@@ -691,16 +691,19 @@ async fn without_a_lock_a_late_migration_moves_past_migrations_ahead_of_the_cloc
     p.file("20990101000000_a.sql", &format!("create table a (id {int});"));
     p.file("20990101020000_d.sql", &format!("alter table a add column x {int};"));
     assert_eq!(p.dev().await, 0, "{}", p.peek());
+    // A late migration, and a pending one after it that needs it.
     p.file("20990101010000_e.sql", "create table e as select * from a;");
+    p.file("20990101030000_f.sql", &format!("alter table e add column y {int};"));
     p.output();
     assert_eq!(p.dev().await, 1);
     let out = p.output();
     assert_has!(&out, r"Give it a later name, so that every database runs it after 20990101020000_d\.sql:\n    mv \S+/20990101010000_e\.sql \S+/20990101020001_e\.sql\n");
-    // Renamed as the refusal says, it sorts after what it follows, and runs.
+    // Renamed as the refusal says, it sorts after what it follows and before what needs it, and runs.
     let line = out.lines().find(|l| l.trim_start().starts_with("mv ")).unwrap().trim().to_string();
     let words: Vec<&str> = line.split(' ').collect();
     std::fs::rename(words[1], words[2]).unwrap();
     assert_eq!(p.dev().await, 0, "{}", p.peek());
+    assert_eq!(p.history().await, ["20990101000000_a.sql", "20990101020000_d.sql", "20990101020001_e.sql", "20990101030000_f.sql"]);
 }
 
 async fn without_a_lock_init_sql_still_runs_first(mut p: P) {

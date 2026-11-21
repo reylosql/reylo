@@ -1300,11 +1300,13 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
     shadows.push(fresh, by_name.iter().map(Step::of));
     let names = late.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ");
     let one = late.len() == 1;
-    // Each late migration under a name after every migration's, as `create` names a new one: now,
-    // or past the newest where a migration's time is ahead of the clock. They keep their order.
-    let newest = all.iter().filter_map(|m| m.name.split_once('_').and_then(|(at, _)| time::seconds(at))).max();
-    let now = time::now_seconds().max(newest.map_or(0, |n| n + 1));
-    let moves: Vec<String> = late
+    // Each late migration under a name just after the last one this database ran, in their order:
+    // the pending migrations that sort after it still follow them, as the replay above ran them. A
+    // project whose names leave no room there gets no command, which would reorder what it checked.
+    let last_ran = ran.iter().map(|m| m.name.as_str()).max_by(|a, b| name_order(a).cmp(&name_order(b))).unwrap_or_default();
+    let next = pending.iter().map(|m| m.name.as_str()).filter(|n| name_order(n) > last).min_by(|a, b| name_order(a).cmp(&name_order(b)));
+    let floor = last_ran.split_once('_').and_then(|(at, _)| time::seconds(at)).map_or_else(time::now_seconds, |s| s + 1);
+    let renamed: Vec<String> = late
         .iter()
         .enumerate()
         .map(|(k, m)| {
@@ -1312,10 +1314,12 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
                 Some((at, rest)) if time::seconds(at).is_some() => rest,
                 _ => m.name.as_str(),
             };
-            let folder = shown(dir);
-            format!("mv {} {}", shell_word(&format!("{folder}/{}", m.name)), shell_word(&format!("{folder}/{}_{rest}", time::stamp(now + k as i64))))
+            format!("{}_{rest}", time::stamp(floor + k as i64))
         })
         .collect();
+    let fits = renamed.iter().all(|n| name_order(n) > last && next.is_none_or(|next| name_order(n) < name_order(next)));
+    let folder = shown(dir);
+    let moves: Vec<String> = late.iter().zip(&renamed).map(|(m, n)| format!("mv {} {}", shell_word(&format!("{folder}/{}", m.name)), shell_word(&format!("{folder}/{n}")))).collect();
     let lead = format!("Give {} a later name, so that every database runs {} after {}", if one { "it" } else { "them" }, if one { "it" } else { "them" }, after.join(", "));
     let diff = |a: &[String], b: &[String]| -> Vec<String> {
         let lines = describe_diff("this database", &crate::catalog::without_comments(a), "a fresh database", &crate::catalog::without_comments(b));
@@ -1329,6 +1333,11 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
         (Err((m, e)), _) => Problem::new("late-migration-fails", format!("Migration {m} fails when run after what this database already ran")).note(e),
         (_, Err((m, e))) => Problem::new("late-migration-fails", format!("Migration {m} fails when the migrations run in name order, as a fresh database runs them")).note(e),
     };
+    if !fits {
+        let it = if one { "it" } else { "them" };
+        let before = next.map_or(String::new(), |n| format!(" and before {n}"));
+        return Ok(Some(problem.note(format!("Give {it} names that sort after {last_ran}{before}, so that every database runs {it} after {}.", after.join(", ")))));
+    }
     let commands: Vec<&str> = moves.iter().map(String::as_str).collect();
     Ok(Some(problem.fix(lead, &commands)))
 }
