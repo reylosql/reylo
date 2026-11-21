@@ -2,12 +2,12 @@
 //!
 //! Syntax errors come from the dialect's tree on every edit. Once the text has been still for a moment, a file of one statement is analyzed on the project's database, as `reylo analyze` analyzes it, for its diagnostics and the types hover shows. Completion and go-to-definition read the statement's tokens, the database's columns and the `CREATE TABLE`s under the project's `reylo/` directory.
 //!
-//! Everything that touches a database runs on a worker thread with a timeout, so a locked table or a silent server never holds up the editor: requests are answered from what the worker last read.
+//! Everything that can wait runs off the message loop, each on a thread of its own: finding a project (its URL may run a command), analyzing a statement, and reading the schema. So a locked table or a silent server never holds up the editor, and requests are answered from what was last read.
 
 mod reading;
 
 use crate::analyze::{untyped_params, Session};
-use reading::{catalog_key, created_tables, for_grammar, items, key, output_column, scopes, select_list, tokens, Class, Created, Lines, Scopes, Source, SourceKind, Tok, RESERVED};
+use reading::{catalog_key, created_tables, for_grammar, items, key, output_column, scopes, select_list, tokens, Class, Created, Lines, Named, Scopes, Source, SourceKind, Tok, RESERVED};
 use reylo_engine::project::{self, Project};
 use reylo_engine::Failure;
 use reylo_engine_core::api::Analysis;
@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use syntax::Dialect;
 
 pub const USAGE: &str = "Usage: reylo lsp [--dialect postgres | mysql | sqlite]
@@ -36,6 +36,8 @@ const FRESH: Duration = Duration::from_secs(5);
 const RETRY: Duration = Duration::from_secs(10);
 /// How long one connection, analysis or schema read may take.
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the server waits for a lock an analysis needs, under [`TIMEOUT`], so that it gives up itself and no backend stays behind waiting after the connection is dropped.
+const LOCK_WAIT_SECONDS: u32 = 5;
 /// The most diagnostics a document shows of its syntax errors.
 const MAX_ERRORS: usize = 200;
 /// The largest message the server reads.
@@ -80,9 +82,16 @@ pub fn run(args: &[String]) -> i32 {
         }
         let _ = from_client.send(Event::Closed);
     });
-    let (jobs, queue) = mpsc::channel();
-    std::thread::spawn(move || Worker { events, forced, places: HashMap::new() }.run(queue));
-    Server { jobs, docs: HashMap::new(), places: HashMap::new(), pending: HashMap::new(), retrying: HashMap::new(), initialized: false, shutting_down: false }.serve(inbox)
+    let (locate, locate_jobs) = mpsc::channel();
+    let (analyze, analyze_jobs) = mpsc::channel();
+    let (read, read_jobs) = mpsc::channel();
+    let locator = Locator { events: events.clone(), forced, analyze: analyze.clone(), read: read.clone(), places: HashMap::new() };
+    std::thread::spawn(move || locator.run(locate_jobs));
+    let analyzer = Analyzer { events: events.clone(), places: HashMap::new() };
+    std::thread::spawn(move || analyzer.run(analyze_jobs));
+    let reader = Reader { events, places: HashMap::new() };
+    std::thread::spawn(move || reader.run(read_jobs));
+    Server { locate, analyze, read, docs: HashMap::new(), places: HashMap::new(), pending: HashMap::new(), retrying: HashSet::new(), initialized: false, shutting_down: false }.serve(inbox)
 }
 
 fn dialect_named(name: &str) -> Option<Dialect> {
@@ -169,7 +178,7 @@ fn uri_of(path: &Path) -> String {
 }
 
 /// A table of the database.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Table {
     schema: String,
     /// Where its schema stands on the search path; none where a statement must name the schema.
@@ -179,7 +188,7 @@ struct Table {
     columns: Vec<Column>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Column {
     name: String,
     key: String,
@@ -187,12 +196,23 @@ struct Column {
     nullable: bool,
 }
 
-/// What the main thread asks of the worker.
-enum Job {
-    /// Find a document's project. `again` reads its database's URL anew.
-    Locate { uri: String, dir: PathBuf, again: bool },
-    Analyze { uri: String, place: PathBuf, text: String },
-    Read { place: PathBuf },
+/// What the locating thread is asked.
+enum LocateJob {
+    Find { uri: String, dir: PathBuf },
+    /// Read which tables the project's SQL files create.
+    Files { place: PathBuf },
+}
+
+/// What the analyzing thread is asked.
+enum AnalyzeJob {
+    Register { place: PathBuf, database: Option<(String, &'static str)>, base: PathBuf, project: Option<Box<Project>> },
+    Statement { uri: String, place: PathBuf, text: String },
+}
+
+/// What the schema-reading thread is asked.
+enum ReadJob {
+    Register { place: PathBuf, dialect: Dialect, database: Option<(String, &'static str)>, base: PathBuf },
+    Schema { place: PathBuf },
 }
 
 /// What reaches the main thread.
@@ -201,96 +221,136 @@ enum Event {
     Closed,
     Located { uri: String, place: Option<(PathBuf, Dialect)> },
     Analyzed { uri: String, text: String, analysis: Option<Box<Analysis>>, found: Vec<Value> },
-    Read { place: PathBuf, tables: Vec<Table>, created: Vec<(PathBuf, Created)> },
+    Read { place: PathBuf, tables: Vec<Table>, reserved: Vec<String> },
+    Created { place: PathBuf, created: Vec<(PathBuf, Created)> },
     /// The database didn't answer; what needs it is tried again later.
     Unavailable { place: PathBuf },
 }
 
-/// The worker's side of a project: what it takes to reach its database.
-struct WorkerPlace {
-    dialect: Dialect,
+/// When the files a project's URL comes from last changed.
+type Signature = Vec<(PathBuf, Option<SystemTime>)>;
+
+fn signature(project: Option<&Project>) -> Signature {
+    let files = project.into_iter().flat_map(|p| p.file.iter().chain(p.env_files()));
+    files.map(|f| (f.clone(), std::fs::metadata(f).and_then(|m| m.modified()).ok())).collect()
+}
+
+/// What the locating thread knows of a project.
+struct Located {
+    signature: Signature,
+    dialect: Option<Dialect>,
+    home: PathBuf,
+}
+
+struct Locator {
+    events: Sender<Event>,
+    forced: Option<Dialect>,
+    analyze: Sender<AnalyzeJob>,
+    read: Sender<ReadJob>,
+    places: HashMap<PathBuf, Located>,
+}
+
+impl Locator {
+    fn run(mut self, queue: Receiver<LocateJob>) {
+        while let Ok(job) = queue.recv() {
+            match job {
+                LocateJob::Find { uri, dir } => {
+                    let place = self.locate(&dir);
+                    let _ = self.events.send(Event::Located { uri, place });
+                }
+                LocateJob::Files { place } => {
+                    let Some(known) = self.places.get(&place) else { continue };
+                    let Some(dialect) = known.dialect else { continue };
+                    let created = created_in(&known.home, dialect);
+                    let _ = self.events.send(Event::Created { place, created });
+                }
+            }
+        }
+    }
+
+    /// The project of a directory. Its URL, which may run a command, is read again only once a file it comes from has changed.
+    fn locate(&mut self, dir: &Path) -> Option<(PathBuf, Dialect)> {
+        let env: HashMap<String, String> = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).collect();
+        let resolved = Project::resolve(dir, env);
+        let project = resolved.as_ref().ok();
+        let key = project.map_or_else(|| dir.to_path_buf(), |p| p.root.clone());
+        let now = signature(project);
+        if let Some(known) = self.places.get(&key).filter(|k| k.signature == now) {
+            return known.dialect.map(|d| (key.clone(), d));
+        }
+        if let Err(why) = &resolved {
+            log(why);
+        }
+        let url = project.and_then(|p| p.type_check_url().ok().flatten()).map(|(url, _)| url).filter(|u| !u.is_empty());
+        let named = url.as_deref().and_then(project::dialect_of);
+        let home = project.map_or_else(|| dir.join("reylo"), |p| p.root.join(p.config.dir.as_deref().unwrap_or("reylo")));
+        // The project's database decides; `--dialect` is for the file that has none.
+        let Some(dialect) = named.and_then(dialect_named).or(self.forced) else {
+            log(&format!("{} names no database, so its files get no diagnostics: set DATABASE_URL, or pass --dialect", key.display()));
+            self.places.insert(key, Located { signature: now, dialect: None, home });
+            return None;
+        };
+        let database = url.zip(named);
+        let base = project.map_or_else(|| dir.to_path_buf(), |p| p.root.clone());
+        let _ = self.read.send(ReadJob::Register { place: key.clone(), dialect, database: database.clone(), base: base.clone() });
+        let _ = self.analyze.send(AnalyzeJob::Register { place: key.clone(), database, base, project: resolved.ok().map(Box::new) });
+        self.places.insert(key.clone(), Located { signature: now, dialect: Some(dialect), home });
+        Some((key, dialect))
+    }
+}
+
+/// The analyzing thread's side of a project.
+struct AnalysisPlace {
     database: Option<(String, &'static str)>,
     base: PathBuf,
-    home: PathBuf,
-    project: Option<Project>,
+    project: Option<Box<Project>>,
     session: Option<Session>,
     /// The last failure logged, so that a server that stays down is said once.
     said: Option<String>,
 }
 
-struct Worker {
+struct Analyzer {
     events: Sender<Event>,
-    forced: Option<Dialect>,
-    places: HashMap<PathBuf, WorkerPlace>,
+    places: HashMap<PathBuf, AnalysisPlace>,
 }
 
-impl Worker {
-    fn run(mut self, queue: Receiver<Job>) {
+/// Whether an error is a wait for a lock given up on, which says nothing of the statement.
+fn waited_for_a_lock(message: &str) -> bool {
+    message.contains("lock timeout") || message.contains("Lock wait timeout")
+}
+
+impl Analyzer {
+    fn run(mut self, queue: Receiver<AnalyzeJob>) {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
         while let Ok(first) = queue.recv() {
-            // What piled up while the last job ran: only the newest text of each document, and one read of each schema.
+            // What piled up while the last one ran: only the newest text of each document.
             let mut batch = vec![first];
             batch.extend(queue.try_iter());
-            let (mut analyzed, mut read) = (HashSet::new(), HashSet::new());
+            let mut seen = HashSet::new();
             let mut wanted = Vec::with_capacity(batch.len());
             for job in batch.into_iter().rev() {
-                let keep = match &job {
-                    Job::Locate { .. } => true,
-                    Job::Analyze { uri, .. } => analyzed.insert(uri.clone()),
-                    Job::Read { place } => read.insert(place.clone()),
-                };
-                if keep {
+                if !matches!(&job, AnalyzeJob::Statement { uri, .. } if !seen.insert(uri.clone())) {
                     wanted.push(job);
                 }
             }
             for job in wanted.into_iter().rev() {
                 match job {
-                    Job::Locate { uri, dir, again } => {
-                        let place = self.locate(&dir, again);
-                        let _ = self.events.send(Event::Located { uri, place });
+                    AnalyzeJob::Register { place, database, base, project } => {
+                        let kept = self.places.remove(&place).filter(|p| p.database == database);
+                        let (session, said) = kept.map_or((None, None), |p| (p.session, p.said));
+                        self.places.insert(place, AnalysisPlace { database, base, project, session, said });
                     }
-                    Job::Analyze { uri, place, text } => self.analyze(&runtime, uri, place, text),
-                    Job::Read { place } => self.read(&runtime, place),
+                    AnalyzeJob::Statement { uri, place, text } => self.analyze(&runtime, uri, place, text),
                 }
             }
         }
     }
 
-    /// The project of a directory, read once unless `again` says its URL may have changed.
-    fn locate(&mut self, dir: &Path, again: bool) -> Option<(PathBuf, Dialect)> {
-        let env: HashMap<String, String> = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).collect();
-        let project = match Project::resolve(dir, env) {
-            Ok(project) => Some(project),
-            Err(why) => {
-                log(&why);
-                None
-            }
-        };
-        let key = project.as_ref().map_or_else(|| dir.to_path_buf(), |p| p.root.clone());
-        if let Some(place) = self.places.get(&key).filter(|_| !again) {
-            return Some((key.clone(), place.dialect));
-        }
-        // A `direct_url` may run a command, which this thread can wait for.
-        let url = project.as_ref().and_then(|p| p.type_check_url().ok().flatten()).map(|(url, _)| url).filter(|u| !u.is_empty());
-        let named = url.as_deref().and_then(project::dialect_of);
-        // The project's database decides; `--dialect` is for the file that has none.
-        let Some(dialect) = named.and_then(dialect_named).or(self.forced) else {
-            self.places.remove(&key);
-            log(&format!("{} names no database, so its files get no diagnostics: set DATABASE_URL, or pass --dialect", key.display()));
-            return None;
-        };
-        let database = url.zip(named);
-        let home = project.as_ref().map_or_else(|| dir.join("reylo"), |p| p.root.join(p.config.dir.as_deref().unwrap_or("reylo")));
-        let base = project.as_ref().map_or_else(|| dir.to_path_buf(), |p| p.root.clone());
-        let kept = self.places.remove(&key).filter(|p| p.database == database);
-        let (session, said) = kept.map_or((None, None), |p| (p.session, p.said));
-        self.places.insert(key.clone(), WorkerPlace { dialect, database, base, home, project, session, said });
-        Some((key, dialect))
-    }
-
-    fn unavailable(&mut self, key: &Path, why: String) {
+    fn unavailable(&mut self, key: &Path, why: String, keep_session: bool) {
         if let Some(place) = self.places.get_mut(key) {
-            place.session = None;
+            if !keep_session {
+                place.session = None;
+            }
             if place.said.as_deref() != Some(why.as_str()) {
                 log(&why);
                 place.said = Some(why);
@@ -306,9 +366,12 @@ impl Worker {
         if place.session.is_none() {
             let opened = runtime.block_on(async { tokio::time::timeout(TIMEOUT, Session::open(name, &url, &place.base)).await });
             match opened {
-                Ok(Ok(session)) => place.session = Some(session),
-                Ok(Err(failure)) => return self.unavailable(&key, failure.to_string()),
-                Err(_) => return self.unavailable(&key, format!("the database took more than {} seconds to connect", TIMEOUT.as_secs())),
+                Ok(Ok(mut session)) => {
+                    let _ = runtime.block_on(async { tokio::time::timeout(TIMEOUT, session.limit_lock_waits(LOCK_WAIT_SECONDS)).await });
+                    place.session = Some(session);
+                }
+                Ok(Err(failure)) => return self.unavailable(&key, failure.to_string(), false),
+                Err(_) => return self.unavailable(&key, format!("the database took more than {} seconds to connect", TIMEOUT.as_secs()), false),
             }
         }
         let session = place.session.as_mut().expect("opened above");
@@ -320,6 +383,10 @@ impl Worker {
         let (analysis, found) = match result {
             Ok(Ok(analysis)) => {
                 let mut diagnostics = analysis.descriptor(&text, version).diagnostics;
+                if let Some(d) = diagnostics.iter().find(|d| waited_for_a_lock(&d.message)) {
+                    let why = d.message.clone();
+                    return self.unavailable(&key, why, true);
+                }
                 if let Some(project) = place.project.as_ref().filter(|p| p.strict_params() && analysis.diagnostics.is_empty()) {
                     let dialect = match name {
                         "postgres" => reylo_engine_core::dialect::Dialect::Postgres,
@@ -331,36 +398,80 @@ impl Worker {
                 let found = diagnostics.iter().map(|d| diagnostic(&text, &lines, byte_of(&text, d.start), byte_of(&text, d.end), &d.message, d.code.as_deref())).collect();
                 (Some(Box::new(analysis)), found)
             }
+            Ok(Err(Failure::Error(message))) if waited_for_a_lock(&message) => return self.unavailable(&key, message, true),
             Ok(Err(Failure::Error(message))) => (None, vec![diagnostic(&text, &lines, 0, text.len(), &message, None)]),
-            Ok(Err(failure)) => return self.unavailable(&key, failure.to_string()),
-            Err(_) => return self.unavailable(&key, format!("the database took more than {} seconds to analyze a statement", TIMEOUT.as_secs())),
+            Ok(Err(failure)) => return self.unavailable(&key, failure.to_string(), false),
+            Err(_) => return self.unavailable(&key, format!("the database took more than {} seconds to analyze a statement", TIMEOUT.as_secs()), false),
         };
         place.said = None;
         let _ = self.events.send(Event::Analyzed { uri, text, analysis, found });
     }
+}
 
-    /// Reads the database's tables and the tables the project's files create.
+/// The schema-reading thread's side of a project.
+struct ReadPlace {
+    dialect: Dialect,
+    database: Option<(String, &'static str)>,
+    base: PathBuf,
+    /// A connection kept between reads. A SQLite file is opened for each, so that nothing holds it.
+    db: Option<Db>,
+}
+
+struct Reader {
+    events: Sender<Event>,
+    places: HashMap<PathBuf, ReadPlace>,
+}
+
+impl Reader {
+    fn run(mut self, queue: Receiver<ReadJob>) {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
+        while let Ok(job) = queue.recv() {
+            match job {
+                ReadJob::Register { place, dialect, database, base } => {
+                    self.places.insert(place, ReadPlace { dialect, database, base, db: None });
+                }
+                ReadJob::Schema { place } => self.read(&runtime, place),
+            }
+        }
+    }
+
     fn read(&mut self, runtime: &tokio::runtime::Runtime, key: PathBuf) {
-        let Some(place) = self.places.get(&key) else { return };
+        let Some(place) = self.places.get_mut(&key) else { return };
         let dialect = place.dialect;
-        let created = created_in(&place.home, dialect);
         let Some((url, name)) = place.database.clone() else {
-            let _ = self.events.send(Event::Read { place: key, tables: Vec::new(), created });
+            let _ = self.events.send(Event::Read { place: key, tables: Vec::new(), reserved: Vec::new() });
             return;
         };
-        let base = place.base.clone();
-        let rows = runtime.block_on(async {
+        let (base, mut db) = (place.base.clone(), place.db.take());
+        let read = runtime.block_on(async {
             let read = async {
-                let mut db = Db::connect_read_only(&url, &base).await?;
-                db.rows(columns_query(name)).await
+                if db.is_none() {
+                    db = Some(Db::connect_read_only(&url, &base).await?);
+                }
+                let connection = db.as_mut().expect("connected above");
+                let rows = connection.rows(columns_query(name)).await?;
+                // MySQL's reserved words change with its version, and it lists them.
+                let reserved = if name == "mysql" { connection.rows("select cast(word as char) as w from information_schema.keywords where reserved = 1").await? } else { Vec::new() };
+                Ok::<_, reylo_migrate::Error>((rows, reserved))
             };
             tokio::time::timeout(TIMEOUT, read).await
         });
-        let rows = match rows {
-            Ok(Ok(rows)) => rows,
-            Ok(Err(e)) => return self.unavailable(&key, e.0),
-            Err(_) => return self.unavailable(&key, format!("the database took more than {} seconds to list its tables", TIMEOUT.as_secs())),
+        let (rows, reserved) = match read {
+            Ok(Ok(found)) => found,
+            Ok(Err(e)) => {
+                log(&e.0);
+                let _ = self.events.send(Event::Unavailable { place: key });
+                return;
+            }
+            Err(_) => {
+                log(&format!("the database took more than {} seconds to list its tables", TIMEOUT.as_secs()));
+                let _ = self.events.send(Event::Unavailable { place: key });
+                return;
+            }
         };
+        if name != "sqlite" {
+            place.db = db;
+        }
         let mut tables: Vec<Table> = Vec::new();
         for r in rows {
             let column = Column { name: r.text("c").to_string(), key: catalog_key(dialect, r.text("c")), ty: r.text("ty").to_string(), nullable: r.text("nn") != "1" };
@@ -369,7 +480,8 @@ impl Worker {
                 None => tables.push(Table { schema: r.text("s").to_string(), rank: r.text("sp").parse().ok(), name: r.text("t").to_string(), key: catalog_key(dialect, r.text("t")), columns: vec![column] }),
             }
         }
-        let _ = self.events.send(Event::Read { place: key, tables, created });
+        let reserved = reserved.iter().map(|r| r.text("w").to_ascii_lowercase()).collect();
+        let _ = self.events.send(Event::Read { place: key, tables, reserved });
     }
 }
 
@@ -473,18 +585,29 @@ struct Place {
     dialect: Dialect,
     tables: Vec<Table>,
     created: Vec<(PathBuf, Created)>,
+    /// The words that need quotes as a name, in lower case.
+    reserved: HashSet<String>,
     read_at: Option<Instant>,
     reading: bool,
 }
 
+impl Place {
+    fn new(dialect: Dialect) -> Place {
+        let reserved = syntax::reserved_words(dialect).into_iter().map(str::to_ascii_lowercase).collect();
+        Place { dialect, tables: Vec::new(), created: Vec::new(), reserved, read_at: None, reading: false }
+    }
+}
+
 struct Server {
-    jobs: Sender<Job>,
+    locate: Sender<LocateJob>,
+    analyze: Sender<AnalyzeJob>,
+    read: Sender<ReadJob>,
     docs: HashMap<String, Doc>,
     places: HashMap<PathBuf, Place>,
     /// The documents to analyze, each with when it's due.
     pending: HashMap<String, Instant>,
-    /// The documents whose database failed, whose project is read anew when they next come due.
-    retrying: HashMap<String, PathBuf>,
+    /// The documents whose database failed, whose project is looked at again when they next come due.
+    retrying: HashSet<String>,
     initialized: bool,
     shutting_down: bool,
 }
@@ -517,22 +640,26 @@ impl Server {
         match event {
             Event::Located { uri, place } => {
                 let Some(doc) = self.docs.get_mut(&uri) else { return };
-                doc.reading = None;
                 match place {
                     Some((key, dialect)) => {
+                        let moved = doc.place.as_ref() != Some(&key);
                         doc.place = Some(key.clone());
-                        let known = self.places.entry(key.clone()).or_insert_with(|| Place { dialect, tables: Vec::new(), created: Vec::new(), read_at: None, reading: false });
-                        if known.dialect != dialect {
-                            known.dialect = dialect;
-                            known.tables.clear();
-                            known.read_at = None;
+                        let known = self.places.entry(key.clone()).or_insert_with(|| Place::new(dialect));
+                        let changed = known.dialect != dialect;
+                        if changed {
+                            *known = Place::new(dialect);
                         }
-                        self.publish(&uri);
+                        if moved || changed {
+                            doc.reading = None;
+                            self.publish(&uri);
+                        }
                         self.read_schema(&key);
                         self.send_analysis(&uri);
                     }
                     None => {
-                        doc.place = None;
+                        if doc.place.take().is_some() {
+                            doc.reading = None;
+                        }
                         self.publish(&uri);
                     }
                 }
@@ -544,12 +671,25 @@ impl Server {
                     self.publish(&uri);
                 }
             }
-            Event::Read { place, tables, created } => {
+            Event::Read { place, tables, reserved } => {
+                let Some(known) = self.places.get_mut(&place) else { return };
+                let changed = known.read_at.is_some() && known.tables != tables;
+                known.tables = tables;
+                known.reserved = syntax::reserved_words(known.dialect).into_iter().map(str::to_ascii_lowercase).chain(reserved).collect();
+                known.read_at = Some(Instant::now());
+                known.reading = false;
+                // The schema moved under the open files: what they said of it may no longer hold.
+                if changed {
+                    let now = Instant::now();
+                    let mine: Vec<String> = self.docs.iter().filter(|(_, d)| d.place.as_ref() == Some(&place)).map(|(uri, _)| uri.clone()).collect();
+                    for uri in mine {
+                        self.pending.insert(uri, now);
+                    }
+                }
+            }
+            Event::Created { place, created } => {
                 if let Some(known) = self.places.get_mut(&place) {
-                    known.tables = tables;
                     known.created = created;
-                    known.read_at = Some(Instant::now());
-                    known.reading = false;
                 }
             }
             Event::Unavailable { place } => {
@@ -557,41 +697,35 @@ impl Server {
                     known.reading = false;
                     known.read_at = Some(Instant::now());
                 }
-                // Try again, with the URL read anew, for a server that comes back or a `.env` that was fixed.
+                // Try again later, for a server that comes back or a `.env` that was fixed.
                 let retry = Instant::now() + RETRY;
                 let mine: Vec<String> = self.docs.iter().filter(|(_, d)| d.place.as_ref() == Some(&place)).map(|(uri, _)| uri.clone()).collect();
                 for uri in mine {
                     self.pending.entry(uri.clone()).or_insert(retry);
-                    if let Some(dir) = self.docs.get(&uri).and_then(|d| d.dir.clone()) {
-                        self.retrying.insert(uri, dir);
-                    }
+                    self.retrying.insert(uri);
                 }
             }
             _ => {}
         }
     }
 
-    /// Asks the worker for the schema, unless a read is recent or under way.
+    /// Asks for the schema and the project's files, unless a read is recent or under way.
     fn read_schema(&mut self, key: &Path) {
         let Some(place) = self.places.get_mut(key) else { return };
         if place.reading || place.read_at.is_some_and(|at| at.elapsed() < FRESH) {
             return;
         }
         place.reading = true;
-        let _ = self.jobs.send(Job::Read { place: key.to_path_buf() });
+        let _ = self.read.send(ReadJob::Schema { place: key.to_path_buf() });
+        let _ = self.locate.send(LocateJob::Files { place: key.to_path_buf() });
     }
 
-    /// A document that's due: look its project up again where its database failed, else analyze it.
+    /// A document that's due: look at its project again where its database failed or it has none, else analyze it.
     fn analyze(&mut self, uri: &str) {
-        if let Some(dir) = self.retrying.remove(uri) {
-            let _ = self.jobs.send(Job::Locate { uri: uri.to_string(), dir, again: true });
-            return;
-        }
         let Some(doc) = self.docs.get(uri) else { return };
-        if doc.place.is_none() {
-            // No project yet: look again, as a `.env` may have appeared.
+        if self.retrying.remove(uri) || doc.place.is_none() {
             if let Some(dir) = doc.dir.clone() {
-                let _ = self.jobs.send(Job::Locate { uri: uri.to_string(), dir, again: true });
+                let _ = self.locate.send(LocateJob::Find { uri: uri.to_string(), dir });
             }
             return;
         }
@@ -610,11 +744,18 @@ impl Server {
         if (exact && !reading.errors.is_empty()) || reading.statements.len() != 1 {
             return;
         }
-        let _ = self.jobs.send(Job::Analyze { uri: uri.to_string(), place: key, text: doc.text.clone() });
+        let _ = self.analyze.send(AnalyzeJob::Statement { uri: uri.to_string(), place: key, text: doc.text.clone() });
     }
 
     /// Answers one message; the exit code, once the client says to exit.
     fn handle(&mut self, message: &Value) -> Option<i32> {
+        // A request whose method is no string still gets its answer.
+        if let (Some(id), Some(method)) = (message.get("id"), message.get("method")) {
+            if !method.is_string() {
+                send(&json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32600, "message": "the method is not a string" } }));
+                return None;
+            }
+        }
         let method = message["method"].as_str().unwrap_or("");
         let params = &message["params"];
         let Some(id) = message.get("id").filter(|_| !method.is_empty()) else {
@@ -669,7 +810,7 @@ impl Server {
                 let doc = Doc { text: d["text"].as_str().unwrap_or("").to_string(), version: d["version"].as_i64().unwrap_or(0), dir: dir.clone(), place: None, reading: None, analysis: None, found: Vec::new() };
                 self.docs.insert(uri.clone(), doc);
                 if let Some(dir) = dir {
-                    let _ = self.jobs.send(Job::Locate { uri, dir, again: false });
+                    let _ = self.locate.send(LocateJob::Find { uri, dir });
                 }
             }
             "textDocument/didChange" => {
@@ -766,45 +907,57 @@ impl Server {
         let Some((uri, home, offset)) = self.at(params) else { return empty };
         let (doc, place) = (&self.docs[&uri], &self.places[&home]);
         let reading = doc.reading.as_ref().expect("read above");
-        if in_comment_or_string(&doc.text, reading, offset) {
+        let dialect = place.dialect;
+        if in_comment_or_string(dialect, &doc.text, reading, offset) {
             return empty;
         }
+        // Inside a quoted name, what's typed is the name so far, and the item replaces the whole token.
+        let open = reading.spans.get(reading.spans.partition_point(|t| (t.end as usize) < offset)).filter(|t| {
+            let closed = t.end - t.start >= 2 && doc.text.as_bytes()[t.end as usize - 1] == closing_quote(doc.text.as_bytes()[t.start as usize]);
+            t.class == Class::Quoted && (t.start as usize) < offset && ((offset as u32) < t.end || !closed)
+        });
         let bytes = doc.text.as_bytes();
         let mut start = offset;
-        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_' || bytes[start - 1] >= 0x80) {
-            start -= 1;
+        if let Some(t) = open {
+            start = t.start as usize;
+        } else {
+            while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_' || bytes[start - 1] >= 0x80) {
+                start -= 1;
+            }
         }
-        let prefix = &doc.text[start..offset];
+        let prefix = if open.is_some() { &doc.text[start + 1..offset] } else { &doc.text[start..offset] };
         let (from, to) = reading.statement_of(start);
         // What the name being typed adds to the statement isn't part of what it already names.
-        let stmt: Vec<Tok<'_>> = reading.toks(&doc.text, from, to).into_iter().filter(|t| !(t.start as usize == start && t.end as usize == offset)).collect();
-        let names = scopes(place.dialect, &stmt);
+        let stmt: Vec<Tok<'_>> = reading.toks(&doc.text, from, to).into_iter().filter(|t| !(t.start as usize == start && (open.is_some() || t.end as usize == offset))).collect();
+        let names = scopes(dialect, &stmt);
         let before_count = stmt.partition_point(|t| (t.end as usize) <= start);
         // The query the cursor is in: that of the token before it, or the statement's own.
         let here = before_count.saturating_sub(1);
         let mut items = Vec::new();
-        let dialect = place.dialect;
         match before_count.checked_sub(1).map(|i| stmt[i]) {
             Some(last) if last.is_punct(".") => {
                 if let Some(q) = before_count.checked_sub(2).map(|i| stmt[i]).filter(Tok::is_name) {
                     let word = key(dialect, &q);
-                    match names.source(here, &word) {
+                    // In `from app.` the name before the dot is a schema, whatever else it is read as.
+                    let names_a_table = names.source_at(q.at()).is_some_and(|s| s.at == q.at());
+                    let source = names.source(here, &word).filter(|_| !names_a_table);
+                    match source {
                         Some(source) => complete_source(place, &names, here, source, &mut items),
                         None => {
-                            if let Some(cte) = names.cte(here, &word) {
-                                items.extend(cte.columns.iter().map(|c| column_item(dialect, c, format!("{}.{c}", cte.name))));
+                            if let Some(cte) = names.cte(here, &word).filter(|_| !names_a_table) {
+                                items.extend(cte.columns.iter().map(|c| column_item(place, &c.name, format!("{}.{}", cte.name, c.name))));
                             }
                             for table in place.tables.iter().filter(|t| catalog_key(dialect, &t.schema) == word) {
-                                items.push(table_item(dialect, table));
+                                items.push(json!({ "label": table.name, "kind": 7, "detail": format!("{}.{} ({} columns)", table.schema, table.name, table.columns.len()), "insertText": quoted(place, &table.name) }));
                             }
                         }
                     }
                 }
             }
             Some(last) if last.is_any(&["FROM", "JOIN", "INTO", "UPDATE", "TABLE"]) => {
-                items.extend(place.tables.iter().map(|t| table_item(dialect, t)));
+                items.extend(place.tables.iter().map(|t| table_item(place, t)));
                 for q in names.chain(here) {
-                    items.extend(names.queries[q].ctes.iter().map(|c| json!({ "label": c.name, "kind": 7, "detail": "WITH query", "insertText": quoted(dialect, &c.name) })));
+                    items.extend(names.queries[q].ctes.iter().map(|c| json!({ "label": c.name, "kind": 7, "detail": "WITH query", "sortText": format!("0{}", c.name), "insertText": quoted(place, &c.name) })));
                 }
             }
             _ => {
@@ -812,21 +965,36 @@ impl Server {
                     for s in &names.queries[q].sources {
                         complete_source(place, &names, here, s, &mut items);
                         if let Some(alias) = &s.alias {
-                            items.push(json!({ "label": alias, "kind": 6, "detail": format!("alias of {}", s.name), "insertText": quoted(dialect, alias) }));
+                            items.push(json!({ "label": alias, "kind": 6, "detail": format!("alias of {}", s.name), "insertText": quoted(place, alias) }));
                         }
                     }
                 }
-                let upper = prefix.chars().next().is_some_and(char::is_uppercase);
-                for word in syntax::keywords(dialect) {
-                    let label = if upper { word.to_ascii_uppercase() } else { word.to_ascii_lowercase() };
-                    items.push(json!({ "label": label, "kind": 14 }));
+                if open.is_none() {
+                    let upper = prefix.chars().next().is_some_and(char::is_uppercase);
+                    for word in syntax::keywords(dialect) {
+                        let label = if upper { word.to_ascii_uppercase() } else { word.to_ascii_lowercase() };
+                        items.push(json!({ "label": label, "kind": 14 }));
+                    }
                 }
             }
         }
         let wanted = prefix.to_lowercase();
         items.retain(|i| i["label"].as_str().is_some_and(|l| l.to_lowercase().starts_with(&wanted)));
         let mut seen = HashSet::new();
-        items.retain(|i| seen.insert((i["label"].as_str().unwrap_or("").to_string(), i["kind"].as_u64())));
+        items.retain(|i| seen.insert((i["label"].as_str().unwrap_or("").to_string(), i["kind"].as_u64(), i["insertText"].as_str().unwrap_or("").to_string())));
+        if let Some(t) = open {
+            let whole = range(&doc.text, &reading.lines, t.start as usize, t.end as usize);
+            let quote = doc.text[t.start as usize..].chars().next().unwrap_or('"');
+            for item in &mut items {
+                let label = item["label"].as_str().unwrap_or("").to_string();
+                let written = item["insertText"].as_str().map_or_else(|| label.clone(), str::to_string);
+                // Inside its quotes a name is written quoted, whether it needs them or not.
+                let written = if written.starts_with(quote) { written } else { format!("{quote}{}{}", label.replace(closing_quote(quote as u8) as char, &format!("{0}{0}", closing_quote(quote as u8) as char)), closing_quote(quote as u8) as char) };
+                item["filterText"] = json!(format!("{quote}{label}"));
+                item["textEdit"] = json!({ "range": whole, "newText": written });
+                item.as_object_mut().expect("an item").remove("insertText");
+            }
+        }
         json!({ "isIncomplete": false, "items": items })
     }
 
@@ -887,9 +1055,16 @@ impl Server {
         }
         // A column of the nearest query that has one of that name.
         for q in names.chain(i) {
-            let found = names.queries[q].sources.iter().filter(|s| has_column(place, &names, i, s, &word)).find_map(|s| in_files(s, Some(&word)));
-            if let Some(found) = found {
-                return found;
+            for s in names.queries[q].sources.iter().filter(|s| has_column(place, &names, i, s, &word)) {
+                // A WITH query's column is defined by that query.
+                if s.kind == SourceKind::Table && s.schema.is_none() {
+                    if let Some(c) = names.cte(i, &s.key) {
+                        return here(c.at);
+                    }
+                }
+                if let Some(found) = in_files(s, Some(&word)) {
+                    return found;
+                }
             }
         }
         Value::Null
@@ -901,13 +1076,13 @@ impl Server {
             return None;
         }
         let table = find_table(place, source.schema.as_deref(), &source.key);
-        let first_schema = place.tables.iter().filter_map(|t| t.rank.map(|r| (r, &t.schema))).min_by_key(|(r, _)| *r).map(|(_, s)| s.clone());
         let matches = |c: &Created| {
             c.key == source.key
                 && match table {
                     Some(t) => match c.schema.as_deref() {
                         Some(s) => s == catalog_key(place.dialect, &t.schema),
-                        None => first_schema.as_deref() == Some(t.schema.as_str()),
+                        // A file that names no schema creates the table where the search path puts it.
+                        None => t.rank.is_some(),
                     },
                     None => source.schema.is_none() || c.schema == source.schema,
                 }
@@ -937,8 +1112,17 @@ impl Server {
     }
 }
 
+/// The character that closes a quoted name opened by `open`.
+fn closing_quote(open: u8) -> u8 {
+    if open == b'[' {
+        b']'
+    } else {
+        open
+    }
+}
+
 /// Whether the cursor sits inside a comment or a string, where no completion applies.
-fn in_comment_or_string(text: &str, reading: &Reading, offset: usize) -> bool {
+fn in_comment_or_string(dialect: Dialect, text: &str, reading: &Reading, offset: usize) -> bool {
     let i = reading.spans.partition_point(|t| (t.end as usize) <= offset);
     if let Some(t) = reading.spans.get(i).filter(|t| (t.start as usize) < offset) {
         return t.class == Class::String;
@@ -951,44 +1135,47 @@ fn in_comment_or_string(text: &str, reading: &Reading, offset: usize) -> bool {
             return true;
         }
     }
-    gap.rsplit(['\n', '\r']).next().unwrap_or("").contains("--")
+    let line = gap.rsplit(['\n', '\r']).next().unwrap_or("");
+    line.contains("--") || (dialect == Dialect::Mysql && line.contains('#')) || (dialect == Dialect::ClickHouse && (line.contains("#!") || line.contains("# ")))
 }
 
 fn complete_source(place: &Place, names: &Scopes, at: usize, source: &Source, items: &mut Vec<Value>) {
-    let dialect = place.dialect;
     match &source.kind {
-        SourceKind::Derived(columns) => items.extend(columns.iter().map(|c| column_item(dialect, c, format!("{}.{c}", source.name)))),
+        SourceKind::Derived(columns) => items.extend(columns.iter().map(|c| column_item(place, &c.name, format!("{}.{}", source.name, c.name)))),
         SourceKind::Function => {}
         SourceKind::Table => {
             if source.schema.is_none() {
                 if let Some(cte) = names.cte(at, &source.key) {
-                    items.extend(cte.columns.iter().map(|c| column_item(dialect, c, format!("{}.{c}", cte.name))));
+                    items.extend(cte.columns.iter().map(|c| column_item(place, &c.name, format!("{}.{}", cte.name, c.name))));
                     return;
                 }
             }
             if let Some(table) = find_table(place, source.schema.as_deref(), &source.key) {
-                items.extend(table.columns.iter().map(|c| column_item(dialect, &c.name, format!("{}.{} {}", table.name, c.name, type_label(c)))));
+                items.extend(table.columns.iter().map(|c| column_item(place, &c.name, format!("{}.{} {}", table.name, c.name, type_label(c)))));
             }
         }
     }
 }
 
-fn column_item(dialect: Dialect, name: &str, detail: String) -> Value {
-    json!({ "label": name, "kind": 5, "detail": detail, "insertText": quoted(dialect, name) })
+fn column_item(place: &Place, name: &str, detail: String) -> Value {
+    json!({ "label": name, "kind": 5, "detail": detail, "insertText": quoted(place, name) })
 }
 
-fn table_item(dialect: Dialect, table: &Table) -> Value {
-    let name = quoted(dialect, &table.name);
-    let insert = if table.rank.is_some() { name } else { format!("{}.{name}", quoted(dialect, &table.schema)) };
-    json!({ "label": table.name, "kind": 7, "detail": format!("{} ({} columns)", qualified(table), table.columns.len()), "insertText": insert })
+/// A table, as a bare name where that name reaches it, and with its schema where it doesn't.
+fn table_item(place: &Place, table: &Table) -> Value {
+    let reached = find_table(place, None, &table.key).is_some_and(|t| std::ptr::eq(t, table));
+    let name = quoted(place, &table.name);
+    let (insert, shown) = if reached { (name, table.name.clone()) } else { (format!("{}.{name}", quoted(place, &table.schema)), format!("{}.{}", table.schema, table.name)) };
+    json!({ "label": table.name, "kind": 7, "detail": format!("{shown} ({} columns)", table.columns.len()), "sortText": format!("{}{}", if reached { 0 } else { 1 }, table.name), "insertText": insert })
 }
 
-/// A name as `dialect` reads it back: bare where it can be, and quoted where it can't.
-fn quoted(dialect: Dialect, name: &str) -> String {
+/// A name as the dialect reads it back: bare where it can be, and quoted where it can't.
+fn quoted(place: &Place, name: &str) -> String {
+    let dialect = place.dialect;
     let letter = |c: char| if dialect == Dialect::Postgres { c.is_ascii_lowercase() } else { c.is_ascii_alphabetic() };
     let first = name.chars().next().is_some_and(|c| c == '_' || letter(c));
     let rest = name.chars().all(|c| c == '_' || c.is_ascii_digit() || letter(c));
-    if first && rest && !RESERVED.iter().any(|w| w.eq_ignore_ascii_case(name)) {
+    if first && rest && !place.reserved.contains(&name.to_ascii_lowercase()) && !RESERVED.iter().any(|w| w.eq_ignore_ascii_case(name)) {
         return name.to_string();
     }
     match dialect {
@@ -1002,8 +1189,8 @@ fn columns_query(dialect: &str) -> &'static str {
     match dialect {
         "postgres" => "select n.nspname as s, c.relname as t, a.attname as c, pg_catalog.format_type(a.atttypid, a.atttypmod) as ty, case when a.attnotnull then '1' else '0' end as nn, coalesce(pg_catalog.array_position(pg_catalog.current_schemas(false), n.nspname)::pg_catalog.text, '') as sp from pg_catalog.pg_attribute a join pg_catalog.pg_class c on c.oid = a.attrelid join pg_catalog.pg_namespace n on n.oid = c.relnamespace where c.relkind in ('r', 'v', 'm', 'f', 'p') and a.attnum > 0 and not a.attisdropped and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\\_toast%' order by n.nspname, c.relname, a.attnum",
         "mysql" => "select cast(table_schema as char) as s, cast(table_name as char) as t, cast(column_name as char) as c, cast(column_type as char) as ty, if(is_nullable = 'NO', '1', '0') as nn, '0' as sp from information_schema.columns where table_schema = database() order by table_name, ordinal_position",
-        // A primary key holds NULL unless it is the rowid or the table is WITHOUT ROWID.
-        _ => "select 'main' as s, m.name as t, p.name as c, p.type as ty, case when p.\"notnull\" or (p.pk > 0 and (select l.wr from pragma_table_list l where l.schema = 'main' and l.name = m.name)) or (p.pk = 1 and lower(p.type) = 'integer' and (select count(*) from pragma_table_xinfo(m.name) q where q.pk > 0) = 1) then '1' else '0' end as nn, '0' as sp from sqlite_schema m join pragma_table_xinfo(m.name) p where m.type in ('table', 'view') and m.name not like 'sqlite\\_%' escape '\\' order by m.name, p.cid",
+        // A primary key holds NULL unless it is the rowid, which `integer primary key desc` isn't, or the table is WITHOUT ROWID.
+        _ => "select 'main' as s, m.name as t, p.name as c, p.type as ty, case when p.\"notnull\" or (p.pk > 0 and (select l.wr from pragma_table_list l where l.schema = 'main' and l.name = m.name)) or (p.pk = 1 and lower(p.type) = 'integer' and (select count(*) from pragma_table_xinfo(m.name) q where q.pk > 0) = 1 and replace(replace(replace(replace(lower(m.sql), ' ', ''), char(10), ''), char(13), ''), char(9), '') not like '%primarykeydesc%') then '1' else '0' end as nn, '0' as sp from sqlite_schema m join pragma_table_xinfo(m.name) p where m.type in ('table', 'view') and m.name not like 'sqlite\\_%' escape '\\' order by m.name, p.cid",
     }
 }
 
@@ -1058,20 +1245,15 @@ fn table_markdown(table: &Table) -> String {
     format!("```sql\n{} (\n{}\n)\n```", qualified(table), lines.join(",\n"))
 }
 
-/// Whether a name read off a subquery's text is this column.
-fn same_column(column: &str, word: &str) -> bool {
-    column.to_lowercase() == word.to_lowercase()
-}
-
 /// Whether `source` has a column of this key, as far as what it reads says.
 fn has_column(place: &Place, names: &Scopes, at: usize, source: &Source, word: &str) -> bool {
     match &source.kind {
-        SourceKind::Derived(columns) => columns.iter().any(|c| same_column(c, word)),
+        SourceKind::Derived(columns) => columns.iter().any(|c| c.key == word),
         SourceKind::Function => false,
         SourceKind::Table => {
             if source.schema.is_none() {
                 if let Some(cte) = names.cte(at, &source.key) {
-                    return cte.columns.iter().any(|c| same_column(c, word));
+                    return cte.columns.iter().any(|c| c.key == word);
                 }
             }
             find_table(place, source.schema.as_deref(), &source.key).is_some_and(|t| t.columns.iter().any(|c| c.key == word))
@@ -1083,12 +1265,12 @@ fn has_column(place: &Place, names: &Scopes, at: usize, source: &Source, word: &
 fn column_markdown(place: &Place, names: &Scopes, at: usize, source: &Source, word: &str, result: &str) -> Option<String> {
     let bare = |owner: &str, column: &str| format!("```sql\n{owner}.{column}\n```{result}");
     match &source.kind {
-        SourceKind::Derived(columns) => columns.iter().find(|c| same_column(c, word)).map(|c| bare(&source.name, c)),
+        SourceKind::Derived(columns) => columns.iter().find(|c| c.key == word).map(|c| bare(&source.name, &c.name)),
         SourceKind::Function => None,
         SourceKind::Table => {
             if source.schema.is_none() {
                 if let Some(cte) = names.cte(at, &source.key) {
-                    return cte.columns.iter().find(|c| same_column(c, word)).map(|c| bare(&cte.name, c));
+                    return cte.columns.iter().find(|c| c.key == word).map(|c| bare(&cte.name, &c.name));
                 }
             }
             let table = find_table(place, source.schema.as_deref(), &source.key)?;
@@ -1099,7 +1281,7 @@ fn column_markdown(place: &Place, names: &Scopes, at: usize, source: &Source, wo
 
 /// What a source itself reads as on hover.
 fn source_markdown(place: &Place, names: &Scopes, at: usize, source: &Source) -> Option<String> {
-    let list = |name: &str, columns: &[String]| format!("```sql\n{name} (\n{}\n)\n```", columns.iter().map(|c| format!("  {c}")).collect::<Vec<_>>().join(",\n"));
+    let list = |name: &str, columns: &[Named]| format!("```sql\n{name} (\n{}\n)\n```", columns.iter().map(|c| format!("  {}", c.name)).collect::<Vec<_>>().join(",\n"));
     match &source.kind {
         SourceKind::Derived(columns) => Some(list(&source.name, columns)),
         SourceKind::Function => None,
@@ -1150,7 +1332,7 @@ fn describe(place: &Place, analysis: Option<&Analysis>, stmt: &[Tok<'_>], names:
     if let Some(q) = &qualifier {
         return match names.source(at, q) {
             Some(s) => column_markdown(place, names, at, s, &word, &result),
-            None => names.cte(at, q).and_then(|c| c.columns.iter().find(|x| same_column(x, &word)).map(|x| format!("```sql\n{}.{x}\n```{result}", c.name))),
+            None => names.cte(at, q).and_then(|c| c.columns.iter().find(|x| x.key == word).map(|x| format!("```sql\n{}.{}\n```{result}", c.name, x.name))),
         };
     }
     if stmt.get(at + 1).is_some_and(|n| n.is_punct(".")) {
@@ -1199,8 +1381,8 @@ mod tests {
 
     #[test]
     fn quotes_a_name_only_where_the_dialect_needs_it() {
-        for (dialect, name, written) in [(Dialect::Postgres, "users", "users"), (Dialect::Postgres, "camelCase", "\"camelCase\""), (Dialect::Postgres, "two words", "\"two words\""), (Dialect::Postgres, "order", "\"order\""), (Dialect::Mysql, "camelCase", "camelCase"), (Dialect::Mysql, "two words", "`two words`"), (Dialect::SqlServer, "a]b", "[a]]b]")] {
-            assert_eq!(quoted(dialect, name), written);
+        for (dialect, name, written) in [(Dialect::Postgres, "users", "users"), (Dialect::Postgres, "camelCase", "\"camelCase\""), (Dialect::Postgres, "two words", "\"two words\""), (Dialect::Postgres, "order", "\"order\""), (Dialect::Postgres, "user", "\"user\""), (Dialect::Postgres, "table", "\"table\""), (Dialect::Sqlite, "index", "\"index\""), (Dialect::Sqlite, "name", "name"), (Dialect::Mysql, "camelCase", "camelCase"), (Dialect::Mysql, "two words", "`two words`"), (Dialect::SqlServer, "a]b", "[a]]b]")] {
+            assert_eq!(quoted(&Place::new(dialect), name), written);
         }
     }
 }

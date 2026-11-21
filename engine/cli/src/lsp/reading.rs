@@ -55,12 +55,20 @@ impl Tok<'_> {
     }
 }
 
+/// A name in `dialect`'s case folding: Postgres and SQLite fold ASCII alone.
+fn folded(dialect: Dialect, name: &str) -> String {
+    match dialect {
+        Dialect::Postgres | Dialect::Sqlite => name.to_ascii_lowercase(),
+        _ => name.to_lowercase(),
+    }
+}
+
 /// How `dialect` compares a name as written: Postgres folds what isn't quoted to lower case and keeps what is; the others compare without case.
 pub fn key(dialect: Dialect, t: &Tok<'_>) -> String {
     if dialect == Dialect::Postgres && t.class == Class::Quoted {
         t.name()
     } else {
-        t.name().to_lowercase()
+        folded(dialect, &t.name())
     }
 }
 
@@ -69,8 +77,19 @@ pub fn catalog_key(dialect: Dialect, name: &str) -> String {
     if dialect == Dialect::Postgres {
         name.to_string()
     } else {
-        name.to_lowercase()
+        folded(dialect, name)
     }
+}
+
+/// A column read off a query's text, with its name as `dialect` compares it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Named {
+    pub name: String,
+    pub key: String,
+}
+
+fn named(dialect: Dialect, t: &Tok<'_>) -> Named {
+    Named { name: t.name(), key: key(dialect, t) }
 }
 
 /// Words that are never a column's bare name.
@@ -84,6 +103,8 @@ fn class_of(dialect: Dialect, text: &str) -> Class {
     let names = next.is_ascii_alphanumeric() || next == b'_' || next >= 0x80;
     match b[0] {
         b'\'' => Class::String,
+        // `$$ … $$` and `$tag$ … $tag$`.
+        b'$' if text.len() >= 2 && text.ends_with('$') && text[1..].contains('$') => Class::String,
         b'"' if dialect == Dialect::Mysql => Class::String,
         b'"' | b'`' => Class::Quoted,
         b'[' if matches!(dialect, Dialect::Sqlite | Dialect::SqlServer) && text.len() >= 2 => Class::Quoted,
@@ -147,7 +168,7 @@ pub enum SourceKind {
     /// A table, or a WITH query of that name.
     Table,
     /// A subquery, with the columns it names.
-    Derived(Vec<String>),
+    Derived(Vec<Named>),
     /// A function's rows, whose columns its text doesn't say.
     Function,
 }
@@ -181,7 +202,11 @@ pub struct Cte {
     pub name: String,
     pub key: String,
     pub at: (u32, u32),
-    pub columns: Vec<String>,
+    pub columns: Vec<Named>,
+    /// The tokens of its body.
+    pub body: (usize, usize),
+    /// Whether its body may name it.
+    pub recursive: bool,
 }
 
 /// One query of a statement: the statement itself, or a subquery.
@@ -218,7 +243,12 @@ impl Scopes {
 
     /// The WITH query `key` names from token `at`.
     pub fn cte(&self, at: usize, key: &str) -> Option<&Cte> {
-        self.chain(at).into_iter().find_map(|q| self.queries[q].ctes.iter().find(|c| c.key == key))
+        self.chain(at).into_iter().find_map(|q| {
+            let list = &self.queries[q].ctes;
+            // Inside a WITH query that isn't recursive, only those before it are in scope.
+            let limit = list.iter().position(|c| !c.recursive && (c.body.0..c.body.1).contains(&at)).unwrap_or(list.len());
+            list[..limit].iter().find(|c| c.key == key)
+        })
     }
 
     /// The source written at this place, by its name or its alias.
@@ -257,9 +287,29 @@ fn past_group(toks: &[Tok<'_>], at: usize) -> usize {
 }
 
 /// The names a query's select list gives its columns. An item with no name of its own, a `*` among them, adds none.
-fn output_names(toks: &[Tok<'_>]) -> Vec<String> {
+fn output_names(dialect: Dialect, toks: &[Tok<'_>]) -> Vec<Named> {
     let Some((from, to)) = select_list(toks) else { return Vec::new() };
-    items(toks, from, to).into_iter().filter_map(|(a, b)| toks[a..b].last().filter(|t| t.is_name() && !t.is_any(RESERVED)).map(Tok::name)).collect()
+    items(toks, from, to).into_iter().filter_map(|(a, b)| item_name(&toks[a..b]).map(|t| named(dialect, t))).collect()
+}
+
+/// The token that names a select list item's column: its alias, or the column it reads, cast or not.
+fn item_name<'t, 's>(item: &'t [Tok<'s>]) -> Option<&'t Tok<'s>> {
+    let usable = |t: &&Tok<'_>| t.is_name() && !t.is_any(RESERVED);
+    if let [.., word, alias] = item {
+        if word.is("AS") {
+            return Some(alias).filter(usable);
+        }
+    }
+    let plain = &item[..item.iter().position(|t| t.is_punct("::")).unwrap_or(item.len())];
+    match plain {
+        [one] => return Some(one).filter(usable),
+        [q, dot, one] if q.is_name() && dot.is_punct(".") => return Some(one).filter(usable),
+        _ => {}
+    }
+    // `count(*) total`: a name right after a value is its alias.
+    let [.., before, alias] = item else { return None };
+    let after_value = before.is_punct(")") || matches!(before.class, Class::Number | Class::String | Class::Quoted) || before.is("END") || (before.class == Class::Word && !before.is_any(RESERVED));
+    Some(alias).filter(usable).filter(|_| after_value)
 }
 
 /// Where the select list of the query in `toks` runs, at its own level.
@@ -344,6 +394,12 @@ fn source(dialect: Dialect, toks: &[Tok<'_>], mut at: usize) -> (Option<Source>,
     while toks.get(at).is_some_and(|t| t.is_any(&["ONLY", "LATERAL", "IF", "NOT", "EXISTS"])) {
         at += 1;
     }
+    // `x(a, b)` renames what `x` holds.
+    let listed = |i: usize| -> Option<Vec<Named>> {
+        toks.get(i).filter(|t| t.is_punct("("))?;
+        let past = past_group(toks, i);
+        Some(toks[i + 1..past.saturating_sub(1).max(i + 1)].iter().filter(|t| t.is_name()).map(|t| named(dialect, t)).collect())
+    };
     let alias_at = |i: usize| -> (Option<Tok<'_>>, usize) {
         match (toks.get(i), toks.get(i + 1)) {
             (Some(a), Some(n)) if a.is("AS") && n.is_name() => (Some(*n), i + 2),
@@ -358,7 +414,7 @@ fn source(dialect: Dialect, toks: &[Tok<'_>], mut at: usize) -> (Option<Source>,
         }
         let (alias, after) = alias_at(past);
         let Some(alias) = alias else { return (None, after) };
-        let columns = output_names(&toks[at + 1..past.saturating_sub(1).max(at + 1)]);
+        let columns = listed(after).unwrap_or_else(|| output_names(dialect, &toks[at + 1..past.saturating_sub(1).max(at + 1)]));
         return (Some(Source { schema: None, name: alias.name(), key: key(dialect, &alias), alias: Some(alias.name()), alias_key: Some(key(dialect, &alias)), at: alias.at(), alias_at: Some(alias.at()), kind: SourceKind::Derived(columns) }), after);
     }
     let Some(first) = toks.get(at).filter(|t| t.is_name()) else { return (None, at) };
@@ -373,7 +429,8 @@ fn source(dialect: Dialect, toks: &[Tok<'_>], mut at: usize) -> (Option<Source>,
     let in_from_list = at > 0 && (toks[at - 1].is_any(&["FROM", "JOIN", "LATERAL", "USING"]) || toks[at - 1].is_punct(",") || toks[at - 1].is_punct("("));
     if call && in_from_list {
         let (alias, after) = alias_at(past_group(toks, i));
-        return (Some(Source { schema, name: last.name(), key: key(dialect, &last), alias: alias.as_ref().map(Tok::name), alias_key: alias.as_ref().map(|a| key(dialect, a)), at: last.at(), alias_at: alias.as_ref().map(Tok::at), kind: SourceKind::Function }), after);
+        let kind = listed(after).filter(|_| alias.is_some()).map_or(SourceKind::Function, SourceKind::Derived);
+        return (Some(Source { schema, name: last.name(), key: key(dialect, &last), alias: alias.as_ref().map(Tok::name), alias_key: alias.as_ref().map(|a| key(dialect, a)), at: last.at(), alias_at: alias.as_ref().map(Tok::at), kind }), after);
     }
     let (alias, after) = if call { (None, i) } else { alias_at(i) };
     (Some(Source { schema, name: last.name(), key: key(dialect, &last), alias: alias.as_ref().map(Tok::name), alias_key: alias.as_ref().map(|a| key(dialect, a)), at: last.at(), alias_at: alias.as_ref().map(Tok::at), kind: SourceKind::Table }), after)
@@ -404,13 +461,15 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
             }
             continue;
         }
-        of_token.push(top.query);
         if t.is_punct(")") {
             if frames.len() > 1 {
                 frames.pop();
             }
+            // A closing parenthesis stands in the query around the group, as the opening one does.
+            of_token.push(frames.last().expect("the statement's own frame").query);
             continue;
         }
+        of_token.push(top.query);
         if !top.reads {
             continue;
         }
@@ -427,7 +486,7 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
         }
         let before = i.checked_sub(1).map(|p| toks[p]);
         // The second part of `t.from` is a column, unless the name after the dot is still being typed and what follows it is the clause.
-        if before.is_some_and(|b| b.is_punct(".")) && !(t.is("FROM") && toks.get(i + 1).is_some_and(|n| n.is_name() && !n.is("FROM"))) {
+        if before.is_some_and(|b| b.is_punct(".")) && !(t.is("FROM") && toks.get(i + 1).is_some_and(|n| n.is_punct("(") || (n.is_name() && !n.is("FROM")))) {
             continue;
         }
         if t.is("WITH") {
@@ -456,7 +515,7 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
             frame.in_from = false;
         } else if t.is("UPDATE") {
             frame.in_from = false;
-            if !before.is_some_and(|b| b.is_any(&["FOR", "DO", "ON", "KEY", "NO"])) {
+            if !before.is_some_and(|b| b.is_any(&["FOR", "DO", "ON", "KEY", "NO", "THEN"])) {
                 let (found, _) = source(dialect, toks, i + 1);
                 queries[frame.query].sources.extend(found);
             }
@@ -477,15 +536,16 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
 
 fn read_ctes(dialect: Dialect, toks: &[Tok<'_>], with: usize, query: &mut Query) {
     let mut j = with + 1;
-    if toks.get(j).is_some_and(|t| t.is("RECURSIVE")) {
+    let recursive = toks.get(j).is_some_and(|t| t.is("RECURSIVE"));
+    if recursive {
         j += 1;
     }
     while let Some(name) = toks.get(j).filter(|t| t.is_name()) {
         let mut k = j + 1;
-        let mut listed: Option<Vec<String>> = None;
+        let mut listed: Option<Vec<Named>> = None;
         if toks.get(k).is_some_and(|t| t.is_punct("(")) {
             let past = past_group(toks, k);
-            listed = Some(toks[k + 1..past.saturating_sub(1).max(k + 1)].iter().filter(|t| t.is_name()).map(Tok::name).collect());
+            listed = Some(toks[k + 1..past.saturating_sub(1).max(k + 1)].iter().filter(|t| t.is_name()).map(|t| named(dialect, t)).collect());
             k = past;
         }
         if !toks.get(k).is_some_and(|t| t.is("AS")) {
@@ -499,8 +559,8 @@ fn read_ctes(dialect: Dialect, toks: &[Tok<'_>], with: usize, query: &mut Query)
             break;
         }
         let past = past_group(toks, k);
-        let columns = listed.unwrap_or_else(|| output_names(&toks[k + 1..past.saturating_sub(1).max(k + 1)]));
-        query.ctes.push(Cte { name: name.name(), key: key(dialect, name), at: name.at(), columns });
+        let columns = listed.unwrap_or_else(|| output_names(dialect, &toks[k + 1..past.saturating_sub(1).max(k + 1)]));
+        query.ctes.push(Cte { name: name.name(), key: key(dialect, name), at: name.at(), columns, body: (k, past), recursive });
         if !toks.get(past).is_some_and(|t| t.is_punct(",")) {
             break;
         }
@@ -640,7 +700,8 @@ mod tests {
         let s = read(Dialect::Postgres, "select 1 from users u, (select id, name as n from t) x, generate_series(1, 3) g, posts p");
         let names: Vec<_> = s.queries[0].sources.iter().map(|x| x.alias.as_deref().unwrap()).collect();
         assert_eq!(names, ["u", "x", "g", "p"]);
-        assert_eq!(s.queries[0].sources[1].kind, SourceKind::Derived(vec!["id".into(), "n".into()]));
+        let SourceKind::Derived(columns) = &s.queries[0].sources[1].kind else { panic!("a subquery") };
+        assert_eq!(columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id", "n"]);
         assert_eq!(s.queries[0].sources[2].kind, SourceKind::Function);
         assert_eq!(sources(&read(Dialect::Postgres, "delete from users a using posts b where b.id = 1"), 0), [("users", Some("a")), ("posts", Some("b"))]);
         assert_eq!(sources(&read(Dialect::Postgres, "merge into users t using posts s on s.id = t.id when matched then delete"), 0), [("users", Some("t")), ("posts", Some("s"))]);
@@ -657,8 +718,32 @@ mod tests {
     #[test]
     fn reads_with_queries_and_their_columns() {
         let s = read(Dialect::Postgres, "with recursive a(x) as (select 1), b as not materialized (select id, 2 as two from a) select * from b");
-        let ctes: Vec<_> = s.queries[0].ctes.iter().map(|c| (c.name.as_str(), c.columns.clone())).collect();
-        assert_eq!(ctes, [("a", vec!["x".to_string()]), ("b", vec!["id".to_string(), "two".to_string()])]);
+        let ctes: Vec<_> = s.queries[0].ctes.iter().map(|c| (c.name.as_str(), c.columns.iter().map(|x| x.name.as_str()).collect::<Vec<_>>())).collect();
+        assert_eq!(ctes, [("a", vec!["x"]), ("b", vec!["id", "two"])]);
+    }
+
+    #[test]
+    fn names_a_subquerys_columns_as_the_database_does() {
+        let columns = |sql: &str| {
+            let s = read(Dialect::Postgres, sql);
+            s.queries[0].ctes[0].columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(columns("with x as (select id::text, a + b, count(*) n, t.c from t) select 1"), ["id", "n", "c"]);
+        let s = read(Dialect::Postgres, "select 1 from (select 1 as p, 2 as q) x(a, b)");
+        let SourceKind::Derived(listed) = &s.queries[0].sources[0].kind else { panic!("a subquery") };
+        assert_eq!(listed.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_with_query_that_isnt_recursive_doesnt_see_itself() {
+        let sql = "with users as (select id from users) select * from users";
+        let tree = syntax::parse(Dialect::Postgres, sql);
+        let toks = tokens(Dialect::Postgres, &tree, sql);
+        let s = scopes(Dialect::Postgres, &toks);
+        let inner = toks.iter().enumerate().filter(|(_, t)| t.text == "users").map(|(i, _)| i).nth(1).unwrap();
+        let outer = toks.iter().rposition(|t| t.text == "users").unwrap();
+        assert!(s.cte(inner, "users").is_none());
+        assert!(s.cte(outer, "users").is_some());
     }
 
     #[test]

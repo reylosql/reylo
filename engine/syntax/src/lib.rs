@@ -73,6 +73,15 @@ pub fn keywords(dialect: Dialect) -> Vec<&'static str> {
     }
 }
 
+/// The words `dialect` won't read as a bare name, which a name spelled like one needs quotes for.
+pub fn reserved_words(dialect: Dialect) -> Vec<&'static str> {
+    match dialect {
+        Dialect::Postgres => postgres::generated::KEYWORDS.iter().filter(|k| k.2 != 0).map(|k| k.0).collect(),
+        Dialect::Sqlite => sqlite::generated::KEYWORDS.iter().filter(|k| sqlite::generated::YY_FALLBACK[k.1 as usize] == 0).map(|k| k.0).collect(),
+        Dialect::Mysql | Dialect::ClickHouse | Dialect::SqlServer => tolerant::KEYWORDS.to_vec(),
+    }
+}
+
 /// The name of a node's kind in `dialect`'s trees.
 pub fn kind_name(dialect: Dialect, kind: u16) -> &'static str {
     match dialect {

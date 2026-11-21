@@ -97,6 +97,11 @@ impl Session {
         self.connection.answers.clear();
     }
 
+    /// Makes the server give up on a table's lock after `seconds`, for a caller that can't wait behind one.
+    pub async fn limit_lock_waits(&mut self, seconds: u32) {
+        let _ = mysql_async::prelude::Queryable::query_drop(&mut self.connection.conn, format!("set session lock_wait_timeout = {seconds}")).await;
+    }
+
     pub async fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
         self.connection.analyze(sql).await.map_err(|answer| Failure::of(&answer))
     }

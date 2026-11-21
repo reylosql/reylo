@@ -76,6 +76,15 @@ impl Session {
         }
     }
 
+    /// Has the server give up on a lock after `seconds`. SQLite's analysis takes none.
+    pub(crate) async fn limit_lock_waits(&mut self, seconds: u32) {
+        match self {
+            Session::Postgres(s) => s.limit_lock_waits(seconds).await,
+            Session::Mysql(s) => s.limit_lock_waits(seconds).await,
+            Session::Sqlite(_) => {}
+        }
+    }
+
     pub(crate) async fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
         match self {
             Session::Postgres(s) => s.analyze(sql).await,
