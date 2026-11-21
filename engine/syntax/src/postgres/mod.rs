@@ -196,8 +196,12 @@ pub fn parse_tree(text: &str) -> Tree<'_> {
     // Each statement the grammar took, on its own, so that an error in one hides no refusal in another.
     let spans = crate::statements(crate::Dialect::Postgres, &parsed.tree);
     let mut refused = Vec::new();
+    let mut failed: Vec<(u32, u32)> = parsed.tree.errors.iter().map(|e| (e.start, e.end)).collect();
+    failed.sort_unstable();
     for (k, &(start, end)) in spans.iter().enumerate() {
-        if parsed.tree.errors.iter().any(|e| e.start < end && e.end > start) {
+        // The errors are in text order, and none overlaps another: the first that ends past this statement's start is the only one that can be in it.
+        let next_error = failed.partition_point(|e| e.1 <= start);
+        if failed.get(next_error).is_some_and(|e| e.0 < end) {
             continue;
         }
         let next = spans.get(k + 1).map_or(text.len(), |s| s.0 as usize);
