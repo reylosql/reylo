@@ -200,6 +200,64 @@
 }
 
 /* ── Heroes ── */
+
+/* The pill above the headline (NewsPill), to the latest launch's post: a "New" badge in the accent, its title, the one part that shrinks, ellipsized on a narrow window, and an arrow that moves on hover. */
+.rh-news {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1.75rem;
+  padding: 0.25rem 0.75rem 0.25rem 0.25rem;
+  border: 1px solid var(--color-fd-border);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--color-fd-card) 50%, transparent);
+  font-size: 0.875rem;
+  line-height: 1;
+  color: var(--color-fd-muted-foreground);
+  text-decoration: none;
+}
+
+.rh-news:hover {
+  border-color: color-mix(in oklab, var(--dk-accent) 50%, transparent);
+}
+
+/* The badge's capitals sat 1.1px high in it, measured by their ink, so its text sits a pixel lower: 5px over it, 3px under. */
+.rh-news-badge {
+  flex: none;
+  padding: 0.3125rem 0.625rem 0.1875rem;
+  border-radius: 999px;
+  background: var(--dk-accent);
+  font-family: var(--font-code);
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #160c08;
+}
+
+/* A line taller than the pill's 1, so the box its ellipsis clips to holds the descenders: under
+   line-height 1, the g of "migrations" was cut off. The badge stays the taller item, so the pill
+   keeps its height. */
+.rh-news-title {
+  min-width: 0;
+  overflow: hidden;
+  line-height: 1.3;
+  color: var(--color-fd-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The arrow's ink sat 1.4px under the pill's centre, so a transform, which moves no layout, lifts it. */
+.rh-news-arrow {
+  flex: none;
+  transform: translateY(-1.375px);
+  transition: transform 150ms;
+}
+
+.rh-news:hover .rh-news-arrow {
+  transform: translate(2px, -1.375px);
+}
 .rh-h1 em {
   white-space: nowrap;
 }
@@ -211,7 +269,7 @@
 }
 
 .rh .ml-hero-words .rh-h1 {
-  --rh-h1: min(5rem, 14.6cqi);
+  --rh-h1: min(4.375rem, 12.8cqi);
 }
 
 .rh-hero-split {
@@ -302,87 +360,54 @@
   text-wrap: balance;
 }
 
-/* The card centred, between the names in the left gutter and a right gutter as wide. */
+/* One card, centred, as wide as the docs' column: the examples' names as tabs across its top, in
+   rows the browser balances so no name sits alone on one, the picked one raised on a lighter pill;
+   the example's lede as a caption under the card. */
 .rh-ex {
-  display: grid;
-  grid-template-columns: 11rem minmax(0, 1fr) 11rem;
-  gap: 2.5rem;
-  max-width: var(--rh-max);
+  max-width: 47rem;
   margin: 0 auto;
 }
 
-/* The picked example alone, at its own height: the section grows and shrinks with it, and the
-   browser's scroll anchoring keeps whatever the reader is looking at from moving. */
-.rh-ex-card {
-  display: none;
+.rh-tabs {
+  padding: 0.5625rem 0.75rem 0.5rem;
+  border-bottom: 1px solid var(--color-fd-border);
+  background: var(--color-fd-muted);
+  text-align: center;
+  text-wrap: balance;
+  line-height: 1.875rem;
 }
 
-/* At least as tall as the list of names beside it, the room past its own lines in the query, so the
-   card and the list end together; an example longer than the list grows the card past it. */
-.rh-ex-cards {
-  display: flex;
-  flex-direction: column;
-}
-
-.rh-ex-card[data-on] {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-}
-
-.rh-ex-card > .rh-card {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-}
-
-.rh-ex-card > .rh-card > .rh-card-row {
-  flex: 1;
-}
-
-/* The list: the names in the left gutter, the picked one lit with the yellow rule the docs' sidebar uses. */
-.rh-ex-list {
-  display: flex;
-  flex-direction: column;
-  /* Spaced so the list is as tall as the longest card, Subqueries', and no card runs past it. */
-  gap: 0.5rem;
-  /* At the top of the card, which grows and shrinks with the picked example, so the names never move. */
-  align-self: start;
-}
-
-.rh-ex-list button {
-  position: relative;
-  padding: 0.375rem 0.75rem 0.375rem 1rem;
-  border-radius: 0.5rem;
-  text-align: left;
-  font-size: 0.9375rem;
-  line-height: 1.25rem;
+.rh-tabs button {
+  display: inline-block;
+  margin: 0 0.0625rem;
+  padding: 0.375rem 0.5625rem;
+  border-radius: 0.4375rem;
+  font-size: 0.8125rem;
+  line-height: 1;
+  white-space: nowrap;
   color: var(--color-fd-muted-foreground);
+  transition: color 120ms, background-color 120ms;
 }
 
-.rh-ex-list button:hover {
+.rh-tabs button:hover {
   color: var(--color-fd-foreground);
 }
 
-.rh-ex-list button.on {
+.rh-tabs button.on {
+  background: color-mix(in oklab, var(--color-fd-foreground) 9%, transparent);
   color: var(--color-fd-foreground);
-  background: var(--color-fd-secondary);
-  font-weight: 500;
 }
 
-.rh-ex-list button.on::before {
-  content: '';
-  position: absolute;
-  left: 0.3125rem;
-  top: 0.5rem;
-  bottom: 0.5rem;
-  width: 2px;
-  border-radius: 2px;
-  background: var(--color-fd-primary);
+.rh-ex-caption {
+  margin: 0.875rem 0 0;
+  text-align: center;
+  font-size: 0.9375rem;
+  color: var(--color-fd-muted-foreground);
+  text-wrap: balance;
 }
 
-.dark .rh-ex-list button.on::before {
-  box-shadow: 0 0 8px rgb(255 184 0 / 0.65);
+.rh-ex-caption code {
+  font-size: 0.9em;
 }
 
 /* ── Features ── */
@@ -496,7 +521,7 @@
    page. Every block of text and every box here is a whole number of pixels tall (ink-align.mjs,
    2026-11-19). */
 .rh .ml-h1 {
-  --rh-h1: clamp(2.25rem, 5.4vw, 5rem);
+  --rh-h1: clamp(2.25rem, 4.75vw, 4.375rem);
   font-size: var(--rh-h1);
   line-height: round(calc(var(--rh-h1) * 0.98), 1px);
 }
@@ -542,25 +567,6 @@
   .rh-examples,
   .rh-features {
     padding-inline: 1.25rem;
-  }
-
-  .rh-ex {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-
-  .rh-ex-list {
-    flex-direction: row;
-    overflow-x: auto;
-    gap: 0.25rem;
-  }
-
-  .rh-ex-list button {
-    flex: none;
-  }
-
-  .rh-ex-list button.on::before {
-    display: none;
   }
 
   .rh-grid {

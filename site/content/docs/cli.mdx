@@ -81,7 +81,6 @@ Analyze it:
 ```terminal
 $ reylo analyze queries/get_user.sql
 {
-  "file": "queries/get_user.sql",
   "$schema": "https://reylo.dev/typedefs/preview.json",
   "dialect": { "name": "postgres", "version": "18.6" },
   "sql": "-- One user, by id.\nselect id, email, bio from users where id = $1\n",
@@ -126,7 +125,7 @@ Each field of the result:
 
 | Field | What it holds |
 | --- | --- |
-| `file` | The file the statement came from: the CLI's own field, which a statement given with `--sql` doesn't have |
+| `file` | The file the statement came from, when the command reads several |
 | `$schema` | The format's version, as the URL of its JSON Schema |
 | `dialect` | The database, and its server's version |
 | `sql` | The statement as the database runs it, with the database's own placeholders |
@@ -165,7 +164,6 @@ With `--format typescript`, it prints the parameters and what `.run()` resolves 
 
 ```terminal
 $ reylo analyze queries/get_user.sql --format typescript
-// queries/get_user.sql
 type Params = { id: number | bigint | string };
 type Returns = { id: bigint; email: string; bio: string | null } | null;
 ```

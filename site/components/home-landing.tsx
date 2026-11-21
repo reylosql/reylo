@@ -2,10 +2,10 @@ import { createContext, useContext, useRef, useState, type CSSProperties, type R
 import { createPortal } from 'react-dom';
 import data from 'virtual:home-examples';
 import { DATABASES, HOSTS } from './host-logos';
-import { StarPill } from './star-pill';
-import { FileIcon, Mark, VariadicMark } from './migrate-landing';
+import { Foot, Nav } from './home-chrome';
+import { FileIcon } from './migrate-landing';
 import type { HomeExample, HomeVariant, Line } from '@/lib/home-examples';
-import { githubUrl, introUrl } from '@/lib/layout.shared';
+import { introUrl } from '@/lib/layout.shared';
 import './home-landing.css';
 
 /*
@@ -20,8 +20,8 @@ import './home-landing.css';
 
 type Dialect = 'postgres' | 'mysql' | 'sqlite';
 
-/** The examples the homepage shows, by the Inference section's anchors, in its order; each card no taller than the list of their names. */
-const SHOWN = ['naming', 'left-joins', 'computed-columns', 'nullable-parameters', 'unique-keys', 'aggregates', 'window-functions', 'subqueries:2', 'returning-inserts', 'unions', 'json', 'json-schema', 'oneof'];
+/** The examples the homepage shows, by the Inference section's anchors, in its order. Named parameters are left out: `:name` is Reylo's addition to SQL, not what Reylo infers. */
+const SHOWN = ['left-joins', 'computed-columns', 'nullable-parameters', 'unique-keys', 'aggregates', 'window-functions', 'subqueries:2', 'returning-inserts', 'unions', 'json', 'json-schema', 'oneof'];
 const EXAMPLES = SHOWN.map((id) => data.examples.find((e) => e.id === id)).filter((e): e is HomeExample => !!e);
 
 
@@ -44,52 +44,6 @@ export function HomeLanding({ stars }: { stars?: number }) {
 }
 
 /* ── The nav ─────────────────────────────────────────────────────────────── */
-
-function Nav({ stars }: { stars?: number }) {
-  return (
-    <nav className="ml-nav rh-nav">
-      <a className="ml-brand" href="/">
-        <Mark />
-        Reylo
-      </a>
-      <div className="ml-links rh-links">
-        <a href={introUrl}>Docs</a>
-        <a href="/play">Playground</a>
-        <a href="/migrate">Migrate</a>
-        <span className="rh-star-wrap">
-          <StarPill stars={stars} />
-          <StarNote />
-        </span>
-      </div>
-    </nav>
-  );
-}
-
-/**
- * "Leave a star!" in a hand, under the pill, and an arrow drawn from the end of it, sweeping right and
- * then up into the middle of the pill's underside; on a wide window, mirrored onto the pill's right. Drawn from the pill's own box (`.rh-star-note`), so
- * it lands on the pill at every width; the nav scrolls away with the page, and the note with it.
- */
-function StarNote() {
-  return (
-    <>
-      <svg className="rh-star-note rh-star-note-left" viewBox="0 0 170 84" fill="none" aria-hidden="true">
-        <text x="62" y="62" textAnchor="end" transform="rotate(-4 62 62)">
-          Leave a star!
-        </text>
-        <path d="M 72 57 C 110 63, 144 36, 150 3" />
-        <path d="M 142 15 L 150 3 L 158 14" />
-      </svg>
-      <svg className="rh-star-note rh-star-note-right" viewBox="0 0 170 84" fill="none" aria-hidden="true">
-        <text x="66" y="62" transform="rotate(-4 66 62)">
-          Leave a star!
-        </text>
-        <path d="M 58 57 C 34 60, 20 36, 20 3" />
-        <path d="M 12 14 L 20 3 L 28 15" />
-      </svg>
-    </>
-  );
-}
 
 /* ── The install ────────────────────────────────────────────────────────── */
 
@@ -234,9 +188,10 @@ function TableHover({ children }: { children: ReactNode }) {
  * right of its label's line where the example has more than one database, then Params and Returns in
  * a band under it.
  */
-function Card({ variant, dialects, dialect, onDialect }: { variant: HomeVariant; dialects: Dialect[]; dialect: Dialect; onDialect: (d: Dialect) => void }) {
+function Card({ variant, dialects, dialect, onDialect, tabs }: { variant: HomeVariant; dialects: Dialect[]; dialect: Dialect; onDialect: (d: Dialect) => void; tabs?: ReactNode }) {
   return (
     <div className="rh-card">
+      {tabs}
       <div className="rh-card-row">
         <div className="rh-card-label">Query</div>
         {dialects.length > 1 && (
@@ -272,14 +227,30 @@ function Card({ variant, dialects, dialect, onDialect }: { variant: HomeVariant;
 
 /* ── The examples ───────────────────────────────────────────────────────── */
 
+/** A line of prose with its inline code, as the docs write it in backticks. */
+function Prose({ text }: { text: string }) {
+  return text.split(/(`[^`]+`)/).map((part, i) => (part.startsWith('`') ? <code key={i}>{part.slice(1, -1)}</code> : part));
+}
+
 /**
- * The Inference section's examples, one inference card at a time, centred between the names in the
- * left gutter and a right gutter as wide. The reader picks one; none turns by itself.
+ * The Inference section's examples, in one inference card: their names as tabs across its top, the
+ * rows balanced so no name sits alone on one, and the picked example's lede as a caption under it.
+ * The card is as tall as its example needs. The reader picks one; none turns by itself.
  */
 function Examples() {
   const [at, setAt] = useState(0);
   const [dialect, setDialect] = useState<Dialect>('postgres');
-  const shownDialect = (e: HomeExample): Dialect => (e.variants[dialect] ? dialect : (Object.keys(e.variants)[0] as Dialect));
+  const example = EXAMPLES[at]!;
+  const shown: Dialect = example.variants[dialect] ? dialect : (Object.keys(example.variants)[0] as Dialect);
+  const tabs = (
+    <div className="rh-tabs" role="tablist" aria-label="Examples">
+      {EXAMPLES.map((e, i) => (
+        <button key={e.id} type="button" role="tab" aria-selected={i === at} className={i === at ? 'on' : undefined} onClick={() => setAt(i)}>
+          {e.title}
+        </button>
+      ))}
+    </div>
+  );
   return (
     <section className="rh-examples">
       <header className="rh-section-head">
@@ -287,30 +258,32 @@ function Examples() {
         <p>Parameters, columns, nullability, cardinality and nested JSON shapes, from your database's own analysis of each query.</p>
       </header>
       <div className="rh-ex">
-        <div className="rh-ex-list" role="tablist" aria-label="Examples">
-          {EXAMPLES.map((e, i) => (
-            <button key={e.id} type="button" role="tab" aria-selected={i === at} className={i === at ? 'on' : undefined} onClick={() => setAt(i)}>
-              {e.title}
-            </button>
-          ))}
-        </div>
-        <div className="rh-ex-cards">
-          {EXAMPLES.map((e, i) => {
-            const d = shownDialect(e);
-            const variant = e.variants[d]!;
-            return (
-              <div key={e.id} className="rh-ex-card" data-on={i === at || undefined}>
-                <Card variant={variant} dialects={Object.keys(e.variants) as Dialect[]} dialect={d} onDialect={setDialect} />
-              </div>
-            );
-          })}
-        </div>
+        <Card variant={example.variants[shown]!} dialects={Object.keys(example.variants) as Dialect[]} dialect={shown} onDialect={setDialect} tabs={tabs} />
+        <p className="rh-ex-caption">
+          <Prose text={example.lede} />
+        </p>
       </div>
     </section>
   );
 }
 
 /* ── The hero ───────────────────────────────────────────────────────────── */
+
+/** The blog post (content/blog) the pill above the headline links: the latest launch, which a patch release never replaces. */
+const NEWS = { href: '/blog/reylo-migrate', title: 'Introducing Reylo Migrate — SQL-first schema and migrations' };
+
+/** Above the headline, a pill to the latest launch's post: a "New" badge, its title, which a narrow window ellipsizes, and an arrow. */
+function NewsPill() {
+  return (
+    <a className="rh-news" href={NEWS.href}>
+      <span className="rh-news-badge">New</span>
+      <span className="rh-news-title">{NEWS.title}</span>
+      <span className="rh-news-arrow" aria-hidden="true">
+        →
+      </span>
+    </a>
+  );
+}
 
 /**
  * The words on the left; on the right the intro's statement, and under it, indented, the main.ts that
@@ -321,6 +294,7 @@ function Hero() {
   return (
     <header className="ml-hero rh-hero-split">
       <div className="ml-hero-words">
+        <NewsPill />
         <h1 className="ml-h1 rh-h1">
           <span>Import SQL</span> <span>into TypeScript,</span> <em>fully typed</em>
         </h1>
@@ -474,21 +448,3 @@ function End() {
   );
 }
 
-function Foot() {
-  return (
-    <footer className="ml-foot">
-      <a className="ml-variadic" href="https://variadic.sh">
-        <VariadicMark />A Variadic project
-      </a>
-      <div className="ml-foot-links">
-        <a href={introUrl}>Docs</a>
-        <a href="/inference">Inference</a>
-        <a href="/play">Playground</a>
-        <a href="/migrate">Migrate</a>
-        <a href={githubUrl}>GitHub</a>
-        <a href="https://www.npmjs.com/package/reylo">npm</a>
-      </div>
-      <span className="ml-license">Released under the MIT License.</span>
-    </footer>
-  );
-}

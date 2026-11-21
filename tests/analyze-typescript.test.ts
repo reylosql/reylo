@@ -42,7 +42,9 @@ function binary(cwd: string, url: string, files: string[]): Promise<Map<string, 
     child.on("close", (status) => {
       if (status !== 0 && status !== 1) return reject(new Error(`reylo analyze exited with ${status} on ${files[0]}`));
       const printed = new Map<string, string>();
-      // Each statement opens with `// <file>`, which no line of a type does, a blank line after the one before.
+      // One file prints its types alone.
+      if (files.length === 1) return resolve(printed.set(files[0]!, out));
+      // Several each open with `// <file>`, which no line of a type does, a blank line after the one before.
       for (const block of out.split(/^\/\/ /m).filter(Boolean)) {
         const newline = block.indexOf("\n");
         printed.set(block.slice(0, newline), block.slice(newline + 1).replace(/\n\n$/, "\n"));

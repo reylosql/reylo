@@ -18,6 +18,9 @@ export default [
   // Reylo Migrate: its landing page, and its docs (content/docs/migrate.mdx) under it.
   route('migrate', 'routes/migrate.tsx'),
   route('migrate/docs', 'routes/page.tsx', { id: 'migrate-docs' }),
+  // The blog: its list of posts, and each post (content/blog, lib/blog.ts).
+  route('blog', 'routes/blog.tsx'),
+  route('blog/:slug', 'routes/blog-post.tsx'),
   ...markdown.map((file) => route(file, 'routes/markdown.ts', { id: `markdown/${file}` })),
   route('404', 'routes/not-found.tsx'),
   // The playground, full screen (components/play.tsx).

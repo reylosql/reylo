@@ -105,7 +105,7 @@ function check(name: string, url: string, { env = {}, tsc = true, analyze = true
   if (analyze) {
     const analyzed = run(process.execPath, [join(project, "node_modules", "reylo", "src", "cli.js"), "analyze", "queries/get_user.sql", "--format", "json"], project, false, env);
     console.log(`reylo analyze: ${analyzed.status}\n${analyzed.out.trim()}`);
-    if (analyzed.status !== 0 || !analyzed.out.includes(`"file":"queries/get_user.sql"`)) failures.push(`${name}: reylo analyze exited ${analyzed.status}`);
+    if (analyzed.status !== 0 || !analyzed.out.includes(`"sql":"select id, name from users where id = `)) failures.push(`${name}: reylo analyze exited ${analyzed.status}`);
   }
   if (!tsc) return;
   rmSync(join(project, "reylo", ".cache"), { recursive: true, force: true });

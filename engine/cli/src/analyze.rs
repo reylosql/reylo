@@ -16,12 +16,12 @@ use std::path::{Path, PathBuf};
 pub const USAGE: &str = "Usage: reylo analyze <file.sql | directory | 'glob' | -> ... [--url <url>] [--format <format>]
        reylo analyze --sql <statement> [--url <url>] [--format <format>]
 
-Prints each statement's type descriptor, with the file it was read from, as JSON: laid out in a
-terminal, each object on one line where it fits, and otherwise one line per statement. Each
-diagnostic is also written to standard error, as file:line:column and the message, with a caret
-under its place. A directory is searched for .sql files, leaving out node_modules, dist, build,
-out, target, coverage, hidden directories and what git ignores; a glob in quotes, as
-'src/**/*.sql', is expanded by Reylo; - reads one statement from standard input.
+Prints each statement's type descriptor as JSON, with the file it was read from when there are
+several: laid out in a terminal, each object on one line where it fits, and otherwise one line per
+statement. Each diagnostic is also written to standard error, as file:line:column and the
+message, with a caret under its place. A directory is searched for .sql files, leaving out
+node_modules, dist, build, out, target, coverage, hidden directories and what git ignores; a glob
+in quotes, as 'src/**/*.sql', is expanded by Reylo; - reads one statement from standard input.
 
 Formats:
   json                      The type descriptor, the default
@@ -236,6 +236,9 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
     let mut flagged = false;
     // Whether a statement is printed yet, which the next one is set apart from.
     let mut shown = false;
+    // A run of one statement prints it alone, since the caller named its file; a run of several
+    // names each one's file, which tells them apart.
+    let several = inputs.len() > 1;
     for (at, input) in inputs.into_iter().enumerate() {
         // The analysis, for the formats that read more than the descriptor; none where the engine
         // could not analyze the statement.
@@ -276,12 +279,13 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
         report(input.file.as_deref(), &input.sql, &descriptor.diagnostics);
         // Two statements a person reads are a blank line apart; a pipe takes a line each.
         let gap = shown && (format != Format::Json || settings.terminal);
-        let header = input.file.as_deref().map(|file| format!("// {file}\n")).unwrap_or_default();
+        let file = input.file.as_deref().filter(|_| several);
+        let header = file.map(|file| format!("// {file}\n")).unwrap_or_default();
         match format {
             Format::Json | Format::Yaml => {
                 let mut line = Map::new();
-                if let Some(file) = input.file {
-                    line.insert("file".into(), Value::String(file));
+                if let Some(file) = file {
+                    line.insert("file".into(), Value::String(file.to_string()));
                 }
                 if let Ok(Value::Object(fields)) = serde_json::to_value(&descriptor) {
                     line.extend(fields);

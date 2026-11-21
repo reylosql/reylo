@@ -151,7 +151,23 @@ test("analyze reads a statement from --sql or standard input, and a file from a 
   assert.deepEqual(stdin.lines.map((l) => [l.result.columns[0]!.name, l.result.columns[0]!.nullable]), [["email", true]]);
   const nested = analyzeIn(join(root, "q"), ["get_user.sql"]);
   assert.equal(nested.status, 0, nested.stderr);
-  assert.deepEqual(nested.lines.map((l) => [l.file, l.result.cardinality]), [["get_user.sql", "at_most_one"]]);
+  assert.deepEqual(nested.lines.map((l) => l.result.cardinality), ["at_most_one"]);
+});
+
+test("analyze names each statement's file only when it reads several", () => {
+  const root = project({ "q/a.sql": "select name from users\n", "q/b.sql": "select nope from users\n", "one/c.sql": "select email from users\n" });
+  // One file, named or the only one under a directory, prints its descriptor alone.
+  assert.deepEqual(analyzeIn(root, ["q/a.sql"]).lines.map((l) => l.file), [undefined]);
+  assert.deepEqual(analyzeIn(root, ["one"]).lines.map((l) => l.file), [undefined]);
+  const yaml = spawnSync(nativeBinary(), ["analyze", "--format", "yaml", "q/b.sql"], { cwd: root, env: inherited(), encoding: "utf8" });
+  assert.ok(yaml.stdout.startsWith(`$schema: ${SCHEMA}\n`), yaml.stdout);
+  // A diagnostic on standard error names its file either way.
+  assert.ok(yaml.stderr.startsWith("q/b.sql:1:8: no such column: nope\n"), yaml.stderr);
+  // Several, by a directory, a glob or a list, each name theirs.
+  assert.deepEqual(analyzeIn(root, ["q"]).lines.map((l) => l.file), ["q/a.sql", "q/b.sql"]);
+  assert.deepEqual(analyzeIn(root, ["*/*.sql"]).lines.map((l) => l.file).sort(), ["one/c.sql", "q/a.sql", "q/b.sql"]);
+  assert.deepEqual(analyzeIn(root, ["q/a.sql", "one/c.sql"]).lines.map((l) => l.file), ["q/a.sql", "one/c.sql"]);
+  assert.deepEqual(analyzeIn(root, ["--sql", "select 1 as one", "one/c.sql"]).lines.map((l) => l.file), [undefined, "one/c.sql"]);
 });
 
 test("analyze holds a parameter nothing types to the project's allow_untyped_params, as the type check does", () => {

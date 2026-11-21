@@ -7,13 +7,17 @@ import { builtPage } from './lib/rust-content.ts';
 // homepage (/), each page of content/docs (index.mdx at /docs, every other file at its name), each
 // page's Markdown (/index.md, /<name>.md), the files beside them, the playground (/play) and its link
 // preview (/play/og.png), and the page for a missing address, which Vercel serves from 404.html. The
-// Rust page is one too, unlisted while the docs leave Rust out (lib/rust-content.ts).
+// Rust page is one too, unlisted while the docs leave Rust out (lib/rust-content.ts). The blog is /blog,
+// and each post of content/blog is /blog/<name>.
 const names = readdirSync('content/docs')
   .filter(builtPage)
   .map((name) => name.slice(0, -'.mdx'.length));
 // The intro is index.mdx, at /docs, under the homepage at /; Reylo Migrate's docs are migrate.mdx, at
 // /migrate/docs, under its landing page at /migrate.
-const routes = ['/', '/migrate', ...names.map((name) => (name === 'index' ? '/docs' : name === 'migrate' ? '/migrate/docs' : `/${name}`))];
+const posts = readdirSync('content/blog')
+  .filter((name) => name.endsWith('.mdx'))
+  .map((name) => `/blog/${name.slice(0, -'.mdx'.length)}`);
+const routes = ['/', '/migrate', ...names.map((name) => (name === 'index' ? '/docs' : name === 'migrate' ? '/migrate/docs' : `/${name}`)), '/blog', ...posts];
 
 export default {
   ssr: false,

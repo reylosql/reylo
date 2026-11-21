@@ -1269,9 +1269,10 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
 .ml-h1 {
   position: relative;
   margin: 0 0 2rem;
-  /* "SQL-first" kept whole on its line, the rest wrapping under it, three lines in all. */
-  font-size: clamp(2.25rem, 5.4vw, 5rem);
-  font-weight: 600;
+  /* "SQL-first" kept whole on its line, the rest wrapping under it, three lines in all. A size down
+     from 5rem and a weight down from 600, so the headline doesn't shout over the page. */
+  font-size: clamp(2.25rem, 4.75vw, 4.375rem);
+  font-weight: 550;
   line-height: 0.98;
   letter-spacing: -0.04em;
 }
@@ -1792,7 +1793,7 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
 
 @media (max-width: 1023px) {
   .ml-h1 {
-    font-size: 4.5rem;
+    font-size: 3.9375rem;
   }
 
   .ml-hero {

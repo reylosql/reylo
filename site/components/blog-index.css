@@ -1,0 +1,229 @@
+/* ── The blog's index (components/blog-index.tsx) ────────────────────────────
+   Under the homepage's bar (.ml, .rh): "Blog", the newest announcement as a card beside a dark
+   window of what it announces, then the releases as rows led by their version. The window is dark on
+   either theme, as the homepage's are. */
+
+.bl-main {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 3.5rem 3rem 6rem;
+}
+
+.bl-h1 {
+  margin: 0 0 2rem;
+  font-size: clamp(2.25rem, 4.6vw, 3rem);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  color: var(--color-fd-foreground);
+}
+
+/* The card: the words on the left, the glimpse on the right; the yellow wash in its corner and the
+   border warm on hover. */
+.bl-feat {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  gap: 2.25rem;
+  align-items: center;
+  padding: 2.25rem;
+  border: 1px solid var(--color-fd-border);
+  border-radius: 1rem;
+  background:
+    radial-gradient(120% 140% at 0% 0%, color-mix(in oklab, var(--dk-accent) 10%, transparent), transparent 55%),
+    var(--color-fd-card);
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 150ms;
+}
+
+.bl-feat-words-only {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.bl-feat:hover {
+  border-color: color-mix(in oklab, var(--dk-accent) 50%, transparent);
+}
+
+/* Its capitals sat 0.44px low with 4px over them and 3px under, measured by their ink, so the two are even. */
+.bl-new {
+  display: inline-block;
+  padding: 0.21875rem 0.5625rem;
+  border-radius: 999px;
+  background: var(--dk-accent);
+  font: 500 0.6875rem/1 var(--font-code);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #160c08;
+}
+
+.bl-feat h2 {
+  margin: 1rem 0 0;
+  font-size: clamp(2rem, 4vw, 2.75rem);
+  font-weight: 600;
+  line-height: 1.02;
+  letter-spacing: -0.04em;
+  color: var(--color-fd-foreground);
+}
+
+.bl-feat p {
+  margin: 0.75rem 0 0;
+  font-size: 1.0625rem;
+  line-height: 1.5;
+  color: var(--color-fd-muted-foreground);
+}
+
+.bl-read {
+  display: inline-flex;
+  gap: 0.375rem;
+  margin-top: 0.875rem;
+  font-size: 0.875rem;
+  color: var(--dk-link, var(--color-fd-primary));
+}
+
+/* The arrow's ink sat 1.4px under the words' cap band, as the homepage pill's does, so a transform lifts it. */
+.bl-read span {
+  transform: translateY(-1.375px);
+  transition: transform 150ms;
+}
+
+.bl-feat:hover .bl-read span {
+  transform: translate(3px, -1.375px);
+}
+
+/* The glimpse: an editor window, dark on either theme, with schema.sql's edit as a diff. */
+.bl-win {
+  overflow: hidden;
+  border: 1px solid hsl(0 0% 17%);
+  border-radius: 0.625rem;
+  background: hsl(0 0% 6%);
+  box-shadow: 0 20px 50px -20px rgb(0 0 0 / 0.7);
+}
+
+.bl-bar {
+  padding: 0.5625rem 0.875rem;
+  border-bottom: 1px solid hsl(0 0% 13%);
+  font: 0.75rem var(--font-code);
+  color: hsl(0 0% 55%);
+}
+
+.bl-win pre {
+  margin: 0;
+  padding: 0.875rem 0;
+  overflow-x: auto;
+  font: 0.78125rem/1.75 var(--font-code);
+  color: #e1e4e8;
+}
+
+.bl-l {
+  display: block;
+  position: relative;
+  padding: 0 1rem 0 1.75rem;
+  white-space: pre;
+}
+
+.bl-l[data-g]::before {
+  content: attr(data-g);
+  position: absolute;
+  left: 0.75rem;
+}
+
+.bl-del {
+  background: rgb(248 81 73 / 0.13);
+}
+
+.bl-del::before {
+  color: #f97583;
+}
+
+.bl-add {
+  background: rgb(46 160 67 / 0.15);
+}
+
+.bl-add::before {
+  color: #85e89d;
+}
+
+.bl-kw {
+  color: #f97583;
+}
+
+.bl-ty {
+  color: #79b8ff;
+}
+
+/* The releases: a rule with its label, then a row per release, the version in the code face. */
+.bl-section {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+  margin: 3.5rem 0 0.5rem;
+  font: 500 0.75rem var(--font-code);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-fd-muted-foreground);
+}
+
+.bl-section::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--color-fd-border);
+}
+
+.bl-releases {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bl-releases a {
+  display: grid;
+  grid-template-columns: 9.5rem minmax(0, 1fr) auto;
+  gap: 1.75rem;
+  align-items: baseline;
+  padding: 1.625rem 0;
+  border-bottom: 1px solid var(--color-fd-border);
+  color: inherit;
+  text-decoration: none;
+}
+
+.bl-version {
+  font: 600 1.875rem/1 var(--font-code);
+  letter-spacing: -0.03em;
+  color: var(--color-fd-foreground);
+  transition: color 150ms;
+}
+
+.bl-releases a:hover .bl-version {
+  color: var(--dk-link, var(--color-fd-primary));
+}
+
+.bl-description {
+  font-size: 1.0625rem;
+  line-height: 1.5;
+  color: var(--color-fd-foreground);
+}
+
+.bl-releases time {
+  font: 0.75rem var(--font-code);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  color: var(--color-fd-muted-foreground);
+}
+
+/* Narrower, the card stacks, and a release's date goes under its version. */
+@media (max-width: 767px) {
+  .bl-main {
+    padding: 2.5rem 1.25rem 4rem;
+  }
+
+  .bl-feat {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 1.5rem;
+  }
+
+  .bl-releases a {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.5rem;
+  }
+}

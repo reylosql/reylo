@@ -14,7 +14,7 @@ Each card shows the types in TypeScript or in Rust: pick one at the top of any c
 
 Each SQL type has one TypeScript type, the same on every driver<Rust>, and one Rust type</Rust>.
 
-Dates and times are ISO 8601 strings, never a `Date`, so they keep [full precision](/postgres#dates-and-times).
+Dates and times are ISO 8601 strings, never a `Date`, so they keep [full precision](/postgres#dates-and-times). To read them as `Temporal` values, set [`js.codecs`](/configuration#jscodecs).
 
 <LanguageSwitch />
 

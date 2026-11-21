@@ -89,5 +89,6 @@ export const pageGroups = [
 
 export const pageLinks = [
   { title: 'Playground', href: '/play' },
+  { title: 'Blog', href: '/blog' },
   { title: 'npm', href: 'https://www.npmjs.com/package/reylo' },
 ];
