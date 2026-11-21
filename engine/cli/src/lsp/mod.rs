@@ -227,7 +227,8 @@ enum Event {
     Read { place: PathBuf, tables: Vec<Table>, reserved: Vec<String> },
     Created { place: PathBuf, created: Vec<(PathBuf, Created)> },
     /// The database didn't answer; what needs it is tried again later.
-    Unavailable { place: PathBuf },
+    /// A database failed. `lost`: not only a wait for a lock, so the URL may be worth reading again.
+    Unavailable { place: PathBuf, why: String, lost: bool, by_reader: bool },
 }
 
 /// When the files a project's URL comes from last changed.
@@ -322,8 +323,6 @@ struct AnalysisPlace {
     base: PathBuf,
     project: Option<Box<Project>>,
     session: Option<Session>,
-    /// The last failure logged, so that a server that stays down is said once.
-    said: Option<String>,
 }
 
 struct Analyzer {
@@ -354,8 +353,7 @@ impl Analyzer {
                 match job {
                     AnalyzeJob::Register { place, database, base, project } => {
                         let kept = self.places.remove(&place).filter(|p| p.database == database);
-                        let (session, said) = kept.map_or((None, None), |p| (p.session, p.said));
-                        self.places.insert(place, AnalysisPlace { database, base, project, session, said });
+                        self.places.insert(place, AnalysisPlace { database, base, project, session: kept.and_then(|p| p.session) });
                     }
                     AnalyzeJob::Statement { uri, place, text } => self.analyze(&runtime, uri, place, text),
                 }
@@ -368,12 +366,8 @@ impl Analyzer {
             if !keep_session {
                 place.session = None;
             }
-            if place.said.as_deref() != Some(why.as_str()) {
-                log(&why);
-                place.said = Some(why);
-            }
         }
-        let _ = self.events.send(Event::Unavailable { place: key.to_path_buf() });
+        let _ = self.events.send(Event::Unavailable { place: key.to_path_buf(), why, lost: !keep_session, by_reader: false });
     }
 
     /// Analyzes a file of one statement on its database.
@@ -420,7 +414,6 @@ impl Analyzer {
             Ok(Err(failure)) => return self.unavailable(&key, failure.to_string(), false),
             Err(_) => return self.unavailable(&key, format!("the database took more than {} seconds to analyze a statement", TIMEOUT.as_secs()), false),
         };
-        place.said = None;
         let _ = self.events.send(Event::Analyzed { uri, text, analysis, found });
     }
 }
@@ -432,8 +425,8 @@ struct ReadPlace {
     base: PathBuf,
     /// A connection kept between reads. A SQLite file is opened for each, so that nothing holds it.
     db: Option<Db>,
-    /// The last failure logged, so that a server that stays down is said once.
-    said: Option<String>,
+    /// A SQLite file, read as an analysis reads it.
+    file: Option<reylo_engine::sqlite::ReadableFile>,
 }
 
 struct Reader {
@@ -447,8 +440,9 @@ impl Reader {
         while let Ok(job) = queue.recv() {
             match job {
                 ReadJob::Register { place, dialect, database, base } => {
-                    let (db, said) = self.places.remove(&place).filter(|p| p.database == database).map_or((None, None), |p| (p.db, p.said));
-                    self.places.insert(place, ReadPlace { dialect, database, base, db, said });
+                    let db = self.places.remove(&place).filter(|p| p.database == database).and_then(|p| p.db);
+                    let file = database.as_ref().filter(|(_, name)| *name == "sqlite").and_then(|(url, _)| project::sqlite_path(url, &base).ok()).map(|path| reylo_engine::sqlite::ReadableFile::new(&path));
+                    self.places.insert(place, ReadPlace { dialect, database, base, db, file });
                 }
                 ReadJob::Schema { place } => self.read(&runtime, place),
             }
@@ -466,14 +460,12 @@ impl Reader {
         let read = runtime.block_on(async {
             let read = async {
                 if db.is_none() {
-                    db = Some(Db::connect_read_only(&url, &base).await?);
+                    db = Some(match &place.file {
+                        Some(file) => Db::Sqlite(file.open().map_err(|e| reylo_migrate::Error(e.to_string()))?),
+                        None => Db::connect_read_only(&url, &base).await?,
+                    });
                 }
-                let connection = db.as_mut().expect("connected above");
-                match list_columns(connection, name).await {
-                    // A SQLite file another connection holds is read as it stands on disk.
-                    Err(e) if name == "sqlite" && e.0.contains("locked") => list_columns(&mut Db::open_held(&url, &base)?, name).await,
-                    listed => listed,
-                }
+                list_columns(db.as_mut().expect("connected above"), name).await
             };
             tokio::time::timeout(TIMEOUT, read).await
         });
@@ -484,15 +476,11 @@ impl Reader {
                     Ok(Err(e)) => e.0,
                     _ => format!("the database took more than {} seconds to list its tables", TIMEOUT.as_secs()),
                 };
-                if place.said.as_deref() != Some(why.as_str()) {
-                    log(&why);
-                    place.said = Some(why);
-                }
-                let _ = self.events.send(Event::Unavailable { place: key });
+                let lost = !waited_for_a_lock(&why);
+                let _ = self.events.send(Event::Unavailable { place: key, why, lost, by_reader: true });
                 return;
             }
         };
-        place.said = None;
         if name != "sqlite" {
             place.db = db;
         }
@@ -620,12 +608,15 @@ struct Place {
     reserved: HashSet<String>,
     read_at: Option<Instant>,
     reading: bool,
+    /// The failures last logged for the analysis and the schema read, so that a server that stays down is said once.
+    said_by_analysis: Option<String>,
+    said_by_read: Option<String>,
 }
 
 impl Place {
     fn new(dialect: Dialect) -> Place {
         let reserved = syntax::reserved_words(dialect).into_iter().map(str::to_ascii_lowercase).collect();
-        Place { dialect, tables: Vec::new(), created: Vec::new(), reserved, read_at: None, reading: false }
+        Place { dialect, tables: Vec::new(), created: Vec::new(), reserved, read_at: None, reading: false, said_by_analysis: None, said_by_read: None }
     }
 }
 
@@ -689,10 +680,10 @@ impl Server {
                         }
                         self.read_schema(&key);
                         self.send_analysis(&uri);
-                        // Every other open file of the project now answers to the new database.
+                        // Every other open file of the project now answers to the new database, and one with no project yet may be in it.
                         if database_moved {
                             let now = Instant::now();
-                            let others: Vec<String> = self.docs.iter().filter(|(u, d)| **u != uri && d.place.as_ref() == Some(&key)).map(|(u, _)| u.clone()).collect();
+                            let others: Vec<String> = self.docs.iter().filter(|(u, d)| **u != uri && (d.place.is_none() || d.place.as_ref() == Some(&key))).map(|(u, _)| u.clone()).collect();
                             for other in others {
                                 self.pending.insert(other, now);
                             }
@@ -703,10 +694,20 @@ impl Server {
                             doc.reading = None;
                         }
                         self.publish(&uri);
+                        if database_moved {
+                            let now = Instant::now();
+                            let others: Vec<String> = self.docs.iter().filter(|(u, d)| **u != uri && d.place.is_some()).map(|(u, _)| u.clone()).collect();
+                            for other in others {
+                                self.pending.insert(other, now);
+                            }
+                        }
                     }
                 }
             }
             Event::Analyzed { uri, text, analysis, found } => {
+                if let Some(known) = self.docs.get(&uri).and_then(|d| d.place.as_ref()).and_then(|key| self.places.get_mut(key)) {
+                    known.said_by_analysis = None;
+                }
                 if let Some(doc) = self.docs.get_mut(&uri).filter(|d| d.text == text) {
                     doc.analysis = analysis;
                     doc.found = found;
@@ -720,6 +721,7 @@ impl Server {
                 known.reserved = syntax::reserved_words(known.dialect).into_iter().map(str::to_ascii_lowercase).chain(reserved).collect();
                 known.read_at = Some(Instant::now());
                 known.reading = false;
+                known.said_by_read = None;
                 // The schema moved under the open files: what they said of it may no longer hold.
                 if changed {
                     let now = Instant::now();
@@ -734,17 +736,23 @@ impl Server {
                     known.created = created;
                 }
             }
-            Event::Unavailable { place } => {
+            Event::Unavailable { place, why, lost, by_reader } => {
                 if let Some(known) = self.places.get_mut(&place) {
                     known.reading = false;
                     known.read_at = Some(Instant::now());
+                    if known.said_by_analysis.as_ref() != Some(&why) && known.said_by_read.as_ref() != Some(&why) {
+                        log(&why);
+                    }
+                    *(if by_reader { &mut known.said_by_read } else { &mut known.said_by_analysis }) = Some(why);
                 }
                 // Try again later, for a server that comes back or a `.env` that was fixed.
                 let retry = Instant::now() + RETRY;
                 let mine: Vec<String> = self.docs.iter().filter(|(_, d)| d.place.as_ref() == Some(&place)).map(|(uri, _)| uri.clone()).collect();
                 for uri in mine {
                     self.pending.entry(uri.clone()).or_insert(retry);
-                    self.retrying.insert(uri);
+                    if lost {
+                        self.retrying.insert(uri);
+                    }
                 }
             }
             _ => {}
@@ -1031,18 +1039,25 @@ impl Server {
         if let Some(t) = open {
             let quote = doc.text[t.start as usize..].chars().next().unwrap_or('"');
             let close = closing_quote(quote as u8) as char;
-            // The rest of the name up to its closing quote is replaced. Text an unclosed quote only reads as a name, up to some later quote or the end of the file, stays.
+            // What's between the cursor and the next quote, where that quote is on this line.
             let rest = &doc.text[offset..t.end as usize];
-            let end = if rest.strip_suffix(close).is_some_and(|name| !name.contains(|c: char| c.is_whitespace() || c == close)) { t.end as usize } else { offset };
-            let whole = range(&doc.text, &reading.lines, t.start as usize, end);
+            let inner = rest.strip_suffix(close).filter(|r| !r.contains('\n'));
+            let plain = inner.is_some_and(|r| r.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$'));
             for item in &mut items {
                 let label = item["label"].as_str().unwrap_or("").to_string();
                 let written = item["insertText"].as_str().map_or_else(|| label.clone(), str::to_string);
                 // Inside its quotes a name is written quoted, whether it needs them or not, after the schema a table off the search path needs.
                 let qualifier = written.strip_suffix(quoted(place, &label).as_str()).unwrap_or("");
-                let written = format!("{qualifier}{quote}{}{close}", label.replace(close, &format!("{close}{close}")));
+                let name = label.replace(close, &format!("{close}{close}"));
+                // The name's own text up to its closing quote is replaced. Past anything else, that quote may be another name's, so the text stays and the name is left for its quote.
+                let whole_name = plain || inner.is_some_and(|r| label.to_lowercase() == format!("{prefix}{r}").to_lowercase());
+                let (end, written) = match (whole_name, inner) {
+                    (true, _) => (t.end as usize, format!("{qualifier}{quote}{name}{close}")),
+                    (false, Some(_)) => (offset, format!("{qualifier}{quote}{name}")),
+                    (false, None) => (offset, format!("{qualifier}{quote}{name}{close}")),
+                };
                 item["filterText"] = json!(format!("{quote}{label}"));
-                item["textEdit"] = json!({ "range": whole, "newText": written });
+                item["textEdit"] = json!({ "range": range(&doc.text, &reading.lines, t.start as usize, end), "newText": written });
                 item.as_object_mut().expect("an item").remove("insertText");
             }
         }

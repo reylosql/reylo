@@ -237,8 +237,15 @@ fn a_completion_in_an_unclosed_quote_keeps_the_rest_of_the_file() {
     assert_eq!(edit["range"], json!({ "start": { "line": 1, "character": 5 }, "end": { "line": 1, "character": 8 } }));
     assert_eq!(labels(&client.at("textDocument/completion", &uri, unclosed, "where", true)), Vec::<String>::new());
 
+    // The quote after the cursor may be another name's: nothing past the cursor goes.
+    let beside = "select * from \"us,\"posts\"";
+    client.change(&uri, 2, beside);
+    let edit = client.complete(&uri, beside, "\"us")["items"][0]["textEdit"].clone();
+    assert_eq!(edit["newText"], "\"users");
+    assert_eq!(edit["range"]["end"], json!({ "line": 0, "character": 17 }));
+
     let closed = "select * from \"us\"";
-    client.change(&uri, 2, closed);
+    client.change(&uri, 3, closed);
     let answer = client.complete(&uri, closed, "\"us");
     assert_eq!(answer["items"][0]["textEdit"]["range"]["end"], json!({ "line": 0, "character": 18 }));
     client.finish();

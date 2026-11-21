@@ -301,17 +301,20 @@ fn item_name<'t, 's>(item: &'t [Tok<'s>]) -> Option<&'t Tok<'s>> {
         }
     }
     let cast = item.iter().position(|t| t.is_punct("::")).unwrap_or(item.len());
-    // `id::text label`: a name after the cast's type is its alias, unless it's the last word of a type of several.
-    if let [.., before, alias] = item.get(cast + 1..).unwrap_or(&[]) {
-        if (before.is_name() || before.is_punct(")") || before.is_punct("]")) && !alias.is_any(TYPE_ENDINGS) {
-            return Some(alias).filter(usable);
+    let after_cast = item.get(cast + 1..).unwrap_or(&[]);
+    // A column, cast or not: what follows `::` is a type alone, whose name, parentheses and brackets are all it holds.
+    if after_cast.iter().all(|t| t.is_name() || t.class == Class::Number || ["::", ".", "(", ")", "[", "]", ","].iter().any(|p| t.is_punct(p))) {
+        // `id::text label`: a name after the type is its alias, unless it's the last word of a type of several.
+        if let [.., before, alias] = after_cast {
+            if alias.is_name() && (before.is_name() || before.is_punct(")") || before.is_punct("]")) && !alias.is_any(TYPE_ENDINGS) {
+                return Some(alias).filter(usable);
+            }
         }
-    }
-    let plain = &item[..cast];
-    match plain {
-        [one] => return Some(one).filter(usable),
-        [q, dot, one] if q.is_name() && dot.is_punct(".") => return Some(one).filter(usable),
-        _ => {}
+        match &item[..cast] {
+            [one] => return Some(one).filter(usable),
+            [q, dot, one] if q.is_name() && dot.is_punct(".") => return Some(one).filter(usable),
+            _ => {}
+        }
     }
     // `count(*) total`: a name right after a value is its alias.
     let [.., before, alias] = item else { return None };
@@ -706,9 +709,9 @@ mod tests {
 
     #[test]
     fn a_cast_keeps_its_alias_and_a_type_of_two_words_is_none() {
-        let s = read(Dialect::Postgres, "with x as (select id::text label, name::text, a::double precision, b::int::text, c::numeric(3) d from t) select 1 from x");
+        let s = read(Dialect::Postgres, "with x as (select id::text label, name::text, a::double precision, b::int::text, c::numeric(3) d, price::numeric / 100 dollars, e::int + f from t) select 1 from x");
         let names: Vec<&str> = s.queries.iter().flat_map(|q| &q.ctes).flat_map(|c| &c.columns).map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["label", "name", "a", "b", "d"]);
+        assert_eq!(names, ["label", "name", "a", "b", "d", "dollars"]);
     }
 
     #[test]

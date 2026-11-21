@@ -133,6 +133,19 @@ fn closed(id: u64) -> Value {
     json!({ "status": "unreachable", "message": format!("connection {id} is closed") })
 }
 
+/// A database file for reading, as an analysis reads it: read-only, and through a copy of the file and its logs while another process holds it. The copy lasts as long as this does.
+pub struct ReadableFile(File);
+
+impl ReadableFile {
+    pub fn new(path: &str) -> ReadableFile {
+        ReadableFile(File::new(path))
+    }
+
+    pub fn open(&self) -> rusqlite::Result<rusqlite::Connection> {
+        self.0.open()
+    }
+}
+
 impl File {
     fn new(path: &str) -> File {
         File {

@@ -266,15 +266,6 @@ impl Db {
         Db::connect(url, base).await
     }
 
-    /// A SQLite file another connection holds, as it stands on disk: `immutable` takes no lock and reads no log, so a read may miss what's uncommitted or in a write-ahead log.
-    #[cfg(feature = "cli")]
-    pub fn open_held(url: &str, base: &Path) -> Result<Db, Error> {
-        let path = sqlite_path(url, base).replace('\\', "/").replace('%', "%25").replace('?', "%3f").replace('#', "%23");
-        let slash = if path.starts_with('/') { "" } else { "/" };
-        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX | rusqlite::OpenFlags::SQLITE_OPEN_URI;
-        Ok(Db::Sqlite(rusqlite::Connection::open_with_flags(format!("file:{slash}{path}?immutable=1"), flags).map_err(sqlite_error)?))
-    }
-
     /// The database `opts` names, a SQLite file on libSQL's engine where the project runs there
     /// ([`crate::Options::libsql_engine`]).
     #[cfg(feature = "cli")]
