@@ -174,9 +174,9 @@ js:
     instant: Temporal.Instant  # or string (the default)
     duration: Temporal.Duration  # or string (the default)
     set: Array  # or Set (the default)
-    vector: TypedArray  # or number[] (the default)
-    geometry: GeoJSON  # or the database's encoding (the default)
-    inet: ip-address  # or string (the default)
+    vector: TypedArray  # number[] if left out
+    geometry: GeoJSON  # the database's encoding if left out
+    inet: ip-address  # string if left out
 ```
 
 Each family covers these types:
