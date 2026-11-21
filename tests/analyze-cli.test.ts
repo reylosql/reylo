@@ -300,6 +300,29 @@ test("analyze reads a Postgres statement over its own connection, the server's v
   }
 });
 
+test("analyze --format rust reads each file's types from the features of its own crate's reylo, as reylo generate does", { skip: pgLive }, async () => {
+  const own = await postgresDatabase("reylo_analyze_cli_rust");
+  try {
+    // A virtual workspace, whose one member turns on reylo's uuid feature.
+    const root = project({
+      "Cargo.toml": '[workspace]\nmembers = ["app"]\nresolver = "2"\n',
+      "app/Cargo.toml": '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nreylo = { version = "0.8", features = ["uuid"] }\n',
+      "app/src/lib.rs": "",
+      "app/src/get.sql": "select gen_random_uuid() as id\n",
+    });
+    const rust = (args: string[]) => spawnSync(nativeBinary(), ["analyze", "--format", "rust", "--url", own.url, ...args], { cwd: root, env: inherited(), encoding: "utf8" });
+    const file = rust(["app/src/get.sql"]);
+    assert.equal(file.status, 0, file.stderr);
+    assert.match(file.stdout, /\bpub id: [^,\n]*\bUuid\b/);
+    // A statement of no file takes the working directory's crate, here the workspace, which has no reylo.
+    const statement = rust(["--sql", "select gen_random_uuid() as id"]);
+    assert.equal(statement.status, 1, statement.stdout);
+    assert.match(statement.stderr, /uuid/);
+  } finally {
+    await own.drop();
+  }
+});
+
 test("analyze reads a MySQL statement over its own connection, the server's version beside it", { skip: mysqlLive }, async () => {
   const own = await mysqlDatabase("reylo_analyze_cli", "create table users (id int primary key, name varchar(40) not null)");
   try {

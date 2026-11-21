@@ -55,7 +55,8 @@ enum Format {
 struct Settings {
     codecs: Value,
     allow_nested_arrays: bool,
-    rust: Option<reylo_build::Options>,
+    /// The working directory, which a statement of no file takes the Rust crate of.
+    cwd: PathBuf,
     terminal: bool,
 }
 
@@ -193,8 +194,7 @@ pub fn run(args: &[String]) -> i32 {
     let settings = Settings {
         codecs: serde_json::to_value(&project.config.js.codecs).unwrap_or(Value::Null),
         allow_nested_arrays: project.config.allow_nested_arrays.unwrap_or(false),
-        // The crate the working directory is in names the types a module may use, as for `reylo generate`.
-        rust: (format == Format::Rust).then(|| reylo_build::generate::options_for(&cwd)),
+        cwd: cwd.clone(),
         terminal: std::io::stdout().is_terminal(),
     };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
@@ -236,6 +236,8 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
     let mut flagged = false;
     // Whether a statement is printed yet, which the next one is set apart from.
     let mut shown = false;
+    // The Rust crates' features, read once for each crate.
+    let mut crates = std::collections::BTreeMap::new();
     // A run of one statement prints it alone, since the caller named its file; a run of several
     // names each one's file, which tells them apart.
     let several = inputs.len() > 1;
@@ -323,7 +325,11 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
                     "mysql" => reylo_build::Dialect::Mysql,
                     _ => reylo_build::Dialect::Sqlite,
                 };
-                match reylo_build::generate::module_text(rust_dialect, settings.rust.unwrap_or_default(), analysis) {
+                // The crate a file is in names the types its module may use, as for `reylo generate`;
+                // a statement of no file takes the working directory's.
+                let dir = input.file.as_deref().map(|file| settings.cwd.join(file)).and_then(|path| path.parent().map(Path::to_path_buf)).unwrap_or_else(|| settings.cwd.clone());
+                let options = reylo_build::generate::options_for(&dir, &mut crates);
+                match reylo_build::generate::module_text(rust_dialect, options, analysis) {
                     Ok(module) => {
                         if gap {
                             println!();

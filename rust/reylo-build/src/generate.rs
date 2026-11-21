@@ -289,11 +289,12 @@ fn cargo_metadata(manifest: &Path) -> Option<Value> {
     output.status.success().then(|| serde_json::from_slice(&output.stdout).ok()).flatten()
 }
 
-/// The crates a module may name, for the `.sql` files under `dir`: the features of the nearest
-/// crate's `reylo` dependency, or none where `dir` is in no crate or cargo cannot read it.
-pub fn options_for(dir: &Path) -> Options {
-    let package = dir.ancestors().find(|d| d.join("Cargo.toml").is_file());
-    package.map_or_else(Options::default, crate_options)
+/// The crates a module may name, for a `.sql` file in `dir`: the features of the nearest crate's
+/// `reylo` dependency, or none where `dir` is in no crate or cargo cannot read it. Each crate's are
+/// read once, into `read`.
+pub fn options_for(dir: &Path, read: &mut BTreeMap<PathBuf, Options>) -> Options {
+    let Some(package) = dir.ancestors().find(|d| d.join("Cargo.toml").is_file()) else { return Options::default() };
+    *read.entry(package.to_path_buf()).or_insert_with(|| crate_options(package))
 }
 
 /// One statement's module as `reylo analyze --format rust` prints it: the items its `.rs` file
