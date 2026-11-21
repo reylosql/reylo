@@ -77,11 +77,12 @@ impl Session {
     }
 
     /// Has the server give up on a lock after `seconds`. SQLite's analysis takes none.
-    pub(crate) async fn limit_lock_waits(&mut self, seconds: u32) {
+    /// Sets the session up for text an editor sends on its own: giving up on a lock after `seconds`, and read-only where parsing a statement can run code, as on Postgres. A SQLite file is opened read-only already.
+    pub(crate) async fn for_an_editor(&mut self, seconds: u32) -> Result<(), String> {
         match self {
-            Session::Postgres(s) => s.limit_lock_waits(seconds).await,
-            Session::Mysql(s) => s.limit_lock_waits(seconds).await,
-            Session::Sqlite(_) => {}
+            Session::Postgres(s) => s.for_an_editor(seconds).await,
+            Session::Mysql(s) => s.for_an_editor(seconds).await,
+            Session::Sqlite(_) => Ok(()),
         }
     }
 

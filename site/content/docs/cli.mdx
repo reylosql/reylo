@@ -51,6 +51,7 @@ Commands:
     --out <file>           Write every module into one file
   lsp                      Serve the language server for .sql files
     --dialect <name>       Read files as postgres, mysql or sqlite
+    --allow-url-command    Run a $(command) in direct_url
   migrate <command>        Write, check and run your migrations
   db <command>             Push, reset, wipe or print a development database
   run <sql>                Run SQL as written, recording nothing
@@ -96,6 +97,12 @@ A project with no database needs its dialect named:
 
 ```sh
 reylo lsp --dialect postgres
+```
+
+Opening a file runs nothing the project wrote. A `direct_url` with a `$(command)` needs this flag in your editor's settings:
+
+```sh
+reylo lsp --allow-url-command
 ```
 
 ## `reylo migrate`

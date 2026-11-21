@@ -547,6 +547,13 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
                 let (found, _) = source(dialect, toks, i + 1);
                 queries[frame.query].sources.extend(found);
             }
+        } else if t.is_any(&["UNION", "INTERSECT", "EXCEPT"]) && !before.is_some_and(|b| b.is_punct("*")) {
+            // Each side of a set operation has a FROM list of its own and sees the same WITH queries.
+            let (parent, ctes) = (queries[frame.query].parent, queries[frame.query].ctes.clone());
+            queries.push(Query { parent, sources: Vec::new(), ctes });
+            frame.query = queries.len() - 1;
+            frame.in_from = false;
+            frame.selected = false;
         } else if t.is_any(ENDS_FROM) {
             frame.in_from = false;
         } else if t.is("INTO") {
@@ -705,6 +712,15 @@ mod tests {
 
     fn sources(s: &Scopes, query: usize) -> Vec<(&str, Option<&str>)> {
         s.queries[query].sources.iter().map(|x| (x.name.as_str(), x.alias.as_deref())).collect()
+    }
+
+    #[test]
+    fn each_side_of_a_set_operation_reads_its_own_from_list() {
+        let s = read(Dialect::Postgres, "with c as (select 1) select u.id from users u union all select u.body from posts u join c on true");
+        let last = s.of_token.len() - 1;
+        assert_eq!(s.source(last, "u").map(|x| x.name.as_str()), Some("posts"));
+        assert_eq!(s.source(12, "u").map(|x| x.name.as_str()), Some("users"));
+        assert!(s.cte(last, "c").is_some());
     }
 
     #[test]

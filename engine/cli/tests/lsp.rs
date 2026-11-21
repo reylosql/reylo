@@ -48,7 +48,11 @@ struct Client {
 
 impl Client {
     fn start(dir: &Path) -> Client {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_reylo")).arg("lsp").current_dir(dir).env_remove("DATABASE_URL").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        Client::start_with(dir, &[])
+    }
+
+    fn start_with(dir: &Path, flags: &[&str]) -> Client {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_reylo")).arg("lsp").args(flags).current_dir(dir).env_remove("DATABASE_URL").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
         let input = child.stdin.take().unwrap();
         let mut output = BufReader::new(child.stdout.take().unwrap());
         let (sender, messages) = mpsc::channel();
@@ -276,6 +280,24 @@ fn a_new_database_url_takes_effect_on_the_next_edit() {
     assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
     client.change(&uri, 2, "select id from users");
     client.wait_for(&uri, "no such table: users");
+    client.finish();
+}
+
+#[test]
+fn a_project_runs_no_command_unless_the_editor_allows_it() {
+    let project = Project::new("command");
+    std::fs::write(project.0.join(".reylo.yaml"), "direct_url: \"file:$(touch ran; echo ./app.db)\"\n").unwrap();
+    let uri = project.uri("q.sql");
+    let mut client = Client::start(&project.0);
+    client.open(&uri, "selec 1");
+    client.wait_for(&uri, "syntax error");
+    assert!(!project.0.join("ran").exists());
+    client.finish();
+
+    let mut client = Client::start_with(&project.0, &["--allow-url-command"]);
+    client.open(&uri, "select nope from users");
+    client.wait_for(&uri, "no such column: nope");
+    assert!(project.0.join("ran").exists());
     client.finish();
 }
 

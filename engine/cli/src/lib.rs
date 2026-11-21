@@ -39,7 +39,8 @@ const USAGE: &str = "Usage: reylo <command>
 
   analyze <paths> [--url]   Print each statement's type descriptor, read from the project's
           [--format]        database, as YAML or, with --format json, one line of JSON each
-  lsp [--dialect <name>]    Serve the language server for .sql files over standard input and
+  lsp [--dialect <name>] [--allow-url-command]
+                            Serve the language server for .sql files over standard input and
                             output: diagnostics, hover, completion and go-to-definition
   generate <generator>      Write each .sql file's module for a language: rust-sqlx, the Rust
           [paths] [--out]   of #[reylo::query] (reylo generate --help)

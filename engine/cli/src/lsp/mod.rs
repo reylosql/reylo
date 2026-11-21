@@ -20,13 +20,14 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant, SystemTime};
 use syntax::Dialect;
 
-pub const USAGE: &str = "Usage: reylo lsp [--dialect postgres | mysql | sqlite]
+pub const USAGE: &str = "Usage: reylo lsp [--dialect postgres | mysql | sqlite] [--allow-url-command]
 
 Serves the language server for .sql files over standard input and output: syntax errors, the
 database's own diagnostics, hover with inferred types, completion from the schema and
 go-to-definition. Each file's project and database are found as reylo analyze finds them, from
 the file's directory. --dialect reads files as that dialect where no project names a database;
-those files get syntax errors and completion from their own text.";
+those files get syntax errors and completion from their own text. Opening a file runs nothing a
+project wrote: --allow-url-command, in the editor's own settings, runs a $(command) in direct_url.";
 
 /// How long the text stays still before it is analyzed on the database.
 const QUIET: Duration = Duration::from_millis(250);
@@ -46,7 +47,7 @@ const MAX_ERRORS: usize = 200;
 const MAX_MESSAGE: usize = 1 << 30;
 
 pub fn run(args: &[String]) -> i32 {
-    let mut forced = None;
+    let (mut forced, mut allow_commands) = (None, false);
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         let value = match arg.as_str() {
@@ -56,6 +57,10 @@ pub fn run(args: &[String]) -> i32 {
             }
             // Editors pass this to every server that speaks over standard input.
             "--stdio" => continue,
+            "--allow-url-command" => {
+                allow_commands = true;
+                continue;
+            }
             "--dialect" => rest.next().map(String::as_str),
             _ => match arg.strip_prefix("--dialect=") {
                 Some(value) => Some(value),
@@ -87,7 +92,7 @@ pub fn run(args: &[String]) -> i32 {
     let (locate, locate_jobs) = mpsc::channel();
     let (analyze, analyze_jobs) = mpsc::channel();
     let (read, read_jobs) = mpsc::channel();
-    let locator = Locator { events: events.clone(), forced, analyze: analyze.clone(), read: read.clone(), places: HashMap::new() };
+    let locator = Locator { events: events.clone(), forced, allow_commands, analyze: analyze.clone(), read: read.clone(), places: HashMap::new() };
     std::thread::spawn(move || locator.run(locate_jobs));
     let analyzer = Analyzer { events: events.clone(), places: HashMap::new() };
     std::thread::spawn(move || analyzer.run(analyze_jobs));
@@ -209,7 +214,8 @@ enum LocateJob {
 /// What the analyzing thread is asked.
 enum AnalyzeJob {
     Register { place: PathBuf, database: Option<(String, &'static str)>, base: PathBuf, project: Option<Box<Project>> },
-    Statement { uri: String, place: PathBuf, text: String },
+    /// `epoch`: which database of the project the text was sent for.
+    Statement { uri: String, place: PathBuf, text: String, epoch: u64 },
 }
 
 /// What the schema-reading thread is asked.
@@ -223,7 +229,7 @@ enum Event {
     Message(Result<Value, ()>),
     Closed,
     Located { uri: String, place: Option<(PathBuf, Dialect)>, database_moved: bool },
-    Analyzed { uri: String, text: String, analysis: Option<Box<Analysis>>, found: Vec<Value> },
+    Analyzed { uri: String, text: String, epoch: u64, analysis: Option<Box<Analysis>>, found: Vec<Value> },
     Read { place: PathBuf, tables: Vec<Table>, reserved: Vec<String> },
     Created { place: PathBuf, created: Vec<(PathBuf, Created)> },
     /// The database didn't answer; what needs it is tried again later.
@@ -253,6 +259,8 @@ struct Located {
 struct Locator {
     events: Sender<Event>,
     forced: Option<Dialect>,
+    /// Whether the user, outside the project, allowed a `$(command)` in its `direct_url`.
+    allow_commands: bool,
     analyze: Sender<AnalyzeJob>,
     read: Sender<ReadJob>,
     places: HashMap<PathBuf, Located>,
@@ -288,13 +296,16 @@ impl Locator {
             return (k.dialect.map(|d| (key.clone(), d)), false);
         }
         let (before, said, same_files) = known.map_or((None, None, false), |k| (Some(k.url.clone()), k.said.clone(), k.signature == now));
-        let read = project.map(|p| p.type_check_url());
+        let refused = || format!("{}: direct_url runs a command, which reylo lsp runs only with --allow-url-command, so its files get no database", key.display());
+        let read = project.map(|p| if p.url_runs_command() && !self.allow_commands { Err(refused()) } else { p.type_check_url() });
         let problem = resolved.as_ref().err().cloned().or_else(|| read.as_ref().and_then(|r| r.as_ref().err().cloned()));
         let url = read.and_then(|r| r.ok().flatten()).map(|(url, _)| url).filter(|u| !u.is_empty());
         let named = url.as_deref().and_then(project::dialect_of);
         let home = project.map_or_else(|| dir.join("reylo"), |p| p.root.join(p.config.dir.as_deref().unwrap_or("reylo")));
         // The project's database decides; `--dialect` is for the file that has none.
-        let dialect = named.and_then(dialect_named).or(self.forced);
+        // A URL whose command wasn't run still says its dialect, where it opens with a scheme, and that's enough for syntax errors.
+        let unrun = project.filter(|p| p.url_runs_command() && !self.allow_commands).and_then(|p| p.config.direct_url.as_deref()).and_then(project::dialect_of);
+        let dialect = named.or(unrun).and_then(dialect_named).or(self.forced);
         let problem = problem.or_else(|| dialect.is_none().then(|| format!("{} names no database, so its files get no diagnostics: set DATABASE_URL, or pass --dialect", key.display())));
         if let Some(why) = problem.as_ref().filter(|why| said.as_ref() != Some(*why)) {
             log(why);
@@ -355,7 +366,7 @@ impl Analyzer {
                         let kept = self.places.remove(&place).filter(|p| p.database == database);
                         self.places.insert(place, AnalysisPlace { database, base, project, session: kept.and_then(|p| p.session) });
                     }
-                    AnalyzeJob::Statement { uri, place, text } => self.analyze(&runtime, uri, place, text),
+                    AnalyzeJob::Statement { uri, place, text, epoch } => self.analyze(&runtime, uri, place, text, epoch),
                 }
             }
         }
@@ -371,16 +382,17 @@ impl Analyzer {
     }
 
     /// Analyzes a file of one statement on its database.
-    fn analyze(&mut self, runtime: &tokio::runtime::Runtime, uri: String, key: PathBuf, text: String) {
+    fn analyze(&mut self, runtime: &tokio::runtime::Runtime, uri: String, key: PathBuf, text: String, epoch: u64) {
         let Some(place) = self.places.get_mut(&key) else { return };
         let Some((url, name)) = place.database.clone() else { return };
         if place.session.is_none() {
             let opened = runtime.block_on(async { tokio::time::timeout(TIMEOUT, Session::open(name, &url, &place.base)).await });
             match opened {
-                Ok(Ok(mut session)) => {
-                    let _ = runtime.block_on(async { tokio::time::timeout(TIMEOUT, session.limit_lock_waits(LOCK_WAIT_SECONDS)).await });
-                    place.session = Some(session);
-                }
+                Ok(Ok(mut session)) => match runtime.block_on(async { tokio::time::timeout(TIMEOUT, session.for_an_editor(LOCK_WAIT_SECONDS)).await }) {
+                    Ok(Ok(())) => place.session = Some(session),
+                    Ok(Err(why)) => return self.unavailable(&key, why, false),
+                    Err(_) => return self.unavailable(&key, format!("the database took more than {} seconds to set up a session", TIMEOUT.as_secs()), false),
+                },
                 Ok(Err(failure)) => return self.unavailable(&key, failure.to_string(), false),
                 Err(_) => return self.unavailable(&key, format!("the database took more than {} seconds to connect", TIMEOUT.as_secs()), false),
             }
@@ -414,7 +426,7 @@ impl Analyzer {
             Ok(Err(failure)) => return self.unavailable(&key, failure.to_string(), false),
             Err(_) => return self.unavailable(&key, format!("the database took more than {} seconds to analyze a statement", TIMEOUT.as_secs()), false),
         };
-        let _ = self.events.send(Event::Analyzed { uri, text, analysis, found });
+        let _ = self.events.send(Event::Analyzed { uri, text, epoch, analysis, found });
     }
 }
 
@@ -611,12 +623,14 @@ struct Place {
     /// The failures last logged for the analysis and the schema read, so that a server that stays down is said once.
     said_by_analysis: Option<String>,
     said_by_read: Option<String>,
+    /// Counts the databases the project has named, so that an answer from an earlier one is dropped.
+    epoch: u64,
 }
 
 impl Place {
     fn new(dialect: Dialect) -> Place {
         let reserved = syntax::reserved_words(dialect).into_iter().map(str::to_ascii_lowercase).collect();
-        Place { dialect, tables: Vec::new(), created: Vec::new(), reserved, read_at: None, reading: false, said_by_analysis: None, said_by_read: None }
+        Place { dialect, tables: Vec::new(), created: Vec::new(), reserved, read_at: None, reading: false, said_by_analysis: None, said_by_read: None, epoch: 0 }
     }
 }
 
@@ -669,12 +683,17 @@ impl Server {
                         let known = self.places.entry(key.clone()).or_insert_with(|| Place::new(dialect));
                         let changed = known.dialect != dialect;
                         if changed {
+                            let epoch = known.epoch;
                             *known = Place::new(dialect);
+                            known.epoch = epoch + 1;
                         }
                         if database_moved {
                             known.read_at = None;
+                            known.epoch += 1;
+                            doc.analysis = None;
+                            doc.found.clear();
                         }
-                        if moved || changed {
+                        if moved || changed || database_moved {
                             doc.reading = None;
                             self.publish(&uri);
                         }
@@ -685,6 +704,11 @@ impl Server {
                             let now = Instant::now();
                             let others: Vec<String> = self.docs.iter().filter(|(u, d)| **u != uri && (d.place.is_none() || d.place.as_ref() == Some(&key))).map(|(u, _)| u.clone()).collect();
                             for other in others {
+                                if let Some(d) = self.docs.get_mut(&other) {
+                                    d.analysis = None;
+                                    d.found.clear();
+                                }
+                                self.publish(&other);
                                 self.pending.insert(other, now);
                             }
                         }
@@ -693,6 +717,9 @@ impl Server {
                         if doc.place.take().is_some() {
                             doc.reading = None;
                         }
+                        // What a database said of this text no longer stands.
+                        doc.analysis = None;
+                        doc.found.clear();
                         self.publish(&uri);
                         if database_moved {
                             let now = Instant::now();
@@ -704,10 +731,9 @@ impl Server {
                     }
                 }
             }
-            Event::Analyzed { uri, text, analysis, found } => {
-                if let Some(known) = self.docs.get(&uri).and_then(|d| d.place.as_ref()).and_then(|key| self.places.get_mut(key)) {
-                    known.said_by_analysis = None;
-                }
+            Event::Analyzed { uri, text, epoch, analysis, found } => {
+                let Some(known) = self.docs.get(&uri).and_then(|d| d.place.as_ref()).and_then(|key| self.places.get_mut(key)).filter(|p| p.epoch == epoch) else { return };
+                known.said_by_analysis = None;
                 if let Some(doc) = self.docs.get_mut(&uri).filter(|d| d.text == text) {
                     doc.analysis = analysis;
                     doc.found = found;
@@ -786,7 +812,7 @@ impl Server {
         let Some(doc) = self.docs.get_mut(uri) else { return };
         let Some(key) = doc.place.clone() else { return };
         let Some(place) = self.places.get(&key) else { return };
-        let dialect = place.dialect;
+        let (dialect, epoch) = (place.dialect, place.epoch);
         let exact = matches!(dialect, Dialect::Postgres | Dialect::Sqlite);
         let text = &doc.text;
         let reading = doc.reading.get_or_insert_with(|| Reading::of(dialect, text));
@@ -794,7 +820,7 @@ impl Server {
         if (exact && !reading.errors.is_empty()) || reading.statements.len() != 1 {
             return;
         }
-        let _ = self.analyze.send(AnalyzeJob::Statement { uri: uri.to_string(), place: key, text: doc.text.clone() });
+        let _ = self.analyze.send(AnalyzeJob::Statement { uri: uri.to_string(), place: key, text: doc.text.clone(), epoch });
     }
 
     /// Answers one message; the exit code, once the client says to exit.
@@ -999,7 +1025,7 @@ impl Server {
                         Some(source) => complete_source(place, &names, here, source, &mut items),
                         None => {
                             if let Some(cte) = names.cte(here, &word).filter(|_| !names_a_table) {
-                                items.extend(cte.columns.iter().map(|c| column_item(place, &c.name, format!("{}.{}", cte.name, c.name))));
+                                items.extend(cte.columns.iter().map(|c| column_item(place, &c.name, &c.key, format!("{}.{}", cte.name, c.name))));
                             }
                             for table in place.tables.iter().filter(|t| catalog_key(dialect, &t.schema) == word) {
                                 items.push(json!({ "label": table.name, "kind": 7, "detail": format!("{}.{} ({} columns)", table.schema, table.name, table.columns.len()), "insertText": quoted(place, &table.name) }));
@@ -1011,7 +1037,7 @@ impl Server {
             Some(last) if last.is_any(&["FROM", "JOIN", "INTO", "UPDATE", "TABLE"]) => {
                 items.extend(place.tables.iter().map(|t| table_item(place, t)));
                 for q in names.chain(here) {
-                    items.extend(names.queries[q].ctes.iter().map(|c| json!({ "label": c.name, "kind": 7, "detail": "WITH query", "sortText": format!("0{}", c.name), "insertText": quoted(place, &c.name) })));
+                    items.extend(names.queries[q].ctes.iter().map(|c| json!({ "label": c.name, "kind": 7, "detail": "WITH query", "sortText": format!("0{}", c.name), "insertText": quoted(place, spelled(place, &c.name, &c.key)), "reads": spelled(place, &c.name, &c.key) })));
                 }
             }
             _ => {
@@ -1019,7 +1045,8 @@ impl Server {
                     for s in &names.queries[q].sources {
                         complete_source(place, &names, here, s, &mut items);
                         if let Some(alias) = &s.alias {
-                            items.push(json!({ "label": alias, "kind": 6, "detail": format!("alias of {}", s.name), "insertText": quoted(place, alias) }));
+                            let reads = spelled(place, alias, s.alias_key.as_deref().unwrap_or(alias));
+                            items.push(json!({ "label": alias, "kind": 6, "detail": format!("alias of {}", s.name), "insertText": quoted(place, reads), "reads": reads }));
                         }
                     }
                 }
@@ -1046,11 +1073,12 @@ impl Server {
             for item in &mut items {
                 let label = item["label"].as_str().unwrap_or("").to_string();
                 let written = item["insertText"].as_str().map_or_else(|| label.clone(), str::to_string);
+                let reads = item["reads"].as_str().unwrap_or(&label).to_string();
                 // Inside its quotes a name is written quoted, whether it needs them or not, after the schema a table off the search path needs.
-                let qualifier = written.strip_suffix(quoted(place, &label).as_str()).unwrap_or("");
-                let name = label.replace(close, &format!("{close}{close}"));
+                let qualifier = written.strip_suffix(quoted(place, &reads).as_str()).unwrap_or("");
+                let name = reads.replace(close, &format!("{close}{close}"));
                 // The name's own text up to its closing quote is replaced. Past anything else, that quote may be another name's, so the text stays and the name is left for its quote.
-                let whole_name = plain || inner.is_some_and(|r| label.to_lowercase() == format!("{prefix}{r}").to_lowercase());
+                let whole_name = plain || inner.is_some_and(|r| reads.to_lowercase() == format!("{prefix}{r}").to_lowercase());
                 let (end, written) = match (whole_name, inner) {
                     (true, _) => (t.end as usize, format!("{qualifier}{quote}{name}{close}")),
                     (false, Some(_)) => (offset, format!("{qualifier}{quote}{name}")),
@@ -1060,6 +1088,9 @@ impl Server {
                 item["textEdit"] = json!({ "range": range(&doc.text, &reading.lines, t.start as usize, end), "newText": written });
                 item.as_object_mut().expect("an item").remove("insertText");
             }
+        }
+        for item in &mut items {
+            item.as_object_mut().expect("an item").remove("reads");
         }
         json!({ "isIncomplete": false, "items": items })
     }
@@ -1207,24 +1238,34 @@ fn in_comment_or_string(dialect: Dialect, text: &str, reading: &Reading, offset:
 
 fn complete_source(place: &Place, names: &Scopes, at: usize, source: &Source, items: &mut Vec<Value>) {
     match &source.kind {
-        SourceKind::Derived(columns) => items.extend(columns.iter().map(|c| column_item(place, &c.name, format!("{}.{}", source.name, c.name)))),
+        SourceKind::Derived(columns) => items.extend(columns.iter().map(|c| column_item(place, &c.name, &c.key, format!("{}.{}", source.name, c.name)))),
         SourceKind::Function => {}
         SourceKind::Table => {
             if source.schema.is_none() {
                 if let Some(cte) = names.cte(at, &source.key) {
-                    items.extend(cte.columns.iter().map(|c| column_item(place, &c.name, format!("{}.{}", cte.name, c.name))));
+                    items.extend(cte.columns.iter().map(|c| column_item(place, &c.name, &c.key, format!("{}.{}", cte.name, c.name))));
                     return;
                 }
             }
             if let Some(table) = find_table(place, source.schema.as_deref(), &source.key) {
-                items.extend(table.columns.iter().map(|c| column_item(place, &c.name, format!("{}.{} {}", table.name, c.name, type_label(c)))));
+                items.extend(table.columns.iter().map(|c| column_item(place, &c.name, &c.key, format!("{}.{} {}", table.name, c.name, type_label(c)))));
             }
         }
     }
 }
 
-fn column_item(place: &Place, name: &str, detail: String) -> Value {
-    json!({ "label": name, "kind": 5, "detail": detail, "insertText": quoted(place, name) })
+fn column_item(place: &Place, name: &str, key: &str, detail: String) -> Value {
+    let reads = spelled(place, name, key);
+    json!({ "label": name, "kind": 5, "detail": detail, "insertText": quoted(place, reads), "reads": reads })
+}
+
+/// The spelling that reaches a name declared in the text: on Postgres, which folds a bare name to lower case, its key.
+fn spelled<'n>(place: &Place, name: &'n str, key: &'n str) -> &'n str {
+    if place.dialect == Dialect::Postgres {
+        key
+    } else {
+        name
+    }
 }
 
 /// A table, as a bare name where that name reaches it, and with its schema where it doesn't.
