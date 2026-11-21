@@ -52,15 +52,9 @@ jobs:
       - name: Refuse to move reylo.dev past a docs fix main lacks
         run: |
           url="https://github.com/$GITHUB_REPOSITORY.git"
-          set +e
-          git ls-remote --exit-code "$url" refs/heads/release > /dev/null
-          found=$?
-          set -e
-          case "$found" in
-            0) ;;
-            2) echo "no release branch yet"; exit 0 ;;
-            *) echo "::error::could not read whether release exists (git ls-remote exited $found)"; exit 1 ;;
-          esac
+          # `git ls-remote` matches a ref by its end, so only a ref that is exactly refs/heads/release counts; a failed lookup stops here, apart from a branch that isn't there.
+          heads="$(git ls-remote "$url" refs/heads/release)" || { echo "::error::could not read whether release exists"; exit 1; }
+          if ! awk '$2 == "refs/heads/release" { found = 1 } END { exit !found }' <<< "$heads"; then echo "no release branch yet"; exit 0; fi
           git init -q "$RUNNER_TEMP/release-check"
           cd "$RUNNER_TEMP/release-check"
           git fetch -q "$url" "$GITHUB_SHA" +refs/heads/release:refs/remotes/origin/release
@@ -359,17 +353,14 @@ jobs:
           remote="git@github.com:$GITHUB_REPOSITORY.git"
           tagged="$(git ls-remote --exit-code origin "refs/tags/v$VERSION")"
           tagged="${tagged%%[[:space:]]*}"
-          # `identical` or `ahead`: release is the tag, or the tag with docs fixes on it. Only a missing branch (ls-remote's exit 2) counts as missing; any other failure, of ls-remote or of the compare, fails the step rather than move release back, and a re-run is safe. Every answer is about the one tip read here, which the push below names as the one it replaces. The branch is named in full, since `release` alone also matches a branch such as `docs/release`.
-          set +e
-          tip="$(git ls-remote --exit-code origin refs/heads/release)"
-          found=$?
-          tip="${tip%%[[:space:]]*}"
-          set -e
-          case "$found" in
-            0) status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$tagged...$tip" --jq .status)" ;;
-            2) status=missing; tip="" ;;
-            *) echo "::error::could not read whether release exists (git ls-remote exited $found)"; exit 1 ;;
-          esac
+          # `identical` or `ahead`: release is the tag, or the tag with docs fixes on it. Only a lookup that answers without refs/heads/release counts as missing (`git ls-remote` matches a ref by its end, so only that exact ref counts); a failed lookup, or compare, fails the step rather than move release back, and a re-run is safe. Every answer is about the one tip read here, which the push below names as the one it replaces.
+          heads="$(git ls-remote origin refs/heads/release)" || { echo "::error::could not read whether release exists"; exit 1; }
+          tip="$(awk '$2 == "refs/heads/release" { print $1 }' <<< "$heads")"
+          if [ -n "$tip" ]; then
+            status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$tagged...$tip" --jq .status)"
+          else
+            status=missing
+          fi
           case "$status" in
             identical | ahead)
               echo "release already holds v$VERSION ($status), and is left as it is"
