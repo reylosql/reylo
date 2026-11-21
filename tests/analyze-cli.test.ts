@@ -86,7 +86,7 @@ test("analyze prints one line of JSON per statement by default where its output 
   assert.match(toml.stderr, /^reylo analyze: --format takes json, yaml, typescript or rust, not toml\n/);
 });
 
-test("analyze lays its JSON out in a terminal, each object on one line where it fits, a blank line between two statements", { skip: process.platform === "win32" && "script, which gives the run a terminal, is POSIX's" }, () => {
+test("analyze lays its JSON out in a terminal, each object on one line where it fits, a blank line between two statements", { skip: process.platform === "win32" && "Windows has no script(1) to give the run a terminal" }, () => {
   const root = project({ "q/a.sql": "select name from users where id = :id\n", "q/b.sql": "select email from users\n" });
   // script(1) runs the command on a pseudo-terminal: BSD's takes the command after the file, util-linux's with -c.
   const command = [nativeBinary(), "analyze", "q"];

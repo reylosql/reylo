@@ -803,7 +803,7 @@ fn schema_kind_type(kind: &str, m: &Map<String, Value>, beside_objects: bool) ->
             let empty = Map::new();
             let properties = m.get("properties").and_then(Value::as_object).unwrap_or(&empty);
             let required = m.get("required").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
-            let mut fields: Vec<String> = properties.iter().map(|(key, value)| format!("{}{}: {}", ident(key), if required.iter().any(|r| r.as_str() == Some(key)) { "" } else { "?" }, schema_type(value, false))).collect();
+            let mut fields: Vec<String> = js_entries(properties).into_iter().map(|(key, value)| format!("{}{}: {}", ident(key), if required.iter().any(|r| r.as_str() == Some(key)) { "" } else { "?" }, schema_type(value, false))).collect();
             let additional = m.get("additionalProperties");
             let rest = match additional {
                 None | Some(Value::Bool(false)) => "never".to_string(),
@@ -824,6 +824,16 @@ fn schema_kind_type(kind: &str, m: &Map<String, Value>, beside_objects: bool) ->
     }
 }
 
+/// An object's entries in the order JavaScript's `Object.entries` gives them: each key that is an
+/// array index (a canonical integer below 2^32 - 1) first, ascending, then the rest as written.
+fn js_entries(map: &Map<String, Value>) -> Vec<(&String, &Value)> {
+    let index = |key: &str| key.parse::<u32>().ok().filter(|n| *n != u32::MAX && n.to_string() == key);
+    let mut entries: Vec<(&String, &Value)> = map.iter().filter(|(k, _)| index(k).is_some()).collect();
+    entries.sort_by_key(|(k, _)| index(k));
+    entries.extend(map.iter().filter(|(k, _)| index(k).is_none()));
+    entries
+}
+
 /// The TypeScript literal type of one JSON value.
 fn literal_type(v: &Value) -> String {
     match v {
@@ -833,7 +843,7 @@ fn literal_type(v: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::Array(items) => format!("[{}]", items.iter().map(literal_type).collect::<Vec<_>>().join(", ")),
         Value::Object(map) if map.is_empty() => "Record<never, never>".into(),
-        Value::Object(map) => format!("{{ {} }}", map.iter().map(|(k, x)| format!("{}: {}", ident(k), literal_type(x))).collect::<Vec<_>>().join("; ")),
+        Value::Object(map) => format!("{{ {} }}", js_entries(map).into_iter().map(|(k, x)| format!("{}: {}", ident(k), literal_type(x))).collect::<Vec<_>>().join("; ")),
     }
 }
 
@@ -1575,5 +1585,9 @@ mod tests {
         assert_eq!(schema_type(&schema, false), "{ a: string; b?: number | null }");
         assert_eq!(schema_type(&json!({ "enum": ["x", 1, 1.5, true, null] }), false), r#""x" | 1 | 1.5 | true | null"#);
         assert_eq!(schema_type(&json!({ "type": "object" }), false), "Record<string, Json>");
+        // An array index comes first, as JavaScript orders an object's keys.
+        let keyed = json!({ "type": "object", "properties": { "name": { "type": "string" }, "10": { "type": "null" }, "2": { "type": "boolean" }, "01": { "type": "null" } }, "required": ["name"], "additionalProperties": false });
+        assert_eq!(schema_type(&keyed, false), r#"{ "2"?: boolean; "10"?: null; name: string; "01"?: null }"#);
+        assert_eq!(literal_type(&json!({ "b": 1, "1": 2 })), r#"{ "1": 2; b: 1 }"#);
     }
 }
