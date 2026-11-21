@@ -376,7 +376,8 @@ struct Lexeme {
     end: u32,
 }
 
-fn lexemes(flavor: Flavor, text: &str) -> (Vec<Lexeme>, u32) {
+/// The tokens of `text`, where its trivia ends, and a conditional comment still open at the end of the text.
+fn lexemes(flavor: Flavor, text: &str) -> (Vec<Lexeme>, u32, Option<(u32, u32)>) {
     let z = text.as_bytes();
     let mut out: Vec<Lexeme> = Vec::with_capacity(z.len() / 4 + 1);
     let (mut at, mut lead) = (0, 0);
@@ -445,11 +446,8 @@ fn lexemes(flavor: Flavor, text: &str) -> (Vec<Lexeme>, u32) {
         at += n;
         lead = at;
     }
-    // A conditional comment still open at the end of the text is an error at its opening.
-    if conditional {
-        out[opened].kind = ILLEGAL;
-    }
-    (out, lead as u32)
+    let unclosed = conditional.then(|| (out[opened].start, out[opened].end));
+    (out, lead as u32, unclosed)
 }
 
 /// The version a conditional comment opens with, and how many digits it takes: six where whitespace follows them, else the first five, and none with fewer.
@@ -573,9 +571,12 @@ fn next_word(tokens: &[Lexeme], text: &str, i: usize) -> Option<String> {
 
 /// Reads `text` into a tree of statements, clauses and parenthesized groups.
 pub fn parse(flavor: Flavor, text: &str) -> Tree<'_> {
-    let (tokens, tail) = lexemes(flavor, text);
+    let (tokens, tail, unclosed) = lexemes(flavor, text);
     let mut b = Builder { nodes: Vec::with_capacity(tokens.len() * 2), child_ids: Vec::with_capacity(tokens.len() * 2) };
     let mut errors: Vec<SyntaxError> = Vec::new();
+    if let Some((start, end)) = unclosed {
+        errors.push(SyntaxError { message: format!("\"{}\" is never closed", &text[start as usize..end as usize]), start, end });
+    }
     let mut statements: Vec<NodeId> = Vec::new();
     let mut stack: Vec<Frame> = vec![Frame::new(STATEMENT, (0, 0))];
     // How many BEGIN … END blocks are open: a `;` inside one doesn't end the statement.
@@ -756,6 +757,9 @@ mod tests {
             assert_eq!(tree.print(), unfinished);
             assert!(!tree.errors.is_empty(), "{unfinished}");
         }
+        let procedure = "/*!80000 CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END /* note */";
+        assert_eq!(parse(Flavor::MYSQL, procedure).errors[0].message, "\"/*!80000\" is never closed");
+        assert_eq!(spans(Flavor::MYSQL, procedure).len(), 1);
         assert_eq!(spans(newer, "SELECT /*!260700 1 */;"), ["SELECT /*!260700 1 */"]);
         assert_eq!(spans(Flavor::MYSQL, "CREATE PROCEDURE p() BEGIN SELECT 1; END /*!99999 IF */; SELECT 3;"), ["CREATE PROCEDURE p() BEGIN SELECT 1; END", "SELECT 3"]);
         assert_eq!(spans(Flavor::MYSQL, "CREATE PROCEDURE p() BEGIN IF 1 THEN SELECT 1; END /*!80000 IF */; END; SELECT 3;").len(), 2);
