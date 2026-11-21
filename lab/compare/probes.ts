@@ -5,7 +5,8 @@ export type Kind = "num" | "text" | "bool" | "time" | "json" | "any";
 export type Card = "one" | "maybeOne" | "many" | "none";
 
 // `anyNullOn`: databases where either answer is right. MySQL's string functions return NULL when the result would exceed max_allowed_packet, whatever their arguments, so its server calls them nullable and a tool may follow it or not.
-export interface WantColumn { name: string; nullable?: boolean; shape?: string[]; anyNullOn?: Db[] }
+// `labels`: the values of an enum, each of which the column's type must name.
+export interface WantColumn { name: string; nullable?: boolean; shape?: string[]; anyNullOn?: Db[]; labels?: string[] }
 // `value`: the TypeScript type of the value a caller passes, for a tool that checks the value at each call instead of typing the parameter.
 // `anyNullOn`: databases where either answer is right, as SQLite's INTEGER PRIMARY KEY, which assigns a rowid for a null.
 export interface WantParam { kinds?: Kind[]; nullable?: boolean; shape?: string[]; value?: string; anyNullOn?: Db[] }
@@ -97,6 +98,53 @@ export const JSON_SCHEMA: Probe[] = [
   { id: "column", sql: { postgres: "select payload from events" }, columns: [{ name: "payload", shape: ["x"] }] },
   { id: "parameter", sql: { postgres: "insert into events (id, payload) values ($1, $2)" }, params: [{ value: "number" }, { shape: ["x"], value: "{ x: number }" }] },
 ];
+
+// What a query can say beyond a lookup, each column to be typed, and typed right, from the query: an untyped column is wrong here, whatever null it admits.
+const nn2 = (a: string, b: string) => [nn(a), nn(b)];
+export const AGGREGATES: Probe[] = [
+  { id: "grouped-count", sql: "select author_id, count(*) as n from posts group by author_id", columns: [nn("author_id"), nn("n")] },
+  { id: "grouped-min", sql: "select author_id, min(title) as v from posts group by author_id", columns: [nn("author_id"), nn("v")] },
+  { id: "having", sql: "select author_id, sum(score) as v from posts group by author_id having count(*) > 1", columns: [nn("author_id"), nu("v")] },
+  { id: "avg", sql: "select avg(score) as v from posts", columns: [nu("v")] },
+  { id: "count-distinct", sql: "select count(distinct author_id) as v from posts", columns: [nn("v")] },
+];
+export const WINDOWS: Probe[] = [
+  { id: "row-number", sql: "select id, row_number() over (partition by author_id order by id) as v from posts", columns: nn2("id", "v") },
+  { id: "rank", sql: "select id, rank() over (order by score) as v from posts", columns: nn2("id", "v") },
+  { id: "running-sum", sql: "select id, sum(score) over (partition by author_id order by id) as v from posts", columns: [nn("id"), nu("v")] },
+  { id: "lag", sql: "select id, lag(title) over (order by id) as v from posts", columns: [nn("id"), nu("v")] },
+];
+export const SUBQUERIES: Probe[] = [
+  { id: "scalar-count", sql: "select u.name, (select count(*) from posts p where p.author_id = u.id) as v from users u", columns: nn2("name", "v") },
+  { id: "scalar-max", sql: "select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u", columns: [nn("name"), nu("v")] },
+  { id: "exists", sql: "select u.name, exists (select 1 from posts p where p.author_id = u.id) as v from users u", columns: nn2("name", "v") },
+  { id: "in", sql: "select name from users where id in (select author_id from posts)", columns: [nn("name")] },
+  { id: "derived", sql: "select x.author_id, x.n from (select author_id, count(*) as n from posts group by author_id) x", columns: nn2("author_id", "n") },
+];
+export const WITH_QUERIES: Probe[] = [
+  { id: "join", sql: "with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u join counts c on c.author_id = u.id", columns: nn2("name", "n") },
+  { id: "left-join", sql: "with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u left join counts c on c.author_id = u.id", columns: [nn("name"), nu("n")] },
+  { id: "recursive", sql: "with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 5) select n from nums", columns: [nn("n")] },
+];
+export const SET_OPERATIONS: Probe[] = [
+  { id: "union", sql: "select name as v from users union select title from posts", columns: [nn("v")] },
+  { id: "union-nullable", sql: "select nickname as v from users union all select title from posts", columns: [nu("v")] },
+  { id: "except", sql: "select id as v from users except select author_id from posts", columns: [nn("v")] },
+];
+const NO_MYSQL = (sql: string) => ({ postgres: sql, sqlite: sql });
+export const RETURNING: Probe[] = [
+  { id: "insert", sql: NO_MYSQL("insert into posts (id, author_id, title) values ($1, $2, $3) returning id, score"), columns: [nn("id"), nu("score")], params: [{ value: "number" }, { value: "number" }, { value: "string" }] },
+  { id: "update", sql: NO_MYSQL("update users set nickname = $1 where id = $2 returning name, nickname"), columns: [nn("name"), nu("nickname")], params: [{ value: "string | null" }, { value: "number" }] },
+  { id: "delete", sql: NO_MYSQL("delete from posts where id = $1 returning title"), columns: [nn("title")], params: [{ value: "number" }] },
+  { id: "upsert", sql: NO_MYSQL("insert into users (id, email, name) values ($1, $2, $3) on conflict (id) do update set name = excluded.name returning id, nickname"), columns: [nn("id"), nu("nickname")], params: [{ value: "number" }, { value: "string" }, { value: "string" }] },
+];
+const ROLES = ["admin", "member"];
+export const ENUMS: Probe[] = [
+  { id: "column", sql: { postgres: "select role from users", mysql: "select role from users" }, columns: [{ name: "role", nullable: false, labels: ROLES }] },
+  { id: "derived", sql: { postgres: "select x.r from (select role as r from users) x", mysql: "select x.r from (select role as r from users) x" }, columns: [{ name: "r", nullable: false, labels: ROLES }] },
+];
+// The groups only the ORM table shows, run for Reylo and the ORMs.
+export const ORM_GROUPS: [string, Probe[]][] = [["aggregates", AGGREGATES], ["windows", WINDOWS], ["subqueries", SUBQUERIES], ["with-queries", WITH_QUERIES], ["set-operations", SET_OPERATIONS], ["returning", RETURNING], ["enums", ENUMS]];
 
 // What only a database knows: its functions' result types, and each operator's result type.
 export const FROM_THE_DATABASE: Probe[] = [

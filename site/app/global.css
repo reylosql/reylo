@@ -597,7 +597,8 @@
   --reylo-g2: 16px;
   --reylo-rows: 46px;
   display: grid;
-  grid-template-columns: var(--reylo-lw) var(--reylo-g1) var(--reylo-rw) var(--reylo-g2) repeat(var(--reylo-tools), minmax(58px, 1fr));
+  /* `--reylo-span`: the tracks a table with fewer tools keeps, so that its columns are as wide as the widest table's. */
+  grid-template-columns: var(--reylo-lw) var(--reylo-g1) var(--reylo-rw) var(--reylo-g2) repeat(var(--reylo-span, var(--reylo-tools)), minmax(58px, 1fr));
   position: relative;
   font-size: 14px;
 }
