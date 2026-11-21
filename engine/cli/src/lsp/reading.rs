@@ -411,6 +411,8 @@ pub fn output_column(toks: &[Tok<'_>], at: usize) -> Option<usize> {
 #[derive(Clone, Copy)]
 struct Frame {
     query: usize,
+    /// The query it opened in, which a set operation's later sides leave.
+    first: usize,
     /// Whether it reads a query's clauses, and isn't a function's arguments.
     reads: bool,
     in_from: bool,
@@ -468,7 +470,7 @@ fn source(dialect: Dialect, toks: &[Tok<'_>], mut at: usize) -> (Option<Source>,
 pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
     let mut queries = vec![Query::default()];
     let mut of_token = Vec::with_capacity(toks.len());
-    let mut frames = vec![Frame { query: 0, reads: true, in_from: false, selected: false }];
+    let mut frames = vec![Frame { query: 0, first: 0, reads: true, in_from: false, selected: false }];
     let creates = toks.first().is_some_and(|t| t.is("CREATE"));
     for i in 0..toks.len() {
         let t = toks[i];
@@ -478,12 +480,12 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
             let next = toks.get(i + 1);
             if next.is_some_and(|n| n.is_any(&["SELECT", "WITH", "VALUES"])) {
                 queries.push(Query { parent: Some(top.query), ..Query::default() });
-                frames.push(Frame { query: queries.len() - 1, reads: true, in_from: false, selected: false });
+                frames.push(Frame { query: queries.len() - 1, first: queries.len() - 1, reads: true, in_from: false, selected: false });
             } else if top.reads && top.in_from && i > 0 && (toks[i - 1].is_any(&["FROM", "JOIN"]) || toks[i - 1].is_punct(",") || toks[i - 1].is_punct("(")) {
                 // `from (a join b on …)`: the same query's FROM list, in parentheses.
                 let (found, _) = source(dialect, toks, i + 1);
                 queries[top.query].sources.extend(found);
-                frames.push(Frame { query: top.query, reads: true, in_from: true, selected: true });
+                frames.push(Frame { query: top.query, first: top.first, reads: true, in_from: true, selected: true });
             } else {
                 frames.push(Frame { reads: false, in_from: false, ..top });
             }
@@ -516,6 +518,10 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
         // The second part of `t.from` is a column, unless the name after the dot is still being typed and what follows it is the clause.
         if before.is_some_and(|b| b.is_punct(".")) && !(t.is("FROM") && toks.get(i + 1).is_some_and(|n| n.is_punct("(") || (n.is_name() && !n.is("FROM")))) {
             continue;
+        }
+        // What follows an INSERT's rows is the INSERT's again, whichever side of a set operation they ended on.
+        if t.is("RETURNING") || (t.is("ON") && toks.get(i + 1).is_some_and(|n| n.is_any(&["CONFLICT", "DUPLICATE"]))) {
+            frame.query = frame.first;
         }
         if t.is("WITH") {
             let query = frame.query;

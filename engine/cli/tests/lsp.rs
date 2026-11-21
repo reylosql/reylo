@@ -284,9 +284,23 @@ fn a_new_database_url_takes_effect_on_the_next_edit() {
 }
 
 #[test]
+fn an_inserts_alias_reaches_returning_past_a_set_operation() {
+    let project = Project::new("compound");
+    let mut client = Client::start(&project.0);
+    let uri = project.uri("q.sql");
+    let text = "insert into users as u (id) select 1 union all select 2 returning u.id";
+    client.open(&uri, text);
+    client.complete(&uri, text, "returning u.");
+    let definition = client.at("textDocument/definition", &uri, text, "u.id", false);
+    assert_eq!(definition["range"]["start"], json!({ "line": 0, "character": 21 }));
+    client.finish();
+}
+
+#[test]
 fn a_project_runs_no_command_unless_the_editor_allows_it() {
     let project = Project::new("command");
-    std::fs::write(project.0.join(".reylo.yaml"), "direct_url: \"file:$(touch ran; echo ./app.db)\"\n").unwrap();
+    let command = if cfg!(windows) { "(type nul > ran) & echo ./app.db" } else { "touch ran; echo ./app.db" };
+    std::fs::write(project.0.join(".reylo.yaml"), format!("direct_url: \"file:$({command})\"\n")).unwrap();
     let uri = project.uri("q.sql");
     let mut client = Client::start(&project.0);
     client.open(&uri, "selec 1");
