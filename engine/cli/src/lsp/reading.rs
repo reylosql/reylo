@@ -414,6 +414,8 @@ struct Frame {
     /// The query it opened in, which holds an INSERT's target while the query reads its rows.
     first: usize,
     inserting: bool,
+    /// Whether it has passed a UNION, INTERSECT or EXCEPT.
+    compound: bool,
     /// Whether it reads a query's clauses, and isn't a function's arguments.
     reads: bool,
     in_from: bool,
@@ -471,7 +473,7 @@ fn source(dialect: Dialect, toks: &[Tok<'_>], mut at: usize) -> (Option<Source>,
 pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
     let mut queries = vec![Query::default()];
     let mut of_token = Vec::with_capacity(toks.len());
-    let mut frames = vec![Frame { query: 0, first: 0, inserting: false, reads: true, in_from: false, selected: false }];
+    let mut frames = vec![Frame { query: 0, first: 0, inserting: false, compound: false, reads: true, in_from: false, selected: false }];
     let creates = toks.first().is_some_and(|t| t.is("CREATE"));
     for i in 0..toks.len() {
         let t = toks[i];
@@ -481,12 +483,12 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
             let next = toks.get(i + 1);
             if next.is_some_and(|n| n.is_any(&["SELECT", "WITH", "VALUES"])) {
                 queries.push(Query { parent: Some(top.query), ..Query::default() });
-                frames.push(Frame { query: queries.len() - 1, first: queries.len() - 1, inserting: false, reads: true, in_from: false, selected: false });
+                frames.push(Frame { query: queries.len() - 1, first: queries.len() - 1, inserting: false, compound: false, reads: true, in_from: false, selected: false });
             } else if top.reads && top.in_from && i > 0 && (toks[i - 1].is_any(&["FROM", "JOIN"]) || toks[i - 1].is_punct(",") || toks[i - 1].is_punct("(")) {
                 // `from (a join b on …)`: the same query's FROM list, in parentheses.
                 let (found, _) = source(dialect, toks, i + 1);
                 queries[top.query].sources.extend(found);
-                frames.push(Frame { query: top.query, first: top.first, inserting: false, reads: true, in_from: true, selected: true });
+                frames.push(Frame { query: top.query, first: top.first, inserting: false, compound: false, reads: true, in_from: true, selected: true });
             } else {
                 frames.push(Frame { reads: false, in_from: false, ..top });
             }
@@ -525,8 +527,12 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
         }
         // What follows an INSERT's rows is the INSERT's again, whichever query read them.
         let upsert = t.is("ON") && (toks.get(i + 1).is_some_and(|n| n.is("DUPLICATE")) || (toks.get(i + 1).is_some_and(|n| n.is("CONFLICT")) && toks.get(i + 2).is_some_and(|n| n.is_punct("(") || n.is("ON") || n.is("DO"))));
-        if frame.inserting && (t.is("RETURNING") || upsert) {
+        if frame.inserting && (t.is("RETURNING") || upsert) && frame.query != frame.first {
+            // MySQL's ON DUPLICATE KEY UPDATE also sees the FROM list of a SELECT with no set operation.
+            let seen = if t.is("ON") && toks[i + 1].is("DUPLICATE") && !frame.compound { queries[frame.query].sources.clone() } else { Vec::new() };
             frame.query = frame.first;
+            queries[frame.query].sources.extend(seen);
+            *of_token.last_mut().expect("this token's") = frame.query;
         }
         if t.is("WITH") {
             let query = frame.query;
@@ -564,6 +570,7 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
             }
         } else if t.is_any(&["UNION", "INTERSECT", "EXCEPT"]) && !before.is_some_and(|b| b.is_punct("*")) {
             next_side(&mut queries, frame);
+            frame.compound = true;
         } else if t.is_any(ENDS_FROM) {
             frame.in_from = false;
         } else if t.is("INTO") {
@@ -751,6 +758,23 @@ mod tests {
         assert_eq!(s.source(last, "u").map(|x| x.name.as_str()), Some("users"));
         assert!(s.source(last, "p").is_none());
         let s = read(Dialect::Postgres, "insert into users (id) select p.id from posts p on conflict (id) do nothing returning id");
+        assert!(s.source(s.of_token.len() - 1, "p").is_none());
+
+        // The RETURNING keyword itself is in the target's scope, which is where completion looks right after it.
+        let sql = "insert into users as u (id) select p.id from posts p returning";
+        let tree = syntax::parse(Dialect::Postgres, sql);
+        let toks = tokens(Dialect::Postgres, &tree, sql);
+        let s = scopes(Dialect::Postgres, &toks);
+        let at = toks.iter().position(|t| t.is("RETURNING")).unwrap();
+        assert_eq!(s.source(at, "u").map(|x| x.name.as_str()), Some("users"));
+        assert!(s.source(at, "p").is_none());
+
+        // MySQL's update clause sees a simple SELECT's sources, and no side of a UNION's.
+        let s = read(Dialect::Mysql, "insert into users (id) select p.id from posts p on duplicate key update id = p.id");
+        let last = s.of_token.len() - 1;
+        assert_eq!(s.source(last, "p").map(|x| x.name.as_str()), Some("posts"));
+        assert_eq!(s.source(last, "users").map(|x| x.name.as_str()), Some("users"));
+        let s = read(Dialect::Mysql, "insert into users (id) select p.id from posts p union select 2 on duplicate key update id = 1");
         assert!(s.source(s.of_token.len() - 1, "p").is_none());
     }
 
