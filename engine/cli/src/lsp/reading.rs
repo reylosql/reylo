@@ -534,10 +534,12 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
         if joins_on {
             frame.joins -= 1;
         }
-        let upsert = t.is("ON") && !joins_on && toks.get(i + 1).is_some_and(|n| n.is_any(&["CONFLICT", "DUPLICATE"]));
+        // `ON DUPLICATE KEY` can't be a join's condition. `ON conflict(…)` can, while a join is still owed one.
+        let duplicate_key = toks.get(i + 1).is_some_and(|n| n.is("DUPLICATE")) && toks.get(i + 2).is_some_and(|n| n.is("KEY"));
+        let upsert = t.is("ON") && (duplicate_key || (!joins_on && toks.get(i + 1).is_some_and(|n| n.is("CONFLICT"))));
         if frame.inserting && frame.query != frame.first && (t.is("RETURNING") || upsert) {
             // MySQL's ON DUPLICATE KEY UPDATE also sees the FROM list of a SELECT that neither groups nor has a set operation, in a scope of its own.
-            let input = (t.is("ON") && toks[i + 1].is("DUPLICATE") && !frame.compound && !groups_rows(toks, frame.rows, i)).then(|| queries[frame.query].sources.clone());
+            let input = (t.is("ON") && duplicate_key && !frame.compound && !groups_rows(toks, frame.rows, i)).then(|| queries[frame.query].sources.clone());
             // The clause runs to the statement's end, where a column may be named `returning`.
             frame.inserting = false;
             frame.query = frame.first;
@@ -560,7 +562,12 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
                 queries[frame.query].sources.extend(found);
             }
         } else if t.is("JOIN") {
-            if !before.is_some_and(|b| b.is_any(&["CROSS", "NATURAL"])) {
+            // `NATURAL LEFT JOIN` and `CROSS JOIN` take no condition.
+            let mut kind = i;
+            while kind > 0 && toks[kind - 1].is_any(&["LEFT", "RIGHT", "FULL", "INNER", "OUTER"]) {
+                kind -= 1;
+            }
+            if !(kind > 0 && toks[kind - 1].is_any(&["CROSS", "NATURAL"])) {
                 frame.joins += 1;
             }
             frame.in_from = true;
@@ -591,6 +598,8 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
             next_side(&mut queries, frame);
             frame.compound = true;
         } else if t.is_any(ENDS_FROM) {
+            // The FROM list is over, and a join left without a condition takes none.
+            frame.joins = 0;
             frame.in_from = false;
         } else if t.is("INTO") {
             if !frame.selected {
@@ -822,8 +831,15 @@ mod tests {
             assert!(s.source(last, "p").is_none(), "{upsert}");
         }
         // A join that takes no condition leaves the ON to the upsert.
-        let s = read(Dialect::Postgres, "insert into users as u (id) select p.id from posts p cross join posts o on conflict (id) do nothing returning u.id");
-        assert_eq!(s.source(s.of_token.len() - 1, "u").map(|x| x.name.as_str()), Some("users"));
+        for (dialect, input) in [(Dialect::Postgres, "cross join posts o"), (Dialect::Postgres, "natural left join posts o"), (Dialect::Sqlite, "join posts o where true")] {
+            let s = read(dialect, &format!("insert into users as u (id) select p.id from posts p {input} on conflict (id) do update set id = u.id"));
+            let last = s.of_token.len() - 1;
+            assert_eq!(s.source(last, "u").map(|x| x.name.as_str()), Some("users"), "{input}");
+            assert!(s.source(last, "p").is_none(), "{input}");
+        }
+        let s = read(Dialect::Mysql, "insert into users (id) select p.id from posts p join posts o where true group by p.id on duplicate key update id = 1");
+        let last = s.of_token.len() - 1;
+        assert!(s.source(last, "p").is_none() && s.source(last, "o").is_none());
 
         // MySQL's update clause sees a simple SELECT's sources, and no side of a UNION's.
         let s = read(Dialect::Mysql, "insert into users (id) select p.id from posts p on duplicate key update id = p.id");
