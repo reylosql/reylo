@@ -56,6 +56,8 @@ pub struct SyntaxError {
     pub message: String,
     pub start: u32,
     pub end: u32,
+    /// The terminals the grammar would have taken there, by their symbols, where the parser knows them. [`crate::expected`] spells them.
+    pub expected: Vec<u16>,
 }
 
 impl<'s> Tree<'s> {

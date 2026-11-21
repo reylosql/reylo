@@ -42,7 +42,8 @@ export function playResult(
     return {
       sql,
       ...(types.params === "Record<never, never>" ? {} : { params: formatType(types.params, width) }),
-      returns: formatType(types.row === "unknown" ? "unknown" : resultType(types.row, types.cardinality), width),
+      // Only a statement the engine could not analyze has Params of `unknown`, and resolves to `unknown`; an analyzed Row of `unknown`, a column of no name and no type, is the element of the cardinality.
+      returns: formatType(types.params === "unknown" ? "unknown" : resultType(types.row, types.cardinality), width),
       element: formatType(types.row, width),
       cardinality: types.cardinality,
       diagnostics: types.diagnostics.map(placed),

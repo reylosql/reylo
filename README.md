@@ -111,7 +111,7 @@ To make `.sql` imports work at run time too, load Reylo where your code runs. On
 node --env-file=.env --import reylo/register main.ts
 ```
 
-For Bun, Nub, Vite, Next.js, esbuild, webpack, Rspack, Cloudflare Workers and Jest, add [the plugin for your setup](https://reylo.dev/#plugins), or copy its complete [example project](https://github.com/reylosql/reylo/tree/main/examples). To see the types as you type, set up [your editor](https://reylo.dev/#editors).
+For Bun, Nub, Vite, Next.js, esbuild, Rolldown, Rollup, webpack, Rspack, Cloudflare Workers and Jest, add [the plugin for your setup](https://reylo.dev/#plugins), or copy its complete [example project](https://github.com/reylosql/reylo/tree/main/examples). To see the types as you type, set up [your editor](https://reylo.dev/#editors).
 
 To give your coding agent Reylo's rules for writing and running queries, install its skill:
 

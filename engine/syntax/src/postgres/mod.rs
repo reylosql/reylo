@@ -179,7 +179,7 @@ pub fn parse_tree(text: &str) -> Tree<'_> {
             let end = text.len() as u32;
             lexemes.push(Lexeme { sym: lalr::SCAN_STOP, lead, start, end: end.max(start) });
             let tail = lexemes.last().map_or(0, |l| l.end);
-            (lexemes, tail, Some(SyntaxError { message: e.message, start, end }))
+            (lexemes, tail, Some(SyntaxError { message: e.message, start, end, expected: Vec::new() }))
         }
     };
     let mut parsed = lalr::parse(tables(), text, &lexemes, tail, tok_semicolon(), statement_list(), &mut NoActions);
@@ -218,7 +218,7 @@ fn refusal(text: &str) -> Option<SyntaxError> {
     // The tree's own parse has reported the stack's limit, at its token.
     let message = parsed.refused.filter(|m| !m.starts_with(lalr::EXHAUSTED))?;
     let (start, end) = parsed.refused_at.unwrap_or((0, text.len() as u32));
-    Some(SyntaxError { message, start, end })
+    Some(SyntaxError { message, start, end, expected: Vec::new() })
 }
 
 fn tok_semicolon() -> u16 {
@@ -331,6 +331,10 @@ impl Actions for TreeActions<'_> {
     fn exhausted(&mut self, last_read: Option<usize>) -> String {
         self.at_token("memory exhausted", last_read)
     }
+
+    fn recovers(&self) -> bool {
+        false
+    }
 }
 
 impl TreeActions<'_> {
@@ -360,10 +364,38 @@ pub fn parse_statements(text: &str, max_depth: u32) -> core::result::Result<Vec<
 
 /// [`parse_statements`]' list of `RawStmt` nodes, before they become [`pb`]'s structs.
 pub fn parse_values(text: &str) -> core::result::Result<nodes::V, ParseError> {
-    let (read, tail, stop) = match scan::read(text) {
+    parse_values_in(text, None)
+}
+
+/// `raw_parser` in one of its modes (`RawParseMode`): 0 reads statements, 1 a type's name, 2 a
+/// PL/pgSQL expression, and 3 to 5 the target and value of a PL/pgSQL assignment to one, two or
+/// three names. The list the grammar builds, or Postgres's words for refusing the text.
+pub fn parse_in_mode(text: &str, mode: i32) -> core::result::Result<nodes::V, String> {
+    use generated::tok;
+    let token = match mode {
+        1 => Some(tok::MODE_TYPE_NAME),
+        2 => Some(tok::MODE_PLPGSQL_EXPR),
+        3 => Some(tok::MODE_PLPGSQL_ASSIGN1),
+        4 => Some(tok::MODE_PLPGSQL_ASSIGN2),
+        5 => Some(tok::MODE_PLPGSQL_ASSIGN3),
+        _ => None,
+    };
+    parse_values_in(text, token).map_err(|e| match e {
+        ParseError::Syntax(m) => m,
+        ParseError::TooDeep => "parse tree is nested too deeply to read".to_string(),
+    })
+}
+
+/// [`parse_values`], the grammar handed `mode` first where there is one, as `raw_parser` hands it
+/// a mode's token.
+fn parse_values_in(text: &str, mode: Option<u16>) -> core::result::Result<nodes::V, ParseError> {
+    let (mut read, tail, stop) = match scan::read(text) {
         Ok((read, tail)) => (read, tail, None),
         Err((read, lead, stop)) => (read, lead, Some(stop)),
     };
+    if let Some(mode) = mode {
+        read.insert(0, scan::Read { lexeme: (mode, 0, 0, 0), value: scan::Value::None });
+    }
     let mut lexemes: Vec<Lexeme> = read.iter().map(|r| Lexeme { sym: r.lexeme.0, lead: r.lexeme.1, start: r.lexeme.2, end: r.lexeme.3 }).collect();
     if stop.is_some() {
         lexemes.push(Lexeme { sym: lalr::SCAN_STOP, lead: tail, start: tail, end: tail });

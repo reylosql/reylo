@@ -41,6 +41,8 @@ const URL_RETRY: Duration = Duration::from_secs(60);
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the server waits for a lock an analysis needs, under [`TIMEOUT`], so that it gives up itself and no backend stays behind waiting after the connection is dropped.
 const LOCK_WAIT_SECONDS: u32 = 5;
+/// The most tokens a syntax error lists as what would have fit; a longer list says nothing useful.
+const MAX_EXPECTED: usize = 6;
 /// The most diagnostics a document shows of its syntax errors.
 const MAX_ERRORS: usize = 200;
 /// The largest message the server reads.
@@ -561,6 +563,14 @@ impl Reading {
                 let (start, end) = (e.start as usize, e.end as usize);
                 // A message quotes the token as the grammar read it, which a placeholder isn't.
                 let message = if end > start { e.message.replace(&written[start..end], &text[start..end]) } else { e.message.clone() };
+                // What would have fit there, where it's a short list worth reading.
+                let fits = syntax::expected(dialect, e);
+                let message = match fits.as_slice() {
+                    [] => message,
+                    [one] => format!("{message}\nExpected {one}"),
+                    [rest @ .., last] if fits.len() <= MAX_EXPECTED => format!("{message}\nExpected {} or {last}", rest.join(", ")),
+                    _ => message,
+                };
                 // The end of the input is where its last token ends, not a blank line or a comment after it.
                 if start >= last {
                     (last as u32, last as u32, message)

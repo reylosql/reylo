@@ -4,7 +4,9 @@ One `main.ts` (and its `main.mjs` twin for the bundlers that take no TypeScript 
 
 | Adapter | Bundlers proven | Command |
 | --- | --- | --- |
-| `reylo/vite` | Vite 7, Rollup 4, Rolldown 1 | `vite build`, `rollup -c rollup.config.mjs`, `rolldown -c rolldown.config.mjs` |
+| `reylo/vite` | Vite 7 | `vite build` |
+| `reylo/rollup` (`reylo/vite`'s plugin) | Rollup 4 | `rollup -c rollup.config.mjs` |
+| `reylo/rolldown` (`reylo/vite`'s plugin) | Rolldown 1 | `rolldown -c rolldown.config.mjs` |
 | `reylo/esbuild` | esbuild 0.28, `Bun.build`, `Bun.plugin` (preload) | `node esbuild.mjs`, `bun bun-build.ts`, `bun --preload ./bun-preload.ts main.ts` |
 | `reylo/webpack` | webpack 5, Rspack 1 (Turbopack takes the same loader as `reylo/turbopack` in `turbopack.rules`, not run here) | `webpack --config webpack.config.mjs`, `rspack build --config rspack.config.mjs` |
 

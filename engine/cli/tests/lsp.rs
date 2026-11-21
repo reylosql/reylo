@@ -316,6 +316,17 @@ fn a_project_runs_no_command_unless_the_editor_allows_it() {
 }
 
 #[test]
+fn a_syntax_error_says_what_would_have_fit() {
+    let project = Project::new("expected");
+    let mut client = Client::start(&project.0);
+    let uri = project.uri("q.sql");
+    client.open(&uri, "select id from users order");
+    let found = client.wait_for(&uri, "incomplete input");
+    assert!(found[0]["message"].as_str().unwrap().ends_with("\nExpected BY"), "{found}");
+    client.finish();
+}
+
+#[test]
 fn a_file_of_many_statements_gets_syntax_errors_alone() {
     let project = Project::new("script");
     let mut client = Client::start(&project.0);

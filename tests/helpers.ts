@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { reportedDiagnostics } from "../src/mapper-diagnostics.ts";
 import { EngineCore, type Dialect } from "../src/engine-core.ts";
 import { nativeBinary } from "../src/native.ts";
+import { typescriptOfModule } from "./typescript-format.ts";
 
 export const ROOT = join(import.meta.dirname, "..");
 export const DRIVERS = join(ROOT, "lab", "drivers", "node_modules");
@@ -127,16 +128,21 @@ export async function postgresDatabase(prefix: string, setup?: string) {
   const url = new URL(PG!);
   url.pathname = `/${name}`;
   const sql = postgres(url.href, { max: 1, onnotice: () => {} });
-  if (setup) await sql.unsafe(setup).simple();
-  return {
-    url: url.href,
-    sql,
-    async drop() {
-      await sql.end();
-      await admin.unsafe(`drop database if exists ${name} with (force)`);
-      await admin.end();
-    },
+  const drop = async () => {
+    await sql.end();
+    await admin.unsafe(`drop database if exists ${name} with (force)`);
+    await admin.end();
   };
+  if (setup) {
+    try {
+      await sql.unsafe(setup).simple();
+    } catch (e) {
+      // A setup that fails drops the database and closes both connections, which would otherwise keep the test's process alive.
+      await drop();
+      throw e;
+    }
+  }
+  return { url: url.href, sql, drop };
 }
 
 /** A database of a test's own on the test MySQL, its URL, and a mysql2 connection to it as the driver connects by default, with `setup` run first. */
@@ -152,7 +158,15 @@ export async function mysqlDatabase(prefix: string, setup?: string) {
   url.pathname = `/${name}`;
   if (setup) {
     const setter = await connect(name, true);
-    await setter.query(setup);
+    try {
+      await setter.query(setup);
+    } catch (e) {
+      // A setup that fails drops the database and closes both connections, which would otherwise keep the test's process alive.
+      await setter.end();
+      await admin.query(`drop database if exists ${name}`);
+      await admin.end();
+      throw e;
+    }
     await setter.end();
   }
   const db = await connect(name);
@@ -215,11 +229,27 @@ export async function transform(root: string, files: Record<string, string>): Pr
       out[name] = { text: result.text, diagnostics: reportedDiagnostics(result) };
     }
     await call("closeProject", { projectHandle: "p" });
+    for (const [name, content] of Object.entries(files)) sameTypescript(root, name, content, out[name]!.text);
     return out;
   } finally {
     child.stdin.end();
     await new Promise((resolve) => child.once("exit", resolve));
   }
+}
+
+/**
+ * Holds `reylo analyze --format typescript`, the binary's port of the content mapper's renderer, to
+ * the module the content mapper wrote for a `.sql` file: its Params, and what `.run()` resolves to.
+ * Run where the content mapper reads the project, from `root`, with the file's text on standard
+ * input; a statement whose database the binary cannot reach is not compared.
+ */
+function sameTypescript(root: string, name: string, content: string, module: string): void {
+  if (!name.endsWith(".sql")) return;
+  const expected = typescriptOfModule(module);
+  if (expected === undefined) return;
+  const run = spawnSync(nativeBinary(), ["analyze", "--format", "typescript", "-"], { cwd: root, input: content, encoding: "utf8" });
+  if (run.status !== 0 && run.status !== 1) return;
+  if (run.stdout !== expected) throw new Error(`reylo analyze --format typescript prints ${name} otherwise than the content mapper declares it:\n--- content mapper\n${expected}--- reylo analyze\n${run.stdout}`);
 }
 
 /** TypeScript's language server for the project at `root`, over stdio with LSP framing, as an editor talks to it. */

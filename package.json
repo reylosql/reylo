@@ -22,6 +22,8 @@
     ".": "./src/index.ts",
     "./register": "./src/register.ts",
     "./vite": "./src/vite.ts",
+    "./rollup": "./src/rollup.ts",
+    "./rolldown": "./src/rolldown.ts",
     "./esbuild": "./src/esbuild.ts",
     "./webpack": "./src/webpack.ts",
     "./turbopack": "./src/turbopack.ts",

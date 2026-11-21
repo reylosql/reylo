@@ -46,8 +46,10 @@ Commands:
   analyze <paths>          Print what Reylo infers for each statement
     --sql <statement>      Read this statement, in place of files
     --url <url>            The database, in place of the project's
-    --format <yaml|json>   YAML, the default, or a line of JSON per statement
+    --format <format>      json, the default, yaml or typescript
 <Rust>
+    --format rust          Print each statement's Rust module for sqlx
+
   generate <generator>     Write each .sql file's module for a language
     --out <file>           Write every module into one file
 </Rust>
@@ -78,30 +80,47 @@ Analyze it:
 
 ```terminal
 $ reylo analyze queries/get_user.sql
-$schema: https://reylo.dev/typedefs/preview.json
-dialect: { name: postgres, version: "18.6" }
-sql: |
-  -- One user, by id.
-  select id, email, bio from users where id = $1
-kind: select
-comment: One user, by id.
-params:
-  - name: id
-    type: { kind: integer, bits: 64, label: int8 }
-result:
-  kind: table
-  cardinality: at_most_one
-  columns:
-    - name: id
-      type: { kind: integer, bits: 64, label: int8 }
-    - name: email
-      type: { kind: text, code_points: [[1, 1114111]], label: text }
-    - name: bio
-      type: { kind: text, code_points: [[1, 1114111]], label: text }
-      nullable: true
-capabilities:
-  tables: { public.users: read }
-diagnostics: []
+{
+  "$schema": "https://reylo.dev/typedefs/preview.json",
+  "dialect": { "name": "postgres", "version": "18.6" },
+  "sql": "-- One user, by id.\nselect id, email, bio from users where id = $1\n",
+  "kind": "select",
+  "comment": "One user, by id.",
+  "params": [
+    { "name": "id", "type": { "kind": "integer", "bits": 64, "label": "int8" } }
+  ],
+  "result": {
+    "kind": "table",
+    "cardinality": "at_most_one",
+    "columns": [
+      {
+        "name": "id",
+        "type": { "kind": "integer", "bits": 64, "label": "int8" }
+      },
+      {
+        "name": "email",
+        "type": {
+          "kind": "text",
+          "code_points": [[1, 1114111]],
+          "size": { "max": 255 },
+          "label": "varchar"
+        }
+      },
+      {
+        "name": "bio",
+        "type": {
+          "kind": "text",
+          "code_points": [[1, 1114111]],
+          "label": "text"
+        },
+        "nullable": true,
+        "comment": "Shown on the profile page"
+      }
+    ]
+  },
+  "capabilities": { "tables": { "public.users": "read" } },
+  "diagnostics": []
+}
 ```
 
 Each field of the result:
@@ -136,12 +155,31 @@ reylo analyze 'queries/**/*.sql'
 reylo analyze --sql 'select count(*) as n from users'
 ```
 
-With `--format json`, each statement prints as one line of JSON:
+Piped, each statement prints as one line of JSON:
 
 ```terminal
-$ reylo analyze --sql 'select count(*) as n from users' --format json
+$ reylo analyze --sql 'select count(*) as n from users' | cat
 {"$schema":"https://reylo.dev/typedefs/preview.json","dialect":{"name":"postgres","version":"18.6"},"sql":"select count(*) as n from users","kind":"select","params":[],"result":{"kind":"table","cardinality":"one","columns":[{"name":"n","type":{"kind":"integer","bits":64,"label":"int8"}}]},"capabilities":{"tables":{"public.users":"read"}},"diagnostics":[]}
 ```
+
+With `--format typescript`, it prints the parameters and what `.run()` resolves to:
+
+```terminal
+$ reylo analyze queries/get_user.sql --format typescript
+type Params = { id: number | bigint | string };
+type Returns = {
+  id: bigint;
+  email: string;
+  /** Shown on the profile page */
+  bio: string | null;
+} | null;
+```
+
+<Rust>
+With `--format rust`, it prints the module [`reylo generate`](#reylo-generate) writes.
+
+</Rust>
+The `--format yaml` flag prints a YAML document per statement.
 
 A statement the database refuses prints its error on stderr, and the command exits with 1:
 

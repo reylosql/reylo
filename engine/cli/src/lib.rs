@@ -25,8 +25,10 @@
 //! runs it.
 
 mod analyze;
+mod compact_json;
 mod lsp;
 mod matched;
+mod typescript;
 mod yaml;
 
 use reylo_engine::project::{self, Project};
@@ -38,7 +40,7 @@ use std::path::Path;
 const USAGE: &str = "Usage: reylo <command>
 
   analyze <paths> [--url]   Print each statement's type descriptor, read from the project's
-          [--format]        database, as YAML or, with --format json, one line of JSON each
+          [--format]        database, as JSON or YAML, or its TypeScript types or Rust module
   generate <generator>      Write each .sql file's module for a language: rust-sqlx, the Rust
           [paths] [--out]   of #[reylo::query] (reylo generate --help)
   migrate <command>         Write, check and run migrations, and repair their history
