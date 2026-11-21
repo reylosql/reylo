@@ -557,7 +557,7 @@ $ reylo migrate new tidy_columns --rename posts.title=heading --drop users.bio
   ! Drops the column users.bio and its data
 ```
 
-It asks wherever a table loses one column and gains one, whatever their types; a rename converts each value to the new type. With one such column, it prints both commands whole.
+It asks wherever a table loses one column and gains one, whatever their types. A rename casts each value to the new type, and a value the database can't cast fails the migration. With one such column, it prints both commands whole.
 
 With no schema change, the migration is empty, for a data change:
 
