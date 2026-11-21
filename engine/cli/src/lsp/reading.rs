@@ -286,9 +286,9 @@ fn past_group(toks: &[Tok<'_>], at: usize) -> usize {
     i
 }
 
-/// The names a query's select list gives its columns. An item with no name of its own, a `*` among them, adds none.
+/// The names a query's RETURNING or select list gives its columns. An item with no name of its own, a `*` among them, adds none.
 fn output_names(dialect: Dialect, toks: &[Tok<'_>]) -> Vec<Named> {
-    let Some((from, to)) = select_list(toks) else { return Vec::new() };
+    let Some((from, to)) = returning_list(toks).or_else(|| select_list(toks)) else { return Vec::new() };
     items(toks, from, to).into_iter().filter_map(|(a, b)| item_name(&toks[a..b]).map(|t| named(dialect, t))).collect()
 }
 
@@ -300,7 +300,14 @@ fn item_name<'t, 's>(item: &'t [Tok<'s>]) -> Option<&'t Tok<'s>> {
             return Some(alias).filter(usable);
         }
     }
-    let plain = &item[..item.iter().position(|t| t.is_punct("::")).unwrap_or(item.len())];
+    let cast = item.iter().position(|t| t.is_punct("::")).unwrap_or(item.len());
+    // `id::text label`: a name after the cast's type is its alias, unless it's the last word of a type of several.
+    if let [.., before, alias] = item.get(cast + 1..).unwrap_or(&[]) {
+        if (before.is_name() || before.is_punct(")") || before.is_punct("]")) && !alias.is_any(TYPE_ENDINGS) {
+            return Some(alias).filter(usable);
+        }
+    }
+    let plain = &item[..cast];
     match plain {
         [one] => return Some(one).filter(usable),
         [q, dot, one] if q.is_name() && dot.is_punct(".") => return Some(one).filter(usable),
@@ -310,6 +317,24 @@ fn item_name<'t, 's>(item: &'t [Tok<'s>]) -> Option<&'t Tok<'s>> {
     let [.., before, alias] = item else { return None };
     let after_value = before.is_punct(")") || matches!(before.class, Class::Number | Class::String | Class::Quoted) || before.is("END") || (before.class == Class::Word && !before.is_any(RESERVED));
     Some(alias).filter(usable).filter(|_| after_value)
+}
+
+/// The words that end a type of several words, as `double precision` does.
+const TYPE_ENDINGS: &[&str] = &["VARYING", "PRECISION", "ZONE", "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND"];
+
+/// Where the RETURNING list of the statement in `toks` runs, at its own level.
+fn returning_list(toks: &[Tok<'_>]) -> Option<(usize, usize)> {
+    let mut depth = 0;
+    for (i, t) in toks.iter().enumerate() {
+        if t.is_punct("(") {
+            depth += 1;
+        } else if t.is_punct(")") {
+            depth -= 1;
+        } else if depth == 0 && t.is("RETURNING") {
+            return Some((i + 1, toks.len()));
+        }
+    }
+    None
 }
 
 /// Where the select list of the query in `toks` runs, at its own level.
@@ -677,6 +702,13 @@ mod tests {
 
     fn sources(s: &Scopes, query: usize) -> Vec<(&str, Option<&str>)> {
         s.queries[query].sources.iter().map(|x| (x.name.as_str(), x.alias.as_deref())).collect()
+    }
+
+    #[test]
+    fn a_cast_keeps_its_alias_and_a_type_of_two_words_is_none() {
+        let s = read(Dialect::Postgres, "with x as (select id::text label, name::text, a::double precision, b::int::text, c::numeric(3) d from t) select 1 from x");
+        let names: Vec<&str> = s.queries.iter().flat_map(|q| &q.ctes).flat_map(|c| &c.columns).map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["label", "name", "a", "b", "d"]);
     }
 
     #[test]

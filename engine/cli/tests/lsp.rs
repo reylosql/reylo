@@ -140,6 +140,18 @@ impl Client {
         self.request(method, json!({ "textDocument": { "uri": uri }, "position": { "line": line, "character": character } }))
     }
 
+    /// Completion just past `needle`, once the schema has been read.
+    fn complete(&mut self, uri: &str, text: &str, needle: &str) -> Value {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let answer = self.at("textDocument/completion", uri, text, needle, true);
+            if !answer["items"].as_array().unwrap().is_empty() || Instant::now() > until {
+                return answer;
+            }
+            let _ = self.receive(Instant::now() + Duration::from_millis(50));
+        }
+    }
+
     fn hover(&mut self, uri: &str, text: &str, needle: &str) -> String {
         // The analysis runs once the text is still; a hover before it answers from the schema alone.
         let until = Instant::now() + Duration::from_secs(10);
@@ -209,6 +221,54 @@ fn an_editor_gets_types_completion_jumps_and_errors() {
     assert_eq!(labels(&client.at("textDocument/completion", &uri, from, "from ", true)), ["posts", "users"]);
     client.change(&uri, 6, "sel");
     assert_eq!(labels(&client.at("textDocument/completion", &uri, "sel", "sel", true)), ["select"]);
+    client.finish();
+}
+
+#[test]
+fn a_completion_in_an_unclosed_quote_keeps_the_rest_of_the_file() {
+    let project = Project::new("quote");
+    let mut client = Client::start(&project.0);
+    let uri = project.uri("q.sql");
+    let unclosed = "select *\nfrom \"us\nwhere id = 1\norder by id;\n";
+    client.open(&uri, unclosed);
+    let answer = client.complete(&uri, unclosed, "\"us");
+    let edit = &answer["items"][0]["textEdit"];
+    assert_eq!(edit["newText"], "\"users\"");
+    assert_eq!(edit["range"], json!({ "start": { "line": 1, "character": 5 }, "end": { "line": 1, "character": 8 } }));
+    assert_eq!(labels(&client.at("textDocument/completion", &uri, unclosed, "where", true)), Vec::<String>::new());
+
+    let closed = "select * from \"us\"";
+    client.change(&uri, 2, closed);
+    let answer = client.complete(&uri, closed, "\"us");
+    assert_eq!(answer["items"][0]["textEdit"]["range"]["end"], json!({ "line": 0, "character": 18 }));
+    client.finish();
+}
+
+#[test]
+fn a_with_query_offers_the_columns_it_names() {
+    let project = Project::new("with");
+    let mut client = Client::start(&project.0);
+    let uri = project.uri("q.sql");
+    let returning = "with x as (insert into users (name) values ('a') returning id, name) select x. from x";
+    client.open(&uri, returning);
+    assert_eq!(labels(&client.complete(&uri, returning, "select x.")), ["id", "name"]);
+    client.finish();
+}
+
+#[test]
+fn a_new_database_url_takes_effect_on_the_next_edit() {
+    let project = Project::new("moved");
+    let mut client = Client::start(&project.0);
+    let uri = project.uri("q.sql");
+    client.open(&uri, "select nope from users");
+    client.wait_for(&uri, "no such column: nope");
+
+    std::fs::write(project.0.join("other.db"), "").unwrap();
+    std::fs::write(project.0.join(".env"), "DATABASE_URL=file:./other.db\n").unwrap();
+    let made = Command::new(env!("CARGO_BIN_EXE_reylo")).args(["run", "create table other (a integer)"]).current_dir(&project.0).env_remove("DATABASE_URL").output().unwrap();
+    assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+    client.change(&uri, 2, "select id from users");
+    client.wait_for(&uri, "no such table: users");
     client.finish();
 }
 

@@ -34,6 +34,8 @@ const QUIET: Duration = Duration::from_millis(250);
 const FRESH: Duration = Duration::from_secs(5);
 /// How long after a failed connection the next one is tried.
 const RETRY: Duration = Duration::from_secs(10);
+/// How often a project's URL is read again while it fails or names nothing, since reading it may run a command.
+const URL_RETRY: Duration = Duration::from_secs(60);
 /// How long one connection, analysis or schema read may take.
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the server waits for a lock an analysis needs, under [`TIMEOUT`], so that it gives up itself and no backend stays behind waiting after the connection is dropped.
@@ -198,7 +200,8 @@ struct Column {
 
 /// What the locating thread is asked.
 enum LocateJob {
-    Find { uri: String, dir: PathBuf },
+    /// `failed`: its database just failed, so the URL may be worth reading again.
+    Find { uri: String, dir: PathBuf, failed: bool },
     /// Read which tables the project's SQL files create.
     Files { place: PathBuf },
 }
@@ -219,7 +222,7 @@ enum ReadJob {
 enum Event {
     Message(Result<Value, ()>),
     Closed,
-    Located { uri: String, place: Option<(PathBuf, Dialect)> },
+    Located { uri: String, place: Option<(PathBuf, Dialect)>, database_moved: bool },
     Analyzed { uri: String, text: String, analysis: Option<Box<Analysis>>, found: Vec<Value> },
     Read { place: PathBuf, tables: Vec<Table>, reserved: Vec<String> },
     Created { place: PathBuf, created: Vec<(PathBuf, Created)> },
@@ -240,6 +243,10 @@ struct Located {
     signature: Signature,
     dialect: Option<Dialect>,
     home: PathBuf,
+    url: Option<String>,
+    read_at: Instant,
+    /// The last problem logged, so that one that lasts is said once.
+    said: Option<String>,
 }
 
 struct Locator {
@@ -254,9 +261,9 @@ impl Locator {
     fn run(mut self, queue: Receiver<LocateJob>) {
         while let Ok(job) = queue.recv() {
             match job {
-                LocateJob::Find { uri, dir } => {
-                    let place = self.locate(&dir);
-                    let _ = self.events.send(Event::Located { uri, place });
+                LocateJob::Find { uri, dir, failed } => {
+                    let (place, database_moved) = self.locate(&dir, failed);
+                    let _ = self.events.send(Event::Located { uri, place, database_moved });
                 }
                 LocateJob::Files { place } => {
                     let Some(known) = self.places.get(&place) else { continue };
@@ -268,34 +275,44 @@ impl Locator {
         }
     }
 
-    /// The project of a directory. Its URL, which may run a command, is read again only once a file it comes from has changed.
-    fn locate(&mut self, dir: &Path) -> Option<(PathBuf, Dialect)> {
+    /// The project of a directory, and whether its database just changed. Its URL, which may run a command, is read again once a file it comes from has changed, and at most once per [`URL_RETRY`] while it fails or names nothing.
+    fn locate(&mut self, dir: &Path, failed: bool) -> (Option<(PathBuf, Dialect)>, bool) {
         let env: HashMap<String, String> = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).collect();
         let resolved = Project::resolve(dir, env);
         let project = resolved.as_ref().ok();
         let key = project.map_or_else(|| dir.to_path_buf(), |p| p.root.clone());
         let now = signature(project);
-        if let Some(known) = self.places.get(&key).filter(|k| k.signature == now) {
-            return known.dialect.map(|d| (key.clone(), d));
+        let known = self.places.get(&key);
+        if let Some(k) = known.filter(|k| k.signature == now && !((failed || k.url.is_none()) && k.read_at.elapsed() >= URL_RETRY)) {
+            return (k.dialect.map(|d| (key.clone(), d)), false);
         }
-        if let Err(why) = &resolved {
-            log(why);
-        }
-        let url = project.and_then(|p| p.type_check_url().ok().flatten()).map(|(url, _)| url).filter(|u| !u.is_empty());
+        let (before, said, same_files) = known.map_or((None, None, false), |k| (Some(k.url.clone()), k.said.clone(), k.signature == now));
+        let read = project.map(|p| p.type_check_url());
+        let problem = resolved.as_ref().err().cloned().or_else(|| read.as_ref().and_then(|r| r.as_ref().err().cloned()));
+        let url = read.and_then(|r| r.ok().flatten()).map(|(url, _)| url).filter(|u| !u.is_empty());
         let named = url.as_deref().and_then(project::dialect_of);
         let home = project.map_or_else(|| dir.join("reylo"), |p| p.root.join(p.config.dir.as_deref().unwrap_or("reylo")));
         // The project's database decides; `--dialect` is for the file that has none.
-        let Some(dialect) = named.and_then(dialect_named).or(self.forced) else {
-            log(&format!("{} names no database, so its files get no diagnostics: set DATABASE_URL, or pass --dialect", key.display()));
-            self.places.insert(key, Located { signature: now, dialect: None, home });
-            return None;
+        let dialect = named.and_then(dialect_named).or(self.forced);
+        let problem = problem.or_else(|| dialect.is_none().then(|| format!("{} names no database, so its files get no diagnostics: set DATABASE_URL, or pass --dialect", key.display())));
+        if let Some(why) = problem.as_ref().filter(|why| said.as_ref() != Some(*why)) {
+            log(why);
+        }
+        let moved = before.as_ref().is_some_and(|b| *b != url);
+        let entry = Located { signature: now, dialect, home, url: url.clone(), read_at: Instant::now(), said: problem };
+        let Some(dialect) = dialect else {
+            self.places.insert(key, entry);
+            return (None, moved);
         };
-        let database = url.zip(named);
-        let base = project.map_or_else(|| dir.to_path_buf(), |p| p.root.clone());
-        let _ = self.read.send(ReadJob::Register { place: key.clone(), dialect, database: database.clone(), base: base.clone() });
-        let _ = self.analyze.send(AnalyzeJob::Register { place: key.clone(), database, base, project: resolved.ok().map(Box::new) });
-        self.places.insert(key.clone(), Located { signature: now, dialect: Some(dialect), home });
-        Some((key, dialect))
+        // The same files and the same URL: the threads' connections stand.
+        if !(same_files && !moved) {
+            let database = url.zip(named);
+            let base = project.map_or_else(|| dir.to_path_buf(), |p| p.root.clone());
+            let _ = self.read.send(ReadJob::Register { place: key.clone(), dialect, database: database.clone(), base: base.clone() });
+            let _ = self.analyze.send(AnalyzeJob::Register { place: key.clone(), database, base, project: resolved.ok().map(Box::new) });
+        }
+        self.places.insert(key.clone(), entry);
+        (Some((key, dialect)), moved)
     }
 }
 
@@ -415,6 +432,8 @@ struct ReadPlace {
     base: PathBuf,
     /// A connection kept between reads. A SQLite file is opened for each, so that nothing holds it.
     db: Option<Db>,
+    /// The last failure logged, so that a server that stays down is said once.
+    said: Option<String>,
 }
 
 struct Reader {
@@ -428,7 +447,8 @@ impl Reader {
         while let Ok(job) = queue.recv() {
             match job {
                 ReadJob::Register { place, dialect, database, base } => {
-                    self.places.insert(place, ReadPlace { dialect, database, base, db: None });
+                    let (db, said) = self.places.remove(&place).filter(|p| p.database == database).map_or((None, None), |p| (p.db, p.said));
+                    self.places.insert(place, ReadPlace { dialect, database, base, db, said });
                 }
                 ReadJob::Schema { place } => self.read(&runtime, place),
             }
@@ -449,26 +469,30 @@ impl Reader {
                     db = Some(Db::connect_read_only(&url, &base).await?);
                 }
                 let connection = db.as_mut().expect("connected above");
-                let rows = connection.rows(columns_query(name)).await?;
-                // MySQL's reserved words change with its version, and it lists them.
-                let reserved = if name == "mysql" { connection.rows("select cast(word as char) as w from information_schema.keywords where reserved = 1").await? } else { Vec::new() };
-                Ok::<_, reylo_migrate::Error>((rows, reserved))
+                match list_columns(connection, name).await {
+                    // A SQLite file another connection holds is read as it stands on disk.
+                    Err(e) if name == "sqlite" && e.0.contains("locked") => list_columns(&mut Db::open_held(&url, &base)?, name).await,
+                    listed => listed,
+                }
             };
             tokio::time::timeout(TIMEOUT, read).await
         });
         let (rows, reserved) = match read {
             Ok(Ok(found)) => found,
-            Ok(Err(e)) => {
-                log(&e.0);
-                let _ = self.events.send(Event::Unavailable { place: key });
-                return;
-            }
-            Err(_) => {
-                log(&format!("the database took more than {} seconds to list its tables", TIMEOUT.as_secs()));
+            failed => {
+                let why = match failed {
+                    Ok(Err(e)) => e.0,
+                    _ => format!("the database took more than {} seconds to list its tables", TIMEOUT.as_secs()),
+                };
+                if place.said.as_deref() != Some(why.as_str()) {
+                    log(&why);
+                    place.said = Some(why);
+                }
                 let _ = self.events.send(Event::Unavailable { place: key });
                 return;
             }
         };
+        place.said = None;
         if name != "sqlite" {
             place.db = db;
         }
@@ -483,6 +507,13 @@ impl Reader {
         let reserved = reserved.iter().map(|r| r.text("w").to_ascii_lowercase()).collect();
         let _ = self.events.send(Event::Read { place: key, tables, reserved });
     }
+}
+
+/// A database's columns, and on MySQL, whose reserved words change with its version, the words it lists.
+async fn list_columns(connection: &mut Db, name: &str) -> Result<(Vec<reylo_migrate::db::Row>, Vec<reylo_migrate::db::Row>), reylo_migrate::Error> {
+    let rows = connection.rows(columns_query(name)).await?;
+    let reserved = if name == "mysql" { connection.rows("select cast(word as char) as w from information_schema.keywords where reserved = 1").await? } else { Vec::new() };
+    Ok((rows, reserved))
 }
 
 /// The tables the SQL files under a project's directory create: its migrations in order, then `schema.sql`, its statement of what it holds, which is found first.
@@ -638,7 +669,7 @@ impl Server {
 
     fn from_worker(&mut self, event: Event) {
         match event {
-            Event::Located { uri, place } => {
+            Event::Located { uri, place, database_moved } => {
                 let Some(doc) = self.docs.get_mut(&uri) else { return };
                 match place {
                     Some((key, dialect)) => {
@@ -649,12 +680,23 @@ impl Server {
                         if changed {
                             *known = Place::new(dialect);
                         }
+                        if database_moved {
+                            known.read_at = None;
+                        }
                         if moved || changed {
                             doc.reading = None;
                             self.publish(&uri);
                         }
                         self.read_schema(&key);
                         self.send_analysis(&uri);
+                        // Every other open file of the project now answers to the new database.
+                        if database_moved {
+                            let now = Instant::now();
+                            let others: Vec<String> = self.docs.iter().filter(|(u, d)| **u != uri && d.place.as_ref() == Some(&key)).map(|(u, _)| u.clone()).collect();
+                            for other in others {
+                                self.pending.insert(other, now);
+                            }
+                        }
                     }
                     None => {
                         if doc.place.take().is_some() {
@@ -720,16 +762,16 @@ impl Server {
         let _ = self.locate.send(LocateJob::Files { place: key.to_path_buf() });
     }
 
-    /// A document that's due: look at its project again where its database failed or it has none, else analyze it.
+    /// A document that's due: its project is looked at first, since the database it names may have changed, and answers with the analysis to run.
     fn analyze(&mut self, uri: &str) {
-        let Some(doc) = self.docs.get(uri) else { return };
-        if self.retrying.remove(uri) || doc.place.is_none() {
-            if let Some(dir) = doc.dir.clone() {
-                let _ = self.locate.send(LocateJob::Find { uri: uri.to_string(), dir });
+        let Some(dir) = self.docs.get(uri).map(|doc| doc.dir.clone()) else { return };
+        let failed = self.retrying.remove(uri);
+        match dir {
+            Some(dir) => {
+                let _ = self.locate.send(LocateJob::Find { uri: uri.to_string(), dir, failed });
             }
-            return;
+            None => self.send_analysis(uri),
         }
-        self.send_analysis(uri);
     }
 
     fn send_analysis(&mut self, uri: &str) {
@@ -810,7 +852,7 @@ impl Server {
                 let doc = Doc { text: d["text"].as_str().unwrap_or("").to_string(), version: d["version"].as_i64().unwrap_or(0), dir: dir.clone(), place: None, reading: None, analysis: None, found: Vec::new() };
                 self.docs.insert(uri.clone(), doc);
                 if let Some(dir) = dir {
-                    let _ = self.locate.send(LocateJob::Find { uri, dir });
+                    let _ = self.locate.send(LocateJob::Find { uri, dir, failed: false });
                 }
             }
             "textDocument/didChange" => {
@@ -916,6 +958,10 @@ impl Server {
             let closed = t.end - t.start >= 2 && doc.text.as_bytes()[t.end as usize - 1] == closing_quote(doc.text.as_bytes()[t.start as usize]);
             t.class == Class::Quoted && (t.start as usize) < offset && ((offset as u32) < t.end || !closed)
         });
+        // A quote opened on an earlier line is no name being typed, and a completion's edit stays on one line.
+        if open.is_some_and(|t| doc.text[t.start as usize..offset].contains('\n')) {
+            return empty;
+        }
         let bytes = doc.text.as_bytes();
         let mut start = offset;
         if let Some(t) = open {
@@ -983,13 +1029,18 @@ impl Server {
         let mut seen = HashSet::new();
         items.retain(|i| seen.insert((i["label"].as_str().unwrap_or("").to_string(), i["kind"].as_u64(), i["insertText"].as_str().unwrap_or("").to_string())));
         if let Some(t) = open {
-            let whole = range(&doc.text, &reading.lines, t.start as usize, t.end as usize);
             let quote = doc.text[t.start as usize..].chars().next().unwrap_or('"');
+            let close = closing_quote(quote as u8) as char;
+            // The rest of the name up to its closing quote is replaced. Text an unclosed quote only reads as a name, up to some later quote or the end of the file, stays.
+            let rest = &doc.text[offset..t.end as usize];
+            let end = if rest.strip_suffix(close).is_some_and(|name| !name.contains(|c: char| c.is_whitespace() || c == close)) { t.end as usize } else { offset };
+            let whole = range(&doc.text, &reading.lines, t.start as usize, end);
             for item in &mut items {
                 let label = item["label"].as_str().unwrap_or("").to_string();
                 let written = item["insertText"].as_str().map_or_else(|| label.clone(), str::to_string);
-                // Inside its quotes a name is written quoted, whether it needs them or not.
-                let written = if written.starts_with(quote) { written } else { format!("{quote}{}{}", label.replace(closing_quote(quote as u8) as char, &format!("{0}{0}", closing_quote(quote as u8) as char)), closing_quote(quote as u8) as char) };
+                // Inside its quotes a name is written quoted, whether it needs them or not, after the schema a table off the search path needs.
+                let qualifier = written.strip_suffix(quoted(place, &label).as_str()).unwrap_or("");
+                let written = format!("{qualifier}{quote}{}{close}", label.replace(close, &format!("{close}{close}")));
                 item["filterText"] = json!(format!("{quote}{label}"));
                 item["textEdit"] = json!({ "range": whole, "newText": written });
                 item.as_object_mut().expect("an item").remove("insertText");
