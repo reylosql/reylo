@@ -416,8 +416,8 @@ struct Frame {
     inserting: bool,
     /// Whether it has passed a UNION, INTERSECT or EXCEPT.
     compound: bool,
-    /// Whether its query groups its rows, by GROUP BY or an aggregate that isn't a window function.
-    grouped: bool,
+    /// Where the SELECT of an INSERT's rows opens.
+    rows: usize,
     /// Whether it reads a query's clauses, and isn't a function's arguments.
     reads: bool,
     in_from: bool,
@@ -475,7 +475,7 @@ fn source(dialect: Dialect, toks: &[Tok<'_>], mut at: usize) -> (Option<Source>,
 pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
     let mut queries = vec![Query::default()];
     let mut of_token = Vec::with_capacity(toks.len());
-    let mut frames = vec![Frame { query: 0, first: 0, inserting: false, compound: false, grouped: false, reads: true, in_from: false, selected: false }];
+    let mut frames = vec![Frame { query: 0, first: 0, inserting: false, compound: false, rows: 0, reads: true, in_from: false, selected: false }];
     let creates = toks.first().is_some_and(|t| t.is("CREATE"));
     for i in 0..toks.len() {
         let t = toks[i];
@@ -485,12 +485,12 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
             let next = toks.get(i + 1);
             if next.is_some_and(|n| n.is_any(&["SELECT", "WITH", "VALUES"])) {
                 queries.push(Query { parent: Some(top.query), ..Query::default() });
-                frames.push(Frame { query: queries.len() - 1, first: queries.len() - 1, inserting: false, compound: false, grouped: false, reads: true, in_from: false, selected: false });
+                frames.push(Frame { query: queries.len() - 1, first: queries.len() - 1, inserting: false, compound: false, rows: 0, reads: true, in_from: false, selected: false });
             } else if top.reads && top.in_from && i > 0 && (toks[i - 1].is_any(&["FROM", "JOIN"]) || toks[i - 1].is_punct(",") || toks[i - 1].is_punct("(")) {
                 // `from (a join b on …)`: the same query's FROM list, in parentheses.
                 let (found, _) = source(dialect, toks, i + 1);
                 queries[top.query].sources.extend(found);
-                frames.push(Frame { query: top.query, first: top.first, inserting: false, compound: false, grouped: false, reads: true, in_from: true, selected: true });
+                frames.push(Frame { query: top.query, first: top.first, inserting: false, compound: false, rows: 0, reads: true, in_from: true, selected: true });
             } else {
                 frames.push(Frame { reads: false, in_from: false, ..top });
             }
@@ -527,15 +527,10 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
         if t.is("INSERT") {
             frame.inserting = true;
         }
-        let aggregate = t.is_any(AGGREGATES) && toks.get(i + 1).is_some_and(|n| n.is_punct("(")) && !toks.get(past_group(toks, i + 1)).is_some_and(|n| n.is("OVER"));
-        if t.is("GROUP") || aggregate {
-            frame.grouped = true;
-        }
         // What follows an INSERT's rows is the INSERT's again, whichever query read them.
-        let upsert = t.is("ON") && (toks.get(i + 1).is_some_and(|n| n.is("DUPLICATE")) || (toks.get(i + 1).is_some_and(|n| n.is("CONFLICT")) && toks.get(i + 2).is_some_and(|n| n.is_punct("(") || n.is("ON") || n.is("DO"))));
-        if frame.inserting && (t.is("RETURNING") || upsert) && frame.query != frame.first {
+        if frame.inserting && frame.query != frame.first && (t.is("RETURNING") || (t.is("ON") && (toks.get(i + 1).is_some_and(|n| n.is("DUPLICATE")) || opens_on_conflict(toks, i)))) {
             // MySQL's ON DUPLICATE KEY UPDATE also sees the FROM list of a SELECT that neither groups nor has a set operation, in a scope of its own.
-            let input = (t.is("ON") && toks[i + 1].is("DUPLICATE") && !frame.compound && !frame.grouped).then(|| queries[frame.query].sources.clone());
+            let input = (t.is("ON") && toks[i + 1].is("DUPLICATE") && !frame.compound && !groups_rows(toks, frame.rows, i)).then(|| queries[frame.query].sources.clone());
             // The clause runs to the statement's end, where a column may be named `returning`.
             frame.inserting = false;
             frame.query = frame.first;
@@ -571,6 +566,7 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
             // The rows of an INSERT are a query of their own, which doesn't see its target.
             if frame.inserting && frame.query == frame.first {
                 next_side(&mut queries, frame);
+                frame.rows = i;
             }
             frame.selected = true;
             frame.in_from = false;
@@ -600,6 +596,57 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
 
 /// The functions that group a query's rows.
 const AGGREGATES: &[&str] = &["AVG", "BIT_AND", "BIT_OR", "BIT_XOR", "COUNT", "GROUP_CONCAT", "JSON_ARRAYAGG", "JSON_OBJECTAGG", "MAX", "MIN", "STD", "STDDEV", "STDDEV_POP", "STDDEV_SAMP", "SUM", "VAR_POP", "VAR_SAMP", "VARIANCE"];
+
+/// Whether the SELECT in `toks[from..to]` groups its rows, by GROUP BY or an aggregate that isn't a window function, in any expression of its own but not in a query nested in it.
+fn groups_rows(toks: &[Tok<'_>], from: usize, to: usize) -> bool {
+    let mut i = from;
+    while i < to {
+        let t = toks[i];
+        if t.is_punct("(") && toks.get(i + 1).is_some_and(|n| n.is_any(&["SELECT", "WITH", "VALUES"])) {
+            i = past_group(toks, i);
+            continue;
+        }
+        if t.is("GROUP") || (t.is_any(AGGREGATES) && toks.get(i + 1).is_some_and(|n| n.is_punct("(")) && !toks.get(past_group(toks, i + 1)).is_some_and(|n| n.is("OVER"))) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Whether the `ON` at `on` opens an INSERT's ON CONFLICT clause, and not a join's condition on something named `conflict`.
+fn opens_on_conflict(toks: &[Tok<'_>], on: usize) -> bool {
+    if !toks.get(on + 1).is_some_and(|t| t.is("CONFLICT")) {
+        return false;
+    }
+    let mut j = on + 2;
+    if toks.get(j).is_some_and(|t| t.is("ON")) {
+        return true;
+    }
+    if toks.get(j).is_some_and(|t| t.is_punct("(")) {
+        j = past_group(toks, j);
+    }
+    if toks.get(j).is_some_and(|t| t.is("DO")) {
+        return true;
+    }
+    if !toks.get(j).is_some_and(|t| t.is("WHERE")) {
+        return false;
+    }
+    // `ON CONFLICT (a) WHERE …` runs to its DO.
+    let mut depth = 0;
+    for t in &toks[j..] {
+        if t.is_punct("(") {
+            depth += 1;
+        } else if t.is_punct(")") {
+            depth -= 1;
+        } else if depth == 0 && t.is("DO") {
+            return true;
+        } else if depth == 0 && t.is_any(&["UNION", "INTERSECT", "EXCEPT", "RETURNING"]) {
+            return false;
+        }
+    }
+    false
+}
 
 /// Moves a frame to a query beside its own, with a FROM list of its own and the same WITH queries, as each side of a set operation has.
 fn next_side(queries: &mut Vec<Query>, frame: &mut Frame) {
@@ -784,6 +831,14 @@ mod tests {
         assert_eq!(s.source(at, "u").map(|x| x.name.as_str()), Some("users"));
         assert!(s.source(at, "p").is_none());
 
+        // A join's condition calling `conflict(…)` is no upsert, and RETURNING still reaches the target past it.
+        let s = read(Dialect::Postgres, "insert into users as u (id) select p.id from posts p join posts o on conflict(p.id, o.id) union all select 1 returning u.id");
+        assert_eq!(s.source(s.of_token.len() - 1, "u").map(|x| x.name.as_str()), Some("users"));
+        let s = read(Dialect::Postgres, "insert into users as u (id) select p.id from posts p on conflict (id) where id > 0 do nothing returning u.id");
+        let last = s.of_token.len() - 1;
+        assert_eq!(s.source(last, "u").map(|x| x.name.as_str()), Some("users"));
+        assert!(s.source(last, "p").is_none());
+
         // MySQL's update clause sees a simple SELECT's sources, and no side of a UNION's.
         let s = read(Dialect::Mysql, "insert into users (id) select p.id from posts p on duplicate key update id = p.id");
         let last = s.of_token.len() - 1;
@@ -792,11 +847,11 @@ mod tests {
         assert!(s.source(3, "p").is_none(), "the target's column list sees no input");
         let s = read(Dialect::Mysql, "insert into users (id) select p.id from posts p union select 2 on duplicate key update id = 1");
         assert!(s.source(s.of_token.len() - 1, "p").is_none());
-        for grouped in ["select p.id from posts p group by p.id", "select max(p.id) from posts p"] {
+        for grouped in ["select p.id from posts p group by p.id", "select max(p.id) from posts p", "select 1 from posts p having (count(*) > 0)"] {
             let s = read(Dialect::Mysql, &format!("insert into users (id) {grouped} on duplicate key update id = 1"));
             assert!(s.source(s.of_token.len() - 1, "p").is_none(), "{grouped}");
         }
-        for ungrouped in ["select max(p.id) over () from posts p", "select p.id from posts p having p.id > 0"] {
+        for ungrouped in ["select max(p.id) over () from posts p", "select p.id from posts p having p.id > 0", "select p.id from posts p where p.id in (select max(id) from users)"] {
             let s = read(Dialect::Mysql, &format!("insert into users (id) {ungrouped} on duplicate key update id = p.id"));
             assert_eq!(s.source(s.of_token.len() - 1, "p").map(|x| x.name.as_str()), Some("posts"), "{ungrouped}");
         }
