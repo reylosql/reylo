@@ -566,15 +566,9 @@ const DIALECTS: { name: string; sql: ReactNode }[] = [
   },
 ];
 
-/** schema.sql with `email` made required, and under it the migration for each database, as tabs that turn by themselves until one is picked. */
+/** schema.sql with `email` made required, and under it the migration for each database, as tabs: Postgres's first, another only when the reader picks it. */
 function DialectMigrations() {
   const [at, setAt] = useState(0);
-  const [picked, setPicked] = useState(false);
-  useEffect(() => {
-    if (picked || stillPlease()) return;
-    const timer = setInterval(() => setAt((i) => (i + 1) % DIALECTS.length), 3500);
-    return () => clearInterval(timer);
-  }, [picked]);
   return (
     <div className="ml-pair">
       <div className="ml-win ml-editor" aria-hidden="true">
@@ -620,10 +614,7 @@ function DialectMigrations() {
               role="tab"
               aria-selected={i === at}
               className={i === at ? 'on' : undefined}
-              onClick={() => {
-                setAt(i);
-                setPicked(true);
-              }}
+              onClick={() => setAt(i)}
             >
               {d.name}
             </button>
@@ -859,15 +850,9 @@ const KINDS: { name: string; sql: ReactNode }[] = [
   },
 ];
 
-/** The kinds as tabs over an editor, one after another every few seconds until the reader picks one. */
+/** The kinds as tabs over an editor; none turns by itself. */
 function SchemaKinds() {
   const [at, setAt] = useState(0);
-  const [picked, setPicked] = useState(false);
-  useEffect(() => {
-    if (picked || stillPlease()) return;
-    const timer = setInterval(() => setAt((i) => (i + 1) % KINDS.length), 3500);
-    return () => clearInterval(timer);
-  }, [picked]);
   return (
     <div className="ml-win ml-kinds">
       <div className="ml-bar">
@@ -882,10 +867,7 @@ function SchemaKinds() {
             role="tab"
             aria-selected={i === at}
             className={i === at ? 'on' : undefined}
-            onClick={() => {
-              setAt(i);
-              setPicked(true);
-            }}
+            onClick={() => setAt(i)}
           >
             {k.name}
           </button>
