@@ -1,0 +1,71 @@
+---
+title: Editors
+description: Syntax errors, inferred types on hover, completion from your schema and go-to-definition in .sql files, through the reylo language server.
+---
+
+Your editor reads `.sql` files through `reylo lsp`, Reylo's language server.
+
+It shows syntax errors and your database's own errors as you type. Hover over a column to see its inferred type. Completion lists your tables and columns, and go-to-definition jumps to their `create table`.
+
+## Setup
+
+Install the extension for your editor, or point it at `reylo lsp`:
+
+```bash tab="VS Code"
+code --install-extension reylosql.reylo
+```
+
+```json title="settings.json" tab="Zed"
+{
+  "auto_install_extensions": { "sql": true, "reylo": true }
+}
+```
+
+```lua title="init.lua" tab="Neovim"
+vim.lsp.config("reylo", {
+  cmd = { "reylo", "lsp" },
+  filetypes = { "sql" },
+  root_markers = { ".reylo.yaml", "package.json" },
+})
+vim.lsp.enable("reylo")
+```
+
+```toml title="languages.toml" tab="Helix"
+[language-server.reylo]
+command = "reylo"
+args = ["lsp"]
+
+[[language]]
+name = "sql"
+language-servers = ["reylo"]
+```
+
+The extensions run your project's own `reylo` from `node_modules`, else the one on your `PATH`. Each file reads the database its project names, as the type check does.
+
+## Files with no database
+
+A project with no database still gets syntax errors and completion from its own SQL. Name its dialect:
+
+```json title="settings.json" tab="VS Code"
+{
+  "reylo.dialect": "postgres"
+}
+```
+
+```bash tab="Other editors"
+reylo lsp --dialect postgres
+```
+
+## A URL that runs a command
+
+Opening a file runs nothing your project wrote. A `direct_url` with a `$(command)` runs only once you allow it in your editor:
+
+```json title="settings.json" tab="VS Code"
+{
+  "reylo.allowUrlCommand": true
+}
+```
+
+```bash tab="Other editors"
+reylo lsp --allow-url-command
+```

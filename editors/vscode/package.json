@@ -1,0 +1,71 @@
+{
+  "name": "reylo",
+  "displayName": "Reylo",
+  "description": "SQL errors, inferred types, completion and go-to-definition from your database",
+  "version": "0.0.1",
+  "publisher": "reylosql",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/reylosql/reylo",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onLanguage:sql"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Reylo",
+      "properties": {
+        "reylo.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The `reylo` command. Empty runs the workspace's own, from `node_modules/.bin`, else the one on `PATH`."
+        },
+        "reylo.dialect": {
+          "type": "string",
+          "enum": [
+            "",
+            "postgres",
+            "mysql",
+            "sqlite"
+          ],
+          "default": "",
+          "markdownDescription": "The dialect of SQL files in a project that names no database."
+        },
+        "reylo.allowUrlCommand": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Run a `$(command)` in a project's `direct_url`. Turn it on only for projects you trust."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "reylo.restart",
+        "title": "Reylo: Restart the language server"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.js --minify",
+    "package": "nub run build && vsce package --no-dependencies --out reylo.vsix"
+  },
+  "dependencies": {
+    "vscode-languageclient": "11.0.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "1.91.0",
+    "@vscode/vsce": "3.6.0",
+    "esbuild": "0.25.10",
+    "@types/node": "24.3.0"
+  }
+}
