@@ -426,6 +426,7 @@ for_each_dialect!(
     dev_relocks_an_edited_locked_migration_where_every_pair_agreed,
     without_a_lock_a_late_migration_runs_where_both_orders_agree,
     without_a_lock_a_late_migration_moves_past_migrations_ahead_of_the_clock,
+    without_a_lock_a_late_migration_is_never_moved_onto_a_migration_a_run_started,
     without_a_lock_init_sql_still_runs_first,
     status_shows_what_ran_what_is_pending_and_what_changed,
     lock_writes_the_lock_from_what_a_database_ran,
@@ -704,6 +705,27 @@ async fn without_a_lock_a_late_migration_moves_past_migrations_ahead_of_the_cloc
     std::fs::rename(words[1], words[2]).unwrap();
     assert_eq!(p.dev().await, 0, "{}", p.peek());
     assert_eq!(p.history().await, ["20990101000000_a.sql", "20990101020000_d.sql", "20990101020001_e.sql", "20990101030000_f.sql"]);
+}
+
+async fn without_a_lock_a_late_migration_is_never_moved_onto_a_migration_a_run_started(mut p: P) {
+    let int = p.t.int;
+    p.strict = true;
+    p.file("20990101000000_a.sql", &format!("create table a (id {int});"));
+    p.file("20990101020000_d.sql", &format!("alter table a add column x {int};"));
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    // A run cut off with its row marked started, its change in place, in the one slot after d.
+    let g = format!("create table g (id {int});");
+    p.file("20990101020001_e.sql", &g);
+    p.exec(&g).await;
+    let column = if p.d == Dialect::Mysql { "`sql`" } else { "sql" };
+    p.exec(&format!("insert into __reylo_migrations (name, {column}, applied_at) values ('20990101020001_e.sql', '{g}', null)")).await;
+    // A late migration whose name the only free slot would give is told where to go, not moved there.
+    p.file("20990101010000_e.sql", "create table e as select * from a;");
+    p.output();
+    assert_eq!(p.dry_run().await, 1);
+    let out = p.output();
+    assert_has!(&out, r"Give it a name that sorts after 20990101020000_d\.sql and before 20990101020001_e\.sql, so that every database runs it after 20990101020000_d\.sql\.");
+    assert!(!out.contains("mv "), "{out}");
 }
 
 async fn without_a_lock_init_sql_still_runs_first(mut p: P) {
