@@ -306,11 +306,13 @@ fn opens_on_conflict(toks: &[Tok<'_>], on: usize) -> bool {
         },
         Some(_) => return false,
     }
-    if toks.get(j).is_some_and(|t| t.is("DO")) {
-        return true;
-    }
-    if !toks.get(j).is_some_and(|t| t.is("WHERE")) {
-        return false;
+    // At the end of the text the clause is still being typed. Its target names bare columns, where a call in a join's condition usually qualifies them.
+    let typing = !toks[on + 2..j].iter().any(|t| t.is_punct("."));
+    match toks.get(j) {
+        None => return typing,
+        Some(t) if t.is("DO") => return true,
+        Some(t) if t.is("WHERE") => {}
+        Some(_) => return false,
     }
     // `ON CONFLICT (a) WHERE …` runs to its DO. After a dot, any word is a column's name.
     let mut depth = 0;
@@ -324,12 +326,13 @@ fn opens_on_conflict(toks: &[Tok<'_>], on: usize) -> bool {
             if t.is("DO") {
                 return true;
             }
-            if t.is_any(&["UNION", "INTERSECT", "EXCEPT", "RETURNING"]) {
+            // A later clause's DO isn't this one's.
+            if t.is_any(&["UNION", "INTERSECT", "EXCEPT", "RETURNING"]) || (t.is("ON") && toks.get(k + 1).is_some_and(|n| n.is("CONFLICT"))) {
                 return false;
             }
         }
     }
-    false
+    typing
 }
 
 /// The names a query's RETURNING or select list gives its columns. An item with no name of its own, a `*` among them, adds none.
@@ -857,6 +860,23 @@ mod tests {
             assert_eq!(s.source(last, "u").map(|x| x.name.as_str()), Some("users"), "{upsert}");
             assert!(s.source(last, "p").is_none(), "{upsert}");
         }
+        // A join's condition calling `conflict(…)` keeps its sources up to the real upsert.
+        let sql = "insert into users as u (id) select p.id from posts p join posts o on conflict(p.id, o.id) where p.id > 0 on conflict (id) do update set id = u.id";
+        let tree = syntax::parse(Dialect::Postgres, sql);
+        let toks = tokens(Dialect::Postgres, &tree, sql);
+        let s = scopes(Dialect::Postgres, &toks);
+        let at = toks.iter().position(|t| t.is("WHERE")).unwrap();
+        assert_eq!(s.source(at, "p").map(|x| x.name.as_str()), Some("posts"));
+        assert_eq!(s.source(s.of_token.len() - 1, "u").map(|x| x.name.as_str()), Some("users"));
+
+        // An upsert still being typed is the INSERT's.
+        for typing in ["on conflict (id)", "on conflict (id) where u.id > 0"] {
+            let s = read(Dialect::Postgres, &format!("insert into users as u (id) select p.id from posts p where true {typing}"));
+            let last = s.of_token.len() - 1;
+            assert_eq!(s.source(last, "u").map(|x| x.name.as_str()), Some("users"), "{typing}");
+            assert!(s.source(last, "p").is_none(), "{typing}");
+        }
+
         // A join's condition on names like `conflict` and `natural` stays the join's, and the upsert after it is the INSERT's.
         for (dialect, input, name) in [(Dialect::Postgres, "select s.id from posts as conflict join settings s on conflict.id = s.id where s.id > 0", "s"), (Dialect::Sqlite, "select c.id from natural left join posts as conflict on conflict.id = natural.id join posts c on c.id = natural.id where c.id > 0", "c")] {
             let sql = format!("insert into users as u (id) {input} on conflict (id) do update set id = u.id");
