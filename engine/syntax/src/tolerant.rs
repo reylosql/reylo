@@ -383,6 +383,7 @@ fn lexemes(flavor: Flavor, text: &str) -> (Vec<Lexeme>, u32) {
     let mut ahead = Ahead::default();
     // Inside `/*! … */`, whose text MySQL runs as SQL: the markers are trivia, and what's between them tokens.
     let mut conditional = false;
+    let mut opened = 0;
     while at < z.len() {
         if let Flavor::Mysql { version, .. } = flavor {
             if conditional && z[at..].starts_with(b"*/") {
@@ -396,18 +397,23 @@ fn lexemes(flavor: Flavor, text: &str) -> (Vec<Lexeme>, u32) {
                 let (digits, wanted) = comment_version(&z[at + 3..]);
                 if wanted > version {
                     // A comment this server skips, which may hold one comment inside it.
-                    if let Some(end) = skipped_comment(z, at + 3 + digits) {
-                        at = end;
-                        continue;
+                    match skipped_comment(z, at + 3 + digits) {
+                        Some(end) => at = end,
+                        None => {
+                            out.push(Lexeme { kind: ILLEGAL, lead: lead as u32, start: at as u32, end: z.len() as u32 });
+                            at = z.len();
+                            lead = at;
+                        }
                     }
-                } else if z[at..].windows(2).any(|w| w == b"*/") {
-                    conditional = true;
-                    let start = at;
-                    at += 3 + digits;
-                    out.push(Lexeme { kind: CONDITIONAL, lead: lead as u32, start: start as u32, end: at as u32 });
-                    lead = at;
                     continue;
                 }
+                conditional = true;
+                opened = out.len();
+                let start = at;
+                at += 3 + digits;
+                out.push(Lexeme { kind: CONDITIONAL, lead: lead as u32, start: start as u32, end: at as u32 });
+                lead = at;
+                continue;
             }
         }
         let (mut n, mut kind) = token(flavor, z, at, &mut ahead);
@@ -438,6 +444,10 @@ fn lexemes(flavor: Flavor, text: &str) -> (Vec<Lexeme>, u32) {
         out.push(Lexeme { kind, lead: lead as u32, start: at as u32, end: (at + n) as u32 });
         at += n;
         lead = at;
+    }
+    // A conditional comment still open at the end of the text is an error at its opening.
+    if conditional {
+        out[opened].kind = ILLEGAL;
     }
     (out, lead as u32)
 }
@@ -741,6 +751,11 @@ mod tests {
         assert_eq!(spans(Flavor::MYSQL, "SELECT /*!800000+1 */;"), ["SELECT /*!800000+1 */"]);
         assert_eq!(spans(Flavor::MYSQL, "/*!99999 /* note */ */ SELECT 2;"), ["SELECT 2"]);
         assert_eq!(spans(Flavor::MYSQL, "SELECT /*!260700 1 */;"), ["SELECT"]);
+        for unfinished in ["/*!99999 /* note */ SELECT 2;", "/*!80000 /* note */ SELECT 2;", "/*!80000 SELECT '*/';"] {
+            let tree = parse(Flavor::MYSQL, unfinished);
+            assert_eq!(tree.print(), unfinished);
+            assert!(!tree.errors.is_empty(), "{unfinished}");
+        }
         assert_eq!(spans(newer, "SELECT /*!260700 1 */;"), ["SELECT /*!260700 1 */"]);
         assert_eq!(spans(Flavor::MYSQL, "CREATE PROCEDURE p() BEGIN SELECT 1; END /*!99999 IF */; SELECT 3;"), ["CREATE PROCEDURE p() BEGIN SELECT 1; END", "SELECT 3"]);
         assert_eq!(spans(Flavor::MYSQL, "CREATE PROCEDURE p() BEGIN IF 1 THEN SELECT 1; END /*!80000 IF */; END; SELECT 3;").len(), 2);
