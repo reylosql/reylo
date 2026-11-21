@@ -745,7 +745,7 @@ async fn without_a_lock_a_late_migration_is_not_moved_past_what_needs_it_or_what
     // No name is both after what it may need and before what needs it: no move is printed.
     assert_eq!(p.dry_run().await, 1);
     let out = p.output();
-    assert_has!(&out, r"Give it a later name, so that every database runs it after 20990101020000_d\.sql, and before the pending migrations that need it\.");
+    assert_has!(&out, r"No name sorts both after 20990101040000_g\.sql, which a run cut off already applied, and before 20990101030000_f\.sql, which is pending: put these migrations in the order they need by hand\.");
     assert!(!out.contains("mv "), "{out}");
 }
 

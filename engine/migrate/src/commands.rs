@@ -1339,7 +1339,7 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
         let it = if one { "it" } else { "them" };
         let names = if one { "a name that sorts" } else { "names that sort" };
         let note = match next {
-            Some(next) if name_order(next) <= name_order(last_ran) => format!("{lead}, and before the pending migrations that need {it}."),
+            Some(next) if name_order(next) <= name_order(last_ran) => format!("No name sorts both after {last_ran}, which a run cut off already applied, and before {next}, which is pending: put these migrations in the order they need by hand."),
             Some(next) => format!("Give {it} {names} after {last_ran} and before {next}, so that every database runs {it} after {}.", after.join(", ")),
             None => format!("Give {it} {names} after {last_ran}, so that every database runs {it} after {}.", after.join(", ")),
         };
