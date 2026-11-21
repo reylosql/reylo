@@ -54,6 +54,11 @@ impl Session {
         Ok(Session { connection: Connection { file, answers: AnswerCache::until_cleared() }, version: crate::engines::sqlite::sqlite_tree::version().to_string() })
     }
 
+    /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
+    pub fn forget(&mut self) {
+        self.connection.answers.clear();
+    }
+
     pub fn analyze(&mut self, sql: &str) -> Result<reylo_engine_core::api::Analysis, crate::Failure> {
         let db = self.connection.file.open().map_err(|e| crate::Failure::Unreachable(e.to_string()))?;
         answers::analyze(&db, sql, &mut self.connection.answers).map_err(|e| crate::Failure::Error(e.to_string()))

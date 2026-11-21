@@ -256,6 +256,16 @@ impl Db {
         }
     }
 
+    /// A connection for reading only: a SQLite file is opened so that nothing can create or checkpoint it.
+    #[cfg(feature = "cli")]
+    pub async fn connect_read_only(url: &str, base: &Path) -> Result<Db, Error> {
+        if Dialect::of_url(url)? == Dialect::Sqlite && !crate::libsql::is_url(url) {
+            let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+            return Ok(Db::Sqlite(rusqlite::Connection::open_with_flags(sqlite_path(url, base), flags).map_err(sqlite_error)?));
+        }
+        Db::connect(url, base).await
+    }
+
     /// The database `opts` names, a SQLite file on libSQL's engine where the project runs there
     /// ([`crate::Options::libsql_engine`]).
     #[cfg(feature = "cli")]

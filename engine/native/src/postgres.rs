@@ -168,6 +168,11 @@ impl Session {
         Ok(Session { connection: Connection { client, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), date_style }, version: server_version(&version) })
     }
 
+    /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
+    pub fn forget(&mut self) {
+        self.connection.answers.clear();
+    }
+
     pub async fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
         self.connection.analyze(sql).await.map_err(|answer| Failure::of(&answer))
     }

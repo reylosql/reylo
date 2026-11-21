@@ -43,7 +43,7 @@ struct Input {
 }
 
 /// One database's statements, over one connection.
-enum Session {
+pub(crate) enum Session {
     Postgres(reylo_engine::postgres::Session),
     Mysql(reylo_engine::mysql::Session),
     Sqlite(reylo_engine::sqlite::Session),
@@ -51,7 +51,7 @@ enum Session {
 
 impl Session {
     /// `base` is the directory a relative SQLite path is read from.
-    async fn open(dialect: &str, url: &str, base: &Path) -> Result<Session, Failure> {
+    pub(crate) async fn open(dialect: &str, url: &str, base: &Path) -> Result<Session, Failure> {
         Ok(match dialect {
             "postgres" => Session::Postgres(reylo_engine::postgres::Session::open(url).await?),
             "mysql" => Session::Mysql(reylo_engine::mysql::Session::open(url).await?),
@@ -59,7 +59,7 @@ impl Session {
         })
     }
 
-    fn version(&self) -> &str {
+    pub(crate) fn version(&self) -> &str {
         match self {
             Session::Postgres(s) => &s.version,
             Session::Mysql(s) => &s.version,
@@ -67,7 +67,16 @@ impl Session {
         }
     }
 
-    async fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
+    /// Drops what the session remembers of the schema.
+    pub(crate) fn forget(&mut self) {
+        match self {
+            Session::Postgres(s) => s.forget(),
+            Session::Mysql(s) => s.forget(),
+            Session::Sqlite(s) => s.forget(),
+        }
+    }
+
+    pub(crate) async fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
         match self {
             Session::Postgres(s) => s.analyze(sql).await,
             Session::Mysql(s) => s.analyze(sql).await,
@@ -270,7 +279,7 @@ fn byte_offset(text: &str, utf16: usize) -> usize {
 /// A parameter nothing in the statement types is an error at its first use, unless the project
 /// file says `allow_untyped_params: true`, as the type check says it (src/module-types.ts). A statement
 /// the engine refused already was not analyzed to its end, and is not asked.
-fn untyped_params(sql: &str, analysis: &Analysis, dialect: Dialect, project: &Project) -> Vec<Diagnostic> {
+pub(crate) fn untyped_params(sql: &str, analysis: &Analysis, dialect: Dialect, project: &Project) -> Vec<Diagnostic> {
     // A MySQL session reads its strings by its sql_mode, which the lexer alone does not know: the
     // placeholders are the ones the analysis read.
     let placeholders: Vec<(String, usize, usize)> = match dialect {

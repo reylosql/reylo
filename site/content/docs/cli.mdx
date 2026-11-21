@@ -49,6 +49,8 @@ Commands:
     --format <yaml|json>   YAML, the default, or a line of JSON per statement
   generate <generator>     Write each .sql file's module for a language
     --out <file>           Write every module into one file
+  lsp                      Serve the language server for .sql files
+    --dialect <name>       Read files as postgres, mysql or sqlite
   migrate <command>        Write, check and run your migrations
   db <command>             Push, reset, wipe or print a development database
   run <sql>                Run SQL as written, recording nothing
@@ -76,6 +78,25 @@ reylo analyze --sql 'select id, email from users'
 ## `reylo generate`
 
 Writes each `.sql` file's module for a language, as `#[reylo::query]` does for Rust. [Usage with Rust](/rust#codegen) covers it.
+
+## `reylo lsp`
+
+Serves a language server for `.sql` files, with syntax errors, inferred types on hover, completion and go-to-definition.
+
+```lua title="init.lua"
+vim.lsp.config("reylo", {
+  cmd = { "reylo", "lsp" },
+  filetypes = { "sql" },
+  root_markers = { ".reylo.yaml", "package.json" },
+})
+vim.lsp.enable("reylo")
+```
+
+A project with no database needs its dialect named:
+
+```sh
+reylo lsp --dialect postgres
+```
 
 ## `reylo migrate`
 

@@ -69,6 +69,7 @@ On an error the database raised, `.run()` throws the driver's own error and `.tr
 - Fetch each row's related rows with a subquery in the same statement, which Reylo types field by field. On Postgres it is an array of rows, `array(select p from (select id, title from posts where user_id = u.id order by id) p) as posts`, and one related row is `(select p from (select … limit 1) p)`, null when none matches; on MySQL and SQLite it is a JSON array, `json_arrayagg` or `json_group_array` of `json_object(…)`. Copy each database's form from https://reylo.dev/#nested-fetching. On Postgres keep the array of rows rather than `jsonb_agg`: inside JSON a `bigint` past 2^53 rounds and a `timestamptz` takes the session's time zone (https://reylo.dev/postgres#json).
 - A JSON value with no schema, such as a `jsonb` column or a value read out of a document, is `Json`, any JSON value, which `reylo` exports (`import type { Json } from "reylo"`). Narrow it or validate it before reading it as a shape. A JSON column a JSON Schema `CHECK` holds is typed by that schema (`references/writing.md`).
 - To read how the project's database types a query, run `npx reylo analyze <file.sql>`: it prints the statement's parameters, columns, types, nullability, cardinality and diagnostics as YAML. The type check reports every query at once.
+- For an editor, `reylo lsp` is a language server for `.sql` files: syntax errors, the database's diagnostics, inferred types on hover, completion from the schema and go-to-definition.
 
 ## Running a query
 
