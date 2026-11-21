@@ -289,6 +289,22 @@ fn cargo_metadata(manifest: &Path) -> Option<Value> {
     output.status.success().then(|| serde_json::from_slice(&output.stdout).ok()).flatten()
 }
 
+/// The crates a module may name, for the `.sql` files under `dir`: the features of the nearest
+/// crate's `reylo` dependency, or none where `dir` is in no crate or cargo cannot read it.
+pub fn options_for(dir: &Path) -> Options {
+    let package = dir.ancestors().find(|d| d.join("Cargo.toml").is_file());
+    package.map_or_else(Options::default, crate_options)
+}
+
+/// One statement's module as `reylo analyze --format rust` prints it: the items its `.rs` file
+/// would hold, without the check that reads its `.sql` file, which a module printed has no path to.
+pub fn module_text(dialect: crate::Dialect, options: Options, analysis: &Value) -> Result<String, String> {
+    let generated = crate::module(dialect, options, analysis, Span::call_site(), &Overrides::default(), false).map_err(|e| e.to_string())?;
+    let mut file: syn::File = syn::parse2(generated.tokens).map_err(|e| format!("the generated module does not parse: {e}"))?;
+    crate::readable::readable(&mut file);
+    Ok(prettyplease::unparse(&file))
+}
+
 /// A module beside its `.sql` file: its items, after the check that the file still reads as the
 /// text they were written from.
 fn beside(module: &Module) -> Result<String, Error> {

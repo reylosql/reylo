@@ -1,6 +1,6 @@
 // `reylo analyze`, the native binary's own command line: each statement's type descriptor
-// (spec/index.ts), from the database the project names as the type check finds it, as YAML or,
-// with `--format json`, one line of JSON per statement.
+// (spec/index.ts), from the database the project names as the type check finds it, as JSON (laid
+// out in a terminal, one line per statement otherwise) or YAML, or its TypeScript types or Rust module.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -70,9 +70,39 @@ test("analyze prints each .sql file's descriptor under a directory, and exits 1 
   assert.deepEqual(broken.diagnostics.map((d) => [d.message, "select nope from users\n".slice(d.start, d.end)]), [["no such column: nope", "nope"]]);
 });
 
-test("analyze prints YAML by default, a document per statement, and each diagnostic on standard error under a caret", () => {
+test("analyze prints one line of JSON per statement by default where its output is no terminal, and each diagnostic on standard error under a caret", () => {
   const root = project({ "q/a.sql": "-- Names, by id.\nselect name from users where id = :id\n", "q/b.sql": "select id,\n  nope from users\n" });
   const run = spawnSync(nativeBinary(), ["analyze", "q"], { cwd: root, env: inherited(), encoding: "utf8" });
+  assert.equal(run.status, 1, run.stderr);
+  const lines = run.stdout.split("\n");
+  assert.equal(lines.length, 3, run.stdout);
+  assert.equal(lines[2], "");
+  assert.deepEqual(lines.slice(0, 2).map((l) => JSON.parse(l) as Line).map((l) => [l.file, l.diagnostics.length]), [["q/a.sql", 0], ["q/b.sql", 1]]);
+  // The same lines as --format json prints, which hold to the schema.
+  assert.equal(spawnSync(nativeBinary(), ["analyze", "--format=json", "q"], { cwd: root, env: inherited(), encoding: "utf8" }).stdout, run.stdout);
+  assert.equal(run.stderr, "q/b.sql:2:3: no such column: nope\n    nope from users\n    ^^^^\n");
+  const toml = spawnSync(nativeBinary(), ["analyze", "--format", "toml", "--sql", "select 1"], { cwd: root, env: inherited(), encoding: "utf8" });
+  assert.equal(toml.status, 2);
+  assert.match(toml.stderr, /^reylo analyze: --format takes json, yaml, typescript or rust, not toml\n/);
+});
+
+test("analyze lays its JSON out in a terminal, each object on one line where it fits, a blank line between two statements", { skip: process.platform === "win32" && "script, which gives the run a terminal, is POSIX's" }, () => {
+  const root = project({ "q/a.sql": "select name from users where id = :id\n", "q/b.sql": "select email from users\n" });
+  // script(1) runs the command on a pseudo-terminal: BSD's takes the command after the file, util-linux's with -c.
+  const command = [nativeBinary(), "analyze", "q"];
+  const run = process.platform === "darwin" ? spawnSync("script", ["-q", "/dev/null", ...command], { cwd: root, env: inherited(), encoding: "utf8" }) : spawnSync("script", ["-qec", command.map((a) => `'${a}'`).join(" "), "/dev/null"], { cwd: root, env: inherited(), encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  const text = run.stdout.replaceAll("\r\n", "\n");
+  const [a, b] = text.split("\n\n") as [string, string];
+  assert.deepEqual([JSON.parse(a).file, JSON.parse(b).file], ["q/a.sql", "q/b.sql"]);
+  assert.ok(a.startsWith(`{\n  "file": "q/a.sql",\n  "$schema": "${SCHEMA}",\n  "dialect": { "name": "sqlite", "version": "3.`), a);
+  assert.match(a, /\n  "params": \[\{ "name": "id", "type": \{ "kind": "integer", "bits": 64 \} \}\],\n/);
+  assert.ok(text.split("\n").every((line) => line.length <= 80), text);
+});
+
+test("analyze prints a YAML document per statement with --format yaml", () => {
+  const root = project({ "q/a.sql": "-- Names, by id.\nselect name from users where id = :id\n", "q/b.sql": "select id,\n  nope from users\n" });
+  const run = spawnSync(nativeBinary(), ["analyze", "--format", "yaml", "q"], { cwd: root, env: inherited(), encoding: "utf8" });
   assert.equal(run.status, 1, run.stderr);
   const [a, b] = run.stdout.split("\n---\n") as [string, string];
   assert.ok(a.startsWith(`file: q/a.sql\n$schema: ${SCHEMA}\ndialect: { name: sqlite, version: "3.`), a);
@@ -80,14 +110,35 @@ test("analyze prints YAML by default, a document per statement, and each diagnos
   assert.match(a, /\nsql: \|\n  -- Names, by id\.\n  select name from users where id = \S+\nkind: select\ncomment: Names, by id\.\nparams:\n  - name: id\n    type: \{ kind: integer, bits: 64 \}\n/);
   assert.match(a, /\ndiagnostics: \[\]$/);
   assert.ok(b.startsWith("file: q/b.sql\n") && b.includes('\ndiagnostics:\n  - { message: "no such column: nope", '), b);
-  // The same descriptors as --format json prints, which the JSON lines hold to the schema.
-  assert.deepEqual(analyzeIn(root, ["q"]).lines.map((l) => [l.file, l.diagnostics.length]), [["q/a.sql", 0], ["q/b.sql", 1]]);
-  assert.equal(run.stderr, "q/b.sql:2:3: no such column: nope\n    nope from users\n    ^^^^\n");
-  const json = spawnSync(nativeBinary(), ["analyze", "--format=json", "--sql", "select name from users"], { cwd: root, env: inherited(), encoding: "utf8" });
-  assert.equal(((JSON.parse(json.stdout) as Line).result).columns[0]!.name, "name");
-  const toml = spawnSync(nativeBinary(), ["analyze", "--format", "toml", "--sql", "select 1"], { cwd: root, env: inherited(), encoding: "utf8" });
-  assert.equal(toml.status, 2);
-  assert.match(toml.stderr, /^reylo analyze: --format takes yaml or json, not toml\n/);
+});
+
+test("analyze prints each statement's parameters and what .run() resolves to with --format typescript, by the project's codecs", () => {
+  const root = project({ "q/get_user.sql": "select id, name, email from users where id = :id\n", "q/count.sql": "select count(*) as n from users\n", "q/broken.sql": "select nope from users\n" });
+  const run = spawnSync(nativeBinary(), ["analyze", "--format", "typescript", "q"], { cwd: root, env: inherited(), encoding: "utf8" });
+  assert.equal(run.status, 1, run.stderr);
+  assert.equal(
+    run.stdout,
+    [
+      "// q/broken.sql\ntype Params = unknown;\ntype Returns = unknown;\n",
+      "// q/count.sql\ntype Returns = { n: number };\n",
+      "// q/get_user.sql\ntype Params = { id: number };\ntype Returns = { id: number; name: string; email: string | null } | null;\n",
+    ].join("\n"),
+  );
+  new DatabaseSync(join(root, "app.db")).exec("create table docs (body blob not null, at datetime not null)");
+  writeFileSync(join(root, ".reylo.yaml"), "js:\n  codecs:\n    bytes: string\n    datetime: Temporal.PlainDateTime\n");
+  const coded = spawnSync(nativeBinary(), ["analyze", "--format", "typescript", "--sql", "select body, at from docs"], { cwd: root, env: inherited(), encoding: "utf8" });
+  assert.equal(coded.status, 0, coded.stderr);
+  assert.equal(coded.stdout, "type Returns = { body: string; at: Temporal.PlainDateTime }[];\n");
+});
+
+test("analyze prints each statement's Rust module for sqlx with --format rust", () => {
+  const root = project({ "q/get_user.sql": "select id, name from users where id = :id\n", "q/positional.sql": "select name from users where id = ?\n" });
+  const run = spawnSync(nativeBinary(), ["analyze", "--format", "rust", "q"], { cwd: root, env: inherited(), encoding: "utf8" });
+  assert.equal(run.status, 1, run.stderr);
+  assert.ok(run.stdout.startsWith("// q/get_user.sql\n"), run.stdout);
+  assert.match(run.stdout, /pub struct Row \{[^}]*\bpub id: i64,[^}]*\bpub name: String,/);
+  assert.doesNotMatch(run.stdout, /positional/);
+  assert.match(run.stderr, /^q\/positional\.sql: name each parameter/m);
 });
 
 test("analyze reads a statement from --sql or standard input, and a file from a subdirectory finds the package's project", () => {

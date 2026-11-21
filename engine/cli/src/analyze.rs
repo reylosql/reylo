@@ -1,6 +1,7 @@
 //! `reylo analyze`: each statement's type descriptor (spec/index.ts), read from the database the
-//! project names, as the type check reads it: a YAML document per statement, or with
-//! `--format json` one line of JSON per statement.
+//! project names, as the type check reads it: JSON by default, laid out compactly in a terminal and
+//! one line per statement otherwise; or a YAML document per statement, the statement's TypeScript
+//! types, or its Rust module for sqlx.
 
 use reylo_engine::project::{self, Project};
 use reylo_engine_core::api::{utf16_offset, Analysis};
@@ -9,17 +10,25 @@ use reylo_engine_core::types::{Cardinality, DialectVersion, Diagnostic, Kind, Re
 use reylo_engine::Failure;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-pub const USAGE: &str = "Usage: reylo analyze <file.sql | directory | 'glob' | -> ... [--url <url>] [--format yaml | json]
-       reylo analyze --sql <statement> [--url <url>] [--format yaml | json]
+pub const USAGE: &str = "Usage: reylo analyze <file.sql | directory | 'glob' | -> ... [--url <url>] [--format <format>]
+       reylo analyze --sql <statement> [--url <url>] [--format <format>]
 
-Prints each statement's type descriptor, with the file it was read from: as YAML, a document per
-statement (--format yaml, the default), or as one line of JSON per statement (--format json).
-Each diagnostic is also written to standard error, as file:line:column and the message, with a
-caret under its place. A directory is searched for .sql files, leaving out node_modules, dist,
-build, out, target, coverage, hidden directories and what git ignores; a glob in quotes, as
+Prints each statement's type descriptor, with the file it was read from, as JSON: laid out in a
+terminal, each object on one line where it fits, and otherwise one line per statement. Each
+diagnostic is also written to standard error, as file:line:column and the message, with a caret
+under its place. A directory is searched for .sql files, leaving out node_modules, dist, build,
+out, target, coverage, hidden directories and what git ignores; a glob in quotes, as
 'src/**/*.sql', is expanded by Reylo; - reads one statement from standard input.
+
+Formats:
+  json                      The type descriptor, the default
+  yaml                      The type descriptor, a YAML document per statement
+  typescript                Its parameters and what .run() resolves to, as TypeScript types
+  rust                      Its module for sqlx, as reylo generate rust-sqlx writes it
+
 The database is --url, else the project file's direct_url, else DATABASE_URL, from the
 environment or the .env files; a relative SQLite path in --url is read from the working
 directory, one in the project's URL from the project's root. A statement the engine cannot
@@ -27,13 +36,27 @@ analyze is printed with one diagnostic that says why. Exits with 1 when any stat
 diagnostic, and with 2 when the database cannot be reached or the statements cannot be read.";
 
 
-/// How standard output writes each descriptor.
+/// How standard output writes each statement.
 #[derive(Clone, Copy, PartialEq)]
 enum Format {
-    /// A YAML document per statement, `---` between two ([`crate::yaml`]).
-    Yaml,
-    /// One line of JSON per statement.
+    /// Its descriptor as JSON: laid out compactly in a terminal, a blank line between two
+    /// ([`crate::compact_json`]), and one line each where standard output is a pipe or a file.
     Json,
+    /// Its descriptor as a YAML document, `---` between two ([`crate::yaml`]).
+    Yaml,
+    /// Its parameters and what `.run()` resolves to ([`crate::typescript`]).
+    TypeScript,
+    /// Its module for sqlx, as `reylo generate rust-sqlx` writes it.
+    Rust,
+}
+
+/// What the formats take beyond the analysis: the project file's settings for TypeScript, and the
+/// crate's for Rust.
+struct Settings {
+    codecs: Value,
+    allow_nested_arrays: bool,
+    rust: Option<reylo_build::Options>,
+    terminal: bool,
 }
 
 /// One statement to analyze, and the file it was read from.
@@ -98,7 +121,7 @@ impl Session {
 pub fn run(args: &[String]) -> i32 {
     let mut url: Option<String> = None;
     let mut sql: Option<String> = None;
-    let mut format = Format::Yaml;
+    let mut format = Format::Json;
     let mut paths: Vec<String> = Vec::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -112,7 +135,7 @@ pub fn run(args: &[String]) -> i32 {
                 Some(value) if arg == "--sql" => sql = Some(value.clone()),
                 Some(value) => match format_of(value) {
                     Some(given) => format = given,
-                    None => return usage(&format!("--format takes yaml or json, not {value}")),
+                    None => return usage(&format!("--format takes json, yaml, typescript or rust, not {value}")),
                 },
                 None => return usage(&format!("{arg} takes a value")),
             },
@@ -120,7 +143,7 @@ pub fn run(args: &[String]) -> i32 {
             _ if arg.starts_with("--sql=") => sql = Some(arg["--sql=".len()..].to_string()),
             _ if arg.starts_with("--format=") => match format_of(&arg["--format=".len()..]) {
                 Some(given) => format = given,
-                None => return usage(&format!("--format takes yaml or json, not {}", &arg["--format=".len()..])),
+                None => return usage(&format!("--format takes json, yaml, typescript or rust, not {}", &arg["--format=".len()..])),
             },
             _ if arg.starts_with('-') && arg != "-" => return usage(&format!("unknown option {arg}")),
             _ => paths.push(arg.clone()),
@@ -167,19 +190,29 @@ pub fn run(args: &[String]) -> i32 {
             return fail(&format!("Cannot read the SQLite URL {url} ({source}): {why}."));
         }
     }
+    let settings = Settings {
+        codecs: serde_json::to_value(&project.config.js.codecs).unwrap_or(Value::Null),
+        allow_nested_arrays: project.config.allow_nested_arrays.unwrap_or(false),
+        // The crate the working directory is in names the types a module may use, as for `reylo generate`.
+        rust: (format == Format::Rust).then(|| reylo_build::generate::options_for(&cwd)),
+        terminal: std::io::stdout().is_terminal(),
+    };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
-    runtime.block_on(analyze_all(dialect, url, given, &base, &project, inputs, format))
+    runtime.block_on(analyze_all(dialect, url, given, &base, &project, inputs, format, &settings))
 }
 
 fn format_of(name: &str) -> Option<Format> {
     match name {
-        "yaml" => Some(Format::Yaml),
         "json" => Some(Format::Json),
+        "yaml" => Some(Format::Yaml),
+        "typescript" => Some(Format::TypeScript),
+        "rust" => Some(Format::Rust),
         _ => None,
     }
 }
 
-async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, project: &Project, inputs: Vec<Input>, format: Format) -> i32 {
+#[allow(clippy::too_many_arguments)]
+async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, project: &Project, inputs: Vec<Input>, format: Format, settings: &Settings) -> i32 {
     let mut session = match Session::open(dialect, &url, base).await {
         Ok(session) => session,
         // A command in `direct_url` that makes a short-lived token is run again once the token is
@@ -201,12 +234,20 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
         _ => Dialect::Sqlite,
     };
     let mut flagged = false;
+    // Whether a statement is printed yet, which the next one is set apart from.
+    let mut shown = false;
     for (at, input) in inputs.into_iter().enumerate() {
+        // The analysis, for the formats that read more than the descriptor; none where the engine
+        // could not analyze the statement.
+        let mut analyzed: Option<Value> = None;
         let descriptor = match session.analyze(&input.sql).await {
             Ok(analysis) => {
                 let mut descriptor = analysis.descriptor(&input.sql, version.clone());
                 if project.strict_params() && analysis.diagnostics.is_empty() {
                     descriptor.diagnostics.extend(untyped_params(&input.sql, &analysis, engine_dialect, project));
+                }
+                if matches!(format, Format::TypeScript | Format::Rust) {
+                    analyzed = serde_json::to_value(&analysis).ok();
                 }
                 descriptor
             }
@@ -233,20 +274,64 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
         };
         flagged |= !descriptor.diagnostics.is_empty();
         report(input.file.as_deref(), &input.sql, &descriptor.diagnostics);
-        let mut line = Map::new();
-        if let Some(file) = input.file {
-            line.insert("file".into(), Value::String(file));
-        }
-        if let Ok(Value::Object(fields)) = serde_json::to_value(&descriptor) {
-            line.extend(fields);
-        }
+        // Two statements a person reads are a blank line apart; a pipe takes a line each.
+        let gap = shown && (format != Format::Json || settings.terminal);
+        let header = input.file.as_deref().map(|file| format!("// {file}\n")).unwrap_or_default();
         match format {
-            Format::Json => println!("{}", Value::Object(line)),
-            Format::Yaml => {
-                if at > 0 {
-                    println!("---");
+            Format::Json | Format::Yaml => {
+                let mut line = Map::new();
+                if let Some(file) = input.file {
+                    line.insert("file".into(), Value::String(file));
                 }
-                print!("{}", crate::yaml::document(&Value::Object(line)));
+                if let Ok(Value::Object(fields)) = serde_json::to_value(&descriptor) {
+                    line.extend(fields);
+                }
+                let line = Value::Object(line);
+                if format == Format::Yaml {
+                    if at > 0 {
+                        println!("---");
+                    }
+                    print!("{}", crate::yaml::document(&line));
+                } else {
+                    if gap {
+                        println!();
+                    }
+                    println!("{}", if settings.terminal { crate::compact_json::compact(&line) } else { line.to_string() });
+                }
+                shown = true;
+            }
+            Format::TypeScript => {
+                let printed = match &analyzed {
+                    Some(analysis) => crate::typescript::printed(analysis, dialect, &settings.codecs, settings.allow_nested_arrays),
+                    None => crate::typescript::Printed::unknown(),
+                };
+                if gap {
+                    println!();
+                }
+                print!("{header}{}", printed.text());
+                shown = true;
+            }
+            Format::Rust => {
+                // A statement with a diagnostic has no module: what it says is on standard error.
+                let Some(analysis) = analyzed.as_ref().filter(|_| descriptor.diagnostics.is_empty()) else { continue };
+                let rust_dialect = match dialect {
+                    "postgres" => reylo_build::Dialect::Postgres,
+                    "mysql" => reylo_build::Dialect::Mysql,
+                    _ => reylo_build::Dialect::Sqlite,
+                };
+                match reylo_build::generate::module_text(rust_dialect, settings.rust.unwrap_or_default(), analysis) {
+                    Ok(module) => {
+                        if gap {
+                            println!();
+                        }
+                        print!("{header}{module}");
+                        shown = true;
+                    }
+                    Err(message) => {
+                        flagged = true;
+                        eprintln!("{}: {message}", input.file.as_deref().unwrap_or("<statement>"));
+                    }
+                }
             }
         }
     }
