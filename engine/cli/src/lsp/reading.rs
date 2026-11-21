@@ -291,6 +291,34 @@ fn closed_group(toks: &[Tok<'_>], at: usize) -> Option<usize> {
     None
 }
 
+/// Whether the nearest clause before the `ON` at `on` is a join that takes a condition.
+fn join_owed(toks: &[Tok<'_>], on: usize) -> bool {
+    let mut depth = 0;
+    for k in (0..on).rev() {
+        let t = toks[k];
+        if t.is_punct(")") {
+            depth += 1;
+        } else if t.is_punct("(") {
+            if depth == 0 {
+                return false;
+            }
+            depth -= 1;
+        } else if depth == 0 && !(k > 0 && toks[k - 1].is_punct(".")) {
+            if t.is("JOIN") {
+                let mut kind = k;
+                while kind > 0 && toks[kind - 1].is_any(&["LEFT", "RIGHT", "FULL", "INNER", "OUTER"]) {
+                    kind -= 1;
+                }
+                return !(kind > 0 && toks[kind - 1].is_any(&["CROSS", "NATURAL"]));
+            }
+            if t.is_any(&["ON", "USING", "WHERE", "GROUP", "HAVING", "FROM", "SELECT"]) {
+                return false;
+            }
+        }
+    }
+    false
+}
+
 /// Whether the `ON` at `on` opens an INSERT's ON CONFLICT clause, by what follows it, and not a join's condition on something named `conflict`. One still being typed counts.
 fn opens_on_conflict(toks: &[Tok<'_>], on: usize) -> bool {
     if !toks.get(on + 1).is_some_and(|t| t.is("CONFLICT")) {
@@ -306,8 +334,8 @@ fn opens_on_conflict(toks: &[Tok<'_>], on: usize) -> bool {
         },
         Some(_) => return false,
     }
-    // At the end of the text the clause is still being typed. Its target names bare columns, where a call in a join's condition usually qualifies them.
-    let typing = !toks[on + 2..j].iter().any(|t| t.is_punct("."));
+    // With no DO by the end of the text, it's a clause still being typed, unless a join before it is owed this `ON`.
+    let typing = !join_owed(toks, on);
     match toks.get(j) {
         None => return typing,
         Some(t) if t.is("DO") => return true,
@@ -868,6 +896,13 @@ mod tests {
         let at = toks.iter().position(|t| t.is("WHERE")).unwrap();
         assert_eq!(s.source(at, "p").map(|x| x.name.as_str()), Some("posts"));
         assert_eq!(s.source(s.of_token.len() - 1, "u").map(|x| x.name.as_str()), Some("users"));
+
+        // A join's condition with a bare argument stays the join's to the end of the statement.
+        let sql = "insert into users as u (id) select p.id from posts p join flags f on conflict(enabled) where p.id > 0";
+        let tree = syntax::parse(Dialect::Postgres, sql);
+        let toks = tokens(Dialect::Postgres, &tree, sql);
+        let s = scopes(Dialect::Postgres, &toks);
+        assert_eq!(s.source(s.of_token.len() - 1, "p").map(|x| x.name.as_str()), Some("posts"));
 
         // An upsert still being typed is the INSERT's.
         for typing in ["on conflict (id)", "on conflict (id) where u.id > 0"] {
