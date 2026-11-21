@@ -291,41 +291,8 @@ fn closed_group(toks: &[Tok<'_>], at: usize) -> Option<usize> {
     None
 }
 
-/// Whether the `ON` at `on` belongs to a join in the FROM list before it. SQLite lets any join take one, comma and CROSS JOIN included.
-fn join_owed(dialect: Dialect, toks: &[Tok<'_>], on: usize) -> bool {
-    let mut depth = 0;
-    for k in (0..on).rev() {
-        let t = toks[k];
-        if t.is_punct(")") {
-            depth += 1;
-        } else if t.is_punct("(") {
-            if depth == 0 {
-                return false;
-            }
-            depth -= 1;
-        } else if depth == 0 && dialect == Dialect::Sqlite && t.is_punct(",") {
-            return true;
-        } else if depth == 0 && !(k > 0 && toks[k - 1].is_punct(".")) {
-            if t.is("JOIN") {
-                if dialect == Dialect::Sqlite {
-                    return true;
-                }
-                let mut kind = k;
-                while kind > 0 && toks[kind - 1].is_any(&["LEFT", "RIGHT", "FULL", "INNER", "OUTER"]) {
-                    kind -= 1;
-                }
-                return !(kind > 0 && toks[kind - 1].is_any(&["CROSS", "NATURAL"]));
-            }
-            if t.is_any(&["ON", "USING", "FROM", "SELECT"]) || t.is_any(ENDS_FROM) {
-                return false;
-            }
-        }
-    }
-    false
-}
-
-/// Whether the `ON` at `on` opens an INSERT's ON CONFLICT clause, by what follows it, and not a join's condition on something named `conflict`. One still being typed counts.
-fn opens_on_conflict(dialect: Dialect, toks: &[Tok<'_>], on: usize) -> bool {
+/// Whether the `ON` at `on` opens an INSERT's ON CONFLICT clause, and not a join's condition calling a function named `conflict`. A whole clause has its DO. One still being typed counts while it's no more than a target of bare columns at the end of the text.
+fn opens_on_conflict(toks: &[Tok<'_>], on: usize) -> bool {
     if !toks.get(on + 1).is_some_and(|t| t.is("CONFLICT")) {
         return false;
     }
@@ -339,10 +306,8 @@ fn opens_on_conflict(dialect: Dialect, toks: &[Tok<'_>], on: usize) -> bool {
         },
         Some(_) => return false,
     }
-    // With no DO by the end of the text, it's a clause still being typed, unless a join before it is owed this `ON`.
-    let typing = !join_owed(dialect, toks, on);
     match toks.get(j) {
-        None => return typing,
+        None => return toks[on + 3..j - 1].iter().all(|t| t.is_name() || t.is_punct(",")),
         Some(t) if t.is("DO") => return true,
         Some(t) if t.is("WHERE") => {}
         Some(_) => return false,
@@ -365,7 +330,7 @@ fn opens_on_conflict(dialect: Dialect, toks: &[Tok<'_>], on: usize) -> bool {
             }
         }
     }
-    typing
+    false
 }
 
 /// The names a query's RETURNING or select list gives its columns. An item with no name of its own, a `*` among them, adds none.
@@ -611,7 +576,7 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
         }
         // What follows an INSERT's rows is the INSERT's again, whichever query read them.
         let duplicate_key = t.is("ON") && toks.get(i + 1).is_some_and(|n| n.is("DUPLICATE")) && toks.get(i + 2).is_some_and(|n| n.is("KEY"));
-        let upsert = duplicate_key || (t.is("ON") && opens_on_conflict(dialect, toks, i));
+        let upsert = duplicate_key || (t.is("ON") && opens_on_conflict(toks, i));
         if frame.inserting && frame.query != frame.first && (t.is("RETURNING") || upsert) {
             // MySQL's ON DUPLICATE KEY UPDATE also sees the FROM list of a SELECT that neither groups nor has a set operation, in a scope of its own.
             let input = (duplicate_key && !frame.compound && !groups_rows(toks, frame.rows, i)).then(|| queries[frame.query].sources.clone());
@@ -910,7 +875,7 @@ mod tests {
         assert_eq!(s.source(s.of_token.len() - 1, "p").map(|x| x.name.as_str()), Some("posts"));
 
         // SQLite lets a comma or CROSS JOIN take a condition.
-        for input in ["posts p cross join flags f on conflict(f.enabled)", "posts p, flags f on conflict(f.enabled)", "natural left join posts p on conflict(natural.enabled)"] {
+        for input in ["posts p cross join flags f on conflict(f.enabled)", "posts p, flags f on conflict(f.enabled)", "natural left join posts p on conflict(natural.enabled)", "posts p join flags as format on conflict(format.enabled)"] {
             let s = read(Dialect::Sqlite, &format!("insert into users as u (id) select p.id from {input} where p.id > 0"));
             assert_eq!(s.source(s.of_token.len() - 1, "p").map(|x| x.name.as_str()), Some("posts"), "{input}");
         }
@@ -920,8 +885,8 @@ mod tests {
         assert!(s.source(last, "p").is_none());
 
         // An upsert still being typed is the INSERT's.
-        for typing in ["on conflict (id)", "on conflict (id) where u.id > 0"] {
-            let s = read(Dialect::Postgres, &format!("insert into users as u (id) select p.id from posts p where true {typing}"));
+        for typing in ["where true on conflict (id)", "join flags f order by p.id limit 0, 2 on conflict (id)", "where true on conflict ()"] {
+            let s = read(Dialect::Postgres, &format!("insert into users as u (id) select p.id from posts p {typing}"));
             let last = s.of_token.len() - 1;
             assert_eq!(s.source(last, "u").map(|x| x.name.as_str()), Some("users"), "{typing}");
             assert!(s.source(last, "p").is_none(), "{typing}");
