@@ -179,7 +179,7 @@ pub fn parse_tree(text: &str) -> Tree<'_> {
             let end = text.len() as u32;
             lexemes.push(Lexeme { sym: lalr::SCAN_STOP, lead, start, end: end.max(start) });
             let tail = lexemes.last().map_or(0, |l| l.end);
-            (lexemes, tail, Some(SyntaxError { message: e.message, start, end }))
+            (lexemes, tail, Some(SyntaxError { message: e.message, start, end, expected: Vec::new() }))
         }
     };
     let mut parsed = lalr::parse(tables(), text, &lexemes, tail, tok_semicolon(), statement_list(), &mut NoActions);
@@ -218,7 +218,7 @@ fn refusal(text: &str) -> Option<SyntaxError> {
     // The tree's own parse has reported the stack's limit, at its token.
     let message = parsed.refused.filter(|m| !m.starts_with(lalr::EXHAUSTED))?;
     let (start, end) = parsed.refused_at.unwrap_or((0, text.len() as u32));
-    Some(SyntaxError { message, start, end })
+    Some(SyntaxError { message, start, end, expected: Vec::new() })
 }
 
 fn tok_semicolon() -> u16 {
@@ -330,6 +330,10 @@ impl Actions for TreeActions<'_> {
 
     fn exhausted(&mut self, last_read: Option<usize>) -> String {
         self.at_token("memory exhausted", last_read)
+    }
+
+    fn recovers(&self) -> bool {
+        false
     }
 }
 

@@ -23,6 +23,7 @@ static GRAMMAR: Grammar = Grammar {
     accept: g::YY_ACCEPT_ACTION,
     min_reduce: g::YY_MIN_REDUCE,
     illegal: g::TK_ILLEGAL,
+    ntokens: g::YYNTOKEN,
     separator: g::TK_SEMI,
     complete: &[g::SYM_CMDLIST, g::SYM_ECMD],
     refuse,
@@ -32,7 +33,7 @@ static GRAMMAR: Grammar = Grammar {
 fn refuse(r: &Reduced<'_>) -> Option<SyntaxError> {
     let at = |id: NodeId, message: String| {
         let n = &r.nodes[id as usize];
-        SyntaxError { message, start: n.start, end: n.end }
+        SyntaxError { message, start: n.start, end: n.end, expected: Vec::new() }
     };
     let token = |id: NodeId| &r.text[r.nodes[id as usize].start as usize..r.nodes[id as usize].end as usize];
     let kids = r.children(r.node);
@@ -163,4 +164,17 @@ mod tests {
         let spans: Vec<&str> = crate::statements(crate::Dialect::Sqlite, &parse_tree(text)).iter().map(|(a, b)| &text[*a as usize..*b as usize]).collect();
         assert_eq!(spans, ["select 1", "select from", "select 2"]);
     }
+}
+
+/// A terminal's name as SQL spells it, for an error's list of what would have fit.
+pub(crate) fn spelled(name: &str) -> Option<String> {
+    let punctuation = [("SEMI", ";"), ("LP", "("), ("RP", ")"), ("COMMA", ","), ("DOT", "."), ("STAR", "*"), ("PLUS", "+"), ("MINUS", "-"), ("SLASH", "/"), ("REM", "%"), ("EQ", "="), ("NE", "<>"), ("LT", "<"), ("LE", "<="), ("GT", ">"), ("GE", ">="), ("CONCAT", "||"), ("BITAND", "&"), ("BITOR", "|"), ("BITNOT", "~"), ("LSHIFT", "<<"), ("RSHIFT", ">>"), ("PTR", "->")];
+    if let Some((_, p)) = punctuation.iter().find(|(n, _)| *n == name) {
+        return Some(p.to_string());
+    }
+    // Symbols SQLite's grammar makes up, which no text spells.
+    if matches!(name, "SPACE" | "ILLEGAL" | "COMMENT" | "FUNCTION" | "COLUMN" | "AGG_FUNCTION" | "AGG_COLUMN" | "TRUEFALSE" | "ISNOT" | "UMINUS" | "UPLUS" | "TRUTH" | "REGISTER" | "VECTOR" | "SELECT_COLUMN" | "IF_NULL_ROW" | "ASTERISK" | "SPAN" | "ERROR" | "QNUMBER" | "BLOB") {
+        return None;
+    }
+    name.chars().all(|c| c.is_ascii_uppercase() || c == '_').then(|| name.to_string())
 }

@@ -575,7 +575,7 @@ pub fn parse(flavor: Flavor, text: &str) -> Tree<'_> {
     let mut b = Builder { nodes: Vec::with_capacity(tokens.len() * 2), child_ids: Vec::with_capacity(tokens.len() * 2) };
     let mut errors: Vec<SyntaxError> = Vec::new();
     if let Some((start, end)) = unclosed {
-        errors.push(SyntaxError { message: format!("\"{}\" is never closed", &text[start as usize..end as usize]), start, end });
+        errors.push(SyntaxError { message: format!("\"{}\" is never closed", &text[start as usize..end as usize]), start, end, expected: Vec::new() });
     }
     let mut statements: Vec<NodeId> = Vec::new();
     let mut stack: Vec<Frame> = vec![Frame::new(STATEMENT, (0, 0))];
@@ -588,7 +588,7 @@ pub fn parse(flavor: Flavor, text: &str) -> Tree<'_> {
     fn close_groups(b: &mut Builder, stack: &mut Vec<Frame>, errors: &mut Vec<SyntaxError>) {
         while stack.len() > 1 {
             let f = stack.pop().unwrap();
-            errors.push(SyntaxError { message: "\"(\" is never closed".to_string(), start: f.open.0, end: f.open.1 });
+            errors.push(SyntaxError { message: "\"(\" is never closed".to_string(), start: f.open.0, end: f.open.1, expected: Vec::new() });
             let id = b.close(f);
             stack.last_mut().unwrap().clause.push(id);
         }
@@ -633,7 +633,7 @@ pub fn parse(flavor: Flavor, text: &str) -> Tree<'_> {
                 stack.last_mut().unwrap().clause.push(id);
             }
             RPAREN => {
-                errors.push(SyntaxError { message: "\")\" with no \"(\" before it".to_string(), start: l.start, end: l.end });
+                errors.push(SyntaxError { message: "\")\" with no \"(\" before it".to_string(), start: l.start, end: l.end, expected: Vec::new() });
                 stack.last_mut().unwrap().clause.push(leaf);
             }
             SEMI if blocks == 0 || is_batch_end(flavor, text, l) => {
@@ -659,7 +659,7 @@ pub fn parse(flavor: Flavor, text: &str) -> Tree<'_> {
             ILLEGAL => {
                 let token = &text[l.start as usize..l.end as usize];
                 let shown: String = token.chars().take(32).collect();
-                errors.push(SyntaxError { message: format!("unrecognized token: \"{shown}\""), start: l.start, end: l.end });
+                errors.push(SyntaxError { message: format!("unrecognized token: \"{shown}\""), start: l.start, end: l.end, expected: Vec::new() });
                 stack.last_mut().unwrap().clause.push(leaf);
             }
             _ => stack.last_mut().unwrap().clause.push(leaf),

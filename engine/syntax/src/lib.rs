@@ -39,10 +39,18 @@ pub fn statements(dialect: Dialect, tree: &Tree<'_>) -> Vec<(u32, u32)> {
         Dialect::Sqlite => "ecmd",
         Dialect::Mysql | Dialect::ClickHouse | Dialect::SqlServer => "statement",
     };
-    let mut out = Vec::new();
+    let mut out: Vec<(u32, u32)> = Vec::new();
     let mut stack = vec![tree.root];
     while let Some(id) = stack.pop() {
         let n = tree.node(id);
+        // A token a repair deleted after a statement's last part belongs to that statement.
+        if n.kind == ERROR_KIND && n.leaf {
+            match out.last_mut() {
+                Some(last) if !tree.text[last.1 as usize..n.start as usize].contains(';') => last.1 = n.end,
+                _ => out.push((n.start, n.end)),
+            }
+            continue;
+        }
         if n.kind == ERROR_KIND || (!n.leaf && kind_name(dialect, n.kind) == name) {
             // Where its last token before any statement end stops.
             let is_end = |kind: u16| match dialect {
@@ -80,6 +88,39 @@ pub fn reserved_words(dialect: Dialect) -> Vec<&'static str> {
         Dialect::Sqlite => sqlite::generated::KEYWORDS.iter().filter(|k| sqlite::generated::YY_FALLBACK[k.1 as usize] == 0).map(|k| k.0).collect(),
         Dialect::Mysql | Dialect::ClickHouse | Dialect::SqlServer => tolerant::KEYWORDS.to_vec(),
     }
+}
+
+/// The tokens an error says the grammar would have taken, spelled for a reader: a keyword in capitals, punctuation as written, and a class of token by what it is, as "a name". Tokens no text spells, and repeats, are left out.
+pub fn expected(dialect: Dialect, error: &SyntaxError) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for kind in &error.expected {
+        let name = kind_name(dialect, *kind);
+        let spelled = match (dialect, name) {
+            (_, "$end" | "END_OF_FILE") => Some("end of input".to_string()),
+            (Dialect::Postgres, "IDENT") | (Dialect::Sqlite, "ID") => Some("a name".to_string()),
+            (Dialect::Postgres, "SCONST") | (Dialect::Sqlite, "STRING") => Some("a string".to_string()),
+            (Dialect::Postgres, "ICONST" | "FCONST") | (Dialect::Sqlite, "INTEGER" | "FLOAT") => Some("a number".to_string()),
+            (Dialect::Postgres, "PARAM") | (Dialect::Sqlite, "VARIABLE") => Some("a parameter".to_string()),
+            (Dialect::Postgres, "Op") => Some("an operator".to_string()),
+            (Dialect::Postgres, "TYPECAST") => Some("::".to_string()),
+            (Dialect::Postgres, "DOT_DOT") => Some("..".to_string()),
+            (Dialect::Postgres, "COLON_EQUALS") => Some(":=".to_string()),
+            (Dialect::Postgres, "EQUALS_GREATER") => Some("=>".to_string()),
+            (Dialect::Postgres, "LESS_EQUALS") => Some("<=".to_string()),
+            (Dialect::Postgres, "GREATER_EQUALS") => Some(">=".to_string()),
+            (Dialect::Postgres, "NOT_EQUALS") => Some("<>".to_string()),
+            // Spellings the scanner makes of other tokens, a mode a caller sets, and comments.
+            (Dialect::Postgres, n) if n.starts_with("MODE_") || matches!(n, "UIDENT" | "USCONST" | "BCONST" | "XCONST" | "SQL_COMMENT" | "C_COMMENT") => None,
+            (_, n) if n.len() == 3 && n.starts_with('\'') && n.ends_with('\'') => Some(n[1..2].to_string()),
+            (Dialect::Postgres, n) if n.chars().all(|c| c.is_ascii_uppercase() || c == '_') => Some(n.trim_end_matches("_P").trim_end_matches("_LA").to_string()),
+            (Dialect::Sqlite, n) => sqlite::spelled(n),
+            _ => None,
+        };
+        if let Some(s) = spelled.filter(|s| !out.contains(s)) {
+            out.push(s);
+        }
+    }
+    out
 }
 
 /// The name of a node's kind in `dialect`'s trees.
@@ -132,6 +173,56 @@ mod tests {
         assert_eq!(tree.errors.len(), 1);
         assert_eq!(tree.errors[0].message, "memory exhausted at or near \"(\"");
         assert_eq!(tree.errors[0].end - tree.errors[0].start, 1);
+    }
+
+    /// The kinds of the inner nodes of `text`'s tree, and its errors' messages with what each expected.
+    fn repaired(dialect: Dialect, text: &str) -> (Tree<'_>, Vec<(String, Vec<String>)>) {
+        let tree = parse(dialect, text);
+        assert_eq!(tree.print(), text);
+        let errors = tree.errors.iter().map(|e| (e.message.clone(), expected(dialect, e))).collect();
+        (tree, errors)
+    }
+
+    fn has_error_node(tree: &Tree<'_>) -> bool {
+        tree.nodes.iter().any(|n| n.kind == ERROR_KIND && !n.leaf)
+    }
+
+    #[test]
+    fn a_statement_is_repaired_where_one_token_is_missing_or_extra() {
+        for (dialect, text) in [
+            (Dialect::Postgres, "select a, from t; select 2"),
+            (Dialect::Postgres, "select (a + 1 from t where b = 2"),
+            (Dialect::Postgres, "select a from t where where b = 1"),
+            (Dialect::Sqlite, "select a, from t; select 2"),
+            (Dialect::Sqlite, "select a from t where where b = 1"),
+        ] {
+            let (tree, errors) = repaired(dialect, text);
+            assert_eq!(errors.len(), 1, "{text}: {errors:?}");
+            // The statement keeps its structure past the error: no stretch of it goes under an error node.
+            assert!(!has_error_node(&tree), "{text}");
+            assert_eq!(statements(dialect, &tree).len(), text.matches(';').count() + 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn an_error_says_what_would_have_fit() {
+        let (_, errors) = repaired(Dialect::Postgres, "select a from t order");
+        assert_eq!(errors[0].0, "syntax error at end of input");
+        assert_eq!(errors[0].1, ["BY"]);
+        let (_, errors) = repaired(Dialect::Postgres, "select a from");
+        assert!(errors[0].1.contains(&"a name".to_string()), "{errors:?}");
+        let (_, errors) = repaired(Dialect::Sqlite, "select a from t order");
+        assert_eq!(errors[0].1, ["BY"]);
+    }
+
+    #[test]
+    fn text_that_is_mostly_not_sql_stays_a_tree_and_stays_fast() {
+        let junk = "select ) ( from from , where ; ".repeat(5_000);
+        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+            let started = std::time::Instant::now();
+            assert_eq!(parse(dialect, &junk).print(), junk);
+            assert!(started.elapsed().as_secs() < 5, "{dialect:?}");
+        }
     }
 
     #[test]
