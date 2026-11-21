@@ -40,16 +40,22 @@ pub fn statements(dialect: Dialect, tree: &Tree<'_>) -> Vec<(u32, u32)> {
         Dialect::Mysql | Dialect::ClickHouse | Dialect::SqlServer => "statement",
     };
     let mut out: Vec<(u32, u32)> = Vec::new();
-    // Where deleted tokens before the next statement start.
-    let mut pending: Option<u32> = None;
+    // Deleted tokens no statement has taken yet: where they start and end.
+    let mut pending: Option<(u32, u32)> = None;
     let mut stack = vec![tree.root];
     while let Some(id) = stack.pop() {
         let n = tree.node(id);
         // A token a repair deleted belongs to the statement it sits in: the one before it, up to that statement's `;`, else the next.
         if n.kind == ERROR_KIND && n.leaf {
-            match out.last_mut() {
-                Some(last) if !after_end(tree, last.1, n.start) => last.1 = n.end,
-                _ => pending = Some(pending.unwrap_or(n.start)),
+            match (out.last_mut(), pending) {
+                (Some(last), None) if !after_end(tree, last.1, n.start) => last.1 = n.end,
+                // A `;` between them makes the earlier deletions a statement of their own.
+                (_, Some((start, end))) if after_end(tree, end, n.start) => {
+                    out.push((start, end));
+                    pending = Some((n.start, n.end));
+                }
+                (_, Some((start, _))) => pending = Some((start, n.end)),
+                _ => pending = Some((n.start, n.end)),
             }
             continue;
         }
@@ -64,16 +70,23 @@ pub fn statements(dialect: Dialect, tree: &Tree<'_>) -> Vec<(u32, u32)> {
                 let text = &tree.text[n.start as usize..last.end as usize];
                 let kept = text.trim_end_matches(|c: char| c == ';' || c.is_whitespace()).len() as u32;
                 if kept > 0 {
-                    out.push((pending.take().unwrap_or(n.start), n.start + kept));
+                    let start = match pending.take() {
+                        Some((start, end)) if after_end(tree, end, n.start) => {
+                            out.push((start, end));
+                            n.start
+                        }
+                        Some((start, _)) => start,
+                        None => n.start,
+                    };
+                    out.push((start, n.start + kept));
                 }
             }
         } else {
             stack.extend(tree.children(id).iter().rev());
         }
     }
-    if let Some(start) = pending {
-        let end = tree.leaves().map(|l| tree.node(l)).filter(|l| l.kind == ERROR_KIND && l.start >= start).map(|l| l.end).max().unwrap_or(start);
-        out.push((start, end));
+    if let Some(span) = pending {
+        out.push(span);
     }
     out
 }
@@ -219,6 +232,7 @@ mod tests {
     fn a_repair_stays_in_its_own_statement() {
         for dialect in [Dialect::Postgres, Dialect::Sqlite] {
             assert_eq!(spans(dialect, "select 1; ) select 2;"), ["select 1", ") select 2"], "{dialect:?}");
+            assert_eq!(spans(dialect, "select 1; ); select 2;"), ["select 1", ")", "select 2"], "{dialect:?}");
             let text = "select (select 1 limit 1 union select 2; select 3;";
             let (tree, errors) = repaired(dialect, text);
             assert_eq!(errors.len(), 1, "{dialect:?}: {errors:?}");
