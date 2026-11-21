@@ -966,6 +966,17 @@ impl Compiler<'_> {
         crate::postgres::parse_in_mode(query, mode).map(|_| ())
     }
 
+    /// Whether a name, or a block's label and a name, is a record (`plpgsql_parse_wordtype` and
+    /// `plpgsql_parse_cwordtype`).
+    fn names_record(&self, idents: &[String]) -> bool {
+        let found = match idents {
+            [a] => self.ns_lookup(self.ns_top, false, a, None, None),
+            [a, b] => self.ns_lookup(self.ns_top, false, a, Some(b), None).filter(|(_, used)| *used == 2),
+            _ => None,
+        };
+        found.is_some_and(|(item, _)| self.ns[item].kind == super::compile::NS_REC)
+    }
+
     /// `read_datatype`: a declaration's type, up to what follows it.
     fn read_datatype(&mut self, lookahead: Code) -> R<Type> {
         let mut tok = if lookahead == EMPTY { self.yylex()? } else { lookahead };
@@ -973,12 +984,13 @@ impl Compiler<'_> {
         let mut result: Option<Type> = None;
         if tok == t::T_WORD || is_unreserved_keyword(tok) || tok == t::T_CWORD {
             let compound = tok == t::T_CWORD;
-            let name = if compound { cword_of(&self.cur).join(".") } else { word_of(&self.cur) };
+            let idents = if compound { cword_of(&self.cur) } else { vec![word_of(&self.cur)] };
+            let name = idents.join(".");
             tok = self.yylex()?;
             if tok == PERCENT {
                 tok = self.yylex()?;
                 if self.tok_is_keyword(tok, t::K_TYPE, "type") {
-                    let of_record = !self.stand_in && !compound && self.ns_lookup(self.ns_top, false, &name, None, None).is_some_and(|(item, _)| self.ns[item].kind == super::compile::NS_REC);
+                    let of_record = !self.stand_in && self.names_record(&idents);
                     result = Some(if of_record { record_type(format!("{name}%TYPE")) } else { pct_type(format!("{name}%TYPE")) });
                 } else if self.tok_is_keyword(tok, t::K_ROWTYPE, "rowtype") {
                     result = Some(if self.stand_in { pct_type(format!("{name}%rowtype")) } else { record_type(format!("{name}%rowtype")) });

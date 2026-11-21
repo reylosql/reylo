@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn keeps_what_it_can_read() {
-        for body in ["begin new.a := regexp_replace(new.a, '\\s+', ' '); return new; end", "declare n alias for new; begin n.a := 1; return n; end", "<<outer>> begin return new; end outer;", "declare scratch audit.widgets%rowtype; begin scratch.id := new.id; return new; end", "declare r new%type; begin r := new; r.a := 1; return new; end"] {
+        for body in ["begin new.a := regexp_replace(new.a, '\\s+', ' '); return new; end", "declare n alias for new; begin n.a := 1; return n; end", "<<outer>> begin return new; end outer;", "declare scratch audit.widgets%rowtype; begin scratch.id := new.id; return new; end", "declare r new%type; begin r := new; r.a := 1; return new; end", "<<outer>> declare scratch widgets%rowtype; begin declare copy outer.scratch%type; begin copy.id := new.id; end; return new; end"] {
             assert!(keeps_the_row(body, true, true), "{body}");
         }
     }
