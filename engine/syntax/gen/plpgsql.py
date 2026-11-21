@@ -117,6 +117,50 @@ def keywords(args, name):
     return re.findall(r'PG_KEYWORD\("(\w+)", (\w+)\)', text)
 
 
+def builtin_types(args):
+    """libpg_query's table of the types its stand-in catalog knows, each as (oid, name, typtype, array oid),
+    with the numbers read from Postgres's own pg_type.dat by name."""
+    dat = git(args.postgres, "show", f"{TAG}:src/include/catalog/pg_type.dat").decode()
+    oids, arrays = {}, {}
+    # Each entry starts on a line of its own; a description can hold braces.
+    for entry in re.split(r"(?m)^\{", dat)[1:]:
+        fields = dict(re.findall(r"(\w+) => '((?:[^'\\]|\\.)*)'", entry))
+        if "typname" in fields and "oid" in fields:
+            oids[fields["typname"]] = int(fields["oid"])
+            if "array_type_oid" in fields:
+                oids["_" + fields["typname"]] = int(fields["array_type_oid"])
+                arrays[fields["typname"]] = int(fields["array_type_oid"])
+            elif "typarray" in fields:
+                arrays[fields["typname"]] = fields["typarray"]
+    text = git(args.libpg_query, "show", f"{LIBPG_QUERY}:src/include/pg_query_pg_type.c").decode()
+    table = text.split("pg_query_builtin_types[] = {", 1)[1].split("};", 1)[0]
+    kinds = {"TYPTYPE_BASE": "b", "TYPTYPE_COMPOSITE": "c", "TYPTYPE_DOMAIN": "d", "TYPTYPE_ENUM": "e", "TYPTYPE_PSEUDO": "p", "TYPTYPE_RANGE": "r", "TYPTYPE_MULTIRANGE": "m"}
+    out = []
+    for row in re.findall(r"\{([^{}]*)\}", table):
+        parts = [p.strip() for p in row.split(",")]
+        name = parts[1].strip('"')
+        if name not in oids:
+            raise SystemExit(f"no oid for type {name}")
+        array = 0 if parts[7] == "InvalidOid" else arrays.get(name)
+        # An array written out by hand names its array type, whose oid its own entry holds.
+        array = oids.get(array, array) if isinstance(array, str) else array
+        if array is None:
+            raise SystemExit(f"no array type for {name}")
+        out.append((oids[name], name, kinds[parts[4]], array))
+    return out
+
+
+def conditions(args):
+    """PL/pgSQL's exception condition names and their SQLSTATEs, as generate-plerrcodes.pl lists them."""
+    text = git(args.postgres, "show", f"{TAG}:src/backend/utils/errcodes.txt").decode()
+    out = []
+    for line in text.split("\n"):
+        parts = line.split()
+        if len(parts) == 4 and re.fullmatch(r"[0-9A-Z]{5}", parts[0]):
+            out.append((parts[3], parts[0]))
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--postgres", required=True)
@@ -158,6 +202,10 @@ def main():
     for kind, file in [("RESERVED", "pl_reserved_kwlist.h"), ("UNRESERVED", "pl_unreserved_kwlist.h")]:
         words = keywords(args, file)
         out.append(f"/// PL/pgSQL's {kind.lower()} keywords and their tokens, in the order of `{file}`.\npub static {kind}: [(&str, u16); {len(words)}] = [{', '.join(f'(\"{w}\", t::{tok})' for w, tok in words)}];\n")
+    types = builtin_types(args)
+    out.append("/// The types libpg_query's stand-in catalog knows: oid, name, `typtype` and array type, in its order.\npub static TYPES: [(u32, &str, u8, u32); %d] = [%s];\n" % (len(types), ", ".join(f'({o}, "{n}", b\'{k}\', {a})' for o, n, k, a in types)))
+    conds = conditions(args)
+    out.append("/// The exception conditions a handler can name, with their SQLSTATEs, in `errcodes.txt`'s order.\npub static CONDITIONS: [(&str, &str); %d] = [%s];\n" % (len(conds), ", ".join(f'("{l}", "{c}")' for l, c in conds)))
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     open(OUT, "w").write("".join(out))
     print(f"{len(rules)} rules, {len(arrays['pact'])} states, {constants['ntokens']} terminals")
