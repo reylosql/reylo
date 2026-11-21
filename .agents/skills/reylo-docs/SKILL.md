@@ -84,7 +84,7 @@ Copy written by hand for a page goes in as written. Fix only a wrong fact or a p
 
 ## What ships when
 
-reylo.dev serves the `release` branch, which each release moves to its tag, so the live docs describe what npm serves. A docs change for a released feature can go live before the next release by a cherry-pick onto `release`; one about anything unreleased waits for the release.
+reylo.dev serves the `release` branch, which each release moves to its tag, so the live docs describe what npm serves. A docs change for a released feature goes live before the next release by being made on `release` itself: commit it in a worktree on `origin/release`, build the site there, push, then merge `release` into `main` at once. A commit on `release` that `main` doesn't have is dropped at the next release, which moves `release` to a commit of `main`. A change about anything unreleased stays on `main` until its release.
 
 ## Before a change lands
 
