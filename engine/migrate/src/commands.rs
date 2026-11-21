@@ -1300,14 +1300,13 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
     shadows.push(fresh, by_name.iter().map(Step::of));
     let names = late.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ");
     let one = late.len() == 1;
-    // Each late migration under a name just after the last migration that isn't pending (what this
-    // database ran, and what a run cut off already applied, which may be what it needs), in their
-    // order, and before the next migration file: the pending ones that sort after it still follow
-    // them, as the replay above ran them, and no name is one a file has. A project whose names
-    // leave no room there gets no command.
+    // Each late migration under a name after every migration that isn't pending (what this database
+    // ran, and what a run cut off already applied, which may be what it needs), in their order, and
+    // before every other pending one, which may need it: the order the replay above ran. Between
+    // the two no name is one a file has. Where they leave no room, or cross, no command is printed.
     let done = all.iter().map(|m| m.name.as_str()).filter(|n| !pending.iter().any(|p| p.name == *n));
     let last_ran = done.max_by(|a, b| name_order(a).cmp(&name_order(b))).unwrap_or_default();
-    let next = all.iter().map(|m| m.name.as_str()).filter(|n| name_order(n) > name_order(last_ran)).min_by(|a, b| name_order(a).cmp(&name_order(b)));
+    let next = pending.iter().map(|m| m.name.as_str()).filter(|n| !late.iter().any(|l| l.name == *n)).min_by(|a, b| name_order(a).cmp(&name_order(b)));
     let floor = last_ran.split_once('_').and_then(|(at, _)| time::seconds(at)).map_or_else(time::now_seconds, |s| s + 1);
     let renamed: Vec<String> = late
         .iter()
@@ -1338,9 +1337,13 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
     };
     if !fits {
         let it = if one { "it" } else { "them" };
-        let before = next.map_or(String::new(), |n| format!(" and before {n}"));
         let names = if one { "a name that sorts" } else { "names that sort" };
-        return Ok(Some(problem.note(format!("Give {it} {names} after {last_ran}{before}, so that every database runs {it} after {}.", after.join(", ")))));
+        let note = match next {
+            Some(next) if name_order(next) <= name_order(last_ran) => format!("{lead}, and before the pending migrations that need {it}."),
+            Some(next) => format!("Give {it} {names} after {last_ran} and before {next}, so that every database runs {it} after {}.", after.join(", ")),
+            None => format!("Give {it} {names} after {last_ran}, so that every database runs {it} after {}.", after.join(", ")),
+        };
+        return Ok(Some(problem.note(note)));
     }
     let commands: Vec<&str> = moves.iter().map(String::as_str).collect();
     Ok(Some(problem.fix(lead, &commands)))
