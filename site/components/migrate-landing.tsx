@@ -425,13 +425,13 @@ const LOCK_FREE: Script = [
   '    + a fresh database: column users.nick text',
   '',
   '  Give it a later name, so that every database runs it after 20261105090000_nick.sql:',
-  '    mv reylo/migrations/20261105080000_no_nick.sql reylo/migrations/20261105100000_no_nick.sql',
+  '    mv reylo/migrations/20261105080000_no_nick.sql reylo/migrations/20261105090001_no_nick.sql',
   '',
   'Nothing was changed.',
-  '$ mv reylo/migrations/20261105080000_no_nick.sql reylo/migrations/20261105100000_no_nick.sql',
+  '$ mv reylo/migrations/20261105080000_no_nick.sql reylo/migrations/20261105090001_no_nick.sql',
   '$ reylo migrate deploy',
   'Applying to postgres://db.example.com/app',
-  '  ✓ 20261105100000_no_nick.sql  applied · 9 ms',
+  '  ✓ 20261105090001_no_nick.sql  applied · 9 ms',
   '✓ Applied 1 migration',
 ];
 
