@@ -67,14 +67,19 @@ jobs:
           version="$(git show "$GITHUB_SHA:package.json" | jq -r .version)"
           case "$version" in *-*) echo "$version is a prerelease, which leaves release as it is"; exit 0 ;; esac
           # A version already tagged (a dispatch that rewrites its notes) keeps its tag, which `finish` moves release to; one release already holds is left as it is.
-          target="$(git ls-remote "$url" "refs/tags/v$version" | cut -f1)"
+          # The shell is `bash -e` without pipefail, so each lookup's output is read whole, keeping its own exit status, rather than through `cut`.
+          tag="$(git ls-remote "$url" "refs/tags/v$version")" || { echo "::error::could not look up the tag v$version"; exit 1; }
+          target="${tag%%[[:space:]]*}"
           if [ -n "$target" ]; then
             git fetch -q "$url" "$target"
             if git merge-base --is-ancestor "$target" refs/remotes/origin/release; then echo "release already holds v$version, and is left as it is"; exit 0; fi
           else
             target="$GITHUB_SHA"
           fi
-          missing="$(git cherry "$target" refs/remotes/origin/release | sed -n 's/^+ //p')"
+          # A merge commit's own edits are in no patch `git cherry` reads, so a merge on release that the target lacks is refused too.
+          merges="$(git rev-list --merges "$target..refs/remotes/origin/release")"
+          missing="$(git cherry "$target" refs/remotes/origin/release | sed -n 's/^+ //p')${merges:+$'\n'$merges}"
+          missing="${missing#$'\n'}"
           if [ -n "$missing" ]; then
             echo "::error::release holds changes $target lacks, which moving it to v$version would take off reylo.dev; merge release into main, then dispatch again from main"
             while read -r sha; do git log -1 --format='  %h %s' "$sha"; done <<< "$missing"
@@ -352,11 +357,13 @@ jobs:
           echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
           export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/release-tag-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
           remote="git@github.com:$GITHUB_REPOSITORY.git"
-          tagged="$(git ls-remote origin "refs/tags/v$VERSION" | cut -f1)"
+          tagged="$(git ls-remote --exit-code origin "refs/tags/v$VERSION")"
+          tagged="${tagged%%[[:space:]]*}"
           # `identical` or `ahead`: release is the tag, or the tag with docs fixes on it. Only a missing branch (ls-remote's exit 2) counts as missing; any other failure, of ls-remote or of the compare, fails the step rather than move release back, and a re-run is safe. Every answer is about the one tip read here, which the push below names as the one it replaces.
           set +e
-          tip="$(git ls-remote --exit-code --heads origin release | cut -f1)"
+          tip="$(git ls-remote --exit-code --heads origin release)"
           found=$?
+          tip="${tip%%[[:space:]]*}"
           set -e
           case "$found" in
             0) status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$tagged...$tip" --jq .status)" ;;
@@ -372,6 +379,11 @@ jobs:
               git fetch --quiet --unshallow origin "$tagged" ${tip:+"$tip"} 2> /dev/null || git fetch --quiet origin "$tagged" ${tip:+"$tip"}
               git -c advice.detachedHead=false checkout --quiet --detach "$tagged"
               carried=0
+              if [ -n "$tip" ] && [ -n "$(git rev-list --merges "$tagged..$tip")" ]; then
+                echo "::error::release holds a merge commit that v$VERSION lacks, whose own edits can't be carried onto the tag, so release is left as it is: merge v$VERSION into release, push it, and re-run this job, which then finds release holding the tag"
+                git log --merges --format='  %h %s' "$tagged..$tip"
+                exit 1
+              fi
               if [ -n "$tip" ]; then
                 for sha in $(git cherry "$tagged" "$tip" | sed -n 's/^+ //p'); do
                   if ! git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" cherry-pick -x "$sha" > /dev/null; then
