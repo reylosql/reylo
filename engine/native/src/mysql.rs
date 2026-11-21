@@ -38,6 +38,8 @@ struct Connection {
     bridge: Option<String>,
     /// The engine's answers, kept between statements as the loader's session keeps them.
     answers: AnswerCache<Describe>,
+    /// What a session of this connection runs under, set again on a connection that replaces it.
+    setup: Option<String>,
 }
 
 impl Connection {
@@ -49,7 +51,11 @@ impl Connection {
 
     /// The connection opened again where the server dropped it, as the old one is.
     async fn reopen(&mut self) -> Result<(), Value> {
-        self.conn = connect(&self.url, self.bridge.as_deref()).await?.0;
+        let mut conn = connect(&self.url, self.bridge.as_deref()).await?.0;
+        if let Some(setup) = &self.setup {
+            mysql_async::prelude::Queryable::query_drop(&mut conn, setup).await.map_err(|e| json!({ "status": "unreachable", "message": e.to_string() }))?;
+        }
+        self.conn = conn;
         Ok(())
     }
 
@@ -89,7 +95,20 @@ pub struct Session {
 impl Session {
     pub async fn open(url: &str) -> Result<Session, Failure> {
         let (conn, version) = open(url).await?;
-        Ok(Session { connection: Connection { conn, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared() }, version })
+        Ok(Session { connection: Connection { conn, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), setup: None }, version })
+    }
+
+    /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
+    pub fn forget(&mut self) {
+        self.connection.answers.clear();
+    }
+
+    /// Sets the session up for text an editor sends on its own, giving up on a table's lock after `seconds`. A connection that replaces this one is set up the same way. It stays writable, since MySQL refuses to prepare a write in a read-only session, and preparing a statement here runs none of its code.
+    pub async fn for_an_editor(&mut self, seconds: u32) -> Result<(), String> {
+        let setup = format!("set session lock_wait_timeout = {seconds}");
+        mysql_async::prelude::Queryable::query_drop(&mut self.connection.conn, &setup).await.map_err(|e| e.to_string())?;
+        self.connection.setup = Some(setup);
+        Ok(())
     }
 
     pub async fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
@@ -113,7 +132,7 @@ impl Program for Mysql {
                 match connect(url, bridge.as_deref()).await {
                     Ok((conn, version)) => {
                         self.next += 1;
-                        self.connections.insert(self.next, Connection { conn, url: url.to_string(), bridge, answers: AnswerCache::until_cleared() });
+                        self.connections.insert(self.next, Connection { conn, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), setup: None });
                         json!({ "status": "opened", "conn": self.next, "version": version })
                     }
                     Err(failure) => failure,

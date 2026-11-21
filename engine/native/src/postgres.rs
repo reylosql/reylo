@@ -45,6 +45,8 @@ struct Connection {
     /// The session's `DateStyle` as the server reported it when the connection started, from its
     /// role, its database or the server's own setting.
     date_style: String,
+    /// What a session of this connection runs under, set again on a connection that replaces it.
+    setup: Option<String>,
 }
 
 impl Connection {
@@ -53,6 +55,9 @@ impl Connection {
     /// while a request does: that request is answered over the new one.
     async fn reopen(&mut self) -> Result<(), Value> {
         let Started { client, date_style, .. } = connect(&self.url, self.bridge.as_deref()).await?;
+        if let Some(setup) = &self.setup {
+            client.batch_execute(setup).await.map_err(|e| json!({ "status": "unreachable", "message": e.to_string() }))?;
+        }
         (self.client, self.date_style) = (client, date_style);
         Ok(())
     }
@@ -165,7 +170,20 @@ impl Session {
             return Err(Failure::Error(refusal));
         }
         let Started { client, version, date_style } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
-        Ok(Session { connection: Connection { client, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), date_style }, version: server_version(&version) })
+        Ok(Session { connection: Connection { client, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), date_style, setup: None }, version: server_version(&version) })
+    }
+
+    /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
+    pub fn forget(&mut self) {
+        self.connection.answers.clear();
+    }
+
+    /// Sets the session up for text an editor sends on its own: read-only, since parsing a statement can run a type's input function, and giving up on a table's lock after `seconds`. A connection that replaces this one is set up the same way.
+    pub async fn for_an_editor(&mut self, seconds: u32) -> Result<(), String> {
+        let setup = format!("set lock_timeout = '{seconds}s'; set default_transaction_read_only = on");
+        self.connection.client.batch_execute(&setup).await.map_err(|e| e.to_string())?;
+        self.connection.setup = Some(setup);
+        Ok(())
     }
 
     pub async fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
@@ -192,7 +210,7 @@ impl Program for Postgres {
                 match connect(url, bridge.as_deref()).await {
                     Ok(Started { client, version, date_style }) => {
                         self.next += 1;
-                        self.connections.insert(self.next, Connection { client, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), date_style });
+                        self.connections.insert(self.next, Connection { client, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), date_style, setup: None });
                         json!({ "status": "opened", "conn": self.next, "version": server_version(&version) })
                     }
                     Err(failure) => failure,

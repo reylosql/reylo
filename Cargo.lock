@@ -1919,6 +1919,7 @@ dependencies = [
  "reylo-build",
  "reylo-engine",
  "reylo-engine-core",
+ "reylo-engine-syntax",
  "reylo-migrate",
  "serde_json",
  "serde_yaml",

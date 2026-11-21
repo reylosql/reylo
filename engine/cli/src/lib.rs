@@ -25,6 +25,7 @@
 //! runs it.
 
 mod analyze;
+mod lsp;
 mod matched;
 mod yaml;
 
@@ -38,6 +39,9 @@ const USAGE: &str = "Usage: reylo <command>
 
   analyze <paths> [--url]   Print each statement's type descriptor, read from the project's
           [--format]        database, as YAML or, with --format json, one line of JSON each
+  lsp [--dialect <name>] [--allow-url-command]
+                            Serve the language server for .sql files over standard input and
+                            output: diagnostics, hover, completion and go-to-definition
   generate <generator>      Write each .sql file's module for a language: rust-sqlx, the Rust
           [paths] [--out]   of #[reylo::query] (reylo generate --help)
   migrate <command>         Write, check and run migrations, and repair their history
@@ -548,6 +552,7 @@ pub fn main() {
             0
         }
         Some("analyze") => analyze::run(&args[1..]),
+        Some("lsp") => lsp::run(&args[1..]),
         Some("engine") => engine_command(&args[1..]),
         Some("play") => {
             eprintln!("reylo play runs from reylo's npm package, which renders the playground's TypeScript: npx reylo play");
