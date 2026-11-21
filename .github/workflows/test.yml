@@ -64,7 +64,7 @@ jobs:
           # the docs claim.
           everything() {
             echo engine=true
-            echo 'tests=-p reylo-engine-core -p reylo-engine-syntax -p reylo-engine-postgres -p reylo-engine-sqlite -p reylo-engine-mysql -p reylo-engine -p reylo-migrate -p reylo-cli -p reylo-oracle -p reylo-build -p reylo --features reylo/mysql,reylo/sqlite'
+            echo 'tests=-p reylo-engine-core -p reylo-syntax -p reylo-engine-postgres -p reylo-engine-sqlite -p reylo-engine-mysql -p reylo-engine -p reylo-migrate -p reylo-cli -p reylo-oracle -p reylo-build -p reylo --features reylo/mysql,reylo/sqlite'
             echo "shards=[\"postgres\",\"sqlite\",\"mysql-1\",\"mysql-2\",\"mysql-slow\"${1-}]"
             echo playground=true
           }

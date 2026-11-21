@@ -1,9 +1,9 @@
-# reylo-engine-syntax
+# reylo-syntax
 
 Lossless SQL syntax trees. Every byte of the text belongs to a token or to the trivia before one, so a tree prints back what it read, and invalid SQL still has a tree.
 
 ```rust
-use reylo_engine_syntax::{parse, Dialect};
+use reylo_syntax::{parse, Dialect};
 
 let tree = parse(Dialect::Postgres, "select id from users where");
 assert_eq!(tree.print(), "select id from users where");

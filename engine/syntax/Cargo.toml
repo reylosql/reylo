@@ -1,5 +1,5 @@
 [package]
-name = "reylo-engine-syntax"
+name = "reylo-syntax"
 version.workspace = true
 edition = "2021"
 rust-version.workspace = true
@@ -9,7 +9,7 @@ homepage.workspace = true
 description = "Lossless SQL syntax trees for every database Reylo reads, generated from a database's own grammar where its license allows."
 
 [lib]
-name = "reylo_engine_syntax"
+name = "reylo_syntax"
 
 [build-dependencies]
 reylo-engine-build.workspace = true

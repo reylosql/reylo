@@ -93,7 +93,7 @@ pub fn kind_name(dialect: Dialect, kind: u16) -> &'static str {
 
 /// The hash of this crate's sources (`build.rs`), which an engine's fingerprint combines with its own.
 #[doc(hidden)]
-pub const SOURCE_HASH: &str = env!("REYLO_ENGINE_SYNTAX_HASH");
+pub const SOURCE_HASH: &str = env!("REYLO_SYNTAX_HASH");
 
 #[cfg(test)]
 mod tests {

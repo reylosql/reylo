@@ -1292,7 +1292,7 @@ version = "0.8.1"
 dependencies = [
  "reylo-engine-build",
  "reylo-engine-core",
- "reylo-engine-syntax",
+ "reylo-syntax",
  "serde",
  "serde_json",
 ]
@@ -1306,14 +1306,6 @@ dependencies = [
  "reylo-engine-core",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "reylo-engine-syntax"
-version = "0.8.1"
-dependencies = [
- "reylo-engine-build",
- "serde",
 ]
 
 [[package]]
@@ -1332,6 +1324,14 @@ name = "reylo-sqlparser"
 version = "0.63.0"
 dependencies = [
  "log",
+]
+
+[[package]]
+name = "reylo-syntax"
+version = "0.8.1"
+dependencies = [
+ "reylo-engine-build",
+ "serde",
 ]
 
 [[package]]

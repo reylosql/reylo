@@ -1,5 +1,5 @@
 //! Reylo's analysis engine for Postgres, over the core every database shares
-//! ([`reylo_engine_core`]): Postgres's parse tree (`reylo-engine-syntax`), the type
+//! ([`reylo_engine_core`]): Postgres's parse tree (`reylo-syntax`), the type
 //! registry read from `pg_type`, the expression rules ([`infer`]), the row-count proof
 //! ([`cardinality`]), the nested JSON shapes ([`jsonshape`]) and the handshake with a server-side extension
 //! ([`extension`]).
