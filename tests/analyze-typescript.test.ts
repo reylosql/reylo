@@ -38,7 +38,8 @@ function binary(cwd: string, url: string, files: string[]): Promise<Map<string, 
     let out = "";
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => (out += chunk));
     child.on("error", reject);
-    child.on("exit", (status) => {
+    // `close`, not `exit`: the output is whole only once the pipe has drained.
+    child.on("close", (status) => {
       if (status !== 0 && status !== 1) return reject(new Error(`reylo analyze exited with ${status} on ${files[0]}`));
       const printed = new Map<string, string>();
       // Each statement opens with `// <file>`, which no line of a type does, a blank line after the one before.
