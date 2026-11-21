@@ -223,8 +223,12 @@ pub fn parse<'s, A: Actions>(tables: &Tables, text: &'s str, tokens: &[Lexeme], 
     // led to: a default reduction runs without checking the token, so at an error the parser may
     // stand in a state the token never belonged in. A repair starts from here.
     let recovers = actions.recovers();
+    // Only what reductions overwrite is saved, in reverse, with where it starts: the stacks below that are as they were.
     let (mut kept_states, mut kept_trees): (Vec<i32>, Vec<NodeId>) = (Vec::new(), Vec::new());
+    let (mut states_from, mut trees_from) = (0usize, 0usize);
     let mut kept = false;
+    // Deleted tokens on top of the stack, set aside while a reduction runs below them.
+    let mut above: Vec<NodeId> = Vec::new();
     let mut value = None;
     let mut refused = None;
     let mut refused_at = None;
@@ -287,15 +291,18 @@ pub fn parse<'s, A: Actions>(tables: &Tables, text: &'s str, tokens: &[Lexeme], 
             Action::Reduce(rule) => {
                 if recovers && !kept {
                     kept_states.clear();
-                    kept_states.extend_from_slice(&states);
                     kept_trees.clear();
-                    kept_trees.extend_from_slice(&trees);
+                    (states_from, trees_from) = (states.len(), trees.len());
                     kept = true;
                 }
                 let len = tables.r2[rule] as usize;
                 let lhs = tables.r1[rule];
-                // A token a repair deleted sits among the rule's parts, and goes with them.
-                let mut from = trees.len();
+                // A token a repair deleted on top of the stack comes after this rule's parts, and stays above them for the next rule; one among them goes with them.
+                let mut top_end = trees.len();
+                while top_end > 0 && nodes[trees[top_end - 1] as usize].kind == ERROR_KIND {
+                    top_end -= 1;
+                }
+                let mut from = top_end;
                 let mut counted = 0;
                 while counted < len {
                     from -= 1;
@@ -303,14 +310,28 @@ pub fn parse<'s, A: Actions>(tables: &Tables, text: &'s str, tokens: &[Lexeme], 
                         counted += 1;
                     }
                 }
+                if kept {
+                    let low = states.len() - len;
+                    if low < states_from {
+                        kept_states.extend(states[low..states_from].iter().rev());
+                        states_from = low;
+                    }
+                    if from < trees_from {
+                        kept_trees.extend(trees[from..trees_from].iter().rev());
+                        trees_from = from;
+                    }
+                }
                 let first = child_ids.len() as u32;
-                child_ids.extend_from_slice(&trees[from..]);
-                let (start, end) = span(&nodes, &trees[from..], token(p, &inserted).map_or(tail, |l| l.lead));
-                let children = (trees.len() - from) as u32;
+                child_ids.extend_from_slice(&trees[from..top_end]);
+                let (start, end) = span(&nodes, &trees[from..top_end], token(p, &inserted).map_or(tail, |l| l.lead));
+                let children = (top_end - from) as u32;
+                above.clear();
+                above.extend_from_slice(&trees[top_end..]);
                 trees.truncate(from);
                 states.truncate(states.len() - len);
                 nodes.push(Node { kind: lhs as u16, start, end, lead: first, children, leaf: false });
                 trees.push(nodes.len() as NodeId - 1);
+                trees.extend_from_slice(&above);
                 if acting {
                     let at = values.len() - len;
                     // Bison's default for this grammar: where the first part that read anything starts.
@@ -340,8 +361,10 @@ pub fn parse<'s, A: Actions>(tables: &Tables, text: &'s str, tokens: &[Lexeme], 
                 let end_of_text = text.len() as u32;
                 let (from, to) = at.map_or((end_of_text, end_of_text), |l| (l.start, l.end));
                 if kept {
-                    std::mem::swap(&mut states, &mut kept_states);
-                    std::mem::swap(&mut trees, &mut kept_trees);
+                    states.truncate(states_from);
+                    states.extend(kept_states.iter().rev());
+                    trees.truncate(trees_from);
+                    trees.extend(kept_trees.iter().rev());
                     kept = false;
                 }
                 // Past the parse's budget of repairs, an error says what it is and no more.
@@ -378,6 +401,8 @@ pub fn parse<'s, A: Actions>(tables: &Tables, text: &'s str, tokens: &[Lexeme], 
                     continue;
                 }
                 repaired = 0;
+                // A token a repair supplied that the parser never took goes with the repair.
+                inserted = None;
                 let mut held: Vec<NodeId> = std::mem::take(&mut trees);
                 // The statements already read, and the `;` after them, stay as they are.
                 let done = held

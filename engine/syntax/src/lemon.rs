@@ -167,7 +167,11 @@ pub fn parse<'s>(g: &Grammar, text: &'s str, tokens: &[Lexeme], tail: u32) -> Tr
     let (mut repaired, mut repairs) = (0usize, 0usize);
     let top = |stack: &[(u16, NodeId)]| stack.iter().rev().find(|e| e.0 != DELETED).map_or(0, |e| e.0);
     // The stack as it stood when the parser first read the current token, before the reductions it led to: a default reduction runs without checking the token, so a repair starts from here.
+    // Only what reductions overwrite is saved, in reverse, with where it starts: the stack below that is as it was.
     let mut kept: Vec<(u16, NodeId)> = Vec::new();
+    let mut kept_from = 0usize;
+    // Deleted tokens on top of the stack, set aside while a reduction runs below them.
+    let mut above: Vec<(u16, NodeId)> = Vec::new();
     'read: loop {
         let current = inserted.or_else(|| tokens.get(p).copied());
         let sym = current.map_or(0, |l| l.sym);
@@ -184,14 +188,18 @@ pub fn parse<'s>(g: &Grammar, text: &'s str, tokens: &[Lexeme], tail: u32) -> Tr
             if act >= g.min_reduce {
                 if !reduced {
                     kept.clear();
-                    kept.extend_from_slice(&stack);
+                    kept_from = stack.len();
                     reduced = true;
                 }
                 let rule = (act - g.min_reduce) as usize;
                 let len = -(g.rule_nrhs[rule] as i32) as usize;
                 let lhs = g.rule_lhs[rule];
-                // A token a repair deleted sits among the rule's parts, and goes with them.
-                let mut at = stack.len();
+                // A token a repair deleted on top of the stack comes after this rule's parts, and stays above them for the next rule; one among them goes with them.
+                let mut top_end = stack.len();
+                while top_end > 1 && stack[top_end - 1].0 == DELETED {
+                    top_end -= 1;
+                }
+                let mut at = top_end;
                 let mut counted = 0;
                 while counted < len {
                     at -= 1;
@@ -199,10 +207,16 @@ pub fn parse<'s>(g: &Grammar, text: &'s str, tokens: &[Lexeme], tail: u32) -> Tr
                         counted += 1;
                     }
                 }
+                if at < kept_from {
+                    kept.extend(stack[at..kept_from].iter().rev());
+                    kept_from = at;
+                }
                 let first = child_ids.len() as u32;
-                child_ids.extend(stack[at..].iter().map(|e| e.1));
+                child_ids.extend(stack[at..top_end].iter().map(|e| e.1));
                 let (start, end) = span(&nodes, &child_ids[first as usize..], current.map_or(tail, |l| l.lead));
-                let children = (stack.len() - at) as u32;
+                let children = (top_end - at) as u32;
+                above.clear();
+                above.extend_from_slice(&stack[top_end..]);
                 stack.truncate(at);
                 nodes.push(Node { kind: lhs, start, end, lead: first, children, leaf: false });
                 let node = nodes.len() as NodeId - 1;
@@ -211,6 +225,7 @@ pub fn parse<'s>(g: &Grammar, text: &'s str, tokens: &[Lexeme], tail: u32) -> Tr
                 }
                 act = g.reduce_action(top(&stack), lhs);
                 stack.push((act, node));
+                stack.extend_from_slice(&above);
             } else if act <= g.max_shiftreduce && refused.is_none() {
                 let Some(l) = current else { break 'read };
                 nodes.push(Node { kind: l.sym, start: l.start, end: l.end, lead: l.lead, children: 0, leaf: true });
@@ -233,7 +248,8 @@ pub fn parse<'s>(g: &Grammar, text: &'s str, tokens: &[Lexeme], tail: u32) -> Tr
                 let taken = act <= g.max_shiftreduce || act == g.accept;
                 let refusal = refused.take().filter(|_| taken);
                 if reduced && refusal.is_none() {
-                    std::mem::swap(&mut stack, &mut kept);
+                    stack.truncate(kept_from);
+                    stack.extend(kept.iter().rev());
                 }
                 let states: Vec<u16> = stack.iter().map(|e| e.0).filter(|s| *s != DELETED).collect();
                 // Past the parse's budget of 100 errors looked into, an error says what it is and no more.
@@ -260,6 +276,8 @@ pub fn parse<'s>(g: &Grammar, text: &'s str, tokens: &[Lexeme], tail: u32) -> Tr
                     continue 'read;
                 }
                 repaired = 0;
+                // A token a repair supplied that the parser never took goes with the repair.
+                inserted = None;
                 let mut held: Vec<NodeId> = stack.drain(1..).map(|e| e.1).collect();
                 let done = held.iter().take_while(|id| g.complete.contains(&nodes[**id as usize].kind)).count();
                 finished.extend(held.drain(..done));

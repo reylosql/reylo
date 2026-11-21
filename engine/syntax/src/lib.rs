@@ -40,14 +40,16 @@ pub fn statements(dialect: Dialect, tree: &Tree<'_>) -> Vec<(u32, u32)> {
         Dialect::Mysql | Dialect::ClickHouse | Dialect::SqlServer => "statement",
     };
     let mut out: Vec<(u32, u32)> = Vec::new();
+    // Where deleted tokens before the next statement start.
+    let mut pending: Option<u32> = None;
     let mut stack = vec![tree.root];
     while let Some(id) = stack.pop() {
         let n = tree.node(id);
-        // A token a repair deleted after a statement's last part belongs to that statement.
+        // A token a repair deleted belongs to the statement it sits in: the one before it, up to that statement's `;`, else the next.
         if n.kind == ERROR_KIND && n.leaf {
             match out.last_mut() {
-                Some(last) if !tree.text[last.1 as usize..n.start as usize].contains(';') => last.1 = n.end,
-                _ => out.push((n.start, n.end)),
+                Some(last) if !after_end(tree, last.1, n.start) => last.1 = n.end,
+                _ => pending = Some(pending.unwrap_or(n.start)),
             }
             continue;
         }
@@ -62,14 +64,23 @@ pub fn statements(dialect: Dialect, tree: &Tree<'_>) -> Vec<(u32, u32)> {
                 let text = &tree.text[n.start as usize..last.end as usize];
                 let kept = text.trim_end_matches(|c: char| c == ';' || c.is_whitespace()).len() as u32;
                 if kept > 0 {
-                    out.push((n.start, n.start + kept));
+                    out.push((pending.take().unwrap_or(n.start), n.start + kept));
                 }
             }
         } else {
             stack.extend(tree.children(id).iter().rev());
         }
     }
+    if let Some(start) = pending {
+        let end = tree.leaves().map(|l| tree.node(l)).filter(|l| l.kind == ERROR_KIND && l.start >= start).map(|l| l.end).max().unwrap_or(start);
+        out.push((start, end));
+    }
     out
+}
+
+/// Whether a statement end, a leaf whose text is `;`, sits between `from` and `to`.
+fn after_end(tree: &Tree<'_>, from: u32, to: u32) -> bool {
+    tree.leaves().map(|l| tree.node(l)).any(|l| l.start >= from && l.end <= to && &tree.text[l.start as usize..l.end as usize] == ";")
 }
 
 /// The dialect's keywords, as its lexer spells them.
@@ -201,6 +212,30 @@ mod tests {
             // The statement keeps its structure past the error: no stretch of it goes under an error node.
             assert!(!has_error_node(&tree), "{text}");
             assert_eq!(statements(dialect, &tree).len(), text.matches(';').count() + 1, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_repair_stays_in_its_own_statement() {
+        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+            assert_eq!(spans(dialect, "select 1; ) select 2;"), ["select 1", ") select 2"], "{dialect:?}");
+            let text = "select (select 1 limit 1 union select 2; select 3;";
+            let (tree, errors) = repaired(dialect, text);
+            assert_eq!(errors.len(), 1, "{dialect:?}: {errors:?}");
+            assert_eq!(spans(dialect, text).last(), Some(&"select 3"), "{dialect:?}");
+            let last = tree.children(tree.root).last().map(|id| tree.node(*id).kind);
+            assert_ne!(last, Some(ERROR_KIND), "{dialect:?}");
+        }
+    }
+
+    #[test]
+    fn deep_valid_sql_parses_in_linear_time() {
+        for (dialect, depth) in [(Dialect::Sqlite, 64_000), (Dialect::Postgres, 3_000)] {
+            let text = format!("select {}1{}", "(1+".repeat(depth), ")".repeat(depth));
+            let started = std::time::Instant::now();
+            let tree = parse(dialect, &text);
+            assert!(tree.errors.is_empty(), "{dialect:?}");
+            assert!(started.elapsed().as_secs() < 3, "{dialect:?}: {:?}", started.elapsed());
         }
     }
 
