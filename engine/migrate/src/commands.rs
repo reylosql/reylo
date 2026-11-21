@@ -1300,8 +1300,10 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
     shadows.push(fresh, by_name.iter().map(Step::of));
     let names = late.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ");
     let one = late.len() == 1;
-    // Each late migration under a name of now, which sorts after every migration a database ran.
-    let now = time::now_seconds();
+    // Each late migration under a name after every migration's, as `create` names a new one: now,
+    // or past the newest where a migration's time is ahead of the clock. They keep their order.
+    let newest = all.iter().filter_map(|m| m.name.split_once('_').and_then(|(at, _)| time::seconds(at))).max();
+    let now = time::now_seconds().max(newest.map_or(0, |n| n + 1));
     let moves: Vec<String> = late
         .iter()
         .enumerate()
@@ -3542,8 +3544,11 @@ struct Guess {
     new: String,
     /// What else changes: `text → citext`, `adds total`.
     change: String,
-    /// Whether its table is itself one of the guesses, so that dropping that table says it all.
-    in_guessed_table: bool,
+    /// The id of its table where that table is itself one of the guesses, so that dropping that
+    /// table says it all.
+    owner: Option<String>,
+    /// Its id, a table's new one: what a column's `owner` names, however the names are shown.
+    id: String,
     /// Whether it is a table, rather than a column.
     table: bool,
 }
@@ -3551,7 +3556,7 @@ struct Guess {
 /// The refusal for guesses, with what else the migration asks of `--drop`. One guess gets the
 /// command for each reading. Several get a line each, its two flags side by side, and the command
 /// to add the picked flags to, since any mix of the two readings may be the right one.
-fn guess_problem(guesses: &[Guess], drops: &[(String, String)], narrowed: &[(String, String)], outside: &[String], stated: &Choices, asked: &Asked) -> Problem {
+fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], narrowed: &[(String, String, Option<String>)], outside: &[String], stated: &Choices, asked: &Asked) -> Problem {
     let subject = asked.subject;
     let one = guesses.len() == 1;
     let kinds = match (guesses.iter().any(|g| g.table), guesses.iter().any(|g| !g.table)) {
@@ -3568,16 +3573,18 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String)], narrowed: &[(Str
     let guessed = |name: &str| guesses.iter().any(|g| g.old == name);
     // What it drops whichever way each guess goes: not what a renamed table drops, which its
     // change says.
-    let others: Vec<(String, String)> = drops.iter().filter(|(_, n)| !guessed(n) && outside.contains(n)).cloned().collect();
+    let others: Vec<(String, String)> = drops.iter().filter(|(_, n, _)| !guessed(n) && outside.contains(n)).map(|(k, n, _)| (k.clone(), n.clone())).collect();
     if !others.is_empty() {
         problem = problem.lines([String::new()]).note(if others.len() == 1 { format!("It also drops {} and its data.", drop_phrase(&others)) } else { format!("It also drops {}, with their data.", drop_phrase(&others)) });
     } else if !narrowed.is_empty() {
         problem = problem.lines([String::new()]);
     }
-    for (name, why) in narrowed {
+    for (name, why, _) in narrowed {
         problem = problem.note(if guessed(name) { format!("As a rename, {name} {why}.") } else { format!("{name} {why}.") });
     }
-    let more: Vec<String> = drops.iter().map(|(_, n)| n.clone()).chain(narrowed.iter().map(|(n, _)| n.clone())).collect();
+    // Each name --drop may need, with the id of the guessed table it belongs to, if any.
+    let owned: Vec<(String, Option<String>)> = drops.iter().map(|(_, n, o)| (n.clone(), o.clone())).chain(narrowed.iter().map(|(n, _, o)| (n.clone(), o.clone()))).collect();
+    let more: Vec<String> = owned.iter().map(|(n, _)| n.clone()).collect();
     if one {
         let renames: Vec<(String, String)> = guesses.iter().map(|g| (g.old.clone(), g.new.clone())).collect();
         let dropped: Vec<String> = guesses.iter().map(|g| g.old.clone()).chain(outside.iter().cloned()).collect();
@@ -3587,12 +3594,14 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String)], narrowed: &[(Str
     }
     // Each line's flags: a rename takes along what its own reading also asks of --drop, the columns
     // a renamed table drops, and what the rename's change of type loses; a guess within a guessed
-    // table goes with its table's line, which a drop of the table settles.
+    // table goes with its table's line, which a drop of the table settles. Each is matched to its
+    // table by the table's id, since a column's name may be shown without the schema its table's
+    // carries, as under a search_path.
     let mut taken: Vec<String> = Vec::new();
     let mut rows: Vec<(String, String)> = Vec::new();
-    for g in guesses.iter().filter(|g| !g.in_guessed_table) {
-        let within: Vec<&Guess> = guesses.iter().filter(|c| c.in_guessed_table && g.table && c.old.starts_with(&format!("{}.", g.new))).collect();
-        let mine: Vec<String> = more.iter().filter(|n| *n == &g.old || (g.table && n.starts_with(&format!("{}.", g.new))) || within.iter().any(|c| *n == &c.old)).cloned().collect();
+    for g in guesses.iter().filter(|g| g.owner.is_none()) {
+        let within: Vec<&Guess> = guesses.iter().filter(|c| g.table && c.owner.as_deref() == Some(g.id.as_str())).collect();
+        let mine: Vec<String> = owned.iter().filter(|(n, o)| *n == g.old || (g.table && o.as_deref() == Some(g.id.as_str())) || within.iter().any(|c| *n == c.old)).map(|(n, _)| n.clone()).collect();
         let mut keep = vec![format!("--rename {}={}", shell_word(&g.old), shell_word(&g.new))];
         keep.extend(within.iter().map(|c| format!("--rename {}={}", shell_word(&c.old), shell_word(&c.new))));
         let mut lost: Vec<String> = Vec::new();
@@ -3642,12 +3651,12 @@ fn lock_problem(hazards: &[crate::locks::Hazard], asked: &Asked, choices: &Choic
 /// The problems with what `choices` states about the tables and columns a plan drops (`lost`, as
 /// the plan's ids, and `shown`, as the file names them, one for one): each must be named in
 /// `--drop`, and each name in `--drop` must name only what it drops. `guesses`, renames it won't
-/// assume, are settled with them; `guessed_tables` are the new ids of the tables among them, whose
-/// own columns a drop of the table takes along; `added` are the columns and tables the plan adds, the
+/// assume, are settled with them; `owner` gives the new id of the guessed table an id belongs to,
+/// whose own columns a drop of the table takes along; `added` are the columns and tables the plan adds, the
 /// names a person could mean by a rename.
 #[allow(clippy::too_many_arguments)]
-fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owners: &dyn Fn(&str) -> bool, added: &[String], choices: &Choices, asked: &Asked) -> Vec<Problem> {
-    let mut problems = drop_problems_of(lost, shown, narrowed, guesses, owners, added, choices, asked);
+fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, added: &[String], choices: &Choices, asked: &Asked) -> Vec<Problem> {
+    let mut problems = drop_problems_of(lost, shown, narrowed, guesses, owner, added, choices, asked);
     // Where --force can accept them all, the last says so, once nothing but what it accepts is left.
     if asked.offers_force && !problems.is_empty() && problems.iter().all(|p| DESTRUCTIVE.contains(&p.code)) {
         let stated = Choices { drop: vec![], rename: choices.rename.clone(), ..Default::default() };
@@ -3658,7 +3667,7 @@ fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owners: &dyn Fn(&str) -> bool, added: &[String], choices: &Choices, asked: &Asked) -> Vec<Problem> {
+fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, added: &[String], choices: &Choices, asked: &Asked) -> Vec<Problem> {
     let subject = asked.subject;
     let display = |id: &String| lost.iter().position(|l| l == id).map(|k| shown_id(&shown[k])).or_else(|| narrowed.iter().find(|(n, _, _)| n == id).map(|(_, s, _)| shown_id(s))).unwrap_or_else(|| shown_id(id));
     let mut problems = Vec::new();
@@ -3689,9 +3698,9 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
     let unstated: Vec<&String> = lost.iter().filter(|l| !named.contains(l)).collect();
     let unnamed: Vec<(&String, String, String)> = narrowed.iter().filter(|(id, _, _)| !named.contains(id)).map(|(id, shown, why)| (id, shown_id(shown), why.clone())).collect();
     if !guesses.is_empty() {
-        let drops: Vec<(String, String)> = unstated.iter().map(|l| (l.split(' ').next().unwrap_or_default().to_string(), display(l))).collect();
-        let lossy: Vec<(String, String)> = unnamed.iter().map(|(_, name, why)| (name.clone(), why.clone())).collect();
-        let outside: Vec<String> = unstated.iter().copied().chain(unnamed.iter().map(|(id, _, _)| *id)).filter(|id| !owners(id)).map(&display).collect();
+        let drops: Vec<(String, String, Option<String>)> = unstated.iter().map(|l| (l.split(' ').next().unwrap_or_default().to_string(), display(l), owner(l))).collect();
+        let lossy: Vec<(String, String, Option<String>)> = unnamed.iter().map(|(id, name, why)| (name.clone(), why.clone(), owner(id))).collect();
+        let outside: Vec<String> = unstated.iter().copied().chain(unnamed.iter().map(|(id, _, _)| *id)).filter(|id| owner(id).is_none()).map(&display).collect();
         problems.push(guess_problem(guesses, &drops, &lossy, &outside, &stated, asked));
         return problems;
     }
@@ -3803,7 +3812,7 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
     for (old, new, _) in renamed_tables.iter().filter(|(_, _, was_stated)| !was_stated) {
         match crate::diff::column_changes(&current, &target.schema, old, new) {
             Some(change) => {
-                guesses.push(Guess { old: shown_name(old), new: shown_name(new), change, in_guessed_table: false, table: true });
+                guesses.push(Guess { old: shown_name(old), new: shown_name(new), change, owner: None, id: new.clone(), table: true });
                 guessed_tables.insert(new.clone());
             }
             None => assumed.push((shown_name(old), shown_name(new), true)),
@@ -3850,13 +3859,13 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
         let paired: Vec<String> = plan.pairs.iter().map(|p| p.0.clone()).collect();
         style(db, &mut plan, &target.schema).await?;
         let mut narrowed: Vec<(String, String, String)> = narrowing.iter().zip(&plan.narrowings).map(|((id, why), (shown, _))| (id.clone(), shown.clone(), why.clone())).collect();
-        let owned_by_guess = |id: &str| current.objects.get(id).and_then(|o| o.owner.as_ref()).is_some_and(|t| guessed_tables.contains(t));
+        let guess_owner = |id: &str| current.objects.get(id).and_then(|o| o.owner.clone()).filter(|t| guessed_tables.contains(t));
         let mut guesses = guesses;
         let mut assumed = assumed;
         for (raw, (old, new, change)) in guessed.iter().zip(&plan.renames) {
             let old = shown_id(old);
             match change {
-                Some(change) => guesses.push(Guess { old, new: new.clone(), change: change.clone(), in_guessed_table: owned_by_guess(raw), table: false }),
+                Some(change) => guesses.push(Guess { old, new: new.clone(), change: change.clone(), owner: guess_owner(raw), id: raw.clone(), table: false }),
                 None => assumed.push((old, new.clone(), false)),
             }
         }
@@ -3875,14 +3884,14 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
             if let Some(why) = loses {
                 narrowed.push((raw.clone(), old.clone(), why.clone()));
             }
-            guesses.push(Guess { old: shown_id(old), new: new.clone(), change: change.clone(), in_guessed_table: false, table: false });
+            guesses.push(Guess { old: shown_id(old), new: new.clone(), change: change.clone(), owner: None, id: raw.clone(), table: false });
         }
         // Tables first, then columns, each by name.
         guesses.sort_by(|a, b| (!a.table, &a.old).cmp(&(!b.table, &b.old)));
         if let Some(asked) = asked {
             // What the plan adds, the names a person might mean by a rename of what it drops.
             let added: Vec<String> = target.schema.objects.iter().filter(|(id, o)| matches!(o.kind, Some(crate::diff::Kind::Column | crate::diff::Kind::Table)) && !current.objects.contains_key(*id) && !(o.kind == Some(crate::diff::Kind::Column) && o.owner.as_ref().is_some_and(|t| !current.objects.contains_key(t)))).map(|(id, o)| format!("{} {}", if o.kind == Some(crate::diff::Kind::Table) { "table" } else { "column" }, shown_name(id))).collect();
-            let mut problems = drop_problems(&lost, &shown, &narrowed, &guesses, &owned_by_guess, &added, &Choices { drop: columns.drop.clone(), rename: choices.rename.clone(), ..Default::default() }, asked);
+            let mut problems = drop_problems(&lost, &shown, &narrowed, &guesses, &guess_owner, &added, &Choices { drop: columns.drop.clone(), rename: choices.rename.clone(), ..Default::default() }, asked);
             if force {
                 problems.retain(|p| !DESTRUCTIVE.contains(&p.code));
             }

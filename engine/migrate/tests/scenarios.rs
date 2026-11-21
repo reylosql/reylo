@@ -425,6 +425,7 @@ for_each_dialect!(
     status_refuses_a_lock_with_no_checksum_of_schema_sql,
     dev_relocks_an_edited_locked_migration_where_every_pair_agreed,
     without_a_lock_a_late_migration_runs_where_both_orders_agree,
+    without_a_lock_a_late_migration_moves_past_migrations_ahead_of_the_clock,
     without_a_lock_init_sql_still_runs_first,
     status_shows_what_ran_what_is_pending_and_what_changed,
     lock_writes_the_lock_from_what_a_database_ran,
@@ -681,6 +682,25 @@ async fn without_a_lock_a_late_migration_runs_where_both_orders_agree(mut p: P) 
     std::fs::rename(words[1], words[2]).unwrap();
     assert_eq!(p.dev().await, 0, "{}", p.peek());
     assert_eq!(deploy_on(&mut p, &other.url).await, 0, "{}", p.peek());
+}
+
+async fn without_a_lock_a_late_migration_moves_past_migrations_ahead_of_the_clock(mut p: P) {
+    let int = p.t.int;
+    p.strict = true;
+    // Migrations dated ahead of the clock, as a machine with a wrong clock writes them.
+    p.file("20990101000000_a.sql", &format!("create table a (id {int});"));
+    p.file("20990101020000_d.sql", &format!("alter table a add column x {int};"));
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    p.file("20990101010000_e.sql", "create table e as select * from a;");
+    p.output();
+    assert_eq!(p.dev().await, 1);
+    let out = p.output();
+    assert_has!(&out, r"Give it a later name, so that every database runs it after 20990101020000_d\.sql:\n    mv \S+/20990101010000_e\.sql \S+/20990101020001_e\.sql\n");
+    // Renamed as the refusal says, it sorts after what it follows, and runs.
+    let line = out.lines().find(|l| l.trim_start().starts_with("mv ")).unwrap().trim().to_string();
+    let words: Vec<&str> = line.split(' ').collect();
+    std::fs::rename(words[1], words[2]).unwrap();
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
 }
 
 async fn without_a_lock_init_sql_still_runs_first(mut p: P) {
@@ -2821,6 +2841,7 @@ macro_rules! on {
 on!(
     Postgres,
     a_database_search_path_resolves_names_as_the_target_does,
+    a_guess_within_a_guessed_table_keeps_its_line_under_a_search_path,
     a_database_time_zone_does_not_change_defaults,
     grants_compare_without_their_grantor,
     a_migration_that_creates_a_role_is_refused,
@@ -3561,6 +3582,25 @@ mod adversarial {
         p.file("20261027110000_users.sql", "create table users (id int);");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         assert_eq!(p.migrate().await, 0, "a second run must not report drift:\n{}", p.peek());
+    }
+
+    pub async fn a_guess_within_a_guessed_table_keeps_its_line_under_a_search_path(mut p: P) {
+        p.exec(&format!("alter database {} set search_path = a, public", p.name)).await;
+        p.file("20261027100000_orders.sql", "create schema a; create table a.orders (id int, x text, y text, z text, nick varchar(20));");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into a.orders (nick) values ('ada')").await;
+        p.output();
+        p.schema("create schema a; create table a.invoices (id int, x text, y text, z text, handle varchar(40));");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tidy", &Default::default(), log).await).await, 1);
+        let out = p.output();
+        // The column's guess goes on its table's line, however the schema is shown on each.
+        assert_has!(&out, r"\n    --rename a\.orders=a\.invoices --rename \S*nick=handle +or   --drop a\.orders\n  Add the flags you picked to:\n");
+        // Each line's rename, as printed, settles every guess and keeps the rows.
+        let choices = choices_of(&picked(&out, |_| true));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tidy", &choices, log).await).await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("select handle from a.invoices").await[0].text("handle"), "ada");
     }
 
     pub async fn a_database_time_zone_does_not_change_defaults(mut p: P) {
