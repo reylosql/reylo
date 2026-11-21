@@ -42,15 +42,17 @@ pub fn statements(dialect: Dialect, tree: &Tree<'_>) -> Vec<(u32, u32)> {
     let mut out: Vec<(u32, u32)> = Vec::new();
     // Deleted tokens no statement has taken yet: where they start and end.
     let mut pending: Option<(u32, u32)> = None;
+    // Where each written `;` starts, read once, when a deleted token first needs it.
+    let mut ends: Option<Vec<u32>> = None;
     let mut stack = vec![tree.root];
     while let Some(id) = stack.pop() {
         let n = tree.node(id);
         // A token a repair deleted belongs to the statement it sits in: the one before it, up to that statement's `;`, else the next.
         if n.kind == ERROR_KIND && n.leaf {
             match (out.last_mut(), pending) {
-                (Some(last), None) if !after_end(tree, last.1, n.start) => last.1 = n.end,
+                (Some(last), None) if !after_end(tree, &mut ends, last.1, n.start) => last.1 = n.end,
                 // A `;` between them makes the earlier deletions a statement of their own.
-                (_, Some((start, end))) if after_end(tree, end, n.start) => {
+                (_, Some((start, end))) if after_end(tree, &mut ends, end, n.start) => {
                     out.push((start, end));
                     pending = Some((n.start, n.end));
                 }
@@ -71,7 +73,7 @@ pub fn statements(dialect: Dialect, tree: &Tree<'_>) -> Vec<(u32, u32)> {
                 let kept = text.trim_end_matches(|c: char| c == ';' || c.is_whitespace()).len() as u32;
                 if kept > 0 {
                     let start = match pending.take() {
-                        Some((start, end)) if after_end(tree, end, n.start) => {
+                        Some((start, end)) if after_end(tree, &mut ends, end, n.start) => {
                             out.push((start, end));
                             n.start
                         }
@@ -91,9 +93,11 @@ pub fn statements(dialect: Dialect, tree: &Tree<'_>) -> Vec<(u32, u32)> {
     out
 }
 
-/// Whether a statement end, a leaf whose text is `;`, sits between `from` and `to`.
-fn after_end(tree: &Tree<'_>, from: u32, to: u32) -> bool {
-    tree.leaves().map(|l| tree.node(l)).any(|l| l.start >= from && l.end <= to && &tree.text[l.start as usize..l.end as usize] == ";")
+/// Whether a statement end, a leaf whose text is `;`, sits between `from` and `to`. `ends` holds where each starts, in order, once it has been read.
+fn after_end(tree: &Tree<'_>, ends: &mut Option<Vec<u32>>, from: u32, to: u32) -> bool {
+    let ends = ends.get_or_insert_with(|| tree.leaves().map(|l| tree.node(l)).filter(|l| &tree.text[l.start as usize..l.end as usize] == ";").map(|l| l.start).collect());
+    let i = ends.partition_point(|at| *at < from);
+    ends.get(i).is_some_and(|at| *at < to)
 }
 
 /// The dialect's keywords, as its lexer spells them.
