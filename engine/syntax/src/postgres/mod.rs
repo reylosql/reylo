@@ -77,11 +77,23 @@ pub fn parse(sql: &str, _options: i32) -> Result<ParseResult> {
     on_deep_stack(|| parse_at_most(sql, PARSE_DEPTH).map(|protobuf| ParseResult { protobuf }))
 }
 
-/// Runs `f` with room for the deepest tree [`parse`] returns, whatever thread calls it: reading a tree recurses once per level, and a caller may be on a small stack.
 #[cfg(not(target_family = "wasm"))]
-fn on_deep_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+thread_local! {
+    static ON_DEEP_STACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with room for the deepest tree [`parse`] returns, whatever thread calls it. Reading, cloning and dropping a tree each recurse once per level, so a caller that holds a tree does that work inside this.
+#[cfg(not(target_family = "wasm"))]
+pub fn on_deep_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
     const DEEP_STACK: usize = 256 << 20;
-    std::thread::scope(|s| match std::thread::Builder::new().stack_size(DEEP_STACK).spawn_scoped(s, f).expect("a thread for the parser").join() {
+    if ON_DEEP_STACK.with(std::cell::Cell::get) {
+        return f();
+    }
+    let run = move || {
+        ON_DEEP_STACK.with(|on| on.set(true));
+        f()
+    };
+    std::thread::scope(|s| match std::thread::Builder::new().stack_size(DEEP_STACK).spawn_scoped(s, run).expect("a thread for the parser").join() {
         Ok(value) => value,
         Err(panic) => std::panic::resume_unwind(panic),
     })
@@ -89,7 +101,7 @@ fn on_deep_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 
 /// WebAssembly has no threads here: the engine's own stack is the one there is.
 #[cfg(target_family = "wasm")]
-fn on_deep_stack<T>(f: impl FnOnce() -> T) -> T {
+pub fn on_deep_stack<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
@@ -181,9 +193,22 @@ pub fn parse_tree(text: &str) -> Tree<'_> {
         parsed.tree.errors.retain(|o| o.start != e.start);
         parsed.tree.errors.push(e);
     }
-    if parsed.tree.errors.is_empty() {
-        parsed.tree.errors.extend(refusal(text));
+    // Each statement the grammar took, on its own, so that an error in one hides no refusal in another.
+    let spans = crate::statements(crate::Dialect::Postgres, &parsed.tree);
+    let mut refused = Vec::new();
+    for (k, &(start, end)) in spans.iter().enumerate() {
+        if parsed.tree.errors.iter().any(|e| e.start < end && e.end > start) {
+            continue;
+        }
+        let next = spans.get(k + 1).map_or(text.len(), |s| s.0 as usize);
+        if let Some(mut e) = refusal(&text[start as usize..next]) {
+            e.start += start;
+            e.end += start;
+            refused.push(e);
+        }
     }
+    parsed.tree.errors.extend(refused);
+    parsed.tree.errors.sort_by_key(|e| e.start);
     parsed.tree
 }
 
@@ -203,10 +228,10 @@ fn tok_semicolon() -> u16 {
     generated::CHAR_TOKENS[b';' as usize]
 }
 
-/// The grammar's symbol for a list of statements.
-fn statement_list() -> u16 {
-    static LIST: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
-    *LIST.get_or_init(|| (0..u16::MAX).find(|k| kind_name(*k) == "stmtmulti").expect("the grammar names its statement list"))
+/// The grammar's symbols for a list of finished statements.
+fn statement_list() -> &'static [u16] {
+    static LIST: std::sync::OnceLock<[u16; 2]> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| ["stmtmulti", "parse_toplevel"].map(|name| (0..u16::MAX).find(|k| kind_name(*k) == name).expect("the grammar names its statement list")))
 }
 
 /// Postgres's words for a syntax error at a token.

@@ -665,11 +665,14 @@ pub(super) fn read(schema: &Schema, sql: &str, base: &[String]) -> Declared {
     let mut reader = Reader { schema, path: base.to_vec(), base: base.to_vec(), out: Declared::default(), given: BTreeSet::new() };
     reader.keep_existing();
     reader.base = reader.path.clone();
-    if let Ok(parsed) = syntax::postgres::parse(sql, 0) {
-        for raw in &parsed.protobuf.stmts {
-            reader.read(sql, raw);
+    // The tree is read and dropped a level at a time.
+    syntax::postgres::on_deep_stack(|| {
+        if let Ok(parsed) = syntax::postgres::parse(sql, 0) {
+            for raw in &parsed.protobuf.stmts {
+                reader.read(sql, raw);
+            }
         }
-    }
+    });
     reader.out
 }
 

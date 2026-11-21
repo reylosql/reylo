@@ -134,9 +134,9 @@ pub struct Parsed<'s, V> {
 }
 
 /// Parses `tokens`, of `text`, into a tree, running `actions` on each reduction. `separator`, a
-/// statement's end, is where parsing starts over after an error, and `complete` is the symbol that
-/// holds the statements before it.
-pub fn parse<'s, A: Actions>(tables: &Tables, text: &'s str, tokens: &[Lexeme], tail: u32, separator: u16, complete: u16, actions: &mut A) -> Parsed<'s, A::Value> {
+/// statement's end, is where parsing starts over after an error, and `complete` are the symbols
+/// that hold the statements before it.
+pub fn parse<'s, A: Actions>(tables: &Tables, text: &'s str, tokens: &[Lexeme], tail: u32, separator: u16, complete: &[u16], actions: &mut A) -> Parsed<'s, A::Value> {
     let mut nodes: Vec<Node> = Vec::with_capacity(tokens.len() * 3);
     let mut child_ids: Vec<NodeId> = Vec::with_capacity(tokens.len() * 3);
     let mut states: Vec<i32> = Vec::with_capacity(64);
@@ -250,7 +250,7 @@ pub fn parse<'s, A: Actions>(tables: &Tables, text: &'s str, tokens: &[Lexeme], 
                     .iter()
                     .take_while(|id| {
                         let n = &nodes[**id as usize];
-                        n.kind == complete || (n.leaf && n.kind == separator)
+                        complete.contains(&n.kind) || (n.leaf && n.kind == separator)
                     })
                     .count();
                 finished.extend(held.drain(..done));
