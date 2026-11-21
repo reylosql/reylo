@@ -1300,12 +1300,14 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
     shadows.push(fresh, by_name.iter().map(Step::of));
     let names = late.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ");
     let one = late.len() == 1;
-    // Each late migration under a name just after the last one this database ran, in their order,
-    // and before every other migration file: the ones that sort after it still follow them, as the
-    // replay above ran them, a migration an interrupted run already started included, and no name
-    // is one a file has. A project whose names leave no room there gets no command.
-    let last_ran = ran.iter().map(|m| m.name.as_str()).max_by(|a, b| name_order(a).cmp(&name_order(b))).unwrap_or_default();
-    let next = all.iter().map(|m| m.name.as_str()).filter(|n| name_order(n) > last).min_by(|a, b| name_order(a).cmp(&name_order(b)));
+    // Each late migration under a name just after the last migration that isn't pending (what this
+    // database ran, and what a run cut off already applied, which may be what it needs), in their
+    // order, and before the next migration file: the pending ones that sort after it still follow
+    // them, as the replay above ran them, and no name is one a file has. A project whose names
+    // leave no room there gets no command.
+    let done = all.iter().map(|m| m.name.as_str()).filter(|n| !pending.iter().any(|p| p.name == *n));
+    let last_ran = done.max_by(|a, b| name_order(a).cmp(&name_order(b))).unwrap_or_default();
+    let next = all.iter().map(|m| m.name.as_str()).filter(|n| name_order(n) > name_order(last_ran)).min_by(|a, b| name_order(a).cmp(&name_order(b)));
     let floor = last_ran.split_once('_').and_then(|(at, _)| time::seconds(at)).map_or_else(time::now_seconds, |s| s + 1);
     let renamed: Vec<String> = late
         .iter()
@@ -1318,7 +1320,7 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
             format!("{}_{rest}", time::stamp(floor + k as i64))
         })
         .collect();
-    let fits = renamed.iter().all(|n| name_order(n) > last && next.is_none_or(|next| name_order(n) < name_order(next)));
+    let fits = renamed.iter().all(|n| name_order(n) > name_order(last_ran) && next.is_none_or(|next| name_order(n) < name_order(next)));
     let folder = shown(dir);
     let moves: Vec<String> = late.iter().zip(&renamed).map(|(m, n)| format!("mv {} {}", shell_word(&format!("{folder}/{}", m.name)), shell_word(&format!("{folder}/{n}")))).collect();
     let lead = format!("Give {} a later name, so that every database runs {} after {}", if one { "it" } else { "them" }, if one { "it" } else { "them" }, after.join(", "));

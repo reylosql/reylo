@@ -719,13 +719,11 @@ async fn without_a_lock_a_late_migration_is_never_moved_onto_a_migration_a_run_s
     p.exec(&g).await;
     let column = if p.d == Dialect::Mysql { "`sql`" } else { "sql" };
     p.exec(&format!("insert into __reylo_migrations (name, {column}, applied_at) values ('20990101020001_e.sql', '{g}', null)")).await;
-    // A late migration whose name the only free slot would give is told where to go, not moved there.
+    // A late migration of the same name goes after it, which may be what it needs, not onto it.
     p.file("20990101010000_e.sql", "create table e as select * from a;");
     p.output();
     assert_eq!(p.dry_run().await, 1);
-    let out = p.output();
-    assert_has!(&out, r"Give it a name that sorts after 20990101020000_d\.sql and before 20990101020001_e\.sql, so that every database runs it after 20990101020000_d\.sql\.");
-    assert!(!out.contains("mv "), "{out}");
+    assert_has!(p.output(), r"\n    mv \S+/20990101010000_e\.sql \S+/20990101020002_e\.sql(\n|$)");
 }
 
 async fn without_a_lock_init_sql_still_runs_first(mut p: P) {
