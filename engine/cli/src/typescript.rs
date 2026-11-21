@@ -44,7 +44,7 @@ pub fn printed(analysis: &Value, dialect: &str, codecs: &Value, allow_nested_arr
     let types = module_types(analysis, dialect, codecs, allow_nested_arrays && dialect == "postgres");
     Printed {
         params: (types.params != "Record<never, never>").then(|| format_type(&types.params, WIDTH)),
-        returns: format_type(&if types.row == "unknown" { "unknown".to_string() } else { result_type(&types.row, &types.cardinality) }, WIDTH),
+        returns: format_type(&if types.analyzed { result_type(&types.row, &types.cardinality) } else { "unknown".to_string() }, WIDTH),
     }
 }
 
@@ -1033,6 +1033,9 @@ struct ModuleTypes {
     params: String,
     row: String,
     cardinality: String,
+    /// Whether the engine analyzed the statement: a row of `unknown` is then the element of its
+    /// cardinality, as for a column of no name whose type is unknown, and otherwise the whole result.
+    analyzed: bool,
 }
 
 /// The fence a Markdown text opens and never closes.
@@ -1120,7 +1123,7 @@ fn module_types(written: &Value, dialect: &str, codecs: &Value, allow_nested_arr
     .to_string();
     let refused = items(&written["diagnostics"]).iter().any(|d| d["code"].as_u64() == Some(REFUSED));
     if refused || dialect == "postgres" && written.get("kind").is_none_or(Value::is_null) {
-        return ModuleTypes { params: "unknown".into(), row: "unknown".into(), cardinality };
+        return ModuleTypes { params: "unknown".into(), row: "unknown".into(), cardinality, analyzed: false };
     }
     let column_types: Vec<(String, Option<&str>)> = last_of_each_name(&columns)
         .into_iter()
@@ -1157,7 +1160,7 @@ fn module_types(written: &Value, dialect: &str, codecs: &Value, allow_nested_arr
     } else {
         object_type(&column_types)
     };
-    ModuleTypes { params: if param_types.is_empty() { "Record<never, never>".into() } else { object_type(&param_types) }, row, cardinality }
+    ModuleTypes { params: if param_types.is_empty() { "Record<never, never>".into() } else { object_type(&param_types) }, row, cardinality, analyzed: true }
 }
 
 fn with_type(slot: &Value, ty: Value) -> Value {

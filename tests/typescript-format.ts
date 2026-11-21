@@ -17,9 +17,13 @@ function laidOut(type: string): string {
   }
 }
 
-/** The declarations of a statement's Params, Row and cardinality, as its module declares them. */
+/**
+ * The declarations of a statement's Params, Row and cardinality, as its module declares them. A
+ * statement the engine could not analyze has Params of `unknown`, which no analyzed one has, and
+ * resolves to `unknown`; an analyzed one's Row is the element of its cardinality, `unknown` too.
+ */
 export function typescriptText(params: string, row: string, cardinality: string): string {
-  const returns = laidOut(row === "unknown" ? "unknown" : resultType(row, cardinality));
+  const returns = laidOut(params === "unknown" ? "unknown" : resultType(row, cardinality));
   return `${params === "Record<never, never>" ? "" : `type Params = ${laidOut(params)};\n`}type Returns = ${returns};\n`;
 }
 

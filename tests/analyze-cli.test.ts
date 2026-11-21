@@ -129,6 +129,11 @@ test("analyze prints each statement's parameters and what .run() resolves to wit
   const coded = spawnSync(nativeBinary(), ["analyze", "--format", "typescript", "--sql", "select body, at from docs"], { cwd: root, env: inherited(), encoding: "utf8" });
   assert.equal(coded.status, 0, coded.stderr);
   assert.equal(coded.stdout, "type Returns = { body: string; at: Temporal.PlainDateTime }[];\n");
+  // A column of no name and no type is still a result of its cardinality, as .run() resolves it.
+  new DatabaseSync(join(root, "app.db")).exec("create table anys (v any) strict");
+  const value = spawnSync(nativeBinary(), ["analyze", "--format", "typescript", "--sql", "select coalesce(v, 0) from anys"], { cwd: root, env: inherited(), encoding: "utf8" });
+  assert.equal(value.status, 0, value.stderr);
+  assert.equal(value.stdout, "type Returns = unknown[];\n");
 });
 
 test("analyze prints each statement's Rust module for sqlx with --format rust", () => {
