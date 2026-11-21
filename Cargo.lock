@@ -1920,7 +1920,7 @@ dependencies = [
  "reylo-engine",
  "reylo-engine-core",
  "reylo-migrate",
- "reylo-syntax",
+ "reylo-sql",
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
@@ -1982,7 +1982,7 @@ version = "0.8.1"
 dependencies = [
  "reylo-engine-build",
  "reylo-engine-core",
- "reylo-syntax",
+ "reylo-sql",
  "serde",
  "serde_json",
 ]
@@ -2018,7 +2018,7 @@ dependencies = [
  "mysql_async",
  "regex",
  "reylo-engine",
- "reylo-syntax",
+ "reylo-sql",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2048,18 +2048,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "reylo-sqlparser"
-version = "0.63.0"
-dependencies = [
- "log",
-]
-
-[[package]]
-name = "reylo-syntax"
+name = "reylo-sql"
 version = "0.8.1"
 dependencies = [
  "reylo-engine-build",
  "serde",
+]
+
+[[package]]
+name = "reylo-sqlparser"
+version = "0.63.0"
+dependencies = [
+ "log",
 ]
 
 [[package]]

@@ -25,7 +25,7 @@ cli = ["dep:reylo-engine", "dep:syntax", "dep:rusqlite", "dep:tokio-postgres", "
 
 [dependencies]
 reylo-engine = { workspace = true, features = ["postgres", "mysql", "sqlite"], optional = true }
-# Postgres 18's parser (`reylo-syntax`), which reads `schema.sql` for the text each object
+# Postgres 18's parser (`reylo-sql`), which reads `schema.sql` for the text each object
 # was declared with.
 syntax = { workspace = true, optional = true }
 regex = "1"

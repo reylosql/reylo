@@ -1292,7 +1292,7 @@ version = "0.8.1"
 dependencies = [
  "reylo-engine-build",
  "reylo-engine-core",
- "reylo-syntax",
+ "reylo-sql",
  "serde",
  "serde_json",
 ]
@@ -1327,7 +1327,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "reylo-syntax"
+name = "reylo-sql"
 version = "0.8.1"
 dependencies = [
  "reylo-engine-build",
