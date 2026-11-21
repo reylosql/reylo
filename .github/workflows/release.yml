@@ -66,13 +66,21 @@ jobs:
           git fetch -q "$url" "$GITHUB_SHA" +refs/heads/release:refs/remotes/origin/release
           version="$(git show "$GITHUB_SHA:package.json" | jq -r .version)"
           case "$version" in *-*) echo "$version is a prerelease, which leaves release as it is"; exit 0 ;; esac
-          missing="$(git cherry "$GITHUB_SHA" refs/remotes/origin/release | sed -n 's/^+ //p')"
+          # A version already tagged (a dispatch that rewrites its notes) keeps its tag, which `finish` moves release to; one release already holds is left as it is.
+          target="$(git ls-remote "$url" "refs/tags/v$version" | cut -f1)"
+          if [ -n "$target" ]; then
+            git fetch -q "$url" "$target"
+            if git merge-base --is-ancestor "$target" refs/remotes/origin/release; then echo "release already holds v$version, and is left as it is"; exit 0; fi
+          else
+            target="$GITHUB_SHA"
+          fi
+          missing="$(git cherry "$target" refs/remotes/origin/release | sed -n 's/^+ //p')"
           if [ -n "$missing" ]; then
-            echo "::error::release holds changes this commit lacks, which moving it to the new tag would take off reylo.dev; merge release into main, then dispatch again from main"
+            echo "::error::release holds changes $target lacks, which moving it to v$version would take off reylo.dev; merge release into main, then dispatch again from main"
             while read -r sha; do git log -1 --format='  %h %s' "$sha"; done <<< "$missing"
             exit 1
           fi
-          echo "every change on release is in $GITHUB_SHA"
+          echo "every change on release is in $target"
 
   test:
     needs: preflight
@@ -345,14 +353,14 @@ jobs:
           export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/release-tag-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
           remote="git@github.com:$GITHUB_REPOSITORY.git"
           tagged="$(git ls-remote origin "refs/tags/v$VERSION" | cut -f1)"
-          # `identical` or `ahead`: release is the tag, or the tag with docs fixes on it. Only a missing branch (ls-remote's exit 2) counts as missing; any other failure, of ls-remote or of the compare, fails the step rather than move release back, and a re-run is safe.
+          # `identical` or `ahead`: release is the tag, or the tag with docs fixes on it. Only a missing branch (ls-remote's exit 2) counts as missing; any other failure, of ls-remote or of the compare, fails the step rather than move release back, and a re-run is safe. Every answer is about the one tip read here, which the push below names as the one it replaces.
           set +e
-          git ls-remote --exit-code --heads origin release > /dev/null
+          tip="$(git ls-remote --exit-code --heads origin release | cut -f1)"
           found=$?
           set -e
           case "$found" in
-            0) status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$tagged...release" --jq .status)" ;;
-            2) status=missing ;;
+            0) status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$tagged...$tip" --jq .status)" ;;
+            2) status=missing; tip="" ;;
             *) echo "::error::could not read whether release exists (git ls-remote exited $found)"; exit 1 ;;
           esac
           case "$status" in
@@ -360,9 +368,22 @@ jobs:
               echo "release already holds v$VERSION ($status), and is left as it is"
               ;;
             *)
-              git cat-file -e "$tagged^{commit}" 2> /dev/null || git fetch --quiet --depth=1 origin "$tagged"
-              git push --force "$remote" "$tagged:refs/heads/release"
-              echo "release moved to v$VERSION ($tagged) from $status"
+              # A docs fix made on release while this run waited for its approval is in neither the tag nor the preflight's check, so it is carried onto the tag, in its order, rather than dropped from reylo.dev; preflight asks for it on main before the next release. A fix that no longer applies to the tag stops the step, naming it. The lease replaces only the tip read above, so a fix pushed meanwhile stops the push, and a re-run reads it.
+              git fetch --quiet --unshallow origin "$tagged" ${tip:+"$tip"} 2> /dev/null || git fetch --quiet origin "$tagged" ${tip:+"$tip"}
+              git -c advice.detachedHead=false checkout --quiet --detach "$tagged"
+              carried=0
+              if [ -n "$tip" ]; then
+                for sha in $(git cherry "$tagged" "$tip" | sed -n 's/^+ //p'); do
+                  if ! git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" cherry-pick -x "$sha" > /dev/null; then
+                    git cherry-pick --abort
+                    echo "::error::$(git log -1 --format='%h %s' "$sha"), on release and not in v$VERSION, no longer applies to the tag; apply it to release by hand after the move, then re-run this job"
+                    exit 1
+                  fi
+                  carried=$((carried + 1))
+                done
+              fi
+              git push --force-with-lease="refs/heads/release:$tip" "$remote" "HEAD:refs/heads/release"
+              echo "release moved to v$VERSION ($tagged) from $status, with $carried docs fix(es) carried onto it"
               ;;
           esac
 
