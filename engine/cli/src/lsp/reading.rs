@@ -411,8 +411,9 @@ pub fn output_column(toks: &[Tok<'_>], at: usize) -> Option<usize> {
 #[derive(Clone, Copy)]
 struct Frame {
     query: usize,
-    /// The query it opened in, which a set operation's later sides leave.
+    /// The query it opened in, which holds an INSERT's target while the query reads its rows.
     first: usize,
+    inserting: bool,
     /// Whether it reads a query's clauses, and isn't a function's arguments.
     reads: bool,
     in_from: bool,
@@ -470,7 +471,7 @@ fn source(dialect: Dialect, toks: &[Tok<'_>], mut at: usize) -> (Option<Source>,
 pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
     let mut queries = vec![Query::default()];
     let mut of_token = Vec::with_capacity(toks.len());
-    let mut frames = vec![Frame { query: 0, first: 0, reads: true, in_from: false, selected: false }];
+    let mut frames = vec![Frame { query: 0, first: 0, inserting: false, reads: true, in_from: false, selected: false }];
     let creates = toks.first().is_some_and(|t| t.is("CREATE"));
     for i in 0..toks.len() {
         let t = toks[i];
@@ -480,12 +481,12 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
             let next = toks.get(i + 1);
             if next.is_some_and(|n| n.is_any(&["SELECT", "WITH", "VALUES"])) {
                 queries.push(Query { parent: Some(top.query), ..Query::default() });
-                frames.push(Frame { query: queries.len() - 1, first: queries.len() - 1, reads: true, in_from: false, selected: false });
+                frames.push(Frame { query: queries.len() - 1, first: queries.len() - 1, inserting: false, reads: true, in_from: false, selected: false });
             } else if top.reads && top.in_from && i > 0 && (toks[i - 1].is_any(&["FROM", "JOIN"]) || toks[i - 1].is_punct(",") || toks[i - 1].is_punct("(")) {
                 // `from (a join b on …)`: the same query's FROM list, in parentheses.
                 let (found, _) = source(dialect, toks, i + 1);
                 queries[top.query].sources.extend(found);
-                frames.push(Frame { query: top.query, first: top.first, reads: true, in_from: true, selected: true });
+                frames.push(Frame { query: top.query, first: top.first, inserting: false, reads: true, in_from: true, selected: true });
             } else {
                 frames.push(Frame { reads: false, in_from: false, ..top });
             }
@@ -519,8 +520,12 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
         if before.is_some_and(|b| b.is_punct(".")) && !(t.is("FROM") && toks.get(i + 1).is_some_and(|n| n.is_punct("(") || (n.is_name() && !n.is("FROM")))) {
             continue;
         }
-        // What follows an INSERT's rows is the INSERT's again, whichever side of a set operation they ended on.
-        if t.is("RETURNING") || (t.is("ON") && toks.get(i + 1).is_some_and(|n| n.is_any(&["CONFLICT", "DUPLICATE"]))) {
+        if t.is("INSERT") {
+            frame.inserting = true;
+        }
+        // What follows an INSERT's rows is the INSERT's again, whichever query read them.
+        let upsert = t.is("ON") && (toks.get(i + 1).is_some_and(|n| n.is("DUPLICATE")) || (toks.get(i + 1).is_some_and(|n| n.is("CONFLICT")) && toks.get(i + 2).is_some_and(|n| n.is_punct("(") || n.is("ON") || n.is("DO"))));
+        if frame.inserting && (t.is("RETURNING") || upsert) {
             frame.query = frame.first;
         }
         if t.is("WITH") {
@@ -545,6 +550,10 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
                 queries[frame.query].sources.extend(found);
             }
         } else if t.is("SELECT") {
+            // The rows of an INSERT are a query of their own, which doesn't see its target.
+            if frame.inserting && frame.query == frame.first {
+                next_side(&mut queries, frame);
+            }
             frame.selected = true;
             frame.in_from = false;
         } else if t.is("UPDATE") {
@@ -554,12 +563,7 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
                 queries[frame.query].sources.extend(found);
             }
         } else if t.is_any(&["UNION", "INTERSECT", "EXCEPT"]) && !before.is_some_and(|b| b.is_punct("*")) {
-            // Each side of a set operation has a FROM list of its own and sees the same WITH queries.
-            let (parent, ctes) = (queries[frame.query].parent, queries[frame.query].ctes.clone());
-            queries.push(Query { parent, sources: Vec::new(), ctes });
-            frame.query = queries.len() - 1;
-            frame.in_from = false;
-            frame.selected = false;
+            next_side(&mut queries, frame);
         } else if t.is_any(ENDS_FROM) {
             frame.in_from = false;
         } else if t.is("INTO") {
@@ -573,6 +577,15 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
         }
     }
     Scopes { queries, of_token }
+}
+
+/// Moves a frame to a query beside its own, with a FROM list of its own and the same WITH queries, as each side of a set operation has.
+fn next_side(queries: &mut Vec<Query>, frame: &mut Frame) {
+    let (parent, ctes) = (queries[frame.query].parent, queries[frame.query].ctes.clone());
+    queries.push(Query { parent, sources: Vec::new(), ctes });
+    frame.query = queries.len() - 1;
+    frame.in_from = false;
+    frame.selected = false;
 }
 
 fn read_ctes(dialect: Dialect, toks: &[Tok<'_>], with: usize, query: &mut Query) {
@@ -727,6 +740,18 @@ mod tests {
         assert_eq!(s.source(last, "u").map(|x| x.name.as_str()), Some("posts"));
         assert_eq!(s.source(12, "u").map(|x| x.name.as_str()), Some("users"));
         assert!(s.cte(last, "c").is_some());
+
+        // An alias named `conflict` is no upsert.
+        let s = read(Dialect::Postgres, "select u.id from users u union all select u.id from posts u join users conflict on conflict.id = u.id");
+        assert_eq!(s.source(s.of_token.len() - 1, "u").map(|x| x.name.as_str()), Some("posts"));
+
+        // RETURNING sees the INSERT's target, and none of the sources of the rows.
+        let s = read(Dialect::Postgres, "insert into users as u (id) select p.id from posts p union all select 2 returning id");
+        let last = s.of_token.len() - 1;
+        assert_eq!(s.source(last, "u").map(|x| x.name.as_str()), Some("users"));
+        assert!(s.source(last, "p").is_none());
+        let s = read(Dialect::Postgres, "insert into users (id) select p.id from posts p on conflict (id) do nothing returning id");
+        assert!(s.source(s.of_token.len() - 1, "p").is_none());
     }
 
     #[test]
