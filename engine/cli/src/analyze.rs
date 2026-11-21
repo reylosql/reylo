@@ -62,7 +62,10 @@ struct Settings {
 
 /// One statement to analyze, and the file it was read from.
 struct Input {
+    /// The file as messages and the output name it.
     file: Option<String>,
+    /// The file on disk, whose Rust crate its module is for.
+    path: Option<PathBuf>,
     sql: String,
 }
 
@@ -163,7 +166,7 @@ pub fn run(args: &[String]) -> i32 {
     if let Some(notice) = project.notice() {
         eprintln!("reylo analyze: {notice}");
     }
-    let mut inputs: Vec<Input> = sql.map(|sql| Input { file: None, sql }).into_iter().collect();
+    let mut inputs: Vec<Input> = sql.map(|sql| Input { file: None, path: None, sql }).into_iter().collect();
     for path in &paths {
         match read_inputs(path, &cwd) {
             Ok(found) => inputs.extend(found),
@@ -327,8 +330,8 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
                 };
                 // The crate a file is in names the types its module may use, as for `reylo generate`;
                 // a statement of no file takes the working directory's.
-                let dir = input.file.as_deref().map(|file| settings.cwd.join(file)).and_then(|path| path.parent().map(Path::to_path_buf)).unwrap_or_else(|| settings.cwd.clone());
-                let options = reylo_build::generate::options_for(&dir, &mut crates);
+                let dir = input.path.as_deref().and_then(Path::parent).unwrap_or(&settings.cwd);
+                let options = reylo_build::generate::options_for(dir, &mut crates);
                 match reylo_build::generate::module_text(rust_dialect, options, analysis) {
                     Ok(module) => {
                         if gap {
@@ -412,13 +415,13 @@ fn read_inputs(path: &str, cwd: &Path) -> Result<Vec<Input>, String> {
     if path == "-" {
         let mut sql = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut sql).map_err(|e| format!("cannot read standard input: {e}"))?;
-        return Ok(vec![Input { file: None, sql }]);
+        return Ok(vec![Input { file: None, path: None, sql }]);
     }
     reylo_build::files::sql_files(path, cwd)?
         .into_iter()
         .map(|file| {
             let sql = std::fs::read_to_string(&file).map_err(|e| format!("cannot read {}: {e}", shown(cwd, &file)))?;
-            Ok(Input { file: Some(shown(cwd, &file)), sql })
+            Ok(Input { file: Some(shown(cwd, &file)), path: Some(cwd.join(&file)), sql })
         })
         .collect()
 }
