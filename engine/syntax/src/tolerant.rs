@@ -21,8 +21,6 @@ pub const DOT: u16 = 14;
 pub const SEMI: u16 = 15;
 pub const ILLEGAL: u16 = 16;
 const SPACE: u16 = 17;
-/// The first version number of a conditional comment that no MySQL release reaches.
-const NO_RELEASE: u32 = 99_000;
 /// `/*!50003` or the `*/` that closes it: MySQL runs the text between them as SQL.
 pub const CONDITIONAL: u16 = 18;
 
@@ -39,15 +37,15 @@ pub fn kind_name(kind: u16) -> &'static str {
 /// Which database's lexical rules to read with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flavor {
-    /// `backslash_escapes` is off under `NO_BACKSLASH_ESCAPES`, and `ansi_quotes` makes `"` quote an identifier.
-    Mysql { backslash_escapes: bool, ansi_quotes: bool },
+    /// `backslash_escapes` is off under `NO_BACKSLASH_ESCAPES`, and `ansi_quotes` makes `"` quote an identifier. `version` is the server's, as `80400`, which decides the `/*!80400 … */` comments it runs.
+    Mysql { backslash_escapes: bool, ansi_quotes: bool, version: u32 },
     ClickHouse,
     SqlServer,
 }
 
 impl Flavor {
-    /// MySQL under its default `sql_mode`.
-    pub const MYSQL: Flavor = Flavor::Mysql { backslash_escapes: true, ansi_quotes: false };
+    /// MySQL 8.4 under its default `sql_mode`.
+    pub const MYSQL: Flavor = Flavor::Mysql { backslash_escapes: true, ansi_quotes: false, version: 80400 };
 }
 
 /// The words that open a clause, in capitals and sorted, for every flavor.
@@ -288,7 +286,7 @@ fn token<'z>(flavor: Flavor, z: &'z [u8], at: usize, ahead: &mut Ahead<'z>) -> (
         _ => {}
     }
     match flavor {
-        Flavor::Mysql { backslash_escapes, ansi_quotes } => match c {
+        Flavor::Mysql { backslash_escapes, ansi_quotes, .. } => match c {
             // `--` opens a comment only before whitespace or a control character.
             b'-' if next == b'-' && z.get(at + 2).is_none_or(|d| *d <= b' ') => line_comment(z, at),
             b'#' => line_comment(z, at),
@@ -386,7 +384,7 @@ fn lexemes(flavor: Flavor, text: &str) -> (Vec<Lexeme>, u32) {
     // Inside `/*! … */`, whose text MySQL runs as SQL: the markers are trivia, and what's between them tokens.
     let mut conditional = false;
     while at < z.len() {
-        if matches!(flavor, Flavor::Mysql { .. }) {
+        if let Flavor::Mysql { version, .. } = flavor {
             if conditional && z[at..].starts_with(b"*/") {
                 conditional = false;
                 out.push(Lexeme { kind: CONDITIONAL, lead: lead as u32, start: at as u32, end: at as u32 + 2 });
@@ -394,11 +392,15 @@ fn lexemes(flavor: Flavor, text: &str) -> (Vec<Lexeme>, u32) {
                 lead = at;
                 continue;
             }
-            if !conditional && z[at..].starts_with(b"/*!") && z[at..].windows(2).any(|w| w == b"*/") {
-                let digits = z[at + 3..].iter().take_while(|c| c.is_ascii_digit()).count();
-                let version = text[at + 3..at + 3 + digits].parse::<u32>().unwrap_or(0);
-                // A version past any release, as `/*!99999`, is how a script writes a comment no server runs.
-                if version < NO_RELEASE {
+            if !conditional && z[at..].starts_with(b"/*!") {
+                let (digits, wanted) = comment_version(&z[at + 3..]);
+                if wanted > version {
+                    // A comment this server skips, which may hold one comment inside it.
+                    if let Some(end) = skipped_comment(z, at + 3 + digits) {
+                        at = end;
+                        continue;
+                    }
+                } else if z[at..].windows(2).any(|w| w == b"*/") {
                     conditional = true;
                     let start = at;
                     at += 3 + digits;
@@ -438,6 +440,41 @@ fn lexemes(flavor: Flavor, text: &str) -> (Vec<Lexeme>, u32) {
         lead = at;
     }
     (out, lead as u32)
+}
+
+/// The version a conditional comment opens with, and how many digits it takes: six where whitespace follows them, else the first five, and none with fewer.
+fn comment_version(rest: &[u8]) -> (usize, u32) {
+    let run = rest.iter().take_while(|c| c.is_ascii_digit()).count();
+    let digits = if run == 6 && rest.get(6).copied().is_some_and(is_space) {
+        6
+    } else if run >= 5 {
+        5
+    } else {
+        return (0, 0);
+    };
+    (digits, rest[..digits].iter().fold(0, |v, c| v * 10 + (c - b'0') as u32))
+}
+
+/// Where a conditional comment the server skips ends, past one comment nested in it.
+fn skipped_comment(z: &[u8], from: usize) -> Option<usize> {
+    let (mut i, mut depth) = (from, 1);
+    while i + 1 < z.len() {
+        match &z[i..i + 2] {
+            b"/*" if depth == 1 => {
+                depth = 2;
+                i += 2;
+            }
+            b"*/" => {
+                depth -= 1;
+                i += 2;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// The length of `GO` and its count, SQL Server's batch separator, where they stand alone on their line. Each scan stops at the first thing that rules it out, so a long line of words stays linear.
@@ -636,7 +673,7 @@ fn is_batch_end(flavor: Flavor, text: &str, l: &Lexeme) -> bool {
 mod tests {
     use super::*;
 
-    const ALL: [Flavor; 4] = [Flavor::MYSQL, Flavor::Mysql { backslash_escapes: false, ansi_quotes: true }, Flavor::ClickHouse, Flavor::SqlServer];
+    const ALL: [Flavor; 4] = [Flavor::MYSQL, Flavor::Mysql { backslash_escapes: false, ansi_quotes: true, version: 80400 }, Flavor::ClickHouse, Flavor::SqlServer];
 
     fn statements(flavor: Flavor, text: &str) -> usize {
         let t = parse(flavor, text);
@@ -675,7 +712,7 @@ mod tests {
     #[test]
     fn reads_each_dialects_quotes() {
         assert!(parse(Flavor::MYSQL, r"select 'it\'s'").errors.is_empty());
-        assert!(!parse(Flavor::Mysql { backslash_escapes: false, ansi_quotes: false }, r"select 'it\'s'").errors.is_empty());
+        assert!(!parse(Flavor::Mysql { backslash_escapes: false, ansi_quotes: false, version: 80400 }, r"select 'it\'s'").errors.is_empty());
         assert!(parse(Flavor::SqlServer, "select [a]]b], N'c''d' /* x /* y */ z */").errors.is_empty());
         assert!(parse(Flavor::ClickHouse, r"select 'a\'b', `c`, 1::Int8").errors.is_empty());
         assert_eq!(statements(Flavor::MYSQL, "select 1 --2; select 3"), 2);
@@ -691,6 +728,22 @@ mod tests {
             assert_eq!(parse(flavor, &text).print(), text);
             assert!(started.elapsed().as_secs() < 2, "{flavor:?}");
         }
+    }
+
+    #[test]
+    fn runs_a_conditional_comment_as_the_servers_version_does() {
+        fn spans(flavor: Flavor, text: &str) -> Vec<&str> {
+            let tree = parse(flavor, text);
+            crate::statements(crate::Dialect::Mysql, &tree).iter().map(|&(start, end)| &text[start as usize..end as usize]).collect()
+        }
+        let newer = Flavor::Mysql { backslash_escapes: true, ansi_quotes: false, version: 260700 };
+        // Six digits count only before whitespace: otherwise the sixth is SQL.
+        assert_eq!(spans(Flavor::MYSQL, "SELECT /*!800000+1 */;"), ["SELECT /*!800000+1 */"]);
+        assert_eq!(spans(Flavor::MYSQL, "/*!99999 /* note */ */ SELECT 2;"), ["SELECT 2"]);
+        assert_eq!(spans(Flavor::MYSQL, "SELECT /*!260700 1 */;"), ["SELECT"]);
+        assert_eq!(spans(newer, "SELECT /*!260700 1 */;"), ["SELECT /*!260700 1 */"]);
+        assert_eq!(spans(Flavor::MYSQL, "CREATE PROCEDURE p() BEGIN SELECT 1; END /*!99999 IF */; SELECT 3;"), ["CREATE PROCEDURE p() BEGIN SELECT 1; END", "SELECT 3"]);
+        assert_eq!(spans(Flavor::MYSQL, "CREATE PROCEDURE p() BEGIN IF 1 THEN SELECT 1; END /*!80000 IF */; END; SELECT 3;").len(), 2);
     }
 
     #[test]

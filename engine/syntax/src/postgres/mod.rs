@@ -193,26 +193,20 @@ pub fn parse_tree(text: &str) -> Tree<'_> {
         parsed.tree.errors.retain(|o| o.start != e.start);
         parsed.tree.errors.push(e);
     }
-    // Each statement the grammar took, on its own, so that an error in one hides no refusal in another.
+    // Each statement on its own, so that an error in one hides no refusal in another. Its actions run up to its first syntax error, so a refusal found here is one Postgres reaches first, and it sorts ahead of a syntax error at the same token.
     let spans = crate::statements(crate::Dialect::Postgres, &parsed.tree);
-    let mut refused = Vec::new();
-    let mut failed: Vec<(u32, u32)> = parsed.tree.errors.iter().map(|e| (e.start, e.end)).collect();
-    failed.sort_unstable();
-    for (k, &(start, end)) in spans.iter().enumerate() {
-        // The errors are in text order, and none overlaps another: the first that ends past this statement's start is the only one that can be in it.
-        let next_error = failed.partition_point(|e| e.1 <= start);
-        if failed.get(next_error).is_some_and(|e| e.0 < end) {
-            continue;
-        }
+    let mut errors = Vec::new();
+    for (k, &(start, _)) in spans.iter().enumerate() {
         let next = spans.get(k + 1).map_or(text.len(), |s| s.0 as usize);
         if let Some(mut e) = refusal(&text[start as usize..next]) {
             e.start += start;
             e.end += start;
-            refused.push(e);
+            errors.push(e);
         }
     }
-    parsed.tree.errors.extend(refused);
-    parsed.tree.errors.sort_by_key(|e| e.start);
+    errors.append(&mut parsed.tree.errors);
+    errors.sort_by_key(|e| e.start);
+    parsed.tree.errors = errors;
     parsed.tree
 }
 
