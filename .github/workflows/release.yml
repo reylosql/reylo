@@ -53,7 +53,7 @@ jobs:
         run: |
           url="https://github.com/$GITHUB_REPOSITORY.git"
           set +e
-          git ls-remote --exit-code --heads "$url" release > /dev/null
+          git ls-remote --exit-code "$url" refs/heads/release > /dev/null
           found=$?
           set -e
           case "$found" in
@@ -359,9 +359,9 @@ jobs:
           remote="git@github.com:$GITHUB_REPOSITORY.git"
           tagged="$(git ls-remote --exit-code origin "refs/tags/v$VERSION")"
           tagged="${tagged%%[[:space:]]*}"
-          # `identical` or `ahead`: release is the tag, or the tag with docs fixes on it. Only a missing branch (ls-remote's exit 2) counts as missing; any other failure, of ls-remote or of the compare, fails the step rather than move release back, and a re-run is safe. Every answer is about the one tip read here, which the push below names as the one it replaces.
+          # `identical` or `ahead`: release is the tag, or the tag with docs fixes on it. Only a missing branch (ls-remote's exit 2) counts as missing; any other failure, of ls-remote or of the compare, fails the step rather than move release back, and a re-run is safe. Every answer is about the one tip read here, which the push below names as the one it replaces. The branch is named in full, since `release` alone also matches a branch such as `docs/release`.
           set +e
-          tip="$(git ls-remote --exit-code --heads origin release)"
+          tip="$(git ls-remote --exit-code origin refs/heads/release)"
           found=$?
           tip="${tip%%[[:space:]]*}"
           set -e
