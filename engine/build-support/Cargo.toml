@@ -1,8 +1,11 @@
 [package]
 name = "reylo-engine-build"
-version = "0.0.0"
+version.workspace = true
 edition = "2021"
-publish = false
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "What the engine crates' build scripts share: the hash of a crate's sources that its fingerprint is made of."
 
 [lib]

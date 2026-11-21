@@ -1,6 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { arrayLiteral } from "../src/execute.ts";
@@ -8,8 +7,13 @@ import { execute, executeSync, type QueryModule } from "./run.ts";
 import { checks, defineQuery } from "../src/index.ts";
 import type { EngineType, JsonSchema } from "../src/engine-type.ts";
 import { array, checked, lite as liteType, my as myType, oneOf, pg as pgType, record } from "./descriptors.ts";
-import { existsSync } from "node:fs";
-import { DRIVERS, driver, MYSQL, mysqlDatabase, mysqlLive, pgLive, plain, postgresDatabase, sqliteWasm } from "./helpers.ts";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+import { engine as loadEngine, type EngineIo } from "../src/engine.ts";
+import { marksOf, sqlModule } from "../src/loader.ts";
+import { connect, createServer, type AddressInfo, type Socket } from "node:net";
+import { closeSessions, DRIVERS, driver, handWritten, INDEX, MYSQL, mysqlDatabase, mysqlLive, pgLive, plain, postgresDatabase, sqliteWasm } from "./helpers.ts";
 import { neonSql, pgPool, postgresJsSql } from "./stand-ins.ts";
 
 // Each fake client records what execute handed it and answers the way its driver does; the
@@ -99,9 +103,22 @@ test("postgres: every client gets an array for a SQL array parameter as its lite
     assert.ok(!Array.isArray(data));
     assert.equal(JSON.stringify(data), '[1,{"a":"b"}]');
   }
-  // postgres.js (typed() beside unsafe()), whose JSON serializer Drizzle replaces with one that passes the value through.
+  // postgres.js (typed() beside unsafe()), whose JSON serializer Drizzle replaces with one that passes the value through,
+  // gets every parameter as its text declared unknown, since one is.
   await execute(postgresJsSql((_, values) => void seen.push(values)), typed, typedValues);
-  assert.deepEqual(seen.at(-1), ['{"1","3"}', "ada", { value: '[1,{"a":"b"}]', type: 705 }]);
+  assert.deepEqual(seen.at(-1), [{ value: '{"1","3"}', type: 705 }, { value: "ada", type: 705 }, { value: '[1,{"a":"b"}]', type: 705 }]);
+});
+
+test("postgres: a Bun.sql client made with prepare: false, which sends an object as its String(), gets a JSON parameter as its JSON text", async () => {
+  const seen: unknown[][] = [];
+  const unsafe = async (_: string, values?: unknown[]) => (seen.push(values!), []);
+  const unprepared = { unsafe, commitDistributed: async () => {}, options: { prepare: false } };
+  const prepared = { unsafe, commitDistributed: async () => {}, options: { prepare: true } };
+  await execute(unprepared, typed, typedValues);
+  await execute(prepared, typed, typedValues);
+  assert.deepEqual(seen[0], ['{"1","3"}', "ada", '[1,{"a":"b"}]']);
+  assert.equal(JSON.stringify(seen[1]![2]), '[1,{"a":"b"}]');
+  assert.equal(typeof seen[1]![2], "object");
 });
 
 // Every kind of JSON value, null, and a jsonb[] parameter, whose elements are JSON values.
@@ -220,11 +237,11 @@ test("a query without inputs, defined by hand or built before them, binds every 
   await execute(sql, bare, typedValues);
   await execute(pgPool(async (_: string, values?: unknown[]) => (seen.push(values!), { rows: [] })), bare, typedValues);
   for (const values of seen) assert.deepEqual(values, [[1, 3], "ada", [1, { a: "b" }]]);
-  // Hand-written inputs work through the runtime's own lexer too, a repeated name included.
+  // Inputs written by hand work on a statement written by hand too, a repeated name included.
   const hand: QueryModule<"postgres"> = { dialect: "postgres", sql: "select :ids::int[] = :ids::int[]", params: ["ids"], inputs: { ids: { type: array(pgType("int4")) } } };
   seen.length = 0;
   await execute(sql, hand, { ids: [2] });
-  assert.deepEqual(seen, [['{"2"}']]);
+  assert.deepEqual(seen, [[{ value: '{"2"}', type: 705 }]]);
 });
 
 test("a Date for any date or time parameter, and a string without its zone for a timestamptz one, is refused before the statement runs", async () => {
@@ -269,7 +286,7 @@ test("postgres: postgres.js, which binds a date or time string through new Date(
   const bun = { unsafe, typed, commitDistributed: async () => {} };
   await execute(bun, q, values);
   assert.deepEqual(seen, [
-    [{ value: "2026-01-02 03:04:05.006", type: 705 }, { value: "infinity", type: 705 }, { value: "2026-01-02 03:04:05 America/New_York", type: 705 }, { value: "1970-01-01T00:00:00Z", type: 705 }, "ada"],
+    [{ value: "2026-01-02 03:04:05.006", type: 705 }, { value: "infinity", type: 705 }, { value: "2026-01-02 03:04:05 America/New_York", type: 705 }, { value: "1970-01-01T00:00:00Z", type: 705 }, { value: "ada", type: 705 }],
     ["2026-01-02 03:04:05.006", "infinity", "2026-01-02 03:04:05 America/New_York", "1970-01-01T00:00:00Z", "ada"],
   ]);
 });
@@ -398,7 +415,7 @@ test("postgres: Neon's neon() before 1.0 is called with (text, values)", async (
 // postgres.js on a throwaway server (REYLO_TEST_PG), in a database of its own; the driver is lab/drivers'.
 
 test("postgres.js: a statement with parameters is prepared on its connection and run again from there, unless the client was made with prepare: false", { skip: pgLive }, async () => {
-  const postgres = createRequire(join(DRIVERS, "postgres", "package.json"))("postgres");
+  const postgres = driver("postgres");
   const own = await postgresDatabase("reylo_execute_prepare");
   const url = new URL(own.url);
   const prepared = own.sql;
@@ -428,6 +445,32 @@ test("postgres.js: a statement with parameters is prepared on its connection and
   }
 });
 
+test("postgres.js: JSON and array parameters beside an untyped one reach the server as written on every run, in a transaction too", { skip: pgLive }, async () => {
+  // postgres.js 4 serializes the values of such a statement by the types the server described for
+  // it: the JSON text was stored as a JSON string from the second run, and the jsonb[] literal was
+  // refused as a malformed array from the first.
+  const own = await postgresDatabase("reylo_execute_typed_again");
+  const q: QueryModule<"postgres"> = {
+    dialect: "postgres",
+    sql: "select (:doc::jsonb)::text as doc, (:docs::jsonb[])::text as docs, (:flags::bool[])::text as flags, (:days::date[])::text as days, (:raw::bytea[])::text as raw, :id::int as id",
+    params: ["doc", "docs", "flags", "days", "raw", "id"],
+    inputs: { doc: { type: { kind: "json" } }, docs: { type: array({ kind: "json" }) }, flags: { type: array(pgType("bool")) }, days: { type: array(pgType("date")) }, raw: { type: array(pgType("bytea")) } },
+  };
+  const values = { doc: [1, "a"], docs: [{ a: 1 }, 2], flags: [true, false], days: ["2026-01-02"], raw: [new Uint8Array([1, 2])] };
+  const expected = { doc: '[1, "a"]', docs: '{"{\\"a\\": 1}",2}', flags: "{t,f}", days: "{2026-01-02}", raw: '{"\\\\x0102"}' };
+  const runs = async (c: any) => {
+    const out: unknown[] = [];
+    for (const id of [1, null, 3]) out.push(...(await execute(c, q, { ...values, id })).map(({ id: _, ...r }: any) => r));
+    return out;
+  };
+  try {
+    assert.deepEqual(await runs(own.sql), Array(3).fill(expected));
+    assert.deepEqual(await own.sql.begin((tx: never) => runs(tx)), Array(3).fill(expected));
+  } finally {
+    await own.drop();
+  }
+});
+
 test("a parameter left out binds NULL, which postgres.js, mysql2, node:sqlite and libSQL would reject", async () => {
   const seen: unknown[][] = [];
   const client = postgresJsSql((_, values) => void seen.push(values));
@@ -446,6 +489,292 @@ test("mysql: execute() → [rows, fields] on mysql2, a repeated name repeated in
   assert.deepEqual(values, [1, "ada", 1]);
   assert.deepEqual({ ...options, typeCast: typeof options.typeCast }, { sql: "select ? as id, ? as name, ? as again", supportBigNumbers: true, bigNumberStrings: true, dateStrings: true, rowsAsArray: true, nestTables: false, typeCast: "function" });
   assert.deepEqual(await execute(pool, my, { id: 1, name: "ada" }), []);
+});
+
+test("mysql: where a server refuses mysql2's prepared statements, as Cloudflare Hyperdrive does, Reylo writes the values into the text and runs query() from then on", async () => {
+  const refusal = Object.assign(new Error("Hyperdrive does not currently support MySQL COM_STMT_PREPARE messages"), { code: "ER_UNKNOWN_COM_ERROR" });
+  const sent: string[] = [];
+  let executes = 0;
+  let sqlMode = "STRICT_TRANS_TABLES";
+  const fields = [{ name: "id" }, { name: "name" }, { name: "again" }];
+  const pool = {
+    escape: (v: unknown) => `'${String(v)}'`,
+    execute: async () => (executes++, Promise.reject(refusal)),
+    query: async (options: { sql: string }) => {
+      sent.push(options.sql);
+      return (options.sql === "select @@session.sql_mode" ? [[[sqlMode]], []] : [[[1, "ada", 1]], fields]) as [unknown, unknown];
+    },
+  };
+  assert.deepEqual(await execute(pool, my, { id: 1, name: "it's" }), [{ id: 1, name: "ada", again: 1 }]);
+  await execute(pool, my, { id: 2.5, name: "C:\\" });
+  sqlMode = "STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES";
+  await execute(pool, my, { id: 3, name: "C:\\" });
+  await execute(pool, my, { id: 4, name: new Uint8Array([1, 2]) });
+  assert.equal(executes, 1);
+  assert.deepEqual(sent, [
+    "select 1 as id, 'it''s' as name, 1 as again",
+    "select @@session.sql_mode",
+    "select 2.5e0 as id, 'C:\\\\' as name, 2.5e0 as again",
+    "select @@session.sql_mode",
+    "select 3 as id, 'C:\\' as name, 3 as again",
+    "select 4 as id, _binary X'0102' as name, 4 as again",
+  ]);
+  // The comment naming the file ends the statement, after every value.
+  sent.length = 0;
+  await execute(pool, { ...my, sqlcommenter: true, source: "queries/my.sql" }, { id: 5, name: "?" });
+  assert.deepEqual(sent, ["select 5 as id, '?' as name, 5 as again /*file='queries%2Fmy.sql'*/"]);
+  // A query defined by hand without its placeholders' places is refused, rather than given a value at a place nobody found.
+  sent.length = 0;
+  await assert.rejects(async () => execute(pool, { ...my, text: "select ? as id, ? as name, ? as again", order: ["id", "name", "id"] }, { id: 1, name: "ada" }), (e: Error) => e instanceof TypeError && e.message.includes("a query defined by hand needs `marks` there"));
+  assert.deepEqual(sent, []);
+  // A charset other than UTF-8 can write a character outside ASCII with a quote's or a backslash's byte (SJIS's ¥, latin1's Ŝ): such a value is refused, and ASCII runs.
+  for (const charsetNumber of [13, 8]) {
+    const other = { ...pool, pool: { config: { connectionConfig: { charsetNumber } } } };
+    assert.deepEqual(await execute(other, my, { id: 1, name: "ada" }), [{ id: 1, name: "ada", again: 1 }]);
+    await assert.rejects(async () => execute(other, my, { id: 1, name: "¥' or 1=1 -- " }), (e: Error) => e.message.startsWith("reylo cannot run a mysql statement through mysql2 here:") && e.message.includes("is not UTF-8"));
+  }
+  // The app's queryFormat would rewrite every statement query() sends.
+  const formatted = { ...pool, pool: { config: { connectionConfig: { queryFormat: (sql: string) => sql } } } };
+  await assert.rejects(async () => execute(formatted, my, { id: 1, name: "ada" }), (e: Error) => e.message === "reylo cannot run a mysql statement through mysql2 here: this server, as Cloudflare Hyperdrive does, refuses prepared statements, so Reylo runs mysql2's query(), which passes every statement through the app's queryFormat. Connect without a queryFormat, or with the mariadb driver.");
+  // Any other error is the driver's own.
+  const other = new Error("Unknown column 'nmae' in 'field list'");
+  await assert.rejects(async () => execute({ ...pool, execute: async () => Promise.reject(other) }, my, { id: 1, name: "ada" }), (e: unknown) => e === other);
+});
+
+// A proxy in front of the test MySQL that refuses prepared statements as Cloudflare Hyperdrive does:
+// a client's command is a packet with sequence id 0, and COM_STMT_PREPARE (0x16) gets an error
+// packet with Hyperdrive's message. Clients connect without TLS, so the proxy reads their packets.
+async function refusingPrepares(): Promise<{ port: number; close(): Promise<void> }> {
+  const u = new URL(MYSQL!);
+  const sockets = new Set<Socket>();
+  const proxy = createServer((client) => {
+    const upstream = connect(Number(u.port), u.hostname);
+    sockets.add(client).add(upstream);
+    let pending = Buffer.alloc(0);
+    upstream.on("data", (d) => client.write(d));
+    client.on("data", (d: Buffer) => {
+      pending = Buffer.concat([pending, d]);
+      while (pending.length >= 4 && pending.length >= 4 + pending.readUIntLE(0, 3)) {
+        const packet = pending.subarray(0, 4 + pending.readUIntLE(0, 3));
+        pending = pending.subarray(packet.length);
+        if (packet[3] !== 0 || packet[4] !== 0x16) {
+          upstream.write(packet);
+          continue;
+        }
+        const payload = Buffer.concat([Buffer.from([0xff, 0x2b, 0x05]), Buffer.from("#HY000Hyperdrive does not currently support MySQL COM_STMT_PREPARE messages")]);
+        const head = Buffer.alloc(4);
+        head.writeUIntLE(payload.length, 0, 3);
+        head[3] = 1;
+        client.write(Buffer.concat([head, payload]));
+      }
+    });
+    const end = () => (client.destroy(), upstream.destroy());
+    client.on("close", end).on("error", end);
+    upstream.on("close", end).on("error", end);
+  });
+  await new Promise<void>((done) => proxy.listen(0, "127.0.0.1", done));
+  return {
+    port: (proxy.address() as AddressInfo).port,
+    close: () => new Promise<void>((done) => (sockets.forEach((s) => s.destroy()), proxy.close(() => done()))),
+  };
+}
+
+const mariadbLive = mysqlLive || (!existsSync(join(DRIVERS, "mariadb")) && "lab/drivers is not installed");
+
+test("mysql: through a server that refuses prepared statements, as Cloudflare Hyperdrive does, mysql2 and mariadb run, in either sql_mode", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_refusing", "create table users (id int primary key, name text not null); insert into users values (1, 'Ada'), (2, 'C:\\\\dir\\\\ it''s')");
+  const proxy = await refusingPrepares();
+  const u = new URL(MYSQL!);
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "select name from users where id = :id", params: ["id"] };
+  const byName: QueryModule<"mysql"> = { dialect: "mysql", sql: "select id from users where name = :name -- :note", params: ["name"] };
+  const bits: QueryModule<"mysql"> = { dialect: "mysql", sql: "select :a | :b as n", params: ["a", "b"] };
+  // As the engine compiles it on a server in NO_BACKSLASH_ESCAPES, where the literal ends at its second quote.
+  const slash: QueryModule<"mysql"> = { dialect: "mysql", sql: "select '\\' as slash, :id as n", params: ["id"], text: "select '\\' as slash, ? as n", order: ["id"], marks: [[21, 22]], sqlMode: { backslashEscapes: false, ansiQuotes: false } };
+  const mysql2 = driver("mysql2/promise");
+  try {
+    const clients: [string, () => Promise<ReturnType<typeof driver>>][] = [
+      ["mysql2", () => mysql2.createConnection(connection)],
+      ["mysql2", async () => mysql2.createPool({ ...connection, connectionLimit: 1 })],
+      ["mysql2", async () => mysql2.createPool({ ...connection, connectionLimit: 1, namedPlaceholders: true, nestTables: true })],
+      ["mariadb", () => driver("mariadb").createConnection(connection)],
+      ["mariadb", async () => driver("mariadb").createPool({ ...connection, connectionLimit: 1 })],
+    ];
+    for (const [name, open] of clients) {
+      const client = await open();
+      try {
+        for (const mode of ["", "NO_BACKSLASH_ESCAPES"]) {
+          await client.query(`set session sql_mode = '${mode}'`);
+          assert.deepEqual(plain((await execute(client, q, { id: 1 })) as object[]), [{ name: "Ada" }]);
+          assert.deepEqual(plain((await execute(client, byName, { name: "C:\\dir\\ it's" })) as object[]), [{ id: 2 }]);
+          assert.deepEqual(plain((await execute(client, byName, { name: "x\\' or 1=1 -- " })) as object[]), []);
+          const [bitwise] = (await execute(client, bits, { a: new Uint8Array([1, 2]), b: new Uint8Array([3, 4]) })) as { n: Uint8Array }[];
+          assert.deepEqual([...bitwise!.n], [3, 6]);
+          // mariadb's own placeholder scan reads the literal as it would in the default mode. In
+          // the default mode the literal runs on past the placeholder, so it is refused there.
+          if (mode && name === "mysql2") assert.deepEqual(plain((await execute(client, slash, { id: 7 })) as object[]), [{ slash: "\\", n: 7n }]);
+          if (!mode && name === "mysql2") await assert.rejects(execute(client, slash, { id: 7 }) as Promise<unknown>, /this session's sql_mode has neither NO_BACKSLASH_ESCAPES nor ANSI_QUOTES/);
+        }
+      } finally {
+        await client.end();
+      }
+    }
+    // SJIS writes ¥ with a backslash's byte, and latin1 and ascii keep a character's low byte (Ŝ is a backslash's, ħ a quote's): ASCII runs, and a value outside it is refused.
+    for (const [charset, attack] of [["SJIS", "¥' or 1=1 -- "], ["LATIN1", "\u015c' or 1=1 -- "], ["ASCII", "x\u0127 or 1=1 -- "]] as const) {
+      const other = await mysql2.createConnection({ ...connection, charset });
+      try {
+        assert.deepEqual(plain((await execute(other, q, { id: 1 })) as object[]), [{ name: "Ada" }]);
+        await assert.rejects(async () => execute(other, byName, { name: attack }), (e: Error) => e.message.includes("is not UTF-8"));
+      } finally {
+        await other.end();
+      }
+    }
+  } finally {
+    await proxy.close();
+    await own.drop();
+  }
+});
+
+// Statements whose placeholder a session's sql_mode moves. Under NO_BACKSLASH_ESCAPES `'a\'` ends
+// at its second quote, so `:id` follows it, and the comment hides the last quote; in the default
+// mode the backslash escapes that quote, so the string runs on to the one in the comment and holds
+// `:id`. Under ANSI_QUOTES `"a\"` is a name, which escapes nothing, and `:id` follows it; in the
+// default mode a double quote opens a string, which runs on to the one in the comment.
+const MODAL: readonly (readonly [sql: string, mode: string])[] = [
+  ["select 'a\\' as s, :id as n -- '\n, 1 as t", "NO_BACKSLASH_ESCAPES"],
+  ['select 1 as "a\\", :id as n -- "\n, 1 as t', "ANSI_QUOTES"],
+];
+
+/** How the refusal words each mode the tests use. */
+const MODE_WORDS: Record<string, string> = { "": "has neither NO_BACKSLASH_ESCAPES nor ANSI_QUOTES", NO_BACKSLASH_ESCAPES: "has NO_BACKSLASH_ESCAPES and not ANSI_QUOTES", ANSI_QUOTES: "has ANSI_QUOTES and not NO_BACKSLASH_ESCAPES" };
+
+/** `sql` as a build step compiles it on a server whose sql_mode is `mode`: the engine's analysis, its needs answered here, with the marks the loader writes. */
+async function builtUnder(sql: string, mode: string): Promise<QueryModule<"mysql">> {
+  const engine = await loadEngine("mysql");
+  const column = (name: string) => ({ name, type: 253, flags: 0, charset: 255, length: 1024, org_table: "", org_name: "" });
+  const io: EngineIo = {
+    async describe(text) {
+      return text.includes("?") ? { kind: "mysql", columns: [column("s"), column("n"), column("t")], params: [{ type: 253, flags: 0, charset: 255 }] } : { kind: "mysql", columns: [column("x"), column("t")], params: [] };
+    },
+    async query(text) {
+      return text === "select @@session.sql_mode" ? [[mode]] : [];
+    },
+  };
+  const analysis = await engine.analyze(sql, "mysql", io);
+  const text = analysis.rewritten.sql.trimEnd();
+  return { dialect: "mysql", sql, params: analysis.params.map((p) => p.name), text, order: analysis.rewritten.order, marks: await marksOf(analysis, text, "mysql", (region) => engine.lexAsync(region, "mysql")), sqlMode: analysis.sqlMode };
+}
+
+test("mysql: where values are written into the text, they are written only on a session that reads the statement's strings as its build did", async () => {
+  const refusal = Object.assign(new Error("Hyperdrive does not currently support MySQL COM_STMT_PREPARE messages"), { code: "ER_UNKNOWN_COM_ERROR" });
+  const attack = "' or 1=1 -- ";
+  for (const [sql, flag] of MODAL) {
+    const builds: Record<string, QueryModule<"mysql">> = { "": await builtUnder(sql, ""), [flag]: await builtUnder(sql, flag) };
+    // Under the flag the statement holds one placeholder; in the default mode none: its `:id` is text.
+    const one = builds[flag]!;
+    assert.deepEqual([one.params, one.marks?.map(([start, end]) => one.text!.slice(start, end))], [["id"], ["?"]]);
+    assert.deepEqual([builds[""]!.params, builds[""]!.marks, builds[""]!.text], [[], [], sql]);
+    // Each build carries the mode it read the statement under.
+    assert.deepEqual(one.sqlMode, { backslashEscapes: flag !== "NO_BACKSLASH_ESCAPES", ansiQuotes: flag === "ANSI_QUOTES" });
+    assert.deepEqual(builds[""]!.sqlMode, { backslashEscapes: true, ansiQuotes: false });
+    for (const built of ["", flag]) {
+      for (const session of ["", flag]) {
+        const sent: string[] = [];
+        const pool = {
+          escape: (v: unknown) => `'${String(v)}'`,
+          execute: async () => Promise.reject(refusal),
+          query: async (options: { sql: string }) => (sent.push(options.sql), (options.sql === "select @@session.sql_mode" ? [[[`STRICT_TRANS_TABLES${session ? `,${session}` : ""}`]], []] : [[], []]) as [unknown, unknown]),
+        };
+        const q = builds[built]!;
+        const run = execute(pool, q, built ? { id: attack } : {}) as Promise<unknown>;
+        if (built === session) {
+          await run;
+          // The value stands at the placeholder the session reads, a string whose quotes are doubled.
+          const [start, end] = q.marks![0] ?? [0, 0];
+          assert.deepEqual(sent, ["select @@session.sql_mode", built ? `${q.text!.slice(0, start)}''' or 1=1 -- '${q.text!.slice(end)}` : sql]);
+        } else {
+          await assert.rejects(run, (e: Error) => e.message.includes(`which the build found as a session reads them whose sql_mode ${MODE_WORDS[built]}, and this session's sql_mode ${MODE_WORDS[session]}`));
+          // Nothing but the read of its mode reached the session.
+          assert.deepEqual(sent, ["select @@session.sql_mode"]);
+        }
+      }
+    }
+  }
+});
+
+test("mysql: through a server that refuses prepared statements, a statement whose strings each sql_mode reads otherwise runs only on a session that reads them as its build did", { skip: mysqlLive }, async () => {
+  const proxy = await refusingPrepares();
+  const u = new URL(MYSQL!);
+  const client = await driver("mysql2/promise").createConnection({ host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password) });
+  const attack = "' or 1=1 -- ";
+  const text = (row: unknown) => JSON.stringify(row, (_, v) => (typeof v === "bigint" ? String(v) : v));
+  try {
+    for (const [sql, flag] of MODAL) {
+      for (const built of ["", flag]) {
+        const q = await builtUnder(sql, built);
+        for (const session of ["", flag]) {
+          await client.query(`set session sql_mode = '${session}'`);
+          const run = execute(client, q, built ? { id: attack } : {}) as Promise<Record<string, unknown>[]>;
+          if (built !== session) {
+            await assert.rejects(run, /this session's sql_mode/);
+            continue;
+          }
+          const [row] = await run;
+          // The value comes back as the string it was, none of it read as SQL; where the build found
+          // no placeholder, `:id` is the text of a string the session reads.
+          if (built) assert.equal(row!.n, attack, `${flag}: ${text(row)}`);
+          else assert.ok(text(row).includes(":id as n -- "), `${flag}: ${text(row)}`);
+        }
+      }
+    }
+    // The control: the text a build under NO_BACKSLASH_ESCAPES gets with the value written in, on a
+    // session in the default mode, reads the value's `or 1=1` as SQL, and returns two columns, not three.
+    const q = await builtUnder(MODAL[0]![0], "NO_BACKSLASH_ESCAPES");
+    const [start, end] = q.marks![0]!;
+    await client.query("set session sql_mode = ''");
+    const [rows] = await client.query({ sql: `${q.text!.slice(0, start)}''' or 1=1 -- '${q.text!.slice(end)}`, rowsAsArray: true });
+    assert.deepEqual(rows.map((r: unknown[]) => r.map(Number)), [[1, 1]]);
+  } finally {
+    await client.end();
+    await proxy.close();
+  }
+});
+
+/** The module a build step writes for `raw` in a project whose database is `url`, imported. */
+async function builtModule(url: string, name: string, raw: string): Promise<any> {
+  const root = mkdtempSync(join(tmpdir(), "reylo-execute-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  writeFileSync(join(root, ".env"), `DATABASE_URL=${url}\n`);
+  const file = join(root, `${name}.sql`);
+  writeFileSync(file, raw);
+  try {
+    const { code } = await sqlModule(file, raw);
+    const out = join(root, `${name}.mjs`);
+    writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+    return (await import(pathToFileURL(out).href)).default;
+  } finally {
+    await closeSessions();
+  }
+}
+
+test("mysql: through a server that refuses prepared statements, a built statement's values go in at the engine's places, inside what a cast, a JSON parameter or a structured parameter wraps, a structured insert's lists written again", { skip: mysqlLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_marks", "create table accounts (id int auto_increment primary key, name varchar(9) not null, role varchar(9) not null default 'user')");
+  const proxy = await refusingPrepares();
+  const u = new URL(MYSQL!);
+  const client = await driver("mysql2/promise").createConnection({ host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) });
+  try {
+    const insert = await builtModule(own.url, "insert_accounts", "insert into accounts :a::rows(name varchar(9) not null, role? varchar(9) not null)\n");
+    const cast = await builtModule(own.url, "cast_values", "select :x::int as x, :s as s, :doc::json as doc\n");
+    // Rows that leave `role` out: its entries leave the lists, and the placeholder after them moves.
+    await insert.run(client, { a: [{ name: "it's" }, { name: "C:\\" }] });
+    await insert.run(client, { a: [{ name: "?", role: "admin" }] });
+    assert.deepEqual(await own.rows("select name, role from accounts order by id"), [{ name: "it's", role: "user" }, { name: "C:\\", role: "user" }, { name: "?", role: "admin" }]);
+    assert.deepEqual({ ...(await cast.run(client, { x: 5, s: "?", doc: { a: "?" } })) }, { x: 5n, s: "?", doc: { a: "?" } });
+  } finally {
+    await client.end();
+    await proxy.close();
+    await own.drop();
+  }
 });
 
 test("mysql: PlanetScale's execute() → { rows }", async () => {
@@ -597,7 +926,7 @@ test("sqlite: SQLite Wasm's oo1 Database answers at once, its statements read ro
     assert.deepEqual(rows, [row]);
     // oo1's bind() refuses an array, even an empty one, on a statement with no parameters.
     assert.deepEqual(execute(db, { dialect: "sqlite", sql: "select 1 as one", params: [] }), [{ one: 1 }]);
-    const insert = defineQuery<{ email: string; big: bigint | null }, never, "none", "sqlite">({ dialect: "sqlite", sql: "insert into users (email, big) values (:email, :big)", params: ["email", "big"], cardinality: "none" });
+    const insert = defineQuery<{ email: string; big: bigint | null }, never, "none", "sqlite">({ dialect: "sqlite", ...handWritten("insert into users (email, big) values (:email, :big)", "sqlite"), cardinality: "none" });
     const count = defineQuery<{}, { n: number }, "one", "sqlite">({ dialect: "sqlite", sql: "select count(*) as n from users", params: [], cardinality: "one" });
     assert.equal(insert.runSync(db, { email: "ada@example.com", big: 2n ** 60n }), undefined);
     assert.equal(await insert.run(db, { email: "bo@example.com", big: null }), undefined);
@@ -617,12 +946,34 @@ test("sqlite: SQLite Wasm's oo1 Database answers at once, its statements read ro
     const unique = insert.trySync(db, { email: "ada@example.com", big: null }).error;
     assert.deepEqual({ ...unique, message: unique?.message }, { message: "UNIQUE constraint failed: users.email", code: "SQLITE_CONSTRAINT_UNIQUE", errcode: 2067, table: "users", columns: ["email"], constraint: undefined });
     // It binds a whole number as a 64-bit integer, which wraps around past 2^63, so one is refused before anything runs.
-    const real = defineQuery<{ r: number }, { r: number }, "one", "sqlite">({ dialect: "sqlite", sql: "select :r as r", params: ["r"], cardinality: "one" });
+    const real = defineQuery<{ r: number }, { r: number }, "one", "sqlite">({ dialect: "sqlite", ...handWritten("select :r as r", "sqlite"), cardinality: "one" });
     assert.deepEqual(real.runSync(db, { r: 2 ** 40 }), { r: 2 ** 40 });
     assert.throws(() => real.runSync(db, { r: 1e20 }), /Parameter "r" is 100000000000000000000, a whole number past 2\^63, which SQLite Wasm binds as a 64-bit integer that wraps around/);
     assert.throws(() => real.runSync(db, { r: -(2 ** 63) - 2 ** 11 }), /a whole number past 2\^63/);
     assert.deepEqual(real.runSync(db, { r: 1.5 }), { r: 1.5 });
     assert.equal(db.openStatementCount(), 0, "every statement Reylo prepared was finalized");
+  } finally {
+    db.close();
+  }
+});
+
+test("sqlite: sql.js's Database answers at once, its statements read row by row and freed; runSync takes it, a BIGINT past 2^53 is exact both ways, and trySync reads its error", { skip: existsSync(join(DRIVERS, "sql.js")) ? false : "lab/drivers is not installed" }, async () => {
+  const SQL = await driver("sql.js")();
+  const db = new SQL.Database();
+  try {
+    db.run("create table users (id integer primary key, email text unique not null, big bigint)");
+    const rows = execute(db, lite, { id: 1, name: "ada" });
+    assert.ok(Array.isArray(rows), "a synchronous client's rows are not a promise");
+    assert.deepEqual(rows, [row]);
+    assert.deepEqual(execute(db, { dialect: "sqlite", sql: "select 1 as one", params: [] }), [{ one: 1 }]);
+    const insert = defineQuery<{ email: string; big: bigint | null }, never, "none", "sqlite">({ dialect: "sqlite", sql: "insert into users (email, big) values (:email, :big)", params: ["email", "big"], cardinality: "none" });
+    assert.equal(insert.runSync(db, { email: "ada@example.com", big: 2n ** 60n + 1n }), undefined);
+    assert.equal(await insert.run(db, { email: "bo@example.com", big: null }), undefined);
+    // A BIGINT past 2^53 goes in as an INTEGER and comes back exact, and a bound BigInt compares as one.
+    const big = defineQuery<{ big: bigint }, { big: bigint; kind: string }, "one", "sqlite">({ dialect: "sqlite", sql: "select big, typeof(big) as kind from users where big = :big", params: ["big"], columns: [["big", "int8"], ["kind", "text"]], cardinality: "one" });
+    assert.deepEqual(big.runSync(db, { big: 2n ** 60n + 1n }), { big: 2n ** 60n + 1n, kind: "integer" });
+    const unique = insert.trySync(db, { email: "ada@example.com", big: null }).error;
+    assert.deepEqual({ ...unique, message: unique?.message }, { message: "UNIQUE constraint failed: users.email", code: "SQLITE_CONSTRAINT_UNIQUE", errcode: 2067, table: "users", columns: ["email"], constraint: undefined });
   } finally {
     db.close();
   }
@@ -718,7 +1069,7 @@ test("sqlite: Turso's @tursodatabase/database, its Database in every release and
     exec: () => {},
     maxWriteReplicationIndex: () => {},
   };
-  const q = defineQuery<{ id: number; name: string }, unknown, "many", "sqlite">({ dialect: "sqlite", sql: lite.sql, params: lite.params });
+  const q = defineQuery<{ id: number; name: string }, unknown, "many", "sqlite">({ dialect: "sqlite", ...handWritten(lite.sql, "sqlite") });
   assert.deepEqual(q.runSync(compat, { id: 2, name: "bo" }), [row]);
   assert.deepEqual(q.runSync(compat, { id: 2, name: "bo" }), [row]);
   assert.deepEqual(calls.at(-1), { sql: "select ? as id, ? as name, ? as again", values: [2, "bo", 2] });
@@ -758,6 +1109,43 @@ test("sqlite: Bun.sql's SQLite adapter, which has unsafe() and no prepare()", as
   assert.deepEqual(await execute({ unsafe: async () => [row], commitDistributed: async () => {} }, lite, { id: 1, name: "ada" }), [row]);
 });
 
+test("sqlite: a BigInt outside 64 bits, which bun:sqlite and Bun.sql wrap and sqlite3 binds as NULL, is refused before any client is called; Turso's engine's 2^63 too, and only on Turso", async () => {
+  const calls: unknown[][] = [];
+  const bun = { unsafe: async (_: string, values: unknown[]) => (calls.push(values), [row]), commitDistributed: async () => {} };
+  const db = new DatabaseSync(":memory:");
+  const outside = /^TypeError: Parameter "id" is 9223372036854775808, outside the 64-bit integers SQLite holds \(-2\^63 to 2\^63 - 1\), so no SQLite driver binds it exactly\.$/;
+  await assert.rejects(Promise.resolve().then(() => execute(bun, lite, { id: 2n ** 63n, name: "ada" })), outside);
+  await assert.rejects(Promise.resolve().then(() => execute(bun, lite, { id: -(2n ** 63n) - 1n, name: "ada" })), /is -9223372036854775809, outside the 64-bit integers/);
+  assert.throws(() => execute(db, lite, { id: 2n ** 63n, name: "ada" }), outside);
+  assert.equal(calls.length, 0);
+  // The ends of the range bind as they are.
+  await execute(bun, lite, { id: 2n ** 63n - 1n, name: "ada" });
+  await execute(bun, lite, { id: -(2n ** 63n), name: "ada" });
+  assert.deepEqual(calls.map((v) => v[0]), [2n ** 63n - 1n, -(2n ** 63n)]);
+  // Turso's engine binds the whole number 2^63 as 2^63 - 1, through its compat Database (with
+  // batch() from 0.7, without before) and its promise API alike; any other driver binds the REAL,
+  // the libsql package's Database among them, which has maxWriteReplicationIndex() as Turso's has,
+  // and sync(), which no Database of Turso's has.
+  const tursoRefusal = /^TypeError: Parameter "id" is 2\^63 \(9223372036854775808\), which Turso's engine binds as 2\^63 - 1 \(9223372036854775807\), so it would store another number\.$/;
+  const statement = () => ({ reader: true, safeIntegers: () => {}, all: (...values: unknown[]) => (calls.push(values), [row]), close: () => {} });
+  const compat = { prepare: statement, batch: () => [], exec: () => {}, maxWriteReplicationIndex: () => {} };
+  const compat06 = { prepare: statement, exec: () => {}, maxWriteReplicationIndex: () => {} };
+  const libsql = { prepare: statement, exec: () => {}, maxWriteReplicationIndex: () => {}, sync: () => {} };
+  const turso = { prepare: () => ({ ...statement(), all: async (...values: unknown[]) => (calls.push(values), [row]) }), connect: async () => {}, maxWriteReplicationIndex: () => {}, exec: async () => {} };
+  const q = defineQuery<{ id: number; name: string }, unknown, "many", "sqlite">({ dialect: "sqlite", ...handWritten(lite.sql, "sqlite") });
+  assert.throws(() => q.runSync(compat, { id: 2 ** 63, name: "ada" }), tursoRefusal);
+  assert.throws(() => q.runSync(compat06, { id: 2 ** 63, name: "ada" }), tursoRefusal);
+  await assert.rejects(Promise.resolve().then(() => q.run(turso, { id: 2 ** 63, name: "ada" })), tursoRefusal);
+  assert.deepEqual(q.runSync(compat, { id: 2 ** 62, name: "ada" }), [row]);
+  assert.deepEqual(q.runSync(libsql, { id: 2 ** 63, name: "ada" }), [row]);
+  assert.equal(calls.at(-1)![0], 2 ** 63);
+  await execute(bun, lite, { id: 2 ** 63, name: "ada" });
+  assert.equal(calls.at(-1)![0], 2 ** 63);
+  // A Standard Query's encode binds as .run() does, so it refuses the same BigInt.
+  assert.throws(() => q["~standard"].query.encode({ id: 2n ** 64n as never, name: "ada" }), /is 18446744073709551616, outside the 64-bit integers SQLite holds/);
+  assert.deepEqual(q["~standard"].query.encode({ id: 2n ** 63n - 1n as never, name: "ada" }), [2n ** 63n - 1n, "ada", 2n ** 63n - 1n]);
+});
+
 test("the driver's own error comes through unchanged", async () => {
   const duplicate = Object.assign(new Error("duplicate key value violates unique constraint"), { code: "23505" });
   await assert.rejects(() => execute(pgPool(async () => Promise.reject(duplicate)), pg, { id: 1 }) as Promise<unknown>, (e) => e === duplicate);
@@ -790,6 +1178,14 @@ test("postgres: Slonik, through a tag from its own createSqlTag that passes ever
   assert.deepEqual(sent[0]!.values, [9007199254740993n, "\\x0102", null]);
   const names = sent[0]!.typeParsers!.map((p) => p.name);
   for (const name of ["numeric", "timestamptz", "interval", "int8", "date", "json", "citext"]) assert.ok(names.includes(name), name);
+  // The comment naming the file ends the statement, after every placeholder.
+  sent.length = 0;
+  await execute(client([], []), { ...q, sqlcommenter: true, source: "queries/q.sql" }, { id: 1, raw: Uint8Array.of(1) });
+  assert.equal(sent[0]!.sql, "select n, at, iv, nums, flag, '$1.50'::money as price from t -- :x\nwhere id = $slonik_1 and raw = $slonik_2 and note is not distinct from $slonik_3 /*file='queries%2Fq.sql'*/");
+  // A query defined by hand without its placeholders' places is refused, rather than split where nobody found one.
+  sent.length = 0;
+  await assert.rejects(() => execute(client([], []), { dialect: "postgres", sql: "select $1::int", params: ["id"], text: "select $1::int", order: ["id"] }, { id: 1 }) as Promise<unknown>, (e: Error) => e instanceof TypeError && e.message.includes("a query defined by hand needs `marks` there"));
+  assert.equal(sent.length, 0);
   // Positional placeholders out of order bind in the order they appear.
   sent.length = 0;
   const positional: QueryModule<"postgres"> = { dialect: "postgres", sql: "select $2::int as b, $1::text as a", params: ["1", "2"] };
@@ -834,14 +1230,19 @@ test("an unsupported client rejects, naming what it has and what reylo takes", a
   await assert.rejects(() => execute({} as never, my) as Promise<unknown>, /query\(text, values\) as on mariadb's pool or connection, from its promise or callback API/);
   // A pg pool handed to a SQLite statement matches no SQLite shape.
   await assert.rejects(() => execute({ query: async () => ({ rows: [] }) } as never, lite) as Promise<unknown>, /sqlite statement on an object with query/);
-  // sql.js answers at once, as better-sqlite3 does, but throws SQLite's errors with no code and binds a BigInt as text: it is refused before anything runs.
-  let prepared = false;
-  const sqljs = { prepare: () => void (prepared = true), exec() {}, run() {}, getRowsModified() {} };
+  // sql.js before 1.17.0 bound a BigInt as its text and threw SQLite's errors with no code: it is refused before the statement runs, once the database has said which it does.
+  const preparedSql: string[] = [];
+  const sqljs = {
+    prepare: (sql: string) => (preparedSql.push(sql), { bind() {}, step: () => true, get: () => ["text"], free() {} }),
+    exec() {},
+    run() {},
+    getRowsModified() {},
+  };
   const one = defineQuery<{}, unknown, "many", "sqlite">({ dialect: "sqlite", sql: "select 1", params: [] });
-  const named = /sqlite statement on an object with prepare, exec, run, getRowsModified\. .* It is sql\.js, which reylo does not take: .*SQLite Wasm \(@sqlite\.org\/sqlite-wasm\)/;
-  await assert.rejects(one.run(sqljs as never), named);
-  assert.throws(() => one.runSync(sqljs as never), named);
-  assert.equal(prepared, false);
+  const old = /This sql\.js binds a BigInt as its text and throws SQLite's errors with no code, which \.try\(\) could not tell apart: reylo takes sql\.js 1\.17\.0 or later\./;
+  await assert.rejects(one.run(sqljs as never), old);
+  assert.throws(() => one.runSync(sqljs as never), old);
+  assert.deepEqual(preparedSql, ["select typeof(?)"], "the database is asked once, and the statement never prepared");
   // No client at all is named as such.
   await assert.rejects(one.run(undefined as never), /reylo cannot run a sqlite statement on undefined\./);
   await assert.rejects(one.run(null as never), /reylo cannot run a sqlite statement on null\./);
@@ -1029,8 +1430,7 @@ test("an array of parameters is refused before anything runs, with a TypeError t
   const client = postgresJsSql((...args: unknown[]) => void calls.push(args));
   const named = /^TypeError: The parameters must be an object keyed by parameter name, or by number for positional placeholders \(\{ 1: \.\.\., 2: \.\.\. \}\); got an array\. This statement takes \{ id: \.\.\., name: \.\.\. \}\.$/;
   const refused = (re: RegExp) => (e: Error) => e instanceof TypeError && re.test(String(e));
-  // A freshness check would be a round trip: the array is refused before it too.
-  await assert.rejects(() => execute(client, { ...pg, fresh: { query: "select 1", rows: [], inserts: [] } }, [1, "ada"] as never) as Promise<unknown>, refused(named));
+  await assert.rejects(() => execute(client, pg, [1, "ada"] as never) as Promise<unknown>, refused(named));
   const positional: QueryModule<"postgres"> = { dialect: "postgres", sql: "select $1::int, $2::text", params: ["1", "2"] };
   await assert.rejects(() => execute(client, positional, [1, "ada"] as never) as Promise<unknown>, refused(/got an array\. This statement takes \{ 1: \.\.\., 2: \.\.\. \}\.$/));
   await assert.rejects(() => execute(client, pg, "ada" as never) as Promise<unknown>, refused(/positional placeholders \(\{ 1: \.\.\., 2: \.\.\. \}\); got ada\. This statement takes \{ id: \.\.\., name: \.\.\. \}\.$/));
@@ -1041,7 +1441,7 @@ test("an array of parameters is refused before anything runs, with a TypeError t
   assert.throws(() => execute(db, lite, [1, "ada"] as never), refused(named));
   assert.throws(() => execute(db, { dialect: "sqlite", sql: "select 1", params: [] }, [] as never), refused(/got an array\. This statement takes none: leave them out\.$/));
   // Through the query object: run and with reject, runSync throws, and the types refuse it too.
-  const q = defineQuery<{ id: number; name: string }, { id: number; name: string; again: number }, "one", "sqlite">({ dialect: "sqlite", sql: lite.sql, params: lite.params, cardinality: "one" });
+  const q = defineQuery<{ id: number; name: string }, { id: number; name: string; again: number }, "one", "sqlite">({ dialect: "sqlite", ...handWritten(lite.sql, "sqlite"), cardinality: "one" });
   // @ts-expect-error the parameters are an object, never an array
   await assert.rejects(() => q.run(db, [1, "ada"]), refused(named));
   // @ts-expect-error the parameters are an object, never an array
@@ -1058,7 +1458,7 @@ test("an array of parameters is refused before anything runs, with a TypeError t
 test("runSync: on a synchronous client the value comes back at once and an error is thrown, so db.transaction(fn) rolls back", () => {
   const db = new DatabaseSync(":memory:");
   db.exec("create table users (id integer primary key, email text unique)");
-  const insert = defineQuery<{ email: string }, { id: number }, "one", "sqlite">({ dialect: "sqlite", sql: "insert into users (email) values (:email) returning id", params: ["email"], cardinality: "one" });
+  const insert = defineQuery<{ email: string }, { id: number }, "one", "sqlite">({ dialect: "sqlite", ...handWritten("insert into users (email) values (:email) returning id", "sqlite"), cardinality: "one" });
   const count = defineQuery<{}, { n: number }, "one", "sqlite">({ dialect: "sqlite", sql: "select count(*) as n from users", params: [], cardinality: "one" });
   // better-sqlite3's and bun:sqlite's transaction(fn): BEGIN, the function, then COMMIT, or ROLLBACK if it throws.
   const transaction = (fn: () => void) => {
@@ -1084,7 +1484,7 @@ test("runSync: on a synchronous client the value comes back at once and an error
 test("run: on a synchronous client the statement runs at once, and its rows and its error still come through the promise", async () => {
   const db = new DatabaseSync(":memory:");
   db.exec("create table users (id integer primary key, email text unique)");
-  const insert = defineQuery<{ email: string }, { id: number }, "one", "sqlite">({ dialect: "sqlite", sql: "insert into users (email) values (:email) returning id", params: ["email"], cardinality: "one" });
+  const insert = defineQuery<{ email: string }, { id: number }, "one", "sqlite">({ dialect: "sqlite", ...handWritten("insert into users (email) values (:email) returning id", "sqlite"), cardinality: "one" });
   const pending = insert.run(db, { email: "ada@example.com" });
   assert.ok(pending instanceof Promise);
   assert.equal((db.prepare("select count(*) as n from users").get() as { n: number }).n, 1, "the insert ran before run returned");
@@ -1105,7 +1505,7 @@ test("runSync: a client that answers through a promise, or a Postgres or MySQL s
 });
 
 test("run: on an asynchronous client every failure is a rejection, never a throw", async () => {
-  const q = defineQuery<{ id: number }, { id: number }, "maybeOne", "postgres">({ dialect: "postgres", sql: "select :id::int as id", params: ["id"], cardinality: "maybeOne" });
+  const q = defineQuery<{ id: number }, { id: number }, "maybeOne", "postgres">({ dialect: "postgres", ...handWritten("select :id::int as id", "postgres"), cardinality: "maybeOne" });
   const two = pgPool(async () => ({ rows: [{ id: 1 }, { id: 2 }] }));
   let returned: unknown;
   assert.doesNotThrow(() => void (returned = q.run(two, { id: 1 })));
@@ -1122,7 +1522,7 @@ test("a query's source names its file, and Reylo's own errors about the query st
   assert.throws(() => one.runSync(db), /^Error: queries\/none\.sql: Expected exactly one row, got 0$/m);
   await assert.rejects(one.run(db), { message: "queries/none.sql: Expected exactly one row, got 0" });
   // A parameter's value: thrown in runSync, rejected by run, the stack's first line named too.
-  const at = defineQuery<{ at: string }, unknown, "many", "postgres">({ dialect: "postgres", sql: "select :at::timestamptz as at", params: ["at"], inputs: { at: { type: pgType("timestamptz") } }, source: "at.sql" });
+  const at = defineQuery<{ at: string }, unknown, "many", "postgres">({ dialect: "postgres", ...handWritten("select :at::timestamptz as at", "postgres"), inputs: { at: { type: pgType("timestamptz") } }, source: "at.sql" });
   const rejected = await at.run(pgPool(async () => ({ rows: [] })), { at: "2026-10-12 19:06:48" }).then(() => undefined, (e: Error) => e);
   assert.ok(rejected instanceof TypeError);
   assert.match(rejected.message, /^at\.sql: Parameter "at" is a timestamptz/);
@@ -1134,7 +1534,7 @@ test("a query's source names its file, and Reylo's own errors about the query st
   assert.throws(() => truth.runSync(db), (e: Error) => e instanceof TypeError && /^truth\.sql: Column "b" is a boolean/.test(e.message));
   await assert.rejects(truth.run(db), (e: Error) => /^truth\.sql: Column "b" is a boolean/.test(e.message));
   // The driver's own error passes through as it is.
-  const insert = defineQuery<{ email: string }, unknown, "none", "sqlite">({ dialect: "sqlite", sql: "insert into users (email) values (:email)", params: ["email"], cardinality: "none", source: "insert.sql" });
+  const insert = defineQuery<{ email: string }, unknown, "none", "sqlite">({ dialect: "sqlite", ...handWritten("insert into users (email) values (:email)", "sqlite"), cardinality: "none", source: "insert.sql" });
   insert.runSync(db, { email: "ada@example.com" });
   assert.throws(() => insert.runSync(db, { email: "ada@example.com" }), (e: Error) => /^UNIQUE constraint failed/.test(e.message));
   await assert.rejects(insert.run(db, { email: "ada@example.com" }), (e: Error) => /^UNIQUE constraint failed/.test(e.message));
@@ -1170,16 +1570,14 @@ test("a Durable Object's ctx.storage.sql: runSync and run take it, its values gi
   const sql = durableObjectSql(db);
   const insert = defineQuery<{ n: bigint; big: bigint; data: Uint8Array; flag: boolean; doc: unknown }, { id: number }, "one", "sqlite">({
     dialect: "sqlite",
-    sql: "insert into items (n, big, data, flag, doc) values (:n, :big, :data, :flag, :doc) returning id",
-    params: ["n", "big", "data", "flag", "doc"],
+    ...handWritten("insert into items (n, big, data, flag, doc) values (:n, :big, :data, :flag, :doc) returning id", "sqlite"),
     cardinality: "one",
     inputs: { big: { type: liteType("int8") } },
     columns: [["id", "int"]],
   });
   const select = defineQuery<{ id: number }, unknown, "one", "sqlite">({
     dialect: "sqlite",
-    sql: "select n, big, data, flag, doc from items where id = :id",
-    params: ["id"],
+    ...handWritten("select n, big, data, flag, doc from items where id = :id", "sqlite"),
     cardinality: "one",
     columns: [["n", "int"], ["big", "int8"], ["data", "bytes"], ["flag", "bool"], ["doc", "json"]],
   });
@@ -1200,27 +1598,3 @@ test("a Durable Object's ctx.storage.sql: runSync and run take it, its values gi
   assert.equal((db.prepare("select sum(n) as s from items").get() as { s: number }).s, 13);
 });
 
-test("a Durable Object's ctx.storage.sql: the catalog facts are read again through exec()", async () => {
-  const db = new DatabaseSync(":memory:");
-  db.exec("create table users (id integer primary key, email text not null)");
-  const sql = durableObjectSql(db);
-  const query = "select j.value as fresh_table, p.name as fresh_column, p.type as fresh_type, cast(p.\"notnull\" as text) as fresh_not_null, cast(p.dflt_value is not null or (p.pk > 0 and lower(p.type) = 'integer' and (select count(*) from pragma_table_xinfo(j.value) k where k.pk > 0) = 1) as text) as fresh_default from (select 'users' as value) j, pragma_table_xinfo(j.value) p order by 1, 2";
-  const built = (email: string[]) =>
-    defineQuery<{}, unknown, "many", "sqlite">({ dialect: "sqlite", sql: "select id, email from users", params: [], fresh: { query, rows: [email, ["users", "id", "INTEGER", "0", "1"]], inserts: [] }, source: "users.sql" });
-  assert.deepEqual(built(["users", "email", "TEXT", "1", "0"]).runSync(sql), []);
-  const said: string[] = [];
-  const warn = console.warn;
-  console.warn = (message: string) => void said.push(message);
-  try {
-    assert.deepEqual(built(["users", "email", "INTEGER", "1", "0"]).runSync(sql), []);
-  } finally {
-    console.warn = warn;
-  }
-  assert.deepEqual(said, ["reylo: users.email has changed since users.sql was built (it was INTEGER not null, and is now TEXT not null), so its types may be out of date until the next build."]);
-  // run takes the same synchronous path: the check and the statement run before it returns.
-  const ran: string[] = [];
-  const counted = { ...sql, exec: (text: string, ...bindings: unknown[]) => (ran.push(text), sql.exec(text, ...bindings)), databaseSize: 4096 };
-  const pending = built(["users", "email", "TEXT", "1", "0"]).run(counted);
-  assert.deepEqual(ran, [query, "select id, email from users"]);
-  assert.deepEqual(await pending, []);
-});

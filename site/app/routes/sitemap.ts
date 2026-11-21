@@ -1,12 +1,17 @@
-import { siteUrl } from '@/lib/layout.shared';
+import { docsUrl, siteUrl } from '@/lib/layout.shared';
 import { source } from '@/lib/source';
+import { unlistedPage } from '@/lib/rust-content';
+import { blogUrl, posts } from '@/lib/blog';
 
 // The site's pages, dated by the build, which runs on every push that changes the site. Written to
 // build/client/sitemap.xml.
 export function loader() {
   const lastmod = new Date().toISOString();
-  const urls = source.getPages().map((page) => `<url>
-<loc>${new URL(page.url, siteUrl).href}</loc>
+  // The homepage, /, and Reylo Migrate's landing page, /migrate, are pages too, each over its docs.
+  // An unlisted page (lib/rust-content.ts) is left out. The blog and its posts follow.
+  const pages = source.getPages().filter((page) => !unlistedPage(page.slugs.join('/')));
+  const urls = ['/', ...pages.map((page) => docsUrl(page.url)), '/migrate', blogUrl, ...posts.map((post) => `${blogUrl}/${post.slug}`)].map((url) => `<url>
+<loc>${new URL(url, siteUrl).href}</loc>
 <lastmod>${lastmod}</lastmod>
 <changefreq>weekly</changefreq>
 <priority>1</priority>

@@ -17,7 +17,8 @@ on:
       - engine/cli/**
       - engine/native/**
       - engine/migrate/**
-      - rust/reylo-codegen/**
+      - engine/syntax/**
+      - rust/reylo-build/**
       - npm/**
       - scripts/build.ts
       - src/cli.ts
@@ -25,6 +26,7 @@ on:
       - src/engine.ts
       - .cargo/**
       - Cargo.lock
+      - rust-toolchain.toml
       - .github/scripts/build-binary.sh
       - .github/scripts/install-check.ts
       - .github/workflows/binaries.yml
@@ -172,3 +174,13 @@ jobs:
             docker run --rm -v "$GITHUB_WORKSPACE:/w" -w /w "$image" .github/scripts/with-node.sh node .github/scripts/install-check.ts packages "$PLATFORM"
             echo "::endgroup::"
           done
+
+  # The same binaries through every way to install the reylo command without npm (channels.yml): packed as the release will carry them, served on each runner, and installed and run there, so a release whose installers fail stages nothing.
+  channels:
+    needs: build
+    if: ${{ !inputs.platform }}
+    uses: ./.github/workflows/channels.yml
+    permissions:
+      contents: read
+    with:
+      artifacts: true

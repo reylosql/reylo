@@ -22,7 +22,8 @@ const [packsArg, platform] = process.argv.slice(2);
 if (!packsArg || !platform) throw new Error("usage: node .github/scripts/install-check.ts <packs> <platform>");
 const packs = resolve(packsArg);
 const VERDACCIO = "6.11.1";
-const PORT = 48731;
+// Below every platform's ephemeral range, which an outgoing connection can take the port from.
+const PORT = 28731;
 const registry = `http://127.0.0.1:${PORT}/`;
 const windows = process.platform === "win32";
 
@@ -78,14 +79,16 @@ try {
   step("The nine packages, published to it");
   const tarballs = readdirSync(packs).filter((f) => f.endsWith(".tgz")).sort();
   if (tarballs.length !== 9) throw new Error(`${packs} holds ${tarballs.length} packages, not reylo and its eight engines: ${tarballs.join(", ")}`);
+  const version = tarballs.find((f) => f.startsWith("reylo-"))!.replace(/^reylo-/, "").replace(/\.tgz$/, "");
+  // npm refuses a prerelease without a dist-tag, so one goes under its first identifier, as the release stages it (0.8.0-beta.1 under beta).
+  const tag = version.includes("-") ? ["--tag", version.slice(version.indexOf("-") + 1).split(".")[0]!] : [];
   // The engines before reylo, as the release stages them.
   for (const tgz of [...tarballs.filter((f) => !f.startsWith("reylo-")), ...tarballs.filter((f) => f.startsWith("reylo-"))]) {
-    run("npm", ["publish", join(packs, tgz), "--userconfig", npmrc, "--provenance=false"]);
+    run("npm", ["publish", join(packs, tgz), "--userconfig", npmrc, "--provenance=false", ...tag]);
     console.log(`published ${tgz}`);
   }
 
   step("npm install reylo, in a fresh project");
-  const version = tarballs.find((f) => f.startsWith("reylo-"))!.replace(/^reylo-/, "").replace(/\.tgz$/, "");
   const project = join(root, "project");
   mkdirSync(project);
   writeFileSync(join(project, "package.json"), JSON.stringify({ name: "check", private: true, type: "module", dependencies: { reylo: version } }, null, 2));
@@ -111,7 +114,7 @@ try {
   console.log(analyzed);
   // The result is a table, of at most one row where the key is pinned.
   const descriptor = JSON.parse(analyzed) as { file?: string; result?: { cardinality?: string; columns: { name: string }[] } };
-  if (descriptor.file !== "user.sql" || descriptor.result?.columns.map((c) => c.name).join() !== "id,name" || descriptor.result?.cardinality !== "at_most_one") throw new Error("reylo analyze did not type user.sql");
+  if (descriptor.file !== undefined || descriptor.result?.columns.map((c) => c.name).join() !== "id,name" || descriptor.result?.cardinality !== "at_most_one") throw new Error("reylo analyze did not type user.sql");
   // The playground's server, which the launcher runs in JavaScript.
   if (!run(command, ["play", "--help"], { cwd: project }).startsWith("Usage: reylo play")) throw new Error("reylo play --help printed no usage");
   const ran = run(process.execPath, ["--import", "reylo/register", "main.ts"], { cwd: project, env }).trim();

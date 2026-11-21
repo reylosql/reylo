@@ -16,7 +16,7 @@
 //! source does not match (`WHEN NOT MATCHED BY SOURCE`) returns rows with no source row at all.
 
 use crate::levels::{Columns, Level, Withs};
-use pg_query::protobuf::{self, node::Node as NodeEnum, CmdType, ColumnRef, MergeMatchKind, Node, ReturningOptionKind};
+use syntax::postgres::protobuf::{self, node::Node as NodeEnum, CmdType, ColumnRef, MergeMatchKind, Node, ReturningOptionKind};
 use serde_json::Value;
 
 /// One of the two rows, by the name RETURNING reads it by.
@@ -114,6 +114,16 @@ impl Rows {
 
     fn named(&self, name: &str) -> Option<&Row> {
         [&self.old, &self.new].into_iter().flatten().find(|r| r.name == name)
+    }
+
+    /// Whether `name`, the first field of a column reference, is for certain the new row (`true`)
+    /// or the old one (`false`); `None` where it is neither for certain.
+    pub fn row(&self, name: &str) -> Option<bool> {
+        match (&self.old, &self.new) {
+            (Some(old), _) if old.name == name && old.certain => Some(false),
+            (_, Some(new)) if new.name == name && new.certain => Some(true),
+            _ => None,
+        }
     }
 
     /// A column reference that reads the old or the new row for certain, as the same reference to

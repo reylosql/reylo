@@ -3,11 +3,12 @@
 //! engine's hooks ([`sqlite_tree`]), and the function tables and row-count proof over it
 //! ([`sqlite`]). No other parser is linked: what SQLite resolves is what the analysis reads.
 //!
-//! Two hosts link it: the facade, `reylo-engine`, and the program built from it, `engine/native`,
-//! which the `reylo` binary serves; and a host that runs [`sqlite::analyze_ddl`] over a connection of
+//! Two hosts link it: `reylo-engine` (`engine/native`), whose program the `reylo` binary serves; and
+//! a host that runs [`sqlite::analyze_ddl`] over a connection of
 //! its own.
 
 pub mod api;
+pub mod capabilities;
 pub mod errors;
 pub mod host;
 pub mod sqlite;

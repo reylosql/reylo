@@ -1,5 +1,5 @@
 // Turns each tool's answers into the comparison's marks: a mark is computed from what the tool answered and nothing else.
-import { DBS, CARDINALITY, EXPRESSIONS, FROM_THE_DATABASE, FROM_THE_DATABASE_KINDS, JSON_SCHEMA, JSON_SHAPES, OUTER_JOINS, PARAMETER_NULLABILITY, PARAMETER_TYPES, sqlFor, type Db, type Probe } from "./probes.ts";
+import { DBS, ORM_GROUPS, CARDINALITY, EXPRESSIONS, FROM_THE_DATABASE, FROM_THE_DATABASE_KINDS, JSON_SCHEMA, JSON_SHAPES, OUTER_JOINS, PARAMETER_NULLABILITY, PARAMETER_TYPES, sqlFor, type Db, type Probe } from "./probes.ts";
 import type { Answer, TypedValue } from "./tools/lib.ts";
 
 export type State = "y" | "p" | "n";
@@ -37,6 +37,20 @@ function checkParams(p: Probe, a: Answer, db: Db): Problem[] {
   });
   return out;
 }
+// For the query shapes only the ORM table shows: each column typed, with the null it admits, and an enum's every value.
+function checkTyped(p: Probe, a: Answer, db: Db): Problem[] {
+  const out: Problem[] = [];
+  (p.columns ?? []).forEach((want, i) => {
+    const got = a.columns?.find((c) => c.name.toLowerCase() === want.name.toLowerCase()) ?? a.columns?.[i];
+    const column = want.name;
+    if (!got) return void out.push({ text: `\`${want.name}\` is missing`, column });
+    if (got.kind === "any") return void out.push({ text: `\`${want.name}\` is typed \`${got.type}\``, column });
+    if (want.nullable !== undefined && !want.anyNullOn?.includes(db) && got.nullable !== want.nullable) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, but ${want.nullable ? "it can be null" : "it is never null"}`, column });
+    const named = (l: string) => got.labels?.includes(l) || new RegExp(`["']${l}["']`).test(got.type);
+    if (want.labels && !want.labels.every(named)) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, without its values`, column });
+  });
+  return out;
+}
 // Answers for one group of probes on one database: right when `check` finds no problem.
 function run(answers: Answers, dbs: Db[], group: string, probes: Probe[], check: (p: Probe, a: Answer, db: Db) => Problem[]): ProbeResult[] {
   const out: ProbeResult[] = [];
@@ -45,7 +59,7 @@ function run(answers: Answers, dbs: Db[], group: string, probes: Probe[], check:
     if (!sql) continue;
     const a = answers[key(db, group, p)];
     if (!a) continue;
-    const found: Problem[] = a.ok ? check(p, a, db) : [{ text: `it reports an error: ${a.error ?? "unknown"}` }];
+    const found: Problem[] = !a.ok ? [{ text: `it reports an error: ${a.error ?? "unknown"}` }] : a.untyped ? [{ text: `it types each row as \`${a.untyped}\`` }, ...check(p, { ...a, columns: [] }, db).filter((f) => f.param)] : check(p, a, db);
     const { ok: _, ...answer } = a;
     out.push({ db, probe: p.id, sql, ok: found.length === 0, problems: found.map((f) => f.text), at: found.map(({ text: _, ...at }) => at), answer });
   }
@@ -99,6 +113,11 @@ export function gradeTool(answers: Answers, dbs: Db[], facts: { wrote: string[];
 
   const schema = run(answers, dbs.includes("postgres") ? ["postgres"] : [], "json-schema", JSON_SCHEMA, (p, a, db) => [...checkColumns(p, a, false, db), ...checkParams(p, a, db)]);
   cells["json-schema"] = cell(schema);
+
+  for (const [group, probes] of ORM_GROUPS) {
+    const results = run(answers, dbs, group, probes, checkTyped);
+    if (results.length) cells[group] = cell(results);
+  }
 
   for (const db of DBS) {
     const a = answers[`${db}:smoke:smoke`];

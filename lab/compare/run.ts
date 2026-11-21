@@ -1,7 +1,7 @@
 // Runs every tool on every probe it can take and writes results.json and RESULTS.md. `--only <id>` runs one tool, and merges it into the existing results.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ALL_PROBES, CARDINALITY, EXPRESSIONS, FROM_THE_DATABASE, JSON_SCHEMA, JSON_SHAPES, OUTER_JOINS, PARAMETER_NULLABILITY, PARAMETER_TYPES, SMOKE, sqlFor, type Probe } from "./probes.ts";
+import { ALL_PROBES, ORM_GROUPS, CARDINALITY, EXPRESSIONS, FROM_THE_DATABASE, JSON_SCHEMA, JSON_SHAPES, OUTER_JOINS, PARAMETER_NULLABILITY, PARAMETER_TYPES, SMOKE, sqlFor, type Probe } from "./probes.ts";
 import { gradeTool } from "./grade.ts";
 import type { Answer, Statement, Tool, Urls } from "./tools/lib.ts";
 
@@ -13,7 +13,7 @@ const dead: Urls = { postgres: "postgres://postgres@127.0.0.1:1/none", mysql: "m
 
 const GROUPS: [string, Probe[]][] = [["outer-joins", OUTER_JOINS], ["expressions", EXPRESSIONS], ["parameter-types", PARAMETER_TYPES], ["parameter-nullability", PARAMETER_NULLABILITY], ["cardinality", CARDINALITY], ["json-shapes", JSON_SHAPES], ["json-schema", JSON_SCHEMA], ["from-the-database", FROM_THE_DATABASE], ["smoke", [SMOKE]]];
 
-const toolIds = (process.argv.includes("--only") ? process.argv[process.argv.indexOf("--only") + 1].split(",") : ["reylo", "sqlc", "sqlx", "pgtyped", "typedsql", "safeql", "sqlxts", "typesql", "postgrestypedsql"]);
+const toolIds = (process.argv.includes("--only") ? process.argv[process.argv.indexOf("--only") + 1].split(",") : ["reylo", "sqlc", "sqlx", "pgtyped", "typedsql", "safeql", "sqlxts", "typesql", "postgrestypedsql", "prisma", "drizzle", "kysely", "typeorm"]);
 const results: any = existsSync(resolve(here, "results.json")) ? JSON.parse(readFileSync(resolve(here, "results.json"), "utf8")) : { tools: {} };
 // `--report` writes the reports from the results already held, and runs nothing.
 const reportOnly = process.argv.includes("--report");
@@ -24,7 +24,8 @@ for (const id of reportOnly ? [] : toolIds) {
   let wrote: string[] = [];
   const t0 = Date.now();
   for (const db of tool.dbs) {
-    const statements: Statement[] = GROUPS.flatMap(([group, probes]) => probes.flatMap((probe) => { const sql = sqlFor(probe, db); return sql ? [{ key: `${db}:${group}:${probe.id}`, probe, sql }] : []; }));
+    const groups = tool.orm || tool.id === "reylo" ? [...GROUPS, ...ORM_GROUPS] : GROUPS;
+    const statements: Statement[] = groups.flatMap(([group, probes]) => probes.flatMap((probe) => { const sql = sqlFor(probe, db); return sql ? [{ key: `${db}:${group}:${probe.id}`, probe, sql }] : []; }));
     const r = await tool.analyze(db, statements, urls);
     Object.assign(answers, r.answers);
     if (db === tool.dbs[0]) wrote = r.wrote;
@@ -54,7 +55,7 @@ for (const id of reportOnly ? [] : toolIds) {
 
 // RESULTS.md: the grid, then every query a tool got wrong and what it answered.
 const MARK = { y: "yes", p: "partly", n: "no" };
-const ROW_LABELS: Record<string, string> = { "no-codegen": "No codegen", "from-the-database": "Live database", "outer-joins": "Nullable left joins", "expression-nullability": "Nullable expressions", "parameter-types": "Parameter types", "parameter-nullability": "Nullable parameters", cardinality: "Cardinality", "json-shapes": "Nested JSON", "json-schema": "JSON Schema types", postgres: "Postgres", mysql: "MySQL", sqlite: "SQLite" };
+const ROW_LABELS: Record<string, string> = { "no-codegen": "No codegen", "from-the-database": "Live database", "outer-joins": "Nullable left joins", "expression-nullability": "Nullable expressions", "parameter-types": "Parameter types", "parameter-nullability": "Nullable parameters", cardinality: "Cardinality", "json-shapes": "Nested JSON", "json-schema": "JSON Schema types", aggregates: "Aggregates", windows: "Window functions", subqueries: "Subqueries", "with-queries": "WITH queries", "set-operations": "Set operations", returning: "Returning rows", enums: "Enums", postgres: "Postgres", mysql: "MySQL", sqlite: "SQLite" };
 const ids = Object.keys(results.tools);
 const lines = [`# Results`, ``, `Written by \`./run.sh\` on ${results.at.slice(0, 10)}. Each mark comes from what the tool answered; [probes.ts](probes.ts) holds the queries and the right answers, and [grade.ts](grade.ts) the rules.`, ``, `| | ${ids.map((i) => results.tools[i].name).join(" | ")} |`, `| --- | ${ids.map(() => "---").join(" | ")} |`, `| Version | ${ids.map((i) => results.tools[i].version).join(" | ")} |`];
 for (const [row, label] of Object.entries(ROW_LABELS)) lines.push(`| ${label} | ${ids.map((i) => { const c = results.tools[i].cells[row]; return c ? `${MARK[c.state as "y"]}${c.total > 1 ? ` (${c.right}/${c.total})` : ""}` : "no"; }).join(" | ")} |`);
@@ -72,7 +73,7 @@ for (const i of ids) {
 const DB_NAME: Record<string, string> = { postgres: "Postgres", mysql: "MySQL", sqlite: "SQLite" };
 const CARD = { one: "exactly one row", maybeOne: "at most one row", many: "many rows", none: "no rows" };
 lines.push(``, `## The queries`, ``, `Every tool gets each query on each database it supports. [probes.ts](probes.ts) holds them with their right answers.`);
-for (const [group, probes] of GROUPS) {
+for (const [group, probes] of [...GROUPS, ...ORM_GROUPS]) {
   if (group === "smoke") continue;
   lines.push(``, `**${group}**`, ``);
   for (const p of probes) {
@@ -88,6 +89,8 @@ writeFileSync(resolve(here, "RESULTS.md"), `${lines.join("\n")}\n`);
 
 // What the docs' table shows of each mark: the clearest query the tool got wrong, with what it answered, the lines that are wrong and Reylo's answer to the same query on the same database; or, where no query shows it, the tool's note.
 const ERROR_WORDS = (p: string) => (/invalid SQL/.test(p) ? "It marks this query as invalid SQL." : "It stops with an error on this query.");
+// An ORM's query that its own type check refuses, or whose rows it leaves untyped.
+const ORM_WORDS = (a: any) => (a.untyped ? `It types each row as ${a.untyped}.` : "Its type check refuses this query.");
 // The queries a reader can judge from the text alone come first, so a popover opens on a mistake that needs no explaining.
 const CLEAREST: Record<string, string[]> = {
   "outer-joins": ["left", "left-where", "left-sorted", "left-subquery", "right", "full"],
@@ -98,9 +101,9 @@ const CLEAREST: Record<string, string[]> = {
 };
 const rank = (row: string, probe: string) => { const at = CLEAREST[row]?.indexOf(probe) ?? -1; return at < 0 ? CLEAREST[row]?.length ?? 0 : at; };
 // A mistake only the schema shows carries the statements that define what the query names.
-const NEEDS_SCHEMA = new Set(["json-schema:column", "json-schema:parameter", "from-the-database:function", "parameter-types:uuid", "parameter-types:timestamp", "parameter-types:insert"]);
-const schemaStatements = readFileSync(resolve(here, "schema/postgres.sql"), "utf8").split(/;\n/).map((s) => s.trim()).filter((s) => /^create (table|function)/.test(s));
-const schemaFor = (sql: string) => schemaStatements.filter((s) => new RegExp(`\\b${/^create (?:table|function) (\w+)/.exec(s)![1]}\\b`).test(sql)).map((s) => `${s};`).join("\n");
+const NEEDS_SCHEMA = new Set(["enums:column", "enums:derived", "json-schema:column", "json-schema:parameter", "from-the-database:function", "parameter-types:uuid", "parameter-types:timestamp", "parameter-types:insert"]);
+const schemaStatements = readFileSync(resolve(here, "schema/postgres.sql"), "utf8").split(/;\n/).map((s) => s.trim()).filter((s) => /^create (table|function|type)/.test(s));
+const schemaFor = (sql: string) => { const named = schemaStatements.filter((s) => new RegExp(`\\b${/^create (?:table|function|type) (\w+)/.exec(s)![1]}\\b`).test(sql)); const types = schemaStatements.filter((s) => s.startsWith("create type") && named.some((n) => new RegExp(`\\b${/^create type (\w+)/.exec(s)![1]}\\b`).test(n))); return [...new Set([...types, ...named])].map((s) => `${s};`).join("\n"); };
 const site: any = { at: results.at, tools: {} };
 for (const i of ids) {
   const t = results.tools[i];
@@ -109,8 +112,11 @@ for (const i of ids) {
     const wrong = c.results.filter((r: any) => !r.ok && !r.problems.every((p: string) => p === "it does not infer one"));
     // The clearest query the tool got wrong, with every database it is wrong on.
     // A card marks a line of the answer, so a query whose mistake is on no line of it (a column the tool left out) comes after every other.
-    const drawn = (r: any) => !!r.answer.error || r.at.some((at: any) => (at.cardinality && r.answer.cardinality) || (at.param && r.answer.params?.[at.param - 1]) || (at.column && r.answer.columns?.some((c: any) => c.name.toLowerCase() === at.column.toLowerCase())));
-    const first = [...wrong].sort((x: any, y: any) => Number(drawn(y)) - Number(drawn(x)) || rank(row, x.probe) - rank(row, y.probe))[0];
+    const drawn = (r: any) => !!r.answer.error || !!r.answer.untyped || r.at.some((at: any) => (at.cardinality && r.answer.cardinality) || (at.param && r.answer.params?.[at.param - 1]) || (at.column && r.answer.columns?.some((c: any) => c.name.toLowerCase() === at.column.toLowerCase())));
+    // An ORM's wrong type in its typed API comes first, then an `unknown` from it, then a refusal of its type check, then the raw SQL it leaves untyped.
+    const vague = (r: any) => r.at.length > 0 && r.at.every((at: any) => r.answer.columns?.find((c: any) => c.name.toLowerCase() === String(at.column).toLowerCase())?.kind === "any");
+    const raw = (r: any) => (!r.answer.code ? 0 : r.answer.raw ? 3 : r.answer.error ? 2 : vague(r) ? 1 : 0);
+    const first = [...wrong].sort((x: any, y: any) => Number(drawn(y)) - Number(drawn(x)) || raw(x) - raw(y) || rank(row, x.probe) - rank(row, y.probe))[0];
     let example: any;
     if (first) {
       const same = (r: any) => r.sql === first.sql && r.problems.join() === first.problems.join();
@@ -124,7 +130,9 @@ for (const i of ids) {
       example = {
         sql: first.sql,
         ...(NEEDS_SCHEMA.has(`${row}:${first.probe}`) ? { schema: schemaFor(first.sql) } : {}),
-        ...(a.error ? { error: ERROR_WORDS(first.problems[0]) } : {}),
+        // An ORM's query as its user writes it.
+        ...(a.code ? { code: a.code } : {}),
+        ...(a.code && (a.error || a.untyped) ? { error: ORM_WORDS(a) } : a.error ? { error: ERROR_WORDS(first.problems[0]) } : {}),
         // A tool that checks each value instead of typing the parameter is wrong in what it lets through: "A null passes for $1".
         params: (a.params ?? []).map((v: any, k: number) => {
           const passes = first.problems.filter((_: string, j: number) => first.at[j].param === k + 1).map((p: string) => /^(an? \w+|any) value (passes|is refused) for parameter/.exec(p)).find(Boolean);

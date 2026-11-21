@@ -10,7 +10,7 @@ import { defineQuery, type MysqlClient, type MysqlCode, type MysqlNarrowing, typ
 import { readMysqlError, readPostgresError, readSqliteError } from "../src/query-error.ts";
 import { queryErrorType } from "../src/module-types.ts";
 import type { Analysis, Dialect } from "../src/engine.ts";
-import { DRIVERS, MYSQL, ROOT, pgLive, mysqlLive, postgresDatabase, driver, languageServer } from "./helpers.ts";
+import { DRIVERS, MYSQL, ROOT, pgLive, mysqlLive, postgresDatabase, driver, handWritten, languageServer } from "./helpers.ts";
 import { pgPool } from "./stand-ins.ts";
 
 // `.try()` and the database's error it reads from each driver's own (src/query-error.ts). The
@@ -43,8 +43,13 @@ test("Postgres: the error each driver throws reads as one, with the server's fie
       { ...PG_NONE, message: `null value in column "email" of relation "t" violates not-null constraint`, code: "23502", condition: "not_null_violation", detail: "Failing row contains (3, null, 1, null).", schema: "rs_probe", table: "t", column: "email" },
     ],
     [
-      "postgres.js on a domain, whose type is `data type_name`",
+      "postgres.js 3 on a domain, whose type is `data type_name`",
       thrown(`value for domain rs_probe.positive violates check constraint "positive_check"`, { severity: "ERROR", code: "23514", schema_name: "rs_probe", "data type_name": "positive", constraint_name: "positive_check" }),
+      { ...PG_NONE, message: `value for domain rs_probe.positive violates check constraint "positive_check"`, code: "23514", condition: "check_violation", schema: "rs_probe", dataType: "positive", constraint: "positive_check" },
+    ],
+    [
+      "postgres.js 4 on a domain, whose type is `data_type_name`",
+      thrown(`value for domain rs_probe.positive violates check constraint "positive_check"`, { severity: "ERROR", code: "23514", schema_name: "rs_probe", data_type_name: "positive", constraint_name: "positive_check" }),
       { ...PG_NONE, message: `value for domain rs_probe.positive violates check constraint "positive_check"`, code: "23514", condition: "check_violation", schema: "rs_probe", dataType: "positive", constraint: "positive_check" },
     ],
     [
@@ -56,6 +61,11 @@ test("Postgres: the error each driver throws reads as one, with the server's fie
       "Bun.sql, where the server sent the column",
       thrown(`null value in column "email" of relation "t" violates not-null constraint`, { code: "ERR_POSTGRES_SERVER_ERROR", errno: "23502", severity: "ERROR", schema: "rs_probe", table: "t", column: "email", line: "2219" }),
       { ...PG_NONE, message: `null value in column "email" of relation "t" violates not-null constraint`, code: "23502", condition: "not_null_violation", schema: "rs_probe", table: "t", column: "email" },
+    ],
+    [
+      "Drizzle's driver, which names the fields as pg does, on a domain",
+      thrown(`value for domain rs_probe.positive violates check constraint "positive_check"`, { name: "PgError", severityLocal: "ERROR", severity: "ERROR", code: "23514", schema: "rs_probe", dataType: "positive", constraint: "positive_check", file: "execExprInterp.c", line: "4209", routine: "ExecEvalConstraintCheck" }),
+      { ...PG_NONE, message: `value for domain rs_probe.positive violates check constraint "positive_check"`, code: "23514", condition: "check_violation", schema: "rs_probe", dataType: "positive", constraint: "positive_check" },
     ],
     [
       "a syntax error, its position a number",
@@ -178,6 +188,8 @@ test("SQLite: the error each driver throws reads as one, its most specific code 
     ["Turso's engine before 0.8, which gives the primary code's number", thrown("step failed: Runtime error: UNIQUE constraint failed: uniq.k (19)", { code: "GenericFailure" }), { ...SQ_NONE, message: "UNIQUE constraint failed: uniq.k", code: "SQLITE_CONSTRAINT", errcode: 19, table: "uniq", columns: ["k"] }],
     ["SQLite Wasm, which writes the code's name and number before the message and keeps the number", thrown("SQLITE_CONSTRAINT_UNIQUE: sqlite3 result code 2067: UNIQUE constraint failed: t.email", { name: "SQLite3Error", resultCode: 2067 }), { ...SQ_NONE, message: "UNIQUE constraint failed: t.email", code: "SQLITE_CONSTRAINT_UNIQUE", errcode: 2067, table: "t", columns: ["email"] }],
     ["SQLite Wasm's syntax error", thrown(`SQLITE_ERROR: sqlite3 result code 1: near "selec": syntax error`, { name: "SQLite3Error", resultCode: 1 }), { ...SQ_NONE, message: `near "selec": syntax error`, code: "SQLITE_ERROR", errcode: 1 }],
+    ["sql.js from 1.17.0, which names the extended code and keeps its number", thrown("UNIQUE constraint failed: t.email", { code: "SQLITE_CONSTRAINT_UNIQUE", errcode: 2067 }), { ...SQ_NONE, message: "UNIQUE constraint failed: t.email", code: "SQLITE_CONSTRAINT_UNIQUE", errcode: 2067, table: "t", columns: ["email"] }],
+    ["sql.js's syntax error", thrown(`near "selec": syntax error`, { code: "SQLITE_ERROR", errcode: 1 }), { ...SQ_NONE, message: `near "selec": syntax error`, code: "SQLITE_ERROR", errcode: 1 }],
     ["better-sqlite3's closed database", thrown("The database connection is not open", {}, TypeError), undefined],
     ["SQLite Wasm's own error, which numbers itself SQLITE_ERROR", thrown("DB has been closed.", { name: "SQLite3Error", resultCode: 1 }), undefined],
     ["node:sqlite's closed database", thrown("database is not open", { code: "ERR_INVALID_STATE" }), undefined],
@@ -200,8 +212,8 @@ test("try resolves to the value or to the database's error, and rejects with eve
   const refused = thrown("connect ECONNREFUSED 127.0.0.1:1", { errno: -61, code: "ECONNREFUSED" });
   const answering = (rows: unknown[]) => (pgPool(async () => ({ rows })));
   const failing = (error: Error) => (pgPool(async () => Promise.reject(error)));
-  const many = defineQuery<{ id: number }, { id: number }, "many", "postgres">({ dialect: "postgres", sql: "select id from users where id = :id", params: ["id"], cardinality: "many" });
-  const one = defineQuery<{ id: number }, { id: number }, "one", "postgres">({ dialect: "postgres", sql: "select id from users where id = :id", params: ["id"], cardinality: "one", source: "get_user.sql" });
+  const many = defineQuery<{ id: number }, { id: number }, "many", "postgres">({ dialect: "postgres", ...handWritten("select id from users where id = :id", "postgres"), cardinality: "many" });
+  const one = defineQuery<{ id: number }, { id: number }, "one", "postgres">({ dialect: "postgres", ...handWritten("select id from users where id = :id", "postgres"), cardinality: "one", source: "get_user.sql" });
 
   const ok = await many.try(answering([{ id: 1 }]), { id: 1 });
   assert.deepEqual(ok, { value: [{ id: 1 }] });
@@ -223,8 +235,8 @@ test("try resolves to the value or to the database's error, and rejects with eve
 test("trySync returns the value or the database's error on a synchronous SQLite client, and throws every other error", () => {
   const db = new DatabaseSync(":memory:");
   db.exec("create table users (id integer primary key, email text unique not null)");
-  const insert = defineQuery<{ email: string | null }, never, "none", "sqlite">({ dialect: "sqlite", sql: "insert into users (email) values (:email)", params: ["email"], cardinality: "none" });
-  const get = defineQuery<{ id: number }, { id: number }, "one", "sqlite">({ dialect: "sqlite", sql: "select id from users where id = :id", params: ["id"], cardinality: "one" });
+  const insert = defineQuery<{ email: string | null }, never, "none", "sqlite">({ dialect: "sqlite", ...handWritten("insert into users (email) values (:email)", "sqlite"), cardinality: "none" });
+  const get = defineQuery<{ id: number }, { id: number }, "one", "sqlite">({ dialect: "sqlite", ...handWritten("select id from users where id = :id", "sqlite"), cardinality: "one" });
   try {
     assert.deepEqual(insert.trySync(db, { email: "a" }), { value: undefined });
     const unique = insert.trySync(db, { email: "a" });

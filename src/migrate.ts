@@ -51,6 +51,16 @@ export function runMigrations(storage: MigrationStorage, list: readonly Migratio
     try {
       storage.transactionSync(() => {
         sql.exec(m.sql);
+        // As reylo migrate checks a SQLite migration's foreign keys before it commits (`run` in
+        // engine/migrate/src/commands.rs): a deferred one it broke fails here, rolling back the
+        // migration alone, rather than at the object's commit, which resets the object.
+        const broken = sql.exec("pragma foreign_key_check").toArray().length;
+        if (broken) throw new Error(`${broken} rows break a foreign key after this migration`);
+        // The check read every key and found each whole, so what SQLite still counts as deferred
+        // violations is none: a table's drop counts its children's rows, and making it again does
+        // not uncount them. Left counted, they fail the object's commit, which resets the object,
+        // and with the migration's row gone too, every start runs it and resets again.
+        sql.exec("pragma defer_foreign_keys = off");
         sql.exec(`insert into ${HISTORY} (name, sql, applied_at) values (?, ?, strftime('%Y-%m-%d %H:%M:%f', 'now'))`, m.name, m.sql);
       });
     } catch (e) {

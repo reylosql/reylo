@@ -1,4 +1,4 @@
-//! `reylo-lock.yaml`, the project's lock: the migrations in the order they run, each its name and a checksum chained to the line before, and
+//! `reylo.lock`, the project's lock: the migrations in the order they run, each its name and a checksum chained to the line before, and
 //! the checksum of `schema.sql` from the last time the migrations were proven to reach it. Two
 //! branches that each add a migration both append to it, so git conflicts on it when the second one
 //! merges, which is the point: before anything is deployed, one branch's migrations must move after
@@ -14,7 +14,11 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::LazyLock;
 
-pub const LOCK: &str = "reylo-lock.yaml";
+pub const LOCK: &str = "reylo.lock";
+
+/// The lock's name before 0.8.0. Every command that reads or writes the lock refuses a project that
+/// still holds it, rather than read it: read as no lock, it would run the migrations in name order.
+pub const OLD_LOCK: &str = "reylo-lock.yaml";
 
 const HEADER: &str = "# The order this project's migrations run in, written by reylo migrate dev and reylo migrate lock.
 # A merge conflict here means another branch added migrations too: keep main's lines, then
@@ -45,6 +49,8 @@ impl Lock {
 #[derive(Debug, PartialEq, Eq)]
 pub enum State {
     Missing,
+    /// It is there and can't be read (its permissions, a directory, text that isn't UTF-8): why.
+    Unreadable(String),
     /// It holds git's conflict markers.
     Conflicted,
     Invalid(String),
@@ -233,9 +239,12 @@ fn parse(text: &str) -> Result<Lock, String> {
     Ok(Lock { schema: file.schema, entries })
 }
 
+/// The lock at `path`. Only a lock that isn't there is missing: one that is there and can't be read,
+/// read as none, would turn its checksums off and deploy its drafts.
 pub fn read(path: &Path) -> State {
     match std::fs::read_to_string(path) {
-        Err(_) => State::Missing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::Missing,
+        Err(e) => State::Unreadable(e.to_string()),
         Ok(text) => of_text(&text),
     }
 }
@@ -284,6 +293,20 @@ mod tests {
         assert_eq!(lock.entries[1].sum, checksum(&lock.entries[0].sum, "20261102000000_b.sql", "create table b (id int)"));
         std::fs::write(dir.join(LOCK), format!("{text}<<<<<<< HEAD\n")).unwrap();
         assert_eq!(read(&dir.join(LOCK)), State::Conflicted);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_lock_that_isnt_there_is_missing() {
+        let dir = std::env::temp_dir().join(format!("reylo-lock-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(read(&dir.join(LOCK)), State::Missing);
+        std::fs::write(dir.join(LOCK), b"migrations:\n  - a.sql \xff\n").unwrap();
+        assert!(matches!(read(&dir.join(LOCK)), State::Unreadable(why) if why.contains("UTF-8")));
+        std::fs::remove_file(dir.join(LOCK)).unwrap();
+        std::fs::create_dir(dir.join(LOCK)).unwrap();
+        assert!(matches!(read(&dir.join(LOCK)), State::Unreadable(_)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -11,18 +11,18 @@
 //! declares in a way this does not follow (renamed, or altered after it is declared, or under a
 //! search_path of its own) keeps the server's rendering, which the shadow check still covers.
 
-use super::{bare, parse_column, render_column, AROUND};
+use super::{bare, parse_column, render_column, AROUND, SEP};
 use crate::diff::{Kind, Schema};
-use pg_query::protobuf::{self, node::Node as N, AlterTableType as At, ConstrType, ObjectType};
-use pg_query::Node;
+use syntax::postgres::protobuf::{self, node::Node as N, AlterTableType as At, ConstrType, ObjectType};
+use syntax::postgres::Node;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// An identifier as Postgres's `quote_ident` writes it: bare when it is lowercase and no keyword
 /// but an unreserved one.
-pub(super) fn quote_ident(name: &str) -> String {
+pub(crate) fn quote_ident(name: &str) -> String {
     let bare = name.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
         && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '$')
-        && !pg_query::scan(name).ok().and_then(|r| r.tokens.first().map(|t| t.keyword_kind)).is_some_and(|k| k > protobuf::KeywordKind::UnreservedKeyword as i32);
+        && !syntax::postgres::scan_tokens(name).ok().and_then(|r| r.tokens.first().map(|t| t.keyword_kind)).is_some_and(|k| k > protobuf::KeywordKind::UnreservedKeyword as i32);
     if bare {
         name.to_string()
     } else {
@@ -46,7 +46,7 @@ fn names(list: &[Node]) -> Vec<String> {
 fn expression(node: &Node) -> Option<String> {
     let target = Node { node: Some(N::ResTarget(Box::new(protobuf::ResTarget { val: Some(Box::new(node.clone())), ..Default::default() }))) };
     let select = Node { node: Some(N::SelectStmt(Box::new(protobuf::SelectStmt { target_list: vec![target], op: protobuf::SetOperation::SetopNone as i32, limit_option: protobuf::LimitOption::Default as i32, ..Default::default() }))) };
-    select.deparse(pg_query::DeparseOptions::default()).ok()?.strip_prefix("SELECT ").map(String::from)
+    select.deparse(syntax::postgres::DeparseOptions::default()).ok()?.strip_prefix("SELECT ").map(String::from)
 }
 
 /// Every node of a kind anywhere in a tree, as JSON, which every node of the parser's serializes to.
@@ -167,7 +167,7 @@ fn source(sql: &str, raw: &protobuf::RawStmt) -> Option<String> {
     let start = raw.stmt_location.max(0) as usize;
     let end = if raw.stmt_len == 0 { sql.len() } else { start + raw.stmt_len as usize };
     let text = sql.get(start..end)?;
-    let tokens = pg_query::scan(text).ok()?.tokens;
+    let tokens = syntax::postgres::scan_tokens(text).ok()?.tokens;
     let code: Vec<&protobuf::ScanToken> = tokens.iter().filter(|t| t.token != protobuf::Token::SqlComment as i32 && t.token != protobuf::Token::CComment as i32).collect();
     let (first, last) = (code.first()?, code.last()?);
     text.get(first.start as usize..last.end as usize).map(String::from)
@@ -476,7 +476,15 @@ impl Reader<'_> {
                                 self.column(&table, &relname, d);
                             }
                         }
-                        Ok(At::AtColumnDefault) => self.expression(format!("default {column}"), def),
+                        Ok(At::AtColumnDefault) => {
+                            // Set on a table and the tables that inherit it (no `only`), it reaches
+                            // their columns of the name too, over the text they declared.
+                            if a.relation.as_ref().is_some_and(|r| r.inh) {
+                                let suffix = format!(".{}", quote_ident(&cmd.name));
+                                self.out.expressions.retain(|k, _| !(k.starts_with("default column ") && k.ends_with(&suffix) && *k != format!("default {column}")));
+                            }
+                            self.expression(format!("default {column}"), def)
+                        }
                         Ok(At::AtSetExpression) => self.expression(format!("generated {column}"), def),
                         Ok(At::AtDropExpression) => self.expression(format!("generated {column}"), None),
                         Ok(At::AtAddConstraint) => {
@@ -500,7 +508,7 @@ impl Reader<'_> {
             }
             N::IndexStmt(i) => {
                 let Some((table, relname)) = i.relation.as_ref().and_then(|r| self.relation(r)) else { return };
-                let schema = table.rsplit_once('.').map(|(s, _)| s.to_string()).unwrap_or_default();
+                let schema = super::split_last(&table).0.to_string();
                 let name = if i.idxname.is_empty() {
                     let Some(name) = self.index_name(&table, &schema, &relname, &i.index_params) else { return };
                     name
@@ -515,7 +523,7 @@ impl Reader<'_> {
                     let mut named = i.as_ref().clone();
                     named.idxname = name;
                     named.concurrent = false;
-                    Node { node: Some(N::IndexStmt(Box::new(named))) }.deparse(pg_query::DeparseOptions::default()).ok()
+                    Node { node: Some(N::IndexStmt(Box::new(named))) }.deparse(syntax::postgres::DeparseOptions::default()).ok()
                 } else {
                     text()
                 };
@@ -657,15 +665,37 @@ pub(super) fn read(schema: &Schema, sql: &str, base: &[String]) -> Declared {
     let mut reader = Reader { schema, path: base.to_vec(), base: base.to_vec(), out: Declared::default(), given: BTreeSet::new() };
     reader.keep_existing();
     reader.base = reader.path.clone();
-    if let Ok(parsed) = pg_query::parse(sql, 0) {
-        for raw in &parsed.protobuf.stmts {
-            reader.read(sql, raw);
+    // The tree is read and dropped a level at a time.
+    syntax::postgres::on_deep_stack(|| {
+        if let Ok(parsed) = syntax::postgres::parse(sql, 0) {
+            for raw in &parsed.protobuf.stmts {
+                reader.read(sql, raw);
+            }
         }
-    }
+    });
     reader.out
 }
 
 /// The index of the parenthesis that closes the one at `open`, past quoted text.
+/// A default as a column's definition writes it: an expression the definition can't take as it
+/// stands (`now() at time zone 'utc'`, `not a`, `x is null`) in parentheses, which `set default`
+/// needs none of. A column's default is the grammar's narrower expression, with no word operator
+/// at its top level.
+pub(super) fn column_default(text: &str) -> String {
+    use crate::sql::TokenKind::{Symbol, Word};
+    const WORDS: [&str; 15] = ["and", "or", "not", "is", "isnull", "notnull", "like", "ilike", "similar", "between", "in", "at", "collate", "overlaps", "escape"];
+    let mut depth = 0i32;
+    for t in crate::sql::tokenize(text, crate::Dialect::Postgres) {
+        match (t.kind, t.text.as_str()) {
+            (Symbol, "(" | "[") => depth += 1,
+            (Symbol, ")" | "]") => depth -= 1,
+            (Word, w) if depth == 0 && WORDS.contains(&w.to_ascii_lowercase().as_str()) => return format!("({text})"),
+            _ => {}
+        }
+    }
+    text.to_string()
+}
+
 pub(super) fn closing(text: &str, open: usize) -> Option<usize> {
     let (mut depth, mut quote) = (0, None);
     for (k, c) in text.char_indices().skip_while(|(k, _)| *k < open) {
@@ -705,11 +735,12 @@ pub(super) fn apply(schema: &mut Schema, declared: &Declared) {
         }
         match o.kind {
             Some(Kind::Column) => {
-                let old = bare(&o.def).to_string();
+                // As the column's statements write it: an unvalidated not null is the table's to say.
+                let old = bare(&o.def).trim_end_matches(" not valid").to_string();
                 let mut c = parse_column(&old);
                 let mut extra = Vec::new();
                 if let (Some(_), Some(text)) = (&c.default, declared.expressions.get(&format!("default {}", o.id))) {
-                    c.default = Some(text.clone());
+                    c.default = Some(column_default(text));
                     extra.push(format!("default {text}"));
                 }
                 if let (Some(g), Some(text)) = (c.generated.clone(), declared.expressions.get(&format!("generated {}", o.id))) {
@@ -764,11 +795,11 @@ pub(super) fn apply(schema: &mut Schema, declared: &Declared) {
     let creates: BTreeMap<String, String> = schema.objects.values().map(|o| (o.id.clone(), o.create.join("; "))).collect();
     for o in schema.objects.values_mut() {
         for line in o.extra.iter_mut().filter(|l| l.starts_with(AROUND)) {
-            let mut parts: Vec<String> = line.splitn(4, '\t').map(String::from).collect();
+            let mut parts: Vec<String> = line.splitn(4, SEP).map(String::from).collect();
             if let (Some(id), Some(create)) = (parts.first().and_then(|p| p.strip_prefix(AROUND)), parts.get(3)) {
                 if let Some(now) = creates.get(id).filter(|c| *c != create) {
                     parts[3] = now.clone();
-                    *line = parts.join("\t");
+                    *line = parts.join(SEP);
                 }
             }
         }
@@ -791,6 +822,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_column_default_is_parenthesized_where_its_definition_needs_it() {
+        assert_eq!(column_default("now() AT TIME ZONE 'utc'"), "(now() AT TIME ZONE 'utc')");
+        assert_eq!(column_default("NOT (a IS DISTINCT FROM b)"), "(NOT (a IS DISTINCT FROM b))");
+        assert_eq!(column_default("coalesce(a is null, false)"), "coalesce(a is null, false)");
+        assert_eq!(column_default("'x'::text"), "'x'::text");
+        assert_eq!(column_default("nextval('s'::regclass)"), "nextval('s'::regclass)");
+    }
+
+    #[test]
     fn names_as_postgres_names_them() {
         assert_eq!(quote_ident("users"), "users");
         assert_eq!(quote_ident("user"), "\"user\"");
@@ -803,7 +843,7 @@ mod tests {
 
     #[test]
     fn deparses_an_expression_as_declared() {
-        let parsed = pg_query::parse("create table t (tier varchar(10) check (tier in ('free', 'pro')))", 0).unwrap();
+        let parsed = syntax::postgres::parse("create table t (tier varchar(10) check (tier in ('free', 'pro')))", 0).unwrap();
         let checks = find(&parsed.protobuf, "Constraint");
         assert_eq!(checks.len(), 1);
         let N::CreateStmt(c) = parsed.protobuf.stmts[0].stmt.as_ref().unwrap().node.as_ref().unwrap() else { panic!() };
@@ -848,7 +888,7 @@ mod tests {
     #[test]
     fn keeps_a_statement_without_its_comments() {
         let sql = "-- the users\ncreate view v as select 1; /* after */ -- tail\n create index i on t (x) -- why\n;";
-        let parsed = pg_query::parse(sql, 0).unwrap();
+        let parsed = syntax::postgres::parse(sql, 0).unwrap();
         assert_eq!(source(sql, &parsed.protobuf.stmts[0]).unwrap(), "create view v as select 1");
         assert_eq!(source(sql, &parsed.protobuf.stmts[1]).unwrap(), "create index i on t (x)");
         assert_eq!(id_arguments("function public.f(integer,\"a,b\",numeric)"), ["integer", "\"a,b\"", "numeric"]);

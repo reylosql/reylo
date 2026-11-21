@@ -33,6 +33,7 @@ pub mod oid {
     pub const NUMERIC: u32 = 1700;
     pub const UNKNOWN: u32 = 705;
     pub const JSONB: u32 = 3802;
+    pub const JSONB_ARRAY: u32 = 3807;
     pub const RECORD: u32 = 2249;
     pub const RECORD_ARRAY: u32 = 2287;
 }
@@ -92,7 +93,7 @@ impl PgType {
 
 /// An identifier as Postgres writes it: bare where it is lowercase letters, digits and
 /// underscores not starting with a digit, else in double quotes.
-fn quote_ident(name: &str) -> String {
+pub(crate) fn quote_ident(name: &str) -> String {
     let plain = name.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_') && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
     if plain { name.to_string() } else { format!("\"{}\"", name.replace('"', "\"\"")) }
 }
@@ -242,6 +243,12 @@ pub const RELATION_TYPES_QUERY: &str = concat!(
     type_columns!(),
     " FROM pg_catalog.pg_type t WHERE t.oid OPERATOR(pg_catalog.=) ANY (SELECT w.oid FROM wanted w)"
 );
+
+/// The `pg_catalog` array type of a `pg_catalog` element type the registry starts with
+/// (`_int4` of `int4`).
+pub fn builtin_array_of(element: u32) -> Option<u32> {
+    BUILTINS.iter().find(|(_, name, _, elem, _, _)| *elem == element && name.starts_with('_')).map(|(oid, ..)| *oid)
+}
 
 /// The `pg_catalog` types with fixed oids the registry starts with, as `pg_type` reports them on
 /// 14 (`oid, typname, typtype, typelem, typbasetype, format_type`), so a statement over plain
@@ -892,7 +899,7 @@ fn base_type(t: &PgType) -> Type {
         (true, "polygon") => points(1),
         (true, "circle") => Type::structure(vec![Field::new("center", point(), false), Field::new("radius", float8(), false)]),
         // An extension's types, in whatever schema it was created in.
-        (_, "hstore") => Type::new(Kind::Map(MapType { key: Box::new(Slot::non_null(text())), value: Box::new(Slot::nullable(text())) })),
+        (_, "hstore") => Type::new(Kind::Map(MapType { key: Box::new(Slot::non_null(text())), value: Box::new(Slot::nullable(text())), size: None })),
         (_, "vector" | "sparsevec") => vector(8, 23),
         (_, "halfvec") => vector(5, 10),
         (_, "citext") => text(),

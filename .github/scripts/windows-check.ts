@@ -29,12 +29,12 @@ writeFileSync(join(project, "package.json"), JSON.stringify({
   dependencies: { reylo: `link:${posixRelative(project, join(repo, "dist", "reylo"))}` },
   devDependencies: {
     "@types/node": "^26.6.1",
-    typescript: "7.1.0-beta",
+    typescript: "7.1.0-dev.20261118.1",
   },
 }, null, 2));
 writeFileSync(join(project, "tsconfig.json"), JSON.stringify({
   compilerOptions: { target: "esnext", module: "nodenext", lib: ["esnext"], types: ["node"], strict: true, noEmit: true, skipLibCheck: true },
-  contentMappers: [{ package: "reylo", extensions: [".sql", ".reylo.yaml", ".reylo.yml"] }],
+  contentMappers: [{ package: "reylo" }],
   include: ["src"],
 }, null, 2));
 writeFileSync(join(project, "queries", "get_user.sql"), "select id, name from users where id = :id");
@@ -105,7 +105,7 @@ function check(name: string, url: string, { env = {}, tsc = true, analyze = true
   if (analyze) {
     const analyzed = run(process.execPath, [join(project, "node_modules", "reylo", "src", "cli.js"), "analyze", "queries/get_user.sql", "--format", "json"], project, false, env);
     console.log(`reylo analyze: ${analyzed.status}\n${analyzed.out.trim()}`);
-    if (analyzed.status !== 0 || !analyzed.out.includes(`"file":"queries/get_user.sql"`)) failures.push(`${name}: reylo analyze exited ${analyzed.status}`);
+    if (analyzed.status !== 0 || !analyzed.out.includes(`"sql":"select id, name from users where id = `)) failures.push(`${name}: reylo analyze exited ${analyzed.status}`);
   }
   if (!tsc) return;
   rmSync(join(project, "reylo", ".cache"), { recursive: true, force: true });
@@ -152,11 +152,13 @@ if (pg && certs) {
   const client = (dir: string) => `&sslcert=${encodeURIComponent(join(dir, "client.crt"))}&sslkey=${encodeURIComponent(join(dir, "client.key"))}`;
   check("Postgres, TLS files on another drive", `${pg}?sslmode=verify-full&sslrootcert=${encodeURIComponent(join(elsewhere, "root.crt"))}${client(elsewhere)}`, { tsc: false });
   check("Postgres, relative TLS files", `${pg}?sslmode=verify-ca&sslrootcert=certs/root.crt&sslcert=certs/client.crt&sslkey=certs/client.key`, { tsc: false });
+  // Direct TLS, which the server takes only with the ALPN protocol `postgresql` (Postgres 17 and later).
+  check("Postgres, direct TLS negotiation", `${pg}?sslmode=verify-full&sslnegotiation=direct&sslrootcert=${encodeURIComponent(join(elsewhere, "root.crt"))}${client(elsewhere)}`, { tsc: false });
   check("Postgres, PGSSL* in the environment", pg, { tsc: false, env: { PGSSLMODE: "verify-ca", PGSSLROOTCERT: join(elsewhere, "root.crt"), PGSSLCERT: "certs\\client.crt", PGSSLKEY: join(project, "certs", "client.key") } });
   check("Postgres, NODE_EXTRA_CA_CERTS", `${pg}?sslrootcert=system${client(join(project, "certs"))}`, { tsc: false, env: { NODE_EXTRA_CA_CERTS: join(elsewhere, "root.crt") } });
   // MySQL over TCP and over a named pipe, as mysql2's socketPath names one on Windows; Postgres's
   // socket directory, which Node cannot open on Windows, is refused with what to write instead.
-  check("MySQL over TCP", "mysql://root@127.0.0.1:53306/reylo_windows", { tsc: false });
+  check("MySQL over TCP", "mysql://root@127.0.0.1:23306/reylo_windows", { tsc: false });
   // The engine connects over TCP alone, and the loader bridges a named pipe to it (src/host-url.ts).
   check("MySQL, a named pipe", `mysql://root@localhost/reylo_windows?socketPath=${encodeURIComponent(String.raw`\\.\pipe\reylo-mysql`)}`, { tsc: false, analyze: false });
   check("Postgres, a socket directory", "postgres://postgres@/reylo_windows?host=/tmp", { tsc: false, refused: /names the Unix socket \/tmp\/\.s\.PGSQL\.5432, which Node cannot open on Windows/ });

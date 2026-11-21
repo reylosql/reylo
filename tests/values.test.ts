@@ -515,8 +515,9 @@ test("coerce: a value a driver decoded, given its kind; an integer a number cann
   assert.deepEqual(coerce("int8[]", ["1", 2n], "c"), [1n, 2n]);
   assert.equal(coerce("decimal", 1.5, "c"), "1.5");
   assert.equal(coerce("date", new Date("2026-10-20T00:00:00Z"), "c"), "2026-10-20");
-  // Bun.sql decodes a date or timestamp before 1 AD as an Invalid Date (its infinities are ±Infinity):
-  // refused, never read as infinity.
+  // Bun.sql decodes a date or timestamp it cannot read into a Date (a MySQL date with a zero month or
+  // day, one after 13 September 275760, and before 1.4.4 one before 1 AD) as an Invalid Date (its
+  // infinities are ±Infinity): refused, never read as infinity.
   for (const kind of ["date", "timestamp", "timestamptz", "timestamp|timestamptz"]) {
     assert.throws(() => coerce(kind, new Date(Number.NaN), "born"), (e: Error) => e instanceof DecodeError && /^Column "born": the driver returned an Invalid Date/.test(e.message), kind);
   }
@@ -568,6 +569,13 @@ test("the kinds: a BIGINT is a BigInt, and an integer a temporary table may wide
   assert.deepEqual(typeSchema(pg("int8"), "postgres"), { type: "integer", format: "int64" });
   assert.deepEqual(typeSchema(pg("int8"), "postgres", true), { type: ["integer", "string"], format: "int64" }, "a parameter, as every driver binds it");
   assert.deepEqual(typeSchema(pg("timestamptz"), "postgres"), { type: "string", format: "date-time" });
+  // RFC 3339's date-time, which JSON Schema's format names, needs an offset, which a wall-clock value has none of, as a result or as the parameter's text.
+  const wallClock = { type: "string", description: "a date and time without a time zone, as the database wrote it (2026-10-20T10:00:00.123456)" };
+  for (const input of [false, true]) {
+    assert.deepEqual(typeSchema(pg("timestamp"), "postgres", input), wallClock);
+    assert.deepEqual(typeSchema(my("datetime"), "mysql", input), wallClock);
+    assert.deepEqual(typeSchema(my("timestamp"), "mysql", input), wallClock);
+  }
   assert.deepEqual(typeSchema({ kind: "boolean" }, "mysql"), { type: "boolean" });
   assert.deepEqual(typeSchema(lite("bool"), "sqlite"), { type: "boolean" });
   assert.deepEqual(typeSchema(lite("integer"), "sqlite"), { type: "integer", format: "int64" });

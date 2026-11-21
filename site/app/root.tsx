@@ -1,6 +1,7 @@
 import './global.css';
 import { DocsDocument } from 'docs-kit/document';
 import type { ReactNode } from 'react';
+import { Analytics } from '@vercel/analytics/react';
 import { isRouteErrorResponse, Outlet } from 'react-router';
 import type { Route } from './+types/root';
 import caveatLatin from '../assets/fonts/caveat-latin.woff2?url';
@@ -88,8 +89,14 @@ export function Layout({ children }: { children: ReactNode }) {
   );
 }
 
+/** Every page, and Vercel Web Analytics' page views: cookieless, and loaded from reylo.dev's own `/_vercel/insights`. */
 export default function App() {
-  return <Outlet />;
+  return (
+    <>
+      <Outlet />
+      <Analytics />
+    </>
+  );
 }
 
 // What a failed navigation shows: the missing-address page for a 404 (a link to a page the site

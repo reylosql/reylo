@@ -12,8 +12,8 @@ import { anyEngine, engine, Unreachable, type Analysis, type Connection, type En
 import { placeholdersOf, untypedParams } from "./module-types.ts";
 import { dialectOf, PROJECT_FILE, resolveProject, sqlitePath, sqliteUrlProblem, type Dialect as Database } from "./project.ts";
 
-/** The format version `analyze` writes, as the URL of its JSON Schema (spec/typedefs.schema.json), which the type holds to the spec's. */
-const SCHEMA: StatementDescriptor["$schema"] = "https://reylo.dev/typedefs/0.1.0.json";
+/** The format `analyze` writes, as the URL of its JSON Schema (spec/typedefs.schema.json), which the type holds to the spec's. */
+const SCHEMA: StatementDescriptor["$schema"] = "https://reylo.dev/typedefs/preview.json";
 
 /** What a statement's untyped parameters answer to: whether each is an error, and the project file its message names. */
 type Strict = { params: boolean; file: string };
@@ -159,6 +159,7 @@ export function descriptor(sql: string, dialect: Database, version: string, a: A
       ...(a.cardinality === "many" && a.unique?.length && { unique: a.unique }),
       ...(a.cardinality === "many" && a.order?.length && { order: a.order }),
     },
+    ...(a.capabilities !== undefined && { capabilities: a.capabilities }),
     diagnostics: [...a.diagnostics, ...untyped].map((d) => {
       const start = utf16(sql, d.start);
       return { message: d.message, start, end: Math.max(utf16(sql, d.start + d.length), start), ...(d.server_code !== undefined && { code: d.server_code }) };

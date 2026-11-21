@@ -9,8 +9,8 @@
 use crate::{Failure, Program};
 use mysql_async::prelude::Queryable;
 use mysql_async::{ClientIdentity, Conn, Opts, OptsBuilder, SslOpts};
-use reylo_engine::clients::mysql_async::{self as answers, Describe};
-use reylo_engine::{AnswerCache, ReplayError};
+use crate::clients::mysql_async::{self as answers, Describe};
+use crate::{AnswerCache, ReplayError};
 use reylo_engine_core::api::Analysis;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -38,6 +38,8 @@ struct Connection {
     bridge: Option<String>,
     /// The engine's answers, kept between statements as the loader's session keeps them.
     answers: AnswerCache<Describe>,
+    /// What a session of this connection runs under, set again on a connection that replaces it.
+    setup: Option<String>,
 }
 
 impl Connection {
@@ -49,7 +51,11 @@ impl Connection {
 
     /// The connection opened again where the server dropped it, as the old one is.
     async fn reopen(&mut self) -> Result<(), Value> {
-        self.conn = connect(&self.url, self.bridge.as_deref()).await?.0;
+        let mut conn = connect(&self.url, self.bridge.as_deref()).await?.0;
+        if let Some(setup) = &self.setup {
+            mysql_async::prelude::Queryable::query_drop(&mut conn, setup).await.map_err(|e| json!({ "status": "unreachable", "message": e.to_string() }))?;
+        }
+        self.conn = conn;
         Ok(())
     }
 
@@ -89,7 +95,20 @@ pub struct Session {
 impl Session {
     pub async fn open(url: &str) -> Result<Session, Failure> {
         let (conn, version) = open(url).await?;
-        Ok(Session { connection: Connection { conn, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared() }, version })
+        Ok(Session { connection: Connection { conn, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), setup: None }, version })
+    }
+
+    /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
+    pub fn forget(&mut self) {
+        self.connection.answers.clear();
+    }
+
+    /// Sets the session up for text an editor sends on its own, giving up on a table's lock after `seconds`. A connection that replaces this one is set up the same way. It stays writable, since MySQL refuses to prepare a write in a read-only session, and preparing a statement here runs none of its code.
+    pub async fn for_an_editor(&mut self, seconds: u32) -> Result<(), String> {
+        let setup = format!("set session lock_wait_timeout = {seconds}");
+        mysql_async::prelude::Queryable::query_drop(&mut self.connection.conn, &setup).await.map_err(|e| e.to_string())?;
+        self.connection.setup = Some(setup);
+        Ok(())
     }
 
     pub async fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
@@ -99,7 +118,7 @@ impl Session {
 
 impl Program for Mysql {
     fn call(&self, request: &str) -> String {
-        reylo_engine_core::api::call::<reylo_engine::mysql::Mysql>(request)
+        reylo_engine_core::api::call::<crate::engines::mysql::Mysql>(request)
     }
 
     async fn serve(&mut self, request: &Value) -> Option<Value> {
@@ -113,7 +132,7 @@ impl Program for Mysql {
                 match connect(url, bridge.as_deref()).await {
                     Ok((conn, version)) => {
                         self.next += 1;
-                        self.connections.insert(self.next, Connection { conn, url: url.to_string(), bridge, answers: AnswerCache::until_cleared() });
+                        self.connections.insert(self.next, Connection { conn, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), setup: None });
                         json!({ "status": "opened", "conn": self.next, "version": version })
                     }
                     Err(failure) => failure,
@@ -169,7 +188,7 @@ impl Program for Mysql {
     }
 }
 
-/// A query's rows, each value as mysql2 reads it (`reylo_engine::clients::mysql_async::decoded`).
+/// A query's rows, each value as mysql2 reads it (`crate::clients::mysql_async::decoded`).
 async fn rows(conn: &mut Conn, text: String) -> mysql_async::Result<Vec<Vec<Value>>> {
     let mut result = conn.query_iter(text).await?;
     let types: Vec<u8> = result.columns_ref().iter().map(|c| c.column_type() as u8).collect();
@@ -284,6 +303,12 @@ fn parse(url: &str) -> Result<Opts, String> {
     if let Some(path) = &socket {
         return Err(format!("socketPath={path} is a Unix socket, which this engine cannot open: connect over TCP"));
     }
+    // A socket's connection never leaves the machine, and mysql_async loses the handshake when it
+    // starts TLS on one ("Packets out of sync"): a socket connects without TLS, whatever the URL
+    // asks, as libpq does over a Postgres socket.
+    if socket.is_some() {
+        tls = None;
+    }
     let opts = Opts::from_url(base).map_err(|e| format!("cannot read the URL: {e}"))?;
     // The two settings mysql_async otherwise asks the server for on every connection, as the server's
     // defaults: a connection then sends nothing before the engine's own statements.
@@ -352,5 +377,19 @@ mod tests {
         assert_eq!(ssl.root_certs().len(), 1);
         assert!(ssl.client_identity().is_some());
         assert!(parse(r#"mysql://root@h/app?ssl={"cert":"c"}"#).is_err());
+    }
+
+    #[test]
+    fn a_socket_connects_without_tls_whatever_the_url_asks() {
+        for url in [
+            "mysql://root@localhost/app?socket=/tmp/mysql.sock&ssl=true",
+            "mysql://root@localhost/app?socketPath=%2Ftmp%2Fmysql.sock&ssl-mode=REQUIRED",
+            r#"mysql://root@localhost/app?ssl={"rejectUnauthorized":true}&socketPath=/tmp/mysql.sock"#,
+        ] {
+            let opts = parse(url).unwrap();
+            assert_eq!(opts.socket(), Some("/tmp/mysql.sock"), "{url}");
+            assert!(opts.ssl_opts().is_none(), "{url}");
+        }
+        assert!(parse("mysql://root@localhost/app?ssl=true").unwrap().ssl_opts().is_some());
     }
 }

@@ -31,7 +31,7 @@ match_against.sql: many (q: varchar) -> { id: int }
 match_against_score.sql: many (q: varchar) -> { id: int, score: double }
 member_of.sql: many () -> { id: int }
 optimizer_hint.sql: at_most_one (id: int32) -> { id: int }
-optimizer_hint_set_var.sql: many () -> { id: int }
+optimizer_hint_set_var.sql: many () -> { id: int? }
 parenthesized.sql: many (id: int32) -> { id: int }
 partition_and_hint.sql: at_most_one (id: int32) -> { id: int }
 placeholder_at.sql: many () -> { name: varchar(≤20) }
@@ -56,7 +56,7 @@ select_stored_function.sql: one () -> { n: int | bigint? }
 set_variable.sql: none () -> {  }
 show_tables.sql: many () -> { Tables_in_reylo_oracle_mysql_statements: varchar? }
 syntax_error.sql: many () -> {  } !! reylo6: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '' at line 1 (ER_PARSE_ERROR)
-table_statement.sql: many () -> { id: int, name: varchar(≤20), email: varchar(≤40)?, doc: json? }
+table_statement.sql: many () -> { id: int?, name: varchar(≤20)?, email: varchar(≤40)?, doc: json? }
 trailing_comment.sql: at_most_one (id: int32) -> { id: int }
 trailing_semicolon.sql: at_most_one (id: int32) -> { id: int }
 truncate.sql: none () -> {  }
@@ -70,6 +70,6 @@ use_database.sql: many () -> {  } !! reylo6: This command is not supported in th
 user_variable_read.sql: at_most_one (id: int32) -> { x: unknown?, id: int }
 values_statement.sql: many () -> { column_0: bigint | int, column_1: varchar('a' | 'b') }
 window_named.sql: many () -> { id: int, r: bigint }
-with_recursive_cte.sql: many () -> { i: bigint | int? }
+with_recursive_cte.sql: many () -> { i: bigint | int }
 with_statement.sql: many () -> { id: int }
 wrong_group.sql: many () -> {  } !! reylo6: In aggregated query without GROUP BY, expression #1 of SELECT list contains nonaggregated column 'reylo_oracle_mysql_statements.users.id'; this is incompatible with sql_mode=only_full_group_by (ER_MIX_OF_GROUP_FUNC_AND_FIELDS)

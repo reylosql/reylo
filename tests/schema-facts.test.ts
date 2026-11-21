@@ -16,6 +16,14 @@ const int4 = (facts: object): EngineType => ({ kind: "integer", bits: 32, label:
 const varchar = (facts: object): EngineType => ({ kind: "text", label: "varchar", ...facts }) as EngineType;
 const output = (t: EngineType, inJson = false) => typeSchema(t, "postgres", false, inJson);
 
+test("a JSON document nested to the engine's bound has a schema", () => {
+  let nested: EngineType = int4({});
+  for (let depth = 0; depth < 495; depth++) nested = { kind: "struct", fields: [{ name: "a", type: nested }] } as EngineType;
+  let schema = output({ kind: "json", content: { type: nested } } as EngineType) as { type: string; properties: { a: unknown } };
+  for (let depth = 0; depth < 495; depth++) schema = schema.properties.a as typeof schema;
+  assert.equal(schema.type, "integer");
+});
+
 test("a text's size in code points and its pattern are written, and nothing else of a string", () => {
   assert.deepEqual(output(varchar({ size: { max: 20 } })), { type: "string", maxLength: 20 });
   assert.deepEqual(output(varchar({ size: { exact: 5 } })), { type: "string", minLength: 5, maxLength: 5 });
@@ -23,6 +31,9 @@ test("a text's size in code points and its pattern are written, and nothing else
   assert.deepEqual(output(varchar({ encoding: "UTF-8", size: { unit: "byte", max: 63 } })), { type: "string" });
   assert.deepEqual(output(varchar({ code_points: [[1, 1114111]], encoding: "UTF-8", ill_formed: true })), { type: "string" });
   assert.deepEqual(output(varchar({ pattern: "[^@]+@[^@]+" })), { type: "string", pattern: "^(?:[^@]+@[^@]+)$" });
+  // A format is a name alone, and JSON Schema's `format` is one a validator may assert.
+  assert.deepEqual(output(varchar({ format: "email" })), { type: "string" });
+  assert.deepEqual(typeSchema(varchar({ format: "email", size: { max: 254 } }), "postgres", true), { type: "string", maxLength: 254 });
 });
 
 test("a UUID's version fixes its version digit and its variant, and one with none is any UUID", () => {
@@ -76,6 +87,15 @@ test("an array's size is written on an array", () => {
   const vector = { kind: "array", label: "vector", element: { type: { kind: "float", exponent_bits: 8, mantissa_bits: 23 } }, size: { exact: 3 } } as EngineType;
   const schema = output(vector) as { minItems?: number; maxItems?: number };
   assert.deepEqual([schema.minItems, schema.maxItems], [3, 3]);
+});
+
+test("a map's size, which counts its keys, is written on the object an hstore is, as a result, inside a document and as a parameter", () => {
+  const hstore = (facts: object): EngineType => ({ kind: "map", label: "public.hstore", key: { type: { kind: "text" } }, value: { type: { kind: "text" }, nullable: true }, ...facts }) as EngineType;
+  const object = { type: "object", additionalProperties: { type: ["string", "null"] } };
+  assert.deepEqual(output(hstore({})), object);
+  assert.deepEqual(output(hstore({ size: { max: 64 } })), { ...object, maxProperties: 64 });
+  assert.deepEqual(output(hstore({ size: { min: 1, max: 64 } }), true), { ...object, minProperties: 1, maxProperties: 64 });
+  assert.deepEqual(typeSchema(hstore({ size: { exact: 2 } }), "postgres", true), { ...object, minProperties: 2, maxProperties: 2 });
 });
 
 test("a nullable position keeps its facts beside null, and comments describe what they are on", () => {

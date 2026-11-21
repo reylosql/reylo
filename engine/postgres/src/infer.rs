@@ -39,7 +39,7 @@
 //! is a boolean, and `reylo_html` is text. Postgres already describes every type, so there the
 //! rules only ever settle nullability.
 //!
-//! SQLite has no parse tree of its own to offer, so both dialects are read with libpg_query, the
+//! SQLite has no parse tree of its own to offer, so both dialects are read with Postgres's grammar, the
 //! parser `jsonshape` already reads SQLite statements with. What it cannot parse, and what parses
 //! as something the rules do not recognise, proves nothing.
 //!
@@ -53,7 +53,7 @@ use crate::levels::{Columns, Level, Withs};
 use crate::pgtypes::oid;
 use crate::resolution::{Kind, Operand, Shared};
 use crate::returning::Rows;
-use pg_query::protobuf::{self, node::Node as NodeEnum, Node, ParseResult, RawStmt, SelectStmt};
+use syntax::postgres::protobuf::{self, node::Node as NodeEnum, Node, ParseResult, RawStmt, SelectStmt};
 use std::collections::{HashMap, HashSet};
 
 /// The operators whose Postgres built-ins return a value for every pair of non-null operands (or
@@ -216,7 +216,7 @@ const POSTGRES_ROW_TAKERS: &[&str] = &[
 /// `percentile_disc` and `mode` of an `anyelement`. What they return proves nothing of its type.
 const POSTGRES_ROW_RESULTS: &[&str] = &["min", "max", "lag", "lead", "first_value", "last_value", "any_value", "percentile_disc", "mode"];
 /// The never-null functions the rules read that take no argument but two (`random(min, max)`):
-/// a call of one is no call of theirs.
+/// a call of one is no call of theirs, and only a call of none is never NULL.
 const POSTGRES_NO_ARGUMENT: &[&str] = &["now", "clock_timestamp", "statement_timestamp", "transaction_timestamp", "gen_random_uuid", "uuidv4", "random"];
 /// The window functions a rule reads (see `Reader::call`).
 pub const POSTGRES_WINDOW: &[&str] = &["row_number", "rank", "dense_rank", "percent_rank", "cume_dist", "ntile", "lag", "lead"];
@@ -251,7 +251,7 @@ pub fn postgres_function_names() -> Vec<&'static str> {
     }
     names
 }
-/// SQLite's cast targets with a type of their own, by the name libpg_query gives them
+/// SQLite's cast targets with a type of their own, by the name Postgres's parser gives them
 /// (`INTEGER` parses as `int4`, `REAL` as `float4`). A cast to anything else still carries its
 /// argument's nullability on SQLite, but not a type: `CAST(x AS NUMERIC)` may be either class.
 const SQLITE_CASTS: &[(&str, u32)] = &[
@@ -263,7 +263,7 @@ const SQLITE_CASTS: &[(&str, u32)] = &[
     ("text", oid::TEXT),
     ("varchar", oid::VARCHAR),
 ];
-/// Postgres's built-in cast targets by the name libpg_query gives them, so a cast names its type
+/// Postgres's built-in cast targets by the name Postgres's parser gives them, so a cast names its type
 /// for a rule that reads one ([`Expr::Guarded`]). A target outside the list proves its argument's
 /// nullability as before and names no type.
 const POSTGRES_CASTS: &[(&str, u32)] = &[
@@ -311,8 +311,9 @@ pub enum Expr {
     /// Column `n` of the leaf probe: a column reference, answered by its provenance.
     Leaf(usize),
     /// Column `n` of the leaf probe, read as the whole row of this relation: non-null when the
-    /// probe says it is that relation's row type (and so not a column that shares the alias's
-    /// name), because a row of a table that no outer join nulls always exists.
+    /// probe describes it as the relation's whole row ([`DescribedColumn::own_row`]), and so not a
+    /// column that shares the alias's name, of a type of that name or any other, because a row of
+    /// a table that no outer join nulls always exists.
     Row(usize, String),
     /// Non-null when every operand is: an operator, a cast, a `CASE` with an `ELSE`.
     Every(Vec<Expr>, Ty),
@@ -324,6 +325,10 @@ pub enum Expr {
     /// The inner expression, which proves non-null only where it holds no `jsonb` value for
     /// certain: the argument of a cast to a number or a boolean ([`POSTGRES_JSONB_NULL_CASTS`]).
     NotJsonb(Box<Expr>),
+    /// The inner array read whole, a column, cast to a number or a boolean array: a JSON null
+    /// among its elements becomes NULL, so they are non-null only where none is `jsonb`
+    /// ([`items_nullable`]). The array itself, and its type, are the inner one's.
+    NotJsonbItems(Box<Expr>),
     /// The inner expression, which cannot be NULL where it is read: a column inside a CASE arm
     /// that runs only where it is not NULL. Its type is the inner one's.
     Narrowed(Box<Expr>),
@@ -469,6 +474,9 @@ pub enum Ty {
     /// `text` when every operand is a string type: Postgres's `||` over strings. Over anything
     /// else (an array, `jsonb`, a string beside a number) the build names no type.
     Concat,
+    /// Nothing the build can name, of `array_append` and `array_prepend`, which add a value to an
+    /// array as one element ([`items_nullable`]).
+    Appends,
     /// The operands' type when they all agree on a number type the built-in arithmetic has an
     /// operator of that type for (`int4 + int4` is `int4`), `%` having none for a float: an
     /// arithmetic operator over two values of one type, or a prefix sign.
@@ -505,6 +513,9 @@ pub struct Plan {
     pub star: bool,
     /// `SELECT <the leaves> FROM <the statement's FROM>`, when an expression reads a column.
     pub leaves: Option<String>,
+    /// Each leaf as the statement writes it, in order, before a RETURNING's old or new row is
+    /// read as the target relation's.
+    pub sources: Vec<Node>,
     /// A set operation at the top of the statement; nothing else in the plan is set then.
     pub set_op: Option<SetOp>,
 }
@@ -550,6 +561,10 @@ pub struct Trust {
     /// Whether the database holds no nondeterministic collation, so no value can bring one to a
     /// comparison. A host that did not ask leaves it unset.
     pub deterministic_only: bool,
+    /// Whether the statement compares a value with a bare NULL by `=` ([`compares_with_null`]),
+    /// which `transform_null_equals` turns into `IS NULL`: no such comparison is then a strict
+    /// test, which a probe's NULL in place of a parameter stands for otherwise.
+    pub null_equals: bool,
 }
 
 impl Trust {
@@ -575,10 +590,11 @@ impl Trust {
     }
 
     /// Whether a call of `name` is the built-in only for some operands' types: a user or an
-    /// extension defined the name, or an implicit cast between built-in types by a function of
-    /// theirs, which a built-in's candidate may run on its operand.
+    /// extension defined the name, or an implicit cast by a function of theirs into a built-in
+    /// type, from a built-in type or from one of theirs, which a built-in's candidate may run on
+    /// its operand, unless every built-in of the name takes its arguments as they are.
     pub(crate) fn checked(&self, name: &str) -> bool {
-        !self.builtin(name) || self.overloads.as_ref().is_some_and(|o| o.0.casts_implicitly())
+        !self.builtin(name) || self.overloads.as_ref().is_some_and(|o| o.0.casts_implicitly() && !o.0.passes_through(name))
     }
 
     /// Whether a call a strict claim rests on is the built-in only for some operands' types: a
@@ -629,7 +645,7 @@ impl Trust {
 }
 
 /// Read one rewritten statement's expression columns. SQLite's `?n` placeholders are read as
-/// `$n`, which is how libpg_query spells one; nothing runs against the database here.
+/// `$n`, which is how Postgres spells one; nothing runs against the database here.
 pub fn plan(sql: &str, dialect: Dialect, trust: &Trust, columns: &Columns) -> Plan {
     crate::stack::run(|| plan_here(sql, dialect, trust, columns))
 }
@@ -675,7 +691,7 @@ fn plan_here(sql: &str, dialect: Dialect, trust: &Trust, columns: &Columns) -> P
     let rows = Rows::of(top).map(|rows| (rows, Level::of(&from, &withs, columns)));
     let froms = (dialect == Dialect::Postgres).then(|| vec![Level::of(&from, &withs, columns)]);
     let fields = row_fields(&serde_json::to_value(&parsed.protobuf).unwrap_or_default());
-    let mut reader = Reader { dialect, trust, columns, withs, rows: rows.as_ref(), leaves: (!grouped).then(Vec::new), grouped: plain_group_by, narrowed: Vec::new(), scope: froms, windows, fields: Some(&fields), lockstep: targets_lockstep(top, &targets, dialect, trust) };
+    let mut reader = Reader { dialect, trust, columns, withs, rows: rows.as_ref(), leaves: (!grouped).then(Vec::new), sources: Vec::new(), grouped: plain_group_by, narrowed: Vec::new(), scope: froms, windows, fields: Some(&fields), lockstep: targets_lockstep(top, &targets, dialect, trust) };
     let scope = match top {
         NodeEnum::SelectStmt(s) if dialect == Dialect::Postgres && !grouped => Some(Scope::of(s, &mut reader)),
         _ => None,
@@ -738,6 +754,7 @@ fn plan_here(sql: &str, dialect: Dialect, trust: &Trust, columns: &Columns) -> P
         }
     }
     let leaves = reader.leaves.unwrap_or_default();
+    plan.sources = reader.sources;
     if !leaves.is_empty() {
         // Every row the select list reads passed the WHERE, so the probe filters by it too: its
         // strict tests narrow the leaves and reduce outer joins there as they do here.
@@ -879,8 +896,8 @@ pub fn resolve(expr: &Expr, leaves: Option<&[DescribedColumn]>) -> Fact {
             Some(col) => Fact { non_null: !col.nullable, type_oid: (col.type_oid != oid::UNKNOWN).then_some(col.type_oid) },
             None => NOTHING,
         },
-        Expr::Row(i, relation) => match leaves.and_then(|l| l.get(*i)) {
-            Some(col) => Fact { non_null: !col.nullable || col.type_name == *relation, type_oid: (col.type_oid != oid::UNKNOWN).then_some(col.type_oid) },
+        Expr::Row(i, _) => match leaves.and_then(|l| l.get(*i)) {
+            Some(col) => Fact { non_null: !col.nullable || col.own_row, type_oid: (col.type_oid != oid::UNKNOWN).then_some(col.type_oid) },
             None => NOTHING,
         },
         Expr::Every(operands, ty) => {
@@ -901,6 +918,7 @@ pub fn resolve(expr: &Expr, leaves: Option<&[DescribedColumn]>) -> Fact {
             Fact { non_null: fact.non_null && !may_be_jsonb(inner, leaves), ..fact }
         }
         Expr::Narrowed(inner) => Fact { non_null: true, ..resolve(inner, leaves) },
+        Expr::NotJsonbItems(inner) => resolve(inner, leaves),
         Expr::JsonPath { .. } => match json_read(expr, leaves) {
             Some(read) => Fact { non_null: read.non_null, type_oid: Some(read.type_oid) },
             None => NOTHING,
@@ -1029,7 +1047,7 @@ fn may_be_jsonb(expr: &Expr, leaves: Option<&[DescribedColumn]>) -> bool {
         None => match expr {
             Expr::NonNull(_) | Expr::Array { .. } => false,
             Expr::Unknown | Expr::Unread(_) | Expr::Leaf(_) | Expr::Row(..) => true,
-            Expr::Nullable(inner) | Expr::Guarded(inner, _) | Expr::NotJsonb(inner) | Expr::Narrowed(inner) | Expr::NotRow(inner, _) => may_be_jsonb(inner, leaves),
+            Expr::Nullable(inner) | Expr::Guarded(inner, _) | Expr::NotJsonb(inner) | Expr::NotJsonbItems(inner) | Expr::Narrowed(inner) | Expr::NotRow(inner, _) => may_be_jsonb(inner, leaves),
             Expr::Every(operands, _) | Expr::Any(operands, _) => operands.iter().any(|o| may_be_jsonb(o, leaves)),
             // `->` and `#>` give the column's own JSON; `->>` and `#>>` text.
             Expr::JsonPath { text, .. } => !text,
@@ -1048,21 +1066,31 @@ fn may_be_jsonb(expr: &Expr, leaves: Option<&[DescribedColumn]>) -> bool {
 /// type oids are arrays ([`DescribedColumn::nullable_items`]). Only an array the statement builds
 /// says anything: `Some(true)` when an element may be NULL (`ARRAY[nickname]`, `array_agg(u.email)`
 /// over a LEFT JOIN, a literal that spells NULL), `Some(false)` when every element is proven
-/// non-null. A column's array, a function's, `ARRAY(SELECT …)`, an element that is itself an
-/// array (`array_agg(tags)` is two-dimensional, its elements the tags') and one that reads a
-/// column the leaf probe does not ([`Expr::Unread`]) say nothing: `None`. A `CASE`, a `coalesce`
-/// or an operator over arrays may return any operand's elements.
+/// non-null. A column's array says what the leaf probe says of its elements, which a CHECK
+/// settles. A function's array, `ARRAY(SELECT …)`, an element that is itself an array
+/// (`array_agg(tags)` is two-dimensional, its elements the tags') and one that reads a column the
+/// leaf probe does not ([`Expr::Unread`]) say nothing: `None`. A `CASE`, a `coalesce` or an
+/// operator over arrays may return any operand's elements.
 pub fn items_nullable(expr: &Expr, leaves: Option<&[DescribedColumn]>, is_array: &dyn Fn(u32) -> bool) -> Option<bool> {
     match expr {
         Expr::Array { items, .. } => array_items(items, leaves, is_array),
         Expr::Nullable(inner) | Expr::Guarded(inner, _) | Expr::NotJsonb(inner) | Expr::Narrowed(inner) | Expr::NotRow(inner, _) => items_nullable(inner, leaves, is_array),
-        Expr::Every(operands, _) | Expr::Any(operands, _) => join_items(operands.iter().map(|o| items_nullable(o, leaves, is_array))),
-        Expr::NonNull(_) | Expr::Unknown | Expr::Unread(_) | Expr::Leaf(_) | Expr::Row(..) | Expr::JsonPath { .. } => None,
+        // A JSON null among the elements becomes NULL in the cast, which a CHECK that keeps out
+        // SQL NULL lets through.
+        Expr::NotJsonbItems(inner) => match items_nullable(inner, leaves, is_array) {
+            Some(false) if may_hold_jsonb_items(inner, leaves) => None,
+            items => items,
+        },
+        Expr::Every(operands, ty) | Expr::Any(operands, ty) => operands_items(operands, *ty, leaves, is_array),
+        // A column's array holds what the leaf probe says of its elements, which a CHECK settles
+        // (`array_position(tags, NULL) IS NULL`), so `coalesce(tags, '{}')` keeps it.
+        Expr::Leaf(i) => leaves.and_then(|l| l.get(*i)).and_then(|c| c.nullable_items),
+        Expr::NonNull(_) | Expr::Unknown | Expr::Unread(_) | Expr::Row(..) | Expr::JsonPath { .. } => None,
         // A user's overload may return any elements.
         Expr::Call(call) => match (call.fact(leaves), &call.claim) {
             (None, _) | (Some(_), Claim::NonNull(_)) => None,
             (Some(_), Claim::Array(_)) => array_items(&call.args, leaves, is_array),
-            (Some(_), Claim::Every(..)) => join_items(call.args.iter().map(|o| items_nullable(o, leaves, is_array))),
+            (Some(_), Claim::Every(_, ty)) => operands_items(&call.args, *ty, leaves, is_array),
             (Some(_), Claim::Removed(true)) => Some(false),
             (Some(_), Claim::Removed(false)) => call.args.first().and_then(|a| items_nullable(a, leaves, is_array)),
         },
@@ -1097,7 +1125,7 @@ impl Nesting {
 pub fn nesting(expr: &Expr, leaves: Option<&[DescribedColumn]>, is_array: &dyn Fn(u32) -> Option<bool>) -> Option<Nesting> {
     let nested = match expr {
         Expr::Array { items, .. } => items_nesting(items, leaves, is_array),
-        Expr::Nullable(inner) | Expr::Guarded(inner, _) | Expr::NotJsonb(inner) | Expr::Narrowed(inner) | Expr::NotRow(inner, _) => nesting(inner, leaves, is_array),
+        Expr::Nullable(inner) | Expr::Guarded(inner, _) | Expr::NotJsonb(inner) | Expr::NotJsonbItems(inner) | Expr::Narrowed(inner) | Expr::NotRow(inner, _) => nesting(inner, leaves, is_array),
         Expr::Call(call) => match (call.fact(leaves), &call.claim) {
             (Some(_), Claim::Array(_)) => items_nesting(&call.args, leaves, is_array),
             _ => None,
@@ -1120,6 +1148,8 @@ fn items_nesting(items: &[Expr], leaves: Option<&[DescribedColumn]>, is_array: &
             _ => {
                 let type_oid = match item {
                     Expr::Unread(type_oid) => *type_oid,
+                    // `||`, `array_append` and `array_prepend` of an array are of its type.
+                    Expr::Every(operands, Ty::Concat | Ty::Appends) => operands.iter().find_map(|o| resolve(o, leaves).type_oid.filter(|t| is_array(*t) == Some(true))),
                     _ => resolve(item, leaves).type_oid,
                 };
                 match type_oid.map(|t| (t, is_array(t))) {
@@ -1154,13 +1184,55 @@ fn array_items(items: &[Expr], leaves: Option<&[DescribedColumn]>, is_array: &dy
 fn reads_unread(expr: &Expr) -> bool {
     match expr {
         Expr::Unread(_) => true,
-        Expr::Nullable(inner) | Expr::Guarded(inner, _) | Expr::NotJsonb(inner) | Expr::Narrowed(inner) | Expr::NotRow(inner, _) => reads_unread(inner),
+        Expr::Nullable(inner) | Expr::Guarded(inner, _) | Expr::NotJsonb(inner) | Expr::NotJsonbItems(inner) | Expr::Narrowed(inner) | Expr::NotRow(inner, _) => reads_unread(inner),
         Expr::JsonPath { base, .. } => reads_unread(base),
         Expr::Every(operands, _) | Expr::Any(operands, _) => operands.iter().any(reads_unread),
         Expr::Array { items, .. } => items.iter().any(reads_unread),
         Expr::NonNull(_) | Expr::Unknown | Expr::Leaf(_) | Expr::Row(..) => false,
         Expr::Call(call) => call.args.iter().any(reads_unread),
         Expr::Trusted(t) => reads_unread(&t.then) || reads_unread(&t.otherwise),
+    }
+}
+
+/// What the operands of an [`Expr::Every`] or an [`Expr::Any`] of type `ty` say of the elements
+/// of the array it is: each operand's own elements, as a `CASE`'s or a `coalesce`'s arrays. `||`,
+/// `array_append` and `array_prepend` also take a value that is no array, which is one element of
+/// the result: where an operand of one is of a type that is no array for certain it is such an
+/// element, which may be NULL where the operand may, and where its type is not known it may be
+/// either, and says nothing, unless it builds an array. A string literal there is an array beside
+/// an array (`tags || '{a}'`), whatever type it reads as alone, and holds what it spells.
+fn operands_items(operands: &[Expr], ty: Ty, leaves: Option<&[DescribedColumn]>, is_array: &dyn Fn(u32) -> bool) -> Option<bool> {
+    if !matches!(ty, Ty::Concat | Ty::Appends) {
+        return join_items(operands.iter().map(|o| items_nullable(o, leaves, is_array)));
+    }
+    join_items(operands.iter().map(|o| {
+        if spelled_array(o) || builds_array(o) {
+            return items_nullable(o, leaves, is_array);
+        }
+        let fact = resolve(o, leaves);
+        match fact.type_oid {
+            // A non-null element adds no NULL, but says nothing more of the others either.
+            Some(t) if !is_array(t) => (!fact.non_null).then_some(true),
+            Some(_) => items_nullable(o, leaves, is_array),
+            None => None,
+        }
+    }))
+}
+
+/// Whether an expression is a string literal that spells an array (`'{a,b}'`), as
+/// [`Reader::read`] reads one.
+fn spelled_array(expr: &Expr) -> bool {
+    matches!(expr, Expr::Every(operands, Ty::Is(oid::TEXT)) if matches!(operands.as_slice(), [Expr::Array { .. }]))
+}
+
+/// Whether an expression is an array the statement builds: `ARRAY[…]` or `array_agg(…)`, as it
+/// is or narrowed.
+fn builds_array(expr: &Expr) -> bool {
+    match expr {
+        Expr::Array { .. } => true,
+        Expr::Nullable(inner) | Expr::Guarded(inner, _) | Expr::NotJsonb(inner) | Expr::NotJsonbItems(inner) | Expr::Narrowed(inner) | Expr::NotRow(inner, _) => builds_array(inner),
+        Expr::Call(call) => matches!(call.claim, Claim::Array(_)),
+        _ => false,
     }
 }
 
@@ -1363,9 +1435,17 @@ pub(crate) fn set_calls(target: &Node, trust: &Trust) -> usize {
     serde_json::to_value(target).map_or(2, |v| walk(&v, trust))
 }
 
+/// Whether an array's elements may be `jsonb` values: its type is `jsonb[]`, or one a database
+/// defined, which may be a domain over it, or the rules name no type for it.
+fn may_hold_jsonb_items(expr: &Expr, leaves: Option<&[DescribedColumn]>) -> bool {
+    resolve(expr, leaves).type_oid.is_none_or(|ty| ty == oid::JSONB_ARRAY || ty >= FIRST_USER_OID)
+}
+
 /// An array cast to a number or a boolean array, whose elements a JSON null among them makes
 /// NULL: every element the array is built from, read as one that is non-null only where it holds
-/// no `jsonb` value for certain ([`Expr::NotJsonb`]). The array itself is as it was.
+/// no `jsonb` value for certain ([`Expr::NotJsonb`]), and an array read whole (a column) as one
+/// whose elements are non-null only where none is `jsonb` ([`Expr::NotJsonbItems`]). The array
+/// itself is as it was.
 fn elements_not_jsonb(expr: Expr) -> Expr {
     match expr {
         Expr::Array { non_null, items } => Expr::Array {
@@ -1401,6 +1481,7 @@ fn elements_not_jsonb(expr: Expr) -> Expr {
             t.otherwise = elements_not_jsonb(t.otherwise);
             Expr::Trusted(t)
         }
+        leaf @ Expr::Leaf(_) => Expr::NotJsonbItems(Box::new(leaf)),
         other => other,
     }
 }
@@ -1429,7 +1510,7 @@ fn array_elements(node: &Node) -> Option<Vec<&Node>> {
 /// rows may have ([`row_fields`]), `None` where the caller does not see the whole statement, and
 /// `arg_type` gives the type of a column an argument reads where the caller knows it.
 pub fn aggregates(expr: &Node, dialect: Dialect, trust: &Trust, level: Option<&Level>, fields: Option<&HashSet<String>>, arg_type: &dyn Fn(&Node) -> Option<u32>) -> bool {
-    Reader { dialect, trust, columns: &Columns::default(), withs: Withs::default(), rows: None, leaves: None, grouped: false, narrowed: Vec::new(), scope: None, windows: &[], fields, lockstep: false }.aggregates(expr, true, level, arg_type)
+    Reader { dialect, trust, columns: &Columns::default(), withs: Withs::default(), rows: None, leaves: None, sources: Vec::new(), grouped: false, narrowed: Vec::new(), scope: None, windows: &[], fields, lockstep: false }.aggregates(expr, true, level, arg_type)
 }
 
 /// The aggregates the rules read that no built-in of takes a row on every server Reylo supports
@@ -1565,7 +1646,7 @@ impl Ty {
     fn of(self, facts: &[Fact]) -> Option<u32> {
         match self {
             Ty::Is(o) => Some(o),
-            Ty::Unknown => None,
+            Ty::Unknown | Ty::Appends => None,
             Ty::Shared => {
                 let first = facts.first()?.type_oid?;
                 facts.iter().all(|f| f.type_oid == Some(first)).then_some(first)
@@ -1596,6 +1677,9 @@ struct Reader<'a> {
     rows: Option<&'a (Rows, Level)>,
     /// The column references read so far, in leaf order; `None` where a reference proves nothing.
     leaves: Option<Vec<Node>>,
+    /// Each of `leaves` as the statement writes it, before a RETURNING's old or new row is read as
+    /// the target relation's.
+    sources: Vec<Node>,
     /// Whether the expressions belong to a SELECT with a plain `GROUP BY`, where no group is empty.
     grouped: bool,
     /// The columns, as written, that cannot be NULL where the reader stands: inside a CASE arm
@@ -1666,6 +1750,7 @@ impl Reader<'_> {
                 let read = match self.leaves.as_mut() {
                     Some(leaves) if !is_star(expr) => {
                         leaves.push(leaf);
+                        self.sources.push(expr.clone());
                         Expr::Leaf(leaves.len() - 1)
                     }
                     Some(_) => Expr::Unknown,
@@ -1707,7 +1792,9 @@ impl Reader<'_> {
                             // where a JSON null cast to a number or a boolean is NULL
                             // (`ARRAY['null'::jsonb]::int[]` is `{NULL}`).
                             let operand = if POSTGRES_JSONB_NULL_CASTS.contains(&name.as_str()) && !self.trust.jsonb_casts_raise { elements_not_jsonb(operand) } else { operand };
-                            Expr::Every(vec![operand], Ty::Unknown)
+                            // Of the built-in array type, which an array of it nests in turn.
+                            let ty = POSTGRES_CASTS.iter().find(|(n, _)| *n == name).and_then(|(_, o)| crate::pgtypes::builtin_array_of(*o)).map_or(Ty::Unknown, Ty::Is);
+                            Expr::Every(vec![operand], ty)
                         }
                         _ => Expr::Unknown,
                     };
@@ -1890,6 +1977,19 @@ impl Reader<'_> {
                     read
                 }
             }
+            // A slice of an array (`tags[1:2]`) is of the array's type, NULL for a NULL array or
+            // bound: one subscript a slice makes them all slices.
+            Some(NodeEnum::AIndirection(i))
+                if self.dialect == Dialect::Postgres
+                    && !i.indirection.is_empty()
+                    && i.indirection.iter().all(|n| matches!(n.node, Some(NodeEnum::AIndices(_))))
+                    && i.indirection.iter().any(|n| matches!(&n.node, Some(NodeEnum::AIndices(x)) if x.is_slice)) =>
+            {
+                match i.arg.as_deref() {
+                    Some(arg) => Expr::Nullable(Box::new(Expr::Every(vec![self.read(arg)], Ty::Shared))),
+                    None => Expr::Unknown,
+                }
+            }
             Some(NodeEnum::SubLink(s)) => self.sublink(s),
             // `CURRENT_SCHEMA` is NULL where no schema of the search path exists.
             Some(NodeEnum::SqlvalueFunction(v)) if v.op == protobuf::SqlValueFunctionOp::SvfopCurrentSchema as i32 => Expr::Unknown,
@@ -1990,7 +2090,9 @@ impl Reader<'_> {
             // Anywhere else `array_agg` may see no rows and be NULL, but its elements are still the
             // values of its argument.
             (Dialect::Postgres, "array_agg", 1) if self.trust.builtin("array_agg") => Expr::Array { non_null: false, items: f.args.iter().map(|a| self.read(a)).collect() },
-            (Dialect::Postgres, n, _) if POSTGRES_NEVER_NULL.contains(&n) && self.trust.builtin(n) => Expr::NonNull(None),
+            // `random(min, max)` is strict, and raises rather than answering NULL where `min > max`.
+            (Dialect::Postgres, "random", 2) if self.trust.builtin("random") => Expr::Every(self.args(f, projection), Ty::Unknown),
+            (Dialect::Postgres, n, args) if POSTGRES_NEVER_NULL.contains(&n) && (args == 0 || !POSTGRES_NO_ARGUMENT.contains(&n)) && self.trust.builtin(n) => Expr::NonNull(None),
             // `unnest(ARRAY[…])` gives the elements written, a nested array's flattened: none NULL
             // where none of them is and each is a value of a scalar type. An element that is an
             // array itself (`array[tags]`, `array['{NULL}'::int[]]`) makes the array one of more
@@ -2036,6 +2138,7 @@ impl Reader<'_> {
                 let claim = Claim::Removed(is_null_literal(&f.args[1]));
                 Expr::Call(Box::new(Call { check: Check::builtin(), args, claim }))
             }
+            (Dialect::Postgres, "array_append" | "array_prepend", 2) if self.trust.builtin(&name) => Expr::Every(self.args(f, projection), Ty::Appends),
             (Dialect::Postgres, n, _) if POSTGRES_TOTAL.contains(&n) && self.trust.builtin(n) => {
                 let ty = if POSTGRES_JSONB.contains(&n) { Ty::Is(oid::JSONB) } else { Ty::Unknown };
                 Expr::Every(self.args(f, projection), ty)
@@ -2121,7 +2224,8 @@ impl Reader<'_> {
             }
             ("array_agg", 1) => (Claim::Array(false), None),
             ("array_remove", 2) => (Claim::Removed(is_null_literal(&f.args[1])), None),
-            (n, _) if POSTGRES_NEVER_NULL.contains(&n) => (Claim::NonNull(None), None),
+            ("random", 2) => (Claim::Every(None, Ty::Unknown), None),
+            (n, args) if POSTGRES_NEVER_NULL.contains(&n) && (args == 0 || !POSTGRES_NO_ARGUMENT.contains(&n)) => (Claim::NonNull(None), None),
             ("uuidv7", 0) => (Claim::NonNull(Some(oid::UUID)), None),
             (n, 0) if POSTGRES_NO_ARGUMENT_NEVER_NULL.contains(&n) => (Claim::NonNull(None), None),
             (n, 1) if POSTGRES_TOTAL_ONE_ARGUMENT.contains(&n) => (Claim::Every(None, Ty::Is(oid::TEXT)), None),
@@ -2131,6 +2235,7 @@ impl Reader<'_> {
             (n, 1) if POSTGRES_FRAME_VALUES.contains(&n) && f.over.as_deref().is_some_and(|over| frame_holds_current_row(over, self.windows)) => (Claim::Every(None, Ty::Unknown), None),
             (n, 1..) if POSTGRES_FIRST_ARG.contains(&n) => (Claim::Every(Some(1), Ty::Is(oid::TEXT)), None),
             (n, 1..) if POSTGRES_TOTAL_FOR.iter().any(|(name, _)| *name == n) => (Claim::Every(None, Ty::Unknown), POSTGRES_TOTAL_FOR.iter().find(|(name, _)| *name == n).map(|(_, t)| (0, *t))),
+            ("array_append" | "array_prepend", 2) => (Claim::Every(None, Ty::Appends), None),
             (n, _) if POSTGRES_TOTAL.contains(&n) => (Claim::Every(None, if POSTGRES_JSONB.contains(&n) { Ty::Is(oid::JSONB) } else { Ty::Unknown }), None),
             _ => return None,
         })
@@ -2236,7 +2341,7 @@ impl Reader<'_> {
             Some(outside) => level.within(outside.clone()),
             None => level,
         };
-        let mut inner_reader = Reader { dialect: self.dialect, trust: self.trust, columns: self.columns, withs, rows: None, leaves: None, grouped: false, narrowed: Vec::new(), scope, windows: &select.window_clause, fields: self.fields, lockstep: false };
+        let mut inner_reader = Reader { dialect: self.dialect, trust: self.trust, columns: self.columns, withs, rows: None, leaves: None, sources: Vec::new(), grouped: false, narrowed: Vec::new(), scope, windows: &select.window_clause, fields: self.fields, lockstep: false };
         let value = inner_reader.read(inner);
         if array {
             // Its elements are the subquery's values: arrays of arrays where they are arrays
@@ -2630,7 +2735,7 @@ impl Items<'_> {
                     })
                 });
                 let query = cte.and_then(|cte| {
-                    let body = cte.ctequery.as_deref().and_then(as_select)?;
+                    let body = cte.ctequery.as_deref()?;
                     // A WITH query's body sees the queries before it, and in a recursive WITH
                     // every one: a later query's name, or its own, is a table's there.
                     let scope = self.with.map(|w| {
@@ -2649,12 +2754,19 @@ impl Items<'_> {
                     names.extend(own.into_iter().skip(names.len()));
                     // SEARCH adds its sequence column, CYCLE its mark and its path.
                     let extra = usize::from(cte.search_clause.is_some()) + 2 * usize::from(cte.cycle_clause.is_some());
-                    Some(ItemQuery { sql: arm_text(self.version, body, scope.as_ref())?, columns: names, with: Some(cte.ctename.clone()), nulled, known: None, ordinality: None, lateral: false, around: None, extra })
+                    // An INSERT, an UPDATE or a MERGE is settled as the statement it is: its
+                    // RETURNING list reads what it wrote ([`written_returning`]).
+                    let sql = match body.node.as_ref()? {
+                        NodeEnum::SelectStmt(body) => arm_text(self.version, body, scope.as_ref())?,
+                        NodeEnum::InsertStmt(_) | NodeEnum::UpdateStmt(_) | NodeEnum::MergeStmt(_) => write_text(self.version, body, scope.as_ref())?,
+                        _ => return None,
+                    };
+                    Some(ItemQuery { sql, columns: names, with: Some(cte.ctename.clone()), nulled, known: None, ordinality: None, lateral: false, around: None, extra })
                 });
                 let name = Some(alias(rv.alias.as_ref()).unwrap_or_else(|| rv.relname.clone()));
                 if cte.is_none() {
                     let plain = rv.schemaname.is_empty() && rv.alias.as_ref().is_none_or(|a| a.colnames.is_empty());
-                    self.shows.push(if plain { Shows::Table(rv.relname.clone()) } else { Shows::Unknown });
+                    self.shows.push(if plain { Shows::Table(crate::analyze::relation_name("", &rv.relname)) } else { Shows::Unknown });
                     self.names.push((name, Item::Table));
                     return Some(());
                 }
@@ -3202,6 +3314,9 @@ impl Reader<'_> {
             if out.iter().any(|n| n.column == strict.column && n.checks.is_empty()) {
                 continue;
             }
+            if self.trust.null_equals && strict.calls.iter().any(StrictCall::null_equality) {
+                continue;
+            }
             let mut checks = Vec::new();
             if strict.calls.iter().any(|c| self.trust.call_checked(c)) && (self.dialect != Dialect::Postgres || self.trust.overloads.is_none()) {
                 continue;
@@ -3312,6 +3427,44 @@ impl Strict {
         self.calls.push(StrictCall { kind, name: name.to_string(), args });
         self
     }
+}
+
+impl StrictCall {
+    /// Whether the call is `=` with a bare NULL on a side ([`compares_with_null`]).
+    pub(crate) fn null_equality(&self) -> bool {
+        self.kind == Kind::Infix && self.name == "=" && self.args.iter().any(is_null_constant)
+    }
+}
+
+/// Whether a node is a NULL constant as written, with no cast: what `transform_null_equals` reads
+/// beside `=`.
+pub(crate) fn is_null_constant(node: &Node) -> bool {
+    matches!(node.node.as_ref(), Some(NodeEnum::AConst(c)) if c.isnull)
+}
+
+/// Whether a statement compares a value with a bare NULL by `=` anywhere (`x = NULL`, `NULL = x`).
+/// Under the setting `transform_null_equals`, which a database or a role may set, Postgres reads
+/// such a comparison as `x IS NULL`, true of the rows where `x` is NULL; without it the comparison
+/// is never true. Either way it pins no key and narrows no column, though a probe writes `x = NULL`
+/// for `x = $1`, which does: in a statement that holds one, no `= NULL` is read as either.
+pub fn compares_with_null(sql: &str) -> bool {
+    fn walk(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::Object(map) => {
+                let found = map.get("AExpr").is_some_and(|e| {
+                    let op = e.get("kind").and_then(serde_json::Value::as_i64) == Some(protobuf::AExprKind::AexprOp as i64);
+                    let equals = e.get("name").and_then(serde_json::Value::as_array).is_some_and(|n| n.len() == 1 && n[0].pointer("/node/String/sval").and_then(serde_json::Value::as_str) == Some("="));
+                    let null = |side: &str| e.get(side).and_then(|s| s.pointer("/node/AConst/isnull")).and_then(serde_json::Value::as_bool) == Some(true);
+                    op && equals && (null("lexpr") || null("rexpr"))
+                });
+                found || map.values().any(walk)
+            }
+            serde_json::Value::Array(items) => items.iter().any(walk),
+            _ => false,
+        }
+    }
+    let Ok(parsed) = crate::stack::parse(sql) else { return true };
+    walk(&serde_json::to_value(&parsed.protobuf).unwrap_or_default())
 }
 
 /// The columns a predicate at the top level of a WHERE, or of an inner join's ON clause, is strict
@@ -3483,7 +3636,7 @@ fn holds_current_row(options: i32) -> bool {
 /// A bare `VALUES (…), (…)` arm: a column is non-null when it is in every row.
 fn values_plan(s: &SelectStmt, dialect: Dialect, trust: &Trust, columns: &Columns) -> Plan {
     let withs = Withs::default().with(s.with_clause.as_ref(), columns);
-    let mut reader = Reader { dialect, trust, columns, withs, rows: None, leaves: None, grouped: false, narrowed: Vec::new(), scope: None, windows: &[], fields: None, lockstep: false };
+    let mut reader = Reader { dialect, trust, columns, withs, rows: None, leaves: None, sources: Vec::new(), grouped: false, narrowed: Vec::new(), scope: None, windows: &[], fields: None, lockstep: false };
     let mut rows: Vec<Vec<Expr>> = Vec::new();
     for row in &s.values_lists {
         let Some(NodeEnum::List(list)) = row.node.as_ref() else { return Plan::default() };
@@ -3525,6 +3678,25 @@ fn arm_text(version: i32, arm: &SelectStmt, with: Option<&protobuf::WithClause>)
             stmt_len: 0,
         }],
     };
+    crate::stack::deparse(&result).ok()
+}
+
+/// An INSERT, an UPDATE or a MERGE as a statement of its own, with the WITH clause around it,
+/// whose queries it may read; `None` for one with a WITH clause of its own as well.
+fn write_text(version: i32, statement: &Node, with: Option<&protobuf::WithClause>) -> Option<String> {
+    let mut statement = statement.clone();
+    let own = match statement.node.as_mut()? {
+        NodeEnum::InsertStmt(s) => &mut s.with_clause,
+        NodeEnum::UpdateStmt(s) => &mut s.with_clause,
+        NodeEnum::MergeStmt(s) => &mut s.with_clause,
+        _ => return None,
+    };
+    match (&own, with) {
+        (None, _) => *own = with.cloned(),
+        (Some(_), Some(_)) => return None,
+        (Some(_), None) => {}
+    }
+    let result = ParseResult { version, stmts: vec![RawStmt { stmt: Some(Box::new(statement)), stmt_location: 0, stmt_len: 0 }] };
     crate::stack::deparse(&result).ok()
 }
 
@@ -3600,7 +3772,7 @@ fn write_narrowing_here(sql: &str, trust: &Trust, columns: &Columns) -> Option<W
     let withs = Withs::default().with(with.as_ref(), columns);
     let level = Level::of(&from, &withs, columns);
     let target = relation.alias.as_ref().map_or_else(|| relation.relname.clone(), |a| a.aliasname.clone());
-    let mut reader = Reader { dialect: Dialect::Postgres, trust, columns, withs, rows: None, leaves: None, grouped: false, narrowed: Vec::new(), scope: None, windows: &[], fields: None, lockstep: false };
+    let mut reader = Reader { dialect: Dialect::Postgres, trust, columns, withs, rows: None, leaves: None, sources: Vec::new(), grouped: false, narrowed: Vec::new(), scope: None, windows: &[], fields: None, lockstep: false };
     let scope = Scope::over(&from, filter, &mut reader);
     // The reference's claim, and whose column it reads.
     let mut narrowed = |c: &protobuf::ColumnRef| -> Option<WriteRead> {
@@ -3642,8 +3814,373 @@ fn write_narrowing_here(sql: &str, trust: &Trust, columns: &Columns) -> Option<W
         let name = if rt.name.is_empty() { c.fields.last().and_then(|f| last_string(std::slice::from_ref(f)))? } else { rt.name.clone() };
         out.push(narrowed(&c).filter(|_| !missing).map(|read| (name, read)));
     }
-    let target = if relation.schemaname.is_empty() { relation.relname.clone() } else { format!("{}.{}", relation.schemaname, relation.relname) };
+    let target = crate::analyze::relation_name(&relation.schemaname, &relation.relname);
     Some(WriteNarrowing { target, update, assigned, columns: out })
+}
+
+/// What a column a value a write gives a column reads is, as far as the value's nullability goes
+/// ([`written_returning`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum WrittenLeaf {
+    /// The target's column of this name in the row the write changes, as the row held it before:
+    /// an UPDATE's or a MERGE's target row, or the row an upsert's DO UPDATE finds in its way.
+    Target(String),
+    /// `excluded.<column>`: the row an upsert proposed to insert.
+    Excluded(String),
+    /// Column `n` of the SELECT an INSERT reads its rows from ([`WrittenReturning::select`]).
+    Selected(usize),
+    /// Anything else, which proves nothing: a column of a relation the write joins in or of a
+    /// MERGE's source, a whole row.
+    Other,
+}
+
+/// One value a write gives a column: what the rules read it as, with what each of its leaves reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WrittenValue {
+    pub claim: Expr,
+    pub leaves: Vec<WrittenLeaf>,
+    /// Whether the value has a type of its own, which an assignment cast turns into the column's:
+    /// anything but a string literal or a bare parameter, which the server reads as the column's
+    /// type, and the same column of `excluded`.
+    pub cast: bool,
+}
+
+/// What an INSERT, an UPDATE or a MERGE writes to the columns its RETURNING list reads of the row
+/// it wrote ([`written_returning`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WrittenReturning {
+    /// The target relation, as the statement names it (`users`, `app.users`).
+    pub target: String,
+    /// The row events (`TRIGGER_ROW_INSERT`, `_UPDATE`, `_DELETE` as bits) on which a trigger or a
+    /// rule may act on the statement's rows: a row an UPDATE moves to another partition is deleted
+    /// from one and inserted into the other.
+    pub events: i32,
+    /// Per result column, the target's column whose new value it reads, for certain; `None` for
+    /// every other.
+    pub columns: Vec<Option<String>>,
+    /// Per way the statement inserts a row it returns (its own rows, a MERGE's INSERT action), the
+    /// values it may write to each column it writes. A column a way leaves out takes its default.
+    pub inserts: Vec<HashMap<String, Vec<WrittenValue>>>,
+    /// The same per way it updates one (an UPDATE's SET, an upsert's DO UPDATE, a MERGE's UPDATE
+    /// action). A column a way leaves out keeps what the row held.
+    pub updates: Vec<HashMap<String, Vec<WrittenValue>>>,
+    /// The SELECT an INSERT reads its rows from, as a statement of its own: with the INSERT's
+    /// WITH clause, which it may read.
+    pub select: Option<String>,
+    /// What the RETURNING list's expressions need ([`plan`]), and per leaf of it, the target's
+    /// column whose new value it reads, for certain: an expression reads a column the statement
+    /// wrote a value to as that value.
+    pub plan: Plan,
+    pub leaf_columns: Vec<Option<String>>,
+}
+
+impl WrittenReturning {
+    /// The target's columns the statement writes a non-null value to in every row it returns.
+    /// `not_null` says which of the target's columns hold a value in every row of it, `selected`
+    /// which columns of the INSERT's SELECT do, and `uncast` which columns are of a type no cast of
+    /// a user's or an extension's targets: a value that may reach a column through an assignment
+    /// cast is non-null there only then.
+    pub fn non_null(&self, not_null: &dyn Fn(&str) -> bool, selected: &dyn Fn(usize) -> bool, uncast: &dyn Fn(&str) -> bool) -> HashSet<String> {
+        let holds = |value: &WrittenValue, column: &str, excluded: &dyn Fn(&str) -> bool| {
+            let leaves: Vec<DescribedColumn> = value
+                .leaves
+                .iter()
+                .map(|leaf| {
+                    let non_null = match leaf {
+                        WrittenLeaf::Target(column) => not_null(column),
+                        WrittenLeaf::Excluded(column) => excluded(column),
+                        WrittenLeaf::Selected(i) => selected(*i),
+                        WrittenLeaf::Other => false,
+                    };
+                    DescribedColumn { name: String::new(), type_oid: oid::UNKNOWN, typmod: -1, type_name: String::new(), nullable: !non_null, nullable_items: None, distinct_items: false, nested: None, values: None, document: None, non_finite: Default::default(), facts: Default::default(), whole_row: false, own_row: false }
+                })
+                .collect();
+            (!value.cast || uncast(column)) && resolve(&value.claim, Some(&leaves)).non_null
+        };
+        // The columns every way writes a non-null value to.
+        let every = |ways: &[HashMap<String, Vec<WrittenValue>>], excluded: &dyn Fn(&str) -> bool| -> Option<HashSet<String>> {
+            let mut ways = ways.iter().map(|way| -> HashSet<String> {
+                way.iter().filter(|(column, values)| !values.is_empty() && values.iter().all(|v| holds(v, column, excluded))).map(|(column, _)| column.clone()).collect()
+            });
+            let first = ways.next()?;
+            Some(ways.fold(first, |known, way| known.intersection(&way).cloned().collect()))
+        };
+        let inserted = every(&self.inserts, &|_| false);
+        // `excluded` is the row an upsert's one insert proposed, as it reached the row: a column it
+        // wrote a non-null value to, through no cast that may give NULL.
+        let proposed = inserted.clone().unwrap_or_default();
+        let updated = every(&self.updates, &|column| proposed.contains(column));
+        match (inserted, updated) {
+            (Some(inserted), Some(updated)) => inserted.intersection(&updated).cloned().collect(),
+            (Some(only), None) | (None, Some(only)) => only,
+            (None, None) => HashSet::new(),
+        }
+    }
+}
+
+/// What an INSERT, an UPDATE or a MERGE writes to the columns its RETURNING list reads of the row
+/// it wrote: per result column that is the target's column in the new row (bare, by the target's
+/// name, or by the new row's, and each column a `*` shows), and per way the statement writes a row
+/// it returns, each value it writes to each column ([`WrittenReturning`]). A MERGE that may delete
+/// returns the deleted row's values as they were, so it reads nothing here; an upsert's DO NOTHING,
+/// and a MERGE's, return no row. A column written in part (`tags[1]`, `point.x`), `DEFAULT`, and a
+/// column of a row a subquery assigns (`SET (a, b) = (SELECT …)`) are written nothing the rules
+/// read. Whether a trigger, a rule, a cast or anything else changes the value on its way to the
+/// row is the caller's to rule out. `None` for any other statement.
+pub fn written_returning(sql: &str, trust: &Trust, columns: &Columns) -> Option<WrittenReturning> {
+    crate::stack::run(|| written_returning_here(sql, trust, columns))
+}
+
+fn written_returning_here(sql: &str, trust: &Trust, columns: &Columns) -> Option<WrittenReturning> {
+    use crate::cardinality::{TRIGGER_ROW_DELETE, TRIGGER_ROW_INSERT, TRIGGER_ROW_UPDATE};
+    let parsed = crate::stack::parse(sql).ok()?;
+    let version = parsed.protobuf.version;
+    let top = parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|n| n.node.as_ref())?;
+    let relation = match top {
+        NodeEnum::InsertStmt(s) => s.relation.as_ref()?,
+        NodeEnum::UpdateStmt(s) => s.relation.as_ref()?,
+        NodeEnum::MergeStmt(s) => s.relation.as_ref()?,
+        _ => return None,
+    };
+    let (targets, from, with) = top_context(top)?;
+    if targets.is_empty() || target_named_by_with(top, with.as_ref()) {
+        return None;
+    }
+    let rows = Rows::of(top)?;
+    let withs = Withs::default().with(with.as_ref(), columns);
+    let level = Level::of(&from, &withs, columns);
+    let name = relation.alias.as_ref().map_or_else(|| relation.relname.clone(), |a| a.aliasname.clone());
+    let target = crate::analyze::relation_name(&relation.schemaname, &relation.relname);
+    let string = |node: &Node| last_string(std::slice::from_ref(node));
+    // The target's column a reference reads, where it reads the target relation.
+    let target_column = |c: &protobuf::ColumnRef| -> Option<String> {
+        let fields: Vec<String> = c.fields.iter().map(string).collect::<Option<_>>()?;
+        match fields.as_slice() {
+            [item, column] if *item == name => Some(column.clone()),
+            [column] if level.reader_of(column).as_deref() == Some(name.as_str()) => Some(column.clone()),
+            _ => None,
+        }
+    };
+    // A reference as one to the target relation, and whether it reads the new row: `old.x` reads
+    // the row before the write, which no value written says anything of, and `new.x` the
+    // target's row after it. A bare name is a column before it is a row.
+    let as_target = |c: &protobuf::ColumnRef| -> (Option<protobuf::ColumnRef>, bool) {
+        let row = if c.fields.len() > 1 { c.fields.first().and_then(string).and_then(|first| rows.row(&first)) } else { None };
+        let read = match row {
+            Some(_) => rows.read(c, &|_| false).map(|(read, _)| read),
+            None => Some(c.clone()),
+        };
+        (read, row != Some(false))
+    };
+    // The result columns that read the new row's column of the target.
+    let mut out = Vec::new();
+    for t in &targets {
+        let Some(NodeEnum::ResTarget(rt)) = t.node.as_ref() else { return None };
+        let val = rt.val.as_deref()?;
+        let Some(NodeEnum::ColumnRef(c)) = val.node.as_ref() else {
+            // `(row).*` is as many columns as the row's type has.
+            if expands(val) {
+                return None;
+            }
+            out.push(None);
+            continue;
+        };
+        let (c, new) = as_target(c);
+        if is_star(val) {
+            // A MERGE's `*` shows the source's columns before the target's, which the FROM's
+            // order does not.
+            if c.as_ref().is_none_or(|c| c.fields.len() == 1) && matches!(top, NodeEnum::MergeStmt(_)) {
+                return None;
+            }
+            for column in star_columns(&c?, &level)? {
+                out.push(target_column(&column).filter(|_| new));
+            }
+            continue;
+        }
+        out.push(c.as_ref().filter(|_| new).and_then(target_column));
+    }
+    let mut reader = Reader { dialect: Dialect::Postgres, trust, columns, withs: withs.clone(), rows: None, leaves: Some(Vec::new()), sources: Vec::new(), grouped: false, narrowed: Vec::new(), scope: None, windows: &[], fields: None, lockstep: false };
+    // One value as the rules read it. `excluded` says whether `excluded.<column>` is the row an
+    // upsert proposed, and `own` names the column the value is written to.
+    let mut value = |node: &Node, excluded: bool, own: &str| -> Option<WrittenValue> {
+        if matches!(node.node.as_ref(), Some(NodeEnum::SetToDefault(_))) {
+            return None;
+        }
+        reader.leaves = Some(Vec::new());
+        let claim = reader.read(node);
+        let leaves = reader.leaves.take().unwrap_or_default();
+        let leaves: Vec<WrittenLeaf> = leaves
+            .iter()
+            .map(|leaf| {
+                let Some(NodeEnum::ColumnRef(c)) = leaf.node.as_ref() else { return WrittenLeaf::Other };
+                let fields: Option<Vec<String>> = c.fields.iter().map(string).collect();
+                match fields.as_deref() {
+                    Some([item, column]) if excluded && item == "excluded" && name != "excluded" => WrittenLeaf::Excluded(column.clone()),
+                    _ => target_column(c).map_or(WrittenLeaf::Other, WrittenLeaf::Target),
+                }
+            })
+            .collect();
+        let cast = match node.node.as_ref() {
+            Some(NodeEnum::AConst(c)) => !matches!(c.val, Some(protobuf::a_const::Val::Sval(_))),
+            Some(NodeEnum::ParamRef(_)) => false,
+            Some(NodeEnum::ColumnRef(c)) if excluded => c.fields.iter().map(string).collect::<Option<Vec<String>>>().is_none_or(|f| f.len() != 2 || f[0] != "excluded" || f[1] != own),
+            _ => true,
+        };
+        Some(WrittenValue { claim, leaves, cast })
+    };
+    // A way's values by column, each column with the value written to it whole, `excluded` read as
+    // the proposed row where `excluded` says. A column written once with no value the rules read
+    // (`DEFAULT`, or nothing at all) is one the way says nothing of.
+    let mut way = |written: Vec<(String, Option<&Node>)>, excluded: bool| -> HashMap<String, Vec<WrittenValue>> {
+        let mut way: HashMap<String, Vec<WrittenValue>> = HashMap::new();
+        let mut unread: HashSet<String> = HashSet::new();
+        for (column, node) in written {
+            match node.and_then(|node| value(node, excluded, &column)) {
+                Some(written) => way.entry(column).or_default().push(written),
+                None => {
+                    unread.insert(column);
+                }
+            }
+        }
+        way.retain(|column, _| !unread.contains(column));
+        way
+    };
+    let table: Option<Vec<String>> = columns.of(&target).cloned();
+    // The columns rows are inserted into, those a list names or the table's in order, each with
+    // whether it is written whole, not in part (`tags[1]`, `point.x`).
+    let insert_names = |names: &[Node]| -> Option<Vec<(String, bool)>> {
+        if names.is_empty() {
+            return Some(table.clone()?.into_iter().map(|c| (c, true)).collect());
+        }
+        names.iter().map(|n| match n.node.as_ref() {
+            Some(NodeEnum::ResTarget(rt)) => Some((rt.name.clone(), rt.indirection.is_empty())),
+            _ => None,
+        }).collect()
+    };
+    let mut inserts = Vec::new();
+    let mut updates = Vec::new();
+    let mut select = None;
+    let events = match top {
+        NodeEnum::InsertStmt(s) => {
+            let source = s.select_stmt.as_deref().and_then(|n| n.node.as_ref());
+            match source {
+                // `DEFAULT VALUES` writes no column.
+                None => inserts.push(HashMap::new()),
+                Some(NodeEnum::SelectStmt(v)) if !v.values_lists.is_empty() => {
+                    let lists: Vec<&[Node]> = v.values_lists.iter().filter_map(|l| match l.node.as_ref() {
+                        Some(NodeEnum::List(l)) => Some(l.items.as_slice()),
+                        _ => None,
+                    }).collect();
+                    if lists.len() != v.values_lists.len() {
+                        return None;
+                    }
+                    // A `*` in a row is as many values as it shows, none included, which moves
+                    // every value after it to another column: such rows write nothing read here.
+                    if lists.iter().any(|row| row.iter().any(spreads)) {
+                        inserts.push(HashMap::new());
+                    } else {
+                        inserts.push(way(rows_written(&insert_names(&s.cols)?, &lists), false));
+                    }
+                }
+                // Any other SELECT: column `n` of its rows is written to the `n`th column.
+                Some(NodeEnum::SelectStmt(v)) => {
+                    let names = insert_names(&s.cols)?;
+                    let selected: HashMap<String, Vec<WrittenValue>> = names
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, (_, whole))| *whole)
+                        .map(|(i, (column, _))| (column.clone(), vec![WrittenValue { claim: Expr::Leaf(0), leaves: vec![WrittenLeaf::Selected(i)], cast: true }]))
+                        .collect();
+                    inserts.push(selected);
+                    // The SELECT reads the INSERT's WITH queries; one with a WITH clause of its own
+                    // and the INSERT's too is left unread rather than merged.
+                    let mut statement = (**v).clone();
+                    if statement.with_clause.is_none() {
+                        statement.with_clause = s.with_clause.clone();
+                    } else if s.with_clause.is_some() {
+                        return None;
+                    }
+                    let result = ParseResult { version, stmts: vec![RawStmt { stmt: Some(Box::new(Node { node: Some(NodeEnum::SelectStmt(Box::new(statement))) })), stmt_location: 0, stmt_len: 0 }] };
+                    select = crate::stack::deparse(&result).ok();
+                }
+                _ => return None,
+            }
+            match s.on_conflict_clause.as_deref() {
+                Some(c) if c.action == protobuf::OnConflictAction::OnconflictUpdate as i32 => {
+                    updates.push(way(assignments(&c.target_list), true));
+                    TRIGGER_ROW_INSERT | TRIGGER_ROW_UPDATE
+                }
+                _ => TRIGGER_ROW_INSERT,
+            }
+        }
+        NodeEnum::UpdateStmt(s) => {
+            updates.push(way(assignments(&s.target_list), false));
+            TRIGGER_ROW_INSERT | TRIGGER_ROW_UPDATE | TRIGGER_ROW_DELETE
+        }
+        NodeEnum::MergeStmt(s) => {
+            for clause in &s.merge_when_clauses {
+                let Some(NodeEnum::MergeWhenClause(c)) = clause.node.as_ref() else { return None };
+                match protobuf::CmdType::try_from(c.command_type).ok()? {
+                    protobuf::CmdType::CmdUpdate => updates.push(way(assignments(&c.target_list), false)),
+                    // `INSERT DEFAULT VALUES` has no values and writes no column.
+                    protobuf::CmdType::CmdInsert if c.values.is_empty() || c.values.iter().any(spreads) => inserts.push(HashMap::new()),
+                    protobuf::CmdType::CmdInsert => inserts.push(way(rows_written(&insert_names(&c.target_list)?, &[c.values.as_slice()]), false)),
+                    protobuf::CmdType::CmdNothing => {}
+                    _ => return None,
+                }
+            }
+            TRIGGER_ROW_INSERT | TRIGGER_ROW_UPDATE | TRIGGER_ROW_DELETE
+        }
+        _ => return None,
+    };
+    let plan = plan_here(sql, Dialect::Postgres, trust, columns);
+    let leaf_columns = plan
+        .sources
+        .iter()
+        .map(|leaf| match leaf.node.as_ref() {
+            Some(NodeEnum::ColumnRef(c)) => match as_target(c) {
+                (Some(c), true) => target_column(&c),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    Some(WrittenReturning { target, events, columns: out, inserts, updates, select, plan, leaf_columns })
+}
+
+/// Whether a value is `*`, `x.*` or `(row).*`, which Postgres expands into as many values as it
+/// shows, none at all included.
+fn spreads(node: &Node) -> bool {
+    is_star(node) || expands(node)
+}
+
+/// Each row's value per column of `names`, `None` for a column written in part, and for one the
+/// row leaves out, which takes its default.
+fn rows_written<'a>(names: &[(String, bool)], rows: &[&'a [Node]]) -> Vec<(String, Option<&'a Node>)> {
+    rows.iter().flat_map(|row| names.iter().enumerate().map(move |(i, (column, whole))| (column.clone(), row.get(i).filter(|_| *whole)))).collect()
+}
+
+/// The assignments of a SET list, each column with the value written to it whole: `None` for a
+/// column written in part (`tags[1]`, `point.x`), and for one a subquery's row assigns (`SET (a, b)
+/// = (SELECT …)`), which may find no row.
+fn assignments(list: &[Node]) -> Vec<(String, Option<&Node>)> {
+    list.iter()
+        .filter_map(|item| match item.node.as_ref() {
+            Some(NodeEnum::ResTarget(rt)) => Some(rt),
+            _ => None,
+        })
+        .map(|rt| {
+            let val = rt.val.as_deref().filter(|_| rt.indirection.is_empty()).and_then(|val| match val.node.as_ref() {
+                // A `*` among the row's fields moves every field after it to another column.
+                Some(NodeEnum::MultiAssignRef(m)) => match m.source.as_deref().and_then(|s| s.node.as_ref()) {
+                    Some(NodeEnum::RowExpr(r)) if !r.args.iter().any(spreads) => usize::try_from(m.colno - 1).ok().and_then(|i| r.args.get(i)),
+                    _ => None,
+                },
+                _ => Some(val),
+            });
+            (rt.name.clone(), val)
+        })
+        .collect()
 }
 
 /// Whether the top SELECT has a `*` in its target list that a test of its WHERE or of an inner
@@ -3772,7 +4309,7 @@ fn reads_leaf(expr: &Expr) -> bool {
         Expr::Leaf(_) | Expr::Row(..) => true,
         Expr::Nullable(inner) => reads_leaf(inner),
         Expr::Every(operands, _) | Expr::Any(operands, _) => operands.iter().any(reads_leaf),
-        Expr::Guarded(inner, _) | Expr::NotJsonb(inner) | Expr::Narrowed(inner) | Expr::NotRow(inner, _) => reads_leaf(inner),
+        Expr::Guarded(inner, _) | Expr::NotJsonb(inner) | Expr::NotJsonbItems(inner) | Expr::Narrowed(inner) | Expr::NotRow(inner, _) => reads_leaf(inner),
         Expr::JsonPath { base, .. } => reads_leaf(base),
         Expr::Array { items, .. } => items.iter().any(reads_leaf),
         Expr::NonNull(_) | Expr::Unknown | Expr::Unread(_) => false,
@@ -3894,7 +4431,7 @@ mod tests {
     }
 
     fn col(nullable: bool, type_oid: u32) -> DescribedColumn {
-        DescribedColumn { name: "a".into(), type_oid, typmod: -1, type_name: String::new(), nullable, nullable_items: None, distinct_items: false, nested: None, values: None, document: None, non_finite: Default::default(), facts: Default::default(), whole_row: false }
+        DescribedColumn { name: "a".into(), type_oid, typmod: -1, type_name: String::new(), nullable, nullable_items: None, distinct_items: false, nested: None, values: None, document: None, non_finite: Default::default(), facts: Default::default(), whole_row: false, own_row: false }
     }
 
     #[test]
@@ -4039,6 +4576,16 @@ mod tests {
         assert_eq!(items("SELECT (SELECT ARRAY[p.id, NULL] FROM posts p LIMIT 1) AS x FROM users u", &[]), Some(true));
         // The literal is still text where it stands for text.
         assert_eq!(resolve(&claim("SELECT '{x}' AS a"), None), Fact { non_null: true, type_oid: Some(oid::TEXT) });
+        // `||`, `array_append` and `array_prepend` add a value that is no array as one element,
+        // NULL where it is; a literal beside an array is an array, and one in a CASE is text.
+        assert_eq!(items("SELECT ARRAY['a'] || '{x}'", &[]), Some(false));
+        assert_eq!(items("SELECT ARRAY['a'] || '{NULL}'", &[]), Some(true));
+        assert_eq!(items("SELECT ARRAY['a', 'b'] || CASE WHEN id > 1 THEN '{x}' END FROM t", &[]), Some(true));
+        assert_eq!(items("SELECT array_append(ARRAY[a], a) FROM t", &[col(false, oid::INT4), col(true, oid::INT4)]), Some(true));
+        assert_eq!(items("SELECT array_append(ARRAY[a], a) FROM t", &[col(false, oid::INT4), col(false, oid::INT4)]), None);
+        assert_eq!(items("SELECT array_prepend(a, ARRAY[1]) FROM t", &[col(true, oid::INT4)]), Some(true));
+        // An element of no type the build names may be NULL, though it is made of arrays.
+        assert_eq!(items("SELECT array_append(ARRAY[a], CASE WHEN a > 0 THEN cardinality(ARRAY[a]) END) FROM t", &[col(false, oid::INT4), col(false, oid::INT4), col(false, oid::INT4)]), None);
         // A cast keeps its operand's elements, but where it takes a JSON null to NULL: on
         // PostgreSQL 18 `ARRAY['null'::jsonb]::int[]` is `{NULL}`.
         assert_eq!(items("SELECT ARRAY[1]::text[]", &[]), Some(false));
@@ -4159,6 +4706,77 @@ mod tests {
         assert_eq!(found("DELETE FROM todos USING tags WHERE name = 'a' RETURNING name").columns, [None]);
         assert!(write_narrowing("SELECT 1", &Trust::default(), &columns).is_none());
         assert!(write_narrowing("INSERT INTO todos (title) VALUES ('a') RETURNING title", &Trust::default(), &columns).is_none());
+    }
+
+    #[test]
+    fn a_writes_values_say_what_its_returning_reads_of_the_row_it_wrote() {
+        let columns: Columns = [("todos", vec!["id", "owner_id", "title", "n"]), ("owners", vec!["id", "name"])].into_iter().collect();
+        // `$2` is bare and written to a column that may hold NULL; every other parameter is a value.
+        let trust = Trust { non_null_params: true, nullable_params: [2].into_iter().collect(), ..Default::default() };
+        let found = |sql: &str| written_returning(sql, &trust, &columns).unwrap();
+        let some = |c: &str| Some(c.to_string());
+        // The target's columns written a non-null value. `id` is the one column that holds a value
+        // in every row of the table, `n` is of a type a user's cast targets, and the SELECT that
+        // feeds an INSERT has its second column non-null.
+        let written = |sql: &str| {
+            let mut out: Vec<String> = found(sql).non_null(&|c| c == "id", &|i| i == 1, &|c| c != "n").into_iter().collect();
+            out.sort();
+            out
+        };
+        let w = |columns: &[&str]| columns.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        // The new row's columns, by any name, and none of the old row's.
+        let i = found("INSERT INTO todos (id, title, n) VALUES (1, 'a', now()) RETURNING title, n AS at, owner_id, new.title AS t, old.title AS o, *");
+        assert_eq!(i.columns, [some("title"), some("n"), some("owner_id"), some("title"), None, some("id"), some("owner_id"), some("title"), some("n")]);
+        assert_eq!(found("INSERT INTO todos AS x (id) VALUES (1) RETURNING WITH (NEW AS a, OLD AS b) a.title, b.title, x.n, a.*, b.*").columns, [some("title"), None, some("n"), some("id"), some("owner_id"), some("title"), some("n"), None, None, None, None]);
+        // An expression's leaves, each by the column it reads of the new row.
+        let e = found("UPDATE todos t SET title = 'a' RETURNING upper(title) AS up, old.title || new.title AS both, t.title || owner_id::text AS joined, title");
+        assert_eq!(e.leaf_columns, [some("title"), None, some("title"), some("title"), some("owner_id")]);
+        // A string literal and a bare parameter are read as the column's type; any other value
+        // reaches a column of a type a user's cast targets through that cast, which may give NULL.
+        assert_eq!(written("INSERT INTO todos (id, title, n) VALUES (1, 'a', now()) RETURNING title"), w(&["id", "title"]));
+        assert_eq!(written("INSERT INTO todos (title, n) VALUES ($1, $3::int8) RETURNING title"), w(&["title"]));
+        // A parameter the caller may pass NULL for, `DEFAULT`, NULL, and a column a row leaves out
+        // write nothing; every row of a VALUES list must write a value.
+        assert_eq!(written("INSERT INTO todos (title, n, owner_id) VALUES ($2, DEFAULT, NULL) RETURNING title"), w(&[]));
+        assert_eq!(written("INSERT INTO todos (title, owner_id) VALUES ('a', 1), ('b', $2) RETURNING title"), w(&["title"]));
+        assert_eq!(written("INSERT INTO todos VALUES (1, 2, 'a') RETURNING title"), w(&["id", "owner_id", "title"]));
+        assert_eq!(written("INSERT INTO todos DEFAULT VALUES RETURNING title"), w(&[]));
+        assert_eq!(written("INSERT INTO todos (title[1], id) VALUES ('a', 1) RETURNING title"), w(&["id"]));
+        // A `*` among a row's values moves the values after it to other columns.
+        assert_eq!(written("INSERT INTO todos (id, owner_id, title) VALUES ((ROW(1, 2)::pair).*, 'a') RETURNING title"), w(&[]));
+        assert_eq!(written("UPDATE todos SET (id, owner_id, title) = ROW(o.*, 'a') FROM owners o RETURNING title"), w(&[]));
+        // An upsert writes its row and, where it conflicts, what its DO UPDATE sets: `excluded` is
+        // the row it proposed, and the row in its way holds what the table's constraints say.
+        assert_eq!(written("INSERT INTO todos (id, title) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET title = excluded.title RETURNING title"), w(&["title"]));
+        assert_eq!(written("INSERT INTO todos (id, title) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET title = excluded.n RETURNING title"), w(&[]));
+        assert_eq!(written("INSERT INTO todos (id, title, n) VALUES (1, 'a', 2) ON CONFLICT (id) DO UPDATE SET title = excluded.n RETURNING title"), w(&[]));
+        assert_eq!(written("INSERT INTO todos (id, title) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET n = 1 RETURNING title"), w(&[]));
+        assert_eq!(written("INSERT INTO todos (id, title) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET title = todos.title RETURNING title"), w(&[]));
+        assert_eq!(written("INSERT INTO todos (id, title) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET title = todos.id::text, id = excluded.id RETURNING title"), w(&["id", "title"]));
+        assert_eq!(written("INSERT INTO todos (id, title) VALUES (1, 'a') ON CONFLICT (id) DO NOTHING RETURNING title"), w(&["id", "title"]));
+        // An UPDATE writes what its SET does, from the row it changes and what it joins in.
+        assert_eq!(written("UPDATE todos SET title = coalesce(title, ''), owner_id = owners.id FROM owners WHERE owners.id = todos.owner_id RETURNING title"), w(&["title"]));
+        assert_eq!(written("UPDATE todos SET (title, owner_id) = ('a', 1) RETURNING title"), w(&["owner_id", "title"]));
+        assert_eq!(written("UPDATE todos SET (title, n) = (SELECT 'a', 1) RETURNING title"), w(&[]));
+        assert_eq!(written("UPDATE todos SET title = 'a', title[1] = 'b' RETURNING title"), w(&[]));
+        assert_eq!(found("UPDATE todos SET n = 1 FROM owners RETURNING name, title, id").columns, [None, some("title"), None]);
+        // A MERGE writes what each action that returns a row does; one that may delete returns the
+        // deleted row as it was, and its `*` shows the source's columns first.
+        let merge = "MERGE INTO todos t USING owners o ON t.owner_id = o.id WHEN MATCHED AND o.name = 'x' THEN DO NOTHING WHEN MATCHED THEN UPDATE SET title = 'a' WHEN NOT MATCHED THEN INSERT (id, title) VALUES (o.id, 'b')";
+        assert_eq!(found(&format!("{merge} RETURNING t.title, new.title, title, o.name")).columns, [some("title"), some("title"), some("title"), None]);
+        assert_eq!(written(&format!("{merge} RETURNING t.title")), w(&["title"]));
+        assert_eq!(written("MERGE INTO todos t USING owners o ON t.owner_id = o.id WHEN NOT MATCHED BY SOURCE THEN UPDATE SET title = o.name RETURNING t.title"), w(&[]));
+        assert_eq!(written("MERGE INTO todos t USING owners o ON t.owner_id = o.id WHEN NOT MATCHED THEN INSERT (id, title) VALUES (o.*, 'b') RETURNING t.title"), w(&[]));
+        assert!(written_returning("MERGE INTO todos t USING owners o ON t.owner_id = o.id WHEN MATCHED THEN DELETE WHEN NOT MATCHED THEN INSERT (id, title) VALUES (o.id, 'b') RETURNING t.title", &trust, &columns).is_none());
+        assert!(written_returning(&format!("{merge} RETURNING *"), &trust, &columns).is_none());
+        // An INSERT's SELECT writes its columns in order, and is read as a statement of its own.
+        let s = found("WITH x AS (SELECT 1 AS id, 'a' AS name) INSERT INTO todos (id, title) SELECT id, name FROM x RETURNING title");
+        assert_eq!(s.select.as_deref(), Some("WITH x AS (SELECT 1 AS id, 'a' AS name) SELECT id, name FROM x"));
+        assert_eq!(written("INSERT INTO todos (id, title) SELECT id, name FROM owners RETURNING title"), w(&["title"]));
+        // Nothing for a DELETE, a SELECT, or a write to a WITH query's name.
+        assert!(written_returning("DELETE FROM todos RETURNING title", &trust, &columns).is_none());
+        assert!(written_returning("SELECT 1", &trust, &columns).is_none());
+        assert!(written_returning("WITH todos AS (SELECT 1) INSERT INTO todos (title) VALUES ('a') RETURNING title", &trust, &columns).is_none());
     }
 
     #[test]
@@ -4773,11 +5391,14 @@ mod tests {
         assert_eq!(p.head[0], Some(Expr::Row(0, "users".to_string())));
         assert_eq!(p.head[1], None);
         assert_eq!(p.leaves.as_deref(), Some("SELECT u AS a0 FROM users u WHERE u.id = NULL"));
-        // The probe says whether it was the row after all: a column named like the alias is not.
-        let row = DescribedColumn { name: "whole".into(), type_oid: 16500, typmod: -1, type_name: "users".into(), nullable: true, nullable_items: None, distinct_items: false, nested: None, values: None, document: None, non_finite: Default::default(), facts: Default::default(), whole_row: false };
-        let column = DescribedColumn { name: "whole".into(), type_oid: oid::TEXT, typmod: -1, type_name: "text".into(), nullable: true, nullable_items: None, distinct_items: false, nested: None, values: None, document: None, non_finite: Default::default(), facts: Default::default(), whole_row: false };
+        // The probe says whether it was the row after all: a column named like the alias is not,
+        // whatever its type is named.
+        let row = DescribedColumn { name: "whole".into(), type_oid: 16500, typmod: -1, type_name: "users".into(), nullable: true, nullable_items: None, distinct_items: false, nested: None, values: None, document: None, non_finite: Default::default(), facts: Default::default(), whole_row: false, own_row: true };
+        let column = DescribedColumn { name: "whole".into(), type_oid: oid::TEXT, typmod: -1, type_name: "text".into(), nullable: true, nullable_items: None, distinct_items: false, nested: None, values: None, document: None, non_finite: Default::default(), facts: Default::default(), whole_row: false, own_row: false };
+        let named_alike = DescribedColumn { type_oid: 16600, type_name: "users".into(), ..column.clone() };
         assert!(resolve(p.head[0].as_ref().unwrap(), Some(&[row])).non_null);
         assert!(!resolve(p.head[0].as_ref().unwrap(), Some(&[column])).non_null);
+        assert!(!resolve(p.head[0].as_ref().unwrap(), Some(&[named_alike])).non_null);
         assert_eq!(pg("SELECT p FROM users u LEFT JOIN posts p ON p.user_id = u.id").head[0], None);
         assert_eq!(pg("SELECT s FROM (SELECT 1 AS a) s").head[0], None);
     }
@@ -4833,10 +5454,12 @@ mod tests {
         assert_eq!(reads("SELECT u.name, p.title, name FROM users u JOIN posts p ON p.user_id = u.id"), vec![ItemRead::Table, ItemRead::Table, ItemRead::Other]);
         assert_eq!(reads("SELECT public.users.id FROM public.users"), vec![ItemRead::Other]);
         assert_eq!(reads("SELECT x.id FROM public.users x"), vec![ItemRead::Table]);
-        // A WITH query of that name is no table, whatever its statement reads; an expression
-        // and a `*` read no one column.
+        // A WITH query of that name is no table, whatever its statement reads, and a write's is
+        // the rows it returns; an expression and a `*` read no one column.
         assert_eq!(reads("WITH users AS (SELECT 1 AS id UNION SELECT 2) SELECT users.id FROM users"), vec![ItemRead::Column { item: 0, column: "id".into() }]);
-        assert_eq!(reads("WITH w AS (INSERT INTO t DEFAULT VALUES RETURNING id) SELECT w.id FROM w"), vec![ItemRead::Other]);
+        assert_eq!(reads("WITH w AS (INSERT INTO t DEFAULT VALUES RETURNING id) SELECT w.id FROM w"), vec![ItemRead::Column { item: 0, column: "id".into() }]);
+        assert_eq!(item_reads("WITH v AS (SELECT 1 AS id), w AS (UPDATE t SET n = v.id FROM v RETURNING t.id) SELECT w.id FROM w").unwrap().1[0].sql, "WITH v AS (SELECT 1 AS id) UPDATE t SET n = v.id FROM v RETURNING t.id");
+        assert_eq!(reads("WITH w AS (DELETE FROM t RETURNING id) SELECT w.id FROM w"), vec![ItemRead::Other]);
         assert_eq!(reads("SELECT u.id + 1, u.* FROM users u"), vec![ItemRead::Other, ItemRead::TableStar]);
         assert_eq!(reads("SELECT * FROM users u JOIN posts p ON p.user_id = u.id"), vec![ItemRead::TableStar]);
         assert_eq!(reads("WITH a AS (SELECT 1 AS x) SELECT * FROM a, users"), vec![ItemRead::Star { item: None }]);

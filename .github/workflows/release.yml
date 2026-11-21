@@ -2,15 +2,15 @@
 
 name: Release on npm
 on:
-  # Dispatch only, and deliberately so, as zod and nub release. A `workflow_dispatch` needs a GitHub session or token carrying write access; a stolen git push credential carries neither, so it cannot start a release by landing a commit or cutting a tag. That is the shape of the 2026-09-21 nubjs/nub compromise, where a stolen push credential cut a tag and 18 packages published unattended. A version bump on main is therefore inert: a maintainer runs `gh workflow run release.yml -R colinhacks/reylo -f notes="$(cat notes.md)"`, approves the npm environment, and then approves each staged version on npm with 2FA.
+  # Dispatch only, and deliberately so, as zod and nub release. A `workflow_dispatch` needs a GitHub session or token carrying write access; a stolen git push credential carries neither, so it cannot start a release by landing a commit or cutting a tag. That is the shape of the 2026-09-21 nubjs/nub compromise, where a stolen push credential cut a tag and 18 packages published unattended. A version bump on main is therefore inert: a maintainer runs `gh workflow run release.yml -R reylosql/reylo -f notes="$(cat notes.md)"`, approves the npm environment, and then approves each staged version on npm with 2FA.
   #
   # Everything the release needs is given at dispatch: the commit is the one dispatched, the version comes from its `package.json` (every package moves at reylo's version, which `scripts/build.ts` enforces), and the release notes are the required `notes` input. A run's inputs are fixed for its whole life, so the notes survive the approval wait and any re-run of a job.
   #
-  # One run builds the `reylo` binary on each platform of npm/platforms.json (`build`, a job per platform on a runner of its architecture), then two release jobs. `stage` puts the nine versions in npm's staged queue: the eight platform packages `@reylosql/engine-<platform>`, each holding its platform's binary, then reylo, which names them as optional dependencies at its own version. `finish` is a job on the `release-approval` environment, whose required reviewer is a maintainer: GitHub holds the run there, with no runner, for up to 30 days. The npm approval is the gate; the environment approval only resumes the run, and `finish` checks the registry before it tags or releases anything. The GitHub release carries the same eight binaries as assets, and the docs site's playground engine (`playground`), which no commit holds. `stager`, run by a maintainer with one authenticator code, does both, approving on npm and then resuming the run.
+  # One run builds the `reylo` binary on each platform of npm/platforms.json (`build`, a job per platform on a runner of its architecture), and installs each through every channel that does without npm (binaries.yml calls channels.yml), then two release jobs. `stage` puts the nine versions in npm's staged queue: the eight platform packages `@reylosql/engine-<platform>`, each holding its platform's binary, then reylo, which names them as optional dependencies at its own version. `finish` is a job on the `release-approval` environment, whose required reviewer is a maintainer: GitHub holds the run there, with no runner, for up to 30 days. The npm approval is the gate; the environment approval only resumes the run, and `finish` checks the registry before it tags or releases anything. The GitHub release carries the same eight binaries as assets, and the docs site's playground engine (`playground`), which no commit holds; `finish` then publishes the Homebrew formula, the Scoop manifest and the container image from those assets, and `crates` the Rust crates, on crates.io. `stager`, run by a maintainer with one authenticator code, does both, approving on npm and then resuming the run.
   #
   # Only `finish` can create a tag. The "Release tags" ruleset refuses tag creation, moves and deletions to everyone, admins and workflow tokens included, except deploy keys; the one deploy key is the `RELEASE_TAG_KEY` secret on `release-approval`, so a tag exists only after a maintainer approved the run.
   #
-  # This runs in the public repository, colinhacks/reylo. npm's trusted publishers name that repository, this file and the `npm` environment, and provenance needs a public source repository.
+  # This runs in the public repository, reylosql/reylo. npm's trusted publishers name that repository, this file and the `npm` environment, and provenance needs a public source repository.
   workflow_dispatch:
     inputs:
       notes:
@@ -40,13 +40,46 @@ jobs:
         env:
           PRIVATE: ${{ github.event.repository.private }}
         run: |
-          [ "$PRIVATE" = "false" ] || { echo "::error::release.yml runs in the public repository, colinhacks/reylo; $GITHUB_REPOSITORY is private"; exit 1; }
+          [ "$PRIVATE" = "false" ] || { echo "::error::release.yml runs in the public repository, reylosql/reylo; $GITHUB_REPOSITORY is private"; exit 1; }
 
       - name: Refuse a release without notes
         env:
           NOTES: ${{ inputs.notes }}
         run: |
           [ -n "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ] || { echo "::error::the notes input is empty: gh workflow run release.yml -R $GITHUB_REPOSITORY -f notes=\"\$(cat notes.md)\""; exit 1; }
+
+      # A quick docs fix is made on `release`, which reylo.dev serves, and then merged into main. `finish` moves `release` to the new tag, so a fix main doesn't hold yet would drop off the site with nothing to say so. `git cherry` lists each commit of `release` whose change this commit lacks, by reachability or by an equal patch (a cherry-pick), and a prerelease, which leaves `release` alone, is not held up. The public repository answers a fetch without a credential, and a refusal stages nothing.
+      - name: Refuse to move reylo.dev past a docs fix main lacks
+        run: |
+          url="https://github.com/$GITHUB_REPOSITORY.git"
+          # `git ls-remote` matches a ref by its end, so only a ref that is exactly refs/heads/release counts; a failed lookup stops here, apart from a branch that isn't there.
+          heads="$(git ls-remote "$url" refs/heads/release)" || { echo "::error::could not read whether release exists"; exit 1; }
+          if ! awk '$2 == "refs/heads/release" { found = 1 } END { exit !found }' <<< "$heads"; then echo "no release branch yet"; exit 0; fi
+          git init -q "$RUNNER_TEMP/release-check"
+          cd "$RUNNER_TEMP/release-check"
+          git fetch -q "$url" "$GITHUB_SHA" +refs/heads/release:refs/remotes/origin/release
+          version="$(git show "$GITHUB_SHA:package.json" | jq -r .version)"
+          case "$version" in *-*) echo "$version is a prerelease, which leaves release as it is"; exit 0 ;; esac
+          # A version already tagged (a dispatch that rewrites its notes) keeps its tag, which `finish` moves release to; one release already holds is left as it is.
+          # The shell is `bash -e` without pipefail, so each lookup's output is read whole, keeping its own exit status, rather than through `cut`.
+          tag="$(git ls-remote "$url" "refs/tags/v$version")" || { echo "::error::could not look up the tag v$version"; exit 1; }
+          target="${tag%%[[:space:]]*}"
+          if [ -n "$target" ]; then
+            git fetch -q "$url" "$target"
+            if git merge-base --is-ancestor "$target" refs/remotes/origin/release; then echo "release already holds v$version, and is left as it is"; exit 0; fi
+          else
+            target="$GITHUB_SHA"
+          fi
+          # A merge commit's own edits are in no patch `git cherry` reads, so a merge on release that the target lacks is refused too.
+          merges="$(git rev-list --merges "$target..refs/remotes/origin/release")"
+          missing="$(git cherry "$target" refs/remotes/origin/release | sed -n 's/^+ //p')${merges:+$'\n'$merges}"
+          missing="${missing#$'\n'}"
+          if [ -n "$missing" ]; then
+            echo "::error::release holds changes $target lacks, which moving it to v$version would take off reylo.dev; merge release into main, then dispatch again from main"
+            while read -r sha; do git log -1 --format='  %h %s' "$sha"; done <<< "$missing"
+            exit 1
+          fi
+          echo "every change on release is in $target"
 
   test:
     needs: preflight
@@ -89,7 +122,8 @@ jobs:
 
   stage:
     needs: [preflight, test, build, playground]
-    runs-on: ubuntu-latest
+    # ubuntu-24.04, not ubuntu-latest: on ubuntu-26.04 setup-nub fronts the image's own Node in /usr/local/bin rather than the one it provisions, and the global npm install below fails writing to /usr/local (EACCES)
+    runs-on: ubuntu-24.04
     name: Stage on npm
     # a required reviewer approves every run, and the environment only deploys main; npm's trusted publishers are bound to it so no other branch or workflow can even stage. The environment is the first of two gates — the second is the 2FA approval of each staged version, which this job cannot perform.
     environment: npm
@@ -147,11 +181,14 @@ jobs:
       - name: Stage the platform packages and reylo on npm
         env:
           VERSION: ${{ steps.version.outputs.version }}
+        # npm refuses a prerelease without a dist-tag, and one under `latest` would reach every `npm install reylo`, so a prerelease goes under its first identifier (0.8.0-beta.1 under `beta`) and a release under `latest`, npm's default
         run: |
+          tag=()
+          case "$VERSION" in *-*) pre="${VERSION#*-}"; tag=(--tag "${pre%%.*}") ;; esac
           for platform in $(jq -r '.[].platform' npm/platforms.json); do
-            bash .github/scripts/npm-stage-publish.sh "dist/engine-$platform" --provenance --access public
+            bash .github/scripts/npm-stage-publish.sh "dist/engine-$platform" --provenance --access public ${tag[@]+"${tag[@]}"}
           done
-          bash .github/scripts/npm-stage-publish.sh dist/reylo --provenance --access public
+          bash .github/scripts/npm-stage-publish.sh dist/reylo --provenance --access public ${tag[@]+"${tag[@]}"}
 
       - name: Check whether npm serves every version
         id: served
@@ -202,6 +239,8 @@ jobs:
     timeout-minutes: 360
     permissions:
       contents: write
+      # the container image, ghcr.io/reylosql/reylo
+      packages: write
     steps:
       # THE HUMAN GATE. The run resumes on the environment approval, which says nothing about npm, so the tag and the GitHub release wait here until the registry serves every version; nothing public ever describes a version npm did not ship. The loop also absorbs the automated review npm runs once a version is approved, which held zod 4.5.0 for 16 minutes, 4.5.3 for 25 and 4.6.0 for 116; none of those is an upper bound. If the approval comes later, re-run this job.
       - name: Wait for npm to serve every version
@@ -243,19 +282,7 @@ jobs:
           name: playground-postgres
           path: ${{ runner.temp }}/assets
       - name: Pack the binaries
-        env:
-          PLATFORMS: ${{ needs.build.outputs.matrix }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/assets"
-          for platform in $(jq -r '.include[].platform' <<< "$PLATFORMS"); do
-            dir="$RUNNER_TEMP/binaries/engine-$platform"
-            exe=reylo
-            case "$platform" in win32-*) exe=reylo.exe ;; esac
-            [ -f "$dir/$exe" ] || { echo "::error::the build left no $exe for $platform"; exit 1; }
-            chmod 755 "$dir/$exe"
-            tar -czf "$RUNNER_TEMP/assets/reylo-$platform.tar.gz" -C "$dir" "$exe"
-          done
-          (cd "$RUNNER_TEMP/assets" && sha256sum reylo-*.tar.gz > SHA256SUMS && cat SHA256SUMS)
+        run: .github/scripts/pack-binaries.sh "$RUNNER_TEMP/binaries" "$RUNNER_TEMP/assets"
 
       # the job token cannot create a tag or move `release`, so both are pushed with the deploy key the rulesets exempt, and the key file is gone when each step ends, however it ends; nothing is installed in this job, so no dependency's script ever runs while the key is on disk
       - name: Tag the release
@@ -289,15 +316,30 @@ jobs:
             echo "v$VERSION was already released; its notes are rewritten from this dispatch"
             exit 0
           fi
+          # a prerelease is marked one, and never takes the repository's Latest from the release before it
+          prerelease=()
+          case "$VERSION" in *-*) prerelease=(--prerelease --latest=false) ;; esac
           gh release create "v$VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "v$VERSION" \
             --notes-file "$RUNNER_TEMP/release_notes.md" \
+            ${prerelease[@]+"${prerelease[@]}"} \
             "$RUNNER_TEMP"/assets/*
 
+      # The package managers, from the release's own assets, before reylo.dev's docs move to describe them: the Homebrew formula into reylosql/homebrew-tap and the Scoop manifest into reylosql/scoop-bucket, each with that repository's deploy key, which only this environment holds, and only when this version is the latest release; and the container image to ghcr.io/reylosql/reylo with the job's token. Running it again publishes the same files and tags (.github/scripts/channels-publish.sh).
+      - name: Publish to Homebrew, Scoop and GHCR
+        env:
+          VERSION: ${{ needs.stage.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_KEY: ${{ secrets.HOMEBREW_TAP_KEY }}
+          SCOOP_BUCKET_KEY: ${{ secrets.SCOOP_BUCKET_KEY }}
+        run: .github/scripts/channels-publish.sh "$VERSION"
+
       # reylo.dev serves the `release` branch, so the docs describe what npm serves: it moves to the release's tagged commit, past any docs fix cherry-picked onto the previous release, which main holds too. It moves after the GitHub release exists, since the site's build fetches the playground's engine from the release of its version (site/scripts/playground-engine.ts). It follows the tag, not this run's commit, since a dispatch that only rewrites a release's notes runs on a main that may hold unreleased changes. Where `release` already holds the tag (that dispatch, or a re-run of this job), it is left as it is, docs fixes cherry-picked onto it since included; the shallow checkout can't tell, so GitHub's compare does. The tag is a lightweight one, so `ls-remote` names its commit.
+      # A prerelease leaves reylo.dev on the docs of the release npm's `latest` serves.
       - name: Move the docs to the release
+        if: ${{ !contains(needs.stage.outputs.version, '-') }}
         env:
           VERSION: ${{ needs.stage.outputs.version }}
           RELEASE_TAG_KEY: ${{ secrets.RELEASE_TAG_KEY }}
@@ -309,25 +351,86 @@ jobs:
           echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
           export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/release-tag-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
           remote="git@github.com:$GITHUB_REPOSITORY.git"
-          tagged="$(git ls-remote origin "refs/tags/v$VERSION" | cut -f1)"
-          # `identical` or `ahead`: release is the tag, or the tag with docs fixes on it. Only a missing branch (ls-remote's exit 2) counts as missing; any other failure, of ls-remote or of the compare, fails the step rather than move release back, and a re-run is safe.
-          set +e
-          git ls-remote --exit-code --heads origin release > /dev/null
-          found=$?
-          set -e
-          case "$found" in
-            0) status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$tagged...release" --jq .status)" ;;
-            2) status=missing ;;
-            *) echo "::error::could not read whether release exists (git ls-remote exited $found)"; exit 1 ;;
-          esac
+          tagged="$(git ls-remote --exit-code origin "refs/tags/v$VERSION")"
+          tagged="${tagged%%[[:space:]]*}"
+          # `identical` or `ahead`: release is the tag, or the tag with docs fixes on it. Only a lookup that answers without refs/heads/release counts as missing (`git ls-remote` matches a ref by its end, so only that exact ref counts); a failed lookup, or compare, fails the step rather than move release back, and a re-run is safe. Every answer is about the one tip read here, which the push below names as the one it replaces.
+          heads="$(git ls-remote origin refs/heads/release)" || { echo "::error::could not read whether release exists"; exit 1; }
+          tip="$(awk '$2 == "refs/heads/release" { print $1 }' <<< "$heads")"
+          if [ -n "$tip" ]; then
+            status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$tagged...$tip" --jq .status)"
+          else
+            status=missing
+          fi
           case "$status" in
             identical | ahead)
               echo "release already holds v$VERSION ($status), and is left as it is"
               ;;
             *)
-              git cat-file -e "$tagged^{commit}" 2> /dev/null || git fetch --quiet --depth=1 origin "$tagged"
-              git push --force "$remote" "$tagged:refs/heads/release"
-              echo "release moved to v$VERSION ($tagged) from $status"
+              # A docs fix made on release while this run waited for its approval is in neither the tag nor the preflight's check, so it is carried onto the tag, in its order, rather than dropped from reylo.dev; preflight asks for it on main before the next release. A fix that no longer applies to the tag stops the step, naming it. The lease replaces only the tip read above, so a fix pushed meanwhile stops the push, and a re-run reads it.
+              git fetch --quiet --unshallow origin "$tagged" ${tip:+"$tip"} 2> /dev/null || git fetch --quiet origin "$tagged" ${tip:+"$tip"}
+              git -c advice.detachedHead=false checkout --quiet --detach "$tagged"
+              carried=0
+              if [ -n "$tip" ] && [ -n "$(git rev-list --merges "$tagged..$tip")" ]; then
+                echo "::error::release holds a merge commit that v$VERSION lacks, whose own edits can't be carried onto the tag, so release is left as it is: merge v$VERSION into release, push it, and re-run this job, which then finds release holding the tag"
+                git log --merges --format='  %h %s' "$tagged..$tip"
+                exit 1
+              fi
+              if [ -n "$tip" ]; then
+                for sha in $(git cherry "$tagged" "$tip" | sed -n 's/^+ //p'); do
+                  if ! git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" cherry-pick -x "$sha" > /dev/null; then
+                    git cherry-pick --abort
+                    echo "::error::$(git log -1 --format='%h %s' "$sha"), on release and not in v$VERSION, no longer applies to the tag; apply it to release by hand after the move, then re-run this job"
+                    exit 1
+                  fi
+                  carried=$((carried + 1))
+                done
+              fi
+              git push --force-with-lease="refs/heads/release:$tip" "$remote" "HEAD:refs/heads/release"
+              echo "release moved to v$VERSION ($tagged) from $status, with $carried docs fix(es) carried onto it"
               ;;
           esac
 
+
+  # The Rust crates on crates.io, from the release's tag, once npm serves the release and `finish` has made the tag. crates.io's trusted publishers name this repository, this file and the `crates` environment, which only `main` can deploy to, so a workflow of this name on another branch gets no token; the run gets one that lasts 30 minutes, and none is stored anywhere. crates.io gives a crate a trusted publisher only once it exists, so a crate's first version is published from a maintainer's machine (`.github/scripts/crates-publish.sh --trust`); until `reylo` is on crates.io, this job publishes nothing and says so.
+  crates:
+    needs: [stage, finish]
+    environment: crates
+    runs-on: ubuntu-latest
+    name: Publish the Rust crates
+    # 13 crates, each waiting for crates.io's index to list the one before it, and its rate if it refuses one
+    timeout-minutes: 90
+    permissions:
+      id-token: write
+    steps:
+      # Only crates.io's 404 means no crate; any other answer is tried again, and fails the job if it lasts, rather than skip the crates.
+      - name: Whether crates.io holds the crates yet
+        id: listed
+        run: |
+          for _ in 1 2 3 4 5; do
+            status=$(curl -s -A "reylo-release (github.com/reylosql/reylo)" -o /dev/null -w '%{http_code}' https://crates.io/api/v1/crates/reylo || true)
+            case "$status" in
+              200) echo "yes=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
+              404) echo "::notice::reylo is not on crates.io yet, so this release publishes no crate: its first version is published with .github/scripts/crates-publish.sh --trust from a maintainer's machine"; exit 0 ;;
+            esac
+            echo "crates.io answered $status; trying again in 30 seconds"
+            sleep 30
+          done
+          echo "::error::crates.io did not say whether reylo exists; re-run this job"
+          exit 1
+      # the tag's sources, which npm's packages were built from, on any dispatch: one that only rewrites the notes runs on a newer main
+      - if: steps.listed.outputs.yes == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/v${{ needs.stage.outputs.version }}
+          persist-credentials: false
+      # the patched Postgres parser and the SQLite amalgamation, which the crates carry and no commit holds
+      - if: steps.listed.outputs.yes == 'true'
+        run: engine/build.sh --prepare
+      - if: steps.listed.outputs.yes == 'true'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - if: steps.listed.outputs.yes == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          VERSION: ${{ needs.stage.outputs.version }}
+        run: .github/scripts/crates-publish.sh "$VERSION"

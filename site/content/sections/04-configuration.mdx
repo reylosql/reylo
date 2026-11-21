@@ -19,7 +19,7 @@ sqlcommenter: true
 dir: reylo
 ```
 
-The `package.json` it sits beside is the nearest one at or above the directory Reylo runs in, short of your home directory: one in the home directory itself is passed over, and `reylo migrate init` starts no project there.
+Reylo uses the nearest `package.json` at or above the directory it runs in. One in your home directory doesn't count.
 
 ## `direct_url`
 
@@ -40,7 +40,7 @@ DATABASE_URL=mysql://root@localhost:3306/app
 DATABASE_URL=file:./app.db
 ```
 
-Point it at a direct connection, not a pooler: describing a query through a pooler in transaction mode, such as PgBouncer's, can fail. You can interpolate other variables from your environment to construct a connection string.
+Point it at a direct connection, not a pooler. A pooler in transaction mode, such as PgBouncer, can fail to describe a query. You can interpolate other variables from your environment to construct a connection string.
 
 ```yaml title=".reylo.yaml"
 # the default is ${DATABASE_URL}
@@ -53,22 +53,20 @@ A variable can fall back, as in a shell, when it is unset or empty:
 direct_url: ${BUILD_DATABASE_URL:-${DATABASE_URL}}
 ```
 
-To keep a password out of every file, `$(…)` runs a command, such as a password manager's or a cloud's token command, and puts what it prints in its place. Reylo runs it once per editor session or build, and again when the database refuses the login, as when a token expires.
+To keep a password out of every file, use `$(…)`. It runs a command, such as a password manager's, and puts what it prints in its place. Reylo runs it once per editor session or build, and again when a login is refused.
 
 ```yaml title=".reylo.yaml"
 # or $(aws rds generate-db-auth-token …) for a short-lived token
 direct_url: postgres://app:$(op read op://dev/db/password)@db:5432/app
 ```
 
-A type check or a build reads this database, so in CI and on your host it needs your migrations applied. The database a query runs on is the client you pass to `.run()`, so the two can differ.
+A type check or a build reads this database. In CI and on your host, apply your migrations first. The database a query runs on is the client you pass to `.run()`, so the two can differ.
 
-A script that runs against production is typed on your dev database, and its queries warn when the two differ in a way that breaks their types ([When the schema changes](/typescript#when-the-schema-changes)). To type it on the database it runs on:
+A script that runs against production is typed on your dev database. Its types hold only where the two schemas agree. To type it on the database it runs on:
 
 ```sh
 DATABASE_URL="$PRODUCTION_URL" node --import reylo/register report.ts
 ```
-
-### TLS
 
 The type check reads TLS settings from the URL in `direct_url`:
 
@@ -83,9 +81,11 @@ DATABASE_URL=mysql://…/app?ssl-mode=REQUIRED
 DATABASE_URL=mysql://…/app?ssl-mode=VERIFY_IDENTITY
 ```
 
+The defaults, and the other settings each reads:
+
 - With no setting, a Postgres connection is encrypted where the server offers it, and a MySQL connection isn't.
-- Postgres also reads `sslrootcert`, `sslcert`, `sslkey` and `channel_binding`, as libpq does, and node-postgres's `ssl=true`.
-- MySQL also reads mysql2's `ssl` setting, as JSON with `rejectUnauthorized`, `ca`, `cert` and `key`, and Prisma's `sslaccept=strict`.
+- Postgres also reads libpq's `sslrootcert`, `sslcert`, `sslkey` and `channel_binding`, and node-postgres's `ssl=true`.
+- MySQL also reads mysql2's `ssl` JSON setting and Prisma's `sslaccept=strict`.
 - A certificate is also checked against the certificates `NODE_EXTRA_CA_CERTS` names, as Node checks it.
 
 ## `env`
@@ -100,6 +100,7 @@ env: [.env.development, .env]
 Reylo reads them as `dotenv` does. A `#` outside quotes starts a comment, so quote a value that holds one:
 
 ```sh title=".env"
+# or mysql://… or sqlite:./path/to/your.db, etc
 DATABASE_URL="postgres://app:pa#ss@localhost:5432/app" # the dev database
 ```
 
@@ -118,7 +119,7 @@ allow_untyped_params: true
 
 Whether a Postgres array column may hold nested arrays.
 
-Postgres doesn't track an array's dimensions, so by default Reylo types an array column with one, and `.run()` throws on a value of more. With this set, the column is typed at any depth, as `NestedArray<T>`, and nothing is refused.
+Postgres doesn't track an array's dimensions. By default Reylo types an array column as one-dimensional, and `.run()` throws on a deeper value. With this set, the column is a `NestedArray<T>` of any depth.
 
 ```yaml title=".reylo.yaml"
 # the default is false
@@ -127,12 +128,14 @@ allow_nested_arrays: true
 
 ## `sqlcommenter`
 
-Each query Reylo sends ends with a comment that names its file, in [sqlcommenter](https://google.github.io/sqlcommenter/)'s format, so database monitoring that reads it, such as Datadog's and PlanetScale's, groups your queries by file. On SQLite the comment opens the query instead, since SQLite would write it into the name of a last column with no alias. The query's [`.sql`](/typescript#sql) leaves it out. Set `sqlcommenter: false` to leave it off what Reylo sends too.
+Each query Reylo sends ends with a comment that names its file, in [sqlcommenter](https://google.github.io/sqlcommenter/)'s format. Monitoring tools such as Datadog and PlanetScale group your queries by it. On SQLite the comment opens the query instead. The query's [`.sql`](/typescript#sql) leaves it out. Set `sqlcommenter: false` to leave it off what Reylo sends too.
 
 ```yaml title=".reylo.yaml"
 # the default is true
 sqlcommenter: false
 ```
+
+Each query then carries its file:
 
 ```sql title="What Postgres receives for queries/get_user.sql, by default"
 select id, name, email from users where id = $1::int /*file='queries%2Fget_user.sql'*/
@@ -140,7 +143,7 @@ select id, name, email from users where id = $1::int /*file='queries%2Fget_user.
 
 ## `dir`
 
-The directory beside `.reylo.yaml` that holds Reylo's files: the `schema.sql`, `migrations/` and `reylo-lock.yaml` of [migrations](/migrations), which you commit, and its cache in `.cache/`, which keeps itself out of git.
+The directory beside `.reylo.yaml` that holds Reylo's files. You commit its [migrations](/migrate/docs), and its `.cache/` keeps itself out of git.
 
 ```yaml title=".reylo.yaml"
 # the default is reylo
@@ -149,7 +152,7 @@ dir: db
 
 ## `shadow_url`
 
-The server where [migrations](/migrations) build their shadow databases, for a database whose own server refuses `create database`:
+The server where [migrations](/migrate/docs) build their shadow databases, for a database whose own server refuses `create database`:
 
 ```yaml title=".reylo.yaml"
 # the default is the database's own server
@@ -158,7 +161,7 @@ shadow_url: ${SHADOW_URL}
 
 ## `js.codecs`
 
-The TypeScript type `.run()` gives a family of values, and that its parameters take. A family you leave out keeps [its default](/inference#primitives):
+The TypeScript type of a family of values, in what `.run()` returns and in its parameters. A family you leave out keeps [its default](/inference#primitives):
 
 ```yaml title=".reylo.yaml"
 js:
@@ -176,9 +179,11 @@ js:
     inet: ip-address  # or string (the default)
 ```
 
+Each family covers these types:
+
 | Family | Postgres | MySQL | SQLite |
 | --- | --- | --- | --- |
-| `decimal` | `numeric` | `DECIMAL` | |
+| `decimal` | `numeric`, `money` | `DECIMAL` | |
 | `bytes` | `bytea` | `BINARY`, `VARBINARY`, `BLOB` | `BLOB` |
 | `date` | `date` | `DATE` | a column declared `DATE` |
 | `time` | `time` | | a column declared `TIME` |
@@ -190,13 +195,23 @@ js:
 | `geometry` | PostGIS's `geometry`, `geography` | `GEOMETRY` | |
 | `inet` | `inet`, `cidr` | | |
 
-- Every codec is exact. A number refuses a decimal a double cannot hold, and a Temporal class refuses a value it has no form for, such as Postgres's `infinity` or an interval of one month less a day, so the error names the column instead of returning a wrong value.
-- A parameter takes the codec's type: a `Temporal.Instant` where the column is an `instant`, so a row goes back in as it came out.
-- A decimal library, named by its package, makes each decimal a value of its class, from your own install of it beside the `.sql` file. For big.js, also install `@types/big.js`. Since big.js has no `NaN` or infinity, it refuses a `numeric` that holds one.
-- A decimal library rounds its own arithmetic as you set it: decimal.js rounds to 20 significant digits unless you raise its `precision`.
-- A vector is a `Float32Array`, or a `Float16Array` for a `halfvec`, which needs TypeScript's `es2025` lib. Sent as JSON, a typed array is an object of its indexes, so spread it into an array first.
-- A geometry is a GeoJSON geometry with its SRID as `srid`, typed by `@types/geojson`, which you install. A parameter without an `srid` takes the column's. GeoJSON has no M coordinates or curves, so a geometry with either is refused.
-- A network address is an `Address4` or `Address6` from your own install of ip-address. Sent as JSON, one is an object of its fields, so send its `.address`.
-- A codec reaches every value Reylo decodes: an array's elements, a Postgres row value's fields, and the members of a structured parameter. A value inside JSON the query builds keeps its JSON type.
-- A 64-bit integer is always a `bigint`, its one exact type. Cast it in the query where you want a `number` or text, as `count(*)::int`.
+Every codec is exact. It refuses a value its type can't hold, and the error names the column:
+
+- A `number` refuses a decimal a double can't hold.
+- A Temporal class refuses a value it has no form for, such as `infinity` or an interval of a month less a day.
+- A big.js value refuses a `numeric` that holds `NaN` or an infinity.
+- GeoJSON refuses a geometry with M coordinates or curves.
+
+A parameter takes the codec's type too, so a row goes back in as it came out. A codec reaches nested values too, such as an array's elements or a row value's fields. A value inside JSON the query builds keeps its JSON type.
+
+Some codecs need more of your project:
+
+- A decimal library, named by its package, comes from your own install beside the `.sql` file. For big.js, also install `@types/big.js`. Arithmetic in decimal.js rounds to 20 significant digits unless you raise its `precision`.
 - A Temporal codec needs a runtime with a global `Temporal`, and TypeScript's `esnext` lib.
+- A vector is a `Float32Array`, or a `Float16Array` for a `halfvec`, which needs TypeScript's `es2025` lib.
+- A geometry is typed by `@types/geojson`, which you install, with its SRID as `srid`. A parameter without an `srid` takes the column's.
+- A network address is an `Address4` or `Address6` from your own install of ip-address.
+
+Sent as JSON, a typed array or an address is an object of its fields. Spread the array, or send the address's `.address`.
+
+A 64-bit integer is always a `bigint`, its one exact type. Cast it in the query where you want a `number`, as `count(*)::int`.

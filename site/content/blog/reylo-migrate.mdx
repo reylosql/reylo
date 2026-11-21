@@ -1,0 +1,128 @@
+---
+title: "Reylo Migrate"
+description: "SQL-first schema modeling and migrations for Postgres, SQLite and MySQL."
+date: 2026-11-21
+---
+
+Reylo Migrate is SQL-first schema modeling and migrations for Postgres, SQLite and MySQL.
+
+- **Schema in SQL:** model your schema in `schema.sql`
+- **Your whole database:** checks, indexes, triggers, functions, views and more, all tracked
+- **Preflight checks:** each migration is tried on a shadow database before it runs
+- **Strict ordering:** an optional lockfile, `reylo.lock`, fixes the order migrations run in
+
+## Schema modeling
+
+Your schema is plain SQL in one file, not a DSL like Prisma's.
+
+```sql title="schema.sql"
+create table users (
+  id integer primary key,
+  email text not null check (email like '%@%'),
+  verified_at timestamptz,
+  updated_at timestamptz not null default now()
+);
+
+create index users_unverified on users (id) where verified_at is null;
+
+create function touch() returns trigger language plpgsql as $$
+begin new.updated_at := now(); return new; end $$;
+
+create trigger users_touch before update on users
+  for each row execute function touch();
+
+create view verified_users as
+  select id, email from users where verified_at is not null;
+```
+
+Change any of it, and `reylo migrate new` writes the migration. It tracks enums, domains, generated columns, materialized views, partitions, row level security policies, grants and comments too, on each database that has them.
+
+## Schemaless mode
+
+Delete `schema.sql`, and your migrations are your schema.
+
+A schema file reads best in review, but when an agent writes the DDL, migrations alone work too. With no schema to compare against, `reylo migrate new` drafts a migration from changes to your development database, or writes an empty one for you or your agent to fill:
+
+```terminal
+$ reylo run 'alter table users add column bio text'
+✓ alter table users add column bio text
+
+$ reylo migrate new add_bio
+✓ Wrote reylo/migrations/20261104140347_add_bio.sql
+```
+
+See the database's schema at any time with `reylo db introspect`.
+
+## Migration ordering
+
+An optional lockfile, `reylo.lock`, lists your migrations in order, each with a checksum chained to the one before:
+
+```yaml title="reylo.lock"
+schema: c7bf681b
+migrations:
+  - 20261104120000_users.sql c86e9de4
+  - 20261104140347_add_bio.sql 78ad08c0
+```
+
+Two branches that each add a migration conflict on it in git, before either reaches a database. For a team that writes many migrations, those conflicts add up.
+
+## Lock-free integrity
+
+Delete `reylo.lock`, and migrations run in name order until `reylo migrate lock` writes it again.
+
+Without a lock, a merged migration can sort before one a database already ran. Reylo replays both orders on a shadow database, and refuses where they end differently:
+
+```terminal
+$ reylo migrate deploy
+✗ Migration 20261105080000_no_nick.sql sorts before 20261105090000_nick.sql, which this database already ran, and the two orders end differently
+  + a fresh database: column users.nick text
+  Give 20261105080000_no_nick.sql a later name, so that every database runs it after 20261105090000_nick.sql
+
+Nothing was changed.
+```
+
+## A typical workflow
+
+Write a migration, run it in development, then deploy it:
+
+```sh
+reylo migrate new add_bio    # write the next migration, from schema.sql
+reylo migrate dev            # run it on your development database
+reylo migrate deploy         # run what the lock lists, when you deploy
+
+reylo db push --watch        # or, while you prototype, push schema.sql on every save
+```
+
+## Get started
+
+Reylo Migrate completes the Reylo toolkit. Reylo infers types from SQL queries, so you run them type-safe from [TypeScript](/docs) or [Rust](/rust), with no codegen, ORM or query builder.
+
+Start from your existing database:
+
+```bash tab="npm"
+npx reylo migrate init
+```
+
+```bash tab="Homebrew"
+brew install reylosql/tap/reylo
+reylo migrate init
+```
+
+```bash tab="curl"
+curl -fsSL https://reylo.dev/install.sh | sh
+reylo migrate init
+```
+
+It writes your schema and a first migration, then [the docs](/migrate/docs) take it from there:
+
+```terminal
+$ reylo migrate init
+✓ Started reylo/ from postgres://localhost:5432/app
+  reylo/
+  ├── schema.sql          this database's schema
+  ├── migrations/
+  │   └── init.sql        the same, recorded as run here
+  └── reylo.lock          the order the migrations run in
+```
+
+Reylo is open source, on [GitHub](https://github.com/reylosql/reylo).

@@ -1,0 +1,217 @@
+---
+title: "Reylo v0.8.0"
+description: "The reylo CLI, statement analysis, structured values, deeper inference and more drivers."
+date: 2026-11-20
+release: v0.8.0
+---
+
+Reylo v0.8.0 introduces the `reylo` CLI, which installs without Node, along with deeper inference and more drivers.
+
+> [!NOTE]
+> [Reylo Migrate](https://reylo.dev/blog/reylo-migrate) ships in v0.8: SQL-first schema modeling and migrations for Postgres, SQLite and MySQL ([#179](https://github.com/reylosql/reylo/pull/179)).
+
+It has a number of breaking changes from v0.7, listed in [Upgrading from v0.7](#upgrading-from-v07).
+
+## The `reylo` CLI
+
+The `reylo` CLI installs from npm, or without Node through Homebrew, Scoop, Docker or a script ([#174](https://github.com/reylosql/reylo/pull/174), [#275](https://github.com/reylosql/reylo/pull/275)).
+
+```sh
+brew install reylosql/tap/reylo                     # Homebrew
+curl -fsSL https://reylo.dev/install.sh | sh        # macOS and Linux
+irm https://reylo.dev/install.ps1 | iex             # Windows PowerShell
+scoop bucket add reylo https://github.com/reylosql/scoop-bucket && scoop install reylo
+docker run --rm ghcr.io/reylosql/reylo --version
+```
+
+Every route installs the same binary:
+
+- **Checked:** the install scripts, Homebrew and Scoop check the binary against the release's `SHA256SUMS`
+- **Platforms:** macOS, Linux on glibc and musl, and Windows, each on x64 and arm64
+
+## Statement analysis
+
+The new `reylo analyze` prints what Reylo infers for each statement, as YAML or as JSON with `--format json` ([#172](https://github.com/reylosql/reylo/pull/172), [#239](https://github.com/reylosql/reylo/pull/239)).
+
+```yaml
+file: queries/get_user.sql
+$schema: https://reylo.dev/typedefs/preview.json
+dialect: { name: postgres, version: "18.6" }
+sql: |
+  -- One user, by id.
+  select id, email, bio from users where id = $1
+kind: select
+comment: One user, by id.
+params:
+  - name: id
+    type: { kind: integer, bits: 64, label: int8 }
+result:
+  kind: table
+  cardinality: at_most_one
+  columns:
+    - name: id
+      type: { kind: integer, bits: 64, label: int8 }
+    - name: email
+      type: { kind: text, code_points: [[1, 1114111]], size: { max: 255 }, label: varchar }
+    - name: bio
+      type: { kind: text, code_points: [[1, 1114111]], label: text }
+      nullable: true
+      comment: Shown on the profile page
+capabilities:
+  tables: { public.users: read }
+diagnostics: []
+```
+
+Besides each type, it reports what the database declares and what Reylo infers about it:
+
+- **From code:** `analyze()`, exported from `reylo`, returns the same descriptor ([#191](https://github.com/reylosql/reylo/pull/191), [#195](https://github.com/reylosql/reylo/pull/195))
+- **Sizes and precision:** `varchar(20)` is `size: { max: 20 }`, and `numeric(10,2)` carries its precision and scale ([#180](https://github.com/reylosql/reylo/pull/180), [#192](https://github.com/reylosql/reylo/pull/192), [#210](https://github.com/reylosql/reylo/pull/210))
+- **Check constraints:** `check (age between 0 and 150)` gives `min` and `max`, and `check (slug like 'a%')` a `pattern` ([#200](https://github.com/reylosql/reylo/pull/200), [#251](https://github.com/reylosql/reylo/pull/251))
+- **UUID versions:** `gen_random_uuid()` is version 4 and `uuidv7()` version 7 ([#232](https://github.com/reylosql/reylo/pull/232))
+- **Unique columns and order:** a result's `unique` column sets, and the `order` its rows are sorted on, on Postgres ([#184](https://github.com/reylosql/reylo/pull/184), [#213](https://github.com/reylosql/reylo/pull/213))
+- **Distinct arrays:** `array_agg(distinct …)` and `json_agg(distinct …)` are marked `distinct` ([#251](https://github.com/reylosql/reylo/pull/251))
+
+## Structured values
+
+Postgres's structured values, and MySQL's `SET`, now come back as objects ([#193](https://github.com/reylosql/reylo/pull/193), [#197](https://github.com/reylosql/reylo/pull/197), [#205](https://github.com/reylosql/reylo/pull/205)).
+
+- **Row value:** `"(1,Ada)"` → `{ id: 1, name: "Ada" }`
+- **Geometric type:** `"(1.5,-2)"` → `{ x: 1.5, y: -2 }`
+- **Range:** `"[1,5)"` → `{ lower: 1, upper: 5, bounds: "[)" }`, or `{ empty: true }`
+- **Multirange:** `"{[1,3)}"` → an array of ranges
+- **Array of a subquery's rows:** `array(select c from (…) c)` → an array of objects, each field decoded
+- **MySQL `SET`:** `"a,c"` → `new Set(["a", "c"])`
+- **MySQL `ENUM`:** typed as the union of its labels, where it was `string`
+
+Parameters take the same forms.
+
+## Deeper inference
+
+Reylo now reads SQL function bodies and infers through keyed writes, constants, whole rows and `RETURNING`.
+
+```sql
+update t set note = :note::text where id = :id returning note
+```
+
+The returned `note` is a `string`, where it was nullable ([#267](https://github.com/reylosql/reylo/pull/267)).
+
+- **SQL function bodies:** a Postgres `language sql` function's body is read as its query, so `select id, body from one_comment(:x)` is one row of non-null columns ([#211](https://github.com/reylosql/reylo/pull/211))
+- **Keyed writes:** an `update … from` or `delete … using` that pins a key returns a row or `null`, and so does an insert of one selected row ([#190](https://github.com/reylosql/reylo/pull/190))
+- **Constants:** a column a statement fills with constants is typed as those literals, such as `"user" | "post"` ([#243](https://github.com/reylosql/reylo/pull/243))
+- **Whole rows:** a whole row of a derived table, subquery, `with` query or aliased join is typed field by field ([#167](https://github.com/reylosql/reylo/pull/167))
+- **Arrays:** each level of an array of arrays is typed, and `array_remove(tags, null)` or a `CHECK` that keeps `NULL` out makes elements non-null ([#181](https://github.com/reylosql/reylo/pull/181), [#166](https://github.com/reylosql/reylo/pull/166), [#287](https://github.com/reylosql/reylo/pull/287))
+- **Check constraints:** `tags <@ array['a', 'b']` types `("a" | "b")[]`, and `jsonb_typeof(doc) = 'object'` types an object ([#190](https://github.com/reylosql/reylo/pull/190), [#171](https://github.com/reylosql/reylo/pull/171))
+- **Triggers:** a `BEFORE` trigger whose every `return` is `new`, such as an `updated_at` trigger, no longer makes a write nullable ([#190](https://github.com/reylosql/reylo/pull/190))
+- **Grouped JSON:** an object that puts an aggregate beside a grouped column is typed inside a scalar subquery, and on MySQL at the top level ([#230](https://github.com/reylosql/reylo/pull/230))
+- **SQLite views:** a write to a view through its `INSTEAD OF` trigger type-checks ([#238](https://github.com/reylosql/reylo/pull/238))
+- **libSQL vectors:** on a Turso project's local file, the type check reads vector columns and indexes, the vector functions and `vector_top_k` ([#316](https://github.com/reylosql/reylo/pull/316))
+- **Postgres 19:** supported, and tested in CI ([#311](https://github.com/reylosql/reylo/pull/311))
+- **Shorter setup:** `"contentMappers": [{ "package": "reylo" }]` is enough on TypeScript's 7.1 nightlies from 2026-11-12 on ([#315](https://github.com/reylosql/reylo/pull/315))
+
+## More drivers
+
+Queries now run on Knex, SQLite Wasm and sql.js, and on `mysql2` through Cloudflare Hyperdrive.
+
+```ts
+import knex from "knex";
+import getUser from "./get_user.sql";
+
+const db = knex({ client: "pg", connection: process.env.DATABASE_URL });
+const user = await getUser.run(db, { id: 1 });
+```
+
+The clients it adds:
+
+- **Knex:** an instance, transaction or savepoint, over `pg`, `mysql2`, `mariadb`, `better-sqlite3` and `sqlite3` ([#233](https://github.com/reylosql/reylo/pull/233))
+- **SQLite Wasm:** an `oo1` database of `@sqlite.org/sqlite-wasm`, OPFS ones included ([#235](https://github.com/reylosql/reylo/pull/235))
+- **sql.js:** a `Database` from sql.js 1.17.0 on ([#331](https://github.com/reylosql/reylo/pull/331))
+- **Hyperdrive:** `mysql2`, and Drizzle or Knex over it, through Hyperdrive, which refuses prepared statements ([guide](https://reylo.dev/hyperdrive), [#261](https://github.com/reylosql/reylo/pull/261), [#284](https://github.com/reylosql/reylo/pull/284))
+- **Durable Objects:** a Workers project with Durable Objects and no D1 database is type-checked on Cloudflare's SQLite ([#241](https://github.com/reylosql/reylo/pull/241))
+
+## Standard Query
+
+A built module's Standard Query carries more of what Reylo infers, for drivers that run it themselves.
+
+- **Decoders:** `columns` holds a decoder per column, and `output()` applies the cardinality to decoded rows ([#165](https://github.com/reylosql/reylo/pull/165))
+- **Keys:** `key` names the result columns that identify each row, on Postgres ([#160](https://github.com/reylosql/reylo/pull/160))
+- **Order:** `ordered` is `true` where the `order by` makes the order total, on Postgres ([#163](https://github.com/reylosql/reylo/pull/163))
+- **Cardinality:** `cardinality` says how many rows the statement returns ([#206](https://github.com/reylosql/reylo/pull/206))
+- **Reads:** `readOnly` is `true` where nothing in the statement can write ([#190](https://github.com/reylosql/reylo/pull/190))
+- **Schemas:** `inputSchema` and `outputSchema` carry `maxLength`, `pattern`, bounds, `multipleOf`, `enum` and `description` ([#199](https://github.com/reylosql/reylo/pull/199), [#192](https://github.com/reylosql/reylo/pull/192))
+
+## Faster and smaller
+
+A bundle now carries only its query's dialect, and the type check reads the catalog once per run.
+
+- **Bundle:** 162.8 KB for every dialect → Postgres 76.7 KB, MySQL 117.7 KB, SQLite 63.2 KB, for one query built minified by esbuild 0.28.2 ([#228](https://github.com/reylosql/reylo/pull/228))
+- **JIT off on the engine's Postgres connections:** 264 s → 20 s over 566 statements, where JIT is on, as in the official Docker images ([#158](https://github.com/reylosql/reylo/pull/158))
+- **Catalog read once per run:** 10.29 s → 6.01 s over 517 statements ([#190](https://github.com/reylosql/reylo/pull/190))
+- **Postgres row decoding:** 13.5 → 16.8 reads per second of 25,000 rows × 12 columns through postgres.js ([#164](https://github.com/reylosql/reylo/pull/164))
+- **Inserts of `::rows`:** 91 ms → 63 ms for 10,000 rows into a 20-column table ([#277](https://github.com/reylosql/reylo/pull/277))
+- **A SQLite `CASE` of 10,000 arms:** 7.2 s → 0.45 s ([#238](https://github.com/reylosql/reylo/pull/238))
+- **Vite, Rollup and Rolldown:** the plugin's hook filters skip every module that isn't `.sql` ([#137](https://github.com/reylosql/reylo/pull/137))
+
+## Docs
+
+The docs at [reylo.dev](https://reylo.dev) now describe v0.8:
+
+- **A homepage:** [reylo.dev](https://reylo.dev), with the docs at [reylo.dev/docs](https://reylo.dev/docs) ([`ce24aa1`](https://github.com/reylosql/reylo/commit/ce24aa178aa2774d8f7a169baa329fbea519b64c))
+- **Pages with a sidebar:** guides for Cloudflare D1 and Durable Objects, Neon, PlanetScale, Supabase, Turso, Next.js and CI ([`c451fed`](https://github.com/reylosql/reylo/commit/c451fed4dc32a4749733f9386abd6da8685dd1b0), [`381daa1`](https://github.com/reylosql/reylo/commit/381daa140a8f60e0d2e6436c3c212f298eb275d9), [`8de0c6e`](https://github.com/reylosql/reylo/commit/8de0c6ef1e7dbff72e1a6bd2b930a6a8f3ebcfd5))
+- **[Reylo Migrate](https://reylo.dev/migrate):** a page of its own, with [its docs](https://reylo.dev/migrate/docs) under it ([`bc22e61`](https://github.com/reylosql/reylo/commit/bc22e613486febe6804c2f9810dd7b6a14acc10f), [`ba3e060`](https://github.com/reylosql/reylo/commit/ba3e060c5459ed7ea1a352f0a3e1e45d8506adbd))
+- **[Cloudflare Hyperdrive](https://reylo.dev/hyperdrive):** a guide to Postgres and MySQL through it ([`e7288e7`](https://github.com/reylosql/reylo/commit/e7288e7cd50ee21398721a80c3da306f3a75f0f9))
+- **[A comparison](https://reylo.dev/compare)** with other SQL tools, each mark from a real run ([#183](https://github.com/reylosql/reylo/pull/183))
+- **[Moving from Prisma](https://reylo.dev/prisma):** a guide ([`d3940d3`](https://github.com/reylosql/reylo/commit/d3940d35e956157fabf38085be65f0ba29cbbf02))
+
+## Upgrading from v0.7
+
+Each change below can surface in a project that upgrades from v0.7.
+
+### Every dialect
+
+- **One unnamed column returns its values, not rows.** Write `const count = await q.run(db)`, or add `as count` to keep a row ([#206](https://github.com/reylosql/reylo/pull/206)).
+- **Columns filled with constants are typed as their literals.** Widen the variable's type where code assigns another value to it ([#243](https://github.com/reylosql/reylo/pull/243)).
+- **A JSON column whose schema leaves `additionalProperties` out has no index signature.** Name the key in the schema, or give `additionalProperties` a schema ([#169](https://github.com/reylosql/reylo/pull/169)).
+- **An untyped JSON parameter is `JsonInput`, not `unknown`.** Type the value passed to it as `JsonInput`, exported from `reylo` ([#193](https://github.com/reylosql/reylo/pull/193)).
+- **The command `reylo generate` no longer fills the cache, and the project file's `cli` section was removed.** Drop it from scripts and CI, and delete `cli:` ([#174](https://github.com/reylosql/reylo/pull/174)).
+- **The setting `strict_params` is now `allow_untyped_params`, which reads the other way round.** Write `allow_untyped_params: true` for `strict_params: false`, and delete `strict_params: true` ([#187](https://github.com/reylosql/reylo/pull/187)).
+- **The cache moved from `.reylo/` to `reylo/.cache/`.** Delete `.reylo/` and its `.gitignore` line ([#179](https://github.com/reylosql/reylo/pull/179)).
+- **An unquoted `.env` value is cut at its first `#`, as dotenv reads it.** Quote the value, or write `#` as `%23` ([#227](https://github.com/reylosql/reylo/pull/227)).
+- **A hand-written `{ query }` client wrapper is refused.** Pass the driver's own pool, client or transaction, or subclass or proxy it ([#242](https://github.com/reylosql/reylo/pull/242)).
+- **A build that can't reach its database reads only that server's analysis.** Unset the URL for a build that relied on another database's analysis ([#242](https://github.com/reylosql/reylo/pull/242)).
+- **The run-time schema check was removed.** Build again after each migration, since nothing warns when a build is older than its database ([#208](https://github.com/reylosql/reylo/pull/208), [#306](https://github.com/reylosql/reylo/pull/306)).
+- **A query made with `defineQuery` sends its `sql` as written.** Give a statement with `:name` placeholders its compiled `text` and `order` ([#306](https://github.com/reylosql/reylo/pull/306)).
+- **A value with no time zone carries no `format: date-time` or `format: time` in a query's JSON Schema.** Validate it without the format ([#306](https://github.com/reylosql/reylo/pull/306)).
+
+### Postgres
+
+- **Row values, geometric types, ranges, multiranges and arrays of a subquery's rows come back as objects.** Remove the code that parsed their text ([#193](https://github.com/reylosql/reylo/pull/193), [#205](https://github.com/reylosql/reylo/pull/205)).
+- **The values `NaN` and `Infinity` inside built JSON are numbers.** Test them with `Number.isNaN` and `Number.isFinite` ([#171](https://github.com/reylosql/reylo/pull/171)).
+- **A timestamp always has six fraction digits.** Update code or tests that compare its text ([#190](https://github.com/reylosql/reylo/pull/190)).
+- **A `money` value comes back as its decimal text, `"1234.50"`.** Format it for display in the app ([#254](https://github.com/reylosql/reylo/pull/254)).
+- **A keyed write, an insert of one selected row, a keyed function call and a `CALL` with `OUT` parameters return a row, not an array.** Check the row for `null` instead of reading `.length` ([#190](https://github.com/reylosql/reylo/pull/190), [#211](https://github.com/reylosql/reylo/pull/211), [#186](https://github.com/reylosql/reylo/pull/186)).
+- **An array of more than one dimension in a column or in built JSON is refused.** Select `to_jsonb(column)`, or set `allow_nested_arrays: true` ([#181](https://github.com/reylosql/reylo/pull/181), [#243](https://github.com/reylosql/reylo/pull/243)).
+- **The setting `ssl=true` checks the certificate and its name.** Use `ssl=no-verify` or `sslmode=require` for an unchecked connection ([#226](https://github.com/reylosql/reylo/pull/226)).
+- **A date under a non-ISO `DateStyle` makes `.run()` throw.** Set `datestyle = 'ISO, DMY'` on the database or the connection ([#242](https://github.com/reylosql/reylo/pull/242)).
+- **Some columns widen to nullable or to any JSON.** Handle `null` where the type check now asks ([#225](https://github.com/reylosql/reylo/pull/225), [#226](https://github.com/reylosql/reylo/pull/226), [#273](https://github.com/reylosql/reylo/pull/273), [#306](https://github.com/reylosql/reylo/pull/306)).
+
+### MySQL
+
+- **A `SET` comes back as a `Set`.** Remove the code that split its text, and pass a `Set` as a parameter ([#193](https://github.com/reylosql/reylo/pull/193)).
+- **An `ENUM` is typed as its labels, and an empty `''` value is refused.** Read such a column with `nullif(column, '')` ([#193](https://github.com/reylosql/reylo/pull/193)).
+- **A made-up column name that isn't an identifier, beside other columns, is an error.** Name the column with `as` ([#206](https://github.com/reylosql/reylo/pull/206)).
+- **A JSON parameter where MySQL takes a value, as in `json_set(doc, '$.name', :name)`, is an error.** Write `:name::json` where the error points ([#242](https://github.com/reylosql/reylo/pull/242)).
+- **Some columns widen to `unknown` or to `int | bigint`.** Handle the wider type where the type check now asks ([#226](https://github.com/reylosql/reylo/pull/226), [#234](https://github.com/reylosql/reylo/pull/234), [#306](https://github.com/reylosql/reylo/pull/306)).
+- **The type check needs MySQL 8.0.38 or later.** On an older server it crashes the server or never returns ([#306](https://github.com/reylosql/reylo/pull/306)).
+- **Through `query()`, as on Hyperdrive, a statement whose reading turns on `sql_mode` is refused under another mode.** Run it under the `sql_mode` the build used ([#306](https://github.com/reylosql/reylo/pull/306)).
+
+### SQLite
+
+- **A made-up column name that isn't an identifier, beside other columns, is an error.** Name the column with `as` ([#206](https://github.com/reylosql/reylo/pull/206)).
+- **A double-quoted string, `select "hello"`, fails the type check, as most SQLite drivers refuse it.** Write string literals in single quotes ([#215](https://github.com/reylosql/reylo/pull/215)).
+- **A parameter the lexer doesn't read, such as `:été`, is an error.** Rename the parameter ([#226](https://github.com/reylosql/reylo/pull/226)).
+- **A `bigint` parameter outside the 64-bit range throws before the statement runs.** Pass a value in range ([#268](https://github.com/reylosql/reylo/pull/268), [#274](https://github.com/reylosql/reylo/pull/274)).
+- **Some columns widen to nullable.** Handle `null` where the type check now asks ([#225](https://github.com/reylosql/reylo/pull/225), [#238](https://github.com/reylosql/reylo/pull/238), [#306](https://github.com/reylosql/reylo/pull/306)).
+
+### DuckDB
+
+- **DuckDB support was removed.** A `duckdb:` URL is refused, and `defineDuckdbQuery`, `DuckdbClient` and `DuckdbQueryError` are gone, so stay on v0.7 for a DuckDB project ([#258](https://github.com/reylosql/reylo/pull/258)).

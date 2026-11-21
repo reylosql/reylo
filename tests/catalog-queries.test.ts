@@ -71,6 +71,8 @@ const STATEMENTS = [
   "select n.id, n.email from named n join posts p on p.author = n.id where p.id = :id",
   "select p.title, n.email from posts p left join named n on n.id = p.author",
   `select u.id, i.label from users u left join "dot.ted".items i on i.id = u.id`,
+  // The parse names no table a WITH query takes the name of, even read inside it, so the describe's columns of it are asked for by oid.
+  "with users as (select * from users) select p.title, u.email from posts p left join users u on u.id = p.author",
   "select id from users where name ~~~ :q::text",
 ];
 
@@ -83,7 +85,11 @@ const OWN_FUNCTIONS = ["stamp", "pairs"];
 // Each catalog query by a fragment of its text, so the test fails when a statement stops asking one.
 const KINDS: [string, RegExp][] = [
   ["TRUST_QUERY", /users\(kind, name, args/],
+  // Before ERRORS_QUERY, whose CTE the tables query shares.
+  ["CAPABILITIES_TABLES_QUERY", /reached\(oid, access\)/],
   ["ERRORS_QUERY", /named\(oid, written\)/],
+  ["IMMUTABLE_QUERY", /'depends on'::pg_catalog\.text, x\.name/],
+  ["EXTENSION_TABLES_QUERY", /d\.deptype OPERATOR\(pg_catalog\.=\) 'e'::pg_catalog\."char"/],
   ["OPERATORS_QUERY", /'operator'::pg_catalog\.text/],
   ["USER_OPERATORS_QUERY", /SELECT DISTINCT o\.oprname::pg_catalog\.text FROM pg_catalog\.pg_operator o WHERE/],
   ["REFUSES_NULL_QUERY", /domains\(attrelid, attnum, oid\)/],
@@ -101,7 +107,6 @@ const KINDS: [string, RegExp][] = [
   ["TRIGGERS_QUERY", /AS skipping/],
   ["RELATION_TYPES_QUERY", /wanted AS/],
   ["TYPE_QUERY", /^SELECT t\.oid::pg_catalog\.int8.* WHERE t\.oid OPERATOR\(pg_catalog\.=\) ANY \(\$1/s],
-  ["fresh PG_QUERY", /fresh_table/],
   ["PG_TABLE_QUERY", /^SELECT a\.attname::pg_catalog\.text, b\.typname/],
   ["PROBE_QUERY", /pg_extension/],
   ["RELNAMES_QUERY", /^SELECT c\.oid::pg_catalog\.int8, c\.relname::pg_catalog\.text FROM pg_catalog\.pg_class c WHERE/],

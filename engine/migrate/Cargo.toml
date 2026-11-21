@@ -1,25 +1,48 @@
 [package]
 name = "reylo-migrate"
-version = "0.0.0"
+version.workspace = true
 edition = "2021"
-publish = false
-description = "Reylo's migrations: hand-written SQL migrations checked against the declared schema in shadow databases before they run: on Postgres, MySQL and SQLite over the connections of the native engine."
+rust-version.workspace = true
+# libSQL is MIT-licensed, and the SQLite it forks is in the public domain, with its blessing in
+# place of a license.
+license = "MIT AND blessing"
+# The amalgamation `build.rs` compiles is no source of this repository: libSQL's, which the prepare
+# step writes into `.libsql/` and the package carries, so that a build from crates.io needs no step
+# of ours.
+include = ["Cargo.toml", "build.rs", "src/**/*.rs", "csrc/**", ".libsql/sqlite3-private.c", ".libsql/sqlite3.h", ".libsql/sqlite3ext.h", ".libsql/sqlean/**"]
+repository.workspace = true
+homepage.workspace = true
+description = "Reylo's migrations: hand-written SQL migrations checked against the declared schema in shadow databases before they run: on Postgres, MySQL and SQLite (Turso's among it) over the connections of the native engine."
+
+[features]
+default = ["cli"]
+# The commands as the `reylo` binary runs them: connections of their own (tokio-postgres, mysql_async
+# and rusqlite, through the engine's connection code), shadow databases, and the diff engine that
+# writes a migration from a change to schema.sql, over Postgres's parser. Without it, deploy and
+# status run on a database a host connects (`db::Session`), as a Rust app's `reylo::migrate!()` does,
+# and nothing else is built.
+cli = ["dep:reylo-engine", "dep:syntax", "dep:rusqlite", "dep:tokio-postgres", "dep:mysql_async", "dep:ureq"]
 
 [dependencies]
-reylo-engine-native = { path = "../native", default-features = false, features = ["postgres", "mysql", "sqlite"] }
-# Postgres 18's parser, patched in by the workspace, which reads `schema.sql` for the text each
-# object was declared with; prost's recursion limit lifted, as the Postgres engine lifts it, so a
-# deeply nested declaration decodes.
-pg_query = "18.0"
-prost = { version = "0.13", features = ["no-recursion-limit"] }
+reylo-engine = { workspace = true, features = ["postgres", "mysql", "sqlite"], optional = true }
+# Postgres 18's parser (`reylo-engine-syntax`), which reads `schema.sql` for the text each object
+# was declared with.
+syntax = { workspace = true, optional = true }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
-rusqlite = { version = "0.39", features = ["bundled"] }
+sha2 = "0.10"
+rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 serde_json = { version = "1", features = ["preserve_order", "unbounded_depth"] }
 tokio = { version = "1", features = ["rt", "time"] }
-tokio-postgres = "0.7"
-mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust", "default-rustls-ring"] }
+tokio-postgres = { version = "0.7", optional = true }
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust", "default-rustls-ring"], optional = true }
+
+# A libSQL server's database (Turso's) over HTTP, as `@libsql/client` reaches it.
+ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
+
+[build-dependencies]
+cc = "1"
 
 [target.'cfg(unix)'.dependencies]
 # The user id, which names the directory of a user's SQLite run locks.

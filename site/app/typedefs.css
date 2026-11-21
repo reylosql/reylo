@@ -1,17 +1,18 @@
 /* The type format's page (content/docs/typedefs.mdx) and the analyze page: the badge and the schema
-   button under the title, each card's rows, in alternating backgrounds so that a long card scans,
+   button beside the title, each card's rows, in alternating backgrounds so that a long card scans,
    its Holds row, the values its type admits as tight chips, and its Databases row, a table of each
    database's types (lib/remark-typedefs.ts). */
 
-#nd-page .prose .typedef-version {
+/* At the right of the page's title, in the title's row. */
+#nd-page .typedef-version {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.75rem;
-  margin-block: 0 1.875rem;
+  margin: 0;
 }
 
-/* A badge in two halves, as a project's README shows its version. */
+/* A badge, as a project's README shows its version: the stage while the format is a preview, then the version. */
 #nd-page .typedef-badge {
   display: inline-flex;
   overflow: hidden;
@@ -121,10 +122,18 @@
 }
 
 /* A card and the whole format read in one scroll of the page: Fumadocs caps a code block at 600px. */
-#nd-page .typedef-card figure .max-h-\[600px\],
-#nd-page .typedef-analyzed figure .max-h-\[600px\],
-#nd-page .typedef-spec figure .max-h-\[600px\] {
+#nd-page .typedef-card figure .max-h-\[600px\] {
   max-height: none;
+}
+
+/* The whole format scrolls past 30rem. */
+#nd-page .typedef-spec figure .max-h-\[600px\] {
+  max-height: 30rem;
+}
+
+/* The analysis a statement prints is long, so its terminal scrolls past 26rem. */
+#nd-page .typedef-analyzed figure .max-h-\[600px\] {
+  max-height: 26rem;
 }
 
 /* A dialect page's types: each row's label is a type's name, written as code, and its descriptor

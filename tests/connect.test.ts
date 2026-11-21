@@ -10,9 +10,10 @@ import { engine, reason, Unreachable } from "../src/engine.ts";
 import { hostUrl } from "../src/host-url.ts";
 import { nativeBinary } from "../src/native.ts";
 import { mysqlStandIn } from "./mysql-stand-in.ts";
-import { PG, MYSQL, pgLive, postgresDatabase } from "./helpers.ts";
+import { PG, PG_TLS, MYSQL, pgLive, postgresDatabase } from "./helpers.ts";
 
 const noPg = !PG && "REYLO_TEST_PG names no server";
+const noPgTls = !PG_TLS && "REYLO_TEST_PG_TLS names no server";
 const noMysql = !MYSQL && "REYLO_TEST_MYSQL names no server";
 // Node listens on no Unix socket on Windows, where a path names a named pipe.
 const noUnixSockets = process.platform === "win32" && "Node opens no Unix socket on Windows";
@@ -48,6 +49,27 @@ test("the engine reports a connection the server refuses as Unreachable, on Post
   }
 });
 
+test("a Postgres URL that requires channel binding signs in over TLS, as a hosted Postgres's URLs ask", { skip: noPgTls }, async () => {
+  // SCRAM's channel binding ties the password exchange to the TLS connection by the hash of the
+  // server's certificate; `channel_binding=require` alone asks for TLS too.
+  for (const query of ["sslmode=require&channel_binding=require", "channel_binding=require"]) {
+    const c = await (await engine("postgres")).open(`${PG_TLS}?${query}`);
+    assert.deepEqual((await c.analyze("select 1 as x")).columns.map((col) => col.name), ["x"], query);
+    await c.close();
+  }
+});
+
+test("a connection that fails at every address reports what a server answered, not only the last address's error", { skip: noPg }, async () => {
+  // The server answers first, and an address that refuses the connection comes last: tokio-postgres
+  // keeps only the last address's error, which alone would read as a network problem.
+  const { username, host } = new URL(PG!);
+  const [r] = await Promise.allSettled([(await engine("postgres")).open(`postgres://${username}@${host},127.0.0.1:1/reylo_no_such_database`)]);
+  assert.equal(r!.status, "rejected");
+  const message = reason((r as PromiseRejectedResult).reason);
+  assert.match(message, /^[^;]*database "reylo_no_such_database" does not exist/);
+  assert.match(message, /127\.0\.0\.1:1: error connecting to server/);
+});
+
 test("analyses waiting on a server that never answers fail together, at the one connect timeout", { timeout: 30_000 }, async () => {
   // A server that accepts the socket and never says anything: the engine gives up after its connect
   // timeout, and every analysis that waited on that one connection fails with it.
@@ -81,6 +103,15 @@ test("the files a Postgres URL names are resolved from the working directory, as
   assert.match(url, /&application_name=a\+b$/);
   assert.equal((await hostUrl("postgres://u@h/d?sslrootcert=system")).url, "postgres://u@h/d?sslrootcert=system");
   assert.equal((await hostUrl("mysql://root@h/d?ssl=true")).url, "mysql://root@h/d?ssl=true");
+});
+
+test("the engine refuses Supabase's transaction pooler before it connects, naming the session pooler, and keeps the password out of the message", async () => {
+  const [r] = await Promise.allSettled([(await engine("postgres")).open("postgresql://postgres.abc:secret@aws-1-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require")]);
+  assert.equal(r!.status, "rejected");
+  const e = (r as PromiseRejectedResult).reason as Error;
+  assert.ok(!(e instanceof Unreachable), `expected a refusal, got ${e}`);
+  assert.match(e.message, /^aws-1-us-east-1\.pooler\.supabase\.com:6543 is Supabase's transaction pooler, .*: point direct_url in \.reylo\.yaml at its session pooler, port 5432 on the same host, or at the direct connection$/);
+  assert.doesNotMatch(e.message, /secret/);
 });
 
 test("a URL that names a Unix socket is opened through a bridge, on Postgres and on MySQL", { skip: noUnixSockets || noPg || noMysql }, async () => {

@@ -24,14 +24,14 @@ case "$target" in
     export MACOSX_DEPLOYMENT_TARGET=11.0
     ;;
   *-linux-gnu)
-    # The container's toolchain, and what the build reads beside it: libclang for bindgen, and
-    # python3, unzip and patch for the prepare step.
+    # What the build reads beside the container's toolchain: python3, unzip and patch for the
+    # prepare step.
     if command -v dnf > /dev/null; then
-      dnf install -y -q clang-devel python3 unzip patch > /dev/null
+      dnf install -y -q python3 unzip patch > /dev/null
     fi
     ;;
   *-linux-musl)
-    # musl's compiler wrapper for the C (libpg_query, SQLite, ring) and the linker, and a static
+    # musl's compiler wrapper for the C (SQLite, ring) and the linker, and a static
     # binary, as Rust's musl targets link by default: it runs on any Linux of its CPU.
     sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends musl-tools > /dev/null
     triple="${target//-/_}"
@@ -41,27 +41,25 @@ case "$target" in
     # The C runtime linked in, so that the binary starts on a Windows without the Visual C++
     # redistributable, whose absence stops a program before it can say why (STATUS_DLL_NOT_FOUND).
     export RUSTFLAGS="-C target-feature=+crt-static"
-    # bindgen reads libpg_query's header with the runner's LLVM.
-    export LIBCLANG_PATH="${LIBCLANG_PATH:-C:\\Program Files\\LLVM\\bin}"
     ;;
 esac
 
-# rustup, where the runner's image has none (the arm64 images are younger than the others).
+# rustup, where the runner's image has none (the arm64 images are younger than the others), with
+# no toolchain of its own: rust-toolchain.toml names the one the build uses.
 if ! command -v rustup > /dev/null; then
   case "$target" in
     *-windows-*)
       host=x86_64-pc-windows-msvc
       [ "$(uname -m)" = aarch64 ] && host=aarch64-pc-windows-msvc
       curl -fsSL -o "$RUNNER_TEMP/rustup-init.exe" "https://static.rust-lang.org/rustup/dist/$host/rustup-init.exe"
-      "$RUNNER_TEMP/rustup-init.exe" -y --profile minimal --default-toolchain stable
+      "$RUNNER_TEMP/rustup-init.exe" -y --profile minimal --default-toolchain none
       ;;
-    *) curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable ;;
+    *) curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none ;;
   esac
   export PATH="$HOME/.cargo/bin:$PATH"
 fi
 case "$target" in
   *-pc-windows-msvc)
-    [ -f "$LIBCLANG_PATH/libclang.dll" ] || { echo "::error::no libclang.dll in $LIBCLANG_PATH, which bindgen reads libpg_query's header with: install LLVM, or name its bin directory in LIBCLANG_PATH"; exit 1; }
     # The prepare step patches SQLite with python3, which Windows names python.
     if ! command -v python3 > /dev/null; then
       mkdir -p "$RUNNER_TEMP/python3"
@@ -72,9 +70,11 @@ case "$target" in
     ;;
 esac
 
+# The toolchain rust-toolchain.toml pins, whatever the runner's own is, then the platform's target in it.
+rustup toolchain install
 rustup target add "$target"
 engine/build.sh --prepare
-cargo build --release --locked -p reylo --target "$target"
+cargo build --release --locked -p reylo-cli --target "$target"
 
 exe=reylo
 case "$target" in *-windows-*) exe=reylo.exe ;; esac

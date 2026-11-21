@@ -17,9 +17,11 @@
 //!   array's order (`wiki/bulk-insert.md`, Order);
 //! - anywhere else, a table, named by the alias written after it or else by the parameter.
 //!
-//! Each dialect reads the JSON with its own reader: `jsonb_to_record` on Postgres, `json_each` on
-//! SQLite, `JSON_TABLE` with `ERROR ON ERROR` on every column on MySQL (which otherwise turns a
-//! value it cannot read into NULL without a warning; `wiki/structured-params/verify.md`).
+//! Each dialect reads the JSON with its own reader: `json_to_record` and `json_to_recordset` on
+//! Postgres (an insert that copies a default reads each element as `jsonb`, which its key tests
+//! read), `json_each` on SQLite, `JSON_TABLE` with `ERROR ON ERROR` on every column on MySQL (which
+//! otherwise turns a value it cannot read into NULL without a warning;
+//! `wiki/structured-params/verify.md`).
 //!
 //! A key a row leaves out takes its column's default. On Postgres and SQLite the insert reads,
 //! for each member whose key may be left out, the row's value where it has the key and else the
@@ -1321,11 +1323,16 @@ pub fn lower(found: &Found, dialect: Dialect, placeholder: &str, server: &Server
                     w.member(k, &format!("{} {}", q(&m.name), m.ty));
                 }
             };
+            // The rows are read as `json`, which Postgres only validates, rather than `jsonb`, which
+            // it parses into a tree with every object's keys sorted: on 10,000 rows of 16 columns
+            // that parse alone took 32 ms against 7, and the insert 63 ms against 91 end to end.
+            // The values read are the same for every type; a `json` member keeps the text as sent.
             let reader = |w: &mut Writer| {
-                w.push(if found.one { "jsonb_to_record(" } else { "jsonb_to_recordset(" });
+                w.push(if found.one { "json_to_record(" } else { "json_to_recordset(" });
                 w.placeholder(placeholder);
-                w.push("::jsonb)");
+                w.push("::json)");
             };
+            let copies = (0..ms.len()).any(|k| copied_at(found, k).is_some());
             if found.insert {
                 // A member whose key a row may leave out reads, for such a row, the default copied
                 // from the catalog; `->` tells a missing key (SQL NULL) from a JSON null.
@@ -1344,7 +1351,7 @@ pub fn lower(found: &Found, dialect: Dialect, placeholder: &str, server: &Server
                 w.list(ms.iter().map(|m| q(&m.name)).collect(), &mut lists);
                 w.push(") SELECT ");
                 w.list(select, &mut lists);
-                if found.one && (0..ms.len()).any(|k| copied_at(found, k).is_some()) {
+                if found.one && copies {
                     // The object itself, which the key tests read.
                     w.push(" FROM (SELECT ");
                     w.placeholder(placeholder);
@@ -1352,12 +1359,25 @@ pub fn lower(found: &Found, dialect: Dialect, placeholder: &str, server: &Server
                     coldefs(&mut w);
                     w.push(")");
                 } else if found.one {
-                    w.push(" FROM jsonb_to_record(");
-                    w.placeholder(placeholder);
-                    w.push(&format!("::jsonb) AS {alias}("));
+                    w.push(" FROM ");
+                    reader(&mut w);
+                    w.push(&format!(" AS {alias}("));
                     coldefs(&mut w);
                     w.push(")");
+                } else if !copies {
+                    // The row's number decides the order the rows are inserted in.
+                    w.push(" FROM ROWS FROM (");
+                    reader(&mut w);
+                    w.push(" AS (");
+                    coldefs(&mut w);
+                    w.push(&format!(")) WITH ORDINALITY AS {alias}("));
+                    for m in ms {
+                        w.push(&format!("{}, ", q(&m.name)));
+                    }
+                    w.push(&format!("\"reylo.n\") ORDER BY {alias}.\"reylo.n\""));
                 } else {
+                    // The key tests read each element, which `jsonb` gives them without parsing it
+                    // again for each key, as `json` would (106 ms against 141 for 10,000 rows).
                     // The element's number decides the order the rows are inserted in.
                     w.push(" FROM jsonb_array_elements(");
                     w.placeholder(placeholder);
@@ -1600,11 +1620,6 @@ const PROBE: &str = "SELECT * FROM ";
 pub struct Info {
     pub name: String,
     pub lists: Vec<List>,
-    /// On Postgres and SQLite, where the statement copies the defaults instead of being written
-    /// again per call, the columns whose defaults it copied, for the freshness facts
-    /// ([`crate::fresh`]). Not on the wire.
-    #[serde(skip)]
-    pub copied: Vec<String>,
 }
 
 /// Whether no structured parameter has lists the run time writes again, so that the analysis
@@ -1772,6 +1787,7 @@ pub fn analyze<D: Describe>(sql: &str, dialect: Dialect, host: &Host<'_, D>, inn
                 optional: m.omittable(),
                 default: None,
                 comment: None,
+                title: None,
             })
             .collect();
         // The column list against the table: only once the database took every type.
@@ -1795,20 +1811,14 @@ pub fn analyze<D: Describe>(sql: &str, dialect: Dialect, host: &Host<'_, D>, inn
         let added: usize = inserted.iter().filter(|&&(at, _, _)| at <= p).map(|&(_, rs, re)| re - rs).sum();
         (p as isize + delta) as usize + added
     };
-    for ((f, (l, at)), table) in expanded.found.iter().zip(&expanded.lowered).zip(&columns) {
+    for (f, (l, at)) in expanded.found.iter().zip(&expanded.lowered) {
         if !f.insert {
             continue;
         }
-        if f.copied.is_some() {
-            // The columns whose defaults the statement copied, defaults or none, which the
-            // freshness check compares: a default changed after the build would otherwise be
-            // written as it was.
-            let copied = f.members.iter().filter(|m| m.omittable()).filter_map(|m| column_of(table, &m.name, dialect)).map(|c| c.name.clone()).collect();
-            analysis.structured.push(Info { name: f.name.clone(), lists: Vec::new(), copied });
-        } else {
-            let lists = l.lists.iter().map(|list| List { start: rewritten(at + list.start), end: rewritten(at + list.end), entries: list.entries.clone() }).collect();
-            analysis.structured.push(Info { name: f.name.clone(), lists, copied: Vec::new() });
-        }
+        // A statement that copied the defaults (Postgres and SQLite) is one text for every call:
+        // no list is written again. The defaults are the ones the database had at the build.
+        let lists = if f.copied.is_some() { Vec::new() } else { l.lists.iter().map(|list| List { start: rewritten(at + list.start), end: rewritten(at + list.end), entries: list.entries.clone() }).collect() };
+        analysis.structured.push(Info { name: f.name.clone(), lists });
     }
     // Each placeholder at its place in the author's text; a structured parameter's covers its
     // whole expansion, so an error the database reports inside it lands on the parameter.
@@ -1991,9 +2001,8 @@ pub struct TableColumn {
 /// measured on Postgres 14, 17 and 18: the column's own default, else for an identity
 /// `GENERATED BY DEFAULT` its sequence's `nextval`, else its domain's default; a generated
 /// column has none. `pg_get_expr` writes a name without its schema only where the session's
-/// `search_path` finds the same object by it, so the text is read under the session's own path,
-/// and the freshness check reads it again under the path the query runs with: equal text is the
-/// same objects (wiki/design.md §24).
+/// `search_path` finds the same object by it, so the text is read under the session's own path
+/// (wiki/design.md §24).
 macro_rules! pg_default {
     () => {
         "CASE WHEN a.attgenerated OPERATOR(pg_catalog.<>) ''::pg_catalog.\"char\" THEN NULL \
@@ -2003,7 +2012,6 @@ macro_rules! pg_default {
         WHEN t.typtype OPERATOR(pg_catalog.=) 'd'::pg_catalog.\"char\" THEN pg_catalog.pg_get_expr(t.typdefaultbin, '0'::pg_catalog.oid) END"
     };
 }
-pub(crate) use pg_default;
 
 /// Every column of a Postgres table: `$1` is its name as the statement writes it. Beside the
 /// facts the checks read, the default ([`pg_default`]), the type it is cast to, without
@@ -2486,17 +2494,17 @@ mod tests {
         let e = expand(sql, found, Dialect::Postgres, &Server::default());
         assert_eq!(
             e.sql,
-            "insert into events (\"id\", \"status\") SELECT \"events\".\"id\", \"events\".\"status\" FROM jsonb_array_elements(:events::jsonb) WITH ORDINALITY AS \"reylo.e\"(\"reylo.v\", \"reylo.n\"), jsonb_to_record(\"reylo.e\".\"reylo.v\") AS \"events\"(\"id\" int8, \"status\" text) ORDER BY \"reylo.e\".\"reylo.n\" on conflict (id) do nothing returning id"
+            "insert into events (\"id\", \"status\") SELECT \"events\".\"id\", \"events\".\"status\" FROM ROWS FROM (json_to_recordset(:events::json) AS (\"id\" int8, \"status\" text)) WITH ORDINALITY AS \"events\"(\"id\", \"status\", \"reylo.n\") ORDER BY \"events\".\"reylo.n\" on conflict (id) do nothing returning id"
         );
         let sql = "select e.id from :events::rows(id int8 not null, note text) e";
         let e = expand(sql, find(sql, Dialect::Postgres, &Server::default()).unwrap(), Dialect::Postgres, &Server::default());
-        assert_eq!(e.sql, "select e.id from (SELECT \"reylo.r\".\"id\", \"reylo.r\".\"note\" FROM jsonb_to_recordset(:events::jsonb) AS \"reylo.r\"(\"id\" int8, \"note\" text) WHERE \"reylo.r\".\"id\" IS NOT NULL) AS e");
+        assert_eq!(e.sql, "select e.id from (SELECT \"reylo.r\".\"id\", \"reylo.r\".\"note\" FROM json_to_recordset(:events::json) AS \"reylo.r\"(\"id\" int8, \"note\" text) WHERE \"reylo.r\".\"id\" IS NOT NULL) AS e");
         let sql = "select * from :events::rows(note text)";
         let e = expand(sql, find(sql, Dialect::Postgres, &Server::default()).unwrap(), Dialect::Postgres, &Server::default());
-        assert_eq!(e.sql, "select * from jsonb_to_recordset(:events::jsonb) AS \"events\"(\"note\" text)");
+        assert_eq!(e.sql, "select * from json_to_recordset(:events::json) AS \"events\"(\"note\" text)");
         let sql = "insert into users :user::row(email text not null)";
         let e = expand(sql, find(sql, Dialect::Postgres, &Server::default()).unwrap(), Dialect::Postgres, &Server::default());
-        assert_eq!(e.sql, "insert into users (\"email\") SELECT \"user\".\"email\" FROM jsonb_to_record(:user::jsonb) AS \"user\"(\"email\" text)");
+        assert_eq!(e.sql, "insert into users (\"email\") SELECT \"user\".\"email\" FROM json_to_record(:user::json) AS \"user\"(\"email\" text)");
     }
 
     #[test]
@@ -2693,7 +2701,7 @@ mod tests {
         assert_eq!(&sql[s..t], "status? text not null");
         let ret = e.sql.find("returning").unwrap();
         assert_eq!(e.to_author(ret).0, sql.find("returning").unwrap());
-        let reader = e.sql.find("jsonb_array_elements").unwrap();
+        let reader = e.sql.find("json_to_recordset").unwrap();
         let (s, t) = e.to_author(reader);
         assert_eq!(&sql[s..t], ":events::rows");
     }
@@ -2746,8 +2754,8 @@ mod tests {
             seen.last().unwrap(),
             "insert into accounts (\"name\", \"role\", \"email\", \"n\") SELECT \"a\".\"name\", CASE WHEN (\"reylo.e\".\"reylo.v\" -> 'role') IS NOT NULL THEN \"a\".\"role\" ELSE ('member'::text)::text END, \"a\".\"email\", CASE WHEN (\"reylo.e\".\"reylo.v\" -> 'n') IS NOT NULL THEN \"a\".\"n\" ELSE (nextval('public.n_seq'::regclass))::int8 END FROM jsonb_array_elements(:a::jsonb) WITH ORDINALITY AS \"reylo.e\"(\"reylo.v\", \"reylo.n\"), jsonb_to_record(\"reylo.e\".\"reylo.v\") AS \"a\"(\"name\" text, \"role\" text, \"email\" text, \"n\" int8) ORDER BY \"reylo.e\".\"reylo.n\" returning id"
         );
-        // No list for the run time to write again, and the copied columns for the freshness facts.
-        assert_eq!(a.structured, vec![Info { name: "a".into(), lists: Vec::new(), copied: vec!["role".into(), "email".into(), "n".into()] }]);
+        // No list for the run time to write again.
+        assert_eq!(a.structured, vec![Info { name: "a".into(), lists: Vec::new() }]);
         assert!(!serde_json::to_value(&a).unwrap().as_object().unwrap().contains_key("structured"));
 
         // One row reads the object itself for its key tests.
@@ -2759,18 +2767,17 @@ mod tests {
         // SQLite: the default's source text in parentheses, a bare identifier as the string it is.
         let sql = "insert into accounts :a::rows(id? integer not null, name text not null, role? text not null, nick text, token? text not null)";
         let rows = table(Dialect::Sqlite, &[("id", "INTEGER", false, None), ("name", "TEXT", true, None), ("role", "TEXT", true, Some("'member'")), ("nick", "TEXT", false, Some("member")), ("token", "TEXT", true, Some("lower(hex(randomblob(4)))"))]);
-        let (a, seen) = drive(sql, Dialect::Sqlite, rows);
+        let (_, seen) = drive(sql, Dialect::Sqlite, rows);
         assert_eq!(
             seen.last().unwrap(),
             "insert into accounts (\"id\", \"name\", \"role\", \"nick\", \"token\") SELECT \"reylo.e\".value ->> '$.\"id\"', \"reylo.e\".value ->> '$.\"name\"', CASE WHEN json_type(\"reylo.e\".value, '$.\"role\"') IS NOT NULL THEN \"reylo.e\".value ->> '$.\"role\"' ELSE ('member') END, CASE WHEN json_type(\"reylo.e\".value, '$.\"nick\"') IS NOT NULL THEN \"reylo.e\".value ->> '$.\"nick\"' ELSE ('member') END, CASE WHEN json_type(\"reylo.e\".value, '$.\"token\"') IS NOT NULL THEN \"reylo.e\".value ->> '$.\"token\"' ELSE (lower(hex(randomblob(4)))) END FROM json_each(:a) AS \"reylo.e\" WHERE true ORDER BY \"reylo.e\".key"
         );
-        assert_eq!(a.structured[0].copied, ["id", "role", "nick", "token"]);
 
         // MySQL: unchanged, the lists the run time writes again per call.
         let sql = "insert into accounts :a::rows(name varchar(9) not null, role? varchar(9) not null)";
         let (a, seen) = drive(sql, Dialect::Mysql, Vec::new());
         assert!(seen.last().unwrap().starts_with("insert into accounts (`name`, `role`) SELECT `a`.`name`, `a`.`role` FROM JSON_TABLE("), "{}", seen.last().unwrap());
-        assert_eq!((a.structured.len(), a.structured[0].lists.len(), a.structured[0].copied.len()), (1, 2, 0));
+        assert_eq!((a.structured.len(), a.structured[0].lists.len()), (1, 2));
         assert!(serde_json::to_value(&a).unwrap()["structured"].is_array());
     }
 

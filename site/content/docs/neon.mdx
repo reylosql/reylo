@@ -5,16 +5,18 @@ description: How to use Reylo with Neon. The connection string the type check re
 
 <p className="dk-subheader">Reylo on Neon's serverless Postgres</p>
 
-Reylo works with Neon. Neon is Postgres, so everything on the [Postgres](/postgres) page holds for it. This page covers what's specific to Neon: its two connection strings, its serverless driver and its branches.
+Neon is Postgres, so everything on the [Postgres](/postgres) page holds for it.
 
 | | |
 | --- | --- |
 | Dialect | Postgres |
 | The type check reads | The direct connection string, through [`direct_url`](/configuration#direct_url) |
-| Queries run on | `@neondatabase/serverless`, `pg` or postgres.js, through the pooled connection string |
+| Queries run on | `@neondatabase/serverless`, `pg`, postgres.js or Drizzle Postgres, through the pooled connection string |
 | Transactions | On a `Pool`'s client over a WebSocket, not on `neon()` over HTTP |
 | Branches | Each has connection strings of its own, to type against its schema |
 | Edge runtimes | Neon's driver, on the [Next.js edge runtime](/nextjs#the-edge-runtime) and in [Cloudflare Workers](/d1#setup) |
+
+The examples on this page use this schema:
 
 <Details summary="View the schema behind the examples" id="schema">
 
@@ -45,9 +47,11 @@ Point [`direct_url`](/configuration#direct_url) at the direct one:
 direct_url: ${DATABASE_URL_UNPOOLED}
 ```
 
-- Neon's pooler is PgBouncer in transaction mode. Your app's queries can go through it, but the type check can fail there.
-- Without this line, Reylo reads `DATABASE_URL` and nothing else. `DATABASE_URL_UNPOOLED` is the name Neon's Vercel integration gives the direct string.
-- The type check takes the string as Neon writes it, `sslmode=require` and `channel_binding=require` included ([TLS](/configuration#tls)).
+Why the direct connection:
+
+- Neon's pooler is PgBouncer in transaction mode. Your app's queries can go through it. The type check can fail there, and [migrations](/migrate/docs) refuse it, since the pooler shares sessions between clients.
+- Without this line, Reylo reads `DATABASE_URL` and nothing else. Neon's Vercel integration names the direct string `DATABASE_URL_UNPOOLED`.
+- The type check takes the string as Neon writes it, [TLS settings](/configuration#direct_url) included.
 
 ## Serverless driver
 
@@ -101,12 +105,14 @@ values (:name)
 returning id
 ```
 
+Transactions on Neon:
+
 - The `transaction()` of `neon()` takes queries built with Neon's own `sql` tag, so a Reylo query can't join one.
-- Drizzle over Neon's driver has transactions over a `Pool`, and none over HTTP ([Drizzle](/postgres#drizzle)).
+- [Drizzle](/postgres#drizzle) over Neon's driver has transactions over a `Pool`, and none over HTTP.
 
 ## TCP drivers
 
-Over TCP, pass a `pg` pool or a postgres.js client, or in Rust an sqlx pool, made with the pooled connection string:
+Over TCP, use the pooled connection string. Make a `pg` pool, a postgres.js client or a Drizzle Postgres pool<Rust>, or in Rust an sqlx pool</Rust>:
 
 ```ts twoslash tab="pg"
 import pg from "pg";
@@ -124,6 +130,15 @@ const db = postgres(process.env.DATABASE_URL);
 const user = await getUser.run(db, { id: 1 });
 ```
 
+```ts twoslash tab="Drizzle Postgres"
+import { Pool } from "drizzle-orm/postgres/client";
+import getUser from "./get_user.sql";
+
+const db = new Pool({ url: process.env.DATABASE_URL });
+const user = await getUser.run(db, { id: 1 });
+```
+
+<Rust>
 ```rust tab="sqlx"
 #[reylo::query("select id, name, email from users where id = :id")]
 pub mod get_user {}
@@ -132,12 +147,20 @@ pub mod get_user {}
 let db = sqlx::PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
 let user = get_user::Query { id: 1 }.run(&db).await?;
 ```
+</Rust>
 
-Each runs a transaction its own way: on a client checked out of the pool with `pg`, in `db.begin()` with postgres.js ([Drivers](/postgres#drivers)), and in `db.begin()` with sqlx ([Rust](/rust#run)).
+Each [driver](/postgres#drivers) runs a transaction its own way:
+
+- `pg`: on a client checked out of the pool
+- postgres.js: in `db.begin()`
+- Drizzle Postgres: in `db.transaction()`
+<Rust>
+- sqlx: in `db.begin()` ([Rust](/rust#transactions))
+</Rust>
 
 ## Branches
 
-Each branch has connection strings of its own. Neon's CLI prints a branch's direct one:
+Neon's CLI prints a branch's direct connection string:
 
 ```sh title="Terminal"
 # add --pooled for the pooled one
@@ -154,7 +177,7 @@ A branch starts with its parent's schema, so run your migrations on it before th
 
 ## Pull requests
 
-In CI, create a branch for each pull request with Neon's GitHub Action, migrate it, and type-check against it:
+In CI, create a branch for each pull request with Neon's GitHub Action. Migrate it, then type-check against it:
 
 ```yaml title=".github/workflows/ci.yml"
 on: pull_request
@@ -195,8 +218,10 @@ jobs:
           branch: pr-${{ github.event.number }}
 ```
 
+What the action gives you:
+
 - The action's `db_url` is the branch's direct connection string, and `db_url_pooled` its pooled one.
-- Neon's Vercel integration can also create a branch for each preview deployment, with its own `DATABASE_URL_UNPOOLED`. It starts with its parent's schema, so run your migrations on it before the build ([A host that builds before it migrates](/deployment#build-before-migrate)).
+- Neon's Vercel integration can also create a branch for each preview deployment, with its own `DATABASE_URL_UNPOOLED`. It starts with its parent's schema, so [run your migrations on it](/deployment#build-before-migrate) before the build.
 
 ## Edge runtimes
 
@@ -214,6 +239,8 @@ export default {
 };
 ```
 
-- In a Worker, it needs no `nodejs_compat` flag. [Cloudflare D1](/d1#setup) covers the Vite plugin that loads `.sql` files there.
-- On the Next.js edge runtime, use it the same way ([The edge runtime](/nextjs#the-edge-runtime)).
+In a Worker:
+
+- In a Worker, it needs no `nodejs_compat` flag, only the [Vite plugin](/d1#setup) that loads `.sql` files there.
+- Use it the same way on the [Next.js edge runtime](/nextjs#the-edge-runtime).
 - In an edge runtime, connect, use and close a `Pool` or `Client` within one request.

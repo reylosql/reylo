@@ -7,7 +7,6 @@ use crate::host::Host;
 use reylo_engine_core::database::{with_facts, Database};
 use reylo_engine_core::dialect::Dialect;
 use reylo_engine_core::errors::Errors;
-use reylo_engine_core::fresh::Tables;
 use reylo_engine_core::host::Lazy;
 use serde::Deserialize;
 
@@ -53,15 +52,6 @@ impl Database for Postgres {
         crate::postgres::analyze(sql, host)
     }
 
-    /// The tables libpg_query reads in the statement as it runs.
-    fn tables(analysis: &Analysis) -> Option<Tables> {
-        if analysis.tables.is_some() {
-            return analysis.tables.clone();
-        }
-        let parsed = crate::analyze::analyze(&analysis.rewritten.sql).ok()?;
-        Some(Tables { read: parsed.read_set, write: parsed.write_set, ..Default::default() })
-    }
-
     /// The constraint errors the statement may raise, where it runs only the server's own code.
     fn errors(analysis: &Analysis, host: &Host) -> Lazy<Option<Errors>> {
         crate::errors::errors(analysis, host)
@@ -70,6 +60,11 @@ impl Database for Postgres {
     /// Whether the engine finds nothing in the statement that could write.
     fn read_only(analysis: &Analysis, host: &Host) -> Lazy<bool> {
         crate::errors::read_only(analysis, host)
+    }
+
+    /// What running the statement may do: the tables it reaches, and what it does beyond their rows.
+    fn capabilities(analysis: &Analysis, host: &Host) -> Lazy<Option<reylo_engine_core::types::Capabilities>> {
+        crate::capabilities::capabilities(analysis, host)
     }
 
     /// One round of the replay, through the server's extension where there is one: the

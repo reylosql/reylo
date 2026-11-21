@@ -6,13 +6,12 @@
 //! objects (`tests/catalog-queries.test.ts`).
 
 use crate::{bodies, cardinality, errors, extension, pgtypes, postgres};
-use pg_query::protobuf::{AExprKind, SubLinkType};
+use syntax::postgres::protobuf::{AExprKind, SubLinkType};
 use serde_json::{Map, Value};
-use reylo_engine_core::{fresh, structured};
+use reylo_engine_core::structured;
 
-/// Each query by its name, the freshness check's with two tables in place of its list.
+/// Each query by its name.
 fn queries() -> Vec<(&'static str, String)> {
-    let tables = "('\"users\"'::pg_catalog.text), ('\"archive\".\"users\"'::pg_catalog.text)";
     vec![
         ("ATTNOTNULL_QUERY", postgres::ATTNOTNULL_QUERY.into()),
         ("CHECKS_QUERY", postgres::CHECKS_QUERY.into()),
@@ -30,6 +29,7 @@ fn queries() -> Vec<(&'static str, String)> {
         ("SET_RETURNING_OPERATORS_QUERY", cardinality::SET_RETURNING_OPERATORS_QUERY.into()),
         ("SET_RETURNING_ATTRIBUTES_QUERY", cardinality::SET_RETURNING_ATTRIBUTES_QUERY.into()),
         ("BODIES_QUERY", bodies::BODIES_QUERY.into()),
+        ("OPERATOR_FUNCTIONS_QUERY", bodies::OPERATOR_FUNCTIONS_QUERY.into()),
         ("TYPE_QUERY", pgtypes::TYPE_QUERY.into()),
         ("RELATION_TYPES_QUERY", pgtypes::RELATION_TYPES_QUERY.into()),
         ("ERRORS_QUERY", errors::ERRORS_QUERY.into()),
@@ -37,9 +37,6 @@ fn queries() -> Vec<(&'static str, String)> {
         ("USER_OPERATORS_QUERY", errors::USER_OPERATORS_QUERY.into()),
         ("PROBE_QUERY", extension::PROBE_QUERY.into()),
         ("PG_TABLE_QUERY", structured::PG_TABLE_QUERY.into()),
-        ("fresh::PG_QUERY", fresh::PG_QUERY.replace("{tables}", tables)),
-        ("fresh::PG_QUERY_DEFAULTS", fresh::PG_QUERY_DEFAULTS.replace("{tables}", tables)),
-        ("fresh::PG_FUNCTIONS", fresh::PG_FUNCTIONS.replace("{extra}", "").replace("{functions}", "('f(bigint)'::pg_catalog.text)")),
     ]
 }
 
@@ -47,7 +44,7 @@ fn queries() -> Vec<(&'static str, String)> {
 /// polymorphic argument. A query that needs another adds it here once it is checked to be so:
 /// `unnest`, `array_agg`, `cardinality`, `array_length`, `to_jsonb` and the like take any type, and
 /// an overload of narrower types created in `pg_catalog` would be the closer match.
-const FUNCTIONS: [&str; 30] = [
+const FUNCTIONS: [&str; 27] = [
     "bit_or",
     "bool_or",
     "count",
@@ -66,13 +63,10 @@ const FUNCTIONS: [&str; 30] = [
     "pg_get_viewdef",
     "pg_operator_is_visible",
     "pg_table_is_visible",
-    "quote_ident",
     "quote_literal",
     "regclassout",
     "regprocedureout",
     "regexp_matches",
-    "split_part",
-    "strpos",
     "textin",
     "textout",
     "to_number",
@@ -106,7 +100,7 @@ fn objects<'a>(key: &'a str, value: &'a Value, out: &mut Vec<(&'a str, &'a Map<S
 
 /// What `sql` breaks of the rules, one line each.
 fn violations(sql: &str) -> Vec<String> {
-    let parsed = pg_query::parse(sql, 0).unwrap_or_else(|e| panic!("{e}\n{sql}"));
+    let parsed = syntax::postgres::parse(sql, 0).unwrap_or_else(|e| panic!("{e}\n{sql}"));
     let tree = serde_json::to_value(&parsed.protobuf).unwrap();
     let mut all = Vec::new();
     objects("", &tree, &mut all);

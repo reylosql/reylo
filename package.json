@@ -1,6 +1,6 @@
 {
   "name": "reylo",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "description": "Import SQL files as fully typed queries. A TypeScript content mapper plus a runtime loader.",
   "license": "MIT",
@@ -8,9 +8,9 @@
   "homepage": "https://reylo.dev",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/colinhacks/reylo.git"
+    "url": "git+https://github.com/reylosql/reylo.git"
   },
-  "bugs": "https://github.com/colinhacks/reylo/issues",
+  "bugs": "https://github.com/reylosql/reylo/issues",
   "type": "module",
   "engines": {
     "node": ">=24"
@@ -34,6 +34,7 @@
         "node",
         "src/mapper.ts"
       ],
+      "extensions": [".sql", ".reylo.yaml", ".reylo.yml"],
       "compilerOptions": [],
       "dynamicConfig": true
     }
@@ -56,7 +57,7 @@
     "esbuild": "^0.28.2",
     "ip-address": "10.7.6",
     "slonik": "49.12.0",
-    "typescript": "^7.1.0-dev.20260918.1"
+    "typescript": "^7.1.0-dev.20261118.1"
   },
   "peerDependencies": {
     "slonik": ">=49.12.0"

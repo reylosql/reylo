@@ -28,6 +28,8 @@
 // - SQLite Wasm's oo1 Database: Reylo prepares its statement, reads it row by row by position, and
 //   finalizes it after its one run. An INTEGER past 2^53 comes back a BigInt and any other a number,
 //   so none is rounded; its BLOB is a Uint8Array.
+// - sql.js's Database: the same, freed after its one run, with every INTEGER read as a BigInt
+//   (`useBigInt`); its BLOB is a Uint8Array.
 // - sqlite3 and the sqlite wrapper, libSQL, D1 and Bun.SQL's SQLite: the rows the driver gives,
 //   normalized. sqlite3 and sqlite are not cached: a statement left open makes the app's close()
 //   fail with SQLITE_BUSY. An INTEGER the driver already rounded (sqlite3, sqlite, D1, Bun.SQL
@@ -35,7 +37,7 @@
 //   only be one; a BIGINT's number within 2^53, or libSQL's BigInt or digits, is its BigInt.
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, coerce, columnKind, DecodeError, exactInteger, ParameterError, refuseTruth, truth, type Columns, type Kind } from "./values.ts";
-import { isDurableObjectSql, isSqliteWasm, isTurso, type AnyClient as Client, type Bound, type QueryModule, type Runtime } from "./execute.ts";
+import { isDurableObjectSql, isSqlJs, isSqliteWasm, isTurso, type AnyClient as Client, type Bound, type QueryModule, type Runtime } from "./execute.ts";
 import { readSqliteError } from "./query-error.ts";
 import type { EngineType } from "./engine-type.ts";
 
@@ -199,6 +201,24 @@ export function runSqliteWasm(db: AnyClient, text: string, values: unknown[], co
   }
 }
 
+/**
+ * Runs `text` on sql.js's Database, whose statement answers at once, row by row, and returns its
+ * normalized rows. The rows are read by position, every INTEGER as a BigInt, so none is rounded.
+ * The statement is freed after its one run, so none holds the WebAssembly heap until the database
+ * closes.
+ */
+export function runSqlJs(db: AnyClient, text: string, values: unknown[], columns: Columns | undefined): unknown[] {
+  const st = db.prepare(text) as Statement;
+  try {
+    if (values.length) st.bind(values);
+    const rows: unknown[][] = [];
+    while (st.step()) rows.push(st.get(null, { useBigInt: true }));
+    return rows.length ? normalize(byPosition(rows, columns, () => st.getColumnNames()), columns, { exact: true }) : rows;
+  } finally {
+    st.free();
+  }
+}
+
 type Plan = {
   name: string;
   /** An INTEGER the driver read as a BigInt. */
@@ -357,6 +377,7 @@ function numberOrDigits(v: unknown, type: EngineType | undefined, driver: "sqlit
 
 /** A SQLite statement's rows on each SQLite driver's client that answers through a promise, each value given its kind, or undefined on any other client. */
 async function runSqlite(c: Client, query: QueryModule<"sqlite">, { text, values, names }: Bound): Promise<unknown[] | undefined> {
+  if (isTurso(c)) tursoValues(names, values);
   const type = (i: number) => query.inputs?.[names[i]!]?.type;
   const columns = query.columns;
   if (typeof c.unsafe === "function") return normalize(await c.unsafe(text, values), columns);
@@ -383,6 +404,15 @@ async function runSqlite(c: Client, query: QueryModule<"sqlite">, { text, values
   return undefined;
 }
 
+// Turso's engine binds the whole number 2^63 as 2^63 - 1, the largest 64-bit integer, where every
+// other driver binds it as the REAL it is (a BigInt outside 64 bits is refused for every driver, in
+// src/execute.ts).
+function tursoValues(names: readonly string[], values: unknown[]): void {
+  values.forEach((v, i) => {
+    if (v === 2 ** 63) throw new ParameterError(`Parameter "${names[i]}" is 2^63 (9223372036854775808), which Turso's engine binds as 2^63 - 1 (9223372036854775807), so it would store another number.`);
+  });
+}
+
 // SQLite Wasm binds a whole number as a 64-bit integer, which wraps around past 2^63: 1e20 would be
 // stored as 7766279631452241920.
 function sqliteWasmValues(names: readonly string[], values: unknown[]): unknown[] {
@@ -392,10 +422,15 @@ function sqliteWasmValues(names: readonly string[], values: unknown[]): unknown[
   return values;
 }
 
-/** The rows of a synchronous client: a Durable Object's SQL storage, whose exec() refuses a BigInt ("Cannot convert a BigInt value to a number"), SQLite Wasm's oo1 Database (`runSqliteWasm`), or a database with prepare() (`runSyncSqlite`). */
+/** The rows of a synchronous client: a Durable Object's SQL storage, whose exec() refuses a BigInt ("Cannot convert a BigInt value to a number"), SQLite Wasm's oo1 Database (`runSqliteWasm`), sql.js's Database (`runSqlJs`), or a database with prepare() (`runSyncSqlite`). */
 function runSqliteSync(c: Client, query: QueryModule<"sqlite">, { text, values, names }: Bound): unknown[] | Promise<unknown[]> {
+  // Every Database of Turso's has maxWriteReplicationIndex(), and its compat Database has no sync()
+  // (nor batch() before 0.7); the libsql package's Database has both of the first two, and binds
+  // 2^63 as a REAL.
+  if (typeof c.maxWriteReplicationIndex === "function" && typeof c.sync !== "function") tursoValues(names, values);
   if (isDurableObjectSql(c)) return runDurableObject(c, text, values.map((v, i) => numberOrDigits(v, query.inputs?.[names[i]!]?.type, "durable-object")), query.columns);
   if (isSqliteWasm(c)) return runSqliteWasm(c, text, sqliteWasmValues(names, values), query.columns);
+  if (isSqlJs(c)) return runSqlJs(c, text, values, query.columns);
   return runSyncSqlite(c, text, values, query.columns);
 }
 

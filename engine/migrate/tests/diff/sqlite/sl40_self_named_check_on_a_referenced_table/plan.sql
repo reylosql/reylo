@@ -1,0 +1,10 @@
+create table reylo_aside_users as select id, age from users;
+create table reylo_aside_orders as select id, user_id from orders;
+drop table orders;
+drop table users;
+create table users (id integer primary key, age integer, name text not null default 'x', constraint adult check ("users"."age" > 21));
+create table orders (id integer primary key, user_id integer references users (id));
+insert into users (id, age) select id, age from reylo_aside_users;
+drop table reylo_aside_users;
+insert into orders (id, user_id) select id, user_id from reylo_aside_orders;
+drop table reylo_aside_orders;

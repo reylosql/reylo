@@ -2,11 +2,11 @@
 //! project names, as the type check reads it: a YAML document per statement, or with
 //! `--format json` one line of JSON per statement.
 
-use reylo_engine_native::project::{self, Project};
+use reylo_engine::project::{self, Project};
 use reylo_engine_core::api::{utf16_offset, Analysis};
 use reylo_engine_core::dialect::Dialect;
 use reylo_engine_core::types::{Cardinality, DialectVersion, Diagnostic, Kind, ResultRows, StatementDescriptor};
-use reylo_engine_native::Failure;
+use reylo_engine::Failure;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 pub const USAGE: &str = "Usage: reylo analyze <file.sql | directory | 'glob' | -> ... [--url <url>] [--format yaml | json]
        reylo analyze --sql <statement> [--url <url>] [--format yaml | json]
 
-Prints each statement's type descriptor, with the file it was read from: as YAML, a document per
-statement (--format yaml, the default), or as one line of JSON per statement (--format json).
+Prints each statement's type descriptor, with the file it was read from when there are several:
+as YAML, a document per statement (--format yaml, the default), or as one line of JSON per
+statement (--format json).
 Each diagnostic is also written to standard error, as file:line:column and the message, with a
 caret under its place. A directory is searched for .sql files, leaving out node_modules, dist,
 build, out, target, coverage, hidden directories and what git ignores; a glob in quotes, as
@@ -43,23 +44,23 @@ struct Input {
 }
 
 /// One database's statements, over one connection.
-enum Session {
-    Postgres(reylo_engine_native::postgres::Session),
-    Mysql(reylo_engine_native::mysql::Session),
-    Sqlite(reylo_engine_native::sqlite::Session),
+pub(crate) enum Session {
+    Postgres(reylo_engine::postgres::Session),
+    Mysql(reylo_engine::mysql::Session),
+    Sqlite(reylo_engine::sqlite::Session),
 }
 
 impl Session {
     /// `base` is the directory a relative SQLite path is read from.
-    async fn open(dialect: &str, url: &str, base: &Path) -> Result<Session, Failure> {
+    pub(crate) async fn open(dialect: &str, url: &str, base: &Path) -> Result<Session, Failure> {
         Ok(match dialect {
-            "postgres" => Session::Postgres(reylo_engine_native::postgres::Session::open(url).await?),
-            "mysql" => Session::Mysql(reylo_engine_native::mysql::Session::open(url).await?),
-            _ => Session::Sqlite(reylo_engine_native::sqlite::Session::open(&project::sqlite_path(url, base).map_err(|why| Failure::Error(format!("Cannot read the SQLite URL {url}: {why}.")))?)?),
+            "postgres" => Session::Postgres(reylo_engine::postgres::Session::open(url).await?),
+            "mysql" => Session::Mysql(reylo_engine::mysql::Session::open(url).await?),
+            _ => Session::Sqlite(reylo_engine::sqlite::Session::open(&project::sqlite_path(url, base).map_err(|why| Failure::Error(format!("Cannot read the SQLite URL {url}: {why}.")))?)?),
         })
     }
 
-    fn version(&self) -> &str {
+    pub(crate) fn version(&self) -> &str {
         match self {
             Session::Postgres(s) => &s.version,
             Session::Mysql(s) => &s.version,
@@ -67,7 +68,26 @@ impl Session {
         }
     }
 
-    async fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
+    /// Drops what the session remembers of the schema.
+    pub(crate) fn forget(&mut self) {
+        match self {
+            Session::Postgres(s) => s.forget(),
+            Session::Mysql(s) => s.forget(),
+            Session::Sqlite(s) => s.forget(),
+        }
+    }
+
+    /// Has the server give up on a lock after `seconds`. SQLite's analysis takes none.
+    /// Sets the session up for text an editor sends on its own: giving up on a lock after `seconds`, and read-only where parsing a statement can run code, as on Postgres. A SQLite file is opened read-only already.
+    pub(crate) async fn for_an_editor(&mut self, seconds: u32) -> Result<(), String> {
+        match self {
+            Session::Postgres(s) => s.for_an_editor(seconds).await,
+            Session::Mysql(s) => s.for_an_editor(seconds).await,
+            Session::Sqlite(_) => Ok(()),
+        }
+    }
+
+    pub(crate) async fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
         match self {
             Session::Postgres(s) => s.analyze(sql).await,
             Session::Mysql(s) => s.analyze(sql).await,
@@ -182,6 +202,9 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
         _ => Dialect::Sqlite,
     };
     let mut flagged = false;
+    // A run of one statement prints its descriptor alone, since the caller named its file; a run of
+    // several names each one's file, which tells their descriptors apart.
+    let several = inputs.len() > 1;
     for (at, input) in inputs.into_iter().enumerate() {
         let descriptor = match session.analyze(&input.sql).await {
             Ok(analysis) => {
@@ -208,13 +231,14 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
                 comment: None,
                 params: Vec::new(),
                 result: ResultRows::new(Cardinality::Many, Vec::new(), Vec::new(), Vec::new()),
+                capabilities: None,
                 diagnostics: vec![Diagnostic { message, start: 0, end: utf16_offset(&input.sql, input.sql.len()), code: None }],
             },
         };
         flagged |= !descriptor.diagnostics.is_empty();
         report(input.file.as_deref(), &input.sql, &descriptor.diagnostics);
         let mut line = Map::new();
-        if let Some(file) = input.file {
+        if let Some(file) = input.file.filter(|_| several) {
             line.insert("file".into(), Value::String(file));
         }
         if let Ok(Value::Object(fields)) = serde_json::to_value(&descriptor) {
@@ -269,7 +293,7 @@ fn byte_offset(text: &str, utf16: usize) -> usize {
 /// A parameter nothing in the statement types is an error at its first use, unless the project
 /// file says `allow_untyped_params: true`, as the type check says it (src/module-types.ts). A statement
 /// the engine refused already was not analyzed to its end, and is not asked.
-fn untyped_params(sql: &str, analysis: &Analysis, dialect: Dialect, project: &Project) -> Vec<Diagnostic> {
+pub(crate) fn untyped_params(sql: &str, analysis: &Analysis, dialect: Dialect, project: &Project) -> Vec<Diagnostic> {
     // A MySQL session reads its strings by its sql_mode, which the lexer alone does not know: the
     // placeholders are the ones the analysis read.
     let placeholders: Vec<(String, usize, usize)> = match dialect {
@@ -299,7 +323,7 @@ fn read_inputs(path: &str, cwd: &Path) -> Result<Vec<Input>, String> {
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut sql).map_err(|e| format!("cannot read standard input: {e}"))?;
         return Ok(vec![Input { file: None, sql }]);
     }
-    reylo_codegen::files::sql_files(path, cwd)?
+    reylo_build::files::sql_files(path, cwd)?
         .into_iter()
         .map(|file| {
             let sql = std::fs::read_to_string(&file).map_err(|e| format!("cannot read {}: {e}", shown(cwd, &file)))?;

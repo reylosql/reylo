@@ -7,8 +7,8 @@
 
 use crate::tls::{self, Check};
 use crate::{Failure, Program};
-use reylo_engine::clients::tokio_postgres::{self as answers, Describe};
-use reylo_engine::{AnswerCache, AsyncAnswerer, ReplayError};
+use crate::clients::tokio_postgres::{self as answers, Describe};
+use crate::{AnswerCache, AsyncAnswerer, ReplayError};
 use reylo_engine_core::api::Analysis;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -45,6 +45,8 @@ struct Connection {
     /// The session's `DateStyle` as the server reported it when the connection started, from its
     /// role, its database or the server's own setting.
     date_style: String,
+    /// What a session of this connection runs under, set again on a connection that replaces it.
+    setup: Option<String>,
 }
 
 impl Connection {
@@ -53,6 +55,9 @@ impl Connection {
     /// while a request does: that request is answered over the new one.
     async fn reopen(&mut self) -> Result<(), Value> {
         let Started { client, date_style, .. } = connect(&self.url, self.bridge.as_deref()).await?;
+        if let Some(setup) = &self.setup {
+            client.batch_execute(setup).await.map_err(|e| json!({ "status": "unreachable", "message": e.to_string() }))?;
+        }
         (self.client, self.date_style) = (client, date_style);
         Ok(())
     }
@@ -75,6 +80,26 @@ impl Connection {
             Err(e) => Err(json!({ "status": "error", "message": e.to_string() })),
         }
     }
+}
+
+/// Why an analysis can't run through the transaction pooler a URL names: Supabase's pooler on port
+/// 6543, whose transaction mode shares server sessions between clients and keeps one client's
+/// prepared statements on them for the next, so the statements an analysis prepares collide by
+/// name with those another type check, or one that was stopped, left there ("prepared statement
+/// \"s5\" already exists"), and its describes fail. Its session pooler and the direct connection
+/// give each client a session of its own.
+pub fn transaction_pooler(url: &str) -> Option<String> {
+    let Parsed { config, .. } = parse(url, &|key| std::env::var(key).ok()).ok()?;
+    let ports = config.get_ports();
+    config.get_hosts().iter().enumerate().find_map(|(i, host)| {
+        let tokio_postgres::config::Host::Tcp(name) = host else { return None };
+        let port = ports.get(i).or(ports.first()).copied().unwrap_or(5432);
+        // A name may end in the root's dot, as the same host's absolute form.
+        let lower = name.to_ascii_lowercase();
+        (port == 6543 && lower.strip_suffix('.').unwrap_or(&lower).ends_with(".pooler.supabase.com")).then(|| {
+            format!("{name}:6543 is Supabase's transaction pooler, which shares server sessions between clients, and the statements the type check prepares on one collide with other clients' there: point direct_url in .reylo.yaml at its session pooler, port 5432 on the same host, or at the direct connection")
+        })
+    })
 }
 
 /// A connection to the database a libpq URL names, as the program opens one, and the server's
@@ -141,8 +166,24 @@ pub struct Session {
 
 impl Session {
     pub async fn open(url: &str) -> Result<Session, Failure> {
+        if let Some(refusal) = transaction_pooler(url) {
+            return Err(Failure::Error(refusal));
+        }
         let Started { client, version, date_style } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
-        Ok(Session { connection: Connection { client, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), date_style }, version: server_version(&version) })
+        Ok(Session { connection: Connection { client, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), date_style, setup: None }, version: server_version(&version) })
+    }
+
+    /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
+    pub fn forget(&mut self) {
+        self.connection.answers.clear();
+    }
+
+    /// Sets the session up for text an editor sends on its own: read-only, since parsing a statement can run a type's input function, and giving up on a table's lock after `seconds`. A connection that replaces this one is set up the same way.
+    pub async fn for_an_editor(&mut self, seconds: u32) -> Result<(), String> {
+        let setup = format!("set lock_timeout = '{seconds}s'; set default_transaction_read_only = on");
+        self.connection.client.batch_execute(&setup).await.map_err(|e| e.to_string())?;
+        self.connection.setup = Some(setup);
+        Ok(())
     }
 
     pub async fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
@@ -152,7 +193,7 @@ impl Session {
 
 impl Program for Postgres {
     fn call(&self, request: &str) -> String {
-        reylo_engine_core::api::call::<reylo_engine::postgres::Postgres>(request)
+        reylo_engine_core::api::call::<crate::engines::postgres::Postgres>(request)
     }
 
     async fn serve(&mut self, request: &Value) -> Option<Value> {
@@ -163,10 +204,13 @@ impl Program for Postgres {
             "open" => {
                 let url = request["url"].as_str().unwrap_or_default();
                 let bridge = request["bridge"].as_str().map(String::from);
+                if let Some(refusal) = transaction_pooler(url) {
+                    return Some(json!({ "status": "error", "message": refusal }));
+                }
                 match connect(url, bridge.as_deref()).await {
                     Ok(Started { client, version, date_style }) => {
                         self.next += 1;
-                        self.connections.insert(self.next, Connection { client, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), date_style });
+                        self.connections.insert(self.next, Connection { client, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), date_style, setup: None });
                         json!({ "status": "opened", "conn": self.next, "version": server_version(&version) })
                     }
                     Err(failure) => failure,
@@ -254,9 +298,10 @@ fn lost(message: &str) -> Value {
 /// knows it from any other local process's, and carries no TLS, which libpq does not use over a
 /// Unix socket either.
 async fn connect(url: &str, bridge: Option<&str>) -> Result<Started, Value> {
-    let Parsed { mut config, check, root, identity } = parse(url, &|key| std::env::var(key).ok()).map_err(|message| json!({ "status": "error", "message": message }))?;
-    let identity = identity.as_ref().map(|(cert, key, password)| tls::Identity { cert, key, password: *password });
+    let Parsed { mut config, check, root, identity: client_cert } = parse(url, &|key| std::env::var(key).ok()).map_err(|message| json!({ "status": "error", "message": message }))?;
+    let identity = client_cert.as_ref().map(|(cert, key, password)| tls::Identity { cert, key, password: *password });
     let timeout = config.get_connect_timeout().copied().unwrap_or(CONNECT_TIMEOUT) + Duration::from_secs(1);
+    let each = bridge.is_none().then(|| config.clone());
     let opening = async {
         let Some(token) = bridge else {
             // With no TLS to ask for (`sslmode=disable`, or a Unix socket) no TLS connector is made:
@@ -268,7 +313,10 @@ async fn connect(url: &str, bridge: Option<&str>) -> Result<Started, Value> {
             }
             // The TLS settings are read only here, so a certificate file named for TLS that the
             // connection never asks for cannot stop it.
-            let tls = tls::config(check, root.as_deref(), identity).map_err(|message| json!({ "status": "error", "message": message }))?;
+            let mut tls = tls::config(check, root.as_deref(), identity).map_err(|message| json!({ "status": "error", "message": message }))?;
+            // Postgres 17 and later refuse a direct TLS connection (`sslnegotiation=direct`) that
+            // offers no ALPN protocol `postgresql`; libpq 17 offers it in either negotiation.
+            tls.alpn_protocols = vec![b"postgresql".to_vec()];
             let (client, connection) = config.connect(tokio_postgres_rustls::MakeRustlsConnect::new(tls)).await.map_err(|e| failure(&e))?;
             return Ok(started(client, connection));
         };
@@ -290,12 +338,113 @@ async fn connect(url: &str, bridge: Option<&str>) -> Result<Started, Value> {
         // each statement: about 2.6 seconds, where running them takes 50 milliseconds. A server
         // without the setting refuses it, and then there is nothing to turn off.
         let _ = started.client.batch_execute("set jit = off").await;
-        Ok(started)
+        Ok::<Started, Value>(started)
     };
     match tokio::time::timeout(timeout, connecting).await {
         Err(_) => Err(json!({ "status": "unreachable", "message": "no answer within the connect timeout" })),
+        Ok(Err(answer)) if answer["status"] == "unreachable" => {
+            let Some(config) = each else { return Err(answer) };
+            let tls = match config.get_ssl_mode() {
+                SslMode::Disable => None,
+                _ => tls::config(check, root.as_deref(), client_cert.as_ref().map(|(cert, key, password)| tls::Identity { cert, key, password: *password })).ok().map(|mut tls| {
+                    tls.alpn_protocols = vec![b"postgresql".to_vec()];
+                    tls
+                }),
+            };
+            Err(tokio::time::timeout(timeout, each_address(&config, tls)).await.ok().flatten().unwrap_or(answer))
+        }
         Ok(result) => result,
     }
+}
+
+/// What each address of the URL's hosts answers on its own, once a connection to all of them failed.
+/// tokio-postgres tries every address and keeps only the last one's error, so an address the network
+/// cannot route, as an IPv6 address from a build machine with no IPv6 route, can hide what another
+/// address's server answered: a refused login, a TLS setting, a database that does not exist. A
+/// server's answer comes first, then each address that answered nothing; `None` where there is only
+/// one address, whose error the connection already reported, or where one connects now.
+async fn each_address(config: &Config, tls: Option<rustls::ClientConfig>) -> Option<Value> {
+    use tokio_postgres::config::Host;
+    use tokio_postgres::tls::MakeTlsConnect;
+    let ports = config.get_ports();
+    let mut targets = Vec::new();
+    for i in 0..config.get_hosts().len().max(config.get_hostaddrs().len()) {
+        let port = ports.get(i).or(ports.first()).copied().unwrap_or(5432);
+        let name = match config.get_hosts().get(i) {
+            Some(Host::Tcp(name)) => Some(name.clone()),
+            // A Unix socket is one address, which the connection's own error already names.
+            Some(_) => return None,
+            None => None,
+        };
+        match (config.get_hostaddrs().get(i), &name) {
+            (Some(addr), _) => targets.push((name.clone().unwrap_or_else(|| addr.to_string()), Ok(std::net::SocketAddr::new(*addr, port)))),
+            (None, Some(host)) => match tokio::net::lookup_host((host.as_str(), port)).await {
+                Ok(addrs) => targets.extend(addrs.map(|addr| (host.clone(), Ok(addr)))),
+                Err(e) => targets.push((host.clone(), Err(format!("cannot resolve {host}: {e}")))),
+            },
+            (None, None) => return None,
+        }
+    }
+    if targets.len() < 2 {
+        return None;
+    }
+    let wait = config.get_connect_timeout().copied().unwrap_or(CONNECT_TIMEOUT);
+    let (mut answered, mut silent) = (Vec::new(), Vec::new());
+    for (name, addr) in targets {
+        let addr = match addr {
+            Ok(addr) => addr,
+            Err(message) => {
+                silent.push(message);
+                continue;
+            }
+        };
+        let stream = match tokio::time::timeout(wait, tokio::net::TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => {
+                silent.push(format!("{addr}: error connecting to server: {e}"));
+                continue;
+            }
+            Err(_) => {
+                silent.push(format!("{addr}: no answer within the connect timeout"));
+                continue;
+            }
+        };
+        let _ = stream.set_nodelay(true);
+        let result = match &tls {
+            None => config.connect_raw(stream, tokio_postgres::NoTls).await.map(|_| ()),
+            Some(tls) => {
+                let connect = MakeTlsConnect::<tokio::net::TcpStream>::make_tls_connect(&mut tokio_postgres_rustls::MakeRustlsConnect::new(tls.clone()), &name).unwrap_or_else(|never| match never {});
+                config.connect_raw(stream, connect).await.map(|_| ())
+            }
+        };
+        match result {
+            // It connects now, so the connection's own error is the one to report.
+            Ok(()) => return None,
+            Err(e) if network(&e) => silent.push(format!("{addr}: {}", failure(&e)["message"].as_str().unwrap_or_default())),
+            Err(e) => answered.push((addr, failure(&e))),
+        }
+    }
+    let mut messages: Vec<String> = answered.iter().map(|(addr, answer)| format!("{addr}: {}", answer["message"].as_str().unwrap_or_default())).collect();
+    messages.extend(silent);
+    let mut out = answered.into_iter().next().map_or_else(|| json!({ "status": "unreachable" }), |(_, answer)| answer);
+    out["message"] = json!(messages.join("; "));
+    Some(out)
+}
+
+/// Whether a connection failed before any server answered it: an I/O error on the way (a refused
+/// or unroutable address, a reset), not a server's error, a TLS failure or an authentication step.
+fn network(e: &tokio_postgres::Error) -> bool {
+    if e.as_db_error().is_some() || tls::failed(e) {
+        return false;
+    }
+    let mut source = std::error::Error::source(e);
+    while let Some(s) = source {
+        if s.is::<std::io::Error>() {
+            return true;
+        }
+        source = s.source();
+    }
+    false
 }
 
 /// A connection just opened, and what the server reported as it started, which costs no round trip.
@@ -481,6 +630,25 @@ mod tests {
 
     fn no_env(_: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn an_analysis_refuses_supabases_transaction_pooler_alone() {
+        let refusal = transaction_pooler("postgresql://postgres.abc:p%40ss@AWS-1-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require").expect("the transaction pooler");
+        assert!(refusal.starts_with("AWS-1-us-east-1.pooler.supabase.com:6543 is Supabase's transaction pooler"), "{refusal}");
+        assert!(!refusal.contains("p@ss") && !refusal.contains("p%40ss"), "{refusal}");
+        assert!(transaction_pooler("postgresql://postgres.abc:x@aws-1-us-east-1.pooler.supabase.com.:6543/postgres").is_some(), "the host's absolute form");
+        // Its session pooler, the direct connection, and another host's port 6543 take an analysis.
+        for url in [
+            "postgresql://postgres.abc:x@aws-1-us-east-1.pooler.supabase.com:5432/postgres",
+            "postgresql://postgres:x@db.abc.supabase.co:5432/postgres",
+            "postgresql://postgres.abc:x@db.abc.supabase.co:6543/postgres",
+            "postgresql://u@my-pooler.example.com:6543/app",
+            "postgresql://u@pooler.supabase.com.example.com:6543/app",
+            "postgresql://u@127.0.0.1:6543/app",
+        ] {
+            assert_eq!(transaction_pooler(url), None, "{url}");
+        }
     }
 
     #[test]

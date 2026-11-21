@@ -12,7 +12,7 @@ export type CompareCard = { schema?: string; query: string; on?: string; lines: 
 
 /** `says`: what a tool that checks each value instead of typing the parameter lets through, as "A null passes for $1". */
 type Member = { type: string; wrong?: boolean; name?: string; says?: string };
-type Example = { sql: string; schema?: string; on?: string; error?: string; params: Member[]; columns: Member[]; rows?: string; reylo: { params: string; row: string; cardinality: string; rows: string } };
+type Example = { sql: string; code?: string; schema?: string; on?: string; error?: string; params: Member[]; columns: Member[]; rows?: string; reylo: { params: string; row: string; cardinality: string; rows: string } };
 type Results = { tools: Record<string, { cells: Record<string, { example?: Example }> }> };
 type Token = { content: string; htmlStyle?: string | Record<string, string> };
 type Mark = { start: number; end: number };
@@ -40,6 +40,23 @@ function clauses(sql: string) {
       out += `\n${word.trim()} `;
       i += word.length - 1;
     } else out += sql[i];
+  }
+  return out;
+}
+
+/** An ORM's query, each call of its chain on a line of its own. */
+function chain(code: string) {
+  let depth = 0;
+  let quote = '';
+  let out = '';
+  for (let i = 0; i < code.length; i++) {
+    const c = code[i]!;
+    if (quote) { if (c === quote) quote = ''; }
+    else if (c === '`' || c === "'" || c === '"') quote = c;
+    else if ('([{'.includes(c)) depth++;
+    else if (')]}'.includes(c)) depth--;
+    else if (c === '.' && depth === 0 && code[i - 1] === ')') out += '\n  ';
+    out += c;
   }
   return out;
 }
@@ -87,6 +104,7 @@ export async function buildCompareCards(results: Results): Promise<Record<string
   const highlighter = await createHighlighter({ themes: Object.values(THEMES), langs: ['sql', 'ts'] });
   const tokens = (code: string, lang: 'sql' | 'ts') => highlighter.codeToTokens(code, { lang, themes: THEMES, defaultColor: false }).tokens as Token[][];
   const sql = (code: string) => tokens(code, 'sql').map((line) => line.map((t) => span(t, t.content)).join('')).join('\n');
+  const ts = (code: string) => tokens(code, 'ts').map((line) => line.map((t) => span(t, t.content)).join('')).join('\n');
   // Reylo's row type alone, as the tool's line is one row's type; a wrong row count has a line of its own.
   // A type, its wrong members underlined: each token is cut where a mark begins or ends.
   const type = (text: string, marks: Mark[] = []) => {
@@ -121,7 +139,7 @@ export async function buildCompareCards(results: Results): Promise<Record<string
         lines.push(says.length ? { label, text: true, html: escape(says.join('. ')) } : { label, html: type(text, marks) }, shouldBe(label));
       }
       if (e.rows) lines.push({ label: 'Rows', html: escape(e.rows) }, { label: 'Should be', right: true, html: escape(e.reylo.rows) });
-      cards[`${tool}:${row}`] = { ...(e.schema ? { schema: sql(statements(e.schema)) } : {}), query: sql(clauses(e.sql)), ...(e.on ? { on: e.on } : {}), lines };
+      cards[`${tool}:${row}`] = { ...(e.schema ? { schema: sql(statements(e.schema)) } : {}), query: e.code ? ts(chain(e.code)) : sql(clauses(e.sql)), ...(e.on ? { on: e.on } : {}), lines };
     }
   }
   highlighter.dispose();

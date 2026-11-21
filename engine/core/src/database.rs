@@ -6,7 +6,6 @@
 use crate::api::{Analysis, Answers, Describe, Response};
 use crate::dialect::Dialect;
 use crate::errors::Errors;
-use crate::fresh::{self, Tables};
 use crate::host::{Host, Lazy};
 
 pub trait Database {
@@ -21,13 +20,6 @@ pub trait Database {
     /// far, or `None` with the missing needs recorded on `host`.
     fn analyze(sql: &str, host: &Host<'_, Self::Describe>) -> Lazy<Analysis>;
 
-    /// The tables the statement reads and writes, as this database's own parse names them, which
-    /// the freshness facts are read for ([`crate::fresh`]); `None` where the parse said nothing.
-    /// By default what the analysis recorded ([`Analysis::tables`]).
-    fn tables(analysis: &Analysis) -> Option<Tables> {
-        analysis.tables.clone()
-    }
-
     /// The names each error the statement may raise can carry ([`crate::errors`]): `Some(None)`
     /// where the statement may run code the database does not define, or the database narrows none.
     fn errors(_analysis: &Analysis, _host: &Host<'_, Self::Describe>) -> Lazy<Option<Errors>> {
@@ -40,8 +32,14 @@ pub trait Database {
         Some(false)
     }
 
-    /// One request's round: the analysis, and then the facts it relied on. Postgres overrides it
-    /// to settle what a server-side extension offers first.
+    /// What running the statement may do, an upper bound ([`crate::types::Capabilities`]), read
+    /// once the rest of the analysis is settled: by default nothing is said.
+    fn capabilities(_analysis: &Analysis, _host: &Host<'_, Self::Describe>) -> Lazy<Option<crate::types::Capabilities>> {
+        Some(None)
+    }
+
+    /// One request's round: the analysis, and then what it reads once the rest is settled. Postgres
+    /// overrides it to settle what a server-side extension offers first.
     fn round(sql: &str, answers: &Answers<Self::Describe>) -> Response {
         let host = Host::new(answers);
         match Self::analyze(sql, &host) {
@@ -55,24 +53,22 @@ pub trait Database {
     fn unbundle(_answers: &mut Answers<Self::Describe>) {}
 }
 
-/// The analysis with the facts it relied on and the errors it may raise, read in one more round
-/// ([`crate::fresh`], [`crate::errors`]).
+/// The analysis with the errors it may raise, whether it writes nothing and what it may do, read in
+/// one more round ([`crate::errors`]).
 pub fn with_facts<D: Database + ?Sized>(mut analysis: Analysis, host: &Host<'_, D::Describe>) -> Response {
-    let tables = D::tables(&analysis);
-    let fresh = fresh::facts(&analysis, D::DIALECT, tables.as_ref(), host);
     let errors = if analysis.diagnostics.is_empty() { D::errors(&analysis, host) } else { Some(None) };
-    match (fresh, errors) {
-        (Some(fresh), Some(errors)) => {
-            analysis.fresh = fresh;
+    match errors {
+        Some(errors) => {
             analysis.errors = errors;
-            match D::read_only(&analysis, host) {
-                Some(read_only) => {
+            match (D::read_only(&analysis, host), D::capabilities(&analysis, host)) {
+                (Some(read_only), Some(capabilities)) => {
                     analysis.read_only = read_only;
+                    analysis.capabilities = capabilities;
                     Response::Analysis { analysis }
                 }
-                None => Response::Need { needs: host.needs() },
+                _ => Response::Need { needs: host.needs() },
             }
         }
-        _ => Response::Need { needs: host.needs() },
+        None => Response::Need { needs: host.needs() },
     }
 }

@@ -3,7 +3,9 @@
 
 mod queries;
 
+use futures_util::TryStreamExt;
 use queries::*;
+use reylo::Enum;
 
 #[tokio::main]
 async fn main() -> Result<(), sqlx::Error> {
@@ -50,5 +52,58 @@ async fn main() -> Result<(), sqlx::Error> {
     let changed: u64 = set_nickname::Query { nickname: Some("b"), id: 2 }.run(&mut *tx).await?;
     tx.rollback().await?;
     println!("11. write       {changed} changed");
+
+    let rows = post_statuses::Query.run(&pool).await?;
+    let status: post_statuses::Status = rows[0].status;
+    assert_eq!(status, post_statuses::Status::Draft);
+    let reflected: Publication = status.cast();
+    assert_eq!(reflected, Publication::Draft);
+    println!("12. CHECK list  {rows:?} ({}, {reflected:?})", status.label());
+
+    let post = get_post::Query { id: 1 }.run(&pool).await?.expect("hello");
+    let own: PostStatus = post.status;
+    assert_eq!(own, PostStatus::Draft);
+    println!("13. own enum    {post:?}");
+
+    let mut tx = pool.begin().await?;
+    let changed = set_post_status::Query { status: PostStatus::Published, id: 1 }.run(&mut *tx).await?;
+    let published = get_post::Query { id: 1 }.run(&mut *tx).await?.expect("hello").status;
+    tx.rollback().await?;
+    assert_eq!(published, PostStatus::Published);
+    println!("14. own param   {changed} changed, now {published:?}");
+
+    let moods = user_moods::Query.run(&pool).await?;
+    let mood: Option<Mood> = moods[1].mood;
+    assert_eq!((moods[1].id, mood), (2, Some(Mood::Sad)));
+    println!("15. own row     {moods:?}");
+
+    // One query's enum as another's, and the crate's as a query's: the same database enum.
+    let ada = user_details::Query { id: 1 }.run(&pool).await?.expect("ada").mood.expect("ok");
+    let as_param: users_by_mood::Mood = ada.cast();
+    let sad: users_by_mood::Mood = Mood::Sad.cast();
+    let ok = users_by_mood::Query { mood: as_param }.run(&pool).await?;
+    println!("16. cast        {ok:?} {sad:?} ({})", Mood::Ok.label());
+
+    // A list the statement names, cast into a CHECK column's enum of three values, and into the
+    // Postgres enum type, the module's and the crate's.
+    let planned = planned_states::Query.run(&pool).await?;
+    let mut tx = pool.begin().await?;
+    let changed = set_task_state::Query { state: planned[0].state.cast(), id: 1 }.run(&mut *tx).await?;
+    tx.rollback().await?;
+    let sad = users_by_mood::Query { mood: planned[0].mood.cast() }.run(&pool).await?;
+    let reflected: Mood = planned[1].mood.cast();
+    assert_eq!((changed, reflected), (0, Mood::Ok));
+    let code: ReflectedCode = all_codes::Code::V199.cast();
+    assert_eq!(code.label(), "v199");
+    println!("17. widen       {planned:?} {changed} changed, {sad:?}, {} of 200", code.label());
+
+    let mut titles = titles_by_author::Query { author: 1 }.stream(&pool);
+    let mut streamed = Vec::new();
+    while let Some(row) = titles.try_next().await? {
+        streamed.push(row.title);
+    }
+    assert_eq!(streamed.len(), 2);
+    println!("18. stream      {streamed:?}");
+    println!("19. SQL         {}", get_user::SQL.trim());
     Ok(())
 }

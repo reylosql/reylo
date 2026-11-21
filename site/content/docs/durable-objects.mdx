@@ -5,14 +5,16 @@ description: How to use Reylo with a Cloudflare Durable Object's SQLite database
 
 <p className="dk-subheader">Reylo on a Durable Object's database</p>
 
-Reylo runs on a Cloudflare Durable Object's own SQLite database. A Durable Object's database is SQLite, so everything on the [SQLite](/sqlite) page holds for it. This page covers what's specific to Durable Objects. D1 is on [Cloudflare D1](/d1).
+A Durable Object's database is SQLite, so everything on the [SQLite](/sqlite) page holds for it. D1 is on [Cloudflare D1](/d1).
 
 | | |
 | --- | --- |
 | Database | Each Durable Object's own, through `ctx.storage.sql` |
 | Bundler | Vite, with Cloudflare's Vite plugin |
 | Tests | Vitest inside workerd, with Cloudflare's Vitest plugin |
-| Example | [cloudflare-workers](https://github.com/colinhacks/reylo/tree/main/examples/cloudflare-workers), a Worker with D1 and a Durable Object that runs locally with no Cloudflare account |
+| Example | [cloudflare-workers](https://github.com/reylosql/reylo/tree/main/examples/cloudflare-workers), a Worker with D1 and a Durable Object that runs locally with no Cloudflare account |
+
+The examples on this page use this schema:
 
 <Details summary="View the schema behind the examples" id="schema">
 
@@ -41,6 +43,8 @@ export default defineConfig({
 });
 ```
 
+Two notes on the setup:
+
 - Import each `.sql` file by a relative path. A path through an alias, such as a tsconfig `paths` entry, reaches the Cloudflare plugin's text rule before Reylo.
 - A Worker that only uses Durable Objects needs no `nodejs_compat` flag.
 
@@ -58,12 +62,14 @@ Your [migrations](#migrations) create it:
 reylo migrate dev
 ```
 
+About that file:
+
 - Set it in `.reylo.yaml`, not in `.env`: Wrangler loads `.env` into the Worker as secrets.
-- The type check reads one database per package, the one its `.reylo.yaml` names. An object whose tables match D1's can run D1's migrations. An object with tables of its own goes in a package of its own, whose `.reylo.yaml` names a SQLite file made from that object's schema.
+- The type check reads one database per package, the one its `.reylo.yaml` names. An object whose tables match D1's can run D1's migrations. An object with tables of its own goes in a package of its own. Its `.reylo.yaml` names a SQLite file made from that object's schema.
 
 ## Queries
 
-Pass the object's `ctx.storage.sql`. It's synchronous, so `.runSync()` works on it, inside `ctx.storage.transactionSync(fn)` too:
+Pass the object's `ctx.storage.sql`. It's synchronous, so `.runSync()` works on it:
 
 ```ts twoslash tab="worker.ts"
 /// <reference types="@cloudflare/workers-types" />
@@ -96,8 +102,10 @@ select id, name, email from users where id = :id
 insert into users (name) values (:name)
 ```
 
-- The [check against schema changes](/typescript#when-the-schema-changes) runs in each object on its own, since each object is a database of its own. Before an object's tables exist, a query fails with the database's own error.
-- The storage rounds an integer past 2^53, so Reylo throws an error rather than return it, even for a `BIGINT` column. It can't bind a `bigint` parameter past 2^53 either, so Reylo rejects one unless it's written to a `BIGINT` column.
+On a Durable Object:
+
+- Each object is a database of its own: before its tables exist, a query fails with the database's own error.
+- The storage rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
 
 ## Migrations
 
@@ -119,13 +127,17 @@ export class Board extends DurableObject {
 }
 ```
 
-- Reylo's Vite or esbuild plugin puts your locked migrations in the bundle, in the lock's order, and a bundle that never calls `migrate` leaves them out.
-- Each object runs the ones it hasn't run when it starts, each in a transaction, and records them in `__reylo_migrations`, so a deploy reaches every object the next time it runs.
+How the migrations reach the object:
+
+- Reylo's Vite or esbuild plugin bundles your locked migrations, in the lock's order. A bundle that never calls `migrate` leaves them out.
+- Where `reylo migrate deploy` would refuse your files, `migrate` throws the same refusal and runs nothing. A migration the lock doesn't list yet is one such case.
+- Each object runs the ones it hasn't run when it starts, each in a transaction. It records them in `__reylo_migrations`, so a deploy reaches every object the next time it runs.
 - An object that ran a migration the bundle lacks, or one edited since, throws and runs nothing.
+- A Durable Object keeps foreign keys on during a migration. A migration from `reylo migrate new` keeps every row: it rebuilds the tables that reference a rebuilt table along with it. A rebuild you write by hand drops a table others still reference. The drop then fails and rolls back, or deletes or nulls their rows under `on delete cascade` or `on delete set null`.
 
 ## Blocked functions
 
-Durable Objects block some of SQLite's functions, such as `json_pretty` and `power`. The type check also runs each query on Cloudflare's SQLite, as Wrangler runs it locally, so a blocked function is a type error. It does so when your `package.json` has `wrangler` and its config has a SQLite-backed Durable Object:
+Durable Objects block some of SQLite's functions, such as `json_pretty` and `power`. The type check also runs each query on Cloudflare's SQLite, so a blocked function is a type error. It does so when your `package.json` has `wrangler` and its config has a SQLite-backed Durable Object:
 
 ```jsonc title="wrangler.jsonc"
 {
@@ -152,7 +164,7 @@ export default defineConfig({
 });
 ```
 
-Wrangler makes every imported `.sql` file a text module, and the Vitest plugin applies that rule before Vite runs any plugin. List Wrangler's other text types so that `.sql` is left to Reylo:
+Wrangler makes every imported `.sql` file a text module. The Vitest plugin applies that rule before any Vite plugin runs. List Wrangler's other text types so that `.sql` is left to Reylo:
 
 ```jsonc title="wrangler.jsonc"
 {

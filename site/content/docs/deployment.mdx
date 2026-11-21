@@ -5,7 +5,7 @@ description: How to run Reylo's type check and build in CI and on your host. A G
 
 <p className="dk-subheader">Type-check and build your queries in CI and on your host</p>
 
-Reylo's type check runs in CI as it does on your machine. It reads your schema from a live database, as your build does. A CI job starts a database, applies your schema to it, then runs the type check and the build.
+Reylo's type check runs in CI as it does on your machine, against a database the job starts:
 
 | | |
 | --- | --- |
@@ -41,7 +41,7 @@ jobs:
 
 Then apply your schema, and run the type check, the build and your tests:
 
-```yaml title=".github/workflows/ci.yml" tab="TypeScript"
+```yaml title=".github/workflows/ci.yml"<Rust> tab="TypeScript"</Rust>
 jobs:
   check:
     # ...
@@ -58,6 +58,7 @@ jobs:
       - run: npm test
 ```
 
+<Rust>
 ```yaml title=".github/workflows/ci.yml" tab="Rust"
 jobs:
   check:
@@ -71,9 +72,12 @@ jobs:
       - run: cargo build
       - run: cargo test
 ```
+</Rust>
 
-- The build reads the database too. Reylo's plugins read each query's types from it as they bundle the query, and `next build` runs the type check itself. In Rust, `cargo build` is the type check.
-- A `DATABASE_URL` in the environment wins over your `.env` files. A `direct_url` in `.reylo.yaml` wins over both, so if yours names a database, point it at a variable the job sets.
+About this workflow:
+
+- The build reads the database too. Reylo's plugins read each query's types from it as they bundle the query, and `next build` runs the type check itself.<Rust> In Rust, `cargo build` is the type check.</Rust>
+- A `DATABASE_URL` in the environment wins over your `.env` files. A `direct_url` in `.reylo.yaml` wins over both. If yours names a database, point it at a variable the job sets.
 - Reylo's engine is an optional dependency, installed for the runner's platform, so don't install with `--omit=optional`.
 - Reylo keeps a cache of each query's analysis in `reylo/.cache/`, which git ignores. A fresh checkout has none, so the type check analyzes every query on the database.
 

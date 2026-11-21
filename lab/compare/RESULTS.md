@@ -1,24 +1,31 @@
 # Results
 
-Written by `./run.sh` on 2026-11-09. Each mark comes from what the tool answered; [probes.ts](probes.ts) holds the queries and the right answers, and [grade.ts](grade.ts) the rules.
+Written by `./run.sh` on 2026-11-21. Each mark comes from what the tool answered; [probes.ts](probes.ts) holds the queries and the right answers, and [grade.ts](grade.ts) the rules.
 
-| | Reylo | sqlc | PgTyped | TypedSQL | sqlx-ts | SafeQL | sqlx | TypeSQL | Postgres Typed SQL |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Version | 0.7.0 | v1.31.1 | 2.4.3 | 7.10.1 | 0.49.0 | 5.4.2 | 0.9.0 | 0.24.0 | 0.1.0-beta.22 |
-| No codegen | yes | no | no | no | no | partly | yes | no | partly |
-| Live database | yes (3/3) | partly (3/3) | yes (3/3) | yes (3/3) | partly (1/3) | partly (2/3) | yes (3/3) | yes (3/3) | no (3/3) |
-| Nullable left joins | yes (17/17) | partly (14/17) | no (0/6) | partly (12/17) | no (0/17) | yes (6/6) | partly (12/17) | partly (11/17) | yes (6/6) |
-| Nullable expressions | yes (57/57) | partly (37/57) | no (9/19) | partly (44/57) | partly (30/57) | partly (15/19) | partly (44/57) | partly (49/57) | yes (19/19) |
-| Parameter types | yes (17/17) | yes (17/17) | yes (7/7) | partly (12/17) | partly (16/17) | partly (5/7) | partly (7/17) | partly (16/17) | yes (7/7) |
-| Nullable parameters | yes (12/12) | partly (9/12) | no (0/4) | no (4/12) | partly (9/12) | no (0/4) | no (0/12) | yes (12/12) | no (2/4) |
-| Cardinality | yes (28/28) | no (0/28) | no (0/10) | no (0/28) | no (0/28) | no (0/10) | no (0/28) | partly (16/28) | partly (9/10) |
-| Nested JSON | yes (6/6) | no (0/6) | no (0/2) | no (0/6) | partly (5/6) | yes (2/2) | no (0/6) | partly (2/6) | yes (2/2) |
-| JSON Schema types | yes (2/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) |
-| Postgres | yes | yes | yes | yes | yes | yes | yes | yes | yes |
-| MySQL | yes | yes | no | yes | yes | no | yes | yes | no |
-| SQLite | yes | yes | no | yes | yes | no | yes | yes | no |
+| | Reylo | sqlc | PgTyped | TypedSQL | sqlx-ts | SafeQL | sqlx | TypeSQL | Postgres Typed SQL | Drizzle | Kysely | Prisma | TypeORM |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Version | 0.8.1 | v1.31.1 | 2.4.3 | 7.10.1 | 0.49.0 | 5.4.2 | 0.9.0 | 0.24.0 | 0.1.0-beta.22 | 0.45.4 | 0.29.9 | 7.10.1 | 1.1.3 |
+| No codegen | yes | no | no | no | no | partly | yes | no | partly | no | no | no | yes |
+| Live database | yes (3/3) | partly (3/3) | yes (3/3) | yes (3/3) | partly (1/3) | partly (2/3) | yes (3/3) | yes (3/3) | no (3/3) | no | no | no | no |
+| Nullable left joins | yes (17/17) | partly (14/17) | no (0/6) | partly (12/17) | no (0/17) | yes (6/6) | partly (12/17) | partly (11/17) | yes (6/6) | yes (17/17) | yes (17/17) | no (0/17) | no (0/17) |
+| Nullable expressions | yes (57/57) | partly (37/57) | no (9/19) | partly (44/57) | partly (30/57) | partly (15/19) | partly (44/57) | partly (49/57) | yes (19/19) | partly (32/57) | partly (40/57) | partly (9/57) | partly (6/57) |
+| Parameter types | yes (17/17) | yes (17/17) | yes (7/7) | partly (12/17) | partly (16/17) | partly (5/7) | partly (7/17) | partly (16/17) | yes (7/7) | yes (17/17) | yes (17/17) | yes (17/17) | yes (17/17) |
+| Nullable parameters | yes (12/12) | partly (9/12) | no (0/4) | no (4/12) | partly (9/12) | no (0/4) | no (0/12) | yes (12/12) | no (2/4) | yes (12/12) | partly (3/12) | yes (9/9) | yes (12/12) |
+| Cardinality | yes (28/28) | no (0/28) | no (0/10) | no (0/28) | no (0/28) | no (0/10) | no (0/28) | partly (16/28) | partly (9/10) | no (0/28) | no (0/28) | no (0/28) | no (0/28) |
+| Nested JSON | yes (6/6) | no (0/6) | no (0/2) | no (0/6) | partly (5/6) | yes (2/2) | no (0/6) | partly (2/6) | yes (2/2) | yes (6/6) | yes (6/6) | yes (6/6) | yes (6/6) |
+| JSON Schema types | yes (2/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) |
+| Aggregates | yes (15/15) | no | no | no | no | no | no | no | no | partly (12/15) | partly (9/15) | partly (9/15) | no (0/15) |
+| Window functions | yes (12/12) | no | no | no | no | no | no | no | no | no (0/12) | no (0/12) | no (0/12) | no (0/12) |
+| Subqueries | yes (15/15) | no | no | no | no | no | no | no | no | partly (9/15) | partly (12/15) | partly (6/15) | partly (3/15) |
+| WITH queries | yes (9/9) | no | no | no | no | no | no | no | no | partly (3/9) | yes (9/9) | no (0/9) | no (0/9) |
+| Set operations | yes (9/9) | no | no | no | no | no | no | no | no | yes (9/9) | partly (8/9) | no (0/9) | no (0/9) |
+| Returning rows | yes (8/8) | no | no | no | no | no | no | no | no | yes (8/8) | partly (6/8) | yes (8/8) | partly (6/8) |
+| Enums | yes (4/4) | no | no | no | no | no | no | no | no | yes (4/4) | yes (4/4) | partly (2/4) | partly (2/4) |
+| Postgres | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| MySQL | yes | yes | no | yes | yes | no | yes | yes | no | yes | yes | yes | yes |
+| SQLite | yes | yes | no | yes | yes | no | yes | yes | no | yes | yes | yes | yes |
 
-## Reylo 0.7.0
+## Reylo 0.8.1
 
 **No codegen**: yes. Nothing to commit after a run.
 
@@ -598,6 +605,604 @@ Written by `./run.sh` on 2026-11-09. Each mark comes from what the tool answered
 
 **SQLite**: no. It is not available for SQLite.
 
+## Drizzle 0.45.4
+
+**No codegen**: no. A run leaves new files to commit: `db/0000_worried_adam_warlock.sql`, `db/meta/0000_snapshot.json`, `db/meta/_journal.json`.
+
+**Live database**: no. It types each query from the schema kept in your code, and never asks the database.
+
+**Nullable expressions**: partly, 32 of 57
+
+- postgres: `select coalesce(nickname, 'x') as v from users`: `v` is typed `unknown`, but it is never null
+- postgres: `select name || '!' as v from users`: `v` is typed `unknown`, but it is never null
+- postgres: `select upper(name) as v from users`: `v` is typed `unknown`, but it is never null
+- postgres: `select id + 1 as v from posts`: `v` is typed `unknown`, but it is never null
+- postgres: `select nickname is null as v from users`: `v` is typed `unknown`, but it is never null
+- postgres: `select exists (select 1 from posts) as v`: `v` is typed `unknown`, but it is never null
+- postgres: `select row_number() over (order by id) as v from users`: `v` is typed `unknown`, but it is never null
+- postgres: `select id as v from users union all select score from posts`: it reports an error: Argument of type 'PgSelectBase<"posts", { v: PgColumn<{ name: "score"; tableName: "posts"; dataType: "number"; columnType: "PgInteger"; data: number; driverParam: string | number; notNull: false; hasDefault: false; isPrimaryKey: false; ... 5 more ...; generated: undefined; }, {}
+- postgres: `select max(id) as v from posts group by author_id`: `v` is typed `number | null`, but it is never null
+- mysql: `select coalesce(nickname, 'x') as v from users`: `v` is typed `unknown`, but it is never null
+- mysql: `select id + 1 as v from posts`: `v` is typed `unknown`, but it is never null
+- mysql: `select nickname is null as v from users`: `v` is typed `unknown`, but it is never null
+- mysql: `select exists (select 1 from posts) as v`: `v` is typed `unknown`, but it is never null
+- mysql: `select row_number() over (order by id) as v from users`: `v` is typed `unknown`, but it is never null
+- mysql: `select id as v from users union all select score from posts`: it reports an error: Argument of type 'MySqlSelectBase<"posts", { v: MySqlColumn<{ name: "score"; tableName: "posts"; dataType: "number"; columnType: "MySqlInt"; data: number; driverParam: string | number; notNull: false; hasDefault: false; isPrimaryKey: false; ... 5 more ...; generated: undefined; 
+- mysql: `select max(id) as v from posts group by author_id`: `v` is typed `number | null`, but it is never null
+- sqlite: `select coalesce(nickname, 'x') as v from users`: `v` is typed `unknown`, but it is never null
+- sqlite: `select name || '!' as v from users`: `v` is typed `unknown`, but it is never null
+- sqlite: `select upper(name) as v from users`: `v` is typed `unknown`, but it is never null
+- sqlite: `select id + 1 as v from posts`: `v` is typed `unknown`, but it is never null
+- sqlite: `select nickname is null as v from users`: `v` is typed `unknown`, but it is never null
+- sqlite: `select exists (select 1 from posts) as v`: `v` is typed `unknown`, but it is never null
+- sqlite: `select row_number() over (order by id) as v from users`: `v` is typed `unknown`, but it is never null
+- sqlite: `select id as v from users union all select score from posts`: it reports an error: Argument of type 'SQLiteSelectBase<"posts", "sync", RunResult, { v: SQLiteColumn<{ name: "score"; tableName: "posts"; dataType: "number"; columnType: "SQLiteInteger"; data: number; driverParam: number; notNull: false; hasDefault: false; isPrimaryKey: false; ... 5 more ...; gener
+- sqlite: `select max(id) as v from posts group by author_id`: `v` is typed `number | null`, but it is never null
+
+**Cardinality**: no, 0 of 28. Each call picks how many rows it takes: a query returns an array, and `findFirst` at most one row.
+
+- postgres: `select id, name from users where id = $1`: it does not infer one
+- postgres: `select id from users where email = $1`: it does not infer one
+- postgres: `select count(*) as v from users`: it does not infer one
+- postgres: `insert into users (id, email, name) values ($1, $2, $3) returning id`: it does not infer one
+- postgres: `select id from users`: it does not infer one
+- postgres: `select id from users limit 1`: it does not infer one
+- postgres: `update users set name = $1 where id = $2 returning id`: it does not infer one
+- postgres: `select p.title from posts p join users u on u.id = p.author_id where p.id = $1`: it does not infer one
+- postgres: `select id from posts where author_id = $1`: it does not infer one
+- postgres: `delete from users where id = $1`: it does not infer one
+- mysql: `select id, name from users where id = $1`: it does not infer one
+- mysql: `select id from users where email = $1`: it does not infer one
+- mysql: `select count(*) as v from users`: it does not infer one
+- mysql: `select id from users`: it does not infer one
+- mysql: `select id from users limit 1`: it does not infer one
+- mysql: `select p.title from posts p join users u on u.id = p.author_id where p.id = $1`: it does not infer one
+- mysql: `select id from posts where author_id = $1`: it does not infer one
+- mysql: `delete from users where id = $1`: it does not infer one
+- sqlite: `select id, name from users where id = $1`: it does not infer one
+- sqlite: `select id from users where email = $1`: it does not infer one
+- sqlite: `select count(*) as v from users`: it does not infer one
+- sqlite: `insert into users (id, email, name) values ($1, $2, $3) returning id`: it does not infer one
+- sqlite: `select id from users`: it does not infer one
+- sqlite: `select id from users limit 1`: it does not infer one
+- sqlite: `update users set name = $1 where id = $2 returning id`: it does not infer one
+- sqlite: `select p.title from posts p join users u on u.id = p.author_id where p.id = $1`: it does not infer one
+- sqlite: `select id from posts where author_id = $1`: it does not infer one
+- sqlite: `delete from users where id = $1`: it does not infer one
+
+**JSON Schema types**: no, 0 of 2
+
+- postgres: `select payload from events`: `payload` is typed `unknown`, without its fields
+- postgres: `insert into events (id, payload) values ($1, $2)`: parameter 2 is typed `{ x: number }`, without its fields
+
+**Aggregates**: partly, 12 of 15
+
+- postgres: `select author_id, min(title) as v from posts group by author_id`: `v` is typed `string | null`, but it is never null
+- mysql: `select author_id, min(title) as v from posts group by author_id`: `v` is typed `string | null`, but it is never null
+- sqlite: `select author_id, min(title) as v from posts group by author_id`: `v` is typed `string | null`, but it is never null
+
+**Window functions**: no, 0 of 12
+
+- postgres: `select id, row_number() over (partition by author_id order by id) as v from posts`: `v` is typed `unknown`
+- postgres: `select id, rank() over (order by score) as v from posts`: `v` is typed `unknown`
+- postgres: `select id, sum(score) over (partition by author_id order by id) as v from posts`: `v` is typed `unknown`
+- postgres: `select id, lag(title) over (order by id) as v from posts`: `v` is typed `unknown`
+- mysql: `select id, row_number() over (partition by author_id order by id) as v from posts`: `v` is typed `unknown`
+- mysql: `select id, rank() over (order by score) as v from posts`: `v` is typed `unknown`
+- mysql: `select id, sum(score) over (partition by author_id order by id) as v from posts`: `v` is typed `unknown`
+- mysql: `select id, lag(title) over (order by id) as v from posts`: `v` is typed `unknown`
+- sqlite: `select id, row_number() over (partition by author_id order by id) as v from posts`: `v` is typed `unknown`
+- sqlite: `select id, rank() over (order by score) as v from posts`: `v` is typed `unknown`
+- sqlite: `select id, sum(score) over (partition by author_id order by id) as v from posts`: `v` is typed `unknown`
+- sqlite: `select id, lag(title) over (order by id) as v from posts`: `v` is typed `unknown`
+
+**Subqueries**: partly, 9 of 15
+
+- postgres: `select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u`: `v` is typed `unknown`
+- postgres: `select u.name, exists (select 1 from posts p where p.author_id = u.id) as v from users u`: `v` is typed `unknown`
+- mysql: `select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u`: `v` is typed `unknown`
+- mysql: `select u.name, exists (select 1 from posts p where p.author_id = u.id) as v from users u`: `v` is typed `unknown`
+- sqlite: `select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u`: `v` is typed `unknown`
+- sqlite: `select u.name, exists (select 1 from posts p where p.author_id = u.id) as v from users u`: `v` is typed `unknown`
+
+**WITH queries**: partly, 3 of 9
+
+- postgres: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u left join counts c on c.author_id = u.id`: `n` is typed `number`, but it can be null
+- postgres: `with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 5) select n from nums`: `n` is typed `unknown`
+- mysql: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u left join counts c on c.author_id = u.id`: `n` is typed `number`, but it can be null
+- mysql: `with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 5) select n from nums`: `n` is typed `unknown`
+- sqlite: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u left join counts c on c.author_id = u.id`: `n` is typed `number`, but it can be null
+- sqlite: `with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 5) select n from nums`: `n` is typed `unknown`
+
+## Kysely 0.29.9
+
+**No codegen**: no. A run leaves new files to commit: `db.d.ts`.
+
+**Live database**: no. It types each query from the schema kept in your code, and never asks the database.
+
+**Nullable expressions**: partly, 40 of 57
+
+- postgres: `select max(id) as v from posts`: `v` is typed `number`, but it can be null
+- postgres: `select sum(score) as v from posts`: `v` is typed `string | number | bigint`, but it can be null
+- postgres: `select upper(name) as v from users`: `v` is typed `unknown`, but it is never null
+- postgres: `select (select count(*) from posts) as v`: `v` is typed `string | number | bigint | null`, but it is never null
+- postgres: `select row_number() over (order by id) as v from users`: `v` is typed `unknown`, but it is never null
+- postgres: `select id as v from users union all select score from posts`: it reports an error: Argument of type 'SelectQueryBuilder<DB, "posts", { v: number | null; }>' is not assignable to parameter of type 'SetOperandExpression<DB, { v: number; }>'.   Type 'SelectQueryBuilder<DB, "posts", { v: number | null; }>' is not assignable to type 'Expression<{ v: number; }>'.   
+- mysql: `select max(id) as v from posts`: `v` is typed `number`, but it can be null
+- mysql: `select sum(score) as v from posts`: `v` is typed `string | number | bigint`, but it can be null
+- mysql: `select (select count(*) from posts) as v`: `v` is typed `string | number | bigint | null`, but it is never null
+- mysql: `select row_number() over (order by id) as v from users`: `v` is typed `unknown`, but it is never null
+- mysql: `select id as v from users union all select score from posts`: it reports an error: Argument of type 'SelectQueryBuilder<DB, "posts", { v: number | null; }>' is not assignable to parameter of type 'SetOperandExpression<DB, { v: number; }>'.   Type 'SelectQueryBuilder<DB, "posts", { v: number | null; }>' is not assignable to type 'Expression<{ v: number; }>'.   
+- sqlite: `select sum(score) as v from posts`: `v` is typed `string | number | bigint`, but it can be null
+- sqlite: `select upper(name) as v from users`: `v` is typed `unknown`, but it is never null
+- sqlite: `select id + 1 as v from posts`: `v` is typed `number | null`, but it is never null
+- sqlite: `select (select count(*) from posts) as v`: `v` is typed `string | number | bigint | null`, but it is never null
+- sqlite: `select row_number() over (order by id) as v from users`: `v` is typed `unknown`, but it is never null
+- sqlite: `select max(id) as v from posts group by author_id`: `v` is typed `number | null`, but it is never null
+
+**Nullable parameters**: partly, 3 of 12
+
+- postgres: `update users set nickname = $1 where id = $2`: a null value passes for parameter 2, which takes no null
+- postgres: `select name from users where id = $1`: a null value passes for parameter 1, which takes no null
+- postgres: `select id from users where nickname = $1`: a null value passes for parameter 1, which takes no null
+- mysql: `update users set nickname = $1 where id = $2`: a null value passes for parameter 2, which takes no null
+- mysql: `select name from users where id = $1`: a null value passes for parameter 1, which takes no null
+- mysql: `select id from users where nickname = $1`: a null value passes for parameter 1, which takes no null
+- sqlite: `update users set nickname = $1 where id = $2`: a null value passes for parameter 2, which takes no null
+- sqlite: `select name from users where id = $1`: a null value passes for parameter 1, which takes no null
+- sqlite: `select id from users where nickname = $1`: a null value passes for parameter 1, which takes no null
+
+**Cardinality**: no, 0 of 28. Each call picks how many rows it takes: `execute` returns an array, and `executeTakeFirst` at most one row.
+
+- postgres: `select id, name from users where id = $1`: it does not infer one
+- postgres: `select id from users where email = $1`: it does not infer one
+- postgres: `select count(*) as v from users`: it does not infer one
+- postgres: `insert into users (id, email, name) values ($1, $2, $3) returning id`: it does not infer one
+- postgres: `select id from users`: it does not infer one
+- postgres: `select id from users limit 1`: it does not infer one
+- postgres: `update users set name = $1 where id = $2 returning id`: it does not infer one
+- postgres: `select p.title from posts p join users u on u.id = p.author_id where p.id = $1`: it does not infer one
+- postgres: `select id from posts where author_id = $1`: it does not infer one
+- postgres: `delete from users where id = $1`: it does not infer one
+- mysql: `select id, name from users where id = $1`: it does not infer one
+- mysql: `select id from users where email = $1`: it does not infer one
+- mysql: `select count(*) as v from users`: it does not infer one
+- mysql: `select id from users`: it does not infer one
+- mysql: `select id from users limit 1`: it does not infer one
+- mysql: `select p.title from posts p join users u on u.id = p.author_id where p.id = $1`: it does not infer one
+- mysql: `select id from posts where author_id = $1`: it does not infer one
+- mysql: `delete from users where id = $1`: it does not infer one
+- sqlite: `select id, name from users where id = $1`: it does not infer one
+- sqlite: `select id from users where email = $1`: it does not infer one
+- sqlite: `select count(*) as v from users`: it does not infer one
+- sqlite: `insert into users (id, email, name) values ($1, $2, $3) returning id`: it does not infer one
+- sqlite: `select id from users`: it does not infer one
+- sqlite: `select id from users limit 1`: it does not infer one
+- sqlite: `update users set name = $1 where id = $2 returning id`: it does not infer one
+- sqlite: `select p.title from posts p join users u on u.id = p.author_id where p.id = $1`: it does not infer one
+- sqlite: `select id from posts where author_id = $1`: it does not infer one
+- sqlite: `delete from users where id = $1`: it does not infer one
+
+**JSON Schema types**: no, 0 of 2
+
+- postgres: `select payload from events`: `payload` is typed `JsonArray | JsonObject | JsonPrimitive`, without its fields
+- postgres: `insert into events (id, payload) values ($1, $2)`: parameter 2 is typed `{ x: number }`, without its fields
+
+**Aggregates**: partly, 9 of 15
+
+- postgres: `select author_id, sum(score) as v from posts group by author_id having count(*) > 1`: `v` is typed `string | number | bigint`, but it can be null
+- postgres: `select avg(score) as v from posts`: `v` is typed `string | number`, but it can be null
+- mysql: `select author_id, sum(score) as v from posts group by author_id having count(*) > 1`: `v` is typed `string | number | bigint`, but it can be null
+- mysql: `select avg(score) as v from posts`: `v` is typed `string | number`, but it can be null
+- sqlite: `select author_id, sum(score) as v from posts group by author_id having count(*) > 1`: `v` is typed `string | number | bigint`, but it can be null
+- sqlite: `select avg(score) as v from posts`: `v` is typed `string | number`, but it can be null
+
+**Window functions**: no, 0 of 12
+
+- postgres: `select id, row_number() over (partition by author_id order by id) as v from posts`: `v` is typed `unknown`
+- postgres: `select id, rank() over (order by score) as v from posts`: `v` is typed `unknown`
+- postgres: `select id, sum(score) over (partition by author_id order by id) as v from posts`: `v` is typed `string | number | bigint`, but it can be null
+- postgres: `select id, lag(title) over (order by id) as v from posts`: `v` is typed `unknown`
+- mysql: `select id, row_number() over (partition by author_id order by id) as v from posts`: `v` is typed `unknown`
+- mysql: `select id, rank() over (order by score) as v from posts`: `v` is typed `unknown`
+- mysql: `select id, sum(score) over (partition by author_id order by id) as v from posts`: `v` is typed `string | number | bigint`, but it can be null
+- mysql: `select id, lag(title) over (order by id) as v from posts`: `v` is typed `unknown`
+- sqlite: `select id, row_number() over (partition by author_id order by id) as v from posts`: `id` is typed `number | null`, but it is never null; `v` is typed `unknown`
+- sqlite: `select id, rank() over (order by score) as v from posts`: `id` is typed `number | null`, but it is never null; `v` is typed `unknown`
+- sqlite: `select id, sum(score) over (partition by author_id order by id) as v from posts`: `id` is typed `number | null`, but it is never null; `v` is typed `string | number | bigint`, but it can be null
+- sqlite: `select id, lag(title) over (order by id) as v from posts`: `id` is typed `number | null`, but it is never null; `v` is typed `unknown`
+
+**Subqueries**: partly, 12 of 15
+
+- postgres: `select u.name, (select count(*) from posts p where p.author_id = u.id) as v from users u`: `v` is typed `string | number | bigint | null`, but it is never null
+- mysql: `select u.name, (select count(*) from posts p where p.author_id = u.id) as v from users u`: `v` is typed `string | number | bigint | null`, but it is never null
+- sqlite: `select u.name, (select count(*) from posts p where p.author_id = u.id) as v from users u`: `v` is typed `string | number | bigint | null`, but it is never null
+
+**Set operations**: partly, 8 of 9
+
+- sqlite: `select id as v from users except select author_id from posts`: `v` is typed `number | null`, but it is never null
+
+**Returning rows**: partly, 6 of 8
+
+- sqlite: `insert into posts (id, author_id, title) values ($1, $2, $3) returning id, score`: `id` is typed `number | null`, but it is never null
+- sqlite: `insert into users (id, email, name) values ($1, $2, $3) on conflict (id) do update set name = excluded.name returning id, nickname`: `id` is typed `number | null`, but it is never null
+
+## Prisma 7.10.1
+
+**No codegen**: no. A run leaves new files to commit: `prisma/schema.prisma`, `generated/prisma/browser.ts`, `generated/prisma/client.ts`.
+
+**Live database**: no. It types each query from the schema kept in your code, and never asks the database.
+
+**Nullable left joins**: no, 0 of 17
+
+- postgres: `select u.name, p.title from users u left join posts p on p.author_id = u.id`: it types each row as `unknown`
+- postgres: `select u.name, p.title from users u left join posts p on p.author_id = u.id order by p.title`: it types each row as `unknown`
+- postgres: `select u.name, p.title from users u left join posts p on p.author_id = u.id where u.id = $1`: it types each row as `unknown`
+- postgres: `select u.name, x.title from users u left join (select author_id, title from posts) x on x.author_id = u.id`: it types each row as `unknown`
+- postgres: `select u.name, p.title from posts p right join users u on u.id = p.author_id`: it types each row as `unknown`
+- postgres: `select u.name, p.title from users u full join posts p on p.author_id = u.id`: it types each row as `unknown`
+- mysql: `select u.name, p.title from users u left join posts p on p.author_id = u.id`: it types each row as `unknown`
+- mysql: `select u.name, p.title from users u left join posts p on p.author_id = u.id order by p.title`: it types each row as `unknown`
+- mysql: `select u.name, p.title from users u left join posts p on p.author_id = u.id where u.id = $1`: it types each row as `unknown`
+- mysql: `select u.name, x.title from users u left join (select author_id, title from posts) x on x.author_id = u.id`: it types each row as `unknown`
+- mysql: `select u.name, p.title from posts p right join users u on u.id = p.author_id`: it types each row as `unknown`
+- sqlite: `select u.name, p.title from users u left join posts p on p.author_id = u.id`: it types each row as `unknown`
+- sqlite: `select u.name, p.title from users u left join posts p on p.author_id = u.id order by p.title`: it types each row as `unknown`
+- sqlite: `select u.name, p.title from users u left join posts p on p.author_id = u.id where u.id = $1`: it types each row as `unknown`
+- sqlite: `select u.name, x.title from users u left join (select author_id, title from posts) x on x.author_id = u.id`: it types each row as `unknown`
+- sqlite: `select u.name, p.title from posts p right join users u on u.id = p.author_id`: it types each row as `unknown`
+- sqlite: `select u.name, p.title from users u full join posts p on p.author_id = u.id`: it types each row as `unknown`
+
+**Nullable expressions**: partly, 9 of 57
+
+- postgres: `select coalesce(nickname, 'x') as v from users`: it types each row as `unknown`
+- postgres: `select name || '!' as v from users`: it types each row as `unknown`
+- postgres: `select nickname || '!' as v from users`: it types each row as `unknown`
+- postgres: `select upper(name) as v from users`: it types each row as `unknown`
+- postgres: `select upper(nickname) as v from users`: it types each row as `unknown`
+- postgres: `select id + 1 as v from posts`: it types each row as `unknown`
+- postgres: `select score + 1 as v from posts`: it types each row as `unknown`
+- postgres: `select nullif(name, 'x') as v from users`: it types each row as `unknown`
+- postgres: `select case when id > 0 then name end as v from users`: it types each row as `unknown`
+- postgres: `select nickname is null as v from users`: it types each row as `unknown`
+- postgres: `select (select count(*) from posts) as v`: it types each row as `unknown`
+- postgres: `select exists (select 1 from posts) as v`: it types each row as `unknown`
+- postgres: `select row_number() over (order by id) as v from users`: it types each row as `unknown`
+- postgres: `select lag(id) over (order by id) as v from users`: it types each row as `unknown`
+- postgres: `select id as v from users union all select score from posts`: it types each row as `unknown`
+- postgres: `select max(id) as v from posts group by author_id`: `v` is typed `number | null`, but it is never null
+- mysql: `select coalesce(nickname, 'x') as v from users`: it types each row as `unknown`
+- mysql: `select concat(name, '!') as v from users`: it types each row as `unknown`
+- mysql: `select concat(nickname, '!') as v from users`: it types each row as `unknown`
+- mysql: `select upper(name) as v from users`: it types each row as `unknown`
+- mysql: `select upper(nickname) as v from users`: it types each row as `unknown`
+- mysql: `select id + 1 as v from posts`: it types each row as `unknown`
+- mysql: `select score + 1 as v from posts`: it types each row as `unknown`
+- mysql: `select nullif(name, 'x') as v from users`: it types each row as `unknown`
+- mysql: `select case when id > 0 then name end as v from users`: it types each row as `unknown`
+- mysql: `select nickname is null as v from users`: it types each row as `unknown`
+- mysql: `select (select count(*) from posts) as v`: it types each row as `unknown`
+- mysql: `select exists (select 1 from posts) as v`: it types each row as `unknown`
+- mysql: `select row_number() over (order by id) as v from users`: it types each row as `unknown`
+- mysql: `select lag(id) over (order by id) as v from users`: it types each row as `unknown`
+- mysql: `select id as v from users union all select score from posts`: it types each row as `unknown`
+- mysql: `select max(id) as v from posts group by author_id`: `v` is typed `number | null`, but it is never null
+- sqlite: `select coalesce(nickname, 'x') as v from users`: it types each row as `unknown`
+- sqlite: `select name || '!' as v from users`: it types each row as `unknown`
+- sqlite: `select nickname || '!' as v from users`: it types each row as `unknown`
+- sqlite: `select upper(name) as v from users`: it types each row as `unknown`
+- sqlite: `select upper(nickname) as v from users`: it types each row as `unknown`
+- sqlite: `select id + 1 as v from posts`: it types each row as `unknown`
+- sqlite: `select score + 1 as v from posts`: it types each row as `unknown`
+- sqlite: `select nullif(name, 'x') as v from users`: it types each row as `unknown`
+- sqlite: `select case when id > 0 then name end as v from users`: it types each row as `unknown`
+- sqlite: `select nickname is null as v from users`: it types each row as `unknown`
+- sqlite: `select (select count(*) from posts) as v`: it types each row as `unknown`
+- sqlite: `select exists (select 1 from posts) as v`: it types each row as `unknown`
+- sqlite: `select row_number() over (order by id) as v from users`: it types each row as `unknown`
+- sqlite: `select lag(id) over (order by id) as v from users`: it types each row as `unknown`
+- sqlite: `select id as v from users union all select score from posts`: it types each row as `unknown`
+- sqlite: `select max(id) as v from posts group by author_id`: `v` is typed `number | null`, but it is never null
+
+**Cardinality**: no, 0 of 28. Each call picks how many rows it takes: `findMany` returns an array, and `findUnique` and `findFirst` at most one row.
+
+- postgres: `select id, name from users where id = $1`: it does not infer one
+- postgres: `select id from users where email = $1`: it does not infer one
+- postgres: `select count(*) as v from users`: it does not infer one
+- postgres: `insert into users (id, email, name) values ($1, $2, $3) returning id`: it does not infer one
+- postgres: `select id from users`: it does not infer one
+- postgres: `select id from users limit 1`: it does not infer one
+- postgres: `update users set name = $1 where id = $2 returning id`: it does not infer one
+- postgres: `select p.title from posts p join users u on u.id = p.author_id where p.id = $1`: it does not infer one
+- postgres: `select id from posts where author_id = $1`: it does not infer one
+- postgres: `delete from users where id = $1`: it does not infer one
+- mysql: `select id, name from users where id = $1`: it does not infer one
+- mysql: `select id from users where email = $1`: it does not infer one
+- mysql: `select count(*) as v from users`: it does not infer one
+- mysql: `select id from users`: it does not infer one
+- mysql: `select id from users limit 1`: it does not infer one
+- mysql: `select p.title from posts p join users u on u.id = p.author_id where p.id = $1`: it does not infer one
+- mysql: `select id from posts where author_id = $1`: it does not infer one
+- mysql: `delete from users where id = $1`: it does not infer one
+- sqlite: `select id, name from users where id = $1`: it does not infer one
+- sqlite: `select id from users where email = $1`: it does not infer one
+- sqlite: `select count(*) as v from users`: it does not infer one
+- sqlite: `insert into users (id, email, name) values ($1, $2, $3) returning id`: it does not infer one
+- sqlite: `select id from users`: it does not infer one
+- sqlite: `select id from users limit 1`: it does not infer one
+- sqlite: `update users set name = $1 where id = $2 returning id`: it does not infer one
+- sqlite: `select p.title from posts p join users u on u.id = p.author_id where p.id = $1`: it does not infer one
+- sqlite: `select id from posts where author_id = $1`: it does not infer one
+- sqlite: `delete from users where id = $1`: it does not infer one
+
+**JSON Schema types**: no, 0 of 2
+
+- postgres: `select payload from events`: `payload` is typed `string | number | boolean | JsonObject | JsonArray | null`, without its fields
+- postgres: `insert into events (id, payload) values ($1, $2)`: parameter 2 is typed `{ x: number }`, without its fields
+
+**Aggregates**: partly, 9 of 15
+
+- postgres: `select author_id, min(title) as v from posts group by author_id`: `v` is typed `string | null`, but it is never null
+- postgres: `select count(distinct author_id) as v from posts`: it types each row as `unknown`
+- mysql: `select author_id, min(title) as v from posts group by author_id`: `v` is typed `string | null`, but it is never null
+- mysql: `select count(distinct author_id) as v from posts`: it types each row as `unknown`
+- sqlite: `select author_id, min(title) as v from posts group by author_id`: `v` is typed `string | null`, but it is never null
+- sqlite: `select count(distinct author_id) as v from posts`: it types each row as `unknown`
+
+**Window functions**: no, 0 of 12
+
+- postgres: `select id, row_number() over (partition by author_id order by id) as v from posts`: it types each row as `unknown`
+- postgres: `select id, rank() over (order by score) as v from posts`: it types each row as `unknown`
+- postgres: `select id, sum(score) over (partition by author_id order by id) as v from posts`: it types each row as `unknown`
+- postgres: `select id, lag(title) over (order by id) as v from posts`: it types each row as `unknown`
+- mysql: `select id, row_number() over (partition by author_id order by id) as v from posts`: it types each row as `unknown`
+- mysql: `select id, rank() over (order by score) as v from posts`: it types each row as `unknown`
+- mysql: `select id, sum(score) over (partition by author_id order by id) as v from posts`: it types each row as `unknown`
+- mysql: `select id, lag(title) over (order by id) as v from posts`: it types each row as `unknown`
+- sqlite: `select id, row_number() over (partition by author_id order by id) as v from posts`: it types each row as `unknown`
+- sqlite: `select id, rank() over (order by score) as v from posts`: it types each row as `unknown`
+- sqlite: `select id, sum(score) over (partition by author_id order by id) as v from posts`: it types each row as `unknown`
+- sqlite: `select id, lag(title) over (order by id) as v from posts`: it types each row as `unknown`
+
+**Subqueries**: partly, 6 of 15
+
+- postgres: `select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u`: it types each row as `unknown`
+- postgres: `select u.name, exists (select 1 from posts p where p.author_id = u.id) as v from users u`: it types each row as `unknown`
+- postgres: `select x.author_id, x.n from (select author_id, count(*) as n from posts group by author_id) x`: it types each row as `unknown`
+- mysql: `select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u`: it types each row as `unknown`
+- mysql: `select u.name, exists (select 1 from posts p where p.author_id = u.id) as v from users u`: it types each row as `unknown`
+- mysql: `select x.author_id, x.n from (select author_id, count(*) as n from posts group by author_id) x`: it types each row as `unknown`
+- sqlite: `select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u`: it types each row as `unknown`
+- sqlite: `select u.name, exists (select 1 from posts p where p.author_id = u.id) as v from users u`: it types each row as `unknown`
+- sqlite: `select x.author_id, x.n from (select author_id, count(*) as n from posts group by author_id) x`: it types each row as `unknown`
+
+**WITH queries**: no, 0 of 9
+
+- postgres: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u join counts c on c.author_id = u.id`: it types each row as `unknown`
+- postgres: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u left join counts c on c.author_id = u.id`: it types each row as `unknown`
+- postgres: `with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 5) select n from nums`: it types each row as `unknown`
+- mysql: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u join counts c on c.author_id = u.id`: it types each row as `unknown`
+- mysql: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u left join counts c on c.author_id = u.id`: it types each row as `unknown`
+- mysql: `with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 5) select n from nums`: it types each row as `unknown`
+- sqlite: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u join counts c on c.author_id = u.id`: it types each row as `unknown`
+- sqlite: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u left join counts c on c.author_id = u.id`: it types each row as `unknown`
+- sqlite: `with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 5) select n from nums`: it types each row as `unknown`
+
+**Set operations**: no, 0 of 9
+
+- postgres: `select name as v from users union select title from posts`: it types each row as `unknown`
+- postgres: `select nickname as v from users union all select title from posts`: it types each row as `unknown`
+- postgres: `select id as v from users except select author_id from posts`: it types each row as `unknown`
+- mysql: `select name as v from users union select title from posts`: it types each row as `unknown`
+- mysql: `select nickname as v from users union all select title from posts`: it types each row as `unknown`
+- mysql: `select id as v from users except select author_id from posts`: it types each row as `unknown`
+- sqlite: `select name as v from users union select title from posts`: it types each row as `unknown`
+- sqlite: `select nickname as v from users union all select title from posts`: it types each row as `unknown`
+- sqlite: `select id as v from users except select author_id from posts`: it types each row as `unknown`
+
+**Enums**: partly, 2 of 4
+
+- postgres: `select x.r from (select role as r from users) x`: it types each row as `unknown`
+- mysql: `select x.r from (select role as r from users) x`: it types each row as `unknown`
+
+## TypeORM 1.1.3
+
+**No codegen**: yes. Nothing to commit after a run.
+
+**Live database**: no. It types each query from the schema kept in your code, and never asks the database.
+
+**Nullable left joins**: no, 0 of 17
+
+- postgres: `select u.name, p.title from users u left join posts p on p.author_id = u.id`: it types each row as `any`
+- postgres: `select u.name, p.title from users u left join posts p on p.author_id = u.id order by p.title`: it types each row as `any`
+- postgres: `select u.name, p.title from users u left join posts p on p.author_id = u.id where u.id = $1`: it types each row as `any`
+- postgres: `select u.name, x.title from users u left join (select author_id, title from posts) x on x.author_id = u.id`: it types each row as `any`
+- postgres: `select u.name, p.title from posts p right join users u on u.id = p.author_id`: it types each row as `any`
+- postgres: `select u.name, p.title from users u full join posts p on p.author_id = u.id`: it types each row as `any`
+- mysql: `select u.name, p.title from users u left join posts p on p.author_id = u.id`: it types each row as `any`
+- mysql: `select u.name, p.title from users u left join posts p on p.author_id = u.id order by p.title`: it types each row as `any`
+- mysql: `select u.name, p.title from users u left join posts p on p.author_id = u.id where u.id = $1`: it types each row as `any`
+- mysql: `select u.name, x.title from users u left join (select author_id, title from posts) x on x.author_id = u.id`: it types each row as `any`
+- mysql: `select u.name, p.title from posts p right join users u on u.id = p.author_id`: it types each row as `any`
+- sqlite: `select u.name, p.title from users u left join posts p on p.author_id = u.id`: it types each row as `any`
+- sqlite: `select u.name, p.title from users u left join posts p on p.author_id = u.id order by p.title`: it types each row as `any`
+- sqlite: `select u.name, p.title from users u left join posts p on p.author_id = u.id where u.id = $1`: it types each row as `any`
+- sqlite: `select u.name, x.title from users u left join (select author_id, title from posts) x on x.author_id = u.id`: it types each row as `any`
+- sqlite: `select u.name, p.title from posts p right join users u on u.id = p.author_id`: it types each row as `any`
+- sqlite: `select u.name, p.title from users u full join posts p on p.author_id = u.id`: it types each row as `any`
+
+**Nullable expressions**: partly, 6 of 57
+
+- postgres: `select sum(score) as v from posts`: it reports an error: Argument of type '"score"' is not assignable to parameter of type 'PickKeysByType<Post, number>'.
+- postgres: `select coalesce(nickname, 'x') as v from users`: it types each row as `any`
+- postgres: `select name || '!' as v from users`: it types each row as `any`
+- postgres: `select nickname || '!' as v from users`: it types each row as `any`
+- postgres: `select upper(name) as v from users`: it types each row as `any`
+- postgres: `select upper(nickname) as v from users`: it types each row as `any`
+- postgres: `select id + 1 as v from posts`: it types each row as `any`
+- postgres: `select score + 1 as v from posts`: it types each row as `any`
+- postgres: `select nullif(name, 'x') as v from users`: it types each row as `any`
+- postgres: `select case when id > 0 then name end as v from users`: it types each row as `any`
+- postgres: `select nickname is null as v from users`: it types each row as `any`
+- postgres: `select (select count(*) from posts) as v`: it types each row as `any`
+- postgres: `select exists (select 1 from posts) as v`: it types each row as `any`
+- postgres: `select row_number() over (order by id) as v from users`: it types each row as `any`
+- postgres: `select lag(id) over (order by id) as v from users`: it types each row as `any`
+- postgres: `select id as v from users union all select score from posts`: it types each row as `any`
+- postgres: `select max(id) as v from posts group by author_id`: it types each row as `any`
+- mysql: `select sum(score) as v from posts`: it reports an error: Argument of type '"score"' is not assignable to parameter of type 'PickKeysByType<Post, number>'.
+- mysql: `select coalesce(nickname, 'x') as v from users`: it types each row as `any`
+- mysql: `select concat(name, '!') as v from users`: it types each row as `any`
+- mysql: `select concat(nickname, '!') as v from users`: it types each row as `any`
+- mysql: `select upper(name) as v from users`: it types each row as `any`
+- mysql: `select upper(nickname) as v from users`: it types each row as `any`
+- mysql: `select id + 1 as v from posts`: it types each row as `any`
+- mysql: `select score + 1 as v from posts`: it types each row as `any`
+- mysql: `select nullif(name, 'x') as v from users`: it types each row as `any`
+- mysql: `select case when id > 0 then name end as v from users`: it types each row as `any`
+- mysql: `select nickname is null as v from users`: it types each row as `any`
+- mysql: `select (select count(*) from posts) as v`: it types each row as `any`
+- mysql: `select exists (select 1 from posts) as v`: it types each row as `any`
+- mysql: `select row_number() over (order by id) as v from users`: it types each row as `any`
+- mysql: `select lag(id) over (order by id) as v from users`: it types each row as `any`
+- mysql: `select id as v from users union all select score from posts`: it types each row as `any`
+- mysql: `select max(id) as v from posts group by author_id`: it types each row as `any`
+- sqlite: `select sum(score) as v from posts`: it reports an error: Argument of type '"score"' is not assignable to parameter of type 'PickKeysByType<Post, number>'.
+- sqlite: `select coalesce(nickname, 'x') as v from users`: it types each row as `any`
+- sqlite: `select name || '!' as v from users`: it types each row as `any`
+- sqlite: `select nickname || '!' as v from users`: it types each row as `any`
+- sqlite: `select upper(name) as v from users`: it types each row as `any`
+- sqlite: `select upper(nickname) as v from users`: it types each row as `any`
+- sqlite: `select id + 1 as v from posts`: it types each row as `any`
+- sqlite: `select score + 1 as v from posts`: it types each row as `any`
+- sqlite: `select nullif(name, 'x') as v from users`: it types each row as `any`
+- sqlite: `select case when id > 0 then name end as v from users`: it types each row as `any`
+- sqlite: `select nickname is null as v from users`: it types each row as `any`
+- sqlite: `select (select count(*) from posts) as v`: it types each row as `any`
+- sqlite: `select exists (select 1 from posts) as v`: it types each row as `any`
+- sqlite: `select row_number() over (order by id) as v from users`: it types each row as `any`
+- sqlite: `select lag(id) over (order by id) as v from users`: it types each row as `any`
+- sqlite: `select id as v from users union all select score from posts`: it types each row as `any`
+- sqlite: `select max(id) as v from posts group by author_id`: it types each row as `any`
+
+**Cardinality**: no, 0 of 28. Each call picks how many rows it takes: `find` returns an array, and `findOne` at most one row.
+
+- postgres: `select id, name from users where id = $1`: it does not infer one
+- postgres: `select id from users where email = $1`: it does not infer one
+- postgres: `select count(*) as v from users`: it does not infer one
+- postgres: `insert into users (id, email, name) values ($1, $2, $3) returning id`: it does not infer one
+- postgres: `select id from users`: it does not infer one
+- postgres: `select id from users limit 1`: it does not infer one
+- postgres: `update users set name = $1 where id = $2 returning id`: it does not infer one
+- postgres: `select p.title from posts p join users u on u.id = p.author_id where p.id = $1`: it does not infer one
+- postgres: `select id from posts where author_id = $1`: it does not infer one
+- postgres: `delete from users where id = $1`: it does not infer one
+- mysql: `select id, name from users where id = $1`: it does not infer one
+- mysql: `select id from users where email = $1`: it does not infer one
+- mysql: `select count(*) as v from users`: it does not infer one
+- mysql: `select id from users`: it does not infer one
+- mysql: `select id from users limit 1`: it does not infer one
+- mysql: `select p.title from posts p join users u on u.id = p.author_id where p.id = $1`: it does not infer one
+- mysql: `select id from posts where author_id = $1`: it does not infer one
+- mysql: `delete from users where id = $1`: it does not infer one
+- sqlite: `select id, name from users where id = $1`: it does not infer one
+- sqlite: `select id from users where email = $1`: it does not infer one
+- sqlite: `select count(*) as v from users`: it does not infer one
+- sqlite: `insert into users (id, email, name) values ($1, $2, $3) returning id`: it does not infer one
+- sqlite: `select id from users`: it does not infer one
+- sqlite: `select id from users limit 1`: it does not infer one
+- sqlite: `update users set name = $1 where id = $2 returning id`: it does not infer one
+- sqlite: `select p.title from posts p join users u on u.id = p.author_id where p.id = $1`: it does not infer one
+- sqlite: `select id from posts where author_id = $1`: it does not infer one
+- sqlite: `delete from users where id = $1`: it does not infer one
+
+**JSON Schema types**: no, 0 of 2
+
+- postgres: `select payload from events`: `payload` is typed `object`, without its fields
+- postgres: `insert into events (id, payload) values ($1, $2)`: parameter 2 is typed `{ x: number }`, without its fields
+
+**Aggregates**: no, 0 of 15
+
+- postgres: `select author_id, count(*) as n from posts group by author_id`: it types each row as `any`
+- postgres: `select author_id, min(title) as v from posts group by author_id`: it types each row as `any`
+- postgres: `select author_id, sum(score) as v from posts group by author_id having count(*) > 1`: it types each row as `any`
+- postgres: `select avg(score) as v from posts`: it reports an error: Argument of type '"score"' is not assignable to parameter of type 'PickKeysByType<Post, number>'.
+- postgres: `select count(distinct author_id) as v from posts`: it types each row as `any`
+- mysql: `select author_id, count(*) as n from posts group by author_id`: it types each row as `any`
+- mysql: `select author_id, min(title) as v from posts group by author_id`: it types each row as `any`
+- mysql: `select author_id, sum(score) as v from posts group by author_id having count(*) > 1`: it types each row as `any`
+- mysql: `select avg(score) as v from posts`: it reports an error: Argument of type '"score"' is not assignable to parameter of type 'PickKeysByType<Post, number>'.
+- mysql: `select count(distinct author_id) as v from posts`: it types each row as `any`
+- sqlite: `select author_id, count(*) as n from posts group by author_id`: it types each row as `any`
+- sqlite: `select author_id, min(title) as v from posts group by author_id`: it types each row as `any`
+- sqlite: `select author_id, sum(score) as v from posts group by author_id having count(*) > 1`: it types each row as `any`
+- sqlite: `select avg(score) as v from posts`: it reports an error: Argument of type '"score"' is not assignable to parameter of type 'PickKeysByType<Post, number>'.
+- sqlite: `select count(distinct author_id) as v from posts`: it types each row as `any`
+
+**Window functions**: no, 0 of 12
+
+- postgres: `select id, row_number() over (partition by author_id order by id) as v from posts`: it types each row as `any`
+- postgres: `select id, rank() over (order by score) as v from posts`: it types each row as `any`
+- postgres: `select id, sum(score) over (partition by author_id order by id) as v from posts`: it types each row as `any`
+- postgres: `select id, lag(title) over (order by id) as v from posts`: it types each row as `any`
+- mysql: `select id, row_number() over (partition by author_id order by id) as v from posts`: it types each row as `any`
+- mysql: `select id, rank() over (order by score) as v from posts`: it types each row as `any`
+- mysql: `select id, sum(score) over (partition by author_id order by id) as v from posts`: it types each row as `any`
+- mysql: `select id, lag(title) over (order by id) as v from posts`: it types each row as `any`
+- sqlite: `select id, row_number() over (partition by author_id order by id) as v from posts`: it types each row as `any`
+- sqlite: `select id, rank() over (order by score) as v from posts`: it types each row as `any`
+- sqlite: `select id, sum(score) over (partition by author_id order by id) as v from posts`: it types each row as `any`
+- sqlite: `select id, lag(title) over (order by id) as v from posts`: it types each row as `any`
+
+**Subqueries**: partly, 3 of 15
+
+- postgres: `select u.name, (select count(*) from posts p where p.author_id = u.id) as v from users u`: it types each row as `any`
+- postgres: `select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u`: it types each row as `any`
+- postgres: `select u.name, exists (select 1 from posts p where p.author_id = u.id) as v from users u`: it types each row as `any`
+- postgres: `select x.author_id, x.n from (select author_id, count(*) as n from posts group by author_id) x`: it types each row as `any`
+- mysql: `select u.name, (select count(*) from posts p where p.author_id = u.id) as v from users u`: it types each row as `any`
+- mysql: `select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u`: it types each row as `any`
+- mysql: `select u.name, exists (select 1 from posts p where p.author_id = u.id) as v from users u`: it types each row as `any`
+- mysql: `select x.author_id, x.n from (select author_id, count(*) as n from posts group by author_id) x`: it types each row as `any`
+- sqlite: `select u.name, (select count(*) from posts p where p.author_id = u.id) as v from users u`: it types each row as `any`
+- sqlite: `select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u`: it types each row as `any`
+- sqlite: `select u.name, exists (select 1 from posts p where p.author_id = u.id) as v from users u`: it types each row as `any`
+- sqlite: `select x.author_id, x.n from (select author_id, count(*) as n from posts group by author_id) x`: it types each row as `any`
+
+**WITH queries**: no, 0 of 9
+
+- postgres: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u join counts c on c.author_id = u.id`: it types each row as `any`
+- postgres: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u left join counts c on c.author_id = u.id`: it types each row as `any`
+- postgres: `with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 5) select n from nums`: it types each row as `any`
+- mysql: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u join counts c on c.author_id = u.id`: it types each row as `any`
+- mysql: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u left join counts c on c.author_id = u.id`: it types each row as `any`
+- mysql: `with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 5) select n from nums`: it types each row as `any`
+- sqlite: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u join counts c on c.author_id = u.id`: it types each row as `any`
+- sqlite: `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u left join counts c on c.author_id = u.id`: it types each row as `any`
+- sqlite: `with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 5) select n from nums`: it types each row as `any`
+
+**Set operations**: no, 0 of 9
+
+- postgres: `select name as v from users union select title from posts`: it types each row as `any`
+- postgres: `select nickname as v from users union all select title from posts`: it types each row as `any`
+- postgres: `select id as v from users except select author_id from posts`: it types each row as `any`
+- mysql: `select name as v from users union select title from posts`: it types each row as `any`
+- mysql: `select nickname as v from users union all select title from posts`: it types each row as `any`
+- mysql: `select id as v from users except select author_id from posts`: it types each row as `any`
+- sqlite: `select name as v from users union select title from posts`: it types each row as `any`
+- sqlite: `select nickname as v from users union all select title from posts`: it types each row as `any`
+- sqlite: `select id as v from users except select author_id from posts`: it types each row as `any`
+
+**Returning rows**: partly, 6 of 8
+
+- postgres: `delete from posts where id = $1 returning title`: `title` is typed `any`
+- sqlite: `delete from posts where id = $1 returning title`: `title` is typed `any`
+
+**Enums**: partly, 2 of 4
+
+- postgres: `select x.r from (select role as r from users) x`: it types each row as `any`
+- mysql: `select x.r from (select role as r from users) x`: it types each row as `any`
+
 ## The queries
 
 Every tool gets each query on each database it supports. [probes.ts](probes.ts) holds them with their right answers.
@@ -683,3 +1288,50 @@ Every tool gets each query on each database it supports. [probes.ts](probes.ts) 
 - `select add_one(id) as v from users` (Postgres)
 - `select id::numeric / 2 as v from users` (Postgres)
 - `select array_agg(id) as v from users` (Postgres)
+
+**aggregates**
+
+- `select author_id, count(*) as n from posts group by author_id`
+- `select author_id, min(title) as v from posts group by author_id`
+- `select author_id, sum(score) as v from posts group by author_id having count(*) > 1`
+- `select avg(score) as v from posts`
+- `select count(distinct author_id) as v from posts`
+
+**windows**
+
+- `select id, row_number() over (partition by author_id order by id) as v from posts`
+- `select id, rank() over (order by score) as v from posts`
+- `select id, sum(score) over (partition by author_id order by id) as v from posts`
+- `select id, lag(title) over (order by id) as v from posts`
+
+**subqueries**
+
+- `select u.name, (select count(*) from posts p where p.author_id = u.id) as v from users u`
+- `select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u`
+- `select u.name, exists (select 1 from posts p where p.author_id = u.id) as v from users u`
+- `select name from users where id in (select author_id from posts)`
+- `select x.author_id, x.n from (select author_id, count(*) as n from posts group by author_id) x`
+
+**with-queries**
+
+- `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u join counts c on c.author_id = u.id`
+- `with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u left join counts c on c.author_id = u.id`
+- `with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 5) select n from nums`
+
+**set-operations**
+
+- `select name as v from users union select title from posts`
+- `select nickname as v from users union all select title from posts`
+- `select id as v from users except select author_id from posts`
+
+**returning**
+
+- `insert into posts (id, author_id, title) values ($1, $2, $3) returning id, score` (Postgres and SQLite)
+- `update users set nickname = $1 where id = $2 returning name, nickname` (Postgres and SQLite)
+- `delete from posts where id = $1 returning title` (Postgres and SQLite)
+- `insert into users (id, email, name) values ($1, $2, $3) on conflict (id) do update set name = excluded.name returning id, nickname` (Postgres and SQLite)
+
+**enums**
+
+- `select role from users` (Postgres and MySQL)
+- `select x.r from (select role as r from users) x` (Postgres and MySQL)

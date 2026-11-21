@@ -21,7 +21,7 @@ use crate::lex::{self, Lexed, Rewritten, Target};
 use crate::pgtypes::{not_null_rows, TypeRegistry, RELATION_TYPES_QUERY, TYPE_QUERY};
 use crate::returning::Rows;
 use crate::types::{Cardinality, CheckFacts, DescribedColumn, DescribedStatement, Kind as TyKind, NonFinite, StatementKind, Type};
-use pg_query::protobuf::node::Node as NodeEnum;
+use syntax::postgres::protobuf::node::Node as NodeEnum;
 use serde_json::{json, Value};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -259,7 +259,13 @@ pub const RELATION_COLUMNS_QUERY: &str = concat!(
 ///   such a key. An enum's, or a domain's over one, is the built-in `=(anyenum, anyenum)` where no
 ///   `=` of a user's takes the enum, exactly, through a domain over it or by a polymorphic
 ///   argument, and no implicit cast converts it.
-/// - `implicit`: a built-in type a user's implicit cast function converts to a built-in type.
+/// - `implicit`: a type a user's implicit cast function converts to a built-in type: a built-in
+///   one, by its base type or its elements as the server reads them, or a type of a user's, a
+///   composite, an enum or an extension's, as the cast names it.
+/// - `through`: a function name (the second column) every built-in overload of which takes each
+///   argument as it is, of any type (`anyelement`, `anyarray`, `anynonarray`, `anyenum`,
+///   `anyrange`, `anymultirange`, `"any"`, `record`, `record[]`), so no implicit cast runs on one:
+///   the `anycompatible` family, which converts its arguments to a common type, is not one.
 /// - `rows`: every built-in type that is a row (the third column): a catalog's row type, `record`,
 ///   or a domain over a row type. `scalars`: every type of a user's that is no row and no array (the
 ///   third column): a base type, an enum, a range, a multirange, or a domain over one of them. A
@@ -394,6 +400,13 @@ pub const TRUST_QUERY: &str = "WITH RECURSIVE \
     UNION ALL SELECT 'implicit', NULL, NULL, s.s::pg_catalog.int8, NULL FROM sources s \
     WHERE EXISTS (SELECT 1 FROM pg_catalog.pg_cast c WHERE c.oid OPERATOR(pg_catalog.>=) '16384'::pg_catalog.oid AND c.castcontext OPERATOR(pg_catalog.=) 'i'::pg_catalog.\"char\" AND c.castmethod OPERATOR(pg_catalog.=) 'f'::pg_catalog.\"char\" \
     AND c.casttarget OPERATOR(pg_catalog.<) '16384'::pg_catalog.oid AND (c.castsource OPERATOR(pg_catalog.=) s.b OR c.castsource OPERATOR(pg_catalog.=) ANY (SELECT a.e FROM arrays a WHERE a.t OPERATOR(pg_catalog.=) s.b))) \
+    UNION ALL SELECT 'implicit', NULL, NULL, c.castsource::pg_catalog.int8, NULL FROM pg_catalog.pg_cast c \
+    WHERE c.oid OPERATOR(pg_catalog.>=) '16384'::pg_catalog.oid AND c.castcontext OPERATOR(pg_catalog.=) 'i'::pg_catalog.\"char\" AND c.castmethod OPERATOR(pg_catalog.=) 'f'::pg_catalog.\"char\" \
+    AND c.casttarget OPERATOR(pg_catalog.<) '16384'::pg_catalog.oid AND c.castsource OPERATOR(pg_catalog.>=) '16384'::pg_catalog.oid \
+    UNION ALL SELECT 'through', p.proname::pg_catalog.text, NULL, NULL, NULL FROM pg_catalog.pg_proc p \
+    WHERE p.oid OPERATOR(pg_catalog.<) '16384'::pg_catalog.oid AND p.proname::pg_catalog.text OPERATOR(pg_catalog.=) ANY ($2::pg_catalog.text[]) GROUP BY p.proname \
+    HAVING NOT pg_catalog.bool_or(EXISTS (SELECT 1 FROM pg_catalog.generate_series(0, p.pronargs OPERATOR(pg_catalog.-) 1) AS i \
+    WHERE NOT (p.proargtypes[i] OPERATOR(pg_catalog.=) ANY ('{2283,2277,2776,3500,3831,4537,2276,2249,2287}'::pg_catalog.oid[])))) \
     UNION ALL SELECT 'type', t.typname::pg_catalog.text, NULL, NULL, NULL FROM pg_catalog.pg_type t \
     WHERE t.oid OPERATOR(pg_catalog.>=) '16384'::pg_catalog.oid AND t.typname::pg_catalog.text OPERATOR(pg_catalog.=) ANY ($2::pg_catalog.text[]) \
     UNION ALL SELECT 'cast', t.typname::pg_catalog.text, NULL, NULL, NULL FROM pg_catalog.pg_type t \
@@ -484,10 +497,13 @@ fn analyze_plain(sql: &str, host: &Host, marked: &[String]) -> Lazy<Analysis> {
     let inner = Engine::new(host);
     let read = inner.run(&text, &inner_lexed, &inner_marked)?;
     let (declared, found) = (engine.column_oids.borrow(), inner.column_oids.borrow());
-    let (mut analysis, narrowed) = narrowed(analysis, &declared, read, &found);
+    // A function whose body belies its label runs again for each call, where its body in place is a
+    // subquery the server may run once: what that says of the rows holds of the expansion alone.
+    let rows = engine.belied.borrow().is_empty();
+    let (mut analysis, narrowed) = narrowed(analysis, &declared, read, &found, rows);
     analysis.notes = expanded.notes;
-    // A type the body settled holds only while the body and what it reads do: the freshness check
-    // watches those too.
+    // The tables the body reads and the functions read through, which no parse of the statement
+    // as written gives.
     if narrowed {
         let (first, through) = (analyze::analyze(&analysis.rewritten.sql).ok(), analyze::analyze(&text).ok());
         let own: Vec<String> = first.iter().flat_map(|p| p.read_set.iter().chain(&p.write_set).cloned()).collect();
@@ -502,8 +518,9 @@ fn analyze_plain(sql: &str, host: &Host, marked: &[String]) -> Lazy<Analysis> {
 /// What the statement with its functions' bodies in place says of `analysis`, where it describes to
 /// the same columns of the same types: a column not null, a type it holds more of (a JSON shape), the
 /// smaller of the two cardinalities. Each claim is the statement's own, so taking either is sound.
-/// With whether it changed anything.
-fn narrowed(mut analysis: Analysis, declared: &[u32], read: Analysis, found: &[u32]) -> (Analysis, bool) {
+/// What it says of the rows (the cardinality, the keys, the order) only where `rows`. With whether
+/// it changed anything.
+fn narrowed(mut analysis: Analysis, declared: &[u32], read: Analysis, found: &[u32], rows: bool) -> (Analysis, bool) {
     let same = declared == found && analysis.columns.len() == read.columns.len() && analysis.columns.iter().zip(&read.columns).all(|(a, b)| a.name == b.name);
     if !same || read.columns.is_empty() {
         return (analysis, false);
@@ -515,6 +532,9 @@ fn narrowed(mut analysis: Analysis, declared: &[u32], read: Analysis, found: &[u
         column.nullable &= body.nullable;
         column.ty = body.ty;
         column.comment = column.comment.take().or(body.comment);
+    }
+    if !rows {
+        return (analysis, changed);
     }
     let rank = |c: &Cardinality| match c {
         Cardinality::None => 0,
@@ -566,7 +586,7 @@ pub fn describe(sql: &str, host: &Host) -> Lazy<Result<DescribedStatement, DbErr
     host.on_engine_stack(|host| {
         let engine = Engine::new(host);
         let parsed = analyze::analyze(sql).ok();
-        let trust = trust(host);
+        let trust = trust(host).map(|trust| Trust { null_equals: infer::compares_with_null(sql), ..trust });
         let relations = relations_of(parsed.as_ref());
         engine.described(sql, parsed.as_ref(), &relations, trust.as_ref(), &[]).map(|r| r.map(|(_, described)| described))
     })
@@ -603,7 +623,7 @@ pub fn shaped(sql: &str, host: &Host) -> Lazy<Result<ShapedStatement, DbError>> 
     host.on_engine_stack(|host| {
         let engine = Engine::new(host);
         let parsed = analyze::analyze(sql).ok();
-        let trust = trust(host);
+        let trust = trust(host).map(|trust| Trust { null_equals: infer::compares_with_null(sql), ..trust });
         let relations = relations_of(parsed.as_ref());
         let described = engine.described(sql, parsed.as_ref(), &relations, trust.as_ref(), &[]);
         let columns = columns_where(true, sql, host);
@@ -669,6 +689,7 @@ pub fn catalog(host: &Host, functions: &[String], relations: &[String]) -> Lazy<
     if let Some(rows) = view_rows {
         merge_keys(&mut catalog, build_catalog(&operators, rows));
     }
+    crate::bodies::belied_labels(&mut catalog, host)?;
     catalog.views = views;
     trusted(&mut catalog, &trust);
     Some(catalog)
@@ -704,6 +725,7 @@ fn columns_where(needed: bool, sql: &str, host: &Host) -> Lazy<Columns> {
 /// What the trust check says that the row-count proof reads: whether `=` is only the built-in
 /// one, which operators a user defined, and which types no user's cast function targets.
 fn trusted(catalog: &mut Catalog, trust: &Trust) {
+    catalog.null_equals = trust.null_equals;
     catalog.equality_shadowed = !trust.builtin("=");
     catalog.user_operators = trust.shadowed.clone();
     catalog.cast_targets = trust.cast_targets.clone();
@@ -742,12 +764,11 @@ fn catalog_rows(host: &Host, functions: &[String], relations: &[String]) -> Lazy
     let functions = if functions.is_empty() { none() } else { host.query_each(cardinality::FUNCTIONS_QUERY, functions.iter().map(|f| vec![json!([f])]), Scope::Statement) };
     let triggers = by_relation(host, cardinality::TRIGGERS_QUERY, relations);
     let (Some(keys), Some(columns), Some(functions), Some(triggers)) = (keys, columns, functions, triggers) else { return None };
-    Some(CatalogRows {
-        keys: keys.unwrap_or_default(),
-        columns: columns.unwrap_or_default(),
-        functions: functions.unwrap_or_default(),
-        triggers: triggers.unwrap_or_default(),
-    })
+    // A catalog that does not say which triggers and rules act on the relations is read as one
+    // where every one of them acts on every event: a write may then skip its row, change it, or be
+    // rewritten.
+    let triggers = triggers.unwrap_or_else(|_| relations.iter().map(|r| vec![json!(r), json!(28), json!(28), json!([]), json!([]), json!(28)]).collect());
+    Some(CatalogRows { keys: keys.unwrap_or_default(), columns: columns.unwrap_or_default(), functions: functions.unwrap_or_default(), triggers })
 }
 
 /// The rows of the row-count proof's catalog queries, as the host answered them.
@@ -825,6 +846,8 @@ struct Engine<'a> {
     comments: RefCell<Comments>,
     /// The type of each column the main statement's describe reports.
     column_oids: RefCell<Vec<u32>>,
+    /// The functions the statement calls whose label their body belies ([`crate::bodies::belied_labels`]).
+    belied: RefCell<Vec<String>>,
     budget: Cell<usize>,
 }
 
@@ -844,7 +867,7 @@ struct Nullable {
 
 impl<'a> Engine<'a> {
     fn new(host: &'a Host<'a>) -> Engine<'a> {
-        Engine { host, registry: RefCell::new(TypeRegistry::with_builtins()), relations: RefCell::new(HashMap::new()), columns_by_name: RefCell::new(HashMap::new()), oids_by_name: RefCell::new(HashMap::new()), stored: RefCell::new(HashSet::new()), column_types: RefCell::new(HashMap::new()), written_facts: RefCell::new(HashMap::new()), views: RefCell::new(HashMap::new()), with_stack: RefCell::new(Vec::new()), probed: RefCell::new(HashSet::new()), prewarmed: RefCell::new(HashSet::new()), probing: RefCell::new(Vec::new()), probe_calls: Cell::new(0), settled: RefCell::new(HashMap::new()), assumptions: Cell::new(0), casts: RefCell::new(Vec::new()), pinned: Cell::new(false), written: RefCell::new(HashMap::new()), written_values: RefCell::new(HashMap::new()), comments: RefCell::new(Comments::default()), budget: Cell::new(MAX_PROBES), column_oids: RefCell::new(Vec::new()) }
+        Engine { host, registry: RefCell::new(TypeRegistry::with_builtins()), relations: RefCell::new(HashMap::new()), columns_by_name: RefCell::new(HashMap::new()), oids_by_name: RefCell::new(HashMap::new()), stored: RefCell::new(HashSet::new()), column_types: RefCell::new(HashMap::new()), written_facts: RefCell::new(HashMap::new()), views: RefCell::new(HashMap::new()), with_stack: RefCell::new(Vec::new()), probed: RefCell::new(HashSet::new()), prewarmed: RefCell::new(HashSet::new()), probing: RefCell::new(Vec::new()), probe_calls: Cell::new(0), settled: RefCell::new(HashMap::new()), assumptions: Cell::new(0), casts: RefCell::new(Vec::new()), pinned: Cell::new(false), written: RefCell::new(HashMap::new()), written_values: RefCell::new(HashMap::new()), comments: RefCell::new(Comments::default()), budget: Cell::new(MAX_PROBES), column_oids: RefCell::new(Vec::new()), belied: RefCell::new(Vec::new()) }
     }
 
     fn run(&self, sql: &str, lexed: &Lexed, marked: &[String]) -> Lazy<Analysis> {
@@ -853,6 +876,7 @@ impl<'a> Engine<'a> {
         // The parameters cast to `nullable(…)`, by the number the rewrite gave each.
         let marked: HashSet<i32> = rewritten.order.iter().enumerate().filter(|(_, name)| marked.contains(name)).map(|(k, _)| k as i32 + 1).collect();
         crate::errors::prefetch(&rewritten.sql, self.host);
+        crate::capabilities::prefetch(&rewritten.sql, self.host);
         let parsed = match analyze::analyze(&rewritten.sql) {
             Ok(p) => Some(p),
             // A statement of a kind the analysis does not read (DDL, a session setting, EXPLAIN)
@@ -890,6 +914,7 @@ impl<'a> Engine<'a> {
         let trust = trust(self.host).zip(nullable.clone()).map(|(mut trust, nullable)| {
             trust.non_null_params = true;
             trust.nullable_params = nullable;
+            trust.null_equals = infer::compares_with_null(&rewritten.sql);
             trust
         });
         let operators = set_returning_operators(self.host);
@@ -941,6 +966,7 @@ impl<'a> Engine<'a> {
         if let Some(rows) = view_rows {
             merge_keys(&mut catalog, build_catalog(&operators, rows));
         }
+        *self.belied.borrow_mut() = crate::bodies::belied_labels(&mut catalog, self.host)?;
         catalog.views = view_definitions;
         catalog.not_null = self.not_null_columns();
         catalog.param_types = raw.params.clone();
@@ -1082,12 +1108,13 @@ impl<'a> Engine<'a> {
             ordered,
             value: false,
             rewritten,
+            sql_mode: None,
             style: lexed.style,
             diagnostics,
             unresolved,
             structured: Vec::new(),
-            fresh: None,
             errors: None,
+            capabilities: None,
             read_only: false,
             notes: Vec::new(),
             tables: None,
@@ -1200,12 +1227,13 @@ impl<'a> Engine<'a> {
             ordered: false,
             value: false,
             rewritten,
+            sql_mode: None,
             style: lexed.style,
             diagnostics,
             unresolved: Vec::new(),
             structured: Vec::new(),
-            fresh: None,
             errors: None,
+            capabilities: None,
             read_only: false,
             notes: Vec::new(),
             tables: None,
@@ -1287,7 +1315,7 @@ impl<'a> Engine<'a> {
             let definition = {
                 let known = self.relations.borrow();
                 let views = self.views.borrow();
-                known.iter().find(|(_, (n, _))| *n == name).and_then(|(oid, _)| views.get(oid).cloned())
+                known.iter().find(|(_, (n, _))| analyze::relation_name("", n) == name).and_then(|(oid, _)| views.get(oid).cloned())
             };
             let Some(definition) = definition else { continue };
             let parsed = analyze::analyze(&definition).ok();
@@ -1856,9 +1884,91 @@ impl<'a> Engine<'a> {
         *self.written_facts.borrow_mut() = written.iter().filter_map(|key| Some((*key, checks.facts.get(key)?.clone()))).collect();
         self.refine(sql, &mut described, trust)?;
         with_check_items(sql, parsed, &raw, &checks, &mut described);
+        self.written_values(sql, parsed, &raw, &mut described, trust)?;
         self.without_missing_rows(sql, parsed, &raw, &mut described);
         self.written_through(parsed, &raw, &mut described)?;
         Some(Ok((raw, described)))
+    }
+
+    /// The columns of an INSERT's, an UPDATE's or a MERGE's RETURNING list that read the target's
+    /// column of the row the statement wrote, non-null where the statement writes a non-null value
+    /// to that column in every row it returns ([`infer::written_returning`]) and nothing changes
+    /// the value on its way to the row: no row trigger runs before the write or in its place on the
+    /// relation or any partition or child of it, for any event the write sets off (a row an UPDATE
+    /// moves to another partition is deleted and inserted); no rewrite rule acts on the write and no
+    /// view takes it; the relation and its partitions are no foreign tables, whose wrapper returns a
+    /// row of its own; and no cast a user or an extension defined turns a value into the column's
+    /// type, which a string literal and a bare parameter never need, as the server reads them as
+    /// that type. Each result column must read the column by its provenance too. The catalog
+    /// query that names the triggers and the rules must have answered. A probe is narrowed this
+    /// way too, as a data-modifying WITH query is.
+    fn written_values(&self, sql: &str, parsed: Option<&Parsed>, raw: &RawDescribe, described: &mut DescribedStatement, trust: &Trust) -> Lazy<()> {
+        if parsed.is_none_or(|p| !matches!(p.statement, "insert" | "update" | "merge") || !p.has_returning) {
+            return Some(());
+        }
+        let columns = columns_where(true, sql, self.host)?;
+        let Some(found) = infer::written_returning(sql, trust, &columns) else { return Some(()) };
+        if found.columns.len() != raw.columns.len() || found.columns.len() != described.columns.len() || found.columns.iter().chain(&found.leaf_columns).all(Option::is_none) {
+            return Some(());
+        }
+        let rules = by_relation(self.host, cardinality::TRIGGERS_QUERY, std::slice::from_ref(&found.target))?;
+        // Column `n` of the SELECT an INSERT reads its rows from: non-null as its own analysis says.
+        let selected = match &found.select {
+            Some(select) => self.probe(select, trust)?,
+            None => None,
+        };
+        let Ok(rules) = rules else { return Some(()) };
+        // A host that answers without the rules' column reports none: every write is then taken
+        // as one a rule may rewrite.
+        let acted_on = rules.iter().filter(|row| row.first().and_then(as_str) == Some(found.target.as_str())).any(|row| {
+            let triggered = row.get(3).and_then(Value::as_array).into_iter().flatten().filter_map(as_u32).fold(row.get(1).and_then(as_u32).unwrap_or(28), |events, fires| events | fires);
+            let rewritten = row.get(2).map_or(Some(28), as_u32).unwrap_or(28);
+            ((triggered | rewritten) as i32 & found.events) != 0
+        });
+        if acted_on {
+            return Some(());
+        }
+        let written = {
+            let oids = self.oids_by_name.borrow();
+            let by_name = self.columns_by_name.borrow();
+            let relations = self.relations.borrow();
+            let registry = self.registry.borrow();
+            let (Some(oid), Some(known)) = (oids.get(&found.target), by_name.get(&found.target)) else { return Some(()) };
+            let attnum = |column: &str| known.iter().find(|(_, (name, _))| name == column).map(|(attnum, _)| *attnum);
+            // A column every row a scan of the relation reads holds a value in ([`Catalog::not_null`]).
+            let reads = relations.get(oid).map(|(_, reads)| reads);
+            let not_null = |column: &str| attnum(column).is_some_and(|a| reads.is_some_and(|reads| reads.get(&a) == Some(&true)));
+            let selected = |i: usize| selected.as_ref().and_then(|s| s.columns.get(i)).is_some_and(|c| !c.nullable);
+            // A column whose type, a domain's base type, no user's or extension's cast targets.
+            let uncast = |column: &str| columns.type_of(&found.target, column).and_then(|t| registry.get(registry.resolve_domain(t))).is_some_and(|t| trust.cast_targets.as_ref().is_none_or(|targets| targets.contains(&t.name)));
+            let written = found.non_null(&not_null, &selected, &uncast);
+            for ((column, raw), col) in found.columns.iter().zip(&raw.columns).zip(described.columns.iter_mut()) {
+                if column.as_deref().is_some_and(|column| raw.table == *oid && attnum(column) == Some(raw.attnum) && written.contains(column)) {
+                    col.nullable = false;
+                }
+            }
+            // Each leaf of the list's expressions that reads a column of the new row written a value.
+            found.leaf_columns.iter().map(|c| c.as_ref().is_some_and(|c| written.contains(c))).collect::<Vec<bool>>()
+        };
+        // An expression of the list reads a column written a value as that value: its leaf is
+        // non-null, and the expression is read again over the leaves.
+        let Some(probe) = found.plan.leaves.as_ref().filter(|_| found.plan.reads_leaves() && written.contains(&true)) else { return Some(()) };
+        let Some(mut leaves) = self.probe(probe, trust)?.map(|d| d.columns) else { return Some(()) };
+        if leaves.len() != written.len() {
+            return Some(());
+        }
+        for (leaf, written) in leaves.iter_mut().zip(&written) {
+            if *written {
+                leaf.nullable = false;
+            }
+        }
+        let count = described.columns.len();
+        for (col, claim) in described.columns.iter_mut().zip(found.plan.claims(count)) {
+            if claim.is_some_and(|claim| infer::resolve(claim, Some(&leaves)).non_null) {
+                col.nullable = false;
+            }
+        }
+        Some(())
     }
 
     /// PostgreSQL 18's `RETURNING old.*` and `new.*`, and a MERGE's source where the MERGE acts
@@ -2195,7 +2305,7 @@ impl<'a> Engine<'a> {
             }
         }
         // Without a parse tree nothing degrades and nothing is nulled by a join, which is
-        // wrong in the unsafe direction, so a statement libpg_query cannot read keeps every
+        // wrong in the unsafe direction, so a statement the parser cannot read keeps every
         // column nullable.
         let grouping = parsed.is_none_or(|p| p.has_grouping_sets);
         // A table read twice where an outer join nulls one reading: the describe names the table
@@ -2272,7 +2382,10 @@ impl<'a> Engine<'a> {
                     _ => false,
                 };
                 let whole_row = from_view || own_row;
-                DescribedColumn { name: col.name.clone(), type_oid: col.oid, typmod: col.typmod, type_name: registry.name(col.oid), nullable, nullable_items: None, distinct_items: false, nested: None, values: None, document, non_finite: Default::default(), facts: Default::default(), whole_row }
+                // A bare name read as an alias's row is the row where the describe names it so,
+                // whatever else degrades the column's provenance ([`DescribedColumn::own_row`]).
+                let read_whole = col.table != 0 && col.attnum == 0 && registry.get(col.oid).and_then(|t| t.relid) == Some(col.table);
+                DescribedColumn { name: col.name.clone(), type_oid: col.oid, typmod: col.typmod, type_name: registry.name(col.oid), nullable, nullable_items: None, distinct_items: false, nested: None, values: None, document, non_finite: Default::default(), facts: Default::default(), whole_row, own_row: read_whole }
             })
             .collect();
         let columns = columns
@@ -2500,7 +2613,7 @@ impl<'a> Engine<'a> {
     /// Per result column, `None` where it is no such column for certain.
     fn generated_rows(&self, sql: &str, count: usize, trust: &Trust) -> Lazy<Vec<Option<Type>>> {
         use infer::ItemRead;
-        use pg_query::protobuf::CommonTableExpr;
+        use syntax::postgres::protobuf::CommonTableExpr;
         let none = vec![None; count];
         let Ok(parsed) = crate::stack::parse(sql) else { return Some(none) };
         let with = match parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|n| n.node.as_ref()) {
@@ -2547,7 +2660,7 @@ impl<'a> Engine<'a> {
         if at.len() != count {
             return Some(none);
         }
-        let names = |nodes: &[pg_query::protobuf::Node]| nodes.iter().filter_map(|n| match n.node.as_ref() {
+        let names = |nodes: &[syntax::postgres::protobuf::Node]| nodes.iter().filter_map(|n| match n.node.as_ref() {
             Some(NodeEnum::String(s)) => Some(s.sval.clone()),
             _ => None,
         }).collect::<Vec<_>>();
@@ -2700,17 +2813,29 @@ impl<'a> Engine<'a> {
         if facts.len() != described.columns.len() {
             return Some(());
         }
+        // An array of a domain over an array type (`ARRAY[x]` of such a column, which the describe
+        // reports by its base type) holds the domain's values, each one value however its base
+        // type nests: Postgres builds it as an array of the domain, as the describe says it is.
+        let registry = self.registry.borrow();
+        let of_array_domains = |type_oid: u32| {
+            registry.get(type_oid).filter(|t| t.kind == crate::pgtypes::TypeKind::Array).and_then(|t| registry.get(t.elem?)).is_some_and(|e| {
+                e.kind == crate::pgtypes::TypeKind::Domain && registry.get(registry.resolve_domain(e.oid)).is_none_or(|base| base.kind == crate::pgtypes::TypeKind::Array)
+            })
+        };
         for (col, fact) in described.columns.iter_mut().zip(facts) {
             if let Some((non_null, items, nested)) = fact {
                 if non_null {
                     col.nullable = false;
                 }
                 col.nullable_items = items;
-                col.nested = nested;
+                col.nested = nested.filter(|_| !of_array_domains(col.type_oid));
             }
         }
+        drop(registry);
         // `ARRAY(SELECT …)`'s elements are its subquery's one column, which the subquery's own FROM
-        // and WHERE settle, over the items of this statement it may read.
+        // and WHERE settle, over the items of this statement it may read. A column of arrays is the
+        // rows of an array of more dimensions, whose elements are the arrays' own: non-null where
+        // the subquery's own analysis says so of them.
         if plan.set_op.is_none() {
             let subqueries = infer::array_subqueries(sql).filter(|s| s.len() == described.columns.len()).unwrap_or_default();
             let mut pending = false;
@@ -2718,7 +2843,9 @@ impl<'a> Engine<'a> {
                 let Some(subquery) = subquery else { continue };
                 match self.probe(subquery, trust) {
                     Some(Some(settled)) => {
-                        if matches!(settled.columns.as_slice(), [only] if !only.nullable) {
+                        let registry = self.registry.borrow();
+                        let no_array = |o: u32| registry.get(registry.resolve_domain(o)).is_some_and(|t| t.kind != crate::pgtypes::TypeKind::Array);
+                        if matches!(settled.columns.as_slice(), [only] if !only.nullable && (no_array(only.type_oid) || only.nullable_items == Some(false))) {
                             col.nullable_items = Some(false);
                         }
                     }
@@ -2813,6 +2940,7 @@ impl<'a> Engine<'a> {
         }
         self.refine(sql, &mut described, trust)?;
         with_check_items(sql, parsed.as_ref(), &raw, &checks, &mut described);
+        self.written_values(sql, parsed.as_ref(), &raw, &mut described, trust)?;
         self.without_missing_rows(sql, parsed.as_ref(), &raw, &mut described);
         self.written_through(parsed.as_ref(), &raw, &mut described)?;
         Some(Some(described))
@@ -2876,10 +3004,7 @@ fn conflict_targets(sql: &str) -> Vec<ConflictTarget> {
     fn target(insert: &Value) -> Option<ConflictTarget> {
         let relation = insert.get("relation")?;
         let name = relation.get("relname")?.as_str()?;
-        let relation = match relation.get("schemaname").and_then(Value::as_str) {
-            Some(schema) if !schema.is_empty() => format!("{schema}.{name}"),
-            _ => name.to_string(),
-        };
+        let relation = analyze::relation_name(relation.get("schemaname").and_then(Value::as_str).unwrap_or(""), name);
         let infer = insert.get("on_conflict_clause")?.get("infer")?;
         if infer.get("conname").and_then(Value::as_str).is_some_and(|c| !c.is_empty()) {
             return None;
@@ -3026,7 +3151,7 @@ fn missing_rows(sql: &str, origins: &[bool], columns: &dyn Fn(&str) -> Option<Ve
     let Ok(parsed) = crate::stack::parse(sql) else { return none };
     let Some(top) = parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|n| n.node.as_ref()) else { return none };
     // (the rows RETURNING can name, the target relation, the RETURNING list)
-    let shape = |node: &NodeEnum| -> Option<(Rows, String, Vec<pg_query::protobuf::Node>)> {
+    let shape = |node: &NodeEnum| -> Option<(Rows, String, Vec<syntax::postgres::protobuf::Node>)> {
         let (relation, clause) = match node {
             NodeEnum::InsertStmt(s) => (s.relation.as_ref()?, &s.returning_clause),
             NodeEnum::UpdateStmt(s) => (s.relation.as_ref()?, &s.returning_clause),
@@ -3034,9 +3159,9 @@ fn missing_rows(sql: &str, origins: &[bool], columns: &dyn Fn(&str) -> Option<Ve
             NodeEnum::MergeStmt(s) => (s.relation.as_ref()?, &s.returning_clause),
             _ => return None,
         };
-        Some((Rows::of(node)?, relation.relname.clone(), jsonshape::returning(clause)))
+        Some((Rows::of(node)?, analyze::relation_name(&relation.schemaname, &relation.relname), jsonshape::returning(clause)))
     };
-    let reads_missing = |rows: &Rows, relation: &str, node: &pg_query::protobuf::Node| {
+    let reads_missing = |rows: &Rows, relation: &str, node: &syntax::postgres::protobuf::Node| {
         let known = columns(relation);
         rows.reads_missing(node, &|name| known.as_ref().is_some_and(|k| k.iter().any(|c| c == name)))
     };
@@ -3113,7 +3238,7 @@ struct SublinkRows {
 /// set operation's columns trace to its leftmost arm, so where the statement holds one anywhere,
 /// only a bare reference to a column of a table in its own FROM is sure to be that column,
 /// whatever its WITH queries and subqueries hold: one read through a WITH query, a derived table
-/// or a `*` may come from any arm. A statement libpg_query cannot read owns none.
+/// or a `*` may come from any arm. A statement the parser cannot read owns none.
 fn own_provenance(sql: &str, parsed: Option<&Parsed>, count: usize) -> Vec<bool> {
     match parsed {
         Some(p) if !p.has_set_op => return vec![true; count],
@@ -3165,9 +3290,9 @@ fn with_check_items(sql: &str, parsed: Option<&Parsed>, raw: &RawDescribe, check
 /// name reads a column of any FROM in scope before it reads a row, which
 /// [`Engine::stored_sublinks`] rules out with the tables' columns.
 fn sublink_rows(sql: &str) -> Option<SublinkRows> {
-    use pg_query::protobuf::node::Node as N;
-    use pg_query::protobuf::{Node, SetOperation, SubLinkType};
-    use pg_query::NodeRef;
+    use syntax::postgres::protobuf::node::Node as N;
+    use syntax::postgres::protobuf::{Node, SetOperation, SubLinkType};
+    use syntax::postgres::NodeRef;
     let parsed = crate::stack::parse(sql).ok()?;
     let (mut tables, mut ctes) = (Vec::new(), Vec::new());
     for (node, _, _, _) in parsed.protobuf.nodes() {
@@ -3204,7 +3329,7 @@ fn sublink_rows(sql: &str) -> Option<SublinkRows> {
     fn empty(node: &Node) -> bool {
         match node.node.as_ref() {
             Some(N::TypeCast(c)) => c.arg.as_deref().is_some_and(empty),
-            Some(N::AConst(c)) => matches!(&c.val, Some(pg_query::protobuf::a_const::Val::Sval(s)) if s.sval.trim() == "{}"),
+            Some(N::AConst(c)) => matches!(&c.val, Some(syntax::postgres::protobuf::a_const::Val::Sval(s)) if s.sval.trim() == "{}"),
             Some(N::AArrayExpr(a)) => a.elements.is_empty(),
             _ => false,
         }
@@ -3266,6 +3391,7 @@ fn sublink_rows(sql: &str) -> Option<SublinkRows> {
     if select.op != SetOperation::SetopNone as i32 {
         return None;
     }
+    let tables = tables.iter().map(|t| analyze::relation_name("", t)).collect();
     Some(SublinkRows { targets: select.target_list.iter().map(row).collect(), tables })
 }
 
@@ -3321,8 +3447,8 @@ enum CheckArg {
 /// functions are such a validator, and which arguments hold the schema and the value, is
 /// [`crate::schema_type::postgres_validator`]'s to say.
 fn check_documents(text: &str, column: &str) -> Vec<(String, Vec<CheckArg>)> {
-    use pg_query::protobuf::node::Node as N;
-    use pg_query::protobuf::Node;
+    use syntax::postgres::protobuf::node::Node as N;
+    use syntax::postgres::protobuf::Node;
     let Ok(parsed) = crate::stack::parse(&format!("SELECT {text}")) else { return Vec::new() };
     let Some(N::SelectStmt(select)) = parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|s| s.node.as_ref()) else { return Vec::new() };
     let Some(N::ResTarget(target)) = select.target_list.first().and_then(|t| t.node.as_ref()) else { return Vec::new() };
@@ -3344,14 +3470,14 @@ fn check_documents(text: &str, column: &str) -> Vec<(String, Vec<CheckArg>)> {
     };
     let arg = |node: &Node| match uncast(node, &["json", "jsonb", "text"]).node.as_ref() {
         Some(N::AConst(c)) => match &c.val {
-            Some(pg_query::protobuf::a_const::Val::Sval(s)) => CheckArg::Schema(s.sval.clone()),
+            Some(syntax::postgres::protobuf::a_const::Val::Sval(s)) => CheckArg::Schema(s.sval.clone()),
             _ => CheckArg::Other,
         },
         _ if is_column(node) => CheckArg::Column,
         _ => CheckArg::Other,
     };
     fn calls(node: &Node, is_column: &dyn Fn(&Node) -> bool, arg: &dyn Fn(&Node) -> CheckArg, out: &mut Vec<(String, Vec<CheckArg>)>) {
-        use pg_query::protobuf::{BoolExprType, NullTestType};
+        use syntax::postgres::protobuf::{BoolExprType, NullTestType};
         match node.node.as_ref() {
             Some(N::BoolExpr(b)) if b.boolop == BoolExprType::AndExpr as i32 => {
                 for a in &b.args {
@@ -3400,12 +3526,12 @@ pub fn with_values(ty: Type, values: Option<&[String]>, string: bool) -> Type {
 /// one of its conjuncts tests the column `IS NOT NULL`, which a null makes false where any other
 /// test of it would be unknown, and so pass.
 fn refuses_null(text: &str, column: &str) -> bool {
-    use pg_query::protobuf::node::Node as N;
-    use pg_query::protobuf::{BoolExprType, NullTestType};
+    use syntax::postgres::protobuf::node::Node as N;
+    use syntax::postgres::protobuf::{BoolExprType, NullTestType};
     let Ok(parsed) = crate::stack::parse(&format!("SELECT {text}")) else { return false };
     let Some(N::SelectStmt(select)) = parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|s| s.node.as_ref()) else { return false };
     let Some(N::ResTarget(target)) = select.target_list.first().and_then(|t| t.node.as_ref()) else { return false };
-    fn conjunct(node: &pg_query::protobuf::Node, column: &str) -> bool {
+    fn conjunct(node: &syntax::postgres::protobuf::Node, column: &str) -> bool {
         match node.node.as_ref() {
             Some(N::BoolExpr(b)) if b.boolop == BoolExprType::AndExpr as i32 => b.args.iter().any(|a| conjunct(a, column)),
             Some(N::NullTest(t)) if t.nulltesttype == NullTestType::IsNotNull as i32 => match t.arg.as_deref().and_then(|a| a.node.as_ref()) {
@@ -3424,12 +3550,12 @@ fn refuses_null(text: &str, column: &str) -> bool {
 /// whether a NULL under casts of casts stays NULL (`casts`, where the CHECK calls no user's
 /// function): a NULL cast once from a literal always does.
 fn check_items(text: &str, column: &str, casts: bool) -> bool {
-    use pg_query::protobuf::node::Node as N;
-    use pg_query::protobuf::{BoolExprType, NullTestType};
+    use syntax::postgres::protobuf::node::Node as N;
+    use syntax::postgres::protobuf::{BoolExprType, NullTestType};
     let Ok(parsed) = crate::stack::parse(&format!("SELECT {text}")) else { return false };
     let Some(N::SelectStmt(select)) = parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|s| s.node.as_ref()) else { return false };
     let Some(N::ResTarget(target)) = select.target_list.first().and_then(|t| t.node.as_ref()) else { return false };
-    fn null(node: &pg_query::protobuf::Node, casts: bool) -> bool {
+    fn null(node: &syntax::postgres::protobuf::Node, casts: bool) -> bool {
         match node.node.as_ref() {
             Some(N::TypeCast(t)) => match t.arg.as_deref() {
                 Some(a) if matches!(a.node.as_ref(), Some(N::AConst(_))) => null(a, casts),
@@ -3440,7 +3566,7 @@ fn check_items(text: &str, column: &str, casts: bool) -> bool {
             _ => false,
         }
     }
-    fn conjunct(node: &pg_query::protobuf::Node, column: &str, casts: bool) -> bool {
+    fn conjunct(node: &syntax::postgres::protobuf::Node, column: &str, casts: bool) -> bool {
         match node.node.as_ref() {
             Some(N::BoolExpr(b)) if b.boolop == BoolExprType::AndExpr as i32 => b.args.iter().any(|a| conjunct(a, column, casts)),
             Some(N::NullTest(t)) if t.nulltesttype == NullTestType::IsNull as i32 => match t.arg.as_deref().and_then(|a| a.node.as_ref()) {
@@ -3466,14 +3592,16 @@ fn check_items(text: &str, column: &str, casts: bool) -> bool {
 /// of its own type and a cast one of the cast's.
 fn check_values(text: &str, column: &str, types: (Option<u32>, Option<u32>), trust: &Trust) -> Option<Vec<String>> {
     use crate::resolution::{Kind, Operand};
-    use pg_query::protobuf::node::Node as N;
+    use syntax::postgres::protobuf::node::Node as N;
     let parsed = crate::stack::parse(&format!("SELECT {text}")).ok()?;
     let Some(N::SelectStmt(select)) = parsed.protobuf.stmts.first()?.stmt.as_deref()?.node.as_ref() else { return None };
     let Some(N::ResTarget(target)) = select.target_list.first()?.node.as_ref() else { return None };
-    fn uncast(node: &pg_query::protobuf::Node) -> &pg_query::protobuf::Node {
+    /// A cast to a string type that keeps the value whole: one with a length (`varchar(1)`) cuts it,
+    /// so `x::varchar(1) IN ('a', 'b')` lets `'ab'` in.
+    fn uncast(node: &syntax::postgres::protobuf::Node) -> &syntax::postgres::protobuf::Node {
         match node.node.as_ref() {
             Some(N::TypeCast(t)) => {
-                let name = t.type_name.as_ref().and_then(|n| crate::jsonshape::last_string(&n.names)).unwrap_or_default();
+                let name = t.type_name.as_ref().filter(|n| n.typmods.is_empty()).and_then(|n| crate::jsonshape::last_string(&n.names)).unwrap_or_default();
                 match (["text", "varchar"].contains(&name.as_str()), t.arg.as_deref()) {
                     (true, Some(arg)) => uncast(arg),
                     _ => node,
@@ -3484,7 +3612,7 @@ fn check_values(text: &str, column: &str, types: (Option<u32>, Option<u32>), tru
     }
     // The type a printed operand has: its outermost cast's, where it has one. The server prints a
     // type's name bare only where the name reads as that type, schema-qualified elsewhere.
-    let cast_type = |node: &pg_query::protobuf::Node| match node.node.as_ref() {
+    let cast_type = |node: &syntax::postgres::protobuf::Node| match node.node.as_ref() {
         Some(N::TypeCast(t)) => match t.type_name.as_ref().and_then(|n| crate::infer::builtin_name(&n.names)).as_deref() {
             Some("text") => Some(Operand::Is(crate::pgtypes::oid::TEXT)),
             Some("varchar") => Some(Operand::Is(crate::pgtypes::oid::VARCHAR)),
@@ -3493,7 +3621,7 @@ fn check_values(text: &str, column: &str, types: (Option<u32>, Option<u32>), tru
         _ => None,
     };
     // A bare column is of its type, which a domain's CHECK reads as `VALUE` of the base type.
-    let column_type = |node: &pg_query::protobuf::Node| {
+    let column_type = |node: &syntax::postgres::protobuf::Node| {
         cast_type(node).unwrap_or(match (node.node.as_ref(), types) {
             (Some(N::ColumnRef(c)), (Some(declared), Some(base))) => match c.fields.as_slice() {
                 [f] if matches!(f.node.as_ref(), Some(N::String(s)) if s.sval == "value" && column != "value") => Operand::Is(base),
@@ -3503,28 +3631,28 @@ fn check_values(text: &str, column: &str, types: (Option<u32>, Option<u32>), tru
             _ => Operand::Opaque,
         })
     };
-    let is_column = |node: &pg_query::protobuf::Node| match uncast(node).node.as_ref() {
+    let is_column = |node: &syntax::postgres::protobuf::Node| match uncast(node).node.as_ref() {
         Some(N::ColumnRef(c)) => matches!(c.fields.as_slice(), [f] if matches!(f.node.as_ref(), Some(N::String(s)) if s.sval == column || s.sval == "value")),
         _ => false,
     };
-    let string = |node: &pg_query::protobuf::Node| match uncast(node).node.as_ref() {
+    let string = |node: &syntax::postgres::protobuf::Node| match uncast(node).node.as_ref() {
         Some(N::AConst(c)) => match &c.val {
-            Some(pg_query::protobuf::a_const::Val::Sval(s)) => Some(s.sval.clone()),
+            Some(syntax::postgres::protobuf::a_const::Val::Sval(s)) => Some(s.sval.clone()),
             _ => None,
         },
         _ => None,
     };
     // A value's type, a literal printed bare being of no type an `=` over strings takes.
-    let value_type = |node: &pg_query::protobuf::Node| cast_type(node).unwrap_or(Operand::Opaque);
+    let value_type = |node: &syntax::postgres::protobuf::Node| cast_type(node).unwrap_or(Operand::Opaque);
     type Comparisons = Vec<[crate::resolution::Operand; 2]>;
     struct Read<'a> {
-        is_column: &'a dyn Fn(&pg_query::protobuf::Node) -> bool,
-        string: &'a dyn Fn(&pg_query::protobuf::Node) -> Option<String>,
-        column_type: &'a dyn Fn(&pg_query::protobuf::Node) -> crate::resolution::Operand,
-        value_type: &'a dyn Fn(&pg_query::protobuf::Node) -> crate::resolution::Operand,
+        is_column: &'a dyn Fn(&syntax::postgres::protobuf::Node) -> bool,
+        string: &'a dyn Fn(&syntax::postgres::protobuf::Node) -> Option<String>,
+        column_type: &'a dyn Fn(&syntax::postgres::protobuf::Node) -> crate::resolution::Operand,
+        value_type: &'a dyn Fn(&syntax::postgres::protobuf::Node) -> crate::resolution::Operand,
     }
-    fn list(node: &pg_query::protobuf::Node, read: &Read, compared: &mut Comparisons) -> Option<Vec<String>> {
-        use pg_query::protobuf::{AExprKind, BoolExprType, NullTestType};
+    fn list(node: &syntax::postgres::protobuf::Node, read: &Read, compared: &mut Comparisons) -> Option<Vec<String>> {
+        use syntax::postgres::protobuf::{AExprKind, BoolExprType, NullTestType};
         match node.node.as_ref()? {
             N::BoolExpr(b) if b.boolop == BoolExprType::AndExpr as i32 => {
                 let mut lists = b.args.iter().filter_map(|a| list(a, read, compared));
@@ -3532,7 +3660,7 @@ fn check_values(text: &str, column: &str, types: (Option<u32>, Option<u32>), tru
                 Some(lists.fold(first, |kept, other| kept.into_iter().filter(|v| other.contains(v)).collect()))
             }
             N::BoolExpr(b) if b.boolop == BoolExprType::OrExpr as i32 && b.args.len() == 2 => {
-                let null_test = |a: &pg_query::protobuf::Node| matches!(a.node.as_ref(), Some(N::NullTest(t)) if t.nulltesttype == NullTestType::IsNull as i32 && t.arg.as_deref().is_some_and(read.is_column));
+                let null_test = |a: &syntax::postgres::protobuf::Node| matches!(a.node.as_ref(), Some(N::NullTest(t)) if t.nulltesttype == NullTestType::IsNull as i32 && t.arg.as_deref().is_some_and(read.is_column));
                 match (null_test(&b.args[0]), null_test(&b.args[1])) {
                     (true, false) => list(&b.args[1], read, compared),
                     (false, true) => list(&b.args[0], read, compared),
@@ -3592,8 +3720,8 @@ const JSON_KIND: Validators = &[&crate::schema_type::REYLO];
 /// Only where `=` over text is the built-in; the caller makes sure the call is.
 fn check_json_kinds(text: &str, column: &str, trust: &Trust) -> Vec<&'static str> {
     use crate::resolution::{Kind, Operand};
-    use pg_query::protobuf::node::Node as N;
-    use pg_query::protobuf::{AExprKind, BoolExprType, Node, NullTestType};
+    use syntax::postgres::protobuf::node::Node as N;
+    use syntax::postgres::protobuf::{AExprKind, BoolExprType, Node, NullTestType};
     let Ok(parsed) = crate::stack::parse(&format!("SELECT {text}")) else { return Vec::new() };
     let Some(N::SelectStmt(select)) = parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|s| s.node.as_ref()) else { return Vec::new() };
     let Some(N::ResTarget(target)) = select.target_list.first().and_then(|t| t.node.as_ref()) else { return Vec::new() };
@@ -3607,8 +3735,8 @@ fn check_json_kinds(text: &str, column: &str, trust: &Trust) -> Vec<&'static str
         let Some(N::TypeCast(t)) = node.node.as_ref() else { return None };
         let Some(N::AConst(c)) = t.arg.as_deref().and_then(|a| a.node.as_ref()) else { return None };
         match &c.val {
-            Some(pg_query::protobuf::a_const::Val::Sval(s)) if s.sval == "object" => Some(r#"{"type":"object"}"#),
-            Some(pg_query::protobuf::a_const::Val::Sval(s)) if s.sval == "array" => Some(r#"{"type":"array"}"#),
+            Some(syntax::postgres::protobuf::a_const::Val::Sval(s)) if s.sval == "object" => Some(r#"{"type":"object"}"#),
+            Some(syntax::postgres::protobuf::a_const::Val::Sval(s)) if s.sval == "array" => Some(r#"{"type":"array"}"#),
             _ => None,
         }
     };
@@ -3651,17 +3779,18 @@ fn check_json_kinds(text: &str, column: &str, trust: &Trust) -> Vec<&'static str
 pub fn check_array_values(text: &str, column: &str, types: (Option<u32>, Option<u32>), trust: &Trust) -> Option<Vec<String>> {
     use crate::pgtypes::oid;
     use crate::resolution::{Kind, Operand};
-    use pg_query::protobuf::node::Node as N;
-    use pg_query::protobuf::{AExprKind, BoolExprType, Node, NullTestType};
+    use syntax::postgres::protobuf::node::Node as N;
+    use syntax::postgres::protobuf::{AExprKind, BoolExprType, Node, NullTestType};
     let array_type = types.1.filter(|base| [oid::TEXT_ARRAY, oid::VARCHAR_ARRAY].contains(base))?;
     let parsed = crate::stack::parse(&format!("SELECT {text}")).ok()?;
     let Some(N::SelectStmt(select)) = parsed.protobuf.stmts.first()?.stmt.as_deref()?.node.as_ref() else { return None };
     let Some(N::ResTarget(target)) = select.target_list.first()?.node.as_ref() else { return None };
-    /// A cast to a string type, as the server prints one around a column of a domain.
+    /// A cast to a string type, as the server prints one around a column of a domain: with no
+    /// length, which would cut each element (`arr::varchar(1)[]`).
     fn uncast(node: &Node) -> &Node {
         match node.node.as_ref() {
             Some(N::TypeCast(t)) => {
-                let name = t.type_name.as_ref().and_then(|n| crate::infer::builtin_name(&n.names)).unwrap_or_default();
+                let name = t.type_name.as_ref().filter(|n| n.typmods.is_empty()).and_then(|n| crate::infer::builtin_name(&n.names)).unwrap_or_default();
                 match (["text", "varchar"].contains(&name.as_str()), t.arg.as_deref()) {
                     (true, Some(arg)) => uncast(arg),
                     _ => node,
@@ -3679,7 +3808,7 @@ pub fn check_array_values(text: &str, column: &str, types: (Option<u32>, Option<
             let Some(N::AConst(c)) = uncast(element).node.as_ref() else { return None };
             match &c.val {
                 _ if c.isnull => {}
-                Some(pg_query::protobuf::a_const::Val::Sval(s)) => out.push(s.sval.clone()),
+                Some(syntax::postgres::protobuf::a_const::Val::Sval(s)) => out.push(s.sval.clone()),
                 _ => return None,
             }
         }
@@ -3729,8 +3858,8 @@ pub fn check_array_values(text: &str, column: &str, types: (Option<u32>, Option<
 pub fn check_non_finite(text: &str, column: &str, types: (Option<u32>, Option<u32>), trust: &Trust) -> Option<NonFinite> {
     use crate::pgtypes::oid;
     use crate::resolution::{Kind, Operand};
-    use pg_query::protobuf::node::Node as N;
-    use pg_query::protobuf::{a_const::Val, AExprKind, BoolExprType, Node, NullTestType};
+    use syntax::postgres::protobuf::node::Node as N;
+    use syntax::postgres::protobuf::{a_const::Val, AExprKind, BoolExprType, Node, NullTestType};
     let parsed = crate::stack::parse(&format!("SELECT {text}")).ok()?;
     let Some(N::SelectStmt(select)) = parsed.protobuf.stmts.first()?.stmt.as_deref()?.node.as_ref() else { return None };
     let Some(N::ResTarget(target)) = select.target_list.first()?.node.as_ref() else { return None };
@@ -3758,7 +3887,7 @@ pub fn check_non_finite(text: &str, column: &str, types: (Option<u32>, Option<u3
             _ => body.parse::<f64>().ok().filter(|v| v.is_finite()).map(|_| Value::Finite),
         }
     }
-    fn number_type(cast: &pg_query::protobuf::TypeCast) -> Option<u32> {
+    fn number_type(cast: &syntax::postgres::protobuf::TypeCast) -> Option<u32> {
         match crate::infer::builtin_name(&cast.type_name.as_ref()?.names)?.as_str() {
             "numeric" => Some(oid::NUMERIC),
             "float8" => Some(oid::FLOAT8),
@@ -3890,15 +4019,15 @@ pub fn check_non_finite(text: &str, column: &str, types: (Option<u32>, Option<u3
 pub fn check_facts(text: &str, column: &str, types: (Option<u32>, Option<u32>), deterministic: bool, trust: &Trust) -> Option<CheckFacts> {
     use crate::pgtypes::oid;
     use crate::resolution::{Kind, Operand};
-    use pg_query::protobuf::node::Node as N;
-    use pg_query::protobuf::{a_const::Val, AExprKind, BoolExprType, Node, NullTestType};
+    use syntax::postgres::protobuf::node::Node as N;
+    use syntax::postgres::protobuf::{a_const::Val, AExprKind, BoolExprType, Node, NullTestType};
     let parsed = crate::stack::parse(&format!("SELECT {text}")).ok()?;
     let Some(N::SelectStmt(select)) = parsed.protobuf.stmts.first()?.stmt.as_deref()?.node.as_ref() else { return None };
     let Some(N::ResTarget(target)) = select.target_list.first()?.node.as_ref() else { return None };
     let check = target.val.as_deref()?;
 
     // A number type, but for one with a modifier, whose cast rounds (`2.55::numeric(3,1)`).
-    fn number_type(cast: &pg_query::protobuf::TypeCast) -> Option<u32> {
+    fn number_type(cast: &syntax::postgres::protobuf::TypeCast) -> Option<u32> {
         let name = cast.type_name.as_ref()?;
         if !name.typmods.is_empty() {
             return None;
@@ -4170,8 +4299,8 @@ pub fn check_facts(text: &str, column: &str, types: (Option<u32>, Option<u32>), 
 /// since Postgres reports one only where every element has it.
 pub fn nest(col: &DescribedColumn, registry: &crate::pgtypes::TypeRegistry) -> Type {
     let level = |element: Type| crate::types::ArrayType::of(crate::types::Slot::non_null(element));
-    let Type { kind, label, comment } = registry.render_typmod(col.type_oid, col.typmod);
-    let named = |kind| Type { kind, label: label.clone(), comment: comment.clone() };
+    let Type { kind, label, comment, title } = registry.render_typmod(col.type_oid, col.typmod);
+    let named = |kind| Type { kind, label: label.clone(), comment: comment.clone(), title: title.clone() };
     match (col.nested, kind) {
         (Some(infer::Nesting { rows, element }), TyKind::Array(array)) => {
             let mut inner = match element {
@@ -4241,10 +4370,16 @@ fn same_value_is_equal(ty: &Type, in_json: bool) -> bool {
 /// test that rests on one does not prove the joined row exists.
 fn witness_holds(witness: &analyze::Witness, relation: &str, columns: &[Vec<Value>], trust: &Trust) -> bool {
     use crate::resolution::Operand;
+    // Under `transform_null_equals`, `x = NULL` is `x IS NULL`, which holds of NULL.
+    if trust.null_equals && witness.calls.iter().any(infer::StrictCall::null_equality) {
+        return false;
+    }
     // A domain's column, or one the catalog does not report, is of no type the build vouches for.
     let read = || -> Option<Operand> {
         let name = witness.column.last()?;
-        let row = columns.iter().find(|r| r.first().and_then(as_str) == Some(relation))?;
+        // The rows are keyed by the name as the catalog was asked it, quoted where it must be.
+        let asked = analyze::relation_name("", relation);
+        let row = columns.iter().find(|r| r.first().and_then(as_str) == Some(asked.as_str()))?;
         let at = row.get(1).and_then(as_strings)?.iter().position(|c| c == name)?;
         let base = row.get(2)?.as_array()?.get(at).and_then(as_u32)?;
         let declared = row.get(5)?.as_array()?.get(at).and_then(as_u32)?;
@@ -4265,14 +4400,14 @@ fn witness_holds(witness: &analyze::Witness, relation: &str, columns: &[Vec<Valu
 }
 
 /// A column reference's names, where each is a plain name.
-fn bare_fields(c: &pg_query::protobuf::ColumnRef) -> Option<Vec<String>> {
+fn bare_fields(c: &syntax::postgres::protobuf::ColumnRef) -> Option<Vec<String>> {
     c.fields.iter().map(|f| match f.node.as_ref() {
         Some(NodeEnum::String(s)) => Some(s.sval.clone()),
         _ => None,
     }).collect()
 }
 
-/// The relations a statement reads or writes, as the parse names them, sorted. libpg_query
+/// The relations a statement reads or writes, as the parse names them, sorted. The parser's walk
 /// collects them through a hash set, so each parse lists them in another order; a query that
 /// carried that order would be a new need every round, and the replay would settle only when two
 /// rounds happened to agree.
@@ -4316,6 +4451,7 @@ fn merge_keys(into: &mut Catalog, from: Catalog) {
     into.functions.extend(from.functions);
     into.set_returning.extend(from.set_returning);
     into.volatile.extend(from.volatile);
+    into.labelled.extend(from.labelled);
 }
 
 fn build_catalog(set_returning: &(HashSet<String>, HashSet<String>), rows: CatalogRows) -> Catalog {
@@ -4409,6 +4545,11 @@ fn build_catalog(set_returning: &(HashSet<String>, HashSet<String>), rows: Catal
             if row.get(2).and_then(as_bool).unwrap_or(true) {
                 catalog.volatile.insert(name.to_string());
             }
+            // A host that answers without the fourth column reports no `language sql` function:
+            // every function is then taken at its label.
+            if row.get(3).and_then(as_bool).unwrap_or(false) {
+                catalog.labelled.insert(name.to_string());
+            }
             catalog.functions.insert(name.to_string());
         }
     }
@@ -4422,7 +4563,7 @@ fn build_catalog(set_returning: &(HashSet<String>, HashSet<String>), rows: Catal
 /// expands to. Nothing where a bare `*`, or a star of an item `width` does not answer for, hides
 /// which target is which column, or the targets are not the columns.
 fn aliased_columns(sql: &str, count: usize, width: &dyn Fn(&str) -> Option<usize>) -> Vec<Option<(String, bool)>> {
-    use pg_query::protobuf::{JoinType, Node};
+    use syntax::postgres::protobuf::{JoinType, Node};
     fn items(node: &Node, nulled: bool, ctes: &[String], out: &mut HashMap<String, Option<(String, bool)>>, qualified: &mut Vec<String>) {
         match node.node.as_ref() {
             Some(NodeEnum::RangeVar(rv)) => {
@@ -4465,7 +4606,7 @@ fn aliased_columns(sql: &str, count: usize, width: &dyn Fn(&str) -> Option<usize
     }
     let Ok(parsed) = crate::stack::parse(sql) else { return Vec::new() };
     let Some(NodeEnum::SelectStmt(select)) = parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|n| n.node.as_ref()) else { return Vec::new() };
-    if select.op != pg_query::protobuf::SetOperation::SetopNone as i32 && select.op != 0 {
+    if select.op != syntax::postgres::protobuf::SetOperation::SetopNone as i32 && select.op != 0 {
         return Vec::new();
     }
     let ctes: Vec<String> = select
@@ -4534,12 +4675,22 @@ struct InsertTarget {
     defaults: Vec<usize>,
 }
 
+/// A relation's name in a message, in double quotes: as [`analyze::relation_name`] writes it where
+/// that quotes a part already (`"Users"`, `public."a.b"`).
+fn shown(relation: &str) -> String {
+    if relation.contains('"') {
+        relation.to_string()
+    } else {
+        format!("\"{relation}\"")
+    }
+}
+
 /// The INSERT the top statement is (a WITH before it allowed), as [`InsertTarget`] reads it.
 fn insert_target(sql: &str) -> Option<InsertTarget> {
     let parsed = crate::stack::parse(sql).ok()?;
     let Some(NodeEnum::InsertStmt(insert)) = parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|n| n.node.as_ref()) else { return None };
     let rv = insert.relation.as_ref()?;
-    let relation = if rv.schemaname.is_empty() { rv.relname.clone() } else { format!("{}.{}", rv.schemaname, rv.relname) };
+    let relation = analyze::relation_name(&rv.schemaname, &rv.relname);
     let start = usize::try_from(rv.location).ok()?;
     let end = sql[start..].find(|c: char| c.is_whitespace() || c == '(').map_or(sql.len(), |i| start + i);
     let columns = (!insert.cols.is_empty()).then(|| {
@@ -4571,7 +4722,7 @@ fn insert_target(sql: &str) -> Option<InsertTarget> {
                 width = None;
             }
         }
-        Some(NodeEnum::SelectStmt(select)) if select.op == pg_query::protobuf::SetOperation::SetopNone as i32 => {
+        Some(NodeEnum::SelectStmt(select)) if select.op == syntax::postgres::protobuf::SetOperation::SetopNone as i32 => {
             let star = select.target_list.iter().any(|t| matches!(t.node.as_ref(), Some(NodeEnum::ResTarget(rt)) if rt.val.as_deref().is_some_and(expands)));
             width = (!star).then_some(select.target_list.len());
         }
@@ -4582,8 +4733,8 @@ fn insert_target(sql: &str) -> Option<InsertTarget> {
 
 /// Whether a SELECT's target or a VALUES item stands for as many values as a row has columns:
 /// `t.*`, or `(composite).*`, which parses as an indirection ending in the star.
-fn expands(node: &pg_query::protobuf::Node) -> bool {
-    let last_is_star = |items: &[pg_query::protobuf::Node]| items.last().is_some_and(|f| matches!(f.node.as_ref(), Some(NodeEnum::AStar(_))));
+fn expands(node: &syntax::postgres::protobuf::Node) -> bool {
+    let last_is_star = |items: &[syntax::postgres::protobuf::Node]| items.last().is_some_and(|f| matches!(f.node.as_ref(), Some(NodeEnum::AStar(_))));
     match node.node.as_ref() {
         Some(NodeEnum::ColumnRef(c)) => last_is_star(&c.fields),
         Some(NodeEnum::AIndirection(i)) => last_is_star(&i.indirection),
@@ -4612,8 +4763,8 @@ fn unwritten(target: &InsertTarget, rows: &[Vec<Value>]) -> Option<String> {
     let quoted: Vec<String> = missing.iter().map(|m| format!("\"{m}\"")).collect();
     match quoted.as_slice() {
         [] => None,
-        [one] => Some(format!("Column {one} of \"{}\" is NOT NULL with no default, and this insert leaves it out or writes DEFAULT to it, so Postgres refuses every row it inserts.", target.relation)),
-        many => Some(format!("Columns {} of \"{}\" are NOT NULL with no default, and this insert leaves them out or writes DEFAULT to them, so Postgres refuses every row it inserts.", many.join(", "), target.relation)),
+        [one] => Some(format!("Column {one} of {} is NOT NULL with no default, and this insert leaves it out or writes DEFAULT to it, so Postgres refuses every row it inserts.", shown(&target.relation))),
+        many => Some(format!("Columns {} of {} are NOT NULL with no default, and this insert leaves them out or writes DEFAULT to them, so Postgres refuses every row it inserts.", many.join(", "), shown(&target.relation))),
     }
 }
 
@@ -4672,7 +4823,7 @@ fn column_spans(sql: &str, rewritten: &Rewritten) -> Vec<(usize, usize)> {
     let Ok(parsed) = crate::stack::parse(&rewritten.sql) else { return Vec::new() };
     let Some(top) = parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|n| n.node.as_ref()) else { return Vec::new() };
     let Some((items, _, _)) = jsonshape::top_context(top) else { return Vec::new() };
-    let targets: Vec<&pg_query::protobuf::ResTarget> = items.iter().map_while(|i| match i.node.as_ref() {
+    let targets: Vec<&syntax::postgres::protobuf::ResTarget> = items.iter().map_while(|i| match i.node.as_ref() {
         Some(NodeEnum::ResTarget(rt)) => Some(&**rt),
         _ => None,
     }).collect();
@@ -4867,7 +5018,7 @@ mod tests {
     /// How many result columns the top statement's own target list names (the leftmost arm's
     /// for a set operation), which is what the fake describer reports.
     fn target_count(sql: &str) -> usize {
-        fn arm(s: &pg_query::protobuf::SelectStmt) -> usize {
+        fn arm(s: &syntax::postgres::protobuf::SelectStmt) -> usize {
             match s.larg.as_deref() {
                 Some(left) => arm(left),
                 None => s.target_list.len(),
@@ -4875,9 +5026,9 @@ mod tests {
         }
         let parsed = crate::stack::parse(sql).expect("the probe parses");
         match parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|n| n.node.as_ref()) {
-            Some(pg_query::NodeEnum::SelectStmt(s)) => arm(s).max(1),
+            Some(syntax::postgres::NodeEnum::SelectStmt(s)) => arm(s).max(1),
             // DDL describes with no columns, as Postgres does.
-            Some(pg_query::NodeEnum::CreateStmt(_) | pg_query::NodeEnum::AlterTableStmt(_) | pg_query::NodeEnum::CopyStmt(_)) => 0,
+            Some(syntax::postgres::NodeEnum::CreateStmt(_) | syntax::postgres::NodeEnum::AlterTableStmt(_) | syntax::postgres::NodeEnum::CopyStmt(_)) => 0,
             _ => 1,
         }
     }
@@ -5683,7 +5834,7 @@ mod tests {
 
     #[test]
     fn a_position_the_parse_reports_is_an_offset_in_the_text_it_read() {
-        // libpg_query 18 leaves comments out of what it parses; a location is still an offset in
+        // Postgres's parser leaves comments out of what it parses; a location is still an offset in
         // the text with them, which is where a diagnostic is put.
         let sql = "/* upsert */ INSERT INTO bar (id, name) -- the row\n VALUES ($1, $2) /* é */ ON CONFLICT (name) DO NOTHING";
         let target = conflict_targets(sql).into_iter().next().expect("a target");
@@ -5705,7 +5856,7 @@ mod tests {
 
     #[test]
     fn a_round_names_the_same_needs_however_the_parse_orders_its_tables() {
-        // libpg_query lists a statement's tables in hash order, which differs between parses; a
+        // The parser's walk lists a statement's tables in hash order, which differs between parses; a
         // need that carried that order would be new every round and the replay would not settle.
         let sql = "SELECT a.x FROM alpha a JOIN beta b ON b.id = a.id JOIN gamma g ON g.id = b.id JOIN delta d ON d.id = g.id";
         let answers: HashMap<String, Answer> = HashMap::new();

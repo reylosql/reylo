@@ -272,7 +272,7 @@ struct Info {
     /// whether the planner replaces it itself, its drop (none where it goes with what it is on),
     /// its create, and where it stands among the schema's objects.
     goes: Vec<(String, String, String, String, usize)>,
-    /// The names of its schema a rebuild's new table could take.
+    /// The names of its schema a rebuild's own tables and indexes could take.
     taken: BTreeSet<String>,
 }
 
@@ -322,7 +322,7 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
     let list: BTreeMap<String, Row> = db.rows("select name, type, strict, wr from pragma_table_list where schema = 'main'").await?.into_iter().map(|r| (fold(r.text("name")), r)).collect();
     let shadow = |name: &str| list.get(&fold(name)).is_some_and(|r| r.text("type") == "shadow");
     let rows: Vec<Row> = db
-        .rows(&format!("select type, name, tbl_name as tbl, sql from sqlite_schema where name not like 'sqlite_%' and tbl_name <> '{HISTORY_TABLE}' and sql is not null order by rowid"))
+        .rows(&format!("select type, name, tbl_name as tbl, sql from sqlite_schema where name not like 'sqlite_%' and tbl_name <> '{HISTORY_TABLE}' and name {turso} and tbl_name {turso} and sql is not null and {} order by rowid", crate::catalog::NOT_LIBSQL_VECTOR_OWN, turso = crate::catalog::NOT_TURSO_OWN))
         .await?
         .into_iter()
         .filter(|r| !shadow(r.text("tbl")))
@@ -401,7 +401,7 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
                     name: name.to_string(),
                     autoincrement: tokens.iter().any(|t| t.upper() == "AUTOINCREMENT"),
                     bare_rowid: !wr && !alias,
-                    taken: names.iter().filter(|n| n.starts_with("new_")).cloned().collect(),
+                    taken: names.iter().filter(|n| n.starts_with("new_") || n.starts_with("reylo_aside_")).cloned().collect(),
                     ..Info::default()
                 };
                 for (k, p) in table_parts.iter().enumerate() {
@@ -526,6 +526,15 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
     for (id, info) in infos {
         if let Some(o) = s.objects.get_mut(&id) {
             o.extra = info.lines();
+        }
+    }
+    // What the file keeps of the project's own, where it is set: `pragma user_version` and
+    // `pragma application_id`. One the target no longer sets is left as it is, as an app may set
+    // its own.
+    for pragma in ["user_version", "application_id"] {
+        let value = db.rows(&format!("select {pragma} as v from pragma_{pragma}")).await?.first().map(|r| r.text("v").to_string()).unwrap_or_default();
+        if !value.is_empty() && value != "0" {
+            s.add(Object { id: format!("pragma {pragma}"), kind: Some(Kind::ColumnSetting), def: value.clone(), create: vec![format!("pragma {pragma} = {value}")], ..Object::default() });
         }
     }
     Ok(s)
@@ -690,6 +699,133 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
             out.push(format!("-- {} is not null with no default, so the copy fails on a table that has rows: give it a default, or add it nullable, fill it, then make it not null", p.tokens[0].text));
         }
     }
+    // The columns both have, but those the new table generates.
+    let copied: Vec<String> = new_parts
+        .iter()
+        .filter(|p| p.column.as_deref().is_some_and(|c| find(&old_parts, c).is_some() && !flag(c, 'g')))
+        .map(|p| p.tokens[0].text.clone())
+        .collect();
+    let named: Vec<String> = old_columns.iter().chain(new_columns.iter()).map(|(c, _)| c.clone()).collect();
+    let mut texts: Vec<String> = vec![target.clone()];
+    for (child, _) in &children {
+        texts.push(child.create.first()?.clone());
+    }
+    // A name no object of the schema has, nor one of `used`: `base`, else `base` and a number.
+    let free = |base: String, used: &BTreeSet<String>| -> String {
+        (1..)
+            .map(|n| if n == 1 { base.clone() } else { format!("{base}_{n}") })
+            .find(|n| !used.contains(&fold(n)) && !family.iter().any(|(x, y)| x.taken.contains(&fold(n)) || y.taken.contains(&fold(n))))
+            .unwrap_or_default()
+    };
+    // With foreign keys on, as a Durable Object and D1 keep them, a row copied into a table that
+    // references another looks its key up there, and a key that is a unique index of its own must
+    // stand by then, not after the copies, where what goes with a table is otherwise made again:
+    // the unique indexes of each rebuilt table that one of them references. One the plan replaces
+    // (renames, or makes again another way) it drops before the rebuild and makes after it, so
+    // the rebuild makes that one for itself, as it was, and drops it when the rows are in.
+    let referenced: BTreeSet<String> = texts
+        .iter()
+        .flat_map(|text| {
+            let tokens = tokenize(text, Dialect::Sqlite);
+            (0..tokens.len()).filter(|&k| tokens[k].upper() == "REFERENCES").filter_map(|k| tokens.get(k + 1).and_then(name_of)).collect::<Vec<_>>()
+        })
+        .filter(|table| family.iter().any(|(x, _)| fold(&x.name) == *table))
+        .collect();
+    // The columns each rebuilt table has while it is rebuilt: the new table's, by their old names.
+    let columns_then: BTreeMap<String, BTreeSet<String>> = family.iter().zip(&texts).map(|((x, _), text)| (fold(&x.name), parts(text).iter().filter_map(|p| p.column.clone()).collect())).collect();
+    // Whether a text is a key a foreign key can name: a unique index of a referenced table, on
+    // whole columns it has then, over every row.
+    let is_key = |create: &str| {
+        let tokens = tokenize(create, Dialect::Sqlite);
+        unique_index(&tokens).is_some_and(|(_, table)| name_of(&tokens[table]).is_some_and(|t| referenced.contains(&t) && columns_then.get(&t).is_some_and(|columns| whole_columns(&tokens[table + 1..], columns))))
+    };
+    let (keys, coming): (Vec<_>, Vec<_>) = by_rank(coming).into_iter().partition(|(_, create)| is_key(create));
+    let mut replaced: Vec<(usize, String)> = Vec::new();
+    for (x, y) in &family {
+        for item in x.goes.iter().filter(|i| !kept(i, y) && is_key(&i.3)) {
+            if !replaced.iter().any(|(_, create)| *create == item.3) {
+                replaced.push((item.4, item.3.clone()));
+            }
+        }
+    }
+    replaced.sort();
+    // A table whose text names its columns by its own name (a check written `"users"."age" > 21`)
+    // can be neither made under another name nor renamed: SQLite reads the name as the table's
+    // own. Where one of the tables rebuilt together is such, the rows of each wait in a table of
+    // their own instead (no temporary one, which a Durable Object refuses), while the tables are
+    // made again under their names, each after what it references, and filled in the same order.
+    if family.iter().zip(&texts).any(|((x, _), text)| names_itself(text, &x.name)) {
+        if cycle {
+            out.push("-- these tables reference each other, so no order fills them: their keys wait for the commit".to_string());
+            out.push("pragma defer_foreign_keys = on".to_string());
+        }
+        // Each member's columns to keep, the rowid where no column is it, and whether it counts.
+        let mut members: Vec<(String, String, String, bool)> = Vec::new();
+        for (k, ((x, y), text)) in family.iter().zip(&texts).enumerate() {
+            let mut kept: Vec<String> = if k == 0 {
+                copied.clone()
+            } else {
+                parts(text).iter().filter(|p| p.column.as_deref().is_some_and(|c| !x.flag(c, 'g'))).map(|p| p.tokens[0].text.clone()).collect()
+            };
+            let names: Vec<String> = if k == 0 { named.clone() } else { parts(text).iter().filter_map(|p| p.column.clone()).collect() };
+            if x.bare_rowid && y.bare_rowid {
+                if let Some(rowid) = ["rowid", "_rowid_", "oid"].into_iter().find(|n| !names.iter().any(|c| c == n)) {
+                    kept.insert(0, rowid.to_string());
+                }
+            }
+            members.push((x.name.clone(), kept.join(", "), text.clone(), x.autoincrement && y.autoincrement));
+        }
+        // Where each member's rows wait, and its counter: names no table has, nor another of these.
+        let mut used: BTreeSet<String> = BTreeSet::new();
+        let mut asides: Vec<(String, String)> = Vec::new();
+        for (name, ..) in &members {
+            let rows = free(format!("reylo_aside_{name}"), &used);
+            used.insert(fold(&rows));
+            let counter = free(format!("reylo_aside_{name}_sequence"), &used);
+            used.insert(fold(&counter));
+            asides.push((quote(&rows), quote(&counter)));
+        }
+        for ((name, list, _, sequence), (aside, seq_aside)) in members.iter().zip(&asides) {
+            if !list.is_empty() {
+                out.push(format!("create table {aside} as select {list} from {}", quote(name)));
+            }
+            if *sequence {
+                out.push(format!("create table {seq_aside} as select seq from sqlite_sequence where name = {}", literal(name)));
+            }
+        }
+        for (name, ..) in members.iter().rev() {
+            out.push(format!("drop table {}", quote(name)));
+        }
+        for (_, _, text, _) in &members {
+            out.push(text.clone());
+        }
+        // The old tables took their indexes with them: the keys come back before the rows, and
+        // one the plan makes again itself stands meanwhile under a name of its own.
+        out.extend(keys.into_iter().map(|(_, create)| create));
+        let mut standing: Vec<String> = Vec::new();
+        for (_, create) in &replaced {
+            let tokens = tokenize(create, Dialect::Sqlite);
+            let (name, _) = unique_index(&tokens)?;
+            let scratch = free(format!("new_{}", unquote(&tokens[name])), &used);
+            used.insert(fold(&scratch));
+            out.push(rewrite(create, &tokens, |k, _| (k == name).then(|| quote(&scratch))));
+            standing.push(scratch);
+        }
+        for ((name, list, _, sequence), (aside, seq_aside)) in members.iter().zip(&asides) {
+            if !list.is_empty() {
+                out.push(format!("insert into {} ({list}) select {list} from {aside}", quote(name)));
+                out.push(format!("drop table {aside}"));
+            }
+            if *sequence {
+                out.push(format!("delete from sqlite_sequence where name = {}", literal(name)));
+                out.push(format!("insert into sqlite_sequence (name, seq) select {}, seq from {seq_aside}", literal(name)));
+                out.push(format!("drop table {seq_aside}"));
+            }
+        }
+        out.extend(standing.iter().map(|name| format!("drop index {}", quote(name))));
+        out.extend(coming.into_iter().map(|(_, create)| create));
+        return Some(out);
+    }
     if cycle {
         out.push("-- these tables reference each other, so no order fills them: their keys wait for the commit".to_string());
         out.push("pragma defer_foreign_keys = on".to_string());
@@ -723,13 +859,18 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
     for ((x, _), (child, _)) in family[1..].iter().zip(&children) {
         out.push(renamed_text(child.create.first()?, &x.name)?);
     }
-    // The columns both have, but those the new table generates; and the rowid where no column is it.
-    let copied: Vec<String> = new_parts
-        .iter()
-        .filter(|p| p.column.as_deref().is_some_and(|c| find(&old_parts, c).is_some() && !flag(c, 'g')))
-        .map(|p| p.tokens[0].text.clone())
-        .collect();
-    let named: Vec<String> = old_columns.iter().chain(new_columns.iter()).map(|(c, _)| c.clone()).collect();
+    // Each key on its table's new one, under a name of its own while the old index has its name.
+    let mut used: BTreeSet<String> = scratches.values().map(|(name, _)| fold(name)).collect();
+    let mut passing: Vec<String> = Vec::new();
+    for (_, create) in keys.iter().chain(&replaced) {
+        let tokens = tokenize(create, Dialect::Sqlite);
+        let (name, table) = unique_index(&tokens)?;
+        let scratch = free(format!("new_{}", unquote(&tokens[name])), &used);
+        used.insert(fold(&scratch));
+        let on = scratch_of(&name_of(&tokens[table])?);
+        out.push(rewrite(create, &tokens, |k, _| if k == name { Some(quote(&scratch)) } else if k == table { Some(on.clone()) } else { None }));
+        passing.push(scratch);
+    }
     copy_rows(&mut out, &a, &b, &scratches[&fold(&a.name)].0, copied, &named);
     for ((x, y), (child, _)) in family[1..].iter().zip(&children) {
         let child_parts = parts(child.create.first()?);
@@ -744,12 +885,53 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
     for (x, _) in &family {
         out.push(format!("alter table {} rename to {}", scratch_of(&x.name), quote(&x.name)));
     }
-    out.extend(by_rank(coming).into_iter().map(|(_, create)| create));
+    // The keys under their own names again, as they were written, with the rest of what was taken down.
+    out.extend(passing.iter().map(|name| format!("drop index {}", quote(name))));
+    let mut again: Vec<(usize, String)> = keys.into_iter().chain(coming).collect();
+    again.sort();
+    out.extend(again.into_iter().map(|(_, create)| create));
     Some(out)
 }
 
-/// The tables of `from` that reference the table `id`, at any depth, each with itself in `to`: one
-/// the plan drops is no part of a rebuild, since the plan drops it first. Each comes after every one
+/// Where a unique index's stored text names the index and its table; None for anything else.
+fn unique_index(tokens: &[Token]) -> Option<(usize, usize)> {
+    let at = name_at(tokens)?;
+    let unique = tokens[..at].iter().any(|t| t.upper() == "UNIQUE") && tokens[at - 1].upper() == "INDEX";
+    (unique && tokens.get(at + 1).is_some_and(|t| t.upper() == "ON") && at + 2 < tokens.len()).then_some((at, at + 2))
+}
+
+/// Whether what follows an index's table in its text is a list of whole columns among `columns`
+/// and nothing more: no expression and no WHERE, neither of which a foreign key's parent key may
+/// have. A column may name its collation, which is the column's own where the index is a key.
+fn whole_columns(list: &[Token], columns: &BTreeSet<String>) -> bool {
+    let Some(close) = list.iter().position(|t| t.text == ")") else { return false };
+    if list.first().is_none_or(|t| t.text != "(") || close + 1 != list.len() {
+        return false;
+    }
+    let mut k = 1;
+    while k < close {
+        let t = &list[k];
+        // A collation, and its name after it.
+        if t.upper() == "COLLATE" {
+            k += 2;
+            continue;
+        }
+        if t.text != "," && !matches!(t.upper().as_str(), "ASC" | "DESC") && name_of(t).is_none_or(|c| !columns.contains(&c)) {
+            return false;
+        }
+        k += 1;
+    }
+    true
+}
+
+/// Whether a table's text names a column by the table's own name, as `"users"."age"`.
+fn names_itself(sql: &str, table: &str) -> bool {
+    let tokens = tokenize(sql, Dialect::Sqlite);
+    (0..tokens.len()).any(|k| tokens.get(k + 1).is_some_and(|n| n.text == ".") && (k == 0 || tokens[k - 1].text != ".") && name_of(&tokens[k]).is_some_and(|n| fold(&n) == fold(table)))
+}
+
+/// The tables of `from` that reference the table `id`, at any depth, and still do in `to`, each with
+/// itself in `to`: one the plan drops is no part of a rebuild, since the plan drops it first. Each comes after every one
 /// of them it references, and the answer's second part says whether some reference each other, so
 /// that no order has that.
 fn children_of<'a>(from: &'a Schema, to: &'a Schema, id: &str) -> (Vec<(&'a Object, &'a Object)>, bool) {
@@ -760,7 +942,10 @@ fn children_of<'a>(from: &'a Schema, to: &'a Schema, id: &str) -> (Vec<(&'a Obje
     while k < seen.len() {
         let parent = seen[k].clone();
         k += 1;
-        for o in from.objects.values().filter(table).filter(|o| o.deps.contains(&parent)) {
+        // One that stops referencing it changes first, the planner's order for what stops
+        // depending on a table, so it no longer references it when the rebuild runs.
+        let still = |o: &&Object| to.objects.get(&o.id).is_some_and(|t| t.deps.contains(&parent));
+        for o in from.objects.values().filter(table).filter(|o| o.deps.contains(&parent)).filter(still) {
             if !seen.contains(&o.id) {
                 seen.push(o.id.clone());
                 family.push(o);

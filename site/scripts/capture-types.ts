@@ -22,6 +22,7 @@
 // to lib/sql-errors.json; an example the mapper finds no error in fails the run.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -227,8 +228,11 @@ async function buildMysql(schema: string, url = URLS.mysql): Promise<string> {
   return url;
 }
 
+/** A schema with a libSQL vector index is made on libSQL, through the `libsql` package `@libsql/client` opens files with: SQLite has no `libsql_vector_idx`. */
 function buildSqlite(dir: string, schema: string): string {
-  const db = new DatabaseSync(path.join(dir, 'capture.db'));
+  const file = path.join(dir, 'capture.db');
+  const require = createRequire(import.meta.url);
+  const db: { exec(sql: string): unknown; close(): void } = /libsql_vector_idx/i.test(schema) ? new (createRequire(require.resolve('@libsql/client'))('libsql'))(file) : new DatabaseSync(file);
   try {
     db.exec(schema);
   } finally {
@@ -419,7 +423,7 @@ if (errors.length) {
 
 // The inference cards' other languages (lib/remark-mapper.ts): each statement's type descriptor, its
 // parameters and result as `reylo analyze` writes them, and its Rust types, as `#[reylo::query]`
-// writes them, from the renderer `REYLO_DOCS_RUST` names (reylo-codegen's `docs` example). Without
+// writes them, from the renderer `REYLO_DOCS_RUST` names (reylo-build's `docs` example). Without
 // it, the Rust types the file already holds are kept.
 type InferenceCapture = { descriptor: { params: unknown; result: unknown }; rust?: { params: string; returns: string } | { error: string } };
 const capturesFile = path.join(site, 'lib', 'inference-captures.json');

@@ -40,6 +40,8 @@ export interface Base {
   label?: string;
   /** The comment the source keeps on a named type, such as `COMMENT ON TYPE`. A field's own comment is on the field. */
   comment?: string;
+  /** A short name for the type, written for a reader, as JSON Schema's `title`: `Mailing address`, on a type whose `label` is `public.address`. Like the comment, it says nothing of the values. */
+  title?: string;
 }
 
 /** Inclusive bounds on an integer's values, in its canonical text, as JSON Schema's `minimum` and `maximum` are. Every bound on a whole number has an inclusive spelling (`x > 0` is `min: "1"`), so an integer takes no exclusive bound. Bounds narrow its values only beyond what its width implies. */
@@ -54,7 +56,7 @@ export interface Bounded extends InclusivelyBounded {
   exclusive_max?: string;
 }
 
-/** How long a value is, in whole numbers of its kind's unit (bytes, elements, or a text's `unit`): `exact`, or `min`, `max` or both. A length is never exclusive, since a whole number has an inclusive spelling. */
+/** How long a value is, in whole numbers of its kind's unit (bytes, elements, a map's keys, or a text's `unit`): `exact`, or `min`, `max` or both. A length is never exclusive, since a whole number has an inclusive spelling. */
 export interface Size {
   exact?: number;
   min?: number;
@@ -120,6 +122,8 @@ export interface TextType extends Base {
   pattern?: string;
   /** What the text is, as a media type (`text/html`): JSON Schema's `contentMediaType`. */
   media_type?: string;
+  /** What the text is meant to be, by JSON Schema's format name (`email`, `uri`, `hostname`, `ipv4`) or a source's own. It is a name alone, which says nothing of the values: a rule every value keeps is written as a `pattern`. A consumer that does not know a format ignores it. A format the format has a kind for is written as that kind: `date-time` is an `instant`, `uuid` a `uuid` and `binary` `bytes`. */
+  format?: string;
 }
 
 /** A text's length: in code points where `unit` is absent, in the encoding's code units (UTF-16 units, as a JavaScript string's `length` counts), or in bytes in the encoding. A unit other than code points is written only where the text names its `encoding`. */
@@ -281,8 +285,8 @@ export interface StructType extends Base {
   extra?: Slot;
 }
 
-/** Keys to values, each key once and in no order: a dictionary. A map whose keys may repeat is an array of `{ key, value }` structs. */
-export interface MapType extends Base {
+/** Keys to values, each key once and in no order: a dictionary. A map whose keys may repeat is an array of `{ key, value }` structs. Its size counts its keys, as JSON Schema's `minProperties` and `maxProperties` do. */
+export interface MapType extends Base, Sized {
   kind: "map";
   /** Inside JSON content, a key is text and never null. */
   key: Slot;
@@ -401,8 +405,8 @@ export interface UnknownType {
 
 /** What introspecting one statement returns. A tool may write keys of its own beside these, as `reylo analyze` writes the file a statement was read from. */
 export interface StatementDescriptor {
-  /** The version of the format the descriptor is written in, as the URL of that version's JSON Schema, which a validator or an editor reads. Versions are semantic, and until 1.0.0 a new minor version may change anything. */
-  $schema: "https://reylo.dev/typedefs/0.1.0.json";
+  /** The format the descriptor is written in, as the URL of its JSON Schema, which a validator or an editor reads. Until 1.0.0 the format is a preview, which changes in place and has no version number; from 1.0.0 the URL names the version. */
+  $schema: "https://reylo.dev/typedefs/preview.json";
   dialect: Dialect;
   /** The statement as the database runs it, with its own placeholders (`$1` on Postgres, `?` on MySQL and SQLite), in the order `params` lists them. */
   sql: string;
@@ -413,6 +417,8 @@ export interface StatementDescriptor {
   params: Param[];
   /** What the statement returns, a table: a row of columns per row, and its cardinality. A statement that returns one value is still a row of one column, which keeps the column's name. A row is an object keyed by its columns' names, which keeps only the last of two with one name, so a statement whose result repeats a name (`select a.id, b.id`) has a diagnostic at each later column of it, asking for another name with `as`. The name the database gives a column stands: Postgres calls `select 1`'s `?column?`. */
   result: TableType;
+  /** What running the statement may do, an upper bound: a flag it lacks, or a table it does not name, is something it cannot do, so a statement whose tables are all `read` and that has no flag only reads. Absent, nothing is said. */
+  capabilities?: Capabilities;
   /** What the database or the introspection reports against the statement, each at its place, so an editor can underline it. A statement that does not parse has a diagnostic and no columns. */
   diagnostics: Diagnostic[];
 }
@@ -441,6 +447,8 @@ export interface Field extends Slot {
   default?: string;
   /** What the field is, as its source documents it, such as the comment a database keeps on a column. */
   comment?: string;
+  /** A short name for the field, as JSON Schema's `title`. */
+  title?: string;
 }
 
 /** A statement's parameter. Where the statement writes it whole into a column, its type is that column's: `insert into t (price) values (:price)` into a decimal of scale 2 gives `price` that scale, though the database describes the parameter with none and would round 1.234. That is stricter than the server, never looser. */
@@ -457,3 +465,20 @@ export interface Dialect {
   name: string;
   version: string;
 }
+
+/** What running a statement may do: the tables it touches, and four kinds of effect beyond their rows. */
+export interface Capabilities {
+  /** Each table the statement touches, qualified as a `label` is (`public.posts`), with the most it may do to its rows, through a view, a partition, a foreign key's action or a sequence's default too; `unknown` where it may touch tables the analysis cannot name, as through a function or a trigger whose body it does not read. */
+  tables: { [table: string]: Access; } | "unknown";
+  /** Creates, alters or drops what the database defines, or changes who may use it: `CREATE`, `ALTER`, `DROP`, `GRANT`. */
+  ddl?: true;
+  /** Begins or ends a transaction: `BEGIN`, `COMMIT`, `SAVEPOINT`, and MySQL's DDL, which commits. */
+  transaction?: true;
+  /** Leaves state on the connection after it: `SET`, a temporary table, a session's advisory lock, `PREPARE`, `LISTEN`, MySQL's `USE`, a SQLite `PRAGMA` or `ATTACH`. */
+  session?: true;
+  /** Reaches past the connection and the data: the server's settings (`ALTER SYSTEM`, `SET GLOBAL`), another session (`NOTIFY`, ending a backend), a file or the network. */
+  external?: true;
+}
+
+/** The most a statement may do to a table's rows, each covering the ones before it: `read`; `readlock`, which reads them and locks them until its transaction ends (`FOR UPDATE`, `LOCK TABLE`); and `write`, which inserts, updates or deletes them. */
+export type Access = "read" | "readlock" | "write";

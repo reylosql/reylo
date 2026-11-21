@@ -4,13 +4,9 @@ title: "Tracing"
 
 ## Observability
 
-Trace every query Reylo runs, and see when its schema changes.
+Trace every query Reylo runs.
 
-### Tracing
-
-Reylo publishes every query it runs to a tracing channel.
-
-To add observability (o11y) to your queries, subscribe to Node's [tracing channel](https://nodejs.org/api/diagnostics_channel.html#class-tracingchannel) `reylo:query`, where Reylo publishes every query it runs, and wrap each one in a span:
+Subscribe to Node's [tracing channel](https://nodejs.org/api/diagnostics_channel.html#class-tracingchannel) `reylo:query`, and wrap each query in a span:
 
 ```ts twoslash
 type Span = { recordException(error: unknown): void; end(): void };
@@ -42,6 +38,6 @@ queries.subscribe({
 });
 ```
 
-Each event carries the `query`, its `params`, the `client`, and then its `result` or `error`. Calls to `.runSync()` and `.trySync()` set `sync` and end on `end`; every other call ends on `asyncEnd`.
+Each event carries the `query`, its `params` and the `client`. A later event adds the `result` or the `error`. Calls to `.runSync()` and `.trySync()` set `sync` and end on `end`. Every other call ends on `asyncEnd`.
 
 The channel is there on Node, on Bun, and on Cloudflare Workers with the `nodejs_compat` flag. Elsewhere, queries run untraced.

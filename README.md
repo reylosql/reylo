@@ -8,14 +8,14 @@
 <p align="center">Import <code>.sql</code> files into your TypeScript code with full type inference</p>
 
 <p align="center">
-  <a href="https://github.com/colinhacks/reylo/actions/workflows/test.yml"><img src="https://github.com/colinhacks/reylo/actions/workflows/test.yml/badge.svg?branch=main" alt="test status" /></a>
-  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/github/license/colinhacks/reylo?style=flat" alt="License: MIT" /></a>
-  <a href="https://www.npmjs.com/package/reylo"><img src="https://img.shields.io/github/v/release/colinhacks/reylo?label=npm" alt="npm version" /></a>
-  <a href="https://github.com/colinhacks/reylo"><img src="https://img.shields.io/github/stars/colinhacks/reylo" alt="GitHub stars" /></a>
+  <a href="https://github.com/reylosql/reylo/actions/workflows/test.yml"><img src="https://github.com/reylosql/reylo/actions/workflows/test.yml/badge.svg?branch=main" alt="test status" /></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/github/license/reylosql/reylo?style=flat" alt="License: MIT" /></a>
+  <a href="https://www.npmjs.com/package/reylo"><img src="https://img.shields.io/github/v/release/reylosql/reylo?label=npm" alt="npm version" /></a>
+  <a href="https://github.com/reylosql/reylo"><img src="https://img.shields.io/github/stars/reylosql/reylo" alt="GitHub stars" /></a>
 </p>
 
 <div align="center">
-  <a href="https://reylo.dev">Read the docs →</a>
+  <a href="https://reylo.dev/docs">Read the docs →</a>
 </div>
 
 <br/>
@@ -50,7 +50,7 @@ const author = await getAuthor.run(db, { id: 1 });
 // { id: number; name: string; post_count: number } | null
 ```
 
-Reylo is powered by TypeScript [content mappers](https://github.com/microsoft/typescript-go/pull/4712), introduced in TypeScript 7.1 (currently [in beta](https://devblogs.microsoft.com/typescript/announcing-typescript-7-1-beta/)), which let you dynamically define static types for external file types and integrate them directly into TypeScript compilation.
+Reylo is powered by TypeScript [content mappers](https://github.com/microsoft/typescript-go/pull/4712), introduced in [TypeScript 7.1](https://devblogs.microsoft.com/typescript/announcing-typescript-7-1-beta/) (currently in nightly builds), which let you dynamically define static types for external file types and integrate them directly into TypeScript compilation.
 
 Reylo is the perfect option for the agent era:
 
@@ -66,15 +66,15 @@ Reylo is the perfect option for the agent era:
 
 To install Reylo, you'll need:
 
-- **TypeScript 7.1 (currently in beta).** The first release with content mappers.
+- **TypeScript 7.1 (currently in nightly builds).** The first release with content mappers. The `tsconfig.json` entry below needs a nightly from 2026-11-12 or later.
 - **Node 24 or later.**
-- **A running dev database.** Postgres, MySQL 8.0.22 or later, or a SQLite file: Reylo reads your current schema from it.
+- **A running dev database.** Postgres, MySQL 8.0.38 or later, or a SQLite file: Reylo reads your current schema from it.
 
 Install Reylo, which brings its engine for your machine, and TypeScript 7.1:
 
 ```sh
 npm install reylo
-npm install -D typescript@beta
+npm install -D typescript@next
 ```
 
 Add Reylo to `tsconfig.json`, for `.sql` files and for its project file, `.reylo.yaml` or `.reylo.yml`:
@@ -83,9 +83,7 @@ Add Reylo to `tsconfig.json`, for `.sql` files and for its project file, `.reylo
 // tsconfig.json
 {
   "compilerOptions": { /* ... */ },
-  "contentMappers": [
-    { "package": "reylo", "extensions": [".sql", ".reylo.yaml", ".reylo.yml"] }
-  ]
+  "contentMappers": [{ "package": "reylo" }]
 }
 ```
 
@@ -104,7 +102,7 @@ Point Reylo at your dev database with `DATABASE_URL`, in your environment or in 
 
 ```sh
 # .env
-DATABASE_URL=postgres://localhost:5432/app  # or mysql://…, or file:./app.db for SQLite
+DATABASE_URL=postgres://localhost:5432/app  # or mysql://… or sqlite:./path/to/your.db, etc
 ```
 
 To make `.sql` imports work at run time too, load Reylo where your code runs. On Node:
@@ -113,12 +111,12 @@ To make `.sql` imports work at run time too, load Reylo where your code runs. On
 node --env-file=.env --import reylo/register main.ts
 ```
 
-For Bun, Nub, Vite, Next.js, esbuild, webpack, Rspack, Cloudflare Workers and Jest, add [the plugin for your setup](https://reylo.dev/#plugins), or copy its complete [example project](https://github.com/colinhacks/reylo/tree/main/examples). To see the types as you type, set up [your editor](https://reylo.dev/#editors).
+For Bun, Nub, Vite, Next.js, esbuild, webpack, Rspack, Cloudflare Workers and Jest, add [the plugin for your setup](https://reylo.dev/#plugins), or copy its complete [example project](https://github.com/reylosql/reylo/tree/main/examples). To see the types as you type, set up [your editor](https://reylo.dev/#editors).
 
 To give your coding agent Reylo's rules for writing and running queries, install its skill:
 
 ```sh
-npx skills add colinhacks/reylo --skill using-reylo
+npx skills add reylosql/reylo --skill reylo
 ```
 
 ## Usage
@@ -163,11 +161,11 @@ Each has examples in [Inference](https://reylo.dev/#inference).
 
 ## Supported drivers
 
-Reylo is bring-your-own-driver. Pass `.run()` a client from any of these, or a Drizzle database or Knex instance over one:
+Reylo is bring-your-own-driver. Pass `.run()` a client from any of these, or a Drizzle connection or Knex instance over one:
 
-- **Postgres** — `pg`, postgres.js, `Bun.sql`, PGlite, Neon, `pg-promise`, `slonik`, `@vercel/postgres`
+- **Postgres** — `pg`, postgres.js, `Bun.sql`, PGlite, Neon, `pg-promise`, `slonik`, `@vercel/postgres`, Drizzle Postgres
 - **MySQL** — `mysql2`, `mariadb`, PlanetScale, `Bun.sql`
-- **SQLite** — `better-sqlite3`, `node:sqlite`, `Bun.sql`, libSQL, Turso, SQLite Wasm, Cloudflare D1 and Durable Objects, `sqlite3`, `sqlite`
+- **SQLite** — `better-sqlite3`, `node:sqlite`, `Bun.sql`, libSQL, Turso, SQLite Wasm, sql.js, Cloudflare D1 and Durable Objects, `sqlite3`, `sqlite`
 
 ## Documentation
 

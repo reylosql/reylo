@@ -2,9 +2,11 @@ import path from 'node:path';
 import { docsKit } from 'docs-kit/vite';
 import { defineConfig } from 'vite';
 import { compareCards } from './lib/compare-cards.ts';
+import { homeExamples } from './lib/home-examples.ts';
 import { live } from './lib/live/plugin.ts';
 import { playground } from './lib/playground-plugin.ts';
 import { mapperDependents } from './lib/remark-mapper.ts';
+import { rustContentPlugin } from './lib/rust-content.ts';
 import * as mdxConfig from './source.config.ts';
 
 // docs-kit's plugins (docs-kit/src/vite.ts): fumadocs-mdx over source.config.ts, Tailwind 4, React
@@ -12,16 +14,18 @@ import * as mdxConfig from './source.config.ts';
 // section re-rendered alone), and the mapper's own (a section compiled again when a statement it
 // imports from another section changes, and only then), and the local playground's endpoint on the
 // dev server (lib/playground-plugin.ts), and the live card's files (lib/live/plugin.ts). `@/` is the site's root; `collections` is fumadocs-mdx's
-// generated .source/ (lib/source.ts).
+// generated .source/ (lib/source.ts). First of all, each file of content/ with its Rust content
+// left out while the docs leave Rust out (lib/rust-content.ts).
 export default defineConfig({
-  plugins: [...docsKit(mdxConfig), mapperDependents(), playground(), live(), compareCards()],
+  plugins: [rustContentPlugin(), ...docsKit(mdxConfig), mapperDependents(), playground(), live(), compareCards(), homeExamples()],
   resolve: {
     alias: {
       '@': import.meta.dirname,
       collections: path.join(import.meta.dirname, '.source'),
     },
   },
-  server: { port: 3311 },
+  // The build writes build/ inside the site; a dev server watching it reloaded every page on each build.
+  server: { port: 3311, watch: { ignored: ['**/build/**', '**/.share/**'] } },
   // The live card's worker (lib/live/worker.ts) loads PGlite as a chunk of its own, which a module
   // worker can; PGlite finds its files by the URLs it is handed, so Vite leaves it unbundled in dev.
   // PGlite's data file, which its own code and the worker both name, ships as a `.tar`: the CDN
