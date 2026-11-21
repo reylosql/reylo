@@ -105,9 +105,12 @@ pub trait Actions {
     fn reduce(&mut self, rule: usize, values: &mut [Self::Value], locations: &[i32], here: i32, last_read: Option<usize>) -> Result<Self::Value, String>;
     /// The error when the parser's stack is full, with the last token asked for.
     fn exhausted(&mut self, _last_read: Option<usize>) -> String {
-        "memory exhausted".to_string()
+        EXHAUSTED.to_string()
     }
 }
+
+/// What Bison says when its stack reaches `YYMAXDEPTH`.
+pub const EXHAUSTED: &str = "memory exhausted";
 
 /// Actions that keep nothing: a parse for its tree alone.
 pub struct NoActions;
@@ -236,10 +239,12 @@ pub fn parse<'s, A: Actions>(tables: &Tables, text: &'s str, tokens: &[Lexeme], 
             }
             Action::Error => {
                 // What was read of the statement, and the tokens to its end, under one error node.
-                let at = tokens.get(p);
+                let at = tokens.get(if full && !peeked { p.saturating_sub(1) } else { p });
                 let end_of_text = text.len() as u32;
                 let (from, to) = at.map_or((end_of_text, end_of_text), |l| (l.start, l.end));
-                errors.push(SyntaxError { message: String::new(), start: from, end: to });
+                // Bison's own limit, at the last token read. Any other error's words are the caller's.
+                let message = if full { EXHAUSTED.to_string() } else { String::new() };
+                errors.push(SyntaxError { message, start: from, end: to });
                 acting = false;
                 values.clear();
                 locations.clear();

@@ -126,6 +126,15 @@ mod tests {
     }
 
     #[test]
+    fn the_parser_stack_limit_is_one_error_at_its_token() {
+        let text = format!("select {}1", "(".repeat(12_000));
+        let tree = parse(Dialect::Postgres, &text);
+        assert_eq!(tree.errors.len(), 1);
+        assert_eq!(tree.errors[0].message, "memory exhausted at or near \"(\"");
+        assert_eq!(tree.errors[0].end - tree.errors[0].start, 1);
+    }
+
+    #[test]
     fn a_statement_with_an_error_keeps_all_its_text() {
         assert_eq!(spans(Dialect::Postgres, "select 1; select u. from users u"), ["select 1", "select u. from users u"]);
         assert_eq!(spans(Dialect::Postgres, "select 1; select ); select 2;"), ["select 1", "select )", "select 2"]);

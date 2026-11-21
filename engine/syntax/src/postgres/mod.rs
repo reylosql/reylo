@@ -184,10 +184,8 @@ pub fn parse_tree(text: &str) -> Tree<'_> {
     };
     let mut parsed = lalr::parse(tables(), text, &lexemes, tail, tok_semicolon(), statement_list(), &mut NoActions);
     for e in &mut parsed.tree.errors {
-        e.message = syntax_message(text, e.start, e.end);
-    }
-    if let (Some(message), Some(e)) = (parsed.refused.take(), parsed.tree.errors.first_mut()) {
-        e.message = message;
+        let words = if e.message.is_empty() { "syntax error" } else { lalr::EXHAUSTED };
+        e.message = message_at(words, text, e.start, e.end);
     }
     if let Some(e) = scan_error {
         parsed.tree.errors.retain(|o| o.start != e.start);
@@ -217,7 +215,8 @@ fn refusal(text: &str) -> Option<SyntaxError> {
     helpers::reset_extra();
     let parsed = lalr::parse(tables(), text, &lexemes, tail, tok_semicolon(), statement_list(), &mut TreeActions { text, read: &read });
     helpers::reset_extra();
-    let message = parsed.refused?;
+    // The tree's own parse has reported the stack's limit, at its token.
+    let message = parsed.refused.filter(|m| !m.starts_with(lalr::EXHAUSTED))?;
     let (start, end) = parsed.refused_at.unwrap_or((0, text.len() as u32));
     Some(SyntaxError { message, start, end })
 }
@@ -234,10 +233,14 @@ fn statement_list() -> &'static [u16] {
 
 /// Postgres's words for a syntax error at a token.
 pub fn syntax_message(text: &str, start: u32, end: u32) -> String {
+    message_at("syntax error", text, start, end)
+}
+
+fn message_at(words: &str, text: &str, start: u32, end: u32) -> String {
     if start as usize >= text.len() {
-        "syntax error at end of input".to_string()
+        format!("{words} at end of input")
     } else {
-        format!("syntax error at or near \"{}\"", &text[start as usize..end as usize])
+        format!("{words} at or near \"{}\"", &text[start as usize..end as usize])
     }
 }
 
