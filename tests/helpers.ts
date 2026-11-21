@@ -128,16 +128,21 @@ export async function postgresDatabase(prefix: string, setup?: string) {
   const url = new URL(PG!);
   url.pathname = `/${name}`;
   const sql = postgres(url.href, { max: 1, onnotice: () => {} });
-  if (setup) await sql.unsafe(setup).simple();
-  return {
-    url: url.href,
-    sql,
-    async drop() {
-      await sql.end();
-      await admin.unsafe(`drop database if exists ${name} with (force)`);
-      await admin.end();
-    },
+  const drop = async () => {
+    await sql.end();
+    await admin.unsafe(`drop database if exists ${name} with (force)`);
+    await admin.end();
   };
+  if (setup) {
+    try {
+      await sql.unsafe(setup).simple();
+    } catch (e) {
+      // A setup that fails drops the database and closes both connections, which would otherwise keep the test's process alive.
+      await drop();
+      throw e;
+    }
+  }
+  return { url: url.href, sql, drop };
 }
 
 /** A database of a test's own on the test MySQL, its URL, and a mysql2 connection to it as the driver connects by default, with `setup` run first. */
@@ -153,7 +158,15 @@ export async function mysqlDatabase(prefix: string, setup?: string) {
   url.pathname = `/${name}`;
   if (setup) {
     const setter = await connect(name, true);
-    await setter.query(setup);
+    try {
+      await setter.query(setup);
+    } catch (e) {
+      // A setup that fails drops the database and closes both connections, which would otherwise keep the test's process alive.
+      await setter.end();
+      await admin.query(`drop database if exists ${name}`);
+      await admin.end();
+      throw e;
+    }
     await setter.end();
   }
   const db = await connect(name);
