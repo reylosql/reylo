@@ -253,7 +253,26 @@ pub fn parse<'s, A: Actions>(tables: &Tables, text: &'s str, tokens: &[Lexeme], 
                         complete.contains(&n.kind) || (n.leaf && n.kind == separator)
                     })
                     .count();
-                finished.extend(held.drain(..done));
+                // A list the error's lookahead reduced ends in the statement the error is in: its earlier statements stand, and that one goes with the error.
+                let open = done.checked_sub(1).map(|last| held[last]).filter(|id| complete.contains(&nodes[*id as usize].kind));
+                if let Some(mut node) = open {
+                    finished.extend(held.drain(..done - 1));
+                    while complete.contains(&nodes[node as usize].kind) {
+                        let n = nodes[node as usize];
+                        match child_ids[n.lead as usize..(n.lead + n.children) as usize] {
+                            [one] => node = one,
+                            [earlier, sep, last] if nodes[sep as usize].leaf && nodes[sep as usize].kind == separator => {
+                                finished.extend([earlier, sep]);
+                                node = last;
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
+                    held[0] = node;
+                } else {
+                    finished.extend(held.drain(..done));
+                }
                 while let Some(l) = tokens.get(p) {
                     nodes.push(Node { kind: l.sym, start: l.start, end: l.end, lead: l.lead, children: 0, leaf: true });
                     held.push(nodes.len() as NodeId - 1);
