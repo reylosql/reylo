@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 pub const USAGE: &str = "Usage: reylo analyze <file.sql | directory | 'glob' | -> ... [--url <url>] [--format yaml | json]
        reylo analyze --sql <statement> [--url <url>] [--format yaml | json]
 
-Prints each statement's type descriptor, with the file it was read from: as YAML, a document per
-statement (--format yaml, the default), or as one line of JSON per statement (--format json).
+Prints each statement's type descriptor, with the file it was read from when there are several:
+as YAML, a document per statement (--format yaml, the default), or as one line of JSON per
+statement (--format json).
 Each diagnostic is also written to standard error, as file:line:column and the message, with a
 caret under its place. A directory is searched for .sql files, leaving out node_modules, dist,
 build, out, target, coverage, hidden directories and what git ignores; a glob in quotes, as
@@ -201,6 +202,9 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
         _ => Dialect::Sqlite,
     };
     let mut flagged = false;
+    // A run of one statement prints its descriptor alone, since the caller named its file; a run of
+    // several names each one's file, which tells their descriptors apart.
+    let several = inputs.len() > 1;
     for (at, input) in inputs.into_iter().enumerate() {
         let descriptor = match session.analyze(&input.sql).await {
             Ok(analysis) => {
@@ -234,7 +238,7 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
         flagged |= !descriptor.diagnostics.is_empty();
         report(input.file.as_deref(), &input.sql, &descriptor.diagnostics);
         let mut line = Map::new();
-        if let Some(file) = input.file {
+        if let Some(file) = input.file.filter(|_| several) {
             line.insert("file".into(), Value::String(file));
         }
         if let Ok(Value::Object(fields)) = serde_json::to_value(&descriptor) {
