@@ -48,6 +48,32 @@ jobs:
         run: |
           [ -n "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ] || { echo "::error::the notes input is empty: gh workflow run release.yml -R $GITHUB_REPOSITORY -f notes=\"\$(cat notes.md)\""; exit 1; }
 
+      # A quick docs fix is made on `release`, which reylo.dev serves, and then merged into main. `finish` moves `release` to the new tag, so a fix main doesn't hold yet would drop off the site with nothing to say so. `git cherry` lists each commit of `release` whose change this commit lacks, by reachability or by an equal patch (a cherry-pick), and a prerelease, which leaves `release` alone, is not held up. The public repository answers a fetch without a credential, and a refusal stages nothing.
+      - name: Refuse to move reylo.dev past a docs fix main lacks
+        run: |
+          url="https://github.com/$GITHUB_REPOSITORY.git"
+          set +e
+          git ls-remote --exit-code --heads "$url" release > /dev/null
+          found=$?
+          set -e
+          case "$found" in
+            0) ;;
+            2) echo "no release branch yet"; exit 0 ;;
+            *) echo "::error::could not read whether release exists (git ls-remote exited $found)"; exit 1 ;;
+          esac
+          git init -q "$RUNNER_TEMP/release-check"
+          cd "$RUNNER_TEMP/release-check"
+          git fetch -q "$url" "$GITHUB_SHA" +refs/heads/release:refs/remotes/origin/release
+          version="$(git show "$GITHUB_SHA:package.json" | jq -r .version)"
+          case "$version" in *-*) echo "$version is a prerelease, which leaves release as it is"; exit 0 ;; esac
+          missing="$(git cherry "$GITHUB_SHA" refs/remotes/origin/release | sed -n 's/^+ //p')"
+          if [ -n "$missing" ]; then
+            echo "::error::release holds changes this commit lacks, which moving it to the new tag would take off reylo.dev; merge release into main, then dispatch again from main"
+            while read -r sha; do git log -1 --format='  %h %s' "$sha"; done <<< "$missing"
+            exit 1
+          fi
+          echo "every change on release is in $GITHUB_SHA"
+
   test:
     needs: preflight
     uses: ./.github/workflows/test.yml
