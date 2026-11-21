@@ -49,6 +49,9 @@ Commands:
     --format <yaml|json>   YAML, the default, or a line of JSON per statement
   generate <generator>     Write each .sql file's module for a language
     --out <file>           Write every module into one file
+  lsp                      Serve the language server for .sql files
+    --dialect <name>       Read files as postgres, mysql or sqlite
+    --allow-url-command    Run a $(command) in direct_url
   migrate <command>        Write, check and run your migrations
   db <command>             Push, reset, wipe or print a development database
   run <sql>                Run SQL as written, recording nothing
@@ -76,6 +79,15 @@ reylo analyze --sql 'select id, email from users'
 ## `reylo generate`
 
 Writes each `.sql` file's module for a language, as [`#[reylo::query]`](/rust#codegen) does for Rust.
+
+## `reylo lsp`
+
+Serves the language server [your editor](/editors) runs for `.sql` files:
+
+```sh
+reylo lsp
+reylo lsp --dialect postgres
+```
 
 ## `reylo migrate`
 

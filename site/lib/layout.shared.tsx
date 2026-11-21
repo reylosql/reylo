@@ -53,6 +53,7 @@ export const pageGroups = [
       { title: SHOW_RUST ? 'Usage with TypeScript' : 'Usage', href: '/typescript' },
       ...(SHOW_RUST ? [{ title: 'Usage with Rust', href: '/rust' }] : []),
       { title: 'Inference', href: '/inference' },
+      { title: 'Editors', href: '/editors' },
       { title: 'Comparison', href: '/compare' },
       { title: 'FAQ', href: '/faq' },
     ],

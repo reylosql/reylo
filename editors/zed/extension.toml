@@ -1,0 +1,11 @@
+id = "reylo"
+name = "Reylo"
+description = "SQL errors, inferred types, completion and go-to-definition from your database"
+version = "0.0.1"
+schema_version = 1
+authors = ["Reylo contributors"]
+repository = "https://github.com/reylosql/reylo"
+
+[language_servers.reylo]
+name = "Reylo"
+languages = ["SQL"]
