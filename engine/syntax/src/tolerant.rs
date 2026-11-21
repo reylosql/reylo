@@ -21,6 +21,8 @@ pub const DOT: u16 = 14;
 pub const SEMI: u16 = 15;
 pub const ILLEGAL: u16 = 16;
 const SPACE: u16 = 17;
+/// The first version number of a conditional comment that no MySQL release reaches.
+const NO_RELEASE: u32 = 99_000;
 /// `/*!50003` or the `*/` that closes it: MySQL runs the text between them as SQL.
 pub const CONDITIONAL: u16 = 18;
 
@@ -393,15 +395,17 @@ fn lexemes(flavor: Flavor, text: &str) -> (Vec<Lexeme>, u32) {
                 continue;
             }
             if !conditional && z[at..].starts_with(b"/*!") && z[at..].windows(2).any(|w| w == b"*/") {
-                conditional = true;
-                let start = at;
-                at += 3;
-                while z.get(at).is_some_and(u8::is_ascii_digit) {
-                    at += 1;
+                let digits = z[at + 3..].iter().take_while(|c| c.is_ascii_digit()).count();
+                let version = text[at + 3..at + 3 + digits].parse::<u32>().unwrap_or(0);
+                // A version past any release, as `/*!99999`, is how a script writes a comment no server runs.
+                if version < NO_RELEASE {
+                    conditional = true;
+                    let start = at;
+                    at += 3 + digits;
+                    out.push(Lexeme { kind: CONDITIONAL, lead: lead as u32, start: start as u32, end: at as u32 });
+                    lead = at;
+                    continue;
                 }
-                out.push(Lexeme { kind: CONDITIONAL, lead: lead as u32, start: start as u32, end: at as u32 });
-                lead = at;
-                continue;
             }
         }
         let (mut n, mut kind) = token(flavor, z, at, &mut ahead);
@@ -660,6 +664,7 @@ mod tests {
         assert_eq!(statements(Flavor::MYSQL, "create function f() returns int language javascript as $$ return 1; $$; select 2"), 2);
         assert_eq!(statements(Flavor::MYSQL, "/*!50003 create procedure p() begin select 1; end */; select 2"), 2);
         assert_eq!(statements(Flavor::MYSQL, "create procedure p() begin if 1 then select 1; end /*!80000 if */; select 2; end; select 3"), 2);
+        assert_eq!(statements(Flavor::MYSQL, "create procedure p() begin select 1; end /*!99999 if */; select 3"), 2);
         assert_eq!(statements(Flavor::SqlServer, "begin select 1; select 2; end; select 3"), 2);
         assert_eq!(statements(Flavor::SqlServer, "begin tran; select 1; commit"), 3);
         assert_eq!(statements(Flavor::SqlServer, "select 1\nGO\nselect 2\ngo 5\nselect 3"), 3);
