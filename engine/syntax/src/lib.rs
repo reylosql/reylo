@@ -110,6 +110,8 @@ mod tests {
     #[test]
     fn a_statement_with_an_error_keeps_all_its_text() {
         assert_eq!(spans(Dialect::Postgres, "select 1; select u. from users u"), ["select 1", "select u. from users u"]);
+        assert_eq!(spans(Dialect::Postgres, "select 1; select ); select 2;"), ["select 1", "select )", "select 2"]);
+        assert_eq!(spans(Dialect::Postgres, "select );"), ["select )"]);
     }
 
     #[test]
