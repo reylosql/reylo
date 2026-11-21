@@ -18,14 +18,14 @@ import './home-landing.css';
  * captured (lib/home-examples.ts). Nothing moves by itself, and nothing reads the scroll position.
  */
 
-type Dialect = 'postgres' | 'mysql' | 'sqlite';
+type Dialect = 'postgres' | 'mysql' | 'sqlite' | 'sqlserver';
 
 /** The examples the homepage shows, by the Inference section's anchors, in its order; each card no taller than the list of their names. */
 const SHOWN = ['naming', 'left-joins', 'computed-columns', 'nullable-parameters', 'unique-keys', 'aggregates', 'window-functions', 'subqueries:2', 'returning-inserts', 'unions', 'json', 'json-schema', 'oneof'];
 const EXAMPLES = SHOWN.map((id) => data.examples.find((e) => e.id === id)).filter((e): e is HomeExample => !!e);
 
 
-const DIALECT_NAMES: Record<Dialect, string> = { postgres: 'Postgres', mysql: 'MySQL', sqlite: 'SQLite' };
+const DIALECT_NAMES: Record<Dialect, string> = { postgres: 'Postgres', mysql: 'MySQL', sqlite: 'SQLite', sqlserver: 'SQL Server' };
 
 export function HomeLanding({ stars }: { stars?: number }) {
   return (
@@ -395,7 +395,7 @@ const FEATURES: { title: string; body: ReactNode; icon: ReactNode }[] = [
     ),
   },
   {
-    title: 'Postgres, MySQL and SQLite',
+    title: 'Postgres, MySQL, SQLite and SQL Server',
     body: 'Each in its own dialect, on Neon, Supabase, PlanetScale, Cloudflare D1, Turso and more.',
     icon: (
       <>
@@ -408,7 +408,7 @@ const FEATURES: { title: string; body: ReactNode; icon: ReactNode }[] = [
     title: 'Your own driver',
     body: (
       <>
-        Runs on <code>pg</code>, postgres.js, Bun.sql, Neon, <code>mysql2</code>, <code>mariadb</code>, PlanetScale, <code>better-sqlite3</code>, <code>node:sqlite</code>, libSQL, Cloudflare D1 and more, or through Drizzle and Knex.
+        Runs on <code>pg</code>, postgres.js, Bun.sql, Neon, <code>mysql2</code>, <code>mariadb</code>, PlanetScale, <code>better-sqlite3</code>, <code>node:sqlite</code>, libSQL, Cloudflare D1, <code>mssql</code> and more, or through Drizzle and Knex.
       </>
     ),
     icon: <path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0V8ZM12 17v4" />,

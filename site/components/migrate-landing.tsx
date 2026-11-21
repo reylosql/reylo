@@ -35,7 +35,7 @@ export function MigrateLanding({ stars }: { stars?: number }) {
           <h1 className="ml-h1">
             <span>SQL-first</span> <em>schema and migrations.</em>
           </h1>
-          <p className="ml-lede">Model your schema in <code>schema.sql</code>. Generate migrations, or write your own. Works on Postgres, MySQL and SQLite.</p>
+          <p className="ml-lede">Model your schema in <code>schema.sql</code>. Generate migrations, or write your own. Works on Postgres, MySQL, SQLite and SQL Server.</p>
           <Install />
         </div>
         <div className="ml-hero-visual">
@@ -80,7 +80,7 @@ export function MigrateLanding({ stars }: { stars?: number }) {
       </Row>
 
       <Row n={10} title="Works with your database" visual={<Hosts />} flip>
-        <p>Works with Postgres, MySQL, SQLite—and all major database hosts and backends.</p>
+        <p>Works with Postgres, MySQL, SQLite, SQL Server—and all major database hosts and backends.</p>
       </Row>
 
       <Row n={11} title="Switch easily" visual={<Term lines={INIT} />}>
@@ -525,7 +525,7 @@ function SchemaToMigration() {
 
 /** SQL as the editor windows colour it: keywords pink and types and strings yellow (`.ml-kw`, `.ml-ty`), names plain. */
 const SQL_KW = new Set('create type as enum domain check value table generated always identity primary key not null unique default references on delete cascade stored index where desc view select from join is function returns trigger language begin end return before update for each row execute enable level security policy using alter add column constraint valid validate set drop insert into rename to foreign or replace'.split(' '));
-const SQL_TY = new Set('text bigint integer int boolean timestamptz jsonb numeric varchar plpgsql tinyint'.split(' '));
+const SQL_TY = new Set('text bigint integer int boolean timestamptz jsonb numeric varchar plpgsql tinyint nvarchar bit'.split(' '));
 
 function Sql({ text }: { text: string }) {
   return text.split(/('(?:[^']|'')*'|\$\$|\b[a-z_]+\b)/).map((t, i) =>
@@ -587,7 +587,9 @@ const EDIT: [gutter: ' ' | '-' | '+' | '…', text: string][] = [
  * The migrations `reylo migrate new tighten_posts` wrote for that edit, run with reylo 0.8.1 on
  * Postgres 18, MySQL 8.4 and SQLite, where `comments` references `posts`: Postgres drops and
  * recreates the view and validates its new constraints apart, so no step blocks writes; MySQL takes
- * one statement per migration; SQLite rebuilds `posts` and the table that references it.
+ * one statement per migration; SQLite rebuilds `posts` and the table that references it. SQL Server's,
+ * for the same edit in its own types, changes the columns in place and alters the view in a batch of
+ * its own.
  */
 const MIGRATIONS: { name: string; files: [file: string, sql: string][] }[] = [
   {
@@ -622,6 +624,15 @@ const MIGRATIONS: { name: string; files: [file: string, sql: string][] }[] = [
       [
         "20261121090447_tighten_posts.sql",
         "drop view post_titles;\ncreate table new_posts (\n  id integer primary key,\n  author_id integer not null,\n  title text not null check (length(title) <= 200),\n  published boolean not null default false,\n  body text not null,\n  foreign key (author_id) references users (id)\n);\ncreate table new_comments (\n  id integer primary key,\n  post_id integer not null,\n  body text not null,\n  foreign key (post_id) references new_posts (id)\n);\ninsert into new_posts (id, author_id, title, body) select id, author_id, title, body from posts;\ninsert into new_comments (id, post_id, body) select id, post_id, body from comments;\ndrop table comments;\ndrop table posts;\nalter table new_posts rename to posts;\nalter table new_comments rename to comments;\ncreate index posts_author on posts (author_id);\ncreate view post_titles as\n  select p.id, p.title, p.published, u.name as author\n  from posts p join users u on u.id = p.author_id;"
+      ]
+    ]
+  },
+  {
+    name: "SQL Server",
+    files: [
+      [
+        "20261121090447_tighten_posts.sql",
+        "alter table posts add published bit not null default ((0));\nalter table posts alter column title nvarchar(max) not null;\nalter table posts add check (len([title])<=(200));\nGO\ncreate or alter view post_titles as\n  select p.id, p.title, p.published, u.name as author\n  from posts p join users u on u.id = p.author_id;"
       ]
     ]
   }
@@ -727,10 +738,7 @@ function Hosts() {
     </span>
   );
   return (
-    <div className="ml-hosts">
-      <div className="ml-dbs">{DATABASES.map(tile)}</div>
-      <div className="ml-hostgrid">{HOSTS.map(tile)}</div>
-    </div>
+    <div className="ml-hosts">{[...DATABASES, ...HOSTS].map(tile)}</div>
   );
 }
 
