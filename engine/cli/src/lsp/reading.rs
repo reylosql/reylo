@@ -416,7 +416,7 @@ struct Frame {
     inserting: bool,
     /// Whether it has passed a UNION, INTERSECT or EXCEPT.
     compound: bool,
-    /// Whether its query groups its rows, by GROUP BY, HAVING or an aggregate.
+    /// Whether its query groups its rows, by GROUP BY or an aggregate that isn't a window function.
     grouped: bool,
     /// Whether it reads a query's clauses, and isn't a function's arguments.
     reads: bool,
@@ -527,7 +527,8 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
         if t.is("INSERT") {
             frame.inserting = true;
         }
-        if t.is_any(&["GROUP", "HAVING"]) || (t.is_any(AGGREGATES) && toks.get(i + 1).is_some_and(|n| n.is_punct("("))) {
+        let aggregate = t.is_any(AGGREGATES) && toks.get(i + 1).is_some_and(|n| n.is_punct("(")) && !toks.get(past_group(toks, i + 1)).is_some_and(|n| n.is("OVER"));
+        if t.is("GROUP") || aggregate {
             frame.grouped = true;
         }
         // What follows an INSERT's rows is the INSERT's again, whichever query read them.
@@ -535,6 +536,8 @@ pub fn scopes(dialect: Dialect, toks: &[Tok<'_>]) -> Scopes {
         if frame.inserting && (t.is("RETURNING") || upsert) && frame.query != frame.first {
             // MySQL's ON DUPLICATE KEY UPDATE also sees the FROM list of a SELECT that neither groups nor has a set operation, in a scope of its own.
             let input = (t.is("ON") && toks[i + 1].is("DUPLICATE") && !frame.compound && !frame.grouped).then(|| queries[frame.query].sources.clone());
+            // The clause runs to the statement's end, where a column may be named `returning`.
+            frame.inserting = false;
             frame.query = frame.first;
             if let Some(input) = input {
                 let target = queries[frame.first].clone();
@@ -793,6 +796,12 @@ mod tests {
             let s = read(Dialect::Mysql, &format!("insert into users (id) {grouped} on duplicate key update id = 1"));
             assert!(s.source(s.of_token.len() - 1, "p").is_none(), "{grouped}");
         }
+        for ungrouped in ["select max(p.id) over () from posts p", "select p.id from posts p having p.id > 0"] {
+            let s = read(Dialect::Mysql, &format!("insert into users (id) {ungrouped} on duplicate key update id = p.id"));
+            assert_eq!(s.source(s.of_token.len() - 1, "p").map(|x| x.name.as_str()), Some("posts"), "{ungrouped}");
+        }
+        let s = read(Dialect::Mysql, "insert into users (id) select p.id from posts p on duplicate key update returning = p.id");
+        assert_eq!(s.source(s.of_token.len() - 1, "p").map(|x| x.name.as_str()), Some("posts"));
         let s = read(Dialect::Mysql, "insert into users (id) select d.id from (select id from posts group by id) d on duplicate key update id = d.id");
         assert_eq!(s.source(s.of_token.len() - 1, "d").map(|x| x.alias.as_deref()), Some(Some("d")));
     }
