@@ -106,4 +106,13 @@ mod tests {
         assert_eq!(tree.print(), text);
         assert_eq!(tree.errors[0].message, "WITH TIES cannot be specified without ORDER BY clause");
     }
+
+    #[test]
+    fn an_error_in_one_statement_hides_no_refusal_in_another() {
+        let text = "select 1 fetch first row with ties; select ); select 2 fetch first row with ties";
+        let tree = parse(Dialect::Postgres, text);
+        assert_eq!(tree.print(), text);
+        let messages: Vec<&str> = tree.errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages, ["WITH TIES cannot be specified without ORDER BY clause", "syntax error at or near \")\"", "WITH TIES cannot be specified without ORDER BY clause"]);
+    }
 }

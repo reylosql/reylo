@@ -191,6 +191,11 @@ fn shape(statement: &str, existing: &BTreeSet<String>, needs_not_null: &BTreeSet
 /// that already has rows) while they read every row: where any statement does, the files in order,
 /// comments kept with the statement they come before; `None` where the plan holds no such lock.
 pub fn lock_safe(plan: &Plan, existing: &BTreeSet<String>) -> Option<Vec<Vec<String>>> {
+    // A statement's tree is cloned and dropped here, a level at a time.
+    syntax::postgres::on_deep_stack(|| plan_lock_safe(plan, existing))
+}
+
+fn plan_lock_safe(plan: &Plan, existing: &BTreeSet<String>) -> Option<Vec<Vec<String>>> {
     // A table the plan makes (again, perhaps partitioned now) holds no rows the plan reads under a
     // lock: none of it is the database's as it stands.
     let made: BTreeSet<String> = plan.statements.iter().filter_map(|s| match parsed(s) {
@@ -399,7 +404,9 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
             hazards.push(hazard);
         }
     };
-    if let Ok(result) = syntax::postgres::parse(&m.sql, 0) {
+    // Its tree is read and dropped a level at a time.
+    syntax::postgres::on_deep_stack(|| {
+        if let Ok(result) = syntax::postgres::parse(&m.sql, 0) {
         for raw in &result.protobuf.stmts {
             match raw.stmt.as_ref().and_then(|s| s.node.as_ref()) {
                 Some(N::AlterTableStmt(a)) => {
@@ -462,7 +469,8 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                 _ => {}
             }
         }
-    }
+        }
+    });
     run(db, m, false).await?;
     // A table renamed keeps its storage; one given new storage was copied, but for a truncate,
     // which empties it at once. An index given new storage on a table that wasn't copied was
@@ -577,16 +585,12 @@ mod tests {
 
     #[test]
     fn reads_an_index_on_a_deeply_nested_expression() {
-        // An unoptimized build's frames, a level each, need more than a test thread's stack.
-        let reads = std::thread::Builder::new().stack_size(64 << 20).spawn(|| {
-            let sum = vec!["n"; 521].join(" + ");
-            let index = format!("create index users_sum on users (({sum}))");
-            let files = lock_safe(&plan(&[index.as_str(), "alter table users add constraint n_pos check (n > 0)"]), &existing(&["users"])).expect("a lock-safe plan");
-            let all = files.concat();
-            assert!(all.iter().any(|s| s.starts_with("create index concurrently users_sum")));
-            assert!(all.iter().any(|s| s.contains("n_pos check (n > 0) not valid")));
-        });
-        reads.unwrap().join().unwrap();
+        let sum = vec!["n"; 3501].join(" + ");
+        let index = format!("create index users_sum on users (({sum}))");
+        let files = lock_safe(&plan(&[index.as_str(), "alter table users add constraint n_pos check (n > 0)"]), &existing(&["users"])).expect("a lock-safe plan");
+        let all = files.concat();
+        assert!(all.iter().any(|s| s.starts_with("create index concurrently users_sum")));
+        assert!(all.iter().any(|s| s.contains("n_pos check (n > 0) not valid")));
     }
 
     #[test]
