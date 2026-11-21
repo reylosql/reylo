@@ -372,7 +372,7 @@ const FEATURES: { title: string; body: ReactNode; icon: ReactNode }[] = [
   },
   {
     title: 'No hand-written types',
-    body: "Parameters, columns, nullability and cardinality come from the database's own analysis of each query. There is nothing to declare by hand.",
+    body: "Parameters, columns, nullability and cardinality come from the database's own analysis of each query.",
     icon: <path d="M8 4H6a2 2 0 0 0-2 2v4l-2 2 2 2v4a2 2 0 0 0 2 2h2M16 4h2a2 2 0 0 1 2 2v4l2 2-2 2v4a2 2 0 0 1-2 2h-2" />,
   },
   {

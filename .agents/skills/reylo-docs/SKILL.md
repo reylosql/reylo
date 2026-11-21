@@ -16,13 +16,14 @@ The model is [zod.dev](https://zod.dev): one short sentence, then the example.
 | Instead of | Write |
 | --- | --- |
 | Name a parameter with a colon, and Reylo infers its type from where it's used, and compiles it to your database's own placeholder. | Name a parameter with a colon. Reylo infers its type from where it's used, and compiles it to your database's own placeholder. |
-| Hyperdrive refuses prepared statements, so Reylo runs `mysql2` there through `query()` ([`mysql2`](/mysql#mysql2)). | Hyperdrive refuses prepared statements. So Reylo runs [`mysql2`](/mysql#mysql2) there through `query()`. |
+| Hyperdrive refuses prepared statements, so Reylo runs `mysql2` there through `query()`, with each value written into the statement. | Hyperdrive refuses prepared statements. So Reylo runs `mysql2` there through `query()`, with each value written into the statement. |
 | These are typed `boolean`: comparisons, `IN`, `BETWEEN`, `LIKE`, … and a `CASE` whose every value is one of them. | A sentence, then the list as a code block or table. |
 
-- **A link goes on the words**, never in a parenthetical pointer: "[run your migrations on it](/deployment#build-before-migrate) before the build", not "… before the build ([Deployment](/deployment))".
+- **A link is part of a sentence that says something.** A parenthetical link after a fact is fine: "Prints what Reylo infers for each statement ([Inference](/inference))". A sentence whose only job is to point elsewhere is not (below).
 - **An enumeration leaves the sentence.** Three or more code tokens in a row become a list, a table or a code block.
 - **Imperative and direct.** "Hover over a query to see its types." Not "When you hover over a query, its types are shown."
-- **Never open a sentence with inline code**, or with a lowercase word. Lead with a prose word: "The `--watch` flag pushes again on each save."
+- **Never open a sentence with inline code**, or with a lowercase word. Lead with a plain verb phrase, the way a person would say it: "Calling `.run()` on such a row throws.", "The `--watch` flag pushes again on each save." Not a contortion that only moves the code: "Reading such a row, `.run()` throws."
+- **Name a thing by what it is**, not by what a library's examples call its variable. What `drizzle(client)` returns is a Drizzle connection: "a Drizzle database" makes Drizzle sound like a database. A variable's name goes in inline code, as `db`, never as a plain word.
 - **Plain words.** Reylo *infers* a type, never proves one. How many rows a query returns is its *cardinality*. A method is written `.run()`, never a bare `run`.
 
 ## What never goes in

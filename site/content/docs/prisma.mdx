@@ -97,7 +97,7 @@ One production app migrated about 750 Prisma Client calls. A billing report went
   ```sh
   npx skills add reylosql/reylo --skill reylo
   ```
-- **Set Reylo up** as [Setup](/typescript#setup) shows.
+- **[Set Reylo up](/typescript#setup).**
 - **Count what moves:** every Prisma Client call, raw query and transaction, and every folder that holds them. A folder that `tsconfig.json` leaves out is never type-checked. Give it a `tsconfig` of its own.
 - **Keep the branch short.** A long-lived branch pays at each sync with `main`, in new Prisma calls to convert and in conflicts. Re-apply what `main` changed onto the `.sql`, rather than taking either side.
 - **Give your pool an error listener**, on the pool and on each connection a transaction takes. Prisma's adapter had both, and without them Node exits when the database drops an idle connection.
@@ -168,7 +168,7 @@ Prisma writes `timestamp(3)` again for every `DateTime` added later without `@db
 ! grep -nE '^[[:space:]]+[[:alnum:]_]+[[:space:]]+DateTime\??([[:space:]]|$)' prisma/schema.prisma | grep -v '@db.Timestamptz'
 ```
 
-### `@updatedAt`
+### Update times
 
 Set `"updatedAt"` with a trigger on each table that has one:
 
@@ -196,7 +196,7 @@ How the trigger behaves:
   if current_setting('app.keep_updated_at', true) = 'on' then return new; end if;
   ```
 
-### `String[]`
+### Text arrays
 
 Prisma Client reads a `String[]` as never null, and throws on a `NULL` element. Postgres allows both:
 

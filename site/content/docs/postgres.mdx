@@ -686,7 +686,7 @@ Reylo infers [how many rows](/inference#unique-keys) a query returns. On Postgre
 
 - **Unique indexes on an expression** count when the query compares the same expression, cast included.
 - **Partial unique indexes** count only when the `where` includes the index's condition.
-- **Writes that join**, with `from`, `using` or a `with` query of one row, still return a row or `null` when their key is matched.
+- **Writes that join** still return a row or `null` when their key is matched. That includes `from`, `using` and a one-row `with` query.
 - **`BEFORE` row triggers** can skip a row by returning `NULL`, so a write they fire on returns a row or `null`. A PL/pgSQL trigger that always returns `new` skips nothing.
 - **Nondeterministic collations** bound nothing. Under one, `'a'` can equal `'A'`, so a unique key can match several rows.
 - **A `varchar` key** compared with a `char` value bounds nothing, since trailing blanks don't count.
@@ -900,7 +900,7 @@ After five runs of a prepared statement, Postgres can switch to one generic plan
 
 ### `pg-promise`
 
-Pass the database object, or the context a task or transaction hands its callback:
+Pass the `db` that `pgp()` returns, or the context a task or transaction hands its callback:
 
 ```ts twoslash tab="main.ts"
 import pgPromise from "pg-promise";
@@ -966,7 +966,7 @@ From Bun 1.4.4, Reylo decodes the bytes Bun receives itself, so each type comes 
 
 ### PGlite
 
-Pass the database, or the transaction it hands its callback:
+Pass the `PGlite` instance, or the transaction it hands its callback:
 
 ```ts twoslash tab="main.ts"
 import { PGlite } from "@electric-sql/pglite";
@@ -1035,7 +1035,7 @@ Drizzle Postgres ships in `drizzle-orm` from 1.0.0-rc.6. On Neon, import from `d
 
 ### Drizzle
 
-Pass a Drizzle database over `pg`, postgres.js, Neon, PGlite, `Bun.sql` or [Drizzle Postgres](#drizzle-postgres). A transaction or savepoint taken from it works too. Over Neon's HTTP driver, Drizzle has no transactions:
+Pass a Drizzle connection made over `pg`, postgres.js, Neon, PGlite, `Bun.sql` or [Drizzle Postgres](#drizzle-postgres). A transaction or savepoint taken from it works too. Over Neon's HTTP driver, Drizzle has no transactions:
 
 ```ts twoslash tab="main.ts"
 import { drizzle } from "drizzle-orm/node-postgres";
