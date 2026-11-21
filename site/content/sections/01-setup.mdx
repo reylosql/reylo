@@ -100,7 +100,7 @@ When type-checking with `tsc`, you must pass the `--runExternalCode` flag. Updat
 
 Install the plugin for your runtime or framework of choice:
 
-<Tabs items={["Node", "Bun", "Nub", "Vite", "Next.js", "esbuild", "webpack", "Rspack", "Cloudflare", "Jest"]}>
+<Tabs items={["Node", "Bun", "Nub", "Vite", "Next.js", "esbuild", "Rolldown", "Rollup", "webpack", "Rspack", "Cloudflare", "Jest"]}>
 <Tab value="Node" id="setup-node">
 
 Load Reylo's preload with `--import`:
@@ -233,6 +233,42 @@ await esbuild.build({
 ```
 
 Complete example: [`examples/esbuild`](https://github.com/reylosql/reylo/tree/main/examples/esbuild)
+
+</Tab>
+<Tab value="Rolldown" id="setup-rolldown">
+
+Add Reylo's plugin to your Rolldown config:
+
+```ts title="rolldown.config.ts"
+import { defineConfig } from "rolldown";
+import reylo from "reylo/rolldown";
+
+export default defineConfig({
+  input: "main.ts",
+  platform: "node",
+  plugins: [reylo()],
+});
+```
+
+Complete example: [`examples/rolldown`](https://github.com/reylosql/reylo/tree/main/examples/rolldown)
+
+</Tab>
+<Tab value="Rollup" id="setup-rollup">
+
+Add Reylo's plugin to your Rollup config:
+
+```js title="rollup.config.mjs"
+import reylo from "reylo/rollup";
+
+export default {
+  // ...
+  plugins: [reylo()],
+};
+```
+
+Compile TypeScript with `@rollup/plugin-sucrase`, since TypeScript 7 has no JavaScript API for `@rollup/plugin-typescript`.
+
+Complete example: [`examples/rollup`](https://github.com/reylosql/reylo/tree/main/examples/rollup)
 
 </Tab>
 <Tab value="webpack" id="setup-webpack">
