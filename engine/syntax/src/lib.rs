@@ -108,6 +108,15 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_reached_before_a_syntax_error_comes_first() {
+        let text = "SELECT 2 FETCH FIRST ROW WITH TIES ); SELECT 3;";
+        assert_eq!(parse(Dialect::Postgres, text).errors[0].message, "WITH TIES cannot be specified without ORDER BY clause");
+        assert_eq!(spans(Dialect::Postgres, text), ["SELECT 2 FETCH FIRST ROW WITH TIES )", "SELECT 3"]);
+        let deep = format!("select {}1{})", "(".repeat(3000), ")".repeat(3000));
+        assert!(!parse(Dialect::Postgres, &deep).errors.is_empty());
+    }
+
+    #[test]
     fn a_statement_with_an_error_keeps_all_its_text() {
         assert_eq!(spans(Dialect::Postgres, "select 1; select u. from users u"), ["select 1", "select u. from users u"]);
         assert_eq!(spans(Dialect::Postgres, "select 1; select ); select 2;"), ["select 1", "select )", "select 2"]);
