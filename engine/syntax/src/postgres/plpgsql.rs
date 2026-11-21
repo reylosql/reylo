@@ -85,6 +85,7 @@ mod tests {
             "declare \"foreach\" alias for new; begin \"foreach\" := null; return new; end",
             "declare \"strict\" alias for new; begin select 1 into \"strict\"; return new; end",
             "begin perform 'a\\'' ; return null; --';\nreturn new; end",
+            "declare scratch widgets%rowtype; begin scratch.id := new.id; return scratch; end",
         ] {
             assert!(!keeps_the_row(body, true, true), "{body}");
         }
@@ -92,7 +93,7 @@ mod tests {
 
     #[test]
     fn keeps_what_it_can_read() {
-        for body in ["begin new.a := regexp_replace(new.a, '\\s+', ' '); return new; end", "declare n alias for new; begin n.a := 1; return n; end", "<<outer>> begin return new; end outer;"] {
+        for body in ["begin new.a := regexp_replace(new.a, '\\s+', ' '); return new; end", "declare n alias for new; begin n.a := 1; return n; end", "<<outer>> begin return new; end outer;", "declare scratch audit.widgets%rowtype; begin scratch.id := new.id; return new; end", "declare r new%type; begin r := new; r.a := 1; return new; end"] {
             assert!(keeps_the_row(body, true, true), "{body}");
         }
     }

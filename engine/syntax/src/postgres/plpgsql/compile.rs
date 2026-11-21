@@ -127,6 +127,12 @@ pub(super) struct Compiler<'s> {
     pub datums_last: usize,
     pub func: FnInfo,
     pub result: Option<Block>,
+    /// Where each line ends, for line numbers.
+    pub newlines: Vec<u32>,
+    /// Whether types resolve as in libpg_query's stand-in catalog, which writes a `%ROWTYPE`
+    /// variable as a scalar. Otherwise one is a record, as in Postgres, and so is a `%TYPE` of a
+    /// record.
+    pub stand_in: bool,
 }
 
 impl<'s> Compiler<'s> {
@@ -135,7 +141,7 @@ impl<'s> Compiler<'s> {
             Ok(raw) => (raw, None),
             Err((raw, stop)) => (raw, Some(stop.message)),
         };
-        Compiler { src, raw, raw_at: 0, stop, pushback: Vec::new(), yytoken: 0, yyleng: 0, cur: Tok::default(), yychar: EMPTY, lookup: Lookup::Normal, ns: Vec::new(), ns_top: None, datums: Vec::new(), datums_last: 0, func: FnInfo { out_param_varno: -1, ..FnInfo::default() }, result: None }
+        Compiler { src, raw, raw_at: 0, stop, pushback: Vec::new(), yytoken: 0, yyleng: 0, cur: Tok::default(), yychar: EMPTY, lookup: Lookup::Normal, ns: Vec::new(), ns_top: None, datums: Vec::new(), datums_last: 0, func: FnInfo { out_param_varno: -1, ..FnInfo::default() }, result: None, newlines: src.bytes().enumerate().filter(|(_, b)| *b == b'\n').map(|(i, _)| i as u32).collect(), stand_in: true }
     }
 
     /// The body's line at a byte offset (`plpgsql_location_to_lineno`).
@@ -143,8 +149,7 @@ impl<'s> Compiler<'s> {
         if loc < 0 {
             return 0;
         }
-        let end = (loc as usize).min(self.src.len());
-        1 + self.src.as_bytes()[..end].iter().filter(|&&b| b == b'\n').count() as i32
+        1 + self.newlines.partition_point(|&n| (n as i64) < loc as i64) as i32
     }
 
     /// `plpgsql_yyerror`: the words, then the current token.
@@ -484,7 +489,7 @@ fn create_function(stmt: &pb::CreateFunctionStmt) -> R<Function> {
         if pronargs != 0 {
             return Err("trigger functions cannot have declared arguments".to_string());
         }
-        return trigger_named(&source, &funcname);
+        return trigger_named(&source, &funcname, true);
     }
     let mut c = Compiler::new(&source);
     c.func.procedure = stmt.is_procedure;
@@ -548,12 +553,14 @@ fn create_function(stmt: &pb::CreateFunctionStmt) -> R<Function> {
 }
 
 /// A DML trigger function's body compiled, with NEW, OLD and the trigger's other variables.
+/// A DML trigger function's body compiled as Postgres compiles it, a `%ROWTYPE` variable a record.
 pub(super) fn trigger(source: &str) -> R<Function> {
-    trigger_named(source, "reylo_trigger")
+    trigger_named(source, "reylo_trigger", false)
 }
 
-fn trigger_named(source: &str, funcname: &str) -> R<Function> {
+fn trigger_named(source: &str, funcname: &str, stand_in: bool) -> R<Function> {
     let mut c = Compiler::new(source);
+    c.stand_in = stand_in;
     c.ns_push(Some(funcname), LABEL_BLOCK);
     let new_varno = c.build_record("new", 0, true);
     let old_varno = c.build_record("old", 0, true);
@@ -596,6 +603,8 @@ fn do_block(stmt: &pb::DoStmt) -> R<Function> {
 
 /// Each CREATE FUNCTION and DO statement of `sql` compiled, as libpg_query's
 /// `pg_query_parse_plpgsql` writes them: a JSON array of functions, or the first error's message.
+/// A RETURN and a RETURN NEXT also carry the datum they return, `retvarno`, as they do with
+/// pganalyze/libpg_query#402.
 pub fn parse_plpgsql(sql: &str) -> Result<String, String> {
     crate::postgres::on_deep_stack(|| {
         let tree = crate::postgres::parse(sql, 0).map_err(|e| match e {

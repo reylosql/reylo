@@ -978,9 +978,10 @@ impl Compiler<'_> {
             if tok == PERCENT {
                 tok = self.yylex()?;
                 if self.tok_is_keyword(tok, t::K_TYPE, "type") {
-                    result = Some(pct_type(format!("{name}%TYPE")));
+                    let of_record = !self.stand_in && !compound && self.ns_lookup(self.ns_top, false, &name, None, None).is_some_and(|(item, _)| self.ns[item].kind == super::compile::NS_REC);
+                    result = Some(if of_record { record_type(format!("{name}%TYPE")) } else { pct_type(format!("{name}%TYPE")) });
                 } else if self.tok_is_keyword(tok, t::K_ROWTYPE, "rowtype") {
-                    result = Some(pct_type(format!("{name}%rowtype")));
+                    result = Some(if self.stand_in { pct_type(format!("{name}%rowtype")) } else { record_type(format!("{name}%rowtype")) });
                 }
             }
         }
@@ -1685,6 +1686,11 @@ fn empty_expr() -> Expr {
 /// A `%TYPE` or `%ROWTYPE` type, which libpg_query names without resolving it.
 fn pct_type(typname: String) -> Type {
     Type { typname, typoid: 0, ttype: TType::Scalar, typisarray: false, collatable: false }
+}
+
+/// A row type named by `%ROWTYPE`, or by `%TYPE` of a record, as Postgres resolves it.
+fn record_type(typname: String) -> Type {
+    Type { typname, typoid: RECORDOID, ttype: TType::Rec, typisarray: false, collatable: false }
 }
 
 /// `parse_datatype`: a type's name read by Postgres's parser, then looked up.
