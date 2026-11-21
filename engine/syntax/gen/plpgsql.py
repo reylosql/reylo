@@ -118,7 +118,7 @@ def keywords(args, name):
 
 
 def builtin_types(args):
-    """libpg_query's table of the types its stand-in catalog knows, each as (oid, name, typtype, array oid),
+    """libpg_query's table of the types its stand-in catalog knows, each as (oid, name, typtype, array oid, collatable),
     with the numbers read from Postgres's own pg_type.dat by name."""
     dat = git(args.postgres, "show", f"{TAG}:src/include/catalog/pg_type.dat").decode()
     oids, arrays = {}, {}
@@ -146,7 +146,7 @@ def builtin_types(args):
         array = oids.get(array, array) if isinstance(array, str) else array
         if array is None:
             raise SystemExit(f"no array type for {name}")
-        out.append((oids[name], name, kinds[parts[4]], array))
+        out.append((oids[name], name, kinds[parts[4]], array, parts[8] != "InvalidOid"))
     return out
 
 
@@ -156,7 +156,8 @@ def conditions(args):
     out = []
     for line in text.split("\n"):
         parts = line.split()
-        if len(parts) == 4 and re.fullmatch(r"[0-9A-Z]{5}", parts[0]):
+        # Errors only, as generate-plerrcodes.pl takes them: no warning or success is a condition.
+        if len(parts) == 4 and re.fullmatch(r"[0-9A-Z]{5}", parts[0]) and parts[1] == "E":
             out.append((parts[3], parts[0]))
     return out
 
@@ -203,7 +204,7 @@ def main():
         words = keywords(args, file)
         out.append(f"/// PL/pgSQL's {kind.lower()} keywords and their tokens, in the order of `{file}`.\npub static {kind}: [(&str, u16); {len(words)}] = [{', '.join(f'(\"{w}\", t::{tok})' for w, tok in words)}];\n")
     types = builtin_types(args)
-    out.append("/// The types libpg_query's stand-in catalog knows: oid, name, `typtype` and array type, in its order.\npub static TYPES: [(u32, &str, u8, u32); %d] = [%s];\n" % (len(types), ", ".join(f'({o}, "{n}", b\'{k}\', {a})' for o, n, k, a in types)))
+    out.append("/// The types libpg_query's stand-in catalog knows: oid, name, `typtype`, array type and whether it has a collation, in its order.\npub static TYPES: [(u32, &str, u8, u32, bool); %d] = [%s];\n" % (len(types), ", ".join(f'({o}, "{n}", b\'{k}\', {a}, {str(c).lower()})' for o, n, k, a, c in types)))
     conds = conditions(args)
     out.append("/// The exception conditions a handler can name, with their SQLSTATEs, in `errcodes.txt`'s order.\npub static CONDITIONS: [(&str, &str); %d] = [%s];\n" % (len(conds), ", ".join(f'("{l}", "{c}")' for l, c in conds)))
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
