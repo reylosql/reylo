@@ -78,7 +78,7 @@ reylo analyze --sql 'select id, email from users'
 
 ## `reylo generate`
 
-Writes each `.sql` file's module for a language, as `#[reylo::query]` does for Rust. [Usage with Rust](/rust#codegen) covers it.
+Writes each `.sql` file's module for a language, as [`#[reylo::query]`](/rust#codegen) does for Rust.
 
 ## `reylo lsp`
 
@@ -91,7 +91,7 @@ reylo lsp --dialect postgres
 
 ## `reylo migrate`
 
-Write, check and run your migrations. [Reylo Migrate](/migrate/docs#cli-reylo-migrate) covers each command:
+Write, check and run your [migrations](/migrate/docs#cli-reylo-migrate):
 
 ```terminal
 Usage: reylo migrate <command> [flags]
@@ -189,7 +189,7 @@ reylo migrate history pull --url $PROD_URL
 
 ## `reylo db`
 
-Push `schema.sql` to a development database, reset it, wipe it or read its schema. [Reylo Migrate](/migrate/docs#db-push) covers each command:
+Push `schema.sql` to a [development database](/migrate/docs#db-push), reset it, wipe it or read its schema:
 
 ```terminal
 Usage: reylo db <command> [flags]

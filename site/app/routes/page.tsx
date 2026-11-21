@@ -57,7 +57,17 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     agentPrompt: agentPrompt === undefined ? undefined : `${agentPrompt}\n`,
     // The intro's star pill shows the count.
     stars: slug ? undefined : await fetchStars(),
+    // The type format's page shows its version, or that it is a preview, at the right of its title.
+    typedefs: slug === 'typedefs' ? await typedefsVersion() : undefined,
   };
+}
+
+/** The type format's version, from its JSON Schema's `$id` (none while it is a preview), and the path reylo.dev serves the schema at, as lib/remark-typedefs.ts reads them. */
+async function typedefsVersion(): Promise<{ version: string | null; href: string }> {
+  const id = String(JSON.parse(await readFile('../spec/typedefs.schema.json', 'utf8')).$id);
+  const m = /^https:\/\/reylo\.dev(\/typedefs\/(preview|\d+\.\d+\.\d+)\.json)$/.exec(id);
+  if (!m) throw new Error(`spec/typedefs.schema.json: its $id, ${id}, is no reylo.dev typedefs URL`);
+  return { version: m[2] === 'preview' ? null : m[2]!, href: m[1]! };
 }
 
 /**
@@ -119,7 +129,7 @@ export default function Page({ loaderData }: Route.ComponentProps) {
 }
 
 function PageContent({ loaderData }: Pick<Route.ComponentProps, 'loaderData'>) {
-  const { slug, path, title, tree, url, agentPrompt, stars } = loaderData;
+  const { slug, path, title, tree, url, agentPrompt, stars, typedefs } = loaderData;
   const files = use(loadPage(path));
   const components = getMDXComponents(slug === '' ? { HeroActions: () => <HeroActions agentPrompt={agentPrompt} stars={stars} /> } : undefined);
   const main = slug === '';
@@ -153,6 +163,16 @@ function PageContent({ loaderData }: Pick<Route.ComponentProps, 'loaderData'>) {
       pageTitle={pageName(slug, title)}
       brand={<Brand />}
       github={githubUrl}
+      titleAside={
+        typedefs ? (
+          <p className="typedef-version not-prose">
+            <span className="typedef-badge">{typedefs.version ? <span className="typedef-badge-version">v{typedefs.version}</span> : <span className="typedef-badge-stage">preview</span>}</span>
+            <a className="typedef-schema-button" href={typedefs.href}>
+              View JSON Schema
+            </a>
+          </p>
+        ) : undefined
+      }
       // The intro asks for a star beside "Copy agent prompt" (components/hero.tsx), so its table of contents doesn't.
       star={!main}
       footer={<>Released under the MIT License. Copyright © 2026 Colin McDonnell.</>}

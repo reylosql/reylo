@@ -78,7 +78,7 @@ About the client:
 
 - The client answers through a promise, so use `.run()`, not `.runSync()`.
 - With the default `intMode`, libSQL throws a `RangeError` on an integer past 2^53. Set `intMode: "bigint"` to get it exact.
-- A Drizzle database over `@libsql/client` works too ([Drizzle](/sqlite#drizzle)).
+- A Drizzle connection over `@libsql/client` works too ([Drizzle](/sqlite#drizzle)).
 
 ## Local database
 
@@ -154,7 +154,7 @@ A query it refuses is a type error, with its own message:
 queries/user_settings.sql(1,12): error reylo6: @libsql/client runs SQLite 3.45.1, which refuses this statement: no such function: json_pretty
 ```
 
-It refuses newer functions, such as `json_pretty` and two-argument `iif`. [Functions](/sqlite#functions) has the rest.
+It refuses [newer functions](/sqlite#functions), such as `json_pretty` and two-argument `iif`.
 
 ## Vectors
 
@@ -187,7 +187,7 @@ About vectors:
 - Each row of `vector_top_k` is the `id` of a row of the indexed table. That's its rowid, or its primary key in a `WITHOUT ROWID` table.
 - A distance is `number | null`. It's `NULL` where it can't be computed, as for a vector of zeros.
 - A vector function fails on a `NULL` vector, where most SQLite functions return `NULL`. Leave rows without one out with `where emb is not null`.
-- A vector column is typed as a `BLOB`. It can't be in a `STRICT` table, since libSQL refuses vector types there. `.run()` returns a vector as a `Uint8Array`, and `vector_extract(emb)` returns its text.
+- A vector column is typed as a `BLOB`. It can't be in a `STRICT` table, since libSQL refuses vector types there. Calling `.run()` returns a vector as a `Uint8Array`, and `vector_extract(emb)` returns its text.
 - A driver whose SQLite has no vectors, such as `better-sqlite3`, refuses these queries in the type check. Turso's own engine can't open a schema with a vector index, so the type check skips it then.
 - `alter table … alter column` type-checks as a statement that returns nothing.
 
@@ -223,7 +223,7 @@ Where these functions run:
 
 ## Turso's own engine [#turso-engine]
 
-Turso's own engine, `@tursodatabase/database`, runs in your process on a database file. Pass the database `connect()` resolves to, or the transaction `.transactionAsync()` hands its callback:
+Turso's own engine, `@tursodatabase/database`, runs in your process on a database file. Pass the connection `connect()` resolves to, or the transaction `.transactionAsync()` hands its callback:
 
 ```ts twoslash tab="main.ts"
 import { connect } from "@tursodatabase/database";

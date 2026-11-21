@@ -50,7 +50,7 @@ direct_url: ${DATABASE_URL_UNPOOLED}
 Why the direct connection:
 
 - Neon's pooler is PgBouncer in transaction mode. Your app's queries can go through it. The type check can fail there, and [migrations](/migrate/docs) refuse it, since the pooler shares sessions between clients.
-- Without this line, Reylo reads `DATABASE_URL` and nothing else. `DATABASE_URL_UNPOOLED` is the name Neon's Vercel integration gives the direct string.
+- Without this line, Reylo reads `DATABASE_URL` and nothing else. Neon's Vercel integration names the direct string `DATABASE_URL_UNPOOLED`.
 - The type check takes the string as Neon writes it, [TLS settings](/configuration#direct_url) included.
 
 ## Serverless driver
@@ -112,7 +112,7 @@ Transactions on Neon:
 
 ## TCP drivers
 
-Over TCP, make a `pg` pool, a postgres.js client or a Drizzle Postgres pool<Rust>, or in Rust an sqlx pool,</Rust> with the pooled connection string:
+Over TCP, use the pooled connection string. Make a `pg` pool, a postgres.js client or a Drizzle Postgres pool<Rust>, or in Rust an sqlx pool</Rust>:
 
 ```ts twoslash tab="pg"
 import pg from "pg";
@@ -241,6 +241,6 @@ export default {
 
 In a Worker:
 
-- In a Worker, it needs no `nodejs_compat` flag. [Cloudflare D1](/d1#setup) covers the Vite plugin that loads `.sql` files there.
+- In a Worker, it needs no `nodejs_compat` flag, only the [Vite plugin](/d1#setup) that loads `.sql` files there.
 - Use it the same way on the [Next.js edge runtime](/nextjs#the-edge-runtime).
 - In an edge runtime, connect, use and close a `Pool` or `Client` within one request.

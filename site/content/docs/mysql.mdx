@@ -362,7 +362,7 @@ MySQL validates every schema as draft 4, whatever its `$schema` says. So `const`
 
 An `ENUM` is the union of its labels, and a `SET` a JavaScript `Set` of them.
 
-MySQL keeps a `SET`'s members once each, in the order the column declares them. A parameter written to a `SET` column, or compared with one, takes a `Set` too. `JSON.stringify` writes a `Set` as `{}`, so spread it into an array before sending it as JSON.
+MySQL keeps a `SET`'s members once each, in the order the column declares them. A parameter written to a `SET` column, or compared with one, takes a `Set` too. To send a `Set` as JSON, spread it into an array first, since JSON has no sets.
 
 <Pairs>
 
@@ -371,11 +371,11 @@ MySQL keeps a `SET`'s members once each, in the order the column declares them. 
 
 </Pairs>
 
-MySQL stores `''` in an `ENUM` for a value it doesn't list, under `INSERT IGNORE` or outside strict mode. `.run()` throws on such a row, naming the column. Select `nullif(column, '')` to read it.
+MySQL stores `''` in an `ENUM` for a value it doesn't list, under `INSERT IGNORE` or outside strict mode. Calling `.run()` on such a row throws, naming the column. Select `nullif(column, '')` to read it.
 
 ### Vectors
 
-A `VECTOR`, new in MySQL 9, comes back as a `number[]` of 32-bit floats. A vector parameter takes a `number[]`. `NaN` and infinities are rejected before the query runs.
+A `VECTOR`, new in MySQL 9, comes back as a `number[]` of 32-bit floats. A vector parameter takes a `number[]`, and rejects `NaN` and infinities before the query runs.
 
 <Pairs>
 
@@ -489,7 +489,7 @@ select id from orders where placed_at > :since
 A `BINARY`, `VARBINARY` or `BLOB` parameter takes only a `Uint8Array`. It rejects base64 or hex text, which MySQL would store as the text's own bytes. Decode the text into a `Uint8Array` first.
 
 - A JSON parameter is sent as JSON, so a string is stored as a JSON string: `'{"a":1}'` becomes `"{\"a\":1}"`.
-- MySQL reads that JSON as a document in three places: written whole to a column, as the document a JSON function reads, and where it's cast. Anywhere else, as in `json_set(doc, '$.name', :name)`, it would store the text as a string. So the query is a type error until you cast the parameter: `:name::json`.
+- MySQL reads that JSON as a document only in three places: written to a column, read by a JSON function, and cast. Anywhere else, as in `json_set(doc, '$.name', :name)`, it would store the text as a string. So the query is a type error until you cast the parameter: `:name::json`.
 - Where the query takes no null for a JSON parameter, `null` is JSON's `null`. To keep `doc` for `null`, write `coalesce(:doc::nullable(json), doc)`.
 
 ### Parameters that may be null
@@ -689,7 +689,7 @@ Bun loses the microseconds of a `DATETIME` before Reylo sees them. Before Bun 1.
 
 ### Drizzle
 
-Pass a Drizzle database over `mysql2` or PlanetScale, or a transaction or savepoint taken from it:
+Pass a Drizzle connection made over `mysql2` or PlanetScale, or a transaction or savepoint taken from it:
 
 ```ts twoslash tab="main.ts"
 import { drizzle } from "drizzle-orm/mysql2";

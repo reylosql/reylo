@@ -341,7 +341,7 @@ const user = await getUser.run(db, { id: 1 });
 
 #### Transactions
 
-Pass a transaction's client to `.run()`, as you pass the database:
+Pass a transaction's client to `.run()`, as you pass the client:
 
 **Postgres**
 
@@ -884,7 +884,7 @@ Reylo also narrows each error to the names it can carry. A unique violation name
 
 - Each driver's error is read into the same fields, and the driver's own error is the `cause`. Any other error, such as a refused connection, still throws.
 - The file exports the error's type as `QueryError`. On a synchronous SQLite driver, `.trySync()` returns the result itself.
-- On Postgres, any error aborts its transaction, even one `.try()` returned. Every later statement in it fails, and the transaction rolls back. MySQL and SQLite keep it open after most errors. The [Postgres page](/postgres#database-errors) shows how to carry on after an error.
+- On Postgres, any error aborts its transaction, even one `.try()` returned. Every later statement in it fails, and the transaction rolls back. MySQL and SQLite keep it open after most errors. On Postgres, [a savepoint](/postgres#database-errors) lets a transaction carry on after one.
 
 ### `.readOnly`
 
