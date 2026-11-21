@@ -108,6 +108,11 @@ mod tests {
     }
 
     #[test]
+    fn a_statement_with_an_error_keeps_all_its_text() {
+        assert_eq!(spans(Dialect::Postgres, "select 1; select u. from users u"), ["select 1", "select u. from users u"]);
+    }
+
+    #[test]
     fn an_error_in_one_statement_hides_no_refusal_in_another() {
         let text = "select 1 fetch first row with ties; select ); select 2 fetch first row with ties";
         let tree = parse(Dialect::Postgres, text);
