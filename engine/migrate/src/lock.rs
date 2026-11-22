@@ -20,10 +20,7 @@ pub const LOCK: &str = "reylo.lock";
 /// still holds it, rather than read it: read as no lock, it would run the migrations in name order.
 pub const OLD_LOCK: &str = "reylo-lock.yaml";
 
-const HEADER: &str = "# The order this project's migrations run in, written by reylo migrate dev and reylo migrate lock.
-# A merge conflict here means another branch added migrations too: keep main's lines, then
-# run reylo migrate dev, which runs this branch's after them and adds them back.
-";
+const HEADER: &str = "# On a conflict, keep main's and run reylo migrate dev\n";
 
 /// The lock: its migrations in order, and schema.sql's checksum where one was proven.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
