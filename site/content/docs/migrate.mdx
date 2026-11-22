@@ -179,6 +179,14 @@ $ reylo migrate dev
 $ reylo migrate history push --url $PROD_URL
 ```
 
+Where production hasn't run every migration ahead of yours, `reylo migrate history push` refuses and prints the SQL that undoes the change. Undo it there, and deploy:
+
+```terminal
+# undo it, then run the migrations ahead of yours, and yours, which makes it again
+$ reylo run --url $PROD_URL 'drop index users_email;'
+$ reylo migrate deploy --url $PROD_URL
+```
+
 ## Schema <code className="dk-aside">schema.sql</code> [#schema-schemasql]
 
 Declare your schema in plain SQL, as you would on the database. Reylo Migrate compares and migrates:
