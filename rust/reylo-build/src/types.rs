@@ -363,6 +363,23 @@ impl Types {
     /// A Postgres type's Rust type, and whether it is decoded through `reylo::Exact`.
     fn postgres(&mut self, t: &Type, label: &str) -> syn::Result<(TokenStream2, bool)> {
         let name = t.label.as_deref().map(bare).unwrap_or_default();
+        // A geometric type of `pg_catalog`, which the format labels bare, as sqlx's type for it: its
+        // binary form is float8 values, read exactly. A type of the same name in another schema is
+        // labelled with its schema, and is not one of these.
+        let geometric = match t.label.as_deref() {
+            Some("point") => Some(quote!(PgPoint)),
+            Some("line") => Some(quote!(PgLine)),
+            Some("lseg") => Some(quote!(PgLSeg)),
+            Some("box") => Some(quote!(PgBox)),
+            Some("path") => Some(quote!(PgPath)),
+            Some("polygon") => Some(quote!(PgPolygon)),
+            Some("circle") => Some(quote!(PgCircle)),
+            _ => None,
+        };
+        if let Some(ty) = geometric {
+            self.serialize = false;
+            return Ok((quote!(::reylo::sqlx::postgres::types::#ty), false));
+        }
         Ok(match &t.kind {
             Kind::Boolean(_) => (quote!(bool), false),
             Kind::Integer(i) => match (i.bits, i.unsigned) {
@@ -399,6 +416,13 @@ impl Types {
                 self.serialize = false;
                 (quote!(::reylo::sqlx::postgres::types::PgMoney), false)
             }
+            // A function that returns nothing, as `pg_sleep`.
+            Kind::Opaque if t.label.as_deref() == Some("void") => (quote!(()), false),
+            // hstore, in whatever schema the extension was created in: text keys, each value text or NULL.
+            Kind::Map(_) if name == "hstore" => {
+                self.serialize = false;
+                (quote!(::reylo::sqlx::postgres::types::PgHstore), false)
+            }
             Kind::Unknown => return Err(self.any_value(label)),
             _ => return Err(self.unsupported(label, t, "cast it to text in the statement, as `x::text`")),
         })
@@ -424,7 +448,11 @@ impl Types {
                     Affinity::Real => (quote!(f64), false),
                     Affinity::Text => (quote!(::std::string::String), false),
                     Affinity::Blob => (quote!(::std::vec::Vec<u8>), false),
-                    Affinity::Numeric => return Err(syn::Error::new(self.span, format!("{label} is declared {declared}, which holds an integer, a real or text: cast it in the statement, as `cast({label} as real)`"))),
+                    // A date or a time is stored as its text, which a cast to real would turn into a number.
+                    Affinity::Numeric => {
+                        let to = if is_date(declared) { "text" } else { "real" };
+                        return Err(syn::Error::new(self.span, format!("{label} is declared {declared}, which holds an integer, a real or text: cast it in the statement, as `cast({label} as {to})`")));
+                    }
                 },
                 None => return Err(self.any_value(label)),
             },
@@ -1014,6 +1042,13 @@ fn affinity(declared: &str) -> Affinity {
     }
 }
 
+/// A SQLite column declared as a date or a time (DATE, DATETIME, TIMESTAMP, TIME), whose values are
+/// written as text.
+fn is_date(declared: &str) -> bool {
+    let d = declared.to_ascii_uppercase();
+    d.contains("DATE") || d.contains("TIME")
+}
+
 /// A SQLite column declared BOOLEAN, which the loader reads as a truth value too.
 fn is_bool(declared: &str) -> bool {
     let d = declared.trim().to_ascii_lowercase();
@@ -1092,6 +1127,38 @@ mod tests {
         assert!(positions.windows(2).all(|p| p[0] < p[1]), "{tree}");
         assert_eq!(super::label_tree(&values[..1]).to_string(), quote!(::reylo::Label<{ ::reylo::__private::label_hash("v0") }>).to_string());
         assert_eq!(super::label_tree(&[]).to_string(), "()");
+    }
+
+    /// A column of `t` on `dialect`, as its Rust type and whether the row can derive `Serialize`;
+    /// or the error.
+    fn column(dialect: Dialect, t: Type) -> Result<(String, bool), String> {
+        let mut types = Types::new(dialect, Options::default(), BTreeMap::new(), Span::call_site(), false);
+        let shape = types.column(&t, false, "c").map_err(|e| e.to_string())?;
+        Ok((shape.ty().to_string().replace(' ', ""), types.serialize))
+    }
+
+    #[test]
+    fn void_hstore_and_the_geometric_types_are_sqlxs() {
+        let point = || Type::structure(vec![reylo_engine_core::types::Field::new("x", Type::double(), false), reylo_engine_core::types::Field::new("y", Type::double(), false)]);
+        assert_eq!(column(Dialect::Postgres, point().named("point")), Ok(("::reylo::sqlx::postgres::types::PgPoint".into(), false)));
+        assert_eq!(column(Dialect::Postgres, Type::array(reylo_engine_core::types::Slot::non_null(point().named("point"))).named("polygon")), Ok(("::reylo::sqlx::postgres::types::PgPolygon".into(), false)));
+        // A composite type a schema names `point` is no geometric type.
+        assert!(column(Dialect::Postgres, point().named("public.point")).unwrap_err().contains("no Rust type for public.point"));
+        assert_eq!(column(Dialect::Postgres, Type::opaque("void")), Ok(("()".into(), true)));
+        let map = |label: &str| {
+            use reylo_engine_core::types::{MapType, Slot};
+            Type::new(Kind::Map(MapType { key: Box::new(Slot::non_null(Type::text())), value: Box::new(Slot::nullable(Type::text())), size: None })).named(label)
+        };
+        assert_eq!(column(Dialect::Postgres, map("extensions.hstore")), Ok(("::reylo::sqlx::postgres::types::PgHstore".into(), false)));
+        assert!(column(Dialect::Postgres, Type::opaque("public.ltree")).unwrap_err().contains("no Rust type for public.ltree"));
+    }
+
+    #[test]
+    fn a_sqlite_date_is_cast_to_text_not_real() {
+        let declared = |name: &str| Type::union(vec![Type::integer(64), Type::double(), Type::text()]).named(name);
+        assert!(column(Dialect::Sqlite, declared("DATE")).unwrap_err().contains("as `cast(c as text)`"));
+        assert!(column(Dialect::Sqlite, declared("DATETIME")).unwrap_err().contains("as `cast(c as text)`"));
+        assert!(column(Dialect::Sqlite, declared("NUMERIC")).unwrap_err().contains("as `cast(c as real)`"));
     }
 
     #[test]

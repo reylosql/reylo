@@ -105,5 +105,25 @@ async fn main() -> Result<(), sqlx::Error> {
     assert_eq!(streamed.len(), 2);
     println!("18. stream      {streamed:?}");
     println!("19. SQL         {}", get_user::SQL.trim());
+
+    use reylo::sqlx::postgres::types::{PgCircle, PgHstore, PgPoint};
+    let place = get_place::Query { id: 1 }.run(&pool).await?.expect("place 1");
+    let pin: PgPoint = place.pin.clone();
+    assert_eq!((pin.x, pin.y), (1.5, -2.0));
+    let reach: &PgCircle = &place.reach;
+    assert_eq!((reach.x, reach.y, reach.radius), (1.0, 2.0, 3.0));
+    assert_eq!((place.route.closed, place.route.points.len(), place.outline.points.len()), (false, 2, 3));
+    let attrs: &PgHstore = &place.attrs;
+    assert_eq!((attrs.get("color"), attrs.get("size")), (Some(&Some("red".to_string())), Some(&None)));
+    let mut tx = pool.begin().await?;
+    let attrs: PgHstore = [("color".to_string(), Some("blue".to_string()))].into_iter().collect();
+    let changed = move_place::Query { pin: PgPoint { x: 0.25, y: 1e300 }, attrs, id: 1 }.run(&mut *tx).await?;
+    let moved = get_place::Query { id: 1 }.run(&mut *tx).await?.expect("place 1");
+    tx.rollback().await?;
+    assert_eq!((changed, moved.pin.x, moved.pin.y, moved.attrs.len()), (1, 0.25, 1e300, 1));
+    println!("20. geometry    {place:?}");
+
+    let slept = nap::Query.run(&pool).await?.slept;
+    println!("21. void        {slept:?}");
     Ok(())
 }

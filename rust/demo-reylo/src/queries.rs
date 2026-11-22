@@ -141,3 +141,15 @@ pub async fn user_page(pool: &PgPool, id: i32) -> sqlx::Result<Option<UserPage>>
     let titles = titles_by_author::Query { author: id }.run(pool).await?;
     Ok(Some(UserPage { user, titles }))
 }
+
+/// The geometric types and hstore, each sqlx's own type.
+#[reylo::query("select pin, area, route, outline, reach, edge, axis, attrs from places where id = :id")]
+pub mod get_place {}
+
+/// A point and an hstore as parameters.
+#[reylo::query("update places set pin = :pin, attrs = :attrs where id = :id")]
+pub mod move_place {}
+
+/// A function that returns nothing, as `()`.
+#[reylo::query("select pg_sleep(0) as slept")]
+pub mod nap {}
