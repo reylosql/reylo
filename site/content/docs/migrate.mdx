@@ -358,7 +358,9 @@ $ reylo migrate deploy
 ✗ Migration 20261105080000_no_nick.sql sorts before 20261105090000_nick.sql, which this database already ran
   Run in name order, as on a fresh database, the migrations end differently:
 
-    + a fresh database: column users.nick text
+    --- this database
+    +++ a fresh database
+    + column users.nick text
 
   Give it a later name, so that every database runs it after 20261105090000_nick.sql:
     mv reylo/migrations/20261105080000_no_nick.sql reylo/migrations/20261105090001_no_nick.sql

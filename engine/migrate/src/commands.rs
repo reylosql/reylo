@@ -724,16 +724,18 @@ async fn run_once(db: &mut Db, m: &Migration, record: bool) -> Result<(), Ran> {
 // ---------------------------------------------------------------------------------------------
 // The check.
 
+/// How the schema `a` differs from `b`, as a diff from one to the other under headers that name
+/// them, set off by a blank line on each side: `-` what only `a` has, `+` what only `b` has.
 fn describe_diff(label_a: &str, a: &[String], label_b: &str, b: &[String]) -> Vec<String> {
     const MAX: usize = 20;
     let (only_a, only_b) = difference(a, b);
-    let mut out: Vec<String> = only_a.iter().take(MAX).map(|l| paint("red", &format!("  - {label_a}: {}", readable(l)))).collect();
-    out.extend(only_b.iter().take(MAX).map(|l| paint("green", &format!("  + {label_b}: {}", readable(l)))));
-    let more = only_a.len() + only_b.len() - out.len();
+    let mut changes: Vec<String> = only_a.iter().take(MAX).map(|l| paint("red", &format!("    - {}", readable(l)))).collect();
+    changes.extend(only_b.iter().take(MAX).map(|l| paint("green", &format!("    + {}", readable(l)))));
+    let more = only_a.len() + only_b.len() - changes.len();
     if more > 0 {
-        out.push(format!("  … and {more} more"));
+        changes.push(format!("    … and {more} more"));
     }
-    out
+    [String::new(), paint("dim", &format!("    --- {label_a}")), paint("dim", &format!("    +++ {label_b}"))].into_iter().chain(changes).chain([String::new()]).collect()
 }
 
 /// A comparison line as a person reads it: `public.` left out, and an index or a constraint as SQL
@@ -1341,10 +1343,7 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
     let folder = shown(dir);
     let moves: Vec<String> = late.iter().zip(&renamed).map(|(m, n)| format!("mv {} {}", shell_word(&format!("{folder}/{}", m.name)), shell_word(&format!("{folder}/{n}")))).collect();
     let lead = format!("Give {} a later name, so that every database runs {} after {}", if one { "it" } else { "them" }, if one { "it" } else { "them" }, after.join(", "));
-    let diff = |a: &[String], b: &[String]| -> Vec<String> {
-        let lines = describe_diff("this database", &crate::catalog::without_comments(a), "a fresh database", &crate::catalog::without_comments(b));
-        std::iter::once(String::new()).chain(lines.into_iter().map(|l| format!("  {l}"))).chain([String::new()]).collect()
-    };
+    let diff = |a: &[String], b: &[String]| describe_diff("this database", &crate::catalog::without_comments(a), "a fresh database", &crate::catalog::without_comments(b));
     let problem = match (shadows.lines(here).await?, shadows.lines(fresh).await?) {
         (Ok(a), Ok(b)) if crate::catalog::same_schema(&a, &b) => return Ok(None),
         (Ok(a), Ok(b)) => Problem::new("late-migration-differs", format!("{} {names} {} before {}, which this database already ran", if one { "Migration" } else { "Migrations" }, if one { "sorts" } else { "sort" }, after.join(", ")))
@@ -3067,8 +3066,8 @@ async fn emptied(db: &mut Db, server: &mut Server, opts: &Options, log: Log<'_>)
     }
     match take_to(db, &target, &then, &lines, None).await? {
         Err(Unreached::Refused(problems)) => return Ok(refuse(&problems, log)),
-        Err(Unreached::Differs(lines)) => {
-            let problem = Problem::new("reset-incomplete", "Reylo can't drop everything on this database").lines(lines);
+        Err(Unreached::Differs(now, expect)) => {
+            let problem = Problem::new("reset-incomplete", "Reylo can't drop everything on this database").lines(describe_diff("this database", &now, "an empty database", &expect));
             if d != Dialect::Mysql {
                 return Ok(refuse(&[problem], log));
             }
@@ -4714,8 +4713,9 @@ const COMMITTED: &str = "The plan commits partway (an enum's new labels, before 
 
 /// Why `take_to` left the database as it was.
 enum Unreached {
-    /// The plan ran, but the database didn't then read as the target: how it differs.
-    Differs(Vec<String>),
+    /// The plan ran, but the database didn't then read as the target: its schema then, and the
+    /// target's, which `differs` describes.
+    Differs(Vec<String>, Vec<String>),
     /// What was stated refused the plan before it ran.
     Refused(Vec<Problem>),
 }
@@ -4756,7 +4756,7 @@ async fn take_to(db: &mut Db, target: &Target, then: &[String], expect: &[String
         crate::catalog::keep_turso_sequences(db).await?;
         let now = crate::catalog::without_comments(&crate::catalog::without_extra_children(&catalog(db).await?, expect));
         if now != expect {
-            return Ok(Err(Unreached::Differs(describe_diff("this database", &now, "the target", expect))));
+            return Ok(Err(Unreached::Differs(now, expect.to_vec())));
         }
         if transactional {
             db.exec("commit").await?;
@@ -5391,7 +5391,7 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
             None => match take_to(db, &k_target, &forget, &at_kept, None).await {
                 Err(e) => return fail("Rewinding this database failed", e.0, log),
                 Ok(Err(Unreached::Refused(problems))) => return Ok(refuse(&problems, log)),
-                Ok(Err(Unreached::Differs(lines))) => return refused("Rewinding this database wouldn't reach what its migrations make", lines, log),
+                Ok(Err(Unreached::Differs(now, expect))) => return refused("Rewinding this database wouldn't reach what its migrations make", describe_diff("this database", &now, "its migrations", &expect), log),
                 Ok(Ok((_, plan))) => {
                     base = at_kept.clone();
                     plan
@@ -5485,7 +5485,7 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
             match take_to(db, &target, &[], &expect, None).await {
                 Err(e) => return fail("Undoing changes no migration made failed", e.0, log),
                 Ok(Err(Unreached::Refused(problems))) => return Ok(refuse(&problems, log)),
-                Ok(Err(Unreached::Differs(lines))) => return refused("Undoing changes no migration made wouldn't reach what the migrations make", lines, log),
+                Ok(Err(Unreached::Differs(now, expect))) => return refused("Undoing changes no migration made wouldn't reach what the migrations make", describe_diff("this database", &now, "the migrations", &expect), log),
                 Ok(Ok((_, plan))) => {
                     rows.open(log);
                     log(&format!("  {} Undid what no migration made, so that {} runs on what the migrations make", paint("yellow", "↺"), pending[0].name));
@@ -5711,8 +5711,8 @@ async fn db_push_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Optio
         let (renames, plan) = match take_to(db, &target, &[], &wanted, Some((push, asked))).await {
             Err(e) => return fail(if d == Dialect::Mysql { "reylo db push failed partway" } else { "reylo db push failed" }, e.0, log),
             Ok(Err(Unreached::Refused(problems))) => return Ok(refuse(&problems, log)),
-            Ok(Err(Unreached::Differs(lines))) => {
-                let problem = Problem::new("db-push-incomplete", format!("Reylo can't take this database the rest of the way to {}", shown(&opts.schema))).lines(lines).fix("Write the change as a migration, finishing by hand what it leaves out", &["reylo migrate new <name>"]);
+            Ok(Err(Unreached::Differs(now, expect))) => {
+                let problem = Problem::new("db-push-incomplete", format!("Reylo can't take this database the rest of the way to {}", shown(&opts.schema))).lines(describe_diff("this database", &now, &shown(&opts.schema), &expect)).fix("Write the change as a migration, finishing by hand what it leaves out", &["reylo migrate new <name>"]);
                 if d != Dialect::Mysql {
                     return Ok(refuse(&[problem], log));
                 }

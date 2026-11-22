@@ -675,7 +675,7 @@ async fn without_a_lock_a_late_migration_runs_where_both_orders_agree(mut p: P) 
     p.output();
     assert_eq!(p.dev().await, 1);
     let out = p.output();
-    assert_has!(&out, r"✗ Migration 20261027130000_e\.sql sorts before 20261027140000_d\.sql, which this database already ran\n  Run in name order, as on a fresh database, the migrations end differently:\n\n    [-+] ");
+    assert_has!(&out, r"✗ Migration 20261027130000_e\.sql sorts before 20261027140000_d\.sql, which this database already ran\n  Run in name order, as on a fresh database, the migrations end differently:\n\n    --- this database\n    \+\+\+ a fresh database\n(?:    [-+] [^\n]+\n)*    - column e\.x [^\n]+\n(?:    [-+] [^\n]+\n)*\n  Give it a later name");
     assert_has!(&out, r"\n\n  Give it a later name, so that every database runs it after 20261027140000_d\.sql:\n    mv \S+/20261027130000_e\.sql \S+/\d{14}_e\.sql\n");
     assert_eq!(deploy_on(&mut p, &other.url).await, 1);
     assert_has!(p.output(), r"sorts before 20261027140000_d\.sql");
