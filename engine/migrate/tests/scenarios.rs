@@ -458,6 +458,7 @@ for_each_dialect!(
     a_change_by_hand_with_schema_sql_is_told_to_write_the_migration,
     init_writes_and_records_the_baseline,
     a_migration_the_lock_lacks_is_a_draft,
+    status_reports_a_history_out_of_the_locks_order,
     a_rebased_migration_is_rewound_by_dev,
     history_pull_writes_the_lock_and_keeps_what_is_still_to_deploy,
     db_introspect_prints_the_schema,
@@ -502,6 +503,7 @@ for_each_dialect!(
     create_lists_every_rename_it_assumes,
     commands_create_prints_for_names_with_spaces_run_as_printed,
     deploy_compares_with_what_dev_replayed,
+    dev_says_schema_sql_is_ahead_once_a_changed_object_is_pushed,
     deploy_refuses_any_schema_with_no_history,
     init_on_an_empty_database_writes_an_empty_schema_and_lock,
     a_broken_draft_keeps_what_sync_made,
@@ -684,7 +686,7 @@ async fn without_a_lock_a_late_migration_runs_where_both_orders_agree(mut p: P) 
     p.output();
     assert_eq!(p.dev().await, 1);
     let out = p.output();
-    assert_has!(&out, r"✗ Migration 20261027130000_e\.sql sorts before 20261027140000_d\.sql, which this database already ran\n  Run in name order, as on a fresh database, the migrations end differently:\n\n    [-+] ");
+    assert_has!(&out, r"✗ Migration 20261027130000_e\.sql sorts before 20261027140000_d\.sql, which this database already ran\n  Run in name order, as on a fresh database, the migrations end differently:\n\n    --- this database\n    \+\+\+ a fresh database\n(?:    [-+] [^\n]+\n)*    - column e\.x [^\n]+\n(?:    [-+] [^\n]+\n)*\n  Give it a later name");
     assert_has!(&out, r"\n\n  Give it a later name, so that every database runs it after 20261027140000_d\.sql:\n    mv \S+/20261027130000_e\.sql \S+/\d{14}_e\.sql\n");
     assert_eq!(deploy_on(&mut p, &other.url).await, 1);
     assert_has!(p.output(), r"sorts before 20261027140000_d\.sql");
@@ -928,6 +930,8 @@ async fn new_without_schema_sql_writes_what_the_database_has(mut p: P) {
     p.exec(&format!("create table tags (id {int})")).await;
     p.output();
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tags", &Default::default(), log).await).await, 0, "{}", p.peek());
+    // It says what the migration changes.
+    assert_has!(p.output(), r"✓ Wrote \S*_tags\.sql\n(?:  \+ [^\n]+\n)*  \+ column tags\.id ");
     let written = p.files().into_iter().find(|f| f.ends_with("_tags.sql")).unwrap();
     let sql = std::fs::read_to_string(p.dir.join("migrations").join(&written)).unwrap();
     assert_has!(&sql, r"(?i)create table [^\n]*tags");
@@ -1205,6 +1209,29 @@ async fn a_migration_the_lock_lacks_is_a_draft(mut p: P) {
     assert_has!(p.output(), r"The lock doesn't list 20261027110000_b\.sql yet\n\n  Run it in development, which locks it:\n    reylo migrate dev");
 }
 
+async fn status_reports_a_history_out_of_the_locks_order(mut p: P) {
+    let int = p.t.int;
+    let (a, tags, status) = ("20261027100000_a.sql", "20261027110000_tags.sql", "20261027120000_status.sql");
+    p.linear();
+    p.file(a, &format!("create table a (id {int});"));
+    p.file(status, &format!("alter table a add column status {int};"));
+    p.lock(&[a, status]);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    // Main gained a migration named earlier, and the merge kept main's lines: the lock now runs it
+    // before the one this database already ran.
+    p.file(tags, &format!("alter table a add column tags {int};"));
+    p.lock(&[a, tags, status]);
+    p.output();
+    let refusal = r"✗ This database applied 20261027120000_status\.sql where \S*reylo\.lock lists 20261027110000_tags\.sql\n  Every database runs the migrations in the lock's order\.";
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), refusal);
+    // Status says the same, and doesn't offer the deploy that refuses.
+    assert_eq!(p.status().await, 1);
+    let out = p.output();
+    assert_has!(&out, refusal);
+    assert!(!out.contains("To run it in production"), "{out}");
+}
+
 async fn a_rebased_migration_is_rewound_by_dev(mut p: P) {
     let int = p.t.int;
     p.schema(&format!("create table a (id {int}); create table mine (id {int});"));
@@ -1360,6 +1387,8 @@ async fn a_failed_migration_leaves_nothing(mut p: P) {
     p.file("20261027110000_b.sql", &format!("create table b (id {int}); alter table a {change};"));
     p.schema(&format!("create table a (id {int}{column}); create table b (id {int});"));
     assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    // Said as every refusal is: what failed, that nothing of it stays, and what to run next.
+    assert_has!(p.output(), r"  ✗ 20261027110000_b\.sql  failed\n\n✗ The migration 20261027110000_b\.sql failed and was rolled back\n  [^\n]+\n  Nothing was recorded, so the next deploy runs it again\.\n\n  Fix the file, lock the fix and deploy again:\n    reylo migrate dev\n    reylo migrate deploy\n  If another database already ran it, write a new migration instead:\n    reylo migrate new <name>$");
     assert!(p.try_rows("select 1 from b").await.is_err(), "b rolled back with the file");
     assert_eq!(p.history().await, ["20261027100000_a.sql"]);
 }
@@ -1449,7 +1478,7 @@ async fn a_lone_statement_cut_off_with_no_fingerprint_to_compare(mut p: P) {
     p.output();
     // Run again, it fails where it landed, and says how to find out.
     assert_eq!(p.migrate().await, 1);
-    assert_has!(p.output(), r"✗ 20261027110000_index\.sql  failed[^\n]*\n[\s\S]*A run before this one was cut off here, so its change may be in place\n    See whether it is:\n      reylo migrate deploy --dry-run\n    Record it if it is, running nothing:\n      reylo migrate history push");
+    assert_has!(p.output(), r"✗ 20261027110000_index\.sql  failed\n[\s\S]*A run before this one was cut off here, so its change may be in place\.\n\n  See whether it is:\n    reylo migrate deploy --dry-run\n  Record it if it is, running nothing:\n    reylo migrate history push");
     assert_eq!(p.dry_run().await, 1);
     assert_has!(p.output(), r"20261027110000_index\.sql makes exactly this change[^\n]*\n    reylo migrate history push");
     assert_eq!(p.history_push().await, 0, "{}", p.peek());
@@ -2098,6 +2127,35 @@ async fn deploy_compares_with_what_dev_replayed(mut p: P) {
     assert_has!(p.output(), r"^✓ Up to date$");
 }
 
+/// What dev says of schema.sql where an object changed rather than came, a view's text: edited, the
+/// two disagree, and the next migration writes the change; pushed, the database has schema.sql, so
+/// schema.sql is ahead.
+async fn dev_says_schema_sql_is_ahead_once_a_changed_object_is_pushed(mut p: P) {
+    let int = p.t.int;
+    let declared = |columns: &str| format!("create table t (id {int}, n {int}); create view v as select {columns} from t;");
+    p.linear();
+    p.schema(&declared("id"));
+    // A file each, since MySQL runs each statement alone.
+    p.file("20261027100000_t.sql", &format!("create table t (id {int}, n {int});"));
+    p.file("20261027100100_v.sql", "create view v as select id from t;");
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    p.output();
+    p.schema(&declared("id, n"));
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    assert_has!(p.output(), r"! The migrations and \S*schema\.sql disagree\n  To write what \S*schema\.sql has to a migration file:\n    reylo migrate new <name>");
+    assert_eq!(p.db_push().await, 0, "{}", p.peek());
+    p.output();
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    assert_has!(p.output(), r"✓ Up to date with the migrations\n» The schema is ahead of the migrations\n  To write the changes to a migration file:\n    reylo migrate new <name>");
+    // Written, the migration is recorded, and the two agree.
+    assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "v", &Default::default(), log).await).await, 0, "{}", p.peek());
+    p.output();
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    let out = p.output();
+    assert_has!(&out, r"recorded: already in place");
+    assert!(!has(&out, "ahead|disagree"), "{out}");
+}
+
 async fn a_broken_draft_keeps_what_sync_made(mut p: P) {
     let (int, text) = (p.t.int, p.t.text);
     p.linear();
@@ -2183,7 +2241,7 @@ async fn create_renames_a_table_keeping_its_rows(mut p: P) {
     // One table goes while one of its columns comes: renamed, and the foreign key on it follows.
     p.schema(&format!("create table accounts (id {id}, email {text}); create table posts (id {int}, user_id {int}, foreign key (user_id) references accounts (id));"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "accounts", &Default::default(), log).await).await, 0, "{}", p.peek());
-    assert_has!(p.output(), r"✓ Wrote [^\n]+\n  ! Written as a rename, keeping its rows: users → accounts\n    If they're different tables, delete the file, then:");
+    assert_has!(p.output(), r"✓ Wrote [^\n]+\n(?:  [-+] [^\n]+\n)*  ! Written as a rename, keeping its rows: users → accounts\n    If they're different tables, delete the file, then:");
     let sql = sql_of(&p, "accounts");
     assert!(sql.contains("rename to accounts") && !sql.contains("drop table"), "{sql}");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
@@ -2903,6 +2961,7 @@ on!(
     a_migration_that_creates_a_role_is_refused,
     an_object_the_comparison_does_not_read_is_not_a_match,
     a_failed_concurrent_index_leaves_nothing,
+    a_failed_lone_statement_may_leave_its_change,
     a_platforms_objects_are_left_out,
     reylo_run_runs_inline_sql_and_files,
     history_push_leaves_a_data_migration_pending,
@@ -2940,6 +2999,8 @@ on!(
     a_platforms_schemas_by_name_are_left_out_whoever_owns_them,
     a_projects_auth_and_storage_are_its_own_on_a_server_of_no_platform,
     a_change_by_hand_is_shown_alone_beside_a_function_of_many_lines,
+    an_enum_value_added_is_ahead_on_the_side_that_added_it,
+    a_comment_a_migration_adds_is_the_migrations,
 );
 on!(Mysql, a_migration_that_names_a_database_is_refused);
 on!(
@@ -2998,6 +3059,8 @@ on!(
     new_writes_constraints_and_indexes_that_block_no_writes,
     new_refuses_a_table_rewrite_until_blocking,
     deploy_waits_out_a_lock_another_session_holds,
+    deploys_at_once_wait_out_a_concurrent_index_build,
+    a_deploy_waits_for_the_run_lock_no_longer_than_its_sessions_timeouts,
     new_refuses_a_check_on_a_partitioned_table_until_blocking,
     new_refuses_an_index_built_again_until_blocking,
     a_concurrent_reindex_is_said_to_block_nothing,
@@ -3848,10 +3911,24 @@ mod adversarial {
         p.schema("create table t (x int); create unique index t_x on t (x);");
         p.output();
         assert_eq!(p.migrate().await, 1);
-        assert_has!(p.output(), "could not create unique index");
+        assert_has!(p.output(), r"✗ The migration 20261027110000_unique\.sql failed and was rolled back\n  could not create unique index[^\n]*\n  Nothing was recorded, so the next deploy runs it again\.\n\n  Fix the file, lock the fix and deploy again:");
         assert!(p.rows("select 1 from pg_class where relname = 't_x'").await.is_empty(), "the invalid index was dropped");
         p.exec("delete from t where ctid = (select max(ctid) from t)").await;
         assert_eq!(p.migrate().await, 0, "the file runs again as written:\n{}", p.peek());
+    }
+
+    pub async fn a_failed_lone_statement_may_leave_its_change(mut p: P) {
+        p.schema("create table t (x int);");
+        p.file("20261027100000_t.sql", "create table t (x int);");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        // Run outside a transaction, a statement other than an index build may leave part of itself,
+        // as a detach left pending: deploy never says it rolled back.
+        p.file("20261027110000_drop.sql", "drop index concurrently t_missing;");
+        p.output();
+        assert_eq!(p.migrate().await, 1);
+        let out = p.output();
+        assert_has!(&out, r"✗ The migration 20261027110000_drop\.sql failed\n  [^\n]*t_missing[^\n]*\n  It runs outside a transaction, so its change may be in place\.\n\n  See what is:\n    reylo migrate deploy --dry-run$");
+        assert!(!out.contains("rolled back"), "{out}");
     }
 
     pub async fn a_platforms_objects_are_left_out(mut p: P) {
@@ -3932,6 +4009,11 @@ mod adversarial {
         assert_eq!(p.run(async |o, log| reylo_migrate::run_sql(o, &items, log).await).await, 0, "{}", p.peek());
         assert_eq!(p.rows("select x from t order by x").await.iter().map(|r| r.text("x").to_string()).collect::<Vec<_>>(), ["1", "2"]);
         assert_eq!(p.rows("select to_regclass('__reylo_migrations') as t").await[0].get("t"), None, "records nothing");
+        // What each statement returns is shown under its line, its columns where it returned no row.
+        p.output();
+        let items = [("rows".to_string(), "select x from t order by x; select x from t where false; update t set x = x returning x".to_string())];
+        assert_eq!(p.run(async |o, log| reylo_migrate::run_sql(o, &items, log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.output(), "✓ rows\n  x\n  ─\n  1\n  2\n  Returned 2 rows\n\n  x\n  ─\n  Returned 0 rows\n\n  x\n  ─\n  1\n  2\n  Returned 2 rows");
     }
 
     pub async fn history_push_leaves_a_data_migration_pending(mut p: P) {
@@ -4028,6 +4110,52 @@ mod adversarial {
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_has!(p.output(), "Up to date");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    }
+
+    /// An enum is one line of the catalog, so a value added changes that line on both sides: schema.sql's
+    /// enum with a value more is schema.sql ahead, pushed or not, and a migration's is the migrations'.
+    pub async fn an_enum_value_added_is_ahead_on_the_side_that_added_it(mut p: P) {
+        let declared = |values: &str| format!("create type visibility as enum ({values}); create table bookmarks (id int primary key, visibility visibility not null default 'private');");
+        p.linear();
+        p.schema(&declared("'private', 'public'"));
+        p.file("20261027100000_bookmarks.sql", &declared("'private', 'public'"));
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        p.schema(&declared("'private', 'team', 'public'"));
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"» The schema is ahead of the migrations\n  To write the changes to a migration file:\n    reylo migrate new <name>");
+        assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+        assert_has!(p.output(), r"The schema is ahead of the migrations\n\n[^\n]*add value 'team' after 'private'");
+        assert_eq!(p.db_push().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"✓ Up to date with the migrations\n» The schema is ahead of the migrations\n  To write the changes to a migration file:\n    reylo migrate new <name>");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "team", &Default::default(), log).await).await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!has(&out, "ahead|disagree"), "{out}");
+        // A value a migration adds and schema.sql doesn't declare is the migrations'.
+        p.file("20261027100100_archived.sql", "alter type visibility add value 'archived';");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"The migrations make what \S*schema\.sql doesn't declare");
+        assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+        assert_has!(p.output(), r"The migrations make what \S*schema\.sql doesn't declare");
+    }
+
+    /// A comment a migration makes and schema.sql doesn't declare is the migrations', though this
+    /// database, whose comments aren't compared, matches schema.sql as well as the migrations.
+    pub async fn a_comment_a_migration_adds_is_the_migrations(mut p: P) {
+        p.linear();
+        p.schema("create table t (id int);");
+        p.file("20261027100000_t.sql", "create table t (id int);");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        p.file("20261027100100_doc.sql", "comment on table t is 'the table';");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"The migrations make what \S*schema\.sql doesn't declare");
+        assert!(!has(&out, "ahead"), "{out}");
     }
 
     pub async fn a_comment_in_schema_sql_is_written(mut p: P) {
@@ -4215,6 +4343,76 @@ mod adversarial {
         assert!(at.elapsed() >= std::time::Duration::from_secs(2), "the migration waited for the reader");
         release.await.unwrap();
         assert_eq!(p.rows("select count(*) as n from information_schema.columns where table_name = 'users' and column_name = 'bio'").await[0].text("n"), "1");
+    }
+
+    pub async fn deploys_at_once_wait_out_a_concurrent_index_build(mut p: P) {
+        p.file("20261027100000_users.sql", "create table users (id int primary key, created_at timestamptz not null default now());");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into users select g, now() - g * interval '1 minute' from generate_series(1, 100000) g").await;
+        p.file("20261027110000_users_created.sql", "create index concurrently users_created on users (created_at);");
+        p.relock();
+        let opts = p.opts();
+        // Three instances of an app start while another run holds the lock, each deploying. The one
+        // that takes the lock next builds the index concurrently, which waits out every snapshot older
+        // than its own: a run still waiting for the lock must hold none, or the two deadlock.
+        let (url, dir) = (&p.url, &p.dir);
+        let runs: Vec<(i32, String)> = std::thread::scope(|s| {
+            let (locked, held) = std::sync::mpsc::channel();
+            s.spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                rt.block_on(async {
+                    let mut other = Db::connect(url, dir).await.unwrap();
+                    other.exec("select pg_advisory_lock(hashtextextended('reylo_migrate', 0))").await.unwrap();
+                    locked.send(()).unwrap();
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    other.close().await;
+                });
+            });
+            held.recv().unwrap();
+            let started: Vec<_> = (0..3)
+                .map(|_| {
+                    let opts = &opts;
+                    s.spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                        let mut lines = Vec::new();
+                        let code = rt.block_on(reylo_migrate::deploy(opts, &mut |l: &str| lines.push(l.to_string()))).unwrap_or_else(|e| {
+                            lines.push(e.to_string());
+                            1
+                        });
+                        (code, lines.join("\n"))
+                    })
+                })
+                .collect();
+            started.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for (code, out) in &runs {
+            assert_eq!(*code, 0, "{out}");
+        }
+        assert_eq!(runs.iter().map(|(_, out)| out.matches(" applied ·").count()).sum::<usize>(), 1, "{runs:?}");
+        assert_eq!(runs.iter().filter(|(_, out)| out.contains("Up to date")).count(), 2, "{runs:?}");
+        assert_eq!(p.rows("select indisvalid::text as v from pg_index where indexrelid = 'users_created'::regclass").await[0].text("v"), "true");
+    }
+
+    pub async fn a_deploy_waits_for_the_run_lock_no_longer_than_its_sessions_timeouts(mut p: P) {
+        p.file("20261027100000_users.sql", "create table users (id int primary key);");
+        p.relock();
+        let opts = p.opts();
+        let mut other = Db::connect(&p.url, &p.dir).await.unwrap();
+        other.exec("select pg_advisory_lock(hashtextextended('reylo_migrate', 0))").await.unwrap();
+        // Another run holds the lock for longer than either timeout: the deploy gives up at the
+        // timeout, as a statement blocked on the lock would, running nothing.
+        for setting in ["lock_timeout", "statement_timeout"] {
+            p.exec(&format!("alter database {} set {setting} = '300ms'", p.name)).await;
+            let at = std::time::Instant::now();
+            let waited = tokio::time::timeout(std::time::Duration::from_secs(10), reylo_migrate::deploy(&opts, &mut |_: &str| {})).await.expect("the deploy gave up at its timeout");
+            let e = waited.expect_err("the lock was held");
+            assert!(e.to_string().contains(&format!("{setting} of 300ms")), "{e}");
+            assert!(at.elapsed() < std::time::Duration::from_secs(2), "{setting}: {:?}", at.elapsed());
+            p.exec(&format!("alter database {} reset {setting}", p.name)).await;
+        }
+        assert!(p.history().await.is_empty());
+        other.close().await;
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
     }
 
     pub async fn a_narrowing_type_change_fails_rather_than_cuts(mut p: P) {

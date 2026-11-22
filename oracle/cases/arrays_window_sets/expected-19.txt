@@ -1,0 +1,1 @@
+inline_window.sql: many () -> {  } !! reylo6: set-returning functions are not allowed in window definitions (0A000)

@@ -2014,6 +2014,7 @@ name = "reylo-migrate"
 version = "0.8.2"
 dependencies = [
  "cc",
+ "futures-util",
  "libc",
  "mysql_async",
  "regex",

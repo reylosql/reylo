@@ -37,22 +37,30 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::Path;
 
-const USAGE: &str = "Usage: reylo <command>
+/// The CLI page's own block (site/content/docs/cli.mdx), which shows the Rust lines only where the
+/// docs show Rust. `engine` and `lsp` are left out: a language's tooling runs them, not a person.
+const USAGE: &str = "Usage: reylo <command> [flags]
 
-  analyze <paths> [--url]   Print each statement's type descriptor, read from the project's
-          [--format]        database, as JSON or YAML, or its TypeScript types or Rust module
-  generate <generator>      Write each .sql file's module for a language: rust-sqlx, the Rust
-          [paths] [--out]   of #[reylo::query] (reylo generate --help)
-  migrate <command>         Write, check and run migrations, and repair their history
-  db <command>              Push schema.sql to a development database, reset, wipe or read it
-  run \"<sql>\"… [--file <path>]…
-                            Run SQL on the database as written; records nothing
-  play [--port] [--no-open] Serve the playground on 127.0.0.1, against the project's database
-                            (from reylo's npm package: npx reylo play)
-  engine <database> [call]  Serve the analysis engine of postgres, mysql or sqlite over
-                            standard input and output, one JSON request per line; with call,
-                            answer the one request on standard input
-  --version                 Print the version";
+Commands:
+  analyze <paths>          Print what Reylo infers for each statement
+    --sql <statement>      Read this statement, in place of files
+    --url <url>            The database, in place of the project's
+    --format <format>      json, the default, yaml or typescript
+    --format rust          Print each statement's Rust module for sqlx
+  generate <generator>     Write each .sql file's module for a language
+    --out <file>           Write every module into one file
+  migrate <command>        Write, check and run your migrations
+  db <command>             Push, reset, wipe or print a development database
+  run <sql>                Run SQL as written, recording nothing
+    --file <path>          Run a file's SQL too, after the text
+    --url <url>            The database, in place of the project's
+  play                     Serve the playground on this machine
+    --port <n>             The port, 4983 by default
+    --no-open              Leave the browser closed
+
+Flags:
+  -h, --help               Print this help
+  --version                Print the version";
 
 const GENERATE_USAGE: &str = "Usage: reylo generate <generator> [<file.sql | directory | 'glob'> ...] [--out <file>]
 
@@ -73,8 +81,8 @@ TypeScript needs no generator: the type check reads each query itself.";
 const RUN_USAGE: &str = "Usage: reylo run \"<sql>\"… [--file <path>]…
 
 Runs SQL on the database as written, outside any migration's history: inline text, and the files
---file names (-f), in the order given. The database is the type check's connection; --url names
-another.";
+--file names (-f), in the order given. A statement that returns rows prints them as a table, the
+first 50 and how many more. The database is the type check's connection; --url names another.";
 
 const MIGRATE_USAGE: &str = "Usage: reylo migrate <command> [flags]
 
@@ -116,12 +124,12 @@ Flags:
   --json                   Print the result as one JSON object
   -h, --help               Print this help";
 
-/// A group's help: `reylo migrate`'s or `reylo db`'s.
+/// A group's help: `reylo migrate`'s or `reylo db`'s, or with none, `reylo`'s own.
 fn usage(group: &str) -> &'static str {
-    if group == "db" {
-        DB_USAGE
-    } else {
-        MIGRATE_USAGE
+    match group {
+        "db" => DB_USAGE,
+        "migrate" => MIGRATE_USAGE,
+        _ => USAGE,
     }
 }
 
@@ -131,11 +139,11 @@ const COMMANDS: [&str; 12] = ["migrate init", "migrate new", "migrate dev", "mig
 /// Names another tool gives these commands, and the one each is here.
 const ALSO_KNOWN_AS: [(&str, &str); 3] = [("create", "migrate new"), ("generate", "migrate new"), ("pull", "db introspect")];
 
-/// A group's help as a terminal shows it: its headings bold, each command cyan, each flag yellow and
-/// what it takes dim. Piped, it is the text alone.
+/// A help as a terminal shows it: its headings bold, each command cyan, each flag yellow and what it
+/// takes dim. Piped, it is the text alone.
 fn painted_usage(group: &str) -> String {
     use reylo_migrate::commands::paint;
-    let name = regex::Regex::new(r"^(\s+)(--?[a-z-]+(?:, --[a-z-]+)?|[a-z][a-z -]*?)( <\S+)?(\s{2}.*)$").unwrap();
+    let name = regex::Regex::new(r"^(\s+)(--?[a-z-]+(?:, --[a-z-]+)?(?: [a-z]+)?|[a-z][a-z -]*?)( <\S+)?(\s{2}.*)$").unwrap();
     let lines = usage(group).lines().map(|line| {
         if let Some(rest) = line.strip_prefix("Usage: ") {
             return format!("{} {rest}", paint("bold", "Usage:"));
@@ -402,7 +410,7 @@ fn run_group(command: &str, parsed: &Args, log: reylo_migrate::commands::Log<'_>
         return Err(format!("no {}/ directory here: start one with reylo migrate init, or set dir in .reylo.yaml", home.strip_prefix(&opts.root).unwrap_or(home).display()));
     }
     // The development commands change a database in ways no deploy wants.
-    let in_ci = std::env::var_os("CI").is_some();
+    let in_ci = ci(std::env::var_os("CI").as_deref());
     let mut log = log;
     let rt = runtime();
     let result = rt.block_on(async {
@@ -441,6 +449,11 @@ fn run_group(command: &str, parsed: &Args, log: reylo_migrate::commands::Log<'_>
         }
     });
     result.map_err(|e| e.0)
+}
+
+/// Whether `CI` says this is CI: set, to anything but empty, `false` or `0`, which say it isn't.
+fn ci(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !(v.is_empty() || v.eq_ignore_ascii_case("false") || v == "0"))
 }
 
 /// `reylo generate <generator> [paths] [--out <file>]`.
@@ -551,7 +564,7 @@ pub fn main() {
     reylo_migrate::terminal::set_spinner(std::io::stdout().is_terminal() && std::io::stderr().is_terminal() && std::env::var("TERM").map_or(true, |t| t != "dumb"));
     let code = match args.first().map(String::as_str) {
         None | Some("--help" | "-h" | "help") => {
-            println!("{USAGE}");
+            println!("{}", painted_usage("reylo"));
             0
         }
         Some("--version" | "-V") => {
@@ -584,11 +597,18 @@ pub fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{painted_usage, usage, COMMANDS};
+    use super::{ci, painted_usage, usage, COMMANDS};
+
+    #[test]
+    fn ci_is_any_value_but_empty_false_or_0() {
+        for (value, is) in [(None, false), (Some(""), false), (Some("false"), false), (Some("FALSE"), false), (Some("False"), false), (Some("0"), false), (Some("true"), true), (Some("1"), true), (Some("yes"), true), (Some("woodpecker"), true)] {
+            assert_eq!(ci(value.map(std::ffi::OsStr::new)), is, "CI={value:?}");
+        }
+    }
 
     #[test]
     fn the_help_is_its_text_when_nothing_paints_it() {
-        for group in ["migrate", "db"] {
+        for group in ["migrate", "db", "reylo"] {
             assert_eq!(painted_usage(group), usage(group));
         }
     }

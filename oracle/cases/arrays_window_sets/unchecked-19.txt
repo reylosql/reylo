@@ -1,0 +1,1 @@
+inline_window.sql: set-returning functions are not allowed in window definitions (0A000)

@@ -1,11 +1,14 @@
+aggregates.sql: one () -> { rounded_sum: numeric, rounded_bare_sum: numeric?, abs_avg: numeric, rounded_max: numeric }
 builtin_control.sql: many () -> { r: text(¬NUL), l: text(¬NUL)?, k: bool, f: text(¬NUL) }
 enum_like.sql: many () -> { v: bool? }
 enum_replace.sql: many () -> { v: text(¬NUL)? }
+grouped.sql: many () -> { k: int4, rounded: numeric, rounded_int_sum: numeric, average: numeric } key (k)
 insert_returning.sql: one () -> { v: varchar(≤20, ¬NUL)? }
 left_column.sql: many () -> { v: text(¬NUL)? }
 length_column.sql: many () -> { v: int4? }
 like_cast.sql: one () -> { v: bool? }
 like_column.sql: many () -> { v: bool? }
+mixed_numbers.sql: many () -> { rounded: numeric, widest: numeric }
 pass_through.sql: one () -> { a: (public.boxed{ v: int4? })[]?, j: jsonb?, n: int8 }
 repeat_column.sql: many () -> { v: text(¬NUL)? }
 replace_cast.sql: one () -> { v: text(¬NUL)? }
