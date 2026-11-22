@@ -50,7 +50,9 @@ test("the migration commands and reylo run are the binary's, with their output a
   const root = project();
   const help = reylo(root, ["--help"]);
   assert.equal(help.status, 0, help.err);
-  for (const usage of ["  migrate <command>", "  db <command>", "  run \"<sql>\""]) assert.ok(help.out.includes(usage), usage);
+  for (const usage of ["  migrate <command>", "  db <command>", "  run <sql>"]) assert.ok(help.out.includes(usage), usage);
+  // Plumbing a language's tooling runs is no command of a person's.
+  assert.doesNotMatch(help.out, /\n  (engine|lsp)\b/);
   const migrate = reylo(root, ["migrate", "--help"]);
   assert.equal(migrate.status, 0, migrate.err);
   assert.match(migrate.out, /^Usage: reylo migrate <command> \[flags\]\n/);
@@ -61,11 +63,11 @@ test("the migration commands and reylo run are the binary's, with their output a
   assert.match(dbHelp.out, /^Usage: reylo db <command> \[flags\]\n/);
   assert.match(dbHelp.out, /\n  introspect  /);
   assert.doesNotMatch(dbHelp.out, /\n  (init|new|dev|deploy|status|lock|history)\b/);
-  // The docs show each group's help as it is.
+  // The docs show each help as it is, the CLI page's Rust lines where the docs show Rust (site/lib/rust-content.ts).
   // A checkout on Windows may write a page with CRLF line endings.
   for (const page of ["migrate.mdx", "cli.mdx"]) {
-    const text = readFileSync(join(import.meta.dirname, "..", "site", "content", "docs", page), "utf8").replaceAll("\r\n", "\n");
-    for (const help of [migrate.out, dbHelp.out]) assert.ok(text.includes(`\`\`\`terminal\n${help}\`\`\``), `${page}: ${help.split("\n")[0]}`);
+    const text = readFileSync(join(import.meta.dirname, "..", "site", "content", "docs", page), "utf8").replaceAll("\r\n", "\n").replace(/^<\/?Rust>\n/gm, "");
+    for (const block of page === "cli.mdx" ? [help.out, migrate.out, dbHelp.out] : [migrate.out, dbHelp.out]) assert.ok(text.includes(`\`\`\`terminal\n${block}\`\`\``), `${page}: ${block.split("\n")[0]}`);
   }
   const run = reylo(root, ["run", "insert into users (name) values ('ada')", "insert into users (name) values ('grace')"]);
   assert.equal(run.status, 0, run.err);
