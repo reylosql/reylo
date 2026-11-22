@@ -2967,6 +2967,7 @@ on!(
     a_renamed_tables_sequence_keeps_counting,
     a_table_renamed_as_it_gains_a_column_keeps_its_rows_and_index,
     an_enum_label_a_partition_uses_is_committed_first,
+    an_enum_label_a_default_uses_is_committed_first,
     a_foreign_table_is_renamed_as_stated,
     a_partitioned_table_is_renamed_with_its_partitions,
     a_table_renamed_onto_a_views_name_drops_the_view_first,
@@ -4190,6 +4191,31 @@ mod adversarial {
         p.exec("insert into t values (2, 'ap')").await;
         p.output();
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    }
+
+    pub async fn an_enum_label_a_default_uses_is_committed_first(mut p: P) {
+        let v1 = "create type visibility as enum ('private', 'public'); create table bookmarks (id int primary key, visibility visibility not null default 'private'); create view public_bookmarks as select id from bookmarks where visibility = 'public';";
+        let v2 = "create type visibility as enum ('private', 'public', 'org'); create table bookmarks (id int primary key, visibility visibility not null default 'org'); create view public_bookmarks as select id from bookmarks where visibility = 'public';";
+        p.schema(v1);
+        p.file("20261027100000_bookmarks.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into bookmarks values (1, 'public')").await;
+        // Postgres refuses a label added and used in one transaction: the label is a migration of
+        // its own, before the default, which copies no table and needs no `--blocking`.
+        p.schema(v2);
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "org_default", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"✓ Wrote 2 migrations, since Postgres can't use a new enum value in the migration that adds it:");
+        let made: Vec<String> = p.files().into_iter().filter(|f| f.contains("_org_default")).collect();
+        assert_eq!(made.len(), 2, "{made:?}");
+        let first = std::fs::read_to_string(p.dir.join("migrations").join(&made[0])).unwrap();
+        let second = std::fs::read_to_string(p.dir.join("migrations").join(&made[1])).unwrap();
+        assert_eq!(first.trim(), "alter type visibility add value 'org' after 'public';");
+        assert_eq!(second.trim(), "alter table bookmarks alter column visibility set default 'org';");
+        p.output();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into bookmarks (id) values (2)").await;
+        assert_eq!(p.rows("select 1 from bookmarks where visibility = 'org'").await.len(), 1);
     }
 
     pub async fn a_renamed_tables_sequence_keeps_counting(mut p: P) {

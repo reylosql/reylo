@@ -470,6 +470,7 @@ Writes the next migration, from your change to `schema.sql`.
 - With no `schema.sql`, it writes what your development database has that your migrations don't. That's [schemaless mode](/migrate/docs#schemaless-mode).
 - Edit the file freely, and add any data changes.
 - On Postgres, new constraints and indexes never block writes, and a table rewrite needs `--blocking`. Each statement gives up a busy lock after half a second and retries.
+- On Postgres, a new enum value the change also uses gets a migration of its own, before its first use. Postgres can't use a value in the transaction that adds it.
 
 To accept a table rewrite:
 

@@ -1,4 +1,4 @@
-create type e as enum ('a');
+create type e as enum ('a', 'x');
 revoke usage on type e from public;
 grant usage on type e to diff_enum_user;
 comment on type e is 'kept';

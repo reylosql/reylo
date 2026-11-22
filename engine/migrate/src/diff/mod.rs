@@ -374,6 +374,20 @@ impl Plan {
     }
 }
 
+/// Whether the op at `from` runs after the one at `k`, through the edges `after` holds so far.
+fn runs_after(after: &[BTreeSet<usize>], from: usize, k: usize) -> bool {
+    let (mut stack, mut seen) = (vec![from], BTreeSet::new());
+    while let Some(at) = stack.pop() {
+        if at == k {
+            return true;
+        }
+        if seen.insert(at) {
+            stack.extend(after[at].iter().copied());
+        }
+    }
+    false
+}
+
 /// The objects `id` is dropped with: its owners, and what the server drops it with, nearest first.
 fn owners<'a>(schema: &'a Schema, id: &str) -> Vec<&'a str> {
     let mut out = Vec::new();
@@ -1630,24 +1644,29 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
             let o = &to.objects[id];
             matches!(o.kind, Some(Kind::Column | Kind::Index | Kind::Constraint | Kind::Type | Kind::View)) && o.deps.iter().any(|d| to.objects.get(d).is_some_and(|f| f.kind == Some(Kind::Function)))
         };
-        // Whether `from` already runs after `k`, through the edges so far.
-        let waits_on = |after: &[BTreeSet<usize>], from: usize, k: usize| -> bool {
-            let (mut stack, mut seen) = (vec![from], BTreeSet::new());
-            while let Some(at) = stack.pop() {
-                if at == k {
-                    return true;
-                }
-                if seen.insert(at) {
-                    stack.extend(after[at].iter().copied());
-                }
-            }
-            false
-        };
         for k in (0..ops.len()).filter(|k| runs_one(*k)) {
             for &f in &functions {
-                if f != k && !waits_on(&after, f, k) {
+                if f != k && !runs_after(&after, f, k) {
                     after[k].insert(f);
                 }
+            }
+        }
+    }
+
+    // Where the plan commits partway (an enum's labels added before what uses them), an object it
+    // makes again after the commit is dropped after it too, where nothing before it needs the
+    // object gone: each migration then leaves the object in place, as a deploy that stops between
+    // them would find it.
+    for (k, op) in ops.iter().enumerate() {
+        let Op::Alter(id) = op else { continue };
+        if !alters[id].iter().any(|s| s == COMMIT) {
+            continue;
+        }
+        for (d, other) in ops.iter().enumerate() {
+            let Op::Drop(gone) = other else { continue };
+            let Some(made) = find(Op::Create(gone.clone())) else { continue };
+            if runs_after(&after, made, k) && !runs_after(&after, k, d) {
+                after[d].insert(k);
             }
         }
     }
