@@ -455,6 +455,8 @@ for_each_dialect!(
     a_hotfix_by_hand_is_recorded_once_it_is_a_migration,
     a_hotfix_behind_a_pending_migration_moves_ahead_of_it,
     a_hotfix_that_cannot_move_ahead_is_undone_then_deployed,
+    history_push_takes_a_database_to_a_reordered_lock_keeping_its_rows,
+    a_hotfix_whose_migration_changes_data_is_undone_then_deployed,
     history_push_follows_a_renamed_migration,
     a_failed_migration_leaves_nothing,
     files_that_cannot_run_atomically_are_refused,
@@ -1337,14 +1339,15 @@ async fn a_hotfix_behind_a_pending_migration_moves_ahead_of_it(mut p: P) {
     // after it. Nothing is undone, and deploy runs the rest.
     assert_eq!(p.history_push().await, 0, "{}", p.peek());
     let out = p.output();
-    assert_has!(&out, r"\+ 20261027130000_email_index\.sql +recorded: already in place\n✓ Recorded 1 migration, running nothing\n✓ Wrote \S*reylo\.lock: 20261027130000_email_index\.sql now runs before 20261027120000_nick_index\.sql, as it did here\n» Development databases ran 20261027120000_nick_index\.sql first\n  To take one to the lock's new order:\n    reylo migrate dev\n» This database hasn't run 20261027120000_nick_index\.sql\n  To run it:\n    reylo migrate deploy");
+    assert_has!(&out, r"\+ 20261027130000_email_index\.sql +recorded: already in place\n✓ Recorded 1 migration, running nothing\n✓ Wrote \S*reylo\.lock: 20261027130000_email_index\.sql now runs before 20261027120000_nick_index\.sql, as it did here\n» Development databases ran 20261027120000_nick_index\.sql first\n  To record the lock's new order on one, running nothing:\n    reylo migrate history push\n» This database hasn't run 20261027120000_nick_index\.sql\n  To run it:\n    reylo migrate deploy");
     assert_eq!(p.locked(), [users, backfill, email, nick]);
     assert_eq!(p.history().await, [users, backfill, email]);
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_eq!(p.history().await, [users, backfill, email, nick]);
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     // A migration that changes data, ahead of the one that makes a change by hand, is never recorded
-    // by the schema the two leave, which the later one makes alone: it moves behind it, and runs.
+    // by the schema the two leave, which the later one makes alone, nor moved past, since its
+    // statements can run differently on the rows after the change: the change is undone, and it runs.
     let (refill, both) = ("20261027140000_refill.sql", "20261027150000_both_index.sql");
     p.file(refill, "update users set nick = 'x' where nick is null;");
     p.exec("create index users_both on users (email, nick)").await;
@@ -1352,14 +1355,74 @@ async fn a_hotfix_behind_a_pending_migration_moves_ahead_of_it(mut p: P) {
     p.file(both, "create index users_both on users (email, nick);");
     p.lock(&[users, backfill, email, nick, refill, both]);
     p.output();
-    assert_eq!(p.history_push().await, 0, "{}", p.peek());
-    assert_has!(p.output(), r"\+ 20261027150000_both_index\.sql +recorded: already in place\n✓ Recorded 1 migration");
-    assert_eq!(p.locked(), [users, backfill, email, nick, both, refill]);
-    assert_eq!(p.history().await, [users, backfill, email, nick, both]);
+    let refused = r"✗ Migration 20261027150000_both_index\.sql makes this change, but runs after 20261027140000_refill\.sql, which this database hasn't run\n  Migration 20261027140000_refill\.sql changes data, which can run differently after this change, so it can't move ahead of it\.\n  It ran the migrations through 20261027120000_nick_index\.sql,";
+    assert_eq!(p.history_push().await, 1);
+    let out = p.output();
+    assert_has!(&out, refused);
+    assert_eq!(p.dry_run().await, 1);
+    assert_has!(p.output(), refused);
+    assert_eq!(p.locked(), [users, backfill, email, nick, refill, both]);
+    assert_eq!(p.history().await, [users, backfill, email, nick]);
+    p.exec(&undo_on(&out)).await;
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
-    assert_eq!(p.history().await, [users, backfill, email, nick, both, refill]);
+    assert_eq!(p.history().await, [users, backfill, email, nick, refill, both]);
     let rows = p.rows("select nick from users").await;
     assert_eq!(rows.iter().map(|r| r.text("nick").to_string()).collect::<Vec<_>>(), ["x"]);
+}
+
+async fn history_push_takes_a_database_to_a_reordered_lock_keeping_its_rows(mut p: P) {
+    let int = p.t.int;
+    p.linear();
+    let (a, notes, index) = ("20261027100000_a.sql", "20261027110000_notes.sql", "20261027120000_a_index.sql");
+    p.schema(&format!("create table a (id {int}); create table notes (id {int}); create index a_id on a (id);"));
+    p.file(a, &format!("create table a (id {int});"));
+    p.file(notes, &format!("create table notes (id {int});"));
+    p.file(index, "create index a_id on a (id);");
+    p.lock(&[a, notes, index]);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into notes values (1)").await;
+    // Another database moved the index ahead, as it ran it: this one, which ran the old order, has
+    // what the new one makes, and takes its order with nothing run or rewound.
+    p.lock(&[a, index, notes]);
+    p.output();
+    assert_eq!(p.history_push().await, 0, "{}", p.peek());
+    assert_has!(p.output(), r"✓ The history now lists 3 migrations, in the order they run");
+    assert_eq!(p.history().await, [a, index, notes]);
+    assert_eq!(p.rows("select * from notes").await.len(), 1);
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+}
+
+async fn a_hotfix_whose_migration_changes_data_is_undone_then_deployed(mut p: P) {
+    // On MySQL each migration holds one change, so no migration both indexes and updates.
+    if p.d == Dialect::Mysql {
+        return;
+    }
+    let (int, text) = (p.t.int, p.t.text);
+    p.linear();
+    let table = format!("create table users (id {int}, email {text}, nick {text});");
+    let (users, nick, email) = ("20261027100000_users.sql", "20261027110000_nick_index.sql", "20261027120000_email_index.sql");
+    p.schema(&format!("{table} create index users_nick on users (nick); create index users_email on users (email);"));
+    p.file(users, &table);
+    p.lock(&[users]);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into users values (1, 'a@b.co', null)").await;
+    p.exec("create index users_email on users (email)").await;
+    // The migration that makes the index made by hand also fills a column, which no schema shows ran.
+    p.file(nick, "create index users_nick on users (nick);");
+    p.file(email, "create index users_email on users (email); update users set nick = 'y' where nick is null;");
+    p.lock(&[users, nick, email]);
+    p.output();
+    let refused = r"✗ Migration 20261027120000_email_index\.sql makes this change, but runs after 20261027110000_nick_index\.sql, which this database hasn't run\n  Its data statements can't be told to have run here, so it isn't recorded without running\.";
+    assert_eq!(p.history_push().await, 1);
+    let out = p.output();
+    assert_has!(&out, refused);
+    assert_eq!(p.dry_run().await, 1);
+    assert_has!(p.output(), refused);
+    p.exec(&undo_on(&out)).await;
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.history().await, [users, nick, email]);
+    let rows = p.rows("select nick from users").await;
+    assert_eq!(rows.iter().map(|r| r.text("nick").to_string()).collect::<Vec<_>>(), ["y"]);
 }
 
 async fn a_hotfix_that_cannot_move_ahead_is_undone_then_deployed(mut p: P) {

@@ -1707,10 +1707,7 @@ async fn drift(shadows: &mut Shadows<'_>, target: &mut Db, run: &Run<'_>, checkp
         let ran: Vec<Migration> = run.applied_files.iter().chain(&run.records).cloned().collect();
         if let Some(j) = behind(shadows, &ran, &run.pending, &live).await? {
             let (it, rest) = (&run.pending[j], &run.pending[..j]);
-            let reordered: Vec<Migration> = ran.iter().chain([it]).chain(rest).chain(&run.pending[j + 1..]).cloned().collect();
-            let original: Vec<Migration> = ran.iter().chain(&run.pending).cloned().collect();
-            if !ends_alike(shadows, &original, &reordered).await? {
-                let why = format!("Run ahead of {}, the migrations end differently, so it can't move there.", names_of(rest));
+            if let Some(why) = unmovable(shadows, &ran, &run.pending, j, run.d).await? {
                 return Ok(vec![behind_problem(shadows, target, run.url, &ran, it, rest, &live, Some(why)).await]);
             }
             ahead = Some((it.name.clone(), names_of(rest)));
@@ -1750,6 +1747,29 @@ async fn behind(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[Migrati
                 return Ok(Some(j));
             }
         }
+    }
+    Ok(None)
+}
+
+/// Why `pending[j]`, which makes all this database has on top of `ran`, can't be recorded there,
+/// ahead of `pending[..j]`; None where it can. What changes data is never moved past, nor
+/// recorded by its schema alone: no schema shows that its statements ran, or that they run the same
+/// on the rows after the change. And the two orders must end at the same schema.
+#[cfg(feature = "cli")]
+async fn unmovable(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[Migration], j: usize, d: Dialect) -> Result<Option<String>, Error> {
+    let (it, ahead) = (&pending[j], &pending[..j]);
+    if !data_statements(&it.sql, d).is_empty() {
+        return Ok(Some("Its data statements can't be told to have run here, so it isn't recorded without running.".into()));
+    }
+    let changing: Vec<Migration> = ahead.iter().filter(|m| !data_statements(&m.sql, d).is_empty()).cloned().collect();
+    if !changing.is_empty() {
+        let one = changing.len() == 1;
+        return Ok(Some(format!("{} {} {} data, which can run differently after this change, so it can't move ahead of {}.", if one { "Migration" } else { "Migrations" }, names_of(&changing), if one { "changes" } else { "change" }, if one { "it" } else { "them" })));
+    }
+    let reordered: Vec<Migration> = ran.iter().chain([it]).chain(ahead).chain(&pending[j + 1..]).cloned().collect();
+    let original: Vec<Migration> = ran.iter().chain(pending).cloned().collect();
+    if !ends_alike(shadows, &original, &reordered).await? {
+        return Ok(Some(format!("Run ahead of {}, the migrations end differently, so it can't move there.", names_of(ahead))));
     }
     Ok(None)
 }
@@ -2690,26 +2710,25 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     });
     // A later migration that makes all this database has since the run its history ends at, which is
     // where deploy starts, ran here before those ahead of it: it is recorded, and the order made the
-    // one this database ran, with it right after that run and the rest after it. So it is where a
-    // run that changes data also matches, which can't be recorded by its schema alone. The order is
-    // moved where it ends as before; where it doesn't, the change is undone instead, for deploy to
-    // run the migrations in their order.
+    // one this database ran, with it right after that run and the rest after it ([`unmovable`] says
+    // where it can't be). It is looked for too where a run that changes data also matches, which
+    // can't be recorded by its schema alone. Where it can't move, the change is undone instead, for
+    // deploy to run the migrations in their order.
     let unproven = |n: usize| history_run.is_some_and(|h| order[h.min(n)..n].iter().any(|m| !data_statements(&m.sql, d).is_empty()));
     let mut moved: Option<(Vec<Migration>, usize, String, String)> = None;
     if let Some(h) = history_run.filter(|&h| !init && h < order.len() && matched.is_none_or(unproven)) {
         let found = match behind(&mut shadows, &order[..h], &order[h..], &live).await {
-            Ok(Some(j)) => {
-                let (it, ahead) = (&order[h + j], &order[h..h + j]);
-                let reordered: Vec<Migration> = order[..h].iter().chain([it]).chain(ahead).chain(&order[h + j + 1..]).cloned().collect();
-                ends_alike(&mut shadows, &order, &reordered).await.map(|alike| Some((j, reordered, alike)))
-            }
+            Ok(Some(j)) => unmovable(&mut shadows, &order[..h], &order[h..], j, d).await.map(|why| Some((j, why))),
             other => other.map(|_| None),
         };
         match found {
             Ok(None) => {}
-            Ok(Some((j, reordered, true))) => moved = Some((reordered, h + 1, order[h + j].name.clone(), names_of(&order[h..h + j]))),
-            Ok(Some((j, _, false))) => {
-                let why = format!("Run ahead of {}, the migrations end differently, so it can't move there.", names_of(&order[h..h + j]));
+            Ok(Some((j, None))) => {
+                let (it, ahead) = (&order[h + j], &order[h..h + j]);
+                let reordered: Vec<Migration> = order[..h].iter().chain([it]).chain(ahead).chain(&order[h + j + 1..]).cloned().collect();
+                moved = Some((reordered, h + 1, it.name.clone(), names_of(ahead)));
+            }
+            Ok(Some((j, Some(why)))) => {
                 let problem = behind_problem(&mut shadows, db, &opts.url, &order[..h], &order[h + j], &order[h..h + j], &live, Some(why)).await;
                 shadows.finish().await;
                 return Ok(refuse(&[problem], log));
@@ -2815,16 +2834,20 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
         rows.row(log, &paint("red", "-"), &r.name, "taken out of the history");
     }
     let count = |n: usize| format!("{n} migration{}", if n == 1 { "" } else { "s" });
-    if added.is_empty() && taken.is_empty() {
+    if added.is_empty() && taken.is_empty() && kept < recorded.len() {
+        log(&format!("{} The history now lists {}, in the order they run", paint("green", "✓"), count(recorded.len())));
+    } else if added.is_empty() && taken.is_empty() {
         log(&format!("{} The history already matches this database: {}", paint("green", "✓"), count(recorded.len())));
     } else if added.is_empty() {
         log(&format!("{} The history now lists {}", paint("green", "✓"), count(recorded.len())));
     } else {
         log(&format!("{} Recorded {}, running nothing", paint("green", "✓"), count(added.len())));
     }
+    // A development database that ran them in the old order has what the new one makes: its history
+    // takes the new order with no rewind, which would drop what they made, rows included.
     if let (Some((it, ahead)), true) = (&moved, relocked) {
         log(&format!("{} Wrote {}: {it} now runs before {ahead}, as it did here", paint("green", "✓"), shown(&opts.lock)));
-        log(&then(note(format!("Development databases ran {ahead} first")), &[("To take one to the lock's new order", &["reylo migrate dev"])]));
+        log(&then(note(format!("Development databases ran {ahead} first")), &[("To record the lock's new order on one, running nothing", &["reylo migrate history push"])]));
     }
     let pending = &order[n..];
     if !pending.is_empty() {
