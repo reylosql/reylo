@@ -2228,7 +2228,7 @@ fn deploy_failure(m: &Migration, e: &Error, d: Dialect, started: bool, undone: b
     }
     if !undone {
         let why = if d == Dialect::Mysql { "MySQL commits each statement, so its first statements may be in place" } else { "It runs outside a transaction, so its change may be in place" };
-        return problem.note(why).fix("See what is", &["reylo migrate deploy --dry-run"]);
+        return problem.note(format!("{why}.")).fix("See what is", &["reylo migrate deploy --dry-run"]);
     }
     Problem { title: format!("The migration {} failed and was rolled back", m.name), ..problem }
         .note("Nothing was recorded, so the next deploy runs it again.")
