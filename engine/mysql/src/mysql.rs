@@ -124,28 +124,29 @@ fn analyze_text_plain(sql: &str, host: &Host, marked: &[String]) -> Lazy<Analysi
 
 /// How a session of this reading reads a statement: a backslash escapes only where it does there,
 /// and `"` quotes a name under ANSI_QUOTES. Beside the reading, whether `||` is OR, as it is unless
-/// the session's `sql_mode` has PIPES_AS_CONCAT, where it joins strings ([`pipes_are_or`]).
+/// the session's `sql_mode` has PIPES_AS_CONCAT, where it joins strings ([`pipes_are_or`]), and
+/// whether a built-in's name before a spaced parenthesis is the built-in, as under IGNORE_SPACE
+/// ([`misread`]).
 #[derive(Debug, Clone, Copy)]
-struct SessionDialect(MysqlText, bool);
+struct SessionDialect(MysqlText, bool, bool);
 
 impl Default for SessionDialect {
     fn default() -> Self {
-        SessionDialect(MysqlText::default(), true)
+        SessionDialect(MysqlText::default(), true, false)
     }
 }
 
 impl SessionDialect {
-    /// The grammar's options for the session. A built-in's name before a spaced parenthesis is the
-    /// built-in, as IGNORE_SPACE reads it; where the session's mode lacks it, [`misread`] says so.
+    /// The grammar's options for the session.
     fn options(&self) -> syntax::mysql::Options {
-        syntax::mysql::Options { backslash_escapes: self.0.backslash_escapes, ansi_quotes: self.0.ansi_quotes, pipes_as_concat: !self.1, ignore_space: true, ..syntax::mysql::Options::default() }
+        syntax::mysql::Options { backslash_escapes: self.0.backslash_escapes, ansi_quotes: self.0.ansi_quotes, pipes_as_concat: !self.1, ignore_space: self.2, ..syntax::mysql::Options::default() }
     }
 }
 
 /// `text` is how the session reads its strings, `None` where it would not say and the statement
 /// turns on it; `marked` names the parameters cast to `nullable(…)`.
 pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, marked: &[String]) -> Lazy<Analysis> {
-    let dialect = SessionDialect(text.unwrap_or_default(), true);
+    let dialect = SessionDialect(text.unwrap_or_default(), true, false);
     // What the engine prints of the statement, for the probes it describes, writes its strings
     // as the session reads them back.
     syntax::mysql::ast::set_backslash_escapes(dialect.0.backslash_escapes);
@@ -187,7 +188,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     let raw = host.describe(&rewritten.sql);
     let misread = match text {
         Some(_) => misread(sql, lexed, host),
-        None => Some(Some("the server did not say its sql_mode, which decides how it reads this statement's strings and double quotes, so nothing bounds its rows".into())),
+        None => Some((Some("the server did not say its sql_mode, which decides how it reads this statement's strings and double quotes, so nothing bounds its rows".into()), false)),
     };
     let pipes = match text {
         Some(_) => pipes_are_or(sql, lexed, host),
@@ -203,15 +204,15 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
         crate::mysql_params::prefetch(statement, &names, host);
         crate::errors::prefetch(kind(Some(statement)), &crate::mysql_params::tables(statement), &rewritten.sql, host);
     }
-    let (raw, misread, pipes) = (raw?, misread?, pipes?);
+    let (raw, (misread, ignore_space), pipes) = (raw?, misread?, pipes?);
     let misread = misread.or_else(|| pipes.clone().err());
-    let (dialect, read) = match pipes {
-        Ok(false) => {
-            let concatenates = SessionDialect(dialect.0, false);
-            let read = read_as(&concatenates);
-            (concatenates, read)
-        }
-        _ => (dialect, read),
+    // The tree again where the session reads `||` or a spaced built-in otherwise than the default.
+    let session = SessionDialect(dialect.0, !matches!(pipes, Ok(false)), ignore_space);
+    let (dialect, read) = if (session.1, session.2) != (dialect.1, dialect.2) {
+        let read = read_as(&session);
+        (session, read)
+    } else {
+        (dialect, read)
     };
     let raw = match raw {
         Ok(r) => r,
@@ -1839,18 +1840,18 @@ const SPACE_SENSITIVE: &[&str] = &[
     "var_pop", "var_samp",
 ];
 
-/// Why the engine's parser does not read the statement as this server does, if it does not.
-/// The parser reads `count (x)` as it reads `count(x)`, and NOT as MySQL ranks it by default; the server
-/// reads each by the session's `sql_mode`, where `count (x)` calls a stored function `count` unless
-/// IGNORE_SPACE is set, and HIGH_NOT_PRECEDENCE moves NOT. (Strings, double quotes and `||` the
-/// parser reads by the mode itself: [`SessionDialect`], [`pipes_are_or`].) The mode is asked for
-/// only when the text has one of these; an optimizer hint that sets a variable for the statement
-/// leaves no mode to ask for.
-fn misread(sql: &str, lexed: &Lexed, host: &Host) -> Lazy<Option<String>> {
+/// Why the engine's parser does not read the statement as this server does, if it does not, and
+/// whether the session has IGNORE_SPACE, under which the parser reads a spaced built-in as one.
+/// Without it the server reads `count (x)` as a call of a stored function `count`, which the tree
+/// can't tell from the built-in; HIGH_NOT_PRECEDENCE moves NOT, which the parser ranks as the
+/// default mode does. (Strings, double quotes and `||` the parser reads by the mode itself:
+/// [`SessionDialect`], [`pipes_are_or`].) The mode is asked for only when the text has one of
+/// these; an optimizer hint that sets a variable for the statement leaves no mode to ask for.
+fn misread(sql: &str, lexed: &Lexed, host: &Host) -> Lazy<(Option<String>, bool)> {
     let text = |&(start, end): &(usize, usize)| &sql[start..end];
     let is_comment = |span: &str| span.starts_with("--") || span.starts_with("/*") || span.starts_with('#');
     if lexed.opaque.iter().map(text).any(|span| span.starts_with("/*+") && span.to_ascii_lowercase().contains("set_var")) {
-        return Some(Some("an optimizer hint sets a variable for this statement (SET_VAR), which may change how the server reads it, so nothing bounds its rows".into()));
+        return Some((Some("an optimizer hint sets a variable for this statement (SET_VAR), which may change how the server reads it, so nothing bounds its rows".into()), false));
     }
     // The text outside strings, quoted names and comments, a comment as `\u{2}` and any other
     // of those as `\u{1}`.
@@ -1886,7 +1887,7 @@ fn misread(sql: &str, lexed: &Lexed, host: &Host) -> Lazy<Option<String>> {
     };
     // Under IGNORE_SPACE too (measured on 8.4): the mode skips spaces, and a comment is none.
     if parted(true) {
-        return Some(Some("a comment between a built-in's name and its parenthesis makes the name a stored function's, which is not how the engine's parser reads the statement, so nothing bounds its rows".into()));
+        return Some((Some("a comment between a built-in's name and its parenthesis makes the name a stored function's, which is not how the engine's parser reads the statement, so nothing bounds its rows".into()), false));
     }
     if parted(false) {
         readings.push(("IGNORE_SPACE", false, "a name with a space before its parenthesis is a stored function's, not the built-in's"));
@@ -1900,17 +1901,18 @@ fn misread(sql: &str, lexed: &Lexed, host: &Host) -> Lazy<Option<String>> {
         readings.push(("HIGH_NOT_PRECEDENCE", true, "NOT binds tighter than a comparison"));
     }
     if readings.is_empty() {
-        return Some(None);
+        return Some((None, false));
     }
     let rows = host.query(SQL_MODE_QUERY, Vec::new(), Scope::Session)?;
     let mode = rows.ok().and_then(|rows| rows.first().and_then(|row| row.first()).and_then(as_str).map(str::to_ascii_uppercase));
     let Some(mode) = mode else {
-        return Some(Some("the server did not say its sql_mode, which decides how it reads this statement, so nothing bounds its rows".into()));
+        return Some((Some("the server did not say its sql_mode, which decides how it reads this statement, so nothing bounds its rows".into()), false));
     };
     let set = |name: &str| mode.split(',').any(|m| m.trim() == name);
-    Some(readings.iter().find(|(name, when_set, _)| set(name) == *when_set).map(|(name, when_set, what)| {
+    let reason = readings.iter().find(|(name, when_set, _)| set(name) == *when_set).map(|(name, when_set, what)| {
         format!("under this server's sql_mode ({} {name}) {what}, which is not how the engine's parser reads the statement, so nothing bounds its rows", if *when_set { "with" } else { "without" })
-    }))
+    });
+    Some((reason, set("IGNORE_SPACE")))
 }
 
 /// Whether the session reads `||` as OR, which it does unless its `sql_mode` has PIPES_AS_CONCAT,
@@ -3765,6 +3767,12 @@ mod tests {
         assert_eq!(rows("select count\n(id) as id from users", "IGNORE_SPACE"), "one");
         assert_eq!(rows("select count (id) as id from users", "ignore_space"), "one");
         assert_eq!(rows("select app.count (id) as id from users", default), "many");
+        // A table or a stored function of a built-in's name reads as one, spaced or not.
+        let none = json!({ "columns": [], "params": [{ "type": 3, "flags": 0 }] });
+        assert_eq!(analyzed("insert into count (id) values (?)", none, default).0.kind, Some(StatementKind::Insert));
+        for mode in [default, "IGNORE_SPACE"] {
+            assert_eq!(rows("select id from users where id = 1 and translate (id) = 1", mode), "at_most_one", "{mode}");
+        }
         // A double-quoted word is a column under ANSI_QUOTES, a backslash a character under
         // NO_BACKSLASH_ESCAPES, and the parser reads both as the session does.
         assert_eq!(rows("select id from users where email = \"email\"", default), "at_most_one");
@@ -4018,20 +4026,20 @@ mod tests {
         }
         let one = |sql: &str, text: MysqlText| {
             syntax::mysql::ast::set_backslash_escapes(text.backslash_escapes);
-            parse(&SessionDialect(text, true), sql).unwrap().pop().unwrap().to_string()
+            parse(&SessionDialect(text, true, false), sql).unwrap().pop().unwrap().to_string()
         };
         let plain = MysqlText { backslash_escapes: false, ansi_quotes: false };
         let ansi = MysqlText { backslash_escapes: true, ansi_quotes: true };
         assert_eq!(one(r"select 'C:\' as p, id from t where id = ?", plain), r"SELECT 'C:\' AS p, id FROM t WHERE id = ?");
-        assert!(parse(&SessionDialect(MysqlText::default(), true), r"select 'C:\' as p, id from t where id = ?").is_err());
+        assert!(parse(&SessionDialect(MysqlText::default(), true, false), r"select 'C:\' as p, id from t where id = ?").is_err());
         assert_eq!(one(r#"select "id" from "t" where "id" = 1"#, ansi), r#"SELECT "id" FROM "t" WHERE "id" = 1"#);
         // `||` is OR, bound as OR binds, unless the session joins strings with it.
-        let pipes = |sql: &str, or: bool| parse(&SessionDialect(MysqlText::default(), or), sql).unwrap().pop().unwrap().to_string();
+        let pipes = |sql: &str, or: bool| parse(&SessionDialect(MysqlText::default(), or, false), sql).unwrap().pop().unwrap().to_string();
         assert_eq!(pipes("select id from t where id = 1 || name = 'a' && n = 2", true), "SELECT id FROM t WHERE id = 1 OR name = 'a' AND n = 2");
         assert_eq!(pipes("select a = b || c as x from t", true), "SELECT a = b OR c AS x FROM t");
         assert_eq!(pipes("select a = b || c as x from t", false), "SELECT a = b || c AS x FROM t");
         let top = |or: bool| {
-            let Some(Statement::Query(q)) = parse(&SessionDialect(MysqlText::default(), or), "select a = b || c as x from t").unwrap().pop() else { panic!("not a query") };
+            let Some(Statement::Query(q)) = parse(&SessionDialect(MysqlText::default(), or, false), "select a = b || c as x from t").unwrap().pop() else { panic!("not a query") };
             let SetExpr::Select(s) = *q.body else { panic!("not a select") };
             let Some(SelectItem::ExprWithAlias { expr: Expr::BinaryOp { left, op, .. }, .. }) = s.projection.into_iter().next() else { panic!("no operator") };
             (op, matches!(*left, Expr::BinaryOp { .. }))

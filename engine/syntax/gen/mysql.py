@@ -218,7 +218,9 @@ def main():
         L.append("];\n")
 
     table("KEYWORDS", "Every keyword, sorted by its uppercase spelling, and its symbol.", keyword_map)
-    table("FUNCTIONS", "The builtin functions that are keywords only before `(`, sorted.", go_map(misc, "btFuncTokenMap"))
+    # TiDB's own aggregates and TRANSLATE are no built-ins of MySQL's, where each is a stored function's name.
+    tidb_functions = {"APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE", "MAX_COUNT", "MIN_COUNT", "SUM_INT", "TRANSLATE"}
+    table("FUNCTIONS", "The builtin functions that are keywords only before `(`, sorted.", [(w, g) for w, g in go_map(misc, "btFuncTokenMap") if w not in tidb_functions])
     table("WINDOW_FUNCTIONS", "The window functions' keywords, sorted.", go_map(misc, "windowFuncTokenMap"))
     hinted = re.search(r"var hintedTokens = map\[int\]struct\{\}\{(.*?)\n\}", misc, re.S).group(1)
     hinted = re.findall(r"(\w+):\s*\{\}", hinted)

@@ -1884,9 +1884,7 @@ pub static KEYWORDS: [(&str, u16); 892] = [
 ];
 
 /// The builtin functions that are keywords only before `(`, sorted.
-pub static FUNCTIONS: [(&str, u16); 34] = [
-    ("APPROX_COUNT_DISTINCT", 807),
-    ("APPROX_PERCENTILE", 808),
+pub static FUNCTIONS: [(&str, u16); 28] = [
     ("BIT_AND", 809),
     ("BIT_OR", 810),
     ("BIT_XOR", 811),
@@ -1899,10 +1897,8 @@ pub static FUNCTIONS: [(&str, u16); 34] = [
     ("EXTRACT", 818),
     ("GROUP_CONCAT", 819),
     ("MAX", 820),
-    ("MAX_COUNT", 821),
     ("MID", 829),
     ("MIN", 822),
-    ("MIN_COUNT", 823),
     ("NOW", 824),
     ("POSITION", 825),
     ("STD", 827),
@@ -1912,9 +1908,7 @@ pub static FUNCTIONS: [(&str, u16); 34] = [
     ("SUBSTR", 829),
     ("SUBSTRING", 829),
     ("SUM", 830),
-    ("SUM_INT", 831),
     ("SYSDATE", 832),
-    ("TRANSLATE", 833),
     ("TRIM", 834),
     ("VARIANCE", 836),
     ("VAR_POP", 836),
