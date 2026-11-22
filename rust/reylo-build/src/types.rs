@@ -376,7 +376,8 @@ impl Types {
     fn plain_array(&self, t: &Type) -> bool {
         match t.label.as_deref() {
             None => true,
-            Some(name) => self.dialect == Dialect::Postgres && bare(name).starts_with('_'),
+            // `_int4`, and `public."_ResourceKind"` for a type whose name is quoted.
+            Some(name) => self.dialect == Dialect::Postgres && unquoted(qualified(name).1).starts_with('_'),
         }
     }
 
@@ -1244,6 +1245,11 @@ mod tests {
         let shape = types.column(&t, false, "kind").unwrap();
         let finished = types.finish(&BTreeSet::new()).unwrap();
         assert_eq!(finished.named(shape.ty()).to_string(), "ResourceKind");
+        let kinds = Type::array(reylo_engine_core::types::Slot::nullable(t.clone())).named("public.\"_ResourceKind\"");
+        let mut types = Types::new(Dialect::Postgres, Options::default(), BTreeMap::new(), Span::call_site(), false);
+        let shape = types.column(&kinds, false, "kinds").unwrap();
+        let finished = types.finish(&BTreeSet::new()).unwrap();
+        assert_eq!(finished.named(shape.ty()).to_string().replace(' ', ""), "::std::vec::Vec<::core::option::Option<ResourceKind>>");
         let impls = super::postgres_impls(&format_ident!("ResourceKind"), "public.\"ResourceKind\"").to_string();
         assert!(impls.contains(r#"found == "ResourceKind""#) && impls.contains(r#"found == "\"ResourceKind\"""#), "{impls}");
         assert!(impls.contains(r#"array_of ("public.\"ResourceKind\"")"#), "{impls}");
