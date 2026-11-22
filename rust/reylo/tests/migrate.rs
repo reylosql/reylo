@@ -195,7 +195,7 @@ async fn scenario<DB: reylo::migrate::Database>(p: &Project, pool: impl AsyncFn(
     broken.lock();
     let failed = broken.migrator().run(&pool(&broken).await).await.unwrap_err();
     assert_eq!(failed.applied(), NAMES, "{failed}");
-    assert!(failed.to_string().starts_with("reylo migrate deploy failed") && failed.to_string().contains("nowhere"), "{failed}");
+    assert!(failed.to_string().lines().next().is_some_and(|lead| lead.starts_with("reylo migrate deploy failed: 20260104000000_broken.sql: ") && lead.contains("nowhere")), "{failed}");
 
     // With no lock, a migration that sorts before one the database ran is replayed in a shadow
     // database, which the app has none of: refused, for the command line to deploy, even where
