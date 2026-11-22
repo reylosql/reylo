@@ -138,5 +138,7 @@ async fn main() -> Result<(), sqlx::Error> {
     println!("23. vector      {item:?} {}", serde_json::to_string(&embedding).expect("json"));
     let declared = nearest_item_id::Query { near: reylo::pgvector::Vector::from(vec![0.0, 0.0, 1.0]) }.run(&pool).await?;
     assert_eq!(declared.map(|r| r.id), Some(2));
+    let text = vector_text::Query { near: vec![1.0, 2.0, 3.0] }.run(&pool).await?.near;
+    assert!(format!("{text:?}").contains("[1,2,3]"), "{text:?}");
     Ok(())
 }

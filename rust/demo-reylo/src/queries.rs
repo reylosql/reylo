@@ -169,3 +169,11 @@ pub mod nearest_item_id {
         pub near: reylo::pgvector::Vector,
     }
 }
+
+/// A vector parameter the crate declares as another type sqlx binds, cast in the statement.
+#[reylo::query("select :near::vector::text as near")]
+pub mod vector_text {
+    pub struct Params {
+        pub near: Vec<f32>,
+    }
+}
