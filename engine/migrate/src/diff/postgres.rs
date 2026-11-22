@@ -905,6 +905,9 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             };
             let from_parent = if c.flag("inherited") || partition { "inherited" } else { "" };
             table_columns.push(format!("{TABLE_COLUMN}{col_id}{SEP}{held}{SEP}{}{SEP}alter table {name} add column {} {added}{SEP}{}{SEP}{from_parent}", c.text("name"), c.text("name"), c.text("nn_name")));
+            // Each column below changes in place. Only a change of its type or collation is refused
+            // under a view, rule, policy or trigger on it, which the alterer's `remakes` says; a
+            // default, a not null, an identity or a generated expression changes under them.
             // A typed table's columns are its type's attributes, made, changed and dropped through
             // the type; a default or a not null of one is the table's own, written `with options`.
             if let Some(ty) = r.get("of_type") {
@@ -921,7 +924,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                     // Where the type gains the attribute under the table, what the table says of it.
                     create: [c.get("def").filter(|_| c.text("generated").is_empty() && c.text("identity").is_empty()).map(|d| format!("{at} set default {d}")), c.flag("notnull").then(|| format!("{at} set not null"))].into_iter().flatten().collect(),
                     inline: true,
-                    change: Change::Alter { blocks: true },
+                    change: Change::Alter { blocks: false },
                     extra: vec![TYPED.to_string()],
                     deps: [format!("column {ty}.{}", c.text("name"))].into_iter().collect(),
                     ..Object::default()
@@ -990,7 +993,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                     deps: if c.flag("inherited") && !partition { holders(c.text("name")) } else { BTreeSet::new() },
                     drop: vec![if kind == "c" { format!("alter type {name} drop attribute {}{cascade}", c.text("name")) } else { format!("alter table {name} drop column {}", c.text("name")) }],
                     inline: true,
-                    change: Change::Alter { blocks: true },
+                    change: Change::Alter { blocks: false },
                     ..Object::default()
                 });
                 // Its identity's sequence, logged otherwise than its table or commented, which the
@@ -1038,7 +1041,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                     owner: Some(id.clone()),
                     def: def.clone(),
                     inline: true,
-                    change: Change::Alter { blocks: true },
+                    change: Change::Alter { blocks: false },
                     extra: vec!["inherited".to_string(), format!("{PARENTS}{}", r.text("parent")), format!("{TABLE_PARENTS}{}", r.text("parent"))],
                     deps: holders(c.text("name")),
                     ..Object::default()
@@ -1071,7 +1074,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                     owner: Some(id.clone()),
                     def: def.clone(),
                     inline: true,
-                    change: Change::Alter { blocks: true },
+                    change: Change::Alter { blocks: false },
                     extra: std::iter::once("partition".to_string()).chain((kind == "p").then(|| "partitioned".to_string())).chain(c.get("nn_name").map(|n| format!("not null name {n}"))).collect(),
                     deps: r.get("parent").map(|p| format!("column {p}.{}", c.text("name"))).into_iter().collect(),
                     ..Object::default()
