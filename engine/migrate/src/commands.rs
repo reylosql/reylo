@@ -729,6 +729,7 @@ async fn run_once(db: &mut Db, m: &Migration, record: bool) -> Result<(), Ran> {
 fn describe_diff(label_a: &str, a: &[String], label_b: &str, b: &[String]) -> Vec<String> {
     const MAX: usize = 20;
     let (only_a, only_b) = difference(a, b);
+    let (only_a, only_b) = (without_default_grants(&only_a), without_default_grants(&only_b));
     let mut changes: Vec<String> = only_a.iter().take(MAX).map(|l| paint("red", &format!("    - {}", readable(l)))).collect();
     changes.extend(only_b.iter().take(MAX).map(|l| paint("green", &format!("    + {}", readable(l)))));
     let more = only_a.len() + only_b.len() - changes.len();
@@ -736,6 +737,19 @@ fn describe_diff(label_a: &str, a: &[String], label_b: &str, b: &[String]) -> Ve
         changes.push(format!("    … and {more} more"));
     }
     [String::new(), paint("dim", &format!("    --- {label_a}")), paint("dim", &format!("    +++ {label_b}"))].into_iter().chain(changes).chain([String::new()]).collect()
+}
+
+/// One side of a diff without the privileges an object it adds or drops has by default (Postgres's
+/// `USAGE` on a type for every role, `EXECUTE` on a function): they come and go with the object. A
+/// grant that changes on an object both sides have is kept.
+fn without_default_grants(lines: &[String]) -> Vec<String> {
+    static DEFAULT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^grant (?:type|domain|language|function|procedure) (?:[^\s.(]+\.)?([^\s.(]+)\S* PUBLIC:(?:USAGE|EXECUTE)$").expect("a valid pattern"));
+    let comes_with = |line: &String| {
+        let Some(c) = DEFAULT.captures(line) else { return false };
+        let name = Regex::new(&format!(r"[\s.]{}\b", regex::escape(&c[1]))).expect("a valid pattern");
+        lines.iter().any(|other| !other.starts_with("grant ") && name.is_match(other))
+    };
+    lines.iter().filter(|l| !comes_with(l)).cloned().collect()
 }
 
 /// A comparison line as a person reads it: `public.` left out, and an index or a constraint as SQL
@@ -747,7 +761,7 @@ fn readable(line: &str) -> String {
     static MYSQL_INDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^index ([^.\s]+)\.(\S+) (unique )?(\w+)((?: invisible)?(?: comment "(?:[^"\\]|\\.)*")?) (\(.*\))$"#).expect("a valid pattern"));
     static SQLITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(index|view|trigger) \S+ create (unique )?(?:temp |temporary )?(?:index|view|trigger) (?:if not exists )?(\S+) (.*)$").expect("a valid pattern"));
     static CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) (\S+) (.*)$").expect("a valid pattern"));
-    static PUBLIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s(,])(?:public|"public")\."#).expect("a valid pattern"));
+    static PUBLIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s(,]|::)(?:public|"public")\."#).expect("a valid pattern"));
     let line = PUBLIC.replace_all(line, "$1").into_owned();
     if let Some(c) = INDEX.captures(&line) {
         let using = if &c[4] == "btree" { String::new() } else { format!("using {} ", &c[4]) };
@@ -809,6 +823,7 @@ fn lowercase_keywords(sql: &str) -> String {
 fn changed_lines(before: &[String], after: &[String]) -> Vec<String> {
     const MAX: usize = 20;
     let (gone, came) = difference(before, after);
+    let (gone, came) = (without_default_grants(&gone), without_default_grants(&came));
     let constraint_names = |lines: &[String]| -> Vec<String> { lines.iter().filter_map(|l| l.strip_prefix("constraint ")).filter_map(|rest| rest.split(' ').nth(1)).map(str::to_string).collect() };
     let made_by_constraint = |line: &str, names: &[String]| names.iter().any(|n| line.starts_with("index ") && line.contains(&format!(" INDEX {n} ON ")));
     let (gone_names, came_names) = (constraint_names(&gone), constraint_names(&came));
@@ -5916,6 +5931,17 @@ pub async fn run_sql(opts: &Options, items: &[(String, String)], log: Log<'_>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_types_default_grant_is_left_out() {
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let made = lines(&["column public.posts.status public.post_status not null default 'draft'::public.post_status", "enum public.post_status (\"draft\", \"published\")", "grant type public.post_status PUBLIC:USAGE"]);
+        assert_eq!(without_default_grants(&made), made[..2]);
+        // On a type both sides have, a grant is a change.
+        let granted = lines(&["grant type public.post_status PUBLIC:USAGE"]);
+        assert_eq!(without_default_grants(&granted), granted);
+        assert_eq!(readable(&made[0]), "column posts.status post_status not null default 'draft'::post_status");
+    }
 
     #[test]
     fn an_index_reads_the_same_on_every_database() {
