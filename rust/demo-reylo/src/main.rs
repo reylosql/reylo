@@ -146,5 +146,12 @@ async fn main() -> Result<(), sqlx::Error> {
     tx.rollback().await?;
     assert_eq!(inserted.kind, insert_resource::ResourceKind::MOVIE);
     println!("24. \"Enum\"      {inserted:?}");
+
+    let renamed = nearest_item_renamed::Query { near: reylo::pgvector::Vector::from(vec![0.0, 0.0, 1.0]) }.run(&pool).await?;
+    assert_eq!(renamed.map(|r| r.id), Some(2));
+    let kinds = resource_kinds::Query { kinds: vec![resource_kinds::ResourceKind::BOOK, resource_kinds::ResourceKind::MOVIE] }.run(&pool).await?.kinds;
+    let shown = format!("{kinds:?}");
+    assert!(shown.find("BOOK").is_some_and(|b| shown.find("MOVIE").is_some_and(|m| b < m)), "{shown}");
+    println!("25. enum[]      {kinds:?}");
     Ok(())
 }

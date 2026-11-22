@@ -245,9 +245,14 @@ pub fn module(dialect: Dialect, options: Options, analysis: &Value, span: Span, 
                             _ => quote!(#from(#v)),
                         })
                     }
-                    // A vector the crate declares as `pgvector::Vector` is bound through reylo's
-                    // codec; a field of another type, as `Vec<f32>` for `:v::vector`, as it is.
-                    None if shape.bound_via() && shape.leaf_of(written, &param.name).is_ok_and(|leaf| names_vector(&leaf)) => shape.encode(this),
+                    // A vector the crate declares as `pgvector::Vector`, under any name, is bound
+                    // through reylo's codec; a field of another type, as `Vec<f32>` for
+                    // `:v::vector`, as it is. The compiler picks which by the field's type.
+                    None if shape.bound_via() => quote!({
+                        #[allow(unused_imports)]
+                        use ::reylo::__private::{BindAsIs as _, BindVector as _};
+                        (&&::reylo::__private::Bind(::core::clone::Clone::clone(#this))).reylo_bind()
+                    }),
                     None => quote!(::core::clone::Clone::clone(#this)),
                 };
                 (quote!(#written), encode)
@@ -425,11 +430,6 @@ impl Conversions {
         self.made.push((key.0, key.1, into.clone(), from.clone()));
         Ok((into, from))
     }
-}
-
-/// Whether `ty` is a path that ends in `Vector`, as `pgvector::Vector` and `reylo::pgvector::Vector` do.
-fn names_vector(ty: &syn::Type) -> bool {
-    matches!(ty, syn::Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Vector"))
 }
 
 /// An error at each field of `own` that names nothing the statement has.

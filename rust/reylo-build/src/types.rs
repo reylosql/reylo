@@ -968,12 +968,10 @@ pub fn postgres_enum_tokens(ident: &Ident, name: &str, values: &[String]) -> Tok
 /// sqlx's impls for the enum `ident` of the Postgres enum type `name`: decoded from its value's
 /// text, encoded as it, and the type found by its name at run time.
 pub fn postgres_impls(ident: &Ident, name: &str) -> TokenStream2 {
-    let (schema, written) = qualified(name);
+    let (_, written) = qualified(name);
     // sqlx reports a type by its bare name, which keeps the quotes Postgres writes around one that
     // needs them (`"ResourceKind"`), and a type it looked up by name as it was asked for.
     let short = unquoted(written);
-    let array = if written.starts_with('"') { format!("\"_{}\"", short.replace('"', "\"\"")) } else { format!("_{short}") };
-    let array = if schema.is_empty() { array } else { format!("{schema}.{array}") };
     let message = format!("is no value of {name}");
     quote!(
         impl ::reylo::sqlx::Type<::reylo::sqlx::Postgres> for #ident {
@@ -986,8 +984,15 @@ pub fn postgres_impls(ident: &Ident, name: &str) -> TokenStream2 {
             }
         }
         impl ::reylo::sqlx::postgres::PgHasArrayType for #ident {
+            // The array type of the enum, whatever Postgres named it, and one whose element is the enum.
             fn array_type_info() -> ::reylo::sqlx::postgres::PgTypeInfo {
-                ::reylo::sqlx::postgres::PgTypeInfo::with_name(#array)
+                ::reylo::sqlx::postgres::PgTypeInfo::array_of(#name)
+            }
+            fn array_compatible(ty: &::reylo::sqlx::postgres::PgTypeInfo) -> bool {
+                match ty.kind() {
+                    ::reylo::sqlx::postgres::PgTypeKind::Array(element) => <Self as ::reylo::sqlx::Type<::reylo::sqlx::Postgres>>::compatible(element),
+                    _ => false,
+                }
             }
         }
         impl<'r> ::reylo::sqlx::Decode<'r, ::reylo::sqlx::Postgres> for #ident {
@@ -1241,7 +1246,7 @@ mod tests {
         assert_eq!(finished.named(shape.ty()).to_string(), "ResourceKind");
         let impls = super::postgres_impls(&format_ident!("ResourceKind"), "public.\"ResourceKind\"").to_string();
         assert!(impls.contains(r#"found == "ResourceKind""#) && impls.contains(r#"found == "\"ResourceKind\"""#), "{impls}");
-        assert!(impls.contains(r#""public.\"_ResourceKind\"""#), "{impls}");
+        assert!(impls.contains(r#"array_of ("public.\"ResourceKind\"")"#), "{impls}");
         assert_eq!(super::qualified("\"a.b\".\"c\"\"d\""), ("\"a.b\"", "\"c\"\"d\""));
         assert_eq!(super::unquoted("\"c\"\"d\""), "c\"d");
     }

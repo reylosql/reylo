@@ -181,3 +181,17 @@ pub mod vector_text {
 /// An enum type whose name is quoted mixed case, bound and read back.
 #[reylo::query("insert into resources (kind) values (:kind) returning id, kind")]
 pub mod insert_resource {}
+
+/// A vector parameter the crate declares under a name of its own, bound through the codec.
+#[reylo::query("select id from items order by embedding <-> :near limit 1")]
+pub mod nearest_item_renamed {
+    use reylo::pgvector::Vector as Embedding;
+
+    pub struct Params {
+        pub near: Embedding,
+    }
+}
+
+/// An array of the quoted enum type, bound and read back.
+#[reylo::query("select :kinds::\"ResourceKind\"[] as kinds")]
+pub mod resource_kinds {}

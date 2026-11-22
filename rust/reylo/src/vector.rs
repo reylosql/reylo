@@ -69,3 +69,48 @@ impl Encode<'_, Postgres> for PgVector {
         Ok(IsNull::No)
     }
 }
+
+/// A value of a `Params` field the crate declares for a vector parameter, as it is bound: a
+/// `pgvector::Vector` (in an `Option` or a `Vec` too) through [`PgVector`], whatever name the crate
+/// gave the type, and a value of any other type as it is. `(&&Bind(v)).reylo_bind()` takes
+/// [`BindVector`]'s method where it applies, and [`BindAsIs`]'s one dereference further on.
+#[doc(hidden)]
+pub struct Bind<T>(pub T);
+
+#[doc(hidden)]
+pub trait BindVector {
+    type Bound;
+    fn reylo_bind(self) -> Self::Bound;
+}
+
+impl BindVector for &&Bind<pgvector::Vector> {
+    type Bound = PgVector;
+    fn reylo_bind(self) -> PgVector {
+        PgVector(self.0.clone())
+    }
+}
+
+impl BindVector for &&Bind<Option<pgvector::Vector>> {
+    type Bound = Option<PgVector>;
+    fn reylo_bind(self) -> Option<PgVector> {
+        self.0.clone().map(PgVector)
+    }
+}
+
+impl BindVector for &&Bind<Vec<pgvector::Vector>> {
+    type Bound = Vec<PgVector>;
+    fn reylo_bind(self) -> Vec<PgVector> {
+        self.0.iter().cloned().map(PgVector).collect()
+    }
+}
+
+#[doc(hidden)]
+pub trait BindAsIs<T> {
+    fn reylo_bind(self) -> T;
+}
+
+impl<T: Clone> BindAsIs<T> for &Bind<T> {
+    fn reylo_bind(self) -> T {
+        self.0.clone()
+    }
+}
