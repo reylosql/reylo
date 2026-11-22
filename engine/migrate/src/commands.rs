@@ -1367,6 +1367,21 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
     Ok(Some(problem.fix(lead, &commands)))
 }
 
+/// The refusal of a database that applied its migrations in another order than the lock lists, `order`
+/// being the lock's (`run_order`). Every database runs the lock's order, and nothing else; with no
+/// lock, a late one is proven at deploy, so there is none.
+fn lock_order_problem(opts: &Options, applied: &[&HistoryRow], order: &[Migration]) -> Option<Problem> {
+    if lock_free(opts) {
+        return None;
+    }
+    let k = applied.iter().zip(order).position(|(r, f)| r.name != f.name)?;
+    Some(
+        Problem::new("history-out-of-order", format!("This database applied {} where {} lists {}", applied[k].name, shown(&opts.lock), order[k].name))
+            .note("Every database runs the migrations in the lock's order. Where one ran them otherwise, the lock was merged keeping a branch's lines: keep main's.")
+            .fix("On a development database, take it to the lock's order", &["reylo migrate dev"]),
+    )
+}
+
 /// Where a migration falls in name order: init.sql, which holds the schema a project started
 /// from, first; then the rest by name, which starts with the time each was written.
 fn name_order(name: &str) -> (bool, &str) {
@@ -1423,11 +1438,8 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
         }
     }
     let applied_files: Vec<Migration> = applied.iter().filter_map(|r| by_name(&r.name).cloned()).collect();
-    // Every database runs the lock's order, and nothing else; with no lock, a late one is proven at deploy.
-    if problems.is_empty() && !lock_free(opts) {
-        if let Some(k) = applied.iter().zip(&files).position(|(r, f)| r.name != f.name) {
-            problems.push(Problem::new("history-out-of-order", format!("This database applied {} where {} lists {}", applied[k].name, shown(&opts.lock), files[k].name)).note("Every database runs the migrations in the lock's order. Where one ran them otherwise, the lock was merged keeping a branch's lines: keep main's.").fix("On a development database, take it to the lock's order", &["reylo migrate dev"]));
-        }
+    if problems.is_empty() {
+        problems.extend(lock_order_problem(opts, &applied, &files));
     }
     // Nothing is recorded without running but what a cut-off run of Reylo's own left (below).
     let records: Vec<Migration> = Vec::new();
@@ -2818,7 +2830,17 @@ async fn status_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
     // A draft leaves the checksum as it was; any other disagreement leaves it nothing to be held to.
     let stamped = if lock_problems.iter().all(Problem::is_drafts) { stamp(opts, schema_sql.as_deref()) } else { Stamp::Unreadable };
     let drafts = !lock_problems.is_empty();
+    // Once the lock and the files agree, the order this database ran them in, as deploy holds it to.
+    let misordered = if out_of_step || drafts {
+        None
+    } else {
+        let applied: Vec<&HistoryRow> = history.iter().filter(|r| r.applied).collect();
+        lock_order_problem(opts, &applied, &order)
+    };
+    // Deploy refuses such a database, so running what it hasn't run is offered only where it doesn't.
+    let offer_run = misordered.is_none();
     problems.extend(lock_problems);
+    problems.extend(misordered);
     match stamped {
         // A draft written from schema.sql makes the change the checksum doesn't hold yet, until development locks it.
         Stamp::Changed if drafts => said.push(then(note(format!("Until the drafts are locked, {} isn't held to the lock", shown(&opts.schema))), &[("To lock them", &["reylo migrate dev"])])),
@@ -2843,6 +2865,7 @@ async fn status_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
         log(line);
     }
     match pending.len() {
+        _ if !offer_run => {}
         0 => {}
         1 => log(&then(note(format!("This database hasn't run {}", pending[0].name)), &[("To run it in development", &["reylo migrate dev"]), ("To run it in production", &["reylo migrate deploy"])])),
         n => log(&then(note(format!("This database hasn't run {n} migrations")), &[("To run them in development", &["reylo migrate dev"]), ("To run them in production", &["reylo migrate deploy"])])),

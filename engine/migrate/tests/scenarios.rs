@@ -448,6 +448,7 @@ for_each_dialect!(
     a_change_by_hand_with_schema_sql_is_told_to_write_the_migration,
     init_writes_and_records_the_baseline,
     a_migration_the_lock_lacks_is_a_draft,
+    status_reports_a_history_out_of_the_locks_order,
     a_rebased_migration_is_rewound_by_dev,
     history_pull_writes_the_lock_and_keeps_what_is_still_to_deploy,
     db_introspect_prints_the_schema,
@@ -1193,6 +1194,29 @@ async fn a_migration_the_lock_lacks_is_a_draft(mut p: P) {
     p.lock(&["20261027100000_a.sql", "20261027120000_c.sql"]);
     assert_eq!(p.migrate().await, 1);
     assert_has!(p.output(), r"The lock doesn't list 20261027110000_b\.sql yet\n\n  Run it in development, which locks it:\n    reylo migrate dev");
+}
+
+async fn status_reports_a_history_out_of_the_locks_order(mut p: P) {
+    let int = p.t.int;
+    let (a, tags, status) = ("20261027100000_a.sql", "20261027110000_tags.sql", "20261027120000_status.sql");
+    p.linear();
+    p.file(a, &format!("create table a (id {int});"));
+    p.file(status, &format!("alter table a add column status {int};"));
+    p.lock(&[a, status]);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    // Main gained a migration named earlier, and the merge kept main's lines: the lock now runs it
+    // before the one this database already ran.
+    p.file(tags, &format!("alter table a add column tags {int};"));
+    p.lock(&[a, tags, status]);
+    p.output();
+    let refusal = r"✗ This database applied 20261027120000_status\.sql where \S*reylo\.lock lists 20261027110000_tags\.sql\n  Every database runs the migrations in the lock's order\.";
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), refusal);
+    // Status says the same, and doesn't offer the deploy that refuses.
+    assert_eq!(p.status().await, 1);
+    let out = p.output();
+    assert_has!(&out, refusal);
+    assert!(!out.contains("To run it in production"), "{out}");
 }
 
 async fn a_rebased_migration_is_rewound_by_dev(mut p: P) {
