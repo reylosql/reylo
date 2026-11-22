@@ -634,16 +634,17 @@ fn constant_keys(sql: &str, lexed: &Lexed, t: &Tree) -> Vec<crate::api::Diagnost
 /// The error of an INSERT that leaves out a column it must write: one that is NOT NULL, has no
 /// default and is neither the rowid's alias nor generated (a WITHOUT ROWID table's key columns are
 /// NOT NULL whatever they declare). The NOT NULL is checked before any uniqueness, so neither OR
-/// REPLACE (which writes the default, and there is none) nor an upsert keeps the row. Nothing is
-/// said where the row may be skipped rather than refused: under OR IGNORE, on a table that declares
-/// a constraint ON CONFLICT IGNORE, and under any BEFORE or INSTEAD OF trigger on the insert, which
-/// can `RAISE(IGNORE)`; nor where SQLite could not name the column a value goes to.
+/// REPLACE (which writes the default, and there is none), nor a UNIQUE's ON CONFLICT IGNORE, nor an
+/// upsert keeps the row. Nothing is said where the row may be skipped rather than refused: under OR
+/// IGNORE, on a table that declares a NOT NULL ON CONFLICT IGNORE, and under any BEFORE or INSTEAD
+/// OF trigger on the insert, which can `RAISE(IGNORE)`. A target SQLite names no column for is the
+/// rowid of a table with no alias for it, since it refuses any other name it does not know.
 fn unwritten(t: &Tree, skipping: &HashMap<String, i32>) -> Option<String> {
     let dml = t.dml.as_ref().filter(|d| d.kind == "insert")?;
     let info = t.tables.get(&dml.table)?;
-    let ignored = dml.on_error == "ignore" || (dml.on_error == "default" && info.ignores);
+    let ignored = dml.on_error == "ignore" || (dml.on_error == "default" && info.ignores_null);
     let triggered = skipping.get(&dml.table.to_ascii_lowercase()).is_some_and(|mask| mask & TRIGGER_ROW_INSERT != 0);
-    if ignored || triggered || dml.columns.iter().any(Option::is_none) {
+    if ignored || triggered {
         return None;
     }
     let written = |name: &str| dml.columns.iter().flatten().any(|c| c.eq_ignore_ascii_case(name));
@@ -656,30 +657,59 @@ fn unwritten(t: &Tree, skipping: &HashMap<String, i32>) -> Option<String> {
     }
 }
 
-/// Where an INSERT names its table: the name after the first INTO that is code, a quoted part and a
-/// schema's included; `None` where there is no such INTO.
+/// Where an INSERT names its table: the name after the first INTO that is a word of code, not
+/// text, a comment or a placeholder; a quoted part and a schema's included. `None` where there is
+/// no such INTO.
 fn insert_target_at(sql: &str, lexed: &Lexed) -> Option<(usize, usize)> {
-    let opaque_at = |at: usize| lexed.opaque.iter().find(|(from, to)| (*from..*to).contains(&at)).copied();
-    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
-    let into = sql.char_indices().find(|(i, _)| {
-        sql.get(*i..*i + 4).is_some_and(|w| w.eq_ignore_ascii_case("into"))
-            && !sql[..*i].chars().next_back().is_some_and(word)
-            && !sql[*i + 4..].chars().next().is_some_and(word)
-            && opaque_at(*i).is_none()
-    })?.0;
-    // One part of the name: a quoted one to its closing quote, a bare one to its last letter.
-    let part = |from: usize| -> Option<usize> {
-        let from = from + (sql.len() - from - sql[from..].trim_start().len());
-        match opaque_at(from) {
-            Some((_, to)) => Some(to),
-            None => Some(from + sql[from..].find(|c: char| !word(c)).unwrap_or(sql.len() - from)).filter(|end| *end > from),
+    let bytes = sql.as_bytes();
+    // A byte of a word: a letter, a digit, `_`, `$`, or any byte of a character past ASCII.
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
+    let word_end = |mut at: usize| {
+        while at < bytes.len() && word(bytes[at]) {
+            at += 1;
+        }
+        at
+    };
+    // The end of the text, comment or placeholder that covers `at`.
+    let covered = |at: usize| lexed.opaque.iter().copied().chain(lexed.placeholders.iter().map(|p| (p.start, p.end))).find(|(from, to)| (*from..*to).contains(&at)).map(|(_, to)| to);
+    let comment = |at: usize| lexed.opaque.iter().find(|(from, _)| *from == at && (sql[at..].starts_with("--") || sql[at..].starts_with("/*"))).map(|(_, to)| *to);
+    // Past whitespace and comments.
+    let gap = |mut at: usize| loop {
+        while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        match comment(at) {
+            Some(to) => at = to,
+            None => return at,
         }
     };
-    let rest = into + 4;
-    let start = rest + (sql.len() - rest - sql[rest..].trim_start().len());
-    let mut end = part(rest)?;
-    if sql[end..].starts_with('.') {
-        end = part(end + 1)?;
+    // The end of one part of a name: a quoted one's closing quote, a bare one's last letter.
+    let part = |at: usize| match lexed.opaque.iter().find(|(from, _)| *from == at) {
+        Some((_, to)) => Some(*to),
+        None => Some(word_end(at)).filter(|end| *end > at),
+    };
+    let mut at = 0;
+    let into = loop {
+        if at >= bytes.len() {
+            return None;
+        }
+        if let Some(to) = covered(at) {
+            at = to;
+        } else if word(bytes[at]) {
+            let end = word_end(at);
+            if sql[at..end].eq_ignore_ascii_case("into") {
+                break end;
+            }
+            at = end;
+        } else {
+            at += 1;
+        }
+    };
+    let start = gap(into);
+    let mut end = part(start)?;
+    let dot = gap(end);
+    if bytes.get(dot) == Some(&b'.') {
+        end = part(gap(dot + 1))?;
     }
     Some((start, end - start))
 }
@@ -5621,6 +5651,14 @@ mod tests {
         assert!(said("insert into v (id) values (1)", &["create view v as select id, name from req", "create trigger vi instead of insert on v begin insert into req (id, name, email) values (new.id, 'a', 'b'); end"]).is_empty());
         assert_eq!(said("insert into req (id) values (1)", &["create trigger later after insert on req begin select 1; end"]).len(), 1);
         assert_eq!(said("insert into req (id) values (1)", &["create trigger other before update on req begin select 1; end"]).len(), 1);
+        // A UNIQUE's IGNORE comes after the NOT NULL, and the rowid of a table with no alias is no column.
+        assert_eq!(said("insert into uniq (tag) values ('x')", &["create table uniq (required text not null, tag text unique on conflict ignore)"]).len(), 1);
+        assert_eq!(said("insert into plain (rowid, tag) values (1, 'x')", &["create table plain (required text not null, tag text)"]).len(), 1);
+        assert_eq!(said("insert into ign (id, name) values (1, :name)", &[]).len(), 0);
+        // The table's name past comments and around a schema's dot, and no INTO inside a placeholder.
+        assert_eq!(said("insert into /* audit */ req default values", &[]).first().map(|d| d.0.as_str()), Some("req"));
+        assert_eq!(said("insert into main . req default values", &[]).first().map(|d| d.0.as_str()), Some("main . req"));
+        assert_eq!(said("with s as (select :into as name) insert into req (name) select name from s", &[]).first().map(|d| d.0.as_str()), Some("req"));
         // SQLite checks no NOT NULL a virtual table declares, and an EXPLAIN inserts nothing.
         assert!(said("insert into g (_shape) values ('[[0,0],[1,0],[0,1],[0,0]]')", &["create virtual table g using geopoly(name text not null)"]).is_empty());
         assert!(said("explain insert into req (id) values (1)", &[]).is_empty());

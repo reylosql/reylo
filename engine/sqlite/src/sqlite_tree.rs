@@ -112,6 +112,9 @@ pub struct TableInfo {
     /// A NOT NULL, UNIQUE or PRIMARY KEY of the table is declared ON CONFLICT IGNORE: a write
     /// that breaks it, with no OR clause of its own, skips the row.
     pub ignores: bool,
+    /// A NOT NULL of the table is declared ON CONFLICT IGNORE: a write of NULL to it, with no OR
+    /// clause of its own, skips the row.
+    pub ignores_null: bool,
     /// The PRIMARY KEY or a UNIQUE of the table is declared ON CONFLICT REPLACE: a write that
     /// breaks it, with no OR clause of its own, deletes the row it conflicts with.
     pub replaces: bool,

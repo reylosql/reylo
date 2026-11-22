@@ -580,6 +580,15 @@ static int ignoresConflict(Table *pTab){
   return 0;
 }
 
+/* Whether a NOT NULL of the table is declared ON CONFLICT IGNORE: an INSERT with no OR clause of
+** its own that writes NULL to it skips the row. SQLite checks every NOT NULL before any other
+** constraint, so a UNIQUE's or the PRIMARY KEY's IGNORE cannot keep a row a NOT NULL refuses. */
+static int ignoresNull(Table *pTab){
+  int i;
+  for(i=0; i<pTab->nCol; i++) if( pTab->aCol[i].notNull==OE_Ignore ) return 1;
+  return 0;
+}
+
 /* Whether the table declares its PRIMARY KEY or a UNIQUE ON CONFLICT REPLACE: a write that breaks
 ** it deletes the row it conflicts with, unless the statement's own OR clause says otherwise. A NOT
 ** NULL's REPLACE writes the column's default instead, and deletes nothing. */
@@ -612,6 +621,7 @@ static void tables(sqlite3_str *s){
     kv_bool(s, "withoutRowid", (pTab->tabFlags & TF_WithoutRowid)!=0);
     kv_str(s, "rowidAlias", pTab->iPKey>=0 ? pTab->aCol[pTab->iPKey].zCnName : 0);
     kv_bool(s, "ignores", ignoresConflict(pTab));
+    kv_bool(s, "ignoresNull", ignoresNull(pTab));
     kv_bool(s, "replaces", replacesConflict(pTab));
     key(s, "columns"); sqlite3_str_appendchar(s, 1, '[');
     for(i=0; i<pTab->nCol; i++){
