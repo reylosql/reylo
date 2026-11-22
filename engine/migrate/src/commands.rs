@@ -5102,8 +5102,9 @@ async fn relock(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, files: &
     match reach.filter(|_| whole) {
         Some(Reach::SchemaAhead) => log(&then(note("The schema is ahead of the migrations"), &[("To write the changes to a migration file", &["reylo migrate new <name>"])])),
         Some(Reach::MigrationsAhead) => log(&format!("{} The migrations make what {schema} doesn't declare: add it there, or take it out of the migration", paint("yellow", "!"))),
-        // Either may be what's wanted: schema.sql edited, or a migration written by hand.
-        Some(Reach::Differ) => log(&then(format!("{} The migrations and {schema} disagree", paint("yellow", "!")), &[("To see how they differ", &["reylo migrate deploy --dry-run"]), (&format!("To write what {schema} has to a migration file"), &["reylo migrate new <name>"])])),
+        // Either may be what's wanted, schema.sql edited or a migration written by hand, so the lead
+        // says what the migration would hold. A dry run would stop at what db push made.
+        Some(Reach::Differ) => log(&then(format!("{} The migrations and {schema} disagree", paint("yellow", "!")), &[(&format!("To write what {schema} has to a migration file"), &["reylo migrate new <name>"])])),
         Some(Reach::SchemaFails(e)) => log(&format!("{} On an empty database, {schema} fails: {}", paint("yellow", "!"), e.lines().next().unwrap_or_default())),
         Some(Reach::Same) | None => {}
     }

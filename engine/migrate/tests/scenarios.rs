@@ -2130,7 +2130,7 @@ async fn dev_says_schema_sql_is_ahead_once_a_changed_object_is_pushed(mut p: P) 
     p.output();
     p.schema(&declared("id, n"));
     assert_eq!(p.dev().await, 0, "{}", p.peek());
-    assert_has!(p.output(), r"! The migrations and \S*schema\.sql disagree\n  To see how they differ:\n    reylo migrate deploy --dry-run\n  To write what \S*schema\.sql has to a migration file:\n    reylo migrate new <name>");
+    assert_has!(p.output(), r"! The migrations and \S*schema\.sql disagree\n  To write what \S*schema\.sql has to a migration file:\n    reylo migrate new <name>");
     assert_eq!(p.db_push().await, 0, "{}", p.peek());
     p.output();
     assert_eq!(p.dev().await, 0, "{}", p.peek());
