@@ -80,7 +80,7 @@ const MIGRATE_USAGE: &str = "Usage: reylo migrate <command> [flags]
 
 Commands:
   init                     Start from this database
-    --schema <name>        A schema to read (Postgres; public by default)
+    --schema <name>        A schema to read; repeat for more (Postgres; all by default)
   new <name>               Write the next migration, from schema.sql or this database
     --drop <names>         Accept what it drops: tables and columns
     --rename <old>=<new>   Say a table or column was renamed
@@ -109,7 +109,7 @@ Commands:
   reset                    Rebuild this database from the migrations
   wipe                     Delete every row, keeping the schema
   introspect               Print this database's schema as SQL
-    --schema <name>        A schema to read (Postgres; public by default)
+    --schema <name>        A schema to read; repeat for more (Postgres; all by default)
 
 Flags:
   --url <url>              The database, in place of direct_url

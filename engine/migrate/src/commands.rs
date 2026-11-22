@@ -4173,18 +4173,99 @@ async fn schema_as_sql_on(db: &mut Db, opts: &Options, schemas: &[String], shado
         return checked_against_dump(db, opts, schemas).await.map(Ok);
     }
     // Reylo's own SQL, checked against the database itself, needs no pg_dump: only the dump it
-    // falls back on does.
-    let why = match own_sql(db, opts).await? {
-        Ok(sql) => return Ok(Ok(sql)),
-        Err(NotOwn::NoShadow(e)) if shadowed => return Err(e),
-        Err(NotOwn::NoShadow(e)) => vec![format!("  No shadow database can be made to check Reylo's own SQL for it: {e}")],
-        Err(NotOwn::Short(why)) => why,
+    // falls back on does. It makes every schema, so --schema naming only some of those that hold
+    // anything leaves the dump.
+    let partial = left_out(db, schemas).await?;
+    let why = if !partial.is_empty() {
+        vec![format!("  Reylo's own SQL makes every schema, and --schema leaves out {}", and_list(&partial))]
+    } else {
+        match own_sql(db, opts).await? {
+            Ok(sql) => return Ok(Ok(sql)),
+            Err(NotOwn::NoShadow(e)) if shadowed => return Err(e),
+            Err(NotOwn::NoShadow(e)) => vec![format!("  No shadow database can be made to check Reylo's own SQL for it: {e}")],
+            Err(NotOwn::Short(why)) => why,
+        }
     };
     let version: i64 = db.rows("select current_setting('server_version_num') as v").await?.first().and_then(|r| r.first()?.parse().ok()).unwrap_or(0);
     if let Err(missing) = crate::db::find_pg_dump(version / 10000) {
         return Ok(Err(pg_dump_problem(&missing, why)));
     }
     dump_from(db, opts, schemas).await.map(Ok)
+}
+
+/// What --schema (`schemas`, where it names any) leaves out: each schema of the project's that holds
+/// an object of its own and that it doesn't name. Postgres alone has schemas to name.
+#[cfg(feature = "cli")]
+async fn left_out(db: &mut Db, schemas: &[String]) -> Result<Vec<String>, Error> {
+    if schemas.is_empty() || db.dialect() != Dialect::Postgres {
+        return Ok(vec![]);
+    }
+    Ok(schemas_with_objects(db).await?.into_iter().filter(|s| !schemas.contains(s)).collect())
+}
+
+/// `schemas`, as --schema names them, with each schema of the project's that what they hold refers
+/// to, said in a note: SQL that made them alone wouldn't run.
+#[cfg(feature = "cli")]
+async fn with_referenced(db: &mut Db, schemas: &[String], log: Log<'_>) -> Result<Vec<String>, Error> {
+    if schemas.is_empty() || db.dialect() != Dialect::Postgres {
+        return Ok(schemas.to_vec());
+    }
+    let project = crate::catalog::user_schemas(db).await?;
+    let mut named = schemas.to_vec();
+    loop {
+        let more: Vec<String> = referenced_schemas(db, &named).await?.into_iter().filter(|s| project.contains(s) && !named.contains(s)).collect();
+        if more.is_empty() {
+            break;
+        }
+        named.extend(more);
+    }
+    if named.len() > schemas.len() {
+        log(&note(format!("Reading {} too, which {} refers to", and_list(&named[schemas.len()..]), and_list(schemas))));
+    }
+    Ok(named)
+}
+
+/// The schemas of the project's that hold an object of its own: not one an extension made, nor what
+/// comes with another object (a table's index or sequence), nor Reylo's history.
+#[cfg(feature = "cli")]
+async fn schemas_with_objects(db: &mut Db) -> Result<Vec<String>, Error> {
+    let rows = db
+        .rows(&format!(
+            "select n.nspname as name from pg_namespace n where {} and {} and exists (
+               select 1 from pg_depend d where d.refclassid = 'pg_namespace'::regclass and d.refobjid = n.oid and d.deptype = 'n'
+                 and not exists (select 1 from pg_depend o where o.classid = d.classid and o.objid = d.objid and o.deptype in ('e', 'a', 'i'))
+                 and not (d.classid = 'pg_class'::regclass and d.objid in (select oid from pg_class where relname = '{HISTORY_TABLE}')))
+             order by 1",
+            crate::catalog::PG_USER_NS,
+            crate::catalog::not_platform_schema("n")
+        ))
+        .await?;
+    Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
+}
+
+/// The schemas outside `named` that what `named` holds refers to: a view's tables, a key's table, a
+/// column's type, a default's sequence, a trigger's function.
+#[cfg(feature = "cli")]
+async fn referenced_schemas(db: &mut Db, named: &[String]) -> Result<Vec<String>, Error> {
+    let list = named.iter().map(|s| crate::db::literal(s)).collect::<Vec<_>>().join(", ");
+    // The schema of what refers: a rule's, a default's, a trigger's and a policy's is its table's.
+    let on_table = |catalog: &str, table: &str| format!("when '{catalog}'::regclass then (select c.relnamespace from {catalog} x join pg_class c on c.oid = x.{table} where x.oid = d.objid)");
+    let rows = db
+        .rows(&format!(
+            "select distinct r.schema as name from pg_depend d
+               cross join lateral (select coalesce(case d.classid {} {} {} {} end,
+                 (select n.oid from pg_namespace n where n.nspname = (pg_identify_object(d.classid, d.objid, 0)).schema)) as ns) o
+               join pg_namespace n on n.oid = o.ns
+               cross join lateral pg_identify_object(d.refclassid, d.refobjid, 0) r
+             where d.deptype = 'n' and d.objid >= 16384 and n.nspname in ({list}) and r.schema is not null and r.schema not in ({list})
+             order by 1",
+            on_table("pg_rewrite", "ev_class"),
+            on_table("pg_attrdef", "adrelid"),
+            on_table("pg_trigger", "tgrelid"),
+            on_table("pg_policy", "polrelid")
+        ))
+        .await?;
+    Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
 }
 
 /// `live` as a shadow that ran SQL written from it reads, where the SQL makes all of it: without the
@@ -4195,6 +4276,16 @@ async fn schema_as_sql_on(db: &mut Db, opts: &Options, schemas: &[String], shado
 fn as_made(live: &[String], made: &[String]) -> Vec<String> {
     use crate::catalog::{DEFAULT_PRIVILEGES, EXTENSION_GRANT};
     live.iter().filter(|l| !(l.starts_with(DEFAULT_PRIVILEGES) || l.starts_with(EXTENSION_GRANT)) || made.contains(l)).cloned().collect()
+}
+
+/// The refusal of an init whose --schema (`schemas`) leaves out schemas that hold objects of the
+/// project's (`left`): init.sql must make the whole schema, to be recorded as run.
+#[cfg(feature = "cli")]
+fn schemas_left_out(schemas: &[String], left: &[String]) -> Problem {
+    let flags: Vec<String> = schemas.iter().chain(left).map(|s| format!("--schema {}", shell_word(s))).collect();
+    Problem::new("schemas-left-out", format!("This database's schema is in {} too, which --schema leaves out", and_list(left)))
+        .note("The whole schema has to be in init.sql, to record it as run here.")
+        .fix("Name every schema it's in", &[format!("reylo migrate init {}", flags.join(" ")).as_str()])
 }
 
 /// The extensions of the project's a Postgres database has, by name, lowercase.
@@ -4388,7 +4479,11 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             // Owners are kept where they aren't the role the file will run as, which owns what it makes.
             let runner = db.rows("select quote_ident(current_user) as u").await?.first().map(|r| r.text("u").to_string()).unwrap_or_default();
             args.push(format!("--exclude-table=*.{HISTORY_TABLE}"));
-            let named_schemas: Vec<String> = if schemas.is_empty() { vec!["public".into()] } else { schemas.to_vec() };
+            // Every schema of the project's, unless --schema names some.
+            let mut named_schemas: Vec<String> = if schemas.is_empty() { crate::catalog::user_schemas(db).await? } else { schemas.to_vec() };
+            if named_schemas.is_empty() {
+                named_schemas.push("public".into());
+            }
             for s in &named_schemas {
                 args.push("--schema".into());
                 args.push(s.clone());
@@ -4508,10 +4603,14 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
                 if s.starts_with("CREATE FOREIGN TABLE ") {
                     kept.append(&mut foreign);
                 }
-                kept.push(match s.strip_prefix("CREATE SCHEMA ") {
+                let s = match s.strip_prefix("CREATE SCHEMA ") {
                     Some(rest) if !rest.starts_with("IF NOT EXISTS ") => format!("CREATE SCHEMA IF NOT EXISTS {rest}"),
                     _ => s.to_string(),
-                });
+                };
+                // A schema made already, for the extensions in it.
+                if !(s.starts_with("CREATE SCHEMA IF NOT EXISTS ") && kept.contains(&s)) {
+                    kept.push(s);
+                }
             }
             kept.append(&mut foreign);
             // Event triggers and publications, which are in no schema, so pg_dump writes neither for a
@@ -4685,10 +4784,15 @@ pub async fn init(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i3
     // file the role runs makes them as they are here.
     let problems = out_of_reach(&mut db, &opts.url).await;
     let lines = catalog(&mut db).await;
+    let left = left_out(&mut db, schemas).await;
     db.close().await;
     let problems = problems?;
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
+    }
+    let left = left?;
+    if !left.is_empty() {
+        return Ok(refuse(&[schemas_left_out(schemas, &left)], log));
     }
     if !holds_a_schema(&lines?) {
         drop(spinning);
@@ -4770,7 +4874,8 @@ pub async fn db_introspect(opts: &Options, schemas: &[String], log: Log<'_>) -> 
         if !holds_a_schema(&catalog(&mut db).await?) {
             return Ok(Ok(String::new()));
         }
-        schema_as_sql_on(&mut db, opts, schemas, false).await
+        let schemas = with_referenced(&mut db, schemas, &mut *log).await?;
+        schema_as_sql_on(&mut db, opts, &schemas, false).await
     }
     .await;
     db.close().await;

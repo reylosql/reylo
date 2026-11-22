@@ -2930,6 +2930,8 @@ on!(
     a_dump_makes_a_schema_its_extensions_share_once,
     init_introspect_and_new_need_no_pg_dump,
     introspect_with_no_check_and_no_pg_dump_says_how_to_get_one,
+    init_reads_every_schema_a_view_crosses,
+    introspect_of_some_schemas_is_their_dump,
     an_extension_in_a_projects_schema_is_the_projects_whoever_owns_it,
     an_extension_a_platform_role_owns_in_a_projects_schema_is_the_projects,
     init_writes_the_privileges_on_an_extensions_schema,
@@ -3263,6 +3265,52 @@ mod adversarial {
         assert_has!(said.clone(), r"\n  The pg_dump at \S+/old-bin/pg_dump is version 9, which can't read Postgres \d+\n");
         assert_has!(said.clone(), r"\n  Reylo looks for it in PGBIN, then where Postgres installs it, then on PATH\.\n");
         assert_has!(said, r"\n  Install pg_dump \d+, then run it again:\n    \S[^\n]*\n\nNothing was changed\.$");
+    }
+
+    /// A view in `public` on a table in another schema, which has a key to `public`: init reads every
+    /// schema, so its init.sql makes both and a new database replays it. --schema naming one of them
+    /// is refused before anything is written, with the command that names both, and introspect
+    /// --schema reads what the schema it names refers to.
+    pub async fn init_reads_every_schema_a_view_crosses(mut p: P) {
+        p.exec("create schema billing; create table customers (id serial primary key, name text not null); create table billing.invoices (id serial primary key, customer_id int references customers (id), total numeric(10,2)); create view unpaid as select c.name, i.total from customers c join billing.invoices i on i.customer_id = c.id").await;
+        for (named, other) in [("public", "billing"), ("billing", "public")] {
+            assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[named.to_string()], log).await).await, 1, "{}", p.peek());
+            assert_has!(p.output(), &format!(r"^✗ This database's schema is in {other} too, which --schema leaves out\n[\s\S]*\n  Name every schema it's in:\n    reylo migrate init --schema {named} --schema {other}\n\nNothing was changed\.$"));
+            assert!(!p.dir.join("schema.sql").exists() && p.files().is_empty(), "init wrote files");
+        }
+        let mut said = Vec::new();
+        let text = match reylo_migrate::db_introspect(&p.opts(), &["public".to_string()], &mut |l: &str| said.push(l.to_string())).await {
+            Ok(Ok(text)) => text,
+            other => panic!("introspect: {:?}\n{}", other.map_err(|e| e.0), said.join("\n")),
+        };
+        assert_eq!(said.join("\n"), "» Reading billing too, which public refers to");
+        assert_has!(text.clone(), r"create table billing\.invoices \(");
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        assert_eq!(std::fs::read_to_string(p.dir.join("schema.sql")).unwrap(), text);
+        let q = P::new(p.d).await.unwrap();
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(q.history().await, ["init.sql"]);
+        assert_eq!(q.rows("select 1 from information_schema.views where table_name = 'unpaid'").await.len(), 1);
+    }
+
+    /// Introspect of some of the schemas that hold anything is their dump, which Reylo's own SQL,
+    /// making every schema, can't write; with no pg_dump, it says so.
+    pub async fn introspect_of_some_schemas_is_their_dump(p: P) {
+        p.exec("create schema scratch; create table scratch.notes (id int); create table users (id int primary key)").await;
+        let public = ["public".to_string()];
+        let mut said = Vec::new();
+        reylo_migrate::db::set_pg_dump_dirs(Some(vec![]));
+        let result = reylo_migrate::db_introspect(&p.opts(), &public, &mut |l: &str| said.push(l.to_string())).await;
+        reylo_migrate::db::set_pg_dump_dirs(None);
+        assert!(matches!(result, Ok(Err(1))), "{}", said.join("\n"));
+        assert_has!(said.join("\n"), r"^✗ Writing this schema as SQL needs pg_dump \d+ or newer\n  Reylo's own SQL makes every schema, and --schema leaves out scratch\n");
+        let mut said = Vec::new();
+        let text = match reylo_migrate::db_introspect(&p.opts(), &public, &mut |l: &str| said.push(l.to_string())).await {
+            Ok(Ok(text)) => text,
+            other => panic!("introspect: {:?}\n{}", other.map_err(|e| e.0), said.join("\n")),
+        };
+        assert!(text.contains("CREATE TABLE public.users") && !text.contains("scratch"), "{text}");
     }
 
     /// A database whose `public` its own role owns outright, not through `pg_database_owner`: one made
