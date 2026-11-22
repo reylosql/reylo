@@ -226,12 +226,24 @@ const POSTGRES_NO_ARGUMENT: &[&str] = &["now", "clock_timestamp", "statement_tim
 pub const POSTGRES_WINDOW: &[&str] = &["row_number", "rank", "dense_rank", "percent_rank", "cume_dist", "ntile", "lag", "lead"];
 /// Postgres aggregates that answer NULL only over no rows or over nothing but NULLs. Under a
 /// plain `GROUP BY` a group is never empty, so there they are non-null on a non-null argument.
-/// The type a built-in aggregate of [`POSTGRES_GROUPED`] returns over its argument's.
+/// The types `min` and `max` have an overload of each, which returns it: any other argument
+/// converts to one (`max(name)` and `max(varchar)` are `max(text)`), or is of a type the build
+/// does not name here.
+const MIN_MAX_TYPES: &[u32] = &[
+    oid::INT2, oid::INT4, oid::INT8, oid::NUMERIC, oid::FLOAT4, oid::FLOAT8, oid::DATE, oid::TIME, oid::TIMESTAMP, oid::TIMESTAMPTZ, oid::INTERVAL, MONEY, oid::TEXT,
+    oid::BPCHAR,
+];
+
+/// The type a built-in aggregate of [`POSTGRES_GROUPED`] returns over its argument's, where the
+/// build names it for certain.
 fn aggregate_type(name: &str) -> Ty {
     match name {
         "sum" => Ty::Sum,
         "avg" => Ty::Avg,
-        "min" | "max" | "any_value" | "bit_and" | "bit_or" => Ty::Shared,
+        "min" | "max" => Ty::Exact(MIN_MAX_TYPES),
+        "bit_and" | "bit_or" => Ty::Exact(&[oid::INT2, oid::INT4, oid::INT8]),
+        // `any_value(anyelement)` returns its argument as it is.
+        "any_value" => Ty::Shared,
         "bool_and" | "bool_or" | "every" => Ty::Is(oid::BOOL),
         _ => Ty::Unknown,
     }
@@ -502,6 +514,10 @@ pub enum Ty {
     /// What `avg` returns over its argument's type: `numeric` over an integer or `numeric`,
     /// `float8` over a float, `interval` over `interval`.
     Avg,
+    /// The first operand's type where it is one of these, which the built-in has an overload of
+    /// that returns it: `max(int4)` is `int4`, while `max(name)` is the built-in `max(text)`,
+    /// whose `text` the build would misname as `name`.
+    Exact(&'static [u32]),
     /// `text` when every operand is a string type: Postgres's `||` over strings. Over anything
     /// else (an array, `jsonb`, a string beside a number) the build names no type.
     Concat,
@@ -1696,6 +1712,7 @@ impl Ty {
                 t @ (oid::FLOAT4 | oid::FLOAT8 | MONEY | oid::INTERVAL) => Some(t),
                 _ => None,
             },
+            Ty::Exact(types) => facts.first()?.type_oid.filter(|t| types.contains(t)),
             Ty::Avg => match facts.first()?.type_oid? {
                 oid::INT2 | oid::INT4 | oid::INT8 | oid::NUMERIC => Some(oid::NUMERIC),
                 oid::FLOAT4 | oid::FLOAT8 => Some(oid::FLOAT8),
