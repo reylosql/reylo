@@ -29,6 +29,7 @@ pub mod oid {
     pub const TIME: u32 = 1083;
     pub const TIMESTAMP: u32 = 1114;
     pub const TIMESTAMPTZ: u32 = 1184;
+    pub const TIMETZ: u32 = 1266;
     pub const INTERVAL: u32 = 1186;
     pub const NUMERIC: u32 = 1700;
     pub const UNKNOWN: u32 = 705;
