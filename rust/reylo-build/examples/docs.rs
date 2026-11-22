@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
 fn main() {
-    let options = Options { dates: Some(Dates::Chrono), uuid: true, decimals: Some(Decimals::RustDecimal) };
+    let options = Options { dates: Some(Dates::Chrono), uuid: true, decimals: Some(Decimals::RustDecimal), pgvector: false };
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for line in std::io::stdin().lock().lines() {

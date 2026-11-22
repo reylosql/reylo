@@ -31,6 +31,8 @@ compile_error!("reylo's sqlite feature runs on sqlx 0.9 alone: sqlx 0.8's SQLite
 // What the expansion names, so that a crate needs no dependency of its own on them.
 pub use serde;
 pub use serde_json;
+#[cfg(feature = "pgvector")]
+pub use pgvector;
 #[cfg(feature = "sqlx_0_9")]
 pub use sqlx;
 #[cfg(all(feature = "sqlx_0_8", not(feature = "sqlx_0_9")))]

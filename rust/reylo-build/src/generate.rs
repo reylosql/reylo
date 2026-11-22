@@ -271,6 +271,7 @@ fn crate_options(package: &Path) -> Options {
             None
         },
         uuid: has("uuid"),
+        pgvector: has("pgvector"),
         decimals: if has("rust_decimal") {
             Some(Decimals::RustDecimal)
         } else if has("bigdecimal") {

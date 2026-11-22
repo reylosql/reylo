@@ -94,6 +94,8 @@ pub struct Options {
     pub dates: Option<Dates>,
     pub uuid: bool,
     pub decimals: Option<Decimals>,
+    /// pgvector's `vector` as the `pgvector` crate's `Vector`.
+    pub pgvector: bool,
 }
 
 /// What the query's module, as the crate wrote it, holds in place of the generated items.

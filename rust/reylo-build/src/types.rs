@@ -318,7 +318,10 @@ impl Types {
         if let Kind::Array(a) = &t.kind {
             if self.plain_array(t) {
                 let element = self.value(&a.element.ty, label, at)?;
-                return Ok(Shape::Vec(Box::new(if a.element.nullable { Shape::Option(Box::new(element)) } else { element })));
+                // A parameter's elements are never NULL, as TypeScript's are not: a NULL element
+                // in `<> all(…)` or `not in (…)` matches no row.
+                let nullable = a.element.nullable && at == Use::Column;
+                return Ok(Shape::Vec(Box::new(if nullable { Shape::Option(Box::new(element)) } else { element })));
             }
         }
         if let Kind::Enum(e) = &t.kind {
@@ -423,6 +426,8 @@ impl Types {
                 self.serialize = false;
                 (quote!(::reylo::sqlx::postgres::types::PgHstore), false)
             }
+            // pgvector's `vector`, in whatever schema the extension was created in.
+            Kind::Array(_) if name == "vector" => (self.pgvector(label)?, false),
             Kind::Unknown => return Err(self.any_value(label)),
             _ => return Err(self.unsupported(label, t, "cast it to text in the statement, as `x::text`")),
         })
@@ -748,6 +753,14 @@ impl Types {
             Some(Decimals::RustDecimal) => Ok(quote!(::reylo::sqlx::types::Decimal)),
             Some(Decimals::BigDecimal) => Ok(quote!(::reylo::sqlx::types::BigDecimal)),
             None => Err(syn::Error::new(self.span, format!("{label} is a decimal: enable reylo's rust_decimal or bigdecimal feature"))),
+        }
+    }
+
+    fn pgvector(&self, label: &str) -> syn::Result<TokenStream2> {
+        if self.options.pgvector {
+            Ok(quote!(::reylo::pgvector::Vector))
+        } else {
+            Err(syn::Error::new(self.span, format!("{label} is a pgvector vector: enable reylo's pgvector feature")))
         }
     }
 
@@ -1151,6 +1164,25 @@ mod tests {
         };
         assert_eq!(column(Dialect::Postgres, map("extensions.hstore")), Ok(("::reylo::sqlx::postgres::types::PgHstore".into(), false)));
         assert!(column(Dialect::Postgres, Type::opaque("public.ltree")).unwrap_err().contains("no Rust type for public.ltree"));
+    }
+
+    #[test]
+    fn a_vector_is_pgvectors_behind_its_feature() {
+        use reylo_engine_core::types::Slot;
+        let vector = Type::array(Slot::non_null(Type::single())).named("extensions.vector");
+        let mut types = Types::new(Dialect::Postgres, Options { pgvector: true, ..Options::default() }, BTreeMap::new(), Span::call_site(), false);
+        let shape = types.column(&vector, false, "embedding").unwrap();
+        assert_eq!((shape.ty().to_string().replace(' ', ""), types.serialize), ("::reylo::pgvector::Vector".to_string(), true));
+        assert!(column(Dialect::Postgres, vector).unwrap_err().contains("enable reylo's pgvector feature"));
+    }
+
+    #[test]
+    fn an_array_parameters_elements_are_never_null() {
+        use reylo_engine_core::types::Slot;
+        let ints = Type::array(Slot::nullable(Type::integer(32))).named("_int4");
+        let mut types = Types::new(Dialect::Postgres, Options::default(), BTreeMap::new(), Span::call_site(), false);
+        assert_eq!(types.param(&ints, false, "skip").unwrap().0.ty().to_string().replace(' ', ""), "::std::vec::Vec<i32>");
+        assert_eq!(types.column(&ints, false, "ids").unwrap().ty().to_string().replace(' ', ""), "::std::vec::Vec<::core::option::Option<i32>>");
     }
 
     #[test]

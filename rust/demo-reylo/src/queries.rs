@@ -153,3 +153,11 @@ pub mod move_place {}
 /// A function that returns nothing, as `()`.
 #[reylo::query("select pg_sleep(0) as slept")]
 pub mod nap {}
+
+/// An array parameter: a `Vec` of its element type, none of them NULL.
+#[reylo::query("select id from users where id <> all(:skip::int[]) order by id")]
+pub mod users_but {}
+
+/// pgvector's `vector`, read and bound as `pgvector::Vector`.
+#[reylo::query("select id, embedding from items order by embedding <-> :near limit 1")]
+pub mod nearest_item {}

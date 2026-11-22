@@ -125,5 +125,16 @@ async fn main() -> Result<(), sqlx::Error> {
 
     let slept = nap::Query.run(&pool).await?.slept;
     println!("21. void        {slept:?}");
+
+    let skip: Vec<i32> = vec![1];
+    let others = users_but::Query { skip }.run(&pool).await?;
+    assert_eq!(others.iter().map(|r| r.id).collect::<Vec<_>>(), [2]);
+    println!("22. int[] param {others:?}");
+
+    let near = reylo::pgvector::Vector::from(vec![1.0, 2.0, -3.0]);
+    let item = nearest_item::Query { near }.run(&pool).await?.expect("an item");
+    let embedding: reylo::pgvector::Vector = item.embedding.clone();
+    assert_eq!((item.id, embedding.to_vec()), (1, vec![1.0, 2.5, -3.0]));
+    println!("23. vector      {item:?} {}", serde_json::to_string(&embedding).expect("json"));
     Ok(())
 }
