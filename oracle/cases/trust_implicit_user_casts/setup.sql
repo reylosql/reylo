@@ -21,3 +21,7 @@ create function tagged_text(tagged) returns text language sql as $$ select 'x'::
 create cast (tagged as text) with function tagged_text(tagged) as implicit;
 create table tt (id int primary key, g tagged);
 insert into tt values (1, null), (2, row(2));
+-- Numbers beside those casts: a built-in call over them proves its rule only where the build names
+-- each operand's type, an aggregate's and a coalesce's of several number types included.
+create table numbers (id int primary key, k int not null, amount numeric not null, qty int not null, maybe numeric);
+insert into numbers values (1, 1, 1.25, 2, null), (2, 1, 2.5, 3, 4.75);

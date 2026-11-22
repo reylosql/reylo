@@ -1,0 +1,3 @@
+max_int.sql: many () -> { result: bool }
+max_name.sql: one () -> { result: bool? }
+max_varchar.sql: many () -> { result: bool? }

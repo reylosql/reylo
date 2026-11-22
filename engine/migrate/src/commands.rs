@@ -487,7 +487,36 @@ async fn set_fingerprint(db: &mut Db, name: &str, value: &str) -> Result<(), Err
 /// its own transaction: one of the two fails, changing nothing.
 async fn lock(db: &mut Db, opts: &Options) -> Result<Option<std::fs::File>, Error> {
     match db.dialect() {
-        Dialect::Postgres => db.exec("select pg_advisory_lock(hashtextextended('reylo_migrate', 0))").await.map(|_| None),
+        // Asked for in short statements, with the waits between them outside any: a session blocked
+        // in `pg_advisory_lock` holds its statement's snapshot all the while, and the run holding the
+        // lock, building an index concurrently, waits for every snapshot older than its own to end,
+        // which is a deadlock that Postgres ends by failing one of the two. The session's
+        // `lock_timeout` and `statement_timeout` still bound the whole wait, as they bound a blocking
+        // one, and a pause stays well inside `idle_session_timeout`, which ends a session idle longer.
+        Dialect::Postgres => {
+            let settings = db.rows("select name, setting, current_setting(name) as shown from pg_settings where name in ('lock_timeout', 'statement_timeout', 'idle_session_timeout')").await?;
+            let ms = |name: &str| settings.iter().find(|r| r.text("name") == name).and_then(|r| r.text("setting").parse::<u64>().ok()).filter(|&v| v > 0);
+            let limit = ["lock_timeout", "statement_timeout"].into_iter().filter_map(|name| ms(name).map(|v| (v, name))).min();
+            let longest = std::time::Duration::from_millis(ms("idle_session_timeout").map_or(1000, |v| (v / 2).clamp(1, 1000)));
+            let started = std::time::Instant::now();
+            let mut pause = std::time::Duration::from_millis(50).min(longest);
+            loop {
+                if db.rows("select pg_try_advisory_lock(hashtextextended('reylo_migrate', 0)) as ok").await?.first().is_some_and(|r| r.flag("ok")) {
+                    return Ok(None);
+                }
+                let mut wait = pause;
+                if let Some((limit, name)) = limit {
+                    let left = std::time::Duration::from_millis(limit).saturating_sub(started.elapsed());
+                    if left.is_zero() {
+                        let shown = settings.iter().find(|r| r.text("name") == name).map(|r| r.text("shown").to_string()).unwrap_or_default();
+                        return Err(Error(format!("another run of reylo migrate held this database past this session's {name} of {shown}; try again once it finishes")));
+                    }
+                    wait = wait.min(left);
+                }
+                tokio::time::sleep(wait).await;
+                pause = (pause * 2).min(longest);
+            }
+        }
         // A lock of this database's alone (its name is at most 64 characters), which answers 0
         // once the wait runs out. Named through sha2: MySQL 9.7 has md5 and sha1 only as a component.
         // The answer is read by position: Vitess (PlanetScale's MySQL) runs a lock function apart
@@ -724,28 +753,55 @@ async fn run_once(db: &mut Db, m: &Migration, record: bool) -> Result<(), Ran> {
 // ---------------------------------------------------------------------------------------------
 // The check.
 
+/// How the schema `a` differs from `b`, as a diff from one to the other under headers that name
+/// them, set off by a blank line on each side: `-` what only `a` has, `+` what only `b` has.
 fn describe_diff(label_a: &str, a: &[String], label_b: &str, b: &[String]) -> Vec<String> {
     const MAX: usize = 20;
     let (only_a, only_b) = difference(a, b);
-    let mut out: Vec<String> = only_a.iter().take(MAX).map(|l| paint("red", &format!("  - {label_a}: {}", readable(l)))).collect();
-    out.extend(only_b.iter().take(MAX).map(|l| paint("green", &format!("  + {label_b}: {}", readable(l)))));
-    let more = only_a.len() + only_b.len() - out.len();
+    let (only_a, only_b) = (without_default_grants(&only_a), without_default_grants(&only_b));
+    let mut changes: Vec<String> = only_a.iter().take(MAX).map(|l| paint("red", &format!("    - {}", readable(l)))).collect();
+    changes.extend(only_b.iter().take(MAX).map(|l| paint("green", &format!("    + {}", readable(l)))));
+    let more = only_a.len() + only_b.len() - changes.len();
     if more > 0 {
-        out.push(format!("  … and {more} more"));
+        changes.push(format!("    … and {more} more"));
     }
-    out
+    [String::new(), paint("dim", &format!("    --- {label_a}")), paint("dim", &format!("    +++ {label_b}"))].into_iter().chain(changes).chain([String::new()]).collect()
+}
+
+/// One side of a diff without the privileges an object it adds or drops has by default (Postgres's
+/// `USAGE` on a type for every role, `EXECUTE` on a function): they come and go with the object. A
+/// grant that changes on an object both sides have is kept.
+fn without_default_grants(lines: &[String]) -> Vec<String> {
+    static DEFAULT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^grant (?:type|domain|language|function|procedure) (?:[^\s.(]+\.)?([^\s.(]+)\S* PUBLIC:(?:USAGE|EXECUTE)$").expect("a valid pattern"));
+    let comes_with = |line: &String| {
+        let Some(c) = DEFAULT.captures(line) else { return false };
+        let name = Regex::new(&format!(r"[\s.]{}\b", regex::escape(&c[1]))).expect("a valid pattern");
+        lines.iter().any(|other| !other.starts_with("grant ") && name.is_match(other))
+    };
+    lines.iter().filter(|l| !comes_with(l)).cloned().collect()
 }
 
 /// A comparison line as a person reads it: `public.` left out, and an index or a constraint as SQL
-/// writes it, its keywords in lowercase, rather than as the catalog prints it.
+/// writes it, its keywords in lowercase, rather than as the catalog prints it. An index reads
+/// `index <name> on <table> (<columns>)` on every database, and SQLite's index, view or trigger
+/// names itself once, rather than before its statement and in it.
 fn readable(line: &str) -> String {
     static INDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^index CREATE (UNIQUE )?INDEX (\S+) ON (?:ONLY )?(\S+) USING (\w+) (.*)$").expect("a valid pattern"));
+    static MYSQL_INDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^index ([^.\s]+)\.(\S+) (unique )?(\w+)((?: invisible)?(?: comment "(?:[^"\\]|\\.)*")?) (\(.*\))$"#).expect("a valid pattern"));
+    static SQLITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(index|view|trigger) \S+ create (unique )?(?:temp |temporary )?(?:index|view|trigger) (?:if not exists )?(\S+) (.*)$").expect("a valid pattern"));
     static CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) (\S+) (.*)$").expect("a valid pattern"));
-    static PUBLIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s(,])(?:public|"public")\."#).expect("a valid pattern"));
+    static PUBLIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s(,]|::)(?:public|"public")\."#).expect("a valid pattern"));
     let line = PUBLIC.replace_all(line, "$1").into_owned();
     if let Some(c) = INDEX.captures(&line) {
         let using = if &c[4] == "btree" { String::new() } else { format!("using {} ", &c[4]) };
         return format!("{}index {} on {} {using}{}", if c.get(1).is_some() { "unique " } else { "" }, &c[2], &c[3], lowercase_keywords(&c[5]));
+    }
+    if let Some(c) = MYSQL_INDEX.captures(&line) {
+        let using = if c[4].eq_ignore_ascii_case("btree") { String::new() } else { format!("using {} ", c[4].to_ascii_lowercase()) };
+        return format!("{}index {} on {} {using}{}{}", c.get(3).map_or("", |m| m.as_str()), &c[2], &c[1], &c[6], &c[5]);
+    }
+    if let Some(c) = SQLITE.captures(&line) {
+        return format!("{}{} {} {}", c.get(2).map_or("", |m| m.as_str()), &c[1], &c[3], &c[4]);
     }
     if let Some(c) = CONSTRAINT.captures(&line) {
         return format!("constraint {} on {}: {}", &c[2], &c[1], lowercase_keywords(&c[3]));
@@ -796,6 +852,7 @@ fn lowercase_keywords(sql: &str) -> String {
 fn changed_lines(before: &[String], after: &[String]) -> Vec<String> {
     const MAX: usize = 20;
     let (gone, came) = difference(before, after);
+    let (gone, came) = (without_default_grants(&gone), without_default_grants(&came));
     let constraint_names = |lines: &[String]| -> Vec<String> { lines.iter().filter_map(|l| l.strip_prefix("constraint ")).filter_map(|rest| rest.split(' ').nth(1)).map(str::to_string).collect() };
     let made_by_constraint = |line: &str, names: &[String]| names.iter().any(|n| line.starts_with("index ") && line.contains(&format!(" INDEX {n} ON ")));
     let (gone_names, came_names) = (constraint_names(&gone), constraint_names(&came));
@@ -1341,10 +1398,7 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
     let folder = shown(dir);
     let moves: Vec<String> = late.iter().zip(&renamed).map(|(m, n)| format!("mv {} {}", shell_word(&format!("{folder}/{}", m.name)), shell_word(&format!("{folder}/{n}")))).collect();
     let lead = format!("Give {} a later name, so that every database runs {} after {}", if one { "it" } else { "them" }, if one { "it" } else { "them" }, after.join(", "));
-    let diff = |a: &[String], b: &[String]| -> Vec<String> {
-        let lines = describe_diff("this database", &crate::catalog::without_comments(a), "a fresh database", &crate::catalog::without_comments(b));
-        std::iter::once(String::new()).chain(lines.into_iter().map(|l| format!("  {l}"))).chain([String::new()]).collect()
-    };
+    let diff = |a: &[String], b: &[String]| describe_diff("this database", &crate::catalog::without_comments(a), "a fresh database", &crate::catalog::without_comments(b));
     let problem = match (shadows.lines(here).await?, shadows.lines(fresh).await?) {
         (Ok(a), Ok(b)) if crate::catalog::same_schema(&a, &b) => return Ok(None),
         (Ok(a), Ok(b)) => Problem::new("late-migration-differs", format!("{} {names} {} before {}, which this database already ran", if one { "Migration" } else { "Migrations" }, if one { "sorts" } else { "sort" }, after.join(", ")))
@@ -1365,6 +1419,21 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
     }
     let commands: Vec<&str> = moves.iter().map(String::as_str).collect();
     Ok(Some(problem.fix(lead, &commands)))
+}
+
+/// The refusal of a database that applied its migrations in another order than the lock lists, `order`
+/// being the lock's (`run_order`). Every database runs the lock's order, and nothing else; with no
+/// lock, a late one is proven at deploy, so there is none.
+fn lock_order_problem(opts: &Options, applied: &[&HistoryRow], order: &[Migration]) -> Option<Problem> {
+    if lock_free(opts) {
+        return None;
+    }
+    let k = applied.iter().zip(order).position(|(r, f)| r.name != f.name)?;
+    Some(
+        Problem::new("history-out-of-order", format!("This database applied {} where {} lists {}", applied[k].name, shown(&opts.lock), order[k].name))
+            .note("Every database runs the migrations in the lock's order. Where one ran them otherwise, the lock was merged keeping a branch's lines: keep main's.")
+            .fix("On a development database, take it to the lock's order", &["reylo migrate dev"]),
+    )
 }
 
 /// Where a migration falls in name order: init.sql, which holds the schema a project started
@@ -1423,11 +1492,8 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
         }
     }
     let applied_files: Vec<Migration> = applied.iter().filter_map(|r| by_name(&r.name).cloned()).collect();
-    // Every database runs the lock's order, and nothing else; with no lock, a late one is proven at deploy.
-    if problems.is_empty() && !lock_free(opts) {
-        if let Some(k) = applied.iter().zip(&files).position(|(r, f)| r.name != f.name) {
-            problems.push(Problem::new("history-out-of-order", format!("This database applied {} where {} lists {}", applied[k].name, shown(&opts.lock), files[k].name)).note("Every database runs the migrations in the lock's order. Where one ran them otherwise, the lock was merged keeping a branch's lines: keep main's.").fix("On a development database, take it to the lock's order", &["reylo migrate dev"]));
-        }
+    if problems.is_empty() {
+        problems.extend(lock_order_problem(opts, &applied, &files));
     }
     // Nothing is recorded without running but what a cut-off run of Reylo's own left (below).
     let records: Vec<Migration> = Vec::new();
@@ -2818,7 +2884,17 @@ async fn status_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
     // A draft leaves the checksum as it was; any other disagreement leaves it nothing to be held to.
     let stamped = if lock_problems.iter().all(Problem::is_drafts) { stamp(opts, schema_sql.as_deref()) } else { Stamp::Unreadable };
     let drafts = !lock_problems.is_empty();
+    // Once the lock and the files agree, the order this database ran them in, as deploy holds it to.
+    let misordered = if out_of_step || drafts {
+        None
+    } else {
+        let applied: Vec<&HistoryRow> = history.iter().filter(|r| r.applied).collect();
+        lock_order_problem(opts, &applied, &order)
+    };
+    // Deploy refuses such a database, so running what it hasn't run is offered only where it doesn't.
+    let offer_run = misordered.is_none();
     problems.extend(lock_problems);
+    problems.extend(misordered);
     match stamped {
         // A draft written from schema.sql makes the change the checksum doesn't hold yet, until development locks it.
         Stamp::Changed if drafts => said.push(then(note(format!("Until the drafts are locked, {} isn't held to the lock", shown(&opts.schema))), &[("To lock them", &["reylo migrate dev"])])),
@@ -2843,6 +2919,7 @@ async fn status_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
         log(line);
     }
     match pending.len() {
+        _ if !offer_run => {}
         0 => {}
         1 => log(&then(note(format!("This database hasn't run {}", pending[0].name)), &[("To run it in development", &["reylo migrate dev"]), ("To run it in production", &["reylo migrate deploy"])])),
         n => log(&then(note(format!("This database hasn't run {n} migrations")), &[("To run them in development", &["reylo migrate dev"]), ("To run them in production", &["reylo migrate deploy"])])),
@@ -3044,8 +3121,8 @@ async fn emptied(db: &mut Db, server: &mut Server, opts: &Options, log: Log<'_>)
     }
     match take_to(db, &target, &then, &lines, None).await? {
         Err(Unreached::Refused(problems)) => return Ok(refuse(&problems, log)),
-        Err(Unreached::Differs(lines)) => {
-            let problem = Problem::new("reset-incomplete", "Reylo can't drop everything on this database").lines(lines);
+        Err(Unreached::Differs(now, expect)) => {
+            let problem = Problem::new("reset-incomplete", "Reylo can't drop everything on this database").lines(describe_diff("this database", &now, "an empty database", &expect));
             if d != Dialect::Mysql {
                 return Ok(refuse(&[problem], log));
             }
@@ -3219,6 +3296,9 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
             }
         }
     }
+    for line in &drafted.changes {
+        log(line);
+    }
     for note in &drafted.notes {
         log(note);
     }
@@ -3302,6 +3382,8 @@ struct Drafted {
     /// Where its plan commits partway, each enum's labels before what uses them, a file ending at
     /// each: how many times.
     commits: usize,
+    /// What it changes, a line each, as `changed_lines` writes it.
+    changes: Vec<String>,
 }
 
 /// What a plan loses, as a sentence names it: `the column users.bio`, `the table tags`.
@@ -3969,7 +4051,7 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
 #[allow(clippy::type_complexity)]
 #[cfg(feature = "cli")]
 async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, migration: &str, choices: &Choices, log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
-    let drafted = |texts: Vec<String>, code: i32, notes: Vec<String>, empty: bool| Drafted { texts, code, notes, empty, target: target_name.to_string(), lock_safe: false, commits: 0 };
+    let drafted = |texts: Vec<String>, code: i32, notes: Vec<String>, empty: bool| Drafted { texts, code, notes, empty, target: target_name.to_string(), lock_safe: false, commits: 0, changes: vec![] };
     let mut db = Db::open(opts).await?;
     let mut problems = out_of_reach(&mut db, &opts.url).await?;
     problems.extend(unreadable_grants(&mut db, opts, files, Some(schema_sql)).await?);
@@ -4000,6 +4082,8 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             return Ok(Err(vec![Problem::new("replay-fails", format!("Replaying {m} in a shadow database fails")).note(e)]));
         }
         shadows.taint(c);
+        // What the migrations make, for the summary of what the new one changes.
+        let before = catalog(shadows.db(c)).await?;
         let unread = crate::catalog::unmodeled(shadows.db(a), true).await?;
         unmodeled_note("Reylo doesn't fully compare these in schema.sql, so a migration can leave them, or a change to them, out: check them by hand", &unread, log);
         let mut target = match crate::diff::read(shadows.db(a)).await {
@@ -4145,7 +4229,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             notes.push(format!("      {}", paint("cyan", &create_command(&asked, choices, &names, &[]))));
         }
         if failed.is_none() && reached == wanted {
-            return Ok(Ok(Drafted { lock_safe: split_files.is_some(), commits, ..drafted(texts, 0, notes, false) }));
+            return Ok(Ok(Drafted { lock_safe: split_files.is_some(), commits, changes: changed_lines(&before, &reached), ..drafted(texts, 0, notes, false) }));
         }
         let mut remaining = Vec::new();
         if let Some(f) = &failed {
@@ -4703,8 +4787,9 @@ const COMMITTED: &str = "The plan commits partway (an enum's new labels, before 
 
 /// Why `take_to` left the database as it was.
 enum Unreached {
-    /// The plan ran, but the database didn't then read as the target: how it differs.
-    Differs(Vec<String>),
+    /// The plan ran, but the database didn't then read as the target: its schema then, and the
+    /// target's, which `differs` describes.
+    Differs(Vec<String>, Vec<String>),
     /// What was stated refused the plan before it ran.
     Refused(Vec<Problem>),
 }
@@ -4745,7 +4830,7 @@ async fn take_to(db: &mut Db, target: &Target, then: &[String], expect: &[String
         crate::catalog::keep_turso_sequences(db).await?;
         let now = crate::catalog::without_comments(&crate::catalog::without_extra_children(&catalog(db).await?, expect));
         if now != expect {
-            return Ok(Err(Unreached::Differs(describe_diff("this database", &now, "the target", expect))));
+            return Ok(Err(Unreached::Differs(now, expect.to_vec())));
         }
         if transactional {
             db.exec("commit").await?;
@@ -5380,7 +5465,7 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
             None => match take_to(db, &k_target, &forget, &at_kept, None).await {
                 Err(e) => return fail("Rewinding this database failed", e.0, log),
                 Ok(Err(Unreached::Refused(problems))) => return Ok(refuse(&problems, log)),
-                Ok(Err(Unreached::Differs(lines))) => return refused("Rewinding this database wouldn't reach what its migrations make", lines, log),
+                Ok(Err(Unreached::Differs(now, expect))) => return refused("Rewinding this database wouldn't reach what its migrations make", describe_diff("this database", &now, "its migrations", &expect), log),
                 Ok(Ok((_, plan))) => {
                     base = at_kept.clone();
                     plan
@@ -5474,7 +5559,7 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
             match take_to(db, &target, &[], &expect, None).await {
                 Err(e) => return fail("Undoing changes no migration made failed", e.0, log),
                 Ok(Err(Unreached::Refused(problems))) => return Ok(refuse(&problems, log)),
-                Ok(Err(Unreached::Differs(lines))) => return refused("Undoing changes no migration made wouldn't reach what the migrations make", lines, log),
+                Ok(Err(Unreached::Differs(now, expect))) => return refused("Undoing changes no migration made wouldn't reach what the migrations make", describe_diff("this database", &now, "the migrations", &expect), log),
                 Ok(Ok((_, plan))) => {
                     rows.open(log);
                     log(&format!("  {} Undid what no migration made, so that {} runs on what the migrations make", paint("yellow", "↺"), pending[0].name));
@@ -5700,8 +5785,8 @@ async fn db_push_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Optio
         let (renames, plan) = match take_to(db, &target, &[], &wanted, Some((push, asked))).await {
             Err(e) => return fail(if d == Dialect::Mysql { "reylo db push failed partway" } else { "reylo db push failed" }, e.0, log),
             Ok(Err(Unreached::Refused(problems))) => return Ok(refuse(&problems, log)),
-            Ok(Err(Unreached::Differs(lines))) => {
-                let problem = Problem::new("db-push-incomplete", format!("Reylo can't take this database the rest of the way to {}", shown(&opts.schema))).lines(lines).fix("Write the change as a migration, finishing by hand what it leaves out", &["reylo migrate new <name>"]);
+            Ok(Err(Unreached::Differs(now, expect))) => {
+                let problem = Problem::new("db-push-incomplete", format!("Reylo can't take this database the rest of the way to {}", shown(&opts.schema))).lines(describe_diff("this database", &now, &shown(&opts.schema), &expect)).fix("Write the change as a migration, finishing by hand what it leaves out", &["reylo migrate new <name>"]);
                 if d != Dialect::Mysql {
                     return Ok(refuse(&[problem], log));
                 }
@@ -5887,6 +5972,32 @@ pub async fn run_sql(opts: &Options, items: &[(String, String)], log: Log<'_>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_types_default_grant_is_left_out() {
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let made = lines(&["column public.posts.status public.post_status not null default 'draft'::public.post_status", "enum public.post_status (\"draft\", \"published\")", "grant type public.post_status PUBLIC:USAGE"]);
+        assert_eq!(without_default_grants(&made), made[..2]);
+        // On a type both sides have, a grant is a change.
+        let granted = lines(&["grant type public.post_status PUBLIC:USAGE"]);
+        assert_eq!(without_default_grants(&granted), granted);
+        assert_eq!(readable(&made[0]), "column posts.status post_status not null default 'draft'::post_status");
+    }
+
+    #[test]
+    fn an_index_reads_the_same_on_every_database() {
+        // As each database's catalog writes it.
+        assert_eq!(readable("index CREATE INDEX bookmarks_title ON public.bookmarks USING btree (title)"), "index bookmarks_title on bookmarks (title)");
+        assert_eq!(readable("index orders.orders_qty BTREE (qty)"), "index orders_qty on orders (qty)");
+        assert_eq!(readable("index orders.orders_ref unique HASH invisible (ref, qty desc)"), "unique index orders_ref on orders using hash (ref, qty desc) invisible");
+        assert_eq!(readable("index users_name3 create index users_name3 on users (name)"), "index users_name3 on users (name)");
+        assert_eq!(readable("index users_email create unique index if not exists users_email on users (email)"), "unique index users_email on users (email)");
+        // A view and a trigger name themselves once too.
+        assert_eq!(readable("view v_users create view v_users as select id from users"), "view v_users as select id from users");
+        assert_eq!(readable("trigger t create trigger t after insert on users begin select 1; end"), "trigger t after insert on users begin select 1; end");
+        // What is not an index's own line is left as it is.
+        assert_eq!(readable("index options orders.orders_qty key_block_size=8"), "index options orders.orders_qty key_block_size=8");
+    }
 
     #[test]
     fn a_platforms_column_stamp_leaves_the_dump() {
