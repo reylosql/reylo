@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn a_word_only_tidb_knows_names_a_function() {
-        for text in ["select sql_cache(1)", "select approx_count_distinct (id) from users", "select approx_percentile(id, 0.9) from users", "select translate (a) from t", "select sequence() from t"] {
+        for text in ["select sql_cache(1)", "select plan (1), background(2)", "select approx_count_distinct (id) from users", "select approx_percentile(id, 0.9) from users", "select translate (a) from t", "select sequence() from t"] {
             for opts in [Options::default(), Options { ignore_space: true, ..Options::default() }] {
                 assert!(parse_tree_with(text, opts).errors.is_empty(), "{text}");
                 assert!(parse(text, opts, BOUNDS).is_ok(), "{text}");

@@ -124,14 +124,23 @@ def go_map(misc, name):
     return re.findall(r'"([^"]+)":\s*"?(\w+)"?,', body)
 
 
-def paren_followers(rules_text):
-    """The symbols `(` may come right after in a sentence of the grammar, by its FOLLOW sets, but
-    where a rule that takes a keyword as a name reads it: there a name before `(` is right."""
+def paren_followers(rules_text, start):
+    """The symbols `(` may come right after in what the rule `start` reads, by the FOLLOW sets of
+    the rules it reaches, but where a rule that takes a keyword as a name reads it: there a name
+    before `(` is right."""
     names_rules = {"UnReservedKeyword", "TiDBKeyword", "NotKeywordToken", "LabelName"}
     rules = {}
     for name, body in re.findall(r"(?ms)^([A-Za-z_]\w*):(.*?)(?=^[A-Za-z_]\w*:|\Z)", rules_text):
         body = re.sub(r"\{\}|%prec \S+|/\*.*?\*/", " ", body)
         rules.setdefault(name, []).extend(re.findall(r'"(?:[^"\\]|\\.)*"|\'.\'|[A-Za-z_]\w*', a) for a in body.split("|"))
+    # The rules `start` reaches; the others are statements of TiDB's own, which MySQL doesn't have.
+    reached, todo = set(), [start]
+    while todo:
+        name = todo.pop()
+        if name in reached or name not in rules:
+            continue
+        reached.add(name)
+        todo.extend(sym for alt in rules[name] for sym in alt if sym in rules)
     nullable, first = set(), {n: set() for n in rules}
     def first_of(seq):
         out = set()
@@ -160,7 +169,7 @@ def paren_followers(rules_text):
     while changed:
         changed = False
         for name, alts in rules.items():
-            if name in names_rules:
+            if name in names_rules or name not in reached:
                 continue
             for alt in alts:
                 for i, sym in enumerate(alt):
@@ -288,10 +297,11 @@ def main():
     unmade = [n for n in names[:ntokens] if re.fullmatch(r'"[A-Z][A-Z0-9_]*"', n) and n[1:-1] not in spelled]
     if unmade:
         raise SystemExit("the grammar names tokens no keyword makes: " + " ".join(unmade))
-    # A word TiDB keeps as a keyword and MySQL doesn't know is a name before `(`, where no rule reads
-    # the keyword with `(` after it, through any rules that may be empty between them.
+    # A word TiDB keeps as a keyword and MySQL 8.4 doesn't know is a name before `(`, where no
+    # expression reads the keyword with `(` after it (`ADDDATE(`, `CAST(x AS VECTOR(3))`): a statement
+    # that does so elsewhere is TiDB's own (`TRACE PLAN (…)`).
     mysql_words = {line.split()[0] for line in open(os.path.join(HERE, "mysql-8.4-keywords.txt")) if not line.startswith("#")}
-    before_paren = paren_followers(stripped.split("\n%%\n", 1)[1])
+    before_paren = paren_followers(stripped.split("\n%%\n", 1)[1], "SimpleExpr")
     functions = {w for w, _ in go_map(misc, "btFuncTokenMap")}
     tidb_only = {w for w, g in keyword_map if w not in mysql_words and w not in functions and json.dumps(w) not in before_paren and g not in before_paren}
     words = sorted(mysql_grammar.names_before_paren())
