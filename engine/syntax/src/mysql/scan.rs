@@ -657,11 +657,145 @@ pub(crate) fn conditional_open(text: &str, lead: usize, start: usize) -> usize {
     open
 }
 
+/// The `sql_mode` a script's statements set, as the server runs them one after another: a
+/// `SET sql_mode = …` outside a routine's body changes how the statements after it are read, where
+/// its value is a mode list, `DEFAULT`, or a variable an earlier statement saved `@@sql_mode` in.
+#[derive(Default)]
+struct ModeSwitch {
+    /// The words and other tokens of the statement so far, as `(token, its text)`.
+    statement: Vec<(u16, std::ops::Range<usize>)>,
+    /// How deep in `BEGIN … END` bodies, and in `CASE … END` expressions, the statement is.
+    bodies: u32,
+    cases: u32,
+    /// An `END` whose next token says what it ends.
+    end: bool,
+    /// User variables that hold a mode: `SET @old = @@sql_mode`.
+    saved: Vec<(String, Options)>,
+}
+
+impl ModeSwitch {
+    fn token(&mut self, text: &str, sym: u16, range: std::ops::Range<usize>) {
+        let word = text[range.clone()].to_ascii_uppercase();
+        if std::mem::take(&mut self.end) {
+            match word.as_str() {
+                "IF" | "LOOP" | "WHILE" | "REPEAT" => {}
+                "CASE" => self.cases = self.cases.saturating_sub(1),
+                _ => self.close(),
+            }
+        } else if word == "CASE" {
+            self.cases += 1;
+        }
+        match word.as_str() {
+            // A transaction's BEGIN starts a statement; a body's follows a routine's head or a label, or sits in a body.
+            "BEGIN" if !self.statement.is_empty() || self.bodies > 0 => self.bodies += 1,
+            "END" => self.end = true,
+            _ => {}
+        }
+        self.statement.push((sym, range));
+    }
+
+    fn close(&mut self) {
+        if self.cases > 0 {
+            self.cases -= 1;
+        } else {
+            self.bodies = self.bodies.saturating_sub(1);
+        }
+    }
+
+    /// The statement ended at a `;`: the mode the next is read under.
+    fn finish(&mut self, text: &str, opts: Options) -> Options {
+        if std::mem::take(&mut self.end) {
+            self.close();
+        }
+        let statement = std::mem::take(&mut self.statement);
+        if self.bodies == 0 {
+            // Only a body holds a CASE statement, so no CASE stays open past a statement outside one.
+            self.cases = 0;
+        }
+        if self.bodies > 0 || !statement.first().is_some_and(|(_, r)| text[r.clone()].eq_ignore_ascii_case("SET")) {
+            return opts;
+        }
+        let mut opts = opts;
+        let comma = char_sym(b',');
+        let (mut depth, mut from) = (0i32, 1);
+        for i in 1..=statement.len() {
+            let sym = statement.get(i).map(|t| t.0);
+            match sym {
+                Some(s) if s == char_sym(b'(') => depth += 1,
+                Some(s) if s == char_sym(b')') => depth -= 1,
+                _ => {}
+            }
+            if sym.is_none() || (sym == Some(comma) && depth == 0) {
+                opts = self.assignment(text, &statement[from..i], opts);
+                from = i + 1;
+            }
+        }
+        opts
+    }
+
+    /// One `name = value` of a SET.
+    fn assignment(&mut self, text: &str, item: &[(u16, std::ops::Range<usize>)], opts: Options) -> Options {
+        let words: Vec<&str> = item.iter().map(|(_, r)| &text[r.clone()]).collect();
+        let words = match words.first().map(|w| w.to_ascii_uppercase()) {
+            Some(w) if w == "SESSION" || w == "LOCAL" => &words[1..],
+            Some(w) if w == "GLOBAL" || w == "PERSIST" || w == "PERSIST_ONLY" => return opts,
+            _ => &words[..],
+        };
+        let [name, eq, value] = words else { return opts };
+        if *eq != "=" && *eq != ":=" {
+            return opts;
+        }
+        let is_mode = |w: &str| {
+            let w = w.to_ascii_lowercase();
+            let w = w.strip_prefix("@@").map(|w| w.strip_prefix("session.").or(w.strip_prefix("local.")).unwrap_or(w)).unwrap_or(&w).to_string();
+            w == "sql_mode" || w == "`sql_mode`"
+        };
+        if name.starts_with('@') && !name.starts_with("@@") {
+            if is_mode(value) && value.starts_with("@@") {
+                let key = name.to_ascii_lowercase();
+                self.saved.retain(|(k, _)| *k != key);
+                self.saved.push((key, opts));
+            }
+            return opts;
+        }
+        if !is_mode(name) || name.to_ascii_lowercase().starts_with("@@global.") {
+            return opts;
+        }
+        let modes = match value.as_bytes().first() {
+            Some(b'@') if !value.starts_with("@@") => return self.saved.iter().find(|(k, _)| *k == value.to_ascii_lowercase()).map_or(opts, |(_, o)| Options { version: opts.version, ..*o }),
+            Some(q @ (b'\'' | b'"')) if value.len() >= 2 && value.ends_with(*q as char) => value[1..value.len() - 1].to_string(),
+            Some(c) if c.is_ascii_alphabetic() || *c == b'_' => value.to_string(),
+            _ => return opts,
+        };
+        if modes.eq_ignore_ascii_case("DEFAULT") {
+            return Options { version: opts.version, ..Options::default() };
+        }
+        let mut next = Options { version: opts.version, backslash_escapes: true, ansi_quotes: false, pipes_as_concat: false, high_not_precedence: false, ignore_space: false };
+        for mode in modes.split(',').map(|m| m.trim().to_ascii_uppercase()) {
+            match mode.as_str() {
+                "ANSI_QUOTES" => next.ansi_quotes = true,
+                "NO_BACKSLASH_ESCAPES" => next.backslash_escapes = false,
+                "PIPES_AS_CONCAT" => next.pipes_as_concat = true,
+                "HIGH_NOT_PRECEDENCE" => next.high_not_precedence = true,
+                "IGNORE_SPACE" => next.ignore_space = true,
+                "ANSI" => {
+                    next.ansi_quotes = true;
+                    next.pipes_as_concat = true;
+                    next.ignore_space = true;
+                }
+                _ => {}
+            }
+        }
+        next
+    }
+}
+
 /// The tokens of `text` for the grammar, where its trivia ends, and where a comment is left open.
 pub fn lexemes(text: &str, opts: Options) -> (Vec<Lexeme>, u32, Option<Stop>) {
     let mut s = Scanner { z: text.as_bytes(), at: 0, opts, in_bang: false, identifier_dot: false, last_keyword: [0; 3], after_word: None, unclosed: None, bang_at: 0 };
     let mut out = Vec::with_capacity(text.len() / 4 + 1);
     let mut lead = 0usize;
+    let mut modes = ModeSwitch::default();
     loop {
         let (sym, start, end) = s.lex();
         if sym == 0 {
@@ -669,6 +803,11 @@ pub fn lexemes(text: &str, opts: Options) -> (Vec<Lexeme>, u32, Option<Stop>) {
         }
         out.push(Lexeme { sym, lead: lead as u32, start: start as u32, end: end as u32 });
         lead = end;
+        if sym == char_sym(b';') {
+            s.opts = modes.finish(text, s.opts);
+        } else {
+            modes.token(text, sym, start..end);
+        }
     }
     // A `/*!` comment the text never closes is unfinished SQL.
     let unclosed = s.unclosed.or(s.in_bang.then_some(s.bang_at));

@@ -1509,6 +1509,7 @@ mod tests {
         assert!(Reading::of(Dialect::Mysql, "select \"a\" from \"t\"").errors.is_empty());
         assert!(Reading::of(Dialect::Mysql, "select 'a\\', 'b'").errors.is_empty());
         assert!(Reading::of(Dialect::Mysql, "SELECT COUNT (*) FROM t").errors.is_empty());
+        assert!(Reading::of(Dialect::Mysql, "SET SESSION sql_mode = '';\nSELECT \"a\" \"b\" \"c\";\nSET SESSION sql_mode = 'ANSI_QUOTES';\nSELECT \"i\" FROM (SELECT 1 AS i) AS \"t\";").errors.is_empty());
         for text in ["select \"a\" from \"t\";\nselect from where", "select 'a\\';\nselect from where;"] {
             let errors = Reading::of(Dialect::Mysql, text).errors;
             assert_eq!(errors.len(), 1, "{text}: {errors:?}");
