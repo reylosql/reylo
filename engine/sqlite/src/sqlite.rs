@@ -670,8 +670,10 @@ fn insert_target_at(sql: &str, lexed: &Lexed) -> Option<(usize, usize)> {
         }
         at
     };
-    // The end of the text, comment or placeholder that covers `at`.
-    let covered = |at: usize| lexed.opaque.iter().copied().chain(lexed.placeholders.iter().map(|p| (p.start, p.end))).find(|(from, to)| (*from..*to).contains(&at)).map(|(_, to)| to);
+    // The text, comments and placeholders, in order, which the scan for INTO passes once.
+    let mut spans: Vec<(usize, usize)> = lexed.opaque.iter().copied().chain(lexed.placeholders.iter().map(|p| (p.start, p.end))).collect();
+    spans.sort_unstable();
+    let mut next = 0;
     let comment = |at: usize| lexed.opaque.iter().find(|(from, _)| *from == at && (sql[at..].starts_with("--") || sql[at..].starts_with("/*"))).map(|(_, to)| *to);
     // Past whitespace and comments.
     let gap = |mut at: usize| loop {
@@ -693,8 +695,11 @@ fn insert_target_at(sql: &str, lexed: &Lexed) -> Option<(usize, usize)> {
         if at >= bytes.len() {
             return None;
         }
-        if let Some(to) = covered(at) {
-            at = to;
+        while spans.get(next).is_some_and(|(_, to)| *to <= at) {
+            next += 1;
+        }
+        if let Some((_, to)) = spans.get(next).filter(|(from, _)| *from <= at) {
+            at = *to;
         } else if word(bytes[at]) {
             let end = word_end(at);
             if sql[at..end].eq_ignore_ascii_case("into") {
