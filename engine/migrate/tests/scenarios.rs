@@ -1377,7 +1377,7 @@ async fn a_failed_migration_leaves_nothing(mut p: P) {
     p.schema(&format!("create table a (id {int}{column}); create table b (id {int});"));
     assert_eq!(p.migrate().await, 1, "{}", p.peek());
     // Said as every refusal is: what failed, that nothing of it stays, and what to run next.
-    assert_has!(p.output(), r"  ✗ 20261027110000_b\.sql  failed\n\n✗ 20261027110000_b\.sql failed and was rolled back\n  [^\n]+\n  Nothing was recorded, so the next deploy runs it again\.\n\n  Fix the file, lock the fix and deploy again:\n    reylo migrate dev\n    reylo migrate deploy\n  If another database already ran it, write a new migration instead:\n    reylo migrate new <name>$");
+    assert_has!(p.output(), r"  ✗ 20261027110000_b\.sql  failed\n\n✗ The migration 20261027110000_b\.sql failed and was rolled back\n  [^\n]+\n  Nothing was recorded, so the next deploy runs it again\.\n\n  Fix the file, lock the fix and deploy again:\n    reylo migrate dev\n    reylo migrate deploy\n  If another database already ran it, write a new migration instead:\n    reylo migrate new <name>$");
     assert!(p.try_rows("select 1 from b").await.is_err(), "b rolled back with the file");
     assert_eq!(p.history().await, ["20261027100000_a.sql"]);
 }
@@ -2921,6 +2921,7 @@ on!(
     a_migration_that_creates_a_role_is_refused,
     an_object_the_comparison_does_not_read_is_not_a_match,
     a_failed_concurrent_index_leaves_nothing,
+    a_failed_lone_statement_may_leave_its_change,
     a_platforms_objects_are_left_out,
     reylo_run_runs_inline_sql_and_files,
     history_push_leaves_a_data_migration_pending,
@@ -3723,10 +3724,24 @@ mod adversarial {
         p.schema("create table t (x int); create unique index t_x on t (x);");
         p.output();
         assert_eq!(p.migrate().await, 1);
-        assert_has!(p.output(), r"✗ 20261027110000_unique\.sql failed and was rolled back\n  could not create unique index[^\n]*\n  Nothing was recorded, so the next deploy runs it again\.\n\n  Fix the file, lock the fix and deploy again:");
+        assert_has!(p.output(), r"✗ The migration 20261027110000_unique\.sql failed and was rolled back\n  could not create unique index[^\n]*\n  Nothing was recorded, so the next deploy runs it again\.\n\n  Fix the file, lock the fix and deploy again:");
         assert!(p.rows("select 1 from pg_class where relname = 't_x'").await.is_empty(), "the invalid index was dropped");
         p.exec("delete from t where ctid = (select max(ctid) from t)").await;
         assert_eq!(p.migrate().await, 0, "the file runs again as written:\n{}", p.peek());
+    }
+
+    pub async fn a_failed_lone_statement_may_leave_its_change(mut p: P) {
+        p.schema("create table t (x int);");
+        p.file("20261027100000_t.sql", "create table t (x int);");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        // Run outside a transaction, a statement other than an index build may leave part of itself,
+        // as a detach left pending: deploy never says it rolled back.
+        p.file("20261027110000_drop.sql", "drop index concurrently t_missing;");
+        p.output();
+        assert_eq!(p.migrate().await, 1);
+        let out = p.output();
+        assert_has!(&out, r"✗ The migration 20261027110000_drop\.sql failed\n  [^\n]*t_missing[^\n]*\n  It runs outside a transaction, so its change may be in place\. Nothing was recorded\.\n\n  See what is:\n    reylo migrate deploy --dry-run$");
+        assert!(!out.contains("rolled back"), "{out}");
     }
 
     pub async fn a_platforms_objects_are_left_out(mut p: P) {

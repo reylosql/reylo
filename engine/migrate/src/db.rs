@@ -89,6 +89,7 @@ pub trait Session: Send {
 pub(crate) enum Ran {
     Waited(Error),
     Failed(Error),
+    Partly(Error),
 }
 
 impl From<Error> for Ran {

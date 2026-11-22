@@ -387,6 +387,7 @@ re!(TRANSACTION_CONTROL, r"^(BEGIN|START TRANSACTION|COMMIT|END|ROLLBACK|SAVEPOI
 re!(PG_ALONE, r"^(CREATE (UNIQUE )?INDEX CONCURRENTLY|DROP INDEX CONCURRENTLY|REINDEX\b.*\bCONCURRENTLY|VACUUM|ALTER SYSTEM|CREATE DATABASE|DROP DATABASE|CREATE TABLESPACE|DROP TABLESPACE|CLUSTER$|REINDEX (SYSTEM|DATABASE))");
 re!(SQLITE_ALONE, r"^(VACUUM|ATTACH|DETACH)\b");
 re!(PG_DETACH, r"^ALTER TABLE\b.*\bDETACH PARTITION\b.*\bCONCURRENTLY\b");
+re!(PG_BUILDS_INDEX, r"^(CREATE (UNIQUE )?INDEX CONCURRENTLY|REINDEX)\b");
 re!(MYSQL_DATA, r"^(INSERT|UPDATE|DELETE|REPLACE|SELECT|WITH|DO|TABLE|VALUES|CALL|SET)\b");
 re!(MYSQL_SET_COMMITS, r"^SET (PASSWORD|DEFAULT ROLE)\b|^SET\b.*\bAUTOCOMMIT\b");
 
@@ -456,6 +457,12 @@ pub fn kind_of(statement: &Statement, dialect: Dialect) -> Kind {
             }
         }
     }
+}
+
+/// Whether `sql` is one statement that builds an index outside a transaction on Postgres: one that
+/// fails leaves nothing behind but the invalid index it was building, which can be dropped.
+pub fn builds_index_alone(sql: &str, dialect: Dialect) -> bool {
+    dialect == Dialect::Postgres && matches!(split_statements(sql, dialect).as_slice(), [one] if PG_BUILDS_INDEX.is_match(&head(one, 6)))
 }
 
 /// Why `sql` cannot run as one atomic migration on the dialect, or None when it can. A file runs in

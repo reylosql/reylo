@@ -594,18 +594,27 @@ async fn insert_row(db: &mut Db, m: &Migration, applied: bool, fingerprint: Opti
 // its row. No run cut off between the two leaves an applied row with nothing to compare.
 
 pub(crate) async fn run(db: &mut Db, m: &Migration, record: bool) -> Result<(), Error> {
+    run_undone(db, m, record).await.map_err(|(e, _)| e)
+}
+
+/// Runs a migration as [`run`] does; a failure says whether nothing of the migration is known to be
+/// in place: never on MySQL, which commits each DDL statement, nor where a statement run outside a
+/// transaction may have left part of itself, or finished before its row could be written.
+async fn run_undone(db: &mut Db, m: &Migration, record: bool) -> Result<(), (Error, bool)> {
+    let undone = db.dialect() != Dialect::Mysql;
     let mut tries = 1;
     loop {
         match run_once(db, m, record).await {
             Ok(()) => return Ok(()),
-            Err(Ran::Failed(e)) => return Err(e),
+            Err(Ran::Failed(e)) => return Err((e, undone)),
+            Err(Ran::Partly(e)) => return Err((e, false)),
             // A statement that gave up waiting for a lock changed nothing: the file runs again, after
             // a pause that grows, until the last try.
             Err(Ran::Waited(_)) if tries < LOCK_TRIES => {
                 tokio::time::sleep(std::time::Duration::from_secs(LOCK_PAUSES[(tries - 1).min(LOCK_PAUSES.len() - 1)])).await;
                 tries += 1;
             }
-            Err(Ran::Waited(e)) => return Err(Error(format!("{}: {e}, {LOCK_TRIES} times over {} seconds{}", m.name, LOCK_PAUSES.iter().take(LOCK_TRIES - 1).sum::<u64>(), holders(db).await))),
+            Err(Ran::Waited(e)) => return Err((Error(format!("{}: {e}, {LOCK_TRIES} times over {} seconds{}", m.name, LOCK_PAUSES.iter().take(LOCK_TRIES - 1).sum::<u64>(), holders(db).await)), undone)),
         }
     }
 }
@@ -687,25 +696,39 @@ async fn run_once(db: &mut Db, m: &Migration, record: bool) -> Result<(), Ran> {
             limit_lock_wait(db).await?;
         }
         let result = db.script_or_wait(&m.sql).await;
-        if d == Dialect::Mysql {
-            reset_lock_wait(db).await?;
-        }
+        let reset = if d == Dialect::Mysql { reset_lock_wait(db).await } else { Ok(()) };
         if let Err(e) = result {
-            for index in invalid(db).await.unwrap_or_default() {
-                if !before.contains(&index) {
-                    let _ = db.exec(&format!("drop index concurrently if exists {index}")).await;
+            let mut dropped = true;
+            match invalid(db).await {
+                Ok(now) => {
+                    for index in now.iter().filter(|i| !before.contains(i)) {
+                        dropped &= db.exec(&format!("drop index concurrently if exists {index}")).await.is_ok();
+                    }
                 }
+                Err(_) => dropped = false,
             }
             if record {
                 let _ = db.exec_with(&format!("delete from {HISTORY_TABLE} where name = {}", db.param(1)), &[&m.name]).await;
             }
-            return Err(e);
+            // A statement that gave up waiting for a lock changed nothing, and SQLite's run whole or
+            // not at all; on Postgres, an index build leaves nothing once its invalid index is
+            // dropped, and any other may leave part of itself, as a detach left pending.
+            return Err(match e {
+                Ran::Failed(e) if d == Dialect::Sqlite || (dropped && crate::sql::builds_index_alone(&m.sql, d)) => Ran::Failed(e),
+                Ran::Failed(e) | Ran::Partly(e) => Ran::Partly(e),
+                waited => waited,
+            });
         }
+        // The statement is in place from here, so a failure is no longer one that left nothing.
+        reset.map_err(Ran::Partly)?;
         if record {
-            let lines = catalog(db).await?;
-            let value = fingerprint_of(db, &lines).await?;
-            db.exec_with(&format!("update {HISTORY_TABLE} set applied_at = {}, fingerprint = {} where name = {}", now_sql(d), db.param(1), db.param(2)), &[&value, &m.name]).await?;
-            store_catalog(db, &m.name, &lines).await?;
+            let recorded = async {
+                let lines = catalog(db).await?;
+                let value = fingerprint_of(db, &lines).await?;
+                db.exec_with(&format!("update {HISTORY_TABLE} set applied_at = {}, fingerprint = {} where name = {}", now_sql(d), db.param(1), db.param(2)), &[&value, &m.name]).await?;
+                store_catalog(db, &m.name, &lines).await
+            };
+            recorded.await.map_err(Ran::Partly)?;
         }
         return Ok(());
     }
@@ -738,10 +761,9 @@ async fn run_once(db: &mut Db, m: &Migration, record: bool) -> Result<(), Ran> {
     if result.is_err() {
         let _ = db.exec("rollback").await;
     }
-    if d == Dialect::Sqlite {
-        db.exec("pragma foreign_keys = on").await?;
-    }
+    let on = if d == Dialect::Sqlite { db.exec("pragma foreign_keys = on").await } else { Ok(()) };
     result?;
+    on.map_err(Ran::Partly)?;
     // The migration has committed: a fingerprint that can't be read now leaves its row pending,
     // which the next deploy refuses, rather than reading as a migration that failed.
     if record {
@@ -2156,7 +2178,7 @@ async fn deploy_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
     let mut applied: Vec<serde_json::Value> = Vec::new();
     for m in &plan.pending {
         let at = std::time::Instant::now();
-        match run(db, m, true).await {
+        match run_undone(db, m, true).await {
             // Its row holds the fingerprint it left, so that a run cut off after it, or a migration
             // after it that fails and leaves part of itself, is seen by the next run.
             Ok(()) => {
@@ -2164,11 +2186,11 @@ async fn deploy_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
                 rows.row(log, &paint("green", "✓"), &m.name, &format!("applied {}", paint("dim", &format!("· {ms} ms"))));
                 applied.push(serde_json::json!({ "name": m.name, "state": "applied", "ms": ms as u64 }));
             }
-            Err(e) => {
+            Err((e, undone)) => {
                 rows.row(log, &paint("bold red", "✗"), &m.name, "failed");
                 applied.push(serde_json::json!({ "name": m.name, "state": "failed", "error": e.0 }));
                 log("");
-                print_problems(&[deploy_failure(m, &e, d, started.contains(&m.name.as_str()))], log);
+                print_problems(&[deploy_failure(m, &e, d, started.contains(&m.name.as_str()), undone)], log);
                 code = 1;
                 break;
             }
@@ -2194,21 +2216,21 @@ fn failed(rows: &mut Rows, m: &Migration, e: &Error, d: Dialect, log: Log<'_>) {
 }
 
 /// A migration deploy ran that failed: its error, what of it may be in place, and what to do next.
-/// Nothing of it is recorded either way. Elsewhere than MySQL it is undone whole: a transaction's
-/// file rolls back, and a statement that runs alone (`create index concurrently`) either finishes or
-/// leaves nothing once the invalid index it left is dropped.
-fn deploy_failure(m: &Migration, e: &Error, d: Dialect, started: bool) -> Problem {
-    let problem = Problem::new("migration-failed", format!("{} failed", m.name)).note(&e.0);
+/// Nothing of it is recorded either way. Where nothing of it is in place ([`run_undone`]), it is
+/// said to have rolled back, and to be fixed and run again.
+fn deploy_failure(m: &Migration, e: &Error, d: Dialect, started: bool, undone: bool) -> Problem {
+    let problem = Problem::new("migration-failed", format!("The migration {} failed", m.name)).note(&e.0);
     if started {
         return problem
             .note("A run before this one was cut off here, so its change may be in place. Nothing was recorded.")
             .fix("See whether it is", &["reylo migrate deploy --dry-run"])
             .fix("Record it if it is, running nothing", &["reylo migrate history push"]);
     }
-    if d == Dialect::Mysql {
-        return problem.note("MySQL commits each statement, so its first statements may be in place. Nothing was recorded.").fix("See which are", &["reylo migrate deploy --dry-run"]);
+    if !undone {
+        let why = if d == Dialect::Mysql { "MySQL commits each statement, so its first statements may be in place" } else { "It runs outside a transaction, so its change may be in place" };
+        return problem.note(format!("{why}. Nothing was recorded.")).fix("See what is", &["reylo migrate deploy --dry-run"]);
     }
-    Problem { title: format!("{} failed and was rolled back", m.name), ..problem }
+    Problem { title: format!("The migration {} failed and was rolled back", m.name), ..problem }
         .note("Nothing was recorded, so the next deploy runs it again.")
         .fix("Fix the file, lock the fix and deploy again", &["reylo migrate dev", "reylo migrate deploy"])
         .fix("If another database already ran it, write a new migration instead", &["reylo migrate new <name>"])
