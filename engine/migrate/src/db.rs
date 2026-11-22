@@ -526,9 +526,14 @@ pub fn with_database(url: &str, name: &str) -> String {
 }
 
 /// A URL as a heading says it: no credentials and no settings. Whatever is before the last `@` is
-/// taken for credentials, so that a password never shows, even in a form no driver reads.
+/// taken for credentials, so that a password never shows, even in a form no driver reads; but a
+/// SQLite file's URL is its path, whose `@` is part of a name, and holds none.
 pub fn shown_url(url: &str) -> String {
     let bare = &url[..url.find('?').unwrap_or(url.len())];
+    let lower = bare.to_ascii_lowercase();
+    if lower.starts_with("sqlite:") || lower.starts_with("file:") {
+        return bare.to_string();
+    }
     match bare.split_once("://") {
         Some((scheme, rest)) => {
             let host = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
@@ -1378,6 +1383,9 @@ mod url_tests {
         assert_eq!(shown_url("postgres://host/app?password=secret"), "postgres://host/app");
         assert_eq!(shown_url("sqlite:./app.db?mode=rwc"), "sqlite:./app.db");
         assert_eq!(shown_url("libsql://app-acme.turso.io?authToken=secret"), "libsql://app-acme.turso.io");
+        // A SQLite file's name may hold an @, which names another file without what comes before it.
+        assert_eq!(shown_url("sqlite://team@prod.db"), "sqlite://team@prod.db");
+        assert_eq!(shown_url("file:team@prod.db?mode=ro"), "file:team@prod.db");
         // An @ past the host is no part of the credentials, where a connection is made.
         assert_eq!(with_database("postgres://u@host/d@b", "x"), "postgres://u@host/x");
         assert_eq!(with_database("postgres://host/app?application_name=a@b", "x"), "postgres://host/x?application_name=a@b");
