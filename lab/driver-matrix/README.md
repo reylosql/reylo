@@ -20,6 +20,8 @@ Each job runs in its own process: Node 26.7.0 by default, Node 24.19.0 for the s
 | @neondatabase/serverless | 1.1.0, 0.10.4, 0.9.5 | Postgres 14 behind a local Neon proxy | Pool, Client, PoolClient, PoolClient inside BEGIN/COMMIT (all over WebSocket), `neon()` over HTTP, `neon(url, { fullResults: true })` |
 | pg-promise | 12.7.1 | Postgres 14 (local) | `db`, `db.task(t)`, `db.tx(t)`, nested `t.tx(t2)` (a savepoint) |
 | slonik | 49.12.0 | Postgres 14 (local), with Slonik's own type parsers | the pool, a connection from `pool.connect(c)`, `pool.transaction(tx)`, nested `tx.transaction(sp)` (a savepoint) |
+| @vercel/postgres | 0.10.0, over its own @neondatabase/serverless 0.9.5 | Postgres 14 behind a local Neon proxy | `sql` (also exported as `db`), `createPool()`, a connected `createClient()`, a client from `pool.connect()`, that client inside BEGIN/COMMIT |
+| knex | 3.3.0, 2.5.1, over pg 8.23.0 | Postgres 14 (local) | the instance, `knex.transaction(trx)`, the savepoint `trx.transaction(sp)`, the transaction `await knex.transaction()` hands out, committed or rolled back by hand |
 | Bun.sql | Bun 1.4.4 | Postgres 14, MySQL 8.4, MySQL 8.0, SQLite file | `sql`, `sql.begin(tx)`, `tx.savepoint(sp)`, `sql.reserve()` (not on SQLite) |
 | mysql2 | 3.24.5, 3.15.3, 2.3.3 | MySQL 8.4, MySQL 8.0 | promise Pool, Connection, PoolConnection, PoolConnection inside `beginTransaction()`; callback Pool, Connection and PoolConnection passed without `.promise()` |
 | mariadb (a MySQL client) | 3.5.4, 3.4.5, 2.5.6 | MySQL 8.4 | Pool, Connection, PoolConnection, PoolConnection inside `beginTransaction()`; `mariadb/callback` Connection, Pool, and PoolConnection inside `beginTransaction()` |
@@ -80,11 +82,11 @@ Visibility is always checked with a raw count through the driver, never through 
 
 | Server | Where | Used by |
 | --- | --- | --- |
-| Postgres 14 (shared, local) | `postgres://localhost:5432/postgres`, schema `driver_matrix` only | pg, postgres, pg-promise, Bun.sql |
+| Postgres 14 (shared, local) | `postgres://localhost:5432/postgres`, schema `driver_matrix` only | pg, postgres, pg-promise, Slonik, Knex, Bun.sql |
 | porg-dm-mysql84 (mysql:8.4) | 127.0.0.1:33406, root/porg | mysql2, mariadb, Bun.sql, ps-http-sim |
 | porg-dm-mysql80 (mysql:8.0) | 127.0.0.1:33380, root/porg | mysql2, Bun.sql |
 | porg-dm-neon-pg (postgres:14) | 127.0.0.1:55414, postgres/postgres | behind the Neon proxy |
-| porg-dm-neon-proxy (ghcr.io/timowilhelm/local-neon-http-proxy:main) | 127.0.0.1:54444, HTTP `/sql` and WebSocket `/v1` | @neondatabase/serverless |
+| porg-dm-neon-proxy (ghcr.io/timowilhelm/local-neon-http-proxy:main) | 127.0.0.1:54444, HTTP `/sql` and WebSocket `/v1` | @neondatabase/serverless, @vercel/postgres |
 | porg-dm-ps-sim (ghcr.io/mattrobenolt/ps-http-sim:latest) | 127.0.0.1:38080 | @planetscale/database |
 
 The Neon proxy creates a `neon_control_plane` schema in the database it fronts, so it has a Postgres container of its own instead of the shared server. The connection string names the host `db.localtest.me`, which the proxy uses as the endpoint name. That host does not resolve here, and it does not need to, because `fetchEndpoint` and `wsProxy` send every request to 127.0.0.1:54444.
@@ -216,6 +218,10 @@ Reylo now takes a Drizzle database and the transactions it hands out, and runs o
 ## Re-run (2026-11-16): Bun 1.4.4
 
 The Bun jobs ran alone (`./run.sh --only bun`) on Bun 1.4.4, with Node 26.11.1 for the runner, the MySQL containers in colima and a throwaway Postgres 18 standing in for the shared Postgres 14 (`DM_PG_URL`). Bun 1.4.4 reads a timestamptz before 1 AD, which 1.4.3 decoded as an Invalid Date, so the S11b skip on Bun.sql and on Drizzle over Bun.sql is gone. The run was against src/ where Reylo reads Bun 1.4.4's `.raw()` bytes on Postgres and decodes them itself, and its result columns on MySQL ([src/decode.ts](../../src/decode.ts)): 7 jobs and 567 rows, all of them passing. [compare.ts](compare.ts) against the RESULTS.md before it: the 7 rows that differ are S11b's, from skip to pass, on Bun.sql's four shapes and Drizzle's three. RESULTS.md has those rows and the Bun jobs' version changed by hand; every other job's rows are as the last full run wrote them.
+
+## Run (2026-11-22): @vercel/postgres and Knex
+
+The @vercel/postgres and Knex jobs are new. [drivers/vercel-postgres.ts](drivers/vercel-postgres.ts) points the package's own copy of @neondatabase/serverless at the local Neon proxy, with a pooled connection string (a host with `-pooler.`) for `sql` and `createPool()` and a direct one for `createClient()`, as the package requires. [drivers/knex.ts](drivers/knex.ts) runs Knex over pg on the local Postgres. The full run, on Node 26.11.1 and 24.22.0, Bun 1.4.4 and Miniflare 4.20260730.0, with the containers in colima and a throwaway Postgres 18 standing in for the shared Postgres 14 (`DM_PG_URL`), wrote [RESULTS.md](RESULTS.md): 75 jobs and 6319 rows, with 6236 pass, 4 fail (PlanetScale's simulator, as before), 60 unsupported, 16 skip and 3 not run, and 31 of 120 control rows failing as designed. All 412 rows of the three new jobs pass, S10's array of a subquery's rows on every shape. [compare.ts](compare.ts) against the RESULTS.md before it: 5952 rows over 74 jobs, and every row that was there has the result it had.
 
 ## Type check
 
