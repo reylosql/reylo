@@ -3782,6 +3782,8 @@ mod tests {
         let none = json!({ "columns": [], "params": [{ "type": 3, "flags": 0 }] });
         let hinted = analyzed("insert /*+ SET_VAR(sort_buffer_size=65536) */ into users select cast (? as signed)", none, "IGNORE_SPACE").0;
         assert_eq!(hinted.kind, Some(StatementKind::Insert));
+        let counted = analyzed("select /*+ SET_VAR(sort_buffer_size = 4194304) */ count (*) as n from users", one.clone(), "IGNORE_SPACE").0;
+        assert_eq!(counted.kind, Some(StatementKind::Select));
         // A double-quoted word is a column under ANSI_QUOTES, a backslash a character under
         // NO_BACKSLASH_ESCAPES, and the parser reads both as the session does.
         assert_eq!(rows("select id from users where email = \"email\"", default), "at_most_one");

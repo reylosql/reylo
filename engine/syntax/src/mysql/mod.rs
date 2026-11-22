@@ -317,6 +317,16 @@ mod tests {
     }
 
     #[test]
+    fn a_word_only_tidb_knows_names_a_function() {
+        for text in ["select approx_count_distinct (id) from users", "select approx_percentile(id, 0.9) from users", "select translate (a) from t", "select sequence() from t"] {
+            for opts in [Options::default(), Options { ignore_space: true, ..Options::default() }] {
+                assert!(parse_tree_with(text, opts).errors.is_empty(), "{text}");
+                assert!(parse(text, opts, BOUNDS).is_ok(), "{text}");
+            }
+        }
+    }
+
+    #[test]
     fn json_value_takes_on_empty_before_on_error_alone() {
         assert!(parse_tree("select json_value('{}', '$.x' returning signed null on empty null on error)").errors.is_empty());
         assert!(!parse_tree("select json_value('{}', '$.x' returning signed null on error null on empty)").errors.is_empty());

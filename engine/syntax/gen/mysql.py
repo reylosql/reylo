@@ -238,7 +238,7 @@ def main():
     unmade = [n for n in names[:ntokens] if re.fullmatch(r'"[A-Z][A-Z0-9_]*"', n) and n[1:-1] not in spelled]
     if unmade:
         raise SystemExit("the grammar names tokens no keyword makes: " + " ".join(unmade))
-    # So is a word TiDB keeps as a keyword and MySQL doesn't know, where no rule reads the keyword
+    # A word TiDB keeps as a keyword and MySQL doesn't know is a name before `(`, where no rule reads the keyword
     # before `(`, itself or as the one word of a rule that is.
     mysql_words = {line.split()[0] for line in open(os.path.join(HERE, "mysql-8.4-keywords.txt")) if not line.startswith("#")}
     rules_text = stripped.split("\n%%\n", 1)[1]
@@ -248,8 +248,11 @@ def main():
             before_paren |= {a.strip() for a in re.sub(r"\{\}|%prec \S+", " ", body).split("|") if len(a.split()) == 1}
     functions = {w for w, _ in go_map(misc, "btFuncTokenMap")}
     tidb_only = {w for w, g in keyword_map if w not in mysql_words and w not in functions and json.dumps(w) not in before_paren and g not in before_paren}
-    words = sorted(set(mysql_grammar.names_before_paren()) | tidb_only)
+    words = sorted(mysql_grammar.names_before_paren())
     L.append(f"/// Keywords that are a function's name before `(`, sorted.\npub static NAMES_BEFORE_PAREN: [&str; {len(words)}] = [" + ", ".join(f'"{w}"' for w in words) + "];\n")
+    # MySQL knows none of these words, so before `(`, spaced or not, each is a stored function's name.
+    words = sorted(tidb_only | tidb_functions)
+    L.append(f"/// TiDB's keywords MySQL doesn't have: a function's name before `(`, after any spaces, sorted.\npub static TIDB_NAMES: [&str; {len(words)}] = [" + ", ".join(f'"{w}"' for w in words) + "];\n")
     L.append(f"pub static NAMES: [&str; {len(names)}] = [")
     L.extend("    " + json.dumps(n) + "," for n in names)
     L.append("];")

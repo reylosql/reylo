@@ -3,7 +3,7 @@
 //! few phrases are one token. Comments, and the markers of a `/*! … */` comment whose text the
 //! server runs, are trivia. Reylo's `:name` placeholder is a parameter marker, as `?` is.
 
-use super::generated::{tok, CHAR_TOKENS, FUNCTIONS, HINTED, KEYWORDS, NAMES_BEFORE_PAREN, WINDOW_FUNCTIONS};
+use super::generated::{tok, CHAR_TOKENS, FUNCTIONS, HINTED, KEYWORDS, NAMES_BEFORE_PAREN, TIDB_NAMES, WINDOW_FUNCTIONS};
 use crate::lalr::Lexeme;
 
 /// How the server reads a statement: the `sql_mode` flags that change its tokens, and its version,
@@ -504,12 +504,12 @@ impl<'t> Scanner<'t> {
             return tok::identifier;
         }
         let upper = String::from_utf8_lossy(text).to_ascii_uppercase();
-        let mut next = end;
-        if self.opts.ignore_space {
-            while next < self.z.len() && is_space(self.z[next]) {
-                next += 1;
-            }
+        let mut spaced = end;
+        while spaced < self.z.len() && is_space(self.z[spaced]) {
+            spaced += 1;
         }
+        // A built-in's name is one only right before its parenthesis, unless IGNORE_SPACE.
+        let next = if self.opts.ignore_space { spaced } else { end };
         if self.z.get(next) == Some(&b'(') {
             if let Some(sym) = lookup(&FUNCTIONS, &upper) {
                 return sym;
@@ -517,6 +517,9 @@ impl<'t> Scanner<'t> {
             if NAMES_BEFORE_PAREN.binary_search(&upper.as_str()).is_ok() {
                 return tok::identifier;
             }
+        }
+        if self.z.get(spaced) == Some(&b'(') && TIDB_NAMES.binary_search(&upper.as_str()).is_ok() {
+            return tok::identifier;
         }
         lookup(&KEYWORDS, &upper).or_else(|| lookup(&WINDOW_FUNCTIONS, &upper)).unwrap_or(tok::identifier)
     }
