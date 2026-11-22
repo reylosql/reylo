@@ -242,6 +242,10 @@ fn print(line: &str) {
     reylo_migrate::terminal::println(line);
 }
 
+fn eprint(line: &str) {
+    reylo_migrate::terminal::eprintln(line);
+}
+
 /// A command that isn't one, said on stderr with exit 2; with `--json`, as the one JSON object every
 /// command prints, `extra` (the usage) left out.
 fn usage_error(group: &str, args: &[String], message: &str, extra: &str) -> i32 {
@@ -335,7 +339,8 @@ fn group_command_checked(group: &str, args: &[String]) -> Result<i32, String> {
     }
     if !json {
         let mut sql = None;
-        let code = run_group(command, &parsed, &mut print, &mut sql);
+        // Introspect's stdout is its SQL alone, for a redirect: what it says goes to stderr.
+        let code = if command == "db introspect" { run_group(command, &parsed, &mut eprint, &mut sql) } else { run_group(command, &parsed, &mut print, &mut sql) };
         // The schema alone on stdout, so that it can be saved with a redirect.
         if let Some(sql) = sql {
             print!("{sql}");
@@ -423,9 +428,12 @@ fn run_group(command: &str, parsed: &Args, log: reylo_migrate::commands::Log<'_>
                 }
             }
             // Coloured only where stdout is a terminal, so never with --json.
-            "db introspect" => reylo_migrate::db_introspect(&opts, &parsed.schemas).await.map(|text| {
-                *sql = Some(reylo_migrate::terminal::highlight(&text, reylo_migrate::Dialect::of_url(&opts.url).unwrap_or(reylo_migrate::Dialect::Postgres)));
-                0
+            "db introspect" => reylo_migrate::db_introspect(&opts, &parsed.schemas, &mut log).await.map(|text| match text {
+                Ok(text) => {
+                    *sql = Some(reylo_migrate::terminal::highlight(&text, reylo_migrate::Dialect::of_url(&opts.url).unwrap_or(reylo_migrate::Dialect::Postgres)));
+                    0
+                }
+                Err(code) => code,
             }),
             "db reset" => reylo_migrate::db_reset(&opts, in_ci, &mut log).await,
             "db wipe" => reylo_migrate::db_wipe(&opts, in_ci, &mut log).await,

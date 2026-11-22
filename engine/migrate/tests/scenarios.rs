@@ -366,6 +366,16 @@ fn same_run(out: &str) -> String {
 
 /// Drops the replay caches only this test's target used, which would otherwise stay on the test
 /// server for a week.
+/// `db introspect`'s SQL, which the test expects it to write.
+async fn introspect(opts: &Options) -> String {
+    let mut said = Vec::new();
+    match reylo_migrate::db_introspect(opts, &[], &mut |l: &str| said.push(l.to_string())).await {
+        Ok(Ok(sql)) => sql,
+        Ok(Err(_)) => panic!("introspect refused:\n{}", said.join("\n")),
+        Err(e) => panic!("introspect: {e}"),
+    }
+}
+
 async fn forget(url: &str) {
     let _ = reylo_migrate::cache::forget(url).await;
 }
@@ -1248,9 +1258,9 @@ async fn db_introspect_prints_the_schema(p: P) {
     let int = p.t.int;
     // A SQLite file is made by opening it: introspect refuses one that isn't there.
     p.exec("select 1").await;
-    assert_eq!(reylo_migrate::db_introspect(&p.opts(), &[]).await.unwrap(), "", "an empty database has no schema");
+    assert_eq!(introspect(&p.opts()).await, "", "an empty database has no schema");
     p.exec(&format!("create table hand_made (id {int});")).await;
-    let text = reylo_migrate::db_introspect(&p.opts(), &[]).await.unwrap();
+    let text = introspect(&p.opts()).await;
     assert!(has(&text, "(?i)create table .*hand_made"), "{text}");
     assert!(!p.dir.join("schema.sql").exists(), "it writes no file");
 }
@@ -2918,6 +2928,8 @@ on!(
     a_projects_extension_in_pg_catalog_is_written,
     a_hypertable_is_said_to_be_unread,
     a_dump_makes_a_schema_its_extensions_share_once,
+    init_introspect_and_new_need_no_pg_dump,
+    introspect_with_no_check_and_no_pg_dump_says_how_to_get_one,
     an_extension_in_a_projects_schema_is_the_projects_whoever_owns_it,
     an_extension_a_platform_role_owns_in_a_projects_schema_is_the_projects,
     init_writes_the_privileges_on_an_extensions_schema,
@@ -3156,7 +3168,7 @@ mod adversarial {
         assert_eq!(reylo_migrate::init(&opts, &[], &mut |l: &str| out.push(l.to_string())).await.unwrap_or_else(|e| panic!("init: {e}")), 0, "{}", out.join("\n"));
         let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
         assert!(schema.starts_with("create table users (") && !schema.contains("cloud_admin"), "{schema}");
-        assert_eq!(reylo_migrate::db_introspect(&opts, &[]).await.unwrap(), schema);
+        assert_eq!(introspect(&opts).await, schema);
         p.strict = true;
         assert_eq!(p.status().await, 0, "{}", p.peek());
         p.output();
@@ -3199,9 +3211,58 @@ mod adversarial {
         // A shadows' server that answers nothing leaves the dump, with no role made for it: a new
         // role would change every replay cache's key on the server under the scenarios beside it.
         let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
-        let text = reylo_migrate::db_introspect(&opts, &[]).await.unwrap();
+        let text = introspect(&opts).await;
         assert_eq!(text.matches("CREATE SCHEMA IF NOT EXISTS extensions").count(), 1, "{text}");
         assert!(text.contains("CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA extensions") && text.contains("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions"), "{text}");
+    }
+
+    /// With no pg_dump anywhere, init, introspect and a `migrate new` with no schema.sql write Reylo's
+    /// own SQL, checked against the database on a shadow: only the dump they fall back on needs one.
+    pub async fn init_introspect_and_new_need_no_pg_dump(mut p: P) {
+        reylo_migrate::db::set_pg_dump_dirs(Some(vec![]));
+        p.exec("create table users (id int primary key, email text not null); create view emails as select email from users").await;
+        let text = introspect(&p.opts()).await;
+        assert_has!(text.clone(), r"create table users \(");
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        assert_eq!(std::fs::read_to_string(p.dir.join("schema.sql")).unwrap(), text);
+        assert_eq!(p.history().await, ["init.sql"]);
+        // With no schema.sql, the migration is what the database has beyond the migrations.
+        std::fs::remove_file(p.dir.join("schema.sql")).unwrap();
+        p.exec("alter table users add column bio text").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "bio", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_bio.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap(), r"(?i)add column bio text");
+        reylo_migrate::db::set_pg_dump_dirs(None);
+    }
+
+    /// Where Reylo's own SQL can't be checked (no shadow database can be made here) and no pg_dump can
+    /// dump the database instead, introspect says why, what it found and how to get one.
+    pub async fn introspect_with_no_check_and_no_pg_dump_says_how_to_get_one(p: P) {
+        p.exec("create table users (id int primary key)").await;
+        let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
+        let mut dirs = vec![];
+        // A pg_dump too old to read the server, which is named.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let bin = p.dir.join("old-bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("pg_dump"), "#!/bin/sh\necho 'pg_dump (PostgreSQL) 9.6.24'\n").unwrap();
+            std::fs::set_permissions(bin.join("pg_dump"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            dirs.push(bin);
+        }
+        reylo_migrate::db::set_pg_dump_dirs(Some(dirs));
+        let mut said = Vec::new();
+        let result = reylo_migrate::db_introspect(&opts, &[], &mut |l: &str| said.push(l.to_string())).await;
+        reylo_migrate::db::set_pg_dump_dirs(None);
+        let said = said.join("\n");
+        assert!(matches!(result, Ok(Err(1))), "{said}");
+        assert_has!(said.clone(), r"^✗ Writing this schema as SQL needs pg_dump (\d+) or newer\n  No shadow database can be made to check Reylo's own SQL for it: ");
+        #[cfg(unix)]
+        assert_has!(said.clone(), r"\n  The pg_dump at \S+/old-bin/pg_dump is version 9, which can't read Postgres \d+\n");
+        assert_has!(said.clone(), r"\n  Reylo looks for it in PGBIN, then where Postgres installs it, then on PATH\.\n");
+        assert_has!(said, r"\n  Install pg_dump \d+, then run it again:\n    \S[^\n]*\n\nNothing was changed\.$");
     }
 
     /// A database whose `public` its own role owns outright, not through `pg_database_owner`: one made
@@ -3287,7 +3348,7 @@ mod adversarial {
         assert_eq!(code, 0, "{}", out.join("\n"));
         let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
         assert!(schema.trim_start().starts_with("create table users (") && schema.matches(';').count() == 1, "the project's table alone:\n{schema}");
-        assert_eq!(reylo_migrate::db_introspect(&opts, &[]).await.unwrap(), schema);
+        assert_eq!(introspect(&opts).await, schema);
         p.strict = true;
         assert_eq!(p.status().await, 0, "{}", p.peek());
         // A second database, made as the platform makes one, taken to the migrations.
@@ -3377,7 +3438,7 @@ mod adversarial {
         let admin = p.url.clone();
         p.url = as_role(&admin, "madv_app");
         let opts = p.opts();
-        let text = reylo_migrate::db_introspect(&opts, &[]).await.unwrap_or_else(|e| panic!("introspect: {e}"));
+        let text = introspect(&opts).await;
         assert_has!(&text, r"(?i)create table (public\.)?customers \(");
         assert_has!(&text, r"(?i)create table (public\.)?orders \(");
         let mut out = Vec::new();
@@ -3414,7 +3475,7 @@ mod adversarial {
         assert_eq!(code, 0, "{}", out.join("\n"));
         let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
         assert!(schema.contains("create table customers (") && schema.contains("create table orders ("), "{schema}");
-        assert_eq!(reylo_migrate::db_introspect(&opts, &[]).await.unwrap(), schema);
+        assert_eq!(introspect(&opts).await, schema);
         p.strict = true;
         assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
@@ -3768,7 +3829,7 @@ mod adversarial {
         assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
         let text = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
         assert!(text.contains("function user_count()") && text.contains("create table quotas"), "{text}");
-        assert_eq!(reylo_migrate::db_introspect(&p.opts(), &[]).await.unwrap(), text);
+        assert_eq!(introspect(&p.opts()).await, text);
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     }
 
@@ -4853,7 +4914,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
         p.exec("create index docs_emb on docs (libsql_vector_idx(emb))").await;
         p.exec("insert into docs (emb) values (vector32('[1,2,3]')), (vector32('[3,2,1]'))").await;
         let own = ["docs_emb_shadow", "libsql_vector_meta_shadow"];
-        let sql = reylo_migrate::db_introspect(&p.opts(), &[]).await.unwrap();
+        let sql = introspect(&p.opts()).await;
         assert!(sql.contains("docs_emb on docs") && sql.contains("x_shadow") && !own.iter().any(|t| sql.contains(t)), "{sql}");
         let mut db = Db::connect(&p.url, &p.dir).await.unwrap();
         let lines = catalog(&mut db).await.unwrap();
@@ -4899,7 +4960,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
         // A table of that name that the engine didn't define is never dropped or emptied.
         let stray = "__turso_internal_seq___turso_internal_autoincrement_stray";
         p.exec(&format!("create table {stray} (note text); insert into {stray} values ('kept');")).await;
-        let sql = reylo_migrate::db_introspect(&p.opts(), &[]).await.unwrap();
+        let sql = introspect(&p.opts()).await;
         assert!(sql.contains("create table posts") && !sql.contains("__turso"), "{sql}");
         let mut db = Db::connect(&p.url, &p.dir).await.unwrap();
         let lines = catalog(&mut db).await.unwrap();
@@ -4950,7 +5011,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
     pub async fn a_virtual_tables_own_tables_are_not_in_the_dump(mut p: P) {
         p.file("20261027100000_docs.sql", "create table docs (id integer primary key, body text); create virtual table docs_fts using fts5(body, content='docs', content_rowid='id');");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
-        let sql = reylo_migrate::db_introspect(&p.opts(), &[]).await.unwrap();
+        let sql = introspect(&p.opts()).await;
         assert!(!sql.contains("docs_fts_data"), "{sql}");
         p.exec("alter table docs add column extra int").await;
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "extra", &Default::default(), log).await).await, 0, "{}", p.peek());
@@ -4975,7 +5036,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
         assert!(p.try_rows("insert into docs (id, emb) values (2, null) returning id").await.is_err(), "the column is not null");
-        let sql = reylo_migrate::db_introspect(&p.opts(), &[]).await.unwrap();
+        let sql = introspect(&p.opts()).await;
         assert!(sql.contains("libsql_vector_idx") && !sql.contains("_shadow"), "{sql}");
     }
 

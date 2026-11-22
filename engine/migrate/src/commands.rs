@@ -3243,8 +3243,7 @@ async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Resu
         if !problems.is_empty() {
             return Ok(Err(problems));
         }
-        let schemas = if d == Dialect::Postgres { crate::catalog::user_schemas(&mut db).await? } else { vec![] };
-        dump_from(&mut db, opts, &schemas).await.map(Ok)
+        Ok(schema_as_sql_on(&mut db, opts, &[], true).await?.map_err(|problem| vec![problem]))
     }
     .await;
     db.close().await;
@@ -4153,26 +4152,160 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
     result
 }
 
-/// The database's schema as SQL that makes it, for init's schema.sql and `db introspect`: written as
-/// `migrate new` writes a migration (lowercase, unqualified, from Reylo's own reading of the database)
-/// where shadow databases show that text makes exactly what the database's own dump makes; else the
-/// dump, which also holds what Reylo reads by name only.
+/// The database's schema as SQL that makes it, for init's schema.sql, `db introspect` and a `migrate
+/// new` with no schema.sql, or the refusal that says why it can't be written: written as `migrate
+/// new` writes a migration (lowercase, unqualified, from Reylo's own reading of the database) where
+/// a shadow database shows that text makes exactly this schema; else the database's own dump, which
+/// also holds what Reylo reads by name only.
 #[cfg(feature = "cli")]
-async fn schema_as_sql(opts: &Options, schemas: &[String]) -> Result<String, Error> {
+async fn schema_as_sql(opts: &Options, schemas: &[String]) -> Result<Result<String, Problem>, Error> {
     let mut db = Db::open(opts).await?;
-    let result = schema_as_sql_on(&mut db, opts, schemas).await;
+    let result = schema_as_sql_on(&mut db, opts, schemas, true).await;
     db.close().await;
     result
 }
 
+/// `shadowed` is whether the command needs shadow databases anyway: where none can be made, it is
+/// told so, rather than given the dump.
 #[cfg(feature = "cli")]
-async fn schema_as_sql_on(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<String, Error> {
+async fn schema_as_sql_on(db: &mut Db, opts: &Options, schemas: &[String], shadowed: bool) -> Result<Result<String, Problem>, Error> {
+    if db.dialect() != Dialect::Postgres {
+        return checked_against_dump(db, opts, schemas).await.map(Ok);
+    }
+    // Reylo's own SQL, checked against the database itself, needs no pg_dump: only the dump it
+    // falls back on does.
+    let why = match own_sql(db, opts).await? {
+        Ok(sql) => return Ok(Ok(sql)),
+        Err(NotOwn::NoShadow(e)) if shadowed => return Err(e),
+        Err(NotOwn::NoShadow(e)) => vec![format!("  No shadow database can be made to check Reylo's own SQL for it: {e}")],
+        Err(NotOwn::Short(why)) => why,
+    };
+    let version: i64 = db.rows("select current_setting('server_version_num') as v").await?.first().and_then(|r| r.first()?.parse().ok()).unwrap_or(0);
+    if let Err(missing) = crate::db::find_pg_dump(version / 10000) {
+        return Ok(Err(pg_dump_problem(&missing, why)));
+    }
+    dump_from(db, opts, schemas).await.map(Ok)
+}
+
+/// `live` as a shadow that ran SQL written from it reads, where the SQL makes all of it: without the
+/// lines the environment gives a shadow as it is made and `made` lacks, which the SQL leaves to it
+/// (a default privilege, the privileges on what an extension made). Partitions, comments and the
+/// rest stay, for the SQL to make.
+#[cfg(feature = "cli")]
+fn as_made(live: &[String], made: &[String]) -> Vec<String> {
+    use crate::catalog::{DEFAULT_PRIVILEGES, EXTENSION_GRANT};
+    live.iter().filter(|l| !(l.starts_with(DEFAULT_PRIVILEGES) || l.starts_with(EXTENSION_GRANT)) || made.contains(l)).cloned().collect()
+}
+
+/// The extensions of the project's a Postgres database has, by name, lowercase.
+#[cfg(feature = "cli")]
+async fn project_extensions(db: &mut Db) -> Result<Vec<String>, Error> {
+    let rows = db.rows(&format!("select lower(x.extname) as name from pg_extension x join pg_namespace n on n.oid = x.extnamespace where x.extname <> 'plpgsql' and {}", crate::catalog::project_extension("x", "n"))).await?;
+    Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
+}
+
+/// Why Reylo's own SQL for a schema isn't taken: no shadow database can be made to check it, or it
+/// falls short, as lines a person reads.
+#[cfg(feature = "cli")]
+enum NotOwn {
+    NoShadow(Error),
+    Short(Vec<String>),
+}
+
+/// Reylo's own SQL for a Postgres database's schema, the plan `migrate new` would write from an
+/// empty database to this one, where a shadow database that runs it then reads as this database
+/// does; else why not.
+#[cfg(feature = "cli")]
+async fn own_sql(db: &mut Db, opts: &Options) -> Result<Result<String, NotOwn>, Error> {
+    let mut server = match shadow_server(db, opts).await {
+        Ok(server) => server,
+        Err(e) => return Ok(Err(NotOwn::NoShadow(e))),
+    };
+    // The project's extensions are the text's to make, as a fresh database needs them: a shadow that
+    // already had them would hide a plan that leaves them out.
+    server.leave_extensions(project_extensions(db).await?);
+    let result = async {
+        let live = catalog(db).await?;
+        let mut empty = match server.shadow().await {
+            Ok(shadow) => shadow,
+            Err(e) => return Ok(Err(NotOwn::NoShadow(e))),
+        };
+        let planned = plan_text(&mut empty.db, db, None).await;
+        server.drop_shadow(empty).await;
+        let Some(planned) = planned else { return Ok(Err(NotOwn::Short(vec!["  Reylo can't write it as SQL of its own".to_string()]))) };
+        // A blank line between statements, for a file a person reads whole; one with comments of
+        // the plan's own stays as written.
+        let sql = if planned.lines().any(|l| l.trim_start().starts_with("--")) {
+            planned
+        } else {
+            crate::sql::split_statements(&planned, db.dialect()).iter().map(|st| format!("{};", st.text.trim())).collect::<Vec<_>>().join("\n\n")
+        };
+        let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &[sql.as_str()]).await;
+        let lane = shadows.lane();
+        shadows.push(lane, [Step::script("schema.sql", &sql)]);
+        let made = shadows.lines(lane).await;
+        shadows.finish().await;
+        let made = match made? {
+            Ok(made) => made,
+            Err((_, e)) => return Ok(Err(NotOwn::Short(vec![format!("  Reylo's own SQL for it fails on a shadow database: {e}")]))),
+        };
+        let live = as_made(&live, &made);
+        if live == made {
+            return Ok(Ok(format!("{}\n", sql.trim_end())));
+        }
+        let mut why = vec!["  Reylo's own SQL doesn't make all of it:".to_string()];
+        why.extend(changed_lines(&made, &live));
+        Ok::<_, Error>(Err(NotOwn::Short(why)))
+    }
+    .await;
+    server.close().await;
+    result
+}
+
+/// The refusal of a schema Reylo's own SQL doesn't make, for the reason `why` gives, where no
+/// pg_dump can write it instead.
+#[cfg(feature = "cli")]
+fn pg_dump_problem(missing: &crate::db::NoPgDump, why: Vec<String>) -> Problem {
+    let major = missing.major;
+    let mut problem = Problem::new("pg-dump-missing", format!("Writing this schema as SQL needs pg_dump {major} or newer")).lines(why);
+    for (path, version) in &missing.older {
+        problem = problem.note(format!("The pg_dump at {path} is version {version}, which can't read Postgres {major}"));
+    }
+    problem = problem.note("Reylo looks for it in PGBIN, then where Postgres installs it, then on PATH.");
+    match install_pg_dump(major) {
+        Some(command) => problem.fix(format!("Install pg_dump {major}, then run it again"), &[command.as_str()]),
+        None => problem.note(format!("Run it again where pg_dump {major} or newer is installed.")),
+    }
+}
+
+/// The command that installs pg_dump `major` on this system, where there is one to name: none in a
+/// container with no package manager, as Reylo's own image is.
+#[cfg(feature = "cli")]
+fn install_pg_dump(major: i64) -> Option<String> {
+    let exists = |p: &str| Path::new(p).exists();
+    if cfg!(target_os = "macos") {
+        // The client alone: pg_dump reads every server older than itself.
+        Some("brew install libpq".into())
+    } else if cfg!(windows) {
+        Some("scoop install postgresql".into())
+    } else if !exists("/bin/sh") {
+        None
+    } else if exists("/etc/alpine-release") {
+        Some(format!("apk add postgresql{major}-client"))
+    } else if exists("/etc/redhat-release") {
+        Some(format!("sudo dnf install postgresql{major}"))
+    } else {
+        Some(format!("sudo apt-get install postgresql-client-{major}"))
+    }
+}
+
+/// The schema of a MySQL or SQLite database as SQL that makes it: Reylo's own, where a shadow shows
+/// it makes exactly what the database's own dump makes, else the dump.
+#[cfg(feature = "cli")]
+async fn checked_against_dump(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<String, Error> {
     let dumped = dump_from(db, opts, schemas).await?;
     // Where no shadow database can be made (a role without CREATEDB, and no shadow_url), the dump.
     let Ok(mut server) = shadow_server(db, opts).await else { return Ok(dumped) };
-    // The extensions the dump creates are the text's to make, as a fresh database needs them: a
-    // shadow that already had them would hide a plan that leaves them out.
-    server.leave_extensions(extensions_in(&dumped));
     let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &[dumped.as_str()]).await;
     let styled = async {
         // The plan from an empty database to this one, as `new` writes a migration.
@@ -4573,6 +4706,10 @@ pub async fn init(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i3
     let sql = schema_as_sql(opts, schemas).await?;
     // Recording init.sql replays it on a shadow database, which says so itself.
     drop(spinning);
+    let sql = match sql {
+        Ok(sql) => sql,
+        Err(problem) => return Ok(refuse(&[problem], log)),
+    };
     let made_dir = !opts.dir.exists();
     std::fs::create_dir_all(&opts.dir)?;
     std::fs::write(&opts.schema, &sql)?;
@@ -4622,19 +4759,26 @@ pub async fn init(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i3
 
 /// `reylo db introspect`: the database's schema as SQL that makes it, as `init` writes schema.sql;
 /// nothing for an empty database. Writes no file and changes no database: saving it over schema.sql,
-/// whose comments and layout it doesn't keep, is a redirect.
+/// whose comments and layout it doesn't keep, is a redirect. `Err` is the code to exit with, once
+/// `log` has said why it can't be written.
 #[cfg(feature = "cli")]
-pub async fn db_introspect(opts: &Options, schemas: &[String]) -> Result<String, Error> {
+pub async fn db_introspect(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<Result<String, i32>, Error> {
     there(opts)?;
-    let _spinning = crate::terminal::spinner(format!("Introspecting {}", shown_url(&opts.url)));
+    let spinning = crate::terminal::spinner(format!("Introspecting {}", shown_url(&opts.url)));
     let mut db = Db::open(opts).await?;
-    let result = match catalog(&mut db).await {
-        Ok(lines) if holds_a_schema(&lines) => schema_as_sql_on(&mut db, opts, schemas).await,
-        Ok(_) => Ok(String::new()),
-        Err(e) => Err(e),
-    };
+    let result = async {
+        if !holds_a_schema(&catalog(&mut db).await?) {
+            return Ok(Ok(String::new()));
+        }
+        schema_as_sql_on(&mut db, opts, schemas, false).await
+    }
+    .await;
     db.close().await;
-    result
+    drop(spinning);
+    Ok(match result? {
+        Ok(sql) => Ok(sql),
+        Err(problem) => Err(refuse(&[problem], log)),
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
