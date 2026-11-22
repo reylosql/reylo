@@ -132,9 +132,11 @@ case "$platform" in
         (cd "$assets" && grep " reylo-$platform.tar.gz\$" SHA256SUMS | sha256sum -c -)
         mkdir -p "$work/image/$arch"
         tar -xzf "$assets/reylo-$platform.tar.gz" -C "$work/image/$arch"
+        mkdir -p "$work/image/licenses" && cp LICENSE engine/syntax/NOTICE.md engine/syntax/LICENSE-APACHE "$work/image/licenses/"
         docker build -f .github/docker/Dockerfile --build-arg VERSION="$version" -t reylo-check "$work/image"
         got="$(docker run --rm reylo-check --version)"
         [ "$got" = "reylo $version" ] || { echo "::error::the image's reylo --version printed '$got'"; exit 1; }
+        cid="$(docker create reylo-check)" && docker cp "$cid:/usr/share/doc/reylo/NOTICE.md" - > /dev/null && docker rm "$cid" > /dev/null
         mkdir -p "$work/db" && : > "$work/db/app.db"
         docker run --rm -v "$work/db:/work" reylo-check run "create table users (id integer primary key, email text not null) strict" --url sqlite:app.db
         docker run --rm -v "$work/db:/work" reylo-check analyze --sql "select 1 as one, email from users" --url sqlite:app.db --format json > "$work/out"

@@ -72,6 +72,7 @@ for cpu in x64 arm64; do
   mkdir -p "$work/image/$arch"
   tar -xzf "$work/assets/reylo-linux-$cpu-musl.tar.gz" -C "$work/image/$arch"
 done
+mkdir -p "$work/image/licenses" && cp LICENSE engine/syntax/NOTICE.md engine/syntax/LICENSE-APACHE "$work/image/licenses/"
 tags=(--tag "$image:$version")
 if [ "$latest" = "v$version" ]; then
   minor="$(cut -d. -f1-2 <<< "$version")"
