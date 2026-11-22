@@ -124,6 +124,56 @@ def go_map(misc, name):
     return re.findall(r'"([^"]+)":\s*"?(\w+)"?,', body)
 
 
+def paren_followers(rules_text):
+    """The symbols `(` may come right after in a sentence of the grammar, by its FOLLOW sets, but
+    where a rule that takes a keyword as a name reads it: there a name before `(` is right."""
+    names_rules = {"UnReservedKeyword", "TiDBKeyword", "NotKeywordToken", "LabelName"}
+    rules = {}
+    for name, body in re.findall(r"(?ms)^([A-Za-z_]\w*):(.*?)(?=^[A-Za-z_]\w*:|\Z)", rules_text):
+        body = re.sub(r"\{\}|%prec \S+|/\*.*?\*/", " ", body)
+        rules.setdefault(name, []).extend(re.findall(r'"(?:[^"\\]|\\.)*"|\'.\'|[A-Za-z_]\w*', a) for a in body.split("|"))
+    nullable, first = set(), {n: set() for n in rules}
+    def first_of(seq):
+        out = set()
+        for sym in seq:
+            if sym not in rules:
+                out.add(sym)
+                return out, False
+            out |= first[sym]
+            if sym not in nullable:
+                return out, False
+        return out, True
+    changed = True
+    while changed:
+        changed = False
+        for name, alts in rules.items():
+            for alt in alts:
+                f, empty = first_of(alt)
+                if not f <= first[name]:
+                    first[name] |= f
+                    changed = True
+                if empty and name not in nullable:
+                    nullable.add(name)
+                    changed = True
+    follow = {}
+    changed = True
+    while changed:
+        changed = False
+        for name, alts in rules.items():
+            if name in names_rules:
+                continue
+            for alt in alts:
+                for i, sym in enumerate(alt):
+                    f, empty = first_of(alt[i + 1:])
+                    if empty:
+                        f = f | follow.get(name, set())
+                    have = follow.setdefault(sym, set())
+                    if not f <= have:
+                        have |= f
+                        changed = True
+    return {sym for sym, f in follow.items() if sym not in rules and "'('" in f}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tidb", required=True)
@@ -238,14 +288,10 @@ def main():
     unmade = [n for n in names[:ntokens] if re.fullmatch(r'"[A-Z][A-Z0-9_]*"', n) and n[1:-1] not in spelled]
     if unmade:
         raise SystemExit("the grammar names tokens no keyword makes: " + " ".join(unmade))
-    # A word TiDB keeps as a keyword and MySQL doesn't know is a name before `(`, where no rule reads the keyword
-    # before `(`, itself or as the one word of a rule that is.
+    # A word TiDB keeps as a keyword and MySQL doesn't know is a name before `(`, where no rule reads
+    # the keyword with `(` after it, through any rules that may be empty between them.
     mysql_words = {line.split()[0] for line in open(os.path.join(HERE, "mysql-8.4-keywords.txt")) if not line.startswith("#")}
-    rules_text = stripped.split("\n%%\n", 1)[1]
-    before_paren = set(re.findall(r"(\"[A-Z0-9_]+\"|\b[A-Za-z_]\w*\b)\s+'\('", rules_text))
-    for name, body in re.findall(r"(?ms)^([A-Za-z_]\w*):(.*?)(?=^[A-Za-z_]\w*:|\Z)", rules_text):
-        if name in before_paren and name not in ("UnReservedKeyword", "TiDBKeyword", "NotKeywordToken", "LabelName"):
-            before_paren |= {a.strip() for a in re.sub(r"\{\}|%prec \S+", " ", body).split("|") if len(a.split()) == 1}
+    before_paren = paren_followers(stripped.split("\n%%\n", 1)[1])
     functions = {w for w, _ in go_map(misc, "btFuncTokenMap")}
     tidb_only = {w for w, g in keyword_map if w not in mysql_words and w not in functions and json.dumps(w) not in before_paren and g not in before_paren}
     words = sorted(mysql_grammar.names_before_paren())

@@ -324,6 +324,10 @@ mod tests {
                 assert!(parse(text, opts, BOUNDS).is_ok(), "{text}");
             }
         }
+        // A word a rule reads before its parenthesis stays the keyword, through the rules between.
+        for text in ["create table t (v vector(3))", "create table t (v vector (3))"] {
+            assert!(parse_tree(text).errors.is_empty(), "{text}");
+        }
     }
 
     #[test]
