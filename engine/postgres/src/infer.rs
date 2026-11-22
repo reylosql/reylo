@@ -930,9 +930,9 @@ fn key_tree(v: &serde_json::Value) -> serde_json::Value {
 }
 
 /// An expression a grouping set may null a value inside: each array it builds may hold that NULL
-/// as an element, so its elements are read as a column's of no leaf ([`Expr::Unread`]), each of
-/// its type, which keeps how the array nests; a nested `ARRAY[…]` keeps its rows. A call that
-/// builds an array of its arguments, and a call a user's overload may stand for, say nothing.
+/// as an element, so each element is read as nullable, which keeps its type and so how the array
+/// nests ([`items_nesting`]); a nested `ARRAY[…]` keeps its rows. A call that builds an array of
+/// its arguments, and a call a user's overload may stand for, say nothing.
 fn unsure_elements(expr: Expr) -> Expr {
     let each = |operands: Vec<Expr>| operands.into_iter().map(unsure_elements).collect::<Vec<_>>();
     match expr {
@@ -940,7 +940,7 @@ fn unsure_elements(expr: Expr) -> Expr {
             non_null,
             items: items.into_iter().map(|item| match item {
                 Expr::Array { .. } => unsure_elements(item),
-                item => Expr::Unread(resolve(&item, None).type_oid),
+                item => Expr::Nullable(Box::new(item)),
             }).collect(),
         },
         Expr::Nullable(inner) => Expr::Nullable(Box::new(unsure_elements(*inner))),
@@ -1247,11 +1247,16 @@ fn items_nesting(items: &[Expr], leaves: Option<&[DescribedColumn]>, is_array: &
             // A nested constructor is a row of the result, one level over its own nesting.
             Expr::Array { items, .. } => return items_nesting(items, leaves, is_array).map(|n| Nesting { rows: n.rows + 1, ..n }),
             _ => {
-                let type_oid = match item {
+                // Whether an element may be NULL says nothing of its type.
+                let typed = match item {
+                    Expr::Nullable(inner) => inner.as_ref(),
+                    item => item,
+                };
+                let type_oid = match typed {
                     Expr::Unread(type_oid) => *type_oid,
                     // `||`, `array_append` and `array_prepend` of an array are of its type.
                     Expr::Every(operands, Ty::Concat | Ty::Appends) => operands.iter().find_map(|o| resolve(o, leaves).type_oid.filter(|t| is_array(*t) == Some(true))),
-                    _ => resolve(item, leaves).type_oid,
+                    _ => resolve(typed, leaves).type_oid,
                 };
                 match type_oid.map(|t| (t, is_array(t))) {
                     Some((t, Some(true))) => return Some(Nesting { rows: 0, element: Some(t) }),

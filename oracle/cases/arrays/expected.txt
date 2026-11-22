@@ -20,6 +20,7 @@ subquery_rows.sql: one () -> { nicks: text(¬NUL)?[][] }
 trap_empty_subquery.sql: one () -> { a: timestamptz?[], b: text(¬NUL)?[], c: int8? }
 trap_padded_subquery.sql: one () -> { a: text(¬NUL)?[] }
 trap_rollup_alias.sql: one () -> { a: text(¬NUL)?[], b: text(¬NUL)?[] }
+trap_rollup_appended.sql: many () -> { a: int4?[][]? }
 trap_rollup_array.sql: many () -> { a: text(¬NUL)?[]?, b: jsonb?[]? }
 trap_rollup_beside.sql: many () -> { k: text(¬NUL)?, a: text(¬NUL)?[]? }
 trap_rollup_input_name.sql: many () -> { k: text(¬NUL)?[]? }
