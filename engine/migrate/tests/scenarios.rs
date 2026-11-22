@@ -1300,13 +1300,14 @@ async fn a_hotfix_behind_a_pending_migration_is_undone_then_deployed(mut p: P) {
     p.file(nick, "create index users_nick on users (nick);");
     p.schema(&format!("{table} create index users_nick on users (nick); create index users_email on users (email);"));
     p.file(email, "create index users_email on users (email);");
-    let ran_through = r"It ran the migrations through 20261027110000_backfill\.sql, and then had this change made outside them:\n\n(?:    [^\n]*\n)*    [^\n]*users_email[^\n]*\n(?:    [^\n]*\n)*\n  Undo it here, so that deploy runs 20261027120000_nick_index\.sql first, and then 20261027130000_email_index\.sql, which makes it again:\n    reylo run --url \S+ '[^\n]*users_email[^\n]*'\n    reylo migrate deploy --url \S+";
+    let ran_through = r"It ran the migrations through 20261027110000_backfill\.sql, and then had this change made outside them:\n\n(?:    [^\n]*\n)*    [^\n]*users_email[^\n]*\n(?:    [^\n]*\n)*\n  Undo it on \S+, so that deploy runs 20261027120000_nick_index\.sql first, and then 20261027130000_email_index\.sql, which makes it again:\n    reylo run --url <url> '[^\n]*users_email[^\n]*'\n    reylo migrate deploy --url <url>";
     let title = r"✗ Migration 20261027130000_email_index\.sql makes this change, but runs after 20261027120000_nick_index\.sql, which this database hasn't run\n  ";
     assert_eq!(p.history_push().await, 1);
     let out = p.output();
     assert_has!(&out, &format!("{title}{ran_through}\n\nNothing was changed\\."));
-    // The commands name this database, which a command without --url may not reach.
-    assert!(out.contains(&p.url), "{out}");
+    // The lead names this database, which a command without --url may not reach, as every command
+    // shows one: with no credential or option, which a log keeps.
+    assert!(out.contains(&format!("Undo it on {}, so", reylo_migrate::db::shown_url(&p.url))), "{out}");
     assert_eq!(p.history().await, [users, backfill]);
     assert_eq!(p.dry_run().await, 1);
     assert_has!(p.output(), &format!("{title}{ran_through}"));
@@ -1334,9 +1335,9 @@ async fn a_hotfix_behind_a_pending_migration_is_undone_then_deployed(mut p: P) {
     assert_eq!(rows.iter().map(|r| r.text("nick").to_string()).collect::<Vec<_>>(), ["x"]);
 }
 
-/// The SQL of the `reylo run --url <database>` a refusal gives to undo a change on that database.
+/// The SQL of the `reylo run --url <url>` a refusal gives to undo a change on the database it names.
 fn undo_on(out: &str) -> String {
-    let quoted = regex::Regex::new(r"reylo run --url \S+ '((?:[^']|'\\'')*)'").unwrap().captures(out).unwrap_or_else(|| panic!("no undo in:\n{out}"))[1].to_string();
+    let quoted = regex::Regex::new(r"reylo run --url <url> '((?:[^']|'\\'')*)'").unwrap().captures(out).unwrap_or_else(|| panic!("no undo in:\n{out}"))[1].to_string();
     quoted.replace("'\\''", "'")
 }
 

@@ -1680,8 +1680,9 @@ async fn behind(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[Migrati
 
 /// The refusal for [`behind`]: `it` makes the change, after `ahead`, which this database hasn't run,
 /// on top of `ran`, what its history says it ran, which is where deploy starts. The way out keeps
-/// the order: the change undone, so that deploy runs `ahead`, then `it`, which makes it again. Both
-/// commands name the database at `url`, since another is the one a command without `--url` reaches.
+/// the order: the change undone, so that deploy runs `ahead`, then `it`, which makes it again. The
+/// lead names the database at `url`, as every command shows one, with no credential or option, and
+/// both commands take its URL in `--url`, since a command without it reaches the project's own.
 /// The undo is a command only where `reylo run` applies it whole or not at all: on Postgres, which
 /// runs a script as one transaction, and a lone statement elsewhere. A SQLite rebuild needs the
 /// foreign keys off that a migration runs with.
@@ -1717,12 +1718,12 @@ async fn behind_problem(shadows: &mut Shadows<'_>, target: &mut Db, url: &str, r
     };
     let problem = if lost.is_empty() { problem } else { problem.note(format!("Undoing it loses what {} {}.", and_list(&lost), if lost.len() == 1 { "holds" } else { "hold" })) };
     let order = format!("{names} first, and then {}, which makes it again", it.name);
-    let url = shell_word(&named_url(url));
-    let deploy = format!("reylo migrate deploy --url {url}");
+    let on = shown_url(url);
+    let deploy = "reylo migrate deploy --url <url>";
     let whole = |undo: &Vec<String>| if target.dialect() == Dialect::Postgres { !undo.iter().any(|s| s.starts_with("commit;")) } else { undo.len() == 1 };
     match undo.filter(whole) {
-        Some(undo) => problem.fix(format!("Undo it here, so that deploy runs {order}"), &[&format!("reylo run --url {url} {}", shell_word(&undo.join(" "))), &deploy]),
-        None => problem.note("Undo it here by hand.").fix(format!("Then deploy, which runs {order}"), &[&deploy]),
+        Some(undo) => problem.fix(format!("Undo it on {on}, so that deploy runs {order}"), &[format!("reylo run --url <url> {}", shell_word(&undo.join(" "))).as_str(), deploy]),
+        None => problem.note(format!("Undo it on {on} by hand.")).fix(format!("Then deploy, which runs {order}"), &[deploy]),
     }
 }
 
@@ -1893,35 +1894,6 @@ fn as_user(url: &str, user: &str) -> String {
     let base = format!("{scheme}://{user}@{host}{}", &rest[end..]);
     if kept.is_empty() { base } else { format!("{base}?{}", kept.join("&")) }
 }
-
-/// `url` as a printed command names its database, which a log may keep: its password and token,
-/// where it has either, written as a placeholder, so that the command copied as it is fails to
-/// connect rather than reaching another database.
-#[cfg(feature = "cli")]
-fn named_url(url: &str) -> String {
-    let (base, query) = url.split_once('?').map_or((url, None), |(b, q)| (b, Some(q)));
-    let query: Vec<String> = query
-        .into_iter()
-        .flat_map(|q| q.split('&'))
-        .map(|kv| match kv.split_once('=') {
-            Some(("password", _)) => "password=<password>".to_string(),
-            Some((key @ ("authToken" | "auth_token"), _)) => format!("{key}=<token>"),
-            _ => kv.to_string(),
-        })
-        .collect();
-    let base = match base.split_once("://") {
-        Some((scheme, rest)) => {
-            let end = rest.find('/').unwrap_or(rest.len());
-            match rest[..end].rsplit_once('@').and_then(|(info, host)| Some((info.split_once(':')?.0, host))) {
-                Some((user, host)) => format!("{scheme}://{user}:<password>@{host}{}", &rest[end..]),
-                None => base.to_string(),
-            }
-        }
-        None => base.to_string(),
-    };
-    if query.is_empty() { base } else { format!("{base}?{}", query.join("&")) }
-}
-
 #[cfg(feature = "cli")]
 async fn with_shadows(mut db: Db, opts: &Options) -> Result<(Db, Server, usize), Error> {
     let mut server = shadow_server(&mut db, opts).await?;
@@ -6015,16 +5987,6 @@ pub async fn run_sql(opts: &Options, items: &[(String, String)], log: Log<'_>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(feature = "cli")]
-    #[test]
-    fn a_printed_command_names_its_database_without_a_secret() {
-        assert_eq!(named_url("postgres://app:s3cret@db.example.com:5432/app?sslmode=require"), "postgres://app:<password>@db.example.com:5432/app?sslmode=require");
-        assert_eq!(named_url("mysql://root@127.0.0.1:3306/app?password=s3cret"), "mysql://root@127.0.0.1:3306/app?password=<password>");
-        assert_eq!(named_url("libsql://app-acme.turso.io?authToken=eyJ"), "libsql://app-acme.turso.io?authToken=<token>");
-        assert_eq!(named_url("postgres://postgres@localhost/app"), "postgres://postgres@localhost/app");
-        assert_eq!(named_url("sqlite:prod.db"), "sqlite:prod.db");
-    }
 
     #[test]
     fn a_platforms_column_stamp_leaves_the_dump() {
