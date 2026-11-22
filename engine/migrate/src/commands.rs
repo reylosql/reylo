@@ -5046,7 +5046,8 @@ async fn relock(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, files: &
     match reach.filter(|_| whole) {
         Some(Reach::SchemaAhead) => log(&then(note("The schema is ahead of the migrations"), &[("To write the changes to a migration file", &["reylo migrate new <name>"])])),
         Some(Reach::MigrationsAhead) => log(&format!("{} The migrations make what {schema} doesn't declare: add it there, or take it out of the migration", paint("yellow", "!"))),
-        Some(Reach::Differ) => log(&then(format!("{} The migrations and {schema} disagree", paint("yellow", "!")), &[("To write the changes to a migration file", &["reylo migrate new <name>"])])),
+        // Either may be what's wanted: schema.sql edited, or a migration written by hand.
+        Some(Reach::Differ) => log(&then(format!("{} The migrations and {schema} disagree", paint("yellow", "!")), &[("To see how they differ", &["reylo migrate deploy --dry-run"]), (&format!("To write what {schema} has to a migration file"), &["reylo migrate new <name>"])])),
         Some(Reach::SchemaFails(e)) => log(&format!("{} On an empty database, {schema} fails: {}", paint("yellow", "!"), e.lines().next().unwrap_or_default())),
         Some(Reach::Same) | None => {}
     }
@@ -5104,11 +5105,18 @@ fn sides(a: &[String], b: &[String]) -> (bool, bool) {
     (a_more || !only_a.is_empty(), b_more || !only_b.is_empty())
 }
 
-/// An enum's line, `enum <name> (<values as JSON strings>)`, as its name and values.
+/// An enum's line, `enum <name> (<values as JSON strings>)`, as its name and values. The name ends at
+/// the first space outside its quotes.
 #[cfg(feature = "cli")]
 fn enum_values(line: &str) -> Option<(&str, Vec<String>)> {
-    let (name, values) = line.strip_prefix("enum ")?.split_once(" (")?;
-    Some((name, serde_json::from_str(&format!("[{}]", values.strip_suffix(')')?)).ok()?))
+    let rest = line.strip_prefix("enum ")?;
+    let mut quoted = false;
+    let (k, _) = rest.char_indices().find(|&(_, c)| {
+        quoted ^= c == '"';
+        c == ' ' && !quoted
+    })?;
+    let values = rest[k..].strip_prefix(" (")?.strip_suffix(')')?;
+    Some((&rest[..k], serde_json::from_str(&format!("[{values}]")).ok()?))
 }
 
 /// Whether `fewer` is `more` with some of its values left out, in the same order.
@@ -5142,9 +5150,13 @@ async fn locked(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, files: &
         shadows.push(theirs, [Step::script("schema.sql", sql)]);
         let reach = match (shadows.lines(ours).await?, shadows.lines(theirs).await?) {
             (Ok(a), Ok(b)) if a == b => Reach::Same,
-            // A database that has schema.sql where its migrations don't (db push made it) has what
-            // the next migration writes, whatever changed.
-            (Ok(_), Ok(b)) if crate::catalog::same_schema(&catalog(db).await?, &b) => Reach::SchemaAhead,
+            // A database that has schema.sql and not what its migrations make (db push made it) has
+            // what the next migration writes, whatever changed. What it doesn't compare (a comment)
+            // can match both.
+            (Ok(a), Ok(b)) if {
+                let live = catalog(db).await?;
+                crate::catalog::same_schema(&live, &b) && !crate::catalog::same_schema(&live, &a)
+            } => Reach::SchemaAhead,
             (Ok(a), Ok(b)) => match sides(&a, &b) {
                 (false, true) => Reach::SchemaAhead,
                 (true, false) => Reach::MigrationsAhead,
@@ -5925,6 +5937,9 @@ mod tests {
         // Reordered, or one taken out and another added, each side has what the other doesn't.
         assert_eq!(sides(&lines(r#""public", "private""#), &two), (true, true));
         assert_eq!(sides(&lines(r#""private", "team""#), &two), (true, true));
+        // A quoted name with a space and a parenthesis in it is one name.
+        let quoted = |values: &str| vec![format!("enum public.\"state (internal)\" ({values})")];
+        assert_eq!(sides(&quoted(r#""a""#), &quoted(r#""a", "b""#)), (false, true));
         // A value with a comma in it is one value.
         assert_eq!(sides(&lines(r#""a, b""#), &lines(r#""a, b", "c""#)), (false, true));
         assert_eq!(sides(&lines(r#""a""#), &lines(r#""a, b""#)), (true, true));

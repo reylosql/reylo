@@ -2104,7 +2104,7 @@ async fn dev_says_schema_sql_is_ahead_once_a_changed_object_is_pushed(mut p: P) 
     p.output();
     p.schema(&declared("id, n"));
     assert_eq!(p.dev().await, 0, "{}", p.peek());
-    assert_has!(p.output(), r"! The migrations and \S*schema\.sql disagree\n  To write the changes to a migration file:\n    reylo migrate new <name>");
+    assert_has!(p.output(), r"! The migrations and \S*schema\.sql disagree\n  To see how they differ:\n    reylo migrate deploy --dry-run\n  To write what \S*schema\.sql has to a migration file:\n    reylo migrate new <name>");
     assert_eq!(p.db_push().await, 0, "{}", p.peek());
     p.output();
     assert_eq!(p.dev().await, 0, "{}", p.peek());
@@ -2955,6 +2955,7 @@ on!(
     a_projects_auth_and_storage_are_its_own_on_a_server_of_no_platform,
     a_change_by_hand_is_shown_alone_beside_a_function_of_many_lines,
     an_enum_value_added_is_ahead_on_the_side_that_added_it,
+    a_comment_a_migration_adds_is_the_migrations,
 );
 on!(Mysql, a_migration_that_names_a_database_is_refused);
 on!(
@@ -3935,6 +3936,21 @@ mod adversarial {
         assert_has!(p.output(), r"The migrations make what \S*schema\.sql doesn't declare");
         assert_eq!(p.dry_run().await, 1, "{}", p.peek());
         assert_has!(p.output(), r"The migrations make what \S*schema\.sql doesn't declare");
+    }
+
+    /// A comment a migration makes and schema.sql doesn't declare is the migrations', though this
+    /// database, whose comments aren't compared, matches schema.sql as well as the migrations.
+    pub async fn a_comment_a_migration_adds_is_the_migrations(mut p: P) {
+        p.linear();
+        p.schema("create table t (id int);");
+        p.file("20261027100000_t.sql", "create table t (id int);");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        p.file("20261027100100_doc.sql", "comment on table t is 'the table';");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"The migrations make what \S*schema\.sql doesn't declare");
+        assert!(!has(&out, "ahead"), "{out}");
     }
 
     pub async fn a_comment_in_schema_sql_is_written(mut p: P) {
