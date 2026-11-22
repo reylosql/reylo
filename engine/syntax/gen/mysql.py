@@ -131,19 +131,44 @@ def main():
     args = parser.parse_args()
     source = git(args.tidb, "show", f"{COMMIT}:pkg/parser/parser.y").decode()
     misc = git(args.tidb, "show", f"{COMMIT}:pkg/parser/misc.go").decode()
-    stripped = mysql_grammar.apply(without_actions(source))
+    base = without_actions(source)
     bison = os.environ.get("BISON", "/opt/homebrew/opt/bison/bin/bison")
+    # A keyword TiDB reserves and MySQL doesn't is a name, unless the grammar can't read it as one
+    # where it reads the keyword: each word a conflict names goes back to reserved.
+    mysql_reserved = {w for w, r in (line.split() for line in open(os.path.join(HERE, "mysql-8.4-keywords.txt")) if not line.startswith("#")) if r == "1"}
+    declared = declared_tokens(source)
+    added = {f'"{w}"' for w, _ in mysql_grammar.KEYWORDS}
+    taken = mysql_grammar.keyword_rules(mysql_grammar.apply(base))
+    unreserve = sorted({json.dumps(declared[g]) for w, g in go_map(misc, "tokenMap") if declared.get(g) and w == declared[g] and w not in mysql_reserved} - taken - added)
+    kept = []
     with tempfile.TemporaryDirectory() as tmp:
-        y, c = os.path.join(tmp, "parser.y"), os.path.join(tmp, "parser.c")
-        open(y, "w", encoding="utf8").write(stripped)
-        report = ["-v", "--report-file", os.path.join(args.keep, "parser.output")] if args.keep else []
+        y, c, out = (os.path.join(tmp, n) for n in ("parser.y", "parser.c", "parser.output"))
+        while True:
+            stripped = mysql_grammar.apply(base, unreserve)
+            open(y, "w", encoding="utf8").write(stripped)
+            run = subprocess.run([bison, "-Wno-other", "-Wno-empty-rule", "-v", "--report-file", out, "-o", c, y], capture_output=True, text=True)
+            if run.returncode and "conflict" not in run.stderr:
+                raise SystemExit(run.stderr)
+            if "conflict" not in run.stderr:
+                break
+            report = open(out, encoding="utf8").read()
+            states = re.split(r"\nState \d+\n", report)
+            heads = [int(n) for n in re.findall(r"^State (\d+) conflicts", report, re.M)]
+            numbered = dict(zip([int(n) for n in re.findall(r"\nState (\d+)\n", report)], states[1:]))
+            # A word is to blame where it is the item a conflict reduces, or the token it looks ahead at.
+            blamed = [m for n in heads for m in re.findall(r'(?:UnReservedKeyword|LabelName): ("[A-Z0-9_]+") •', numbered[n]) + re.findall(r'^\s+("[A-Z0-9_]+")\s+\[', numbered[n], re.M) if m in unreserve]
+            # One word a round, the one most conflicts name, so a word that only shares a state with it stays a name.
+            culprits = {max(set(blamed), key=blamed.count)} if blamed else set()
+            if not culprits:
+                raise SystemExit(run.stderr + "".join(f"\nState {n}\n{numbered[n][:1500]}" for n in heads))
+            kept += sorted(culprits)
+            unreserve = [u for u in unreserve if u not in culprits]
         if args.keep:
             os.makedirs(args.keep, exist_ok=True)
             open(os.path.join(args.keep, "parser.y"), "w", encoding="utf8").write(stripped)
-        run = subprocess.run([bison, "-Wno-other", "-Wno-empty-rule", *report, "-o", c, y], capture_output=True, text=True)
-        if run.returncode or "conflict" in run.stderr:
-            raise SystemExit(run.stderr)
+            open(os.path.join(args.keep, "parser.output"), "w", encoding="utf8").write(open(out, encoding="utf8").read())
         arrays, constants, names = tables(open(c, encoding="utf8").read())
+    print(f"{len(unreserve)} of TiDB's reserved words MySQL doesn't reserve are names; reserved still, for the grammar's sake: {' '.join(sorted(kept))}")
     order = ["pact", "pgoto", "defact", "defgoto", "table", "check", "r1", "r2"]
     os.makedirs(OUT, exist_ok=True)
     wide = {k for k in order if max(map(abs, arrays[k])) > 32767}
@@ -203,7 +228,8 @@ def main():
     for rule in ["UnReservedKeyword", "TiDBKeyword", "NotKeywordToken"]:
         body = re.search(r"(?ms)^" + rule + r":(.*?)^(?=[A-Za-z]\w*:)", stripped.split("\n%%\n", 1)[1]).group(1)
         names_ok |= {index[json.dumps(json.loads(s))] for s in re.findall(r'"(?:[^"\\]|\\.)*"', body)}
-    reserved = sorted(word for word, go_name in keyword_map if symbol(go_name) not in names_ok)
+    # The words a name spelled like one needs quotes for: MySQL's reserved words, and those this grammar can't read as a name.
+    reserved = sorted({word for word, go_name in keyword_map if symbol(go_name) not in names_ok} | mysql_reserved)
     L.append(f"/// The keywords no rule takes as a name, sorted.\npub static RESERVED: [&str; {len(reserved)}] = [" + ", ".join(f'"{w}"' for w in reserved) + "];\n")
     # A word the grammar spells as a token is one only if the scanner makes it.
     spelled = {"UNDERSCORE_CHARSET"} | {w for w, _ in keyword_map} | {w for w, _ in go_map(misc, "btFuncTokenMap")} | {w for w, _ in go_map(misc, "windowFuncTokenMap")}

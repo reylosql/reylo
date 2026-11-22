@@ -173,6 +173,25 @@ mod tests {
     }
 
     #[test]
+    fn an_unfinished_token_still_moves_on() {
+        for text in ["select .1e", "select .1e+", "select 1e", "select 0x", "select `a", "select 'a", "select @", "select :"] {
+            let tree = parse_tree(text);
+            assert_eq!(tree.print(), text);
+        }
+    }
+
+    #[test]
+    fn reads_reylos_annotated_placeholders() {
+        for text in ["select :id::nullable(int)", "insert into t (a, b) select * from json_table(:items::rows(a int not null, b? varchar(10)) ...", "select :q :: nullable(varchar(40)) as q", "select ?::int, :doc::nullable(json('{\"type\": \"object\"}'))"] {
+            let tree = parse_tree(text);
+            assert_eq!(tree.print(), text);
+        }
+        for text in ["select :id::nullable(int)", "select :q :: nullable(varchar(40)) as q", "insert into events (id) values (:id::int)"] {
+            assert!(parse_tree(text).errors.is_empty(), "{text}");
+        }
+    }
+
+    #[test]
     fn a_version_comment_newer_than_the_server_is_a_comment() {
         assert!(parse_tree("select 1 /*!99999 nonsense here */").errors.is_empty());
         assert!(!parse_tree("select 1 /*!80000 nonsense here */").errors.is_empty());
@@ -182,6 +201,7 @@ mod tests {
     fn sql_mode_changes_the_tokens() {
         let ansi = Options { ansi_quotes: true, ..Options::default() };
         assert!(parse_tree_with("select \"a\" from \"t\"", ansi).errors.is_empty());
+        assert!(parse_tree_with("select \"a\\\" from t", ansi).errors.is_empty());
         assert!(!parse_tree("select a from \"t\"").errors.is_empty());
         let no_escapes = Options { backslash_escapes: false, ..Options::default() };
         assert!(parse_tree_with(r"select 'a\', 'b'", no_escapes).errors.is_empty());

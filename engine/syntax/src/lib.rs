@@ -71,20 +71,26 @@ pub fn statements(dialect: Dialect, tree: &Tree<'_>) -> Vec<(u32, u32)> {
             };
             let last = tree.leaves_of(id).map(|l| tree.node(l)).filter(|l| l.end > l.start && !is_end(l.kind)).last();
             if let Some(last) = last {
-                // A `/*! … */` comment's close, which trivia holds, belongs to the statement it closes in.
+                // A `/*! … */` comment's close, which trivia holds, belongs to the statement it closes in, and so does
+                // its opener, where the comment holds the statement whole.
                 let last_end = if dialect == Dialect::Mysql { mysql::scan::conditional_close(tree.text, last.end as usize) as u32 } else { last.end };
-                let text = &tree.text[n.start as usize..last_end as usize];
+                let first = tree.leaves_of(id).map(|l| tree.node(l)).find(|l| l.end > l.start);
+                let n_start = match first {
+                    Some(f) if last_end > last.end => mysql::scan::conditional_open(tree.text, f.lead as usize, f.start as usize) as u32,
+                    _ => n.start,
+                };
+                let text = &tree.text[n_start as usize..last_end as usize];
                 let kept = text.trim_end_matches(|c: char| c == ';' || c.is_whitespace()).len() as u32;
                 if kept > 0 {
                     let start = match pending.take() {
-                        Some((start, end)) if after_end(tree, &mut ends, end, n.start) => {
+                        Some((start, end)) if after_end(tree, &mut ends, end, n_start) => {
                             out.push((start, end));
-                            n.start
+                            n_start
                         }
                         Some((start, _)) => start,
-                        None => n.start,
+                        None => n_start,
                     };
-                    out.push((start, n.start + kept));
+                    out.push((start, n_start + kept));
                 }
             }
         } else {
@@ -183,6 +189,9 @@ mod tests {
     #[test]
     fn a_statement_keeps_the_close_of_a_conditional_comment() {
         assert_eq!(spans(Dialect::Mysql, "SELECT 1 /*! + 2 */; select 3"), ["SELECT 1 /*! + 2 */", "select 3"]);
+        assert_eq!(spans(Dialect::Mysql, "/*!80000 SELECT 1 */; select 3"), ["/*!80000 SELECT 1 */", "select 3"]);
+        assert_eq!(spans(Dialect::Mysql, "-- note\n/*!99999 skipped */ /*!80000 SELECT 1 */;"), ["/*!80000 SELECT 1 */"]);
+        assert_eq!(spans(Dialect::Mysql, "/* note */ SELECT 1;"), ["SELECT 1"]);
     }
 
     #[test]

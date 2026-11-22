@@ -540,6 +540,21 @@ struct Span {
     class: Class,
 }
 
+/// Keeps a MySQL syntax error only where its statement reads as an error whatever the session's
+/// `sql_mode`, which the editor doesn't know: a `"name"` under `ANSI_QUOTES`, or a string whose
+/// backslash ends it under `NO_BACKSLASH_ESCAPES`, is an error of the default mode alone.
+fn mode_free_errors(tree: &mut syntax::Tree<'_>, written: &str) {
+    use syntax::mysql::{parse_tree_with, Options};
+    let modes = [Options { ansi_quotes: true, ..Options::default() }, Options { backslash_escapes: false, ..Options::default() }, Options { ansi_quotes: true, backslash_escapes: false, ..Options::default() }];
+    let others: Vec<syntax::Tree<'_>> = modes.iter().map(|m| parse_tree_with(written, *m)).collect();
+    let spans = syntax::statements(Dialect::Mysql, tree);
+    let statement = |at: u32| spans.iter().copied().find(|&(start, end)| start <= at && at <= end).unwrap_or((at, at));
+    tree.errors.retain(|e| {
+        let (start, end) = statement(e.start);
+        others.iter().all(|other| other.errors.iter().any(|o| o.start >= start && o.start <= end.max(e.end)))
+    });
+}
+
 /// What a document's text reads as, kept until the text changes.
 struct Reading {
     spans: Vec<Span>,
@@ -551,7 +566,10 @@ struct Reading {
 impl Reading {
     fn of(dialect: Dialect, text: &str) -> Reading {
         let written = for_grammar(dialect, text);
-        let tree = syntax::parse(dialect, &written);
+        let mut tree = syntax::parse(dialect, &written);
+        if dialect == Dialect::Mysql && !tree.errors.is_empty() {
+            mode_free_errors(&mut tree, &written);
+        }
         let toks = tokens(dialect, &tree, text);
         let spans: Vec<Span> = toks.iter().map(|t| Span { start: t.start, end: t.end, class: t.class }).collect();
         let last = spans.last().map_or(0, |s| s.end as usize);
@@ -1470,6 +1488,13 @@ fn describe(place: &Place, analysis: Option<&Analysis>, stmt: &[Tok<'_>], names:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_a_mysql_error_only_where_no_sql_mode_reads_the_statement() {
+        assert!(Reading::of(Dialect::Mysql, "select \"a\" from \"t\"").errors.is_empty());
+        assert!(Reading::of(Dialect::Mysql, "select 'a\\', 'b'").errors.is_empty());
+        assert_eq!(Reading::of(Dialect::Mysql, "select \"a\" from \"t\";\nselect from where").errors.len(), 1);
+    }
 
     #[test]
     fn reads_a_framed_message_past_other_headers() {

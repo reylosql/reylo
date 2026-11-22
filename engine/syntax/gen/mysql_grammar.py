@@ -22,12 +22,9 @@ KEYWORDS = [
     ("NESTED", False), ("ONE", False), ("OPTIMIZER_COSTS", False), ("ORDINALITY", False), ("PATH", False),
     ("PERSIST", False), ("PERSIST_ONLY", False), ("PHASE", False), ("PLUGIN", False), ("PREV", False),
     ("SUSPEND", False), ("UNINSTALL", False), ("XA", False), ("XID", False),
-    ("MUTEX", False), ("QUALIFY", False), ("RANDOM", False), ("USER_RESOURCES", False),
+    ("MUTEX", False), ("QUALIFY", True), ("RANDOM", False), ("USER_RESOURCES", False),
 ]
 
-
-# QUALIFY after a table is its clause, not the table's alias: its precedence is below the empty
-# alias's, which `apply` declares first.
 
 
 
@@ -96,6 +93,8 @@ SUBSTITUTE = [
     ("SelectStmtFromDualTable SelectStmtGroup OrderByOptional", "SelectStmtFromDualTable SelectStmtGroup HavingClause OrderByOptional"),
     ('"HISTOGRAM" "ON" IdentList AnalyzeOptionListOpt', '"HISTOGRAM" "ON" IdentList AnalyzeOptionListOpt HistogramUpdate'),
     ("SpOptInout Identifier Type", "SpOptInout Identifier RoutineType"),
+    # ILIKE is TiDB's operator, which MySQL doesn't have: there the word is a name.
+    ("|\tBitExpr IlikeOrNotOp SimpleExpr LikeOrIlikeEscapeOpt\n\t{}\n", ""),
     # MATCH … AGAINST is a simple expression in MySQL, so it takes a comparison after it.
     ('|\t"MATCH" \'(\' ColumnNameList \')\' "AGAINST" \'(\' BitExpr FulltextSearchModifierOpt \')\'\n\t{}\n', ''),
     # A label is any name a statement can't start with, keywords MySQL doesn't reserve included.
@@ -533,28 +532,38 @@ def alternatives(grammar, name):
 GIVE_WAY_TO_PAREN = ["OptFieldLen", "FloatOpt", "OptBinary"]
 
 
-def apply(grammar):
-    """The stripped grammar with the keywords and rules above."""
+def keyword_rules(grammar):
+    """The tokens the rules that take a keyword as a name list."""
+    out = set()
+    for rule in ["UnReservedKeyword", "TiDBKeyword", "NotKeywordToken"]:
+        out |= {a for a in alternatives(grammar, rule) if re.fullmatch(r'"[A-Z][A-Z0-9_]*"', a)}
+    return out
+
+
+def apply(grammar, unreserve=()):
+    """The stripped grammar with the keywords and rules above, and with the tokens `unreserve` names
+    taken as names too: TiDB's keywords that MySQL doesn't reserve."""
     head, rules = grammar.split("\n%%\n", 1)
     at = head.index("%precedence")
-    head = head[:at] + "%token\n" + "".join(f'\t{token(w)} "{w}"\n' for w, _ in KEYWORDS) + "\n%precedence \"QUALIFY\"\n%precedence lowerThanParen\n%precedence lowerThanInto\n%precedence \"INTO\"\n" + head[at:]
+    head = head[:at] + "%token\n" + "".join(f'\t{token(w)} "{w}"\n' for w, _ in KEYWORDS) + "\n%precedence lowerThanParen\n%precedence lowerThanInto\n%precedence \"INTO\"\n" + head[at:]
     grammar = head + "\n%%\n" + rules
-    unreserved = [f'"{w}"' for w, reserved in KEYWORDS if not reserved]
-    EXTEND.setdefault("UnReservedKeyword", []).extend(unreserved)
-    body_statements = [a for a in alternatives(grammar, "Statement") + EXTEND["Statement"] if a not in NOT_IN_BODIES]
-    REPLACE["ProcedureStatementStmt"] = body_statements + ["BodyStartTransaction"]
+    extend = {name: list(alts) for name, alts in EXTEND.items()}
+    replace = dict(REPLACE)
+    extend.setdefault("UnReservedKeyword", []).extend([f'"{w}"' for w, reserved in KEYWORDS if not reserved] + list(unreserve))
+    body_statements = [a for a in alternatives(grammar, "Statement") + extend["Statement"] if a not in NOT_IN_BODIES]
+    replace["ProcedureStatementStmt"] = body_statements + ["BodyStartTransaction"]
     keywords = []
     for rule in ["UnReservedKeyword", "TiDBKeyword", "NotKeywordToken"]:
-        keywords += [a for a in alternatives(grammar, rule) + EXTEND.get(rule, []) if re.fullmatch(r'"[A-Z][A-Z0-9_]*"', a) and a[1:-1] not in NOT_LABELS]
+        keywords += [a for a in alternatives(grammar, rule) + extend.get(rule, []) if re.fullmatch(r'"[A-Z][A-Z0-9_]*"', a) and a[1:-1] not in NOT_LABELS]
     grammar = grammar.rstrip() + "\n\nLabelName:\n\tidentifier\n|\t" + "\n|\t".join(dict.fromkeys(keywords)) + "\n\n"
     for old, new in SUBSTITUTE:
         if old not in grammar:
             raise SystemExit(f"no text to replace: {old}")
         grammar = grammar.replace(old, new)
-    for name, alts in REPLACE.items():
+    for name, alts in replace.items():
         start, end = rule_span(grammar, name)
         grammar = grammar[:start] + name + ":\n\t" + "\n|\t".join(alts) + "\n\n" + grammar[end:]
-    for name, alts in EXTEND.items():
+    for name, alts in extend.items():
         start, end = rule_span(grammar, name)
         text = grammar[start:end].rstrip()
         grammar = grammar[:start] + text + "".join(f"\n|\t{a}" for a in alts) + "\n\n" + grammar[end:]

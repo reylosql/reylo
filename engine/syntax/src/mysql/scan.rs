@@ -198,15 +198,72 @@ impl<'t> Scanner<'t> {
             if c == b':' && rest.get(1).is_some_and(|&n| n.is_ascii_alphabetic() || n == b'_' || n >= 0x80) && self.after_word != Some(start) {
                 self.at += 1;
                 self.while_(is_ident_char);
+                self.annotation();
+                return (Raw::Sym(tok::paramMarker), start, self.at);
+            }
+            if c == b'?' {
+                self.at += 1;
+                self.annotation();
                 return (Raw::Sym(tok::paramMarker), start, self.at);
             }
             let sym = match c {
-                b'?' => tok::paramMarker,
                 b'=' => tok::eq,
                 c => char_sym(c),
             };
             return self.take(Raw::Sym(sym), 1);
         }
+    }
+
+    /// Reylo's annotation of a placeholder, `::nullable(int)`, `::rows(…)` or `::int`, read into
+    /// the placeholder's token: MySQL has no `::`.
+    fn annotation(&mut self) {
+        let z = self.z;
+        let space = |mut i: usize| {
+            while i < z.len() && is_space(z[i]) {
+                i += 1;
+            }
+            i
+        };
+        let i = space(self.at);
+        if !z[i..].starts_with(b"::") {
+            return;
+        }
+        let word = space(i + 2);
+        let mut end = word;
+        while end < z.len() && is_ident_char(z[end]) {
+            end += 1;
+        }
+        if end == word {
+            return;
+        }
+        self.at = end;
+        let open = space(end);
+        if z.get(open) != Some(&b'(') {
+            return;
+        }
+        // To the parenthesis that closes it, past quoted text.
+        let (mut depth, mut j) = (0usize, open);
+        while j < z.len() {
+            match z[j] {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.at = j + 1;
+                        return;
+                    }
+                }
+                q @ (b'\'' | b'"' | b'`') => {
+                    j += 1;
+                    while j < z.len() && z[j] != q {
+                        j += if z[j] == b'\\' && q != b'`' { 2 } else { 1 };
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        self.at = z.len();
     }
 
     fn take(&mut self, raw: Raw, n: usize) -> (Raw, usize, usize) {
@@ -319,7 +376,7 @@ impl<'t> Scanner<'t> {
                     return (Raw::String, start, self.at);
                 }
                 self.at += 1;
-            } else if c == b'\\' && self.opts.backslash_escapes {
+            } else if c == b'\\' && self.opts.backslash_escapes && !(quote == b'"' && self.opts.ansi_quotes) {
                 if self.eof() {
                     break;
                 }
@@ -398,8 +455,14 @@ impl<'t> Scanner<'t> {
                 self.while_(|c| c.is_ascii_digit());
                 return (Raw::Float, start, self.at);
             }
+            // `9e` is a name; `.1e`, which no name starts like, is one token no rule takes.
+            let unfinished = self.at;
             self.at = start;
             self.while_(is_ident_char);
+            if self.at == start {
+                self.at = unfinished;
+                return (Raw::Invalid, start, self.at);
+            }
             return (Raw::Ident, start, self.at);
         }
         (Raw::Dec, start, self.at)
@@ -480,7 +543,13 @@ impl<'t> Scanner<'t> {
 
     /// The next token (`Lex`): its symbol and span, a phrase read as one token.
     fn lex(&mut self) -> (u16, usize, usize) {
-        let (raw, start, mut end) = self.scan();
+        let (mut raw, start, mut end) = self.scan();
+        // Every token but the end takes at least a character, so the scanner always moves on.
+        if raw != Raw::Eof && end <= start {
+            end = (start + 1..=self.z.len()).find(|&i| i == self.z.len() || (self.z[i] & 0xC0) != 0x80).unwrap_or(self.z.len());
+            self.at = end;
+            raw = Raw::Invalid;
+        }
         self.after_word = matches!(raw, Raw::Ident | Raw::Quoted).then_some(end);
         self.last_keyword = [0, self.last_keyword[0], self.last_keyword[1]];
         let (mut sym, keyword) = self.symbol(raw, start, end);
@@ -545,6 +614,31 @@ pub(crate) fn conditional_close(text: &str, from: usize) -> usize {
         }
     }
     end
+}
+
+/// Where the `/*!` comment open at `start`, the trivia from `lead` on opened it, starts: `start`
+/// where none does. A skipped `/*!99999 … */` comment closes in the trivia, and opens nothing.
+pub(crate) fn conditional_open(text: &str, lead: usize, start: usize) -> usize {
+    let z = text.as_bytes();
+    let (mut i, mut open) = (lead, start);
+    while i < start {
+        match z[i] {
+            c if is_space(c) => i += 1,
+            b'#' => i = z[i..start].iter().position(|&c| c == b'\n').map_or(start, |n| i + n),
+            b'-' if z[i..].starts_with(b"--") => i = z[i..start].iter().position(|&c| c == b'\n').map_or(start, |n| i + n),
+            b'/' if z[i..].starts_with(b"/*") => match z[i + 2..start].windows(2).position(|w| w == b"*/") {
+                Some(n) => i += 2 + n + 2,
+                None => {
+                    if z[i..].starts_with(b"/*!") {
+                        open = i;
+                    }
+                    break;
+                }
+            },
+            _ => break,
+        }
+    }
+    open
 }
 
 /// The tokens of `text` for the grammar, where its trivia ends, and where a comment is left open.
