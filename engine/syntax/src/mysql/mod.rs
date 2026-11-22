@@ -284,6 +284,7 @@ mod tests {
             assert_eq!(printed(text), read);
         }
         assert_eq!(printed("select sql_no_cache sql_cache(1)"), "SELECT SQL_NO_CACHE sql_cache(1)");
+        assert_eq!(printed("select sql_cache /* c */ (1)"), "SELECT sql_cache(1)");
         let read = parse("select 2 * 3 ^ 1", Options::default(), BOUNDS);
         let Ok([ast::Statement::Query(q)]) = read.as_deref() else { panic!() };
         let ast::SetExpr::Select(s) = q.body.as_ref() else { panic!() };
@@ -319,7 +320,7 @@ mod tests {
 
     #[test]
     fn a_word_only_tidb_knows_names_a_function() {
-        for text in ["select sql_cache(1)", "select plan (1), background(2)", "select approx_count_distinct (id) from users", "select approx_percentile(id, 0.9) from users", "select translate (a) from t", "select sequence() from t"] {
+        for text in ["select sql_cache(1)", "select sql_cache /* c */ (1)", "select plan (1), background(2)", "select approx_count_distinct (id) from users", "select approx_percentile(id, 0.9) from users", "select translate (a) from t", "select sequence() from t"] {
             for opts in [Options::default(), Options { ignore_space: true, ..Options::default() }] {
                 assert!(parse_tree_with(text, opts).errors.is_empty(), "{text}");
                 assert!(parse(text, opts, BOUNDS).is_ok(), "{text}");

@@ -518,10 +518,32 @@ impl<'t> Scanner<'t> {
                 return tok::identifier;
             }
         }
-        if self.z.get(spaced) == Some(&b'(') && TIDB_NAMES.binary_search(&upper.as_str()).is_ok() {
+        if TIDB_NAMES.binary_search(&upper.as_str()).is_ok() && self.z.get(self.past_trivia(end)) == Some(&b'(') {
             return tok::identifier;
         }
         lookup(&KEYWORDS, &upper).or_else(|| lookup(&WINDOW_FUNCTIONS, &upper)).unwrap_or(tok::identifier)
+    }
+
+    /// Where the text goes on after `at`, past spaces and comments: a stored function's name may
+    /// have either before its parenthesis. A `/*!` or `/*+` comment is text, not a comment.
+    fn past_trivia(&self, mut at: usize) -> usize {
+        let z = self.z;
+        loop {
+            while at < z.len() && is_space(z[at]) {
+                at += 1;
+            }
+            let rest = &z[at..];
+            if rest.starts_with(b"/*") && !rest.starts_with(b"/*!") && !rest.starts_with(b"/*+") {
+                match rest[2..].windows(2).position(|w| w == b"*/") {
+                    Some(n) => at += 2 + n + 2,
+                    None => return z.len(),
+                }
+            } else if rest.starts_with(b"#") || (rest.starts_with(b"--") && rest.get(2).is_none_or(|&c| is_space(c))) {
+                at = rest.iter().position(|&c| c == b'\n').map_or(z.len(), |n| at + n);
+            } else {
+                return at;
+            }
+        }
     }
 
     /// A token's symbol from its kind (`Lex` before its phrases).
