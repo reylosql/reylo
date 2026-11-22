@@ -1,0 +1,20 @@
+after_trigger.sql: one (id: int64) -> { id: INTEGER } !! reylo16: Column "name" of "logged" is NOT NULL with no default, and this insert leaves it out, so SQLite refuses every row it inserts.
+conflict_replace.sql: none (id: int64) -> {  } !! reylo16: Column "name" of "rep" is NOT NULL with no default, and this insert leaves it out, so SQLite refuses every row it inserts.
+default_null.sql: none (id: int64) -> {  } !! reylo16: Column "nulled" of "dflt" is NOT NULL with no default, and this insert leaves it out, so SQLite refuses every row it inserts.
+default_values.sql: none () -> {  } !! reylo16: Columns "name", "email" of "req" are NOT NULL with no default, and this insert leaves them out, so SQLite refuses every row it inserts.
+from_select.sql: none (name: text(UTF-8, ill-formed)) -> {  } !! reylo16: Column "email" of "req" is NOT NULL with no default, and this insert leaves it out, so SQLite refuses every row it inserts.
+missing_one.sql: none (id: int64, name: text(UTF-8, ill-formed)) -> {  } !! reylo16: Column "email" of "req" is NOT NULL with no default, and this insert leaves it out, so SQLite refuses every row it inserts.
+missing_two.sql: none (id: int64) -> {  } !! reylo16: Columns "name", "email" of "req" are NOT NULL with no default, and this insert leaves them out, so SQLite refuses every row it inserts.
+ok_all.sql: none (name: text(UTF-8, ill-formed), email: text(UTF-8, ill-formed)) -> {  }
+ok_before_trigger.sql: none (id: int64) -> {  }
+ok_declared_ignore.sql: none (id: int64) -> {  }
+ok_defaults.sql: none () -> {  }
+ok_or_ignore.sql: none (id: int64) -> {  }
+ok_plain_key.sql: none (v: text(UTF-8, ill-formed)?) -> {  }
+ok_positional.sql: none (id: int64, name: text(UTF-8, ill-formed), email: text(UTF-8, ill-formed), note: text(UTF-8, ill-formed)?) -> {  }
+ok_view.sql: none (id: unknown, name: unknown) -> {  }
+ok_virtual.sql: none () -> {  }
+or_replace.sql: none (id: int64, name: text(UTF-8, ill-formed)) -> {  } !! reylo16: Column "email" of "req" is NOT NULL with no default, and this insert leaves it out, so SQLite refuses every row it inserts.
+upsert_nothing.sql: none (id: int64, name: text(UTF-8, ill-formed)) -> {  } !! reylo16: Column "email" of "req" is NOT NULL with no default, and this insert leaves it out, so SQLite refuses every row it inserts.
+upsert_update.sql: none (id: int64, name: text(UTF-8, ill-formed)) -> {  } !! reylo16: Column "email" of "req" is NOT NULL with no default, and this insert leaves it out, so SQLite refuses every row it inserts.
+without_rowid_key.sql: none (v: text(UTF-8, ill-formed)?) -> {  } !! reylo16: Column "k" of "keyed" is NOT NULL with no default, and this insert leaves it out, so SQLite refuses every row it inserts.

@@ -209,7 +209,9 @@ static void columnRef(sqlite3_str *s, Expr *p, Select *pSel){
     kv_str(s, "affinity", affName(pCol->affinity));
     /* The collation a comparison with the column uses, where the column decides it. */
     kv_str(s, "coll", sqlite3ColumnColl(pCol) ? sqlite3ColumnColl(pCol) : sqlite3StrBINARY);
-    kv_bool(s, "notNull", pCol->notNull!=0);
+    /* A virtual table's module stores what it is given: SQLite checks no NOT NULL it declares
+    ** (geopoly copies its columns' declarations whole), so its columns may hold NULL. */
+    kv_bool(s, "notNull", pCol->notNull!=0 && !IsVirtual(pTab));
     kv_bool(s, "rowid", p->iColumn<0 || iCol==pTab->iPKey);
     kv_bool(s, "generated", (pCol->colFlags & COLFLAG_GENERATED)!=0);
     kv_bool(s, "subtype", (pCol->colFlags & COLFLAG_VIRTUAL) && callsOrReadsGenerated(pTab, sqlite3ColumnExpr(pTab, pCol)));
@@ -588,6 +590,17 @@ static int replacesConflict(Table *pTab){
   return 0;
 }
 
+/* Whether an INSERT that leaves the column out writes something other than NULL to it: a DEFAULT
+** that is not the bare NULL. A generated column keeps its expression where a default would be. */
+static int hasDefault(Table *pTab, Column *pCol){
+  Expr *pDflt;
+  if( pCol->iDflt==0 || (pCol->colFlags & COLFLAG_GENERATED)!=0 ) return 0;
+  /* SQLite keeps a default as the span of its text over the expression. */
+  pDflt = sqlite3ColumnExpr(pTab, pCol);
+  while( pDflt && pDflt->op==TK_SPAN ) pDflt = pDflt->pLeft;
+  return pDflt==0 || pDflt->op!=TK_NULL;
+}
+
 static void tables(sqlite3_str *s){
   int t, i, k;
   sqlite3_str_appendchar(s, 1, '{');
@@ -607,8 +620,12 @@ static void tables(sqlite3_str *s){
       kv_str(s, "name", pCol->zCnName);
       kv_str(s, "declared", sqlite3ColumnType(pCol, ""));
       kv_str(s, "affinity", affName(pCol->affinity));
-      kv_bool(s, "notNull", pCol->notNull!=0);
+      kv_bool(s, "notNull", pCol->notNull!=0 && !IsVirtual(pTab));
       kv_bool(s, "checkedNotNull", checkedNotNull(pTab, i));
+      /* A generated column keeps its expression where a default would be (iDflt), and is written
+      ** by no INSERT. */
+      kv_bool(s, "generated", (pCol->colFlags & COLFLAG_GENERATED)!=0);
+      kv_bool(s, "hasDefault", hasDefault(pTab, pCol));
       closeObj(s); sqlite3_str_appendchar(s, 1, ',');
     }
     closeArr(s); sqlite3_str_appendchar(s, 1, ',');
@@ -1115,7 +1132,7 @@ static char *missingSchema(const char *zSql, const char *zMsg, int *piOfst, int 
 /* The version of the tree's format, reylo_sqlite_analyze's first member: TREE_VERSION in
 ** src/sqlite_tree.rs, which refuses a tree of another. A change to what either side reads or writes
 ** moves both. */
-#define REYLO_TREE_VERSION 2
+#define REYLO_TREE_VERSION 3
 
 /* How deep the user's statement may nest: see reylo_sqlite_analyze. */
 #define REYLO_SQLITE_EXPR_DEPTH 350

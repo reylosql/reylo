@@ -1,0 +1,11 @@
+after_trigger.sql: NOT NULL constraint failed: logged.name
+conflict_replace.sql: NOT NULL constraint failed: rep.name
+default_null.sql: NOT NULL constraint failed: dflt.nulled
+default_values.sql: NOT NULL constraint failed: req.name
+from_select.sql: NOT NULL constraint failed: req.email
+missing_one.sql: NOT NULL constraint failed: req.email
+missing_two.sql: NOT NULL constraint failed: req.name
+or_replace.sql: NOT NULL constraint failed: req.email
+upsert_nothing.sql: NOT NULL constraint failed: req.email
+upsert_update.sql: NOT NULL constraint failed: req.email
+without_rowid_key.sql: NOT NULL constraint failed: keyed.k
