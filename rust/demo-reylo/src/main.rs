@@ -140,5 +140,11 @@ async fn main() -> Result<(), sqlx::Error> {
     assert_eq!(declared.map(|r| r.id), Some(2));
     let text = vector_text::Query { near: vec![1.0, 2.0, 3.0] }.run(&pool).await?.near;
     assert!(format!("{text:?}").contains("[1,2,3]"), "{text:?}");
+
+    let mut tx = pool.begin().await?;
+    let inserted = insert_resource::Query { kind: insert_resource::ResourceKind::MOVIE }.run(&mut *tx).await?;
+    tx.rollback().await?;
+    assert_eq!(inserted.kind, insert_resource::ResourceKind::MOVIE);
+    println!("24. \"Enum\"      {inserted:?}");
     Ok(())
 }

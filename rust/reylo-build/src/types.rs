@@ -557,10 +557,11 @@ impl Types {
         if e.values.is_empty() {
             return Err(syn::Error::new(self.span, format!("the enum {name} has no values")));
         }
-        let (schema, short) = name.rsplit_once('.').unwrap_or(("", &name));
-        let base = names::type_name(short);
-        let ident = self.name(base.clone(), format!("{}{base}", names::type_name(schema)));
-        let schema_module = self.shared.then(|| module_name(schema)).flatten();
+        let (schema, short) = qualified(&name);
+        let (schema, short) = (unquoted(schema), unquoted(short));
+        let base = names::type_name(&short);
+        let ident = self.name(base.clone(), format!("{}{base}", names::type_name(&schema)));
+        let schema_module = self.shared.then(|| module_name(&schema)).flatten();
         match schema_module {
             Some(module) => {
                 let shared_name = format_ident!("{}", base);
@@ -967,8 +968,11 @@ pub fn postgres_enum_tokens(ident: &Ident, name: &str, values: &[String]) -> Tok
 /// sqlx's impls for the enum `ident` of the Postgres enum type `name`: decoded from its value's
 /// text, encoded as it, and the type found by its name at run time.
 pub fn postgres_impls(ident: &Ident, name: &str) -> TokenStream2 {
-    let (schema, short) = name.rsplit_once('.').unwrap_or(("", name));
-    let array = if schema.is_empty() { format!("_{short}") } else { format!("{schema}._{short}") };
+    let (schema, written) = qualified(name);
+    // sqlx reports a type by its bare name, unquoted: `ResourceKind` for `public."ResourceKind"`.
+    let short = unquoted(written);
+    let array = if written.starts_with('"') { format!("\"_{}\"", short.replace('"', "\"\"")) } else { format!("_{short}") };
+    let array = if schema.is_empty() { array } else { format!("{schema}.{array}") };
     let message = format!("is no value of {name}");
     quote!(
         impl ::reylo::sqlx::Type<::reylo::sqlx::Postgres> for #ident {
@@ -1023,6 +1027,33 @@ pub fn text_impls(ident: &Ident, db: &TokenStream2) -> TokenStream2 {
             }
         }
     )
+}
+
+/// A type's name as Postgres writes it, split at the dot before its last part: its schema (empty
+/// for none) and its name, each as written, double quotes included (`public."ResourceKind"`).
+fn qualified(name: &str) -> (&str, &str) {
+    let mut quoted = false;
+    let mut last = None;
+    for (i, c) in name.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '.' if !quoted => last = Some(i),
+            _ => {}
+        }
+    }
+    match last {
+        Some(i) => (&name[..i], &name[i + 1..]),
+        None => ("", name),
+    }
+}
+
+/// A name as Postgres knows it: without the double quotes written around it, a doubled one inside
+/// read as one.
+fn unquoted(part: &str) -> String {
+    match part.strip_prefix('"').and_then(|p| p.strip_suffix('"')) {
+        Some(inner) => inner.replace("\"\"", "\""),
+        None => part.to_string(),
+    }
 }
 
 /// A schema's name as a Rust module's, written raw where it is a keyword; none where it is no name.
@@ -1198,6 +1229,20 @@ mod tests {
         let mut types = Types::new(Dialect::Postgres, Options::default(), BTreeMap::new(), Span::call_site(), false);
         assert_eq!(types.param(&ints, false, "skip").unwrap().0.ty().to_string().replace(' ', ""), "::std::vec::Vec<i32>");
         assert_eq!(types.column(&ints, false, "ids").unwrap().ty().to_string().replace(' ', ""), "::std::vec::Vec<::core::option::Option<i32>>");
+    }
+
+    #[test]
+    fn a_quoted_enum_type_is_named_and_found_unquoted() {
+        let t = Type::text_of(vec!["MOVIE".into(), "BOOK".into()]).named("public.\"ResourceKind\"");
+        let mut types = Types::new(Dialect::Postgres, Options::default(), BTreeMap::new(), Span::call_site(), false);
+        let shape = types.column(&t, false, "kind").unwrap();
+        let finished = types.finish(&BTreeSet::new()).unwrap();
+        assert_eq!(finished.named(shape.ty()).to_string(), "ResourceKind");
+        let impls = super::postgres_impls(&format_ident!("ResourceKind"), "public.\"ResourceKind\"").to_string();
+        assert!(impls.contains(r#"found == "ResourceKind""#), "{impls}");
+        assert!(impls.contains(r#""public.\"_ResourceKind\"""#), "{impls}");
+        assert_eq!(super::qualified("\"a.b\".\"c\"\"d\""), ("\"a.b\"", "\"c\"\"d\""));
+        assert_eq!(super::unquoted("\"c\"\"d\""), "c\"d");
     }
 
     #[test]

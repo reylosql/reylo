@@ -177,3 +177,7 @@ pub mod vector_text {
         pub near: Vec<f32>,
     }
 }
+
+/// An enum type whose name is quoted mixed case, bound and read back.
+#[reylo::query("insert into resources (kind) values (:kind) returning id, kind")]
+pub mod insert_resource {}

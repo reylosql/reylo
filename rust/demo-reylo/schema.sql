@@ -15,3 +15,6 @@ insert into places values (1, '(1.5,-2)', '((3,4),(1,2))', '[(0,0),(1,1)]', '((0
 -- pgvector's vectors, as the pgvector crate's Vector.
 create table items (id int primary key, embedding vector(3) not null);
 insert into items values (1, '[1,2.5,-3]'), (2, '[0,0,1]');
+-- An enum type whose name is quoted mixed case, as Prisma writes every enum type.
+create type "ResourceKind" as enum ('MOVIE', 'BOOK');
+create table resources (id serial primary key, kind "ResourceKind" not null default 'BOOK');
