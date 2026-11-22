@@ -4,6 +4,7 @@
 
 pub mod lalr;
 pub mod lemon;
+pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
 pub mod tolerant;
@@ -21,12 +22,12 @@ pub enum Dialect {
     SqlServer,
 }
 
-/// Reads `text` into a lossless tree: every byte belongs to a token or the trivia before one, and text a dialect can't read stays in the tree, under an error node or with an error beside it. Postgres and SQLite follow the database's own grammar, so their errors are its syntax errors. MySQL, ClickHouse and SQL Server are read for their tokens, statements, clauses and parentheses, so their errors are only what doesn't balance or end.
+/// Reads `text` into a lossless tree: every byte belongs to a token or the trivia before one, and text a dialect can't read stays in the tree, under an error node or with an error beside it. Postgres and SQLite follow the database's own grammar, so their errors are its syntax errors, and MySQL follows TiDB's grammar of it, with MySQL's message. ClickHouse and SQL Server are read for their tokens, statements, clauses and parentheses, so their errors are only what doesn't balance or end.
 pub fn parse(dialect: Dialect, text: &str) -> Tree<'_> {
     match dialect {
         Dialect::Postgres => postgres::parse_tree(text),
         Dialect::Sqlite => sqlite::parse_tree(text),
-        Dialect::Mysql => tolerant::parse(tolerant::Flavor::MYSQL, text),
+        Dialect::Mysql => mysql::parse_tree(text),
         Dialect::ClickHouse => tolerant::parse(tolerant::Flavor::ClickHouse, text),
         Dialect::SqlServer => tolerant::parse(tolerant::Flavor::SqlServer, text),
     }
@@ -37,7 +38,8 @@ pub fn statements(dialect: Dialect, tree: &Tree<'_>) -> Vec<(u32, u32)> {
     let name = match dialect {
         Dialect::Postgres => "toplevel_stmt",
         Dialect::Sqlite => "ecmd",
-        Dialect::Mysql | Dialect::ClickHouse | Dialect::SqlServer => "statement",
+        Dialect::Mysql => "Statement",
+        Dialect::ClickHouse | Dialect::SqlServer => "statement",
     };
     let mut out: Vec<(u32, u32)> = Vec::new();
     // Deleted tokens no statement has taken yet: where they start and end.
@@ -64,12 +66,14 @@ pub fn statements(dialect: Dialect, tree: &Tree<'_>) -> Vec<(u32, u32)> {
         if n.kind == ERROR_KIND || (!n.leaf && kind_name(dialect, n.kind) == name) {
             // Where its last token before any statement end stops.
             let is_end = |kind: u16| match dialect {
-                Dialect::Postgres | Dialect::Sqlite => false,
+                Dialect::Postgres | Dialect::Sqlite | Dialect::Mysql => false,
                 _ => kind == tolerant::SEMI,
             };
             let last = tree.leaves_of(id).map(|l| tree.node(l)).filter(|l| l.end > l.start && !is_end(l.kind)).last();
             if let Some(last) = last {
-                let text = &tree.text[n.start as usize..last.end as usize];
+                // A `/*! … */` comment's close, which trivia holds, belongs to the statement it closes in.
+                let last_end = if dialect == Dialect::Mysql { mysql::scan::conditional_close(tree.text, last.end as usize) as u32 } else { last.end };
+                let text = &tree.text[n.start as usize..last_end as usize];
                 let kept = text.trim_end_matches(|c: char| c == ';' || c.is_whitespace()).len() as u32;
                 if kept > 0 {
                     let start = match pending.take() {
@@ -105,7 +109,8 @@ pub fn keywords(dialect: Dialect) -> Vec<&'static str> {
     match dialect {
         Dialect::Postgres => postgres::keywords().collect(),
         Dialect::Sqlite => sqlite::generated::KEYWORDS.iter().map(|k| k.0).collect(),
-        Dialect::Mysql | Dialect::ClickHouse | Dialect::SqlServer => tolerant::KEYWORDS.to_vec(),
+        Dialect::Mysql => mysql::keywords().collect(),
+        Dialect::ClickHouse | Dialect::SqlServer => tolerant::KEYWORDS.to_vec(),
     }
 }
 
@@ -114,7 +119,8 @@ pub fn reserved_words(dialect: Dialect) -> Vec<&'static str> {
     match dialect {
         Dialect::Postgres => postgres::generated::KEYWORDS.iter().filter(|k| k.2 != 0).map(|k| k.0).collect(),
         Dialect::Sqlite => sqlite::generated::KEYWORDS.iter().filter(|k| sqlite::generated::YY_FALLBACK[k.1 as usize] == 0).map(|k| k.0).collect(),
-        Dialect::Mysql | Dialect::ClickHouse | Dialect::SqlServer => tolerant::KEYWORDS.to_vec(),
+        Dialect::Mysql => mysql::generated::RESERVED.to_vec(),
+        Dialect::ClickHouse | Dialect::SqlServer => tolerant::KEYWORDS.to_vec(),
     }
 }
 
@@ -142,6 +148,7 @@ pub fn expected(dialect: Dialect, error: &SyntaxError) -> Vec<String> {
             (_, n) if n.len() == 3 && n.starts_with('\'') && n.ends_with('\'') => Some(n[1..2].to_string()),
             (Dialect::Postgres, n) if n.chars().all(|c| c.is_ascii_uppercase() || c == '_') => Some(n.trim_end_matches("_P").trim_end_matches("_LA").to_string()),
             (Dialect::Sqlite, n) => sqlite::spelled(n),
+            (Dialect::Mysql, _) => mysql::spelled(*kind),
             _ => None,
         };
         if let Some(s) = spelled.filter(|s| !out.contains(s)) {
@@ -156,7 +163,8 @@ pub fn kind_name(dialect: Dialect, kind: u16) -> &'static str {
     match dialect {
         Dialect::Postgres => postgres::kind_name(kind),
         Dialect::Sqlite => sqlite::kind_name(kind),
-        Dialect::Mysql | Dialect::ClickHouse | Dialect::SqlServer => tolerant::kind_name(kind),
+        Dialect::Mysql => mysql::kind_name(kind),
+        Dialect::ClickHouse | Dialect::SqlServer => tolerant::kind_name(kind),
     }
 }
 

@@ -37,15 +37,8 @@ pub fn kind_name(kind: u16) -> &'static str {
 /// Which database's lexical rules to read with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flavor {
-    /// `backslash_escapes` is off under `NO_BACKSLASH_ESCAPES`, and `ansi_quotes` makes `"` quote an identifier. `version` is the server's, as `80400`, which decides the `/*!80400 … */` comments it runs.
-    Mysql { backslash_escapes: bool, ansi_quotes: bool, version: u32 },
     ClickHouse,
     SqlServer,
-}
-
-impl Flavor {
-    /// MySQL 8.4 under its default `sql_mode`.
-    pub const MYSQL: Flavor = Flavor::Mysql { backslash_escapes: true, ansi_quotes: false, version: 80400 };
 }
 
 /// The words that open a clause, in capitals and sorted, for every flavor.
@@ -61,7 +54,6 @@ fn is_clause(flavor: Flavor, upper: &str) -> bool {
         || match flavor {
             Flavor::ClickHouse => CLICKHOUSE_CLAUSES.contains(&upper),
             Flavor::SqlServer => SQLSERVER_CLAUSES.contains(&upper),
-            Flavor::Mysql { .. } => false,
         }
 }
 
@@ -286,23 +278,6 @@ fn token<'z>(flavor: Flavor, z: &'z [u8], at: usize, ahead: &mut Ahead<'z>) -> (
         _ => {}
     }
     match flavor {
-        Flavor::Mysql { backslash_escapes, ansi_quotes, .. } => match c {
-            // `--` opens a comment only before whitespace or a control character.
-            b'-' if next == b'-' && z.get(at + 2).is_none_or(|d| *d <= b' ') => line_comment(z, at),
-            b'#' => line_comment(z, at),
-            b'/' if next == b'*' => block_comment(z, at, false),
-            // `\N` is NULL.
-            b'\\' if next == b'N' => (2, WORD),
-            b'$' => heredoc(z, at, ahead).unwrap_or_else(|| word(z, at)),
-            b'\'' => string(z, at, 0, b'\'', backslash_escapes, STRING),
-            b'"' => string(z, at, 0, b'"', backslash_escapes && !ansi_quotes, if ansi_quotes { QUOTED } else { STRING }),
-            b'`' => string(z, at, 0, b'`', false, QUOTED),
-            b'x' | b'X' | b'b' | b'B' | b'n' | b'N' if next == b'\'' => string(z, at, 1, b'\'', backslash_escapes, STRING),
-            b'@' => at_variable(z, at, b"'\"`", backslash_escapes),
-            b':' if next != b'=' && next != b':' => colon_name(z, at).unwrap_or((1, OPERATOR)),
-            _ if is_word(c) => word(z, at),
-            _ => operator(z, at, flavor),
-        },
         Flavor::ClickHouse => match c {
             b'-' if next == b'-' => line_comment(z, at),
             b'#' if next == b'!' || next == b' ' => line_comment(z, at),
@@ -376,47 +351,13 @@ struct Lexeme {
     end: u32,
 }
 
-/// The tokens of `text`, where its trivia ends, and a conditional comment still open at the end of the text.
-fn lexemes(flavor: Flavor, text: &str) -> (Vec<Lexeme>, u32, Option<(u32, u32)>) {
+/// The tokens of `text`, and where its trivia ends.
+fn lexemes(flavor: Flavor, text: &str) -> (Vec<Lexeme>, u32) {
     let z = text.as_bytes();
     let mut out: Vec<Lexeme> = Vec::with_capacity(z.len() / 4 + 1);
     let (mut at, mut lead) = (0, 0);
     let mut ahead = Ahead::default();
-    // Inside `/*! … */`, whose text MySQL runs as SQL: the markers are trivia, and what's between them tokens.
-    let mut conditional = false;
-    let mut opened = 0;
     while at < z.len() {
-        if let Flavor::Mysql { version, .. } = flavor {
-            if conditional && z[at..].starts_with(b"*/") {
-                conditional = false;
-                out.push(Lexeme { kind: CONDITIONAL, lead: lead as u32, start: at as u32, end: at as u32 + 2 });
-                at += 2;
-                lead = at;
-                continue;
-            }
-            if !conditional && z[at..].starts_with(b"/*!") {
-                let (digits, wanted) = comment_version(&z[at + 3..]);
-                if wanted > version {
-                    // A comment this server skips, which may hold one comment inside it.
-                    match skipped_comment(z, at + 3 + digits) {
-                        Some(end) => at = end,
-                        None => {
-                            out.push(Lexeme { kind: ILLEGAL, lead: lead as u32, start: at as u32, end: z.len() as u32 });
-                            at = z.len();
-                            lead = at;
-                        }
-                    }
-                    continue;
-                }
-                conditional = true;
-                opened = out.len();
-                let start = at;
-                at += 3 + digits;
-                out.push(Lexeme { kind: CONDITIONAL, lead: lead as u32, start: start as u32, end: at as u32 });
-                lead = at;
-                continue;
-            }
-        }
         let (mut n, mut kind) = token(flavor, z, at, &mut ahead);
         // A colon right after a word is a label's (`outer:BEGIN`), not a placeholder's.
         if kind == VARIABLE && z[at] == b':' && out.last().is_some_and(|l| l.end as usize == at && matches!(l.kind, WORD | KEYWORD)) {
@@ -446,43 +387,7 @@ fn lexemes(flavor: Flavor, text: &str) -> (Vec<Lexeme>, u32, Option<(u32, u32)>)
         at += n;
         lead = at;
     }
-    let unclosed = conditional.then(|| (out[opened].start, out[opened].end));
-    (out, lead as u32, unclosed)
-}
-
-/// The version a conditional comment opens with, and how many digits it takes: six where whitespace follows them, else the first five, and none with fewer.
-fn comment_version(rest: &[u8]) -> (usize, u32) {
-    let run = rest.iter().take_while(|c| c.is_ascii_digit()).count();
-    let digits = if run == 6 && rest.get(6).copied().is_some_and(is_space) {
-        6
-    } else if run >= 5 {
-        5
-    } else {
-        return (0, 0);
-    };
-    (digits, rest[..digits].iter().fold(0, |v, c| v * 10 + (c - b'0') as u32))
-}
-
-/// Where a conditional comment the server skips ends, past one comment nested in it.
-fn skipped_comment(z: &[u8], from: usize) -> Option<usize> {
-    let (mut i, mut depth) = (from, 1);
-    while i + 1 < z.len() {
-        match &z[i..i + 2] {
-            b"/*" if depth == 1 => {
-                depth = 2;
-                i += 2;
-            }
-            b"*/" => {
-                depth -= 1;
-                i += 2;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => i += 1,
-        }
-    }
-    None
+    (out, lead as u32)
 }
 
 /// The length of `GO` and its count, SQL Server's batch separator, where they stand alone on their line. Each scan stops at the first thing that rules it out, so a long line of words stays linear.
@@ -571,19 +476,14 @@ fn next_word(tokens: &[Lexeme], text: &str, i: usize) -> Option<String> {
 
 /// Reads `text` into a tree of statements, clauses and parenthesized groups.
 pub fn parse(flavor: Flavor, text: &str) -> Tree<'_> {
-    let (tokens, tail, unclosed) = lexemes(flavor, text);
+    let (tokens, tail) = lexemes(flavor, text);
     let mut b = Builder { nodes: Vec::with_capacity(tokens.len() * 2), child_ids: Vec::with_capacity(tokens.len() * 2) };
     let mut errors: Vec<SyntaxError> = Vec::new();
-    if let Some((start, end)) = unclosed {
-        errors.push(SyntaxError { message: format!("\"{}\" is never closed", &text[start as usize..end as usize]), start, end, expected: Vec::new() });
-    }
     let mut statements: Vec<NodeId> = Vec::new();
     let mut stack: Vec<Frame> = vec![Frame::new(STATEMENT, (0, 0))];
     // How many BEGIN … END blocks are open: a `;` inside one doesn't end the statement.
     let mut blocks = 0u32;
     let mut first_word: Option<String> = None;
-    // Whether the statement creates a stored program, whose body is what BEGIN opens on MySQL.
-    let mut stored = false;
 
     fn close_groups(b: &mut Builder, stack: &mut Vec<Frame>, errors: &mut Vec<SyntaxError>) {
         while stack.len() > 1 {
@@ -604,17 +504,12 @@ pub fn parse(flavor: Flavor, text: &str) -> Tree<'_> {
         if let Some(word) = upper.as_deref() {
             let after_dot = previous_code(&tokens, i).is_some_and(|p| p.kind == DOT);
             let before = previous_code(&tokens, i).filter(|p| matches!(p.kind, WORD | KEYWORD)).map(|p| &text[p.start as usize..p.end as usize]);
-            if matches!(word, "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT") && first_word.as_deref() == Some("CREATE") {
-                stored = true;
-            }
             // A block is written at the statement's own level: in parentheses these words are names.
             if !after_dot && stack.len() == 1 {
                 match (flavor, word) {
-                    (Flavor::Mysql { .. }, "BEGIN") if stored || blocks > 0 => blocks += 1,
                     (Flavor::SqlServer, "BEGIN") if !matches!(next_word(&tokens, text, i).as_deref(), Some("TRAN" | "TRANSACTION" | "DISTRIBUTED" | "DIALOG" | "CONVERSATION")) => blocks += 1,
                     // `END CASE` closes a CASE, and opens nothing.
-                    (Flavor::Mysql { .. } | Flavor::SqlServer, "CASE") if blocks > 0 && !before.is_some_and(|w| w.eq_ignore_ascii_case("end")) => blocks += 1,
-                    (Flavor::Mysql { .. }, "END") if blocks > 0 && !matches!(next_word(&tokens, text, i).as_deref(), Some("IF" | "LOOP" | "WHILE" | "REPEAT")) => blocks -= 1,
+                    (Flavor::SqlServer, "CASE") if blocks > 0 && !before.is_some_and(|w| w.eq_ignore_ascii_case("end")) => blocks += 1,
                     (Flavor::SqlServer, "END") if blocks > 0 => blocks -= 1,
                     _ => {}
                 }
@@ -644,7 +539,6 @@ pub fn parse(flavor: Flavor, text: &str) -> Tree<'_> {
                 statements.push(b.close(statement));
                 stack.push(Frame::new(STATEMENT, (l.end, l.end)));
                 first_word = None;
-                stored = false;
             }
             KEYWORD => {
                 // INSERT(…) and REPLACE(…) are functions.
@@ -684,7 +578,7 @@ fn is_batch_end(flavor: Flavor, text: &str, l: &Lexeme) -> bool {
 mod tests {
     use super::*;
 
-    const ALL: [Flavor; 4] = [Flavor::MYSQL, Flavor::Mysql { backslash_escapes: false, ansi_quotes: true, version: 80400 }, Flavor::ClickHouse, Flavor::SqlServer];
+    const ALL: [Flavor; 2] = [Flavor::ClickHouse, Flavor::SqlServer];
 
     fn statements(flavor: Flavor, text: &str) -> usize {
         let t = parse(flavor, text);
@@ -702,17 +596,6 @@ mod tests {
 
     #[test]
     fn splits_statements() {
-        assert_eq!(statements(Flavor::MYSQL, "select ';'; select \"a;b\"; -- c;\nselect `d;`"), 3);
-        assert_eq!(statements(Flavor::MYSQL, "create procedure p() begin select 1; if a then select 2; end if; end; select 3"), 2);
-        assert_eq!(statements(Flavor::MYSQL, "begin; select 1; commit"), 3);
-        assert_eq!(statements(Flavor::MYSQL, "create table t (begin int); select 1"), 2);
-        assert_eq!(statements(Flavor::MYSQL, "create table begin (a int); select 1"), 2);
-        assert_eq!(statements(Flavor::MYSQL, "create procedure p(x int) begin case x when 1 then select 1; else select 2; end case; end; select 3"), 2);
-        assert_eq!(statements(Flavor::MYSQL, "create procedure p() begin a:begin select 1; end a; select 2; end; select 3"), 2);
-        assert_eq!(statements(Flavor::MYSQL, "create function f() returns int language javascript as $$ return 1; $$; select 2"), 2);
-        assert_eq!(statements(Flavor::MYSQL, "/*!50003 create procedure p() begin select 1; end */; select 2"), 2);
-        assert_eq!(statements(Flavor::MYSQL, "create procedure p() begin if 1 then select 1; end /*!80000 if */; select 2; end; select 3"), 2);
-        assert_eq!(statements(Flavor::MYSQL, "create procedure p() begin select 1; end /*!99999 if */; select 3"), 2);
         assert_eq!(statements(Flavor::SqlServer, "begin select 1; select 2; end; select 3"), 2);
         assert_eq!(statements(Flavor::SqlServer, "begin tran; select 1; commit"), 3);
         assert_eq!(statements(Flavor::SqlServer, "select 1\nGO\nselect 2\ngo 5\nselect 3"), 3);
@@ -722,11 +605,8 @@ mod tests {
 
     #[test]
     fn reads_each_dialects_quotes() {
-        assert!(parse(Flavor::MYSQL, r"select 'it\'s'").errors.is_empty());
-        assert!(!parse(Flavor::Mysql { backslash_escapes: false, ansi_quotes: false, version: 80400 }, r"select 'it\'s'").errors.is_empty());
         assert!(parse(Flavor::SqlServer, "select [a]]b], N'c''d' /* x /* y */ z */").errors.is_empty());
         assert!(parse(Flavor::ClickHouse, r"select 'a\'b', `c`, 1::Int8").errors.is_empty());
-        assert_eq!(statements(Flavor::MYSQL, "select 1 --2; select 3"), 2);
         assert!(parse(Flavor::ClickHouse, "select 1 as $a$b$, json.@c, @@d").errors.is_empty());
         assert!(parse(Flavor::SqlServer, "select\u{1}1").errors.is_empty());
     }
@@ -734,35 +614,11 @@ mod tests {
     #[test]
     fn stays_linear_on_openers_with_no_closer() {
         let tags: String = (0..40_000).map(|i| format!("$a{i}$ ")).collect();
-        for (flavor, text) in [(Flavor::ClickHouse, tags.clone()), (Flavor::MYSQL, tags), (Flavor::ClickHouse, "{a:".repeat(160_000)), (Flavor::SqlServer, "go ".repeat(80_000))] {
+        for (flavor, text) in [(Flavor::ClickHouse, tags), (Flavor::ClickHouse, "{a:".repeat(160_000)), (Flavor::SqlServer, "go ".repeat(80_000))] {
             let started = std::time::Instant::now();
             assert_eq!(parse(flavor, &text).print(), text);
             assert!(started.elapsed().as_secs() < 2, "{flavor:?}");
         }
-    }
-
-    #[test]
-    fn runs_a_conditional_comment_as_the_servers_version_does() {
-        fn spans(flavor: Flavor, text: &str) -> Vec<&str> {
-            let tree = parse(flavor, text);
-            crate::statements(crate::Dialect::Mysql, &tree).iter().map(|&(start, end)| &text[start as usize..end as usize]).collect()
-        }
-        let newer = Flavor::Mysql { backslash_escapes: true, ansi_quotes: false, version: 260700 };
-        // Six digits count only before whitespace: otherwise the sixth is SQL.
-        assert_eq!(spans(Flavor::MYSQL, "SELECT /*!800000+1 */;"), ["SELECT /*!800000+1 */"]);
-        assert_eq!(spans(Flavor::MYSQL, "/*!99999 /* note */ */ SELECT 2;"), ["SELECT 2"]);
-        assert_eq!(spans(Flavor::MYSQL, "SELECT /*!260700 1 */;"), ["SELECT"]);
-        for unfinished in ["/*!99999 /* note */ SELECT 2;", "/*!80000 /* note */ SELECT 2;", "/*!80000 SELECT '*/';"] {
-            let tree = parse(Flavor::MYSQL, unfinished);
-            assert_eq!(tree.print(), unfinished);
-            assert!(!tree.errors.is_empty(), "{unfinished}");
-        }
-        let procedure = "/*!80000 CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END /* note */";
-        assert_eq!(parse(Flavor::MYSQL, procedure).errors[0].message, "\"/*!80000\" is never closed");
-        assert_eq!(spans(Flavor::MYSQL, procedure).len(), 1);
-        assert_eq!(spans(newer, "SELECT /*!260700 1 */;"), ["SELECT /*!260700 1 */"]);
-        assert_eq!(spans(Flavor::MYSQL, "CREATE PROCEDURE p() BEGIN SELECT 1; END /*!99999 IF */; SELECT 3;"), ["CREATE PROCEDURE p() BEGIN SELECT 1; END", "SELECT 3"]);
-        assert_eq!(spans(Flavor::MYSQL, "CREATE PROCEDURE p() BEGIN IF 1 THEN SELECT 1; END /*!80000 IF */; END; SELECT 3;").len(), 2);
     }
 
     #[test]
@@ -774,7 +630,7 @@ mod tests {
     #[test]
     fn reports_what_doesnt_balance() {
         for (text, n) in [("select (1", 1), ("select 1)", 1), ("select ((1)", 1), ("select 'a", 1), ("select (1); select 2", 0)] {
-            assert_eq!(parse(Flavor::MYSQL, text).errors.len(), n, "{text}");
+            assert_eq!(parse(Flavor::ClickHouse, text).errors.len(), n, "{text}");
         }
     }
 }

@@ -1,0 +1,190 @@
+//! MySQL's syntax: the tables Bison generates from TiDB's grammar (`gen/mysql.py`), read with a port
+//! of TiDB's scanner. MySQL's own grammar is GPL, so nothing here comes from it.
+
+#[path = "generated/tokens.rs"]
+pub mod generated;
+pub mod scan;
+
+use crate::lalr::{self, Lexeme, NoActions, Tables};
+use crate::tree::{SyntaxError, Tree, ERROR_KIND};
+use generated::{tok, FINAL, LAST, NAMES, NTOKENS, PACT_NINF, SEGMENTS, TABLE_NINF};
+pub use scan::Options;
+use std::sync::OnceLock;
+
+static TABLE_BYTES: &[u8] = include_bytes!("generated/tables.bin");
+
+/// The grammar's tables.
+pub fn tables() -> &'static Tables {
+    static TABLES: OnceLock<Tables> = OnceLock::new();
+    TABLES.get_or_init(|| Tables::read(TABLE_BYTES, &SEGMENTS, PACT_NINF, TABLE_NINF, FINAL, LAST, NTOKENS))
+}
+
+pub fn kind_name(kind: u16) -> &'static str {
+    if kind == ERROR_KIND {
+        return "error";
+    }
+    NAMES.get(kind as usize).copied().unwrap_or("?")
+}
+
+/// The grammar's symbols for a list of finished statements.
+fn statement_list() -> &'static [u16] {
+    static LIST: OnceLock<[u16; 2]> = OnceLock::new();
+    LIST.get_or_init(|| ["StatementList", "Start"].map(|name| NAMES.iter().position(|n| *n == name).expect("the grammar names its statement list") as u16))
+}
+
+/// The tree of `text`, read as a server with the default `sql_mode` reads it.
+pub fn parse_tree(text: &str) -> Tree<'_> {
+    parse_tree_with(text, Options::default())
+}
+
+/// The tree of `text`, read under `opts`. What the scanner or the grammar refuses is under error
+/// nodes, and listed in the tree's `errors`, in MySQL's words.
+pub fn parse_tree_with(text: &str, opts: Options) -> Tree<'_> {
+    let (mut lexemes, mut tail, stop) = scan::lexemes(text, opts);
+    if let Some(stop) = &stop {
+        // Everything from the unclosed comment on is one token that no rule takes.
+        lexemes.push(Lexeme { sym: lalr::SCAN_STOP, lead: tail, start: stop.at, end: text.len() as u32 });
+        tail = text.len() as u32;
+    }
+    let semicolon = generated::CHAR_TOKENS[b';' as usize];
+    let mut parsed = lalr::parse(tables(), text, &lexemes, tail, semicolon, statement_list(), &mut NoActions);
+    for e in &mut parsed.tree.errors {
+        e.message = if e.message.is_empty() { syntax_message(text, e.start) } else { format!("{} near '{}'", e.message, near(text, e.start)) };
+    }
+    if let Some(stop) = stop {
+        parsed.tree.errors.retain(|o| o.start != stop.at);
+        parsed.tree.errors.push(SyntaxError { message: stop.message, start: stop.at, end: text.len() as u32, expected: Vec::new() });
+        parsed.tree.errors.sort_by_key(|e| e.start);
+    }
+    parsed.tree
+}
+
+/// The text MySQL's message quotes from where a statement goes wrong: the rest of the statement,
+/// at most 80 characters.
+fn near(text: &str, at: u32) -> String {
+    let rest = &text[(at as usize).min(text.len())..];
+    let end = rest.find(';').unwrap_or(rest.len());
+    rest[..end].chars().take(80).collect()
+}
+
+/// MySQL's words for a syntax error at byte `at` of `text` (`ER_PARSE_ERROR`), with the line of
+/// the statement it falls in.
+pub fn syntax_message(text: &str, at: u32) -> String {
+    let at = (at as usize).min(text.len());
+    let start = text[..at].rfind(';').map_or(0, |i| i + 1);
+    let start = start + text[start..at].len() - text[start..at].trim_start().len();
+    let line = 1 + text[start..at].matches('\n').count();
+    format!("You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '{}' at line {line}", near(text, at as u32))
+}
+
+/// MySQL's keywords, in capitals.
+pub fn keywords() -> impl Iterator<Item = &'static str> {
+    generated::KEYWORDS.iter().map(|k| k.0)
+}
+
+/// A token's spelling for a reader of an error's expected tokens, where it has one.
+pub(crate) fn spelled(kind: u16) -> Option<String> {
+    let name = kind_name(kind);
+    Some(match kind {
+        0 => "end of input".into(),
+        tok::identifier => "a name".into(),
+        tok::stringLit => "a string".into(),
+        tok::intLit | tok::decLit | tok::floatLit | tok::hexLit | tok::bitLit => "a number".into(),
+        tok::paramMarker => "?".into(),
+        tok::singleAtIdentifier | tok::doubleAtIdentifier => "a variable".into(),
+        tok::invalid | tok::hintComment | tok::underscoreCS => return None,
+        _ if name.len() > 2 && name.starts_with('"') && name.ends_with('"') => name[1..name.len() - 1].to_string(),
+        _ if name.len() == 3 && name.starts_with('\'') => name[1..2].to_string(),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn errors(text: &str) -> Vec<String> {
+        parse_tree(text).errors.iter().map(|e| e.message.clone()).collect()
+    }
+
+    #[test]
+    fn reads_what_mysql_reads_and_prints_it_back() {
+        for text in [
+            "select a, b from t where c = 1 order by a desc limit 10",
+            "SELECT /*+ MAX_EXECUTION_TIME(1000) */ * FROM t AS OF TIMESTAMP '2024-01-01'",
+            "insert into t (a) values (1), (2) on duplicate key update a = values(a)",
+            "select `select`, \"x\" from `t` where j->>'$.a' = 'b' and x member of (j)",
+            "select count(*), substr(a, 1) from t group by a with rollup",
+            "select 1 /*!80000 + 2 */; select @x, @@session.sql_mode",
+            "create table t (id int primary key auto_increment, name varchar(10) not null default '') engine=InnoDB",
+        ] {
+            let tree = parse_tree(text);
+            assert_eq!(tree.print(), text);
+            assert!(tree.errors.is_empty(), "{text}: {:?}", tree.errors);
+        }
+    }
+
+    #[test]
+    fn refuses_in_mysql_words() {
+        assert_eq!(errors("select from where"), ["You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'from where' at line 1"]);
+        assert_eq!(errors("select 1;\nselect\n  2 2"), ["You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '2' at line 2"]);
+        assert_eq!(errors("select 'abc").len(), 1);
+        assert_eq!(errors("select 1 /* open").len(), 1);
+    }
+
+    fn spans(text: &str) -> Vec<&str> {
+        crate::statements(crate::Dialect::Mysql, &parse_tree(text)).into_iter().map(|(a, b)| &text[a as usize..b as usize]).collect()
+    }
+
+    #[test]
+    fn splits_statements_as_the_grammar_reads_them() {
+        assert_eq!(spans("select ';'; select \"a;b\"; -- c;\nselect `d;`"), ["select ';'", "select \"a;b\"", "select `d;`"]);
+        assert_eq!(spans("begin; select 1; commit").len(), 3);
+        assert_eq!(spans("create table t (`begin` int); select 1").len(), 2);
+        assert_eq!(spans("SELECT /*!800000+1 */;"), ["SELECT /*!800000+1 */"]);
+        assert_eq!(spans("/*!99999 /* note */ */ SELECT 2;"), ["SELECT 2"]);
+        assert_eq!(spans("SELECT 1 /*!99999 + 2 */; select 3"), ["SELECT 1", "select 3"]);
+        for two in [
+            "create procedure p() begin select 1; if a then select 2; end if; end; select 3",
+            "create procedure p(x int) begin case x when 1 then select 1; else select 2; end case; end; select 3",
+            "create procedure p() begin a:begin select 1; end a; select 2; end; select 3",
+            "/*!50003 create procedure p() begin select 1; end */; select 2",
+            "create procedure p() begin if 1 then select 1; end /*!80000 if */; select 2; end; select 3",
+            "create procedure p() begin select 1; end /*!99999 if */; select 3",
+            "create table `begin` (a int); select 1",
+            "select 1 --2; select 3",
+        ] {
+            assert_eq!(spans(two).len(), 2, "{two}");
+        }
+        for unfinished in ["/*!99999 /* note */ SELECT 2;", "/*!80000 /* note */ SELECT 2;", "/*!80000 SELECT '*/';"] {
+            let tree = parse_tree(unfinished);
+            assert_eq!(tree.print(), unfinished);
+            assert!(!tree.errors.is_empty(), "{unfinished}");
+        }
+    }
+
+    #[test]
+    fn reads_reylos_placeholders_and_labels() {
+        for text in ["select * from t where id = :id and name = :name limit :n", "create procedure p() body:begin leave body; end"] {
+            let tree = parse_tree(text);
+            assert_eq!(tree.print(), text);
+            assert!(tree.errors.is_empty(), "{text}: {:?}", tree.errors);
+        }
+    }
+
+    #[test]
+    fn a_version_comment_newer_than_the_server_is_a_comment() {
+        assert!(parse_tree("select 1 /*!99999 nonsense here */").errors.is_empty());
+        assert!(!parse_tree("select 1 /*!80000 nonsense here */").errors.is_empty());
+    }
+
+    #[test]
+    fn sql_mode_changes_the_tokens() {
+        let ansi = Options { ansi_quotes: true, ..Options::default() };
+        assert!(parse_tree_with("select \"a\" from \"t\"", ansi).errors.is_empty());
+        assert!(!parse_tree("select a from \"t\"").errors.is_empty());
+        let no_escapes = Options { backslash_escapes: false, ..Options::default() };
+        assert!(parse_tree_with(r"select 'a\', 'b'", no_escapes).errors.is_empty());
+        assert!(!parse_tree(r"select 'a\'").errors.is_empty());
+    }
+}
