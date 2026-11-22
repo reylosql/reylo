@@ -197,7 +197,12 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     // The tree as the session reads `||`, as MySQL's default mode reads it (OR) until the session
     // says, which what the statement reads and writes does not turn on. A tree the server would
     // read otherwise still says what kind of statement it is, and nothing more.
-    let read_as = |dialect: &SessionDialect| parse(dialect, &rewritten.sql).ok().and_then(|mut v| if v.len() == 1 { v.pop() } else { None });
+    // A tree only IGNORE_SPACE reads still names the statement and its tables, where [`misread`]
+    // keeps its types and rows from being inferred.
+    let read_as = |dialect: &SessionDialect| {
+        let one = |d: &SessionDialect| parse(d, &rewritten.sql).ok().and_then(|mut v| if v.len() == 1 { v.pop() } else { None });
+        one(dialect).or_else(|| one(&SessionDialect(dialect.0, dialect.1, true)))
+    };
     let read = read_as(&dialect);
     let names = crate::mysql_params::names(&rewritten);
     if let Some(statement) = &read {
@@ -3773,6 +3778,10 @@ mod tests {
         for mode in [default, "IGNORE_SPACE"] {
             assert_eq!(rows("select id from users where id = 1 and translate (id) = 1", mode), "at_most_one", "{mode}");
         }
+        // A statement read only under IGNORE_SPACE still says what it is.
+        let none = json!({ "columns": [], "params": [{ "type": 3, "flags": 0 }] });
+        let hinted = analyzed("insert /*+ SET_VAR(sort_buffer_size=65536) */ into users select cast (? as signed)", none, "IGNORE_SPACE").0;
+        assert_eq!(hinted.kind, Some(StatementKind::Insert));
         // A double-quoted word is a column under ANSI_QUOTES, a backslash a character under
         // NO_BACKSLASH_ESCAPES, and the parser reads both as the session does.
         assert_eq!(rows("select id from users where email = \"email\"", default), "at_most_one");
