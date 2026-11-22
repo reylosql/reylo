@@ -1732,16 +1732,16 @@ fn created_extensions(opts: &Options) -> Vec<String> {
 
 /// The schemas the project's own files create.
 fn created_schemas(opts: &Options) -> Vec<String> {
-    static SCHEMA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\bcreate\s+schema\s+(?:if\s+not\s+exists\s+)?"?([A-Za-z0-9_$-]+)"?"#).expect("a valid pattern"));
     let mut texts = vec![opts.schema_text().unwrap_or_default()];
     texts.extend(opts.migrations().map(|(files, _)| files.into_iter().map(|f| f.sql).collect::<Vec<_>>()).unwrap_or_default());
-    texts
-        .iter()
-        .flat_map(|t| {
-            let uncommented = crate::sql::tokenize(t, Dialect::Postgres).iter().map(|token| token.text.clone()).collect::<Vec<_>>().join(" ");
-            SCHEMA.captures_iter(&uncommented).map(|c| c[1].to_string()).filter(|s| !s.eq_ignore_ascii_case("authorization")).collect::<Vec<_>>()
-        })
-        .collect()
+    texts.iter().flat_map(|t| schemas_in(t)).collect()
+}
+
+/// The schemas a text creates.
+fn schemas_in(text: &str) -> Vec<String> {
+    static SCHEMA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\bcreate\s+schema\s+(?:if\s+not\s+exists\s+)?"?([A-Za-z0-9_$-]+)"?"#).expect("a valid pattern"));
+    let uncommented = crate::sql::tokenize(text, Dialect::Postgres).iter().map(|token| token.text.clone()).collect::<Vec<_>>().join(" ");
+    SCHEMA.captures_iter(&uncommented).map(|c| c[1].to_string()).filter(|s| !s.eq_ignore_ascii_case("authorization")).collect()
 }
 
 /// The extensions a text creates.
@@ -3971,8 +3971,9 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
     }
     let mut server = Server::open(&mut db, &opts.url, opts.shadow_url.as_deref()).await?;
     server.copy_default_privileges(!sets_default_privileges(opts));
-    server.leave_extensions(created_extensions(opts));
-    server.leave_schemas(created_schemas(opts));
+    // What the target creates too, which with no schema.sql is the database's own SQL.
+    server.leave_extensions(created_extensions(opts).into_iter().chain(extensions_in(schema_sql)).collect());
+    server.leave_schemas(created_schemas(opts).into_iter().chain(schemas_in(schema_sql)).collect());
     left_out_note(&server, log);
     db.close().await;
     let texts: Vec<&str> = files.iter().map(|f| f.sql.as_str()).chain([schema_sql]).collect();
@@ -4193,14 +4194,14 @@ async fn schema_as_sql_on(db: &mut Db, opts: &Options, schemas: &[String], shado
     dump_from(db, opts, schemas).await.map(Ok)
 }
 
-/// What --schema (`schemas`, where it names any) leaves out: each schema of the project's that holds
-/// an object of its own and that it doesn't name. Postgres alone has schemas to name.
+/// What --schema (`schemas`, where it names any) leaves out: each schema of the project's it doesn't
+/// name that Reylo's own SQL would write ([`schemas_to_name`]). Postgres alone has schemas to name.
 #[cfg(feature = "cli")]
 async fn left_out(db: &mut Db, schemas: &[String]) -> Result<Vec<String>, Error> {
     if schemas.is_empty() || db.dialect() != Dialect::Postgres {
         return Ok(vec![]);
     }
-    Ok(schemas_with_objects(db).await?.into_iter().filter(|s| !schemas.contains(s)).collect())
+    Ok(schemas_to_name(db).await?.into_iter().filter(|s| !schemas.contains(s)).collect())
 }
 
 /// `schemas`, as --schema names them, with each schema of the project's that what they hold refers
@@ -4225,16 +4226,19 @@ async fn with_referenced(db: &mut Db, schemas: &[String], log: Log<'_>) -> Resul
     Ok(named)
 }
 
-/// The schemas of the project's that hold an object of its own: not one an extension made, nor what
-/// comes with another object (a table's index or sequence), nor Reylo's history.
+/// The schemas of the project's that --schema has to name for SQL of them to hold them: each that
+/// holds an object of its own (not one an extension made, nor what comes with another object, as a
+/// table's index or sequence does, nor Reylo's history), and each that holds nothing at all, but
+/// `public`, which every new database has. One that holds an extension alone is made with it.
 #[cfg(feature = "cli")]
-async fn schemas_with_objects(db: &mut Db) -> Result<Vec<String>, Error> {
+async fn schemas_to_name(db: &mut Db) -> Result<Vec<String>, Error> {
     let rows = db
         .rows(&format!(
-            "select n.nspname as name from pg_namespace n where {} and {} and exists (
+            "select n.nspname as name from pg_namespace n where {} and {} and (exists (
                select 1 from pg_depend d where d.refclassid = 'pg_namespace'::regclass and d.refobjid = n.oid and d.deptype = 'n'
                  and not exists (select 1 from pg_depend o where o.classid = d.classid and o.objid = d.objid and o.deptype in ('e', 'a', 'i'))
                  and not (d.classid = 'pg_class'::regclass and d.objid in (select oid from pg_class where relname = '{HISTORY_TABLE}')))
+               or (n.nspname <> 'public' and not exists (select 1 from pg_depend d where d.refclassid = 'pg_namespace'::regclass and d.refobjid = n.oid)))
              order by 1",
             crate::catalog::PG_USER_NS,
             crate::catalog::not_platform_schema("n")
@@ -4278,8 +4282,8 @@ fn as_made(live: &[String], made: &[String]) -> Vec<String> {
     live.iter().filter(|l| !(l.starts_with(DEFAULT_PRIVILEGES) || l.starts_with(EXTENSION_GRANT)) || made.contains(l)).cloned().collect()
 }
 
-/// The refusal of an init whose --schema (`schemas`) leaves out schemas that hold objects of the
-/// project's (`left`): init.sql must make the whole schema, to be recorded as run.
+/// The refusal of an init whose --schema (`schemas`) leaves out schemas of the project's (`left`):
+/// init.sql must make the whole schema, to be recorded as run.
 #[cfg(feature = "cli")]
 fn schemas_left_out(schemas: &[String], left: &[String]) -> Problem {
     let flags: Vec<String> = schemas.iter().chain(left).map(|s| format!("--schema {}", shell_word(s))).collect();
@@ -4485,8 +4489,9 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
                 named_schemas.push("public".into());
             }
             for s in &named_schemas {
+                // A name, matched as it is written: pg_dump reads a pattern, folding what isn't quoted.
                 args.push("--schema".into());
-                args.push(s.clone());
+                args.push(format!("\"{}\"", s.replace('"', "\"\"")));
             }
             // What the platform's roles own in a dumped schema is the platform's, which every
             // comparison leaves out (Tiger Cloud's functions in `public`, its superuser's default
@@ -4761,7 +4766,9 @@ pub async fn init(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i3
     // new, which the shadows' replay cache goes in too. A run that doesn't start the project takes
     // them away again, so that init runs again once it can, and a refusal's "Nothing was changed"
     // holds.
-    let made: Vec<PathBuf> = opts.dir.ancestors().take_while(|d| !d.as_os_str().is_empty() && !d.exists()).map(Path::to_path_buf).collect();
+    // Nothing at the path, not even a link: `exists` follows one, and a link that leads nowhere is
+    // still the user's.
+    let made: Vec<PathBuf> = opts.dir.ancestors().take_while(|d| !d.as_os_str().is_empty() && std::fs::symlink_metadata(d).is_err()).map(Path::to_path_buf).collect();
     let result = init_in(opts, schemas, log).await;
     if let (false, Some(top)) = (matches!(result, Ok(0)), made.last()) {
         let _ = std::fs::remove_dir_all(top);

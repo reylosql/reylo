@@ -2932,6 +2932,8 @@ on!(
     introspect_with_no_check_and_no_pg_dump_says_how_to_get_one,
     init_reads_every_schema_a_view_crosses,
     introspect_of_some_schemas_is_their_dump,
+    the_dump_reads_a_schema_named_with_capitals,
+    new_without_schema_sql_writes_an_extension_in_a_schema_of_its_own,
     an_extension_in_a_projects_schema_is_the_projects_whoever_owns_it,
     an_extension_a_platform_role_owns_in_a_projects_schema_is_the_projects,
     init_writes_the_privileges_on_an_extensions_schema,
@@ -3278,6 +3280,15 @@ mod adversarial {
             assert_has!(p.output(), &format!(r"^✗ This database's schema is in {other} too, which --schema leaves out\n[\s\S]*\n  Name every schema it's in:\n    reylo migrate init --schema {named} --schema {other}\n\nNothing was changed\.$"));
             assert!(!p.dir.join("schema.sql").exists() && p.files().is_empty(), "init wrote files");
         }
+        // A refusal leaves what was there, a link that leads nowhere included.
+        #[cfg(unix)]
+        {
+            let link = p.dir.join("linked");
+            std::os::unix::fs::symlink(p.dir.join("nowhere"), &link).unwrap();
+            let opts = Options { dir: link.join("migrations"), schema: link.join("schema.sql"), lock: link.join(reylo_migrate::lock::LOCK), cache: link.join(".cache"), ..p.opts() };
+            assert_eq!(reylo_migrate::init(&opts, &["public".to_string()], &mut |_: &str| {}).await.unwrap(), 1);
+            assert!(std::fs::symlink_metadata(&link).is_ok(), "init took the link away");
+        }
         let mut said = Vec::new();
         let text = match reylo_migrate::db_introspect(&p.opts(), &["public".to_string()], &mut |l: &str| said.push(l.to_string())).await {
             Ok(Ok(text)) => text,
@@ -3294,23 +3305,48 @@ mod adversarial {
         assert_eq!(q.rows("select 1 from information_schema.views where table_name = 'unpaid'").await.len(), 1);
     }
 
+    /// The dump reads a schema whose name has capitals as it is named: pg_dump folds what --schema
+    /// gives it unless it is quoted.
+    pub async fn the_dump_reads_a_schema_named_with_capitals(p: P) {
+        p.exec(r#"create schema "CaseSensitive"; create table "CaseSensitive".items (id int); create table users (id int primary key)"#).await;
+        // A shadows' server that answers nothing leaves the dump.
+        let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
+        let text = introspect(&opts).await;
+        assert!(text.contains(r#"CREATE TABLE "CaseSensitive".items"#) && text.contains("CREATE TABLE public.users"), "{text}");
+    }
+
+    /// With no schema.sql, an extension made by hand in a schema of its own is the migration's to
+    /// make: the shadows leave it, and its schema, to the database's own SQL.
+    pub async fn new_without_schema_sql_writes_an_extension_in_a_schema_of_its_own(mut p: P) {
+        p.exec("create table users (id int primary key)").await;
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        std::fs::remove_file(p.dir.join("schema.sql")).unwrap();
+        p.exec("create schema extensions; create extension citext with schema extensions; alter table users add column email extensions.citext").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "email", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_email.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        let sql = std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap();
+        assert_has!(sql.clone(), r"(?i)create extension (if not exists )?citext");
+        assert_has!(sql, r"(?i)add column email extensions\.citext");
+    }
+
     /// Introspect of some of the schemas that hold anything is their dump, which Reylo's own SQL,
     /// making every schema, can't write; with no pg_dump, it says so.
     pub async fn introspect_of_some_schemas_is_their_dump(p: P) {
-        p.exec("create schema scratch; create table scratch.notes (id int); create table users (id int primary key)").await;
+        p.exec("create schema scratch; create table scratch.notes (id int); create schema empty; create table users (id int primary key)").await;
         let public = ["public".to_string()];
         let mut said = Vec::new();
         reylo_migrate::db::set_pg_dump_dirs(Some(vec![]));
         let result = reylo_migrate::db_introspect(&p.opts(), &public, &mut |l: &str| said.push(l.to_string())).await;
         reylo_migrate::db::set_pg_dump_dirs(None);
         assert!(matches!(result, Ok(Err(1))), "{}", said.join("\n"));
-        assert_has!(said.join("\n"), r"^✗ Writing this schema as SQL needs pg_dump \d+ or newer\n  Reylo's own SQL makes every schema, and --schema leaves out scratch\n");
+        assert_has!(said.join("\n"), r"^✗ Writing this schema as SQL needs pg_dump \d+ or newer\n  Reylo's own SQL makes every schema, and --schema leaves out empty and scratch\n");
         let mut said = Vec::new();
         let text = match reylo_migrate::db_introspect(&p.opts(), &public, &mut |l: &str| said.push(l.to_string())).await {
             Ok(Ok(text)) => text,
             other => panic!("introspect: {:?}\n{}", other.map_err(|e| e.0), said.join("\n")),
         };
-        assert!(text.contains("CREATE TABLE public.users") && !text.contains("scratch"), "{text}");
+        assert!(text.contains("CREATE TABLE public.users") && !text.contains("scratch") && !text.contains("empty"), "{text}");
     }
 
     /// A database whose `public` its own role owns outright, not through `pg_database_owner`: one made
