@@ -136,5 +136,7 @@ async fn main() -> Result<(), sqlx::Error> {
     let embedding: reylo::pgvector::Vector = item.embedding.clone();
     assert_eq!((item.id, embedding.to_vec()), (1, vec![1.0, 2.5, -3.0]));
     println!("23. vector      {item:?} {}", serde_json::to_string(&embedding).expect("json"));
+    let declared = nearest_item_id::Query { near: reylo::pgvector::Vector::from(vec![0.0, 0.0, 1.0]) }.run(&pool).await?;
+    assert_eq!(declared.map(|r| r.id), Some(2));
     Ok(())
 }

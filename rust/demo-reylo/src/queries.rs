@@ -161,3 +161,11 @@ pub mod users_but {}
 /// pgvector's `vector`, read and bound as `pgvector::Vector`.
 #[reylo::query("select id, embedding from items order by embedding <-> :near limit 1")]
 pub mod nearest_item {}
+
+/// A vector parameter the crate declares itself, bound through the same codec.
+#[reylo::query("select id from items order by embedding <-> :near limit 1")]
+pub mod nearest_item_id {
+    pub struct Params {
+        pub near: reylo::pgvector::Vector,
+    }
+}

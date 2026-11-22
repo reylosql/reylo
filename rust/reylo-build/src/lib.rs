@@ -245,6 +245,8 @@ pub fn module(dialect: Dialect, options: Options, analysis: &Value, span: Span, 
                             _ => quote!(#from(#v)),
                         })
                     }
+                    // A vector is bound through reylo's codec, a field the crate declares too.
+                    None if shape.bound_via() => shape.encode(this),
                     None => quote!(::core::clone::Clone::clone(#this)),
                 };
                 (quote!(#written), encode)

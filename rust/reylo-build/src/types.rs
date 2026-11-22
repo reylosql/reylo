@@ -93,6 +93,14 @@ impl Shape {
         }
     }
 
+    /// Whether the value is bound through a wrapper of reylo's, whatever type the crate writes for it.
+    pub fn bound_via(&self) -> bool {
+        match self {
+            Shape::Leaf { leaf, .. } => matches!(leaf, Leaf::Via(_)),
+            Shape::Option(s) | Shape::Vec(s) => s.bound_via(),
+        }
+    }
+
     /// Whether a value of the decode type is already the field's value.
     pub fn decoded_as_is(&self) -> bool {
         match self {
