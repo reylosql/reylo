@@ -2536,6 +2536,21 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             o.after.extend(rest);
         }
     }
+    // A table's revoke of what it is given as it is made takes its columns' privileges too, so a
+    // column's grant comes after it.
+    let as_made: Vec<(String, String)> = s.objects.values().filter(|o| o.extra.iter().any(|l| l == super::AS_MADE)).filter_map(|o| Some((o.owner.clone()?, o.id.clone()))).collect();
+    let column_grants: Vec<(String, String)> = s
+        .objects
+        .values()
+        .filter(|o| o.kind == Some(Kind::Grant) && o.create.iter().any(|c| c.starts_with("grant ") && c.contains(" on table ")))
+        .filter_map(|o| Some((o.id.clone(), s.objects.get(o.owner.as_ref()?).filter(|c| c.kind == Some(Kind::Column))?.owner.clone()?)))
+        .collect();
+    for (id, table) in column_grants {
+        let revokes: Vec<String> = as_made.iter().filter(|(t, _)| *t == table).map(|(_, r)| r.clone()).collect();
+        if let Some(o) = s.objects.get_mut(&id) {
+            o.after.extend(revokes);
+        }
+    }
     // An enum or a domain made again takes its grants, revokes, owner and comment back, which a new
     // type lacks.
     let mut metadata: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -2946,6 +2961,21 @@ fn grants_of(s: &mut Schema, privileges: &str, name: &str, id: Option<&str>, on:
             def: grantable.to_string(),
             create: vec![revoke(grantee, privilege)],
             drop: vec![grant(grantee, privilege, *grantable)],
+            extra: vec![super::AS_MADE.to_string()],
+            after: giving(grantee, privilege),
+            ..Object::default()
+        });
+    }
+    // What they grant it with grant option, which it has without: the option revoked after it is
+    // made, leaving the privilege.
+    for (grantee, privilege, _) in implied.iter().filter(|g| g.2 && have.contains(&(g.0.clone(), g.1.clone(), false)) && !have.contains(*g)) {
+        s.add(Object {
+            id: format!("revoke grant option for {privilege} on {name} from {grantee}"),
+            kind: Some(Kind::Grant),
+            owner: id.map(String::from),
+            def: true.to_string(),
+            create: vec![format!("revoke grant option for {} on {on} {name} from {grantee}", privilege.to_lowercase())],
+            drop: vec![grant(grantee, privilege, true)],
             extra: vec![super::AS_MADE.to_string()],
             after: giving(grantee, privilege),
             ..Object::default()
