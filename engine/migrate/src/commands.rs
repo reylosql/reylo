@@ -1701,10 +1701,19 @@ async fn drift(shadows: &mut Shadows<'_>, target: &mut Db, run: &Run<'_>, checkp
             }
         }
     }
+    // A later migration that makes exactly this change, as history push moves it ahead of the rest.
+    let mut ahead = None;
     if hint.is_empty() {
         let ran: Vec<Migration> = run.applied_files.iter().chain(&run.records).cloned().collect();
         if let Some(j) = behind(shadows, &ran, &run.pending, &live).await? {
-            return Ok(vec![behind_problem(shadows, target, run.url, &ran, &run.pending[j], &run.pending[..j], &live).await]);
+            let (it, rest) = (&run.pending[j], &run.pending[..j]);
+            let reordered: Vec<Migration> = ran.iter().chain([it]).chain(rest).chain(&run.pending[j + 1..]).cloned().collect();
+            let original: Vec<Migration> = ran.iter().chain(&run.pending).cloned().collect();
+            if !ends_alike(shadows, &original, &reordered).await? {
+                let why = format!("Run ahead of {}, the migrations end differently, so it can't move there.", names_of(rest));
+                return Ok(vec![behind_problem(shadows, target, run.url, &ran, it, rest, &live, Some(why)).await]);
+            }
+            ahead = Some((it.name.clone(), names_of(rest)));
         }
     }
     let prefix = shadows.lane();
@@ -1718,6 +1727,8 @@ async fn drift(shadows: &mut Shadows<'_>, target: &mut Db, run: &Run<'_>, checkp
     problem = if sql.is_empty() { problem.lines(std::iter::once(String::new()).chain(changed_lines(&checkpoint, &live)).chain([String::new()])) } else { problem.sql(&sql) };
     if !hint.is_empty() {
         problem = problem.fix(format!("{} {} exactly this change: record it here, running nothing", hint.join(" and "), if hint.len() == 1 { "makes" } else { "make" }), &["reylo migrate history push"]);
+    } else if let Some((it, rest)) = ahead {
+        problem = problem.fix(format!("Migration {it} makes exactly this change: record it here, running nothing, and deploy runs {rest} after it"), &["reylo migrate history push"]);
     } else {
         problem = keep_fixes(problem, run.schema_sql.is_some().then_some(run.schema.as_str()), only_live.is_empty(), only_history.is_empty());
     }
@@ -1726,8 +1737,8 @@ async fn drift(shadows: &mut Shadows<'_>, target: &mut Db, run: &Run<'_>, checkp
 
 /// Where the database has, on top of `ran`, exactly what a pending migration other than the next
 /// makes: a change made outside the migrations, written since as one that the lock runs after others
-/// this database hasn't run. Recording it would put it out of the one order every database runs.
-/// The index in `pending` of the newest such, of the last three.
+/// this database hasn't run. It is recorded where the order can move to run it first, as this
+/// database did. The index in `pending` of the newest such, of the last three.
 #[cfg(feature = "cli")]
 async fn behind(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[Migration], live: &[String]) -> Result<Option<usize>, Error> {
     for j in (1..pending.len()).rev().take(3) {
@@ -1743,18 +1754,42 @@ async fn behind(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[Migrati
     Ok(None)
 }
 
-/// The refusal for [`behind`]: `it` makes the change, after `ahead`, which this database hasn't run,
-/// on top of `ran`, what its history says it ran, which is where deploy starts. The way out keeps
-/// the order: the change undone, so that deploy runs `ahead`, then `it`, which makes it again. The
+/// Whether two orders of the migrations both replay, and end at the same schema.
+#[cfg(feature = "cli")]
+async fn ends_alike(shadows: &mut Shadows<'_>, a: &[Migration], b: &[Migration]) -> Result<bool, Error> {
+    let (x, y) = (shadows.lane(), shadows.lane());
+    shadows.push(x, a.iter().map(Step::of));
+    shadows.push(y, b.iter().map(Step::of));
+    Ok(match (shadows.lines(x).await?, shadows.lines(y).await?) {
+        (Ok(p), Ok(q)) => crate::catalog::same_schema(&p, &q),
+        _ => false,
+    })
+}
+
+/// The migrations' names, as a sentence lists them.
+#[cfg(feature = "cli")]
+fn names_of(migrations: &[Migration]) -> String {
+    and_list(&migrations.iter().map(|m| m.name.clone()).collect::<Vec<_>>())
+}
+
+/// The refusal for [`behind`] where the order can't move: `it` makes the change, after `ahead`,
+/// which this database hasn't run, on top of `ran`, what its history says it ran, which is where
+/// deploy starts; `why` says why `it` can't run first. The way out keeps the order: the change
+/// undone, so that deploy runs `ahead`, then `it`, as every database does. The
 /// lead names the database at `url`, as every command shows one, with no credential or option, and
 /// both commands take its URL in `--url`, since a command without it reaches the project's own.
 /// The undo is a command only where `reylo run` applies it whole or not at all: on Postgres, which
 /// runs a script as one transaction, and a lone statement elsewhere. A SQLite rebuild needs the
 /// foreign keys off that a migration runs with.
+#[allow(clippy::too_many_arguments)]
 #[cfg(feature = "cli")]
-async fn behind_problem(shadows: &mut Shadows<'_>, target: &mut Db, url: &str, ran: &[Migration], it: &Migration, ahead: &[Migration], live: &[String]) -> Problem {
-    let names = and_list(&ahead.iter().map(|m| m.name.clone()).collect::<Vec<_>>());
+async fn behind_problem(shadows: &mut Shadows<'_>, target: &mut Db, url: &str, ran: &[Migration], it: &Migration, ahead: &[Migration], live: &[String], why: Option<String>) -> Problem {
+    let names = names_of(ahead);
     let problem = Problem::new("later-migration-in-place", format!("Migration {} makes this change, but runs after {names}, which this database hasn't run", it.name));
+    let problem = match why {
+        Some(why) => problem.note(why),
+        None => problem,
+    };
     let problem = match ran.last() {
         Some(last) => problem.note(format!("It ran the migrations through {}, and then had this change made outside them:", last.name)),
         None => problem.note("It ran none of the migrations, and then had this change made outside them:"),
@@ -1782,7 +1817,7 @@ async fn behind_problem(shadows: &mut Shadows<'_>, target: &mut Db, url: &str, r
         None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&made, live)).chain([String::new()])),
     };
     let problem = if lost.is_empty() { problem } else { problem.note(format!("Undoing it loses what {} {}.", and_list(&lost), if lost.len() == 1 { "holds" } else { "hold" })) };
-    let order = format!("{names} first, and then {}, which makes it again", it.name);
+    let order = format!("{names} first, and then {}", it.name);
     let on = shown_url(url);
     let deploy = "reylo migrate deploy --url <url>";
     let whole = |undo: &Vec<String>| if target.dialect() == Dialect::Postgres { !undo.iter().any(|s| s.starts_with("commit;")) } else { undo.len() == 1 };
@@ -2654,15 +2689,28 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
         n
     });
     // A later migration that makes all this database has since the run its history ends at, which is
-    // where deploy starts, can't be recorded ahead of those before it; nor, where a run that changes
-    // data also matches, can that run be recorded by its schema alone. The change is undone instead,
-    // for deploy to run them in order.
+    // where deploy starts, ran here before those ahead of it: it is recorded, and the order made the
+    // one this database ran, with it right after that run and the rest after it. So it is where a
+    // run that changes data also matches, which can't be recorded by its schema alone. The order is
+    // moved where it ends as before; where it doesn't, the change is undone instead, for deploy to
+    // run the migrations in their order.
     let unproven = |n: usize| history_run.is_some_and(|h| order[h.min(n)..n].iter().any(|m| !data_statements(&m.sql, d).is_empty()));
+    let mut moved: Option<(Vec<Migration>, usize, String, String)> = None;
     if let Some(h) = history_run.filter(|&h| !init && h < order.len() && matched.is_none_or(unproven)) {
-        match behind(&mut shadows, &order[..h], &order[h..], &live).await {
-            Ok(None) => {}
+        let found = match behind(&mut shadows, &order[..h], &order[h..], &live).await {
             Ok(Some(j)) => {
-                let problem = behind_problem(&mut shadows, db, &opts.url, &order[..h], &order[h + j], &order[h..h + j], &live).await;
+                let (it, ahead) = (&order[h + j], &order[h..h + j]);
+                let reordered: Vec<Migration> = order[..h].iter().chain([it]).chain(ahead).chain(&order[h + j + 1..]).cloned().collect();
+                ends_alike(&mut shadows, &order, &reordered).await.map(|alike| Some((j, reordered, alike)))
+            }
+            other => other.map(|_| None),
+        };
+        match found {
+            Ok(None) => {}
+            Ok(Some((j, reordered, true))) => moved = Some((reordered, h + 1, order[h + j].name.clone(), names_of(&order[h..h + j]))),
+            Ok(Some((j, _, false))) => {
+                let why = format!("Run ahead of {}, the migrations end differently, so it can't move there.", names_of(&order[h..h + j]));
+                let problem = behind_problem(&mut shadows, db, &opts.url, &order[..h], &order[h + j], &order[h..h + j], &live, Some(why)).await;
                 shadows.finish().await;
                 return Ok(refuse(&[problem], log));
             }
@@ -2672,6 +2720,10 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
             }
         }
     }
+    let (order, matched, moved) = match moved {
+        Some((reordered, n, it, ahead)) => (reordered, Some(n), Some((it, ahead))),
+        None => (order, matched, None),
+    };
     let Some(n) = matched else {
         // The closest run, and the change from what it makes to this database, as SQL.
         let (_, k, lines) = closest;
@@ -2702,6 +2754,19 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
         return Ok(refuse(&[problem], log));
     };
     shadows.finish().await;
+    // The lock takes the order first: a history written after it can be written again, where one
+    // written before a lock that never came would be out of its order.
+    let relocked = moved.is_some() && !lock_free(opts);
+    if relocked {
+        let texts: Vec<(String, String)> = order.iter().map(|f| (f.name.clone(), normalized(&f.sql))).collect();
+        let entries = lock::chain(texts.iter().map(|(n, t)| (n.as_str(), t.as_str())));
+        // The order moved ends as the one schema.sql was shown to match, above.
+        let schema = match schema_sql.as_deref() {
+            Some(sql) => Some(lock::schema_sum(&entries.last().map(|e| e.sum.clone()).unwrap_or_default(), sql)),
+            None => l.schema.clone(),
+        };
+        lock::write(&opts.lock, &lock::Lock { schema, entries })?;
+    }
     let recorded = &order[..n];
     let before = before_rows;
     ensure_history(db).await?;
@@ -2756,6 +2821,10 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
         log(&format!("{} The history now lists {}", paint("green", "✓"), count(recorded.len())));
     } else {
         log(&format!("{} Recorded {}, running nothing", paint("green", "✓"), count(added.len())));
+    }
+    if let (Some((it, ahead)), true) = (&moved, relocked) {
+        log(&format!("{} Wrote {}: {it} now runs before {ahead}, as it did here", paint("green", "✓"), shown(&opts.lock)));
+        log(&then(note(format!("Development databases ran {ahead} first")), &[("To take one to the lock's new order", &["reylo migrate dev"])]));
     }
     let pending = &order[n..];
     if !pending.is_empty() {
