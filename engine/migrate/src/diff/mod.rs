@@ -339,15 +339,18 @@ pub const COMMIT: &str = "commit;\nbegin";
 
 impl Plan {
     /// The plan as the plans each transaction runs: one, or several where it commits partway, the
-    /// first with what the whole loses.
+    /// last with what the whole loses, since those before it hold only an enum's new labels.
     pub fn transactions(&self) -> Vec<Plan> {
-        let mut out = vec![Plan { losses: self.losses.clone(), renames: self.renames.clone(), narrowings: self.narrowings.clone(), ..Plan::default() }];
+        let mut out = vec![Plan::default()];
         for s in &self.statements {
             if s == COMMIT {
                 out.push(Plan::default());
             } else if let Some(last) = out.last_mut() {
                 last.statements.push(s.clone());
             }
+        }
+        if let Some(last) = out.last_mut() {
+            (last.losses, last.renames, last.narrowings) = (self.losses.clone(), self.renames.clone(), self.narrowings.clone());
         }
         out
     }
@@ -372,20 +375,6 @@ impl Plan {
     pub fn runnable(&self) -> impl Iterator<Item = &String> {
         self.statements.iter().filter(|s| !s.starts_with("--"))
     }
-}
-
-/// Whether the op at `from` runs after the one at `k`, through the edges `after` holds so far.
-fn runs_after(after: &[BTreeSet<usize>], from: usize, k: usize) -> bool {
-    let (mut stack, mut seen) = (vec![from], BTreeSet::new());
-    while let Some(at) = stack.pop() {
-        if at == k {
-            return true;
-        }
-        if seen.insert(at) {
-            stack.extend(after[at].iter().copied());
-        }
-    }
-    false
 }
 
 /// The objects `id` is dropped with: its owners, and what the server drops it with, nearest first.
@@ -1644,30 +1633,45 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
             let o = &to.objects[id];
             matches!(o.kind, Some(Kind::Column | Kind::Index | Kind::Constraint | Kind::Type | Kind::View)) && o.deps.iter().any(|d| to.objects.get(d).is_some_and(|f| f.kind == Some(Kind::Function)))
         };
+        // Whether `from` already runs after `k`, through the edges so far.
+        let waits_on = |after: &[BTreeSet<usize>], from: usize, k: usize| -> bool {
+            let (mut stack, mut seen) = (vec![from], BTreeSet::new());
+            while let Some(at) = stack.pop() {
+                if at == k {
+                    return true;
+                }
+                if seen.insert(at) {
+                    stack.extend(after[at].iter().copied());
+                }
+            }
+            false
+        };
         for k in (0..ops.len()).filter(|k| runs_one(*k)) {
             for &f in &functions {
-                if f != k && !runs_after(&after, f, k) {
+                if f != k && !waits_on(&after, f, k) {
                     after[k].insert(f);
                 }
             }
         }
     }
 
-    // Where the plan commits partway (an enum's labels added before what uses them), an object it
-    // makes again after the commit is dropped after it too, where nothing before it needs the
-    // object gone: each migration then leaves the object in place, as a deploy that stops between
-    // them would find it.
+    // Where the plan commits partway (an enum's labels added before what uses them), everything the
+    // commit doesn't wait for runs after it: what commits first is the labels alone, so a deploy or a
+    // push that stops after it has dropped nothing, nor left an object to make again in a migration
+    // it never ran.
     for (k, op) in ops.iter().enumerate() {
         let Op::Alter(id) = op else { continue };
         if !alters[id].iter().any(|s| s == COMMIT) {
             continue;
         }
-        for (d, other) in ops.iter().enumerate() {
-            let Op::Drop(gone) = other else { continue };
-            let Some(made) = find(Op::Create(gone.clone())) else { continue };
-            if runs_after(&after, made, k) && !runs_after(&after, k, d) {
-                after[d].insert(k);
+        let (mut stack, mut needs) = (vec![k], BTreeSet::new());
+        while let Some(at) = stack.pop() {
+            if needs.insert(at) {
+                stack.extend(after[at].iter().copied());
             }
+        }
+        for other in (0..ops.len()).filter(|o| !needs.contains(o)) {
+            after[other].insert(k);
         }
     }
 

@@ -2994,6 +2994,7 @@ on!(
     a_table_renamed_as_it_gains_a_column_keeps_its_rows_and_index,
     an_enum_label_a_partition_uses_is_committed_first,
     an_enum_label_a_default_uses_is_committed_first,
+    a_push_that_fails_past_an_enum_commit_keeps_what_it_drops,
     a_foreign_table_is_renamed_as_stated,
     a_partitioned_table_is_renamed_with_its_partitions,
     a_table_renamed_onto_a_views_name_drops_the_view_first,
@@ -4314,6 +4315,21 @@ mod adversarial {
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.exec("insert into bookmarks (id) values (2)").await;
         assert_eq!(p.rows("select 1 from bookmarks where visibility = 'org'").await.len(), 1);
+    }
+
+    pub async fn a_push_that_fails_past_an_enum_commit_keeps_what_it_drops(mut p: P) {
+        let v1 = "create type mood as enum ('a'); create table items (i int, m mood default 'a'); create table old_notes (body text);";
+        p.file("20261027100000_items.sql", v1);
+        p.schema(v1);
+        assert_eq!(p.dev_then_push().await, 0, "{}", p.peek());
+        p.exec("insert into items values (-1, 'a')").await;
+        p.exec("insert into old_notes values ('kept')").await;
+        p.output();
+        // The new label commits first, alone: the check its row fails after it undoes the drop.
+        p.schema("create type mood as enum ('a', 'b'); create table items (i int check (i > 0), m mood default 'b');");
+        assert_eq!(p.db_push_with(&push(&["old_notes"], &[], false)).await, 1, "{}", p.peek());
+        assert_eq!(p.rows("select body from old_notes").await.len(), 1);
+        assert_eq!(p.rows("select 1 from pg_enum where enumlabel = 'b'").await.len(), 1);
     }
 
     pub async fn a_renamed_tables_sequence_keeps_counting(mut p: P) {
