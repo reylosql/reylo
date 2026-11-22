@@ -671,8 +671,16 @@ struct ModeSwitch {
     cases: u32,
     /// An `END` whose next token says what it ends.
     end: bool,
-    /// User variables set to a mode the reading knows: `SET @old = @@sql_mode`.
-    saved: Vec<(String, Options)>,
+    /// User variables set to a mode the reading knows, by lowercased name: `SET @old = @@sql_mode`.
+    saved: std::collections::HashMap<String, Options>,
+}
+
+/// What one assignment of a SET writes.
+enum Write {
+    /// A user variable, set to a mode the reading knows or to something it doesn't.
+    Variable(String, Option<Options>),
+    /// The session's `sql_mode`.
+    Mode(Option<Options>),
 }
 
 impl ModeSwitch {
@@ -723,7 +731,8 @@ impl ModeSwitch {
         if !statement.first().is_some_and(|(_, r)| text[r.clone()].eq_ignore_ascii_case("SET")) {
             return opts;
         }
-        let mut opts = opts;
+        // Every value is read before any write, as the server reads them; then the writes, in order.
+        let mut writes = Vec::new();
         // A scope word sets the scope of its assignment and of those after it.
         let mut global = false;
         let (comma, open, close) = (char_sym(b','), char_sym(b'('), char_sym(b')'));
@@ -737,15 +746,29 @@ impl ModeSwitch {
             }
             if sym.is_none() || (sym == Some(comma) && depth == 0) {
                 let words: Vec<&str> = statement[from..i].iter().map(|(_, r)| &text[r.clone()]).collect();
-                opts = self.assignment(&words, &mut global, opts);
+                writes.extend(self.assignment(&words, &mut global, opts));
                 from = i + 1;
             }
         }
-        opts
+        let mut next = opts;
+        for write in writes {
+            match write {
+                Write::Variable(key, Some(mode)) => {
+                    self.saved.insert(key, mode);
+                }
+                Write::Variable(key, None) => {
+                    self.saved.remove(&key);
+                }
+                Write::Mode(Some(mode)) => next = mode,
+                // A mode the reading can't know leaves the one it reads under.
+                Write::Mode(None) => {}
+            }
+        }
+        next
     }
 
-    /// One `name = value` of a SET.
-    fn assignment(&mut self, words: &[&str], global: &mut bool, opts: Options) -> Options {
+    /// What one `name = value` of a SET writes, its value read under the state before the SET.
+    fn assignment(&self, words: &[&str], global: &mut bool, opts: Options) -> Option<Write> {
         let words = match words.first().map(|w| w.to_ascii_uppercase()).as_deref() {
             Some("SESSION" | "LOCAL") => {
                 *global = false;
@@ -759,33 +782,30 @@ impl ModeSwitch {
         };
         // A user variable set to anything holds what it held no longer.
         if let Some(name) = words.first().filter(|w| w.starts_with('@') && !w.starts_with("@@")) {
-            let key = name.to_ascii_lowercase();
-            self.saved.retain(|(k, _)| *k != key);
-            if let [_, "=" | ":=", value] = words {
-                if let Some(mode) = self.mode_of(value, opts) {
-                    self.saved.push((key, mode));
-                }
-            }
-            return opts;
+            let mode = match words {
+                [_, "=" | ":=", value] => self.mode_of(value, opts),
+                _ => None,
+            };
+            return Some(Write::Variable(name.to_ascii_lowercase(), mode));
         }
-        let [name, eq, value] = words else { return opts };
+        let [name, eq, value] = words else { return None };
         if *eq != "=" && *eq != ":=" {
-            return opts;
+            return None;
         }
-        let known = self.mode_of(value, opts);
         let name = name.to_ascii_lowercase();
         let (scoped, bare) = match name.strip_prefix("@@") {
             Some(rest) => match rest.split_once('.') {
                 Some(("session" | "local", bare)) => (false, bare.to_string()),
                 Some(_) => (true, String::new()),
-                None => (*global, rest.to_string()),
+                // `@@name` is the session's, whatever scope the assignments before it named.
+                None => (false, rest.to_string()),
             },
             None => (*global, name.clone()),
         };
         if scoped || bare.trim_matches('`') != "sql_mode" {
-            return opts;
+            return None;
         }
-        known.unwrap_or(opts)
+        Some(Write::Mode(self.mode_of(value, opts)))
     }
 
     /// The mode `value` stands for, where the reading knows it: a list of modes, `DEFAULT`, the
@@ -797,7 +817,7 @@ impl ModeSwitch {
             return (rest.trim_matches('`') == "sql_mode").then_some(opts);
         }
         if lower.starts_with('@') {
-            return self.saved.iter().find(|(k, _)| *k == lower).map(|(_, o)| Options { version: opts.version, ..*o });
+            return self.saved.get(&lower).map(|o| Options { version: opts.version, ..*o });
         }
         let modes = match value.as_bytes().first() {
             Some(q @ (b'\'' | b'"')) if value.len() >= 2 && value.ends_with(*q as char) => &value[1..value.len() - 1],

@@ -222,6 +222,9 @@ mod tests {
             "SET SESSION sql_mode = '';\nSELECT 1 AS begin;\nSET SESSION sql_mode = 'ANSI_QUOTES';\nSELECT i FROM (SELECT 1 AS i) AS \"t\";",
             "SET SESSION sql_mode = '';\nSET GLOBAL sort_buffer_size = @@GLOBAL.sort_buffer_size, sql_mode = 'ANSI_QUOTES';\nSELECT \"a\" \"b\" \"c\";",
             "SET SESSION sql_mode = 'ANSI_QUOTES';\nSET @old = @@sql_mode;\nSET @old = '';\nSET sql_mode = @old;\nSELECT \"a\" \"b\" \"c\";",
+            "SET SESSION sql_mode = '';\nSET GLOBAL sort_buffer_size = @@GLOBAL.sort_buffer_size, @@sql_mode = 'ANSI_QUOTES';\nSELECT i FROM (SELECT 1 AS i) AS \"t\";",
+            "SET @a = '';\nSET @a = 'ANSI_QUOTES', sql_mode = @a;\nSELECT \"a\" \"b\" \"c\";",
+            "SET sql_mode = 'ANSI_QUOTES';\nSET @old = @@sql_mode;\nSET @old = @old;\nSET sql_mode = '';\nSET sql_mode = @old;\nSELECT \"i\" FROM (SELECT 1 AS i) AS \"t\";",
             "SET sql_mode = 'ANSI_QUOTES';\nSET @old = @@sql_mode, @old = concat('', 'NO_BACKSLASH_ESCAPES');\nSET sql_mode = '';\nSET sql_mode = @old;\nSELECT \"a\" \"b\" \"c\";",
         ] {
             assert!(parse_tree(script).errors.is_empty(), "{script}: {:?}", parse_tree(script).errors);
