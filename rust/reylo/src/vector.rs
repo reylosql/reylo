@@ -1,6 +1,7 @@
 //! pgvector's `vector` on the sqlx the queries run on. A query's field is the crate's own
-//! `pgvector::Vector`, of whatever version its `Cargo.toml` names, converted from and into the
-//! `Vec<f32>` of [`PgVector`], which reads and writes the type's binary form itself. So reylo
+//! `pgvector::Vector`, of whatever version its `Cargo.toml` names, made from the `Vec<f32>` of
+//! [`PgVector`] with `From` and giving it back with `.to_vec()`, which every release of the crate
+//! has, while [`PgVector`] reads and writes the type's binary form itself. So reylo
 //! depends on no version of the `pgvector` crate, and none of that crate's sqlx support, which may
 //! resolve to another sqlx than the project's, is in the path.
 

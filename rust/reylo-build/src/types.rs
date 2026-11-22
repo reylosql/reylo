@@ -31,8 +31,9 @@ pub enum Leaf {
     Exact,
     /// One of a list of values: decoded as text and read as the enum's variant, bound as its value.
     Label,
-    /// Decoded and bound through a wrapper of reylo's (`reylo::__private::PgVector`), whose `.0`
-    /// converts into the field's type with `From`, and from it with `Into`.
+    /// Decoded and bound through a wrapper of reylo's (`reylo::__private::PgVector`) of a `Vec<f32>`:
+    /// the field's type is made from it with `From` and gives it back with `.to_vec()`, which every
+    /// release of the `pgvector` crate has, and a `Vec<f32>` too.
     Via(TokenStream2),
 }
 
@@ -137,7 +138,7 @@ impl Shape {
     pub fn encode(&self, v: TokenStream2) -> TokenStream2 {
         self.encode_leaves(v, &|leaf, ty, v| match leaf {
             Leaf::Label => quote!(<#ty as ::reylo::Enum>::label(*#v)),
-            Leaf::Via(wrapper) => quote!(#wrapper(::core::convert::Into::into(::core::clone::Clone::clone(#v)))),
+            Leaf::Via(wrapper) => quote!(#wrapper((#v).to_vec())),
             _ => quote!(::core::clone::Clone::clone(#v)),
         })
     }

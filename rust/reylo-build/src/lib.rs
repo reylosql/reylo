@@ -248,8 +248,8 @@ pub fn module(dialect: Dialect, options: Options, analysis: &Value, span: Span, 
                             _ => quote!(#from(#v)),
                         })
                     }
-                    // A vector is bound through reylo's codec from whatever type the crate declares,
-                    // as `pgvector::Vector` under any name or `Vec<f32>`, that converts into `Vec<f32>`.
+                    // A vector is bound through reylo's codec from whatever type the crate declares
+                    // that has `.to_vec()`, as `pgvector::Vector` under any name or `Vec<f32>`.
                     None if shape.bound_via() => shape.encode(this),
                     None => quote!(::core::clone::Clone::clone(#this)),
                 };
