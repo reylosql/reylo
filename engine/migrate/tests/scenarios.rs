@@ -2933,7 +2933,7 @@ on!(
     init_reads_every_schema_a_view_crosses,
     introspect_of_some_schemas_is_their_dump,
     the_dump_reads_a_schema_named_with_capitals,
-    new_without_schema_sql_replays_beside_the_environments_extensions,
+    new_without_schema_sql_makes_an_extension_added_since,
     an_extension_in_a_projects_schema_is_the_projects_whoever_owns_it,
     an_extension_a_platform_role_owns_in_a_projects_schema_is_the_projects,
     init_writes_the_privileges_on_an_extensions_schema,
@@ -3315,10 +3315,10 @@ mod adversarial {
         assert!(text.contains(r#"CREATE TABLE "CaseSensitive".items"#) && text.contains("CREATE TABLE public.users"), "{text}");
     }
 
-    /// With no schema.sql, the migration is what the database has beyond its migrations, its own SQL
-    /// replayed on shadows that have the extensions no migration creates: one made by hand in a schema
-    /// of its own, and one the migrations use as the environment gives it.
-    pub async fn new_without_schema_sql_replays_beside_the_environments_extensions(mut p: P) {
+    /// With no schema.sql, the migration is what the database has beyond its migrations: an extension
+    /// made by hand since the last of them, in a schema of its own, is the migration's to make, while
+    /// one the environment gave the database before them, which they use, is still the environment's.
+    pub async fn new_without_schema_sql_makes_an_extension_added_since(mut p: P) {
         p.exec("create extension citext").await;
         p.file("20261122100000_users.sql", "create table users (id int primary key, name citext);");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
@@ -3326,7 +3326,18 @@ mod adversarial {
         p.output();
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "email", &Default::default(), log).await).await, 0, "{}", p.peek());
         let written = p.files().into_iter().find(|f| f.ends_with("_email.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
-        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap(), r"(?i)add column email text");
+        let sql = std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap();
+        assert_has!(sql.clone(), r"(?i)create schema (if not exists )?extensions");
+        assert_has!(sql.clone(), r"(?i)create extension (if not exists )?pg_trgm");
+        assert!(!sql.to_lowercase().contains("citext"), "{sql}");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"_email\.sql +recorded: already in place");
+        // A database the environment gave citext alone runs both.
+        let q = P::new(p.d).await.unwrap();
+        q.exec("create extension citext").await;
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(q.rows("select 1 from pg_extension where extname = 'pg_trgm'").await.len(), 1);
     }
 
     /// Introspect of some of the schemas that hold anything is their dump, which Reylo's own SQL,
