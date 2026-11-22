@@ -96,6 +96,8 @@ REPLACE = {
     # INTO goes before or after the locking clauses, of which there may be several.
     "SelectStmtIntoOption": ["", '"INTO" SelectIntoTarget', '"INTO" SelectIntoTarget SelectLockList'],
     "SelectLockOpt": ["", "SelectLockList"],
+    # MySQL 8.4 has no SQL_CACHE, where the word is a name; SQL_NO_CACHE it keeps, doing nothing.
+    "SelectStmtSQLCache": ['"SQL_NO_CACHE"'],
     # ESCAPE takes any simple expression.
     "LikeOrIlikeEscapeOpt": ["%prec empty", '"ESCAPE" SimpleExpr'],
     "ExplainFormatType": ["Identifier"],
