@@ -9,4 +9,6 @@ overriding.sql: null value in column "name" of relation "ident" violates not-nul
 positional.sql: null value in column "email" of relation "req" violates not-null constraint (23502)
 positional_default.sql: null value in column "email" of relation "req" violates not-null constraint (23502)
 several_rows.sql: null value in column "email" of relation "req" violates not-null constraint (23502)
+with_insert.sql: null value in column "email" of relation "req" violates not-null constraint (23502)
+with_insert_two.sql: null value in column "name" of relation "req" violates not-null constraint (23502)
 with_query.sql: null value in column "email" of relation "req" violates not-null constraint (23502)

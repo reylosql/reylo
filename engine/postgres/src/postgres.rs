@@ -945,12 +945,11 @@ impl<'a> Engine<'a> {
             let relations = sorted(conflicts.iter().map(|c| c.relation.clone()).collect());
             by_relation(self.host, ARBITERS_QUERY, &relations)
         };
-        // The columns an INSERT's rows must write, asked in this first round too.
-        let insert = insert_target(&rewritten.sql);
-        let required = match &insert {
-            Some(target) => self.host.query(REQUIRED_COLUMNS_QUERY, vec![json!(target.relation)], Scope::Statement),
-            None => Some(Ok(Vec::new())),
-        };
+        // The columns each INSERT's rows must write, the statement's own and its WITH queries',
+        // asked in this first round too: every one, before any answer is read.
+        let inserts = insert_targets(&rewritten.sql);
+        let asked: Vec<_> = inserts.iter().map(|target| self.host.query(REQUIRED_COLUMNS_QUERY, vec![json!(target.relation)], Scope::Statement)).collect();
+        let required: Option<Vec<_>> = asked.into_iter().collect();
         let (Some(described), Some(trust), Some(operators), Some(catalog_rows), Some(arbiters), Some(written), Some(bare_written), Some(required), Some(view_rows), Some((view_definitions, _, _))) = (described, trust, operators, catalog_rows, arbiters, written, bare_written, required, view_rows, viewed) else { return None };
         let (raw, mut described) = match described {
             Ok(d) => d,
@@ -988,7 +987,7 @@ impl<'a> Engine<'a> {
         // server prepares it and refuses each row it inserts. A row trigger that runs before the
         // insert or in its place may fill the column, and a rule may rewrite the insert, so then
         // nothing is said.
-        if let Some(target) = &insert {
+        for (target, required) in inserts.iter().zip(required) {
             let filled_elsewhere = catalog.row_triggers.get(&target.relation).is_some_and(|events| events & cardinality::TRIGGER_ROW_INSERT != 0)
                 || catalog.rewritten.get(&target.relation).is_some_and(|events| events & cardinality::TRIGGER_ROW_INSERT != 0);
             if !filled_elsewhere {
@@ -4685,10 +4684,32 @@ fn shown(relation: &str) -> String {
     }
 }
 
-/// The INSERT the top statement is (a WITH before it allowed), as [`InsertTarget`] reads it.
-fn insert_target(sql: &str) -> Option<InsertTarget> {
-    let parsed = crate::stack::parse(sql).ok()?;
-    let Some(NodeEnum::InsertStmt(insert)) = parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|n| n.node.as_ref()) else { return None };
+/// Each INSERT the statement runs, as [`InsertTarget`] reads it: the top statement, a WITH before it
+/// allowed, and every data-modifying WITH query that is an INSERT.
+fn insert_targets(sql: &str) -> Vec<InsertTarget> {
+    let Ok(parsed) = crate::stack::parse(sql) else { return Vec::new() };
+    let Some(top) = parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()).and_then(|n| n.node.as_ref()) else { return Vec::new() };
+    // A data-modifying WITH query stands only at the top, where it runs whatever reads it.
+    let with = match top {
+        NodeEnum::SelectStmt(s) => s.with_clause.as_ref(),
+        NodeEnum::InsertStmt(i) => i.with_clause.as_ref(),
+        NodeEnum::UpdateStmt(u) => u.with_clause.as_ref(),
+        NodeEnum::DeleteStmt(d) => d.with_clause.as_ref(),
+        NodeEnum::MergeStmt(m) => m.with_clause.as_ref(),
+        _ => None,
+    };
+    let queries = with.map(|w| w.ctes.as_slice()).unwrap_or_default().iter().filter_map(|cte| match cte.node.as_ref() {
+        Some(NodeEnum::CommonTableExpr(c)) => c.ctequery.as_deref().and_then(|q| q.node.as_ref()),
+        _ => None,
+    });
+    queries.chain([top]).filter_map(|node| match node {
+        NodeEnum::InsertStmt(insert) => insert_target(sql, insert),
+        _ => None,
+    }).collect()
+}
+
+/// One INSERT ([`insert_targets`]).
+fn insert_target(sql: &str, insert: &syntax::postgres::protobuf::InsertStmt) -> Option<InsertTarget> {
     let rv = insert.relation.as_ref()?;
     let relation = analyze::relation_name(&rv.schemaname, &rv.relname);
     let start = usize::try_from(rv.location).ok()?;
