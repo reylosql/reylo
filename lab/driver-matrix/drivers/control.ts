@@ -79,10 +79,24 @@ if (a.case === "sqlite") {
       deleteProperty: (_target, key) => (own.delete(key), true),
       getOwnPropertyDescriptor: (target, key) => own.get(key) ?? Reflect.getOwnPropertyDescriptor(target, key),
     });
+    // Bun.sql reads a date and a timestamp as a Date in UTC and a timestamptz as a Date at its offset, BC and
+    // extended years included. PGlite's own parsers read a timestamp in the machine's zone and a BC instant as an
+    // Invalid Date, failures of the fixture rather than of the binding each control fakes, so these two read
+    // them as Bun.sql does, whatever the zone the run is in.
+    const asBunDate = (text: string) => {
+      const m = /^(\d+)-(\d\d)-(\d\d)(?: (\d\d):(\d\d):(\d\d)(\.\d+)?)?(?:([+-])(\d\d)(?::(\d\d))?(?::(\d\d))?)?( BC)?$/.exec(text);
+      if (!m) return new Date(text === "infinity" ? 8.64e15 : text === "-infinity" ? -8.64e15 : NaN);
+      const d = new Date(0);
+      d.setUTCFullYear(m[12] ? 1 - Number(m[1]) : Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+      d.setUTCHours(Number(m[4] ?? 0), Number(m[5] ?? 0), Number(m[6] ?? 0), Math.floor(Number(m[7] ?? 0) * 1000));
+      const offset = m[8] ? (m[8] === "-" ? -1 : 1) * (Number(m[9]) * 3600 + Number(m[10] ?? 0) * 60 + Number(m[11] ?? 0)) * 1000 : 0;
+      return new Date(d.getTime() - offset);
+    };
+    const bunParsers = { 1082: asBunDate, 1114: asBunDate, 1184: asBunDate };
     // Bun.sql's shape: unsafe(text, values) beside commitDistributed(), which Reylo tells Bun.sql's clients by. It
     // has no options, so Reylo reads the rows unsafe() resolves to rather than .raw()'s bytes.
     const unsafe = (bind: (v: unknown) => unknown) => ({
-      unsafe: async (text: string, values?: unknown[]) => (await db.query(text, values?.map(bind))).rows,
+      unsafe: async (text: string, values?: unknown[]) => (await db.query(text, values?.map(bind), { parsers: bunParsers })).rows,
       commitDistributed: async () => {
         throw new Error("the control's Bun.sql shape has no distributed transactions");
       },
