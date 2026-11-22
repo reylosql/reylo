@@ -198,6 +198,11 @@ impl<'t> Scanner<'t> {
             if c == b':' && rest.get(1).is_some_and(|&n| n.is_ascii_alphabetic() || n == b'_' || n >= 0x80) && self.after_word != Some(start) {
                 self.at += 1;
                 self.while_(is_ident_char);
+                // `:auth.user_id`, as the analysis reads a placeholder's name; `:t.*` stops before the dot.
+                while self.z.get(self.at) == Some(&b'.') && self.z.get(self.at + 1).is_some_and(|&n| n.is_ascii_alphabetic() || n == b'_') {
+                    self.at += 1;
+                    self.while_(is_ident_char);
+                }
                 self.annotation();
                 return (Raw::Sym(tok::paramMarker), start, self.at);
             }
@@ -214,8 +219,9 @@ impl<'t> Scanner<'t> {
         }
     }
 
-    /// Reylo's annotation of a placeholder, `::nullable(int)`, `::rows(…)` or `::int`, read into
-    /// the placeholder's token: MySQL has no `::`.
+    /// Reylo's annotation of a placeholder, `::nullable(int)`, `::rows(…)`, `::int` or `::double
+    /// precision`, read into the placeholder's token: MySQL has no `::`. A parenthesis left open, to
+    /// the end of the text or a `;`, is left to the grammar, which reports it.
     fn annotation(&mut self) {
         let z = self.z;
         let space = |mut i: usize| {
@@ -235,6 +241,16 @@ impl<'t> Scanner<'t> {
         }
         if end == word {
             return;
+        }
+        // The second word of a type SQL spells in two, as the analysis reads it.
+        let second = space(end);
+        let mut second_end = second;
+        while second_end < z.len() && is_ident_char(z[second_end]) {
+            second_end += 1;
+        }
+        let (first, next) = (z[word..end].to_ascii_lowercase(), z[second..second_end].to_ascii_lowercase());
+        if matches!((&first[..], &next[..]), (b"double", b"precision") | (b"character", b"varying") | (_, b"unsigned")) {
+            end = second_end;
         }
         self.at = end;
         let open = space(end);
@@ -259,11 +275,11 @@ impl<'t> Scanner<'t> {
                         j += if z[j] == b'\\' && q != b'`' { 2 } else { 1 };
                     }
                 }
+                b';' => return,
                 _ => {}
             }
             j += 1;
         }
-        self.at = z.len();
     }
 
     fn take(&mut self, raw: Raw, n: usize) -> (Raw, usize, usize) {

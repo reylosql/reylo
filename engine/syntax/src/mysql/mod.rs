@@ -186,9 +186,20 @@ mod tests {
             let tree = parse_tree(text);
             assert_eq!(tree.print(), text);
         }
-        for text in ["select :id::nullable(int)", "select :q :: nullable(varchar(40)) as q", "insert into events (id) values (:id::int)"] {
+        for text in ["select :id::nullable(int)", "select :q :: nullable(varchar(40)) as q", "insert into events (id) values (:id::int)", "select :person.name as name, :id::double precision as id", "select :n::int unsigned from t"] {
             assert!(parse_tree(text).errors.is_empty(), "{text}");
         }
+    }
+
+    #[test]
+    fn an_unfinished_annotation_leaves_the_next_statement_to_read() {
+        let text = "select :p::nullable(int; select from where;";
+        let tree = parse_tree(text);
+        assert_eq!(tree.print(), text);
+        assert_eq!(spans(text).len(), 2);
+        let second = text.find("from").unwrap() as u32;
+        assert!(tree.errors.iter().any(|e| e.start < second), "{:?}", tree.errors);
+        assert!(tree.errors.iter().any(|e| e.start >= second), "{:?}", tree.errors);
     }
 
     #[test]

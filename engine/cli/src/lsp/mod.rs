@@ -540,19 +540,34 @@ struct Span {
     class: Class,
 }
 
-/// Keeps a MySQL syntax error only where its statement reads as an error whatever the session's
-/// `sql_mode`, which the editor doesn't know: a `"name"` under `ANSI_QUOTES`, or a string whose
-/// backslash ends it under `NO_BACKSLASH_ESCAPES`, is an error of the default mode alone.
-fn mode_free_errors(tree: &mut syntax::Tree<'_>, written: &str) {
+/// The reading of a MySQL document under the `sql_mode` that finds the least of it wrong, the
+/// default's where it is no worse: the editor doesn't know the session's mode, and a `"name"` under
+/// `ANSI_QUOTES`, a string a backslash ends under `NO_BACKSLASH_ESCAPES` and `COUNT (*)` under
+/// `IGNORE_SPACE` are errors of the default mode alone. One mode reads the whole document, as one
+/// session runs it, so a statement another mode reads differently can't excuse an error of its own.
+fn mysql_reading<'s>(tree: syntax::Tree<'s>, written: &'s str) -> syntax::Tree<'s> {
     use syntax::mysql::{parse_tree_with, Options};
-    let modes = [Options { ansi_quotes: true, ..Options::default() }, Options { backslash_escapes: false, ..Options::default() }, Options { ansi_quotes: true, backslash_escapes: false, ..Options::default() }];
-    let others: Vec<syntax::Tree<'_>> = modes.iter().map(|m| parse_tree_with(written, *m)).collect();
-    let spans = syntax::statements(Dialect::Mysql, tree);
-    let statement = |at: u32| spans.iter().copied().find(|&(start, end)| start <= at && at <= end).unwrap_or((at, at));
-    tree.errors.retain(|e| {
-        let (start, end) = statement(e.start);
-        others.iter().all(|other| other.errors.iter().any(|o| o.start >= start && o.start <= end.max(e.end)))
-    });
+    // How much of the text sits in a statement with an error, then how many errors.
+    let wrong = |tree: &syntax::Tree<'_>| {
+        let spans = syntax::statements(Dialect::Mysql, tree);
+        let mut bad: Vec<(u32, u32)> = tree.errors.iter().map(|e| spans.iter().copied().find(|&(start, end)| start <= e.start && e.start <= end).unwrap_or((e.start, e.end))).collect();
+        bad.sort_unstable();
+        bad.dedup();
+        (bad.iter().map(|&(start, end)| end.saturating_sub(start)).sum::<u32>(), tree.errors.len())
+    };
+    let mut best = (wrong(&tree), tree);
+    for mode in 1..8u8 {
+        let opts = Options { ansi_quotes: mode & 1 != 0, backslash_escapes: mode & 2 == 0, ignore_space: mode & 4 != 0, ..Options::default() };
+        let other = parse_tree_with(written, opts);
+        let score = wrong(&other);
+        if score < best.0 {
+            best = (score, other);
+        }
+        if best.1.errors.is_empty() {
+            break;
+        }
+    }
+    best.1
 }
 
 /// What a document's text reads as, kept until the text changes.
@@ -568,7 +583,7 @@ impl Reading {
         let written = for_grammar(dialect, text);
         let mut tree = syntax::parse(dialect, &written);
         if dialect == Dialect::Mysql && !tree.errors.is_empty() {
-            mode_free_errors(&mut tree, &written);
+            tree = mysql_reading(tree, &written);
         }
         let toks = tokens(dialect, &tree, text);
         let spans: Vec<Span> = toks.iter().map(|t| Span { start: t.start, end: t.end, class: t.class }).collect();
@@ -1490,10 +1505,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reports_a_mysql_error_only_where_no_sql_mode_reads_the_statement() {
+    fn reads_mysql_under_the_sql_mode_that_finds_the_least_wrong() {
         assert!(Reading::of(Dialect::Mysql, "select \"a\" from \"t\"").errors.is_empty());
         assert!(Reading::of(Dialect::Mysql, "select 'a\\', 'b'").errors.is_empty());
-        assert_eq!(Reading::of(Dialect::Mysql, "select \"a\" from \"t\";\nselect from where").errors.len(), 1);
+        assert!(Reading::of(Dialect::Mysql, "SELECT COUNT (*) FROM t").errors.is_empty());
+        for text in ["select \"a\" from \"t\";\nselect from where", "select 'a\\';\nselect from where;"] {
+            let errors = Reading::of(Dialect::Mysql, text).errors;
+            assert_eq!(errors.len(), 1, "{text}: {errors:?}");
+            assert!(errors[0].0 as usize >= text.find("select from").unwrap(), "{text}: {errors:?}");
+        }
     }
 
     #[test]
