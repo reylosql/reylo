@@ -14,32 +14,29 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+//
+// Changed for reylo-sql from sqlparser-rs 0.63.0: what only its parser, its other dialects and
+// its optional features used is left out, and MySQL's statements print as MySQL reads them.
 
 use core::cmp::{Eq, Ord, Ordering, PartialEq, PartialOrd};
 use core::fmt::{self, Debug, Formatter};
 use core::hash::{Hash, Hasher};
 
-use crate::tokenizer::TokenWithSpan;
-
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "visitor")]
-use sqlparser_derive::{Visit, VisitMut};
+use crate::mysql::ast::tokens::TokenWithSpan;
 
 /// A wrapper over [`TokenWithSpan`]s that ignores the token and source
 /// location in comparisons and hashing.
 ///
 /// This type is used when the token and location is not relevant for semantics,
 /// but is still needed for accurate source location tracking, for example, in
-/// the nodes in the [ast](crate::ast) module.
+/// the nodes in the [ast](crate::mysql::ast) module.
 ///
 /// Note: **All** `AttachedTokens` are equal.
 ///
 /// # Examples
 ///
 /// Same token, different location are equal
-/// ```
+/// ```ignore
 /// # use sqlparser::ast::helpers::attached_token::AttachedToken;
 /// # use sqlparser::tokenizer::{Location, Span, Token, TokenWithLocation};
 /// // commas @ line 1, column 10
@@ -59,7 +56,7 @@ use sqlparser_derive::{Visit, VisitMut};
 ///
 /// Different token, different location are equal 🤯
 ///
-/// ```
+/// ```ignore
 /// # use sqlparser::ast::helpers::attached_token::AttachedToken;
 /// # use sqlparser::tokenizer::{Location, Span, Token, TokenWithLocation};
 /// // commas @ line 1, column 10
@@ -78,8 +75,7 @@ use sqlparser_derive::{Visit, VisitMut};
 /// ```
 /// // period @ line 2, column 20
 #[derive(Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct AttachedToken(pub TokenWithSpan);
 
 impl AttachedToken {

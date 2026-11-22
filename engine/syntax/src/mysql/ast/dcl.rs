@@ -15,34 +15,26 @@
 // specific language governing permissions and limitations
 // under the License.
 //
-// Changed in Reylo's copy (engine/mysql/vendor/sqlparser/README.md).
+// Changed for reylo-sql from sqlparser-rs 0.63.0: what only its parser, its other dialects and
+// its optional features used is left out, and MySQL's statements print as MySQL reads them.
 
-//! AST types specific to GRANT/REVOKE/ROLE variants of [`Statement`](crate::ast::Statement)
+//! AST types specific to GRANT/REVOKE/ROLE variants of [`Statement`](crate::mysql::ast::Statement)
 //! (commonly referred to as Data Control Language, or DCL)
 
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
 use core::fmt;
 
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "visitor")]
-use sqlparser_derive::{Visit, VisitMut};
-
 use super::{display_comma_separated, Expr, Ident, Password, Spanned};
-use crate::ast::{
+use crate::mysql::ast::{
     display_separated, CascadeOption, CurrentGrantsKind, GrantObjects, Grantee, ObjectName,
     Privileges,
 };
-use crate::tokenizer::Span;
+use crate::mysql::ast::tokens::Span;
 
 /// An option in `ROLE` statement.
 ///
 /// <https://www.postgresql.org/docs/current/sql-createrole.html>
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum RoleOption {
     /// Enable or disable BYPASSRLS.
     BypassRLS(bool),
@@ -116,8 +108,7 @@ impl fmt::Display for RoleOption {
 /// * SET `configuration_parameter` { TO | = } { `value` | DEFAULT }
 /// * SET `configuration_parameter` FROM CURRENT
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum SetConfigValue {
     /// Use the default value.
     Default,
@@ -131,8 +122,7 @@ pub enum SetConfigValue {
 /// * RESET `configuration_parameter`
 /// * RESET ALL
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum ResetConfig {
     /// Reset all configuration parameters.
     ALL,
@@ -142,8 +132,7 @@ pub enum ResetConfig {
 
 /// An `ALTER ROLE` (`Statement::AlterRole`) operation
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum AlterRoleOperation {
     /// Generic
     RenameRole {
@@ -242,8 +231,7 @@ impl fmt::Display for AlterRoleOperation {
 
 /// A `USE` (`Statement::Use`) operation
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum Use {
     /// Switch to the given catalog (e.g. `USE CATALOG ...`).
     Catalog(ObjectName),
@@ -284,8 +272,7 @@ impl fmt::Display for Use {
 /// Snowflake `SECONDARY ROLES` USE variant
 /// See: <https://docs.snowflake.com/en/sql-reference/sql/use-secondary-roles>
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum SecondaryRoles {
     /// Use all secondary roles.
     All,
@@ -308,8 +295,7 @@ impl fmt::Display for SecondaryRoles {
 /// CREATE ROLE statement
 /// See [PostgreSQL](https://www.postgresql.org/docs/current/sql-createrole.html)
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct CreateRole {
     /// Role names to create.
     pub names: Vec<ObjectName>,
@@ -435,8 +421,7 @@ impl Spanned for CreateRole {
 
 /// GRANT privileges ON objects TO grantees
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct Grant {
     /// Privileges being granted.
     pub privileges: Privileges,
@@ -482,13 +467,10 @@ impl fmt::Display for Grant {
     }
 }
 
-
-
 /// REVOKE privileges ON objects FROM grantees
 /// See [PostgreSQL](https://www.postgresql.org/docs/current/sql-revoke.html)
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct Revoke {
     /// Whether `GRANT OPTION FOR` is present, withdrawing the right to grant
     /// the privileges rather than the privileges themselves.
@@ -527,5 +509,4 @@ impl fmt::Display for Revoke {
         Ok(())
     }
 }
-
 

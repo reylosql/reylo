@@ -14,18 +14,14 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-
-#[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, format, string::ToString, vec::Vec};
+//
+// Changed for reylo-sql from sqlparser-rs 0.63.0: what only its parser, its other dialects and
+// its optional features used is left out, and MySQL's statements print as MySQL reads them.
 
 use core::fmt::{self, Display};
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "visitor")]
-use sqlparser_derive::{Visit, VisitMut};
 
-use crate::{
-    ast::display_separated,
+use crate::mysql::ast::{
+    display_separated,
     display_utils::{indented_list, Indent, SpaceOrNewline},
 };
 
@@ -39,8 +35,7 @@ use super::{
 
 /// INSERT statement.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct Insert {
     /// Token for the `INSERT` keyword (or its substitutes)
     pub insert_token: AttachedToken,
@@ -277,8 +272,7 @@ impl Display for Insert {
 
 /// DELETE statement.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct Delete {
     /// Token for the `DELETE` keyword
     pub delete_token: AttachedToken,
@@ -362,8 +356,7 @@ impl Display for Delete {
 
 /// UPDATE statement.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct Update {
     /// Token for the `UPDATE` keyword
     pub update_token: AttachedToken,
@@ -452,8 +445,7 @@ impl Display for Update {
 
 /// A `MERGE` statement.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct Merge {
     /// The `MERGE` token that starts the statement.
     pub merge_token: AttachedToken,
@@ -508,8 +500,7 @@ impl Display for Merge {
 /// [Snowflake](https://docs.snowflake.com/en/sql-reference/sql/merge)
 /// [BigQuery](https://cloud.google.com/bigquery/docs/reference/standard-sql/dml-syntax#merge_statement)
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct MergeClause {
     /// The `WHEN` token that starts the sub-expression.
     pub when_token: AttachedToken,
@@ -547,8 +538,7 @@ impl Display for MergeClause {
 /// [Snowflake](https://docs.snowflake.com/en/sql-reference/sql/merge)
 /// [BigQuery](https://cloud.google.com/bigquery/docs/reference/standard-sql/dml-syntax#merge_statement)
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum MergeClauseKind {
     /// `WHEN MATCHED`
     Matched,
@@ -586,8 +576,7 @@ impl Display for MergeClauseKind {
 /// [BigQuery](https://cloud.google.com/bigquery/docs/reference/standard-sql/dml-syntax#merge_statement)
 /// [Oracle](https://docs.oracle.com/en/database/oracle/oracle-database/21/sqlrf/MERGE.html)
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum MergeAction {
     /// An `INSERT` clause
     ///
@@ -641,8 +630,7 @@ impl Display for MergeAction {
 /// [Snowflake](https://docs.snowflake.com/en/sql-reference/sql/merge)
 /// [BigQuery](https://cloud.google.com/bigquery/docs/reference/standard-sql/dml-syntax#merge_statement)
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum MergeInsertKind {
     /// The insert expression is defined from an explicit `VALUES` clause
     ///
@@ -697,8 +685,7 @@ impl Display for MergeInsertKind {
 /// [BigQuery](https://cloud.google.com/bigquery/docs/reference/standard-sql/dml-syntax#merge_statement)
 /// [Oracle](https://docs.oracle.com/en/database/oracle/oracle-database/21/sqlrf/MERGE.html)
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct MergeInsertExpr {
     /// The `INSERT` token that starts the sub-expression.
     pub insert_token: AttachedToken,
@@ -733,8 +720,7 @@ impl Display for MergeInsertExpr {
 
 /// The kind of update used within a `MERGE` statement.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum MergeUpdateKind {
     /// Standard update with explicit assignments.
     ///
@@ -779,8 +765,7 @@ impl Display for MergeUpdateKind {
 /// [Oracle](https://docs.oracle.com/en/database/oracle/oracle-database/21/sqlrf/MERGE.html)
 /// [Databricks](https://docs.databricks.com/en/sql/language-manual/delta-merge-into.html)
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct MergeUpdateExpr {
     /// The `UPDATE` token that starts the sub-expression.
     pub update_token: AttachedToken,
@@ -811,8 +796,7 @@ impl Display for MergeUpdateExpr {
 /// OUTPUT $action, deleted.* INTO dbo.temp_products;
 /// <https://learn.microsoft.com/en-us/sql/t-sql/queries/output-clause-transact-sql>
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum OutputClause {
     /// `OUTPUT` clause
     Output {
@@ -868,8 +852,7 @@ impl fmt::Display for OutputClause {
 ///   INTO t2 (c1, c2) VALUES (n1, n2)
 /// ```
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct MultiTableInsertWhenClause {
     /// The condition for this WHEN clause
     pub condition: Expr,
@@ -895,8 +878,7 @@ impl Display for MultiTableInsertWhenClause {
 /// INTO <target_table> [ ( <target_col_name> [ , ... ] ) ] [ VALUES ( { <source_col_name> | DEFAULT | NULL } [ , ... ] ) ]
 /// ```
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct MultiTableInsertIntoClause {
     /// The target table
     pub table_name: ObjectName,
@@ -921,8 +903,7 @@ impl Display for MultiTableInsertIntoClause {
 
 /// The VALUES clause in a multi-table INSERT INTO clause.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct MultiTableInsertValues {
     /// The values to insert (can be column references, DEFAULT, or NULL)
     pub values: Vec<MultiTableInsertValue>,
@@ -930,8 +911,7 @@ pub struct MultiTableInsertValues {
 
 /// A value in a multi-table INSERT VALUES clause.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum MultiTableInsertValue {
     /// A column reference or expression from the source
     Expr(Expr),
@@ -952,8 +932,7 @@ impl Display for MultiTableInsertValue {
 ///
 /// See: <https://docs.snowflake.com/en/sql-reference/sql/insert-multi-table>
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum MultiTableInsertType {
     /// `INSERT ALL` - all matching WHEN clauses are executed
     All,

@@ -14,24 +14,17 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+//
+// Changed for reylo-sql from sqlparser-rs 0.63.0: what only its parser, its other dialects and
+// its optional features used is left out, and MySQL's statements print as MySQL reads them.
 
 use core::fmt;
-
-#[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
-
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "visitor")]
-use sqlparser_derive::{Visit, VisitMut};
 
 use super::display_separated;
 
 /// Unary operators
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum UnaryOperator {
     /// `@-@` Length or circumference (PostgreSQL/Redshift geometric operator)
     /// see <https://www.postgresql.org/docs/9.5/functions-geometry.html>
@@ -94,8 +87,7 @@ impl fmt::Display for UnaryOperator {
 
 /// Binary operators
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum BinaryOperator {
     /// Plus, e.g. `a + b`
     Plus,

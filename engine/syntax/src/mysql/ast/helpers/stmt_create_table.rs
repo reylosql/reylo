@@ -15,25 +15,16 @@
 // specific language governing permissions and limitations
 // under the License.
 //
-// Changed in Reylo's copy (engine/mysql/vendor/sqlparser/README.md).
+// Changed for reylo-sql from sqlparser-rs 0.63.0: what only its parser, its other dialects and
+// its optional features used is left out, and MySQL's statements print as MySQL reads them.
 
-#[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
-
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "visitor")]
-use sqlparser_derive::{Visit, VisitMut};
-
-use crate::ast::{
+use crate::mysql::ast::{
     ClusteredBy, ColumnDef, CommentDef, CreateTable, CreateTableLikeKind, CreateTableOptions,
     DistStyle, Expr, FileFormat, ForValues, HiveDistributionStyle, HiveFormat, Ident,
     InitializeKind, ObjectName, OnCommit, OneOrManyWithParens, Query, RefreshModeKind,
     RowAccessPolicy, StorageLifecyclePolicy, StorageSerializationPolicy,
     TableConstraint, TableVersion, Tag, WithData, WrappedCollection,
 };
-
 
 /// Builder for create table statement variant ([1]).
 ///
@@ -42,7 +33,7 @@ use crate::ast::{
 /// - Moving a lot of variables around the code.
 ///
 /// # Example
-/// ```rust
+/// ```ignore
 /// use sqlparser::ast::helpers::stmt_create_table::CreateTableBuilder;
 /// use sqlparser::ast::{ColumnDef, DataType, Ident, ObjectName};
 /// let builder = CreateTableBuilder::new(ObjectName::from(vec![Ident::new("table_name")]))
@@ -61,10 +52,9 @@ use crate::ast::{
 /// )
 /// ```
 ///
-/// [1]: crate::ast::Statement::CreateTable
+/// [1]: crate::mysql::ast::Statement::CreateTable
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct CreateTableBuilder {
     /// Whether the statement uses `OR REPLACE`.
     pub or_replace: bool,
@@ -670,8 +660,6 @@ impl CreateTableBuilder {
     }
 }
 
-
-
 impl From<CreateTable> for CreateTableBuilder {
     fn from(table: CreateTable) -> Self {
         Self {
@@ -741,14 +729,5 @@ impl From<CreateTable> for CreateTableBuilder {
             with_data: table.with_data,
         }
     }
-}
-
-/// Helper return type when parsing configuration for a `CREATE TABLE` statement.
-#[derive(Default)]
-pub(crate) struct CreateTableConfiguration {
-    pub partition_by: Option<Box<Expr>>,
-    pub cluster_by: Option<WrappedCollection<Vec<Expr>>>,
-    pub inherits: Option<Vec<ObjectName>>,
-    pub table_options: CreateTableOptions,
 }
 

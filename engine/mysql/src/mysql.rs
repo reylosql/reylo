@@ -3,7 +3,7 @@
 //! type per `?` from its context. The engine takes those as they are (see
 //! wiki/mysql-sources.md). MySQL has no RETURNING and no server surface for the row count, so a
 //! data-modifying statement returns no rows, and a SELECT's row count is the unique-key proof
-//! over a `sqlparser` tree with the keys read from `information_schema.statistics`.
+//! over the statement's syntax tree with the keys read from `information_schema.statistics`.
 //!
 //! Two things stand between that tree and the statement the server runs. MySQL reads some text by
 //! the session's `sql_mode` (`||`, a double-quoted word, a backslash in a string, a space before a
@@ -22,9 +22,7 @@ use crate::host::{as_str, Host, Lazy};
 use crate::lex::{self, Lexed, MysqlText, Style, Target};
 use crate::types::{Cardinality, Field, Kind as TyKind, Slot, StatementKind, Type};
 use serde_json::{json, Value};
-use sqlparser::ast::{self, Expr, FunctionArg, FunctionArgExpr, GroupByExpr, LimitClause, Query, Select, SelectItem, SetExpr, Statement, TableFactor};
-use sqlparser::dialect::MySqlDialect;
-use sqlparser::parser::Parser;
+use syntax::mysql::ast::{self, Expr, FunctionArg, FunctionArgExpr, GroupByExpr, LimitClause, Query, Select, SelectItem, SetExpr, Statement, TableFactor};
 use std::collections::{HashMap, HashSet};
 
 /// The session's `sql_mode`, asked only for a statement whose reading turns on it.
@@ -124,126 +122,22 @@ fn analyze_text_plain(sql: &str, host: &Host, marked: &[String]) -> Lazy<Analysi
     analyze(sql, &lexed, text, host, marked).map(|analysis| Analysis { sql_mode: text.filter(|_| !alike), ..analysis })
 }
 
-/// `sqlparser`'s MySQL dialect, reading strings and double quotes as a session of this reading
-/// does: a backslash escapes only where it does there, and `"` quotes a name under ANSI_QUOTES.
-/// Beside the reading, whether `||` is OR, as it is unless the session's `sql_mode` has
-/// PIPES_AS_CONCAT, where it joins strings ([`pipes_are_or`]). Everything else is
-/// `MySqlDialect`'s, which it also says it is, so the parser's own checks for MySQL hold for it.
-#[derive(Debug)]
+/// How a session of this reading reads a statement: a backslash escapes only where it does there,
+/// and `"` quotes a name under ANSI_QUOTES. Beside the reading, whether `||` is OR, as it is unless
+/// the session's `sql_mode` has PIPES_AS_CONCAT, where it joins strings ([`pipes_are_or`]).
+#[derive(Debug, Clone, Copy)]
 struct SessionDialect(MysqlText, bool);
 
-impl sqlparser::dialect::Dialect for SessionDialect {
-    fn dialect(&self) -> std::any::TypeId {
-        std::any::TypeId::of::<MySqlDialect>()
+impl Default for SessionDialect {
+    fn default() -> Self {
+        SessionDialect(MysqlText::default(), true)
     }
-    fn is_delimited_identifier_start(&self, ch: char) -> bool {
-        ch == '`' || (ch == '"' && self.0.ansi_quotes)
-    }
-    fn supports_string_literal_backslash_escape(&self) -> bool {
-        self.0.backslash_escapes
-    }
-    fn supports_double_pipe_or_operator(&self) -> bool {
-        self.1
-    }
-    // The rest is `MySqlDialect`'s (sqlparser 0.63): every method it overrides, delegated.
-    fn is_identifier_start(&self, ch: char) -> bool {
-        MySqlDialect {}.is_identifier_start(ch)
-    }
-    fn is_identifier_part(&self, ch: char) -> bool {
-        MySqlDialect {}.is_identifier_part(ch)
-    }
-    fn identifier_quote_style(&self, identifier: &str) -> Option<char> {
-        MySqlDialect {}.identifier_quote_style(identifier)
-    }
-    fn supports_string_literal_concatenation(&self) -> bool {
-        MySqlDialect {}.supports_string_literal_concatenation()
-    }
-    fn ignores_wildcard_escapes(&self) -> bool {
-        MySqlDialect {}.ignores_wildcard_escapes()
-    }
-    fn supports_numeric_prefix(&self) -> bool {
-        MySqlDialect {}.supports_numeric_prefix()
-    }
-    fn supports_bitwise_shift_operators(&self) -> bool {
-        MySqlDialect {}.supports_bitwise_shift_operators()
-    }
-    fn supports_multiline_comment_hints(&self) -> bool {
-        MySqlDialect {}.supports_multiline_comment_hints()
-    }
-    fn parse_infix(&self, parser: &mut Parser, expr: &Expr, precedence: u8) -> Option<Result<Expr, sqlparser::parser::ParserError>> {
-        MySqlDialect {}.parse_infix(parser, expr, precedence)
-    }
-    fn get_next_precedence(&self, parser: &Parser) -> Option<Result<u8, sqlparser::parser::ParserError>> {
-        MySqlDialect {}.get_next_precedence(parser)
-    }
-    fn parse_statement(&self, parser: &mut Parser) -> Option<Result<Statement, sqlparser::parser::ParserError>> {
-        MySqlDialect {}.parse_statement(parser)
-    }
-    fn require_interval_qualifier(&self) -> bool {
-        MySqlDialect {}.require_interval_qualifier()
-    }
-    fn supports_limit_comma(&self) -> bool {
-        MySqlDialect {}.supports_limit_comma()
-    }
-    fn supports_create_table_select(&self) -> bool {
-        MySqlDialect {}.supports_create_table_select()
-    }
-    fn supports_insert_set(&self) -> bool {
-        MySqlDialect {}.supports_insert_set()
-    }
-    fn supports_user_host_grantee(&self) -> bool {
-        MySqlDialect {}.supports_user_host_grantee()
-    }
-    fn is_table_factor_alias(&self, explicit: bool, kw: &sqlparser::keywords::Keyword, parser: &mut Parser) -> bool {
-        MySqlDialect {}.is_table_factor_alias(explicit, kw, parser)
-    }
-    fn supports_table_hints(&self) -> bool {
-        MySqlDialect {}.supports_table_hints()
-    }
-    fn requires_single_line_comment_whitespace(&self) -> bool {
-        MySqlDialect {}.requires_single_line_comment_whitespace()
-    }
-    fn supports_match_against(&self) -> bool {
-        MySqlDialect {}.supports_match_against()
-    }
-    fn supports_select_modifiers(&self) -> bool {
-        MySqlDialect {}.supports_select_modifiers()
-    }
-    fn supports_set_names(&self) -> bool {
-        MySqlDialect {}.supports_set_names()
-    }
-    fn supports_comma_separated_set_assignments(&self) -> bool {
-        MySqlDialect {}.supports_comma_separated_set_assignments()
-    }
-    fn supports_update_order_by(&self) -> bool {
-        MySqlDialect {}.supports_update_order_by()
-    }
-    fn supports_data_type_signed_suffix(&self) -> bool {
-        MySqlDialect {}.supports_data_type_signed_suffix()
-    }
-    fn supports_cross_join_constraint(&self) -> bool {
-        MySqlDialect {}.supports_cross_join_constraint()
-    }
-    fn supports_double_ampersand_operator(&self) -> bool {
-        MySqlDialect {}.supports_double_ampersand_operator()
-    }
-    fn supports_binary_kw_as_cast(&self) -> bool {
-        MySqlDialect {}.supports_binary_kw_as_cast()
-    }
-    fn supports_comment_optimizer_hint(&self) -> bool {
-        MySqlDialect {}.supports_comment_optimizer_hint()
-    }
-    fn supports_constraint_keyword_without_name(&self) -> bool {
-        MySqlDialect {}.supports_constraint_keyword_without_name()
-    }
-    fn supports_key_column_option(&self) -> bool {
-        MySqlDialect {}.supports_key_column_option()
-    }
-    fn supports_group_by_with_modifier(&self) -> bool {
-        MySqlDialect {}.supports_group_by_with_modifier()
-    }
-    fn supports_left_associative_joins_without_parens(&self) -> bool {
-        MySqlDialect {}.supports_left_associative_joins_without_parens()
+}
+
+impl SessionDialect {
+    /// The grammar's options for the session.
+    fn options(&self) -> syntax::mysql::Options {
+        syntax::mysql::Options { backslash_escapes: self.0.backslash_escapes, ansi_quotes: self.0.ansi_quotes, pipes_as_concat: !self.1, ..syntax::mysql::Options::default() }
     }
 }
 
@@ -253,7 +147,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     let dialect = SessionDialect(text.unwrap_or_default(), true);
     // What the engine prints of the statement, for the probes it describes, writes its strings
     // as the session reads them back.
-    sqlparser::ast::set_backslash_escapes(dialect.0.backslash_escapes);
+    syntax::mysql::ast::set_backslash_escapes(dialect.0.backslash_escapes);
     let statement = match lex::one_statement(sql, lexed, KINDS) {
         Ok(statement) => statement,
         Err(message) => return Some(crate::analysis::bare(sql, lexed, Dialect::Mysql, vec![Diagnostic { message, start: 0, length: sql.trim_end().len().max(1), code: 10, server_code: None }])),
@@ -1945,7 +1839,7 @@ const SPACE_SENSITIVE: &[&str] = &[
 ];
 
 /// Why the engine's parser does not read the statement as this server does, if it does not.
-/// `sqlparser` reads `count (x)` as the aggregate and NOT as MySQL ranks it by default; the server
+/// The parser reads `count (x)` as it reads `count(x)`, and NOT as MySQL ranks it by default; the server
 /// reads each by the session's `sql_mode`, where `count (x)` calls a stored function `count` unless
 /// IGNORE_SPACE is set, and HIGH_NOT_PRECEDENCE moves NOT. (Strings, double quotes and `||` the
 /// parser reads by the mode itself: [`SessionDialect`], [`pipes_are_or`].) The mode is asked for
@@ -2236,14 +2130,10 @@ fn constant_keys(sql: &str, statement: &Statement, rewritten: &lex::Rewritten) -
     out
 }
 
-/// Whether an expression is a user variable. `sqlparser` reads `@x` as a name and `` @`x` `` as a
-/// placeholder; `@@x` is a system variable, of one type.
+/// Whether an expression is a user variable, which the parser reads as a name, `@x` and `` @`x` ``
+/// alike; `@@x` is a system variable, of one type.
 pub(crate) fn is_variable(e: &Expr) -> bool {
-    match e {
-        Expr::Identifier(i) => i.quote_style.is_none() && i.value.starts_with('@') && !i.value.starts_with("@@"),
-        Expr::Value(v) => matches!(&v.value, ast::Value::Placeholder(p) if p.starts_with('@')),
-        _ => false,
-    }
+    matches!(e, Expr::Identifier(i) if i.quote_style.is_none() && i.value.starts_with('@') && !i.value.starts_with("@@"))
 }
 
 /// The select-list items of a query, in order: what may reach each one's type, and for a
@@ -2254,7 +2144,7 @@ enum Item {
 }
 
 struct Flow<'a> {
-    /// The kind of each placeholder by where its `?` stands: line and column, as `sqlparser` counts.
+    /// The kind of each placeholder by where its `?` stands: line and column, as the parser counts.
     kinds: &'a HashMap<(u64, u64), u8>,
     /// Every kind the statement has, for a placeholder or an expression the walk cannot place.
     all: u8,
@@ -2533,14 +2423,9 @@ fn widened(ty: &Type, reached: u8) -> Option<Type> {
 /// Whether a statement's first word makes it a write or a SELECT, which return no result set when
 /// the prepare gives them no columns (a `CALL` does not say what its procedure returns).
 fn opens_without_result_sets(sql: &str) -> bool {
-    use sqlparser::keywords::Keyword;
-    let Ok(tokens) = sqlparser::tokenizer::Tokenizer::new(&MySqlDialect {}, sql).tokenize() else { return false };
-    let first = tokens.iter().find_map(|t| match t {
-        sqlparser::tokenizer::Token::Whitespace(_) | sqlparser::tokenizer::Token::LParen => None,
-        sqlparser::tokenizer::Token::Word(w) => Some(Some(w.keyword)),
-        _ => Some(None),
-    });
-    matches!(first, Some(Some(Keyword::DELETE | Keyword::UPDATE | Keyword::INSERT | Keyword::REPLACE | Keyword::SELECT | Keyword::WITH)))
+    let (lexemes, _, _) = syntax::mysql::scan::lexemes(sql, syntax::mysql::Options::default());
+    let first = lexemes.iter().map(|l| &sql[l.start as usize..l.end as usize]).find(|t| *t != "(");
+    first.is_some_and(|w| ["DELETE", "UPDATE", "INSERT", "REPLACE", "SELECT", "WITH"].iter().any(|k| w.eq_ignore_ascii_case(k)))
 }
 
 /// Whether a query's rows go into variables or a file (`select … into @n`), so it returns none.
@@ -2563,65 +2448,27 @@ fn kind(read: Option<&Statement>) -> Option<StatementKind> {
     })
 }
 
-/// Parse with a depth bound of a fifth of [`crate::stack::MAX_DEPTH`] in place of sqlparser's
-/// default of 50: 200 levels of its recursion, which are 196 nested function calls (`coalesce`,
-/// `abs`, `json_object`), 195 nested `CASE`s, or 97 nested subqueries, which spend two levels each.
-/// It is less than the Postgres parser's 500 levels because in the WebAssembly engine sqlparser's
-/// recursion runs on the JavaScript engine's own stack, which a host shares (`core/src/stack.rs`),
-/// at about twice the cost a level of Postgres's tree: a nested function call is eight frames of the parser,
-/// some 2 kB of Node's stack once V8 has optimized them, so under the Postgres bound 496 nested
-/// `coalesce`s needed two thirds of Node's stack before V8 optimized the engine and, on Node 24,
-/// more than all of it after. At 200 the deepest statement of every shape needs at most 42% of it,
-/// as on Postgres, whatever V8 has compiled the engine to (measured on Node 24 and 26, 2026-10-21).
-/// sqlparser's bound counts only its own recursion, and it reads a chain of operators (`a + b + …`,
-/// `x = 1 or x = 2 or …`) in a loop into a tree as deep as the chain, which every walk of the
-/// engine and the tree's drop then recurse through: so a statement with more operators than half of
-/// [`crate::stack::MAX_DEPTH`] is refused before it is read, a bound of its own, since those walks
-/// cost a fraction of the parser's recursion (501 terms need 15% of the stack). That counts
-/// operators in separate expressions together, and only ever leaves a statement to the describe
-/// that a deeper bound would have read.
-///
-/// MySQL's compound interval units (`interval '1:30' minute_second`, `extract(day_hour from d)`)
-/// are not sqlparser's (0.63 refuses the statement), so each is read as its smallest part, the
-/// unit that decides what MySQL computes: `day_hour` as `hour` keeps `date_add` of a DATE a
-/// DATETIME, `year_month` as `month` keeps it a DATE, and EXTRACT is a BIGINT either way. Each of
-/// them is a reserved word in MySQL, so a bare one is always the unit. The token keeps its place
-/// in the text; only a probe printed from the tree (a JSON shape's) names the smaller unit, which
-/// the server types alike.
-fn parse(dialect: &dyn sqlparser::dialect::Dialect, sql: &str) -> Result<Vec<Statement>, sqlparser::parser::ParserError> {
-    use sqlparser::keywords::Keyword;
-    use sqlparser::tokenizer::{Token, Word};
-    let mut tokens = sqlparser::tokenizer::Tokenizer::new(dialect, sql).tokenize_with_location()?;
-    for t in tokens.iter_mut() {
-        let Token::Word(w) = &t.token else { continue };
-        if w.quote_style.is_some() {
-            continue;
-        }
-        let unit = match w.value.to_ascii_uppercase().as_str() {
-            "SECOND_MICROSECOND" | "MINUTE_MICROSECOND" | "HOUR_MICROSECOND" | "DAY_MICROSECOND" => (Keyword::MICROSECOND, "MICROSECOND"),
-            "MINUTE_SECOND" | "HOUR_SECOND" | "DAY_SECOND" => (Keyword::SECOND, "SECOND"),
-            "HOUR_MINUTE" | "DAY_MINUTE" => (Keyword::MINUTE, "MINUTE"),
-            "DAY_HOUR" => (Keyword::HOUR, "HOUR"),
-            "YEAR_MONTH" => (Keyword::MONTH, "MONTH"),
-            _ => continue,
-        };
-        t.token = Token::Word(Word { value: unit.1.to_string(), quote_style: None, keyword: unit.0 });
-    }
-    let operators = tokens
-        .iter()
-        .filter(|t| match &t.token {
-            Token::Word(w) => matches!(
-                w.keyword,
-                Keyword::AND | Keyword::OR | Keyword::XOR | Keyword::DIV | Keyword::MOD | Keyword::NOT | Keyword::IS | Keyword::IN | Keyword::LIKE | Keyword::RLIKE | Keyword::REGEXP | Keyword::BETWEEN | Keyword::COLLATE | Keyword::MEMBER | Keyword::ESCAPE
-            ) && w.quote_style.is_none(),
-            Token::Whitespace(_) | Token::Comma | Token::LParen | Token::RParen | Token::Period | Token::SemiColon | Token::Placeholder(_) | Token::Number(..) | Token::EOF => false,
-            t => !matches!(t.to_string().chars().next(), Some('\'' | '"' | '`' | 'X' | 'x' | 'N' | 'B' | 'b')),
-        })
-        .count();
-    if operators > crate::stack::MAX_DEPTH / 2 {
-        return Err(sqlparser::parser::ParserError::RecursionLimitExceeded);
-    }
-    Parser::new(dialect).with_recursion_limit(crate::stack::MAX_DEPTH / 5).with_tokens_with_locations(tokens).parse_statements()
+/// How far a statement's tree may go: 200 levels of nesting, which a call's arguments, a
+/// parenthesized operand and a CASE each spend one of and a subquery two, and 500 operators in all,
+/// each a level of the tree a chain of them makes, which every walk of the engine and the tree's
+/// drop then recurse through. A statement past either is an error to parse, left to the server's
+/// describe, never an overflow of the stack.
+const BOUNDS: syntax::mysql::Bounds = syntax::mysql::Bounds { depth: crate::stack::MAX_DEPTH / 5, operators: crate::stack::MAX_DEPTH / 2 };
+
+/// The statements of `sql` as the session reads them, within [`BOUNDS`].
+fn parse(dialect: &SessionDialect, sql: &str) -> Result<Vec<Statement>, syntax::mysql::ParseError> {
+    syntax::mysql::parse(sql, dialect.options(), BOUNDS)
+}
+
+/// The statements of `sql` as a session with the default `sql_mode` reads them.
+#[cfg(test)]
+pub(crate) fn parse_default(sql: &str) -> Result<Vec<Statement>, syntax::mysql::ParseError> {
+    parse(&SessionDialect::default(), sql)
+}
+
+/// An expression alone, such as a table's CHECK clause, as a session with the default `sql_mode` reads it.
+pub(crate) fn parse_expr(text: &str) -> Option<Expr> {
+    syntax::mysql::parse_expr(text, syntax::mysql::Options::default(), BOUNDS).ok()
 }
 
 /// What may reach each item of a probe's select list. A probe is the engine's own text, where a
@@ -3059,21 +2906,13 @@ fn traced_tables(q: &Query) -> Option<Vec<String>> {
 /// `CHECK_CLAUSE` as the CHECK was written, or `GENERATION_EXPRESSION` as the generated column's
 /// expression was, which `information_schema` prints alike. It hands their text back double
 /// encoded, each byte of its UTF-8 as the character of that number, and with one more level of
-/// backslash escapes than the server's own reprint. `None` where that does not read back, or
-/// where a string holds `\a` or `\f`, which `sqlparser` reads as control characters and MySQL as
-/// the letters.
+/// backslash escapes than the server's own reprint. `None` where that does not read back.
 pub(crate) fn check_clause(text: &str) -> Option<String> {
     let text = if text.chars().all(|c| (c as u32) <= 0xFF) { String::from_utf8(text.chars().map(|c| c as u8).collect()).ok()? } else { text.to_string() };
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
         out.push(if c == '\\' { chars.next()? } else { c });
-    }
-    let mut chars = out.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' && matches!(chars.next(), Some('a' | 'f') | None) {
-            return None;
-        }
     }
     Some(out)
 }
@@ -3200,7 +3039,7 @@ fn check_documents(clause: &str) -> Vec<(String, String)> {
         }
     }
     let Some(text) = check_clause(clause) else { return Vec::new() };
-    let Ok(expr) = Parser::new(&MySqlDialect {}).try_with_sql(&text).and_then(|mut p| p.parse_expr()) else { return Vec::new() };
+    let Some(expr) = parse_expr(&text) else { return Vec::new() };
     let mut out = Vec::new();
     conjuncts(&expr, None, &mut out);
     out
@@ -3229,7 +3068,7 @@ fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
             let (Some(name), Some(definition), Some(schema)) = (row.first().and_then(as_str), row.get(1).and_then(as_str), row.get(2).and_then(as_str)) else { continue };
             // A definition the session may not read is empty, and reads as nothing. One the parser
             // does not read keeps its text, which may still name a call.
-            let Ok(mut parsed) = Parser::parse_sql(&MySqlDialect {}, definition) else {
+            let Ok(mut parsed) = parse(&SessionDialect::default(), definition) else {
                 keys.unparsed.push(definition.to_string());
                 continue;
             };
@@ -3726,8 +3565,8 @@ mod tests {
         assert_eq!(found.len(), 1);
         let schema: Value = serde_json::from_str(&found[0].1).unwrap();
         assert_eq!(schema, json!({"enum": ["it's", "a\\b", "\u{e9}", "\u{e9}", "\"q\"", "\u{1f600}", "\u{20ac}", "t\tx", "%_"]}));
-        // A string `sqlparser` would read otherwise than MySQL is not read.
-        assert_eq!(check_clause(r"json_schema_valid(_utf8mb4\'\\f\',`doc`)"), None);
+        // A backslash before any other letter is that letter, as MySQL reads it.
+        assert_eq!(check_clause(r"json_schema_valid(_utf8mb4\'\\f\',`doc`)").as_deref(), Some(r"json_schema_valid(_utf8mb4'\f',`doc`)"));
     }
 
     #[test]
@@ -3751,7 +3590,7 @@ mod tests {
     }
 
     fn card(sql: &str) -> String {
-        let mut v = Parser::parse_sql(&MySqlDialect {}, sql).unwrap();
+        let mut v = parse(&SessionDialect::default(), sql).unwrap();
         let Statement::Query(q) = v.pop().unwrap() else { panic!("not a query") };
         cardinality(&q, &keys()).0.as_str().to_string()
     }
@@ -3763,7 +3602,7 @@ mod tests {
             k.columns.insert(table.into(), columns.iter().map(|(c, ty)| (c.to_string(), class_of(ty))).collect());
         }
         let rows = |sql: &str| {
-            let mut v = Parser::parse_sql(&MySqlDialect {}, sql).unwrap();
+            let mut v = parse(&SessionDialect::default(), sql).unwrap();
             let Statement::Query(q) = v.pop().unwrap() else { panic!("not a query") };
             cardinality(&q, &k).0.as_str()
         };
@@ -3965,7 +3804,7 @@ mod tests {
             .map(|(table, names)| (table.to_string(), names.iter().map(|n| n.to_string()).collect()))
             .collect();
         let hides = |sql: &str| {
-            let mut v = Parser::parse_sql(&MySqlDialect {}, sql).unwrap();
+            let mut v = parse(&SessionDialect::default(), sql).unwrap();
             let Statement::Query(q) = v.pop().unwrap() else { panic!("not a query") };
             let mut wanted = Vec::new();
             (hides_aggregate(&q, &columns, &mut wanted), wanted)
@@ -4005,7 +3844,7 @@ mod tests {
             assert!(!hides(sql).0, "{sql}");
         }
         // The tables whose columns say where a bare name binds.
-        let mut v = Parser::parse_sql(&MySqlDialect {}, "select p.id, (select max(created_at) from comments where post_id = p.id) as last from posts p").unwrap();
+        let mut v = parse(&SessionDialect::default(), "select p.id, (select max(created_at) from comments where post_id = p.id) as last from posts p").unwrap();
         let Statement::Query(q) = v.pop().unwrap() else { panic!("not a query") };
         let mut wanted = Vec::new();
         assert!(hides_aggregate(&q, &Default::default(), &mut wanted));
@@ -4088,15 +3927,14 @@ mod tests {
 
     #[test]
     fn statements_nest_to_the_engines_bound() {
-        // sqlparser's own bound is 50; the engine's is 200 levels of its recursion, which a
-        // parenthesized operand (`id = 0 or (…)`) and a subquery each spend two of, and 500
-        // operators in all. A statement past either is an error to parse, left to the server's
-        // describe, never an overflow of the stack.
-        let deepest = |shape: &str| crate::stack::run(|| (1..1_000).take_while(|&n| parse(&MySqlDialect {}, &crate::stack::nested(shape, n)).is_ok()).last().unwrap_or(0));
+        // 200 levels of nesting, which a parenthesized operand (`id = 0 or (…)`) and a subquery
+        // each spend two of, and 500 operators in all ([`BOUNDS`]). A statement past either is an
+        // error to parse, left to the server's describe, never an overflow of the stack.
+        let deepest = |shape: &str| crate::stack::run(|| (1..1_000).take_while(|&n| parse(&SessionDialect::default(), &crate::stack::nested(shape, n)).is_ok()).last().unwrap_or(0));
         let found: Vec<(&str, usize)> = ["sum", "and_or", "case", "coalesce", "subquery"].into_iter().map(|shape| (shape, deepest(shape))).collect();
-        assert_eq!(found, vec![("sum", 501), ("and_or", 98), ("case", 195), ("coalesce", 196), ("subquery", 97)]);
+        assert_eq!(found, vec![("sum", 501), ("and_or", 99), ("case", 198), ("coalesce", 198), ("subquery", 98)]);
         for shape in ["sum", "case", "or", "and_or"] {
-            assert!(crate::stack::run(|| parse(&MySqlDialect {}, &crate::stack::nested(shape, 100_000)).is_err()), "{shape}");
+            assert!(crate::stack::run(|| parse(&SessionDialect::default(), &crate::stack::nested(shape, 100_000)).is_err()), "{shape}");
         }
         // A whole analysis at the bound and far past it, which used to overflow the stack.
         let described = json!({ "columns": [{ "name": "x", "type": 8, "flags": 1 }], "params": [] });
@@ -4104,14 +3942,18 @@ mod tests {
             let (analysis, _) = crate::stack::run(|| analyzed(&crate::stack::nested("sum", n), described.clone(), "STRICT_TRANS_TABLES"));
             assert_eq!(analysis.columns.len(), 1, "{n}");
         }
+        // Every shape at its deepest is analyzed whole on the engine's stack.
+        for (shape, n) in found {
+            let (analysis, _) = crate::stack::run(|| analyzed(&crate::stack::nested(shape, n), described.clone(), "STRICT_TRANS_TABLES"));
+            assert_eq!(analysis.columns.len(), 1, "{shape}");
+        }
     }
 
     #[test]
     fn a_table_may_be_named_local_or_directory() {
-        // Hive's `INSERT OVERWRITE [LOCAL] DIRECTORY` took both words in upstream's sqlparser,
-        // which refused these; the engine's copy reads them as MySQL does (vendor/sqlparser).
+        // Neither word is a keyword of MySQL's that a table's name would need quotes for.
         for sql in ["insert into local values (1)", "insert into directory (id) values (1)"] {
-            assert!(parse(&MySqlDialect {}, sql).is_ok(), "{sql}");
+            assert!(parse(&SessionDialect::default(), sql).is_ok(), "{sql}");
         }
     }
 
@@ -4119,7 +3961,7 @@ mod tests {
     fn a_chain_of_joins_is_read_in_one_pass() {
         // A join with no ON or USING of its own is the left operand of the joins after it, and
         // nests them only where an ON or USING is left over for it.
-        let printed = |sql: &str| parse(&MySqlDialect {}, sql).unwrap_or_else(|e| panic!("{sql}: {e}")).pop().unwrap().to_string();
+        let printed = |sql: &str| parse(&SessionDialect::default(), sql).unwrap_or_else(|e| panic!("{sql}: {e}")).pop().unwrap().to_string();
         assert_eq!(printed("SELECT * FROM a JOIN b RIGHT JOIN c ON x"), "SELECT * FROM a JOIN b RIGHT JOIN c ON x");
         assert_eq!(printed("SELECT * FROM a JOIN b JOIN c ON x ON y"), "SELECT * FROM a JOIN (b JOIN c ON x) ON y");
         // The joins read after a bare one are kept, never read again, which made a chain of bare
@@ -4141,7 +3983,7 @@ mod tests {
     fn bang_binds_tighter_than_any_binary_operator_but_the_arrows() {
         // `->` and `->>` are part of `!`'s operand, as in MySQL, and every other binary operator
         // takes `!x` as its operand.
-        let item = |sql: &str| match parse(&MySqlDialect {}, sql).unwrap_or_else(|e| panic!("{sql}: {e}")).pop() {
+        let item = |sql: &str| match parse(&SessionDialect::default(), sql).unwrap_or_else(|e| panic!("{sql}: {e}")).pop() {
             Some(Statement::Query(q)) => match *q.body {
                 SetExpr::Select(s) => match s.projection.into_iter().next() {
                     Some(SelectItem::UnnamedExpr(e)) => e,
@@ -4161,7 +4003,7 @@ mod tests {
 
     #[test]
     fn the_session_dialect_is_mysqls_but_for_strings_and_double_quotes() {
-        // In the default reading the tree is `MySqlDialect`'s, statement for statement.
+        // The default reading reads each of these.
         for sql in [
             "select a.id, count(*) div 2, x << 1 from t a straight_join u b on a.id = b.id where a.n && 1 group by a.id with rollup limit 1, 2",
             "select 'it\\'s', \"say \\\"hi\\\"\", `n`, binary name, _utf8mb4'x', 0x1f, x'1f', b'1', date '2026-01-01' + interval 1 day from t use index (k) for update",
@@ -4170,25 +4012,24 @@ mod tests {
             "select /*+ max_execution_time(10) */ id from t where match (name) against ('x' in boolean mode) -- c",
             "select json_object('k', json_arrayagg(id)) from t # c",
         ] {
-            let mysql = Parser::parse_sql(&MySqlDialect {}, sql).map(|v| format!("{v:?}"));
-            assert_eq!(Parser::parse_sql(&SessionDialect(MysqlText::default(), true), sql).map(|v| format!("{v:?}")), mysql, "{sql}");
+            assert!(parse(&SessionDialect::default(), sql).is_ok(), "{sql}");
         }
         let one = |sql: &str, text: MysqlText| {
-            sqlparser::ast::set_backslash_escapes(text.backslash_escapes);
-            Parser::parse_sql(&SessionDialect(text, true), sql).unwrap().pop().unwrap().to_string()
+            syntax::mysql::ast::set_backslash_escapes(text.backslash_escapes);
+            parse(&SessionDialect(text, true), sql).unwrap().pop().unwrap().to_string()
         };
         let plain = MysqlText { backslash_escapes: false, ansi_quotes: false };
         let ansi = MysqlText { backslash_escapes: true, ansi_quotes: true };
         assert_eq!(one(r"select 'C:\' as p, id from t where id = ?", plain), r"SELECT 'C:\' AS p, id FROM t WHERE id = ?");
-        assert!(Parser::parse_sql(&SessionDialect(MysqlText::default(), true), r"select 'C:\' as p, id from t where id = ?").is_err());
+        assert!(parse(&SessionDialect(MysqlText::default(), true), r"select 'C:\' as p, id from t where id = ?").is_err());
         assert_eq!(one(r#"select "id" from "t" where "id" = 1"#, ansi), r#"SELECT "id" FROM "t" WHERE "id" = 1"#);
         // `||` is OR, bound as OR binds, unless the session joins strings with it.
-        let pipes = |sql: &str, or: bool| Parser::parse_sql(&SessionDialect(MysqlText::default(), or), sql).unwrap().pop().unwrap().to_string();
+        let pipes = |sql: &str, or: bool| parse(&SessionDialect(MysqlText::default(), or), sql).unwrap().pop().unwrap().to_string();
         assert_eq!(pipes("select id from t where id = 1 || name = 'a' && n = 2", true), "SELECT id FROM t WHERE id = 1 OR name = 'a' AND n = 2");
         assert_eq!(pipes("select a = b || c as x from t", true), "SELECT a = b OR c AS x FROM t");
         assert_eq!(pipes("select a = b || c as x from t", false), "SELECT a = b || c AS x FROM t");
         let top = |or: bool| {
-            let Some(Statement::Query(q)) = Parser::parse_sql(&SessionDialect(MysqlText::default(), or), "select a = b || c as x from t").unwrap().pop() else { panic!("not a query") };
+            let Some(Statement::Query(q)) = parse(&SessionDialect(MysqlText::default(), or), "select a = b || c as x from t").unwrap().pop() else { panic!("not a query") };
             let SetExpr::Select(s) = *q.body else { panic!("not a select") };
             let Some(SelectItem::ExprWithAlias { expr: Expr::BinaryOp { left, op, .. }, .. }) = s.projection.into_iter().next() else { panic!("no operator") };
             (op, matches!(*left, Expr::BinaryOp { .. }))

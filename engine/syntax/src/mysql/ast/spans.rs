@@ -15,18 +15,19 @@
 // specific language governing permissions and limitations
 // under the License.
 //
-// Changed in Reylo's copy (engine/mysql/vendor/sqlparser/README.md).
+// Changed for reylo-sql from sqlparser-rs 0.63.0: what only its parser, its other dialects and
+// its optional features used is left out, and MySQL's statements print as MySQL reads them.
 
-use crate::{
-    ast::{
+use crate::mysql::ast::{
+    {
         ddl::AlterSchema, query::SelectItemQualifiedWildcardKind, AlterSchemaOperation, AlterTable,
         ColumnOptions, CreateOperator, CreateOperatorClass, CreateOperatorFamily, CreateView, Owner, TypedString,
     },
-    tokenizer::TokenWithSpan,
+    tokens::TokenWithSpan,
 };
 use core::iter;
 
-use crate::tokenizer::Span;
+use crate::mysql::ast::tokens::Span;
 
 use super::{
     comments, dcl::SecondaryRoles, value::ValueWithSpan, AccessExpr, AlterColumnOperation,
@@ -71,7 +72,7 @@ fn union_spans<I: Iterator<Item = Span>>(iter: I) -> Span {
 /// [this ticket]: https://github.com/apache/datafusion-sqlparser-rs/issues/1548
 ///
 /// # Example
-/// ```
+/// ```ignore
 /// # use sqlparser::parser::{Parser, ParserError};
 /// # use sqlparser::ast::Spanned;
 /// # use sqlparser::dialect::GenericDialect;
@@ -97,7 +98,7 @@ pub trait Spanned {
     /// Return the [`Span`] (the minimum and maximum [`Location`]) for this AST
     /// node, by recursively combining the spans of its children.
     ///
-    /// [`Location`]: crate::tokenizer::Location
+    /// [`Location`]: crate::mysql::ast::tokens::Location
     fn span(&self) -> Span;
 }
 

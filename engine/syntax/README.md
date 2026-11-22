@@ -19,6 +19,17 @@ assert_eq!(tree.errors[0].message, "syntax error at end of input");
 
 MySQL's own grammar is GPL, so nothing here is generated or derived from it. Its syntax comes from TiDB's grammar (Apache 2.0), and what TiDB lacks is written from MySQL's reference manual in `gen/mysql_grammar.py`.
 
+## Typed trees
+
+Postgres's statements also read as pg_query's protobuf tree, and MySQL's as sqlparser-rs's AST, built from the lossless tree.
+
+```rust
+use reylo_sql::mysql::{parse, Bounds, Options};
+
+let statements = parse("select id from users where id = ?", Options::default(), Bounds { depth: 200, operators: 500 }).unwrap();
+assert_eq!(statements[0].to_string(), "SELECT id FROM users WHERE id = ?");
+```
+
 ## Regenerating
 
 Each `generated` file comes from a pinned upstream version, and is never edited.

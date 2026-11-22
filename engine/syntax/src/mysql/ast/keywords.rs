@@ -15,7 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 //
-// Changed in Reylo's copy (engine/mysql/vendor/sqlparser/README.md).
+// Changed for reylo-sql from sqlparser-rs 0.63.0: what only its parser, its other dialects and
+// its optional features used is left out, and MySQL's statements print as MySQL reads them.
 
 //! This module defines:
 //! 1) a list of constants for every keyword
@@ -28,12 +29,6 @@
 //!    and could be removed.
 //! 3) a `RESERVED_FOR_TABLE_ALIAS` array with keywords reserved in a
 //!    "table alias" context.
-
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "visitor")]
-use sqlparser_derive::{Visit, VisitMut};
 
 /// Defines a string constant for a single keyword: `kw_def!(SELECT);`
 /// expands to `pub const SELECT = "SELECT";`
@@ -54,8 +49,8 @@ macro_rules! define_keywords {
         $ident:ident $(= $string_keyword:expr)?
     ),*) => {
         #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash)]
-        #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-        #[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
+        
         #[allow(non_camel_case_types)]
         /// An enumeration of SQL keywords recognized by the parser.
         pub enum Keyword {

@@ -14,29 +14,21 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-
-#[cfg(not(feature = "std"))]
-use alloc::string::String;
+//
+// Changed for reylo-sql from sqlparser-rs 0.63.0: what only its parser, its other dialects and
+// its optional features used is left out, and MySQL's statements print as MySQL reads them.
 
 use core::{
     fmt::{self, Write},
     ops::{Deref, DerefMut},
 };
 
-#[cfg(feature = "bigdecimal")]
-use bigdecimal::BigDecimal;
-
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-use crate::{ast::Ident, tokenizer::Span};
-#[cfg(feature = "visitor")]
-use sqlparser_derive::{Visit, VisitMut};
+use crate::mysql::ast::{Ident, tokens::Span};
 
 /// Wraps a primitive SQL [`Value`]  with its [`Span`] location
 ///
 /// # Example: create a `ValueWithSpan` from a `Value`
-/// ```
+/// ```ignore
 /// # use sqlparser::ast::{Value, ValueWithSpan};
 /// # use sqlparser::tokenizer::{Location, Span};
 /// let value = Value::SingleQuotedString(String::from("endpoint"));
@@ -48,7 +40,7 @@ use sqlparser_derive::{Visit, VisitMut};
 /// # Example: create a `ValueWithSpan` from a `Value` with an empty span
 ///
 /// You can call [`Value::with_empty_span`] to create a `ValueWithSpan` with an empty span
-/// ```
+/// ```ignore
 /// # use sqlparser::ast::{Value, ValueWithSpan};
 /// # use sqlparser::tokenizer::{Location, Span};
 /// let value = Value::SingleQuotedString(String::from("endpoint"));
@@ -57,7 +49,7 @@ use sqlparser_derive::{Visit, VisitMut};
 /// ```
 ///
 /// You can also use the [`From`] trait to convert  `ValueWithSpan` to/from `Value`s
-/// ```
+/// ```ignore
 /// # use sqlparser::ast::{Value, ValueWithSpan};
 /// # use sqlparser::tokenizer::{Location, Span};
 /// let value = Value::SingleQuotedString(String::from("endpoint"));
@@ -69,12 +61,7 @@ use sqlparser_derive::{Visit, VisitMut};
 /// ```
 /// A `Value` paired with its source `Span` location.
 #[derive(Debug, Clone, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(
-    feature = "visitor",
-    derive(Visit, VisitMut),
-    visit(with = "visit_value")
-)]
+
 pub struct ValueWithSpan {
     /// The wrapped `Value`.
     pub value: Value,
@@ -134,18 +121,12 @@ impl DerefMut for ValueWithSpan {
 
 /// Primitive SQL values such as number and string
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum Value {
     /// Numeric literal
-    #[cfg(not(feature = "bigdecimal"))]
+
     Number(String, bool),
-    #[cfg(feature = "bigdecimal")]
-    /// HINT: use `test_utils::number` to make an instance of
-    /// Value::Number This might help if you your tests pass locally
-    /// but fail on CI with the `--all-features` flag enabled
-    /// Numeric literal (uses `BigDecimal` when the `bigdecimal` feature is enabled).
-    Number(BigDecimal, bool),
+
     /// 'string value'
     SingleQuotedString(String),
     /// Dollar-quoted string literal, e.g. `$$...$$` or `$tag$...$tag$` (Postgres syntax).
@@ -296,8 +277,7 @@ impl fmt::Display for Value {
 
 /// A dollar-quoted string literal, e.g. `$$...$$` or `$tag$...$tag$`.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct DollarQuotedString {
     /// Inner string contents.
     pub value: String,
@@ -323,8 +303,7 @@ impl fmt::Display for DollarQuotedString {
 /// See [Value::QuoteDelimitedStringLiteral] and/or
 /// [Value::NationalQuoteDelimitedStringLiteral].
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct QuoteDelimitedString {
     /// the quote start character; i.e. the character _after_ the opening `Q'`
     pub start_quote: char,
@@ -346,8 +325,7 @@ impl fmt::Display for QuoteDelimitedString {
 /// `YEAR`, `MONTH`, `DAY`, etc.). The `Custom` variant allows arbitrary
 /// identifiers (e.g. dialect-specific abbreviations).
 #[derive(Debug, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum DateTimeField {
     /// `YEAR`
     Year,
@@ -504,8 +482,7 @@ impl fmt::Display for DateTimeField {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 /// The Unicode Standard defines four normalization forms, which are intended to eliminate
 /// certain distinctions between visually or functionally identical characters.
 ///
@@ -726,8 +703,7 @@ pub fn escape_unicode_string(s: &str) -> EscapeUnicodeStringLiteral<'_> {
 ///
 /// Corresponds to `TRIM(BOTH|LEADING|TRAILING)` SQL syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum TrimWhereField {
     /// `BOTH` (trim from both ends)
     Both,

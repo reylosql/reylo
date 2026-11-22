@@ -1281,7 +1281,7 @@ version = "0.8.2"
 dependencies = [
  "reylo-engine-build",
  "reylo-engine-core",
- "reylo-sqlparser",
+ "reylo-sql",
  "serde",
  "serde_json",
 ]
@@ -1317,13 +1317,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "wit-bindgen 0.63.0",
-]
-
-[[package]]
-name = "reylo-sqlparser"
-version = "0.63.0"
-dependencies = [
- "log",
 ]
 
 [[package]]

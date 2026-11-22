@@ -21,7 +21,7 @@
 use crate::api::{MysqlColumn, MysqlDescribe, Scope};
 use crate::host::{as_str, Host, Lazy};
 use crate::types::Type;
-use sqlparser::ast::{Cte, Expr, ObjectNamePart, Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SetOperator, TableFactor, TableWithJoins, With};
+use syntax::mysql::ast::{Cte, Expr, ObjectNamePart, Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SetOperator, TableFactor, TableWithJoins, With};
 
 /// How many derived tables, WITH queries and UNION sides deep a column is followed.
 const MAX_DEPTH: usize = 8;
@@ -423,7 +423,7 @@ mod tests {
         // A session with a TEMPORARY `statuses` over a table of that name: the prepare and `SHOW COLUMNS` read the temporary table.
         let labelled = |flags: u32, shown: &str| {
             let sql = "select val from statuses union all select val from statuses2";
-            let Some(sqlparser::ast::Statement::Query(q)) = sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, sql).unwrap().pop() else { panic!() };
+            let Some(syntax::mysql::ast::Statement::Query(q)) = crate::mysql::parse_default(sql).unwrap().pop() else { panic!() };
             let column = |ty: u32, flags: u32| serde_json::json!({ "name": "val", "type": ty, "flags": flags, "charset": 255 });
             let raw: MysqlDescribe = serde_json::from_value(serde_json::json!({ "columns": [column(253, 1)], "params": [] })).unwrap();
             let mut answers: std::collections::HashMap<String, crate::api::Answer> = Default::default();
@@ -455,8 +455,8 @@ mod tests {
 
     #[test]
     fn a_reference_is_a_bare_or_qualified_column() {
-        let expr = |sql: &str| match sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, &format!("select {sql}")).unwrap().pop() {
-            Some(sqlparser::ast::Statement::Query(q)) => match *q.body {
+        let expr = |sql: &str| match crate::mysql::parse_default(&format!("select {sql}")).unwrap().pop() {
+            Some(syntax::mysql::ast::Statement::Query(q)) => match *q.body {
                 SetExpr::Select(s) => match s.projection.into_iter().next() {
                     Some(SelectItem::UnnamedExpr(e)) => e,
                     other => panic!("{other:?}"),

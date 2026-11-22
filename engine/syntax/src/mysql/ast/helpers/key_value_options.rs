@@ -14,26 +14,20 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+//
+// Changed for reylo-sql from sqlparser-rs 0.63.0: what only its parser, its other dialects and
+// its optional features used is left out, and MySQL's statements print as MySQL reads them.
 
 //! Key-value options for SQL statements.
 //! See [this page](https://docs.snowflake.com/en/sql-reference/commands-data-loading) for more details.
 
-#[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
 use core::fmt::Formatter;
 
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "visitor")]
-use sqlparser_derive::{Visit, VisitMut};
-
-use crate::ast::{display_comma_separated, display_separated, ValueWithSpan};
+use crate::mysql::ast::{display_comma_separated, display_separated, ValueWithSpan};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 /// A collection of key-value options.
 pub struct KeyValueOptions {
     /// The list of key-value options.
@@ -43,8 +37,7 @@ pub struct KeyValueOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 /// The delimiter used between key-value options.
 pub enum KeyValueOptionsDelimiter {
     /// Options are separated by spaces.
@@ -54,8 +47,7 @@ pub enum KeyValueOptionsDelimiter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 /// A single key-value option.
 pub struct KeyValueOption {
     /// The name of the option.
@@ -70,8 +62,7 @@ pub struct KeyValueOption {
 /// as Value::Placeholder. For example: MFA_METHOD=SMS will be represented as
 /// `Value::Placeholder("SMS".to_string)`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 /// The kind of value for a key-value option.
 pub enum KeyValueOptionKind {
     /// A single value.

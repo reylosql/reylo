@@ -14,14 +14,16 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+//
+// Changed for reylo-sql from sqlparser-rs 0.63.0: what only its parser, its other dialects and
+// its optional features used is left out, and MySQL's statements print as MySQL reads them.
 
 //! SQL Abstract Syntax Tree (AST) for triggers.
 use super::*;
 
 /// This specifies whether the trigger function should be fired once for every row affected by the trigger event, or just once per SQL statement.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum TriggerObject {
     /// The trigger fires once for each row affected by the triggering event
     Row,
@@ -39,8 +41,7 @@ impl fmt::Display for TriggerObject {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 /// This clause indicates whether the following relation name is for the before-image transition relation or the after-image transition relation
 pub enum TriggerReferencingType {
     /// The transition relation containing the old rows affected by the triggering statement
@@ -60,8 +61,7 @@ impl fmt::Display for TriggerReferencingType {
 
 /// This keyword immediately precedes the declaration of one or two relation names that provide access to the transition relations of the triggering statement
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct TriggerReferencing {
     /// The referencing type (`OLD TABLE` or `NEW TABLE`).
     pub refer_type: TriggerReferencingType,
@@ -85,8 +85,7 @@ impl fmt::Display for TriggerReferencing {
 
 /// Used to describe trigger events
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum TriggerEvent {
     /// Trigger on INSERT event
     Insert,
@@ -118,8 +117,7 @@ impl fmt::Display for TriggerEvent {
 
 /// Trigger period
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum TriggerPeriod {
     /// The trigger fires once for each row affected by the triggering event
     For,
@@ -144,8 +142,7 @@ impl fmt::Display for TriggerPeriod {
 
 /// Types of trigger body execution body.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum TriggerExecBodyType {
     /// Execute a function
     Function,
@@ -163,8 +160,7 @@ impl fmt::Display for TriggerExecBodyType {
 }
 /// This keyword immediately precedes the declaration of one or two relation names that provide access to the transition relations of the triggering statement
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct TriggerExecBody {
     /// Whether the body is a `FUNCTION` or `PROCEDURE` invocation.
     pub exec_type: TriggerExecBodyType,

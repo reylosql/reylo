@@ -14,26 +14,21 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+//
+// Changed for reylo-sql from sqlparser-rs 0.63.0: what only its parser, its other dialects and
+// its optional features used is left out, and MySQL's statements print as MySQL reads them.
 
 //! AST types specific to loading and unloading syntax, like one available in Snowflake which
 //! contains: STAGE ddl operations, PUT upload or COPY INTO
 //! See [this page](https://docs.snowflake.com/en/sql-reference/commands-data-loading) for more details.
 
-#[cfg(not(feature = "std"))]
-use alloc::string::String;
 use core::fmt;
 
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-use crate::ast::helpers::key_value_options::KeyValueOptions;
-use crate::ast::{Ident, ObjectName, SelectItem};
-#[cfg(feature = "visitor")]
-use sqlparser_derive::{Visit, VisitMut};
+use crate::mysql::ast::helpers::key_value_options::KeyValueOptions;
+use crate::mysql::ast::{Ident, ObjectName, SelectItem};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 /// Parameters for a named stage object used in data loading/unloading.
 pub struct StageParamsObject {
     /// Optional URL for the stage.
@@ -51,8 +46,7 @@ pub struct StageParamsObject {
 /// This enum enables support for both standard SQL select item expressions
 /// and Snowflake-specific ones for data loading.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum StageLoadSelectItemKind {
     /// A standard SQL select item expression.
     SelectItem(SelectItem),
@@ -70,8 +64,7 @@ impl fmt::Display for StageLoadSelectItemKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 /// A single item in the `SELECT` list for data loading from staged files.
 pub struct StageLoadSelectItem {
     /// Optional alias for the input source.
@@ -123,12 +116,11 @@ impl fmt::Display for StageLoadSelectItem {
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 /// A command to stage files to a named stage.
 pub struct FileStagingCommand {
     /// The stage to which files are being staged.
-    #[cfg_attr(feature = "visitor", visit(with = "visit_relation"))]
+
     pub stage: ObjectName,
     /// Optional file matching `PATTERN` expression.
     pub pattern: Option<String>,

@@ -28,9 +28,9 @@ use std::cell::Cell;
 /// host's frames, and the deepest statement of each shape leaves the host 45% of it
 /// (`tests/depth.test.ts`). The
 /// other parsers spend more a level, so each has a bound of its own, set where the deepest
-/// statement needs no more of Node's stack than that: the MySQL engine bounds `sqlparser`'s
-/// recursion to a fifth of this, 200 levels (196 nested function calls, 195 `CASE`s, 97
-/// subqueries), and a statement's operators to half (`engine/mysql/src/mysql.rs`); the embedded
+/// statement needs no more of Node's stack than that: the MySQL engine bounds its tree's nesting
+/// to a fifth of this, 200 levels (198 nested function calls or `CASE`s, 98 subqueries), and a
+/// statement's operators to half (`engine/mysql/src/mysql.rs`); the embedded
 /// SQLite reads an expression at most 350 deep, where its own bound is 1,000
 /// (`engine/sqlite/csrc/reylo_sqlite.c`).
 pub const MAX_DEPTH: usize = 1_000;

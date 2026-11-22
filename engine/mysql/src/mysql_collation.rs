@@ -274,18 +274,16 @@ mod tests {
 
     #[test]
     fn the_engines_parser_reads_a_json_table_columns_character_set_and_collation_and_prints_them() {
-        use sqlparser::dialect::MySqlDialect;
-        use sqlparser::parser::Parser;
         // The written statement, and one that names a character set too, keep their tree, which
         // the row count, the JSON shapes and the probes are read from.
         for sql in [
             compiled("select j.n from json_table(:d, '$[*]' columns (n text path '$')) j"),
             "select j.n from json_table(?, '$[*]' columns (n varchar(40) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin EXISTS PATH '$')) AS j".to_string(),
         ] {
-            let parsed = Parser::parse_sql(&MySqlDialect {}, &sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+            let parsed = crate::mysql::parse_default(&sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
             let printed = parsed[0].to_string();
             assert!(printed.contains("COLLATE utf8mb4_"), "{printed}");
-            assert_eq!(Parser::parse_sql(&MySqlDialect {}, &printed).unwrap()[0].to_string(), printed);
+            assert_eq!(crate::mysql::parse_default(&printed).unwrap()[0].to_string(), printed);
         }
     }
 }

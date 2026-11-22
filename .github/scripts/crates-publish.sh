@@ -2,9 +2,7 @@
 # Publishes the Rust crates to crates.io at a release's version, from its tagged commit, in the order
 # they depend on each other: each version once, so a run cut off part of the way is run again as it
 # is. A version crates.io already holds is skipped only where the crate packed here holds the same
-# files (crate-matches.py): the parser crates keep the version of what they copy across releases, so
-# a change to one at a version crates.io holds would otherwise never reach crates.io, and the run
-# stops instead, naming the crate to give a new version. The token is CARGO_REGISTRY_TOKEN, which
+# files (crate-matches.py), and where it doesn't, the run stops, naming the crate. The token is CARGO_REGISTRY_TOKEN, which
 # cargo reads: in release.yml a token crates.io's trusted publishing gives the run (this repository, this workflow), which lasts 30 minutes; for a crate's
 # first version, which no trusted publisher can make, a token of a maintainer's own, from their
 # machine, with `--trust`, which then gives each crate its trusted publisher: release.yml in its
@@ -29,9 +27,8 @@ fi
 version=${1:?the version to publish, as the tag names it without its v}
 : "${CARGO_REGISTRY_TOKEN:?CARGO_REGISTRY_TOKEN names the crates.io token}"
 agent="reylo-release (github.com/reylosql/reylo)"
-# Each crate after those it depends on. The parser crate keeps its own version, which changes only
-# with what it copies.
-crates=(reylo-sqlparser reylo-engine-build reylo-sql reylo-engine-core reylo-engine-postgres reylo-engine-sqlite reylo-engine-mysql reylo-engine reylo-migrate reylo-build reylo-macros reylo reylo-cli)
+# Each crate after those it depends on.
+crates=(reylo-engine-build reylo-sql reylo-engine-core reylo-engine-postgres reylo-engine-sqlite reylo-engine-mysql reylo-engine reylo-migrate reylo-build reylo-macros reylo reylo-cli)
 
 metadata=$(cargo metadata --no-deps --format-version 1 --locked)
 versions=$(python3 -c '
@@ -48,18 +45,13 @@ if [ "$listed" != "$(printf '%s\n' "${crates[@]}" | sort)" ]; then
   exit 1
 fi
 
-# Every crate at the release's version before any is published, the parser crate aside.
+# Every crate at the release's version before any is published.
 for crate in "${crates[@]}"; do
   crate_version=$(awk -v c="$crate" '$1 == c { print $2 }' <<<"$versions")
-  case "$crate" in
-    reylo-sqlparser) ;;
-    *)
-      if [ "$crate_version" != "$version" ]; then
-        echo "$crate is at $crate_version in this checkout, not $version" >&2
-        exit 1
-      fi
-      ;;
-  esac
+  if [ "$crate_version" != "$version" ]; then
+    echo "$crate is at $crate_version in this checkout, not $version" >&2
+    exit 1
+  fi
 done
 
 # Whether crates.io holds a crate's version: only its 404 is a no, and any other answer is tried

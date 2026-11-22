@@ -9,20 +9,20 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Changed for reylo-sql from sqlparser-rs 0.63.0: what only its parser, its other dialects and
+// its optional features used is left out, and MySQL's statements print as MySQL reads them.
 
 //! Provides a representation of source code comments in parsed SQL code.
 //!
 //! See [Comments::find] for an example.
-
-#[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
 
 use core::{
     ops::{Bound, Deref, RangeBounds},
     slice,
 };
 
-use crate::tokenizer::{Location, Span};
+use crate::mysql::ast::tokens::{Location, Span};
 
 /// An opaque container for comments from a parse SQL source code.
 #[derive(Default, Debug, Clone)]
@@ -49,7 +49,7 @@ impl Comments {
     /// source code.
     ///
     /// # Example
-    /// ```rust
+    /// ```ignore
     /// use sqlparser::{dialect::GenericDialect, parser::Parser, tokenizer::Location};
     ///
     /// let sql = r#"/*
@@ -84,7 +84,7 @@ impl Comments {
     ///    &[" world ", " second statement", " trailing comment"]);
     /// ```
     ///
-    /// The [Spanned](crate::ast::Spanned) trait allows you to access location
+    /// The [Spanned](crate::mysql::ast::Spanned) trait allows you to access location
     /// information for certain AST nodes.
     pub fn find<R: RangeBounds<Location>>(&self, range: R) -> Iter<'_> {
         let (start, end) = (

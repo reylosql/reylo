@@ -24,7 +24,7 @@
 //! compared with a FLOAT or DOUBLE compares as a double.
 
 use crate::mysql::{compares_as_is, const_limit, deterministic, is_variable, one_before_limit, reads_column, select_of, value_class, Class, Keys};
-use sqlparser::ast::{self, Distinct, Expr, GroupByExpr, JoinConstraint, JoinOperator, ObjectNamePart, Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, TableFactor, TableWithJoins};
+use syntax::mysql::ast::{self, Distinct, Expr, GroupByExpr, JoinConstraint, JoinOperator, ObjectNamePart, Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, TableFactor, TableWithJoins};
 
 /// One WITH query in scope: its name in lower case, its body (`None` for one of a RECURSIVE WITH),
 /// how many of the entries before it its body sees, and the names its column list gives its

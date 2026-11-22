@@ -28,10 +28,10 @@ function nested(shape: string, n: number): string {
 }
 const POSTGRES_BOUNDS: [string, number][] = [["sum", 496], ["concat", 496], ["and_or", 495], ["case", 493], ["coalesce", 495], ["json", 495], ["subquery", 164]];
 const SQLITE_BOUNDS: [string, number][] = [["sum", 350], ["and_or", 348], ["case", 348], ["coalesce", 349], ["subquery", 23]];
-// MySQL's statements are read by sqlparser with a fifth of the bound, 200 levels of its recursion,
-// which a parenthesized operand (`id = 0 or (…)`) and a subquery each spend two of, and at most 500
-// operators, as engine/mysql/src/mysql.rs's tests have them.
-const MYSQL_BOUNDS: [string, number][] = [["sum", 501], ["and_or", 98], ["case", 195], ["coalesce", 196], ["subquery", 97]];
+// MySQL's statements nest to a fifth of the bound, 200 levels, which a parenthesized operand
+// (`id = 0 or (…)`) and a subquery each spend two of, and have at most 500 operators, as
+// engine/mysql/src/mysql.rs's tests have them.
+const MYSQL_BOUNDS: [string, number][] = [["sum", 501], ["and_or", 99], ["case", 198], ["coalesce", 198], ["subquery", 98]];
 
 // A server that describes every statement as one int4 column and answers every catalog query with
 // no rows: enough for the engine to parse the statement and run every pass over its tree.

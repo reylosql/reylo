@@ -102,6 +102,18 @@ SOFTWARE.
 
 The tables and scanner in `src/sqlite/` are generated or ported from SQLite 3.53.4's `parse.y`, `tokenize.c` and `global.c`, which are in the public domain.
 
+## sqlparser
+
+The syntax tree types in `src/mysql/ast/` are sqlparser-rs 0.63.0's AST, under the Apache License 2.0, a copy of which is in `LICENSE-APACHE`. Each file says what it changes under its license header.
+
+```text
+Apache DataFusion sqlparser-rs
+Copyright 2024-2026 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+```
+
 ## TiDB
 
 The tables and scanner in `src/mysql/` are generated or ported from TiDB's `pkg/parser/parser.y`, `lexer.go` and `misc.go`, under the Apache License 2.0, a copy of which is in `LICENSE-APACHE`.

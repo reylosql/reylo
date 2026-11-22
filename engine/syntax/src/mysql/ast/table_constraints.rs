@@ -14,31 +14,24 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+//
+// Changed for reylo-sql from sqlparser-rs 0.63.0: what only its parser, its other dialects and
+// its optional features used is left out, and MySQL's statements print as MySQL reads them.
 
 //! SQL Abstract Syntax Tree (AST) types for table constraints
 
-use crate::ast::{
+use crate::mysql::ast::{
     display_comma_separated, display_separated, ConstraintCharacteristics,
     ConstraintReferenceMatchKind, Expr, Ident, IndexColumn, IndexOption, IndexType,
     KeyOrIndexDisplay, NullsDistinctOption, ObjectName, ReferentialAction,
 };
-use crate::tokenizer::Span;
+use crate::mysql::ast::tokens::Span;
 use core::fmt;
-
-#[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, string::String, vec::Vec};
-
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "visitor")]
-use sqlparser_derive::{Visit, VisitMut};
 
 /// A table-level constraint, specified in a `CREATE TABLE` or an
 /// `ALTER TABLE ADD <constraint>` statement.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum TableConstraint {
     /// MySQL [definition][1] for `UNIQUE` constraints statements:\
     /// * `[CONSTRAINT [<name>]] UNIQUE <index_type_display> [<index_name>] [index_type] (<columns>) <index_options>`
@@ -184,8 +177,7 @@ impl fmt::Display for TableConstraint {
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 /// A `CHECK` constraint (`[ CONSTRAINT <name> ] CHECK (<expr>) [NO INHERIT] [[NOT] ENFORCED]`).
 pub struct CheckConstraint {
     /// Optional constraint name.
@@ -202,7 +194,7 @@ pub struct CheckConstraint {
 
 impl fmt::Display for CheckConstraint {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use crate::ast::ddl::display_constraint_name;
+        use crate::mysql::ast::ddl::display_constraint_name;
         write!(
             f,
             "{}CHECK ({})",
@@ -219,7 +211,7 @@ impl fmt::Display for CheckConstraint {
     }
 }
 
-impl crate::ast::Spanned for CheckConstraint {
+impl crate::mysql::ast::Spanned for CheckConstraint {
     fn span(&self) -> Span {
         self.expr
             .span()
@@ -233,8 +225,7 @@ impl crate::ast::Spanned for CheckConstraint {
 ///   [ON UPDATE <referential_action>] [ON DELETE <referential_action>]
 /// }`).
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct ForeignKeyConstraint {
     /// Optional constraint name.
     pub name: Option<Ident>,
@@ -259,7 +250,7 @@ pub struct ForeignKeyConstraint {
 
 impl fmt::Display for ForeignKeyConstraint {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use crate::ast::ddl::{display_constraint_name, display_option_spaced};
+        use crate::mysql::ast::ddl::{display_constraint_name, display_option_spaced};
         write!(
             f,
             "{}FOREIGN KEY{} ({}) REFERENCES {}",
@@ -287,7 +278,7 @@ impl fmt::Display for ForeignKeyConstraint {
     }
 }
 
-impl crate::ast::Spanned for ForeignKeyConstraint {
+impl crate::mysql::ast::Spanned for ForeignKeyConstraint {
     fn span(&self) -> Span {
         fn union_spans<I: Iterator<Item = Span>>(iter: I) -> Span {
             Span::union_iter(iter)
@@ -322,8 +313,7 @@ impl crate::ast::Spanned for ForeignKeyConstraint {
 /// [1]: https://dev.mysql.com/doc/refman/8.0/en/fulltext-natural-language.html
 /// [2]: https://dev.mysql.com/doc/refman/8.0/en/spatial-types.html
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct FullTextOrSpatialConstraint {
     /// Whether this is a `FULLTEXT` (true) or `SPATIAL` (false) definition.
     pub fulltext: bool,
@@ -355,7 +345,7 @@ impl fmt::Display for FullTextOrSpatialConstraint {
     }
 }
 
-impl crate::ast::Spanned for FullTextOrSpatialConstraint {
+impl crate::mysql::ast::Spanned for FullTextOrSpatialConstraint {
     fn span(&self) -> Span {
         fn union_spans<I: Iterator<Item = Span>>(iter: I) -> Span {
             Span::union_iter(iter)
@@ -377,8 +367,7 @@ impl crate::ast::Spanned for FullTextOrSpatialConstraint {
 ///
 /// [1]: https://dev.mysql.com/doc/refman/8.0/en/create-table.html
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct IndexConstraint {
     /// Whether this index starts with KEY (true) or INDEX (false), to maintain the same syntax.
     pub display_as_key: bool,
@@ -412,7 +401,7 @@ impl fmt::Display for IndexConstraint {
     }
 }
 
-impl crate::ast::Spanned for IndexConstraint {
+impl crate::mysql::ast::Spanned for IndexConstraint {
     fn span(&self) -> Span {
         fn union_spans<I: Iterator<Item = Span>>(iter: I) -> Span {
             Span::union_iter(iter)
@@ -446,8 +435,7 @@ impl crate::ast::Spanned for IndexConstraint {
 /// [2]: IndexType
 /// [3]: IndexOption
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct PrimaryKeyConstraint {
     /// Constraint name.
     ///
@@ -471,7 +459,7 @@ pub struct PrimaryKeyConstraint {
 
 impl fmt::Display for PrimaryKeyConstraint {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use crate::ast::ddl::{display_constraint_name, display_option, display_option_spaced};
+        use crate::mysql::ast::ddl::{display_constraint_name, display_option, display_option_spaced};
         write!(
             f,
             "{}PRIMARY KEY{}{} ({})",
@@ -494,7 +482,7 @@ impl fmt::Display for PrimaryKeyConstraint {
     }
 }
 
-impl crate::ast::Spanned for PrimaryKeyConstraint {
+impl crate::mysql::ast::Spanned for PrimaryKeyConstraint {
     fn span(&self) -> Span {
         fn union_spans<I: Iterator<Item = Span>>(iter: I) -> Span {
             Span::union_iter(iter)
@@ -513,8 +501,7 @@ impl crate::ast::Spanned for PrimaryKeyConstraint {
 }
 
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 /// Unique constraint definition.
 pub struct UniqueConstraint {
     /// Constraint name.
@@ -543,7 +530,7 @@ pub struct UniqueConstraint {
 
 impl fmt::Display for UniqueConstraint {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use crate::ast::ddl::{display_constraint_name, display_option, display_option_spaced};
+        use crate::mysql::ast::ddl::{display_constraint_name, display_option, display_option_spaced};
         write!(
             f,
             "{}UNIQUE{}{:>}{}{} ({})",
@@ -568,7 +555,7 @@ impl fmt::Display for UniqueConstraint {
     }
 }
 
-impl crate::ast::Spanned for UniqueConstraint {
+impl crate::mysql::ast::Spanned for UniqueConstraint {
     fn span(&self) -> Span {
         fn union_spans<I: Iterator<Item = Span>>(iter: I) -> Span {
             Span::union_iter(iter)
@@ -593,8 +580,7 @@ impl crate::ast::Spanned for UniqueConstraint {
 ///
 /// See <https://www.postgresql.org/docs/current/sql-altertable.html>
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct ConstraintUsingIndex {
     /// Optional constraint name.
     pub name: Option<Ident>,
@@ -607,7 +593,7 @@ pub struct ConstraintUsingIndex {
 impl ConstraintUsingIndex {
     /// Format as `[CONSTRAINT name] <keyword> USING INDEX index_name [characteristics]`.
     pub fn fmt_with_keyword(&self, f: &mut fmt::Formatter, keyword: &str) -> fmt::Result {
-        use crate::ast::ddl::{display_constraint_name, display_option_spaced};
+        use crate::mysql::ast::ddl::{display_constraint_name, display_option_spaced};
         write!(
             f,
             "{}{} USING INDEX {}",
@@ -620,7 +606,7 @@ impl ConstraintUsingIndex {
     }
 }
 
-impl crate::ast::Spanned for ConstraintUsingIndex {
+impl crate::mysql::ast::Spanned for ConstraintUsingIndex {
     fn span(&self) -> Span {
         let start = self
             .name
@@ -640,8 +626,7 @@ impl crate::ast::Spanned for ConstraintUsingIndex {
 ///
 /// [PostgreSQL](https://www.postgresql.org/docs/current/sql-createtable.html#SQL-CREATETABLE-EXCLUDE)
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub enum ExcludeConstraintOperator {
     /// A single operator token, e.g. `=`, `&&`, `<->`.
     Token(String),
@@ -664,8 +649,7 @@ impl fmt::Display for ExcludeConstraintOperator {
 ///
 /// [PostgreSQL](https://www.postgresql.org/docs/current/sql-createtable.html#SQL-CREATETABLE-EXCLUDE)
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct ExcludeConstraintElement {
     /// The index column (`{ column_name | ( expression ) } [ opclass ] [ ASC | DESC ] [ NULLS { FIRST | LAST } ]`).
     pub column: IndexColumn,
@@ -683,8 +667,7 @@ impl fmt::Display for ExcludeConstraintElement {
 ///
 /// [PostgreSQL](https://www.postgresql.org/docs/current/sql-createtable.html#SQL-CREATETABLE-EXCLUDE)
 #[derive(Debug, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct ExcludeConstraint {
     /// Optional constraint name.
     pub name: Option<Ident>,
@@ -702,7 +685,7 @@ pub struct ExcludeConstraint {
 
 impl fmt::Display for ExcludeConstraint {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use crate::ast::ddl::display_constraint_name;
+        use crate::mysql::ast::ddl::display_constraint_name;
         write!(f, "{}EXCLUDE", display_constraint_name(&self.name))?;
         if let Some(method) = &self.index_method {
             write!(f, " USING {method}")?;
@@ -721,7 +704,7 @@ impl fmt::Display for ExcludeConstraint {
     }
 }
 
-impl crate::ast::Spanned for ExcludeConstraint {
+impl crate::mysql::ast::Spanned for ExcludeConstraint {
     fn span(&self) -> Span {
         Span::union_iter(
             self.name

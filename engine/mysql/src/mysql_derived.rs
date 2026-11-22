@@ -21,7 +21,7 @@
 //!   the proof through whatever reads the derived table, an outer join included.
 
 use crate::api::MysqlColumn;
-use sqlparser::ast::{Cte, JoinOperator, ObjectNamePart, OptimizerHint, OptimizerHintStyle, Query, Select, SelectItem, SetExpr, SetOperator, TableAlias, TableFactor, TableWithJoins, With};
+use syntax::mysql::ast::{Cte, JoinOperator, ObjectNamePart, OptimizerHint, OptimizerHintStyle, Query, Select, SelectItem, SetExpr, SetOperator, TableAlias, TableFactor, TableWithJoins, With};
 use std::collections::HashSet;
 
 /// The hint the copy's first query block carries: it holds for the whole statement.
@@ -121,8 +121,8 @@ fn views_through_derived(item: &mut TableWithJoins, views: &HashSet<String>) -> 
 
 /// `(SELECT * FROM t) AS t`, as the parser reads it.
 fn derived_template() -> Option<TableFactor> {
-    let mut statements = sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, "SELECT * FROM (SELECT * FROM t) AS t").ok()?;
-    let Some(sqlparser::ast::Statement::Query(q)) = statements.pop() else { return None };
+    let mut statements = syntax::mysql::parse("SELECT * FROM (SELECT * FROM t) AS t", syntax::mysql::Options::default(), syntax::mysql::Bounds { depth: 10, operators: 0 }).ok()?;
+    let Some(syntax::mysql::ast::Statement::Query(q)) = statements.pop() else { return None };
     let SetExpr::Select(select) = *q.body else { return None };
     select.from.into_iter().next().map(|item| item.relation)
 }
@@ -501,7 +501,7 @@ pub fn reads_through(q: &mut Query, k: usize, name: &str, through: &Query) -> bo
         match t {
             TableFactor::Table { name: table, alias, args: None, .. } if matches!(table.0.as_slice(), [ObjectNamePart::Identifier(n)] if n.value == name) => {
                 let Some(TableFactor::Derived { lateral, subquery: _, alias: Some(template), sample }) = derived_template() else { return false };
-                let alias = alias.take().unwrap_or(TableAlias { name: sqlparser::ast::Ident::with_quote('`', name), ..template });
+                let alias = alias.take().unwrap_or(TableAlias { name: syntax::mysql::ast::Ident::with_quote('`', name), ..template });
                 *t = TableFactor::Derived { lateral, subquery: Box::new(through.clone()), alias: Some(alias), sample };
                 true
             }
@@ -522,11 +522,10 @@ pub fn reads_through(q: &mut Query, k: usize, name: &str, through: &Query) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlparser::ast::Statement;
-    use sqlparser::dialect::MySqlDialect;
+    use syntax::mysql::ast::Statement;
 
     fn query(sql: &str) -> Query {
-        match sqlparser::parser::Parser::parse_sql(&MySqlDialect {}, sql).unwrap().pop() {
+        match crate::mysql::parse_default(sql).unwrap().pop() {
             Some(Statement::Query(q)) => *q,
             other => panic!("{other:?}"),
         }

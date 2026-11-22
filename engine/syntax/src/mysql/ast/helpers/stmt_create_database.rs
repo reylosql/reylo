@@ -15,18 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 //
-// Changed in Reylo's copy (engine/mysql/vendor/sqlparser/README.md).
+// Changed for reylo-sql from sqlparser-rs 0.63.0: what only its parser, its other dialects and
+// its optional features used is left out, and MySQL's statements print as MySQL reads them.
 
-#[cfg(not(feature = "std"))]
-use alloc::{format, string::String, vec::Vec};
-
-#[cfg(feature = "serde")]
-use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "visitor")]
-use sqlparser_derive::{Visit, VisitMut};
-
-use crate::ast::{
+use crate::mysql::ast::{
     CatalogSyncNamespaceMode, ContactEntry, ObjectName, StorageSerializationPolicy, Tag,
 };
 
@@ -37,7 +29,7 @@ use crate::ast::{
 /// - Moving a lot of variables around the code.
 ///
 /// # Example
-/// ```rust
+/// ```ignore
 /// use sqlparser::ast::helpers::stmt_create_database::CreateDatabaseBuilder;
 /// use sqlparser::ast::{ColumnDef, Ident, ObjectName};
 /// let builder = CreateDatabaseBuilder::new(ObjectName::from(vec![Ident::new("database_name")]))
@@ -53,8 +45,7 @@ use crate::ast::{
 ///
 /// [1]: Statement::CreateDatabase
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "visitor", derive(Visit, VisitMut))]
+
 pub struct CreateDatabaseBuilder {
     /// The database name to create.
     pub db_name: ObjectName,
@@ -277,8 +268,5 @@ impl CreateDatabaseBuilder {
         self
     }
 
-
 }
-
-
 
