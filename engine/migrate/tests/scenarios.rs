@@ -452,6 +452,7 @@ for_each_dialect!(
     history_pull_writes_the_lock_and_keeps_what_is_still_to_deploy,
     db_introspect_prints_the_schema,
     a_hotfix_by_hand_is_recorded_once_it_is_a_migration,
+    a_hotfix_behind_a_pending_migration_is_undone_then_deployed,
     history_push_follows_a_renamed_migration,
     a_failed_migration_leaves_nothing,
     files_that_cannot_run_atomically_are_refused,
@@ -1276,6 +1277,42 @@ async fn a_hotfix_by_hand_is_recorded_once_it_is_a_migration(mut p: P) {
     assert_eq!(p.history_push().await, 0, "{}", p.peek());
     assert_has!(p.output(), r"\+ 20261027110000_hotfix\.sql +recorded");
     assert_eq!(p.history().await, ["20261027100000_users.sql", "20261027110000_hotfix.sql"]);
+    assert_eq!(p.rows("select * from users").await.len(), 1);
+}
+
+async fn a_hotfix_behind_a_pending_migration_is_undone_then_deployed(mut p: P) {
+    let (int, text) = (p.t.int, p.t.text);
+    let table = format!("create table users (id {int}, email {text}, nick {text});");
+    let (users, backfill, nick, email) = ("20261027100000_users.sql", "20261027110000_backfill.sql", "20261027120000_nick_index.sql", "20261027130000_email_index.sql");
+    p.schema(&table);
+    p.file(users, &table);
+    p.file(backfill, "update users set nick = email where nick is null;");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into users values (1, 'a@b.co', null)").await;
+    p.exec("create index users_email on users (email)").await;
+    p.output();
+    // The run named is the one this database ran, which the data migration ends: as close as the
+    // run before it, which leaves the same schema.
+    assert_eq!(p.history_push().await, 1);
+    assert_has!(p.output(), r"✗ No run of the migrations makes this database's schema\n  The closest is after 20261027110000_backfill\.sql, which differs by:\n\n    [^\n]*users_email");
+    // Development moves on, and the change made by hand is written into schema.sql and its migration,
+    // which the lock runs after the one this database hasn't run.
+    p.file(nick, "create index users_nick on users (nick);");
+    p.schema(&format!("{table} create index users_nick on users (nick); create index users_email on users (email);"));
+    p.file(email, "create index users_email on users (email);");
+    let ran_through = r"It ran the migrations through 20261027110000_backfill\.sql, and then had this change made outside them:\n\n(?:    [^\n]*\n)*    [^\n]*users_email[^\n]*\n(?:    [^\n]*\n)*\n  Undo it here, so that deploy runs 20261027120000_nick_index\.sql first, and then 20261027130000_email_index\.sql, which makes it again:\n    reylo run '[^\n]*users_email[^\n]*'\n    reylo migrate deploy";
+    let title = r"✗ Migration 20261027130000_email_index\.sql makes this change, but runs after 20261027120000_nick_index\.sql, which this database hasn't run\n  ";
+    assert_eq!(p.history_push().await, 1);
+    let out = p.output();
+    assert_has!(&out, &format!("{title}{ran_through}\n\nNothing was changed\\."));
+    assert_eq!(p.history().await, [users, backfill]);
+    assert_eq!(p.dry_run().await, 1);
+    assert_has!(p.output(), &format!("{title}{ran_through}"));
+    // Undone as told, deploy runs both, in the lock's order, and the second makes it again.
+    p.exec(&undo_in(&out)).await;
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.history().await, [users, backfill, nick, email]);
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     assert_eq!(p.rows("select * from users").await.len(), 1);
 }
 

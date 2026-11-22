@@ -1634,6 +1634,12 @@ async fn drift(shadows: &mut Shadows<'_>, target: &mut Db, run: &Run<'_>, checkp
             }
         }
     }
+    if hint.is_empty() {
+        let ran: Vec<Migration> = run.applied_files.iter().chain(&run.records).cloned().collect();
+        if let Some(j) = behind(shadows, &ran, &run.pending, &live).await? {
+            return Ok(vec![behind_problem(shadows, target, &ran, true, &run.pending[j], &run.pending[..j], &live).await]);
+        }
+    }
     let prefix = shadows.lane();
     shadows.push(prefix, run.applied_files.iter().chain(&run.records).map(Step::of));
     let mut sql = String::new();
@@ -1649,6 +1655,69 @@ async fn drift(shadows: &mut Shadows<'_>, target: &mut Db, run: &Run<'_>, checkp
         problem = keep_fixes(problem, run.schema_sql.is_some().then_some(run.schema.as_str()), only_live.is_empty(), only_history.is_empty());
     }
     Ok(vec![problem])
+}
+
+/// Where the database has, on top of `ran`, exactly what a pending migration other than the next
+/// makes: a change made outside the migrations, written since as one that the lock runs after others
+/// this database hasn't run. Recording it would put it out of the one order every database runs.
+/// The index in `pending` of the newest such, of the last three.
+#[cfg(feature = "cli")]
+async fn behind(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[Migration], live: &[String]) -> Result<Option<usize>, Error> {
+    for j in (1..pending.len()).rev().take(3) {
+        let lane = shadows.lane();
+        shadows.push(lane, ran.iter().chain([&pending[j]]).map(Step::of));
+        if let Ok(lines) = shadows.lines(lane).await? {
+            let made = crate::catalog::without_comments(&lines);
+            if crate::catalog::without_extra_children(live, &made) == made {
+                return Ok(Some(j));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The refusal for [`behind`]: `it` makes the change, after `ahead`, which this database hasn't run.
+/// The way out keeps the order: the change undone, so that deploy runs `ahead`, then `it`, which
+/// makes it again. `known` says whether `ran` is what the database's history says it ran, or only
+/// the run its schema is closest to.
+#[cfg(feature = "cli")]
+async fn behind_problem(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Migration], known: bool, it: &Migration, ahead: &[Migration], live: &[String]) -> Problem {
+    let names = and_list(&ahead.iter().map(|m| m.name.clone()).collect::<Vec<_>>());
+    let problem = Problem::new("later-migration-in-place", format!("Migration {} makes this change, but runs after {names}, which this database hasn't run", it.name));
+    let problem = match (ran.last(), known) {
+        (Some(last), true) => problem.note(format!("It ran the migrations through {}, and then had this change made outside them:", last.name)),
+        (Some(last), false) => problem.note(format!("It has what the migrations through {} make, and this change:", last.name)),
+        (None, _) => problem.note("It has this change, and nothing else the migrations make:"),
+    };
+    let lane = shadows.lane();
+    shadows.push(lane, ran.iter().map(Step::of));
+    let made = match shadows.lines(lane).await {
+        Ok(Ok(lines)) => crate::catalog::without_comments(&lines),
+        _ => vec![],
+    };
+    let (mut change, mut sql) = (None, None);
+    if let Ok(Ok(())) = shadows.open(lane).await {
+        shadows.taint(lane);
+        change = scoped_change(target, shadows.db(lane), &[]).await;
+        if change.is_none() {
+            sql = plan_text(shadows.db(lane), target, None).await;
+        }
+    }
+    let order = format!("{names} first, and then {}, which makes it again", it.name);
+    match change {
+        Some((sql, undo, lost)) => {
+            let problem = problem.sql(&sql);
+            let problem = if lost.is_empty() { problem } else { problem.note(format!("Undoing it loses what {} {}.", and_list(&lost), if lost.len() == 1 { "holds" } else { "hold" })) };
+            problem.fix(format!("Undo it here, so that deploy runs {order}"), &[&format!("reylo run {}", shell_word(&undo.join(" "))), "reylo migrate deploy"])
+        }
+        None => {
+            let problem = match sql {
+                Some(sql) => problem.sql(&sql),
+                None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&made, live)).chain([String::new()])),
+            };
+            problem.note("Undo it here by hand.").fix(format!("Then deploy, which runs {order}"), &["reylo migrate deploy"])
+        }
+    }
 }
 
 /// The ways to keep a change made by hand on a database no development command runs on: written as
@@ -2449,8 +2518,12 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
         shadows.finish().await;
         return Ok(refuse(&agreement, log));
     }
+    // The run the database's history says it ran, where that is how the order starts.
+    let applied: Vec<&HistoryRow> = before_rows.iter().filter(|r| r.applied).collect();
+    let history_run = (!applied.is_empty() && applied.len() <= order.len() && applied.iter().zip(&order).all(|(r, f)| r.name == f.name && same_statements(&r.sql, &f.sql, d))).then_some(applied.len());
     // The replay after each migration, from none: the longest run that equals the database, and
-    // else the one closest to it.
+    // else the one closest to it: the history's run where it is as close as any, since a migration
+    // that changes no schema leaves the run before it just as close.
     let replayed = async {
         let lane = shadows.lane();
         if let Err((_, e)) = shadows.open(lane).await? {
@@ -2459,12 +2532,16 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
         shadows.taint(lane);
         let mut matches: Vec<usize> = Vec::new();
         let mut closest: (usize, usize, Vec<String>) = (usize::MAX, 0, vec![]);
+        let mut at_history: Option<(usize, Vec<String>)> = None;
         for k in 0..=order.len() {
             let now = crate::catalog::without_comments(&catalog(shadows.db(lane)).await?);
             if crate::catalog::without_extra_children(&live, &now) == now {
                 matches.push(k);
             } else {
                 let (a, b) = difference(&now, &live);
+                if Some(k) == history_run {
+                    at_history = Some((a.len() + b.len(), now.clone()));
+                }
                 if a.len() + b.len() < closest.0 {
                     closest = (a.len() + b.len(), k, now);
                 }
@@ -2474,6 +2551,11 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
             }
             if let Err(e) = run(shadows.db(lane), &order[k], false).await {
                 return Ok(Err(format!("{} fails when replayed in a shadow database: {e}", order[k].name)));
+            }
+        }
+        if let (Some(k), Some((distance, lines))) = (history_run, at_history) {
+            if distance == closest.0 {
+                closest = (distance, k, lines);
             }
         }
         Ok::<_, Error>(Ok((matches, closest)))
@@ -2493,6 +2575,26 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     let Some(mut n) = matches.last().copied() else {
         // The closest run, and the change from what it makes to this database, as SQL.
         let (_, k, lines) = closest;
+        // A later migration that makes the change on top of the history's run, or else the closest,
+        // can't be recorded ahead of those before it: the change is undone, for deploy to run them.
+        if !init {
+            let mut bases: Vec<usize> = history_run.into_iter().chain([k]).filter(|&b| b < order.len()).collect();
+            bases.dedup();
+            for base in bases {
+                match behind(&mut shadows, &order[..base], &order[base..], &live).await {
+                    Ok(None) => {}
+                    Ok(Some(j)) => {
+                        let problem = behind_problem(&mut shadows, db, &order[..base], Some(base) == history_run, &order[base + j], &order[base..base + j], &live).await;
+                        shadows.finish().await;
+                        return Ok(refuse(&[problem], log));
+                    }
+                    Err(e) => {
+                        shadows.finish().await;
+                        return Err(e);
+                    }
+                }
+            }
+        }
         let lane = shadows.lane();
         shadows.push(lane, order[..k].iter().map(Step::of));
         let mut sql = None;
@@ -5202,7 +5304,7 @@ async fn unexplained(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, kep
     if let Ok(Ok(())) = shadows.open(ran).await {
         shadows.taint(ran);
         match scoped_change(db, shadows.db(ran), &explaining).await {
-            Some((sql, statements)) => {
+            Some((sql, statements, _)) => {
                 problem = problem.sql(&sql);
                 undo = Some(statements);
             }
@@ -5238,9 +5340,10 @@ async fn unexplained(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, kep
 /// statements that undo it alone. An object that differs from the history is refused unless one of
 /// `explaining` (schema.sql, the pending migrations) has it as the database does, it is a comment,
 /// or it is a partition, which is data; what is refused comes back from the history, and everything
-/// else stays as it is on the database. None where nothing would change.
+/// else stays as it is on the database. Last, what the undo loses: each table or column it drops or
+/// narrows, by name. None where nothing would change.
 #[cfg(feature = "cli")]
-async fn scoped_change(db: &mut Db, history: &mut Db, explaining: &[crate::diff::Schema]) -> Option<(String, Vec<String>)> {
+async fn scoped_change(db: &mut Db, history: &mut Db, explaining: &[crate::diff::Schema]) -> Option<(String, Vec<String>, Vec<String>)> {
     let mut current = crate::diff::read(db).await.ok()?;
     current.live = true;
     let mut target = crate::diff::read(history).await.ok()?;
@@ -5281,7 +5384,8 @@ async fn scoped_change(db: &mut Db, history: &mut Db, explaining: &[crate::diff:
     let mut change = crate::diff::plan(&target, &current, alterer.as_ref());
     style(db, &mut change, &current).await.ok()?;
     let statements: Vec<String> = undo.runnable().map(|s| format!("{};", s.trim_end().trim_end_matches(';'))).collect();
-    (!statements.is_empty() && !change.statements.is_empty()).then(|| (change.sql(), statements))
+    let lost: Vec<String> = undo.losses.iter().chain(undo.narrowings.iter().map(|(column, _)| column)).map(|l| l.trim_start_matches("column ").trim_start_matches("table ").to_string()).collect();
+    (!statements.is_empty() && !change.statements.is_empty()).then(|| (change.sql(), statements, lost))
 }
 
 #[allow(clippy::too_many_arguments)]
