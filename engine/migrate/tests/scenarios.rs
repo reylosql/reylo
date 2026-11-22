@@ -1327,7 +1327,7 @@ async fn a_hotfix_behind_a_pending_migration_is_undone_then_deployed(mut p: P) {
     p.file(nick, "create index users_nick on users (nick);");
     p.schema(&format!("{table} create index users_nick on users (nick); create index users_email on users (email);"));
     p.file(email, "create index users_email on users (email);");
-    let ran_through = r"It ran the migrations through 20261027110000_backfill\.sql, and then had this change made outside them:\n\n(?:    [^\n]*\n)*    [^\n]*users_email[^\n]*\n(?:    [^\n]*\n)*\n  Undo it on \S+, so that deploy runs 20261027120000_nick_index\.sql first, and then 20261027130000_email_index\.sql, which makes it again:\n    reylo run --url <url> '[^\n]*users_email[^\n]*'\n    reylo migrate deploy --url <url>";
+    let ran_through = r"It ran the migrations through 20261027110000_backfill\.sql, and then had this change made outside them:\n\n(?:    [^\n]*\n)*    [^\n]*users_email[^\n]*\n(?:    [^\n]*\n)*\n  Give both commands the same URL as this one\.\n\n  Undo it on \S+, so that deploy runs 20261027120000_nick_index\.sql first, and then 20261027130000_email_index\.sql, which makes it again:\n    reylo run --url <url> '[^\n]*users_email[^\n]*'\n    reylo migrate deploy --url <url>";
     let title = r"✗ Migration 20261027130000_email_index\.sql makes this change, but runs after 20261027120000_nick_index\.sql, which this database hasn't run\n  ";
     assert_eq!(p.history_push().await, 1);
     let out = p.output();

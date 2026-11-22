@@ -1787,8 +1787,8 @@ async fn behind_problem(shadows: &mut Shadows<'_>, target: &mut Db, url: &str, r
     let deploy = "reylo migrate deploy --url <url>";
     let whole = |undo: &Vec<String>| if target.dialect() == Dialect::Postgres { !undo.iter().any(|s| s.starts_with("commit;")) } else { undo.len() == 1 };
     match undo.filter(whole) {
-        Some(undo) => problem.fix(format!("Undo it on {on}, so that deploy runs {order}"), &[format!("reylo run --url <url> {}", shell_word(&undo.join(" "))).as_str(), deploy]),
-        None => problem.note(format!("Undo it on {on} by hand.")).fix(format!("Then deploy, which runs {order}"), &[deploy]),
+        Some(undo) => problem.note("Give both commands the same URL as this one.").fix(format!("Undo it on {on}, so that deploy runs {order}"), &[format!("reylo run --url <url> {}", shell_word(&undo.join(" "))).as_str(), deploy]),
+        None => problem.note(format!("Undo it on {on} by hand, then give deploy the same URL as this command.")).fix(format!("Then deploy, which runs {order}"), &[deploy]),
     }
 }
 

@@ -527,13 +527,14 @@ pub fn with_database(url: &str, name: &str) -> String {
 
 /// A URL as a heading says it: no credentials and no settings. Whatever is before the last `@` is
 /// taken for credentials, so that a password never shows, even in a form no driver reads; but a
-/// SQLite file's URL is its path, whose `@` is part of a name, and holds none.
+/// SQLite file's URL is its path, whole, as [`sqlite_path`] opens it (an `@` or a `?` is part of
+/// its name), and holds none.
 pub fn shown_url(url: &str) -> String {
-    let bare = &url[..url.find('?').unwrap_or(url.len())];
-    let lower = bare.to_ascii_lowercase();
+    let lower = url.to_ascii_lowercase();
     if lower.starts_with("sqlite:") || lower.starts_with("file:") {
-        return bare.to_string();
+        return url.to_string();
     }
+    let bare = &url[..url.find('?').unwrap_or(url.len())];
     match bare.split_once("://") {
         Some((scheme, rest)) => {
             let host = rest.rsplit_once('@').map_or(rest, |(_, host)| host);
@@ -1381,11 +1382,12 @@ mod url_tests {
         assert_eq!(shown_url("mysql://root@127.0.0.1:3306/app?ssl=true"), "mysql://127.0.0.1:3306/app");
         assert_eq!(shown_url("postgres://u:pa/ss@host/app"), "postgres://host/app");
         assert_eq!(shown_url("postgres://host/app?password=secret"), "postgres://host/app");
-        assert_eq!(shown_url("sqlite:./app.db?mode=rwc"), "sqlite:./app.db");
         assert_eq!(shown_url("libsql://app-acme.turso.io?authToken=secret"), "libsql://app-acme.turso.io");
-        // A SQLite file's name may hold an @, which names another file without what comes before it.
+        // A SQLite file's URL is its name, an @ and a ? in it included, each naming another file
+        // without what comes before or after it.
         assert_eq!(shown_url("sqlite://team@prod.db"), "sqlite://team@prod.db");
-        assert_eq!(shown_url("file:team@prod.db?mode=ro"), "file:team@prod.db");
+        assert_eq!(shown_url("file:team@prod.db?mode=ro"), "file:team@prod.db?mode=ro");
+        assert_eq!(sqlite_path("file:team@prod.db?mode=ro", Path::new("/p")), Path::new("/p").join("team@prod.db?mode=ro").to_string_lossy());
         // An @ past the host is no part of the credentials, where a connection is made.
         assert_eq!(with_database("postgres://u@host/d@b", "x"), "postgres://u@host/x");
         assert_eq!(with_database("postgres://host/app?application_name=a@b", "x"), "postgres://host/x?application_name=a@b");
