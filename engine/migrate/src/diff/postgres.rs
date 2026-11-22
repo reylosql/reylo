@@ -397,8 +397,9 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             "e" => {
                 let labels: Vec<String> = serde_json::from_str(r.text("labels")).unwrap_or_default();
                 let list = labels.iter().map(|l| literal(l)).collect::<Vec<_>>().join(", ");
-                // A label removed or moved changes every column of the type, which blocks what is on them.
-                (format!("enum ({list})"), format!("create type {name} as enum ({list})"), Change::Alter { blocks: true })
+                // A label removed or moved makes the type again, changing every column of it, which
+                // blocks what is on them (the alterer's `remakes`); a label added blocks nothing.
+                (format!("enum ({list})"), format!("create type {name} as enum ({list})"), Change::Alter { blocks: false })
             }
             "d" => {
                 let def = format!(

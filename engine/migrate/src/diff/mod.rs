@@ -111,8 +111,9 @@ pub enum Change {
     #[default]
     Replace,
     /// Changed in place by statements its database decides from both definitions; `blocks` says
-    /// whether the change is refused while a view, rule, policy or trigger depends on it (a
-    /// column's type), so those are dropped before it and created again after.
+    /// whether every change of it is refused while a view, rule, policy or trigger depends on it, so
+    /// those are dropped before it and created again after. A change refused only for what it
+    /// changes (a column's type, an enum's labels removed) is the alterer's `remakes`.
     Alter { blocks: bool },
 }
 
@@ -163,9 +164,10 @@ pub trait Alterer: Send {
         let _ = (from, to);
         None
     }
-    /// Whether a blocking change of `from` to `to` changes the object under the functions that
-    /// depend on it (an enum made again, a column's type), so that each is made again around the
-    /// change rather than left on what it was, or refusing the change.
+    /// Whether a change of `from` to `to` changes the object under what depends on it (an enum
+    /// made again, a column's type), which the server refuses while a view, rule, policy or trigger
+    /// is on it: those go before the change and come back after, and so do the functions that
+    /// depend on it, rather than being left on what it was, or refusing the change.
     fn remakes(&self, from: &Object, to: &Object) -> bool {
         let _ = (from, to);
         false
