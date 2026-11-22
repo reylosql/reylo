@@ -2099,14 +2099,10 @@ async fn deploy_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
                 applied.push(serde_json::json!({ "name": m.name, "state": "applied", "ms": ms as u64 }));
             }
             Err(e) => {
-                failed(&mut rows, m, &e, d, log);
+                rows.row(log, &paint("bold red", "✗"), &m.name, "failed");
                 applied.push(serde_json::json!({ "name": m.name, "state": "failed", "error": e.0 }));
-                if started.contains(&m.name.as_str()) {
-                    log("  A run before this one was cut off here, so its change may be in place");
-                    log(&steps(4, &[("See whether it is", &["reylo migrate deploy --dry-run"]), ("Record it if it is, running nothing", &["reylo migrate history push"])]));
-                } else if !may_leave_part(&m.sql, d) {
-                    log(&steps(2, &[("Fix it, lock the fix and deploy again", &["reylo migrate dev", "reylo migrate deploy"])]));
-                }
+                log("");
+                print_problems(&[deploy_failure(m, &e, d, started.contains(&m.name.as_str()))], log);
                 code = 1;
                 break;
             }
@@ -2129,6 +2125,27 @@ fn failed(rows: &mut Rows, m: &Migration, e: &Error, d: Dialect, log: Log<'_>) {
         log("  MySQL commits each statement, so its first statements may be in place");
         log(&steps(4, &[("See which are", &["reylo migrate deploy --dry-run"])]));
     }
+}
+
+/// A migration deploy ran that failed: its error, what of it may be in place, and what to do next.
+/// Nothing of it is recorded either way. Elsewhere than MySQL it is undone whole: a transaction's
+/// file rolls back, and a statement that runs alone (`create index concurrently`) either finishes or
+/// leaves nothing once the invalid index it left is dropped.
+fn deploy_failure(m: &Migration, e: &Error, d: Dialect, started: bool) -> Problem {
+    let problem = Problem::new("migration-failed", format!("{} failed", m.name)).note(&e.0);
+    if started {
+        return problem
+            .note("A run before this one was cut off here, so its change may be in place. Nothing was recorded.")
+            .fix("See whether it is", &["reylo migrate deploy --dry-run"])
+            .fix("Record it if it is, running nothing", &["reylo migrate history push"]);
+    }
+    if d == Dialect::Mysql {
+        return problem.note("MySQL commits each statement, so its first statements may be in place. Nothing was recorded.").fix("See which are", &["reylo migrate deploy --dry-run"]);
+    }
+    Problem { title: format!("{} failed and was rolled back", m.name), ..problem }
+        .note("Nothing was recorded, so the next deploy runs it again.")
+        .fix("Fix the file, lock the fix and deploy again", &["reylo migrate dev", "reylo migrate deploy"])
+        .fix("If another database already ran it, write a new migration instead", &["reylo migrate new <name>"])
 }
 
 /// What a command says where the fingerprint its last run stored can't be compared.
