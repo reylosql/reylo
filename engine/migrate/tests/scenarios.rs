@@ -2983,6 +2983,7 @@ on!(
     new_refuses_a_table_rewrite_until_blocking,
     deploy_waits_out_a_lock_another_session_holds,
     deploys_at_once_wait_out_a_concurrent_index_build,
+    a_deploy_waits_for_the_run_lock_no_longer_than_its_sessions_timeouts,
     new_refuses_a_check_on_a_partitioned_table_until_blocking,
     new_refuses_an_index_built_again_until_blocking,
     a_concurrent_reindex_is_said_to_block_nothing,
@@ -4109,6 +4110,28 @@ mod adversarial {
         assert_eq!(runs.iter().map(|(_, out)| out.matches(" applied ·").count()).sum::<usize>(), 1, "{runs:?}");
         assert_eq!(runs.iter().filter(|(_, out)| out.contains("Up to date")).count(), 2, "{runs:?}");
         assert_eq!(p.rows("select indisvalid::text as v from pg_index where indexrelid = 'users_created'::regclass").await[0].text("v"), "true");
+    }
+
+    pub async fn a_deploy_waits_for_the_run_lock_no_longer_than_its_sessions_timeouts(mut p: P) {
+        p.file("20261027100000_users.sql", "create table users (id int primary key);");
+        p.relock();
+        let opts = p.opts();
+        let mut other = Db::connect(&p.url, &p.dir).await.unwrap();
+        other.exec("select pg_advisory_lock(hashtextextended('reylo_migrate', 0))").await.unwrap();
+        // Another run holds the lock for longer than either timeout: the deploy gives up at the
+        // timeout, as a statement blocked on the lock would, running nothing.
+        for setting in ["lock_timeout", "statement_timeout"] {
+            p.exec(&format!("alter database {} set {setting} = '300ms'", p.name)).await;
+            let at = std::time::Instant::now();
+            let waited = tokio::time::timeout(std::time::Duration::from_secs(10), reylo_migrate::deploy(&opts, &mut |_: &str| {})).await.expect("the deploy gave up at its timeout");
+            let e = waited.expect_err("the lock was held");
+            assert!(e.to_string().contains(&format!("{setting} of 300ms")), "{e}");
+            assert!(at.elapsed() < std::time::Duration::from_secs(2), "{setting}: {:?}", at.elapsed());
+            p.exec(&format!("alter database {} reset {setting}", p.name)).await;
+        }
+        assert!(p.history().await.is_empty());
+        other.close().await;
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
     }
 
     pub async fn a_narrowing_type_change_fails_rather_than_cuts(mut p: P) {
