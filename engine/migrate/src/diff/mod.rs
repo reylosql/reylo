@@ -74,6 +74,11 @@ pub enum Kind {
 /// it leaves where the target doesn't name it.
 pub const ENVIRONMENTS: &str = "may be the environment's";
 
+/// An `extra` line of a revoke of what an object is given as it is made (by its owner's default
+/// privileges), which stands for nothing on an object already there: made and dropped only with
+/// its owner. Its `after` names what gives the privilege.
+pub const AS_MADE: &str = "revoked as it is made";
+
 /// One object of a schema.
 #[derive(Clone, Debug, Default)]
 pub struct Object {
@@ -102,6 +107,14 @@ pub struct Object {
     /// Objects it is made after that it doesn't depend on: a partitioned table's index, made after
     /// the partitions' indexes it attaches as it is made.
     pub after: BTreeSet<String>,
+}
+
+/// Whether a grant an object is given as it is made, by what its `after` names (its owner's default
+/// privileges), is given by those alone where the plan makes them: they are there only after the
+/// objects it makes, since grants come after the objects they are on.
+fn given_by_new(o: &Object, to: &Schema, creates: &BTreeSet<String>) -> bool {
+    let by: Vec<&String> = o.after.iter().filter(|a| to.objects.contains_key(*a)).collect();
+    o.kind == Some(Kind::Grant) && !by.is_empty() && by.iter().all(|a| creates.contains(*a))
 }
 
 /// How an object's definition changes when it differs.
@@ -1102,6 +1115,20 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         }
     }
 
+    // A revoke of what an object is given as it is made is made only with its owner, or with the
+    // change of the column that makes it (an identity's sequence), where it is given, and dropped
+    // only with its owner: an object already there was never given it.
+    let as_made = |o: &Object| o.extra.iter().any(|l| l == AS_MADE);
+    let made = |w: &String| creates.contains(w) || (alters.contains_key(w) && to.objects.get(w).is_some_and(|c| c.kind == Some(Kind::Column)));
+    let unmade: Vec<String> = creates.iter().filter(|id| to.objects.get(*id).is_some_and(|o| as_made(o) && (o.owner.as_ref().is_none_or(|w| !made(w)) || given_by_new(o, to, &creates)))).cloned().collect();
+    let undropped: Vec<String> = drops.iter().filter(|id| from.objects.get(*id).is_some_and(|o| as_made(o) && o.owner.as_ref().is_none_or(|w| !drops.contains(w)))).cloned().collect();
+    for id in unmade {
+        creates.remove(&id);
+    }
+    for id in undropped {
+        drops.remove(&id);
+    }
+
     // An object goes with its owner: a dropped table's columns need no statement of their own, and
     // a created table's inline columns neither, unless the drops depend on each other in a circle
     // that dropping one of them first breaks.
@@ -1117,7 +1144,7 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
     // plan makes too is made by name, before that one attaches it.
     let created_with_owner = |id: &str| {
         let o = &to.objects[id];
-        o.inline && o.owner.as_deref().is_some_and(|w| creates.contains(w)) && o.goes_with.as_deref().is_none_or(|g| !creates.contains(g))
+        o.inline && o.owner.as_deref().is_some_and(|w| creates.contains(w)) && o.goes_with.as_deref().is_none_or(|g| !creates.contains(g)) && !given_by_new(o, to, &creates)
     };
 
     // A column whose new default calls a function the plan makes, which reads the column, changes

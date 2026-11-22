@@ -2898,7 +2898,30 @@ fn grants_of(s: &mut Schema, privileges: &str, name: &str, id: Option<&str>, on:
     let implied: BTreeSet<_> = lists.get(2).cloned().flatten().unwrap_or_default().iter().map(key).collect();
     let grant = |grantee: &str, privilege: &str, grantable: bool| format!("grant {} on {on} {name} to {grantee}{}", privilege.to_lowercase(), if grantable { " with grant option" } else { "" });
     let revoke = |grantee: &str, privilege: &str| format!("revoke {} on {on} {name} from {grantee}", privilege.to_lowercase());
+    // The default privileges that give it a privilege as it is made, by the ids they are read
+    // under: its owner's, everywhere and in its schema. One the plan makes is there only after
+    // the objects it makes, which it gives nothing.
+    let class = match on {
+        "table" => Some("tables"),
+        "sequence" => Some("sequences"),
+        "function" | "procedure" => Some("functions"),
+        "type" | "domain" => Some("types"),
+        "schema" => Some("schemas"),
+        _ => None,
+    };
+    let role = if owner == "current_user" { String::new() } else { format!("for role {owner} ") };
+    let schema = if on == "schema" { None } else { schema_of(name) };
+    let giving = |grantee: &str, privilege: &str| -> BTreeSet<String> {
+        let Some(class) = class else { return BTreeSet::new() };
+        let tail = format!("grant {} on {class} to {grantee}", privilege.to_lowercase());
+        let mut out = BTreeSet::from([format!("default privileges {role}{tail}")]);
+        if let Some(schema) = schema {
+            out.insert(format!("default privileges {role}in schema {schema} {tail}"));
+        }
+        out
+    };
     for (grantee, privilege, grantable) in have.difference(&default) {
+        let inline = implied.contains(&(grantee.clone(), privilege.clone(), *grantable));
         s.add(Object {
             id: format!("grant {privilege} on {name} to {grantee}"),
             kind: Some(Kind::Grant),
@@ -2906,7 +2929,8 @@ fn grants_of(s: &mut Schema, privileges: &str, name: &str, id: Option<&str>, on:
             def: grantable.to_string(),
             create: vec![grant(grantee, privilege, *grantable)],
             drop: vec![revoke(grantee, privilege)],
-            inline: implied.contains(&(grantee.clone(), privilege.clone(), *grantable)),
+            inline,
+            after: if inline { giving(grantee, privilege) } else { BTreeSet::new() },
             ..Object::default()
         });
     }
@@ -2920,6 +2944,8 @@ fn grants_of(s: &mut Schema, privileges: &str, name: &str, id: Option<&str>, on:
             def: grantable.to_string(),
             create: vec![revoke(grantee, privilege)],
             drop: vec![grant(grantee, privilege, *grantable)],
+            extra: vec![super::AS_MADE.to_string()],
+            after: giving(grantee, privilege),
             ..Object::default()
         });
     }
@@ -2934,6 +2960,21 @@ fn grants_of(s: &mut Schema, privileges: &str, name: &str, id: Option<&str>, on:
             ..Object::default()
         });
     }
+}
+
+/// The schema a qualified name as written (`public.t`, `"a.b".f(public.t)`) is in: what precedes
+/// its first dot outside quotes.
+fn schema_of(name: &str) -> Option<&str> {
+    let mut quoted = false;
+    for (k, c) in name.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '.' if !quoted => return Some(&name[..k]),
+            '(' if !quoted => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// One object per privilege a column grants of its own (`grant select (email) on table users to
