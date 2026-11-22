@@ -23,6 +23,7 @@ KEYWORDS = [
     ("PERSIST", False), ("PERSIST_ONLY", False), ("PHASE", False), ("PLUGIN", False), ("PREV", False),
     ("SUSPEND", False), ("UNINSTALL", False), ("XA", False), ("XID", False),
     ("MUTEX", False), ("QUALIFY", True), ("RANDOM", False), ("USER_RESOURCES", False),
+    ("ZONE", False), ("GROUPING", True),
 ]
 
 
@@ -63,7 +64,19 @@ EXTEND = {
     "TableLock": ['TableName "AS" Identifier LockType'],
     "SetStmt": ['"SET" "PASSWORD" "TO" "RANDOM"', '"SET" "PASSWORD" "FOR" Username "TO" "RANDOM"', '"SET" "PASSWORD" EqOrAssignmentEq PasswordOpt "REPLACE" stringLit', '"SET" "PASSWORD" EqOrAssignmentEq PasswordOpt "REPLACE" stringLit "RETAIN" "CURRENT" "PASSWORD"', '"SET" "PASSWORD" "FOR" Username EqOrAssignmentEq PasswordOpt "REPLACE" stringLit', '"SET" "PASSWORD" "FOR" Username EqOrAssignmentEq PasswordOpt "REPLACE" stringLit "RETAIN" "CURRENT" "PASSWORD"'],
     "VariableAssignment": ['"PERSIST" VariableName EqOrAssignmentEq SetExpr', '"PERSIST_ONLY" VariableName EqOrAssignmentEq SetExpr'],
-    "TableFactor": ["JsonTable"],
+    # A derived table may name its columns, `(SELECT …) AS t(a, b)`.
+    "TableFactor": ["JsonTable", "SubSelect TableAsName '(' IdentList ')'"],
+    "JoinTable": ['TableRef "NATURAL" "INNER" "JOIN" TableRef'],
+    "CastType": ["NChar OptFieldLen", '"DOUBLE" "PRECISION"'],
+    "FunctionCallKeyword": ['"GROUPING" \'(\' ExpressionList \')\''],
+    # WEIGHT_STRING's internal form, which mysqldump and the server's own tests write.
+    "FunctionCallNonKeyword": ['"WEIGHT_STRING" \'(\' Expression \',\' Expression \',\' Expression \',\' Expression \')\''],
+    # JSON_VALUE takes a type and what to do on an empty or wrong value, written as an alternative
+    # over the argument list a call reads, so the comma after the first argument stays the list's.
+    "FunctionCallGeneric": ['identifier \'(\' ExpressionList "RETURNING" CastType JsonTableOn \')\''],
+    "GroupByClause": ['"GROUP" "BY" "ROLLUP" \'(\' ByList \')\''],
+    # A parenthesized query takes INTO after its ORDER BY and LIMIT.
+    "SetOprStmtWithLimitOrderBy": ['SubSelect "INTO" SelectIntoTarget', 'SubSelect OrderBy "INTO" SelectIntoTarget', 'SubSelect SelectStmtLimit "INTO" SelectIntoTarget', 'SubSelect OrderBy SelectStmtLimit "INTO" SelectIntoTarget'],
     # A session's id as a variable, or in a stored program as one of its own.
     "KillStmt": ["KillOrKillTiDB singleAtIdentifier", 'KillOrKillTiDB "CONNECTION" singleAtIdentifier', 'KillOrKillTiDB "QUERY" singleAtIdentifier', "KillOrKillTiDB identifier"],
     "FlushOption": ['"OPTIMIZER_COSTS"', '"USER_RESOURCES"', 'TableOrTables TableNameList "FOR" "EXPORT"'],
@@ -72,7 +85,7 @@ EXTEND = {
     "CommitStmt": ['"COMMIT" "WORK"', '"COMMIT" "WORK" CompletionTypeWithinTransaction'],
     "RollbackStmt": ['"ROLLBACK" "WORK"', '"ROLLBACK" "WORK" CompletionTypeWithinTransaction'],
     "ShowStmt": ['"SHOW" "CREATE" "FUNCTION" TableName', '"SHOW" "CREATE" "TRIGGER" TableName', '"SHOW" "CREATE" "EVENT" TableName', '"SHOW" "PROCEDURE" "CODE" TableName', '"SHOW" "FUNCTION" "CODE" TableName', '"SHOW" "WARNINGS" "LIMIT" LimitOption', '"SHOW" "WARNINGS" "LIMIT" LimitOption \',\' LimitOption', '"SHOW" "ERRORS" "LIMIT" LimitOption', '"SHOW" "ERRORS" "LIMIT" LimitOption \',\' LimitOption', '"SHOW" "ENGINE" Identifier "STATUS"', '"SHOW" "ENGINE" Identifier "MUTEX"'],
-    "SimpleExpr": ['"MATCH" \'(\' ColumnNameList \')\' "AGAINST" \'(\' BitExpr FulltextSearchModifierOpt \')\'', '"MATCH" ColumnNameList "AGAINST" \'(\' BitExpr FulltextSearchModifierOpt \')\''],
+    "SimpleExpr": ['builtinCast \'(\' Expression "AT" "TIME" "ZONE" stringLit "AS" CastType \')\'', 'builtinCast \'(\' Expression "AT" "TIME" "ZONE" "INTERVAL" stringLit "AS" CastType \')\'', '"MATCH" \'(\' ColumnNameList \')\' "AGAINST" \'(\' BitExpr FulltextSearchModifierOpt \')\'', '"MATCH" ColumnNameList "AGAINST" \'(\' BitExpr FulltextSearchModifierOpt \')\''],
     "AuthOption": ['"IDENTIFIED" "BY" "RANDOM" "PASSWORD"', '"IDENTIFIED" "BY" AuthString "REPLACE" AuthString', '"IDENTIFIED" "WITH" AuthPlugin "BY" "RANDOM" "PASSWORD"'],
 }
 
@@ -80,7 +93,11 @@ EXTEND = {
 REPLACE = {
     # MySQL takes INTO right after the select list as well as at the end, and HAVING without FROM.
     "SelectStmtBasic": ['"SELECT" SelectStmtOpts SelectStmtFieldList SelectIntoEarly'],
-    "SelectStmtIntoOption": ["", '"INTO" SelectIntoTarget'],
+    # INTO goes before or after the locking clauses, of which there may be several.
+    "SelectStmtIntoOption": ["", '"INTO" SelectIntoTarget', '"INTO" SelectIntoTarget SelectLockList'],
+    "SelectLockOpt": ["", "SelectLockList"],
+    # ESCAPE takes any simple expression.
+    "LikeOrIlikeEscapeOpt": ["%prec empty", '"ESCAPE" SimpleExpr'],
     "ExplainFormatType": ["Identifier"],
     "ProcedurceLabelOpt": ["", "LabelName"],
     "ProcedureFetchList": ["Identifier", "ProcedureFetchList ',' Identifier"],
@@ -107,6 +124,8 @@ SUBSTITUTE = [
     ('"REVOKE" RoleOrPrivElemList "ON" ObjectType PrivLevel "FROM" UserSpecList', '"REVOKE" IfExists RoleOrPrivElemList "ON" ObjectType PrivLevel "FROM" UserSpecList IgnoreUnknownUser'),
     ('"CREATE" "USER" IfNotExists UserSpecList RequireClauseOpt', '"CREATE" "USER" IfNotExists UserSpecList DefaultRoleOpt RequireClauseOpt'),
     ('"DECLARE" ProcedureDeclIdents Type ProcedureOptDefault', '"DECLARE" ProcedureDeclIdents RoutineType ProcedureOptDefault'),
+    # A CHAR cast names its character set as a column's type does, ASCII and UNICODE included.
+    ("Char OptFieldLen OptBinary", "Char OptFieldLen OptCharsetWithOptBinary"),
 ]
 
 # Rules this grammar adds.
@@ -127,6 +146,20 @@ SelectIntoVars:
 SelectIntoVar:
 	singleAtIdentifier
 |	Identifier
+
+SelectLockList:
+	SelectLock
+|	SelectLockList SelectLock
+
+SelectLock:
+	"FOR" "UPDATE" OfTablesOpt
+|	"FOR" "SHARE" OfTablesOpt
+|	"FOR" "UPDATE" OfTablesOpt "NOWAIT"
+|	"FOR" "UPDATE" OfTablesOpt "WAIT" NUM
+|	"FOR" "SHARE" OfTablesOpt "NOWAIT"
+|	"FOR" "UPDATE" OfTablesOpt "SKIP" "LOCKED"
+|	"FOR" "SHARE" OfTablesOpt "SKIP" "LOCKED"
+|	"LOCK" "IN" "SHARE" "MODE"
 
 SpatialType:
 	"GEOMETRY"
