@@ -2935,8 +2935,10 @@ fn grants_of(s: &mut Schema, privileges: &str, name: &str, id: Option<&str>, on:
         });
     }
     // What the owner's default privileges grant it as it is made, and it doesn't have: revoked
-    // after it is made, which an object already there has no need of.
-    for (grantee, privilege, grantable) in implied.iter().filter(|g| !have.contains(g) && !default.contains(g)) {
+    // after it is made, which an object already there has no need of. One it has with or without
+    // grant option is no such privilege.
+    let holds = |set: &BTreeSet<(String, String, bool)>, g: &(String, String, bool)| set.iter().any(|h| h.0 == g.0 && h.1 == g.1);
+    for (grantee, privilege, grantable) in implied.iter().filter(|g| !holds(&have, g) && !holds(&default, g)) {
         s.add(Object {
             id: format!("revoke {privilege} on {name} from {grantee}"),
             kind: Some(Kind::Grant),

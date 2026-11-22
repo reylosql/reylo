@@ -20,3 +20,4 @@ grant select on table room_totals to diff_reporting;
 grant select on table rooms to diff_reporting;
 grant select on table reports.daily to diff_reporting;
 grant update (total) on table bookings to diff_app;
+revoke select on table bookings from diff_reporting;

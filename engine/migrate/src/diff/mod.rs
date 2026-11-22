@@ -111,9 +111,10 @@ pub struct Object {
 
 /// Whether a grant an object is given as it is made, by what its `after` names (its owner's default
 /// privileges), is given by those alone where the plan makes them: they are there only after the
-/// objects it makes, since grants come after the objects they are on.
+/// objects it makes, since grants come after the objects they are on. A grant with grant option is
+/// given only by those that carry it, whose definition says so as the grant's does.
 fn given_by_new(o: &Object, to: &Schema, creates: &BTreeSet<String>) -> bool {
-    let by: Vec<&String> = o.after.iter().filter(|a| to.objects.contains_key(*a)).collect();
+    let by: Vec<&String> = o.after.iter().filter(|a| to.objects.get(*a).is_some_and(|d| o.def != "true" || d.def == "true")).collect();
     o.kind == Some(Kind::Grant) && !by.is_empty() && by.iter().all(|a| creates.contains(*a))
 }
 
@@ -1116,11 +1117,12 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
     }
 
     // A revoke of what an object is given as it is made is made only with its owner, or with the
-    // change of the column that makes it (an identity's sequence), where it is given, and dropped
-    // only with its owner: an object already there was never given it.
+    // change of the column that makes it (an identity's sequence), and dropped only with its owner:
+    // an object already there was never given it. One made is kept even where what gives it is new,
+    // since the role the plan runs as makes the object, under its own default privileges.
     let as_made = |o: &Object| o.extra.iter().any(|l| l == AS_MADE);
     let made = |w: &String| creates.contains(w) || (alters.contains_key(w) && to.objects.get(w).is_some_and(|c| c.kind == Some(Kind::Column)));
-    let unmade: Vec<String> = creates.iter().filter(|id| to.objects.get(*id).is_some_and(|o| as_made(o) && (o.owner.as_ref().is_none_or(|w| !made(w)) || given_by_new(o, to, &creates)))).cloned().collect();
+    let unmade: Vec<String> = creates.iter().filter(|id| to.objects.get(*id).is_some_and(|o| as_made(o) && o.owner.as_ref().is_none_or(|w| !made(w)))).cloned().collect();
     let undropped: Vec<String> = drops.iter().filter(|id| from.objects.get(*id).is_some_and(|o| as_made(o) && o.owner.as_ref().is_none_or(|w| !drops.contains(w)))).cloned().collect();
     for id in unmade {
         creates.remove(&id);
