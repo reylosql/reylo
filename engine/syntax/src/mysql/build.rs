@@ -11,11 +11,17 @@ use std::cell::Cell;
 
 type R<T> = Result<T, String>;
 
+/// How many bytes apart the character counts a column starts from are.
+const CHECKPOINT: usize = 256;
+
 /// Builds the AST of a tree.
 pub(crate) struct B<'a> {
     t: &'a Tree<'a>,
     /// Where each line starts, for the line and column a span counts in.
     lines: Vec<usize>,
+    /// How many characters stand before each [`CHECKPOINT`]th byte, so a column counts at most that
+    /// many bytes from the one before it.
+    chars: Vec<u32>,
     /// Whether a backslash escapes in a string (no `NO_BACKSLASH_ESCAPES`).
     backslash: bool,
     /// How deep the build is in expressions, queries and tables.
@@ -31,7 +37,11 @@ impl<'a> B<'a> {
     pub(crate) fn new(t: &'a Tree<'a>, backslash: bool, bounds: super::Bounds) -> Self {
         let mut lines = vec![0];
         lines.extend(t.text.match_indices('\n').map(|(i, _)| i + 1));
-        B { t, lines, backslash, depth: Cell::new(0), bounds }
+        let mut chars = vec![0u32];
+        for block in t.text.as_bytes().chunks(CHECKPOINT) {
+            chars.push(chars.last().unwrap() + block.iter().filter(|&&b| b & 0xC0 != 0x80).count() as u32);
+        }
+        B { t, lines, chars, backslash, depth: Cell::new(0), bounds }
     }
 
     /// How many operators the tree has: the nodes that join two operands or follow one.
@@ -47,6 +57,7 @@ impl<'a> B<'a> {
                     match self.k(id) {
                         "Expression" | "BoolPri" | "PredicateExpr" | "BitExpr" => c.len() > 1,
                         "SimpleExpr" => c.len() == 3 && matches!(self.k(c[1]), "\"||\"" | "\"COLLATE\""),
+                        "SetOpr" => true,
                         _ => false,
                     }
                 }
@@ -90,7 +101,13 @@ impl<'a> B<'a> {
     fn loc(&self, at: usize) -> Location {
         let line = self.lines.partition_point(|&s| s <= at);
         let start = self.lines[line - 1];
-        Location::new(line as u64, self.t.text[start..at].chars().count() as u64 + 1)
+        Location::new(line as u64, u64::from(self.chars_before(at) - self.chars_before(start)) + 1)
+    }
+
+    /// How many characters stand before byte `at`: the bytes that start one.
+    fn chars_before(&self, at: usize) -> u32 {
+        let block = at / CHECKPOINT;
+        self.chars[block] + self.t.text.as_bytes()[block * CHECKPOINT..at].iter().filter(|&&b| b & 0xC0 != 0x80).count() as u32
     }
     fn span(&self, id: NodeId) -> Span {
         let n = self.t.node(id);
@@ -576,12 +593,12 @@ impl<'a> B<'a> {
         let Some(g) = self.get(id, "GroupByClause") else { return Ok(()) };
         let c = self.ch(g);
         if c.len() == 6 {
-            // GROUP BY ROLLUP(…), as a call of ROLLUP.
-            let mut args = Vec::new();
+            // GROUP BY ROLLUP(…) is GROUP BY … WITH ROLLUP.
+            let mut exprs = Vec::new();
             for item in self.list(c[4], "ByItem") {
-                args.push(self.expr(self.ch(item)[0])?);
+                exprs.push(self.expr(self.ch(item)[0])?);
             }
-            s.group_by = GroupByExpr::Expressions(vec![func(ObjectName::from(vec![Ident::new(self.tx(c[2]))]), args)], vec![]);
+            s.group_by = GroupByExpr::Expressions(exprs, vec![GroupByWithModifier::Rollup]);
             return Ok(());
         }
         let mut exprs = Vec::new();
@@ -928,17 +945,16 @@ impl<'a> B<'a> {
                 }
             }
         };
-        Ok(match c.len() {
-            0 => (None, None),
-            3 => {
-                if self.tx(c[2]).eq_ignore_ascii_case("EMPTY") {
-                    (Some(response(c[0])), None)
-                } else {
-                    (None, Some(response(c[0])))
-                }
+        // Each response by the word after its ON, in either order.
+        let (mut on_empty, mut on_error) = (None, None);
+        for at in (0..c.len()).step_by(3) {
+            if self.tx(c[at + 2]).eq_ignore_ascii_case("EMPTY") {
+                on_empty = Some(response(c[at]));
+            } else {
+                on_error = Some(response(c[at]));
             }
-            _ => (Some(response(c[0])), Some(response(c[3]))),
-        })
+        }
+        Ok((on_empty, on_error))
     }
 
     /// A column type, its character set and its collation.

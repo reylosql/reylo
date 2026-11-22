@@ -252,6 +252,7 @@ JsonTableOn:
 |	JsonTableOnResponse "ON" "EMPTY"
 |	JsonTableOnResponse "ON" "ERROR"
 |	JsonTableOnResponse "ON" "EMPTY" JsonTableOnResponse "ON" "ERROR"
+|	JsonTableOnResponse "ON" "ERROR" JsonTableOnResponse "ON" "EMPTY"
 
 JsonTableOnResponse:
 	"NULL"

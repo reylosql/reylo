@@ -276,6 +276,9 @@ mod tests {
             ("select * from json_table(?, '$[*]' columns (id int path '$.id', n varchar(10) path '$.n' null on empty)) as j", "SELECT * FROM JSON_TABLE(?, '$[*]' COLUMNS(id INT PATH '$.id', n VARCHAR(10) PATH '$.n' NULL ON EMPTY)) AS j"),
             // MySQL's precedence: `^` binds tighter than `*`, and a join without ON is the left operand of the joins after it.
             ("select 2 * 3 ^ 1", "SELECT 2 * 3 ^ 1"),
+            ("select a, count(*) from t group by rollup(a)", "SELECT a, count(*) FROM t GROUP BY a WITH ROLLUP"),
+            // A column's responses, in either order.
+            ("select * from json_table(?, '$[*]' columns (x int path '$.v' default '1' on error default '2' on empty)) as j", "SELECT * FROM JSON_TABLE(?, '$[*]' COLUMNS(x INT PATH '$.v' DEFAULT '2' ON EMPTY DEFAULT '1' ON ERROR)) AS j"),
             ("select * from a join b right join c on x", "SELECT * FROM a JOIN b RIGHT JOIN c ON x"),
         ] {
             assert_eq!(printed(text), read);
@@ -293,6 +296,10 @@ mod tests {
         for (placeholder, at) in [("?", "Location(2,11)"), ("?", "Location(2,23)"), (":d", "Location(2,26)")] {
             assert!(debug.contains(&format!("Placeholder(\"{placeholder}\"), span: Span({at}")), "{placeholder} at {at}: {debug}");
         }
+        // A column counts characters, past a long line's run of them.
+        let text = format!("select a from t\nwhere b in ({}?)", "'é', ".repeat(100));
+        let debug = format!("{:?}", parse(&text, Options::default(), BOUNDS).unwrap());
+        assert!(debug.contains("Placeholder(\"?\"), span: Span(Location(2,513)"), "{debug}");
     }
 
     #[test]
@@ -300,6 +307,9 @@ mod tests {
         let sum = |n: usize| format!("select {} as x", vec!["a"; n].join(" + "));
         assert!(parse(&sum(500), Options::default(), BOUNDS).is_ok());
         assert!(parse(&sum(502), Options::default(), BOUNDS).is_err());
+        let unions = |n: usize| vec!["select 1"; n + 1].join(" union all ");
+        assert!(parse(&unions(500), Options::default(), BOUNDS).is_ok());
+        assert!(parse(&unions(501), Options::default(), BOUNDS).is_err());
         let calls = |n: usize| format!("select {}a{} as x", "abs(".repeat(n), ")".repeat(n));
         assert!(parse(&calls(150), Options::default(), BOUNDS).is_ok());
         assert!(parse(&calls(250), Options::default(), BOUNDS).is_err());

@@ -3629,6 +3629,7 @@ mod tests {
             "select * from (select id from posts union all select id from posts) s where s.id = ?",
             "select * from (select p.id from posts p cross join users u) s where s.id = ?",
             "select * from (select user_id, count(*) as n from posts group by user_id with rollup) s where s.user_id = ?",
+            "select * from (select user_id, count(*) as n from posts group by rollup(user_id)) s where s.user_id = ?",
             "select p.id from posts p full outer join users u on u.id = p.user_id where p.id = ?",
         ] {
             assert_eq!(rows(sql), "many", "{sql}");

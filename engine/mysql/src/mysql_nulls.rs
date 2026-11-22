@@ -742,6 +742,7 @@ mod tests {
         for sql in [
             "select sum(a) from t",
             "select user_id, sum(a) from t group by user_id with rollup",
+            "select user_id, sum(a) from t group by rollup(user_id)",
             "select user_id, sum(a) over () from t group by user_id, a",
             "select *, sum(a) from t group by user_id",
             "select user_id, sum(a) + 1 from t group by user_id",
