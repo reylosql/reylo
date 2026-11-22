@@ -493,6 +493,7 @@ for_each_dialect!(
     create_lists_every_rename_it_assumes,
     commands_create_prints_for_names_with_spaces_run_as_printed,
     deploy_compares_with_what_dev_replayed,
+    dev_says_schema_sql_is_ahead_once_a_changed_object_is_pushed,
     deploy_refuses_any_schema_with_no_history,
     init_on_an_empty_database_writes_an_empty_schema_and_lock,
     a_broken_draft_keeps_what_sync_made,
@@ -2116,6 +2117,35 @@ async fn deploy_compares_with_what_dev_replayed(mut p: P) {
     assert_has!(p.output(), r"^✓ Up to date$");
 }
 
+/// What dev says of schema.sql where an object changed rather than came, a view's text: edited, the
+/// two disagree, and the next migration writes the change; pushed, the database has schema.sql, so
+/// schema.sql is ahead.
+async fn dev_says_schema_sql_is_ahead_once_a_changed_object_is_pushed(mut p: P) {
+    let int = p.t.int;
+    let declared = |columns: &str| format!("create table t (id {int}, n {int}); create view v as select {columns} from t;");
+    p.linear();
+    p.schema(&declared("id"));
+    // A file each, since MySQL runs each statement alone.
+    p.file("20261027100000_t.sql", &format!("create table t (id {int}, n {int});"));
+    p.file("20261027100100_v.sql", "create view v as select id from t;");
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    p.output();
+    p.schema(&declared("id, n"));
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    assert_has!(p.output(), r"! The migrations and \S*schema\.sql disagree\n  To write what \S*schema\.sql has to a migration file:\n    reylo migrate new <name>");
+    assert_eq!(p.db_push().await, 0, "{}", p.peek());
+    p.output();
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    assert_has!(p.output(), r"✓ Up to date with the migrations\n» The schema is ahead of the migrations\n  To write the changes to a migration file:\n    reylo migrate new <name>");
+    // Written, the migration is recorded, and the two agree.
+    assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "v", &Default::default(), log).await).await, 0, "{}", p.peek());
+    p.output();
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    let out = p.output();
+    assert_has!(&out, r"recorded: already in place");
+    assert!(!has(&out, "ahead|disagree"), "{out}");
+}
+
 async fn a_broken_draft_keeps_what_sync_made(mut p: P) {
     let (int, text) = (p.t.int, p.t.text);
     p.linear();
@@ -2953,6 +2983,8 @@ on!(
     a_platforms_schemas_by_name_are_left_out_whoever_owns_them,
     a_projects_auth_and_storage_are_its_own_on_a_server_of_no_platform,
     a_change_by_hand_is_shown_alone_beside_a_function_of_many_lines,
+    an_enum_value_added_is_ahead_on_the_side_that_added_it,
+    a_comment_a_migration_adds_is_the_migrations,
 );
 on!(Mysql, a_migration_that_names_a_database_is_refused);
 on!(
@@ -3923,6 +3955,52 @@ mod adversarial {
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_has!(p.output(), "Up to date");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    }
+
+    /// An enum is one line of the catalog, so a value added changes that line on both sides: schema.sql's
+    /// enum with a value more is schema.sql ahead, pushed or not, and a migration's is the migrations'.
+    pub async fn an_enum_value_added_is_ahead_on_the_side_that_added_it(mut p: P) {
+        let declared = |values: &str| format!("create type visibility as enum ({values}); create table bookmarks (id int primary key, visibility visibility not null default 'private');");
+        p.linear();
+        p.schema(&declared("'private', 'public'"));
+        p.file("20261027100000_bookmarks.sql", &declared("'private', 'public'"));
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        p.schema(&declared("'private', 'team', 'public'"));
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"» The schema is ahead of the migrations\n  To write the changes to a migration file:\n    reylo migrate new <name>");
+        assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+        assert_has!(p.output(), r"The schema is ahead of the migrations\n\n[^\n]*add value 'team' after 'private'");
+        assert_eq!(p.db_push().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"✓ Up to date with the migrations\n» The schema is ahead of the migrations\n  To write the changes to a migration file:\n    reylo migrate new <name>");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "team", &Default::default(), log).await).await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!has(&out, "ahead|disagree"), "{out}");
+        // A value a migration adds and schema.sql doesn't declare is the migrations'.
+        p.file("20261027100100_archived.sql", "alter type visibility add value 'archived';");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"The migrations make what \S*schema\.sql doesn't declare");
+        assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+        assert_has!(p.output(), r"The migrations make what \S*schema\.sql doesn't declare");
+    }
+
+    /// A comment a migration makes and schema.sql doesn't declare is the migrations', though this
+    /// database, whose comments aren't compared, matches schema.sql as well as the migrations.
+    pub async fn a_comment_a_migration_adds_is_the_migrations(mut p: P) {
+        p.linear();
+        p.schema("create table t (id int);");
+        p.file("20261027100000_t.sql", "create table t (id int);");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        p.file("20261027100100_doc.sql", "comment on table t is 'the table';");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"The migrations make what \S*schema\.sql doesn't declare");
+        assert!(!has(&out, "ahead"), "{out}");
     }
 
     pub async fn a_comment_in_schema_sql_is_written(mut p: P) {

@@ -405,7 +405,7 @@ fn run_group(command: &str, parsed: &Args, log: reylo_migrate::commands::Log<'_>
         return Err(format!("no {}/ directory here: start one with reylo migrate init, or set dir in .reylo.yaml", home.strip_prefix(&opts.root).unwrap_or(home).display()));
     }
     // The development commands change a database in ways no deploy wants.
-    let in_ci = std::env::var_os("CI").is_some();
+    let in_ci = ci(std::env::var_os("CI").as_deref());
     let mut log = log;
     let rt = runtime();
     let result = rt.block_on(async {
@@ -441,6 +441,11 @@ fn run_group(command: &str, parsed: &Args, log: reylo_migrate::commands::Log<'_>
         }
     });
     result.map_err(|e| e.0)
+}
+
+/// Whether `CI` says this is CI: set, to anything but empty, `false` or `0`, which say it isn't.
+fn ci(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !(v.is_empty() || v.eq_ignore_ascii_case("false") || v == "0"))
 }
 
 /// `reylo generate <generator> [paths] [--out <file>]`.
@@ -584,7 +589,14 @@ pub fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{painted_usage, usage, COMMANDS};
+    use super::{ci, painted_usage, usage, COMMANDS};
+
+    #[test]
+    fn ci_is_any_value_but_empty_false_or_0() {
+        for (value, is) in [(None, false), (Some(""), false), (Some("false"), false), (Some("FALSE"), false), (Some("False"), false), (Some("0"), false), (Some("true"), true), (Some("1"), true), (Some("yes"), true), (Some("woodpecker"), true)] {
+            assert_eq!(ci(value.map(std::ffi::OsStr::new)), is, "CI={value:?}");
+        }
+    }
 
     #[test]
     fn the_help_is_its_text_when_nothing_paints_it() {

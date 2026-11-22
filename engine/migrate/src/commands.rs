@@ -1675,10 +1675,9 @@ async fn schema_problems(shadows: &mut Shadows<'_>, b_lane: usize, b: &[String],
         }
     };
     if a != b {
-        let (only_schema, only_migrations) = difference(&a, b);
-        let problem = match (only_schema.is_empty(), only_migrations.is_empty()) {
-            (false, true) => Problem::new("schema-sql-ahead", "The schema is ahead of the migrations").sql(&lane_plan(shadows, b_lane, a_lane, Some(schema_sql)).await.unwrap_or_default()).fix("To write the changes to a migration file", &["reylo migrate new <name>"]),
-            (true, false) => Problem::new("migrations-ahead", format!("The migrations make what {schema} doesn't declare")).sql(&lane_plan(shadows, a_lane, b_lane, None).await.unwrap_or_default()).note(format!("Add it to {schema}, or take it out of the migration that makes it.")),
+        let problem = match sides(&a, b) {
+            (true, false) => Problem::new("schema-sql-ahead", "The schema is ahead of the migrations").sql(&lane_plan(shadows, b_lane, a_lane, Some(schema_sql)).await.unwrap_or_default()).fix("To write the changes to a migration file", &["reylo migrate new <name>"]),
+            (false, true) => Problem::new("migrations-ahead", format!("The migrations make what {schema} doesn't declare")).sql(&lane_plan(shadows, a_lane, b_lane, None).await.unwrap_or_default()).note(format!("Add it to {schema}, or take it out of the migration that makes it.")),
             _ => Problem::new("schema-sql-disagrees", format!("The migrations and {schema} disagree"))
                 .sql(&lane_plan(shadows, b_lane, a_lane, Some(schema_sql)).await.unwrap_or_default())
                 .note(format!("Change {schema} or the migrations so that they agree."))
@@ -5171,7 +5170,9 @@ async fn relock(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, files: &
     match reach.filter(|_| whole) {
         Some(Reach::SchemaAhead) => log(&then(note("The schema is ahead of the migrations"), &[("To write the changes to a migration file", &["reylo migrate new <name>"])])),
         Some(Reach::MigrationsAhead) => log(&format!("{} The migrations make what {schema} doesn't declare: add it there, or take it out of the migration", paint("yellow", "!"))),
-        Some(Reach::Differ) => log(&then(format!("{} The migrations and {schema} disagree", paint("yellow", "!")), &[("See how", &["reylo migrate deploy --dry-run"])])),
+        // Either may be what's wanted, schema.sql edited or a migration written by hand, so the lead
+        // says what the migration would hold. A dry run would stop at what db push made.
+        Some(Reach::Differ) => log(&then(format!("{} The migrations and {schema} disagree", paint("yellow", "!")), &[(&format!("To write what {schema} has to a migration file"), &["reylo migrate new <name>"])])),
         Some(Reach::SchemaFails(e)) => log(&format!("{} On an empty database, {schema} fails: {}", paint("yellow", "!"), e.lines().next().unwrap_or_default())),
         Some(Reach::Same) | None => {}
     }
@@ -5206,6 +5207,50 @@ enum Reach {
     SchemaFails(String),
 }
 
+/// Whether `a` has what `b` doesn't, and `b` what `a` doesn't, as `difference` finds it, but for an
+/// enum: one whose values in one are the other's with more among them is only the larger one's
+/// change, since a value is added in place (`alter type … add value … after`) and none is taken out.
+#[cfg(feature = "cli")]
+fn sides(a: &[String], b: &[String]) -> (bool, bool) {
+    let (mut only_a, mut only_b) = difference(a, b);
+    let (mut a_more, mut b_more) = (false, false);
+    only_a.retain(|line| {
+        let Some((name, values)) = enum_values(line) else { return true };
+        let Some((i, other)) = only_b.iter().enumerate().find_map(|(i, l)| enum_values(l).filter(|(n, _)| *n == name).map(|(_, v)| (i, v))) else { return true };
+        if within(&other, &values) {
+            a_more = true;
+        } else if within(&values, &other) {
+            b_more = true;
+        } else {
+            return true;
+        }
+        only_b.remove(i);
+        false
+    });
+    (a_more || !only_a.is_empty(), b_more || !only_b.is_empty())
+}
+
+/// An enum's line, `enum <name> (<values as JSON strings>)`, as its name and values. The name ends at
+/// the first space outside its quotes.
+#[cfg(feature = "cli")]
+fn enum_values(line: &str) -> Option<(&str, Vec<String>)> {
+    let rest = line.strip_prefix("enum ")?;
+    let mut quoted = false;
+    let (k, _) = rest.char_indices().find(|&(_, c)| {
+        quoted ^= c == '"';
+        c == ' ' && !quoted
+    })?;
+    let values = rest[k..].strip_prefix(" (")?.strip_suffix(')')?;
+    Some((&rest[..k], serde_json::from_str(&format!("[{values}]")).ok()?))
+}
+
+/// Whether `fewer` is `more` with some of its values left out, in the same order.
+#[cfg(feature = "cli")]
+fn within(fewer: &[String], more: &[String]) -> bool {
+    let mut rest = more.iter();
+    fewer.len() < more.len() && fewer.iter().all(|v| rest.any(|m| m == v))
+}
+
 /// The lock as the database's history makes it: the migrations it ran, in its order, with
 /// schema.sql's checksum where their replay reaches schema.sql. None where the lock already is that.
 #[cfg(feature = "cli")]
@@ -5230,9 +5275,16 @@ async fn locked(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, files: &
         shadows.push(theirs, [Step::script("schema.sql", sql)]);
         let reach = match (shadows.lines(ours).await?, shadows.lines(theirs).await?) {
             (Ok(a), Ok(b)) if a == b => Reach::Same,
-            (Ok(a), Ok(b)) => match difference(&a, &b) {
-                (made, declared) if made.is_empty() && !declared.is_empty() => Reach::SchemaAhead,
-                (made, declared) if !made.is_empty() && declared.is_empty() => Reach::MigrationsAhead,
+            // A database that has schema.sql and not what its migrations make (db push made it) has
+            // what the next migration writes, whatever changed. What it doesn't compare (a comment)
+            // can match both.
+            (Ok(a), Ok(b)) if {
+                let live = catalog(db).await?;
+                crate::catalog::same_schema(&live, &b) && !crate::catalog::same_schema(&live, &a)
+            } => Reach::SchemaAhead,
+            (Ok(a), Ok(b)) => match sides(&a, &b) {
+                (false, true) => Reach::SchemaAhead,
+                (true, false) => Reach::MigrationsAhead,
                 _ => Reach::Differ,
             },
             (_, Err((_, e))) => Reach::SchemaFails(e),
@@ -5610,7 +5662,7 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
         }
         rows.row(log, &paint("green", "✓"), &m.name, &format!("applied {}", paint("dim", &format!("· {} ms", started.elapsed().as_millis()))));
     }
-    if rewind_rows.is_empty() && records.is_empty() && pending.is_empty() && base == at_kept {
+    if rewind_rows.is_empty() && records.is_empty() && pending.is_empty() {
         log(&format!("{} Up to date with the migrations", paint("green", "✓")));
     }
     Ok(0)
@@ -6066,6 +6118,29 @@ mod tests {
         let script = "create trigger t after insert on a begin insert into audit values (new.end); end;\n-- a note; and more\ninsert into a values ('x;y');\n\nselect 1";
         assert_eq!(crate::db::sqlite_statements(script), ["create trigger t after insert on a begin insert into audit values (new.end); end;", "\n-- a note; and more\ninsert into a values ('x;y');", "\n\nselect 1"]);
         assert!(crate::db::sqlite_statements("-- nothing;\n").is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn an_enum_with_a_value_added_is_only_its_sides_change() {
+        let lines = |values: &str| vec!["table public.t".to_string(), format!("enum public.visibility ({values})")];
+        let (two, three) = (lines(r#""private", "public""#), lines(r#""private", "team", "public""#));
+        assert_eq!(sides(&two, &three), (false, true));
+        assert_eq!(sides(&three, &two), (true, false));
+        // Reordered, or one taken out and another added, each side has what the other doesn't.
+        assert_eq!(sides(&lines(r#""public", "private""#), &two), (true, true));
+        assert_eq!(sides(&lines(r#""private", "team""#), &two), (true, true));
+        // A quoted name with a space and a parenthesis in it is one name.
+        let quoted = |values: &str| vec![format!("enum public.\"state (internal)\" ({values})")];
+        assert_eq!(sides(&quoted(r#""a""#), &quoted(r#""a", "b""#)), (false, true));
+        // A value with a comma in it is one value.
+        assert_eq!(sides(&lines(r#""a, b""#), &lines(r#""a, b", "c""#)), (false, true));
+        assert_eq!(sides(&lines(r#""a""#), &lines(r#""a, b""#)), (true, true));
+        // Another line that differs still counts.
+        let mut more = three.clone();
+        more.push("column public.t.x integer".into());
+        assert_eq!(sides(&more, &two), (true, false));
+        assert_eq!(sides(&[two.clone(), vec!["column public.t.x integer".into()]].concat(), &three), (true, true));
     }
 
     #[test]
