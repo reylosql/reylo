@@ -128,13 +128,13 @@ impl Local {
     /// The rows of one statement, every value as text, as rusqlite's are read: an integer and a
     /// real as Rust writes them, a blob's bytes read as UTF-8.
     pub fn rows(&mut self, sql: &str) -> Result<Vec<Row>, Error> {
-        let table = self.query(sql)?;
+        let table = self.query(sql, usize::MAX)?;
         Ok(table.rows.into_iter().map(|values| Row::new(table.columns.clone(), values)).collect())
     }
 
-    /// What one statement returned, read as [`Local::rows`] reads it, its columns kept where it
-    /// returned no row.
-    pub fn query(&mut self, sql: &str) -> Result<Table, Error> {
+    /// What one statement returned, read as [`Local::rows`] reads it: its columns, kept where it
+    /// returned no row, its first `keep` rows and their count.
+    pub fn query(&mut self, sql: &str, keep: usize) -> Result<Table, Error> {
         let statement = self.prepare(sql)?;
         let s = statement.0;
         // SAFETY: a live statement, whose column names are NUL-terminated and valid until it is
@@ -143,11 +143,15 @@ impl Local {
             let count = reylo_libsql_column_count(s);
             let columns: Vec<String> = (0..count).map(|i| CStr::from_ptr(reylo_libsql_column_name(s, i)).to_string_lossy().into_owned()).collect();
             let mut out = Vec::new();
+            let mut total = 0;
             loop {
                 match reylo_libsql_step(s) {
-                    SQLITE_ROW => {}
-                    SQLITE_DONE => return Ok(Table { columns, rows: out }),
+                    SQLITE_ROW => total += 1,
+                    SQLITE_DONE => return Ok(Table { columns, rows: out, total }),
                     _ => return Err(self.error()),
+                }
+                if out.len() >= keep {
+                    continue;
                 }
                 let values = (0..count)
                     .map(|i| match reylo_libsql_column_type(s, i) {

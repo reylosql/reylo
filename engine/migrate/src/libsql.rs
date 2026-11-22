@@ -151,15 +151,15 @@ impl Remote {
         Ok(table.rows.into_iter().map(|values| Row::new(table.columns.clone(), values)).collect())
     }
 
-    /// What one statement returned, its columns kept where it returned no row; a pragma it sets is
-    /// kept, as [`Remote::exec`] keeps it.
+    /// What one statement returned, its columns kept where it returned no row: every row, which the
+    /// server sends whole. A pragma it sets is kept, as [`Remote::exec`] keeps it.
     pub fn query(&mut self, sql: &str) -> Result<Table, Error> {
         let result = self.one(json!({ "type": "execute", "stmt": { "sql": sql, "want_rows": true } }))?;
         self.remember_pragmas(sql);
         let columns: Vec<String> = result["result"]["cols"].as_array().map(|cols| cols.iter().map(|c| c["name"].as_str().unwrap_or_default().to_string()).collect()).unwrap_or_default();
         let rows = result["result"]["rows"].as_array().cloned().unwrap_or_default();
-        let rows = rows.iter().map(|row| Ok(row.as_array().map(|values| values.iter().map(text).collect::<Result<_, _>>()).transpose()?.unwrap_or_default())).collect::<Result<_, Error>>()?;
-        Ok(Table { columns, rows })
+        let rows: Vec<Vec<Option<String>>> = rows.iter().map(|row| Ok(row.as_array().map(|values| values.iter().map(text).collect::<Result<_, _>>()).transpose()?.unwrap_or_default())).collect::<Result<_, Error>>()?;
+        Ok(Table { total: rows.len(), columns, rows })
     }
 
     /// Runs `sql`, one statement or several, in order, stopping at the first that fails.

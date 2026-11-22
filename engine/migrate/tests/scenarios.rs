@@ -3822,6 +3822,11 @@ mod adversarial {
         assert_eq!(p.run(async |o, log| reylo_migrate::run_sql(o, &items, log).await).await, 0, "{}", p.peek());
         assert_eq!(p.rows("select x from t order by x").await.iter().map(|r| r.text("x").to_string()).collect::<Vec<_>>(), ["1", "2"]);
         assert_eq!(p.rows("select to_regclass('__reylo_migrations') as t").await[0].get("t"), None, "records nothing");
+        // What each statement returns is shown under its line, its columns where it returned no row.
+        p.output();
+        let items = [("rows".to_string(), "select x from t order by x; select x from t where false; update t set x = x returning x".to_string())];
+        assert_eq!(p.run(async |o, log| reylo_migrate::run_sql(o, &items, log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.output(), "✓ rows\n  x\n  ─\n  1\n  2\n  Returned 2 rows\n\n  x\n  ─\n  Returned 0 rows\n\n  x\n  ─\n  1\n  2\n  Returned 2 rows");
     }
 
     pub async fn history_push_leaves_a_data_migration_pending(mut p: P) {

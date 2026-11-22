@@ -5971,14 +5971,14 @@ pub async fn run_sql(opts: &Options, items: &[(String, String)], log: Log<'_>) -
     let mut db = Db::open(opts).await?;
     let mut code = 0;
     for (label, sql) in items {
-        match db.script_tables(sql).await {
+        match db.script_tables(sql, RUN_ROWS_SHOWN).await {
             Ok(tables) => {
                 log(&format!("{} {label}", paint("green", "✓")));
                 for (k, table) in tables.iter().enumerate() {
                     if k > 0 {
                         log("");
                     }
-                    for line in table_lines(table, RUN_ROWS_SHOWN) {
+                    for line in table_lines(table) {
                         log(&line);
                     }
                 }
@@ -6010,17 +6010,17 @@ pub async fn run_sql(opts: &Options, items: &[(String, String)], log: Log<'_>) -
 #[cfg(feature = "cli")]
 const RUN_ROWS_SHOWN: usize = 50;
 
-/// What a statement returned, as `reylo run` shows it: a table of its first `shown` rows under its
-/// columns' names, each value on one line, a number set right and null dim, then how many rows there
-/// were, or how many more.
+/// What a statement returned, as `reylo run` shows it: a table of the rows it kept under its
+/// columns' names, each value on one line, a number set right and null dim, then how many rows it
+/// returned, and how many of those aren't shown.
 #[cfg(feature = "cli")]
-fn table_lines(table: &crate::db::Table, shown: usize) -> Vec<String> {
+fn table_lines(table: &crate::db::Table) -> Vec<String> {
     const WIDEST: usize = 60;
     let cell = |value: &Option<String>| -> Option<String> {
         let text = value.as_ref()?.replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t");
         Some(if text.chars().count() > WIDEST { format!("{}…", text.chars().take(WIDEST - 1).collect::<String>()) } else { text })
     };
-    let rows: Vec<Vec<Option<String>>> = table.rows.iter().take(shown).map(|row| row.iter().map(cell).collect()).collect();
+    let rows: Vec<Vec<Option<String>>> = table.rows.iter().map(|row| row.iter().map(cell).collect()).collect();
     let width = |i: usize| rows.iter().map(|r| r[i].as_ref().map_or(4, |v| v.chars().count())).chain([table.columns[i].chars().count()]).max().unwrap_or(0);
     let widths: Vec<usize> = (0..table.columns.len()).map(width).collect();
     let numeric: Vec<bool> = (0..table.columns.len()).map(|i| rows.iter().any(|r| r[i].is_some()) && rows.iter().all(|r| r[i].as_ref().is_none_or(|v| v.parse::<f64>().is_ok()))).collect();
@@ -6037,9 +6037,9 @@ fn table_lines(table: &crate::db::Table, shown: usize) -> Vec<String> {
             None => pad("null", paint("dim", "null"), i),
         }).collect()));
     }
-    let total = table.rows.len();
-    let plural = |n: usize| if n == 1 { "" } else { "s" };
-    out.push(paint("dim", &if total > rows.len() { format!("  … {} more row{}, {total} in all", total - rows.len(), plural(total - rows.len())) } else { format!("  {total} row{}", plural(total)) }));
+    let total = table.total;
+    let counted = format!("  Returned {total} row{}", if total == 1 { "" } else { "s" });
+    out.push(paint("dim", &if total > rows.len() { format!("{counted}, {} not shown", total - rows.len()) } else { counted }));
     out
 }
 
@@ -6051,11 +6051,21 @@ mod tests {
     #[cfg(feature = "cli")]
     fn a_statements_rows_show_as_a_table() {
         set_color(false);
-        let t = |columns: &[&str], rows: &[&[Option<&str>]]| crate::db::Table { columns: columns.iter().map(|c| c.to_string()).collect(), rows: rows.iter().map(|r| r.iter().map(|v| v.map(String::from)).collect()).collect() };
-        let authors = t(&["name", "score", "bio"], &[&[Some("Ada"), Some("3"), None], &[Some("Grace"), Some("12"), Some("line one\nline two")]]);
-        assert_eq!(table_lines(&authors, 50).join("\n"), "  name   score  bio\n  ─────  ─────  ──────────────────\n  Ada        3  null\n  Grace     12  line one\\nline two\n  2 rows");
-        assert_eq!(table_lines(&authors, 1).join("\n"), "  name  score  bio\n  ────  ─────  ────\n  Ada       3  null\n  … 1 more row, 2 in all");
-        assert_eq!(table_lines(&t(&["n"], &[]), 50).join("\n"), "  n\n  ─\n  0 rows");
+        let t = |columns: &[&str], rows: &[&[Option<&str>]], total: usize| crate::db::Table { columns: columns.iter().map(|c| c.to_string()).collect(), rows: rows.iter().map(|r| r.iter().map(|v| v.map(String::from)).collect()).collect(), total };
+        let authors = t(&["name", "score", "bio"], &[&[Some("Ada"), Some("3"), None], &[Some("Grace"), Some("12"), Some("line one\nline two")]], 2);
+        assert_eq!(table_lines(&authors).join("\n"), "  name   score  bio\n  ─────  ─────  ──────────────────\n  Ada        3  null\n  Grace     12  line one\\nline two\n  Returned 2 rows");
+        // Of a statement's rows, those kept are shown, and the count says how many weren't.
+        assert_eq!(table_lines(&t(&["name", "score", "bio"], &[&[Some("Ada"), Some("3"), None]], 51)).join("\n"), "  name  score  bio\n  ────  ─────  ────\n  Ada       3  null\n  Returned 51 rows, 50 not shown");
+        assert_eq!(table_lines(&t(&["n"], &[], 0)).join("\n"), "  n\n  ─\n  Returned 0 rows");
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn a_libsql_script_splits_where_sqlite_ends_each_statement() {
+        // A column named end in a trigger's body, a `;` in a string and in a comment, and a last statement with no `;`.
+        let script = "create trigger t after insert on a begin insert into audit values (new.end); end;\n-- a note; and more\ninsert into a values ('x;y');\n\nselect 1";
+        assert_eq!(crate::db::sqlite_statements(script), ["create trigger t after insert on a begin insert into audit values (new.end); end;", "\n-- a note; and more\ninsert into a values ('x;y');", "\n\nselect 1"]);
+        assert!(crate::db::sqlite_statements("-- nothing;\n").is_empty());
     }
 
     #[test]

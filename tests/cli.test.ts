@@ -77,7 +77,7 @@ test("the migration commands and reylo run are the binary's, with their output a
   // What a statement returns is printed under it, and a change prints its line alone.
   const rows = reylo(root, ["run", "select id, name from users order by id", "update users set name = name"]);
   assert.equal(rows.status, 0, rows.err);
-  assert.equal(rows.out, "✓ select id, name from users order by id\n  id  name\n  ──  ─────\n   1  ada\n   2  grace\n  2 rows\n✓ update users set name = name\n");
+  assert.equal(rows.out, "✓ select id, name from users order by id\n  id  name\n  ──  ─────\n   1  ada\n   2  grace\n  Returned 2 rows\n✓ update users set name = name\n");
   // A flag's value after an `=` is its value, so that this runs on the database it names.
   const other = join(root, "other.db");
   // A SQLite file that isn't there is refused, never made, as the migrations' commands refuse it.
