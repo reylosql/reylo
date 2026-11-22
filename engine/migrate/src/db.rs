@@ -189,7 +189,8 @@ pub(crate) fn sqlite_error(e: rusqlite::Error) -> Error {
 
 /// The statements of a SQLite script, each ended where SQLite's own reading ends it: at the first `;`
 /// after which the text read so far is complete (`sqlite3_complete`), so that no `;` or `end` inside
-/// a trigger's body, a string or a comment ends one early. Those of nothing but comments are left out.
+/// a trigger's body, a string or a comment ends one early. Those of nothing but comments before their
+/// `;` are left out.
 #[cfg(feature = "cli")]
 pub(crate) fn sqlite_statements(sql: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -203,7 +204,7 @@ pub(crate) fn sqlite_statements(sql: &str) -> Vec<String> {
         }
     }
     out.push(sql[start..].to_string());
-    out.retain(|s| !crate::sql::is_blank(s, Dialect::Sqlite));
+    out.retain(|s| !crate::sql::is_blank(s.strip_suffix(';').unwrap_or(s), Dialect::Sqlite));
     out
 }
 

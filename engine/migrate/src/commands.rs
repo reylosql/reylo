@@ -2215,19 +2215,20 @@ fn failed(rows: &mut Rows, m: &Migration, e: &Error, d: Dialect, log: Log<'_>) {
 }
 
 /// A migration deploy ran that failed: its error, what of it may be in place, and what to do next.
-/// Nothing of it is recorded either way. Where nothing of it is in place ([`run_undone`]), it is
-/// said to have rolled back, and to be fixed and run again.
+/// Where nothing of it is in place ([`run_undone`]), nor of its row, it is said to have rolled back,
+/// and to be fixed and run again; elsewhere, where its change or its row may be in place, the dry run
+/// says which.
 fn deploy_failure(m: &Migration, e: &Error, d: Dialect, started: bool, undone: bool) -> Problem {
     let problem = Problem::new("migration-failed", format!("The migration {} failed", m.name)).note(&e.0);
     if started {
         return problem
-            .note("A run before this one was cut off here, so its change may be in place. Nothing was recorded.")
+            .note("A run before this one was cut off here, so its change may be in place.")
             .fix("See whether it is", &["reylo migrate deploy --dry-run"])
             .fix("Record it if it is, running nothing", &["reylo migrate history push"]);
     }
     if !undone {
         let why = if d == Dialect::Mysql { "MySQL commits each statement, so its first statements may be in place" } else { "It runs outside a transaction, so its change may be in place" };
-        return problem.note(format!("{why}. Nothing was recorded.")).fix("See what is", &["reylo migrate deploy --dry-run"]);
+        return problem.note(why).fix("See what is", &["reylo migrate deploy --dry-run"]);
     }
     Problem { title: format!("The migration {} failed and was rolled back", m.name), ..problem }
         .note("Nothing was recorded, so the next deploy runs it again.")
@@ -6118,6 +6119,8 @@ mod tests {
         let script = "create trigger t after insert on a begin insert into audit values (new.end); end;\n-- a note; and more\ninsert into a values ('x;y');\n\nselect 1";
         assert_eq!(crate::db::sqlite_statements(script), ["create trigger t after insert on a begin insert into audit values (new.end); end;", "\n-- a note; and more\ninsert into a values ('x;y');", "\n\nselect 1"]);
         assert!(crate::db::sqlite_statements("-- nothing;\n").is_empty());
+        // An empty statement is none, a comment before its `;` or not.
+        assert_eq!(crate::db::sqlite_statements("select 1;; -- note\n; select 2;"), ["select 1;", " select 2;"]);
     }
 
     #[test]

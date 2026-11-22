@@ -1468,7 +1468,7 @@ async fn a_lone_statement_cut_off_with_no_fingerprint_to_compare(mut p: P) {
     p.output();
     // Run again, it fails where it landed, and says how to find out.
     assert_eq!(p.migrate().await, 1);
-    assert_has!(p.output(), r"✗ 20261027110000_index\.sql  failed\n[\s\S]*A run before this one was cut off here, so its change may be in place\. Nothing was recorded\.\n\n  See whether it is:\n    reylo migrate deploy --dry-run\n  Record it if it is, running nothing:\n    reylo migrate history push");
+    assert_has!(p.output(), r"✗ 20261027110000_index\.sql  failed\n[\s\S]*A run before this one was cut off here, so its change may be in place\.\n\n  See whether it is:\n    reylo migrate deploy --dry-run\n  Record it if it is, running nothing:\n    reylo migrate history push");
     assert_eq!(p.dry_run().await, 1);
     assert_has!(p.output(), r"20261027110000_index\.sql makes exactly this change[^\n]*\n    reylo migrate history push");
     assert_eq!(p.history_push().await, 0, "{}", p.peek());
@@ -3772,7 +3772,7 @@ mod adversarial {
         p.output();
         assert_eq!(p.migrate().await, 1);
         let out = p.output();
-        assert_has!(&out, r"✗ The migration 20261027110000_drop\.sql failed\n  [^\n]*t_missing[^\n]*\n  It runs outside a transaction, so its change may be in place\. Nothing was recorded\.\n\n  See what is:\n    reylo migrate deploy --dry-run$");
+        assert_has!(&out, r"✗ The migration 20261027110000_drop\.sql failed\n  [^\n]*t_missing[^\n]*\n  It runs outside a transaction, so its change may be in place\.\n\n  See what is:\n    reylo migrate deploy --dry-run$");
         assert!(!out.contains("rolled back"), "{out}");
     }
 
