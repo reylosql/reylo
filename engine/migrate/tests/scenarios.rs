@@ -1300,20 +1300,44 @@ async fn a_hotfix_behind_a_pending_migration_is_undone_then_deployed(mut p: P) {
     p.file(nick, "create index users_nick on users (nick);");
     p.schema(&format!("{table} create index users_nick on users (nick); create index users_email on users (email);"));
     p.file(email, "create index users_email on users (email);");
-    let ran_through = r"It ran the migrations through 20261027110000_backfill\.sql, and then had this change made outside them:\n\n(?:    [^\n]*\n)*    [^\n]*users_email[^\n]*\n(?:    [^\n]*\n)*\n  Undo it here, so that deploy runs 20261027120000_nick_index\.sql first, and then 20261027130000_email_index\.sql, which makes it again:\n    reylo run '[^\n]*users_email[^\n]*'\n    reylo migrate deploy";
+    let ran_through = r"It ran the migrations through 20261027110000_backfill\.sql, and then had this change made outside them:\n\n(?:    [^\n]*\n)*    [^\n]*users_email[^\n]*\n(?:    [^\n]*\n)*\n  Undo it here, so that deploy runs 20261027120000_nick_index\.sql first, and then 20261027130000_email_index\.sql, which makes it again:\n    reylo run --url \S+ '[^\n]*users_email[^\n]*'\n    reylo migrate deploy --url \S+";
     let title = r"✗ Migration 20261027130000_email_index\.sql makes this change, but runs after 20261027120000_nick_index\.sql, which this database hasn't run\n  ";
     assert_eq!(p.history_push().await, 1);
     let out = p.output();
     assert_has!(&out, &format!("{title}{ran_through}\n\nNothing was changed\\."));
+    // The commands name this database, which a command without --url may not reach.
+    assert!(out.contains(&p.url), "{out}");
     assert_eq!(p.history().await, [users, backfill]);
     assert_eq!(p.dry_run().await, 1);
     assert_has!(p.output(), &format!("{title}{ran_through}"));
     // Undone as told, deploy runs both, in the lock's order, and the second makes it again.
-    p.exec(&undo_in(&out)).await;
+    p.exec(&undo_on(&out)).await;
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_eq!(p.history().await, [users, backfill, nick, email]);
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
-    assert_eq!(p.rows("select * from users").await.len(), 1);
+    // A migration that changes data, ahead of the one that makes a change by hand, is never recorded
+    // by the schema the two leave, which the later one makes alone: it runs, after the undo.
+    let (refill, both) = ("20261027140000_refill.sql", "20261027150000_both_index.sql");
+    p.file(refill, "update users set nick = 'x' where nick is null;");
+    p.exec("create index users_both on users (email, nick)").await;
+    p.schema(&format!("{table} create index users_nick on users (nick); create index users_email on users (email); create index users_both on users (email, nick);"));
+    p.file(both, "create index users_both on users (email, nick);");
+    p.output();
+    assert_eq!(p.history_push().await, 1);
+    let out = p.output();
+    assert_has!(&out, r"✗ Migration 20261027150000_both_index\.sql makes this change, but runs after 20261027140000_refill\.sql, which this database hasn't run\n  It ran the migrations through 20261027130000_email_index\.sql,");
+    assert_eq!(p.history().await, [users, backfill, nick, email]);
+    p.exec(&undo_on(&out)).await;
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.history().await, [users, backfill, nick, email, refill, both]);
+    let rows = p.rows("select nick from users").await;
+    assert_eq!(rows.iter().map(|r| r.text("nick").to_string()).collect::<Vec<_>>(), ["x"]);
+}
+
+/// The SQL of the `reylo run --url <database>` a refusal gives to undo a change on that database.
+fn undo_on(out: &str) -> String {
+    let quoted = regex::Regex::new(r"reylo run --url \S+ '((?:[^']|'\\'')*)'").unwrap().captures(out).unwrap_or_else(|| panic!("no undo in:\n{out}"))[1].to_string();
+    quoted.replace("'\\''", "'")
 }
 
 async fn history_push_follows_a_renamed_migration(mut p: P) {

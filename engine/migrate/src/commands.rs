@@ -1510,7 +1510,7 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
         // A lone statement cut off before its row was finished did run, or did not: the database says
         // which, and one that landed is recorded, as the row it started says it ran.
         let started: Vec<String> = history.iter().filter(|r| !r.applied).map(|r| r.name.clone()).collect();
-        let mut run = Run { live: &live, schema_sql: schema_sql.as_deref(), schema: shown(&opts.schema), applied_files: &applied_files, records, pending, started, landed: vec![], d };
+        let mut run = Run { live: &live, url: &opts.url, schema_sql: schema_sql.as_deref(), schema: shown(&opts.schema), applied_files: &applied_files, records, pending, started, landed: vec![], d };
         let result = check_in_shadows(&mut shadows, db, &mut run).await;
         shadows.finish().await;
         let problems = result?;
@@ -1521,6 +1521,8 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
 /// What a check holds the shadows against.
 struct Run<'a> {
     live: &'a [String],
+    /// The target's URL, which a refusal's commands name it by.
+    url: &'a str,
     schema_sql: Option<&'a str>,
     /// schema.sql's path, as a refusal names it.
     schema: String,
@@ -1637,7 +1639,7 @@ async fn drift(shadows: &mut Shadows<'_>, target: &mut Db, run: &Run<'_>, checkp
     if hint.is_empty() {
         let ran: Vec<Migration> = run.applied_files.iter().chain(&run.records).cloned().collect();
         if let Some(j) = behind(shadows, &ran, &run.pending, &live).await? {
-            return Ok(vec![behind_problem(shadows, target, &ran, true, &run.pending[j], &run.pending[..j], &live).await]);
+            return Ok(vec![behind_problem(shadows, target, run.url, &ran, &run.pending[j], &run.pending[..j], &live).await]);
         }
     }
     let prefix = shadows.lane();
@@ -1676,18 +1678,20 @@ async fn behind(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[Migrati
     Ok(None)
 }
 
-/// The refusal for [`behind`]: `it` makes the change, after `ahead`, which this database hasn't run.
-/// The way out keeps the order: the change undone, so that deploy runs `ahead`, then `it`, which
-/// makes it again. `known` says whether `ran` is what the database's history says it ran, or only
-/// the run its schema is closest to.
+/// The refusal for [`behind`]: `it` makes the change, after `ahead`, which this database hasn't run,
+/// on top of `ran`, what its history says it ran, which is where deploy starts. The way out keeps
+/// the order: the change undone, so that deploy runs `ahead`, then `it`, which makes it again. Both
+/// commands name the database at `url`, since another is the one a command without `--url` reaches.
+/// The undo is a command only where `reylo run` applies it whole or not at all: on Postgres, which
+/// runs a script as one transaction, and a lone statement elsewhere. A SQLite rebuild needs the
+/// foreign keys off that a migration runs with.
 #[cfg(feature = "cli")]
-async fn behind_problem(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Migration], known: bool, it: &Migration, ahead: &[Migration], live: &[String]) -> Problem {
+async fn behind_problem(shadows: &mut Shadows<'_>, target: &mut Db, url: &str, ran: &[Migration], it: &Migration, ahead: &[Migration], live: &[String]) -> Problem {
     let names = and_list(&ahead.iter().map(|m| m.name.clone()).collect::<Vec<_>>());
     let problem = Problem::new("later-migration-in-place", format!("Migration {} makes this change, but runs after {names}, which this database hasn't run", it.name));
-    let problem = match (ran.last(), known) {
-        (Some(last), true) => problem.note(format!("It ran the migrations through {}, and then had this change made outside them:", last.name)),
-        (Some(last), false) => problem.note(format!("It has what the migrations through {} make, and this change:", last.name)),
-        (None, _) => problem.note("It has this change, and nothing else the migrations make:"),
+    let problem = match ran.last() {
+        Some(last) => problem.note(format!("It ran the migrations through {}, and then had this change made outside them:", last.name)),
+        None => problem.note("It ran none of the migrations, and then had this change made outside them:"),
     };
     let lane = shadows.lane();
     shadows.push(lane, ran.iter().map(Step::of));
@@ -1703,20 +1707,22 @@ async fn behind_problem(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Migra
             sql = plan_text(shadows.db(lane), target, None).await;
         }
     }
+    let (sql, undo, lost) = match change {
+        Some((sql, undo, lost)) => (Some(sql), Some(undo), lost),
+        None => (sql, None, vec![]),
+    };
+    let problem = match sql {
+        Some(sql) => problem.sql(&sql),
+        None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&made, live)).chain([String::new()])),
+    };
+    let problem = if lost.is_empty() { problem } else { problem.note(format!("Undoing it loses what {} {}.", and_list(&lost), if lost.len() == 1 { "holds" } else { "hold" })) };
     let order = format!("{names} first, and then {}, which makes it again", it.name);
-    match change {
-        Some((sql, undo, lost)) => {
-            let problem = problem.sql(&sql);
-            let problem = if lost.is_empty() { problem } else { problem.note(format!("Undoing it loses what {} {}.", and_list(&lost), if lost.len() == 1 { "holds" } else { "hold" })) };
-            problem.fix(format!("Undo it here, so that deploy runs {order}"), &[&format!("reylo run {}", shell_word(&undo.join(" "))), "reylo migrate deploy"])
-        }
-        None => {
-            let problem = match sql {
-                Some(sql) => problem.sql(&sql),
-                None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&made, live)).chain([String::new()])),
-            };
-            problem.note("Undo it here by hand.").fix(format!("Then deploy, which runs {order}"), &["reylo migrate deploy"])
-        }
+    let url = shell_word(&named_url(url));
+    let deploy = format!("reylo migrate deploy --url {url}");
+    let whole = |undo: &Vec<String>| if target.dialect() == Dialect::Postgres { !undo.iter().any(|s| s.starts_with("commit;")) } else { undo.len() == 1 };
+    match undo.filter(whole) {
+        Some(undo) => problem.fix(format!("Undo it here, so that deploy runs {order}"), &[&format!("reylo run --url {url} {}", shell_word(&undo.join(" "))), &deploy]),
+        None => problem.note("Undo it here by hand.").fix(format!("Then deploy, which runs {order}"), &[&deploy]),
     }
 }
 
@@ -1886,6 +1892,34 @@ fn as_user(url: &str, user: &str) -> String {
     let user: String = user.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
     let base = format!("{scheme}://{user}@{host}{}", &rest[end..]);
     if kept.is_empty() { base } else { format!("{base}?{}", kept.join("&")) }
+}
+
+/// `url` as a printed command names its database, which a log may keep: its password and token,
+/// where it has either, written as a placeholder, so that the command copied as it is fails to
+/// connect rather than reaching another database.
+#[cfg(feature = "cli")]
+fn named_url(url: &str) -> String {
+    let (base, query) = url.split_once('?').map_or((url, None), |(b, q)| (b, Some(q)));
+    let query: Vec<String> = query
+        .into_iter()
+        .flat_map(|q| q.split('&'))
+        .map(|kv| match kv.split_once('=') {
+            Some(("password", _)) => "password=<password>".to_string(),
+            Some((key @ ("authToken" | "auth_token"), _)) => format!("{key}=<token>"),
+            _ => kv.to_string(),
+        })
+        .collect();
+    let base = match base.split_once("://") {
+        Some((scheme, rest)) => {
+            let end = rest.find('/').unwrap_or(rest.len());
+            match rest[..end].rsplit_once('@').and_then(|(info, host)| Some((info.split_once(':')?.0, host))) {
+                Some((user, host)) => format!("{scheme}://{user}:<password>@{host}{}", &rest[end..]),
+                None => base.to_string(),
+            }
+        }
+        None => base.to_string(),
+    };
+    if query.is_empty() { base } else { format!("{base}?{}", query.join("&")) }
 }
 
 #[cfg(feature = "cli")]
@@ -2572,29 +2606,38 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
             return Err(e);
         }
     };
-    let Some(mut n) = matches.last().copied() else {
-        // The closest run, and the change from what it makes to this database, as SQL.
-        let (_, k, lines) = closest;
-        // A later migration that makes the change on top of the history's run, or else the closest,
-        // can't be recorded ahead of those before it: the change is undone, for deploy to run them.
-        if !init {
-            let mut bases: Vec<usize> = history_run.into_iter().chain([k]).filter(|&b| b < order.len()).collect();
-            bases.dedup();
-            for base in bases {
-                match behind(&mut shadows, &order[..base], &order[base..], &live).await {
-                    Ok(None) => {}
-                    Ok(Some(j)) => {
-                        let problem = behind_problem(&mut shadows, db, &order[..base], Some(base) == history_run, &order[base + j], &order[base..base + j], &live).await;
-                        shadows.finish().await;
-                        return Ok(refuse(&[problem], log));
-                    }
-                    Err(e) => {
-                        shadows.finish().await;
-                        return Err(e);
-                    }
-                }
+    // A migration at the end of the run that changes data and nothing a schema shows can't be told
+    // to have run: it stays pending, to run.
+    // One the history says ran, as written, stays recorded.
+    let ran = |m: &Migration| before_rows.iter().any(|r| r.applied && r.name == m.name && same_statements(&r.sql, &m.sql, d));
+    let matched = matches.last().copied().map(|mut n| {
+        while n > 0 && !data_statements(&order[n - 1].sql, d).is_empty() && matches.contains(&(n - 1)) && !ran(&order[n - 1]) {
+            n -= 1;
+        }
+        n
+    });
+    // A later migration that makes all this database has since the run its history ends at, which is
+    // where deploy starts, can't be recorded ahead of those before it; nor, where a run that changes
+    // data also matches, can that run be recorded by its schema alone. The change is undone instead,
+    // for deploy to run them in order.
+    let unproven = |n: usize| history_run.is_some_and(|h| order[h.min(n)..n].iter().any(|m| !data_statements(&m.sql, d).is_empty()));
+    if let Some(h) = history_run.filter(|&h| !init && h < order.len() && matched.is_none_or(unproven)) {
+        match behind(&mut shadows, &order[..h], &order[h..], &live).await {
+            Ok(None) => {}
+            Ok(Some(j)) => {
+                let problem = behind_problem(&mut shadows, db, &opts.url, &order[..h], &order[h + j], &order[h..h + j], &live).await;
+                shadows.finish().await;
+                return Ok(refuse(&[problem], log));
+            }
+            Err(e) => {
+                shadows.finish().await;
+                return Err(e);
             }
         }
+    }
+    let Some(n) = matched else {
+        // The closest run, and the change from what it makes to this database, as SQL.
+        let (_, k, lines) = closest;
         let lane = shadows.lane();
         shadows.push(lane, order[..k].iter().map(Step::of));
         let mut sql = None;
@@ -2622,13 +2665,6 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
         return Ok(refuse(&[problem], log));
     };
     shadows.finish().await;
-    // A migration at the end of the run that changes data and nothing a schema shows can't be told
-    // to have run: it stays pending, to run.
-    // One the history says ran, as written, stays recorded.
-    let ran = |m: &Migration| before_rows.iter().any(|r| r.applied && r.name == m.name && same_statements(&r.sql, &m.sql, d));
-    while n > 0 && !data_statements(&order[n - 1].sql, d).is_empty() && matches.contains(&(n - 1)) && !ran(&order[n - 1]) {
-        n -= 1;
-    }
     let recorded = &order[..n];
     let before = before_rows;
     ensure_history(db).await?;
@@ -5979,6 +6015,16 @@ pub async fn run_sql(opts: &Options, items: &[(String, String)], log: Log<'_>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn a_printed_command_names_its_database_without_a_secret() {
+        assert_eq!(named_url("postgres://app:s3cret@db.example.com:5432/app?sslmode=require"), "postgres://app:<password>@db.example.com:5432/app?sslmode=require");
+        assert_eq!(named_url("mysql://root@127.0.0.1:3306/app?password=s3cret"), "mysql://root@127.0.0.1:3306/app?password=<password>");
+        assert_eq!(named_url("libsql://app-acme.turso.io?authToken=eyJ"), "libsql://app-acme.turso.io?authToken=<token>");
+        assert_eq!(named_url("postgres://postgres@localhost/app"), "postgres://postgres@localhost/app");
+        assert_eq!(named_url("sqlite:prod.db"), "sqlite:prod.db");
+    }
 
     #[test]
     fn a_platforms_column_stamp_leaves_the_dump() {
