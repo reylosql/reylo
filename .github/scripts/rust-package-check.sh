@@ -114,8 +114,9 @@ manifest fresh '[dependencies]
 reylo = { version = "='"$version"'", features = ["postgres"] }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-# The oldest release, where the sqlx 0.8 project below is on the newest: reylo takes either.
-pgvector = "=0.1.0"
+# The oldest release reylo takes, 0.4.0, the first with Clone, Debug and PartialEq on its Vector
+# as a generated row derives them, where the sqlx 0.8 project below is on the newest.
+pgvector = "=0.4.0"
 
 # The pgvector feature of reylo, forwarded through a feature of the project, which the generator
 # in the build script reads from Cargo as the macro does.
