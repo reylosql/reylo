@@ -2982,6 +2982,7 @@ on!(
     new_writes_constraints_and_indexes_that_block_no_writes,
     new_refuses_a_table_rewrite_until_blocking,
     deploy_waits_out_a_lock_another_session_holds,
+    deploys_at_once_wait_out_a_concurrent_index_build,
     new_refuses_a_check_on_a_partitioned_table_until_blocking,
     new_refuses_an_index_built_again_until_blocking,
     a_concurrent_reindex_is_said_to_block_nothing,
@@ -4060,6 +4061,54 @@ mod adversarial {
         assert!(at.elapsed() >= std::time::Duration::from_secs(2), "the migration waited for the reader");
         release.await.unwrap();
         assert_eq!(p.rows("select count(*) as n from information_schema.columns where table_name = 'users' and column_name = 'bio'").await[0].text("n"), "1");
+    }
+
+    pub async fn deploys_at_once_wait_out_a_concurrent_index_build(mut p: P) {
+        p.file("20261027100000_users.sql", "create table users (id int primary key, created_at timestamptz not null default now());");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into users select g, now() - g * interval '1 minute' from generate_series(1, 100000) g").await;
+        p.file("20261027110000_users_created.sql", "create index concurrently users_created on users (created_at);");
+        p.relock();
+        let opts = p.opts();
+        // Three instances of an app start while another run holds the lock, each deploying. The one
+        // that takes the lock next builds the index concurrently, which waits out every snapshot older
+        // than its own: a run still waiting for the lock must hold none, or the two deadlock.
+        let (url, dir) = (&p.url, &p.dir);
+        let runs: Vec<(i32, String)> = std::thread::scope(|s| {
+            let (locked, held) = std::sync::mpsc::channel();
+            s.spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                rt.block_on(async {
+                    let mut other = Db::connect(url, dir).await.unwrap();
+                    other.exec("select pg_advisory_lock(hashtextextended('reylo_migrate', 0))").await.unwrap();
+                    locked.send(()).unwrap();
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    other.close().await;
+                });
+            });
+            held.recv().unwrap();
+            let started: Vec<_> = (0..3)
+                .map(|_| {
+                    let opts = &opts;
+                    s.spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                        let mut lines = Vec::new();
+                        let code = rt.block_on(reylo_migrate::deploy(opts, &mut |l: &str| lines.push(l.to_string()))).unwrap_or_else(|e| {
+                            lines.push(e.to_string());
+                            1
+                        });
+                        (code, lines.join("\n"))
+                    })
+                })
+                .collect();
+            started.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for (code, out) in &runs {
+            assert_eq!(*code, 0, "{out}");
+        }
+        assert_eq!(runs.iter().map(|(_, out)| out.matches(" applied ·").count()).sum::<usize>(), 1, "{runs:?}");
+        assert_eq!(runs.iter().filter(|(_, out)| out.contains("Up to date")).count(), 2, "{runs:?}");
+        assert_eq!(p.rows("select indisvalid::text as v from pg_index where indexrelid = 'users_created'::regclass").await[0].text("v"), "true");
     }
 
     pub async fn a_narrowing_type_change_fails_rather_than_cuts(mut p: P) {

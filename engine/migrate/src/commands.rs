@@ -487,7 +487,20 @@ async fn set_fingerprint(db: &mut Db, name: &str, value: &str) -> Result<(), Err
 /// its own transaction: one of the two fails, changing nothing.
 async fn lock(db: &mut Db, opts: &Options) -> Result<Option<std::fs::File>, Error> {
     match db.dialect() {
-        Dialect::Postgres => db.exec("select pg_advisory_lock(hashtextextended('reylo_migrate', 0))").await.map(|_| None),
+        // Asked for in short statements, with the waits between them outside any: a session blocked
+        // in `pg_advisory_lock` holds its statement's snapshot all the while, and the run holding the
+        // lock, building an index concurrently, waits for every snapshot older than its own to end,
+        // which is a deadlock that Postgres ends by failing one of the two.
+        Dialect::Postgres => {
+            let mut pause = std::time::Duration::from_millis(50);
+            loop {
+                if db.rows("select pg_try_advisory_lock(hashtextextended('reylo_migrate', 0)) as ok").await?.first().is_some_and(|r| r.flag("ok")) {
+                    return Ok(None);
+                }
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(std::time::Duration::from_secs(1));
+            }
+        }
         // A lock of this database's alone (its name is at most 64 characters), which answers 0
         // once the wait runs out. Named through sha2: MySQL 9.7 has md5 and sha1 only as a component.
         // The answer is read by position: Vitess (PlanetScale's MySQL) runs a lock function apart
