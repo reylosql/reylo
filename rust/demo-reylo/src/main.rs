@@ -153,5 +153,9 @@ async fn main() -> Result<(), sqlx::Error> {
     let shown = format!("{kinds:?}");
     assert!(shown.find("BOOK").is_some_and(|b| shown.find("MOVIE").is_some_and(|m| b < m)), "{shown}");
     println!("25. enum[]      {kinds:?}");
+
+    let none = vectors_text::Query { near: None }.run(&pool).await?.shown;
+    let some = vectors_text::Query { near: Some(vec![reylo::pgvector::Vector::from(vec![1.0, 2.0])]) }.run(&pool).await?.shown;
+    assert!(format!("{none:?}") == "None" && format!("{some:?}").contains("[1,2]"), "{none:?} {some:?}");
     Ok(())
 }

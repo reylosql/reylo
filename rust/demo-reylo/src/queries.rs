@@ -195,3 +195,11 @@ pub mod nearest_item_renamed {
 /// An array of the quoted enum type, bound and read back.
 #[reylo::query("select :kinds::\"ResourceKind\"[] as kinds")]
 pub mod resource_kinds {}
+
+/// A nullable array of vectors the crate declares, its elements bound through the codec.
+#[reylo::query("select :near::nullable(vector[])::text as shown")]
+pub mod vectors_text {
+    pub struct Params {
+        pub near: Option<Vec<reylo::pgvector::Vector>>,
+    }
+}

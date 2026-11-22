@@ -54,7 +54,7 @@ pub mod __private {
 
     pub use futures_core::stream::BoxStream;
     #[cfg(all(feature = "postgres", feature = "pgvector"))]
-    pub use crate::vector::{Bind, BindAsIs, BindVector, PgVector};
+    pub use crate::vector::{Bind, BindAsIs, BindVector, Codec, PgVector};
 
     /// Whether a value of the enum of `a_type` and `a_labels` casts into the enum of `b_type` and
     /// `b_labels`, in a constant: a Postgres enum type's into the same type with the same values in

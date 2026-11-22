@@ -71,7 +71,7 @@ impl Encode<'_, Postgres> for PgVector {
 }
 
 /// A value of a `Params` field the crate declares for a vector parameter, as it is bound: a
-/// `pgvector::Vector` (in an `Option` or a `Vec` too) through [`PgVector`], whatever name the crate
+/// `pgvector::Vector` (in `Option`s and `Vec`s too, [`Codec`]) through [`PgVector`], whatever name the crate
 /// gave the type, and a value of any other type as it is. `(&&Bind(v)).reylo_bind()` takes
 /// [`BindVector`]'s method where it applies, and [`BindAsIs`]'s one dereference further on.
 #[doc(hidden)]
@@ -83,24 +83,38 @@ pub trait BindVector {
     fn reylo_bind(self) -> Self::Bound;
 }
 
-impl BindVector for &&Bind<pgvector::Vector> {
+impl<T: Codec> BindVector for &&Bind<T> {
+    type Bound = T::Bound;
+    fn reylo_bind(self) -> T::Bound {
+        self.0.bound()
+    }
+}
+
+/// A `pgvector::Vector`, or an `Option` or a `Vec` of one at any depth, as it is bound.
+#[doc(hidden)]
+pub trait Codec {
+    type Bound;
+    fn bound(&self) -> Self::Bound;
+}
+
+impl Codec for pgvector::Vector {
     type Bound = PgVector;
-    fn reylo_bind(self) -> PgVector {
-        PgVector(self.0.clone())
+    fn bound(&self) -> PgVector {
+        PgVector(self.clone())
     }
 }
 
-impl BindVector for &&Bind<Option<pgvector::Vector>> {
-    type Bound = Option<PgVector>;
-    fn reylo_bind(self) -> Option<PgVector> {
-        self.0.clone().map(PgVector)
+impl<T: Codec> Codec for Option<T> {
+    type Bound = Option<T::Bound>;
+    fn bound(&self) -> Option<T::Bound> {
+        self.as_ref().map(Codec::bound)
     }
 }
 
-impl BindVector for &&Bind<Vec<pgvector::Vector>> {
-    type Bound = Vec<PgVector>;
-    fn reylo_bind(self) -> Vec<PgVector> {
-        self.0.iter().cloned().map(PgVector).collect()
+impl<T: Codec> Codec for Vec<T> {
+    type Bound = Vec<T::Bound>;
+    fn bound(&self) -> Vec<T::Bound> {
+        self.iter().map(Codec::bound).collect()
     }
 }
 
