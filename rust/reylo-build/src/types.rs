@@ -969,7 +969,8 @@ pub fn postgres_enum_tokens(ident: &Ident, name: &str, values: &[String]) -> Tok
 /// text, encoded as it, and the type found by its name at run time.
 pub fn postgres_impls(ident: &Ident, name: &str) -> TokenStream2 {
     let (schema, written) = qualified(name);
-    // sqlx reports a type by its bare name, unquoted: `ResourceKind` for `public."ResourceKind"`.
+    // sqlx reports a type by its bare name, which keeps the quotes Postgres writes around one that
+    // needs them (`"ResourceKind"`), and a type it looked up by name as it was asked for.
     let short = unquoted(written);
     let array = if written.starts_with('"') { format!("\"_{}\"", short.replace('"', "\"\"")) } else { format!("_{short}") };
     let array = if schema.is_empty() { array } else { format!("{schema}.{array}") };
@@ -981,7 +982,7 @@ pub fn postgres_impls(ident: &Ident, name: &str) -> TokenStream2 {
             }
             fn compatible(ty: &::reylo::sqlx::postgres::PgTypeInfo) -> bool {
                 let found = ::reylo::sqlx::TypeInfo::name(ty);
-                found == #short || found == #name
+                found == #short || found == #written || found == #name
             }
         }
         impl ::reylo::sqlx::postgres::PgHasArrayType for #ident {
@@ -1239,7 +1240,7 @@ mod tests {
         let finished = types.finish(&BTreeSet::new()).unwrap();
         assert_eq!(finished.named(shape.ty()).to_string(), "ResourceKind");
         let impls = super::postgres_impls(&format_ident!("ResourceKind"), "public.\"ResourceKind\"").to_string();
-        assert!(impls.contains(r#"found == "ResourceKind""#), "{impls}");
+        assert!(impls.contains(r#"found == "ResourceKind""#) && impls.contains(r#"found == "\"ResourceKind\"""#), "{impls}");
         assert!(impls.contains(r#""public.\"_ResourceKind\"""#), "{impls}");
         assert_eq!(super::qualified("\"a.b\".\"c\"\"d\""), ("\"a.b\"", "\"c\"\"d\""));
         assert_eq!(super::unquoted("\"c\"\"d\""), "c\"d");
