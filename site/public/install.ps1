@@ -18,6 +18,7 @@
 
   $repo = 'reylosql/reylo'
   $dir = if ($env:REYLO_INSTALL_DIR) { $env:REYLO_INSTALL_DIR } else { Join-Path $HOME '.local\bin' }
+  $dir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($dir)
   $version = if ($env:REYLO_VERSION) { $env:REYLO_VERSION -replace '^v', '' } else { '' }
 
   # The machine's own architecture, from the system's environment: a process emulated as x64 on arm64,
@@ -55,18 +56,20 @@
     # tar.exe has come with Windows since Windows 10 1803.
     & "$env:SystemRoot\System32\tar.exe" -xzf "$tmp\$asset" -C $tmp
     if ($LASTEXITCODE -ne 0) { throw "reylo install: cannot unpack $asset" }
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
-    Move-Item -Force "$tmp\reylo.exe" (Join-Path $dir 'reylo.exe')
-    # The licenses of the code the binary carries, where the archive holds them (an older release's doesn't).
-    try {
-      $doc = Join-Path (Split-Path -Parent $dir) 'share\doc\reylo'
-      foreach ($notice in 'LICENSE', 'NOTICE.md', 'LICENSE-APACHE') {
-        if (Test-Path "$tmp\$notice") {
+    # The licenses of the code the binary carries, kept before the binary is, where the archive holds
+    # them (an older release's doesn't).
+    $parent = Split-Path -Parent $dir
+    $doc = Join-Path $(if ($parent) { $parent } else { $dir }) 'share\doc\reylo'
+    foreach ($notice in 'LICENSE', 'NOTICE.md', 'LICENSE-APACHE') {
+      if (Test-Path "$tmp\$notice") {
+        try {
           New-Item -ItemType Directory -Force -Path $doc | Out-Null
           Copy-Item -Force "$tmp\$notice" (Join-Path $doc $notice)
-        }
+        } catch { throw "reylo install: cannot write reylo's licenses to $doc`: $($_.Exception.Message)" }
       }
-    } catch {}
+    }
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    Move-Item -Force "$tmp\reylo.exe" (Join-Path $dir 'reylo.exe')
   } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
   }

@@ -106,7 +106,8 @@ licensed() {
 case "$platform" in
   darwin-*)
     step "install.sh"
-    REYLO_INSTALL_DIR="$work/sh" sh site/public/install.sh > "$work/out" || { cat "$work/out"; exit 1; }
+    # A relative directory, as a user may name one, whose licenses go beside it.
+    (cd "$work" && REYLO_INSTALL_DIR=sh sh "$OLDPWD/site/public/install.sh") > "$work/out" || { cat "$work/out"; exit 1; }
     installed "$work/out"
     sh "$smoke" "$work/sh/reylo" "$version"
     licensed "$work/share/doc/reylo"
@@ -171,8 +172,10 @@ case "$platform" in
     # As a user runs it, `irm … | iex`, which reads the script as one string.
     for shell in pwsh powershell; do
       step "install.ps1 under $shell"
-      REYLO_INSTALL_DIR="$(cygpath -w "$work/$shell/bin")" REYLO_NO_MODIFY_PATH=1 \
-        "$shell" -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Raw site/public/install.ps1 | Invoke-Expression" > "$work/out" || { cat "$work/out"; exit 1; }
+      # A relative directory, as a user may name one, whose licenses go beside it.
+      script="$(cygpath -w "$PWD/site/public/install.ps1")"
+      (cd "$work" && REYLO_INSTALL_DIR="$shell\\bin" REYLO_NO_MODIFY_PATH=1 \
+        "$shell" -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Raw '$script' | Invoke-Expression") > "$work/out" || { cat "$work/out"; exit 1; }
       installed "$work/out"
       sh "$smoke" "$work/$shell/bin/reylo.exe" "$version"
       licensed "$work/$shell/share/doc/reylo"
