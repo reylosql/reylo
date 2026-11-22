@@ -158,3 +158,61 @@ The server where [migrations](/migrate/docs) build their shadow databases, for a
 # the default is the database's own server
 shadow_url: ${SHADOW_URL}
 ```
+
+## `js.codecs`
+
+The TypeScript type of a family of values, in what `.run()` returns and in its parameters. A family you leave out keeps [its default](/inference#primitives):
+
+```yaml title=".reylo.yaml"
+js:
+  codecs:
+    decimal: decimal.js  # or bignumber.js, big.js, number, or string (the default)
+    bytes: string  # base64, or Uint8Array (the default)
+    date: Temporal.PlainDate  # or string (the default)
+    time: Temporal.PlainTime  # or string (the default)
+    datetime: Temporal.PlainDateTime  # or string (the default)
+    instant: Temporal.Instant  # or string (the default)
+    duration: Temporal.Duration  # or string (the default)
+    set: Array  # or Set (the default)
+    vector: TypedArray  # or number[] (the default)
+    geometry: GeoJSON  # or the database's encoding (the default)
+    inet: ip-address  # or string (the default)
+```
+
+Each family covers these types:
+
+| Family | Postgres | MySQL | SQLite |
+| --- | --- | --- | --- |
+| `decimal` | `numeric`, `money` | `DECIMAL` | |
+| `bytes` | `bytea` | `BINARY`, `VARBINARY`, `BLOB` | `BLOB` |
+| `date` | `date` | `DATE` | a column declared `DATE` |
+| `time` | `time` | | a column declared `TIME` |
+| `datetime` | `timestamp` | `DATETIME`, `TIMESTAMP` | a column declared `DATETIME` or `TIMESTAMP` |
+| `instant` | `timestamptz` | | |
+| `duration` | `interval` | `TIME` | |
+| `set` | | `SET` | |
+| `vector` | pgvector's `vector`, `halfvec` | `VECTOR` | |
+| `geometry` | PostGIS's `geometry`, `geography` | `GEOMETRY` | |
+| `inet` | `inet`, `cidr` | | |
+
+A codec refuses a value its type can't hold, and the error names the column:
+
+- A `number` refuses a decimal it can't write back digit for digit, such as `0.12345678901234567`. Its arithmetic still rounds, as a double's does.
+- A Temporal class refuses a value it has no form for, such as `infinity` or an interval of a month less a day.
+- A big.js value refuses a `numeric` that holds `NaN` or an infinity.
+- GeoJSON refuses a geometry with M coordinates or curves.
+
+A parameter takes the codec's type too. A codec reaches nested values, such as an array's elements or a row value's fields. A value inside JSON the query builds keeps its JSON type.
+
+Some codecs need more of your project:
+
+- A decimal library, named by its package, comes from your own install beside the `.sql` file. For big.js, also install `@types/big.js`. Arithmetic in decimal.js rounds to 20 significant digits unless you raise its `precision`.
+- A Temporal codec needs a runtime with a global `Temporal`, and TypeScript's `esnext` lib.
+- A vector is a `Float32Array`, or a `Float16Array` for a `halfvec`, which needs TypeScript's `es2025` lib.
+- A geometry is typed by `@types/geojson`, which you install, with its SRID as `srid`. A parameter without an `srid` takes the column's.
+- A network address is an `Address4` or `Address6` from your own install of ip-address.
+- On SQLite, a `Temporal.PlainDateTime` parameter binds as text such as `2026-10-20 10:00:00`, so it matches a column only where the stored text has that form.
+
+Sent as JSON, a typed array or an address is an object of its fields. Spread the array, or send the address's `.address`.
+
+A 64-bit integer is always a `bigint`, its one exact type. Cast it in the query where you want a `number`, as `count(*)::int`.
