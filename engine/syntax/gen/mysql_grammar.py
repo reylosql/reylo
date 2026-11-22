@@ -73,7 +73,7 @@ EXTEND = {
     "FunctionCallNonKeyword": ['"WEIGHT_STRING" \'(\' Expression \',\' Expression \',\' Expression \',\' Expression \')\''],
     # JSON_VALUE takes a type and what to do on an empty or wrong value, written as an alternative
     # over the argument list a call reads, so the comma after the first argument stays the list's.
-    "FunctionCallGeneric": ['identifier \'(\' ExpressionList "RETURNING" CastType JsonTableOn \')\''],
+    "FunctionCallGeneric": ['identifier \'(\' ExpressionList "RETURNING" CastType JsonValueOn \')\''],
     "GroupByClause": ['"GROUP" "BY" "ROLLUP" \'(\' ByList \')\''],
     # A parenthesized query takes INTO after its ORDER BY and LIMIT.
     "SetOprStmtWithLimitOrderBy": ['SubSelect "INTO" SelectIntoTarget', 'SubSelect OrderBy "INTO" SelectIntoTarget', 'SubSelect SelectStmtLimit "INTO" SelectIntoTarget', 'SubSelect OrderBy SelectStmtLimit "INTO" SelectIntoTarget'],
@@ -146,6 +146,12 @@ SelectIntoVars:
 SelectIntoVar:
 	singleAtIdentifier
 |	Identifier
+
+JsonValueOn:
+	/* empty */
+|	JsonTableOnResponse "ON" "EMPTY"
+|	JsonTableOnResponse "ON" "ERROR"
+|	JsonTableOnResponse "ON" "EMPTY" JsonTableOnResponse "ON" "ERROR"
 
 SelectLockList:
 	SelectLock

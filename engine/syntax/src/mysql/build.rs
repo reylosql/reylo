@@ -1826,7 +1826,7 @@ impl<'a> B<'a> {
         let (name, list) = match names.as_slice() {
             ["\"identifier\"", "'('", "ExpressionListOpt", "')'"] => (ObjectName::from(vec![self.leaf_ident(c[0])]), c[2]),
             ["Identifier", "'.'", "Identifier", "'('", "ExpressionListOpt", "')'"] => (ObjectName::from(vec![self.ident(c[0])?, self.ident(c[2])?]), c[4]),
-            ["\"identifier\"", "'('", "ExpressionList", "\"RETURNING\"", "CastType", "JsonTableOn", "')'"] => {
+            ["\"identifier\"", "'('", "ExpressionList", "\"RETURNING\"", "CastType", "JsonValueOn", "')'"] => {
                 if !self.empty(c[5]) {
                     return no("JSON_VALUE ON EMPTY");
                 }

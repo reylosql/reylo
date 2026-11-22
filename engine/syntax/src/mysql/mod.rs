@@ -317,6 +317,13 @@ mod tests {
     }
 
     #[test]
+    fn json_value_takes_on_empty_before_on_error_alone() {
+        assert!(parse_tree("select json_value('{}', '$.x' returning signed null on empty null on error)").errors.is_empty());
+        assert!(!parse_tree("select json_value('{}', '$.x' returning signed null on error null on empty)").errors.is_empty());
+        assert!(parse_tree("select * from json_table('[]', '$[*]' columns (x int path '$.v' null on error null on empty)) as j").errors.is_empty());
+    }
+
+    #[test]
     fn sql_mode_changes_the_tokens() {
         let ansi = Options { ansi_quotes: true, ..Options::default() };
         assert!(parse_tree_with("select \"a\" from \"t\"", ansi).errors.is_empty());
