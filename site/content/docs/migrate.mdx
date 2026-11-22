@@ -64,6 +64,7 @@ Write the migration:
 ```terminal
 $ reylo migrate new add_bio
 ✓ Wrote reylo/migrations/20261104140347_add_bio.sql
+  + column users.bio text
 ```
 
 It's plain SQL, yours to edit:
@@ -297,6 +298,7 @@ $ reylo run 'alter table users add column bio text'
 
 $ reylo migrate new add_bio
 ✓ Wrote reylo/migrations/20261104140347_add_bio.sql
+  + column users.bio text
 
 $ reylo migrate dev
 Applying to postgres://localhost:5432/app
@@ -358,7 +360,9 @@ $ reylo migrate deploy
 ✗ Migration 20261105080000_no_nick.sql sorts before 20261105090000_nick.sql, which this database already ran
   Run in name order, as on a fresh database, the migrations end differently:
 
-    + a fresh database: column users.nick text
+    --- this database
+    +++ a fresh database
+    + column users.nick text
 
   Give it a later name, so that every database runs it after 20261105090000_nick.sql:
     mv reylo/migrations/20261105080000_no_nick.sql reylo/migrations/20261105090001_no_nick.sql
@@ -516,6 +520,8 @@ Writing its migration keeps the rows:
 ```terminal
 $ reylo migrate new rename_bio
 ✓ Wrote reylo/migrations/20261104150000_rename_bio.sql
+  + column users.about text
+  - column users.bio text
   ! Written as a rename, keeping its rows: users.bio → about
     If they're different columns, delete the file, then:
       reylo migrate new rename_bio --drop users.bio
@@ -554,6 +560,10 @@ Nothing was changed.
 
 $ reylo migrate new tidy_columns --rename posts.title=heading --drop users.bio
 ✓ Wrote reylo/migrations/20261104150000_tidy_columns.sql
+  + column posts.heading character varying(200)
+  + column users.about text
+  - column posts.title character varying(100)
+  - column users.bio character varying(200)
   ! Drops the column users.bio and its data
 ```
 

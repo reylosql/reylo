@@ -164,6 +164,10 @@ pub const POSTGRES_TOTAL_FOR: &[(&str, &[u32])] = &[("lower", TEXT_TYPES), ("upp
 const TEXT_TYPES: &[u32] = &[oid::TEXT, oid::VARCHAR, oid::BPCHAR, oid::NAME];
 /// The number types `to_char`'s number overloads take.
 const NUMBER_TYPES: &[u32] = &[oid::INT2, oid::INT4, oid::INT8, oid::NUMERIC, oid::FLOAT4, oid::FLOAT8];
+/// The number types in the order each converts implicitly to the ones after it ([`Ty::Common`]).
+const NUMBER_ORDER: [u32; 6] = [oid::INT2, oid::INT4, oid::INT8, oid::NUMERIC, oid::FLOAT4, oid::FLOAT8];
+/// `money`, which `sum` returns over itself ([`Ty::Sum`]).
+const MONEY: u32 = 790;
 /// The [`POSTGRES_TOTAL`] functions that return `jsonb`, which the cast rule below asks about.
 const POSTGRES_JSONB: &[&str] = &["to_jsonb", "jsonb_strip_nulls"];
 /// The cast targets `jsonb` has a cast function to. Since PostgreSQL 18 each answers SQL NULL
@@ -222,6 +226,29 @@ const POSTGRES_NO_ARGUMENT: &[&str] = &["now", "clock_timestamp", "statement_tim
 pub const POSTGRES_WINDOW: &[&str] = &["row_number", "rank", "dense_rank", "percent_rank", "cume_dist", "ntile", "lag", "lead"];
 /// Postgres aggregates that answer NULL only over no rows or over nothing but NULLs. Under a
 /// plain `GROUP BY` a group is never empty, so there they are non-null on a non-null argument.
+/// The types `min` and `max` have an overload of each, which returns it: any other argument
+/// converts to one (`max(name)` and `max(varchar)` are `max(text)`), or is of a type the build
+/// does not name here.
+const MIN_MAX_TYPES: &[u32] = &[
+    oid::INT2, oid::INT4, oid::INT8, oid::NUMERIC, oid::FLOAT4, oid::FLOAT8, oid::DATE, oid::TIME, oid::TIMESTAMP, oid::TIMESTAMPTZ, oid::INTERVAL, MONEY, oid::TEXT,
+    oid::BPCHAR,
+];
+
+/// The type a built-in aggregate of [`POSTGRES_GROUPED`] returns over its argument's, where the
+/// build names it for certain.
+fn aggregate_type(name: &str) -> Ty {
+    match name {
+        "sum" => Ty::Sum,
+        "avg" => Ty::Avg,
+        "min" | "max" => Ty::Exact(MIN_MAX_TYPES),
+        "bit_and" | "bit_or" => Ty::Exact(&[oid::INT2, oid::INT4, oid::INT8]),
+        // `any_value(anyelement)` returns its argument as it is.
+        "any_value" => Ty::Shared,
+        "bool_and" | "bool_or" | "every" => Ty::Is(oid::BOOL),
+        _ => Ty::Unknown,
+    }
+}
+
 pub const POSTGRES_GROUPED: &[&str] = &["sum", "avg", "min", "max", "bit_and", "bit_or", "bool_and", "bool_or", "every", "string_agg", "any_value"];
 /// Postgres aggregates that answer NULL only over no rows: a group's `array_agg` is an array,
 /// NULL elements and all.
@@ -377,6 +404,9 @@ pub enum Claim {
     /// `array_remove`, which is NULL only for a NULL array, whatever it removes; the flag says it
     /// removes NULL, so that no element is.
     Removed(bool),
+    /// May be NULL whatever the arguments are, of the type the built-in returns, or else the one
+    /// `Ty` names: an aggregate that may see no rows (`sum(x)` with no GROUP BY).
+    Nullable(Ty),
 }
 
 /// See [`Expr::Trusted`].
@@ -459,6 +489,7 @@ impl Call {
             Claim::NonNull(ty) => Fact { non_null: true, type_oid: ty.or(result) },
             Claim::Array(non_null) => Fact { non_null: *non_null, type_oid: None },
             Claim::Removed(_) => Fact { non_null: facts.first().is_some_and(|f| f.non_null), type_oid: result },
+            Claim::Nullable(ty) => Fact { non_null: false, type_oid: result.or(ty.of(&facts)) },
         };
         Some((fact, facts))
     }
@@ -471,6 +502,22 @@ pub enum Ty {
     Is(u32),
     /// The operands' type when they all agree on one: `coalesce`, `CASE`.
     Shared,
+    /// The type Postgres resolves operands of several number types to (`select_common_type`):
+    /// `coalesce(sum(x), 0)` is `numeric` where `sum(x)` is. Each of `int2`, `int4`, `int8`,
+    /// `numeric`, `float4` and `float8` converts implicitly to every one after it, and `float8`
+    /// is the category's preferred type, so the last of them among the operands wins. Only where
+    /// no user's cast between built-in types takes part ([`Reader::common`]).
+    Common,
+    /// What `sum` returns over its argument's type: `int8` over `int2` and `int4`, `numeric` over
+    /// `int8` and `numeric`, the type itself over `float4`, `float8`, `money` and `interval`.
+    Sum,
+    /// What `avg` returns over its argument's type: `numeric` over an integer or `numeric`,
+    /// `float8` over a float, `interval` over `interval`.
+    Avg,
+    /// The first operand's type where it is one of these, which the built-in has an overload of
+    /// that returns it: `max(int4)` is `int4`, while `max(name)` is the built-in `max(text)`,
+    /// whose `text` the build would misname as `name`.
+    Exact(&'static [u32]),
     /// `text` when every operand is a string type: Postgres's `||` over strings. Over anything
     /// else (an array, `jsonb`, a string beside a number) the build names no type.
     Concat,
@@ -1054,7 +1101,7 @@ fn may_be_jsonb(expr: &Expr, leaves: Option<&[DescribedColumn]>) -> bool {
             // A user's overload may return anything.
             Expr::Call(call) => match (call.fact(leaves), &call.claim) {
                 (None, _) => true,
-                (Some(_), Claim::Every(..)) => call.args.iter().any(|a| may_be_jsonb(a, leaves)),
+                (Some(_), Claim::Every(..) | Claim::Nullable(_)) => call.args.iter().any(|a| may_be_jsonb(a, leaves)),
                 (Some(_), Claim::NonNull(_) | Claim::Array(_) | Claim::Removed(_)) => false,
             },
             Expr::Trusted(t) => may_be_jsonb(if t.holds(leaves) { &t.then } else { &t.otherwise }, leaves),
@@ -1088,7 +1135,7 @@ pub fn items_nullable(expr: &Expr, leaves: Option<&[DescribedColumn]>, is_array:
         Expr::NonNull(_) | Expr::Unknown | Expr::Unread(_) | Expr::Row(..) | Expr::JsonPath { .. } => None,
         // A user's overload may return any elements.
         Expr::Call(call) => match (call.fact(leaves), &call.claim) {
-            (None, _) | (Some(_), Claim::NonNull(_)) => None,
+            (None, _) | (Some(_), Claim::NonNull(_) | Claim::Nullable(_)) => None,
             (Some(_), Claim::Array(_)) => array_items(&call.args, leaves, is_array),
             (Some(_), Claim::Every(_, ty)) => operands_items(&call.args, *ty, leaves, is_array),
             (Some(_), Claim::Removed(true)) => Some(false),
@@ -1651,6 +1698,27 @@ impl Ty {
                 let first = facts.first()?.type_oid?;
                 facts.iter().all(|f| f.type_oid == Some(first)).then_some(first)
             }
+            Ty::Common => {
+                let first = facts.first()?.type_oid?;
+                if facts.iter().all(|f| f.type_oid == Some(first)) {
+                    return Some(first);
+                }
+                let at = |f: &Fact| f.type_oid.and_then(|t| NUMBER_ORDER.iter().position(|n| *n == t));
+                facts.iter().map(at).collect::<Option<Vec<_>>>()?.into_iter().max().map(|i| NUMBER_ORDER[i])
+            }
+            Ty::Sum => match facts.first()?.type_oid? {
+                oid::INT2 | oid::INT4 => Some(oid::INT8),
+                oid::INT8 | oid::NUMERIC => Some(oid::NUMERIC),
+                t @ (oid::FLOAT4 | oid::FLOAT8 | MONEY | oid::INTERVAL) => Some(t),
+                _ => None,
+            },
+            Ty::Exact(types) => facts.first()?.type_oid.filter(|t| types.contains(t)),
+            Ty::Avg => match facts.first()?.type_oid? {
+                oid::INT2 | oid::INT4 | oid::INT8 | oid::NUMERIC => Some(oid::NUMERIC),
+                oid::FLOAT4 | oid::FLOAT8 => Some(oid::FLOAT8),
+                oid::INTERVAL => Some(oid::INTERVAL),
+                _ => None,
+            },
             Ty::Concat => (!facts.is_empty() && facts.iter().all(|f| f.type_oid.is_some_and(|t| TEXT_TYPES.contains(&t)))).then_some(oid::TEXT),
             Ty::Arith { modulo } => {
                 let first = facts.first()?.type_oid?;
@@ -1918,10 +1986,10 @@ impl Reader<'_> {
             // `ARRAY[...]` always builds an array, whatever its elements hold; the describe already
             // names the element type, and its elements are the expressions listed.
             Some(NodeEnum::AArrayExpr(a)) => Expr::Array { non_null: true, items: a.elements.iter().map(|e| self.read(e)).collect() },
-            Some(NodeEnum::CoalesceExpr(c)) if !c.args.is_empty() => Expr::Any(c.args.iter().map(|a| self.read(a)).collect(), Ty::Shared),
+            Some(NodeEnum::CoalesceExpr(c)) if !c.args.is_empty() => Expr::Any(c.args.iter().map(|a| self.read(a)).collect(), self.common()),
             // Postgres parses `greatest(…)` and `least(…)` as syntax, which no function of the name
             // shadows: NULL only where every argument is. MySQL's are NULL where any is.
-            Some(NodeEnum::MinMaxExpr(m)) if self.dialect == Dialect::Postgres && !m.args.is_empty() => Expr::Any(m.args.iter().map(|a| self.read(a)).collect(), Ty::Shared),
+            Some(NodeEnum::MinMaxExpr(m)) if self.dialect == Dialect::Postgres && !m.args.is_empty() => Expr::Any(m.args.iter().map(|a| self.read(a)).collect(), self.common()),
             Some(NodeEnum::CaseExpr(c)) => {
                 // In a searched CASE an arm runs only where its WHEN is true, so a column the WHEN
                 // is strict in is not NULL there (`WHEN x > 0 THEN x`); every later arm runs only
@@ -2219,9 +2287,11 @@ impl Reader<'_> {
                 } else if POSTGRES_GROUPED_NEVER_NULL.contains(&n) {
                     (Claim::Array(true), None)
                 } else {
-                    (Claim::Every(Some(1), Ty::Unknown), None)
+                    (Claim::Every(Some(1), aggregate_type(n)), None)
                 }
             }
+            // Anywhere else, filtered or over a frame, it may see no rows and be NULL.
+            (n @ ("sum" | "avg" | "min" | "max"), 1) => (Claim::Nullable(aggregate_type(n)), None),
             ("array_agg", 1) => (Claim::Array(false), None),
             ("array_remove", 2) => (Claim::Removed(is_null_literal(&f.args[1])), None),
             ("random", 2) => (Claim::Every(None, Ty::Unknown), None),
@@ -3354,6 +3424,14 @@ impl Reader<'_> {
 
     /// A call of the shadowed `name` over `nodes` read as `args`: the claim, where the arguments'
     /// types resolve it to the built-in.
+    /// The type of `coalesce`, `greatest` and `least`: Postgres's common type of their operands
+    /// ([`Ty::Common`]), unless a user's implicit cast between built-in types may change which
+    /// one the server picks, where only operands that agree name one ([`Ty::Shared`]).
+    fn common(&self) -> Ty {
+        let user_casts = self.trust.overloads.as_ref().is_some_and(|o| o.0.casts_built_in_implicitly());
+        if self.dialect == Dialect::Postgres && !user_casts { Ty::Common } else { Ty::Shared }
+    }
+
     fn shadowed_call(&self, kind: Kind, name: &str, nodes: &[&Node], args: Vec<Expr>, claim: Claim) -> Expr {
         let operands = nodes.iter().enumerate().map(|(i, n)| self.fixed(n).map_or(Arg::At(i), Arg::Fixed)).collect();
         match self.trust.check(kind, name, operands) {

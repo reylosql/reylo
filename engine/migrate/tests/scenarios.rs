@@ -448,6 +448,7 @@ for_each_dialect!(
     a_change_by_hand_with_schema_sql_is_told_to_write_the_migration,
     init_writes_and_records_the_baseline,
     a_migration_the_lock_lacks_is_a_draft,
+    status_reports_a_history_out_of_the_locks_order,
     a_rebased_migration_is_rewound_by_dev,
     history_pull_writes_the_lock_and_keeps_what_is_still_to_deploy,
     db_introspect_prints_the_schema,
@@ -675,7 +676,7 @@ async fn without_a_lock_a_late_migration_runs_where_both_orders_agree(mut p: P) 
     p.output();
     assert_eq!(p.dev().await, 1);
     let out = p.output();
-    assert_has!(&out, r"✗ Migration 20261027130000_e\.sql sorts before 20261027140000_d\.sql, which this database already ran\n  Run in name order, as on a fresh database, the migrations end differently:\n\n    [-+] ");
+    assert_has!(&out, r"✗ Migration 20261027130000_e\.sql sorts before 20261027140000_d\.sql, which this database already ran\n  Run in name order, as on a fresh database, the migrations end differently:\n\n    --- this database\n    \+\+\+ a fresh database\n(?:    [-+] [^\n]+\n)*    - column e\.x [^\n]+\n(?:    [-+] [^\n]+\n)*\n  Give it a later name");
     assert_has!(&out, r"\n\n  Give it a later name, so that every database runs it after 20261027140000_d\.sql:\n    mv \S+/20261027130000_e\.sql \S+/\d{14}_e\.sql\n");
     assert_eq!(deploy_on(&mut p, &other.url).await, 1);
     assert_has!(p.output(), r"sorts before 20261027140000_d\.sql");
@@ -919,6 +920,8 @@ async fn new_without_schema_sql_writes_what_the_database_has(mut p: P) {
     p.exec(&format!("create table tags (id {int})")).await;
     p.output();
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tags", &Default::default(), log).await).await, 0, "{}", p.peek());
+    // It says what the migration changes.
+    assert_has!(p.output(), r"✓ Wrote \S*_tags\.sql\n(?:  \+ [^\n]+\n)*  \+ column tags\.id ");
     let written = p.files().into_iter().find(|f| f.ends_with("_tags.sql")).unwrap();
     let sql = std::fs::read_to_string(p.dir.join("migrations").join(&written)).unwrap();
     assert_has!(&sql, r"(?i)create table [^\n]*tags");
@@ -1194,6 +1197,29 @@ async fn a_migration_the_lock_lacks_is_a_draft(mut p: P) {
     p.lock(&["20261027100000_a.sql", "20261027120000_c.sql"]);
     assert_eq!(p.migrate().await, 1);
     assert_has!(p.output(), r"The lock doesn't list 20261027110000_b\.sql yet\n\n  Run it in development, which locks it:\n    reylo migrate dev");
+}
+
+async fn status_reports_a_history_out_of_the_locks_order(mut p: P) {
+    let int = p.t.int;
+    let (a, tags, status) = ("20261027100000_a.sql", "20261027110000_tags.sql", "20261027120000_status.sql");
+    p.linear();
+    p.file(a, &format!("create table a (id {int});"));
+    p.file(status, &format!("alter table a add column status {int};"));
+    p.lock(&[a, status]);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    // Main gained a migration named earlier, and the merge kept main's lines: the lock now runs it
+    // before the one this database already ran.
+    p.file(tags, &format!("alter table a add column tags {int};"));
+    p.lock(&[a, tags, status]);
+    p.output();
+    let refusal = r"✗ This database applied 20261027120000_status\.sql where \S*reylo\.lock lists 20261027110000_tags\.sql\n  Every database runs the migrations in the lock's order\.";
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), refusal);
+    // Status says the same, and doesn't offer the deploy that refuses.
+    assert_eq!(p.status().await, 1);
+    let out = p.output();
+    assert_has!(&out, refusal);
+    assert!(!out.contains("To run it in production"), "{out}");
 }
 
 async fn a_rebased_migration_is_rewound_by_dev(mut p: P) {
@@ -2203,7 +2229,7 @@ async fn create_renames_a_table_keeping_its_rows(mut p: P) {
     // One table goes while one of its columns comes: renamed, and the foreign key on it follows.
     p.schema(&format!("create table accounts (id {id}, email {text}); create table posts (id {int}, user_id {int}, foreign key (user_id) references accounts (id));"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "accounts", &Default::default(), log).await).await, 0, "{}", p.peek());
-    assert_has!(p.output(), r"✓ Wrote [^\n]+\n  ! Written as a rename, keeping its rows: users → accounts\n    If they're different tables, delete the file, then:");
+    assert_has!(p.output(), r"✓ Wrote [^\n]+\n(?:  [-+] [^\n]+\n)*  ! Written as a rename, keeping its rows: users → accounts\n    If they're different tables, delete the file, then:");
     let sql = sql_of(&p, "accounts");
     assert!(sql.contains("rename to accounts") && !sql.contains("drop table"), "{sql}");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
