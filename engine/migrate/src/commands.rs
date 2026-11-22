@@ -487,7 +487,36 @@ async fn set_fingerprint(db: &mut Db, name: &str, value: &str) -> Result<(), Err
 /// its own transaction: one of the two fails, changing nothing.
 async fn lock(db: &mut Db, opts: &Options) -> Result<Option<std::fs::File>, Error> {
     match db.dialect() {
-        Dialect::Postgres => db.exec("select pg_advisory_lock(hashtextextended('reylo_migrate', 0))").await.map(|_| None),
+        // Asked for in short statements, with the waits between them outside any: a session blocked
+        // in `pg_advisory_lock` holds its statement's snapshot all the while, and the run holding the
+        // lock, building an index concurrently, waits for every snapshot older than its own to end,
+        // which is a deadlock that Postgres ends by failing one of the two. The session's
+        // `lock_timeout` and `statement_timeout` still bound the whole wait, as they bound a blocking
+        // one, and a pause stays well inside `idle_session_timeout`, which ends a session idle longer.
+        Dialect::Postgres => {
+            let settings = db.rows("select name, setting, current_setting(name) as shown from pg_settings where name in ('lock_timeout', 'statement_timeout', 'idle_session_timeout')").await?;
+            let ms = |name: &str| settings.iter().find(|r| r.text("name") == name).and_then(|r| r.text("setting").parse::<u64>().ok()).filter(|&v| v > 0);
+            let limit = ["lock_timeout", "statement_timeout"].into_iter().filter_map(|name| ms(name).map(|v| (v, name))).min();
+            let longest = std::time::Duration::from_millis(ms("idle_session_timeout").map_or(1000, |v| (v / 2).clamp(1, 1000)));
+            let started = std::time::Instant::now();
+            let mut pause = std::time::Duration::from_millis(50).min(longest);
+            loop {
+                if db.rows("select pg_try_advisory_lock(hashtextextended('reylo_migrate', 0)) as ok").await?.first().is_some_and(|r| r.flag("ok")) {
+                    return Ok(None);
+                }
+                let mut wait = pause;
+                if let Some((limit, name)) = limit {
+                    let left = std::time::Duration::from_millis(limit).saturating_sub(started.elapsed());
+                    if left.is_zero() {
+                        let shown = settings.iter().find(|r| r.text("name") == name).map(|r| r.text("shown").to_string()).unwrap_or_default();
+                        return Err(Error(format!("another run of reylo migrate held this database past this session's {name} of {shown}; try again once it finishes")));
+                    }
+                    wait = wait.min(left);
+                }
+                tokio::time::sleep(wait).await;
+                pause = (pause * 2).min(longest);
+            }
+        }
         // A lock of this database's alone (its name is at most 64 characters), which answers 0
         // once the wait runs out. Named through sha2: MySQL 9.7 has md5 and sha1 only as a component.
         // The answer is read by position: Vitess (PlanetScale's MySQL) runs a lock function apart

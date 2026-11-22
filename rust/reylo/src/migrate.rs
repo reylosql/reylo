@@ -55,8 +55,12 @@ impl Migrator {
         let with = |state: &str| -> Vec<String> { listed.iter().filter(|m| m["state"] == state).filter_map(|m| m["name"].as_str().map(String::from)).collect() };
         let applied = with("applied");
         if run.code != 0 {
-            let failed = !with("failed").is_empty();
-            return Err(Error::stopped(if failed { "reylo migrate deploy failed" } else { "reylo migrate deploy refused" }, &run, applied));
+            // A migration that failed leads, with its error, then the log of what ran before it.
+            let lead = match listed.iter().find(|m| m["state"] == "failed") {
+                Some(m) => format!("reylo migrate deploy failed: {}: {}", m["name"].as_str().unwrap_or_default(), m["error"].as_str().unwrap_or("failed")),
+                None => "reylo migrate deploy refused:".to_string(),
+            };
+            return Err(Error::stopped(&lead, &run, applied));
         }
         Ok(applied)
     }
@@ -434,9 +438,9 @@ impl Error {
     fn of(e: reylo_migrate::Error) -> Error {
         Error::new(format!("reylo::migrate!(): {e}"))
     }
-    fn stopped(what: &str, run: &reylo_migrate::commands::HostRun, applied: Vec<String>) -> Error {
+    fn stopped(lead: &str, run: &reylo_migrate::commands::HostRun, applied: Vec<String>) -> Error {
         let lines: Vec<&str> = run.lines.iter().map(String::as_str).skip_while(|l| l.is_empty()).collect();
-        Error { message: format!("{what}:\n{}", lines.join("\n")), problems: problems(&run.problems), applied }
+        Error { message: format!("{lead}\n{}", lines.join("\n")), problems: problems(&run.problems), applied }
     }
     /// Each reason it refused, with its fix; none where a migration failed or the database was out
     /// of reach.
