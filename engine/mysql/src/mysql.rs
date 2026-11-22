@@ -135,9 +135,10 @@ impl Default for SessionDialect {
 }
 
 impl SessionDialect {
-    /// The grammar's options for the session.
+    /// The grammar's options for the session. A built-in's name before a spaced parenthesis is the
+    /// built-in, as IGNORE_SPACE reads it; where the session's mode lacks it, [`misread`] says so.
     fn options(&self) -> syntax::mysql::Options {
-        syntax::mysql::Options { backslash_escapes: self.0.backslash_escapes, ansi_quotes: self.0.ansi_quotes, pipes_as_concat: !self.1, ..syntax::mysql::Options::default() }
+        syntax::mysql::Options { backslash_escapes: self.0.backslash_escapes, ansi_quotes: self.0.ansi_quotes, pipes_as_concat: !self.1, ignore_space: true, ..syntax::mysql::Options::default() }
     }
 }
 
