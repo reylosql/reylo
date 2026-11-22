@@ -739,15 +739,26 @@ fn describe_diff(label_a: &str, a: &[String], label_b: &str, b: &[String]) -> Ve
 }
 
 /// A comparison line as a person reads it: `public.` left out, and an index or a constraint as SQL
-/// writes it, its keywords in lowercase, rather than as the catalog prints it.
+/// writes it, its keywords in lowercase, rather than as the catalog prints it. An index reads
+/// `index <name> on <table> (<columns>)` on every database, and SQLite's index, view or trigger
+/// names itself once, rather than before its statement and in it.
 fn readable(line: &str) -> String {
     static INDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^index CREATE (UNIQUE )?INDEX (\S+) ON (?:ONLY )?(\S+) USING (\w+) (.*)$").expect("a valid pattern"));
+    static MYSQL_INDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^index ([^.\s]+)\.(\S+) (unique )?(\w+)((?: invisible)?(?: comment "(?:[^"\\]|\\.)*")?) (\(.*\))$"#).expect("a valid pattern"));
+    static SQLITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(index|view|trigger) \S+ create (unique )?(?:temp |temporary )?(?:index|view|trigger) (?:if not exists )?(\S+) (.*)$").expect("a valid pattern"));
     static CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) (\S+) (.*)$").expect("a valid pattern"));
     static PUBLIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s(,])(?:public|"public")\."#).expect("a valid pattern"));
     let line = PUBLIC.replace_all(line, "$1").into_owned();
     if let Some(c) = INDEX.captures(&line) {
         let using = if &c[4] == "btree" { String::new() } else { format!("using {} ", &c[4]) };
         return format!("{}index {} on {} {using}{}", if c.get(1).is_some() { "unique " } else { "" }, &c[2], &c[3], lowercase_keywords(&c[5]));
+    }
+    if let Some(c) = MYSQL_INDEX.captures(&line) {
+        let using = if c[4].eq_ignore_ascii_case("btree") { String::new() } else { format!("using {} ", c[4].to_ascii_lowercase()) };
+        return format!("{}index {} on {} {using}{}{}", c.get(3).map_or("", |m| m.as_str()), &c[2], &c[1], &c[6], &c[5]);
+    }
+    if let Some(c) = SQLITE.captures(&line) {
+        return format!("{}{} {} {}", c.get(2).map_or("", |m| m.as_str()), &c[1], &c[3], &c[4]);
     }
     if let Some(c) = CONSTRAINT.captures(&line) {
         return format!("constraint {} on {}: {}", &c[2], &c[1], lowercase_keywords(&c[3]));
@@ -5905,6 +5916,21 @@ pub async fn run_sql(opts: &Options, items: &[(String, String)], log: Log<'_>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_index_reads_the_same_on_every_database() {
+        // As each database's catalog writes it.
+        assert_eq!(readable("index CREATE INDEX bookmarks_title ON public.bookmarks USING btree (title)"), "index bookmarks_title on bookmarks (title)");
+        assert_eq!(readable("index orders.orders_qty BTREE (qty)"), "index orders_qty on orders (qty)");
+        assert_eq!(readable("index orders.orders_ref unique HASH invisible (ref, qty desc)"), "unique index orders_ref on orders using hash (ref, qty desc) invisible");
+        assert_eq!(readable("index users_name3 create index users_name3 on users (name)"), "index users_name3 on users (name)");
+        assert_eq!(readable("index users_email create unique index if not exists users_email on users (email)"), "unique index users_email on users (email)");
+        // A view and a trigger name themselves once too.
+        assert_eq!(readable("view v_users create view v_users as select id from users"), "view v_users as select id from users");
+        assert_eq!(readable("trigger t create trigger t after insert on users begin select 1; end"), "trigger t after insert on users begin select 1; end");
+        // What is not an index's own line is left as it is.
+        assert_eq!(readable("index options orders.orders_qty key_block_size=8"), "index options orders.orders_qty key_block_size=8");
+    }
 
     #[test]
     fn a_platforms_column_stamp_leaves_the_dump() {
