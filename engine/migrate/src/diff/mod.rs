@@ -1655,22 +1655,14 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         }
     }
 
-    // Where the plan commits partway (an enum's labels added before what uses them), everything the
-    // commit doesn't wait for runs after it: what commits first is the labels alone, so a deploy or a
-    // push that stops after it has dropped nothing, nor left an object to make again in a migration
-    // it never ran.
-    for (k, op) in ops.iter().enumerate() {
-        let Op::Alter(id) = op else { continue };
-        if !alters[id].iter().any(|s| s == COMMIT) {
-            continue;
-        }
-        let (mut stack, mut needs) = (vec![k], BTreeSet::new());
-        while let Some(at) = stack.pop() {
-            if needs.insert(at) {
-                stack.extend(after[at].iter().copied());
-            }
-        }
-        for other in (0..ops.len()).filter(|o| !needs.contains(o)) {
+    // Where the plan commits partway (an enum's labels added before what uses them), the change that
+    // commits needs nothing but its type, which is there, and everything else runs after it: what
+    // commits first is the labels alone, so a deploy or a push that stops after it has dropped
+    // nothing, nor left an object to make again in a migration it never ran.
+    let commits: BTreeSet<usize> = (0..ops.len()).filter(|k| matches!(&ops[*k], Op::Alter(id) if alters[id].iter().any(|s| s == COMMIT))).collect();
+    for &k in &commits {
+        after[k].clear();
+        for other in (0..ops.len()).filter(|o| !commits.contains(o)) {
             after[other].insert(k);
         }
     }

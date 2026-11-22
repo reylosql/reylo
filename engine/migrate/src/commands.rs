@@ -4188,19 +4188,22 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
         let split_files = split.as_ref().map(|files| files.len());
         let mut texts = match split {
             Some(mut files) => {
-                // The moves first, in a file of their own where the first is an index built concurrently.
+                // The moves first, in a file of their own where the first is an index built
+                // concurrently; past the files that commit an enum's new labels alone.
                 if !moves.is_empty() {
-                    let first = files[0].iter().filter(|s| !s.starts_with("--")).map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
+                    let at = commits.min(files.len().saturating_sub(1));
+                    let first = files[at].iter().filter(|s| !s.starts_with("--")).map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
                     if runs_alone(&first, d) {
-                        files.insert(0, std::mem::take(&mut moves));
+                        files.insert(at, std::mem::take(&mut moves));
                     } else {
-                        files[0].splice(0..0, std::mem::take(&mut moves));
+                        files[at].splice(0..0, std::mem::take(&mut moves));
                     }
                 }
                 crate::locks::file_texts(&plan, &files)
             }
             None => {
-                plan.statements.splice(0..0, std::mem::take(&mut moves));
+                let at = plan.statements.iter().rposition(|s| s == crate::diff::COMMIT).map_or(0, |c| c + 1);
+                plan.statements.splice(at..at, std::mem::take(&mut moves));
                 plan_files(&plan, d)
             }
         };

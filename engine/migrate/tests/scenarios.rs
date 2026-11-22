@@ -4318,17 +4318,20 @@ mod adversarial {
     }
 
     pub async fn a_push_that_fails_past_an_enum_commit_keeps_what_it_drops(mut p: P) {
-        let v1 = "create type mood as enum ('a'); create table items (i int, m mood default 'a'); create table old_notes (body text);";
+        let v1 = "create type mood as enum ('a'); create table items (i int, m mood default 'a'); create table old_notes (body text); create table x (c mood); create view v as select c from x;";
         p.file("20261027100000_items.sql", v1);
         p.schema(v1);
         assert_eq!(p.dev_then_push().await, 0, "{}", p.peek());
         p.exec("insert into items values (-1, 'a')").await;
         p.exec("insert into old_notes values ('kept')").await;
         p.output();
-        // The new label commits first, alone: the check its row fails after it undoes the drop.
-        p.schema("create type mood as enum ('a', 'b'); create table items (i int check (i > 0), m mood default 'b');");
+        // The new label commits first, alone: the check its row fails after it undoes the drop, and
+        // the column's move off the type with the view over it.
+        p.schema("create type mood as enum ('a', 'b'); create table items (i int check (i > 0), m mood default 'b'); create table x (c text); create view v as select c from x;");
         assert_eq!(p.db_push_with(&push(&["old_notes"], &[], false)).await, 1, "{}", p.peek());
         assert_eq!(p.rows("select body from old_notes").await.len(), 1);
+        assert_eq!(p.rows("select 1 from pg_views where viewname = 'v'").await.len(), 1);
+        assert_eq!(p.rows("select 1 from information_schema.columns where table_name = 'x' and udt_name = 'mood'").await.len(), 1);
         assert_eq!(p.rows("select 1 from pg_enum where enumlabel = 'b'").await.len(), 1);
     }
 
