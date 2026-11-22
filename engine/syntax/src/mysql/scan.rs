@@ -525,7 +525,8 @@ impl<'t> Scanner<'t> {
     }
 
     /// Where the text goes on after `at`, past spaces and comments: a stored function's name may
-    /// have either before its parenthesis. A `/*!` or `/*+` comment is text, not a comment.
+    /// have either before its parenthesis. A `/*+` comment after a name is no hint, and a `/*!`
+    /// comment is text where the server's version runs it.
     fn past_trivia(&self, mut at: usize) -> usize {
         let z = self.z;
         loop {
@@ -533,7 +534,16 @@ impl<'t> Scanner<'t> {
                 at += 1;
             }
             let rest = &z[at..];
-            if rest.starts_with(b"/*") && !rest.starts_with(b"/*!") && !rest.starts_with(b"/*+") {
+            if rest.starts_with(b"/*!") {
+                let (digits, wanted) = comment_version(&rest[3..]);
+                if wanted <= self.opts.version {
+                    return at;
+                }
+                match skipped_comment(z, at + 3 + digits) {
+                    Some(end) => at = end,
+                    None => return z.len(),
+                }
+            } else if rest.starts_with(b"/*") {
                 match rest[2..].windows(2).position(|w| w == b"*/") {
                     Some(n) => at += 2 + n + 2,
                     None => return z.len(),
