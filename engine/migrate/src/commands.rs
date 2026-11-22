@@ -3237,6 +3237,9 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
             }
         }
     }
+    for line in &drafted.changes {
+        log(line);
+    }
     for note in &drafted.notes {
         log(note);
     }
@@ -3317,6 +3320,8 @@ struct Drafted {
     target: String,
     /// Whether its files are the lock-safe shape's (`locks`), rather than one per MySQL statement.
     lock_safe: bool,
+    /// What it changes, a line each, as `changed_lines` writes it.
+    changes: Vec<String>,
 }
 
 /// What a plan loses, as a sentence names it: `the column users.bio`, `the table tags`.
@@ -3984,7 +3989,7 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
 #[allow(clippy::type_complexity)]
 #[cfg(feature = "cli")]
 async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, migration: &str, choices: &Choices, log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
-    let drafted = |texts: Vec<String>, code: i32, notes: Vec<String>, empty: bool| Drafted { texts, code, notes, empty, target: target_name.to_string(), lock_safe: false };
+    let drafted = |texts: Vec<String>, code: i32, notes: Vec<String>, empty: bool| Drafted { texts, code, notes, empty, target: target_name.to_string(), lock_safe: false, changes: vec![] };
     let mut db = Db::open(opts).await?;
     let mut problems = out_of_reach(&mut db, &opts.url).await?;
     problems.extend(unreadable_grants(&mut db, opts, files, Some(schema_sql)).await?);
@@ -4015,6 +4020,8 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             return Ok(Err(vec![Problem::new("replay-fails", format!("Replaying {m} in a shadow database fails")).note(e)]));
         }
         shadows.taint(c);
+        // What the migrations make, for the summary of what the new one changes.
+        let before = catalog(shadows.db(c)).await?;
         let unread = crate::catalog::unmodeled(shadows.db(a), true).await?;
         unmodeled_note("Reylo doesn't fully compare these in schema.sql, so a migration can leave them, or a change to them, out: check them by hand", &unread, log);
         let mut target = match crate::diff::read(shadows.db(a)).await {
@@ -4155,7 +4162,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             notes.push(format!("      {}", paint("cyan", &create_command(&asked, choices, &names, &[]))));
         }
         if failed.is_none() && reached == wanted {
-            return Ok(Ok(Drafted { lock_safe: split_files.is_some(), ..drafted(texts, 0, notes, false) }));
+            return Ok(Ok(Drafted { lock_safe: split_files.is_some(), changes: changed_lines(&before, &reached), ..drafted(texts, 0, notes, false) }));
         }
         let mut remaining = Vec::new();
         if let Some(f) = &failed {

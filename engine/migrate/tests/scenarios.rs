@@ -919,6 +919,8 @@ async fn new_without_schema_sql_writes_what_the_database_has(mut p: P) {
     p.exec(&format!("create table tags (id {int})")).await;
     p.output();
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tags", &Default::default(), log).await).await, 0, "{}", p.peek());
+    // It says what the migration changes.
+    assert_has!(p.output(), r"✓ Wrote \S*_tags\.sql\n(?:  \+ [^\n]+\n)*  \+ column tags\.id ");
     let written = p.files().into_iter().find(|f| f.ends_with("_tags.sql")).unwrap();
     let sql = std::fs::read_to_string(p.dir.join("migrations").join(&written)).unwrap();
     assert_has!(&sql, r"(?i)create table [^\n]*tags");
@@ -2197,7 +2199,7 @@ async fn create_renames_a_table_keeping_its_rows(mut p: P) {
     // One table goes while one of its columns comes: renamed, and the foreign key on it follows.
     p.schema(&format!("create table accounts (id {id}, email {text}); create table posts (id {int}, user_id {int}, foreign key (user_id) references accounts (id));"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "accounts", &Default::default(), log).await).await, 0, "{}", p.peek());
-    assert_has!(p.output(), r"✓ Wrote [^\n]+\n  ! Written as a rename, keeping its rows: users → accounts\n    If they're different tables, delete the file, then:");
+    assert_has!(p.output(), r"✓ Wrote [^\n]+\n(?:  [-+] [^\n]+\n)*  ! Written as a rename, keeping its rows: users → accounts\n    If they're different tables, delete the file, then:");
     let sql = sql_of(&p, "accounts");
     assert!(sql.contains("rename to accounts") && !sql.contains("drop table"), "{sql}");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
