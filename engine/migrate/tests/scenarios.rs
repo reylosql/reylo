@@ -2933,7 +2933,7 @@ on!(
     init_reads_every_schema_a_view_crosses,
     introspect_of_some_schemas_is_their_dump,
     the_dump_reads_a_schema_named_with_capitals,
-    new_without_schema_sql_writes_an_extension_in_a_schema_of_its_own,
+    new_without_schema_sql_replays_beside_the_environments_extensions,
     an_extension_in_a_projects_schema_is_the_projects_whoever_owns_it,
     an_extension_a_platform_role_owns_in_a_projects_schema_is_the_projects,
     init_writes_the_privileges_on_an_extensions_schema,
@@ -3315,19 +3315,18 @@ mod adversarial {
         assert!(text.contains(r#"CREATE TABLE "CaseSensitive".items"#) && text.contains("CREATE TABLE public.users"), "{text}");
     }
 
-    /// With no schema.sql, an extension made by hand in a schema of its own is the migration's to
-    /// make: the shadows leave it, and its schema, to the database's own SQL.
-    pub async fn new_without_schema_sql_writes_an_extension_in_a_schema_of_its_own(mut p: P) {
-        p.exec("create table users (id int primary key)").await;
-        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
-        std::fs::remove_file(p.dir.join("schema.sql")).unwrap();
-        p.exec("create schema extensions; create extension citext with schema extensions; alter table users add column email extensions.citext").await;
+    /// With no schema.sql, the migration is what the database has beyond its migrations, its own SQL
+    /// replayed on shadows that have the extensions no migration creates: one made by hand in a schema
+    /// of its own, and one the migrations use as the environment gives it.
+    pub async fn new_without_schema_sql_replays_beside_the_environments_extensions(mut p: P) {
+        p.exec("create extension citext").await;
+        p.file("20261122100000_users.sql", "create table users (id int primary key, name citext);");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("create schema extensions; create extension pg_trgm with schema extensions; alter table users add column email text").await;
         p.output();
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "email", &Default::default(), log).await).await, 0, "{}", p.peek());
         let written = p.files().into_iter().find(|f| f.ends_with("_email.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
-        let sql = std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap();
-        assert_has!(sql.clone(), r"(?i)create extension (if not exists )?citext");
-        assert_has!(sql, r"(?i)add column email extensions\.citext");
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap(), r"(?i)add column email text");
     }
 
     /// Introspect of some of the schemas that hold anything is their dump, which Reylo's own SQL,

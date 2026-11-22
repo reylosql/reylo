@@ -1732,16 +1732,16 @@ fn created_extensions(opts: &Options) -> Vec<String> {
 
 /// The schemas the project's own files create.
 fn created_schemas(opts: &Options) -> Vec<String> {
+    static SCHEMA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\bcreate\s+schema\s+(?:if\s+not\s+exists\s+)?"?([A-Za-z0-9_$-]+)"?"#).expect("a valid pattern"));
     let mut texts = vec![opts.schema_text().unwrap_or_default()];
     texts.extend(opts.migrations().map(|(files, _)| files.into_iter().map(|f| f.sql).collect::<Vec<_>>()).unwrap_or_default());
-    texts.iter().flat_map(|t| schemas_in(t)).collect()
-}
-
-/// The schemas a text creates.
-fn schemas_in(text: &str) -> Vec<String> {
-    static SCHEMA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\bcreate\s+schema\s+(?:if\s+not\s+exists\s+)?"?([A-Za-z0-9_$-]+)"?"#).expect("a valid pattern"));
-    let uncommented = crate::sql::tokenize(text, Dialect::Postgres).iter().map(|token| token.text.clone()).collect::<Vec<_>>().join(" ");
-    SCHEMA.captures_iter(&uncommented).map(|c| c[1].to_string()).filter(|s| !s.eq_ignore_ascii_case("authorization")).collect()
+    texts
+        .iter()
+        .flat_map(|t| {
+            let uncommented = crate::sql::tokenize(t, Dialect::Postgres).iter().map(|token| token.text.clone()).collect::<Vec<_>>().join(" ");
+            SCHEMA.captures_iter(&uncommented).map(|c| c[1].to_string()).filter(|s| !s.eq_ignore_ascii_case("authorization")).collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// The extensions a text creates.
@@ -3243,11 +3243,35 @@ async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Resu
         if !problems.is_empty() {
             return Ok(Err(problems));
         }
-        Ok(schema_as_sql_on(&mut db, opts, &[], true).await?.map_err(|problem| vec![problem]))
+        Ok(schema_as_sql_on(&mut db, opts, &[], true).await?.map(|sql| passing_over_existing(&sql, d)).map_err(|problem| vec![problem]))
     }
     .await;
     db.close().await;
     result
+}
+
+/// `sql` with each `create schema` and `create extension` passing over one that exists, as the dump
+/// writes them: as a draft's target, the database's own SQL replays on shadows that already have each
+/// extension the project's files don't create, made in its schema.
+#[cfg(feature = "cli")]
+fn passing_over_existing(sql: &str, d: Dialect) -> String {
+    if d != Dialect::Postgres {
+        return sql.to_string();
+    }
+    let statements: Vec<String> = crate::sql::split_statements(sql, d)
+        .iter()
+        .map(|st| {
+            let text = st.text.trim();
+            let lower = text.to_ascii_lowercase();
+            for create in ["create schema ", "create extension "] {
+                if lower.starts_with(create) && !lower[create.len()..].starts_with("if not exists ") {
+                    return format!("{create}if not exists {};", &text[create.len()..]);
+                }
+            }
+            format!("{text};")
+        })
+        .collect();
+    format!("{}\n", statements.join("\n\n"))
 }
 
 /// For `migrate new` with a schema.sql: what the development database applied that no longer reads as
@@ -3971,9 +3995,8 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
     }
     let mut server = Server::open(&mut db, &opts.url, opts.shadow_url.as_deref()).await?;
     server.copy_default_privileges(!sets_default_privileges(opts));
-    // What the target creates too, which with no schema.sql is the database's own SQL.
-    server.leave_extensions(created_extensions(opts).into_iter().chain(extensions_in(schema_sql)).collect());
-    server.leave_schemas(created_schemas(opts).into_iter().chain(schemas_in(schema_sql)).collect());
+    server.leave_extensions(created_extensions(opts));
+    server.leave_schemas(created_schemas(opts));
     left_out_note(&server, log);
     db.close().await;
     let texts: Vec<&str> = files.iter().map(|f| f.sql.as_str()).chain([schema_sql]).collect();
