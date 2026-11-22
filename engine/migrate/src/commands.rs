@@ -5864,8 +5864,15 @@ pub async fn run_sql(opts: &Options, items: &[(String, String)], log: Log<'_>) -
     let mut db = Db::open(opts).await?;
     let mut code = 0;
     for (label, sql) in items {
-        match db.script(sql).await {
-            Ok(()) => log(&format!("{} {label}", paint("green", "✓"))),
+        match db.script_tables(sql).await {
+            Ok(tables) => {
+                log(&format!("{} {label}", paint("green", "✓")));
+                for table in &tables {
+                    for line in table_lines(table, RUN_ROWS_SHOWN) {
+                        log(&line);
+                    }
+                }
+            }
             Err(e) => {
                 log(&paint("bold red", &format!("✗ {label}")));
                 log(&format!("  {e}"));
@@ -5889,9 +5896,57 @@ pub async fn run_sql(opts: &Options, items: &[(String, String)], log: Log<'_>) -
     Ok(code)
 }
 
+/// How many rows `reylo run` shows of what a statement returns.
+#[cfg(feature = "cli")]
+const RUN_ROWS_SHOWN: usize = 50;
+
+/// What a statement returned, as `reylo run` shows it: a table of its first `shown` rows under its
+/// columns' names, each value on one line, a number set right and null dim, then how many rows there
+/// were, or how many more.
+#[cfg(feature = "cli")]
+fn table_lines(table: &crate::db::Table, shown: usize) -> Vec<String> {
+    const WIDEST: usize = 60;
+    let cell = |value: &Option<String>| -> Option<String> {
+        let text = value.as_ref()?.replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t");
+        Some(if text.chars().count() > WIDEST { format!("{}…", text.chars().take(WIDEST - 1).collect::<String>()) } else { text })
+    };
+    let rows: Vec<Vec<Option<String>>> = table.rows.iter().take(shown).map(|row| row.iter().map(cell).collect()).collect();
+    let width = |i: usize| rows.iter().map(|r| r[i].as_ref().map_or(4, |v| v.chars().count())).chain([table.columns[i].chars().count()]).max().unwrap_or(0);
+    let widths: Vec<usize> = (0..table.columns.len()).map(width).collect();
+    let numeric: Vec<bool> = (0..table.columns.len()).map(|i| rows.iter().any(|r| r[i].is_some()) && rows.iter().all(|r| r[i].as_ref().is_none_or(|v| v.parse::<f64>().is_ok()))).collect();
+    let pad = |text: &str, painted: String, i: usize| {
+        let gap = " ".repeat(widths[i] - text.chars().count());
+        if numeric[i] { format!("{gap}{painted}") } else { format!("{painted}{gap}") }
+    };
+    let line = |cells: Vec<String>| format!("  {}", cells.join("  ")).trim_end().to_string();
+    let mut out = vec![line(table.columns.iter().enumerate().map(|(i, c)| pad(c, paint("bold", c), i)).collect())];
+    out.push(line(widths.iter().map(|w| paint("dim", &"─".repeat(*w))).collect()));
+    for row in &rows {
+        out.push(line(row.iter().enumerate().map(|(i, v)| match v {
+            Some(v) => pad(v, v.clone(), i),
+            None => pad("null", paint("dim", "null"), i),
+        }).collect()));
+    }
+    let total = table.rows.len();
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    out.push(paint("dim", &if total > rows.len() { format!("  … {} more row{}, {total} in all", total - rows.len(), plural(total - rows.len())) } else { format!("  {total} row{}", plural(total)) }));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn a_statements_rows_show_as_a_table() {
+        set_color(false);
+        let t = |columns: &[&str], rows: &[&[Option<&str>]]| crate::db::Table { columns: columns.iter().map(|c| c.to_string()).collect(), rows: rows.iter().map(|r| r.iter().map(|v| v.map(String::from)).collect()).collect() };
+        let authors = t(&["name", "score", "bio"], &[&[Some("Ada"), Some("3"), None], &[Some("Grace"), Some("12"), Some("line one\nline two")]]);
+        assert_eq!(table_lines(&authors, 50).join("\n"), "  name   score  bio\n  ─────  ─────  ──────────────────\n  Ada        3  null\n  Grace     12  line one\\nline two\n  2 rows");
+        assert_eq!(table_lines(&authors, 1).join("\n"), "  name  score  bio\n  ────  ─────  ────\n  Ada       3  null\n  … 1 more row, 2 in all");
+        assert_eq!(table_lines(&t(&["n"], &[]), 50).join("\n"), "  n\n  ─\n  0 rows");
+    }
 
     #[test]
     fn a_platforms_column_stamp_leaves_the_dump() {

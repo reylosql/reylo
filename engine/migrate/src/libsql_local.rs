@@ -7,7 +7,7 @@
 //! Cloud's server loads (math, stats, text, crypto, fuzzy, uuid, regexp), as it runs them.
 //! `csrc/reylo_libsql.c` compiles it with its API private, beside the binary's other SQLites.
 
-use crate::db::Row;
+use crate::db::{Row, Table};
 use crate::Error;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 
@@ -128,6 +128,13 @@ impl Local {
     /// The rows of one statement, every value as text, as rusqlite's are read: an integer and a
     /// real as Rust writes them, a blob's bytes read as UTF-8.
     pub fn rows(&mut self, sql: &str) -> Result<Vec<Row>, Error> {
+        let table = self.query(sql)?;
+        Ok(table.rows.into_iter().map(|values| Row::new(table.columns.clone(), values)).collect())
+    }
+
+    /// What one statement returned, read as [`Local::rows`] reads it, its columns kept where it
+    /// returned no row.
+    pub fn query(&mut self, sql: &str) -> Result<Table, Error> {
         let statement = self.prepare(sql)?;
         let s = statement.0;
         // SAFETY: a live statement, whose column names are NUL-terminated and valid until it is
@@ -139,7 +146,7 @@ impl Local {
             loop {
                 match reylo_libsql_step(s) {
                     SQLITE_ROW => {}
-                    SQLITE_DONE => return Ok(out),
+                    SQLITE_DONE => return Ok(Table { columns, rows: out }),
                     _ => return Err(self.error()),
                 }
                 let values = (0..count)
@@ -156,7 +163,7 @@ impl Local {
                         }
                     })
                     .collect();
-                out.push(Row::new(columns.clone(), values));
+                out.push(values);
             }
         }
     }

@@ -81,8 +81,8 @@ TypeScript needs no generator: the type check reads each query itself.";
 const RUN_USAGE: &str = "Usage: reylo run \"<sql>\"… [--file <path>]…
 
 Runs SQL on the database as written, outside any migration's history: inline text, and the files
---file names (-f), in the order given. The database is the type check's connection; --url names
-another.";
+--file names (-f), in the order given. A statement that returns rows prints them as a table, the
+first 50 and how many more. The database is the type check's connection; --url names another.";
 
 const MIGRATE_USAGE: &str = "Usage: reylo migrate <command> [flags]
 

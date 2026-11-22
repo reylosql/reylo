@@ -42,6 +42,13 @@ impl Row {
     }
 }
 
+/// What one statement returned: its columns, and its rows, every value as text as a [`Row`]'s is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Table {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Option<String>>>,
+}
+
 pub enum Db {
     #[cfg(feature = "cli")]
     Postgres(tokio_postgres::Client),
@@ -159,6 +166,18 @@ fn mysql_create_refused(code: u16, message: &str) -> Option<bool> {
 #[cfg(feature = "cli")]
 pub(crate) fn sqlite_error(e: rusqlite::Error) -> Error {
     Error(e.to_string())
+}
+
+/// A SQLite value as text: an integer and a real as Rust writes them, a blob's bytes read as UTF-8.
+#[cfg(feature = "cli")]
+fn sqlite_text(value: rusqlite::types::ValueRef<'_>) -> Option<String> {
+    use rusqlite::types::ValueRef::*;
+    match value {
+        Null => None,
+        Integer(v) => Some(v.to_string()),
+        Real(v) => Some(v.to_string()),
+        Text(t) | Blob(t) => Some(String::from_utf8_lossy(t).into_owned()),
+    }
 }
 
 #[cfg(feature = "cli")]
@@ -327,15 +346,7 @@ impl Db {
                 let rows = statement
                     .query_map([], |row| {
                         (0..count)
-                            .map(|i| {
-                                use rusqlite::types::ValueRef::*;
-                                Ok(match row.get_ref(i)? {
-                                    Null => None,
-                                    Integer(v) => Some(v.to_string()),
-                                    Real(v) => Some(v.to_string()),
-                                    Text(t) | Blob(t) => Some(String::from_utf8_lossy(t).into_owned()),
-                                })
-                            })
+                            .map(|i| row.get_ref(i).map(sqlite_text))
                             .collect::<rusqlite::Result<Vec<_>>>()
                     })
                     .map_err(sqlite_error)?
@@ -377,6 +388,84 @@ impl Db {
             self.exec(&statement.text).await?;
         }
         Ok(())
+    }
+
+    /// Runs a script as [`Db::script`] does, and gives what each statement that returns rows returned,
+    /// in order: a `select`'s, or a `returning` clause's, its columns kept where it returned no row.
+    /// Postgres runs it as one simple query, as `script` does; elsewhere each statement runs in turn.
+    #[cfg(feature = "cli")]
+    pub async fn script_tables(&mut self, sql: &str) -> Result<Vec<Table>, Error> {
+        if let Db::Host(_) = self {
+            self.script(sql).await?;
+            return Ok(vec![]);
+        }
+        let mut tables = Vec::new();
+        match self {
+            Db::Postgres(client) => {
+                for message in client.simple_query(sql).await.map_err(pg_error)? {
+                    match message {
+                        tokio_postgres::SimpleQueryMessage::RowDescription(columns) => tables.push(Table { columns: columns.iter().map(|c| c.name().to_string()).collect(), rows: vec![] }),
+                        tokio_postgres::SimpleQueryMessage::Row(row) => {
+                            if tables.is_empty() {
+                                tables.push(Table { columns: row.columns().iter().map(|c| c.name().to_string()).collect(), rows: vec![] });
+                            }
+                            let values = (0..row.len()).map(|i| row.get(i).map(String::from)).collect();
+                            tables.last_mut().expect("a table").rows.push(values);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Db::Mysql(conn) => {
+                for statement in crate::sql::split_statements(sql, Dialect::Mysql) {
+                    let mut result = conn.query_iter(statement.text.as_str()).await.map_err(mysql_error)?;
+                    // A statement may return several result sets, as a procedure's `call` does.
+                    loop {
+                        let columns = result.columns().filter(|c| !c.is_empty());
+                        let rows: Vec<mysql_async::Row> = result.collect().await.map_err(mysql_error)?;
+                        if let Some(columns) = columns {
+                            let rows = rows.iter().map(|row| (0..row.len()).map(|i| row.as_ref(i).and_then(mysql_text)).collect()).collect();
+                            tables.push(Table { columns: columns.iter().map(|c| c.name_str().into_owned()).collect(), rows });
+                        }
+                        if result.is_empty() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Db::Sqlite(conn) => {
+                use rusqlite::fallible_iterator::FallibleIterator;
+                let mut batch = rusqlite::Batch::new(conn, sql);
+                while let Some(mut statement) = batch.next().map_err(sqlite_error)? {
+                    let columns: Vec<String> = statement.column_names().into_iter().map(String::from).collect();
+                    if columns.is_empty() {
+                        statement.raw_execute().map_err(sqlite_error)?;
+                        continue;
+                    }
+                    let count = columns.len();
+                    let mut rows = Vec::new();
+                    let mut cursor = statement.raw_query();
+                    while let Some(row) = cursor.next().map_err(sqlite_error)? {
+                        rows.push((0..count).map(|i| row.get_ref(i).map(sqlite_text)).collect::<rusqlite::Result<Vec<_>>>().map_err(sqlite_error)?);
+                    }
+                    tables.push(Table { columns, rows });
+                }
+            }
+            Db::Libsql(remote) => {
+                for statement in crate::sql::split_statements(sql, Dialect::Sqlite) {
+                    tables.push(remote.query(&statement.text)?);
+                }
+                tables.retain(|t| !t.columns.is_empty());
+            }
+            Db::LibsqlLocal(local) => {
+                for statement in crate::sql::split_statements(sql, Dialect::Sqlite) {
+                    tables.push(local.query(&statement.text)?);
+                }
+                tables.retain(|t| !t.columns.is_empty());
+            }
+            Db::Host(_) => {}
+        }
+        Ok(tables)
     }
 
     /// Runs a script as [`Db::script`] does, telling a statement that gave up waiting for a lock
