@@ -840,11 +840,11 @@ impl GroupingKeys {
                     }
                 }
             }
-            keys.trees.push(canonical(v).to_string());
+            keys.trees.push(key_tree(v).to_string());
         }
         let mut keys = GroupingKeys { trees: Vec::new(), names: Vec::new(), positions: Vec::new() };
         for item in &s.group_clause {
-            collect(&key_tree(&serde_json::to_value(item).unwrap_or_default()), false, &mut keys);
+            collect(&canonical(&serde_json::to_value(item).unwrap_or_default()), false, &mut keys);
         }
         // A key that names an output column, by its name or its position, is that column's
         // expression, which another column may hold too (`ARRAY[concat(x)]` beside `concat(x) AS
@@ -870,16 +870,18 @@ impl GroupingKeys {
     fn null(&self, claim: Expr, column: Option<(usize, &str, bool)>, val: &Node, trust: &Trust) -> Expr {
         let tree = key_tree(&serde_json::to_value(val).unwrap_or_default());
         let named = column.is_some_and(|(position, name, starred)| (!name.is_empty() && self.names.iter().any(|n| n == name)) || (!self.positions.is_empty() && (starred || self.positions.contains(&(position + 1)))));
-        if named || self.trees.contains(&tree.to_string()) {
-            Expr::Nullable(Box::new(claim))
-        } else if self.holds(&tree, trust) {
+        // A key below the value's root may be NULL inside it, whether or not the value is a key too.
+        if self.holds(&tree, trust, true) {
             Expr::Nullable(Box::new(unsure_elements(claim)))
+        } else if named || self.trees.contains(&tree.to_string()) {
+            Expr::Nullable(Box::new(claim))
         } else {
             claim
         }
     }
 
-    fn holds(&self, v: &serde_json::Value, trust: &Trust) -> bool {
+    /// Whether `v` is or holds a key outside an aggregate, `v` itself left out with `below`.
+    fn holds(&self, v: &serde_json::Value, trust: &Trust, below: bool) -> bool {
         // An aggregate's arguments and GROUPING's are read before the grouping sets null anything.
         if v.pointer("/node/GroupingFunc").is_some() {
             return false;
@@ -895,12 +897,12 @@ impl GroupingKeys {
                 return false;
             }
         }
-        if v.get("node").is_some() && self.trees.contains(&v.to_string()) {
+        if !below && v.get("node").is_some() && self.trees.contains(&v.to_string()) {
             return true;
         }
         match v {
-            serde_json::Value::Object(map) => map.values().any(|v| self.holds(v, trust)),
-            serde_json::Value::Array(items) => items.iter().any(|v| self.holds(v, trust)),
+            serde_json::Value::Object(map) => map.values().any(|v| self.holds(v, trust, false)),
+            serde_json::Value::Array(items) => items.iter().any(|v| self.holds(v, trust, false)),
             _ => false,
         }
     }
@@ -4764,6 +4766,10 @@ mod tests {
         ] {
             assert_ne!(items(sql, &[col(true, oid::TEXT)]), Some(false), "{sql}");
         }
+        // A qualified name is the input column's, never an output alias; and a column that is a
+        // key may hold another.
+        assert_ne!(items("SELECT ARRAY[concat(t.x)] AS k FROM t GROUP BY ROLLUP (concat(t.x), t.k)", &[]), Some(false));
+        assert_ne!(items("SELECT ARRAY[concat(x)] AS k FROM t GROUP BY ROLLUP (concat(x), k)", &[]), Some(false));
         let beside = pg("SELECT concat(a) AS k, ARRAY[concat(a)] FROM t GROUP BY ROLLUP (k)").head[1].clone().expect("a claim");
         assert_ne!(items_nullable(&beside, Some(&[]), &is_array), Some(false));
         // The array keeps its rows where a key inside it may be NULL.

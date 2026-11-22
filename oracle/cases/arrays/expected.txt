@@ -18,11 +18,11 @@ slices.sql: at_most_one (i: int4, id: int4) -> { head: text(¬NUL)?[]?, head2: t
 subqueries.sql: one () -> { emails: text(¬NUL)[], nicks: text(¬NUL)?[] }
 subquery_rows.sql: one () -> { nicks: text(¬NUL)?[][] }
 trap_empty_subquery.sql: one () -> { a: timestamptz?[], b: text(¬NUL)?[], c: int8? }
-trap_inline_window.sql: one () -> { a: text(¬NUL)?[] }
 trap_padded_subquery.sql: one () -> { a: text(¬NUL)?[] }
 trap_rollup_alias.sql: one () -> { a: text(¬NUL)?[], b: text(¬NUL)?[] }
 trap_rollup_array.sql: many () -> { a: text(¬NUL)?[]?, b: jsonb?[]? }
 trap_rollup_beside.sql: many () -> { k: text(¬NUL)?, a: text(¬NUL)?[]? }
+trap_rollup_input_name.sql: many () -> { k: text(¬NUL)?[]? }
 trap_rollup_nested.sql: many () -> { a: int4?[][]? }
 trap_rollup_qualified.sql: many () -> { a: text(¬NUL)?[]? }
 trap_rollup_window.sql: many () -> { a: text(¬NUL)?[]? }
