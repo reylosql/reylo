@@ -5867,7 +5867,10 @@ pub async fn run_sql(opts: &Options, items: &[(String, String)], log: Log<'_>) -
         match db.script_tables(sql).await {
             Ok(tables) => {
                 log(&format!("{} {label}", paint("green", "✓")));
-                for table in &tables {
+                for (k, table) in tables.iter().enumerate() {
+                    if k > 0 {
+                        log("");
+                    }
                     for line in table_lines(table, RUN_ROWS_SHOWN) {
                         log(&line);
                     }
