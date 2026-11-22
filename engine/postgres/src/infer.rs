@@ -844,7 +844,18 @@ impl GroupingKeys {
         }
         let mut keys = GroupingKeys { trees: Vec::new(), names: Vec::new(), positions: Vec::new() };
         for item in &s.group_clause {
-            collect(&canonical(&serde_json::to_value(item).unwrap_or_default()), false, &mut keys);
+            collect(&key_tree(&serde_json::to_value(item).unwrap_or_default()), false, &mut keys);
+        }
+        // A key that names an output column, by its name or its position, is that column's
+        // expression, which another column may hold too (`ARRAY[concat(x)]` beside `concat(x) AS
+        // k` under `ROLLUP (k)`). An input column of the name would come first, so this may add an
+        // expression the grouping sets leave alone, which costs precision only.
+        for (position, target) in s.target_list.iter().enumerate() {
+            let Some(NodeEnum::ResTarget(rt)) = target.node.as_ref() else { continue };
+            let Some(val) = rt.val.as_deref() else { continue };
+            if (!rt.name.is_empty() && keys.names.contains(&rt.name)) || keys.positions.contains(&(position + 1)) {
+                keys.trees.push(key_tree(&serde_json::to_value(val).unwrap_or_default()).to_string());
+            }
         }
         keys
     }
@@ -857,12 +868,12 @@ impl GroupingKeys {
     /// NULL as an element (`ARRAY[a]` under `ROLLUP (a)`), and nothing is known. `column` is the
     /// output column's position, name and whether a `*` stands before it, where `val` is one.
     fn null(&self, claim: Expr, column: Option<(usize, &str, bool)>, val: &Node, trust: &Trust) -> Expr {
-        let tree = canonical(&serde_json::to_value(val).unwrap_or_default());
+        let tree = key_tree(&serde_json::to_value(val).unwrap_or_default());
         let named = column.is_some_and(|(position, name, starred)| (!name.is_empty() && self.names.iter().any(|n| n == name)) || (!self.positions.is_empty() && (starred || self.positions.contains(&(position + 1)))));
         if named || self.trees.contains(&tree.to_string()) {
             Expr::Nullable(Box::new(claim))
         } else if self.holds(&tree, trust) {
-            Expr::Unknown
+            Expr::Nullable(Box::new(unsure_elements(claim)))
         } else {
             claim
         }
@@ -892,6 +903,54 @@ impl GroupingKeys {
             serde_json::Value::Array(items) => items.iter().any(|v| self.holds(v, trust)),
             _ => false,
         }
+    }
+}
+
+/// A parse tree as a grouping key is compared: [`canonical`], with each column reference by its
+/// last name alone, so that `t.x` and `x` compare equal. Two columns of one name in different
+/// tables compare equal too, which only reads more as a key.
+fn key_tree(v: &serde_json::Value) -> serde_json::Value {
+    fn unqualified(v: serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(mut map) => {
+                if let Some(fields) = map.get_mut("ColumnRef").and_then(|c| c.get_mut("fields")).and_then(|f| f.as_array_mut()) {
+                    if fields.len() > 1 {
+                        fields.drain(..fields.len() - 1);
+                    }
+                }
+                map.into_iter().map(|(k, v)| (k, unqualified(v))).collect()
+            }
+            serde_json::Value::Array(items) => items.into_iter().map(unqualified).collect(),
+            other => other,
+        }
+    }
+    unqualified(canonical(v))
+}
+
+/// An expression a grouping set may null a value inside: each array it builds may hold that NULL
+/// as an element, so its elements are read as a column's of no leaf ([`Expr::Unread`]), each of
+/// its type, which keeps how the array nests; a nested `ARRAY[…]` keeps its rows. A call that
+/// builds an array of its arguments, and a call a user's overload may stand for, say nothing.
+fn unsure_elements(expr: Expr) -> Expr {
+    let each = |operands: Vec<Expr>| operands.into_iter().map(unsure_elements).collect::<Vec<_>>();
+    match expr {
+        Expr::Array { non_null, items } => Expr::Array {
+            non_null,
+            items: items.into_iter().map(|item| match item {
+                Expr::Array { .. } => unsure_elements(item),
+                item => Expr::Unread(resolve(&item, None).type_oid),
+            }).collect(),
+        },
+        Expr::Nullable(inner) => Expr::Nullable(Box::new(unsure_elements(*inner))),
+        Expr::Narrowed(inner) => Expr::Narrowed(Box::new(unsure_elements(*inner))),
+        Expr::Guarded(inner, types) => Expr::Guarded(Box::new(unsure_elements(*inner)), types),
+        Expr::NotJsonb(inner) => Expr::NotJsonb(Box::new(unsure_elements(*inner))),
+        Expr::NotJsonbItems(inner) => Expr::NotJsonbItems(Box::new(unsure_elements(*inner))),
+        Expr::NotRow(inner, shared) => Expr::NotRow(Box::new(unsure_elements(*inner)), shared),
+        Expr::Every(operands, ty) => Expr::Every(each(operands), ty),
+        Expr::Any(operands, ty) => Expr::Any(each(operands), ty),
+        Expr::Call(_) | Expr::Trusted(_) => Expr::Unknown,
+        other => other,
     }
 }
 
@@ -1384,7 +1443,8 @@ pub fn one_value(target: &Node, dialect: Dialect, trust: &Trust) -> bool {
                     let Some(n) = name(f.get("funcname")) else { return false };
                     let arity = f.get("args").and_then(Value::as_array).map_or(0, Vec::len);
                     if [FUNCTIONS, POSTGRES_GROUPED, POSTGRES_GROUPED_NEVER_NULL, POSTGRES_GROUPED_JSON].iter().any(|list| list.contains(&n)) && trust.aggregates(n, arity) {
-                        return true;
+                        // An inline window's PARTITION BY and ORDER BY run over the rows.
+                        return f.get("over").is_none_or(|o| walk(o, trust));
                     }
                     if !trust.returns_no_set(Kind::Function, n) || POSTGRES_SET_RETURNING.contains(&n) || !postgres_function_names().contains(&n) {
                         return false;
@@ -1463,7 +1523,8 @@ pub(crate) fn set_calls(target: &Node, trust: &Trust) -> usize {
                 if let Some(f) = map.get("FuncCall") {
                     let arity = f.get("args").and_then(Value::as_array).map_or(0, Vec::len);
                     match name(f.get("funcname")) {
-                        Some(n) if [FUNCTIONS, POSTGRES_GROUPED, POSTGRES_GROUPED_NEVER_NULL, POSTGRES_GROUPED_JSON].iter().any(|list| list.contains(&n)) && trust.aggregates(n, arity) => return 0,
+                        // Its inline window's PARTITION BY and ORDER BY are the target list's.
+                        Some(n) if [FUNCTIONS, POSTGRES_GROUPED, POSTGRES_GROUPED_NEVER_NULL, POSTGRES_GROUPED_JSON].iter().any(|list| list.contains(&n)) && trust.aggregates(n, arity) => return f.get("over").map_or(0, |o| walk(o, trust)),
                         Some(n) if trust.returns_no_set(Kind::Function, n) && !POSTGRES_SET_RETURNING.contains(&n) && postgres_function_names().contains(&n) => {}
                         _ => own = 1,
                     }
@@ -4693,6 +4754,22 @@ mod tests {
         ] {
             assert_ne!(items(sql, &[col(true, oid::TEXT)]), Some(false), "{sql}");
         }
+        // A key named by its alias or position, or written with a qualifier the select list
+        // leaves off, and an inline window's set of no rows.
+        for sql in [
+            "SELECT ARRAY(SELECT concat('x') AS k GROUP BY ROLLUP (k))",
+            "SELECT ARRAY(SELECT concat('x') GROUP BY ROLLUP (1))",
+            "SELECT ARRAY[concat(t.a)] FROM t GROUP BY ROLLUP (concat(a))",
+            "SELECT ARRAY[(SELECT concat(count(*) OVER (PARTITION BY generate_series(1, 0))))]",
+        ] {
+            assert_ne!(items(sql, &[col(true, oid::TEXT)]), Some(false), "{sql}");
+        }
+        let beside = pg("SELECT concat(a) AS k, ARRAY[concat(a)] FROM t GROUP BY ROLLUP (k)").head[1].clone().expect("a claim");
+        assert_ne!(items_nullable(&beside, Some(&[]), &is_array), Some(false));
+        // The array keeps its rows where a key inside it may be NULL.
+        let nested = claim("SELECT ARRAY[[length(a)::int]] FROM t GROUP BY ROLLUP (length(a)::int)");
+        assert_ne!(items_nullable(&nested, Some(&[]), &is_array), Some(false));
+        assert_eq!(nesting(&nested, Some(&[]), &|t| Some(t == 1009)), Some(Nesting { rows: 1, element: None }));
         assert_eq!(items("SELECT ARRAY[concat(a)] FROM t GROUP BY ROLLUP (b)", &[]), Some(false));
         assert_eq!(items("SELECT array_agg(concat(a)) FROM t GROUP BY ROLLUP (concat(a))", &[]), Some(false));
         assert_eq!(items("SELECT ARRAY(SELECT concat(a) FROM t GROUP BY b)", &[]), Some(false));
