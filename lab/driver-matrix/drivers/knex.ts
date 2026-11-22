@@ -19,11 +19,12 @@ await runJob(meta, async () => {
   const db = knex({ client: "pg", connection: url, pool: { min: 0, max: 10 } });
   const begin = (fn: (trx: any) => Promise<unknown>) => db.transaction(fn);
   // A transaction to commit or roll back by hand; rollback() rejects the transaction's own promise,
-  // which nothing here awaits.
+  // which nothing here awaits. Its release rolls back a transaction a failed scenario left open, so
+  // its connection goes back to the pool.
   const handed = async () => {
     const trx = await db.transaction();
     trx.executionPromise?.catch(() => {});
-    return { client: trx };
+    return { client: trx, release: async () => { if (!trx.isCompleted()) await trx.rollback(); } };
   };
   return {
     ...meta,
