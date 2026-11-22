@@ -2995,6 +2995,7 @@ on!(
     an_enum_label_a_partition_uses_is_committed_first,
     an_enum_label_a_default_uses_is_committed_first,
     a_push_that_fails_past_an_enum_commit_keeps_what_it_drops,
+    a_push_that_fails_past_an_enum_commit_undoes_its_renames,
     a_foreign_table_is_renamed_as_stated,
     a_partitioned_table_is_renamed_with_its_partitions,
     a_table_renamed_onto_a_views_name_drops_the_view_first,
@@ -4332,6 +4333,21 @@ mod adversarial {
         assert_eq!(p.rows("select body from old_notes").await.len(), 1);
         assert_eq!(p.rows("select 1 from pg_views where viewname = 'v'").await.len(), 1);
         assert_eq!(p.rows("select 1 from information_schema.columns where table_name = 'x' and udt_name = 'mood'").await.len(), 1);
+        assert_eq!(p.rows("select 1 from pg_enum where enumlabel = 'b'").await.len(), 1);
+    }
+
+    pub async fn a_push_that_fails_past_an_enum_commit_undoes_its_renames(mut p: P) {
+        p.file("20261027100000_data.sql", "create type mood as enum ('a'); create table items (i int, m mood default 'a'); create table t_data (id int, name text); create view data as select * from t_data; create view q as select * from data;");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into t_data values (1, 'a')").await;
+        p.exec("insert into items values (-1, 'a')").await;
+        p.output();
+        // The new label commits first, alone: the rename, and the views it drops, run after it, and
+        // the check its row fails undoes them.
+        p.schema("create type mood as enum ('a', 'b'); create table items (i int check (i > 0), m mood default 'b'); create table data (id int, name text); create view q as select * from data;");
+        assert_eq!(p.db_push_with(&push(&[], &[("t_data", "data")], false)).await, 1, "{}", p.peek());
+        assert_eq!(p.rows("select name from t_data").await.len(), 1);
+        assert_eq!(p.rows("select 1 from pg_views where viewname in ('data', 'q')").await.len(), 2);
         assert_eq!(p.rows("select 1 from pg_enum where enumlabel = 'b'").await.len(), 1);
     }
 

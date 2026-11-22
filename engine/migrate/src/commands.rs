@@ -4820,8 +4820,20 @@ async fn take_to(db: &mut Db, target: &Target, then: &[String], expect: &[String
             Ok(Settled { renames, plan, .. }) => (renames, plan),
             Err(problems) => return Ok(Err(Unreached::Refused(problems))),
         };
+        // Where the plan commits partway, the renames planning ran on the database run again after
+        // the commit, as a migration writes them: an enum's new labels commit alone, and a push that
+        // fails past them leaves every table under its name.
+        let mut statements: Vec<String> = plan.runnable().cloned().collect();
+        if let Some(last) = statements.iter().rposition(|s| s == crate::diff::COMMIT).filter(|_| transactional) {
+            let ran: Vec<String> = renames.iter().filter(|s| !s.starts_with("--")).cloned().collect();
+            if !ran.is_empty() {
+                db.exec("rollback").await?;
+                db.exec("begin").await?;
+                statements.splice(last + 1..last + 1, ran);
+            }
+        }
         let mut committed = false;
-        for s in plan.runnable().chain(then) {
+        for s in statements.iter().chain(then) {
             if let Err(e) = db.script(&format!("{};", s.trim_end().trim_end_matches(';'))).await {
                 return Err(if committed { Error(format!("{}\n{COMMITTED}", e.0)) } else { e });
             }
