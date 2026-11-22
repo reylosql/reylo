@@ -2924,6 +2924,7 @@ on!(
     a_platforms_schemas_by_name_are_left_out_whoever_owns_them,
     a_projects_auth_and_storage_are_its_own_on_a_server_of_no_platform,
     a_change_by_hand_is_shown_alone_beside_a_function_of_many_lines,
+    an_enum_value_added_is_ahead_on_the_side_that_added_it,
 );
 on!(Mysql, a_migration_that_names_a_database_is_refused);
 on!(
@@ -3873,6 +3874,37 @@ mod adversarial {
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_has!(p.output(), "Up to date");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    }
+
+    /// An enum is one line of the catalog, so a value added changes that line on both sides: schema.sql's
+    /// enum with a value more is schema.sql ahead, pushed or not, and a migration's is the migrations'.
+    pub async fn an_enum_value_added_is_ahead_on_the_side_that_added_it(mut p: P) {
+        let declared = |values: &str| format!("create type visibility as enum ({values}); create table bookmarks (id int primary key, visibility visibility not null default 'private');");
+        p.linear();
+        p.schema(&declared("'private', 'public'"));
+        p.file("20261027100000_bookmarks.sql", &declared("'private', 'public'"));
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        p.schema(&declared("'private', 'team', 'public'"));
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"» The schema is ahead of the migrations\n  To write the changes to a migration file:\n    reylo migrate new <name>");
+        assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+        assert_has!(p.output(), r"The schema is ahead of the migrations\n\n[^\n]*add value 'team' after 'private'");
+        assert_eq!(p.db_push().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"✓ Up to date with the migrations\n» The schema is ahead of the migrations\n  To write the changes to a migration file:\n    reylo migrate new <name>");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "team", &Default::default(), log).await).await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!has(&out, "ahead|disagree"), "{out}");
+        // A value a migration adds and schema.sql doesn't declare is the migrations'.
+        p.file("20261027100100_archived.sql", "alter type visibility add value 'archived';");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"The migrations make what \S*schema\.sql doesn't declare");
+        assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+        assert_has!(p.output(), r"The migrations make what \S*schema\.sql doesn't declare");
     }
 
     pub async fn a_comment_in_schema_sql_is_written(mut p: P) {
