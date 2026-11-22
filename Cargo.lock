@@ -1873,7 +1873,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reylo"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -1893,7 +1893,7 @@ dependencies = [
 
 [[package]]
 name = "reylo-build"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "glob",
  "mysql_async",
@@ -1912,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "reylo-cli"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "flate2",
  "regex",
@@ -1931,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "reylo-engine"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "mysql_async",
  "reylo-engine-build",
@@ -1952,11 +1952,11 @@ dependencies = [
 
 [[package]]
 name = "reylo-engine-build"
-version = "0.8.2"
+version = "0.8.3"
 
 [[package]]
 name = "reylo-engine-core"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "libc",
  "reylo-engine-build",
@@ -1967,7 +1967,7 @@ dependencies = [
 
 [[package]]
 name = "reylo-engine-mysql"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "reylo-engine-build",
  "reylo-engine-core",
@@ -1978,7 +1978,7 @@ dependencies = [
 
 [[package]]
 name = "reylo-engine-postgres"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "reylo-engine-build",
  "reylo-engine-core",
@@ -1989,7 +1989,7 @@ dependencies = [
 
 [[package]]
 name = "reylo-engine-sqlite"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cc",
  "reylo-engine-build",
@@ -2000,7 +2000,7 @@ dependencies = [
 
 [[package]]
 name = "reylo-macros"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2011,7 +2011,7 @@ dependencies = [
 
 [[package]]
 name = "reylo-migrate"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cc",
  "futures-util",
@@ -2050,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "reylo-sql"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "reylo-engine-build",
  "serde",
