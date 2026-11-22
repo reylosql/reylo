@@ -3359,7 +3359,9 @@ mod adversarial {
         p.exec("create function public.theirs() returns int language sql as 'select 1'; alter function public.theirs() owner to madv_other").await;
         p.url = as_role(&p.url, "madv_app");
         p.exec("create table users (id int primary key)").await;
-        let opts = p.opts();
+        // In a directory init makes, as a new project's `reylo/` is.
+        let home = p.dir.join("reylo");
+        let opts = Options { dir: home.join("migrations"), schema: home.join("schema.sql"), lock: home.join(reylo_migrate::lock::LOCK), cache: home.join(".cache"), ..p.opts() };
         let mut out = Vec::new();
         let code = reylo_migrate::init(&opts, &[], &mut |l: &str| out.push(l.to_string())).await.unwrap_or_else(|e| panic!("init: {e}"));
         let said = out.join("\n");
@@ -3367,9 +3369,7 @@ mod adversarial {
         assert_has!(said.clone(), r"Replaying init\.sql in a shadow database fails");
         assert_has!(said.clone(), r"Nothing was changed\.$");
         assert!(!said.contains("Started"), "{said}");
-        assert!(!p.dir.join("schema.sql").exists(), "init left schema.sql:\n{said}");
-        assert!(!p.dir.join(reylo_migrate::lock::LOCK).exists(), "init left the lock");
-        assert!(p.files().is_empty(), "init left {:?}", p.files());
+        assert!(!home.exists(), "init left {}:\n{said}", home.display());
         assert!(p.history().await.is_empty(), "init recorded {:?}", p.history().await);
     }
 

@@ -4757,6 +4757,20 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
 /// records init.sql without running it, once a shadow shows the database already has its schema.
 #[cfg(feature = "cli")]
 pub async fn init(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32, Error> {
+    // The directories it may make, the deepest first: `reylo/migrations/`, and `reylo/` where it's
+    // new, which the shadows' replay cache goes in too. A run that doesn't start the project takes
+    // them away again, so that init runs again once it can, and a refusal's "Nothing was changed"
+    // holds.
+    let made: Vec<PathBuf> = opts.dir.ancestors().take_while(|d| !d.as_os_str().is_empty() && !d.exists()).map(Path::to_path_buf).collect();
+    let result = init_in(opts, schemas, log).await;
+    if let (false, Some(top)) = (matches!(result, Ok(0)), made.last()) {
+        let _ = std::fs::remove_dir_all(top);
+    }
+    result
+}
+
+#[cfg(feature = "cli")]
+async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32, Error> {
     if let Some(code) = refuse_lock_file(opts, log) {
         return Ok(code);
     }
@@ -4814,7 +4828,6 @@ pub async fn init(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i3
         Ok(sql) => sql,
         Err(problem) => return Ok(refuse(&[problem], log)),
     };
-    let made_dir = !opts.dir.exists();
     std::fs::create_dir_all(&opts.dir)?;
     std::fs::write(&opts.schema, &sql)?;
     let init = opts.dir.join(INIT);
@@ -4825,15 +4838,12 @@ pub async fn init(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i3
     lock::write(&opts.lock, &lock::Lock { schema, entries })?;
     // init.sql is recorded as run, which the tree says. One that can't start (no shadow database can
     // be made) or is refused (init.sql doesn't replay, or doesn't make this schema) leaves no project
-    // behind, so that init runs again once it can, and the refusal's "Nothing was changed" holds.
+    // behind: its files here, and its directories in `init`.
     let mut said: Vec<String> = Vec::new();
     let recorded = history_push_as(opts, true, &mut |l: &str| said.push(l.to_string())).await;
     if !matches!(recorded, Ok(0)) {
         for file in [&opts.schema, &init, &opts.lock] {
             let _ = std::fs::remove_file(file);
-        }
-        if made_dir {
-            let _ = std::fs::remove_dir(&opts.dir);
         }
     }
     let code = match recorded {
