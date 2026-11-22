@@ -538,15 +538,15 @@ impl<'t> Scanner<'t> {
                 let (digits, wanted) = comment_version(&rest[3..]);
                 if wanted <= self.opts.version {
                     // One the server runs is text, unless it holds nothing but spaces.
-                    let body = at + 3 + digits;
-                    let close = z[body..].windows(2).position(|w| w == b"*/");
-                    match close {
-                        Some(n) if z[body..body + n].iter().all(|&c| is_space(c)) => {
-                            at = body + n + 2;
-                            continue;
-                        }
-                        _ => return at,
+                    let mut body = at + 3 + digits;
+                    while body < z.len() && is_space(z[body]) {
+                        body += 1;
                     }
+                    if !z[body..].starts_with(b"*/") {
+                        return at;
+                    }
+                    at = body + 2;
+                    continue;
                 }
                 match skipped_comment(z, at + 3 + digits) {
                     Some(end) => at = end,
