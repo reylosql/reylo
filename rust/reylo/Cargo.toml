@@ -32,8 +32,10 @@ time = { version = "0.3", optional = true, features = ["serde"] }
 uuid = { version = "1.12", optional = true, features = ["serde"] }
 rust_decimal = { version = "1.36", optional = true, default-features = false, features = ["serde"] }
 bigdecimal = { version = "0.4", optional = true, default-features = false, features = ["serde"] }
-# pgvector's `vector`, as the pgvector crate's `Vector`, which implements sqlx's traits for it.
-pgvector = { version = "0.4", optional = true, features = ["sqlx", "serde"] }
+# pgvector's `vector`, as the pgvector crate's `Vector`. Its own sqlx support is left off: it takes
+# sqlx 0.8 or 0.9, and Cargo may resolve it to another sqlx than the project's, so a query reads
+# and binds the type through reylo's own codec (src/vector.rs).
+pgvector = { version = "0.4", optional = true, default-features = false, features = ["serde"] }
 # `reylo::migrate!()`: `reylo migrate deploy` and `reylo migrate status` run from the app, on its
 # pool, as the command line's own code without the clients, shadows and diff engine it carries.
 reylo-migrate = { workspace = true, optional = true }
@@ -63,6 +65,5 @@ time = ["dep:time", "sqlx?/time", "reylo-macros/time"]
 uuid = ["dep:uuid", "sqlx?/uuid", "reylo-macros/uuid"]
 rust_decimal = ["dep:rust_decimal", "sqlx?/rust_decimal", "sqlx08?/rust_decimal", "reylo-macros/rust_decimal"]
 bigdecimal = ["dep:bigdecimal", "sqlx?/bigdecimal", "sqlx08?/bigdecimal", "reylo-macros/bigdecimal"]
-# pgvector's `vector` as `pgvector::Vector`, which `reylo::pgvector` names. On sqlx 0.9 alone: the
-# pgvector crate takes 0.8 or 0.9, and Cargo resolves it to the 0.9 this crate names.
+# pgvector's `vector` as `pgvector::Vector`, which `reylo::pgvector` names.
 pgvector = ["dep:pgvector", "reylo-macros/pgvector"]

@@ -247,20 +247,32 @@ fn package_dir(file: &Path) -> PathBuf {
     parent.ancestors().find(|d| d.join("Cargo.toml").is_file()).unwrap_or(parent).to_path_buf()
 }
 
-/// The crates the modules may name for dates and times, uuids and decimals: the features the crate
-/// turns on in its `reylo` dependency, as the macro reads them from its own.
+/// The crates the modules may name for dates and times, uuids, decimals and vectors: the features
+/// the crate turns on in its `reylo` dependency, as the macro reads them from its own. In the crate's
+/// own build script, so are those its features turned on for this build forward to `reylo`
+/// (`vector = ["reylo/pgvector"]`), as Cargo says through `CARGO_FEATURE_<NAME>`.
 fn crate_options(package: &Path) -> Options {
     let manifest = package.join("Cargo.toml");
     let Some(metadata) = cargo_metadata(&manifest) else { return Options::default() };
     let same = |a: &str| std::fs::canonicalize(a).ok() == std::fs::canonicalize(&manifest).ok();
     let Some(own) = metadata["packages"].as_array().into_iter().flatten().find(|p| p["manifest_path"].as_str().is_some_and(same)) else { return Options::default() };
-    let features: Vec<&str> = own["dependencies"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|d| d["rename"].as_str().unwrap_or(d["name"].as_str().unwrap_or_default()) == "reylo" || d["name"].as_str() == Some("reylo"))
-        .flat_map(|d| d["features"].as_array().into_iter().flatten().filter_map(Value::as_str))
-        .collect();
+    let reylo: Vec<&Value> = own["dependencies"].as_array().into_iter().flatten().filter(|d| d["name"].as_str() == Some("reylo")).collect();
+    let mut features: Vec<&str> = reylo.iter().flat_map(|d| d["features"].as_array().into_iter().flatten().filter_map(Value::as_str)).collect();
+    let building = std::env::var_os("CARGO_MANIFEST_DIR").is_some_and(|d| std::fs::canonicalize(d).ok() == std::fs::canonicalize(package).ok());
+    if building {
+        let names: Vec<&str> = reylo.iter().map(|d| d["rename"].as_str().unwrap_or("reylo")).collect();
+        for (feature, enables) in own["features"].as_object().into_iter().flatten() {
+            if std::env::var_os(format!("CARGO_FEATURE_{}", feature.to_uppercase().replace('-', "_"))).is_none() {
+                continue;
+            }
+            for enabled in enables.as_array().into_iter().flatten().filter_map(Value::as_str) {
+                let Some((dep, name)) = enabled.split_once('/') else { continue };
+                if names.contains(&dep.trim_end_matches('?')) {
+                    features.push(name);
+                }
+            }
+        }
+    }
     let has = |name: &str| features.contains(&name);
     Options {
         dates: if has("chrono") {

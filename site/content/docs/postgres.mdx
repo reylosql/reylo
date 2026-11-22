@@ -141,7 +141,7 @@ In Rust, `#[reylo::query]` writes these types:
 | `void`, as `pg_sleep` returns | `()` |
 | Every other type (`inet`, `tsvector`, `xml`, …) | not yet |
 
-A type that is not yet written fails to compile and says to cast it to `text`. The decimal, date, uuid and vector types come from the [features you turn on](/rust#install). A value its Rust type can't hold, such as `infinity` in a `date`, is an error when the row is read.
+A type that is not yet written fails to compile and says to cast it to `text`. The decimal, date, uuid and vector types come from the [features you turn on](/rust#install). A value its Rust type can't hold, such as `infinity` in a `date`, is an error when the row is read. A parameter of `hstore` or `vector` needs the extension's schema on the connection's `search_path`.
 
 </LanguagePanel>
 </LanguagePanels>

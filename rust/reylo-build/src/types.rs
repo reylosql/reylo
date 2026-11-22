@@ -31,6 +31,8 @@ pub enum Leaf {
     Exact,
     /// One of a list of values: decoded as text and read as the enum's variant, bound as its value.
     Label,
+    /// Decoded and bound through a wrapper of reylo's (`reylo::__private::PgVector`), its `.0` the value.
+    Via(TokenStream2),
 }
 
 /// An enum the module holds, as a column's or a parameter's value: its name in the module (a
@@ -70,6 +72,7 @@ impl Shape {
         match self {
             Shape::Leaf { ty, leaf: Leaf::Exact, .. } => quote!(::reylo::Exact<#ty>),
             Shape::Leaf { leaf: Leaf::Label, .. } => quote!(::std::string::String),
+            Shape::Leaf { leaf: Leaf::Via(wrapper), .. } => wrapper.clone(),
             Shape::Leaf { ty, .. } => ty.clone(),
             Shape::Option(s) => {
                 let t = s.decode_ty();
@@ -105,7 +108,7 @@ impl Shape {
             return v;
         }
         match self {
-            Shape::Leaf { leaf: Leaf::Exact, .. } => quote!(#v.0),
+            Shape::Leaf { leaf: Leaf::Exact | Leaf::Via(_), .. } => quote!(#v.0),
             Shape::Leaf { ty, leaf: Leaf::Label, .. } => quote!(::reylo::__private::from_label::<#ty>(&#v, #column)?),
             Shape::Leaf { .. } => v,
             Shape::Option(s) => {
@@ -124,6 +127,7 @@ impl Shape {
     pub fn encode(&self, v: TokenStream2) -> TokenStream2 {
         self.encode_leaves(v, &|leaf, ty, v| match leaf {
             Leaf::Label => quote!(<#ty as ::reylo::Enum>::label(*#v)),
+            Leaf::Via(wrapper) => quote!(#wrapper(::core::clone::Clone::clone(#v))),
             _ => quote!(::core::clone::Clone::clone(#v)),
         })
     }
@@ -324,6 +328,11 @@ impl Types {
                 return Ok(Shape::Vec(Box::new(if nullable { Shape::Option(Box::new(element)) } else { element })));
             }
         }
+        // pgvector's `vector`, in whatever schema the extension was created in, read and bound
+        // through reylo's own codec.
+        if self.dialect == Dialect::Postgres && matches!(t.kind, Kind::Array(_)) && t.label.as_deref().map(bare) == Some("vector") {
+            return Ok(Shape::Leaf { ty: self.pgvector(label)?, leaf: Leaf::Via(quote!(::reylo::__private::PgVector)), enumeration: None });
+        }
         if let Kind::Enum(e) = &t.kind {
             if self.is_postgres_enum(t) {
                 let reference = self.postgres_enum(t)?;
@@ -426,8 +435,6 @@ impl Types {
                 self.serialize = false;
                 (quote!(::reylo::sqlx::postgres::types::PgHstore), false)
             }
-            // pgvector's `vector`, in whatever schema the extension was created in.
-            Kind::Array(_) if name == "vector" => (self.pgvector(label)?, false),
             Kind::Unknown => return Err(self.any_value(label)),
             _ => return Err(self.unsupported(label, t, "cast it to text in the statement, as `x::text`")),
         })
