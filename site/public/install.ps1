@@ -5,7 +5,8 @@
 #
 # $env:REYLO_VERSION         The version to install, as 0.8.0; the latest release by default.
 # $env:REYLO_INSTALL_DIR     Where reylo.exe goes; ~\.local\bin by default, which is added to the
-#                            user's Path unless $env:REYLO_NO_MODIFY_PATH is set.
+#                            user's Path unless $env:REYLO_NO_MODIFY_PATH is set. Its licenses go in
+#                            share\doc\reylo beside that directory, as ~\.local\share\doc\reylo.
 # $env:REYLO_DOWNLOAD_URL    A directory holding a release's assets, in place of the release's own.
 #
 # On macOS and Linux, install.sh beside this file does the same.
@@ -56,6 +57,16 @@
     if ($LASTEXITCODE -ne 0) { throw "reylo install: cannot unpack $asset" }
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     Move-Item -Force "$tmp\reylo.exe" (Join-Path $dir 'reylo.exe')
+    # The licenses of the code the binary carries, where the archive holds them (an older release's doesn't).
+    try {
+      $doc = Join-Path (Split-Path -Parent $dir) 'share\doc\reylo'
+      foreach ($notice in 'LICENSE', 'NOTICE.md', 'LICENSE-APACHE') {
+        if (Test-Path "$tmp\$notice") {
+          New-Item -ItemType Directory -Force -Path $doc | Out-Null
+          Copy-Item -Force "$tmp\$notice" (Join-Path $doc $notice)
+        }
+      }
+    } catch {}
   } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
   }

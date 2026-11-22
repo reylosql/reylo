@@ -68,6 +68,7 @@ homebrew() {
     brew audit --strict --online reylocheck/test/reylo
   fi
   sh "$smoke" "$(brew --prefix)/bin/reylo" "$version"
+  licensed "$(brew --prefix reylocheck/test/reylo)"
   done_
 }
 
@@ -91,12 +92,24 @@ mise_check() {
   done_
 }
 
+# Whether the release's archive carries the licenses an installer keeps: an older release's doesn't.
+notices=0
+tar -tzf "$assets/reylo-$platform.tar.gz" > "$work/listing"
+grep -qx NOTICE.md "$work/listing" && notices=1
+licensed() {
+  [ "$notices" = 1 ] || return 0
+  for notice in LICENSE NOTICE.md LICENSE-APACHE; do
+    [ -f "$1/$notice" ] || { echo "::error::the installer kept no $notice in $1"; exit 1; }
+  done
+}
+
 case "$platform" in
   darwin-*)
     step "install.sh"
     REYLO_INSTALL_DIR="$work/sh" sh site/public/install.sh > "$work/out" || { cat "$work/out"; exit 1; }
     installed "$work/out"
     sh "$smoke" "$work/sh/reylo" "$version"
+    licensed "$work/share/doc/reylo"
     done_
     homebrew
     mise_check
@@ -109,7 +122,7 @@ case "$platform" in
     # 127.0.0.1 is reachable.
     for image in $(jq -r '.[]' <<< "$images"); do
       step "install.sh in $image"
-      docker run --rm --network host -v "$PWD:/w" -w /w -e REYLO_VERSION -e REYLO_DOWNLOAD_URL "$image" sh -c '
+      docker run --rm --network host -v "$PWD:/w" -w /w -e REYLO_VERSION -e REYLO_DOWNLOAD_URL -e notices="$notices" "$image" sh -c '
         set -e
         if ! command -v curl > /dev/null && ! command -v wget > /dev/null; then
           get() { apt-get update -qq > /dev/null && apt-get install -y -qq --no-install-recommends curl ca-certificates > /dev/null; }
@@ -119,6 +132,9 @@ case "$platform" in
         command -v tar > /dev/null || dnf install -y -q tar gzip > /dev/null
         REYLO_INSTALL_DIR=/tmp/reylo sh site/public/install.sh
         sh .github/scripts/channels-smoke.sh /tmp/reylo/reylo "$0"
+        [ "$notices" = 0 ] || for notice in LICENSE NOTICE.md LICENSE-APACHE; do
+          [ -f "/tmp/share/doc/reylo/$notice" ] || { echo "::error::the installer kept no $notice in /tmp/share/doc/reylo"; exit 1; }
+        done
       ' "$version" > "$work/out" || { cat "$work/out"; exit 1; }
       installed "$work/out"
       done_
@@ -155,10 +171,11 @@ case "$platform" in
     # As a user runs it, `irm … | iex`, which reads the script as one string.
     for shell in pwsh powershell; do
       step "install.ps1 under $shell"
-      REYLO_INSTALL_DIR="$(cygpath -w "$work/$shell")" REYLO_NO_MODIFY_PATH=1 \
+      REYLO_INSTALL_DIR="$(cygpath -w "$work/$shell/bin")" REYLO_NO_MODIFY_PATH=1 \
         "$shell" -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Raw site/public/install.ps1 | Invoke-Expression" > "$work/out" || { cat "$work/out"; exit 1; }
       installed "$work/out"
-      sh "$smoke" "$work/$shell/reylo.exe" "$version"
+      sh "$smoke" "$work/$shell/bin/reylo.exe" "$version"
+      licensed "$work/$shell/share/doc/reylo"
       done_
     done
     step "Scoop"

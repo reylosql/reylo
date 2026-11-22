@@ -5,7 +5,8 @@
 #   curl -fsSL https://reylo.dev/install.sh | sh
 #
 # REYLO_VERSION      The version to install, as 0.8.0; the latest release by default.
-# REYLO_INSTALL_DIR  Where the binary goes; ~/.local/bin by default.
+# REYLO_INSTALL_DIR  Where the binary goes; ~/.local/bin by default. Its licenses go in share/doc/reylo
+#                    beside that directory, as ~/.local/share/doc/reylo.
 # REYLO_DOWNLOAD_URL A directory holding a release's assets, in place of the release's own.
 #
 # On Windows, install.ps1 beside this file does the same.
@@ -95,6 +96,13 @@ main() {
   cp "$tmp/reylo" "$dir/.reylo.$$"
   chmod 755 "$dir/.reylo.$$"
   mv -f "$dir/.reylo.$$" "$dir/reylo"
+  # The licenses of the code the binary carries, where the archive holds them (an older release's doesn't).
+  doc="$(dirname "$dir")/share/doc/reylo"
+  for notice in LICENSE NOTICE.md LICENSE-APACHE; do
+    if [ -f "$tmp/$notice" ] && mkdir -p "$doc" 2> /dev/null; then
+      cp "$tmp/$notice" "$doc/$notice" 2> /dev/null || true
+    fi
+  done
 
   echo "Installed $("$dir/reylo" --version) ($platform) at $dir/reylo"
   case ":$PATH:" in

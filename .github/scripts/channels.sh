@@ -66,6 +66,7 @@ class Reylo < Formula
 
   def install
     bin.install "reylo"
+    prefix.install Dir["LICENSE*", "NOTICE.md"]
   end
 
   test do
