@@ -3279,20 +3279,20 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
     // development database as it stands, written out as SQL (as `db introspect` prints it). Either
     // way, the development database must have run each migration it applied as it now reads: one
     // edited or deleted since is `migrate dev`'s to settle first.
-    let (target_sql, target_name, added) = match std::fs::read_to_string(&opts.schema) {
+    let (target_sql, target_name) = match std::fs::read_to_string(&opts.schema) {
         Ok(sql) => {
             let problems = ran_as_written(opts, &files).await?;
             if !problems.is_empty() {
                 return Ok(refuse(&problems, log));
             }
-            (sql, shown(&opts.schema), vec![])
+            (sql, shown(&opts.schema))
         }
         Err(_) => match as_its_migrations_leave_it(opts, &files).await? {
-            Ok((sql, added)) => (sql, "this database".to_string(), added),
+            Ok(sql) => (sql, "this database".to_string()),
             Err(problems) => return Ok(refuse(&problems, log)),
         },
     };
-    let drafted = match draft(opts, &files, &target_sql, &target_name, &added, name, choices, log).await? {
+    let drafted = match draft(opts, &files, &target_sql, &target_name, name, choices, log).await? {
         Ok(drafted) => drafted,
         Err(problems) => return Ok(refuse(&problems, log)),
     };
@@ -3342,10 +3342,9 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
 
 /// The development database as SQL that makes it, for `migrate new` in a project with no schema.sql:
 /// the migration is what it has that the migrations don't make. Refused unless it ran every migration,
-/// each as it now reads, since one it hasn't run would read as something to drop. With it, the
-/// extensions added by hand since ([`added_extensions`]).
+/// each as it now reads, since one it hasn't run would read as something to drop.
 #[cfg(feature = "cli")]
-async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Result<Result<(String, Vec<String>), Vec<Problem>>, Error> {
+async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Result<Result<String, Vec<Problem>>, Error> {
     let mut db = Db::open(opts).await?;
     let result = async {
         let d = db.dialect();
@@ -3363,33 +3362,11 @@ async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Resu
         if !problems.is_empty() {
             return Ok(Err(problems));
         }
-        let sql = match schema_as_sql_on(&mut db, opts, &[], true).await? {
-            Ok(sql) => passing_over_existing(&sql, d),
-            Err(problem) => return Ok(Err(vec![problem])),
-        };
-        Ok(Ok((sql, added_extensions(&mut db, &history).await?)))
+        Ok(schema_as_sql_on(&mut db, opts, &[], true).await?.map(|sql| passing_over_existing(&sql, d)).map_err(|problem| vec![problem]))
     }
     .await;
     db.close().await;
     result
-}
-
-/// The extensions a Postgres database has that it didn't when it last ran a migration, by the lines
-/// stored with that run's fingerprint: made by hand since, so the next migration's to make, where an
-/// extension no migration makes is otherwise taken for the environment's. None where no lines were
-/// stored.
-#[cfg(feature = "cli")]
-async fn added_extensions(db: &mut Db, history: &[HistoryRow]) -> Result<Vec<String>, Error> {
-    let Some(last) = history.iter().rfind(|r| r.applied) else { return Ok(vec![]) };
-    if db.dialect() != Dialect::Postgres {
-        return Ok(vec![]);
-    }
-    let stored = stored_catalog(db, &last.name).await?.unwrap_or_default();
-    if stored.is_empty() {
-        return Ok(vec![]);
-    }
-    let had: Vec<String> = stored.iter().filter_map(|l| l.strip_prefix("extension ")?.split(' ').next()).map(str::to_lowercase).collect();
-    Ok(project_extensions(db).await?.into_iter().filter(|e| !had.contains(e)).collect())
 }
 
 /// `sql` with each `create schema` and `create extension` passing over one that exists, as the dump
@@ -4126,10 +4103,9 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
 /// The new migration's text: the diff engine's plan from the migrations replayed in order to
 /// `schema.sql`, run on the replay and compared with `schema.sql` before it is written. A plan that
 /// does not reach it is written all the same, with what remains, for the person (or agent) to finish.
-/// `added` are the extensions the migration makes that no file of the project's creates.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
 #[cfg(feature = "cli")]
-async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, added: &[String], migration: &str, choices: &Choices, log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
+async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, migration: &str, choices: &Choices, log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
     let drafted = |texts: Vec<String>, code: i32, notes: Vec<String>, empty: bool| Drafted { texts, code, notes, empty, target: target_name.to_string(), lock_safe: false, changes: vec![] };
     let mut db = Db::open(opts).await?;
     let mut problems = out_of_reach(&mut db, &opts.url).await?;
@@ -4140,9 +4116,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
     }
     let mut server = Server::open(&mut db, &opts.url, opts.shadow_url.as_deref()).await?;
     server.copy_default_privileges(!sets_default_privileges(opts));
-    // An extension added by hand since the last migration is the migration's to make, as one the
-    // project's files create is theirs: no shadow is given it.
-    server.leave_extensions(created_extensions(opts).into_iter().chain(added.iter().cloned()).collect());
+    server.leave_extensions(created_extensions(opts));
     server.leave_schemas(created_schemas(opts));
     left_out_note(&server, log);
     db.close().await;

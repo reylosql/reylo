@@ -2992,7 +2992,8 @@ on!(
     init_reads_every_schema_a_view_crosses,
     introspect_of_some_schemas_is_their_dump,
     the_dump_reads_a_schema_named_with_capitals,
-    new_without_schema_sql_makes_an_extension_added_since,
+    new_without_schema_sql_replays_beside_the_environments_extensions,
+    a_pushed_extension_is_recorded_once_its_migration_makes_it,
     an_extension_in_a_projects_schema_is_the_projects_whoever_owns_it,
     an_extension_a_platform_role_owns_in_a_projects_schema_is_the_projects,
     init_writes_the_privileges_on_an_extensions_schema,
@@ -3378,10 +3379,10 @@ mod adversarial {
         assert!(text.contains(r#"CREATE TABLE "CaseSensitive".items"#) && text.contains("CREATE TABLE public.users"), "{text}");
     }
 
-    /// With no schema.sql, the migration is what the database has beyond its migrations: an extension
-    /// made by hand since the last of them, in a schema of its own, is the migration's to make, while
-    /// one the environment gave the database before them, which they use, is still the environment's.
-    pub async fn new_without_schema_sql_makes_an_extension_added_since(mut p: P) {
+    /// With no schema.sql, the migration is what the database has beyond its migrations, its own SQL
+    /// replayed on shadows that have each extension no migration creates, in its schema: one the
+    /// migrations use as the environment gives it, and one made by hand in a schema of its own.
+    pub async fn new_without_schema_sql_replays_beside_the_environments_extensions(mut p: P) {
         p.exec("create extension citext").await;
         p.file("20261122100000_users.sql", "create table users (id int primary key, name citext);");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
@@ -3389,15 +3390,25 @@ mod adversarial {
         p.output();
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "email", &Default::default(), log).await).await, 0, "{}", p.peek());
         let written = p.files().into_iter().find(|f| f.ends_with("_email.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
-        let sql = std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap();
-        assert_has!(sql.clone(), r"(?i)create schema (if not exists )?extensions");
-        assert_has!(sql.clone(), r"(?i)create extension (if not exists )?pg_trgm");
-        assert!(!sql.to_lowercase().contains("citext"), "{sql}");
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap(), r"(?i)add column email text");
+    }
+
+    /// An extension schema.sql makes in a schema of its own, pushed to the development database, then
+    /// written as a migration: dev records the migration as in place, counting the extensions the
+    /// database has, and a new database runs it.
+    pub async fn a_pushed_extension_is_recorded_once_its_migration_makes_it(mut p: P) {
+        p.schema("create table users (id int primary key);");
+        p.file("20261122100000_users.sql", "create table users (id int primary key);");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
-        assert_has!(p.output(), r"_email\.sql +recorded: already in place");
-        // A database the environment gave citext alone runs both.
+        p.schema("create schema extensions; create extension pg_trgm with schema extensions; create table users (id int primary key, email text);");
+        assert_eq!(p.db_push().await, 0, "{}", p.peek());
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "trgm", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_trgm.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join(&written)).unwrap(), r"(?i)create extension (if not exists )?pg_trgm");
+        p.output();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"_trgm\.sql +recorded: already in place");
         let q = P::new(p.d).await.unwrap();
-        q.exec("create extension citext").await;
         p.url = q.url.clone();
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         assert_eq!(q.rows("select 1 from pg_extension where extname = 'pg_trgm'").await.len(), 1);
