@@ -657,25 +657,30 @@ pub(crate) fn conditional_open(text: &str, lead: usize, start: usize) -> usize {
     open
 }
 
-/// The `sql_mode` a script's statements set, as the server runs them one after another: a
+/// The `sql_mode` a script's statements set, as the server runs them one after another: a session's
 /// `SET sql_mode = …` outside a routine's body changes how the statements after it are read, where
-/// its value is a mode list, `DEFAULT`, or a variable an earlier statement saved `@@sql_mode` in.
+/// its value is a mode list, `DEFAULT`, or a variable a statement before it set to a mode.
 #[derive(Default)]
 struct ModeSwitch {
-    /// The words and other tokens of the statement so far, as `(token, its text)`.
+    /// The statement's tokens so far, as `(token, its text)`.
     statement: Vec<(u16, std::ops::Range<usize>)>,
+    /// Whether the statement creates a routine, a trigger or an event, whose body a BEGIN opens.
+    routine: bool,
     /// How deep in `BEGIN … END` bodies, and in `CASE … END` expressions, the statement is.
     bodies: u32,
     cases: u32,
     /// An `END` whose next token says what it ends.
     end: bool,
-    /// User variables that hold a mode: `SET @old = @@sql_mode`.
+    /// User variables set to a mode the reading knows: `SET @old = @@sql_mode`.
     saved: Vec<(String, Options)>,
 }
 
 impl ModeSwitch {
     fn token(&mut self, text: &str, sym: u16, range: std::ops::Range<usize>) {
         let word = text[range.clone()].to_ascii_uppercase();
+        let before = self.statement.last().map(|(_, r)| text[r.clone()].to_ascii_uppercase());
+        // A word after these is a name, as `AS begin` and `t.end` are, never a keyword that opens or closes a body.
+        let named = matches!(before.as_deref(), Some("AS" | "," | "(" | "." | "="));
         if std::mem::take(&mut self.end) {
             match word.as_str() {
                 "IF" | "LOOP" | "WHILE" | "REPEAT" => {}
@@ -686,9 +691,10 @@ impl ModeSwitch {
             self.cases += 1;
         }
         match word.as_str() {
-            // A transaction's BEGIN starts a statement; a body's follows a routine's head or a label, or sits in a body.
-            "BEGIN" if !self.statement.is_empty() || self.bodies > 0 => self.bodies += 1,
-            "END" => self.end = true,
+            "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" if self.statement.len() < 8 && self.statement.first().is_some_and(|(_, r)| text[r.clone()].eq_ignore_ascii_case("CREATE")) => self.routine = true,
+            // A transaction's BEGIN starts a statement; a body's follows a label, a routine's head, or sits in a body.
+            "BEGIN" if before.as_deref() == Some(":") || ((self.routine || self.bodies > 0) && !named) => self.bodies += 1,
+            "END" if !named => self.end = true,
             _ => {}
         }
         self.statement.push((sym, range));
@@ -708,25 +714,30 @@ impl ModeSwitch {
             self.close();
         }
         let statement = std::mem::take(&mut self.statement);
-        if self.bodies == 0 {
-            // Only a body holds a CASE statement, so no CASE stays open past a statement outside one.
-            self.cases = 0;
+        if self.bodies > 0 {
+            return opts;
         }
-        if self.bodies > 0 || !statement.first().is_some_and(|(_, r)| text[r.clone()].eq_ignore_ascii_case("SET")) {
+        self.routine = false;
+        // Only a body holds a CASE statement, so no CASE stays open past a statement outside one.
+        self.cases = 0;
+        if !statement.first().is_some_and(|(_, r)| text[r.clone()].eq_ignore_ascii_case("SET")) {
             return opts;
         }
         let mut opts = opts;
-        let comma = char_sym(b',');
+        // A scope word sets the scope of its assignment and of those after it.
+        let mut global = false;
+        let (comma, open, close) = (char_sym(b','), char_sym(b'('), char_sym(b')'));
         let (mut depth, mut from) = (0i32, 1);
         for i in 1..=statement.len() {
             let sym = statement.get(i).map(|t| t.0);
             match sym {
-                Some(s) if s == char_sym(b'(') => depth += 1,
-                Some(s) if s == char_sym(b')') => depth -= 1,
+                Some(s) if s == open => depth += 1,
+                Some(s) if s == close => depth -= 1,
                 _ => {}
             }
             if sym.is_none() || (sym == Some(comma) && depth == 0) {
-                opts = self.assignment(text, &statement[from..i], opts);
+                let words: Vec<&str> = statement[from..i].iter().map(|(_, r)| &text[r.clone()]).collect();
+                opts = self.assignment(&words, &mut global, opts);
                 from = i + 1;
             }
         }
@@ -734,41 +745,67 @@ impl ModeSwitch {
     }
 
     /// One `name = value` of a SET.
-    fn assignment(&mut self, text: &str, item: &[(u16, std::ops::Range<usize>)], opts: Options) -> Options {
-        let words: Vec<&str> = item.iter().map(|(_, r)| &text[r.clone()]).collect();
-        let words = match words.first().map(|w| w.to_ascii_uppercase()) {
-            Some(w) if w == "SESSION" || w == "LOCAL" => &words[1..],
-            Some(w) if w == "GLOBAL" || w == "PERSIST" || w == "PERSIST_ONLY" => return opts,
-            _ => &words[..],
+    fn assignment(&mut self, words: &[&str], global: &mut bool, opts: Options) -> Options {
+        let words = match words.first().map(|w| w.to_ascii_uppercase()).as_deref() {
+            Some("SESSION" | "LOCAL") => {
+                *global = false;
+                &words[1..]
+            }
+            Some("GLOBAL" | "PERSIST" | "PERSIST_ONLY") => {
+                *global = true;
+                &words[1..]
+            }
+            _ => words,
         };
+        // A user variable set to anything holds what it held no longer.
+        if let Some(name) = words.first().filter(|w| w.starts_with('@') && !w.starts_with("@@")) {
+            let key = name.to_ascii_lowercase();
+            self.saved.retain(|(k, _)| *k != key);
+            if let [_, "=" | ":=", value] = words {
+                if let Some(mode) = self.mode_of(value, opts) {
+                    self.saved.push((key, mode));
+                }
+            }
+            return opts;
+        }
         let [name, eq, value] = words else { return opts };
         if *eq != "=" && *eq != ":=" {
             return opts;
         }
-        let is_mode = |w: &str| {
-            let w = w.to_ascii_lowercase();
-            let w = w.strip_prefix("@@").map(|w| w.strip_prefix("session.").or(w.strip_prefix("local.")).unwrap_or(w)).unwrap_or(&w).to_string();
-            w == "sql_mode" || w == "`sql_mode`"
+        let known = self.mode_of(value, opts);
+        let name = name.to_ascii_lowercase();
+        let (scoped, bare) = match name.strip_prefix("@@") {
+            Some(rest) => match rest.split_once('.') {
+                Some(("session" | "local", bare)) => (false, bare.to_string()),
+                Some(_) => (true, String::new()),
+                None => (*global, rest.to_string()),
+            },
+            None => (*global, name.clone()),
         };
-        if name.starts_with('@') && !name.starts_with("@@") {
-            if is_mode(value) && value.starts_with("@@") {
-                let key = name.to_ascii_lowercase();
-                self.saved.retain(|(k, _)| *k != key);
-                self.saved.push((key, opts));
-            }
+        if scoped || bare.trim_matches('`') != "sql_mode" {
             return opts;
         }
-        if !is_mode(name) || name.to_ascii_lowercase().starts_with("@@global.") {
-            return opts;
+        known.unwrap_or(opts)
+    }
+
+    /// The mode `value` stands for, where the reading knows it: a list of modes, `DEFAULT`, the
+    /// session's own, or a variable set to one.
+    fn mode_of(&self, value: &str, opts: Options) -> Option<Options> {
+        let lower = value.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("@@") {
+            let rest = rest.strip_prefix("session.").or(rest.strip_prefix("local.")).unwrap_or(rest);
+            return (rest.trim_matches('`') == "sql_mode").then_some(opts);
+        }
+        if lower.starts_with('@') {
+            return self.saved.iter().find(|(k, _)| *k == lower).map(|(_, o)| Options { version: opts.version, ..*o });
         }
         let modes = match value.as_bytes().first() {
-            Some(b'@') if !value.starts_with("@@") => return self.saved.iter().find(|(k, _)| *k == value.to_ascii_lowercase()).map_or(opts, |(_, o)| Options { version: opts.version, ..*o }),
-            Some(q @ (b'\'' | b'"')) if value.len() >= 2 && value.ends_with(*q as char) => value[1..value.len() - 1].to_string(),
-            Some(c) if c.is_ascii_alphabetic() || *c == b'_' => value.to_string(),
-            _ => return opts,
+            Some(q @ (b'\'' | b'"')) if value.len() >= 2 && value.ends_with(*q as char) => &value[1..value.len() - 1],
+            Some(c) if c.is_ascii_alphabetic() || *c == b'_' => value,
+            _ => return None,
         };
         if modes.eq_ignore_ascii_case("DEFAULT") {
-            return Options { version: opts.version, ..Options::default() };
+            return Some(Options { version: opts.version, ..Options::default() });
         }
         let mut next = Options { version: opts.version, backslash_escapes: true, ansi_quotes: false, pipes_as_concat: false, high_not_precedence: false, ignore_space: false };
         for mode in modes.split(',').map(|m| m.trim().to_ascii_uppercase()) {
@@ -786,7 +823,7 @@ impl ModeSwitch {
                 _ => {}
             }
         }
-        next
+        Some(next)
     }
 }
 

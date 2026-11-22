@@ -219,6 +219,10 @@ mod tests {
             "/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_BACKSLASH_ESCAPES,ANSI' */;\nselect \"a\", 'b\\' from \"t\";\n/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;\nselect \"x\", 'y\\'z'",
             "create procedure p() begin set sql_mode = 'ANSI_QUOTES'; begin select 1; end; select case when 1 then 2 end; end; select \"a\" \"b\" \"c\"",
             "set @@session.sql_mode = ANSI_QUOTES; select \"a\" from \"t\"; set sql_mode = default; select \"a\"",
+            "SET SESSION sql_mode = '';\nSELECT 1 AS begin;\nSET SESSION sql_mode = 'ANSI_QUOTES';\nSELECT i FROM (SELECT 1 AS i) AS \"t\";",
+            "SET SESSION sql_mode = '';\nSET GLOBAL sort_buffer_size = @@GLOBAL.sort_buffer_size, sql_mode = 'ANSI_QUOTES';\nSELECT \"a\" \"b\" \"c\";",
+            "SET SESSION sql_mode = 'ANSI_QUOTES';\nSET @old = @@sql_mode;\nSET @old = '';\nSET sql_mode = @old;\nSELECT \"a\" \"b\" \"c\";",
+            "SET sql_mode = 'ANSI_QUOTES';\nSET @old = @@sql_mode, @old = concat('', 'NO_BACKSLASH_ESCAPES');\nSET sql_mode = '';\nSET sql_mode = @old;\nSELECT \"a\" \"b\" \"c\";",
         ] {
             assert!(parse_tree(script).errors.is_empty(), "{script}: {:?}", parse_tree(script).errors);
         }
