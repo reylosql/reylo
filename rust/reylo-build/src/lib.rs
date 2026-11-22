@@ -94,7 +94,7 @@ pub struct Options {
     pub dates: Option<Dates>,
     pub uuid: bool,
     pub decimals: Option<Decimals>,
-    /// pgvector's `vector` as the `pgvector` crate's `Vector`.
+    /// pgvector's `vector` as the crate's own `pgvector::Vector`.
     pub pgvector: bool,
 }
 
@@ -190,7 +190,10 @@ pub fn module(dialect: Dialect, options: Options, analysis: &Value, span: Span, 
         gets.push(quote!(let #local = ::reylo::sqlx::Row::try_get::<#decode, _>(row, #index)?;));
         if !shape.decoded_as_is() {
             let decoded = shape.decode(quote!(#local), &column.name);
-            gets.push(quote!(let #local = #decoded;));
+            // Typed, since a vector converts into the field's type with `From`, which the crate's
+            // own row would take through `Into` again.
+            let ty = shape.ty();
+            gets.push(quote!(let #local: #ty = #decoded;));
         }
         let own = row_partial.and_then(|p| p.fields.iter().find(|f| f.name == column.name));
         let (ty, value) = if whole_row {
@@ -245,14 +248,9 @@ pub fn module(dialect: Dialect, options: Options, analysis: &Value, span: Span, 
                             _ => quote!(#from(#v)),
                         })
                     }
-                    // A vector the crate declares as `pgvector::Vector`, under any name, is bound
-                    // through reylo's codec; a field of another type, as `Vec<f32>` for
-                    // `:v::vector`, as it is. The compiler picks which by the field's type.
-                    None if shape.bound_via() => quote!({
-                        #[allow(unused_imports)]
-                        use ::reylo::__private::{BindAsIs as _, BindVector as _};
-                        (&&::reylo::__private::Bind(::core::clone::Clone::clone(#this))).reylo_bind()
-                    }),
+                    // A vector is bound through reylo's codec from whatever type the crate declares,
+                    // as `pgvector::Vector` under any name or `Vec<f32>`, that converts into `Vec<f32>`.
+                    None if shape.bound_via() => shape.encode(this),
                     None => quote!(::core::clone::Clone::clone(#this)),
                 };
                 (quote!(#written), encode)

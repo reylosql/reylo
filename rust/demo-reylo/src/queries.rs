@@ -158,7 +158,7 @@ pub mod nap {}
 #[reylo::query("select id from users where id <> all(:skip::int[]) order by id")]
 pub mod users_but {}
 
-/// pgvector's `vector`, read and bound as `pgvector::Vector`.
+/// pgvector's `vector`, read and bound as the crate's own `pgvector::Vector`.
 #[reylo::query("select id, embedding from items order by embedding <-> :near limit 1")]
 pub mod nearest_item {}
 
@@ -166,7 +166,7 @@ pub mod nearest_item {}
 #[reylo::query("select id from items order by embedding <-> :near limit 1")]
 pub mod nearest_item_id {
     pub struct Params {
-        pub near: reylo::pgvector::Vector,
+        pub near: pgvector::Vector,
     }
 }
 
@@ -185,7 +185,7 @@ pub mod insert_resource {}
 /// A vector parameter the crate declares under a name of its own, bound through the codec.
 #[reylo::query("select id from items order by embedding <-> :near limit 1")]
 pub mod nearest_item_renamed {
-    use reylo::pgvector::Vector as Embedding;
+    use pgvector::Vector as Embedding;
 
     pub struct Params {
         pub near: Embedding,
@@ -200,6 +200,6 @@ pub mod resource_kinds {}
 #[reylo::query("select :near::nullable(vector[])::text as shown")]
 pub mod vectors_text {
     pub struct Params {
-        pub near: Option<Vec<reylo::pgvector::Vector>>,
+        pub near: Option<Vec<pgvector::Vector>>,
     }
 }

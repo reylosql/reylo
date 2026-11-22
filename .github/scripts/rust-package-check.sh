@@ -114,6 +114,7 @@ manifest fresh '[dependencies]
 reylo = { version = "='"$version"'", features = ["postgres"] }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+pgvector = "0.4"
 
 # The pgvector feature of reylo, forwarded through a feature of the project, which the generator
 # in the build script reads from Cargo as the macro does.
@@ -169,9 +170,9 @@ $(migrate_main PgPool)
     let title: &Option<String> = &titles[1].title;
     assert_eq!(title, &None);
     // A vector, in a module the build script wrote and in one the macro wrote.
-    let nearest = queries::nearest::Query { near: reylo::pgvector::Vector::from(vec![1.0, 2.5]) }.run(&pool).await?;
+    let nearest = queries::nearest::Query { near: pgvector::Vector::from(vec![1.0, 2.5]) }.run(&pool).await?;
     assert_eq!(nearest.map(|r| r.id), Some(1));
-    let found = by_embedding::Query { embedding: reylo::pgvector::Vector::from(vec![1.0, 2.0]) }.run(&pool).await?;
+    let found = by_embedding::Query { embedding: pgvector::Vector::from(vec![1.0, 2.0]) }.run(&pool).await?;
     assert_eq!(found.iter().map(|r| (r.id, r.embedding.as_ref().map(|v| v.to_vec()))).collect::<Vec<_>>(), [(1, Some(vec![1.0, 2.0]))]);
     println!("a project outside the workspace built Reylo from its packages, ran its queries and migrated a database");
     Ok(())
@@ -189,8 +190,8 @@ mkdir -p "$project/src"
 manifest fresh-sqlx08 '[dependencies]
 reylo = { version = "='"$version"'", default-features = false, features = ["sqlx_0_8", "postgres", "migrate", "rust_decimal", "chrono", "pgvector"] }
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "rust_decimal", "chrono"] }
-# A pgvector of the project with its sqlx support on, which Cargo resolves to sqlx 0.9: the vectors
-# of the queries go through the codec of reylo on sqlx 0.8, whatever sqlx this one is on.
+# The pgvector of the project, whose Vector the queries take, with its sqlx support on, which Cargo
+# resolves to sqlx 0.9: the vectors go through the codec of reylo on sqlx 0.8 all the same.
 pgvector = { version = "0.4", features = ["sqlx"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 futures-util = { version = "0.3", default-features = false }' > "$project/Cargo.toml"

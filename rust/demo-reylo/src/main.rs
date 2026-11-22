@@ -131,12 +131,12 @@ async fn main() -> Result<(), sqlx::Error> {
     assert_eq!(others.iter().map(|r| r.id).collect::<Vec<_>>(), [2]);
     println!("22. int[] param {others:?}");
 
-    let near = reylo::pgvector::Vector::from(vec![1.0, 2.0, -3.0]);
+    let near = pgvector::Vector::from(vec![1.0, 2.0, -3.0]);
     let item = nearest_item::Query { near }.run(&pool).await?.expect("an item");
-    let embedding: reylo::pgvector::Vector = item.embedding.clone();
+    let embedding: pgvector::Vector = item.embedding.clone();
     assert_eq!((item.id, embedding.to_vec()), (1, vec![1.0, 2.5, -3.0]));
     println!("23. vector      {item:?} {}", serde_json::to_string(&embedding).expect("json"));
-    let declared = nearest_item_id::Query { near: reylo::pgvector::Vector::from(vec![0.0, 0.0, 1.0]) }.run(&pool).await?;
+    let declared = nearest_item_id::Query { near: pgvector::Vector::from(vec![0.0, 0.0, 1.0]) }.run(&pool).await?;
     assert_eq!(declared.map(|r| r.id), Some(2));
     let text = vector_text::Query { near: vec![1.0, 2.0, 3.0] }.run(&pool).await?.near;
     assert!(format!("{text:?}").contains("[1,2,3]"), "{text:?}");
@@ -147,7 +147,7 @@ async fn main() -> Result<(), sqlx::Error> {
     assert_eq!(inserted.kind, insert_resource::ResourceKind::MOVIE);
     println!("24. \"Enum\"      {inserted:?}");
 
-    let renamed = nearest_item_renamed::Query { near: reylo::pgvector::Vector::from(vec![0.0, 0.0, 1.0]) }.run(&pool).await?;
+    let renamed = nearest_item_renamed::Query { near: pgvector::Vector::from(vec![0.0, 0.0, 1.0]) }.run(&pool).await?;
     assert_eq!(renamed.map(|r| r.id), Some(2));
     let kinds = resource_kinds::Query { kinds: vec![resource_kinds::ResourceKind::BOOK, resource_kinds::ResourceKind::MOVIE] }.run(&pool).await?.kinds;
     let shown = format!("{kinds:?}");
@@ -155,7 +155,7 @@ async fn main() -> Result<(), sqlx::Error> {
     println!("25. enum[]      {kinds:?}");
 
     let none = vectors_text::Query { near: None }.run(&pool).await?.shown;
-    let some = vectors_text::Query { near: Some(vec![reylo::pgvector::Vector::from(vec![1.0, 2.0])]) }.run(&pool).await?.shown;
+    let some = vectors_text::Query { near: Some(vec![pgvector::Vector::from(vec![1.0, 2.0])]) }.run(&pool).await?.shown;
     assert!(format!("{none:?}") == "None" && format!("{some:?}").contains("[1,2]"), "{none:?} {some:?}");
     Ok(())
 }

@@ -31,7 +31,8 @@ pub enum Leaf {
     Exact,
     /// One of a list of values: decoded as text and read as the enum's variant, bound as its value.
     Label,
-    /// Decoded and bound through a wrapper of reylo's (`reylo::__private::PgVector`), its `.0` the value.
+    /// Decoded and bound through a wrapper of reylo's (`reylo::__private::PgVector`), whose `.0`
+    /// converts into the field's type with `From`, and from it with `Into`.
     Via(TokenStream2),
 }
 
@@ -116,7 +117,8 @@ impl Shape {
             return v;
         }
         match self {
-            Shape::Leaf { leaf: Leaf::Exact | Leaf::Via(_), .. } => quote!(#v.0),
+            Shape::Leaf { leaf: Leaf::Exact, .. } => quote!(#v.0),
+            Shape::Leaf { leaf: Leaf::Via(_), .. } => quote!(::core::convert::From::from(#v.0)),
             Shape::Leaf { ty, leaf: Leaf::Label, .. } => quote!(::reylo::__private::from_label::<#ty>(&#v, #column)?),
             Shape::Leaf { .. } => v,
             Shape::Option(s) => {
@@ -135,7 +137,7 @@ impl Shape {
     pub fn encode(&self, v: TokenStream2) -> TokenStream2 {
         self.encode_leaves(v, &|leaf, ty, v| match leaf {
             Leaf::Label => quote!(<#ty as ::reylo::Enum>::label(*#v)),
-            Leaf::Via(wrapper) => quote!(#wrapper(::core::clone::Clone::clone(#v))),
+            Leaf::Via(wrapper) => quote!(#wrapper(::core::convert::Into::into(::core::clone::Clone::clone(#v)))),
             _ => quote!(::core::clone::Clone::clone(#v)),
         })
     }
@@ -339,6 +341,8 @@ impl Types {
         // pgvector's `vector`, in whatever schema the extension was created in, read and bound
         // through reylo's own codec.
         if self.dialect == Dialect::Postgres && matches!(t.kind, Kind::Array(_)) && t.label.as_deref().map(bare) == Some("vector") {
+            // Its serde support is a feature of the crate's own `pgvector`, which the row can't see.
+            self.serialize = false;
             return Ok(Shape::Leaf { ty: self.pgvector(label)?, leaf: Leaf::Via(quote!(::reylo::__private::PgVector)), enumeration: None });
         }
         if let Kind::Enum(e) = &t.kind {
@@ -775,9 +779,9 @@ impl Types {
 
     fn pgvector(&self, label: &str) -> syn::Result<TokenStream2> {
         if self.options.pgvector {
-            Ok(quote!(::reylo::pgvector::Vector))
+            Ok(quote!(::pgvector::Vector))
         } else {
-            Err(syn::Error::new(self.span, format!("{label} is a pgvector vector: enable reylo's pgvector feature")))
+            Err(syn::Error::new(self.span, format!("{label} is a pgvector vector: enable reylo's pgvector feature, and depend on the pgvector crate")))
         }
     }
 
@@ -1225,7 +1229,7 @@ mod tests {
         let vector = Type::array(Slot::non_null(Type::single())).named("extensions.vector");
         let mut types = Types::new(Dialect::Postgres, Options { pgvector: true, ..Options::default() }, BTreeMap::new(), Span::call_site(), false);
         let shape = types.column(&vector, false, "embedding").unwrap();
-        assert_eq!((shape.ty().to_string().replace(' ', ""), types.serialize), ("::reylo::pgvector::Vector".to_string(), true));
+        assert_eq!((shape.ty().to_string().replace(' ', ""), types.serialize), ("::pgvector::Vector".to_string(), false));
         assert!(column(Dialect::Postgres, vector).unwrap_err().contains("enable reylo's pgvector feature"));
     }
 

@@ -33,8 +33,6 @@ compile_error!("reylo's sqlite feature runs on sqlx 0.9 alone: sqlx 0.8's SQLite
 // What the expansion names, so that a crate needs no dependency of its own on them.
 pub use serde;
 pub use serde_json;
-#[cfg(feature = "pgvector")]
-pub use pgvector;
 #[cfg(feature = "sqlx_0_9")]
 pub use sqlx;
 #[cfg(all(feature = "sqlx_0_8", not(feature = "sqlx_0_9")))]
@@ -54,7 +52,7 @@ pub mod __private {
 
     pub use futures_core::stream::BoxStream;
     #[cfg(all(feature = "postgres", feature = "pgvector"))]
-    pub use crate::vector::{Bind, BindAsIs, BindVector, Codec, PgVector};
+    pub use crate::vector::PgVector;
 
     /// Whether a value of the enum of `a_type` and `a_labels` casts into the enum of `b_type` and
     /// `b_labels`, in a constant: a Postgres enum type's into the same type with the same values in
