@@ -344,7 +344,7 @@ jobs:
     name: Build a project from the packed Rust crates
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # pgvector's image, for the sqlx 0.8 project's vectors.
+    # pgvector's image, for the sqlx 0.9 project's vectors.
     services:
       postgres:
         image: pgvector/pgvector:pg18

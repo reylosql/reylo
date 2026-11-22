@@ -111,16 +111,17 @@ EOF
 project="$projects/fresh"
 mkdir -p "$project/src" "$project/queries"
 manifest fresh '[dependencies]
-reylo = { version = "='"$version"'", features = ["postgres"] }
+reylo = { version = "='"$version"'", features = ["postgres", "pgvector"] }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [build-dependencies]
 reylo-build = "='"$version"'"' > "$project/Cargo.toml"
 cat > "$project/schema.sql" <<'EOF'
-create table users (id int primary key, name text not null, nickname text);
+create extension vector;
+create table users (id int primary key, name text not null, nickname text, embedding vector(2));
 create table posts (id serial primary key, author_id int not null references users (id), title text not null);
-insert into users values (1, 'ada', 'countess'), (2, 'bob', null);
+insert into users values (1, 'ada', 'countess', '[1,2]'), (2, 'bob', null, null);
 insert into posts (author_id, title) values (1, 'hello');
 EOF
 cat > "$project/queries/titles.sql" <<'EOF'
@@ -139,6 +140,9 @@ mod get_user {}
 #[reylo::query("select count(*) as n from users")]
 mod count_users {}
 
+#[reylo::query("select id, embedding from users where embedding = :embedding")]
+mod by_embedding {}
+
 mod queries {
     include!(concat!(env!("OUT_DIR"), "/queries.rs"));
 }
@@ -155,6 +159,9 @@ $(migrate_main PgPool)
     let titles: Vec<queries::titles::Row> = queries::titles::Query.run(&pool).await?;
     let title: &Option<String> = &titles[1].title;
     assert_eq!(title, &None);
+    // A vector, through the pgvector crate.
+    let found = by_embedding::Query { embedding: reylo::pgvector::Vector::from(vec![1.0, 2.0]) }.run(&pool).await?;
+    assert_eq!(found.iter().map(|r| (r.id, r.embedding.as_ref().map(|v| v.to_vec()))).collect::<Vec<_>>(), [(1, Some(vec![1.0, 2.0]))]);
     println!("a project outside the workspace built Reylo from its packages, ran its queries and migrated a database");
     Ok(())
 }
@@ -165,18 +172,17 @@ echo '::group::a new project on sqlx 0.9, built from the packages and run'
 (cd "$project" && DATABASE_URL="$server/reylo_fresh" MIGRATE_URL="$server/reylo_fresh_migrate" cargo run -q)
 echo '::endgroup::'
 
-# --- sqlx 0.8 on Postgres: a borrowed parameter's stream, an enum bound, an exact numeric, a vector -
+# --- sqlx 0.8 on Postgres: a borrowed parameter's stream, an enum bound, an exact numeric ---------
 project="$projects/fresh-sqlx08"
 mkdir -p "$project/src"
 manifest fresh-sqlx08 '[dependencies]
-reylo = { version = "='"$version"'", default-features = false, features = ["sqlx_0_8", "postgres", "migrate", "rust_decimal", "chrono", "pgvector"] }
+reylo = { version = "='"$version"'", default-features = false, features = ["sqlx_0_8", "postgres", "migrate", "rust_decimal", "chrono"] }
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "rust_decimal", "chrono"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 futures-util = { version = "0.3", default-features = false }' > "$project/Cargo.toml"
 cat > "$project/schema.sql" <<'EOF'
-create extension vector;
-create table items (id int primary key, name text not null, status text not null check (status in ('draft', 'done')), price numeric, due date, embedding vector(2));
-insert into items values (1, 'a', 'draft', 1.50, '2026-11-17', '[1,2]'), (2, 'b', 'done', 1e40, 'infinity', null);
+create table items (id int primary key, name text not null, status text not null check (status in ('draft', 'done')), price numeric, due date);
+insert into items values (1, 'a', 'draft', 1.50, '2026-11-17'), (2, 'b', 'done', 1e40, 'infinity');
 EOF
 migrations "$project" text
 cat > "$project/src/main.rs" <<EOF
@@ -193,9 +199,6 @@ mod price {}
 
 #[reylo::query("select due from items where id = :id")]
 mod due {}
-
-#[reylo::query("select id, embedding from items where embedding = :embedding")]
-mod by_embedding {}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -216,9 +219,6 @@ $(migrate_main PgPool)
     let date: Option<reylo::sqlx::types::chrono::NaiveDate> = due::Query { id: 1 }.run(&pool).await?.expect("a").due;
     assert_eq!(date.map(|d| d.to_string()), Some("2026-11-17".to_string()));
     assert!(due::Query { id: 2 }.run(&pool).await.is_err());
-    // A vector, through the pgvector crate on the project's own sqlx 0.8.
-    let found = by_embedding::Query { embedding: reylo::pgvector::Vector::from(vec![1.0, 2.0]) }.run(&pool).await?;
-    assert_eq!(found.iter().map(|r| (r.id, r.embedding.as_ref().map(|v| v.to_vec()))).collect::<Vec<_>>(), [(1, Some(vec![1.0, 2.0]))]);
     println!("a project on sqlx 0.8 built Reylo from its packages, ran its Postgres queries and migrated a database");
     Ok(())
 }
@@ -226,8 +226,6 @@ EOF
 psql "$pg" -v ON_ERROR_STOP=1 -q -c 'drop database if exists reylo_fresh_sqlx08' -c 'create database reylo_fresh_sqlx08' -c 'drop database if exists reylo_fresh_sqlx08_migrate' -c 'create database reylo_fresh_sqlx08_migrate'
 psql "$server/reylo_fresh_sqlx08" -v ON_ERROR_STOP=1 -q -f "$project/schema.sql"
 echo '::group::a new project on sqlx 0.8 and Postgres'
-# The pgvector crate takes sqlx 0.8 or 0.9, and Cargo picks 0.9: the pin the docs give keeps it on the project's.
-(cd "$project" && cargo generate-lockfile -q && cargo update -q -p sqlx@0.9 --precise 0.8.6)
 (cd "$project" && DATABASE_URL="$server/reylo_fresh_sqlx08" MIGRATE_URL="$server/reylo_fresh_sqlx08_migrate" cargo run -q)
 echo '::endgroup::'
 

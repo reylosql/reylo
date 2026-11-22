@@ -48,7 +48,7 @@ reylo = { version = "0.8", features = [
   "chrono",        # dates and times as chrono's types; or "time"
   "uuid",          # uuid as uuid::Uuid
   "rust_decimal",  # numeric as rust_decimal::Decimal; or "bigdecimal"
-  "pgvector",      # pgvector's vector as pgvector::Vector
+  "pgvector",      # pgvector's vector as pgvector::Vector; on sqlx 0.9
   "migrate",       # the default; reylo::migrate!(), which runs your migrations
 ] }
 ```
@@ -64,12 +64,6 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
 ```
 
 On 0.8, sqlx's own `json`, `chrono`, `time` and `uuid` features are yours to turn on, as your types need them; `json` is one of sqlx's defaults.
-
-The `pgvector` crate takes sqlx 0.8 or 0.9, and Cargo picks 0.9. On 0.8, pin it to yours:
-
-```sh
-cargo update -p sqlx@0.9 --precise 0.8.6
-```
 
 ### Database
 

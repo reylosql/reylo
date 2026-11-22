@@ -63,5 +63,6 @@ time = ["dep:time", "sqlx?/time", "reylo-macros/time"]
 uuid = ["dep:uuid", "sqlx?/uuid", "reylo-macros/uuid"]
 rust_decimal = ["dep:rust_decimal", "sqlx?/rust_decimal", "sqlx08?/rust_decimal", "reylo-macros/rust_decimal"]
 bigdecimal = ["dep:bigdecimal", "sqlx?/bigdecimal", "sqlx08?/bigdecimal", "reylo-macros/bigdecimal"]
-# pgvector's `vector` as `pgvector::Vector`, which `reylo::pgvector` names.
+# pgvector's `vector` as `pgvector::Vector`, which `reylo::pgvector` names. On sqlx 0.9 alone: the
+# pgvector crate takes 0.8 or 0.9, and Cargo resolves it to the 0.9 this crate names.
 pgvector = ["dep:pgvector", "reylo-macros/pgvector"]

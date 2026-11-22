@@ -25,6 +25,8 @@ pub use exact::Exact;
 compile_error!("reylo's sqlx_0_9 and sqlx_0_8 features are both on: turn on the one of the sqlx the crate runs on, with `default-features = false` for sqlx_0_8");
 #[cfg(not(any(feature = "sqlx_0_9", feature = "sqlx_0_8")))]
 compile_error!("reylo needs the feature of the sqlx the crate runs on: sqlx_0_9 (a default feature) or sqlx_0_8");
+#[cfg(all(feature = "sqlx_0_8", feature = "pgvector"))]
+compile_error!("reylo's pgvector feature runs on sqlx 0.9 alone: the pgvector crate takes sqlx 0.8 or 0.9, and Cargo resolves it to the sqlx 0.9 reylo names, so its Vector would implement another sqlx's traits than the project's");
 #[cfg(all(feature = "sqlx_0_8", feature = "sqlite"))]
 compile_error!("reylo's sqlite feature runs on sqlx 0.9 alone: sqlx 0.8's SQLite links libsqlite3-sys 0.30, and the macro's SQLite client a newer one, which Cargo cannot build beside it");
 
