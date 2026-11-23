@@ -3640,6 +3640,22 @@ mod adversarial {
         let held = p.rows("select a.attname from pg_constraint c join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1] where c.conrelid = 'members'::regclass and c.conname = 'members_email_not_null'").await;
         assert_eq!(held.iter().map(|r| r.text("attname").to_string()).collect::<Vec<_>>(), ["handle"]);
         assert_eq!(p.rows("select handle from members").await[0].text("handle"), "h");
+        p.output();
+        // The name held by a check the table inherits.
+        let members = "create table members (id integer primary key, handle text constraint members_email_not_null not null);";
+        p.file("20991231000000_t.sql", "create table parent (handle text, constraint people_email_not_null check (handle <> '')); create table users (email text not null) inherits (parent);");
+        p.schema(&format!("{members} create table parent (handle text, constraint people_email_not_null check (handle <> '')); create table users (email text not null) inherits (parent);"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into users values ('h', 'e')").await;
+        p.output();
+        p.schema(&format!("{members} create table parent (handle text, constraint people_email_not_null check (handle <> '')); create table people () inherits (parent);"));
+        let choices = reylo_migrate::Choices { drop: vec!["users.email".into()], rename: vec![("users".into(), "people".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "people", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("select conname from pg_constraint where conrelid = 'people'::regclass and contype = 'c'").await.iter().map(|r| r.text("conname").to_string()).collect::<Vec<_>>(), ["people_email_not_null"]);
+        assert_eq!(p.rows("select handle from people").await[0].text("handle"), "h");
     }
 
     /// A column whose not null has a name of its own, renamed with a change to its definition: the

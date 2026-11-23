@@ -2759,8 +2759,11 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
         // the new table where Postgres named it, so that the column reads as one made there, unless
         // a constraint of the table holds that name.
         let columns: Vec<&Object> = current.objects.values().filter(|o| o.kind == Some(Kind::Column) && o.owner.as_deref() == Some(old_table.as_str())).collect();
+        // Its own constraints, and those it holds as copies of another table's, an inherited check's.
+        let copied: Vec<String> = current.objects.get(old_table.as_str()).map_or(vec![], |t| t.extra.iter().filter_map(|l| l.strip_prefix(COPIED_CONSTRAINT)?.split(SEP).next()).map(unquoted).collect());
         let held = |wanted: &str| {
             columns.iter().any(|c| not_null_name(c).is_some_and(|n| unquoted(&n) == unquoted(wanted)))
+                || copied.contains(&unquoted(wanted))
                 || current.objects.values().any(|c| c.kind == Some(Kind::Constraint) && related(c) && c.id.split_once(' ').is_some_and(|(_, rest)| unquoted(&last(rest).1) == unquoted(wanted)))
         };
         for o in &columns {
