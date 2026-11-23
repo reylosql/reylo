@@ -577,23 +577,62 @@ fn user_suffix() -> String {
 /// keeps its mark: it says nothing of the schema now, should a rewind make the row the newest again.
 const PENDING: &str = "pending";
 
-/// The SQL of a row's pending mark: [`PENDING`], and after a colon a stamp of the schema, taken in the
-/// migration's own transaction, so that a run cut off before it read the fingerprint can go on where
-/// the stamp is still the schema's ([`unchanged_since_cut_off`]). On Postgres, the count and the sum
-/// of the row versions in each catalog of the database's own, but for statistics, comments and large
-/// objects, which change with no change to the schema, nor the schemas of temporary tables, which
-/// stay once a session has made one; and the roles' names, which grants are read by. Any statement
-/// that changes the schema writes a row of one of them. On SQLite, its schema's version.
-/// MySQL commits each statement, so the schema is read before each migration there ([`Runs`]), and
-/// its mark is bare.
-fn pending_mark(d: Dialect) -> String {
-    match d {
-        Dialect::Postgres => format!(
-            "'{PENDING}:' || (select md5(string_agg(c.relname || '=' || (xpath('/row/s/text()', query_to_xml(format('select count(*) || '':'' || coalesce(sum(xmin::text::bigint), 0) as s from %s%s', c.oid::regclass, case when c.relname = 'pg_namespace' then ' where nspname !~ ''^pg_(toast_)?temp_''' else '' end), false, true, '')))[1]::text, ',' order by c.relname)) || (select md5(string_agg(r.oid::text || ':' || r.rolname, ',' order by r.oid)) from pg_roles r) from pg_class c where c.relnamespace = 'pg_catalog'::regnamespace and c.relkind = 'r' and not c.relisshared and c.relname not in ('pg_statistic', 'pg_statistic_ext_data', 'pg_description', 'pg_largeobject', 'pg_largeobject_metadata') and has_table_privilege(c.oid, 'select'))"
-        ),
-        Dialect::Sqlite => format!("'{PENDING}:' || (select schema_version from pragma_schema_version)"),
-        Dialect::Mysql => format!("'{PENDING}'"),
+/// How a run stamps the schema in a row's pending mark: [`PENDING`], and after a colon a digest of
+/// what a query reads, taken in the migration's own transaction, so that a run cut off before it read
+/// the fingerprint can go on where the stamp is still the schema's ([`unchanged_since_cut_off`]). The
+/// query reads no more than a few thousand catalog rows, and needs nothing a server may be built
+/// without; MySQL commits each statement, so the schema is read before each migration there ([`Runs`]),
+/// and its mark is bare.
+struct SchemaStamp(Option<String>);
+
+impl SchemaStamp {
+    /// The query, for `db`. On Postgres, the count and the sum of the row versions in each catalog of
+    /// the database's own that the session may read, but for statistics, comments and large objects,
+    /// which change with no change to the schema, and the rows of temporary tables' schemas, which stay
+    /// once a session has made one; of the tables, their columns that a change to the schema sets,
+    /// since a truncate or a refresh gives a table new storage in its row; and the names of the roles
+    /// the database's objects name. Any statement that changes the schema writes a row of one of them.
+    /// On SQLite, the schema's statements, which a vacuum leaves as they were.
+    async fn of(db: &mut Db) -> Result<SchemaStamp, Error> {
+        match db.dialect() {
+            Dialect::Postgres => {
+                let temp = "nspname ~ ''^pg_(toast_)?temp_''";
+                let sql = format!(
+                    "select string_agg(format('select %L || '':'' || count(*) || '':'' || coalesce(sum(%s), 0) as s from %s%s', c.relname, \
+                     case when c.relname = 'pg_class' then 'hashtext(row(oid, relname, relnamespace, reltype, reloftype, relowner, relam, reltablespace, relkind, relpersistence, relispartition, relrowsecurity, relforcerowsecurity, relreplident, relacl, reloptions, relnatts, relchecks, relhasrules, relhastriggers)::text)::bigint' else 'xmin::text::bigint' end, \
+                     c.oid::regclass, \
+                     case c.relname when 'pg_namespace' then ' where not ({temp})' when 'pg_class' then ' where relnamespace not in (select oid from pg_namespace where {temp})' else '' end), \
+                     ' union all ' order by c.relname) as q \
+                     from pg_class c where c.relnamespace = 'pg_catalog'::regnamespace and c.relkind = 'r' and not c.relisshared \
+                     and c.relname not in ('pg_statistic', 'pg_statistic_ext_data', 'pg_description', 'pg_largeobject', 'pg_largeobject_metadata') and has_table_privilege(c.oid, 'select')"
+                );
+                let union = db.rows(&sql).await?.first().map(|r| r.text("q").to_string()).unwrap_or_default();
+                let roles = "select 'role:' || r.oid || ':' || r.rolname as s from pg_roles r where r.oid in (select d.refobjid from pg_shdepend d join pg_database b on b.oid = d.dbid where b.datname = current_database() union select datdba from pg_database where datname = current_database())";
+                Ok(SchemaStamp(Some(if union.is_empty() { roles.to_string() } else { format!("{union} union all {roles}") })))
+            }
+            Dialect::Sqlite => Ok(SchemaStamp(Some("select type || char(1) || name || char(1) || tbl_name || char(1) || coalesce(sql, '') as s from sqlite_schema".into()))),
+            Dialect::Mysql => Ok(SchemaStamp(None)),
+        }
     }
+
+    /// The pending mark of the schema now.
+    async fn mark(&self, db: &mut Db) -> Result<String, Error> {
+        let Some(sql) = &self.0 else { return Ok(PENDING.to_string()) };
+        let mut rows: Vec<String> = db.rows(sql).await?.iter().map(|r| r.text("s").to_string()).collect();
+        rows.sort();
+        let mut digest = crate::cache::Sha256::new();
+        for row in &rows {
+            digest.part(row.as_bytes());
+        }
+        Ok(format!("{PENDING}:{}", crate::cache::hex(&digest.finish())))
+    }
+}
+
+/// The pending mark a run would write on `db` now: what a run cut off leaves, for the scenarios to
+/// stand for one.
+#[doc(hidden)]
+pub async fn pending_mark(db: &mut Db) -> Result<String, Error> {
+    SchemaStamp::of(db).await?.mark(db).await
 }
 
 /// Whether a fingerprint is a pending mark ([`PENDING`]).
@@ -608,17 +647,20 @@ async fn unchanged_since_cut_off(db: &mut Db, stored: &str) -> Result<bool, Erro
     if !stored.contains(':') {
         return Ok(false);
     }
-    let now = db.rows(&format!("select {} as v", pending_mark(db.dialect()))).await?;
-    Ok(now.first().is_some_and(|r| r.text("v") == stored))
+    Ok(SchemaStamp::of(db).await?.mark(db).await? == stored)
 }
 
-/// The migration's row: applied now, or marked started; marked pending where its run reads the
-/// fingerprint of the schema it left.
-async fn insert_row(db: &mut Db, m: &Migration, applied: bool, pending: bool) -> Result<(), Error> {
+/// The migration's row: applied now, or marked started; with the pending mark of the schema it left,
+/// where its run reads the fingerprint.
+async fn insert_row(db: &mut Db, m: &Migration, applied: bool, mark: Option<&str>) -> Result<(), Error> {
     let d = db.dialect();
     let at = if applied { now_sql(d) } else { "null".to_string() };
-    let mark = if pending { pending_mark(d) } else { "null".to_string() };
-    db.exec_with(&format!("insert into {HISTORY_TABLE} (name, {}, applied_at, fingerprint) values ({}, {}, {at}, {mark})", sql_col(d), db.param(1), db.param(2)), &[&m.name, &m.sql]).await
+    let stamp = if mark.is_some() { db.param(3) } else { "null".to_string() };
+    let sql = format!("insert into {HISTORY_TABLE} (name, {}, applied_at, fingerprint) values ({}, {}, {at}, {stamp})", sql_col(d), db.param(1), db.param(2));
+    match mark {
+        Some(mark) => db.exec_with(&sql, &[&m.name, &m.sql, &mark]).await,
+        None => db.exec_with(&sql, &[&m.name, &m.sql]).await,
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -629,7 +671,7 @@ async fn insert_row(db: &mut Db, m: &Migration, applied: bool, pending: bool) ->
 
 /// Runs a migration and records nothing of it, as a shadow's replay and the check of its locks do.
 pub(crate) async fn run(db: &mut Db, m: &Migration) -> Result<(), Error> {
-    run_undone(db, m, false).await.map_err(|(e, _)| e)
+    run_undone(db, m, None).await.map_err(|(e, _)| e)
 }
 
 /// Migrations run one after another, each recorded, with the fingerprint of the schema they leave
@@ -637,18 +679,20 @@ pub(crate) async fn run(db: &mut Db, m: &Migration) -> Result<(), Error> {
 /// nothing but the run changes the schema while it holds the lock, and each read is of the whole
 /// catalog, so a read after each made a long history run from empty, as a new database's does, cost
 /// its length times its schema. A run cut off before the read leaves its newest row pending, whose
-/// mark's stamp lets the next run go on where nothing has changed the schema since ([`pending_mark`]).
+/// mark's stamp lets the next run go on where nothing has changed the schema since ([`SchemaStamp`]).
 /// A migration that may leave part of itself when it fails has the fingerprint read before it, so
 /// that the next run sees what it left as a change; after one that fails and leaves nothing, the
 /// schema is the one the migrations before it left, and is read then.
 struct Runs {
     /// The newest row the run wrote, while it is marked pending.
     unread: Option<String>,
+    /// How its pending marks stamp the schema, read once the run first needs it.
+    stamp: Option<SchemaStamp>,
 }
 
 impl Runs {
     fn new() -> Runs {
-        Runs { unread: None }
+        Runs { unread: None, stamp: None }
     }
 
     /// Runs `m` and records it; a failure says whether nothing of it is in place, as [`run_undone`]'s
@@ -657,7 +701,10 @@ impl Runs {
         if may_leave_part(&m.sql, db.dialect()) {
             self.finish(db).await;
         }
-        let result = run_undone(db, m, true).await;
+        if self.stamp.is_none() {
+            self.stamp = Some(SchemaStamp::of(db).await.unwrap_or(SchemaStamp(None)));
+        }
+        let result = run_undone(db, m, self.stamp.as_ref()).await;
         match result {
             Ok(()) => self.unread = Some(m.name.clone()),
             Err((_, true)) => self.finish(db).await,
@@ -681,7 +728,7 @@ impl Runs {
 /// Runs a migration, with its row where `record` says; a failure says whether nothing of it is known to be
 /// in place: never on MySQL, which commits each DDL statement, nor where a statement run outside a
 /// transaction may have left part of itself, or finished before its row could be written.
-async fn run_undone(db: &mut Db, m: &Migration, record: bool) -> Result<(), (Error, bool)> {
+async fn run_undone(db: &mut Db, m: &Migration, record: Option<&SchemaStamp>) -> Result<(), (Error, bool)> {
     let undone = db.dialect() != Dialect::Mysql;
     let mut tries = 1;
     loop {
@@ -756,11 +803,11 @@ async fn reset_lock_wait(db: &mut Db) -> Result<(), Error> {
     }
 }
 
-async fn run_once(db: &mut Db, m: &Migration, record: bool) -> Result<(), Ran> {
+async fn run_once(db: &mut Db, m: &Migration, record: Option<&SchemaStamp>) -> Result<(), Ran> {
     let d = db.dialect();
     if runs_alone(&m.sql, d) {
-        if record {
-            insert_row(db, m, false, false).await?;
+        if record.is_some() {
+            insert_row(db, m, false, None).await?;
         }
         // A failed `create index concurrently` (or `reindex concurrently`) leaves an invalid index
         // behind; the ones this statement left are dropped, so the file can run again as written.
@@ -788,7 +835,7 @@ async fn run_once(db: &mut Db, m: &Migration, record: bool) -> Result<(), Ran> {
                 }
                 Err(_) => dropped = false,
             }
-            if record {
+            if record.is_some() {
                 let _ = db.exec_with(&format!("delete from {HISTORY_TABLE} where name = {}", db.param(1)), &[&m.name]).await;
             }
             // A statement that gave up waiting for a lock changed nothing, and SQLite's run whole or
@@ -802,8 +849,11 @@ async fn run_once(db: &mut Db, m: &Migration, record: bool) -> Result<(), Ran> {
         }
         // The statement is in place from here, so a failure is no longer one that left nothing.
         reset.map_err(Ran::Partly)?;
-        if record {
-            db.exec_with(&format!("update {HISTORY_TABLE} set applied_at = {}, fingerprint = {} where name = {}", now_sql(d), pending_mark(d), db.param(1)), &[&m.name]).await.map_err(Ran::Partly)?;
+        if let Some(stamp) = record {
+            // Outside a transaction, a stamp that can't be read leaves a bare mark, which the next run
+            // refuses until the fingerprint is stored.
+            let mark = stamp.mark(db).await.unwrap_or_else(|_| PENDING.to_string());
+            db.exec_with(&format!("update {HISTORY_TABLE} set applied_at = {}, fingerprint = {} where name = {}", now_sql(d), db.param(1), db.param(2)), &[&mark, &m.name]).await.map_err(Ran::Partly)?;
         }
         return Ok(());
     }
@@ -826,8 +876,9 @@ async fn run_once(db: &mut Db, m: &Migration, record: bool) -> Result<(), Ran> {
             }
             crate::catalog::keep_turso_sequences(db).await?;
         }
-        if record {
-            insert_row(db, m, true, true).await?;
+        if let Some(stamp) = record {
+            let mark = stamp.mark(db).await?;
+            insert_row(db, m, true, Some(&mark)).await?;
         }
         db.exec("commit").await?;
         Ok(())
@@ -2871,7 +2922,7 @@ async fn deploy_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
         log(&uncompared_line());
     }
     // A run cut off before it stored its fingerprint, with the schema as it left it: this one stores it.
-    let mut runs = Runs { unread: plan.resumed.clone() };
+    let mut runs = Runs { unread: plan.resumed.clone(), ..Runs::new() };
     if plan.pending.is_empty() {
         // A fingerprint that can't be compared is stored again, for the next run to compare.
         if plan.unchanged.is_none() {
@@ -3431,7 +3482,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
             db.exec(&format!("delete from {HISTORY_TABLE} where name not in ({})", names.join(", "))).await?;
         }
         for f in &recorded[kept..] {
-            insert_row(db, f, true, false).await?;
+            insert_row(db, f, true, None).await?;
         }
         if let Some(last) = recorded.last() {
             set_fingerprint(db, &last.name, &value).await?;
@@ -6998,7 +7049,7 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
         ensure_history(db).await?;
     }
     for m in &records {
-        insert_row(db, m, true, false).await?;
+        insert_row(db, m, true, None).await?;
         rows.row(log, &paint("green", "+"), &m.name, "recorded: already in place");
     }
     let mut runs = Runs::new();

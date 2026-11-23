@@ -2514,7 +2514,10 @@ async fn a_run_cut_off_goes_on_where_its_schema_is_unchanged(mut p: P) {
             std::fs::remove_file(migrations.join(next)).unwrap();
         } else {
             assert_eq!(p.migrate().await, 0, "{}", p.peek());
-            p.exec(&format!("update __reylo_migrations set fingerprint = 'pending:' || (select schema_version from pragma_schema_version) where name = '{last}'")).await;
+            let mut db = Db::open(&p.opts()).await.unwrap();
+            let mark = reylo_migrate::commands::pending_mark(&mut db).await.unwrap();
+            db.close().await;
+            p.exec(&format!("update __reylo_migrations set fingerprint = '{mark}' where name = '{last}'")).await;
         }
         p.output();
     };
