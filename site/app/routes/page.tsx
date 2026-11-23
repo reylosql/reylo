@@ -9,7 +9,7 @@ import { HeroTitle } from '@/components/hero';
 import { getMDXComponents } from '@/components/mdx';
 import { HeroActions } from '@/components/hero';
 import { loadPage } from '@/lib/content';
-import { compareTitle, docsTitle, docsUrl, githubUrl, introUrl, migrateDocsUrl, markdownPath, pageGroups, pageLinks, pageTitle, siteUrl } from '@/lib/layout.shared';
+import { compareTitle, docsTitle, docsUrl, githubUrl, introUrl, migrateCompareUrl, migrateDocsUrl, markdownPath, pageGroups, pageLinks, pageTitle, siteUrl } from '@/lib/layout.shared';
 import { ogAlt, ogSize } from '@/lib/og';
 import { unlistedPage } from '@/lib/rust-content';
 import { source } from '@/lib/source';
@@ -26,6 +26,7 @@ const DIALECT_PAGES = new Set(['postgres', 'mysql', 'sqlite']);
 /** The pages with no table of contents, by slug, each with the width of its column, which takes the right column's room: a page whose whole point is one wide table. */
 const CENTERED: Record<string, string> = {
   compare: '56rem',
+  'migrate-compare': '56rem',
 };
 
 /**
@@ -38,7 +39,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   // The intro and Reylo Migrate's docs have addresses of their own, /docs and /migrate/docs
   // (app/routes.ts); a prerender asks for each page's data at its address with `.data` after it.
   const pathname = new URL(request.url).pathname.replace(/\.data$/, '').replace(/\/$/, '');
-  const slug = params.slug ?? (pathname === migrateDocsUrl ? 'migrate' : pathname === introUrl ? '' : undefined);
+  const slug = params.slug ?? (pathname === migrateDocsUrl ? 'migrate' : pathname === migrateCompareUrl ? 'migrate-compare' : pathname === introUrl ? '' : undefined);
   if (slug === undefined) throw new Response('Not found', { status: 404 });
   const page = source.getPage(slug ? [slug] : []);
   if (!page) throw new Response('Not found', { status: 404 });
@@ -184,8 +185,8 @@ function PageContent({ loaderData }: Pick<Route.ComponentProps, 'loaderData'>) {
   );
 }
 
-/** The pages that are a site of their own, on one page, outside the docs' page list. */
-const STANDALONE = new Set(['migrate']);
+/** Reylo Migrate's pages, a site of their own outside the docs' page list. */
+const STANDALONE = new Set(['migrate', 'migrate-compare']);
 
 /** The current page's name on the phone's strip, as the list names it. */
 function pageName(slug: string, title: string): string {

@@ -11,7 +11,7 @@ description = "The attribute #[reylo::query(\"…\")] mod name {}: the statement
 [lib]
 proc-macro = true
 
-# Which Rust types the macro writes for dates and times, uuids and decimals: `reylo`'s features of
+# Which Rust types the macro writes for dates and times, uuids, decimals and pgvector's vectors: `reylo`'s features of
 # the same names turn these on beside sqlx's support for the types.
 [features]
 # The databases the macro can analyze a statement on: each builds that database's engine and client.
@@ -23,6 +23,7 @@ time = []
 uuid = []
 rust_decimal = []
 bigdecimal = []
+pgvector = []
 
 [dependencies]
 # The statement's analysis, and the module's items from it.

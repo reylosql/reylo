@@ -2,7 +2,7 @@ import { createContext, useContext, useRef, useState, type CSSProperties, type R
 import { createPortal } from 'react-dom';
 import data from 'virtual:home-examples';
 import { DATABASES, HOSTS } from './host-logos';
-import { Foot, Nav } from './home-chrome';
+import { Foot, Install, Nav } from './home-chrome';
 import { FileIcon } from './migrate-landing';
 import type { HomeExample, HomeVariant, Line } from '@/lib/home-examples';
 import { introUrl } from '@/lib/layout.shared';
@@ -77,57 +77,6 @@ export function HomeLanding({ stars }: { stars?: number }) {
 /* ── The nav ─────────────────────────────────────────────────────────────── */
 
 /* ── The install ────────────────────────────────────────────────────────── */
-
-const INSTALL = 'npm i reylo';
-
-function CopyIcon({ done }: { done: boolean }) {
-  return done ? (
-    <svg viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M3 8.5l3.2 3.2L13 4.8" />
-    </svg>
-  ) : (
-    <svg viewBox="0 0 16 16" aria-hidden="true">
-      <rect x="5.25" y="5.25" width="8.5" height="8.5" rx="1.75" />
-      <path d="M10.75 5.25v-1.5a1.5 1.5 0 0 0-1.5-1.5h-5.5a1.5 1.5 0 0 0-1.5 1.5v5.5a1.5 1.5 0 0 0 1.5 1.5h1.5" />
-    </svg>
-  );
-}
-
-/** The install command, with "Read the docs", which opens the docs at their top: side by side where the width allows. `centered` centres the two. */
-function Install({ centered }: { centered?: boolean }) {
-  const [copied, setCopied] = useState(false);
-  const command = INSTALL;
-  return (
-    <div className={`ml-install rh-install${centered ? ' ml-centered' : ''}`}>
-      <div className="ml-big">
-        <div className="ml-box">
-          <div className="ml-cmd">
-            <span className="ml-dollar">$</span>
-            <span>{command}</span>
-            <button
-              type="button"
-              className="ml-copybtn"
-              aria-label="Copy the command"
-              onClick={() => {
-                void navigator.clipboard.writeText(command);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1400);
-              }}
-            >
-              <CopyIcon done={copied} />
-            </button>
-          </div>
-        </div>
-        <a className="ml-docs ml-docs-primary" href={introUrl}>
-          Read the docs
-          <svg viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M2.5 8h11M9 3.5 13.5 8 9 12.5" />
-          </svg>
-        </a>
-      </div>
-    </div>
-  );
-}
 
 /* ── Code ───────────────────────────────────────────────────────────────── */
 

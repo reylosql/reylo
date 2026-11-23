@@ -1,4 +1,5 @@
 import results from '@/lib/compare-results.json';
+import migrateResultsJson from '@/lib/migrate-compare-results.json';
 
 /**
  * The docs' comparison, /compare: which tools and rows it shows. Every mark comes from
@@ -63,19 +64,67 @@ export const compareOrmRows: { id: string; label: string; asks?: string }[] = [
   row('json-schema'),
 ];
 
-/** Which tools and rows a `<CompareTable />` shows: the SQL tools, or `set="orm"`. */
-export const compareSet = (set?: 'orm') => (set === 'orm' ? { tools: compareOrms, rows: compareOrmRows } : { tools: compareTools, rows: compareRows });
+/**
+ * The migration tools beside Reylo Migrate, on /migrate/compare and in its launch post, in an order
+ * that keeps the longer subtitles from sitting side by side. Every mark
+ * comes from lib/migrate-compare-results.json, written from real runs of each tool on Postgres 18,
+ * MySQL 8.4 and SQLite.
+ */
+export const migrateTools = [
+  { id: 'prisma', name: 'Prisma', sub: 'TypeScript', href: 'https://www.prisma.io/orm' },
+  { id: 'atlas', name: 'Atlas', sub: 'Go', href: 'https://atlasgo.io' },
+  { id: 'drizzle', name: 'Drizzle Kit', sub: 'TypeScript', href: 'https://orm.drizzle.team/docs/kit-overview' },
+  { id: 'flyway', name: 'Flyway', sub: 'Java', href: 'https://github.com/flyway/flyway' },
+  { id: 'pgdelta', name: 'pg-delta', sub: 'Supabase', href: 'https://github.com/supabase/pg-toolbelt/tree/main/packages/pg-delta' },
+  { id: 'liquibase', name: 'Liquibase', sub: 'Java', href: 'https://www.liquibase.com' },
+];
 
-export const compareCell = (tool: string, row: string): CompareCell => compareResults.tools[tool]?.cells[row] ?? { state: 'n' };
+/** The rows of the migration table, each with what it asks of a tool. */
+export const migrateRows: { id: string; label: string; asks?: string }[] = [
+  { id: 'sql-schema', label: 'Schema in SQL', asks: 'Your schema is plain SQL files, and a change to them becomes a migration.' },
+  { id: 'views', label: 'Views', asks: "A change to a view's query becomes a migration." },
+  { id: 'functions-triggers', label: 'Functions and triggers', asks: "A change to a function's body or a trigger becomes a migration." },
+  { id: 'rls', label: 'Row level security', asks: "A change to a policy's expression becomes a migration." },
+  { id: 'three-dialects', label: 'Postgres, MySQL, SQLite', asks: 'It writes migrations from your schema on all three.' },
+  { id: 'renames', label: 'Renames', asks: 'A renamed column keeps its rows, rather than being dropped and added again.' },
+  { id: 'data-loss', label: 'Data-loss guard', asks: 'Dropping a column that holds rows waits for you to confirm it.' },
+  { id: 'view-dependencies', label: 'Dependent views', asks: 'Retyping a column that a view reads takes the view down and puts it back around the change.' },
+  { id: 'non-blocking', label: 'Non-blocking indexes', asks: 'A new index on a Postgres table is built without blocking writes.' },
+  { id: 'shadow', label: 'Shadow database', asks: 'Each migration is tried on a throwaway database before it runs.' },
+  { id: 'drift', label: 'Drift detection', asks: 'A deploy onto a database someone changed by hand is refused.' },
+  { id: 'out-of-order', label: 'Out-of-order migrations', asks: 'A migration that sorts before one a database already ran is caught.' },
+  { id: 'branch-switch', label: 'Branch switching', asks: "After a branch switch, the development database rewinds the other branch's migrations, keeping the rest." },
+  { id: 'lockfile', label: 'Strict order in git', asks: 'Two branches that each add a migration conflict in git.' },
+  { id: 'open-source', label: 'Free and open source', asks: 'Everything above is in a release under an open source license.' },
+];
 
-/** The page's `<CompareTable />`s as Markdown, for /compare.md and /llms.txt. */
+export const migrateResults = migrateResultsJson as unknown as typeof compareResults;
+
+export type CompareSetName = 'orm' | 'migrate';
+
+/** Which tools, rows and results a `<CompareTable />` shows: the SQL tools, `set="orm"` or `set="migrate"`, and what Reylo's column is called under its name. */
+export const compareSet = (set?: CompareSetName) =>
+  set === 'orm'
+    ? { tools: compareOrms, rows: compareOrmRows, results: compareResults, sub: 'TypeScript', name: 'Reylo' }
+    : set === 'migrate'
+      ? { tools: migrateTools, rows: migrateRows, results: migrateResults, sub: 'Migrate', name: 'Reylo Migrate' }
+      : { tools: compareTools, rows: compareRows, results: compareResults, sub: 'TypeScript', name: 'Reylo' };
+
+/** A tool's mark on a row. A migration table's cell no run has measured yet is missing, and shown empty. */
+export function compareCell(tool: string, row: string, set?: CompareSetName): CompareCell | undefined {
+  const cell = compareSet(set).results.tools[tool]?.cells[row];
+  return cell ?? (set === 'migrate' ? undefined : { state: 'n' });
+}
+
+/** The page's `<CompareTable />`s as Markdown, for /compare.md, /migrate-compare.md and /llms.txt. */
 export function expandCompare(text: string): string {
   const word = { y: 'yes', p: 'partly', n: 'no' };
-  return text.replace(/<CompareTable(?: set="(orm)")? \/>/g, (_, set?: 'orm') => {
-    const { tools, rows } = compareSet(set);
-    const head = `| | Reylo | ${tools.map((t) => `[${t.id === 'postgrestypedsql' ? 'Postgres Typed SQL' : t.name}](${t.href})`).join(' | ')} |`;
+  const said = (cell?: CompareCell) => (cell ? word[cell.state] : '');
+  return text.replace(/<CompareTable(?: set="(orm|migrate)")? \/>/g, (_, set?: CompareSetName) => {
+    const { tools, rows, name } = compareSet(set);
+    const head = `| | ${name} | ${tools.map((t) => `[${t.id === 'postgrestypedsql' ? 'Postgres Typed SQL' : t.name}](${t.href})`).join(' | ')} |`;
     const rule = `| --- | --- | ${tools.map(() => '---').join(' | ')} |`;
-    const lines = rows.map((r) => `| ${r.label} | ${word[compareCell('reylo', r.id).state]} | ${tools.map((t) => word[compareCell(t.id, r.id).state]).join(' | ')} |`);
+    const lines = rows.map((r) => `| ${r.label} | ${said(compareCell('reylo', r.id, set))} | ${tools.map((t) => said(compareCell(t.id, r.id, set))).join(' | ')} |`);
     return [head, rule, ...lines].join('\n');
   });
 }

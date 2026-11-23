@@ -15,9 +15,11 @@ export default [
   index('routes/home.tsx'),
   route('docs', 'routes/page.tsx', { id: 'docs' }),
   route(':slug', 'routes/page.tsx'),
-  // Reylo Migrate: its landing page, and its docs (content/docs/migrate.mdx) under it.
+  // Reylo Migrate: its landing page, and its docs (content/docs/migrate.mdx) and its comparison with
+  // other migration tools (content/docs/migrate-compare.mdx) under it.
   route('migrate', 'routes/migrate.tsx'),
   route('migrate/docs', 'routes/page.tsx', { id: 'migrate-docs' }),
+  route('migrate/compare', 'routes/page.tsx', { id: 'migrate-compare' }),
   // The blog: its list of posts, and each post (content/blog, lib/blog.ts).
   route('blog', 'routes/blog.tsx'),
   route('blog/:slug', 'routes/blog-post.tsx'),
@@ -36,4 +38,5 @@ export default [
   route('sitemap.xml', 'routes/sitemap.ts'),
   route('manifest.webmanifest', 'routes/manifest.ts'),
   route('opengraph-image.png', 'routes/opengraph-image.tsx'),
+  route('migrate/opengraph-image.png', 'routes/migrate-opengraph-image.tsx'),
 ] satisfies RouteConfig;

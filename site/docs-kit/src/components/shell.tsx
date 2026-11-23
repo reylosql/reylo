@@ -4,6 +4,7 @@ import Link from 'fumadocs-core/link';
 import type { TOCItemType } from 'fumadocs-core/toc';
 import type { ComponentProps, CSSProperties, ReactNode } from 'react';
 import { TocFooter, TocHeader, TocStar, TopRow } from './chrome';
+import { TocFollow } from './toc-follow';
 import { PageListColumn, PageListMenu, pagesOf, type PageList } from './page-list';
 
 /**
@@ -173,7 +174,12 @@ export function DocsShell({
         <PageListMenu list={pages} brand={brand} github={github} title={pageTitle ?? ''} />
         <DocsPage
           toc={centered ? [] : foldToc(toc, fold)}
-          tableOfContent={centered ? { enabled: false } : { style: 'clerk', container: { className: 'ps-4 pt-8' }, footer: star && toc.length ? <TocStar github={github} /> : undefined }}
+          tableOfContent={centered ? { enabled: false } : { style: 'clerk', container: { className: 'ps-4 pt-8' }, footer: (
+                  <>
+                    <TocFollow />
+                    {star && toc.length ? <TocStar github={github} /> : null}
+                  </>
+                ) }}
           tableOfContentPopover={centered ? { enabled: false } : undefined}
           breadcrumb={{ enabled: false }}
           footer={{ enabled: false }}
@@ -200,7 +206,12 @@ export function DocsShell({
             : {
                 style: 'clerk',
                 header: <TocHeader brand={brand} />,
-                footer: <TocFooter github={github} />,
+                footer: (
+                  <>
+                    <TocFollow />
+                    <TocFooter github={github} />
+                  </>
+                ),
                 container: { className: 'justify-self-end ps-4 pt-8' },
               }
         }

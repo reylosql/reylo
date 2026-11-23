@@ -127,17 +127,19 @@ In Rust, `#[reylo::query]` writes these types:
 | `json`, `jsonb` a JSON Schema `CHECK` holds | sqlx's `Json` of what the schema admits |
 | JSON the statement builds (`jsonb_build_object`, `jsonb_agg`) | sqlx's `Json` of what it builds |
 | `bytea` | `Vec<u8>` |
-| An array | a `Vec` of its element type, each element an `Option` |
+| An array | a `Vec` of its element type; in a column, each element an `Option` where it may be `NULL` |
 | An enum, or `text` a `CHECK` lists values for | an enum the module holds |
 | A domain | its base type |
 | A row value of a table, a subquery or a composite type | not yet |
-| `point`, `box`, `circle` and the other geometric types | not yet |
+| `point`, `box`, `circle` and the other geometric types | sqlx's `PgPoint`, `PgBox`, `PgCircle` and the rest |
 | A range or a multirange | not yet |
-| pgvector's `vector`, `halfvec` | not yet |
-| `hstore` | not yet |
+| pgvector's `vector` | `pgvector::Vector` |
+| pgvector's `halfvec` | not yet |
+| `hstore` | sqlx's `PgHstore` |
+| `void`, as `pg_sleep` returns | `()` |
 | Every other type (`inet`, `tsvector`, `xml`, …) | not yet |
 
-A type that is not yet written fails to compile and says to cast it to `text`. The decimal, date and uuid types come from the [features you turn on](/rust#install). A value its Rust type can't hold, such as `infinity` in a `date`, is an error when the row is read.
+A type that is not yet written fails to compile and says to cast it to `text`. The decimal, date, uuid and vector types come from the [features you turn on](/rust#install). A value its Rust type can't hold, such as `infinity` in a `date`, is an error when the row is read. A parameter of `hstore` or `vector` needs the extension's schema on the connection's `search_path`.
 
 </LanguagePanel>
 </LanguagePanels>

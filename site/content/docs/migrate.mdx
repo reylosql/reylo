@@ -166,7 +166,7 @@ $ reylo db reset
 $ reylo db wipe && reylo run --file seed.sql
 ```
 
-### Keeping a change made by hand
+### Adopting a hotfix
 
 Keep a change made on production by hand:
 
@@ -316,11 +316,11 @@ What changes:
 
 You lose the one file that shows your whole schema.
 
-## Ordering
+## Ordering <code className="dk-aside">reylo.lock</code> [#ordering]
 
 Your migrations run in one order: the lockfile's, or their names'.
 
-### Lockfile <code className="dk-aside">reylo.lock</code> [#lockfile-reylolock]
+### Lockfile
 
 The lockfile lists your migrations in order, each with a checksum chained to the one before. A migration it doesn't list yet is a draft, free to edit:
 
@@ -525,9 +525,9 @@ Writing its migration keeps the rows:
 ```terminal
 $ reylo migrate new rename_bio
 ✓ Wrote reylo/migrations/20261104150000_rename_bio.sql
-  + column users.about text
-  - column users.bio text
-  ! Written as a rename, keeping its rows: users.bio → about
+  ~ column users.[-bio-]{+about+} text
+
+  ! Written as a rename, keeping its rows
     If they're different columns, delete the file, then:
       reylo migrate new rename_bio --drop users.bio
 ```
@@ -552,10 +552,12 @@ create table users (
 $ reylo migrate new tidy_columns
 ✗ This migration can't tell renames from new columns
 
-    posts.title → heading  varchar(100) → varchar(200)
-    users.bio   → about    varchar(200) → text
+    - column posts.title character varying(100)
+    + column posts.heading character varying(200)
+    - column users.bio character varying(200)
+    + column users.about text
 
-  For each, rename to keep its rows, or drop it:
+  For each, rename it to keep its rows, or drop it and add the new one:
     --rename posts.title=heading   or   --drop posts.title
     --rename users.bio=about       or   --drop users.bio
   Add the flags you picked to:
@@ -565,10 +567,10 @@ Nothing was changed.
 
 $ reylo migrate new tidy_columns --rename posts.title=heading --drop users.bio
 ✓ Wrote reylo/migrations/20261104150000_tidy_columns.sql
-  + column posts.heading character varying(200)
+  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})
   + column users.about text
-  - column posts.title character varying(100)
   - column users.bio character varying(200)
+
   ! Drops the column users.bio and its data
 ```
 

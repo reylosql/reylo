@@ -285,6 +285,7 @@ fn options() -> Options {
             None
         },
         uuid: cfg!(feature = "uuid"),
+        pgvector: cfg!(feature = "pgvector"),
         decimals: if cfg!(feature = "rust_decimal") {
             Some(Decimals::RustDecimal)
         } else if cfg!(feature = "bigdecimal") {

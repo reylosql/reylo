@@ -77,6 +77,8 @@ export function Layout({ children }: { children: ReactNode }) {
   return (
     <DocsDocument
       tabs={{ dialect: DIALECTS, language: LANGUAGES }}
+      // Dark unless the reader picks light with the switch: the browser's own preference isn't followed.
+      theme={{ defaultTheme: 'dark', enableSystem: false }}
       head={
         <>
           <script dangerouslySetInnerHTML={{ __html: themeIcons }} />

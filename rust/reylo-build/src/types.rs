@@ -31,6 +31,10 @@ pub enum Leaf {
     Exact,
     /// One of a list of values: decoded as text and read as the enum's variant, bound as its value.
     Label,
+    /// Decoded and bound through a wrapper of reylo's (`reylo::__private::PgVector`) of a `Vec<f32>`:
+    /// the field's type is made from it with `From` and gives it back with `.to_vec()`, which every
+    /// release of the `pgvector` crate has, and a `Vec<f32>` too.
+    Via(TokenStream2),
 }
 
 /// An enum the module holds, as a column's or a parameter's value: its name in the module (a
@@ -70,6 +74,7 @@ impl Shape {
         match self {
             Shape::Leaf { ty, leaf: Leaf::Exact, .. } => quote!(::reylo::Exact<#ty>),
             Shape::Leaf { leaf: Leaf::Label, .. } => quote!(::std::string::String),
+            Shape::Leaf { leaf: Leaf::Via(wrapper), .. } => wrapper.clone(),
             Shape::Leaf { ty, .. } => ty.clone(),
             Shape::Option(s) => {
                 let t = s.decode_ty();
@@ -90,6 +95,14 @@ impl Shape {
         }
     }
 
+    /// Whether the value is bound through a wrapper of reylo's, whatever type the crate writes for it.
+    pub fn bound_via(&self) -> bool {
+        match self {
+            Shape::Leaf { leaf, .. } => matches!(leaf, Leaf::Via(_)),
+            Shape::Option(s) | Shape::Vec(s) => s.bound_via(),
+        }
+    }
+
     /// Whether a value of the decode type is already the field's value.
     pub fn decoded_as_is(&self) -> bool {
         match self {
@@ -106,6 +119,7 @@ impl Shape {
         }
         match self {
             Shape::Leaf { leaf: Leaf::Exact, .. } => quote!(#v.0),
+            Shape::Leaf { leaf: Leaf::Via(_), .. } => quote!(::core::convert::From::from(#v.0)),
             Shape::Leaf { ty, leaf: Leaf::Label, .. } => quote!(::reylo::__private::from_label::<#ty>(&#v, #column)?),
             Shape::Leaf { .. } => v,
             Shape::Option(s) => {
@@ -124,6 +138,7 @@ impl Shape {
     pub fn encode(&self, v: TokenStream2) -> TokenStream2 {
         self.encode_leaves(v, &|leaf, ty, v| match leaf {
             Leaf::Label => quote!(<#ty as ::reylo::Enum>::label(*#v)),
+            Leaf::Via(wrapper) => quote!(#wrapper((#v).to_vec())),
             _ => quote!(::core::clone::Clone::clone(#v)),
         })
     }
@@ -295,11 +310,14 @@ impl Types {
 
     /// A parameter's Rust type, `Option` where it may be null; text is borrowed, a `&'a str`.
     pub fn param(&mut self, t: &Type, nullable: bool, label: &str) -> syn::Result<(Shape, bool)> {
+        // Whether the row derives `Serialize` turns on its columns alone.
+        let serialize = self.serialize;
         let (shape, borrowed) = if self.is_string(t) {
             (Shape::Leaf { ty: quote!(&'a str), leaf: Leaf::Plain, enumeration: None }, true)
         } else {
             (self.value(t, label, Use::Param)?, false)
         };
+        self.serialize = serialize;
         Ok((if nullable { Shape::Option(Box::new(shape)) } else { shape }, borrowed))
     }
 
@@ -318,8 +336,18 @@ impl Types {
         if let Kind::Array(a) = &t.kind {
             if self.plain_array(t) {
                 let element = self.value(&a.element.ty, label, at)?;
-                return Ok(Shape::Vec(Box::new(if a.element.nullable { Shape::Option(Box::new(element)) } else { element })));
+                // A parameter's elements are never NULL, as TypeScript's are not: a NULL element
+                // in `<> all(…)` or `not in (…)` matches no row.
+                let nullable = a.element.nullable && at == Use::Column;
+                return Ok(Shape::Vec(Box::new(if nullable { Shape::Option(Box::new(element)) } else { element })));
             }
+        }
+        // pgvector's `vector`, in whatever schema the extension was created in, read and bound
+        // through reylo's own codec.
+        if self.dialect == Dialect::Postgres && matches!(t.kind, Kind::Array(_)) && t.label.as_deref().map(bare) == Some("vector") {
+            // Its serde support is a feature of the crate's own `pgvector`, which the row can't see.
+            self.serialize = false;
+            return Ok(Shape::Leaf { ty: self.pgvector(label)?, leaf: Leaf::Via(quote!(::reylo::__private::PgVector)), enumeration: None });
         }
         if let Kind::Enum(e) = &t.kind {
             if self.is_postgres_enum(t) {
@@ -356,13 +384,31 @@ impl Types {
     fn plain_array(&self, t: &Type) -> bool {
         match t.label.as_deref() {
             None => true,
-            Some(name) => self.dialect == Dialect::Postgres && bare(name).starts_with('_'),
+            // `_int4`, and `public."_ResourceKind"` for a type whose name is quoted.
+            Some(name) => self.dialect == Dialect::Postgres && unquoted(qualified(name).1).starts_with('_'),
         }
     }
 
     /// A Postgres type's Rust type, and whether it is decoded through `reylo::Exact`.
     fn postgres(&mut self, t: &Type, label: &str) -> syn::Result<(TokenStream2, bool)> {
         let name = t.label.as_deref().map(bare).unwrap_or_default();
+        // A geometric type of `pg_catalog`, which the format labels bare, as sqlx's type for it: its
+        // binary form is float8 values, read exactly. A type of the same name in another schema is
+        // labelled with its schema, and is not one of these.
+        let geometric = match t.label.as_deref() {
+            Some("point") => Some(quote!(PgPoint)),
+            Some("line") => Some(quote!(PgLine)),
+            Some("lseg") => Some(quote!(PgLSeg)),
+            Some("box") => Some(quote!(PgBox)),
+            Some("path") => Some(quote!(PgPath)),
+            Some("polygon") => Some(quote!(PgPolygon)),
+            Some("circle") => Some(quote!(PgCircle)),
+            _ => None,
+        };
+        if let Some(ty) = geometric {
+            self.serialize = false;
+            return Ok((quote!(::reylo::sqlx::postgres::types::#ty), false));
+        }
         Ok(match &t.kind {
             Kind::Boolean(_) => (quote!(bool), false),
             Kind::Integer(i) => match (i.bits, i.unsigned) {
@@ -399,6 +445,13 @@ impl Types {
                 self.serialize = false;
                 (quote!(::reylo::sqlx::postgres::types::PgMoney), false)
             }
+            // A function that returns nothing, as `pg_sleep`.
+            Kind::Opaque if t.label.as_deref() == Some("void") => (quote!(()), false),
+            // hstore, in whatever schema the extension was created in: text keys, each value text or NULL.
+            Kind::Map(_) if name == "hstore" => {
+                self.serialize = false;
+                (quote!(::reylo::sqlx::postgres::types::PgHstore), false)
+            }
             Kind::Unknown => return Err(self.any_value(label)),
             _ => return Err(self.unsupported(label, t, "cast it to text in the statement, as `x::text`")),
         })
@@ -424,7 +477,11 @@ impl Types {
                     Affinity::Real => (quote!(f64), false),
                     Affinity::Text => (quote!(::std::string::String), false),
                     Affinity::Blob => (quote!(::std::vec::Vec<u8>), false),
-                    Affinity::Numeric => return Err(syn::Error::new(self.span, format!("{label} is declared {declared}, which holds an integer, a real or text: cast it in the statement, as `cast({label} as real)`"))),
+                    // A date or a time is stored as its text, which a cast to real would turn into a number.
+                    Affinity::Numeric => {
+                        let to = if is_date(declared) { "text" } else { "real" };
+                        return Err(syn::Error::new(self.span, format!("{label} is declared {declared}, which holds an integer, a real or text: cast it in the statement, as `cast({label} as {to})`")));
+                    }
                 },
                 None => return Err(self.any_value(label)),
             },
@@ -509,10 +566,11 @@ impl Types {
         if e.values.is_empty() {
             return Err(syn::Error::new(self.span, format!("the enum {name} has no values")));
         }
-        let (schema, short) = name.rsplit_once('.').unwrap_or(("", &name));
-        let base = names::type_name(short);
-        let ident = self.name(base.clone(), format!("{}{base}", names::type_name(schema)));
-        let schema_module = self.shared.then(|| module_name(schema)).flatten();
+        let (schema, short) = qualified(&name);
+        let (schema, short) = (unquoted(schema), unquoted(short));
+        let base = names::type_name(&short);
+        let ident = self.name(base.clone(), format!("{}{base}", names::type_name(&schema)));
+        let schema_module = self.shared.then(|| module_name(&schema)).flatten();
         match schema_module {
             Some(module) => {
                 let shared_name = format_ident!("{}", base);
@@ -723,6 +781,14 @@ impl Types {
         }
     }
 
+    fn pgvector(&self, label: &str) -> syn::Result<TokenStream2> {
+        if self.options.pgvector {
+            Ok(quote!(::pgvector::Vector))
+        } else {
+            Err(syn::Error::new(self.span, format!("{label} is a pgvector vector: enable reylo's pgvector feature, and depend on the pgvector crate")))
+        }
+    }
+
     fn uuid(&self, label: &str) -> syn::Result<TokenStream2> {
         if self.options.uuid {
             Ok(quote!(::reylo::sqlx::types::Uuid))
@@ -911,8 +977,10 @@ pub fn postgres_enum_tokens(ident: &Ident, name: &str, values: &[String]) -> Tok
 /// sqlx's impls for the enum `ident` of the Postgres enum type `name`: decoded from its value's
 /// text, encoded as it, and the type found by its name at run time.
 pub fn postgres_impls(ident: &Ident, name: &str) -> TokenStream2 {
-    let (schema, short) = name.rsplit_once('.').unwrap_or(("", name));
-    let array = if schema.is_empty() { format!("_{short}") } else { format!("{schema}._{short}") };
+    let (_, written) = qualified(name);
+    // sqlx reports a type by its bare name, which keeps the quotes Postgres writes around one that
+    // needs them (`"ResourceKind"`), and a type it looked up by name as it was asked for.
+    let short = unquoted(written);
     let message = format!("is no value of {name}");
     quote!(
         impl ::reylo::sqlx::Type<::reylo::sqlx::Postgres> for #ident {
@@ -921,12 +989,19 @@ pub fn postgres_impls(ident: &Ident, name: &str) -> TokenStream2 {
             }
             fn compatible(ty: &::reylo::sqlx::postgres::PgTypeInfo) -> bool {
                 let found = ::reylo::sqlx::TypeInfo::name(ty);
-                found == #short || found == #name
+                found == #short || found == #written || found == #name
             }
         }
         impl ::reylo::sqlx::postgres::PgHasArrayType for #ident {
+            // The array type of the enum, whatever Postgres named it, and one whose element is the enum.
             fn array_type_info() -> ::reylo::sqlx::postgres::PgTypeInfo {
-                ::reylo::sqlx::postgres::PgTypeInfo::with_name(#array)
+                ::reylo::sqlx::postgres::PgTypeInfo::array_of(#name)
+            }
+            fn array_compatible(ty: &::reylo::sqlx::postgres::PgTypeInfo) -> bool {
+                match ty.kind() {
+                    ::reylo::sqlx::postgres::PgTypeKind::Array(element) => <Self as ::reylo::sqlx::Type<::reylo::sqlx::Postgres>>::compatible(element),
+                    _ => false,
+                }
             }
         }
         impl<'r> ::reylo::sqlx::Decode<'r, ::reylo::sqlx::Postgres> for #ident {
@@ -967,6 +1042,33 @@ pub fn text_impls(ident: &Ident, db: &TokenStream2) -> TokenStream2 {
             }
         }
     )
+}
+
+/// A type's name as Postgres writes it, split at the dot before its last part: its schema (empty
+/// for none) and its name, each as written, double quotes included (`public."ResourceKind"`).
+fn qualified(name: &str) -> (&str, &str) {
+    let mut quoted = false;
+    let mut last = None;
+    for (i, c) in name.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '.' if !quoted => last = Some(i),
+            _ => {}
+        }
+    }
+    match last {
+        Some(i) => (&name[..i], &name[i + 1..]),
+        None => ("", name),
+    }
+}
+
+/// A name as Postgres knows it: without the double quotes written around it, a doubled one inside
+/// read as one.
+fn unquoted(part: &str) -> String {
+    match part.strip_prefix('"').and_then(|p| p.strip_suffix('"')) {
+        Some(inner) => inner.replace("\"\"", "\""),
+        None => part.to_string(),
+    }
 }
 
 /// A schema's name as a Rust module's, written raw where it is a keyword; none where it is no name.
@@ -1012,6 +1114,13 @@ fn affinity(declared: &str) -> Affinity {
     } else {
         Affinity::Numeric
     }
+}
+
+/// A SQLite column declared as a date or a time (DATE, DATETIME, TIMESTAMP, TIME), whose values are
+/// written as text.
+fn is_date(declared: &str) -> bool {
+    let d = declared.to_ascii_uppercase();
+    d.contains("DATE") || d.contains("TIME")
 }
 
 /// A SQLite column declared BOOLEAN, which the loader reads as a truth value too.
@@ -1092,6 +1201,76 @@ mod tests {
         assert!(positions.windows(2).all(|p| p[0] < p[1]), "{tree}");
         assert_eq!(super::label_tree(&values[..1]).to_string(), quote!(::reylo::Label<{ ::reylo::__private::label_hash("v0") }>).to_string());
         assert_eq!(super::label_tree(&[]).to_string(), "()");
+    }
+
+    /// A column of `t` on `dialect`, as its Rust type and whether the row can derive `Serialize`;
+    /// or the error.
+    fn column(dialect: Dialect, t: Type) -> Result<(String, bool), String> {
+        let mut types = Types::new(dialect, Options::default(), BTreeMap::new(), Span::call_site(), false);
+        let shape = types.column(&t, false, "c").map_err(|e| e.to_string())?;
+        Ok((shape.ty().to_string().replace(' ', ""), types.serialize))
+    }
+
+    #[test]
+    fn void_hstore_and_the_geometric_types_are_sqlxs() {
+        let point = || Type::structure(vec![reylo_engine_core::types::Field::new("x", Type::double(), false), reylo_engine_core::types::Field::new("y", Type::double(), false)]);
+        assert_eq!(column(Dialect::Postgres, point().named("point")), Ok(("::reylo::sqlx::postgres::types::PgPoint".into(), false)));
+        assert_eq!(column(Dialect::Postgres, Type::array(reylo_engine_core::types::Slot::non_null(point().named("point"))).named("polygon")), Ok(("::reylo::sqlx::postgres::types::PgPolygon".into(), false)));
+        // A composite type a schema names `point` is no geometric type.
+        assert!(column(Dialect::Postgres, point().named("public.point")).unwrap_err().contains("no Rust type for public.point"));
+        assert_eq!(column(Dialect::Postgres, Type::opaque("void")), Ok(("()".into(), true)));
+        let map = |label: &str| {
+            use reylo_engine_core::types::{MapType, Slot};
+            Type::new(Kind::Map(MapType { key: Box::new(Slot::non_null(Type::text())), value: Box::new(Slot::nullable(Type::text())), size: None })).named(label)
+        };
+        assert_eq!(column(Dialect::Postgres, map("extensions.hstore")), Ok(("::reylo::sqlx::postgres::types::PgHstore".into(), false)));
+        assert!(column(Dialect::Postgres, Type::opaque("public.ltree")).unwrap_err().contains("no Rust type for public.ltree"));
+    }
+
+    #[test]
+    fn a_vector_is_pgvectors_behind_its_feature() {
+        use reylo_engine_core::types::Slot;
+        let vector = Type::array(Slot::non_null(Type::single())).named("extensions.vector");
+        let mut types = Types::new(Dialect::Postgres, Options { pgvector: true, ..Options::default() }, BTreeMap::new(), Span::call_site(), false);
+        let shape = types.column(&vector, false, "embedding").unwrap();
+        assert_eq!((shape.ty().to_string().replace(' ', ""), types.serialize), ("::pgvector::Vector".to_string(), false));
+        assert!(column(Dialect::Postgres, vector).unwrap_err().contains("enable reylo's pgvector feature"));
+    }
+
+    #[test]
+    fn an_array_parameters_elements_are_never_null() {
+        use reylo_engine_core::types::Slot;
+        let ints = Type::array(Slot::nullable(Type::integer(32))).named("_int4");
+        let mut types = Types::new(Dialect::Postgres, Options::default(), BTreeMap::new(), Span::call_site(), false);
+        assert_eq!(types.param(&ints, false, "skip").unwrap().0.ty().to_string().replace(' ', ""), "::std::vec::Vec<i32>");
+        assert_eq!(types.column(&ints, false, "ids").unwrap().ty().to_string().replace(' ', ""), "::std::vec::Vec<::core::option::Option<i32>>");
+    }
+
+    #[test]
+    fn a_quoted_enum_type_is_named_and_found_unquoted() {
+        let t = Type::text_of(vec!["MOVIE".into(), "BOOK".into()]).named("public.\"ResourceKind\"");
+        let mut types = Types::new(Dialect::Postgres, Options::default(), BTreeMap::new(), Span::call_site(), false);
+        let shape = types.column(&t, false, "kind").unwrap();
+        let finished = types.finish(&BTreeSet::new()).unwrap();
+        assert_eq!(finished.named(shape.ty()).to_string(), "ResourceKind");
+        let kinds = Type::array(reylo_engine_core::types::Slot::nullable(t.clone())).named("public.\"_ResourceKind\"");
+        let mut types = Types::new(Dialect::Postgres, Options::default(), BTreeMap::new(), Span::call_site(), false);
+        let shape = types.column(&kinds, false, "kinds").unwrap();
+        let finished = types.finish(&BTreeSet::new()).unwrap();
+        assert_eq!(finished.named(shape.ty()).to_string().replace(' ', ""), "::std::vec::Vec<::core::option::Option<ResourceKind>>");
+        let impls = super::postgres_impls(&format_ident!("ResourceKind"), "public.\"ResourceKind\"").to_string();
+        assert!(impls.contains(r#"found == "ResourceKind""#) && impls.contains(r#"found == "\"ResourceKind\"""#), "{impls}");
+        assert!(impls.contains(r#"array_of ("public.\"ResourceKind\"")"#), "{impls}");
+        assert_eq!(super::qualified("\"a.b\".\"c\"\"d\""), ("\"a.b\"", "\"c\"\"d\""));
+        assert_eq!(super::unquoted("\"c\"\"d\""), "c\"d");
+    }
+
+    #[test]
+    fn a_sqlite_date_is_cast_to_text_not_real() {
+        let declared = |name: &str| Type::union(vec![Type::integer(64), Type::double(), Type::text()]).named(name);
+        assert!(column(Dialect::Sqlite, declared("DATE")).unwrap_err().contains("as `cast(c as text)`"));
+        assert!(column(Dialect::Sqlite, declared("DATETIME")).unwrap_err().contains("as `cast(c as text)`"));
+        assert!(column(Dialect::Sqlite, declared("NUMERIC")).unwrap_err().contains("as `cast(c as real)`"));
     }
 
     #[test]
