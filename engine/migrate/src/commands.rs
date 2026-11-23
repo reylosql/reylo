@@ -6198,13 +6198,13 @@ async fn db_push_on(db: &mut Db, server: &mut Server, swept: usize, opts: &Optio
         }
     }
     if !behind.is_empty() {
-        let title = match unrun.as_slice() {
-            [one] if behind.len() == 1 => format!("This database hasn't run {}", one.name),
-            many if behind.len() == many.len() => format!("This database hasn't run {} migrations", many.len()),
-            _ => "This database doesn't match its migrations".to_string(),
+        let (title, fix) = match unrun.as_slice() {
+            [one] if behind.len() == 1 => (format!("This database hasn't run {}", one.name), "Run it first"),
+            many if behind.len() == many.len() => (format!("This database hasn't run {} migrations", many.len()), "Run them first"),
+            _ => ("This database doesn't match its migrations".to_string(), "Make it match its migrations first"),
         };
         let listed = if behind.len() == 1 && unrun.len() == 1 { vec![] } else { behind };
-        problems.push(Problem::new("database-not-at-migrations", title).lines(listed).fix(if unrun.len() == 1 { "Run it first" } else { "Apply its migrations first" }, &["reylo migrate dev"]));
+        problems.push(Problem::new("database-not-at-migrations", title).lines(listed).fix(fix, &["reylo migrate dev"]));
     }
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
