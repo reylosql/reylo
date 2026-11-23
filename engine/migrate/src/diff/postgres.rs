@@ -877,7 +877,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             let named = c.get("identity_name").map(|n| named_identity(&full, n)).unwrap_or_else(|| full.clone());
             // A not null of its own named otherwise than Postgres would name it (`constraint
             // a_required not null`) is made under that name.
-            let declared = c.get("nn_name").filter(|n| matches!(kind, "r" | "p") && !c.flag("inherited") && !generated_not_null(n, &name, c.text("name"))).map(String::from);
+            let declared = c.get("nn_name").filter(|n| matches!(kind, "r" | "p") && !c.flag("inherited") && !generated_not_null(n, &name, &unquoted(c.text("name")))).map(String::from);
             // One left unvalidated is added after, by its name, as below.
             let named = match declared.as_deref().filter(|_| !unvalidated) {
                 Some(n) if named.ends_with(" not null") => format!("{} constraint {n} not null", named.trim_end_matches(" not null")),
@@ -2766,14 +2766,17 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
                 || copied.contains(&unquoted(wanted))
                 || current.objects.values().any(|c| c.kind == Some(Kind::Constraint) && related(c) && c.id.split_once(' ').is_some_and(|(_, rest)| unquoted(&last(rest).1) == unquoted(wanted)))
         };
+        // The names given so far, which two columns' names cut short alike could both be given.
+        let mut given: Vec<String> = Vec::new();
         for o in &columns {
             let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
             let Some(name) = not_null_name(o) else { continue };
             let Some(kept) = target.objects.get(&format!("column {new_rel}.{column}")) else {
                 // The name Postgres would make, as it holds it.
                 let made = default_not_null(new_rel, &unquoted(column));
-                if generated_not_null(&name, old_rel, &unquoted(column)) && unquoted(&name) != made && !held(&made) {
+                if generated_not_null(&name, old_rel, &unquoted(column)) && unquoted(&name) != made && !held(&made) && !given.contains(&made) {
                     out.push(format!("alter table {new_rel} rename constraint {name} to {}", declared::quote_ident(&made)));
+                    given.push(made);
                 }
                 continue;
             };
@@ -3207,19 +3210,20 @@ fn dollar_block(body: &str) -> String {
     format!("do {tag} {body} {tag}")
 }
 
-/// Whether `name` is one Postgres gives a not null it makes on `table`'s `column`: its name for it,
-/// or with a number after where another constraint of the schema held that name.
+/// Whether `name` is one Postgres gives a not null it makes on `table`'s `column`, the column's name
+/// as Postgres holds it: its name for it, or with a number after where another constraint of the
+/// schema held that name.
 fn generated_not_null(name: &str, table: &str, column: &str) -> bool {
     let name = unquoted(name);
     let made = default_not_null(table, column);
     name.strip_prefix(made.as_str()).is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// The name Postgres gives a not null it makes on a table's column, as it holds it: past 63 bytes,
-/// the longer of the table's and the column's names is shortened a byte at a time until it fits,
-/// each then cut at a character's edge (`makeObjectName`).
+/// The name Postgres gives a not null it makes on a table's column, the column's name and its own as
+/// Postgres holds them: past 63 bytes, the longer of the table's and the column's names is shortened
+/// a byte at a time until it fits, each then cut at a character's edge (`makeObjectName`).
 fn default_not_null(table: &str, column: &str) -> String {
-    let (table, column) = (unquoted(split_last(table).1), unquoted(column));
+    let table = unquoted(split_last(table).1);
     let room = 63 - "_not_null".len() - 1;
     let (mut a, mut b) = (table.len(), column.len());
     while a + b > room {
@@ -3235,7 +3239,7 @@ fn default_not_null(table: &str, column: &str) -> String {
         }
         s[..n].to_string()
     };
-    format!("{}_{}_not_null", clip(&table, a), clip(&column, b))
+    format!("{}_{}_not_null", clip(&table, a), clip(column, b))
 }
 
 /// A name as Postgres holds it, from how it is written: a quoted one without its quotes.
@@ -4564,7 +4568,7 @@ impl Alterer for PostgresAlterer {
                 } else if b.not_null && (!a.not_null || a.no_inherit != b.no_inherit || (a.not_valid && !b.not_valid)) && !not_null_done {
                     // A not null the target names otherwise than Postgres would is added under its name.
                     let named = declared(to)
-                        .or_else(|| to.extra.iter().find_map(|l| l.strip_prefix("not null name ")).filter(|n| !generated_not_null(n, &table, &name)).map(String::from))
+                        .or_else(|| to.extra.iter().find_map(|l| l.strip_prefix("not null name ")).filter(|n| !generated_not_null(n, &table, &unquoted(&name))).map(String::from))
                         .filter(|_| !a.not_null || a.no_inherit != b.no_inherit);
                     out.push(match named {
                         Some(n) if b.no_inherit => format!("alter table {table} add constraint {n} not null {name} no inherit"),
@@ -4578,7 +4582,7 @@ impl Alterer for PostgresAlterer {
                 // column's rename and a table's joining rename theirs.
                 let dropped = out.iter().any(|s| s.ends_with(" drop not null"));
                 if a.not_null && b.not_null && !dropped && (declared(from).is_some() || declared(to).is_some()) {
-                    let made = default_not_null(&table, &name);
+                    let made = default_not_null(&table, &unquoted(&name));
                     let made = if made.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') { made } else { crate::db::ident(&made) };
                     let want = declared(to).unwrap_or(made);
                     if let Some(now) = not_null_name(from).filter(|now| unquoted(now) != unquoted(&want)) {

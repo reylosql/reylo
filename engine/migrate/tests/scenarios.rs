@@ -3698,6 +3698,23 @@ mod adversarial {
         let out = p.output();
         assert!(!out.contains("doesn't reach"), "{out}");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        // A column whose name holds quotes, renamed with its table beside a column added; and two
+        // columns dropped whose not nulls' names Postgres would cut short alike.
+        let before = format!(r#"{members} {people} {folk} {kin} create table "123" (note text); create table {long} (note text);"#);
+        let edge = "b".repeat(63);
+        p.file("20991231000006_t.sql", r#"create table quoted (id integer primary key, """email""" text default 'missing' not null); create table cut (note text, abcdefghijklmnopqrstuvwxyzxa text not null, abcdefghijklmnopqrstuvwxyzxb text not null);"#);
+        p.schema(&format!(r#"{before} create table quoted (id integer primary key, """email""" text default 'missing' not null); create table cut (note text, abcdefghijklmnopqrstuvwxyzxa text not null, abcdefghijklmnopqrstuvwxyzxb text not null);"#));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into quoted values (1, 'original')").await;
+        p.output();
+        p.schema(&format!("{before} create table renamed (id integer primary key, x text default 'missing' not null, joined integer); create table {edge} (note text);"));
+        let choices = reylo_migrate::Choices { drop: vec!["cut.abcdefghijklmnopqrstuvwxyzxa".into(), "cut.abcdefghijklmnopqrstuvwxyzxb".into()], rename: vec![("quoted".into(), "renamed".into()), ("cut".into(), edge.clone())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "edges", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("select x from renamed").await[0].text("x"), "original");
     }
 
     /// A column whose not null has a name of its own, renamed with a change to its definition: the
