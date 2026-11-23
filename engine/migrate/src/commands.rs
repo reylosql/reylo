@@ -1570,7 +1570,16 @@ fn fills_existing(statement: &crate::sql::Statement) -> bool {
     use crate::sql::TokenKind;
     let t = &statement.tokens;
     let words: Vec<String> = t.iter().map(crate::sql::Token::upper).collect();
-    let call = |i: usize| i > 0 && t[i].text == "(" && t[i].kind == TokenKind::Symbol && matches!(t[i - 1].kind, TokenKind::Word | TokenKind::Quoted);
+    // A name and a parenthesis, but for a keyword's (`where (…)`, `check (…)`) and the table a
+    // reference names.
+    const NO_CALL: &[&str] = &["WHERE", "AND", "OR", "NOT", "IN", "IS", "EXISTS", "ANY", "ALL", "SOME", "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "CHECK", "ON", "USING", "AS", "LIKE", "ILIKE", "ROW", "SELECT", "FROM", "DEFAULT", "INCLUDE"];
+    let call = |i: usize| {
+        i > 0
+            && t[i].text == "("
+            && t[i].kind == TokenKind::Symbol
+            && (t[i - 1].kind == TokenKind::Quoted || (t[i - 1].kind == TokenKind::Word && !NO_CALL.contains(&words[i - 1].as_str())))
+            && !(i > 1 && words[i - 2] == "REFERENCES")
+    };
     if words.first().map(String::as_str) == Some("CREATE") && words.iter().take(4).any(|w| w == "INDEX") {
         // The key list, the first parenthesis after the table's name (and its access method), and
         // the predicate after `where`.
@@ -1609,7 +1618,7 @@ fn fills_existing(statement: &crate::sql::Statement) -> bool {
         let mut depth = 0usize;
         for i in k + 1..t.len() {
             match t[i].text.as_str() {
-                "(" if t[i].kind == TokenKind::Symbol && matches!(t[i - 1].kind, TokenKind::Word | TokenKind::Quoted) && i > k + 1 => return true,
+                "(" if i > k + 1 && call(i) => return true,
                 "(" if t[i].kind == TokenKind::Symbol => depth += 1,
                 ")" if t[i].kind == TokenKind::Symbol => depth = depth.saturating_sub(1),
                 "," if t[i].kind == TokenKind::Symbol && depth == 0 => return false,
@@ -2536,18 +2545,15 @@ async fn unskippable(shadows: &mut Shadows<'_>, order: &[Migration], k: usize, m
 }
 
 /// The refusal of a database that has what the migrations make without `it`, after `past`, where
-/// it can't move after them (`why`) but its change can be made there: then the migrations are
-/// recorded in their order.
+/// it can't move after them (`why`): what `past` wrote or stored ran without `it`, so making its
+/// change now leaves those as they were, and no command can say what they would be. They are
+/// redone by hand, and the migrations recorded in their order.
 #[cfg(feature = "cli")]
-fn skipped_problem(opts: &Options, it: &Migration, past: &[Migration], why: &str, d: Dialect) -> Problem {
-    let problem = Problem::new("history-push-skipped", format!("This database has what the migrations make without {}", it.name)).note(format!("It ran {} without it. {why}", run_of(past)));
-    let record = "reylo migrate history push --url <url>";
-    if runs_as_a_migration(&it.sql, d) {
-        let file = shell_word(&format!("{}/{}", shown(&opts.dir), it.name));
-        problem.note("Give both commands the same URL as this one.").fix("Make its change here too, then record them all, running nothing", &[&format!("reylo run --url <url> --file {file}"), record])
-    } else {
-        problem.fix(format!("Make its change here by hand, as {} makes it, then record them all, running nothing", it.name), &[record])
-    }
+fn skipped_problem(it: &Migration, past: &[Migration], why: &str, d: Dialect) -> Problem {
+    let changing: Vec<Migration> = past.iter().filter(|m| !order_sensitive(&m.sql, d).is_empty()).cloned().collect();
+    Problem::new("history-push-skipped", format!("This database has what the migrations make without {}", it.name))
+        .note(format!("It ran {} without it. {why}", run_of(past)))
+        .fix(format!("Make the change {} makes here, then redo what {} wrote or built as {} would after it, and record them all, running nothing", it.name, names_of(&changing), if changing.len() == 1 { "it" } else { "they" }), &["reylo migrate history push --url <url>"])
 }
 
 /// The refusal for [`behind`] where the order can't move: `it` makes the change, after `ahead`,
@@ -3543,7 +3549,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
             Ok(Some((k, m, Some((why, makeable))))) => {
                 if makeable {
                     shadows.finish().await;
-                    return Ok(refuse(&[skipped_problem(opts, &order[k], &order[k + 1..m], &why, d)], log));
+                    return Ok(refuse(&[skipped_problem(&order[k], &order[k + 1..m], &why, d)], log));
                 }
                 unskipped = Some(format!("It has what they make without {}. {why}", order[k].name));
             }
@@ -8045,6 +8051,10 @@ mod tests {
         assert!(fills("create unique index t_k on t (id) where active(id)"));
         assert!(!fills("create index t_k on t using btree (id) include (email)"));
         assert!(!fills("create index concurrently if not exists t_k on public.t (id, email desc)"));
+        assert!(!fills("create index t_k on t (id) where (id is not null)"));
+        assert!(!fills("create index t_k on t (id) where id > 0 and (email is null or id < 9)"));
+        assert!(!fills("alter table t add column v int default 1 check (v > 0)"));
+        assert!(!fills("alter table t add column v int default 0 references r (id)"));
     }
 
     #[test]

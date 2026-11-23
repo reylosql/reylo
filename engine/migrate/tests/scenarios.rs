@@ -1456,7 +1456,7 @@ async fn a_skipped_migration_moves_past_no_data_change(mut p: P) {
     p.exec(&format!("create table a (id {int}, n {int}); create table c (id {int});")).await;
     p.output();
     assert_eq!(p.history_push().await, 1);
-    assert_has!(p.output(), r"✗ This database has what the migrations make without 20261027110000_a_index\.sql\n  It ran 20261027120000_fill\.sql and 20261027130000_c\.sql without it\. Migration 20261027120000_fill\.sql changes data, which can run differently without it, so it can't move after them\.\n  Give both commands the same URL as this one\.\n\n  Make its change here too, then record them all, running nothing:\n    reylo run --url <url> --file \S+20261027110000_a_index\.sql\n    reylo migrate history push --url <url>");
+    assert_has!(p.output(), r"✗ This database has what the migrations make without 20261027110000_a_index\.sql\n  It ran 20261027120000_fill\.sql and 20261027130000_c\.sql without it\. Migration 20261027120000_fill\.sql changes data, which can run differently without it, so it can't move after them\.\n\n  Make the change 20261027110000_a_index\.sql makes here, then redo what 20261027120000_fill\.sql wrote or built as it would after it, and record them all, running nothing:\n    reylo migrate history push --url <url>");
     assert_eq!(p.locked(), [a, index, fill, c]);
     assert!(p.history().await.is_empty());
     p.exec("create index a_id on a (id)").await;
@@ -3706,9 +3706,9 @@ mod adversarial {
         p.exec("create table t (id int primary key); create function f() returns int language sql immutable as $$ select 1 $$; insert into t values (1); alter table t add column v int default f();").await;
         p.output();
         assert_eq!(p.history_push().await, 1);
-        assert_has!(p.output(), r"✗ This database has what the migrations make without 20261027110000_f\.sql\n  It ran 20261027120000_v\.sql without it\. Migration 20261027120000_v\.sql changes data, which can run differently without it, so it can't move after it\.\n  Give both commands the same URL as this one\.\n\n  Make its change here too, then record them all, running nothing:\n    reylo run --url <url> --file \S+20261027110000_f\.sql\n    reylo migrate history push --url <url>");
+        assert_has!(p.output(), r"✗ This database has what the migrations make without 20261027110000_f\.sql\n  It ran 20261027120000_v\.sql without it\. Migration 20261027120000_v\.sql changes data, which can run differently without it, so it can't move after it\.\n\n  Make the change 20261027110000_f\.sql makes here, then redo what 20261027120000_v\.sql wrote or built as it would after it, and record them all, running nothing:\n    reylo migrate history push --url <url>");
         assert_eq!(p.locked(), [a, b, c]);
-        p.exec("create or replace function f() returns int language sql immutable as $$ select 2 $$;").await;
+        p.exec("create or replace function f() returns int language sql immutable as $$ select 2 $$; update t set v = f();").await;
         assert_eq!(p.history_push().await, 0, "{}", p.peek());
         assert_eq!(p.history().await, [a, b, c]);
     }
@@ -3744,8 +3744,12 @@ mod adversarial {
         p.exec(&format!("{made} alter table items alter column n set default 0; create index items_expr on items (idx_key(id));")).await;
         p.output();
         assert_eq!(p.history_push().await, 1);
-        assert_has!(p.output(), r"✗ This database has what the migrations make without 20261027110000_key\.sql\n  It ran 20261027120000_index\.sql without it\. Migration 20261027120000_index\.sql changes data");
+        assert_has!(p.output(), r"✗ This database has what the migrations make without 20261027110000_key\.sql\n  It ran 20261027120000_index\.sql without it\. Migration 20261027120000_index\.sql changes data[^\n]*\n\n  Make the change 20261027110000_key\.sql makes here, then redo what 20261027120000_index\.sql wrote or built as it would after it");
         assert_eq!(p.locked(), [a, b, c]);
+        // Following it: the change, the index built again, and all three recorded.
+        p.exec("create or replace function idx_key(int) returns int language plpgsql immutable as $$ begin return $1 + 2; end $$; alter table items alter column n set not null; reindex index items_expr;").await;
+        assert_eq!(p.history_push().await, 0, "{}", p.peek());
+        assert_eq!(p.history().await, [a, b, c]);
     }
 
     /// A column's default and its nullability share a line of the catalog: a skipped migration that
