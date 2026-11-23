@@ -97,9 +97,18 @@ class Reader {
     }
   }
 
-  text(length: number): string {
+  /**
+   * A column's name or its type's, as a result's header writes one. An enum's label, which a
+   * type's name holds, may be any bytes, and two that are no UTF-8 would read as one text, so
+   * such a name is refused rather than read.
+   */
+  text(length: number, what: string): string {
     const start = this.take(length);
-    return utf8(this.bytes.subarray(start, start + length));
+    try {
+      return utf8Strict(this.bytes.subarray(start, start + length));
+    } catch {
+      throw new DecodeError(`The result's ${what} holds bytes that are not UTF-8 text, which Reylo cannot read as they are: an enum's label of such bytes, or a column's name, would read as another's.`);
+    }
   }
 
   /**
@@ -370,23 +379,29 @@ function readerOf(type: Named, column: string): Read {
 }
 
 function unread(type: Named, column: string): DecodeError {
-  return new DecodeError(`Column "${column}" has the ClickHouse type ${typeName(type)}, which Reylo does not read: select it as a type it reads, as toString(${column}) does.`);
+  return new DecodeError(`Column "${column}" has the ClickHouse type ${typeName(type)}, which Reylo does not read: select it as a type it reads, as toString gives.`);
 }
 
-/** The error a statement raised after its result began, where the result's end carries one: `<message>\n<length> <tag>\r\n__exception__\r\n`, the tag the response's own (`X-ClickHouse-Exception-Tag`). */
-function midStreamError(bytes: Uint8Array, tag: string | undefined): Error | undefined {
-  // Each byte as the character of its number, so that a place in the text is a place in the bytes.
-  let tail = "";
-  for (let i = Math.max(0, bytes.length - 65536); i < bytes.length; i += 8192) tail += String.fromCharCode(...bytes.subarray(i, Math.min(bytes.length, i + 8192)));
-  const close = tail.lastIndexOf("\r\n__exception__\r\n");
-  if (close === -1) return undefined;
-  const open = tag === undefined || tag === "" ? tail.indexOf("__exception__\r\n") : tail.indexOf(`__exception__\r\n${tag}\r\n`);
-  if (open === -1 || open >= close) return undefined;
-  const start = tail.indexOf("\r\n", open + "__exception__\r\n".length) + 2;
-  const body = tail.slice(start, close).replace(/\n\d+ \S+$/, "");
-  const raw = new Uint8Array(body.length);
-  for (let i = 0; i < body.length; i++) raw[i] = body.charCodeAt(i);
-  const text = utf8(raw).trim();
+/**
+ * The error a statement raised after its result began, where the result ends with one:
+ * `__exception__\r\n<tag>\r\n<message>\n<length> <tag>\r\n__exception__\r\n`, the tag the
+ * response's own (`X-ClickHouse-Exception-Tag`), which no row's bytes end with by chance. The end
+ * alone says the result is an error, whatever the message's length, and the message starts after
+ * the last opening before it.
+ */
+function midStreamError(bytes: Uint8Array, tag: string): Error | undefined {
+  const ascii = (text: string) => Uint8Array.from(text, (c) => c.charCodeAt(0));
+  const at = (mark: Uint8Array, start: number) => start >= 0 && start + mark.length <= bytes.length && mark.every((byte, i) => bytes[start + i] === byte);
+  const close = ascii(` ${tag}\r\n__exception__\r\n`);
+  if (!at(close, bytes.length - close.length)) return undefined;
+  // The message's end: before its length, and the newline before that.
+  let end = bytes.length - close.length;
+  while (end > 0 && bytes[end - 1]! >= 0x30 && bytes[end - 1]! <= 0x39) end--;
+  if (end > 0 && bytes[end - 1] === 0x0a) end--;
+  const open = ascii(`__exception__\r\n${tag}\r\n`);
+  let start = end - open.length;
+  while (start >= 0 && !at(open, start)) start--;
+  const text = utf8(bytes.subarray(start < 0 ? Math.max(0, end - 65536) : start + open.length, end)).trim();
   const code = /^Code: (\d+)\./.exec(text)?.[1];
   const type = /\(([A-Z][A-Z0-9_]+)\)(?: \(version .*\))?\s*$/.exec(text)?.[1];
   // The message as the client's own error has it for a statement that fails at once: without the
@@ -444,9 +459,9 @@ function rowsOf(bytes: Uint8Array, query: QueryModule<"clickhouse">): unknown[] 
   const r = new Reader(bytes);
   const width = r.varint();
   const names: string[] = [];
-  for (let i = 0; i < width; i++) names.push(r.text(r.varint()));
+  for (let i = 0; i < width; i++) names.push(r.text(r.varint(), `name for column ${i + 1}`));
   const types: string[] = [];
-  for (let i = 0; i < width; i++) types.push(r.text(r.varint()));
+  for (let i = 0; i < width; i++) types.push(r.text(r.varint(), `type for the column "${names[i]}"`));
   const parsed = types.map((type, i) => {
     const read = parseType(type);
     // A session with output_format_binary_encode_types_in_binary_format writes each type as bytes, and no name.
@@ -570,7 +585,8 @@ function valueText(type: Named, v: unknown, name: string, path = ""): string {
       if (t.name !== "Float64" && Number.isFinite(v) && !Number.isFinite(Math.fround(v as number))) fail("which holds -3.4028235e38 to 3.4028235e38");
       if (Number.isNaN(v)) return "nan";
       if (!Number.isFinite(v)) return v === Infinity ? "inf" : "-inf";
-      if (Object.is(v, -0)) return "-0";
+      // The zero a number too small for the type rounds to keeps the number's sign.
+      if (Object.is(t.name === "Float64" ? v : Math.fround(v as number), -0)) return "-0";
       return t.name === "Float64" ? String(v) : shortest32(v as number);
     case "String":
       if (typeof v !== "string") fail("which takes a string");
@@ -647,7 +663,8 @@ function valueText(type: Named, v: unknown, name: string, path = ""): string {
     }
     case "Array":
       if (!Array.isArray(v)) fail("which takes an array");
-      return `[${(v as unknown[]).map((e, i) => valueText(inner(0), e, name, `${path}[${i}]`)).join(",")}]`;
+      // Each place of the array, a hole too, which would go as nothing between two commas: the server reads that as a zero, or drops it.
+      return `[${Array.from(v as unknown[], (e, i) => valueText(inner(0), e, name, `${path}[${i}]`)).join(",")}]`;
     case "Tuple": {
       const named = t.args.length > 0 && t.args.every((a) => "member" in a);
       if (named && !Array.isArray(v) && typeof v === "object") {
@@ -663,8 +680,9 @@ function valueText(type: Named, v: unknown, name: string, path = ""): string {
       return `(${t.args.map((a, i) => valueText("member" in a ? a.of : inner(i), values[i], name, "member" in a ? `${path}.${a.member}` : `${path}[${i}]`)).join(",")})`;
     }
     case "Map": {
-      if (!Array.isArray(v) || !v.every((e) => e !== null && typeof e === "object" && "key" in e && "value" in e && Object.keys(e).length === 2)) fail("which takes an array of its pairs, each { key, value } and no more");
-      return `{${(v as { key: unknown; value: unknown }[]).map((e, i) => `${valueText(inner(0), e.key, name, `${path}[${i}].key`)}:${valueText(inner(1), e.value, name, `${path}[${i}].value`)}`).join(",")}}`;
+      const pairs = Array.isArray(v) ? Array.from(v as unknown[]) : fail("which takes an array of its pairs, each { key, value } and no more");
+      if (!pairs.every((e) => e != null && typeof e === "object" && "key" in e && "value" in e && Object.keys(e).length === 2)) fail("which takes an array of its pairs, each { key, value } and no more");
+      return `{${(pairs as { key: unknown; value: unknown }[]).map((e, i) => `${valueText(inner(0), e.key, name, `${path}[${i}].key`)}:${valueText(inner(1), e.value, name, `${path}[${i}].value`)}`).join(",")}}`;
     }
     default:
       return fail("which Reylo does not write");
@@ -757,9 +775,13 @@ async function runClickhouse(c: Client, query: QueryModule<"clickhouse">, bound:
     throw new DecodeError(`${query.source ?? "The statement"} returned its result in the format ${format}, and Reylo reads ${FORMAT}: take the format out of the statement's SETTINGS (default_format).`);
   }
   const { bytes, error } = await bytesOf(response?.stream);
-  const failed = midStreamError(bytes, typeof tag === "string" ? tag : undefined);
+  const tagged = typeof tag === "string" && tag !== "";
+  const failed = tagged ? midStreamError(bytes, tag) : undefined;
   if (failed) throw failed;
   if (error !== undefined) throw error;
+  // A server before 25.11 ends a result it failed in with its error's text and no mark, which
+  // would read as rows; one from 25.11 names the mark of each response in this header.
+  if (bytes.length > 0 && !tagged) throw new DecodeError(`${query.source ?? "The statement"}'s result came without the X-ClickHouse-Exception-Tag header, which ClickHouse sends from 25.11 on to mark an error that ends a result: without it Reylo cannot tell such an error from the result's rows. The server is older, or something between it and the client drops the header.`);
   try {
     return rowsOf(bytes, query);
   } catch (error) {
@@ -768,13 +790,15 @@ async function runClickhouse(c: Client, query: QueryModule<"clickhouse">, bound:
   }
 }
 
-/** A column's raw value as `.run()` gives it, as a Standard Query's `decode` takes it (src/standard-query.ts): `.run()`'s own, since the raw value of a ClickHouse result is the one Reylo reads from its bytes. */
-function clickhouseDecoder(_name: string, _kind: Kind): (v: unknown) => unknown {
-  return (v) => (v === undefined ? null : v);
+/** A ClickHouse result has no raw value a decoder takes: Reylo reads each from the result's bytes, and a Standard Query on ClickHouse decodes none (src/standard-query.ts). */
+function clickhouseDecoder(name: string, _kind: Kind): (v: unknown) => unknown {
+  return () => {
+    throw new DecodeError(`Column "${name}" has no raw value on ClickHouse, whose results .run() reads from the server's binary format.`);
+  };
 }
 
 /** ClickHouse's half of the run time (src/execute.ts, `Runtime`), which `defineClickhouseQuery` passes. */
-export const clickhouse: Runtime<"clickhouse"> = { dialect: "clickhouse", run: runClickhouse, readError: readClickhouseError, decoder: clickhouseDecoder, encode: texts };
+export const clickhouse: Runtime<"clickhouse"> = { dialect: "clickhouse", run: runClickhouse, readError: readClickhouseError, decoder: clickhouseDecoder };
 
 /** The parts of this module its tests hold to the server's own text and bytes. */
 export const internals = { rowsOf, valueText, typesOf, midStreamError, ipv6Text, decimalText };
