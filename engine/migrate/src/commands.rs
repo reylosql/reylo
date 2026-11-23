@@ -3279,22 +3279,38 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
     // development database as it stands, written out as SQL (as `db introspect` prints it). Either
     // way, the development database must have run each migration it applied as it now reads: one
     // edited or deleted since is `migrate dev`'s to settle first.
-    let (target_sql, target_name) = match std::fs::read_to_string(&opts.schema) {
+    let (target_sql, target_name, added) = match std::fs::read_to_string(&opts.schema) {
         Ok(sql) => {
             let problems = ran_as_written(opts, &files).await?;
             if !problems.is_empty() {
                 return Ok(refuse(&problems, log));
             }
-            (sql, shown(&opts.schema))
+            (sql, shown(&opts.schema), vec![])
         }
         Err(_) => match as_its_migrations_leave_it(opts, &files).await? {
-            Ok(sql) => (sql, "this database".to_string()),
+            Ok((sql, added)) => (sql, "this database".to_string(), added),
             Err(problems) => return Ok(refuse(&problems, log)),
         },
     };
-    let drafted = match draft(opts, &files, &target_sql, &target_name, name, choices, log).await? {
-        Ok(drafted) => drafted,
-        Err(problems) => return Ok(refuse(&problems, log)),
+    // The extensions added since the history began are the new migration's to make, so its shadows
+    // start without them; where a migration uses one without making it, the history replays only
+    // with it, as it did on the database, and the draft is made again with the shadows keeping them.
+    let mut said = Vec::new();
+    let first = draft(opts, &files, &target_sql, &target_name, &added, name, choices, &mut |l: &str| said.push(l.to_string())).await?;
+    let drafted = match first {
+        Err(problems) if !added.is_empty() && problems.iter().any(|p| p.code == "replay-fails") => match draft(opts, &files, &target_sql, &target_name, &[], name, choices, log).await? {
+            Ok(drafted) => drafted,
+            Err(problems) => return Ok(refuse(&problems, log)),
+        },
+        first => {
+            for line in &said {
+                log(line);
+            }
+            match first {
+                Ok(drafted) => drafted,
+                Err(problems) => return Ok(refuse(&problems, log)),
+            }
+        }
     };
     std::fs::create_dir_all(&opts.dir)?;
     // After the newest migration, should one share this second; on MySQL a plan of several DDL
@@ -3346,9 +3362,10 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
 
 /// The development database as SQL that makes it, for `migrate new` in a project with no schema.sql:
 /// the migration is what it has that the migrations don't make. Refused unless it ran every migration,
-/// each as it now reads, since one it hasn't run would read as something to drop.
+/// each as it now reads, since one it hasn't run would read as something to drop. With it, the
+/// extensions added since its history began ([`added_extensions`]).
 #[cfg(feature = "cli")]
-async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Result<Result<String, Vec<Problem>>, Error> {
+async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Result<Result<(String, Vec<String>), Vec<Problem>>, Error> {
     let mut db = Db::open(opts).await?;
     let result = async {
         let d = db.dialect();
@@ -3366,11 +3383,31 @@ async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Resu
         if !problems.is_empty() {
             return Ok(Err(problems));
         }
-        Ok(schema_as_sql_on(&mut db, opts, &[], true).await?.map(|sql| passing_over_existing(&sql, d)).map_err(|problem| vec![problem]))
+        let added = added_extensions(&mut db).await?;
+        Ok(schema_as_sql_on(&mut db, opts, &[], true).await?.map(|sql| (passing_over_existing(&sql, d), added)).map_err(|problem| vec![problem]))
     }
     .await;
     db.close().await;
     result
+}
+
+/// The extensions of the project's a Postgres database was given after its migration history began,
+/// by name, lowercase: each newer than the history table, as Postgres numbers what it makes (and with
+/// no history, each). They are what a developer added by hand, which the next migration makes for a
+/// new database; one the database had before (a platform's, or one a migration uses without making)
+/// is the environment's, which every shadow is made with.
+#[cfg(feature = "cli")]
+async fn added_extensions(db: &mut Db) -> Result<Vec<String>, Error> {
+    if db.dialect() != Dialect::Postgres {
+        return Ok(vec![]);
+    }
+    let rows = db
+        .rows(&format!(
+            "select lower(x.extname) as name from pg_extension x join pg_namespace n on n.oid = x.extnamespace where x.extname <> 'plpgsql' and {} and x.oid > coalesce(to_regclass('{HISTORY_TABLE}')::oid, 0) order by 1",
+            crate::catalog::project_extension("x", "n")
+        ))
+        .await?;
+    Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
 }
 
 /// `sql` with each `create schema` and `create extension` passing over one that exists, as the dump
@@ -4110,9 +4147,10 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
 /// The new migration's text: the diff engine's plan from the migrations replayed in order to
 /// `schema.sql`, run on the replay and compared with `schema.sql` before it is written. A plan that
 /// does not reach it is written all the same, with what remains, for the person (or agent) to finish.
-#[allow(clippy::type_complexity)]
+/// `added` are extensions the shadows leave out beside those the project's files create.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 #[cfg(feature = "cli")]
-async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, migration: &str, choices: &Choices, log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
+async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, added: &[String], migration: &str, choices: &Choices, log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
     let drafted = |texts: Vec<String>, code: i32, notes: Vec<String>, empty: bool| Drafted { texts, code, notes, empty, target: target_name.to_string(), lock_safe: false, commits: 0, changes: vec![] };
     let mut db = Db::open(opts).await?;
     let mut problems = out_of_reach(&mut db, &opts.url).await?;
@@ -4123,7 +4161,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
     }
     let mut server = Server::open(&mut db, &opts.url, opts.shadow_url.as_deref()).await?;
     server.copy_default_privileges(!sets_default_privileges(opts));
-    server.leave_extensions(created_extensions(opts));
+    server.leave_extensions(created_extensions(opts).into_iter().chain(added.iter().cloned()).collect());
     server.leave_schemas(created_schemas(opts));
     left_out_note(&server, log);
     db.close().await;
