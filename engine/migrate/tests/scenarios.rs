@@ -2260,6 +2260,12 @@ async fn create_renames_a_table_keeping_its_rows(mut p: P) {
     assert_has!(p.output(), r"drops the table accounts and its rows\n\n  To drop it:\n    reylo migrate new members --drop accounts\n  If it was renamed instead, as members:\n    reylo migrate new members --rename accounts=<new name>");
     let choices = reylo_migrate::Choices { drop: vec![], rename: vec![("accounts".into(), "members".into()), ("accounts.email".into(), "address".into())], ..Default::default() };
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "members", &choices, log).await).await, 0, "{}", p.peek());
+    // Both renames read as renames, the column's under the table's new name, named as --rename names
+    // it through the table's old name.
+    let out = p.output();
+    assert_has!(&out, r"  ~ table \[-accounts-\]\{\+members\+\}\n");
+    assert_has!(&out, r"  ~ column members\.\[-email-\]\{\+address\+\} ");
+    assert!(!out.contains("column members.address") && !out.contains("column accounts.email") && !out.contains("column members.email"), "{out}");
     p.output();
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_eq!(p.rows("select address from members").await[0].text("address"), "a");

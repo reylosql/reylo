@@ -879,48 +879,33 @@ fn changed_lines(before: &[String], after: &[String]) -> Vec<String> {
     listed(&gone, &came)
 }
 
-/// What a migration changes, as `changed_lines` writes it, but with each of `renames` (an old name and
-/// the new one, as `--rename` takes them) shown as one line changed in place (`~`) rather than as a
-/// drop and an add: a column's line, and a table's, whose columns that change come after it and whose objects
-/// that only take its new name are left out.
-fn summary_lines(before: &[String], after: &[String], renames: &[(String, String)]) -> Vec<String> {
-    let (mut gone, mut came) = difference(before, after);
-    let mut out = Vec::new();
-    let is = |line: &str, kind: &str, name: &str| {
-        let line = readable(line);
-        line.strip_prefix(&format!("{kind} {name}")).is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
-    };
-    let take = |lines: &mut Vec<String>, kind: &str, name: &str| lines.iter().position(|l| is(l, kind, name)).map(|k| lines.remove(k));
-    for (old, new) in renames {
-        let old = old.strip_prefix("public.").unwrap_or(old.as_str());
-        let new = renamed_to(old, new);
-        let new = new.strip_prefix("public.").unwrap_or(&new);
-        let (Some(a), Some(b)) = (take(&mut gone, "table", old), take(&mut came, "table", new)) else {
-            if let (Some(a), Some(b)) = (take(&mut gone, "column", old), take(&mut came, "column", new)) {
-                out.push(changed_line(&readable(&a), &readable(&b)));
-            }
-            continue;
-        };
-        out.push(changed_line(&readable(&a), &readable(&b)));
-        // What only takes the table's new name went with it.
-        let (old_bare, new_bare) = (crate::sql::last_written(old), crate::sql::last_written(new));
-        gone.retain(|g| {
-            let moved = crate::diff::swap_name(g, &old_bare, &new_bare);
-            match came.iter().position(|c| *c == moved) {
-                Some(k) => {
-                    came.remove(k);
-                    false
-                }
-                None => true,
-            }
-        });
-        // A column of it that changes, changed in place.
-        for a in gone.clone() {
-            let Some(column) = readable(&a).strip_prefix(&format!("column {old}.")).and_then(|rest| rest.split(' ').next()).map(str::to_string) else { continue };
-            if let Some(b) = take(&mut came, "column", &format!("{new}.{column}")) {
-                gone.retain(|g| *g != a);
-                out.push(changed_line(&readable(&a), &readable(&b)));
-            }
+/// The schema at each step of drafting a migration, as `catalog` reads it: before it, after its
+/// tables moved to another schema and after its tables renamed (where it does either), and after it.
+#[cfg(feature = "cli")]
+struct Steps<'a> {
+    before: &'a [String],
+    moved: Option<&'a [String]>,
+    renamed: Option<&'a [String]>,
+    after: &'a [String],
+}
+
+/// What a migration changes, as `changed_lines` writes it, but with each table and column it renames
+/// (`tables` and `columns`, each the old id and the new) shown as one line changed in place (`~`)
+/// rather than as a drop and an add. What only took a renamed table's new name, which is what the
+/// table renames changed, is left out.
+#[cfg(feature = "cli")]
+fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(String, String)]) -> Vec<String> {
+    let moved = steps.moved.unwrap_or(steps.before);
+    let mut out = if steps.moved.is_some() { changed_lines(steps.before, moved) } else { Vec::new() };
+    out.extend(tables.iter().map(|(old, new)| changed_line(&format!("table {}", shown_name(old)), &format!("table {}", shown_name(new)))));
+    let (mut gone, mut came) = difference(steps.renamed.unwrap_or(moved), steps.after);
+    let is = |line: &str, name: &str| readable(line).strip_prefix(&format!("column {name}")).is_some_and(|rest| rest.is_empty() || rest.starts_with(' '));
+    for (old, new) in columns {
+        let (old, new) = (shown_name(old), shown_name(new));
+        // Only both lines together make a rename.
+        if let (Some(g), Some(c)) = (gone.iter().position(|l| is(l, &old)), came.iter().position(|l| is(l, &new))) {
+            let (a, b) = (gone.remove(g), came.remove(c));
+            out.push(changed_line(&readable(&a), &readable(&b)));
         }
     }
     out.extend(listed(&gone, &came));
@@ -3896,7 +3881,22 @@ fn word_diff(a: &str, b: &str) -> String {
             (false, false) => format!("{{+{text}+}}"),
         }
     }
+    if a == b {
+        return a.to_string();
+    }
     let (a, b) = (tokens(a), tokens(b));
+    // What both start and end with is shared; only what lies between is compared word by word, and
+    // where that is long, as a long default can be, it is shown as replaced whole.
+    let head = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let tail = a[head..].iter().rev().zip(b[head..].iter().rev()).take_while(|(x, y)| x == y).count();
+    let (start, end) = (a[..head].concat(), a[a.len() - tail..].concat());
+    let (a, b) = (&a[head..a.len() - tail], &b[head..b.len() - tail]);
+    const MOST: usize = 10_000;
+    if a.len() * b.len() > MOST {
+        let (gone, came) = (a.concat(), b.concat());
+        let marked = |removed: bool, text: &str| if text.is_empty() { String::new() } else { mark(removed, text) };
+        return format!("{start}{}{}{end}", marked(true, &gone), marked(false, &came));
+    }
     let (n, m) = (a.len(), b.len());
     // The longest run of words both share, from each pair of positions to the end.
     let mut common = vec![vec![0usize; m + 1]; n + 1];
@@ -3932,7 +3932,7 @@ fn word_diff(a: &str, b: &str) -> String {
         }
     }
     flush(&mut out, &mut gone, &mut came);
-    out
+    format!("{start}{out}{end}")
 }
 
 /// The refusal for guesses, with what else the migration asks of `--drop`. One guess gets the
@@ -4154,6 +4154,8 @@ struct Settled {
     renames: Vec<String>,
     plan: crate::diff::Plan,
     assumed: Vec<(String, String, bool)>,
+    /// The tables renamed, each its old id and its new.
+    tables: Vec<(String, String)>,
 }
 
 /// The plan from `db`, which reads as `current`, to `target`, as `choices` settles it: tables renamed
@@ -4299,7 +4301,8 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
             db.script(&format!("{statement};")).await?;
         }
     }
-    settled.map(|r| r.map(|(plan, assumed)| Settled { renames, plan, assumed }))
+    let tables = renamed_tables.iter().map(|(old, new, _)| (old.clone(), new.clone())).collect();
+    settled.map(|r| r.map(|(plan, assumed)| Settled { renames, plan, assumed, tables }))
 }
 
 /// The new migration's text: the diff engine's plan from the migrations replayed in order to
@@ -4355,6 +4358,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
         // table moved to another schema is moved first, keeping its rows: the moves run on the
         // replay before the rest is planned from it.
         let mut moves = Vec::new();
+        let mut moved: Option<Vec<String>> = None;
         if shadows.db(c).dialect() == Dialect::Postgres {
             crate::diff::postgres::declare(shadows.db(a), &mut target, schema_sql).await?;
             moves = crate::diff::postgres::moves(&current, &target);
@@ -4363,6 +4367,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
                 let file = Migration { name: "moves".into(), time: String::new(), path: PathBuf::new(), sql: moves.iter().map(|m| format!("{m};")).collect::<Vec<_>>().join("\n") };
                 run(shadows.db(c), &file, false).await?;
                 current = crate::diff::read(shadows.db(c)).await?;
+                moved = Some(catalog(shadows.db(c)).await?);
             }
         }
         // Tables renamed, as --rename states, or where one goes while one of the same columns comes:
@@ -4372,10 +4377,13 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
         let indexes = if d == Dialect::Postgres { crate::diff::postgres::index_names(shadows.db(a)).await? } else { Default::default() };
         let target = Target { schema: target, indexes };
         let asked = Asked::migration(migration);
-        let Settled { renames, mut plan, assumed } = match settle(shadows.db(c), current, &target, false, choices, Some(&asked), false).await? {
+        let Settled { renames, mut plan, assumed, tables } = match settle(shadows.db(c), current, &target, false, choices, Some(&asked), false).await? {
             Ok(settled) => settled,
             Err(problems) => return Ok(Err(problems)),
         };
+        // The schema the table renames left, for the summary, which shows each as a rename and leaves
+        // out what only took its new name.
+        let renamed = if tables.is_empty() { None } else { Some(catalog(shadows.db(c)).await?) };
         moves.extend(renames);
         if plan.statements.is_empty() && moves.is_empty() {
             return Ok(Ok(drafted(vec![String::new()], 0, vec![], true)));
@@ -4484,8 +4492,8 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             notes.push(format!("      {}", paint("cyan", &create_command(&asked, choices, &names, &[]))));
         }
         if failed.is_none() && reached == wanted {
-            let renamed: Vec<(String, String)> = choices.rename.iter().cloned().chain(assumed.iter().map(|(old, new, _)| (old.clone(), new.clone()))).collect();
-            return Ok(Ok(Drafted { lock_safe: split_files.is_some(), commits, changes: summary_lines(&before, &reached, &renamed), ..drafted(texts, 0, notes, false) }));
+            let steps = Steps { before: &before, moved: moved.as_deref(), renamed: renamed.as_deref(), after: &reached };
+            return Ok(Ok(Drafted { lock_safe: split_files.is_some(), commits, changes: summary_lines(&steps, &tables, &plan.renamed), ..drafted(texts, 0, notes, false) }));
         }
         let mut remaining = Vec::new();
         if let Some(f) = &failed {
@@ -6657,24 +6665,34 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cli")]
     fn a_rename_reads_as_one_line_changed_in_place() {
         assert_eq!(inline_diff("column posts.title character varying(100)", "column posts.heading character varying(200)"), "column posts.[-title-]{+heading+} character varying([-100-]{+200+})");
         assert_eq!(inline_diff("column users.bio character varying(200)", "column users.about text"), "column users.[-bio-]{+about+} [-character varying(200)-]{+text+}");
         assert_eq!(inline_diff("column users.score bigint", "column users.label varchar(200) collate utf8mb4_0900_ai_ci"), "column users.[-score-]{+label+} [-bigint-]{+varchar(200) collate utf8mb4_0900_ai_ci+}");
         assert_eq!(inline_diff("column \"My Users\".\"Full Name\" text", "column \"My Users\".\"Display Name\" text"), "column \"My Users\".\"[-Full-]{+Display+} Name\" text");
         assert_eq!(inline_diff("table orders", "table invoices"), "table [-orders-]{+invoices+}");
+        // A long definition the same on both sides, and one replaced whole past the bound.
+        let long = format!("column t.c jsonb default '{}'", "x ".repeat(5000));
+        assert_eq!(inline_diff(&long, &long.replacen("t.c", "t.d", 1)), long.replacen("t.c", "t.[-c-]{+d+}", 1));
+        let (a, b) = (format!("default {}", "a ".repeat(200)), format!("default {}", "b ".repeat(200)));
+        assert_eq!(word_diff(&a, &b), format!("default [-{}-]{{+{}+}} ", "a ".repeat(200).trim_end(), "b ".repeat(200).trim_end()));
         let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         // A column renamed, beside one dropped and one added.
         let before = lines(&["table public.posts", "column public.posts.title character varying(100)", "column public.posts.body text"]);
         let after = lines(&["table public.posts", "column public.posts.heading character varying(200)", "column public.posts.summary text"]);
-        let renames = vec![("posts.title".to_string(), "heading".to_string())];
-        assert_eq!(summary_lines(&before, &after, &renames), ["  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})", "  + column posts.summary text", "  - column posts.body text"]);
-        // A table renamed: what only takes its new name is left out, and a column of it that changes
-        // is changed in place.
-        let before = lines(&["table public.users", "column public.users.id integer not null", "column public.users.nick text", "constraint public.users users_pkey PRIMARY KEY (id)"]);
-        let after = lines(&["table public.accounts", "column public.accounts.id integer not null", "column public.accounts.nick character varying(40)", "constraint public.accounts accounts_pkey PRIMARY KEY (id)", "column public.accounts.joined date"]);
-        let renames = vec![("users".to_string(), "accounts".to_string())];
-        assert_eq!(summary_lines(&before, &after, &renames), ["  ~ table [-users-]{+accounts+}", "  ~ column [-users-]{+accounts+}.nick [-text-]{+character varying(40)+}", "  + column accounts.joined date"]);
+        let steps = Steps { before: &before, moved: None, renamed: None, after: &after };
+        let columns = vec![("column public.posts.title".to_string(), "column public.posts.heading".to_string())];
+        assert_eq!(summary_lines(&steps, &[], &columns), ["  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})", "  + column posts.summary text", "  - column posts.body text"]);
+        // A table renamed: what its rename changed is left out, a default naming it that changes
+        // besides is not, and a column of it renamed is a rename under the table's new name.
+        let before = lines(&["table public.orders", "column public.orders.id integer not null", "column public.orders.title text", "column public.orders.kind text default 'orders'::text", "constraint public.orders orders_pkey PRIMARY KEY (id)"]);
+        let renamed = lines(&["table public.invoices", "column public.invoices.id integer not null", "column public.invoices.title text", "column public.invoices.kind text default 'orders'::text", "constraint public.invoices invoices_pkey PRIMARY KEY (id)"]);
+        let after = lines(&["table public.invoices", "column public.invoices.id integer not null", "column public.invoices.heading text", "column public.invoices.kind text default 'invoices'::text", "constraint public.invoices invoices_pkey PRIMARY KEY (id)"]);
+        let steps = Steps { before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string())];
+        let columns = vec![("column public.invoices.title".to_string(), "column public.invoices.heading".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &columns), ["  ~ table [-orders-]{+invoices+}", "  ~ column invoices.[-title-]{+heading+} text", "  + column invoices.kind text default 'invoices'::text", "  - column invoices.kind text default 'orders'::text"]);
     }
 
     #[test]

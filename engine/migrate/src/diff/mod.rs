@@ -336,6 +336,9 @@ pub struct Plan {
     /// column's id, the new name, and its old and new definitions where they differ, for the person
     /// running `create` to settle.
     pub renames: Vec<(String, String, Option<(String, String)>)>,
+    /// Every column it renames, stated or assumed, as the old column's id and the new one's: what
+    /// the summary of a migration shows as a rename.
+    pub renamed: Vec<(String, String)>,
     /// Columns kept whose change of type can lose what their values hold without failing, each the
     /// column's id and what it loses ("changes from … to …, which …"), for `--drop` to accept.
     pub narrowings: Vec<(String, String)>,
@@ -1762,6 +1765,9 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                 plan.statements.extend(o.drop.clone());
             }
             Op::Alter(id) => {
+                if let Some((old_id, _)) = renames.get(id).filter(|_| !followers.contains(id)) {
+                    plan.renamed.push((old_id.clone(), id.clone()));
+                }
                 if let Some((old_id, _)) = renames.get(id).filter(|(old_id, _)| !stated.contains(old_id) && !followers.contains(id)) {
                     // The guess is written down with what to write instead, should the two columns
                     // be two: the old one's drop and the new one's add.

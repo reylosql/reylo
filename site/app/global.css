@@ -2189,6 +2189,10 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   color: #fbc40e;
 }
 
+.shiki:not(.not-fumadocs-codeblock *) code span.term-marker {
+  display: none;
+}
+
 .shiki:not(.not-fumadocs-codeblock *) code span.term-removed {
   color: #82071e;
   background: #ffebe9;

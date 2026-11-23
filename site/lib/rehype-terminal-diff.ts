@@ -16,8 +16,9 @@ const CHANGED = /^(\s+)~ ((?:column|table) .*)$/;
 
 /**
  * Draws a line `reylo` changed in place (a rename in `migrate new`'s summary) as the CLI draws it in a
- * terminal: its `~` yellow, the old words highlighted red and the new green, without the markers it
- * prints where colour is off, which is how the block is written (app/global.css, `.term-removed`).
+ * terminal: its `~` yellow, the old words highlighted red and the new green, its markers, which it
+ * prints where colour is off and the block is written with, hidden but kept for the copy button
+ * (app/global.css, `.term-removed`).
  */
 export function rehypeTerminalDiff() {
   const visit = (node: HastNode) => {
@@ -32,7 +33,10 @@ export function rehypeTerminalDiff() {
         for (const m of text.matchAll(MARK)) {
           if (m.index > at) parts.push({ type: 'text', value: text.slice(at, m.index) });
           const removed = m[1] !== undefined;
-          parts.push({ type: 'element', tagName: 'span', properties: { className: [removed ? 'term-removed' : 'term-added'] }, children: [{ type: 'text', value: removed ? m[1] : m[2] }] });
+          // The markers stay in the text, hidden, so that the block copies as the CLI prints it.
+          const marker = (value: string): HastNode => ({ type: 'element', tagName: 'span', properties: { className: ['term-marker'] }, children: [{ type: 'text', value }] });
+          const [open, close] = removed ? ['[-', '-]'] : ['{+', '+}'];
+          parts.push({ type: 'element', tagName: 'span', properties: { className: [removed ? 'term-removed' : 'term-added'] }, children: [marker(open), { type: 'text', value: removed ? m[1] : m[2] }, marker(close)] });
           at = m.index + m[0].length;
         }
         if (at < text.length) parts.push({ type: 'text', value: text.slice(at) });
