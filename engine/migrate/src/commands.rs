@@ -3384,7 +3384,8 @@ async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Resu
 /// needs an extension where its replay without it fails, makes anything it doesn't make with it, or
 /// lacks anything it makes with it but what the extension itself brings a shadow (its line, its
 /// schema, their grants, read from an empty one), as a migration that does something only where the
-/// extension is. Where the history replays only without them, none is the environment's. Each is tried with
+/// extension is. Where the history replays only without them, each is given back to that replay on
+/// its own, and the same holds. Each is tried with
 /// those already taken, so that one the history needs takes no other with it.
 #[cfg(feature = "cli")]
 async fn unneeded_by_history(opts: &Options, files: &[Migration], extensions: Vec<String>) -> Result<Vec<String>, Error> {
@@ -3416,8 +3417,21 @@ async fn unneeded_by_history(opts: &Options, files: &[Migration], extensions: Ve
         let Some(empty) = lines(&[], false).await? else { return Ok(vec![]) };
         let Some(replayed) = lines(&[], true).await? else {
             // The history replays only without them, as one that renames a schema to the one an
-            // extension is in: none is the environment's.
-            return Ok(if lines(&extensions, true).await?.is_some() { extensions.clone() } else { vec![] });
+            // extension is in: from the replay without any, each is given back on its own, and one
+            // that makes the history make more than what it brings is the environment's.
+            let (Some(bare), Some(empty_bare)) = (lines(&extensions, true).await?, lines(&extensions, false).await?) else { return Ok(vec![]) };
+            let mut needed = Vec::new();
+            for extension in &extensions {
+                let left: Vec<String> = extensions.iter().filter(|x| *x != extension).cloned().collect();
+                if let (Some(with), Some(empty_with)) = (lines(&left, true).await?, lines(&left, false).await?) {
+                    let brought: BTreeSet<&String> = empty_with.difference(&empty_bare).collect();
+                    if !(bare.is_subset(&with) && with.difference(&bare).all(|l| brought.contains(l))) {
+                        needed.push(extension.clone());
+                    }
+                }
+            }
+            let unneeded: Vec<String> = extensions.iter().filter(|x| !needed.contains(x)).cloned().collect();
+            return Ok(if lines(&unneeded, true).await?.is_some() { unneeded } else { vec![] });
         };
         let mut unneeded = async |left: Vec<String>| -> Result<Option<Vec<String>>, Error> {
             let (Some(without), Some(empty_without)) = (lines(&left, true).await?, lines(&left, false).await?) else { return Ok(None) };
