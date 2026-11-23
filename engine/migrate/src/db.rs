@@ -108,6 +108,89 @@ pub(crate) enum Ran {
     Waited(Error),
     Failed(Error),
     Partly(Error),
+    /// Failed as `Failed` does, on a row the table already held that breaks a constraint or a
+    /// unique index the statement checked the rows against.
+    Broke(Error, Breach),
+}
+
+/// What a statement found a row breaking: a constraint or a unique index, by the name the server
+/// gave, and the table it is on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Breach {
+    pub kind: Breaks,
+    /// The constraint's name, or the unique index's, or for a NOT NULL with no name the column's.
+    pub name: String,
+    /// The table, schema-qualified where the server said (Postgres), else as the error named it.
+    pub table: String,
+    /// The column a NOT NULL is on, where the server said.
+    pub column: Option<String>,
+    /// A query that lists the rows that break it, where the database could say.
+    pub rows: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Breaks {
+    #[default]
+    Check,
+    ForeignKey,
+    Unique,
+    NotNull,
+}
+
+/// A Postgres name as SQL writes it: bare where it is a lowercase word, else in double quotes.
+pub(crate) fn pg_ident(s: &str) -> String {
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') && !s.as_bytes()[0].is_ascii_digit() {
+        s.to_string()
+    } else {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    }
+}
+
+/// What a Postgres error says of a row that breaks a constraint, by its SQLSTATE: a `check`, a
+/// foreign key, a unique index or a NOT NULL. None for any other error.
+#[cfg(feature = "cli")]
+pub(crate) fn pg_breach(e: &tokio_postgres::Error) -> Option<Breach> {
+    use tokio_postgres::error::SqlState;
+    let d = e.as_db_error()?;
+    let kind = match d.code() {
+        c if *c == SqlState::CHECK_VIOLATION => Breaks::Check,
+        c if *c == SqlState::FOREIGN_KEY_VIOLATION => Breaks::ForeignKey,
+        c if *c == SqlState::UNIQUE_VIOLATION => Breaks::Unique,
+        c if *c == SqlState::NOT_NULL_VIOLATION => Breaks::NotNull,
+        _ => return None,
+    };
+    let name = d.constraint().or(d.column())?.to_string();
+    let table = match (d.schema(), d.table()) {
+        (Some(schema), Some(table)) => format!("{}.{}", pg_ident(schema), pg_ident(table)),
+        (None, Some(table)) => pg_ident(table),
+        _ => return None,
+    };
+    Some(Breach { kind, name, table, column: d.column().map(pg_ident), rows: None })
+}
+
+/// What a MySQL error says of a row that breaks a constraint: a `check` (3819), a foreign key
+/// (1452) or a unique key (1062), its name read off the server's message. None for any other
+/// error, and where the message doesn't read as MySQL's English one does.
+#[cfg(feature = "cli")]
+pub(crate) fn mysql_breach(code: u16, message: &str) -> Option<Breach> {
+    let between = |from: &str, to: &str| -> Option<String> {
+        let at = message.find(from)? + from.len();
+        let end = message[at..].find(to)? + at;
+        Some(message[at..end].to_string())
+    };
+    match code {
+        // Check constraint 'people_mood' is violated.
+        3819 => Some(Breach { kind: Breaks::Check, name: between("Check constraint '", "' is violated")?, ..Breach::default() }),
+        // Cannot add or update a child row: a foreign key constraint fails (`db`.`#sql-…`, CONSTRAINT `people_team` FOREIGN KEY (`team_id`) REFERENCES `teams` (`id`))
+        1452 => Some(Breach { kind: Breaks::ForeignKey, name: between("CONSTRAINT `", "` FOREIGN KEY")?, ..Breach::default() }),
+        // Duplicate entry 'a' for key 'users.email'
+        1062 => {
+            let key = between("' for key '", "'").or_else(|| message.rsplit_once(" for key '").map(|(_, k)| k.trim_end_matches('\'').to_string()))?;
+            let (table, name) = key.rsplit_once('.').map(|(t, n)| (t.to_string(), n.to_string())).unwrap_or((String::new(), key));
+            Some(Breach { kind: Breaks::Unique, name, table, ..Breach::default() })
+        }
+        _ => None,
+    }
 }
 
 impl From<Error> for Ran {
@@ -527,11 +610,12 @@ impl Db {
             #[cfg(feature = "cli")]
             Db::Postgres(client) => client.batch_execute(sql).await.map_err(|e| {
                 let waited = e.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE);
+                let breach = pg_breach(&e);
                 let e = pg_error(e);
-                if waited {
-                    Ran::Waited(e)
-                } else {
-                    Ran::Failed(e)
+                match breach {
+                    _ if waited => Ran::Waited(e),
+                    Some(b) => Ran::Broke(e, b),
+                    None => Ran::Failed(e),
                 }
             }),
             #[cfg(feature = "cli")]
@@ -540,8 +624,16 @@ impl Db {
                     if let Err(e) = conn.query_drop(&statement.text).await {
                         // ER_LOCK_WAIT_TIMEOUT: a metadata lock, or a row's, waited past its limit.
                         let waited = matches!(&e, mysql_async::Error::Server(s) if s.code == 1205);
+                        let breach = match &e {
+                            mysql_async::Error::Server(s) => mysql_breach(s.code, &s.message),
+                            _ => None,
+                        };
                         let e = mysql_error(e);
-                        return Err(if waited { Ran::Waited(e) } else { Ran::Failed(e) });
+                        return Err(match breach {
+                            _ if waited => Ran::Waited(e),
+                            Some(b) => Ran::Broke(e, b),
+                            None => Ran::Failed(e),
+                        });
                     }
                 }
                 Ok(())

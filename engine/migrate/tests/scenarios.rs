@@ -471,6 +471,10 @@ for_each_dialect!(
     a_hotfix_moves_past_no_table_made_from_a_query_and_is_none,
     history_push_follows_a_renamed_migration,
     a_failed_migration_leaves_nothing,
+    a_check_the_rows_break_stops_its_change_partway,
+    a_foreign_key_the_rows_break_stops_its_change_partway,
+    a_unique_index_the_rows_break_lists_the_duplicates,
+    a_unique_index_built_under_a_new_name_is_named_as_schema_sql_names_it,
     files_that_cannot_run_atomically_are_refused,
     a_lone_statement_cut_off_that_landed,
     a_lone_statement_cut_off_that_did_not_land,
@@ -1655,10 +1659,172 @@ async fn a_failed_migration_leaves_nothing(mut p: P) {
     p.file("20261027110000_b.sql", &format!("create table b (id {int}); alter table a {change};"));
     p.schema(&format!("create table a (id {int}{column}); create table b (id {int});"));
     assert_eq!(p.migrate().await, 1, "{}", p.peek());
-    // Said as every refusal is: what failed, that nothing of it stays, and what to run next.
-    assert_has!(p.output(), r"  ✗ 20261027110000_b\.sql  failed\n\n✗ The migration 20261027110000_b\.sql failed and was rolled back\n  [^\n]+\n  Nothing was recorded, so the next deploy runs it again\.\n\n  Fix the file, lock the fix and deploy again:\n    reylo migrate dev\n    reylo migrate deploy\n  If another database already ran it, write a new migration instead:\n    reylo migrate new <name>$");
+    // Said as every refusal is: what failed, that nothing of it stays, and what to run next. On
+    // Postgres, the row that has no value is what failed it, so the way on is that row, which a
+    // query lists.
+    if p.d == Dialect::Postgres {
+        assert_has!(p.output(), r"  ✗ 20261027110000_b\.sql  failed\n\n✗ The migration 20261027110000_b\.sql failed on rows with nulls in a\.id\n  [^\n]+\n  Nothing was recorded, so the next deploy runs it again\.\n\n  List the rows that break it:\n    select \* from a where id is null;\n  Fix them here, then deploy again:\n    reylo migrate deploy\n  If the rows are right and only development ran 20261027110000_b\.sql, change a\.id in [^\n]*schema\.sql, delete it and write the replacement:\n    reylo migrate new <name>\n    reylo migrate dev$");
+    } else {
+        assert_has!(p.output(), r"  ✗ 20261027110000_b\.sql  failed\n\n✗ The migration 20261027110000_b\.sql failed and was rolled back\n  [^\n]+\n  Nothing was recorded, so the next deploy runs it again\.\n\n  Fix the file, lock the fix and deploy again:\n    reylo migrate dev\n    reylo migrate deploy\n  If another database already ran it, write a new migration instead:\n    reylo migrate new <name>$");
+    }
     assert!(p.try_rows("select 1 from b").await.is_err(), "b rolled back with the file");
     assert_eq!(p.history().await, ["20261027100000_a.sql"]);
+}
+
+/// The query a failure on rows gives, as the refusal shows it under "List the rows that break it".
+fn listed_query(out: &str) -> String {
+    let at = out.find("  List the rows that break it:\n    ").unwrap_or_else(|| panic!("no query in:\n{out}")) + "  List the rows that break it:\n    ".len();
+    out[at..].lines().next().unwrap().to_string()
+}
+
+/// A `check` changed on a table whose rows break the new one. On Postgres the change is two
+/// migrations, the constraint added `not valid` and then validated, so a deploy stops between them:
+/// the first in place, holding new writes, and the second failed. The refusal says so, lists the
+/// rows, and says the two ways on; `status` says the database is partway through the change. On
+/// MySQL the change is one statement, which the server undoes whole.
+async fn a_check_the_rows_break_stops_its_change_partway(mut p: P) {
+    if p.d == Dialect::Sqlite {
+        return;
+    }
+    let (int, text) = (p.t.int, p.t.text);
+    let base = format!("create table people (id {int} primary key, mood {text} not null, constraint people_mood check (mood in ('ok', 'happy', 'sad')));");
+    p.schema(&base);
+    p.file("20261027100000_people.sql", &base);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into people values (1, 'ok'), (2, 'happy')").await;
+    p.schema(&base.replace("'ok', ", ""));
+    if p.d == Dialect::Postgres {
+        p.file("20261027110000_remove_ok.sql", "alter table people drop constraint people_mood;\nalter table people add constraint people_mood check (mood in ('happy', 'sad')) not valid;\n");
+        p.file("20261027110001_remove_ok_2.sql", "alter table people validate constraint people_mood;\n");
+    } else {
+        p.file("20261027110000_remove_ok.sql", "alter table people drop check people_mood, add constraint people_mood check (mood in ('happy', 'sad'));\n");
+    }
+    p.output();
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    let out = p.output();
+    if p.d == Dialect::Postgres {
+        assert_has!(&out, r"  ✓ 20261027110000_remove_ok\.sql +applied[^\n]*\n  ✗ 20261027110001_remove_ok_2\.sql +failed\n\n✗ The migration 20261027110001_remove_ok_2\.sql failed on rows that break people_mood\n  check constraint .people_mood. of relation .people. is violated by some row\n  The migration before it, 20261027110000_remove_ok\.sql, added people_mood without checking the rows already in people, so it holds new writes and not those rows\.\n  Nothing was recorded, so the next deploy runs it again\.\n\n  List the rows that break it:\n    select \* from people where not \([^\n]+\);\n  Fix them here, then deploy again:\n    reylo migrate deploy\n  If the rows are right and only development ran 20261027110001_remove_ok_2\.sql, change people_mood in [^\n]*schema\.sql, delete it and write the replacement:\n    reylo migrate new <name>\n    reylo migrate dev$");
+        // The first half holds new writes already.
+        assert!(p.try_rows("insert into people values (3, 'ok') returning id").await.is_err());
+        assert_eq!(p.status().await, 1);
+        assert_has!(p.output(), r"» This database ran part of one change: 20261027110000_remove_ok\.sql, and not 20261027110001_remove_ok_2\.sql\n» Until it runs, people_mood holds new writes to people and not the rows already there\n» This database hasn't run 20261027110001_remove_ok_2\.sql\n");
+    } else {
+        assert_has!(&out, r"  ✗ 20261027110000_remove_ok\.sql +failed\n\n✗ The migration 20261027110000_remove_ok\.sql failed on rows that break people_mood\n  Check constraint 'people_mood' is violated\.\n  Nothing was recorded, so the next deploy runs it again\.\n\n  List the rows that break it:\n    select \* from people where not \(mood in \('happy', 'sad'\)\);\n  Fix them here, then deploy again:\n    reylo migrate deploy\n  If the rows are right and only development ran 20261027110000_remove_ok\.sql, change people_mood in [^\n]*schema\.sql, delete it and write the replacement:\n");
+        // Undone whole: the old check still takes 'ok'.
+        p.exec("insert into people values (3, 'ok')").await;
+        p.exec("delete from people where id = 3").await;
+    }
+    // The query lists the row that breaks it, and no other.
+    let ids: Vec<String> = p.rows(&listed_query(&out)).await.iter().map(|r| r.text("id").to_string()).collect();
+    assert_eq!(ids, ["1"]);
+    // Fixed here, the same migration runs.
+    p.exec("update people set mood = 'happy' where id = 1").await;
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+}
+
+/// A changed unique index built under a name of its own before the old one is dropped, and renamed
+/// to it after: a build the rows fail leaves the old index in force, and the refusal names the index
+/// as schema.sql does, with both migrations to replace.
+async fn a_unique_index_built_under_a_new_name_is_named_as_schema_sql_names_it(mut p: P) {
+    if p.d != Dialect::Postgres {
+        return;
+    }
+    let base = "create table users (id bigint primary key, org bigint, email text);\ncreate unique index users_email on users (org, email);";
+    p.schema(base);
+    p.file("20261027100000_users.sql", base);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into users values (1, 1, 'a'), (2, 2, 'a')").await;
+    p.schema("create table users (id bigint primary key, org bigint, email text);\ncreate unique index users_email on users (email);");
+    p.file("20261027110000_email.sql", "create unique index concurrently users_email_new on users (email);\n");
+    p.file("20261027110001_email_2.sql", "drop index users_email;\nalter index users_email_new rename to users_email;\n");
+    p.output();
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    assert_has!(p.output(), r"✗ The migration 20261027110000_email\.sql failed on rows that break users_email\n[\s\S]*  If the rows are right and only development ran 20261027110000_email\.sql and 20261027110001_email_2\.sql, change users_email in [^\n]*schema\.sql, delete them and write the replacement:\n");
+    assert_eq!(p.rows("select indexrelid::regclass::text as i from pg_index where indrelid = 'users'::regclass order by 1").await.iter().map(|r| r.text("i").to_string()).collect::<Vec<_>>(), ["users_email", "users_pkey"]);
+}
+
+/// A foreign key added to a table with rows that reference nothing. On Postgres it is added `not
+/// valid`, then validated; on MySQL, a change with a column too is one statement per migration, so
+/// the column is in place when the key fails. Either way the refusal names what of the change is in
+/// place, and lists the rows, leaving out a row whose key is NULL, which a foreign key passes.
+async fn a_foreign_key_the_rows_break_stops_its_change_partway(mut p: P) {
+    if p.d == Dialect::Sqlite {
+        return;
+    }
+    let int = p.t.int;
+    let base = format!("create table teams (id {int} primary key);\ncreate table people (id {int} primary key, team_id {int});");
+    p.schema(&base);
+    // One statement a file, as MySQL takes them.
+    p.file("20261027100000_teams.sql", &format!("create table teams (id {int} primary key);"));
+    p.file("20261027100001_people.sql", &format!("create table people (id {int} primary key, team_id {int});"));
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into teams values (1)").await;
+    p.exec("insert into people values (1, 1), (2, 7), (3, null)").await;
+    if p.d == Dialect::Postgres {
+        p.schema(&format!("create table teams (id {int} primary key);\ncreate table people (id {int} primary key, team_id {int}, constraint people_team foreign key (team_id) references teams (id));"));
+        p.file("20261027110000_team.sql", "alter table people add constraint people_team foreign key (team_id) references teams (id) not valid;\n");
+        p.file("20261027110001_team_2.sql", "alter table people validate constraint people_team;\n");
+    } else {
+        p.schema(&format!("create table teams (id {int} primary key);\ncreate table people (id {int} primary key, team_id {int}, nick varchar(10), constraint people_team foreign key (team_id) references teams (id));"));
+        p.file("20261027110000_team.sql", "alter table people add column nick varchar(10);\n");
+        p.file("20261027110001_team_2.sql", "alter table people add constraint people_team foreign key (team_id) references teams (id);\n");
+    }
+    p.output();
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    let out = p.output();
+    let before = if p.d == Dialect::Postgres {
+        r"The migration before it, 20261027110000_team\.sql, added people_team without checking the rows already in people, so it holds new writes and not those rows\."
+    } else {
+        r"The migration before it, 20261027110000_team\.sql, of the same change is applied\."
+    };
+    assert_has!(&out, &format!(r"✗ The migration 20261027110001_team_2\.sql failed on rows that break people_team\n  [^\n]+\n  {before}\n  Nothing was recorded, so the next deploy runs it again\.\n\n  List the rows that break it:\n    select c\.\* from people as c where c\.team_id is not null and not exists \(select 1 from teams as p where p\.id = c\.team_id\);\n"));
+    let ids: Vec<String> = p.rows(&listed_query(&out)).await.iter().map(|r| r.text("id").to_string()).collect();
+    assert_eq!(ids, ["2"]);
+    if p.d == Dialect::Postgres {
+        assert_eq!(p.status().await, 1);
+        assert_has!(p.output(), r"» This database ran part of one change: 20261027110000_team\.sql, and not 20261027110001_team_2\.sql\n» Until it runs, people_team holds new writes to people and not the rows already there\n");
+    }
+    p.exec("update people set team_id = 1 where id = 2").await;
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+}
+
+/// A unique index built on a table that holds duplicates, new and in place of another. On
+/// Postgres it is built concurrently, alone in its file, and a build that fails leaves an invalid
+/// index, which deploy drops; a changed one is dropped by the migration before it, which stays
+/// applied. The refusal lists the duplicates, read off the index before it is dropped, leaving out
+/// NULLs, which a unique index takes any number of.
+async fn a_unique_index_the_rows_break_lists_the_duplicates(mut p: P) {
+    if p.d == Dialect::Sqlite {
+        return;
+    }
+    let (int, text) = (p.t.int, p.t.text);
+    let base = format!("create table users (id {int} primary key, org {int}, email {text});\ncreate unique index users_org_email on users (org, email);");
+    p.schema(&base);
+    p.file("20261027100000_users.sql", &format!("create table users (id {int} primary key, org {int}, email {text});"));
+    p.file("20261027100001_users_index.sql", "create unique index users_org_email on users (org, email);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into users values (1, 1, 'a'), (2, 2, 'a'), (3, 1, 'b'), (4, 1, null), (5, 2, null)").await;
+    p.schema(&format!("create table users (id {int} primary key, org {int}, email {text});\ncreate unique index users_email on users (email);"));
+    if p.d == Dialect::Postgres {
+        p.file("20261027110000_email.sql", "drop index users_org_email;\n");
+        p.file("20261027110001_email_2.sql", "create unique index concurrently users_email on users (email);\n");
+    } else {
+        p.file("20261027110000_email.sql", "alter table users drop index users_org_email, add unique key users_email (email);\n");
+    }
+    p.output();
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    let out = p.output();
+    if p.d == Dialect::Postgres {
+        assert_has!(&out, r"✗ The migration 20261027110001_email_2\.sql failed on rows that break users_email\n  could not create unique index .users_email.[^\n]*\n  The migration before it, 20261027110000_email\.sql, of the same change is applied\.\n  Nothing was recorded, so the next deploy runs it again\.\n\n  List the rows that break it:\n    select email, count\(\*\) from users where email is not null group by email having count\(\*\) > 1;\n  Fix them here, then deploy again:\n    reylo migrate deploy\n  If the rows are right and only development ran 20261027110001_email_2\.sql, change users_email in [^\n]*schema\.sql, delete it and write the replacement:\n");
+        // The invalid index the build left is gone, so the next deploy builds it again.
+        assert!(p.rows("select 1 from pg_class where relname = 'users_email'").await.is_empty());
+    } else {
+        assert_has!(&out, r"✗ The migration 20261027110000_email\.sql failed on rows that break users_email\n  Duplicate entry [^\n]+\n  Nothing was recorded, so the next deploy runs it again\.\n\n  List the rows that break it:\n    select email, count\(\*\) from users where email is not null group by email having count\(\*\) > 1;\n");
+    }
+    let dupes: Vec<String> = p.rows(&listed_query(&out)).await.iter().map(|r| r.text("email").to_string()).collect();
+    assert_eq!(dupes, ["a"]);
+    p.exec("update users set email = 'c' where id = 2").await;
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
 }
 
 async fn files_that_cannot_run_atomically_are_refused(mut p: P) {
@@ -4395,7 +4561,7 @@ mod adversarial {
         p.schema("create table t (x int); create unique index t_x on t (x);");
         p.output();
         assert_eq!(p.migrate().await, 1);
-        assert_has!(p.output(), r"✗ The migration 20261027110000_unique\.sql failed and was rolled back\n  could not create unique index[^\n]*\n  Nothing was recorded, so the next deploy runs it again\.\n\n  Fix the file, lock the fix and deploy again:");
+        assert_has!(p.output(), r"✗ The migration 20261027110000_unique\.sql failed on rows that break t_x\n  could not create unique index[^\n]*\n  Nothing was recorded, so the next deploy runs it again\.\n\n  List the rows that break it:\n    select x, count\(\*\) from t where x is not null group by x having count\(\*\) > 1;\n  Fix them here, then deploy again:\n    reylo migrate deploy\n");
         assert!(p.rows("select 1 from pg_class where relname = 't_x'").await.is_empty(), "the invalid index was dropped");
         p.exec("delete from t where ctid = (select max(ctid) from t)").await;
         assert_eq!(p.migrate().await, 0, "the file runs again as written:\n{}", p.peek());
