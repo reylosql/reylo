@@ -1228,15 +1228,17 @@ async fn init_leaves_out_another_tools_history(p: P) {
     leaves_out_another_tools_history(p, &format!("create table users (id {id}, email {text} not null);")).await;
 }
 
-/// Where Reylo's own SQL can't write the schema (here a comment on a table), `init` writes
-/// pg_dump's, which leaves the other tool's tables, and the sequences they own, out too.
+/// pg_dump's schema, where Reylo's own SQL can't be checked, leaves the other tool's tables out
+/// too, and the sequences they own.
 #[tokio::test(flavor = "current_thread")]
-async fn init_from_pg_dump_leaves_out_another_tools_history() {
+async fn the_dump_leaves_out_another_tools_history() {
     let Some(p) = P::new(Dialect::Postgres).await else { return };
-    let url = p.url.clone();
-    let schema = leaves_out_another_tools_history(p, "create table users (id bigint primary key, email text not null); comment on table users is 'people';").await;
-    assert!(has(&schema, r"CREATE TABLE public\.users"), "pg_dump's: {schema}");
-    forget(&url).await;
+    p.exec(&format!("create table users (id bigint primary key, email text not null);{}", other_tools_history(&p))).await;
+    // A shadows' server that answers nothing leaves the dump.
+    let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
+    let text = introspect(&opts).await;
+    assert!(text.contains("CREATE TABLE public.users"), "{text}");
+    assert!(!has(&text, "(?i)prisma|knex|drizzle|databasechangelog"), "{text}");
 }
 
 /// What `init` wrote into schema.sql.
