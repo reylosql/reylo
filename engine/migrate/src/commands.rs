@@ -859,10 +859,15 @@ fn readable(line: &str) -> String {
 }
 
 /// A Postgres function or procedure as `pg_get_functiondef` writes it, by its name, its arguments
-/// whole (to the parenthesis that closes them, outside quotes, where a default's string may hold a
-/// line break, written `\n`) and what it returns. None for any other line, or one whose arguments
-/// don't close.
+/// whole (to the parenthesis that closes them, outside quotes, where a name or a default's string
+/// may hold a line break, shown as `↵`) and what it returns. None for any other line, or one whose arguments don't close.
 fn routine(line: &str) -> Option<String> {
+    routine_parts(line).map(|(_, shown)| shown)
+}
+
+/// A routine's signature and what it returns as `pg_get_functiondef` writes them, which tells two
+/// routines apart, and as `routine` shows them.
+fn routine_parts(line: &str) -> Option<(String, String)> {
     let rest = line.strip_prefix("function CREATE OR REPLACE ")?;
     let (kind, rest) = rest.strip_prefix("FUNCTION ").map(|r| ("function", r)).or_else(|| rest.strip_prefix("PROCEDURE ").map(|r| ("procedure", r)))?;
     let (mut depth, mut quote) = (0, None::<char>);
@@ -884,9 +889,10 @@ fn routine(line: &str) -> Option<String> {
         }
     }
     let end = end?;
-    let signature = lowercase_keywords(&rest[..end]).replace('\n', "\\n");
-    let returns = rest[end..].strip_prefix("\n RETURNS ").and_then(|r| r.lines().next()).map(|r| format!(" returns {}", lowercase_keywords(r))).unwrap_or_default();
-    Some(format!("{kind} {signature}{returns}"))
+    let raw_returns = rest[end..].strip_prefix("\n RETURNS ").and_then(|r| r.lines().next());
+    let signature = lowercase_keywords(&rest[..end]).replace('\n', "↵");
+    let returns = raw_returns.map(|r| format!(" returns {}", lowercase_keywords(r))).unwrap_or_default();
+    Some((format!("{kind} {}\n{}", &rest[..end], raw_returns.unwrap_or_default()), format!("{kind} {signature}{returns}")))
 }
 
 /// The name `text` starts with, a qualified one whole and a quoted part with its spaces, and what
@@ -1176,7 +1182,7 @@ fn listed(gone: &[String], came: &[String], before: &[String], after: &[String],
 fn in_place<'a>(gone: Vec<&'a String>, came: Vec<&'a String>, indent: &str) -> (Vec<&'a String>, Vec<&'a String>, Vec<String>) {
     let mut by_signature: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
     for (k, c) in came.iter().enumerate() {
-        if let Some(signature) = routine(c) {
+        if let Some((signature, _)) = routine_parts(c) {
             by_signature.entry(signature).or_default().push(k);
         }
     }
@@ -1184,7 +1190,7 @@ fn in_place<'a>(gone: Vec<&'a String>, came: Vec<&'a String>, indent: &str) -> (
     let mut kept = Vec::new();
     let mut changed = Vec::new();
     for g in gone {
-        let found = routine(g).and_then(|signature| by_signature.get_mut(&signature).and_then(|ks| (!ks.is_empty()).then(|| ks.remove(0))));
+        let found = routine_parts(g).and_then(|(signature, _)| by_signature.get_mut(&signature).and_then(|ks| (!ks.is_empty()).then(|| ks.remove(0))));
         match found {
             Some(k) => {
                 taken[k] = true;
@@ -7214,8 +7220,12 @@ mod tests {
         let boolean = lines(&["function CREATE OR REPLACE FUNCTION public.rate(a text DEFAULT 'hel\nlo'::text, b boolean)\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
         assert_eq!(
             changed_lines(&integer, &boolean, Dialect::Postgres),
-            ["  + function rate(a text default 'hel\\nlo'::text, b boolean) returns integer", "  - function rate(a text default 'hel\\nlo'::text, b integer) returns integer"]
+            ["  + function rate(a text default 'hel↵lo'::text, b boolean) returns integer", "  - function rate(a text default 'hel↵lo'::text, b integer) returns integer"]
         );
+        // A name with a line break and one with a backslash and an n are two functions, and read so.
+        let broken = lines(&["function CREATE OR REPLACE FUNCTION public.\"line\nbreak\"()\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        let escaped = lines(&["function CREATE OR REPLACE FUNCTION public.\"line\\nbreak\"()\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        assert_eq!(changed_lines(&escaped, &broken, Dialect::Postgres), ["  + function \"line↵break\"() returns integer", "  - function \"line\\nbreak\"() returns integer"]);
         assert_eq!(describe_diff("this database", &one, "a fresh database", &two), ["", "    --- this database", "    +++ a fresh database", "    ~ function rate() returns integer", ""]);
     }
 
