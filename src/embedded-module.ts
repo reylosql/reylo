@@ -83,7 +83,9 @@ export function readLock(text: string): { schema?: string; entries: LockEntry[] 
     if (!/^[1-9][0-9]{0,8}$/.test(v)) return { error: `\`version: ${v}\` isn't a lock's version` };
     if (Number(v) > LOCK_VERSION) return { newer: Number(v) };
   }
-  let section: "migrations" | "other" | undefined;
+  // Under `migrations`, its entries; under `schema` or `version`, nothing more, since a value this
+  // reads is on its key's line; under any other key, whatever it holds, passed over.
+  let section: "migrations" | "value" | "other" | undefined;
   const seen = new Set<string>();
   let itemIndent: number | undefined;
   const lines = text.split(/\r?\n/);
@@ -96,12 +98,13 @@ export function readLock(text: string): { schema?: string; entries: LockEntry[] 
       if (!top) return { error: `its line ${at} doesn't parse` };
       if (seen.has(top[0])) return { error: `its line ${at} gives \`${top[0]}\` a second time` };
       seen.add(top[0]);
-      section = top[0] === "migrations" ? "migrations" : "other";
+      section = top[0] === "migrations" ? "migrations" : top[0] === "schema" || top[0] === "version" ? "value" : "other";
       if (top[0] === "schema") schema = scalar(top[1]) || undefined;
       if (section === "migrations" && scalar(top[1]) !== "" && scalar(top[1]) !== "[]") return { error: `its line ${at} doesn't parse` };
       continue;
     }
     if (section === "other") continue;
+    if (section === "value") return { error: `its line ${at} doesn't parse` };
     if (section !== "migrations") return { error: `its line ${at} doesn't parse` };
     // Every entry at the first one's indentation, and an entry's further lines deeper than it.
     const indent = line.length - line.trimStart().length;
