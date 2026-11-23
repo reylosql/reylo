@@ -2770,11 +2770,9 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
             let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
             let Some(name) = not_null_name(o) else { continue };
             let Some(kept) = target.objects.get(&format!("column {new_rel}.{column}")) else {
-                // The name Postgres would make, as it holds it: left alone where Postgres would
-                // shorten it, which it does its own way.
+                // The name Postgres would make, as it holds it.
                 let made = default_not_null(new_rel, &unquoted(column));
-                let whole = format!("{}_{}_not_null", unquoted(split_last(new_rel).1), unquoted(column)).len() <= 63;
-                if whole && generated_not_null(&name, old_rel, &unquoted(column)) && unquoted(&name) != made && !held(&made) {
+                if generated_not_null(&name, old_rel, &unquoted(column)) && unquoted(&name) != made && !held(&made) {
                     out.push(format!("alter table {new_rel} rename constraint {name} to {}", declared::quote_ident(&made)));
                 }
                 continue;
@@ -3217,14 +3215,27 @@ fn generated_not_null(name: &str, table: &str, column: &str) -> bool {
     name.strip_prefix(made.as_str()).is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// The name Postgres gives a not null it makes on a table's column, as it holds it.
+/// The name Postgres gives a not null it makes on a table's column, as it holds it: past 63 bytes,
+/// the longer of the table's and the column's names is shortened a byte at a time until it fits,
+/// each then cut at a character's edge (`makeObjectName`).
 fn default_not_null(table: &str, column: &str) -> String {
-    let name = format!("{}_{}_not_null", unquoted(split_last(table).1), unquoted(column));
-    let mut end = name.len().min(63);
-    while !name.is_char_boundary(end) {
-        end -= 1;
+    let (table, column) = (unquoted(split_last(table).1), unquoted(column));
+    let room = 63 - "_not_null".len() - 1;
+    let (mut a, mut b) = (table.len(), column.len());
+    while a + b > room {
+        if a > b {
+            a -= 1;
+        } else {
+            b -= 1;
+        }
     }
-    name[..end].to_string()
+    let clip = |s: &str, mut n: usize| -> String {
+        while !s.is_char_boundary(n) {
+            n -= 1;
+        }
+        s[..n].to_string()
+    };
+    format!("{}_{}_not_null", clip(&table, a), clip(&column, b))
 }
 
 /// A name as Postgres holds it, from how it is written: a quoted one without its quotes.

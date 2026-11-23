@@ -2587,6 +2587,17 @@ async fn create_renames_a_not_null_column_with_its_table(mut p: P) {
     assert_eq!(p.rows("select address from members").await[0].text("address"), "a");
     p.output();
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    p.output();
+    // A new name long enough that Postgres shortens the not null's name made from it.
+    let long = "a".repeat(49);
+    p.schema(&format!("create table {long} (id {id}, contact {text} not null, joined {int}, since {int});"));
+    let choices = reylo_migrate::Choices { rename: vec![("members".into(), long.clone())], ..Default::default() };
+    assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "long", &choices, log).await).await, 0, "{}", p.peek());
+    assert_has!(p.output(), &format!(r"  ~ column {long}\.\[-address-\]\{{\+contact\+\}} "));
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.rows(&format!("select contact from {long}")).await[0].text("contact"), "a");
+    p.output();
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
 }
 
 async fn create_offers_renames_only_to_what_the_dropped_ones_table_adds(mut p: P) {
