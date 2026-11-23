@@ -598,25 +598,33 @@ pub fn escapes_shadow(statement: &Statement, dialect: Dialect) -> Option<(String
             let renames = words.first().is_some_and(|f| f == "RENAME");
             let first_on = words.iter().position(|w| w == "ON");
             let first_like = words.iter().position(|w| w == "LIKE");
+            // `insert` and `replace` take their table after their modifiers, where `into` is optional.
+            let target = matches!(words.first().map(String::as_str), Some("INSERT" | "REPLACE"))
+                .then(|| (1..t.len()).find(|&j| !INSERT_MODIFIERS.contains(&words[j].as_str())))
+                .flatten()
+                .map(|j| if words[j] == "INTO" { j + 1 } else { j });
             // The function each token is an argument of, innermost: `from` inside `extract(year from
             // e.at)`, `trim(… from …)` and `substring(… from …)` takes a value, never a table.
             let mut calls: Vec<Option<&str>> = Vec::new();
-            let call_of: Vec<Option<&str>> = (0..t.len())
-                .map(|k| {
-                    let inside = calls.last().copied().flatten();
-                    // A word in a table's place is no function, whatever its name: `insert into trim
-                    // (…)` names a table `trim`, as `app.trim (…)` does.
-                    let table = k > 1 && (OBJECT_KEYWORDS.contains(&words[k - 2].as_str()) || matches!(words[k - 2].as_str(), "." | "INSERT" | "REPLACE"));
-                    match words[k].as_str() {
-                        "(" => calls.push((k > 0 && t[k - 1].kind == TokenKind::Word && !table).then(|| words[k - 1].as_str())),
-                        ")" => drop(calls.pop()),
-                        _ => {}
-                    }
-                    inside
-                })
-                .collect();
+            let mut call_of: Vec<Option<&str>> = Vec::with_capacity(t.len());
+            let value_from = |call_of: &[Option<&str>], k: usize| words[k] == "FROM" && call_of[k].is_some_and(|f| matches!(f, "EXTRACT" | "TRIM" | "SUBSTRING" | "SUBSTR" | "MID"));
             for k in 0..t.len() {
-                if words[k] == "FROM" && call_of[k].is_some_and(|f| matches!(f, "EXTRACT" | "TRIM" | "SUBSTRING" | "SUBSTR" | "MID")) {
+                call_of.push(calls.last().copied().flatten());
+                match words[k].as_str() {
+                    "(" if k > 0 && t[k - 1].kind == TokenKind::Word => {
+                        // A word in a table's place is no function, whatever its name: `insert into
+                        // trim (…)` names a table `trim`, as `insert ignore trim (…)` and `app.trim
+                        // (…)` do. A value's `from` is no table's place.
+                        let table = Some(k - 1) == target || (k > 1 && (words[k - 2] == "." || (OBJECT_KEYWORDS.contains(&words[k - 2].as_str()) && !value_from(&call_of, k - 2))));
+                        calls.push((!table).then(|| words[k - 1].as_str()));
+                    }
+                    "(" => calls.push(None),
+                    ")" => drop(calls.pop()),
+                    _ => {}
+                }
+            }
+            for k in 0..t.len() {
+                if value_from(&call_of, k) {
                     continue;
                 }
                 let names_table = OBJECT_KEYWORDS.contains(&words[k].as_str())
@@ -969,6 +977,9 @@ mod tests {
         assert!(shadow_problem("insert into trim ((select 1) union all select id from sample.source)", Dialect::Mysql).is_some());
         assert!(shadow_problem("insert trim ((select 1) union all select id from sample.source)", Dialect::Mysql).is_some());
         assert!(shadow_problem("insert into app.trim (select id from source)", Dialect::Mysql).is_some());
+        assert!(shadow_problem("insert ignore trim (select id from sample.source)", Dialect::Mysql).is_some());
+        assert!(shadow_problem("replace low_priority trim (select id from sample.source)", Dialect::Mysql).is_some());
+        assert_eq!(shadow_problem("update events as e set c = trim(leading 'x' from trim(leading 'y' from e.name))", Dialect::Mysql), None);
         assert_eq!(shadow_problem("update events as e set cleaned = trim(('x') from e.name), c = trim((select 'x') from e.name)", Dialect::Mysql), None);
         assert_eq!(shadow_problem("create view v as select u.email from users u left join posts p on p.user_id = u.id where u.name like p.title", Dialect::Mysql), None);
         assert!(shadow_problem("create index i on app.users (email)", Dialect::Mysql).is_some());
