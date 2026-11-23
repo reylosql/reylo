@@ -299,6 +299,30 @@ $ reylo migrate deploy --dry-run
 
 A failed migration rolls back and records nothing. Fix the file, run `reylo migrate dev`, and deploy again. Where a database already ran the old version, write a new migration instead.
 
+A migration can also fail on rows the database already holds. The refusal gives a query that lists them:
+
+```terminal
+$ reylo migrate deploy
+Applying to postgres://db.example.com/app
+  ✓ 20261123193559_drop_team_plan.sql    applied · 45 ms
+  ✗ 20261123193600_drop_team_plan_2.sql  failed
+
+✗ The migration 20261123193600_drop_team_plan_2.sql failed on rows that break users_plan_check
+  check constraint "users_plan_check" of relation "users" is violated by some row
+  The migration before it, 20261123193559_drop_team_plan.sql, added users_plan_check without checking the rows already in users, so it holds new writes and not those rows.
+  Nothing was recorded, so the next deploy runs it again.
+
+  List the rows that break it:
+    select * from users where not (plan = ANY (ARRAY['free'::text, 'pro'::text]));
+  Fix them here, then deploy again:
+    reylo migrate deploy
+  If the rows are right and only development ran 20261123193600_drop_team_plan_2.sql, change users_plan_check in reylo/schema.sql, delete it and write the replacement:
+    reylo migrate new <name>
+    reylo migrate dev
+```
+
+Fix those rows and deploy again. On Postgres, the first migration of the change stays applied until then, and `reylo migrate status` says so.
+
 A migration and the build that needs it go live at different moments. The old build's queries fail on a renamed or dropped column. So rename in steps. To rename `users.email` to `contact`, add the new column and copy its values, then deploy code that reads `contact` and writes both:
 
 ```sql title="20261110120000_add_contact.sql"
