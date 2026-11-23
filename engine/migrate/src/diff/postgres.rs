@@ -2756,15 +2756,21 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
         }
         // Each column's not null, which Postgres 18 names after the table too. One the target has no
         // column for, which the plan renames or drops, takes the name Postgres would give it under
-        // the new table where Postgres named it, so that the column reads as one made there.
-        for o in current.objects.values().filter(|o| o.kind == Some(Kind::Column) && o.owner.as_deref() == Some(old_table.as_str())) {
+        // the new table where Postgres named it, so that the column reads as one made there, unless
+        // a constraint of the table holds that name.
+        let columns: Vec<&Object> = current.objects.values().filter(|o| o.kind == Some(Kind::Column) && o.owner.as_deref() == Some(old_table.as_str())).collect();
+        let held = |wanted: &str| {
+            columns.iter().any(|c| not_null_name(c).is_some_and(|n| unquoted(&n) == unquoted(wanted)))
+                || current.objects.values().any(|c| c.kind == Some(Kind::Constraint) && related(c) && c.id.split_once(' ').is_some_and(|(_, rest)| unquoted(&last(rest).1) == unquoted(wanted)))
+        };
+        for o in &columns {
             let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
             let Some(name) = not_null_name(o) else { continue };
             let wanted = crate::diff::swap_name(&name, old, new);
             let kept = target.objects.get(&format!("column {new_rel}.{column}"));
             let takes = match kept {
                 Some(t) => not_null_name(t).as_deref() == Some(wanted.as_str()),
-                None => generated_not_null(&name, old_rel, &unquoted(column)) && generated_not_null(&wanted, new_rel, &unquoted(column)),
+                None => generated_not_null(&name, old_rel, &unquoted(column)) && generated_not_null(&wanted, new_rel, &unquoted(column)) && !held(&wanted),
             };
             if wanted != name && takes {
                 out.push(format!("alter table {new_rel} rename constraint {name} to {wanted}"));

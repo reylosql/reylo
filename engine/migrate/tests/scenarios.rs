@@ -2295,9 +2295,14 @@ async fn create_asks_about_a_column_replaced_by_one_of_another_type(mut p: P) {
     p.schema(&format!("create table users (id {id}, label {text});"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "label", &Default::default(), log).await).await, 1);
     let out = p.output();
-    // On Postgres the rename rewrites the table, so the command that takes it says --blocking too.
-    let rename = if p.d == Dialect::Postgres { r"reylo migrate new label \\\n      --rename users\.score=label \\\n      --blocking" } else { r"reylo migrate new label --rename users\.score=label" };
-    assert_has!(&out, &format!(r"✗ This migration can't tell a rename from a new column\n\n    - column users\.score [^\n]+\n    \+ column users\.label [^\n]+\n\n  To rename the column, keeping its rows:\n    {rename}\n  To drop the column and its data, and add a new one:\n    reylo migrate new label --drop users\.score\n"));
+    // On Postgres the rename rewrites the table, so the command that takes it says --blocking too,
+    // and the refusal says what that accepts.
+    let (why, rename) = if p.d == Dialect::Postgres {
+        (r"  As a rename, it rewrites users, copying every row while it blocks reads and writes to it\.\n\n", r"reylo migrate new label \\\n      --rename users\.score=label \\\n      --blocking")
+    } else {
+        ("", r"reylo migrate new label --rename users\.score=label")
+    };
+    assert_has!(&out, &format!(r"✗ This migration can't tell a rename from a new column\n\n    - column users\.score [^\n]+\n    \+ column users\.label [^\n]+\n\n{why}  To rename the column, keeping its rows:\n    {rename}\n  To drop the column and its data, and add a new one:\n    reylo migrate new label --drop users\.score\n"));
     assert!(p.files().iter().all(|f| !f.contains("_label")), "nothing is written");
     let command = |out: &str, after: &str| out.lines().skip_while(|l| !l.contains(after)).skip(1).take_while(|l| l.starts_with("    ")).collect::<Vec<_>>().join("\n");
     // Taken as new, the old column is dropped.
@@ -2902,9 +2907,14 @@ async fn create_names_a_type_change_that_loses_values_in_drop(mut p: P) {
     p.schema(&format!("create table users (id {id}, stamp {after});"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "narrow", &Default::default(), log).await).await, 1);
     let out = p.output();
-    // The change copies the table on Postgres, so the command says --blocking too.
-    let accept = if p.d == Dialect::Postgres { r"reylo migrate new narrow \\\n      --drop users\.stamp \\\n      --blocking\n" } else { r"reylo migrate new narrow --drop users\.stamp\n" };
-    assert_has!(&out, &format!(r"✗ {why}[^\n]*\n\n  To accept that:\n    {accept}"));
+    // The change copies the table on Postgres, so the command says --blocking too, and the refusal
+    // says what that accepts.
+    let (rewrites, accept) = if p.d == Dialect::Postgres {
+        (r"  It also rewrites users, copying every row while it blocks reads and writes to it\.\n", r"reylo migrate new narrow \\\n      --drop users\.stamp \\\n      --blocking\n")
+    } else {
+        ("", r"reylo migrate new narrow --drop users\.stamp\n")
+    };
+    assert_has!(&out, &format!(r"✗ {why}[^\n]*\n{rewrites}\n  To accept that:\n    {accept}"));
     assert!(p.files().iter().all(|f| !f.contains("_narrow")), "nothing is written");
     let choices = reylo_migrate::Choices { drop: vec!["users.stamp".into()], rename: vec![], blocking: p.d == Dialect::Postgres };
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "narrow", &choices, log).await).await, 0, "{}", p.peek());
@@ -3295,6 +3305,8 @@ on!(
     Postgres,
     a_suggested_command_says_blocking_where_its_migration_needs_it,
     a_column_renamed_with_its_declared_not_null_renames_it_once,
+    a_suggested_blocking_names_the_rewrite_it_accepts,
+    a_not_null_renamed_with_its_table_leaves_a_held_name_alone,
     a_database_search_path_resolves_names_as_the_target_does,
     a_guess_within_a_guessed_table_keeps_its_line_under_a_search_path,
     a_database_time_zone_does_not_change_defaults,
@@ -3597,6 +3609,37 @@ mod adversarial {
         assert_has!(&out, r"  To accept that:\n    reylo migrate new dates \\\n      --drop events\.starts_at \\\n      --blocking\n");
         let command = out.lines().skip_while(|l| !l.contains("To accept that")).skip(1).take_while(|l| l.starts_with("    ")).collect::<Vec<_>>().join("\n");
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "dates", &choices_of(&command), log).await).await, 0, "{}", p.peek());
+    }
+
+    /// A rewrite the suggested commands' --blocking accepts is named before them, though it is no
+    /// part of what the refusal asks.
+    pub async fn a_suggested_blocking_names_the_rewrite_it_accepts(mut p: P) {
+        p.file("20261027100000_t.sql", "create table users (id integer primary key, n integer); create table posts (id integer primary key, title varchar(100));");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into users values (1, 7); insert into posts values (1, 'a')").await;
+        p.output();
+        p.schema("create table users (id integer primary key, n bigint); create table posts (id integer primary key, heading varchar(200));");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "widen", &Default::default(), log).await).await, 1);
+        let out = p.output();
+        assert_has!(&out, r"\n\n  As a rename, it rewrites users, copying every row while it blocks reads and writes to it\.\n  As a drop, it rewrites users, copying every row while it blocks reads and writes to it\.\n\n  To rename the column, keeping its rows:\n    reylo migrate new widen \\\n      --rename posts\.title=heading \\\n      --blocking\n  To drop the column and its data, and add a new one:\n    reylo migrate new widen \\\n      --drop posts\.title \\\n      --blocking\n");
+    }
+
+    /// A table renamed with a not null column it drops, where the name Postgres would give that
+    /// column's not null under the new table is held by another's: the held name stays where it is.
+    pub async fn a_not_null_renamed_with_its_table_leaves_a_held_name_alone(mut p: P) {
+        p.file("20261027100000_t.sql", "create table accounts (id integer primary key, email text not null, handle text constraint members_email_not_null not null);");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into accounts values (1, 'a', 'h')").await;
+        p.output();
+        p.schema("create table members (id integer primary key, handle text constraint members_email_not_null not null);");
+        let choices = reylo_migrate::Choices { drop: vec!["accounts.email".into()], rename: vec![("accounts".into(), "members".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "members", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        let held = p.rows("select a.attname from pg_constraint c join pg_attribute a on a.attrelid = c.conrelid and a.attnum = c.conkey[1] where c.conrelid = 'members'::regclass and c.conname = 'members_email_not_null'").await;
+        assert_eq!(held.iter().map(|r| r.text("attname").to_string()).collect::<Vec<_>>(), ["handle"]);
+        assert_eq!(p.rows("select handle from members").await[0].text("handle"), "h");
     }
 
     /// A column whose not null has a name of its own, renamed with a change to its definition: the

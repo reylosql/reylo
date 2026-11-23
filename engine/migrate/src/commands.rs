@@ -1327,11 +1327,14 @@ pub struct Problem {
     /// What each command it suggests states, without `--blocking`: for `migrate new` to try, and to
     /// add `--blocking` to where the migration it writes would need it.
     readings: Vec<Choices>,
+    /// What a `blocks-writes` refusal's migration does that `--blocking` accepts, each as a
+    /// sentence's predicate: `rewrites users, …`.
+    hazards: Vec<String>,
 }
 
 impl Problem {
     fn new(code: &'static str, title: impl Into<String>) -> Problem {
-        Problem { code, title: title.into(), lines: vec![], detail: vec![], sql: None, notes: vec![], fixes: vec![], fixed: false, drafts: false, readings: vec![] }
+        Problem { code, title: title.into(), lines: vec![], detail: vec![], sql: None, notes: vec![], fixes: vec![], fixed: false, drafts: false, readings: vec![], hazards: vec![] }
     }
 
     /// The refusal as `--json` gives it.
@@ -4480,12 +4483,13 @@ struct Asked {
     head: String,
     offers_force: bool,
     /// What suggested commands state, without `--blocking`, where the migration each writes holds a
-    /// lock that `--blocking` accepts: each such command takes the flag.
-    rewrites: Vec<Choices>,
+    /// lock that `--blocking` accepts, with what holds it: each such command takes the flag, and
+    /// its refusal says what the flag accepts.
+    rewrites: Vec<(Choices, Vec<String>)>,
 }
 
 impl Asked {
-    fn migration(name: &str, rewrites: &[Choices]) -> Asked {
+    fn migration(name: &str, rewrites: &[(Choices, Vec<String>)]) -> Asked {
         Asked { subject: "migration", head: format!("reylo migrate new {name}"), offers_force: false, rewrites: rewrites.to_vec() }
     }
 
@@ -4495,7 +4499,12 @@ impl Asked {
 
     /// `reading`, with `--blocking` where the migration it writes needs it.
     fn blocking(&self, reading: &Choices) -> Choices {
-        Choices { blocking: reading.blocking || self.rewrites.contains(reading), ..reading.clone() }
+        Choices { blocking: reading.blocking || !self.hazards(reading).is_empty(), ..reading.clone() }
+    }
+
+    /// What the migration `reading` writes does that `--blocking` accepts.
+    fn hazards(&self, reading: &Choices) -> &[String] {
+        self.rewrites.iter().find(|(r, _)| r == reading).map_or(&[], |(_, what)| what.as_slice())
     }
 }
 
@@ -4735,12 +4744,26 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], 
     // Each name --drop may need, with the id of the guessed table it belongs to, if any.
     let owned: Vec<(String, Option<String>)> = drops.iter().map(|(_, n, o)| (n.clone(), o.clone())).chain(narrowed.iter().map(|(n, _, o)| (n.clone(), o.clone()))).collect();
     let more: Vec<String> = owned.iter().map(|(n, _)| n.clone()).collect();
+    // What each reading holds that its command's --blocking accepts, said before the command.
+    let mut noted = !others.is_empty() || !narrowed.is_empty();
+    let mut hazard = |problem: Problem, lead: &str, r: &Choices| -> Problem {
+        let what = asked.hazards(r);
+        let mut problem = if !what.is_empty() && !noted { problem.lines([String::new()]) } else { problem };
+        noted |= !what.is_empty();
+        for w in what {
+            problem = problem.note(format!("{lead}, it {w}."));
+        }
+        problem
+    };
     if one {
         let renames: Vec<(String, String)> = guesses.iter().map(|g| (g.old.clone(), g.new.clone())).collect();
         let dropped: Vec<String> = guesses.iter().map(|g| g.old.clone()).chain(outside.iter().cloned()).collect();
+        let (keep, drop) = (reading(stated, &more, &renames), reading(stated, &dropped, &[]));
+        let problem = hazard(problem, "As a rename", &keep);
+        let problem = hazard(problem, "As a drop", &drop);
         return problem
-            .offer(format!("To rename the {kind}, keeping its rows"), asked, reading(stated, &more, &renames))
-            .offer(format!("To drop the {kind} and its data, and {} a new one", if guesses[0].table { "create" } else { "add" }), asked, reading(stated, &dropped, &[]));
+            .offer(format!("To rename the {kind}, keeping its rows"), asked, keep)
+            .offer(format!("To drop the {kind} and its data, and {} a new one", if guesses[0].table { "create" } else { "add" }), asked, drop);
     }
     // Each line's flags: a rename takes along what its own reading also asks of --drop, the columns
     // a renamed table drops, and what the rename's change of type loses; a guess within a guessed
@@ -4779,6 +4802,8 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], 
         if asked.blocking(&r).blocking && !stated.blocking {
             rows[k].0.push_str(" --blocking");
         }
+        let (old, new) = &renames[0];
+        problem = hazard(problem, &format!("With --rename {}={}", shell_word(old), shell_word(new)), &r);
         readings.push(r);
     }
     let width = rows.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
@@ -4802,6 +4827,7 @@ fn lock_problem(hazards: &[crate::locks::Hazard], asked: &Asked, choices: &Choic
         _ => "This migration blocks writes to tables while it reads every row".to_string(),
     };
     let mut problem = Problem::new("blocks-writes", title);
+    problem.hazards = hazards.iter().map(|h| h.what.clone()).collect();
     if hazards.len() > 1 {
         problem = problem.lines([String::new()]).lines(hazards.iter().map(|h| format!("    It {}", h.what))).lines([String::new()]);
     }
@@ -4876,7 +4902,8 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
             [one] => format!("This {subject} drops {} and {}", drop_phrase(&what), if one.starts_with("table ") { "its rows" } else { "its data" }),
             _ => format!("This {subject} drops {}, with their data", drop_phrase(&what)),
         };
-        let mut problem = Problem::new("drops-data", title).offer(if list.len() == 1 { "To drop it" } else { "To drop them" }, asked, reading(&stated, &list, &[]));
+        let r = reading(&stated, &list, &[]);
+        let mut problem = asked.hazards(&r).iter().fold(Problem::new("drops-data", title), |p, w| p.note(format!("It also {w}."))).offer(if list.len() == 1 { "To drop it" } else { "To drop them" }, asked, r);
         // Where something comes as these go, any of them may be renamed: which became which is
         // for the person to say, so the command names no new name for them. Each is offered only
         // where something it could be renamed to comes.
@@ -4900,7 +4927,8 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
         problems.push(problem);
     }
     for (_, name, why) in &unnamed {
-        problems.push(Problem::new("loses-data", format!("Column {name} {why}")).offer("To accept that", asked, reading(&stated, std::slice::from_ref(name), &[])));
+        let r = reading(&stated, std::slice::from_ref(name), &[]);
+        problems.push(asked.hazards(&r).iter().fold(Problem::new("loses-data", format!("Column {name} {why}")), |p, w| p.note(format!("It also {w}."))).offer("To accept that", asked, r));
     }
     problems
 }
@@ -5128,7 +5156,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
     for r in readings {
         if let Ok(Err(problems)) = draft_with(opts, files, schema_sql, target_name, added, migration, &r, &[], &mut |_: &str| {}).await {
             if !problems.is_empty() && problems.iter().all(|p| p.code == "blocks-writes") {
-                rewrites.push(r);
+                rewrites.push((r, problems.iter().flat_map(|p| p.hazards.iter().cloned()).collect()));
             }
         }
     }
@@ -5139,10 +5167,10 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
 }
 
 /// `draft`, with the suggested commands `rewrites` names (each as it states its flags, without
-/// `--blocking`) taking `--blocking`.
+/// `--blocking`, with what holds the lock) taking `--blocking`, and the refusal saying why.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 #[cfg(feature = "cli")]
-async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, added: &[String], migration: &str, choices: &Choices, rewrites: &[Choices], log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
+async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, added: &[String], migration: &str, choices: &Choices, rewrites: &[(Choices, Vec<String>)], log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
     let drafted = |texts: Vec<String>, code: i32, notes: Vec<String>, empty: bool| Drafted { texts, code, notes, empty, target: target_name.to_string(), lock_safe: false, commits: 0, changes: vec![] };
     let mut db = Db::open(opts).await?;
     let mut problems = out_of_reach(&mut db, &opts.url).await?;
