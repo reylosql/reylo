@@ -125,7 +125,8 @@ drop table if exists _prisma_migrations;
 ```
 
 ```sql tab="Drizzle Kit"
-drop schema if exists drizzle cascade;
+drop table if exists drizzle.__drizzle_migrations;
+drop schema if exists drizzle;
 ```
 
 ## Schema <code className="dk-aside">schema.sql</code> [#schema-schemasql]

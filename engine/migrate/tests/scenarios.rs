@@ -1241,8 +1241,7 @@ async fn the_dump_leaves_out_another_tools_history() {
     assert!(!has(&text, "(?i)prisma|knex|drizzle|databasechangelog"), "{text}");
 }
 
-/// What `init` wrote into schema.sql.
-async fn leaves_out_another_tools_history(mut p: P, app: &str) -> String {
+async fn leaves_out_another_tools_history(mut p: P, app: &str) {
     p.exec(&format!("{app}{}", other_tools_history(&p))).await;
     assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
     p.output();
@@ -1273,10 +1272,9 @@ async fn leaves_out_another_tools_history(mut p: P, app: &str) -> String {
     assert_eq!(q.history().await, ["init.sql", "20261123100000_drop_prisma.sql"]);
     // Nor is dropping a schema that held nothing but another tool's history.
     if p.d == Dialect::Postgres {
-        q.exec("drop schema if exists drizzle cascade").await;
+        q.exec("drop table if exists drizzle.__drizzle_migrations; drop schema if exists drizzle;").await;
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     }
-    schema
 }
 
 async fn a_migration_the_lock_lacks_is_a_draft(mut p: P) {
