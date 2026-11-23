@@ -15,7 +15,8 @@
 //! commit, for the one transaction. An external-content full-text table (FTS4 or FTS5 with
 //! `content='notes'`) holds an index of its content table's rows and none of its own: it is made
 //! again with nothing lost, and each time it is made its index is rebuilt from those rows, as it is
-//! where a rebuild of its content table gives the rows other keys than the index has.
+//! at the end of the plan where a rebuild of its content table may give them other keys or values
+//! than the index has.
 
 use super::{Alterer, Change, Kind, Object, Schema, ROWS_ELSEWHERE};
 use crate::catalog::HISTORY_TABLE;
@@ -343,8 +344,16 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
         .rows(&format!("select type, name, tbl_name as tbl, sql from sqlite_schema where name not like 'sqlite_%' and tbl_name <> '{HISTORY_TABLE}' and name {turso} and tbl_name {turso} and sql is not null and {} order by rowid", crate::catalog::NOT_LIBSQL_VECTOR_OWN, turso = crate::catalog::NOT_TURSO_OWN))
         .await?;
     // SQLite takes a table named as a full-text table's own (`docs_content`) for one, whoever made
-    // it: one that an external-content index reads its text from is the project's.
-    let contents: BTreeSet<String> = all.iter().filter(|r| r.text("type") == "table").filter_map(|r| external_content(&tokenize(r.text("sql"), Dialect::Sqlite))).map(|(table, ..)| table).collect();
+    // it: one that an external-content index reads its text from is the project's, and so is one
+    // beside a full-text table whose text is elsewhere, which keeps no `_content` of its own.
+    let mut contents: BTreeSet<String> = BTreeSet::new();
+    for r in all.iter().filter(|r| r.text("type") == "table") {
+        let tokens = tokenize(r.text("sql"), Dialect::Sqlite);
+        if fts_args(&tokens).is_some_and(|(_, args)| args.iter().any(|a| option(a).is_some_and(|(k, _)| k == "content"))) {
+            contents.insert(format!("{}_content", fold(r.text("name"))));
+        }
+        contents.extend(external_content(&tokens).map(|(table, ..)| table));
+    }
     let rows: Vec<Row> = all.into_iter().filter(|r| contents.contains(&fold(r.text("tbl"))) || !shadow(r.text("tbl"))).collect();
 
     // Every table's and view's id by its folded name, and each table's columns.
@@ -630,6 +639,30 @@ impl Alterer for SqliteAlterer {
         *self.schemas.borrow_mut() = Some((from.clone(), to.clone()));
     }
 
+    /// The rebuild of a full-text index a table's rebuild wrote runs once, after every other
+    /// statement, where the plan's renames have given its key the name the target reads it by and
+    /// every view it reads through is back; and not at all where the plan makes the index again,
+    /// whose rebuild follows its create.
+    fn finish(&self, statements: &mut Vec<String>) {
+        let made: BTreeSet<String> = statements.iter().filter_map(|s| made_virtual(s)).collect();
+        let (mut out, mut later): (Vec<String>, Vec<String>) = (Vec::with_capacity(statements.len()), Vec::new());
+        let mut previous: Option<String> = None;
+        for s in statements.drain(..) {
+            match rebuilt(&s) {
+                Some(name) if previous.as_deref().and_then(made_virtual).as_deref() == Some(name.as_str()) => out.push(s.clone()),
+                Some(name) => {
+                    if !made.contains(&name) && !later.contains(&s) {
+                        later.push(s.clone());
+                    }
+                }
+                None => out.push(s.clone()),
+            }
+            previous = Some(s);
+        }
+        out.extend(later);
+        *statements = out;
+    }
+
     fn decide(&self, renames: &[(String, String)]) {
         self.decided.set(renames);
     }
@@ -874,7 +907,7 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
         }
         out.extend(standing.iter().map(|name| format!("drop index {}", quote(name))));
         out.extend(coming.into_iter().map(|(_, create)| create));
-        out.extend(reindexed(&a, &b, &renamed, &old_parts, &new_parts, &named, schemas, &on_dropped));
+        out.extend(reindexed(&a, &b, &renamed, &old_parts, &new_parts, &named, options(&from.def) != options(&to.def), schemas));
         return Some(out);
     }
     if cycle {
@@ -941,7 +974,7 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
     let mut again: Vec<(usize, String)> = keys.into_iter().chain(coming).collect();
     again.sort();
     out.extend(again.into_iter().map(|(_, create)| create));
-    out.extend(reindexed(&a, &b, &renamed, &old_parts, &new_parts, &named, schemas, &on_dropped));
+    out.extend(reindexed(&a, &b, &renamed, &old_parts, &new_parts, &named, options(&from.def) != options(&to.def), schemas));
     Some(out)
 }
 
@@ -951,11 +984,8 @@ fn rebuild(name: &str) -> String {
     format!("insert into {q} ({q}) values ('rebuild')")
 }
 
-/// What an FTS4 or FTS5 table's text says of the table whose text it indexes (`content='notes'`):
-/// that table's name, the columns it reads there, and the one its index is keyed on
-/// (`content_rowid`, else the rowid), each folded. None for one that keeps its own text, and for a
-/// contentless one (`content=''`), whose text is nowhere to rebuild it from.
-fn external_content(tokens: &[Token]) -> Option<(String, Vec<String>, String)> {
+/// An FTS4 or FTS5 table's module, folded, and the arguments its text gives it, each its tokens.
+fn fts_args(tokens: &[Token]) -> Option<(String, Vec<Vec<&Token>>)> {
     let using = tokens.iter().position(|t| t.upper() == "USING")?;
     let module = fold(&unquote(tokens.get(using + 1)?));
     if !matches!(module.as_str(), "fts4" | "fts5") || tokens.get(using + 2)?.text != "(" {
@@ -978,67 +1008,81 @@ fn external_content(tokens: &[Token]) -> Option<(String, Vec<String>, String)> {
             arg.push(t);
         }
     }
+    args.retain(|a| !a.is_empty());
+    Some((module, args))
+}
+
+/// An argument that sets an option (`content='notes'`): its name and its value, each folded.
+fn option(arg: &[&Token]) -> Option<(String, String)> {
+    arg.get(1).filter(|t| t.text == "=")?;
+    Some((fold(&arg[0].text), fold(&arg[2..].iter().map(|t| unquote(t)).collect::<String>())))
+}
+
+/// What an FTS4 or FTS5 table's text says of the table whose text it indexes (`content='notes'`):
+/// that table's name, the columns it reads there (FTS4's `languageid` among them), and the one its
+/// index is keyed on (`content_rowid`, else the rowid), each folded. None for one that keeps its
+/// own text, and for a contentless one (`content=''`), whose text is nowhere to rebuild it from.
+fn external_content(tokens: &[Token]) -> Option<(String, Vec<String>, String)> {
+    let (module, args) = fts_args(tokens)?;
     let (mut content, mut key, mut columns) = (None, "rowid".to_string(), Vec::new());
-    for arg in args.iter().filter(|a| !a.is_empty()) {
-        if arg.get(1).is_some_and(|t| t.text == "=") {
-            let value = fold(&arg[2..].iter().map(|t| unquote(t)).collect::<String>());
-            match fold(&arg[0].text).as_str() {
+    for arg in &args {
+        match option(arg) {
+            Some((name, value)) => match name.as_str() {
                 "content" => content = Some(value),
                 // FTS4 keys its index on the content table's rowid, whatever its options say.
                 "content_rowid" if module == "fts5" => key = value,
+                "languageid" if module == "fts4" => columns.push(value),
                 _ => {}
-            }
-        } else {
-            columns.push(fold(&unquote(arg[0])));
+            },
+            None => columns.push(fold(&unquote(arg[0]))),
         }
     }
     Some((content.filter(|c| !c.is_empty())?, columns, key))
 }
 
 /// The rebuilds of the external-content indexes over the table `a` (`b` in the target) that its
-/// rebuild leaves out of step with their rows: where the column the index is keyed on, or the
-/// rowid, is not copied as it was, or a column it indexes changes, as a type's affinity converts
-/// its values or a generated column's expression gives others. An index whose content is a view
-/// over the table is rebuilt whatever changes, as the view's rows are not read here. An index the
-/// plan makes again rebuilds itself, as it is where the plan makes a view it reads through again
-/// (`replaced`), which takes the index along.
+/// rebuild leaves out of step with their rows: where the key the index is read by is not copied
+/// as it was, or a column it indexes may change its values in the copy (its definition, or the
+/// table's options, changes). An index whose content is a view over the table is rebuilt whatever
+/// changes, as the view's rows are not read here. Each runs once the plan's renames are done, and
+/// not at all where the plan makes the index again (`finish`).
 #[allow(clippy::too_many_arguments)]
-fn reindexed(a: &Info, b: &Info, renamed: &BTreeMap<String, String>, old_parts: &[Part], new_parts: &[Part], named: &[String], schemas: Option<&(Schema, Schema)>, replaced: &dyn Fn(&str) -> bool) -> Vec<String> {
+fn reindexed(a: &Info, b: &Info, renamed: &BTreeMap<String, String>, old_parts: &[Part], new_parts: &[Part], named: &[String], reshaped: bool, schemas: Option<&(Schema, Schema)>) -> Vec<String> {
     let Some((from, to)) = schemas else { return Vec::new() };
     let table = fold(&a.name);
     let old_name = |c: &str| renamed.get(c).cloned().unwrap_or_else(|| c.to_string());
     let find = |ps: &[Part], c: &str| ps.iter().find(|p| p.column.as_deref() == Some(c)).map(Part::definition);
-    // The rebuild's statements write each column by its name before the plan's renames. A column's
-    // values change in the copy only where its affinity does, which converts them, and a generated
-    // column's with its expression, or any column it may read.
+    // The rebuild's statements write each column by its name before the plan's renames. A
+    // generated column's values change with any column it may read.
     let columns_same = old_parts.iter().chain(new_parts).filter_map(|p| p.column.as_deref()).all(|c| find(old_parts, c) == find(new_parts, c));
     let same = |c: &str| {
         let (was, is) = (find(old_parts, &old_name(c)), find(new_parts, &old_name(c)));
-        if b.flag(c, 'g') || a.flag(&old_name(c), 'g') {
-            return was == is && columns_same;
-        }
-        was.zip(is).is_some_and(|(was, is)| affinity(&was) == affinity(&is))
+        was.is_some() && was == is && !reshaped && (!(b.flag(c, 'g') || a.flag(&old_name(c), 'g')) || columns_same)
     };
+    // Whether each side has a column of the key's name, which the key then reads rather than the
+    // rowid: the old table one so named, and the new one one renamed to it, or so named and not
+    // renamed away.
+    let old_has = |key: &str| find(old_parts, key).is_some();
+    let new_has = |key: &str| renamed.contains_key(key) || (find(new_parts, key).is_some() && !renamed.values().any(|o| o == key));
     let kept = |key: &str| -> bool {
-        let old = old_name(key);
-        if find(new_parts, &old).is_none() && find(old_parts, &old).is_none() && matches!(key, "rowid" | "oid" | "_rowid_") {
-            // The rowid is copied where neither table has a column that is it, and is the column
-            // that is it, copied, where both have that one.
-            let copied = a.bare_rowid && b.bare_rowid && ["rowid", "_rowid_", "oid"].into_iter().any(|n| !named.iter().any(|c| c == n));
-            let aliased = b.alias.as_deref().is_some_and(|c| a.alias.as_deref() == Some(old_name(c).as_str()));
-            return copied || aliased;
+        match (old_has(key), new_has(key)) {
+            // The same column, copied as it was.
+            (true, true) => old_name(key) == key && same(key),
+            (false, false) if matches!(key, "rowid" | "oid" | "_rowid_") => {
+                // The rowid is copied where neither table has a column that is it, and is the
+                // column that is it, copied, where both have that one.
+                let copied = a.bare_rowid && b.bare_rowid && ["rowid", "_rowid_", "oid"].into_iter().any(|n| !named.iter().any(|c| c == n));
+                let aliased = b.alias.as_deref().is_some_and(|c| a.alias.as_deref() == Some(old_name(c).as_str()));
+                copied || aliased
+            }
+            _ => false,
         }
-        same(key)
     };
-    // Whether a view of the target reads the table, through other views or not, none of which the
-    // plan makes again.
+    // Whether a view of the target reads the table, through other views or not.
     let over_table = |view: &str| -> bool {
         let (mut queue, mut seen) = (vec![view.to_string()], BTreeSet::new());
         while let Some(id) = queue.pop() {
             let Some(o) = to.objects.get(&id).filter(|o| o.kind == Some(Kind::View) && seen.insert(id.clone())) else { continue };
-            if replaced(&id) {
-                return false;
-            }
             if o.deps.contains(&format!("table {table}")) {
                 return true;
             }
@@ -1053,11 +1097,24 @@ fn reindexed(a: &Info, b: &Info, renamed: &BTreeMap<String, String>, old_parts: 
         .filter_map(|o| {
             let info = Info::of(o);
             let (content, key, read) = info.content.as_ref()?;
-            let view = format!("view {content}");
-            let stale = if *content == table { !kept(key) || !read.iter().all(|c| same(c)) } else { unchanged(&view) && over_table(&view) };
+            let stale = if *content == table { !kept(key) || !read.iter().all(|c| same(c)) } else { over_table(&format!("view {content}")) };
             (stale && o.create.len() > 1).then(|| rebuild(&info.name))
         })
         .collect()
+}
+
+/// The full-text table a statement rebuilds the index of (`rebuild`'s), folded.
+fn rebuilt(statement: &str) -> Option<String> {
+    let tokens = tokenize(statement, Dialect::Sqlite);
+    let words: Vec<String> = tokens.iter().map(|t| t.text.to_ascii_lowercase()).collect();
+    (words.len() == 10 && words[0] == "insert" && words[1] == "into" && words[8] == "'rebuild'" && name_of(&tokens[2]) == name_of(&tokens[4])).then(|| name_of(&tokens[2])).flatten()
+}
+
+/// The full-text table a statement makes, folded.
+fn made_virtual(statement: &str) -> Option<String> {
+    let tokens = tokenize(statement, Dialect::Sqlite);
+    let at = name_at(&tokens)?;
+    tokens[..at].iter().any(|t| t.upper() == "VIRTUAL").then(|| name_of(&tokens[at])).flatten()
 }
 
 /// Where a unique index's stored text names the index and its table; None for anything else.
