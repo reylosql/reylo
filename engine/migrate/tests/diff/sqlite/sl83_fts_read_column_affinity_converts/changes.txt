@@ -1,0 +1,1 @@
+notes body text to integer converts '007' to 7, as the change says

@@ -65,8 +65,12 @@ async fn counts(db: &mut Db) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for t in tables {
         let name = t.text("name").to_string();
-        let n = db.rows(&format!("select count(*) as n from \"{}\"", name.replace('"', "\"\""))).await.unwrap();
-        out.push((name.to_lowercase(), n[0].text("n").to_string()));
+        // A full-text index that names a column its content table lacks fails every query.
+        let n = match db.rows(&format!("select count(*) as n from \"{}\"", name.replace('"', "\"\""))).await {
+            Ok(n) => n[0].text("n").to_string(),
+            Err(e) => format!("unreadable: {e}"),
+        };
+        out.push((name.to_lowercase(), n));
     }
     out
 }
