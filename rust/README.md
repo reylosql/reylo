@@ -43,7 +43,7 @@ A misspelt, missing or mistyped parameter is Rust's own error on the struct lite
 | `demo-mysql` | The statements on MySQL, with an unsigned BIGINT, a BOOLEAN, an ENUM (a column and a parameter, one cast to the other), a TIMESTAMP, a DATE, a TIME, a DECIMAL, a YEAR, a BIT, a BLOB and two writes |
 | `demo-sqlite` | The statements on SQLite, from `demo.db`, with a boolean, a 64-bit integer, a blob and two writes |
 | `demo-docs` | Every Rust snippet of the docs site, as the pages write it, with the types the pages name written out, and `reylo::migrate!()` run on a database of its own with the demo's `reylo/migrations` |
-| `demo-codegen` | Modules `reylo generate rust-sqlx` writes beside their `.sql` files, and one `reylo-build` writes from `build.rs` |
+| `demo-codegen` | The file of modules `reylo generate rust-sqlx` writes from a directory of `.sql` files, and the one `reylo-build` writes from `build.rs` |
 
 ## How a column gets its Rust type
 

@@ -1,5 +1,5 @@
-//! Queries written by `reylo generate rust-sqlx` beside their `.sql` files (src/queries/), and by
-//! a build script into OUT_DIR (src/reports/), run. Each `let` names the type the module holds.
+//! Queries written by `reylo generate rust-sqlx` into one file (src/queries.rs, from src/queries/),
+//! and by a build script into OUT_DIR (src/reports/), run. Each `let` names the type the module holds.
 
 mod queries;
 
@@ -15,7 +15,7 @@ async fn main() -> Result<(), sqlx::Error> {
     let name: &String = &user.as_ref().expect("ada").name;
     println!("1. by key        {user:?} ({name})");
 
-    let n: i64 = queries::users::count_users::Query.run(&pool).await?.n;
+    let n: i64 = queries::count_users::Query.run(&pool).await?.n;
     println!("2. count(*)      {n}");
 
     let rows: Vec<reports::post_counts::Row> = reports::post_counts::Query.run(&pool).await?;
@@ -25,7 +25,7 @@ async fn main() -> Result<(), sqlx::Error> {
 
     // One file declares each enum type once, so one query's value of it is another's parameter.
     let moods = reports::moods::Query.run(&pool).await?;
-    let bob: reports::public::Mood = moods[1].mood.expect("bob");
+    let bob: reports::enums::public::Mood = moods[1].mood.expect("bob");
     let same: reports::Mood = bob;
     let sad = reports::sad_users::Query { mood: same }.run(&pool).await?;
     println!("4. shared enum   {moods:?} {sad:?}");
