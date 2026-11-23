@@ -4480,6 +4480,55 @@ impl Asked {
     }
 }
 
+/// A table a plan drops to create it again under its name, since the server can't change it in
+/// place, with the partitions of it that go too.
+struct RemadeTable {
+    id: String,
+    why: Remade,
+    parts: Vec<String>,
+}
+
+/// What a table is made again for.
+enum Remade {
+    /// A plain table made partitioned.
+    Partitioned,
+    /// A partitioned table made plain.
+    Plain,
+    /// A partitioned table given another partition key.
+    Rekeyed,
+    Other,
+}
+
+/// The tables in `lost` that `to` has too, which the plan drops to create again, each with why.
+#[cfg(feature = "cli")]
+fn remade_tables(lost: &[String], from: &crate::diff::Schema, to: &crate::diff::Schema) -> Vec<RemadeTable> {
+    let key = |o: &crate::diff::Object| o.extra.iter().find_map(|l| l.strip_prefix("shape ")).and_then(|s| s.split_once(" partition by ")).map(|(_, k)| k.to_string());
+    let parent = |o: &crate::diff::Object| o.extra.iter().find_map(|l| l.strip_prefix("partition of ")).and_then(|p| p.split_once(' ')).map(|(p, _)| format!("table {p}"));
+    let mut out = Vec::new();
+    for id in lost.iter().filter(|id| id.starts_with("table ")) {
+        let (Some(was), Some(is)) = (from.objects.get(id), to.objects.get(id)) else { continue };
+        let why = match (key(was), key(is)) {
+            (None, Some(_)) => Remade::Partitioned,
+            (Some(_), None) => Remade::Plain,
+            (Some(a), Some(b)) if a != b => Remade::Rekeyed,
+            _ => Remade::Other,
+        };
+        // Its partitions, and theirs, that the plan drops along with it.
+        let mut parts: Vec<String> = Vec::new();
+        let mut parents = vec![id.clone()];
+        while let Some(p) = parents.pop() {
+            for (part, _) in from.objects.iter().filter(|(part, o)| lost.contains(*part) && parent(o).as_deref() == Some(p.as_str())) {
+                if !parts.contains(part) {
+                    parts.push(part.clone());
+                    parents.push(part.clone());
+                }
+            }
+        }
+        out.push(RemadeTable { id: id.clone(), why, parts });
+    }
+    out
+}
+
 /// The refusals `--force` accepts: what a change drops, a type change that loses values, and a rename
 /// that may be a drop. A name `--drop` or `--rename` gives that names nothing still stands.
 const DESTRUCTIVE: [&str; 3] = ["drops-data", "loses-data", "rename-guess"];
@@ -4773,10 +4822,10 @@ fn lock_problem(hazards: &[crate::locks::Hazard], asked: &Asked, choices: &Choic
 /// `--drop`, and each name in `--drop` must name only what it drops. `guesses`, renames it won't
 /// assume, are settled with them; `owner` gives the new id of the guessed table an id belongs to,
 /// whose own columns a drop of the table takes along; `added` are the columns and tables the plan adds, the
-/// names a person could mean by a rename.
+/// names a person could mean by a rename; `remade` are the tables it drops to create again.
 #[allow(clippy::too_many_arguments)]
-fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, added: &[String], choices: &Choices, asked: &Asked) -> Vec<Problem> {
-    let mut problems = drop_problems_of(lost, shown, narrowed, guesses, owner, added, choices, asked);
+fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, added: &[String], remade: &[RemadeTable], choices: &Choices, asked: &Asked) -> Vec<Problem> {
+    let mut problems = drop_problems_of(lost, shown, narrowed, guesses, owner, added, remade, choices, asked);
     // Where --force can accept them all, the last says so, once nothing but what it accepts is left.
     if asked.offers_force && !problems.is_empty() && problems.iter().all(|p| DESTRUCTIVE.contains(&p.code)) {
         let stated = Choices { drop: vec![], rename: choices.rename.clone(), ..Default::default() };
@@ -4787,7 +4836,7 @@ fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, added: &[String], choices: &Choices, asked: &Asked) -> Vec<Problem> {
+fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, added: &[String], remade: &[RemadeTable], choices: &Choices, asked: &Asked) -> Vec<Problem> {
     let subject = asked.subject;
     let display = |id: &String| lost.iter().position(|l| l == id).map(|k| shown_id(&shown[k])).or_else(|| narrowed.iter().find(|(n, _, _)| n == id).map(|(_, s, _)| shown_id(s))).unwrap_or_else(|| shown_id(id));
     let mut problems = Vec::new();
@@ -4815,7 +4864,32 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
             Err(could) => problems.push(Problem::new("drop-name-ambiguous", format!("The --drop flag names {w}, which could be any of {}", could.iter().map(&display).collect::<Vec<_>>().join(", "))).note("Name each with its table, and its schema where two share a name.")),
         }
     }
-    let unstated: Vec<&String> = lost.iter().filter(|l| !named.contains(l)).collect();
+    let mut unstated: Vec<&String> = lost.iter().filter(|l| !named.contains(l)).collect();
+    // A table the plan drops to create it again under its name, with the partitions that go with
+    // it, is refused for what the server can't change in place, and no rename is offered for it.
+    for r in remade {
+        if !unstated.contains(&&r.id) {
+            continue;
+        }
+        let gone: Vec<String> = r.parts.iter().filter(|p| unstated.contains(p)).chain(std::iter::once(&r.id)).cloned().collect();
+        unstated.retain(|l| !gone.contains(l));
+        let table = display(&r.id);
+        let list: Vec<String> = gone.iter().map(&display).collect();
+        let (title, why) = match &r.why {
+            Remade::Partitioned => (format!("Postgres can't make {table} a partitioned table in place"), Some(format!("A table is partitioned only when it's created, so this {subject} drops {table} and its rows to create it again."))),
+            Remade::Plain => (format!("Postgres can't make {table} a plain table in place"), Some(format!("A partitioned table is made plain only by creating it again, so this {subject} drops {table}, its partitions and their rows."))),
+            Remade::Rekeyed => (format!("Postgres can't change the partition key of {table} in place"), Some(format!("A partition key is set only when its table is created, so this {subject} drops {table}, its partitions and their rows to create them again."))),
+            Remade::Other => (format!("This {subject} drops the table {table} and its rows to create it again"), None),
+        };
+        let mut problem = Problem::new("drops-data", title);
+        if let Some(why) = why {
+            problem = problem.note(why);
+        }
+        if subject == "migration" {
+            problem = problem.note(format!("To keep the rows, write it with --drop, then edit it: copy the rows of {table} aside before it's dropped, and back once it's created again."));
+        }
+        problems.push(problem.fix(if subject == "migration" { "To write it, dropping the rows" } else { "To drop the rows" }, &[&create_command(asked, &stated, &list, &[])]));
+    }
     let unnamed: Vec<(&String, String, String)> = narrowed.iter().filter(|(id, _, _)| !named.contains(id)).map(|(id, shown, why)| (id, shown_id(shown), why.clone())).collect();
     if !guesses.is_empty() {
         let drops: Vec<(String, String, Option<String>)> = unstated.iter().map(|l| (l.split(' ').next().unwrap_or_default().to_string(), display(l), owner(l))).collect();
@@ -5020,7 +5094,8 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
         if let Some(asked) = asked {
             // What the plan adds, the names a person might mean by a rename of what it drops.
             let added: Vec<String> = target.schema.objects.iter().filter(|(id, o)| matches!(o.kind, Some(crate::diff::Kind::Column | crate::diff::Kind::Table)) && !current.objects.contains_key(*id) && !(o.kind == Some(crate::diff::Kind::Column) && o.owner.as_ref().is_some_and(|t| !current.objects.contains_key(t)))).map(|(id, o)| format!("{} {}", if o.kind == Some(crate::diff::Kind::Table) { "table" } else { "column" }, shown_name(id))).collect();
-            let mut problems = drop_problems(&lost, &shown, &narrowed, &guesses, &guess_owner, &added, &Choices { drop: columns.drop.clone(), rename: choices.rename.clone(), ..Default::default() }, asked);
+            let remade = remade_tables(&lost, &current, &target.schema);
+            let mut problems = drop_problems(&lost, &shown, &narrowed, &guesses, &guess_owner, &added, &remade, &Choices { drop: columns.drop.clone(), rename: choices.rename.clone(), ..Default::default() }, asked);
             if force {
                 problems.retain(|p| !DESTRUCTIVE.contains(&p.code));
             }
