@@ -6227,19 +6227,17 @@ fn stray_renames(files: &[Migration], strays: &[String], now: i64) -> Vec<String
     // Each migration, and each stray already given a time, as (its time, its name, the name it is
     // ordered by now): init.sql runs first whatever its name.
     let mut placed: Vec<(String, String, String)> = files.iter().map(|f| (f.time.clone(), f.name.clone(), if f.name == INIT { String::new() } else { f.name.clone() })).collect();
-    // Every name a file has or is told to take, so that no two renames meet.
-    let mut taken: std::collections::HashSet<String> = files.iter().map(|f| f.name.clone()).collect();
+    // Every name a file in the directory has or is told to take, in lowercase, as a filesystem that
+    // ignores case reads it, so that no rename meets another file.
+    let mut taken: std::collections::HashSet<String> = files.iter().map(|f| &f.name).chain(strays).map(|n| n.to_lowercase()).collect();
     let mut notes = Vec::new();
+    // A name with no stamp, or digits that aren't a date, can take any time from now, so it waits
+    // for those that can only take a time of their own period.
+    let mut unstamped = Vec::new();
     for s in strays.iter().filter(|s| BARE.is_match(s)) {
-        let (short, rest) = match SHORT.captures(s) {
-            Some(m) if real(format!("{:0<14}", &m[1]).as_str()) => (m[1].to_string(), m[2].to_string()),
-            // No stamp, or digits that aren't a date: the first second from now that no file takes.
-            _ => {
-                let name = (now..).map(|t| format!("{}_{s}", time::stamp(t))).find(|n| !taken.contains(n)).expect("a free second");
-                notes.push(format!("Rename {s} to {name}."));
-                taken.insert(name);
-                continue;
-            }
+        let Some((short, rest)) = SHORT.captures(s).filter(|m| real(format!("{:0<14}", &m[1]).as_str())).map(|m| (m[1].to_string(), m[2].to_string())) else {
+            unstamped.push(s);
+            continue;
         };
         // The start of the stamp's period, and its end: each digit after the prefix the largest that
         // still makes a time.
@@ -6270,6 +6268,11 @@ fn stray_renames(files: &[Migration], strays: &[String], now: i64) -> Vec<String
                 });
             }
         }
+    }
+    for s in unstamped {
+        let name = (now..).map(|t| format!("{}_{s}", time::stamp(t))).find(|n| !taken.contains(n)).expect("a free second");
+        notes.push(format!("Rename {s} to {name}."));
+        taken.insert(name);
     }
     notes
 }
@@ -7419,7 +7422,8 @@ mod tests {
     #[test]
     fn a_stray_with_a_shorter_stamp_is_padded_where_its_name_sorts() {
         let files = |names: &[&str]| -> Vec<Migration> { names.iter().map(|n| Migration { sql: String::new(), name: n.to_string(), time: if *n == INIT { "00000000000000".into() } else { n[..14].to_string() }, path: PathBuf::from(n) }).collect() };
-        let renames = |names: &[&str], strays: &[&str]| stray_renames(&files(names), &strays.iter().map(|s| s.to_string()).collect::<Vec<_>>(), time::seconds("20261123191900").unwrap());
+        let renames_at = |now: &str, names: &[&str], strays: &[&str]| stray_renames(&files(names), &strays.iter().map(|s| s.to_string()).collect::<Vec<_>>(), time::seconds(now).unwrap());
+        let renames = |names: &[&str], strays: &[&str]| renames_at("20261123191900", names, strays);
         // Between its neighbours, from the start of its day.
         assert_eq!(renames(&[INIT, "20260101000000_a.sql", "20260401000000_c.sql"], &["20260320_b.sql"]), ["Rename 20260320_b.sql to 20260320000000_b.sql."]);
         assert_eq!(renames(&[], &["20260320_a.sql", "20260320_b.sql"]), ["Rename 20260320_a.sql to 20260320000000_a.sql.", "Rename 20260320_b.sql to 20260320000000_b.sql."]);
@@ -7433,6 +7437,9 @@ mod tests {
         assert_eq!(renames(&["20260320180000_a.sql"], &["202603201_b.sql"]), ["Rename 202603201_b.sql to 20260320195959_b.sql."]);
         // No two renames, nor a rename and a migration, take one name.
         assert_eq!(renames(&["20261123191900_bar.sql"], &["2026112319190_foo.sql", "bar.sql", "foo.sql"]), ["Rename 2026112319190_foo.sql to 20261123191900_foo.sql.", "Rename bar.sql to 20261123191901_bar.sql.", "Rename foo.sql to 20261123191901_foo.sql."]);
+        // A name that differs only in case is taken, and an unstamped file takes its time after the stamped ones.
+        assert_eq!(renames(&["20260320180000_a.sql"], &["20260320195959_B.sql", "202603201_b.sql"]), ["Rename 202603201_b.sql with a time that runs it where its name sorts, after 20260320180000_a.sql."]);
+        assert_eq!(renames_at("20261123191929", &["20261123191925_a.sql"], &["1_notes.sql", "2026112319192_1_notes.sql"]), ["Rename 2026112319192_1_notes.sql to 20261123191929_1_notes.sql.", "Rename 1_notes.sql to 20261123191930_1_notes.sql."]);
         // No time of the day keeps it between its neighbours.
         assert_eq!(renames(&["20260320000000_z.sql", "20260320235959_z.sql", "20260401000000_c.sql"], &["20260320_b.sql"]), ["Rename 20260320_b.sql with a time that runs it where its name sorts, after 20260320235959_z.sql and before 20260401000000_c.sql."]);
     }
