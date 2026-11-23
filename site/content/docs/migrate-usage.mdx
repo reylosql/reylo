@@ -104,7 +104,7 @@ $ reylo migrate history push
 $ reylo migrate deploy --url $PROD_URL
 ```
 
-It moves yours past no migration that changes data. Past one, it prints the SQL that undoes your change on production instead. A server that ran them before yours, such as staging, takes your change too. Its deploy refusal gives the commands.
+It moves yours past no migration that changes data. Past one, it refuses and says to undo your change on production, then deploy. It prints the undo where it can run it safely. A server that ran them before yours, such as staging, takes your change too. Its deploy refusal gives the commands.
 
 ## Schema <code className="dk-aside">schema.sql</code> [#schema-schemasql]
 
