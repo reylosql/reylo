@@ -1,6 +1,6 @@
 {
   "name": "reylo",
-  "version": "0.8.0",
+  "version": "0.8.3",
   "private": true,
   "description": "Import SQL files as fully typed queries. A TypeScript content mapper plus a runtime loader.",
   "license": "MIT",
@@ -22,6 +22,8 @@
     ".": "./src/index.ts",
     "./register": "./src/register.ts",
     "./vite": "./src/vite.ts",
+    "./rollup": "./src/rollup.ts",
+    "./rolldown": "./src/rolldown.ts",
     "./esbuild": "./src/esbuild.ts",
     "./webpack": "./src/webpack.ts",
     "./turbopack": "./src/turbopack.ts",

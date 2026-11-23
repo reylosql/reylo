@@ -297,6 +297,12 @@ fn run(sql: &str, lexed: &Lexed, ddl: &[String], extras: &Extras, marked: &[Stri
     diagnostics.extend(crate::analysis::odd_pairs(sql, lexed, &constructors));
     // A parameter as a whole sort or group key is an error; the rest is typed all the same.
     diagnostics.extend(constant_keys(sql, lexed, &t));
+    // An INSERT that leaves out a column that refuses NULL and has no default: SQLite prepares it
+    // and refuses each row it inserts. An EXPLAIN of one, a command, inserts nothing.
+    if let (false, Some(message)) = (matches!(statement, lex::Statement::Command(_)), unwritten(&t, &skipping)) {
+        let (start, length) = insert_target_at(sql, lexed).unwrap_or((0, sql.trim_end().len()));
+        diagnostics.push(diag(message, start, length, 16));
+    }
     // The parameters cast to `nullable(…)`, by the `?n` the tree names each by.
     let nullable_params: HashSet<String> = lexed.params.iter().enumerate().filter(|(_, name)| marked.contains(name)).map(|(k, _)| format!("?{}", k + 1)).collect();
     let a = Analyzer { tree: &t, extras, skipping: &skipping, nullable_values: nullable_params.clone(), nullable_params, written: std::cell::RefCell::new(HashSet::new()), level: std::cell::RefCell::new(Level::default()), shapes: std::cell::RefCell::new(HashMap::new()), recursion: std::cell::RefCell::new(Vec::new()), settled: std::cell::RefCell::new(HashMap::new()) };
@@ -623,6 +629,94 @@ fn constant_keys(sql: &str, lexed: &Lexed, t: &Tree) -> Vec<crate::api::Diagnost
     out.sort_by_key(|d| d.start);
     out.dedup_by_key(|d| d.start);
     out
+}
+
+/// The error of an INSERT that leaves out a column it must write: one that is NOT NULL, has no
+/// default and is neither the rowid's alias nor generated (a WITHOUT ROWID table's key columns are
+/// NOT NULL whatever they declare). The NOT NULL is checked before any uniqueness, so neither OR
+/// REPLACE (which writes the default, and there is none), nor a UNIQUE's ON CONFLICT IGNORE, nor an
+/// upsert keeps the row. Nothing is said where the row may be skipped rather than refused: under OR
+/// IGNORE, on a table that declares a NOT NULL ON CONFLICT IGNORE, and under any BEFORE or INSTEAD
+/// OF trigger on the insert, which can `RAISE(IGNORE)`. A target SQLite names no column for is the
+/// rowid of a table with no alias for it, since it refuses any other name it does not know.
+fn unwritten(t: &Tree, skipping: &HashMap<String, i32>) -> Option<String> {
+    let dml = t.dml.as_ref().filter(|d| d.kind == "insert")?;
+    let info = t.tables.get(&dml.table)?;
+    let ignored = dml.on_error == "ignore" || (dml.on_error == "default" && info.ignores_null);
+    let triggered = skipping.get(&dml.table.to_ascii_lowercase()).is_some_and(|mask| mask & TRIGGER_ROW_INSERT != 0);
+    if ignored || triggered {
+        return None;
+    }
+    let written = |name: &str| dml.columns.iter().flatten().any(|c| c.eq_ignore_ascii_case(name));
+    let alias = |name: &str| info.rowid_alias.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(name));
+    let missing: Vec<String> = info.columns.iter().filter(|c| c.not_null && !c.has_default && !c.generated && !alias(&c.name) && !written(&c.name)).map(|c| format!("\"{}\"", c.name)).collect();
+    match missing.as_slice() {
+        [] => None,
+        [one] => Some(format!("Column {one} of \"{}\" is NOT NULL with no default, and this insert leaves it out, so SQLite refuses every row it inserts.", dml.table)),
+        many => Some(format!("Columns {} of \"{}\" are NOT NULL with no default, and this insert leaves them out, so SQLite refuses every row it inserts.", many.join(", "), dml.table)),
+    }
+}
+
+/// Where an INSERT names its table: the name after the first INTO that is a word of code, not
+/// text, a comment or a placeholder; a quoted part and a schema's included. `None` where there is
+/// no such INTO.
+fn insert_target_at(sql: &str, lexed: &Lexed) -> Option<(usize, usize)> {
+    let bytes = sql.as_bytes();
+    // A byte of a word: a letter, a digit, `_`, `$`, or any byte of a character past ASCII.
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
+    let word_end = |mut at: usize| {
+        while at < bytes.len() && word(bytes[at]) {
+            at += 1;
+        }
+        at
+    };
+    // The text, comments and placeholders, in order, which the scan for INTO passes once.
+    let mut spans: Vec<(usize, usize)> = lexed.opaque.iter().copied().chain(lexed.placeholders.iter().map(|p| (p.start, p.end))).collect();
+    spans.sort_unstable();
+    let mut next = 0;
+    let comment = |at: usize| lexed.opaque.iter().find(|(from, _)| *from == at && (sql[at..].starts_with("--") || sql[at..].starts_with("/*"))).map(|(_, to)| *to);
+    // Past whitespace and comments.
+    let gap = |mut at: usize| loop {
+        while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        match comment(at) {
+            Some(to) => at = to,
+            None => return at,
+        }
+    };
+    // The end of one part of a name: a quoted one's closing quote, a bare one's last letter.
+    let part = |at: usize| match lexed.opaque.iter().find(|(from, _)| *from == at) {
+        Some((_, to)) => Some(*to),
+        None => Some(word_end(at)).filter(|end| *end > at),
+    };
+    let mut at = 0;
+    let into = loop {
+        if at >= bytes.len() {
+            return None;
+        }
+        while spans.get(next).is_some_and(|(_, to)| *to <= at) {
+            next += 1;
+        }
+        if let Some((_, to)) = spans.get(next).filter(|(from, _)| *from <= at) {
+            at = *to;
+        } else if word(bytes[at]) {
+            let end = word_end(at);
+            if sql[at..end].eq_ignore_ascii_case("into") {
+                break end;
+            }
+            at = end;
+        } else {
+            at += 1;
+        }
+    };
+    let start = gap(into);
+    let mut end = part(start)?;
+    let dot = gap(end);
+    if bytes.get(dot) == Some(&b'.') {
+        end = part(gap(dot + 1))?;
+    }
+    Some((start, end - start))
 }
 
 fn token_len(rest: &str) -> usize {
@@ -2979,7 +3073,7 @@ impl Analyzer<'_> {
     }
 
     /// The proof for one SELECT arm, its set operation aside: the closure of [`Self::determined`],
-    /// as `cardinality` proves it over libpg_query's tree. Every FROM item determined is one row
+    /// as `cardinality` proves it over Postgres's tree. Every FROM item determined is one row
     /// at most; one group at most when every GROUP BY expression is pinned; one row at most from
     /// a DISTINCT over pinned values.
     fn arm_at_most_one(&self, sel: &Sel) -> Result<(), String> {
@@ -5504,5 +5598,75 @@ mod tests {
         assert_eq!(param(&a, "n"), "integer");
         assert_eq!(analysis("insert or replace into users (id, name) values (:id, :name) returning id").cardinality, "one");
     }
-}
 
+    #[test]
+    fn an_insert_that_leaves_out_a_required_column_is_an_error() {
+        let schema = |extra: &[&str]| -> Vec<String> {
+            let mut s: Vec<String> = [
+                "create table req (id integer primary key not null, name text not null, email text not null, note text)",
+                "create table dflt (id integer primary key, name text not null default 'x', nulled text not null default null, made text not null generated always as (id || 'x'))",
+                "create table keyed (k text not null, v text, primary key (k)) without rowid",
+                "create table plain_key (k int primary key, v text)",
+                "create table ign (id integer primary key, name text not null on conflict ignore)",
+                "create table rep (id integer primary key, name text not null on conflict replace)",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            s.extend(extra.iter().map(|s| s.to_string()));
+            s
+        };
+        let said = |sql: &str, extra: &[&str]| -> Vec<(String, String)> {
+            let a = analyze_ddl(sql, &schema(extra), &Extras::default()).analysis;
+            a.diagnostics.iter().filter(|d| d.code == 16).map(|d| (sql[d.start..d.start + d.length].to_string(), d.message.clone())).collect()
+        };
+        let one = |column: &str, table: &str| format!("Column \"{column}\" of \"{table}\" is NOT NULL with no default, and this insert leaves it out, so SQLite refuses every row it inserts.");
+        assert_eq!(said("insert into req (id, name) values (:id, :name)", &[]), [("req".to_string(), one("email", "req"))]);
+        assert_eq!(said("insert into req (id) values (1)", &[]), [("req".to_string(), "Columns \"name\", \"email\" of \"req\" are NOT NULL with no default, and this insert leaves them out, so SQLite refuses every row it inserts.".to_string())]);
+        assert_eq!(said("insert into req default values", &[]).len(), 1);
+        assert_eq!(said("insert into \"req\" (name) select 'a'", &[]).first().map(|d| d.0.as_str()), Some("\"req\""));
+        assert_eq!(said("insert into main.req (name) select 'a' union all select 'b'", &[]).first().map(|d| d.0.as_str()), Some("main.req"));
+        // OR REPLACE writes the default, and there is none; an upsert's NOT NULL is checked first.
+        assert_eq!(said("insert or replace into req (name) values ('a')", &[]).len(), 1);
+        assert_eq!(said("replace into req (name) values ('a')", &[]).len(), 1);
+        assert_eq!(said("insert into req (id, name) values (1, 'a') on conflict do nothing", &[]).len(), 1);
+        assert_eq!(said("insert into rep (id) values (1)", &[]), [("rep".to_string(), one("name", "rep"))]);
+        // `default null` writes NULL; a WITHOUT ROWID table's key is NOT NULL, a rowid table's other key is not.
+        assert_eq!(said("insert into dflt (id) values (1)", &[]), [("dflt".to_string(), one("nulled", "dflt"))]);
+        assert_eq!(said("insert into keyed (v) values ('a')", &[]), [("keyed".to_string(), one("k", "keyed"))]);
+        // Written whole, positionally or by name: the rowid's alias, a default and a generated column fill themselves.
+        for sql in [
+            "insert into req (name, email) values (:name, :email)",
+            "insert into req values (1, 'a', 'b', null)",
+            "insert into req (NAME, Email) values ('a', 'b'), ('c', 'd')",
+            "insert into req select * from req",
+            "insert into dflt (nulled) values ('a')",
+            "insert into plain_key (v) values ('a')",
+            // The row may be skipped rather than refused.
+            "insert or ignore into req (id) values (1)",
+            "insert into ign (id) values (1)",
+            "select 1",
+            "update req set name = 'a'",
+        ] {
+            assert_eq!(said(sql, &[]), Vec::<(String, String)>::new(), "{sql}");
+        }
+        // A BEFORE trigger can RAISE(IGNORE), and an INSTEAD OF trigger takes a view's write.
+        assert!(said("insert into req (id) values (1)", &["create trigger skip before insert on req begin select raise(ignore); end"]).is_empty());
+        assert!(said("insert into req (id) values (1)", &["create trigger skip insert on REQ begin select 1; end"]).is_empty());
+        assert!(said("insert into v (id) values (1)", &["create view v as select id, name from req", "create trigger vi instead of insert on v begin insert into req (id, name, email) values (new.id, 'a', 'b'); end"]).is_empty());
+        assert_eq!(said("insert into req (id) values (1)", &["create trigger later after insert on req begin select 1; end"]).len(), 1);
+        assert_eq!(said("insert into req (id) values (1)", &["create trigger other before update on req begin select 1; end"]).len(), 1);
+        // A UNIQUE's IGNORE comes after the NOT NULL, and the rowid of a table with no alias is no column.
+        assert_eq!(said("insert into uniq (tag) values ('x')", &["create table uniq (required text not null, tag text unique on conflict ignore)"]).len(), 1);
+        assert_eq!(said("insert into plain (rowid, tag) values (1, 'x')", &["create table plain (required text not null, tag text)"]).len(), 1);
+        assert_eq!(said("insert into ign (id, name) values (1, :name)", &[]).len(), 0);
+        // The table's name past comments and around a schema's dot, and no INTO inside a placeholder.
+        assert_eq!(said("insert into /* audit */ req default values", &[]).first().map(|d| d.0.as_str()), Some("req"));
+        assert_eq!(said("insert into main . req default values", &[]).first().map(|d| d.0.as_str()), Some("main . req"));
+        assert_eq!(said("with s as (select :into as name) insert into req (name) select name from s", &[]).first().map(|d| d.0.as_str()), Some("req"));
+        // SQLite checks no NOT NULL a virtual table declares, and an EXPLAIN inserts nothing.
+        assert!(said("insert into g (_shape) values ('[[0,0],[1,0],[0,1],[0,0]]')", &["create virtual table g using geopoly(name text not null)"]).is_empty());
+        assert!(said("explain insert into req (id) values (1)", &[]).is_empty());
+        assert!(said("explain query plan insert into req (id) values (1)", &[]).is_empty());
+    }
+}

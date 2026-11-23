@@ -387,6 +387,7 @@ re!(TRANSACTION_CONTROL, r"^(BEGIN|START TRANSACTION|COMMIT|END|ROLLBACK|SAVEPOI
 re!(PG_ALONE, r"^(CREATE (UNIQUE )?INDEX CONCURRENTLY|DROP INDEX CONCURRENTLY|REINDEX\b.*\bCONCURRENTLY|VACUUM|ALTER SYSTEM|CREATE DATABASE|DROP DATABASE|CREATE TABLESPACE|DROP TABLESPACE|CLUSTER$|REINDEX (SYSTEM|DATABASE))");
 re!(SQLITE_ALONE, r"^(VACUUM|ATTACH|DETACH)\b");
 re!(PG_DETACH, r"^ALTER TABLE\b.*\bDETACH PARTITION\b.*\bCONCURRENTLY\b");
+re!(PG_BUILDS_INDEX, r"^CREATE (UNIQUE )?INDEX CONCURRENTLY\b");
 re!(MYSQL_DATA, r"^(INSERT|UPDATE|DELETE|REPLACE|SELECT|WITH|DO|TABLE|VALUES|CALL|SET)\b");
 re!(MYSQL_SET_COMMITS, r"^SET (PASSWORD|DEFAULT ROLE)\b|^SET\b.*\bAUTOCOMMIT\b");
 
@@ -456,6 +457,13 @@ pub fn kind_of(statement: &Statement, dialect: Dialect) -> Kind {
             }
         }
     }
+}
+
+/// Whether `sql` is one statement that builds an index outside a transaction on Postgres: one that
+/// fails leaves nothing behind but the invalid index it was building, which can be dropped. A
+/// `reindex` isn't one: a database's or a table's may finish some indexes before it fails.
+pub fn builds_index_alone(sql: &str, dialect: Dialect) -> bool {
+    dialect == Dialect::Postgres && matches!(split_statements(sql, dialect).as_slice(), [one] if PG_BUILDS_INDEX.is_match(&head(one, 6)))
 }
 
 /// Why `sql` cannot run as one atomic migration on the dialect, or None when it can. A file runs in
@@ -710,6 +718,18 @@ pub fn last_written(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_concurrent_index_build_leaves_nothing_when_it_fails() {
+        let p = Dialect::Postgres;
+        assert!(builds_index_alone("-- by handle\ncreate unique index concurrently users_h on users (handle);", p));
+        assert!(builds_index_alone("CREATE INDEX CONCURRENTLY IF NOT EXISTS users_h ON users (handle)", p));
+        // A reindex may finish some indexes before it fails, and a detach may be left pending.
+        for sql in ["reindex database concurrently app", "reindex index concurrently users_h", "alter table t detach partition t1 concurrently", "drop index concurrently users_h"] {
+            assert!(!builds_index_alone(sql, p), "{sql}");
+        }
+        assert!(!builds_index_alone("create index users_h on users (handle)", Dialect::Mysql));
+    }
 
     fn texts(sql: &str, d: Dialect) -> Vec<String> {
         split_statements(sql, d).into_iter().map(|s| s.text).collect()

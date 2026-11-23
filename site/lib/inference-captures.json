@@ -358,7 +358,7 @@
       }
     },
     "inferred_create_user.sql": {
-      "64c49fd060c7b41a": {
+      "faee5b8be92dd75a": {
         "descriptor": {
           "params": [
             {
@@ -386,18 +386,38 @@
                   "bits": 32,
                   "label": "int4"
                 }
+              },
+              {
+                "name": "name",
+                "type": {
+                  "kind": "text",
+                  "code_points": [
+                    [
+                      1,
+                      1114111
+                    ]
+                  ],
+                  "label": "text"
+                }
+              },
+              {
+                "name": "created_at",
+                "type": {
+                  "kind": "instant",
+                  "tick": "1/1000000",
+                  "min": "-4713-11-24T00:00:00Z",
+                  "max": "+294276-12-31T23:59:59.999999Z",
+                  "infinity": true,
+                  "label": "timestamptz"
+                }
               }
             ]
           }
-        },
-        "rust": {
-          "params": "Query { name: &'a str }",
-          "returns": "{ id: i32 }"
         }
       }
     },
     "inferred_event_kinds.sql": {
-      "0555e510293dd913": {
+      "7f2ec0dab6b0fa00": {
         "descriptor": {
           "params": [
             {
@@ -455,15 +475,11 @@
               }
             ]
           }
-        },
-        "rust": {
-          "params": "Query { limit: i32 }",
-          "returns": "Vec<{ id: i32, kind: Kind }>\n\npub enum Kind {\n    Click,\n    Key,\n}"
         }
       }
     },
     "inferred_event_payloads_union.sql": {
-      "062e21fffc127b32": {
+      "9f5105fc912c52af": {
         "descriptor": {
           "params": [
             {
@@ -541,15 +557,11 @@
               }
             ]
           }
-        },
-        "rust": {
-          "params": "Query { id: i32 }",
-          "returns": "Option<{ id: i32, payload: serde_json::Value }>"
         }
       }
     },
     "inferred_event_payloads.sql": {
-      "bb1da72df4824bb5": {
+      "ec009d7ed61c2d8c": {
         "descriptor": {
           "params": [
             {
@@ -599,10 +611,6 @@
               }
             ]
           }
-        },
-        "rust": {
-          "params": "Query { id: i32 }",
-          "returns": "Option<{ id: i32, payload: Json<Payload> }>\n\npub struct Payload {\n    pub x: i64,\n    pub y: i64,\n}"
         }
       }
     },
@@ -2001,29 +2009,13 @@
       }
     },
     "record_order.sql": {
-      "9f504f6de8295fd6": {
+      "a68247b944bf5697": {
         "descriptor": {
           "params": [
             {
               "name": "order",
               "type": {
                 "kind": "json",
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "x": {
-                      "type": "integer"
-                    },
-                    "y": {
-                      "type": "integer"
-                    },
-                    "code": {
-                      "type": "string"
-                    }
-                  },
-                  "additionalProperties": true,
-                  "$schema": "https://json-schema.org/draft/2020-12/schema"
-                },
                 "label": "json"
               }
             }
@@ -2033,10 +2025,6 @@
             "cardinality": "none",
             "columns": []
           }
-        },
-        "rust": {
-          "params": "Query { order: Json<Order> }\n\npub struct Order {\n    pub x: Option<i64>,\n    pub y: Option<i64>,\n    pub code: Option<String>,\n    pub additional_properties: serde_json::Map<\n        String,\n        serde_json::Value,\n    >,\n}",
-          "returns": "u64"
         }
       }
     },
@@ -2389,7 +2377,7 @@
       }
     },
     "upserts.sql": {
-      "dabc9c36caed9bf9": {
+      "ec978ac8b58e25f3": {
         "descriptor": {
           "params": [
             {
@@ -2446,10 +2434,6 @@
               }
             ]
           }
-        },
-        "rust": {
-          "params": "Query { name: &'a str, email: &'a str }",
-          "returns": "{ id: i32, name: String }"
         }
       }
     },
@@ -2921,7 +2905,7 @@
       }
     },
     "inferred_event_payloads_union.sql": {
-      "e7414869b46dd28a": {
+      "43a1cc6b7f0d887e": {
         "descriptor": {
           "params": [
             {
@@ -2998,15 +2982,11 @@
               }
             ]
           }
-        },
-        "rust": {
-          "params": "Query { id: i32 }",
-          "returns": "Option<{ id: i32, payload: serde_json::Value }>"
         }
       }
     },
     "inferred_event_payloads.sql": {
-      "2c56b1677cb4d487": {
+      "2b4e2a10109417ca": {
         "descriptor": {
           "params": [
             {
@@ -3055,10 +3035,6 @@
               }
             ]
           }
-        },
-        "rust": {
-          "params": "Query { id: i32 }",
-          "returns": "Option<{ id: i32, payload: Json<Payload> }>\n\npub struct Payload {\n    pub x: i64,\n    pub y: i64,\n}"
         }
       }
     },
@@ -3973,7 +3949,7 @@
       }
     },
     "record_order.sql": {
-      "9f504f6de8295fd6": {
+      "ac5a2fdda2b33a49": {
         "descriptor": {
           "params": [
             {
@@ -3989,10 +3965,6 @@
             "cardinality": "none",
             "columns": []
           }
-        },
-        "rust": {
-          "params": "Query { order: serde_json::Value }",
-          "returns": "u64"
         }
       }
     },
@@ -4505,7 +4477,7 @@
       }
     },
     "inferred_create_user.sql": {
-      "64c49fd060c7b41a": {
+      "faee5b8be92dd75a": {
         "descriptor": {
           "params": [
             {
@@ -4528,13 +4500,27 @@
                   "bits": 64,
                   "label": "INTEGER"
                 }
+              },
+              {
+                "name": "name",
+                "type": {
+                  "kind": "text",
+                  "encoding": "UTF-8",
+                  "ill_formed": true,
+                  "label": "TEXT"
+                }
+              },
+              {
+                "name": "created_at",
+                "type": {
+                  "kind": "text",
+                  "encoding": "UTF-8",
+                  "ill_formed": true,
+                  "label": "TEXT"
+                }
               }
             ]
           }
-        },
-        "rust": {
-          "params": "Query { name: &'a str }",
-          "returns": "{ id: i64 }"
         }
       }
     },
@@ -5353,7 +5339,7 @@
       }
     },
     "record_order.sql": {
-      "9f504f6de8295fd6": {
+      "1e4e0c279a7d3857": {
         "descriptor": {
           "params": [
             {
@@ -5370,10 +5356,6 @@
             "cardinality": "none",
             "columns": []
           }
-        },
-        "rust": {
-          "params": "Query { order: &'a str }",
-          "returns": "u64"
         }
       }
     },
@@ -5512,7 +5494,7 @@
       }
     },
     "upserts.sql": {
-      "dabc9c36caed9bf9": {
+      "ec978ac8b58e25f3": {
         "descriptor": {
           "params": [
             {
@@ -5555,10 +5537,6 @@
               }
             ]
           }
-        },
-        "rust": {
-          "params": "Query { name: &'a str, email: &'a str }",
-          "returns": "{ id: i64, name: String }"
         }
       }
     },

@@ -5,7 +5,8 @@
 #
 # $env:REYLO_VERSION         The version to install, as 0.8.0; the latest release by default.
 # $env:REYLO_INSTALL_DIR     Where reylo.exe goes; ~\.local\bin by default, which is added to the
-#                            user's Path unless $env:REYLO_NO_MODIFY_PATH is set.
+#                            user's Path unless $env:REYLO_NO_MODIFY_PATH is set. Its licenses go in
+#                            share\doc\reylo beside that directory, as ~\.local\share\doc\reylo.
 # $env:REYLO_DOWNLOAD_URL    A directory holding a release's assets, in place of the release's own.
 #
 # On macOS and Linux, install.sh beside this file does the same.
@@ -17,6 +18,7 @@
 
   $repo = 'reylosql/reylo'
   $dir = if ($env:REYLO_INSTALL_DIR) { $env:REYLO_INSTALL_DIR } else { Join-Path $HOME '.local\bin' }
+  $dir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($dir)
   $version = if ($env:REYLO_VERSION) { $env:REYLO_VERSION -replace '^v', '' } else { '' }
 
   # The machine's own architecture, from the system's environment: a process emulated as x64 on arm64,
@@ -54,6 +56,18 @@
     # tar.exe has come with Windows since Windows 10 1803.
     & "$env:SystemRoot\System32\tar.exe" -xzf "$tmp\$asset" -C $tmp
     if ($LASTEXITCODE -ne 0) { throw "reylo install: cannot unpack $asset" }
+    # The licenses of the code the binary carries, kept before the binary is, where the archive holds
+    # them (an older release's doesn't).
+    $parent = Split-Path -Parent $dir
+    $doc = Join-Path $(if ($parent) { $parent } else { $dir }) 'share\doc\reylo'
+    foreach ($notice in 'LICENSE', 'NOTICE.md', 'LICENSE-APACHE') {
+      if (Test-Path "$tmp\$notice") {
+        try {
+          New-Item -ItemType Directory -Force -Path $doc | Out-Null
+          Copy-Item -Force "$tmp\$notice" (Join-Path $doc $notice)
+        } catch { throw "reylo install: cannot write reylo's licenses to $doc`: $($_.Exception.Message)" }
+      }
+    }
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     Move-Item -Force "$tmp\reylo.exe" (Join-Path $dir 'reylo.exe')
   } finally {

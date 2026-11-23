@@ -5,7 +5,8 @@ import type { LanguageRegistration } from 'shiki';
  * `$ ` is a command, after a dim prompt; a line that opens with `# ` is a
  * comment; every other line is what the command printed, coloured as `reylo` paints it in a
  * terminal (engine/migrate/src/commands.rs): its marks (✓ green, ↺ and ! yellow, a » note dim whole, ✗ and its
- * heading red), the dim headings and timings, the statements `db push` ran and the commands a refusal names.
+ * heading red), the dim headings and timings, the statements `db push` ran and the commands a refusal names;
+ * and, for other tools' output shown beside it, Next.js's ⨯ and a TypeScript error line.
  * From a `Usage:` line on, it is help, as `reylo migrate --help` paints it (engine/cli/src/main.rs):
  * bold headings, commands, flags and the dim values they take.
  * The help's commands and flags, the commands a refusal names and the yellow marks take scopes of
@@ -36,6 +37,9 @@ export const terminal: LanguageRegistration = {
     { match: '^[│\\s]*[├└]── .*?(?=\\s+#|$)', name: 'string.path' },
     { match: '(?<=\\s)# .*$', name: 'comment.line' },
     { match: '^✗ .*$', name: 'keyword.error' },
+    // Other tools' output, as their terminals paint it: Next.js's ⨯ red, and a TypeScript error's file cyan, its `error` red and its code dim.
+    { match: '^(\\s*)(⨯)', captures: { 2: { name: 'keyword.error' } } },
+    { match: '^(\\S+\\(\\d+,\\d+\\))(: )(error)( TS\\d+)(:)', captures: { 1: { name: 'reylo.cli.command' }, 3: { name: 'keyword.error' }, 4: { name: 'comment.timing' } } },
     { match: '^(Applying to|Pushing|Pulling from|Watching) .*$', name: 'comment.heading' },
     { match: '^(Nothing was (applied|changed)|No migration was written)\\.$', name: 'comment.outcome' },
     { match: '^Not run on this database.*$', name: 'comment.outcome' },

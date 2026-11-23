@@ -64,3 +64,9 @@ test("reylo/vite fills reylo's migrations placeholder with the project's, and ke
   writeFileSync(join(root, "embedded-migrations.ts"), "export const mine = 1;\n");
   assert.equal(await load(join(root, "embedded-migrations.ts")), null);
 });
+
+// Rollup and Rolldown run Vite's plugin as it is: their entry points name the same function.
+test("reylo/rollup and reylo/rolldown are reylo/vite's plugin", async () => {
+  assert.equal((await import("reylo/rollup")).default, reylo);
+  assert.equal((await import("reylo/rolldown")).default, reylo);
+});

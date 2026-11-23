@@ -23,11 +23,11 @@ function fnv(hash: bigint, bytes: Uint8Array, crlf: boolean): bigint {
   return hash;
 }
 
-/** What a crate's build script hashes besides `Cargo.toml`: the entries it hands `reylo_engine_build::emit`, or its own `source_hash`, which the copy of `sqlparser` carries so that it names no crate of the workspace. */
+/** What a crate's build script hashes besides `Cargo.toml`: the entries it hands `reylo_engine_build::emit`. */
 function entries(crate: string): string[] {
   const script = readFileSync(join(crate, "build.rs"), "utf8");
-  const list = /(?:reylo_engine_build::emit\(\s*"\w+"|source_hash\(\s*&root)\s*,\s*&\[([^\]]*)\]/.exec(script)?.[1];
-  assert.ok(list !== undefined, `${crate}/build.rs hands neither reylo_engine_build::emit nor its own source_hash a list of entries`);
+  const list = /reylo_engine_build::emit\(\s*"\w+"\s*,\s*&\[([^\]]*)\]/.exec(script)?.[1];
+  assert.ok(list !== undefined, `${crate}/build.rs hands reylo_engine_build::emit no list of entries`);
   return [...list.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
 }
 
@@ -74,8 +74,8 @@ function sourceHash(crate: string): bigint {
   return hash;
 }
 
-/** The crates of its own a database's engine builds on, whose hashes its fingerprint combines after its own: MySQL's copy of `sqlparser`. */
-const BUILDS_ON: Record<string, string[]> = { mysql: ["mysql/vendor/sqlparser"] };
+/** The crates of its own a database's engine builds on, whose hashes its fingerprint combines after its own: the parser, for Postgres and MySQL. */
+const BUILDS_ON: Record<string, string[]> = { postgres: ["syntax"], mysql: ["syntax"] };
 
 /** `reylo_engine_core::fingerprint::combine` of core's hash, the database crate's and each crate it builds on: FNV-1a over their little-endian bytes. */
 function fingerprint(database: string): string {

@@ -5,7 +5,8 @@
 #   curl -fsSL https://reylo.dev/install.sh | sh
 #
 # REYLO_VERSION      The version to install, as 0.8.0; the latest release by default.
-# REYLO_INSTALL_DIR  Where the binary goes; ~/.local/bin by default.
+# REYLO_INSTALL_DIR  Where the binary goes; ~/.local/bin by default. Its licenses go in share/doc/reylo
+#                    beside that directory, as ~/.local/share/doc/reylo.
 # REYLO_DOWNLOAD_URL A directory holding a release's assets, in place of the release's own.
 #
 # On Windows, install.ps1 beside this file does the same.
@@ -90,6 +91,14 @@ main() {
   [ "$actual" = "$expected" ] || fail "$asset does not match SHA256SUMS (expected $expected, got $actual); nothing was installed"
 
   tar -xzf "$tmp/$asset" -C "$tmp"
+  # The licenses of the code the binary carries, kept before the binary is, where the archive holds
+  # them (an older release's doesn't).
+  doc="$(dirname "$dir")/share/doc/reylo"
+  for notice in LICENSE NOTICE.md LICENSE-APACHE; do
+    if [ -f "$tmp/$notice" ]; then
+      mkdir -p "$doc" && cp "$tmp/$notice" "$doc/$notice" || fail "cannot write reylo's licenses to $doc"
+    fi
+  done
   mkdir -p "$dir"
   # Into place with a rename, so a reylo that is running keeps its file and a failed copy leaves no half.
   cp "$tmp/reylo" "$dir/.reylo.$$"

@@ -1,0 +1,104 @@
+---
+title: "Reylo v0.8.2"
+description: "Analyses as JSON and TypeScript, Rollup and Rolldown entry points, MySQL types through WITH queries and a faster Postgres analysis."
+date: 2026-11-22
+release: v0.8.2
+---
+
+Reylo v0.8.2 prints analyses as JSON and TypeScript, adds Rollup and Rolldown entry points, and types MySQL columns through WITH queries.
+
+Three changes can surface in an existing project, listed in [Upgrading from v0.8.1](#upgrading-from-v081).
+
+## JSON and TypeScript from `reylo analyze`
+
+The `reylo analyze` command now prints JSON by default, and TypeScript with `--format typescript` ([#365](https://github.com/reylosql/reylo/pull/365)).
+
+```terminal
+$ reylo analyze queries/get_user.sql --format typescript
+type Params = { id: number | bigint | string };
+type Returns = {
+  id: bigint;
+  email: string;
+  /** Shown on the profile page */
+  bio: string | null;
+} | null;
+```
+
+What it prints:
+
+- **In a terminal:** indented JSON, each object on one line where it fits in 80 columns
+- **Piped:** one line of JSON per statement
+- **TypeScript:** each statement's `Params` and what `.run()` resolves to, its cardinality applied
+- **YAML:** the output v0.8.1 printed, with `--format yaml`
+- **One file:** its result alone, with the `file` key only when the command reads several ([#350](https://github.com/reylosql/reylo/pull/350))
+
+## Rollup and Rolldown
+
+Reylo's plugin now has an entry point for each, `reylo/rollup` and `reylo/rolldown` ([#353](https://github.com/reylosql/reylo/pull/353), fixes [#296](https://github.com/reylosql/reylo/issues/296)).
+
+```ts
+import { defineConfig } from "rolldown";
+import reylo from "reylo/rolldown";
+
+export default defineConfig({
+  input: "src/server.ts",
+  platform: "node",
+  plugins: [reylo()],
+});
+```
+
+## Replaced columns in migrations
+
+A migration that can't tell renames from new columns now lists each column with its own flags ([#324](https://github.com/reylosql/reylo/pull/324)). Any mix of renames and drops can be picked, where it offered all renames or all drops.
+
+```terminal
+$ reylo migrate new tidy_columns
+✗ This migration can't tell renames from new columns
+
+    posts.title → heading  varchar(100) → varchar(200)
+    users.bio   → about    varchar(200) → text
+
+  For each, rename to keep its rows, or drop it:
+    --rename posts.title=heading   or   --drop posts.title
+    --rename users.bio=about       or   --drop users.bio
+  Add the flags you picked to:
+    reylo migrate new tidy_columns
+```
+
+A column replaced by one of another kind of type, such as text to a date, is now asked about the same way. It was a refusal to drop it, with a placeholder for the new name.
+
+## MySQL types through WITH queries
+
+MySQL columns now keep their types through WITH queries, derived tables and UNIONs ([#339](https://github.com/reylosql/reylo/pull/339)).
+
+```sql
+with recursive nums (n) as (
+  select 1 union all select n + 1 from nums where n < 5
+)
+select n from nums
+```
+
+What it infers:
+
+- **Recursive WITH queries:** a column that no query of the WITH makes NULL is never null, as `n` above, where every column was nullable
+- **ENUM labels:** an ENUM column read through a WITH query, a derived table or a UNION is typed as its labels, such as `"admin" | "member"`, where it was `string`
+
+## Faster Postgres analysis
+
+Each connection now prepares a catalog query once, where each analysis prepared it again ([#297](https://github.com/reylosql/reylo/pull/297)). Over 200 statements on a server 20 ms away:
+
+- **40 tables:** 13.4 s → 9.3 s
+- **200 tables:** 25.1 s → 17.3 s
+
+## Upgrading from v0.8.1
+
+Each change below can surface in a project that upgrades from v0.8.1.
+
+### Every dialect
+
+- **The `reylo analyze` command prints JSON, where it printed YAML.** Pass `--format yaml` where a script reads the old output ([#365](https://github.com/reylosql/reylo/pull/365)).
+- **A one-file run of `reylo analyze` has no `file` key.** Read the file's name from the command line, which names it ([#350](https://github.com/reylosql/reylo/pull/350)).
+
+### MySQL
+
+- **An ENUM column read through a WITH query, a derived table or a UNION is typed as its labels, where it was `string`.** Handle the labels where the type check now asks. A row holding MySQL's `''` error value there now throws in `.run()`, as it does for a plain ENUM column ([#339](https://github.com/reylosql/reylo/pull/339)).

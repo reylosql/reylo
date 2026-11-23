@@ -68,7 +68,7 @@ To install Reylo, you'll need:
 
 - **TypeScript 7.1 (currently in nightly builds).** The first release with content mappers. The `tsconfig.json` entry below needs a nightly from 2026-11-12 or later.
 - **Node 24 or later.**
-- **A running dev database.** Postgres, MySQL 8.0.38 or later, ClickHouse 25.11 or later, or a SQLite file: Reylo reads your current schema from it.
+- **A running dev database.** Postgres, MySQL 8.0.38 or later, ClickHouse 25.11 or later (in preview), or a SQLite file: Reylo reads your current schema from it.
 
 Install Reylo, which brings its engine for your machine, and TypeScript 7.1:
 
@@ -111,7 +111,7 @@ To make `.sql` imports work at run time too, load Reylo where your code runs. On
 node --env-file=.env --import reylo/register main.ts
 ```
 
-For Bun, Nub, Vite, Next.js, esbuild, webpack, Rspack, Cloudflare Workers and Jest, add [the plugin for your setup](https://reylo.dev/#plugins), or copy its complete [example project](https://github.com/reylosql/reylo/tree/main/examples). To see the types as you type, set up [your editor](https://reylo.dev/#editors).
+For Bun, Nub, Vite, Next.js, esbuild, Rolldown, Rollup, webpack, Rspack, Cloudflare Workers and Jest, add [the plugin for your setup](https://reylo.dev/#plugins), or copy its complete [example project](https://github.com/reylosql/reylo/tree/main/examples). To see the types as you type, set up [your editor](https://reylo.dev/#editors).
 
 To give your coding agent Reylo's rules for writing and running queries, install its skill:
 
@@ -161,12 +161,12 @@ Each has examples in [Inference](https://reylo.dev/#inference).
 
 ## Supported drivers
 
-Reylo is bring-your-own-driver. Pass `.run()` a client from any of these, or a Drizzle database or Knex instance over one:
+Reylo is bring-your-own-driver. Pass `.run()` a client from any of these, or a Drizzle connection or Knex instance over one:
 
-- **Postgres** — `pg`, postgres.js, `Bun.sql`, PGlite, Neon, `pg-promise`, `slonik`, `@vercel/postgres`, Drizzle's driver
+- **Postgres** — `pg`, postgres.js, `Bun.sql`, PGlite, Neon, `pg-promise`, `slonik`, `@vercel/postgres`, Drizzle Postgres
 - **MySQL** — `mysql2`, `mariadb`, PlanetScale, `Bun.sql`
 - **SQLite** — `better-sqlite3`, `node:sqlite`, `Bun.sql`, libSQL, Turso, SQLite Wasm, sql.js, Cloudflare D1 and Durable Objects, `sqlite3`, `sqlite`
-- **ClickHouse** — `@clickhouse/client`, `@clickhouse/client-web`
+- **ClickHouse** (preview) — `@clickhouse/client`, `@clickhouse/client-web`
 
 ## Documentation
 

@@ -1,9 +1,9 @@
 {
- "at": "2026-11-09T23:16:43.183Z",
+ "at": "2026-11-21T10:09:15.590Z",
  "tools": {
   "reylo": {
    "name": "Reylo",
-   "version": "0.7.0",
+   "version": "0.8.1",
    "cells": {
     "no-codegen": {
      "state": "y",
@@ -31,6 +31,27 @@
      "state": "y"
     },
     "json-schema": {
+     "state": "y"
+    },
+    "aggregates": {
+     "state": "y"
+    },
+    "windows": {
+     "state": "y"
+    },
+    "subqueries": {
+     "state": "y"
+    },
+    "with-queries": {
+     "state": "y"
+    },
+    "set-operations": {
+     "state": "y"
+    },
+    "returning": {
+     "state": "y"
+    },
+    "enums": {
      "state": "y"
     },
     "postgres": {
@@ -502,7 +523,7 @@
      "state": "p",
      "example": {
       "sql": "select add_one(id) as v from users",
-      "schema": "create table users (id int primary key, email text not null unique, name text not null, nickname text, external_id uuid);\ncreate function add_one(n int) returns int language sql immutable as 'select n + 1';",
+      "schema": "create type role as enum ('admin', 'member');\ncreate table users (id int primary key, email text not null unique, name text not null, nickname text, external_id uuid, role role not null default 'member');\ncreate function add_one(n int) returns int language sql immutable as 'select n + 1';",
       "params": [],
       "columns": [
        {
@@ -513,7 +534,7 @@
       ],
       "reylo": {
        "params": "Record<never, never>",
-       "row": "{ v: number | null }",
+       "row": "{ v: number }",
        "cardinality": "many",
        "rows": "many rows"
       }
@@ -682,7 +703,7 @@
      "state": "p",
      "example": {
       "sql": "select add_one(id) as v from users",
-      "schema": "create table users (id int primary key, email text not null unique, name text not null, nickname text, external_id uuid);\ncreate function add_one(n int) returns int language sql immutable as 'select n + 1';",
+      "schema": "create type role as enum ('admin', 'member');\ncreate table users (id int primary key, email text not null unique, name text not null, nickname text, external_id uuid, role role not null default 'member');\ncreate function add_one(n int) returns int language sql immutable as 'select n + 1';",
       "params": [],
       "columns": [
        {
@@ -693,7 +714,7 @@
       ],
       "reylo": {
        "params": "Record<never, never>",
-       "row": "{ v: number | null }",
+       "row": "{ v: number }",
        "cardinality": "many",
        "rows": "many rows"
       }
@@ -1244,6 +1265,875 @@
     "sqlite": {
      "state": "n",
      "note": "It is not available for SQLite."
+    }
+   }
+  },
+  "drizzle": {
+   "name": "Drizzle",
+   "version": "0.45.4",
+   "cells": {
+    "no-codegen": {
+     "state": "n",
+     "note": "A run leaves new files to commit: `db/0000_worried_adam_warlock.sql`, `db/meta/0000_snapshot.json`, `db/meta/_journal.json`."
+    },
+    "from-the-database": {
+     "state": "n",
+     "note": "It types each query from the schema kept in your code, and never asks the database."
+    },
+    "outer-joins": {
+     "state": "y"
+    },
+    "expression-nullability": {
+     "state": "p",
+     "example": {
+      "sql": "select max(id) as v from posts group by author_id",
+      "code": "db.select({ v: max(posts.id) }).from(posts).groupBy(posts.authorId)",
+      "params": [],
+      "columns": [
+       {
+        "name": "v",
+        "type": "number | null",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ v: number }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "parameter-types": {
+     "state": "y"
+    },
+    "parameter-nullability": {
+     "state": "y"
+    },
+    "cardinality": {
+     "state": "n",
+     "note": "Each call picks how many rows it takes: a query returns an array, and `findFirst` at most one row."
+    },
+    "json-shapes": {
+     "state": "y"
+    },
+    "json-schema": {
+     "state": "n",
+     "example": {
+      "sql": "insert into events (id, payload) values ($1, $2)",
+      "schema": "create table events (id int primary key, payload jsonb not null check (jsonb_matches_schema('{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"number\"}},\"required\":[\"x\"],\"additionalProperties\":false}', payload)));",
+      "code": "db.insert(events).values({ id: $1, payload: $2 })",
+      "params": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "{ x: number }",
+        "wrong": true
+       }
+      ],
+      "columns": [],
+      "reylo": {
+       "params": "{ p1: number; p2: { x: number } }",
+       "row": "never",
+       "cardinality": "none",
+       "rows": "no rows"
+      }
+     }
+    },
+    "aggregates": {
+     "state": "p",
+     "example": {
+      "sql": "select author_id, min(title) as v from posts group by author_id",
+      "code": "db.select({ author_id: posts.authorId, v: min(posts.title) }).from(posts).groupBy(posts.authorId)",
+      "params": [],
+      "columns": [
+       {
+        "name": "author_id",
+        "type": "number"
+       },
+       {
+        "name": "v",
+        "type": "string | null",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ author_id: number; v: string }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "windows": {
+     "state": "n",
+     "example": {
+      "sql": "select id, row_number() over (partition by author_id order by id) as v from posts",
+      "code": "db.select({ id: posts.id, v: sql`row_number() over (partition by ${posts.authorId} order by ${posts.id})` }).from(posts)",
+      "params": [],
+      "columns": [
+       {
+        "name": "id",
+        "type": "number"
+       },
+       {
+        "name": "v",
+        "type": "unknown",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ id: number; v: bigint }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "subqueries": {
+     "state": "p",
+     "example": {
+      "sql": "select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u",
+      "code": "db.select({ name: users.name, v: sql`(select max(${posts.title}) from ${posts} where ${posts.authorId} = ${users.id})` }).from(users)",
+      "params": [],
+      "columns": [
+       {
+        "name": "name",
+        "type": "string"
+       },
+       {
+        "name": "v",
+        "type": "unknown",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ name: string; v: string | null }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "with-queries": {
+     "state": "p",
+     "example": {
+      "sql": "with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u left join counts c on c.author_id = u.id",
+      "code": "{ const counts = db.$with('counts').as(db.select({ authorId: posts.authorId, n: count().as('n') }).from(posts).groupBy(posts.authorId)); return db.with(counts).select({ name: users.name, n: counts.n }).from(users).leftJoin(counts, eq(counts.authorId, users.id)); }",
+      "params": [],
+      "columns": [
+       {
+        "name": "name",
+        "type": "string"
+       },
+       {
+        "name": "n",
+        "type": "number",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ name: string; n: bigint | null }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "set-operations": {
+     "state": "y"
+    },
+    "returning": {
+     "state": "y"
+    },
+    "enums": {
+     "state": "y"
+    },
+    "postgres": {
+     "state": "y"
+    },
+    "mysql": {
+     "state": "y"
+    },
+    "sqlite": {
+     "state": "y"
+    }
+   }
+  },
+  "kysely": {
+   "name": "Kysely",
+   "version": "0.29.9",
+   "cells": {
+    "no-codegen": {
+     "state": "n",
+     "note": "A run leaves new files to commit: `db.d.ts`."
+    },
+    "from-the-database": {
+     "state": "n",
+     "note": "It types each query from the schema kept in your code, and never asks the database."
+    },
+    "outer-joins": {
+     "state": "y"
+    },
+    "expression-nullability": {
+     "state": "p",
+     "example": {
+      "sql": "select (select count(*) from posts) as v",
+      "code": "db.selectNoFrom((eb) => eb.selectFrom('posts').select(eb.fn.countAll().as('c')).as('v')).execute()",
+      "params": [],
+      "columns": [
+       {
+        "name": "v",
+        "type": "string | number | bigint | null",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ v: bigint }",
+       "cardinality": "one",
+       "rows": "exactly one row"
+      }
+     }
+    },
+    "parameter-types": {
+     "state": "y"
+    },
+    "parameter-nullability": {
+     "state": "p",
+     "example": {
+      "sql": "select name from users where id = $1",
+      "code": "db.selectFrom('users').select('name').where('id', '=', $1).execute()",
+      "params": [
+       {
+        "type": "number",
+        "wrong": true,
+        "says": "A null passes for $1"
+       }
+      ],
+      "columns": [
+       {
+        "name": "name",
+        "type": "string"
+       }
+      ],
+      "reylo": {
+       "params": "{ p1: number }",
+       "row": "{ name: string }",
+       "cardinality": "maybeOne",
+       "rows": "at most one row"
+      }
+     }
+    },
+    "cardinality": {
+     "state": "n",
+     "note": "Each call picks how many rows it takes: `execute` returns an array, and `executeTakeFirst` at most one row."
+    },
+    "json-shapes": {
+     "state": "y"
+    },
+    "json-schema": {
+     "state": "n",
+     "example": {
+      "sql": "select payload from events",
+      "schema": "create table events (id int primary key, payload jsonb not null check (jsonb_matches_schema('{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"number\"}},\"required\":[\"x\"],\"additionalProperties\":false}', payload)));",
+      "code": "db.selectFrom('events').select('payload').execute()",
+      "params": [],
+      "columns": [
+       {
+        "name": "payload",
+        "type": "JsonArray | JsonObject | JsonPrimitive",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ payload: { x: number } }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "aggregates": {
+     "state": "p",
+     "example": {
+      "sql": "select author_id, sum(score) as v from posts group by author_id having count(*) > 1",
+      "code": "db.selectFrom('posts').select((eb) => ['author_id', eb.fn.sum('score').as('v')]).groupBy('author_id').having((eb) => eb.fn.countAll(), '>', 1).execute()",
+      "params": [],
+      "columns": [
+       {
+        "name": "author_id",
+        "type": "number"
+       },
+       {
+        "name": "v",
+        "type": "string | number | bigint",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ author_id: number; v: bigint | null }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "windows": {
+     "state": "n",
+     "example": {
+      "sql": "select id, sum(score) over (partition by author_id order by id) as v from posts",
+      "code": "db.selectFrom('posts').select((eb) => ['id', eb.fn.sum('score').over((ob) => ob.partitionBy('author_id').orderBy('id')).as('v')]).execute()",
+      "params": [],
+      "columns": [
+       {
+        "name": "id",
+        "type": "number"
+       },
+       {
+        "name": "v",
+        "type": "string | number | bigint",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ id: number; v: bigint | null }",
+       "cardinality": "many",
+       "rows": "many rows"
+      },
+      "on": "Postgres, MySQL"
+     }
+    },
+    "subqueries": {
+     "state": "p",
+     "example": {
+      "sql": "select u.name, (select count(*) from posts p where p.author_id = u.id) as v from users u",
+      "code": "db.selectFrom('users as u').select((eb) => ['u.name', eb.selectFrom('posts as p').select(eb.fn.countAll().as('c')).whereRef('p.author_id', '=', 'u.id').as('v')]).execute()",
+      "params": [],
+      "columns": [
+       {
+        "name": "name",
+        "type": "string"
+       },
+       {
+        "name": "v",
+        "type": "string | number | bigint | null",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ name: string; v: bigint }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "with-queries": {
+     "state": "y"
+    },
+    "set-operations": {
+     "state": "p",
+     "example": {
+      "sql": "select id as v from users except select author_id from posts",
+      "code": "db.selectFrom('users').select('id as v').except(db.selectFrom('posts').select('author_id as v')).execute()",
+      "params": [],
+      "columns": [
+       {
+        "name": "v",
+        "type": "number | null",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ v: number }",
+       "cardinality": "many",
+       "rows": "many rows"
+      },
+      "on": "SQLite"
+     }
+    },
+    "returning": {
+     "state": "p",
+     "example": {
+      "sql": "insert into posts (id, author_id, title) values ($1, $2, $3) returning id, score",
+      "code": "db.insertInto('posts').values({ id: $1, author_id: $2, title: $3 }).returning(['id', 'score']).execute()",
+      "params": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "number"
+       },
+       {
+        "type": "string"
+       }
+      ],
+      "columns": [
+       {
+        "name": "id",
+        "type": "number | null",
+        "wrong": true
+       },
+       {
+        "name": "score",
+        "type": "number | null"
+       }
+      ],
+      "reylo": {
+       "params": "{ p1: number; p2: number; p3: string }",
+       "row": "{ id: number; score: number | null }",
+       "cardinality": "one",
+       "rows": "exactly one row"
+      },
+      "on": "SQLite"
+     }
+    },
+    "enums": {
+     "state": "y"
+    },
+    "postgres": {
+     "state": "y"
+    },
+    "mysql": {
+     "state": "y"
+    },
+    "sqlite": {
+     "state": "y"
+    }
+   }
+  },
+  "prisma": {
+   "name": "Prisma",
+   "version": "7.10.1",
+   "cells": {
+    "no-codegen": {
+     "state": "n",
+     "note": "A run leaves new files to commit: `prisma/schema.prisma`, `generated/prisma/browser.ts`, `generated/prisma/client.ts`."
+    },
+    "from-the-database": {
+     "state": "n",
+     "note": "It types each query from the schema kept in your code, and never asks the database."
+    },
+    "outer-joins": {
+     "state": "n",
+     "example": {
+      "sql": "select u.name, p.title from users u left join posts p on p.author_id = u.id",
+      "code": "prisma.$queryRaw`select u.name, p.title from users u left join posts p on p.author_id = u.id`",
+      "error": "It types each row as unknown.",
+      "params": [],
+      "columns": [],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ name: string; title: string | null }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "expression-nullability": {
+     "state": "p",
+     "example": {
+      "sql": "select max(id) as v from posts group by author_id",
+      "code": "prisma.posts.groupBy({ by: ['author_id'], _max: { id: true } })",
+      "params": [],
+      "columns": [
+       {
+        "name": "v",
+        "type": "number | null",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ v: number }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "parameter-types": {
+     "state": "y"
+    },
+    "parameter-nullability": {
+     "state": "y"
+    },
+    "cardinality": {
+     "state": "n",
+     "note": "Each call picks how many rows it takes: `findMany` returns an array, and `findUnique` and `findFirst` at most one row."
+    },
+    "json-shapes": {
+     "state": "y"
+    },
+    "json-schema": {
+     "state": "n",
+     "example": {
+      "sql": "select payload from events",
+      "schema": "create table events (id int primary key, payload jsonb not null check (jsonb_matches_schema('{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"number\"}},\"required\":[\"x\"],\"additionalProperties\":false}', payload)));",
+      "code": "prisma.events.findMany({ select: { payload: true } })",
+      "params": [],
+      "columns": [
+       {
+        "name": "payload",
+        "type": "string | number | boolean | JsonObject | JsonArray | null",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ payload: { x: number } }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "aggregates": {
+     "state": "p",
+     "example": {
+      "sql": "select author_id, min(title) as v from posts group by author_id",
+      "code": "prisma.posts.groupBy({ by: ['author_id'], _min: { title: true } })",
+      "params": [],
+      "columns": [
+       {
+        "name": "author_id",
+        "type": "number"
+       },
+       {
+        "name": "v",
+        "type": "string | null",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ author_id: number; v: string }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "windows": {
+     "state": "n",
+     "example": {
+      "sql": "select id, row_number() over (partition by author_id order by id) as v from posts",
+      "code": "prisma.$queryRaw`select id, row_number() over (partition by author_id order by id) as v from posts`",
+      "error": "It types each row as unknown.",
+      "params": [],
+      "columns": [],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ id: number; v: bigint }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "subqueries": {
+     "state": "p",
+     "example": {
+      "sql": "select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u",
+      "code": "prisma.$queryRaw`select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u`",
+      "error": "It types each row as unknown.",
+      "params": [],
+      "columns": [],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ name: string; v: string | null }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "with-queries": {
+     "state": "n",
+     "example": {
+      "sql": "with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u join counts c on c.author_id = u.id",
+      "code": "prisma.$queryRaw`with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u join counts c on c.author_id = u.id`",
+      "error": "It types each row as unknown.",
+      "params": [],
+      "columns": [],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ name: string; n: bigint }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "set-operations": {
+     "state": "n",
+     "example": {
+      "sql": "select name as v from users union select title from posts",
+      "code": "prisma.$queryRaw`select name as v from users union select title from posts`",
+      "error": "It types each row as unknown.",
+      "params": [],
+      "columns": [],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ v: string }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "returning": {
+     "state": "y"
+    },
+    "enums": {
+     "state": "p",
+     "example": {
+      "sql": "select x.r from (select role as r from users) x",
+      "schema": "create type role as enum ('admin', 'member');\ncreate table users (id int primary key, email text not null unique, name text not null, nickname text, external_id uuid, role role not null default 'member');",
+      "code": "prisma.$queryRaw`select x.r from (select role as r from users) x`",
+      "error": "It types each row as unknown.",
+      "params": [],
+      "columns": [],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ r: \"admin\" | \"member\" }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "postgres": {
+     "state": "y"
+    },
+    "mysql": {
+     "state": "y"
+    },
+    "sqlite": {
+     "state": "y"
+    }
+   }
+  },
+  "typeorm": {
+   "name": "TypeORM",
+   "version": "1.1.3",
+   "cells": {
+    "no-codegen": {
+     "state": "y",
+     "note": "Nothing to commit after a run."
+    },
+    "from-the-database": {
+     "state": "n",
+     "note": "It types each query from the schema kept in your code, and never asks the database."
+    },
+    "outer-joins": {
+     "state": "n",
+     "example": {
+      "sql": "select u.name, p.title from users u left join posts p on p.author_id = u.id",
+      "code": "ds.getRepository(User).createQueryBuilder('u').leftJoin('u.posts', 'p').select(['u.name', 'p.title']).getRawMany()",
+      "error": "It types each row as any.",
+      "params": [],
+      "columns": [],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ name: string; title: string | null }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "expression-nullability": {
+     "state": "p",
+     "example": {
+      "sql": "select sum(score) as v from posts",
+      "code": "ds.getRepository(Post).sum('score')",
+      "error": "Its type check refuses this query.",
+      "params": [],
+      "columns": [],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ v: bigint | null }",
+       "cardinality": "one",
+       "rows": "exactly one row"
+      }
+     }
+    },
+    "parameter-types": {
+     "state": "y"
+    },
+    "parameter-nullability": {
+     "state": "y"
+    },
+    "cardinality": {
+     "state": "n",
+     "note": "Each call picks how many rows it takes: `find` returns an array, and `findOne` at most one row."
+    },
+    "json-shapes": {
+     "state": "y"
+    },
+    "json-schema": {
+     "state": "n",
+     "example": {
+      "sql": "insert into events (id, payload) values ($1, $2)",
+      "schema": "create table events (id int primary key, payload jsonb not null check (jsonb_matches_schema('{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"number\"}},\"required\":[\"x\"],\"additionalProperties\":false}', payload)));",
+      "code": "ds.getRepository(Event).insert({ id: $1, payload: $2 })",
+      "params": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "{ x: number }",
+        "wrong": true
+       }
+      ],
+      "columns": [
+       {
+        "name": "identifiers",
+        "type": "ObjectLiteral[]"
+       },
+       {
+        "name": "generatedMaps",
+        "type": "ObjectLiteral[]"
+       },
+       {
+        "name": "raw",
+        "type": "any"
+       }
+      ],
+      "reylo": {
+       "params": "{ p1: number; p2: { x: number } }",
+       "row": "never",
+       "cardinality": "none",
+       "rows": "no rows"
+      }
+     }
+    },
+    "aggregates": {
+     "state": "n",
+     "example": {
+      "sql": "select avg(score) as v from posts",
+      "code": "ds.getRepository(Post).average('score')",
+      "error": "Its type check refuses this query.",
+      "params": [],
+      "columns": [],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ v: string | null }",
+       "cardinality": "one",
+       "rows": "exactly one row"
+      }
+     }
+    },
+    "windows": {
+     "state": "n",
+     "example": {
+      "sql": "select id, row_number() over (partition by author_id order by id) as v from posts",
+      "code": "ds.query(\"select id, row_number() over (partition by author_id order by id) as v from posts\", [])",
+      "error": "It types each row as any.",
+      "params": [],
+      "columns": [],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ id: number; v: bigint }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "subqueries": {
+     "state": "p",
+     "example": {
+      "sql": "select u.name, (select count(*) from posts p where p.author_id = u.id) as v from users u",
+      "code": "ds.getRepository(User).createQueryBuilder('u').select('u.name', 'name').addSelect((qb) => qb.select('count(*)').from(Post, 'p').where('p.author_id = u.id'), 'v').getRawMany()",
+      "error": "It types each row as any.",
+      "params": [],
+      "columns": [],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ name: string; v: bigint }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "with-queries": {
+     "state": "n",
+     "example": {
+      "sql": "with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u join counts c on c.author_id = u.id",
+      "code": "ds.query(\"with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u join counts c on c.author_id = u.id\", [])",
+      "error": "It types each row as any.",
+      "params": [],
+      "columns": [],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ name: string; n: bigint }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "set-operations": {
+     "state": "n",
+     "example": {
+      "sql": "select name as v from users union select title from posts",
+      "code": "ds.query(\"select name as v from users union select title from posts\", [])",
+      "error": "It types each row as any.",
+      "params": [],
+      "columns": [],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ v: string }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "returning": {
+     "state": "p",
+     "example": {
+      "sql": "delete from posts where id = $1 returning title",
+      "code": "ds.createQueryBuilder().delete().from(Post).where('id = :id', { id: $1 }).returning(['title']).execute()",
+      "params": [
+       {
+        "type": "number"
+       }
+      ],
+      "columns": [
+       {
+        "name": "title",
+        "type": "any",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "{ p1: number }",
+       "row": "{ title: string }",
+       "cardinality": "maybeOne",
+       "rows": "at most one row"
+      }
+     }
+    },
+    "enums": {
+     "state": "p",
+     "example": {
+      "sql": "select x.r from (select role as r from users) x",
+      "schema": "create type role as enum ('admin', 'member');\ncreate table users (id int primary key, email text not null unique, name text not null, nickname text, external_id uuid, role role not null default 'member');",
+      "code": "ds.query(\"select x.r from (select role as r from users) x\", [])",
+      "error": "It types each row as any.",
+      "params": [],
+      "columns": [],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ r: \"admin\" | \"member\" }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
+    },
+    "postgres": {
+     "state": "y"
+    },
+    "mysql": {
+     "state": "y"
+    },
+    "sqlite": {
+     "state": "y"
     }
    }
   }

@@ -8,7 +8,7 @@ A [nub](https://github.com/nubjs/nub) project that imports `.sql` files as typed
 nub run build                 # at the repository root, once: writes dist/, which this example links
 cd examples/nub
 nub install                   # or pnpm install (npm does not take link: dependencies)
-cp .env.example .env          # DATABASE_URL=file:./app.db
+cp .env.example .env          # DATABASE_URL=sqlite:./app.db
 nub run setup                 # creates app.db from setup.sql: "created app.db"
 nub run typecheck             # tsc --noEmit --runExternalCode: no output, exit 0
 nub run start                 # nub src/main.ts
@@ -33,7 +33,7 @@ Each run of `start` adds a post; `nub run setup` starts over. The tests roll the
 - The `nub.jsonc` file sets `"preload": ["reylo/register"]`, which nub loads before the app, so `nub src/main.ts` and `nub --test` import `.sql` files with no flag.
 - In the `package.json` scripts, `typecheck` is `tsc --noEmit --runExternalCode`, the flag that lets `tsc` run the content mapper. The `start` script is `nub src/main.ts` and `test` is `nub --test`, Node's test runner under nub, which finds `src/queries.test.ts` and runs it with the preload.
 - In `tsconfig.json`, `contentMappers` names `reylo`, whose package lists the extensions it takes: `.sql`, which types each import from the database, and the project file, `.reylo.yaml` or `.reylo.yml`. The `include` option is `src` and `setup.ts`, so `setup.sql`, a schema rather than one query, stays out of the type check.
-- The `.env` file sets `DATABASE_URL=file:./app.db`, the SQLite file Reylo analyzes each statement against, its path starting at `package.json`. Reylo reads it for the type check, the editor and the preload, and nub loads `.env` on its own. The script `src/main.ts` opens the same file, `app.db`.
+- The `.env` file sets `DATABASE_URL=sqlite:./app.db`, the SQLite file Reylo analyzes each statement against, its path starting at `package.json`. Reylo reads it for the type check, the editor and the preload, and nub loads `.env` on its own. The script `src/main.ts` opens the same file, `app.db`.
 - The `queries/*.sql` files hold one statement per file, with `:name` parameters, imported from `src/` with a relative path. The query `get_user.sql` resolves to a row or `null`, `list_posts.sql` to an array, and `create_post.sql`, an insert with `returning`, to the row it wrote; `src/main.ts` runs it with `.runSync()`, which `node:sqlite` allows.
 - In `.vscode/settings.json` and `.vscode/extensions.json`, the TypeScript 7 extension is pointed at this project's TypeScript, so the editor shows the queries' types and errors ([Editors](https://reylo.dev/#editors)). In Zed, `.zed/settings.json` does the same.
 

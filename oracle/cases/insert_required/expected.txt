@@ -20,4 +20,7 @@ overriding.sql: none () -> {  } !! reylo16: Column "name" of "ident" is NOT NULL
 positional.sql: none () -> {  } !! reylo16: Column "email" of "req" is NOT NULL with no default, and this insert leaves it out or writes DEFAULT to it, so Postgres refuses every row it inserts.
 positional_default.sql: none () -> {  } !! reylo16: Column "email" of "req" is NOT NULL with no default, and this insert leaves it out or writes DEFAULT to it, so Postgres refuses every row it inserts.
 several_rows.sql: none () -> {  } !! reylo16: Column "email" of "req" is NOT NULL with no default, and this insert leaves it out or writes DEFAULT to it, so Postgres refuses every row it inserts.
+with_insert.sql: one () -> { id: int4 } !! reylo16: Column "email" of "req" is NOT NULL with no default, and this insert leaves it out or writes DEFAULT to it, so Postgres refuses every row it inserts.
+with_insert_delete.sql: none () -> {  }
+with_insert_two.sql: none () -> {  } !! reylo16: Column "name" of "req" is NOT NULL with no default, and this insert leaves it out or writes DEFAULT to it, so Postgres refuses every row it inserts.
 with_query.sql: none () -> {  } !! reylo16: Column "email" of "req" is NOT NULL with no default, and this insert leaves it out or writes DEFAULT to it, so Postgres refuses every row it inserts.

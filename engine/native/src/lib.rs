@@ -10,7 +10,8 @@
 //! ureq for ClickHouse's HTTP interface) with an `analyze` that runs a statement's whole replay on
 //! it ([`clients`]), and its program. A host that answers the
 //! engine its own way implements [`Answerer`] or [`AsyncAnswerer`] and calls [`replay::run`] or
-//! [`replay::run_async`] with its database's engine, from [`engines`]
+//! [`replay::run_async`] (or, for a client that takes several requests at once,
+//! [`ConcurrentAnswerer`] and [`replay::run_concurrent`]) with its database's engine, from [`engines`]
 //! (`replay::run_async::<reylo_engine::engines::postgres::Postgres, _>`): the module of a database's
 //! name at the crate's root, `reylo_engine::postgres`, is its program.
 //!
@@ -38,12 +39,12 @@
 pub use reylo_engine_core::api::{Analysis, Column, DbError, Diagnostic, Param};
 pub use reylo_engine_core::database::Database;
 pub use reylo_engine_core::dialect::Dialect;
-pub use reylo_engine_core::replay::{self, AnswerCache, Answerer, AsyncAnswerer, ReplayError};
+pub use reylo_engine_core::replay::{self, AnswerCache, Answerer, AsyncAnswerer, ConcurrentAnswerer, ReplayError};
 pub use reylo_engine_core::types::{Field, Type};
 
 /// Each database's engine; its program is the module of its name at the crate's root.
 pub mod engines {
-    /// The Postgres engine: libpg_query's parse tree over the server's describe and catalog.
+    /// The Postgres engine: Postgres's parse tree over the server's describe and catalog.
     #[cfg(feature = "postgres")]
     pub use reylo_engine_postgres as postgres;
     /// The SQLite engine: SQLite's own resolved tree, from the copy of SQLite inside it.

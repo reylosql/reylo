@@ -1,0 +1,23 @@
+{
+  "name": "reylo-example-rollup",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "node --env-file-if-exists=.env setup.ts",
+    "typecheck": "tsc --noEmit --runExternalCode",
+    "dev": "node --watch --env-file-if-exists=.env --import reylo/register src/server.ts",
+    "build": "tsc --noEmit --runExternalCode && rollup -c",
+    "start": "node --env-file-if-exists=.env dist/server.mjs"
+  },
+  "dependencies": {
+    "postgres": "^3.4.9",
+    "reylo": "link:../../dist/reylo"
+  },
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-sucrase": "^5.1.0",
+    "@types/node": "^24.0.0",
+    "rollup": "^4.68.7",
+    "typescript": "7.1.0-dev.20261118.1"
+  }
+}

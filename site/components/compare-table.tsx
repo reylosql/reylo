@@ -1,7 +1,7 @@
 'use client';
 import { Popup, PopupContent, PopupTrigger } from 'fumadocs-twoslash/ui';
 import { type CSSProperties, Fragment, type ReactNode } from 'react';
-import { compareCell, compareResults, compareRows, compareTools, type CompareCell } from '@/lib/compare';
+import { compareCell, compareSet, type CompareCell, type CompareSetName } from '@/lib/compare';
 import cards from 'virtual:compare-cards';
 import type { CompareCard } from '@/lib/compare-cards';
 import { wordmark } from './wordmark';
@@ -50,11 +50,13 @@ function Card({ card }: { card: CompareCard }) {
   );
 }
 
-/** A cross or half circle: hovered, or tapped on a phone, the docs' popup shows a query the tool got wrong, or why it has the mark. */
-function Mark({ tool, row, label, cell }: { tool: string; row: string; label: string; cell: CompareCell }) {
+/** A cross or half circle: hovered, or tapped on a phone, the docs' popup shows a query the tool got wrong, or why it has the mark. A migration table's cell no run has measured yet is empty. */
+function Mark({ tool, row, label, cell, set }: { tool: string; row: string; label: string; cell: CompareCell | undefined; set?: CompareSetName }) {
+  if (!cell) return null;
   if (cell.state === 'y') return <span className="reylo-compare-mark" role="img" aria-label={WORDS.y}>{ICONS.y}</span>;
-  const card = cards[`${tool}:${row}`];
-  const name = tool === 'reylo' ? 'Reylo' : tool === 'postgrestypedsql' ? 'Postgres Typed SQL' : compareResults.tools[tool]?.name ?? tool;
+  const card = set === 'migrate' ? undefined : cards[`${tool}:${row}`];
+  const { results, name: reylo } = compareSet(set);
+  const name = tool === 'reylo' ? reylo : tool === 'postgrestypedsql' ? 'Postgres Typed SQL' : results.tools[tool]?.name ?? tool;
   return (
     <Popup delay={60}>
       <PopupTrigger className="reylo-compare-mark" aria-label={`${name}, ${label}: ${WORDS[cell.state]}`}>{ICONS[cell.state]}</PopupTrigger>
@@ -80,19 +82,20 @@ function Label({ label, asks }: { label: string; asks?: string }) {
  * The comparison on /compare: Reylo's column first, inside the saber frame, then each tool's marks,
  * from lib/compare-results.json. Each row's rule runs unbroken from edge to edge, under the frame.
  */
-export function CompareTable() {
+export function CompareTable({ set }: { set?: CompareSetName }) {
+  const { tools: compareTools, rows: compareRows, sub } = compareSet(set);
   const column = (i: number) => 5 + i;
   let row = 2;
   return (
     <div className="reylo-compare">
       <div className="reylo-compare-scroll">
-        <div className="reylo-compare-grid not-prose" style={{ '--reylo-tools': compareTools.length } as CSSProperties}>
+        <div className="reylo-compare-grid not-prose" style={{ '--reylo-tools': compareTools.length, '--reylo-span': set === 'migrate' ? compareTools.length : Math.max(compareTools.length, compareSet().tools.length) } as CSSProperties}>
           <div className="reylo-compare-corner" style={{ gridRow: 1, gridColumn: 1 }} />
           <div className="reylo-compare-head" style={{ gridRow: 1, gridColumn: 3 }}>
             <span className="reylo-compare-name reylo-compare-brand">
               <svg viewBox={wordmark.viewBox} role="img" aria-label="Reylo"><path className="reylo-compare-brand-mark" d={wordmark.mark} /><path transform={wordmark.wordTransform} d={wordmark.word} /></svg>
             </span>
-            <span className="reylo-compare-sub">TypeScript</span>
+            <span className="reylo-compare-sub">{sub}</span>
           </div>
           {compareTools.map((t, i) => (
             <div key={t.id} className="reylo-compare-head" style={{ gridRow: 1, gridColumn: column(i) }}>
@@ -106,10 +109,10 @@ export function CompareTable() {
               <Fragment key={r.id}>
                 <div className="reylo-compare-rule" style={{ gridRow: at }} />
                 <div className="reylo-compare-row-label" style={{ gridRow: at, gridColumn: 1 }}><Label label={r.label} asks={r.asks} /></div>
-                <div className="reylo-compare-cell" style={{ gridRow: at, gridColumn: 3 }}><Mark tool="reylo" row={r.id} label={r.label} cell={compareCell('reylo', r.id)} /></div>
+                <div className="reylo-compare-cell" style={{ gridRow: at, gridColumn: 3 }}><Mark tool="reylo" row={r.id} label={r.label} cell={compareCell('reylo', r.id, set)} set={set} /></div>
                 {compareTools.map((t, i) => (
                   <div key={t.id} className="reylo-compare-cell" style={{ gridRow: at, gridColumn: column(i) }}>
-                    <Mark tool={t.id} row={r.id} label={r.label} cell={compareCell(t.id, r.id)} />
+                    <Mark tool={t.id} row={r.id} label={r.label} cell={compareCell(t.id, r.id, set)} set={set} />
                   </div>
                 ))}
               </Fragment>

@@ -191,6 +191,26 @@
       "source": "/opengraph-image",
       "destination": "/opengraph-image.png",
       "permanent": true
+    },
+    {
+      "source": "/ci",
+      "destination": "/deployment",
+      "permanent": true
+    },
+    {
+      "source": "/hosted",
+      "destination": "/neon",
+      "permanent": true
+    },
+    {
+      "source": "/rtd",
+      "destination": "/typedefs",
+      "permanent": true
+    },
+    {
+      "source": "/details",
+      "destination": "/configuration",
+      "permanent": true
     }
   ],
   "headers": [

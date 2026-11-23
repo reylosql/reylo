@@ -1,8 +1,10 @@
 import { useEffect, useState, type ReactNode } from 'react';
+import { CompareTable } from './compare-table';
 import { DATABASES, HOSTS, type Logo } from './host-logos';
+import { Install, Nav } from './home-chrome';
+import { MigrateWordmark } from './migrate-wordmark';
 import { VARIADIC_SQUARE, VARIADIC_SQUARES } from './variadic-mark';
-import { wordmark } from './wordmark';
-import { githubUrl, migrateDocsUrl } from '@/lib/layout.shared';
+import { githubUrl, migrateCompareUrl, migrateDocsUrl } from '@/lib/layout.shared';
 
 /**
  * Reylo Migrate's landing page, at /migrate (app/routes/migrate.tsx): a hero split in half, the
@@ -13,66 +15,61 @@ import { githubUrl, migrateDocsUrl } from '@/lib/layout.shared';
  */
 export function MigrateLanding({ stars }: { stars?: number }) {
   return (
-    <div className="ml">
-      <nav className="ml-nav">
-        <a className="ml-brand" href="/migrate">
-          <Mark />
-          Reylo Migrate
-        </a>
-        <div className="ml-links">
-          <a href={migrateDocsUrl}>Docs</a>
-          <a href="/">Reylo</a>
-          <a href={githubUrl} className="ml-gh">
-            <GitHubIcon />
-            <span className="ml-gh-label">GitHub</span>
-            {stars ? <span className="ml-stars">{starCount(stars)}</span> : null}
-          </a>
-        </div>
-      </nav>
+    <div className="ml rh">
+      <Nav
+        stars={stars}
+        brand={{ href: '/migrate', label: 'Reylo Migrate', mark: <MigrateWordmark /> }}
+        links={[
+          ['Docs', migrateDocsUrl],
+          ['Comparison', migrateCompareUrl],
+          ['Reylo', '/'],
+          ['Blog', '/blog'],
+        ]}
+      />
 
-      <header className="ml-hero">
+      <header className="ml-hero rh-hero-split">
         <div className="ml-hero-words">
-          <h1 className="ml-h1">
+          <h1 className="ml-h1 rh-h1 ml-h1-migrate">
             <span>SQL-first</span> <em>schema and migrations.</em>
           </h1>
           <p className="ml-lede">Model your schema in <code>schema.sql</code>. Generate migrations, or write your own. Works on Postgres, MySQL and SQLite.</p>
-          <Install />
+          <Install docs={migrateDocsUrl} />
         </div>
         <div className="ml-hero-visual">
           <SchemaToMigration />
         </div>
       </header>
 
-      <Row n={1} title="The most advanced cross-dialect diff engine" visual={<DialectMigrations />}>
-        <p>Edit <code>schema.sql</code>, then generate a migration with one command. Editable as needed.</p>
-      </Row>
-
-      <Row n={2} title="Use the full power of your database" visual={<SchemaKinds />} flip>
+      <Row n={1} title="Use the full power of your database" visual={<SchemaKinds />}>
         <p>No lossy or limited DSLs. Declare views, functions, triggers, policies, checks, computed columns, and more.</p>
       </Row>
 
-      <Row n={3} title="Explicit disambiguation" visual={<Term lines={RENAMES} />}>
-        <p>When schema changes are ambiguous, Reylo asks you for clarification. Use <code>--drop</code> or <code>--rename</code> to disambiguate.</p>
-      </Row>
-
-      <Row n={4} title="Fast iteration loops" visual={<Term lines={PUSH} />} flip>
+      <Row n={2} title="Fast iteration loops" visual={<Term lines={PUSH} />} flip>
         <p>Push <code>schema.sql</code> to your development database on every save. Then generate a migration once you're done iterating on schema.</p>
       </Row>
 
-      <Row n={5} title="Schemaless mode" visual={<Schemaless />}>
-        <p>For a DDL-first experience, just delete <code>schema.sql</code>. You (or your agents) can write raw DDL migrations.</p>
+      <Row n={3} title="The most advanced cross-dialect diff engine" visual={<DialectMigrations />}>
+        <p>Edit <code>schema.sql</code>, then generate a migration with one command. Editable as needed.</p>
       </Row>
 
-      <Row n={6} title="Introspect anytime" visual={<Term lines={INTROSPECT} sql />} flip>
-        <p>Introspect the current database schema anytime in readable SQL.</p>
+      <Row n={4} title="Explicit disambiguation" visual={<Term lines={RENAMES} />} flip>
+        <p>When schema changes are ambiguous, Reylo asks you for clarification. Use <code>--drop</code> or <code>--rename</code> to disambiguate.</p>
       </Row>
 
-      <Row n={7} title={<>Linear history via <code>reylo.lock</code></>} visual={<LockFile />}>
+      <Row n={5} title={<>Linear history via <code>reylo.lock</code></>} visual={<LockFile />}>
         <p>Enforce linear migration history in Git with the <code>reylo.lock</code> lockfile.</p>
       </Row>
 
-      <Row n={8} title="Soundness guaranteed" visual={<Term lines={HAND_CHANGE} />} flip>
+      <Row n={6} title="Soundness guaranteed" visual={<Term lines={HAND_CHANGE} />} flip>
         <p>Checksums in the lockfile prevent edited or reordered migrations. Untracked schema changes are detected and flagged.</p>
+      </Row>
+
+      <Row n={7} title="Introspect anytime" visual={<Term lines={INTROSPECT} sql />}>
+        <p>Introspect the current database schema anytime in readable SQL.</p>
+      </Row>
+
+      <Row n={8} title="Schemaless mode" visual={<Schemaless />} flip>
+        <p>For a DDL-first experience, just delete <code>schema.sql</code>. You (or your agents) can write raw DDL migrations.</p>
       </Row>
 
       <Row n={9} title="Lock-free mode" visual={<Term lines={LOCK_FREE} />}>
@@ -87,9 +84,15 @@ export function MigrateLanding({ stars }: { stars?: number }) {
         <p>One command introspects your current schema, generates <code>schema.sql</code>, and creates your initial <code>migrations/init.sql</code>.</p>
       </Row>
 
+      <section className="ml-table">
+        <h2>Compared with other migration tools</h2>
+        <p>Hover a cross to see why.</p>
+        <CompareTable set="migrate" />
+      </section>
+
       <section className="ml-end">
         <h2>Ship faster with Reylo</h2>
-        <Install centered />
+        <Install centered docs={migrateDocsUrl} />
       </section>
 
       <footer className="ml-foot">
@@ -98,7 +101,8 @@ export function MigrateLanding({ stars }: { stars?: number }) {
         </a>
         <div className="ml-foot-links">
           <a href={migrateDocsUrl}>Docs</a>
-          <a href={`${migrateDocsUrl}#cli-reylo-migrate`}>CLI</a>
+          <a href={'/migrate/cli'}>CLI</a>
+          <a href={migrateCompareUrl}>Comparison</a>
           <a href="/">Reylo</a>
           <a href={githubUrl}>GitHub</a>
           <a href="https://www.npmjs.com/package/reylo">npm</a>
@@ -116,14 +120,6 @@ export function VariadicMark() {
       {VARIADIC_SQUARES.map((q) => (
         <rect key={`${q.x},${q.y}`} x={q.x} y={q.y} width={VARIADIC_SQUARE.size} height={VARIADIC_SQUARE.size} rx={VARIADIC_SQUARE.rx} fill={q.fill} />
       ))}
-    </svg>
-  );
-}
-
-export function Mark({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 400 235.47" fill="currentColor" aria-hidden="true">
-      <path d={wordmark.mark} />
     </svg>
   );
 }
@@ -155,62 +151,6 @@ function Row({ n, title, visual, flip, children }: { n: number; title: ReactNode
   );
 }
 
-const INSTALLS = { brew: 'brew install reylosql/tap/reylo', npm: 'npm install reylo', curl: 'curl -fsSL https://reylo.dev/install.sh | sh' } as const;
-
-/** The install command, by package manager: the managers as tabs over its upper left, a copy button at its end, and the docs button, filled with the yellow. `centered` is the closing call to action's, which centres the two side by side. */
-function Install({ centered }: { centered?: boolean }) {
-  const [kind, setKind] = useState<keyof typeof INSTALLS>('brew');
-  const [copied, setCopied] = useState(false);
-  const command = INSTALLS[kind];
-  return (
-    <div className={centered ? 'ml-install ml-centered' : 'ml-install'}>
-      <div className="ml-big">
-        <div className="ml-box">
-          <div className="ml-seg" role="tablist">
-            {(Object.keys(INSTALLS) as (keyof typeof INSTALLS)[]).map((k) => (
-              <button key={k} type="button" role="tab" aria-selected={k === kind} className={k === kind ? 'on' : undefined} onClick={() => setKind(k)}>
-                {k}
-              </button>
-            ))}
-          </div>
-          <div className="ml-cmd">
-            <span className="ml-dollar">$</span>
-            <span>{command}</span>
-            <button
-              type="button"
-              className="ml-copybtn"
-              aria-label="Copy the command"
-              onClick={() => {
-                void navigator.clipboard.writeText(command);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1400);
-              }}
-            >
-              {copied ? (
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <path d="M3 8.5l3.2 3.2L13 4.8" />
-                </svg>
-              ) : (
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <rect x="5.25" y="5.25" width="8.5" height="8.5" rx="1.75" />
-                  <path d="M10.75 5.25v-1.5a1.5 1.5 0 0 0-1.5-1.5h-5.5a1.5 1.5 0 0 0-1.5 1.5v5.5a1.5 1.5 0 0 0 1.5 1.5h1.5" />
-                </svg>
-              )}
-            </button>
-          </div>
-        </div>
-        <a className="ml-docs ml-docs-primary" href={migrateDocsUrl}>
-          Read the docs
-          <svg viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M2.5 8h11M9 3.5 13.5 8 9 12.5" />
-          </svg>
-        </a>
-      </div>
-    </div>
-  );
-}
-
-/** Whether the reader asked for less motion: then every player shows its last frame and stays. */
 export function stillPlease(): boolean {
   return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
@@ -296,12 +236,30 @@ function usePlayer(script: Script, onEdit?: (edited: boolean) => void): Line[] {
   return lines;
 }
 
-/** A printed line in the CLI's colours: ✓ and + green, ✗ red, ! and ↺ yellow; a » note and the lead over a command (an indented line from a capital to a colon) dim whole; the command on its own line cyan. */
+/** A printed line in the CLI's colours: ✓ and + green, ✗ and - red, !, ↺ and ~ yellow; a » note, the lead over a command (an indented line from a capital to a colon) and a diff's `---` and `+++` headers dim whole; the command on its own line cyan; the words a ~ line changes in place, written as the CLI writes them where colour is off (`[-title-]{+heading+}`), highlighted red and green. */
 function paint(line: string): ReactNode {
-  if (/^\s*» /.test(line) || /^\s+[A-Z].*:$/.test(line)) return <span className="ml-mu">{line}</span>;
-  const m = line.match(/^(\s*)(✓|✗|!|\+|↺)(\s.*)?$/);
+  const changed = line.match(/^(\s*)~ (.*)$/);
+  if (changed) {
+    return (
+      <>
+        {changed[1]}
+        <span className="ml-wn">~</span>{' '}
+        {changed[2].split(/(\[-.*?-\]|\{\+.*?\+\})/).map((part, i) =>
+          i % 2 ? (
+            <span key={i} className={part.startsWith('[') ? 'ml-rm' : 'ml-ad'}>
+              {part.slice(2, -2)}
+            </span>
+          ) : (
+            part
+          ),
+        )}
+      </>
+    );
+  }
+  if (/^\s*» /.test(line) || /^\s+[A-Z].*:$/.test(line) || /^\s+(---|\+\+\+) /.test(line)) return <span className="ml-mu">{line}</span>;
+  const m = line.match(/^(\s*)(✓|✗|!|\+|-|↺)(\s.*)?$/);
   if (m) {
-    const cls = m[2] === '✓' || m[2] === '+' ? 'ml-ok' : m[2] === '✗' ? 'ml-er' : 'ml-wn';
+    const cls = m[2] === '✓' || m[2] === '+' ? 'ml-ok' : m[2] === '✗' || m[2] === '-' ? 'ml-er' : 'ml-wn';
     return (
       <>
         {m[1]}
@@ -310,7 +268,9 @@ function paint(line: string): ReactNode {
       </>
     );
   }
-  if (/^\s+reylo /.test(line)) return <span className="ml-cy">{line}</span>;
+  if (/^\s+(reylo|mv) /.test(line)) return <span className="ml-cy">{line}</span>;
+  // A line of flags to pick from: each flag cyan, the `or` between them plain.
+  if (/^\s+--/.test(line)) return line.split(/(\s+or\s+)/).map((part, i) => (i % 2 ? part : <span key={i} className="ml-cy">{part}</span>));
   if (line === 'Nothing was changed.') return <span className="ml-mu">{line}</span>;
   return line;
 }
@@ -335,9 +295,12 @@ const paintSpin = (line: string): ReactNode => (
 
 function TermWindow({ lines, script, className, sql }: { lines: Line[]; script: Script; className?: string; sql?: boolean }) {
   const out = (text: string) => (SPINNER.includes(text[0] ?? ' ') ? paintSpin(text) : sql ? paintSql(text) : paint(text));
+  // A line too long for the window wraps under its own text, past its indent and its mark, as the
+  // CLI's lines read: a command's continuation under the command, a refusal's under its title.
+  const hang = (l: Line) => `${l.prompt ? 2 : (l.text.match(/^ */)?.[0].length ?? 0) + 2}ch`;
   const draw = (ls: Line[]) =>
     ls.map((l, i) => (
-      <div key={i} className="ml-ln">
+      <div key={i} className="ml-ln" style={{ paddingLeft: hang(l), textIndent: `-${hang(l)}` }}>
         {l.prompt ? <span className="ml-ps">$ </span> : null}
         {l.prompt ? <span className="ml-c">{l.text}</span> : out(l.text)}
         {l.cursor ? <span className="ml-cur" /> : null}
@@ -366,24 +329,30 @@ function Term({ lines, sql }: { lines: Script; sql?: boolean }) {
   return <TermWindow lines={usePlayer(lines)} script={lines} sql={sql} />;
 }
 
-/** As reylo 0.8.0 printed it: the migration asked for with no flags, then again with the renames named. */
+/** The migration asked for with no flags, then again with a flag picked for each line. */
 const RENAMES: Script = [
   '$ reylo migrate new tidy_columns',
-  '✗ These 2 look like renames, but each changes more than its name',
+  "✗ This migration can't tell renames from new columns",
   '',
-  '    posts.title → heading  text → varchar(100)',
-  '    users.bio   → about    text → varchar(200)',
+  '    - column posts.title character varying(100)',
+  '    + column posts.heading character varying(200)',
+  '    - column users.bio character varying(200)',
+  '    + column users.about text',
   '',
-  '  If they are renames, keeping their rows:',
-  '    reylo migrate new tidy_columns \\',
-  '      --rename posts.title=heading \\',
-  '      --rename users.bio=about',
-  '  If they are new, dropping the old ones and their data:',
-  '    reylo migrate new tidy_columns --drop posts.title,users.bio',
+  '  For each, rename it to keep its rows, or drop it and add the new one:',
+  '    --rename posts.title=heading   or   --drop posts.title',
+  '    --rename users.bio=about       or   --drop users.bio',
+  '  Add the flags you picked to:',
+  '    reylo migrate new tidy_columns',
   '',
   'Nothing was changed.',
-  '$ reylo migrate new tidy_columns --rename posts.title=heading --rename users.bio=about',
+  '$ reylo migrate new tidy_columns --rename posts.title=heading --drop users.bio',
   '✓ Wrote reylo/migrations/20261104150000_tidy_columns.sql',
+  '  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})',
+  '  + column users.about text',
+  '  - column users.bio character varying(200)',
+  '',
+  '  ! Drops the column users.bio and its data',
 ];
 
 /** With no schema.sql: DDL run on the database, the migration written from what it changed (`#edit` fills the editor above), and the migration recorded as run. */
@@ -414,15 +383,21 @@ const INTROSPECT: Script = [
 /** Lock-free: a migration that sorts before one the database ran is refused, then runs once it's given a later name. */
 const LOCK_FREE: Script = [
   '$ reylo migrate deploy',
-  '✗ Migration 20261105080000_no_nick.sql sorts before 20261105090000_nick.sql, which this database already ran, and the two orders end differently',
-  '  + a fresh database: column users.nick text',
-  '  Give 20261105080000_no_nick.sql a later name, so that every database runs it after 20261105090000_nick.sql',
+  '✗ Migration 20261105080000_no_nick.sql sorts before 20261105090000_nick.sql, which this database already ran',
+  '  Run in name order, as on a fresh database, the migrations end differently:',
+  '',
+  '    --- this database',
+  '    +++ a fresh database',
+  '    + column users.nick text',
+  '',
+  '  Give it a later name, so that every database runs it after 20261105090000_nick.sql:',
+  '    mv reylo/migrations/20261105080000_no_nick.sql reylo/migrations/20261105090001_no_nick.sql',
   '',
   'Nothing was changed.',
-  '$ mv reylo/migrations/20261105080000_no_nick.sql reylo/migrations/20261105100000_no_nick.sql',
+  '$ mv reylo/migrations/20261105080000_no_nick.sql reylo/migrations/20261105090001_no_nick.sql',
   '$ reylo migrate deploy',
   'Applying to postgres://db.example.com/app',
-  '  ✓ 20261105100000_no_nick.sql  applied · 9 ms',
+  '  ✓ 20261105090001_no_nick.sql  applied · 9 ms',
   '✓ Applied 1 migration',
 ];
 
@@ -433,6 +408,7 @@ const PUSH: Script = [
   '✓ This database matches reylo/schema.sql',
   '$ reylo migrate new add_nick',
   '✓ Wrote reylo/migrations/20261104150000_add_nick.sql',
+  '  + column users.nick text',
 ];
 
 const HAND_CHANGE: Script = [
@@ -523,200 +499,27 @@ function SchemaToMigration() {
   );
 }
 
-/**
- * One edit to schema.sql, and the migration `reylo migrate new email_required` writes for it on each
- * database, as reylo 0.8.0 wrote them: Postgres and MySQL alter the column, SQLite rebuilds the table.
- */
-const DIALECTS: { name: string; sql: ReactNode }[] = [
-  {
-    name: 'Postgres',
-    sql: (
-      <>
-        {kw('alter table')} users {kw('alter column')} email {kw('set not null')};
-      </>
+/** SQL as the editor windows colour it: keywords pink and types and strings yellow (`.ml-kw`, `.ml-ty`), names plain. */
+const SQL_KW = new Set('create type as enum domain check value table generated always identity primary key not null unique default references on delete cascade stored index where desc view select from join is function returns trigger language begin end return before update for each row execute enable level security policy using alter add column constraint valid validate set drop insert into rename to foreign or replace'.split(' '));
+const SQL_TY = new Set('text bigint integer int boolean timestamptz jsonb numeric varchar plpgsql tinyint'.split(' '));
+
+function Sql({ text }: { text: string }) {
+  return text.split(/('(?:[^']|'')*'|\$\$|\b[a-z_]+\b)/).map((t, i) =>
+    t.startsWith("'") ? (
+      <span key={i} className="ml-ty">
+        {t}
+      </span>
+    ) : SQL_KW.has(t) ? (
+      <span key={i} className="ml-kw">
+        {t}
+      </span>
+    ) : SQL_TY.has(t) ? (
+      <span key={i} className="ml-ty">
+        {t}
+      </span>
+    ) : (
+      t
     ),
-  },
-  {
-    name: 'MySQL',
-    sql: (
-      <>
-        {kw('alter table')} users {kw('modify column')} email {ty('text')} {kw('not null')};
-      </>
-    ),
-  },
-  {
-    name: 'SQLite',
-    sql: (
-      <>
-        {kw('create table')} new_users (id {ty('integer')} {kw('primary key')}, email {ty('text')} {kw('not null')}, name {ty('text')} {kw('not null')}) {kw('strict')};{'\n'}
-        {kw('insert into')} new_users (id, email, name) {kw('select')} id, email, name {kw('from')} users;{'\n'}
-        {kw('drop table')} users;{'\n'}
-        {kw('alter table')} new_users {kw('rename to')} users;
-      </>
-    ),
-  },
-];
-
-/** schema.sql with `email` made required, and under it the migration for each database, as tabs that turn by themselves until one is picked. */
-function DialectMigrations() {
-  const [at, setAt] = useState(0);
-  const [picked, setPicked] = useState(false);
-  useEffect(() => {
-    if (picked || stillPlease()) return;
-    const timer = setInterval(() => setAt((i) => (i + 1) % DIALECTS.length), 3500);
-    return () => clearInterval(timer);
-  }, [picked]);
-  return (
-    <div className="ml-pair">
-      <div className="ml-win ml-editor" aria-hidden="true">
-        <div className="ml-bar">
-          <FileIcon />
-          reylo/schema.sql
-        </div>
-        <pre className="ml-code">
-          <span className="ml-l" data-g=" ">
-            {kw('create table')} users (
-          </span>
-          <span className="ml-l" data-g=" ">
-            {'  id '}
-            {ty('integer')} {kw('primary key')},
-          </span>
-          <span className="ml-l ml-del" data-g="-">
-            {'  email '}
-            {ty('text')},
-          </span>
-          <span className="ml-l ml-add" data-g="+">
-            {'  email '}
-            {ty('text')} {kw('not null')},
-          </span>
-          <span className="ml-l" data-g=" ">
-            {'  name '}
-            {ty('text')} {kw('not null')}
-          </span>
-          <span className="ml-l" data-g=" ">
-            );
-          </span>
-        </pre>
-      </div>
-      <div className="ml-win ml-under ml-dialects">
-        <div className="ml-bar">
-          <FileIcon />
-          reylo/migrations/20261104140347_email_required.sql
-        </div>
-        <div className="ml-tabs" role="tablist">
-          {DIALECTS.map((d, i) => (
-            <button
-              key={d.name}
-              type="button"
-              role="tab"
-              aria-selected={i === at}
-              className={i === at ? 'on' : undefined}
-              onClick={() => {
-                setAt(i);
-                setPicked(true);
-              }}
-            >
-              {d.name}
-            </button>
-          ))}
-        </div>
-        <div className="ml-kinds-body">
-          {DIALECTS.map((d, i) => (
-            <pre key={d.name} className="ml-sql" data-on={i === at || undefined}>
-              {d.sql}
-            </pre>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** Schemaless: the migration file, empty until `reylo migrate new` writes it, over the terminal that changes the database and makes it. */
-function Schemaless() {
-  const [edited, setEdited] = useState(true);
-  const lines = usePlayer(SCHEMALESS, setEdited);
-  return (
-    <div className="ml-pair">
-      <div className="ml-win ml-editor" aria-hidden="true">
-        <div className="ml-bar">
-          <FileIcon />
-          reylo/migrations/20261104140347_add_bio.sql
-        </div>
-        <pre className="ml-code">
-          <span className={edited ? 'ml-l ml-add' : 'ml-l ml-pending'} data-g="+">
-            {kw('alter table')} users {kw('add column')} bio {ty('text')};
-          </span>
-          {/* Room under the line, so the terminal's corner doesn't cover it. */}
-          <span className="ml-l" data-g=" ">
-            {' '}
-          </span>
-          <span className="ml-l" data-g=" ">
-            {' '}
-          </span>
-        </pre>
-      </div>
-      <TermWindow lines={lines} script={SCHEMALESS} className="ml-under" />
-    </div>
-  );
-}
-
-/** Where Reylo Migrate runs, as each host's logo over its name. */
-function Hosts() {
-  // A tile says "Tested" only once every tile can: a grid where some do reads as if the rest failed.
-  const chips = [...DATABASES, ...HOSTS].every((t) => t.tested);
-  const tile = (t: Logo) => (
-    <span key={t.name}>
-      <svg viewBox={t.viewBox} fill="currentColor" aria-hidden="true">
-        {t.paths.map((d) => (
-          <path key={d} d={d} />
-        ))}
-      </svg>
-      {t.name}
-      {chips ? <em className="ml-tested">Tested</em> : null}
-    </span>
-  );
-  return (
-    <div className="ml-hosts">
-      <div className="ml-dbs">{DATABASES.map(tile)}</div>
-      <div className="ml-hostgrid">{HOSTS.map(tile)}</div>
-    </div>
-  );
-}
-
-/** reylo/reylo.lock after two branches each added a migration: git stops the merge on the lock, before anything deploys. */
-function LockFile() {
-  const line = (name: string, sum: string) => (
-    <>
-      {'  - '}
-      {name} {ty(sum)}
-      {'\n'}
-    </>
-  );
-  return (
-    <div className="ml-win" aria-hidden="true">
-      <div className="ml-bar">
-        <FileIcon />
-        reylo/reylo.lock
-      </div>
-      <pre className="ml-sql ml-lock">
-        {kw('schema:')} {ty('c7bf681b')}
-        {'\n'}
-        {kw('migrations:')}
-        {'\n'}
-        {line('init.sql', '1d42e07a')}
-        {line('20261104120000_users.sql', 'c86e9de4')}
-        {line('20261104140347_add_bio.sql', '78ad08c0')}
-        {line('20261105090000_tags.sql', '3f1a9b27')}
-        <span className="ml-er">{'<<<<<<< main'}</span>
-        {'\n'}
-        {line('20261106100000_orders.sql', '9c04e1d2')}
-        <span className="ml-mu">{'======='}</span>
-        {'\n'}
-        {line('20261106093000_nick.sql', 'e51b7a38')}
-        <span className="ml-er">{'>>>>>>> add-nick'}</span>
-      </pre>
-    </div>
   );
 }
 
@@ -853,15 +656,9 @@ const KINDS: { name: string; sql: ReactNode }[] = [
   },
 ];
 
-/** The kinds as tabs over an editor, one after another every few seconds until the reader picks one. */
+/** The kinds as tabs over an editor; none turns by itself. */
 function SchemaKinds() {
   const [at, setAt] = useState(0);
-  const [picked, setPicked] = useState(false);
-  useEffect(() => {
-    if (picked || stillPlease()) return;
-    const timer = setInterval(() => setAt((i) => (i + 1) % KINDS.length), 3500);
-    return () => clearInterval(timer);
-  }, [picked]);
   return (
     <div className="ml-win ml-kinds">
       <div className="ml-bar">
@@ -876,22 +673,194 @@ function SchemaKinds() {
             role="tab"
             aria-selected={i === at}
             className={i === at ? 'on' : undefined}
-            onClick={() => {
-              setAt(i);
-              setPicked(true);
-            }}
+            onClick={() => setAt(i)}
           >
             {k.name}
           </button>
         ))}
       </div>
-      <div className="ml-kinds-body">
+      <div className="ml-stack">
         {KINDS.map((k, i) => (
           <pre key={k.name} className="ml-sql" data-on={i === at || undefined}>
             {k.sql}
           </pre>
         ))}
       </div>
+    </div>
+  );
+}
+
+/** One edit to schema.sql: `posts.title` made required and checked, a column added, and the view over it widened; `…` marks lines left out. */
+const EDIT: [gutter: ' ' | '-' | '+' | '…', text: string][] = [
+  [' ', 'create table posts ('],
+  ['…', ''],
+  ['-', '  title text,'],
+  ['+', "  title text not null check (length(title) <= 200),"],
+  ['+', '  published boolean not null default false,'],
+  ['…', ''],
+  [' ', 'create view post_titles as'],
+  ['-', '  select p.id, p.title, u.name as author'],
+  ['+', '  select p.id, p.title, p.published, u.name as author'],
+  ['…', ''],
+]
+
+/**
+ * The migrations `reylo migrate new tighten_posts` wrote for that edit, run with reylo 0.8.1 on
+ * Postgres 18, MySQL 8.4 and SQLite, where `comments` references `posts`: Postgres drops and
+ * recreates the view and validates its new constraints apart, so no step blocks writes; MySQL takes
+ * one statement per migration; SQLite rebuilds `posts` and the table that references it.
+ */
+const MIGRATIONS: { name: string; files: [file: string, sql: string][] }[] = [
+  {
+    name: "Postgres",
+    files: [
+      [
+        "20261121090447_tighten_posts.sql",
+        "drop view post_titles;\nalter table posts add column published boolean default false not null;\nalter table posts add constraint title_not_null check (title is not null) not valid;\nalter table posts add constraint posts_title_check check (length(title) <= 200) not valid;\ncreate view post_titles as\n  select p.id, p.title, p.published, u.name as author\n  from posts p join users u on u.id = p.author_id;"
+      ],
+      [
+        "20261121090448_tighten_posts_2.sql",
+        "alter table posts validate constraint title_not_null;\nalter table posts validate constraint posts_title_check;\nalter table posts alter column title set not null;\nalter table posts drop constraint title_not_null;"
+      ]
+    ]
+  },
+  {
+    name: "MySQL",
+    files: [
+      [
+        "20261121090447_tighten_posts.sql",
+        "alter table posts\n  modify column title text not null,\n  add column published tinyint(1) not null default '0',\n  add constraint posts_chk_1 check ((length(title) <= 200));"
+      ],
+      [
+        "20261121090448_tighten_posts_2.sql",
+        "create or replace view post_titles as select p.id as id, p.title as title, p.published as published, u.name as author from (posts p join users u on((u.id = p.author_id)));"
+      ]
+    ]
+  },
+  {
+    name: "SQLite",
+    files: [
+      [
+        "20261121090447_tighten_posts.sql",
+        "drop view post_titles;\ncreate table new_posts (\n  id integer primary key,\n  author_id integer not null,\n  title text not null check (length(title) <= 200),\n  published boolean not null default false,\n  body text not null,\n  foreign key (author_id) references users (id)\n);\ncreate table new_comments (\n  id integer primary key,\n  post_id integer not null,\n  body text not null,\n  foreign key (post_id) references new_posts (id)\n);\ninsert into new_posts (id, author_id, title, body) select id, author_id, title, body from posts;\ninsert into new_comments (id, post_id, body) select id, post_id, body from comments;\ndrop table comments;\ndrop table posts;\nalter table new_posts rename to posts;\nalter table new_comments rename to comments;\ncreate index posts_author on posts (author_id);\ncreate view post_titles as\n  select p.id, p.title, p.published, u.name as author\n  from posts p join users u on u.id = p.author_id;"
+      ]
+    ]
+  }
+];
+
+/** The edit over the migration each database gets for it, as tabs: Postgres's first, another only when the reader picks it. */
+function DialectMigrations() {
+  const [at, setAt] = useState(0);
+  return (
+    <div className="ml-pair">
+      <div className="ml-win ml-editor ml-edit" aria-hidden="true">
+        <div className="ml-bar">
+          <FileIcon />
+          reylo/schema.sql
+        </div>
+        <pre className="ml-code">
+          {EDIT.map(([g, text], i) =>
+            g === '…' ? (
+              <span key={i} className="ml-l ml-gap" data-g=" ">
+                …
+              </span>
+            ) : (
+              <span key={i} className={g === '-' ? 'ml-l ml-del' : g === '+' ? 'ml-l ml-add' : 'ml-l'} data-g={g}>
+                <Sql text={text} />
+              </span>
+            ),
+          )}
+        </pre>
+      </div>
+      <div className="ml-win ml-under ml-dialects">
+        <div className="ml-bar">
+          <FileIcon />
+          reylo/migrations/
+        </div>
+        <div className="ml-tabs" role="tablist">
+          {MIGRATIONS.map((d, i) => (
+            <button key={d.name} type="button" role="tab" aria-selected={i === at} className={i === at ? 'on' : undefined} onClick={() => setAt(i)}>
+              {d.name}
+            </button>
+          ))}
+        </div>
+        <div className="ml-stack">
+          {MIGRATIONS.map((d, i) => (
+            <pre key={d.name} className="ml-sql" data-on={i === at || undefined}>
+              {d.files.map(([file, sql], j) => (
+                <span key={file}>
+                  {j ? '\n\n' : ''}
+                  <span className="ml-mu">-- {file}</span>
+                  {'\n'}
+                  <Sql text={sql} />
+                </span>
+              ))}
+            </pre>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Schemaless: the terminal that changes the database and writes the migration from it. */
+function Schemaless() {
+  const lines = usePlayer(SCHEMALESS);
+  return <TermWindow lines={lines} script={SCHEMALESS} />;
+}
+
+/** Where Reylo Migrate runs, as each host's logo over its name. */
+function Hosts() {
+  const tile = (t: Logo) => (
+    <span key={t.name}>
+      <svg viewBox={t.viewBox} fill="currentColor" aria-hidden="true">
+        {t.paths.map((d) => (
+          <path key={d} d={d} />
+        ))}
+      </svg>
+      {t.name}
+    </span>
+  );
+  return (
+    <div className="ml-hosts">
+      <div className="ml-dbs">{DATABASES.map(tile)}</div>
+      <div className="ml-hostgrid">{HOSTS.map(tile)}</div>
+    </div>
+  );
+}
+
+/** reylo/reylo.lock after two branches each added a migration: git stops the merge on the lock, before anything deploys. */
+function LockFile() {
+  const line = (name: string, sum: string) => (
+    <>
+      {'  - '}
+      {name} {ty(sum)}
+      {'\n'}
+    </>
+  );
+  return (
+    <div className="ml-win" aria-hidden="true">
+      <div className="ml-bar">
+        <FileIcon />
+        reylo/reylo.lock
+      </div>
+      <pre className="ml-sql ml-lock">
+        {kw('schema:')} {ty('c7bf681b')}
+        {'\n'}
+        {kw('migrations:')}
+        {'\n'}
+        {line('init.sql', '1d42e07a')}
+        {line('20261104120000_users.sql', 'c86e9de4')}
+        {line('20261104140347_add_bio.sql', '78ad08c0')}
+        {line('20261105090000_tags.sql', '3f1a9b27')}
+        <span className="ml-er">{'<<<<<<< main'}</span>
+        {'\n'}
+        {line('20261106100000_orders.sql', '9c04e1d2')}
+        <span className="ml-mu">{'======='}</span>
+        {'\n'}
+        {line('20261106093000_nick.sql', 'e51b7a38')}
+        <span className="ml-er">{'>>>>>>> add-nick'}</span>
+      </pre>
     </div>
   );
 }

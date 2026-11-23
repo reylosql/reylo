@@ -8,8 +8,11 @@ export const migrateDocsUrl = '/migrate/docs';
 /** The docs' intro, content/docs/index.mdx, at an address of its own under the homepage, / (components/home-landing.tsx). */
 export const introUrl = '/docs';
 
-/** A page's address: its file's name, but the intro and Reylo Migrate's docs, which sit under their landing pages. */
-export const docsUrl = (url: string) => (url === '/' ? introUrl : url === '/migrate' ? migrateDocsUrl : url);
+/** Reylo Migrate's comparison with other migration tools: content/docs/migrate-compare.mdx, beside its docs. */
+export const migrateCompareUrl = '/migrate/compare';
+
+/** A page's address: its file's name, but the intro and Reylo Migrate's pages, which sit under their landing pages. */
+export const docsUrl = (url: string) => (url === '/' ? introUrl : url === '/migrate' ? migrateDocsUrl : url.startsWith('/migrate-') ? `/migrate/${url.slice('/migrate-'.length)}` : url);
 
 /** The docs site's address: reylo.dev, which every other Reylo domain redirects to (wiki/docs-site.md). */
 export const siteUrl = 'https://reylo.dev';
@@ -47,7 +50,7 @@ export const docsTitle = (title: string) => `${title} — Reylo`;
  */
 export const pageGroups = [
   {
-    label: 'Docs',
+    label: 'Reylo',
     items: [
       { title: 'Intro', href: introUrl },
       { title: SHOW_RUST ? 'Usage with TypeScript' : 'Usage', href: '/typescript' },
@@ -58,19 +61,25 @@ export const pageGroups = [
     ],
   },
   {
-    label: 'Migrations',
-    items: [{ title: 'Reylo Migrate', href: '/migrate', external: true }],
+    label: 'Reylo Migrate',
+    items: [
+      { title: 'Intro', href: migrateDocsUrl },
+      { title: 'Usage', href: '/migrate/usage' },
+      { title: 'CLI', href: '/migrate/cli' },
+      { title: 'Comparison', href: migrateCompareUrl },
+    ],
   },
   {
     label: 'Deployment',
     items: [
-      { title: 'Cloudflare D1', href: '/d1' },
-      { title: 'Durable Objects', href: '/durable-objects' },
-      { title: 'Cloudflare Hyperdrive', href: '/hyperdrive' },
+      // The biggest hosts first, then the rest by how many projects use them.
       { title: 'Neon', href: '/neon' },
       { title: 'Supabase', href: '/supabase' },
+      { title: 'Durable Objects', href: '/durable-objects' },
       { title: 'PlanetScale', href: '/planetscale' },
+      { title: 'Cloudflare D1', href: '/d1' },
       { title: 'Turso', href: '/turso' },
+      { title: 'Cloudflare Hyperdrive', href: '/hyperdrive' },
       { title: 'Next.js', href: '/nextjs' },
       { title: 'CI', href: '/deployment' },
     ],
@@ -90,5 +99,6 @@ export const pageGroups = [
 
 export const pageLinks = [
   { title: 'Playground', href: '/play' },
+  { title: 'Blog', href: '/blog' },
   { title: 'npm', href: 'https://www.npmjs.com/package/reylo' },
 ];

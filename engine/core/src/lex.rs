@@ -262,7 +262,7 @@ fn find_bytes(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
 }
 
 /// How a MySQL session reads strings, by its `sql_mode`. The default is the server's default
-/// mode, which is also how `sqlparser`'s MySQL dialect reads them.
+/// mode, which is also how the MySQL parser reads them by default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MysqlText {

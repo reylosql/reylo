@@ -1,0 +1,1 @@
+select array(select concat(m.nickname) from members m group by rollup (concat(m.nickname))) as a, (select array[concat(m.nickname)] from members m group by rollup (concat(m.nickname)) order by grouping(concat(m.nickname)) desc limit 1) as b

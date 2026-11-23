@@ -55,8 +55,12 @@ impl Migrator {
         let with = |state: &str| -> Vec<String> { listed.iter().filter(|m| m["state"] == state).filter_map(|m| m["name"].as_str().map(String::from)).collect() };
         let applied = with("applied");
         if run.code != 0 {
-            let failed = !with("failed").is_empty();
-            return Err(Error::stopped(if failed { "reylo migrate deploy failed" } else { "reylo migrate deploy refused" }, &run, applied));
+            // A migration that failed leads, with its error, then the log of what ran before it.
+            let lead = match listed.iter().find(|m| m["state"] == "failed") {
+                Some(m) => format!("reylo migrate deploy failed: {}: {}", m["name"].as_str().unwrap_or_default(), m["error"].as_str().unwrap_or("failed")),
+                None => "reylo migrate deploy refused:".to_string(),
+            };
+            return Err(Error::stopped(&lead, &run, applied));
         }
         Ok(applied)
     }
@@ -102,6 +106,11 @@ impl Migrator {
                 schema: self.schema.map(String::from),
             })),
         };
+        // A run holds a session, which a transaction pooler shares out: its lock would stay on
+        // whichever session the pooler gave it, and stop the next run.
+        if let Some(refusal) = DB::transaction_pooler(&*pool.connect_options()) {
+            return Err(Error::new(format!("reylo::migrate!(): {refusal}")));
+        }
         let mut conn = pool.acquire().await.map_err(|e| Error::new(format!("reylo::migrate!() could not take a connection from the pool: {e}")))?;
         if command == Command::Deploy && DB::DIALECT != Dialect::Sqlite {
             conn.close_on_drop();
@@ -172,6 +181,10 @@ mod private {
         /// The database's URL as a message shows it, with no password; for SQLite, the path the run
         /// lock is named after.
         fn url(options: &<Self::Connection as sqlx::Connection>::Options) -> String;
+        /// Why a run can't go through the endpoint these options connect to, read from their host and port.
+        fn transaction_pooler(_options: &<Self::Connection as sqlx::Connection>::Options) -> Option<String> {
+            None
+        }
         /// The connection, as the migrations' code runs statements on it.
         fn session(conn: sqlx::pool::PoolConnection<Self>) -> Box<dyn Session>;
     }
@@ -256,6 +269,10 @@ impl private::Hosted for sqlx::Postgres {
     const DIALECT: Dialect = Dialect::Postgres;
     fn url(o: &sqlx::postgres::PgConnectOptions) -> String {
         format!("postgres://{}@{}:{}/{}", o.get_username(), o.get_host(), o.get_port(), o.get_database().unwrap_or_default())
+    }
+    fn transaction_pooler(o: &sqlx::postgres::PgConnectOptions) -> Option<String> {
+        let shown = format!("postgres://{}:{}", o.get_host(), o.get_port());
+        reylo_migrate::db::transaction_pooler_at(o.get_host(), Some(o.get_port()), &shown, "")
     }
     fn session(conn: sqlx::pool::PoolConnection<sqlx::Postgres>) -> Box<dyn Session> {
         Box::new(Pooled(conn))
@@ -421,9 +438,9 @@ impl Error {
     fn of(e: reylo_migrate::Error) -> Error {
         Error::new(format!("reylo::migrate!(): {e}"))
     }
-    fn stopped(what: &str, run: &reylo_migrate::commands::HostRun, applied: Vec<String>) -> Error {
+    fn stopped(lead: &str, run: &reylo_migrate::commands::HostRun, applied: Vec<String>) -> Error {
         let lines: Vec<&str> = run.lines.iter().map(String::as_str).skip_while(|l| l.is_empty()).collect();
-        Error { message: format!("{what}:\n{}", lines.join("\n")), problems: problems(&run.problems), applied }
+        Error { message: format!("{lead}\n{}", lines.join("\n")), problems: problems(&run.problems), applied }
     }
     /// Each reason it refused, with its fix; none where a migration failed or the database was out
     /// of reach.

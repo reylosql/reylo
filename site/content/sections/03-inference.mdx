@@ -4,48 +4,7 @@ title: "Inference"
 
 Reylo sends each statement against your live dev database without running it. It gets back a prepared version of the query plus your database's type descriptors, and it infers type information based on those.
 
-Reylo returns the types in a structured format that is then consumed by the TypeScript content mapper. To read the data in its raw form, you can use the CLI:
-
-<Analyzed file="queries/is_verified.sql">
-
-```sql schema
-create table users (
-  id int8 primary key,
-  verified boolean not null
-);
-```
-
-```sql
--- Whether a user has verified their email.
-select verified from users where id = :id
-```
-
-</Analyzed>
-
-Each field of the result:
-
-| Field | What it holds |
-| --- | --- |
-| `file` | The file `reylo analyze` read the statement from. Only the CLI adds it: the format has no such field, and a statement given with `--sql` has none |
-| `$schema` | The format's version, as the URL of its JSON Schema |
-| `dialect` | The database, and its server's version |
-| `sql` | The statement as the database runs it, with the database's own placeholders |
-| `kind` | What the statement does: `select`, `insert`, `update`, `delete`, `merge` or `other` |
-| `comment` | The comment before the statement |
-| `params` | Each parameter's name and [type](/typedefs) |
-| `result` | Each column's name and type, and the cardinality: how many rows the statement returns |
-| `capabilities` | The tables the statement reads or writes |
-| `diagnostics` | What the database reports where it refuses the statement |
-
-The output is in [Reylo Type Defs](/typedefs), Reylo's format for types:
-
-<Callout type="warning" title="A developing API">
-
-Reylo Type Defs is still changing. For now, consider it an internal detail of Reylo, and don't build on it.
-
-</Callout>
-
-Reylo caches each answer in [`reylo/.cache/`](/faq#faq-reylo-directory), keyed by a fingerprint of the schema, so the next check after a migration sees the new schema.
+Reylo returns the types in a structured format that is then consumed by the TypeScript content mapper. To read the data in its raw form, you can use the [CLI](/cli#reylo-analyze).
 
 ClickHouse states most of this itself: a parameter declares its type, and a column's type says whether it can be null. So the rules below are mostly those of Postgres, MySQL and SQLite, and [ClickHouse](/clickhouse) has its own page.
 
@@ -57,7 +16,7 @@ Each card shows the types in TypeScript or in Rust: pick one at the top of any c
 
 Each SQL type has one TypeScript type, the same on every driver<Rust>, and one Rust type</Rust>.
 
-In TypeScript, a 64-bit integer is a `bigint`, a decimal its exact text, and an instant its ISO 8601 text in UTC: no value is a `Date`. On Postgres, an instant always has six fraction digits, so two of them sort as strings. Pass back the text `.run()` returned, since a `Date` drops microseconds ([Dates and times](/postgres#dates-and-times)).
+Dates and times are ISO 8601 strings, never a `Date`, so they keep [full precision](/postgres#dates-and-times).
 
 <LanguageSwitch />
 
@@ -247,11 +206,11 @@ The Rust crate has no ClickHouse support yet: sqlx has no ClickHouse driver.
 </Dialect>
 </DialectTabs>
 
-For every rule and edge case of each database, from 64-bit integers to time zones, nulls, row counts and parameters, see its own page: [Postgres](/postgres#data-types), [MySQL](/mysql#data-types), [SQLite](/sqlite#data-types) and [ClickHouse](/clickhouse#data-types).
+Each database's page has every rule and edge case: [Postgres](/postgres#data-types), [MySQL](/mysql#data-types), [SQLite](/sqlite#data-types) and [ClickHouse](/clickhouse#data-types).
 
 ## Named parameters [#naming]
 
-Name a parameter with a colon, and Reylo infers its type from where it's used, and compiles it to your database's own placeholder:
+Name a parameter with a colon. Reylo infers its type from where it's used, and compiles it to your database's own placeholder:
 
 <InferenceCard>
 
@@ -286,23 +245,23 @@ It's an error that says to [cast it](#casts), unless [`allow_untyped_params: tru
 <DialectTabs>
 <Dialect value="Postgres">
 
-Postgres types a parameter from its context: a bare `select :x` is a `string`, and `select :x is null` is an error until a cast types it.
+Postgres types a parameter from its context. A bare `select :x` is a `string`, and `select :x is null` needs a cast.
 
 </Dialect>
 <Dialect value="MySQL">
 
-MySQL types every parameter: one that nothing else types, such as a bare `select :x`, is a `string`.
+MySQL types every parameter. One with no context, such as a bare `select :x`, is a `string`.
 
 </Dialect>
 <Dialect value="SQLite">
 
-A bare `select :x`, or an argument of a table-valued function other than `json_each` and `json_tree`, has no type until a cast gives it one:
+A bare `select :x` has no type until a cast gives it one. Neither does an argument of a table-valued function, except `json_each` and `json_tree`:
 
 ```sql
 select length(:text::text) as n
 ```
 
-A call to a function your application registers fails the type check, cast or not: Reylo prepares the statement in its own SQLite, which lacks it ("no such function"). Apply that function in TypeScript instead.
+A function your application registers fails the type check. Reylo prepares the statement in its own SQLite, which doesn't have it. Apply that function in TypeScript instead.
 
 </Dialect>
 <Dialect value="ClickHouse">
@@ -384,7 +343,7 @@ where user_id = coalesce(:user_id::nullable(int), user_id)
 
 </InferenceCard>
 
-A parameter written as it is to a column that may hold null, as `:published_at` is to `posts.published_at`, takes null too, and may be left out as well. Any other parameter takes no null: if one gets `null`, or is left out, `.run()` throws before the query runs, since the result's types rely on its value. A JSON parameter there takes `null` as JSON's `null`, which a `not null` JSON column holds; cast it to `nullable(…)` to pass SQL's `NULL` instead.
+Like `:published_at`, a parameter written straight into a nullable column takes null and may be left out. Any other parameter takes no null, and `.run()` throws if one is null or missing. A JSON parameter there reads `null` as JSON's `null`. To pass SQL's `NULL` instead, cast it to `nullable(…)`.
 
 ## Dynamic sorting
 
@@ -407,7 +366,7 @@ order by
 
 ## Dynamic filtering
 
-To filter a list by a form's values, pass them as one [JSON parameter](#typed-json), which Reylo checks against its schema before the query runs:
+To filter a list by a form's values, pass them as one [JSON parameter](#typed-json). Reylo checks it against its schema before the query runs:
 
 <InferenceCard>
 
@@ -506,7 +465,7 @@ order by
 
 </InferenceCard>
 
-A filter left out takes its default, and one with none, like the author, is null, which turns it off:
+A filter left out takes its default. One with no default, like the author, is null, which turns it off:
 
 ```ts twoslash
 declare const request: Request;
@@ -517,15 +476,13 @@ import searchPosts from "./search_posts.sql";
 const posts = await searchPosts.run(db, { filters: await request.json() });
 ```
 
-Read with `->>`, each filter is a value the database can plan with, so on Postgres and MySQL a filter left out drops out of the plan and one given, like the author, can use an index.
+Each filter read with `->>` is a value the database can plan with. On Postgres and MySQL, a filter left out drops out of the plan, and one given can use an index.
 
-<Details summary="Which filters use an index, in each dialect" id="filter-indexes">
+<Callout type="warning" title="Indexes">
 
-- **Postgres** plans each run with its values on pg and PGlite. On postgres.js and Bun.sql, which prepare each statement once per connection, it can switch to one plan for every value after five runs, which reads the whole table; create the client with `connection: { plan_cache_mode: "force_custom_plan" }` to keep planning each run with its values. The same filter read from `jsonb_to_record` reads the whole table under every plan.
-- **MySQL** plans each run with its values. The same filter read from `json_table` reads the whole table.
-- **SQLite** plans a statement before its values are bound, so a filter that may be left out reads every row.
+A given filter can use an index on Postgres only when each run is planned with its values. Every Postgres driver plans each run, except postgres.js and Bun.sql, and Drizzle over them. Create those clients with `connection: { plan_cache_mode: "force_custom_plan" }` ([postgres.js](/postgres#postgresjs)), or after five runs Postgres can switch to a plan that reads the whole table. MySQL plans each run. SQLite reads every row for this query.
 
-</Details>
+</Callout>
 
 ## Unique keys
 
@@ -685,10 +642,10 @@ where user_id = :user_id::int
 
 </InferenceCard>
 
-An expression with no `as` has no name of its own, only what your database makes up for it, which can differ by driver. Add an `as` to get rows back, as in the [query above](#aggregates). A column read as it is, like `select id`, already has a name and keeps its rows.
+An expression with no `as` has no name of its own. Your database makes one up, and it can differ by driver. Add an `as` to get rows back, as in the [query above](#aggregates). A column read as it is, like `select id`, already has a name and keeps its rows.
 
 - Where such a value may be null and the query may also match no row, `null` stands for both. Name the column to tell them apart.
-- Among several columns, a made-up name that isn't an identifier, like `count(*)` or `?column?`, is a type error. Name the column with `as`.
+- Among several columns, a made-up name like `count(*)` or `?column?` is a type error. Name the column with `as`.
 
 ## Window functions
 
@@ -799,14 +756,14 @@ An insert that returns its row resolves to exactly that row:
 
 ```sql file="inferred_create_user.sql" dialect="postgres"
 insert into users (name)
-values (:name::text)
-returning id
+values (:name)
+returning id, name, created_at
 ```
 
 ```sql file="inferred_create_user.sql" dialect="sqlite"
 insert into users (name)
-values (:name::text)
-returning id
+values (:name)
+returning id, name, created_at
 ```
 
 </InferenceCard>
@@ -817,6 +774,7 @@ So does an upsert, whether it inserts the row or updates it:
 
 ```sql file="upserts.sql" dialect="postgres" play="Upserts"
 insert into users (name, email)
+-- the cast makes email required, though its column takes null
 values (:name, :email::text)
 on conflict (email) do update
   set name = excluded.name
@@ -825,6 +783,7 @@ returning id, name
 
 ```sql file="upserts.sql" dialect="sqlite"
 insert into users (name, email)
+-- the cast makes email required, though its column takes null
 values (:name, :email::text)
 on conflict (email) do update
   set name = excluded.name
@@ -880,6 +839,7 @@ create table events (
 ```
 
 ```sql file="inferred_event_kinds.sql" dialect="postgres"
+-- hover events: kind's check constraint lists its values
 select id, kind
 from events
 order by id desc
@@ -1010,7 +970,7 @@ where u.id = :id::int
 
 </InferenceCard>
 
-On Postgres, each field of an array of rows is read as a column is, so a `bigint` stays exact. [Inside JSON, values can differ](/postgres#json). JSON is still the smaller result when rows nest three levels deep and hold JSON documents, since a row's text escapes the quotes of what it holds at each level:
+On Postgres, each field of an array of rows is read as a column is, so a `bigint` stays exact. [Inside JSON, values can differ](/postgres#json). JSON is still smaller for rows nested three levels deep that hold JSON documents. A row's text escapes the quotes inside it at every level:
 
 <InferenceCard>
 
@@ -1064,12 +1024,14 @@ create table events (
 ```
 
 ```sql file="inferred_event_payloads.sql" dialect="postgres"
+-- hover events: payload's type comes from its JSON Schema
 select id, payload
 from events
 where id = :id::int
 ```
 
 ```sql file="inferred_event_payloads.sql" dialect="mysql"
+-- hover events: payload's type comes from its JSON Schema
 select id, payload
 from events
 where id = :id::int
@@ -1079,7 +1041,7 @@ where id = :id::int
 
 ## JSON parameters [#typed-json]
 
-A JSON parameter declares its schema in its cast to `json` or `jsonb`, and Reylo infers the parameter's type from it:
+A JSON parameter declares its schema in its cast. Reylo infers the parameter's type from it:
 
 <InferenceCard>
 
@@ -1111,9 +1073,30 @@ A schema can nest objects and arrays, and check every value in them:
 
 <InferenceCard>
 
+```sql schema dialect="postgres"
+create table orders (
+  id serial primary key,
+  details jsonb not null
+);
+```
+
+```sql schema dialect="mysql"
+create table orders (
+  id int auto_increment primary key,
+  details json not null
+);
+```
+
+```sql schema dialect="sqlite"
+create table orders (
+  id integer primary key,
+  details text not null
+) strict;
+```
+
 ```sql file="record_order.sql" dialect="postgres,mysql,sqlite"
-insert into events (kind, payload)
-values ('order', :order::json('{
+insert into orders (details)
+values (:order::json('{
   "type": "object",
   "properties": {
     "customer": { "type": "string", "format": "email" },
@@ -1207,7 +1190,7 @@ where id in (select j.value from input, json_each(input.ids) as j)
 
 ## Bulk inserts
 
-Pass the rows as one [JSON parameter](#typed-json): the schema in its cast types them, and Reylo checks every row before the statement runs:
+Pass the rows as one [JSON parameter](#typed-json). The schema in its cast types them, and Reylo checks every row before the statement runs:
 
 <InferenceCard>
 
@@ -1330,7 +1313,7 @@ cross join jsonb_to_recordset(u.posts) as p(title text)
 </Dialect>
 <Dialect value="MySQL">
 
-On MySQL, a `with` only reads, so the users and the posts are two statements, run in one transaction:
+On MySQL, a `with` only reads. So the users and the posts are two statements in one transaction:
 
 ```ts twoslash tab="main.ts"
 import mysql from "mysql2/promise";
@@ -1417,7 +1400,7 @@ where u.title is not null
 </Dialect>
 <Dialect value="SQLite">
 
-On SQLite, a `with` only reads, so the users and the posts are two statements, run in one transaction:
+On SQLite, a `with` only reads. So the users and the posts are two statements in one transaction:
 
 ```ts twoslash tab="main.ts"
 import Database from "better-sqlite3";
@@ -1551,12 +1534,14 @@ create table events (
 ```
 
 ```sql file="inferred_event_payloads_union.sql" dialect="postgres"
+-- hover events: payload's type comes from its JSON Schema
 select id, payload
 from events
 where id = :id::int
 ```
 
 ```sql file="inferred_event_payloads_union.sql" dialect="mysql"
+-- hover events: payload's type comes from its JSON Schema
 select id, payload
 from events
 where id = :id::int

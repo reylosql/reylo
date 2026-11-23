@@ -721,6 +721,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             "select format('%I.%I', n.nspname, c.relname) as rel, string_agg(format('%I', a.attname), ', ' order by a.attnum) as attrs
             from pg_class c join pg_namespace n on n.oid = c.relnamespace join pg_attribute a on a.attrelid = c.oid
             where c.relkind = 'c' and a.attnum > 0 and not a.attisdropped and {ns} and {} and {}
+              and not exists (select 1 from pg_depend e where e.classid = 'pg_type'::regclass and e.objid = c.reltype and e.deptype = 'e')
             group by 1",
             not_extension("pg_class", "c"),
             project_relation("c", "n")
@@ -973,12 +974,14 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             from pg_aggregate a join pg_proc p on p.oid = a.aggfnoid join pg_namespace n on n.oid = p.pronamespace
             where {ns} and {} and {}
             union all select 'rule ' || pg_get_ruledef(r.oid, false) || case r.ev_enabled when 'O' then '' else ' enabled=' || r.ev_enabled::text end from pg_rewrite r join pg_class c on c.oid = r.ev_class join pg_namespace n on n.oid = c.relnamespace
-            where r.rulename <> '_RETURN' and {ns} and {}
+            where r.rulename <> '_RETURN' and {ns} and {} and {} and {}
             union all select 'statistics ' || pg_get_statisticsobjdef(s.oid) from pg_statistic_ext s join pg_namespace n on n.oid = s.stxnamespace where {ns} and {}",
             aggregate_options("p"),
             not_extension("pg_proc", "p"),
             not_platform("p.proowner"),
             project_relation("c", "n"),
+            not_extension("pg_class", "c"),
+            not_extension("pg_rewrite", "r"),
             format!("({} or {})", not_platform("s.stxowner"), not_platform_schema("n"))
         ))
         .await?

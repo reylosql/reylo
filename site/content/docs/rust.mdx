@@ -17,12 +17,6 @@ let user = get_user::Query { id: 1 }.run(&pool).await?;
 
 The attribute fills the module with the statement's types: `Query`, its parameters, and `Row`, one row of its result. The query runs on sqlx, on your own pool, connection or transaction.
 
-<Callout title="Not on crates.io yet">
-
-The `reylo` and `reylo-build` crates aren't on crates.io yet.
-
-</Callout>
-
 ## Setup
 
 To use Reylo in Rust, you'll need:
@@ -54,6 +48,7 @@ reylo = { version = "0.8", features = [
   "chrono",        # dates and times as chrono's types; or "time"
   "uuid",          # uuid as uuid::Uuid
   "rust_decimal",  # numeric as rust_decimal::Decimal; or "bigdecimal"
+  "pgvector",      # pgvector's vector as your pgvector crate's Vector, 0.4 or later
   "migrate",       # the default; reylo::migrate!(), which runs your migrations
 ] }
 ```
@@ -164,7 +159,7 @@ pub mod get_user {
 
 Each `:name` in the statement is a field of `Query`.
 
-Its type comes from its cast, or from where the statement uses it, and a text parameter is a `&str`. To accept null, cast it to `nullable(…)`, which makes its field an `Option`:
+Its type comes from its cast, or from where the statement uses it. A text parameter is a `&str`, and an array a `Vec` with no `Option` elements. To accept null, cast it to `nullable(…)`, which makes its field an `Option`:
 
 ```rust
 #[reylo::query("

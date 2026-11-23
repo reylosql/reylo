@@ -105,5 +105,66 @@ async fn main() -> Result<(), sqlx::Error> {
     assert_eq!(streamed.len(), 2);
     println!("18. stream      {streamed:?}");
     println!("19. SQL         {}", get_user::SQL.trim());
+
+    use reylo::sqlx::postgres::types::{PgCircle, PgHstore, PgPoint};
+    let place = get_place::Query { id: 1 }.run(&pool).await?.expect("place 1");
+    let pin: PgPoint = place.pin.clone();
+    assert_eq!((pin.x, pin.y), (1.5, -2.0));
+    let reach: &PgCircle = &place.reach;
+    assert_eq!((reach.x, reach.y, reach.radius), (1.0, 2.0, 3.0));
+    assert_eq!((place.route.closed, place.route.points.len(), place.outline.points.len()), (false, 2, 3));
+    let attrs: &PgHstore = &place.attrs;
+    assert_eq!((attrs.get("color"), attrs.get("size")), (Some(&Some("red".to_string())), Some(&None)));
+    let mut tx = pool.begin().await?;
+    let attrs: PgHstore = [("color".to_string(), Some("blue".to_string()))].into_iter().collect();
+    let changed = move_place::Query { pin: PgPoint { x: 0.25, y: 1e300 }, attrs, id: 1 }.run(&mut *tx).await?;
+    let moved = get_place::Query { id: 1 }.run(&mut *tx).await?.expect("place 1");
+    tx.rollback().await?;
+    assert_eq!((changed, moved.pin.x, moved.pin.y, moved.attrs.len()), (1, 0.25, 1e300, 1));
+    println!("20. geometry    {place:?}");
+
+    let slept = nap::Query.run(&pool).await?.slept;
+    println!("21. void        {slept:?}");
+
+    let skip: Vec<i32> = vec![1];
+    let others = users_but::Query { skip }.run(&pool).await?;
+    assert_eq!(others.iter().map(|r| r.id).collect::<Vec<_>>(), [2]);
+    println!("22. int[] param {others:?}");
+
+    let near = pgvector::Vector::from(vec![1.0, 2.0, -3.0]);
+    let item = nearest_item::Query { near }.run(&pool).await?.expect("an item");
+    let embedding: pgvector::Vector = item.embedding.clone();
+    assert_eq!((item.id, embedding.to_vec()), (1, vec![1.0, 2.5, -3.0]));
+    println!("23. vector      {item:?} {}", serde_json::to_string(&embedding).expect("json"));
+    let declared = nearest_item_id::Query { near: pgvector::Vector::from(vec![0.0, 0.0, 1.0]) }.run(&pool).await?;
+    assert_eq!(declared.map(|r| r.id), Some(2));
+    let text = vector_text::Query { near: vec![1.0, 2.0, 3.0] }.run(&pool).await?.near;
+    assert!(format!("{text:?}").contains("[1,2,3]"), "{text:?}");
+
+    let mut tx = pool.begin().await?;
+    let inserted = insert_resource::Query { kind: insert_resource::ResourceKind::MOVIE }.run(&mut *tx).await?;
+    tx.rollback().await?;
+    assert_eq!(inserted.kind, insert_resource::ResourceKind::MOVIE);
+    println!("24. \"Enum\"      {inserted:?}");
+
+    let renamed = nearest_item_renamed::Query { near: pgvector::Vector::from(vec![0.0, 0.0, 1.0]) }.run(&pool).await?;
+    assert_eq!(renamed.map(|r| r.id), Some(2));
+    let kinds = resource_kinds::Query { kinds: vec![resource_kinds::ResourceKind::BOOK, resource_kinds::ResourceKind::MOVIE] }.run(&pool).await?.kinds;
+    let shown = format!("{kinds:?}");
+    assert!(shown.find("BOOK").is_some_and(|b| shown.find("MOVIE").is_some_and(|m| b < m)), "{shown}");
+    println!("25. enum[]      {kinds:?}");
+
+    let none = vectors_text::Query { near: None }.run(&pool).await?.shown;
+    let some = vectors_text::Query { near: Some(vec![pgvector::Vector::from(vec![1.0, 2.0])]) }.run(&pool).await?.shown;
+    assert!(format!("{none:?}") == "None" && format!("{some:?}").contains("[1,2]"), "{none:?} {some:?}");
+
+    let shown = vector_from_text::Query { v: "[1,2]".to_string() }.run(&pool).await?.shown;
+    assert!(format!("{shown:?}").contains("[1,2]"), "{shown:?}");
+    let n = count_vectors::Query { vs: vec![Some(pgvector::Vector::from(vec![1.0])), None] }.run(&pool).await?.n;
+    assert_eq!(format!("{n:?}"), "Some(2)");
+    let row = dimensions::Query { v: pgvector::Vector::from(vec![1.0, 2.0]) }.run(&pool).await?;
+    println!("26. dimensions  {}", serde_json::to_string(&row).expect("json"));
+    let by_values = nearest_item_by_values::Query { near: vec![0.0, 0.0, 1.0] }.run(&pool).await?;
+    assert_eq!(by_values.map(|r| r.id), Some(2));
     Ok(())
 }

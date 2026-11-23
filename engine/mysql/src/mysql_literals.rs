@@ -11,7 +11,7 @@
 //! ([`reylo_engine_core::literal::narrow`]).
 
 use reylo_engine_core::literal::Literal;
-use sqlparser::ast::{Expr, Query, SelectItem, SetExpr, SetOperator, Statement, UnaryOperator, Value};
+use syntax::mysql::ast::{Expr, Query, SelectItem, SetExpr, SetOperator, Statement, UnaryOperator, Value};
 
 /// Each result column's literals, in order, where the query's columns are its select list one for
 /// one (no `*`); `None` where it is no query.
@@ -104,11 +104,9 @@ fn expr(e: &Expr) -> Option<Vec<Literal>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlparser::dialect::MySqlDialect;
-    use sqlparser::parser::Parser;
 
     fn shown(sql: &str) -> Option<Vec<Option<Vec<String>>>> {
-        let statement = Parser::parse_sql(&MySqlDialect {}, sql).unwrap().pop().unwrap();
+        let statement = crate::mysql::parse_default(sql).unwrap().pop().unwrap();
         columns(&statement).map(|cs| {
             cs.into_iter()
                 .map(|c| {

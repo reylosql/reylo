@@ -15,7 +15,7 @@
 //!   writes the statement with that join inner ([`reduce`]) and prepares it, and the server's flags
 //!   for it hold for the statement as written.
 
-use sqlparser::ast::{self, BinaryOperator, Expr, GroupByExpr, GroupByWithModifier, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr, TableFactor, TableWithJoins, UnaryOperator};
+use syntax::mysql::ast::{self, BinaryOperator, Expr, GroupByExpr, GroupByWithModifier, JoinConstraint, JoinOperator, Query, SelectItem, SetExpr, TableFactor, TableWithJoins, UnaryOperator};
 
 /// Which arguments of a call to a built-in function make it NULL where they are NULL.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -604,10 +604,10 @@ pub(crate) fn grouped(group_by: &GroupByExpr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlparser::ast::Statement;
+    use syntax::mysql::ast::Statement;
 
     fn query(sql: &str) -> Query {
-        match sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, sql).unwrap().pop() {
+        match crate::mysql::parse_default(sql).unwrap().pop() {
             Some(Statement::Query(q)) => *q,
             other => panic!("{other:?}"),
         }
@@ -742,6 +742,7 @@ mod tests {
         for sql in [
             "select sum(a) from t",
             "select user_id, sum(a) from t group by user_id with rollup",
+            "select user_id, sum(a) from t group by rollup(user_id)",
             "select user_id, sum(a) over () from t group by user_id, a",
             "select *, sum(a) from t group by user_id",
             "select user_id, sum(a) + 1 from t group by user_id",

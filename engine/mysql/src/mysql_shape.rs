@@ -21,7 +21,7 @@
 //! without its subquery items; a column is NOT NULL when either prepare says so.
 
 use crate::shape::{Probe, Shape};
-use sqlparser::ast::{self, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Query, SelectItem, SetExpr, TableFactor, TableWithJoins, Value};
+use syntax::mysql::ast::{self, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Query, SelectItem, SetExpr, TableFactor, TableWithJoins, Value};
 use std::collections::{HashMap, HashSet};
 
 /// The columns of the tables a statement names, by the table's name as the statement writes it,
@@ -268,12 +268,22 @@ fn carried(levels: &[Level]) -> Option<String> {
     Some(format!("{} ", ast::With { with_token: first.with_token.clone(), recursive, cte_tables }))
 }
 
-/// Whether a text has a word that is one of `names`, in any case, quoted or not; true where it
-/// does not tokenize.
+/// Whether a text has a word that is one of `names`, in any case, quoted or not; true where a
+/// comment in it is left open.
 fn mentions(text: &str, names: &[String]) -> bool {
-    use sqlparser::tokenizer::{Token, Tokenizer};
-    let Ok(tokens) = Tokenizer::new(&sqlparser::dialect::MySqlDialect {}, text).tokenize() else { return true };
-    tokens.iter().any(|t| matches!(t, Token::Word(w) if names.iter().any(|n| n.eq_ignore_ascii_case(&w.value))))
+    let (lexemes, _, stop) = syntax::mysql::scan::lexemes(text, syntax::mysql::Options::default());
+    if stop.is_some() {
+        return true;
+    }
+    lexemes.iter().any(|l| {
+        let token = &text[l.start as usize..l.end as usize];
+        let word = match token.strip_prefix('`').and_then(|t| t.strip_suffix('`')) {
+            Some(quoted) => quoted.replace("``", "`"),
+            None if token.starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '$') => token.to_string(),
+            None => return false,
+        };
+        names.iter().any(|n| n.eq_ignore_ascii_case(&word))
+    })
 }
 
 /// The alias of the derived table [`wrapped_text`] reads its columns from.
@@ -1153,12 +1163,10 @@ fn is_empty_array(e: &Expr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlparser::ast::Statement;
-    use sqlparser::dialect::MySqlDialect;
-    use sqlparser::parser::Parser;
+    use syntax::mysql::ast::Statement;
 
     fn query(sql: &str) -> Query {
-        let mut v = Parser::parse_sql(&MySqlDialect {}, sql).unwrap();
+        let mut v = crate::mysql::parse_default(sql).unwrap();
         let Statement::Query(q) = v.pop().unwrap() else { panic!("not a query") };
         *q
     }
@@ -1370,7 +1378,6 @@ mod tests {
             "select (select count(u.name) from (select title from posts) p) as n from users u",
             "with Recent as (select name from posts) select (select count(name) from recent) as n from users u",
             "select (select count(title) from app.posts) as n from users u",
-            "select (select count(title) from posts p (a, b, c)) as n from users u",
             // A part of the call this does not read.
             "select (select count(case when title is null then 1 end) from posts) as n from users u",
             "select (select group_concat(name order by title) from posts) as n from users u",

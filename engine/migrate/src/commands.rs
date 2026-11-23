@@ -237,6 +237,9 @@ pub fn paint(style: &str, text: &str) -> String {
         "cyan" => "36",
         "bold red" => "1;31",
         "bold" => "1",
+        // A diff's words removed and added within a line: light text on a dark red or green.
+        "removed" => "38;5;217;48;5;52",
+        "added" => "38;5;157;48;5;22",
         _ => "0",
     };
     format!("\x1b[{code}m{text}\x1b[0m")
@@ -487,7 +490,36 @@ async fn set_fingerprint(db: &mut Db, name: &str, value: &str) -> Result<(), Err
 /// its own transaction: one of the two fails, changing nothing.
 async fn lock(db: &mut Db, opts: &Options) -> Result<Option<std::fs::File>, Error> {
     match db.dialect() {
-        Dialect::Postgres => db.exec("select pg_advisory_lock(hashtextextended('reylo_migrate', 0))").await.map(|_| None),
+        // Asked for in short statements, with the waits between them outside any: a session blocked
+        // in `pg_advisory_lock` holds its statement's snapshot all the while, and the run holding the
+        // lock, building an index concurrently, waits for every snapshot older than its own to end,
+        // which is a deadlock that Postgres ends by failing one of the two. The session's
+        // `lock_timeout` and `statement_timeout` still bound the whole wait, as they bound a blocking
+        // one, and a pause stays well inside `idle_session_timeout`, which ends a session idle longer.
+        Dialect::Postgres => {
+            let settings = db.rows("select name, setting, current_setting(name) as shown from pg_settings where name in ('lock_timeout', 'statement_timeout', 'idle_session_timeout')").await?;
+            let ms = |name: &str| settings.iter().find(|r| r.text("name") == name).and_then(|r| r.text("setting").parse::<u64>().ok()).filter(|&v| v > 0);
+            let limit = ["lock_timeout", "statement_timeout"].into_iter().filter_map(|name| ms(name).map(|v| (v, name))).min();
+            let longest = std::time::Duration::from_millis(ms("idle_session_timeout").map_or(1000, |v| (v / 2).clamp(1, 1000)));
+            let started = std::time::Instant::now();
+            let mut pause = std::time::Duration::from_millis(50).min(longest);
+            loop {
+                if db.rows("select pg_try_advisory_lock(hashtextextended('reylo_migrate', 0)) as ok").await?.first().is_some_and(|r| r.flag("ok")) {
+                    return Ok(None);
+                }
+                let mut wait = pause;
+                if let Some((limit, name)) = limit {
+                    let left = std::time::Duration::from_millis(limit).saturating_sub(started.elapsed());
+                    if left.is_zero() {
+                        let shown = settings.iter().find(|r| r.text("name") == name).map(|r| r.text("shown").to_string()).unwrap_or_default();
+                        return Err(Error(format!("another run of reylo migrate held this database past this session's {name} of {shown}; try again once it finishes")));
+                    }
+                    wait = wait.min(left);
+                }
+                tokio::time::sleep(wait).await;
+                pause = (pause * 2).min(longest);
+            }
+        }
         // A lock of this database's alone (its name is at most 64 characters), which answers 0
         // once the wait runs out. Named through sha2: MySQL 9.7 has md5 and sha1 only as a component.
         // The answer is read by position: Vitess (PlanetScale's MySQL) runs a lock function apart
@@ -565,18 +597,27 @@ async fn insert_row(db: &mut Db, m: &Migration, applied: bool, fingerprint: Opti
 // its row. No run cut off between the two leaves an applied row with nothing to compare.
 
 pub(crate) async fn run(db: &mut Db, m: &Migration, record: bool) -> Result<(), Error> {
+    run_undone(db, m, record).await.map_err(|(e, _)| e)
+}
+
+/// Runs a migration as [`run`] does; a failure says whether nothing of the migration is known to be
+/// in place: never on MySQL, which commits each DDL statement, nor where a statement run outside a
+/// transaction may have left part of itself, or finished before its row could be written.
+async fn run_undone(db: &mut Db, m: &Migration, record: bool) -> Result<(), (Error, bool)> {
+    let undone = db.dialect() != Dialect::Mysql;
     let mut tries = 1;
     loop {
         match run_once(db, m, record).await {
             Ok(()) => return Ok(()),
-            Err(Ran::Failed(e)) => return Err(e),
+            Err(Ran::Failed(e)) => return Err((e, undone)),
+            Err(Ran::Partly(e)) => return Err((e, false)),
             // A statement that gave up waiting for a lock changed nothing: the file runs again, after
             // a pause that grows, until the last try.
             Err(Ran::Waited(_)) if tries < LOCK_TRIES => {
                 tokio::time::sleep(std::time::Duration::from_secs(LOCK_PAUSES[(tries - 1).min(LOCK_PAUSES.len() - 1)])).await;
                 tries += 1;
             }
-            Err(Ran::Waited(e)) => return Err(Error(format!("{}: {e}, {LOCK_TRIES} times over {} seconds{}", m.name, LOCK_PAUSES.iter().take(LOCK_TRIES - 1).sum::<u64>(), holders(db).await))),
+            Err(Ran::Waited(e)) => return Err((Error(format!("{}: {e}, {LOCK_TRIES} times over {} seconds{}", m.name, LOCK_PAUSES.iter().take(LOCK_TRIES - 1).sum::<u64>(), holders(db).await)), undone)),
         }
     }
 }
@@ -658,25 +699,39 @@ async fn run_once(db: &mut Db, m: &Migration, record: bool) -> Result<(), Ran> {
             limit_lock_wait(db).await?;
         }
         let result = db.script_or_wait(&m.sql).await;
-        if d == Dialect::Mysql {
-            reset_lock_wait(db).await?;
-        }
+        let reset = if d == Dialect::Mysql { reset_lock_wait(db).await } else { Ok(()) };
         if let Err(e) = result {
-            for index in invalid(db).await.unwrap_or_default() {
-                if !before.contains(&index) {
-                    let _ = db.exec(&format!("drop index concurrently if exists {index}")).await;
+            let mut dropped = true;
+            match invalid(db).await {
+                Ok(now) => {
+                    for index in now.iter().filter(|i| !before.contains(i)) {
+                        dropped &= db.exec(&format!("drop index concurrently if exists {index}")).await.is_ok();
+                    }
                 }
+                Err(_) => dropped = false,
             }
             if record {
                 let _ = db.exec_with(&format!("delete from {HISTORY_TABLE} where name = {}", db.param(1)), &[&m.name]).await;
             }
-            return Err(e);
+            // A statement that gave up waiting for a lock changed nothing, and SQLite's run whole or
+            // not at all; on Postgres, an index build leaves nothing once its invalid index is
+            // dropped, and any other may leave part of itself, as a detach left pending.
+            return Err(match e {
+                Ran::Failed(e) if d == Dialect::Sqlite || (dropped && crate::sql::builds_index_alone(&m.sql, d)) => Ran::Failed(e),
+                Ran::Failed(e) | Ran::Partly(e) => Ran::Partly(e),
+                waited => waited,
+            });
         }
+        // The statement is in place from here, so a failure is no longer one that left nothing.
+        reset.map_err(Ran::Partly)?;
         if record {
-            let lines = catalog(db).await?;
-            let value = fingerprint_of(db, &lines).await?;
-            db.exec_with(&format!("update {HISTORY_TABLE} set applied_at = {}, fingerprint = {} where name = {}", now_sql(d), db.param(1), db.param(2)), &[&value, &m.name]).await?;
-            store_catalog(db, &m.name, &lines).await?;
+            let recorded = async {
+                let lines = catalog(db).await?;
+                let value = fingerprint_of(db, &lines).await?;
+                db.exec_with(&format!("update {HISTORY_TABLE} set applied_at = {}, fingerprint = {} where name = {}", now_sql(d), db.param(1), db.param(2)), &[&value, &m.name]).await?;
+                store_catalog(db, &m.name, &lines).await
+            };
+            recorded.await.map_err(Ran::Partly)?;
         }
         return Ok(());
     }
@@ -709,10 +764,9 @@ async fn run_once(db: &mut Db, m: &Migration, record: bool) -> Result<(), Ran> {
     if result.is_err() {
         let _ = db.exec("rollback").await;
     }
-    if d == Dialect::Sqlite {
-        db.exec("pragma foreign_keys = on").await?;
-    }
+    let on = if d == Dialect::Sqlite { db.exec("pragma foreign_keys = on").await } else { Ok(()) };
     result?;
+    on.map_err(Ran::Partly)?;
     // The migration has committed: a fingerprint that can't be read now leaves its row pending,
     // which the next deploy refuses, rather than reading as a migration that failed.
     if record {
@@ -724,33 +778,147 @@ async fn run_once(db: &mut Db, m: &Migration, record: bool) -> Result<(), Ran> {
 // ---------------------------------------------------------------------------------------------
 // The check.
 
+/// How the schema `a` differs from `b`, as a diff from one to the other under headers that name
+/// them, set off by a blank line on each side: `-` what only `a` has, `+` what only `b` has.
 fn describe_diff(label_a: &str, a: &[String], label_b: &str, b: &[String]) -> Vec<String> {
     const MAX: usize = 20;
     let (only_a, only_b) = difference(a, b);
-    let mut out: Vec<String> = only_a.iter().take(MAX).map(|l| paint("red", &format!("  - {label_a}: {}", readable(l)))).collect();
-    out.extend(only_b.iter().take(MAX).map(|l| paint("green", &format!("  + {label_b}: {}", readable(l)))));
-    let more = only_a.len() + only_b.len() - out.len();
+    let (only_a, only_b) = (without_default_grants(&only_a), without_default_grants(&only_b));
+    let (only_a, only_b, mut changes) = in_place(only_a.iter().collect(), only_b.iter().collect(), "    ");
+    changes.extend(only_a.iter().take(MAX).map(|l| paint("red", &format!("    - {}", readable(l)))));
+    changes.extend(only_b.iter().take(MAX).map(|l| paint("green", &format!("    + {}", readable(l)))));
+    let more = only_a.len().saturating_sub(MAX) + only_b.len().saturating_sub(MAX);
     if more > 0 {
-        out.push(format!("  … and {more} more"));
+        changes.push(format!("    … and {more} more"));
     }
-    out
+    [String::new(), paint("dim", &format!("    --- {label_a}")), paint("dim", &format!("    +++ {label_b}"))].into_iter().chain(changes).chain([String::new()]).collect()
+}
+
+/// One side of a diff without the privileges an object it adds or drops has by default (Postgres's
+/// `USAGE` on a type for every role, `EXECUTE` on a function): they come and go with the object. A
+/// grant that changes on an object both sides have is kept.
+fn without_default_grants(lines: &[String]) -> Vec<String> {
+    static DEFAULT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^grant (?:type|domain|language|function|procedure) (?:[^\s.(]+\.)?([^\s.(]+)\S* PUBLIC:(?:USAGE|EXECUTE)$").expect("a valid pattern"));
+    let comes_with = |line: &String| {
+        let Some(c) = DEFAULT.captures(line) else { return false };
+        let name = Regex::new(&format!(r"[\s.]{}\b", regex::escape(&c[1]))).expect("a valid pattern");
+        lines.iter().any(|other| !other.starts_with("grant ") && name.is_match(other))
+    };
+    lines.iter().filter(|l| !comes_with(l)).cloned().collect()
 }
 
 /// A comparison line as a person reads it: `public.` left out, and an index or a constraint as SQL
-/// writes it, its keywords in lowercase, rather than as the catalog prints it.
+/// writes it, its keywords in lowercase, rather than as the catalog prints it. An index reads
+/// `index <name> on <table> (<columns>)` on every database, and SQLite's index, view or trigger
+/// names itself once, rather than before its statement and in it.
 fn readable(line: &str) -> String {
     static INDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^index CREATE (UNIQUE )?INDEX (\S+) ON (?:ONLY )?(\S+) USING (\w+) (.*)$").expect("a valid pattern"));
+    static MYSQL_INDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^index ([^.\s]+)\.(\S+) (unique )?(\w+)((?: invisible)?(?: comment "(?:[^"\\]|\\.)*")?) (\(.*\))$"#).expect("a valid pattern"));
+    static SQLITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(index|view|trigger) \S+ create (unique )?(?:temp |temporary )?(?:index|view|trigger) (?:if not exists )?(\S+) (.*)$").expect("a valid pattern"));
     static CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) (\S+) (.*)$").expect("a valid pattern"));
-    static PUBLIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s(,])(?:public|"public")\."#).expect("a valid pattern"));
+    static POSTGRES_DEFINITION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:PRIMARY KEY|UNIQUE|CHECK|FOREIGN KEY|EXCLUDE|NOT NULL)\b").expect("a valid pattern"));
+    static SQLITE_CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) ((?:primary key|unique|check|foreign key|constraint)\b.*)$").expect("a valid pattern"));
+    static PUBLIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s(,]|::)(?:public|"public")\."#).expect("a valid pattern"));
     let line = PUBLIC.replace_all(line, "$1").into_owned();
     if let Some(c) = INDEX.captures(&line) {
         let using = if &c[4] == "btree" { String::new() } else { format!("using {} ", &c[4]) };
         return format!("{}index {} on {} {using}{}", if c.get(1).is_some() { "unique " } else { "" }, &c[2], &c[3], lowercase_keywords(&c[5]));
     }
+    if let Some(c) = MYSQL_INDEX.captures(&line) {
+        let using = if c[4].eq_ignore_ascii_case("btree") { String::new() } else { format!("using {} ", c[4].to_ascii_lowercase()) };
+        return format!("{}index {} on {} {using}{}{}", c.get(3).map_or("", |m| m.as_str()), &c[2], &c[1], &c[6], &c[5]);
+    }
+    if let Some(c) = SQLITE.captures(&line) {
+        return format!("{}{} {} {}", c.get(2).map_or("", |m| m.as_str()), &c[1], &c[3], &c[4]);
+    }
+    // A function by its signature and what it returns, not its body, which Postgres writes over
+    // several lines; a trigger by its name and table, as a constraint is.
+    if let Some(routine) = routine(&line) {
+        return routine;
+    }
+    if let Some(rest) = line.strip_prefix("trigger CREATE ") {
+        let (constraint, rest) = rest.strip_prefix("CONSTRAINT ").map_or(("", rest), |rest| ("constraint ", rest));
+        // The table is the name after the first ON outside quotes, which a column's quoted name may hold.
+        if let Some((name, rest)) = rest.strip_prefix("TRIGGER ").map(first_name) {
+            if let Some((when, after)) = outside_quotes(rest.trim_start(), " ON ") {
+                let (table, rest) = first_name(after);
+                return format!("{constraint}trigger {name} on {table}: {} {}", lowercase_keywords(when), lowercase_keywords(rest.trim_start()));
+            }
+        }
+    }
+    // Postgres's, whose definition is in capitals, names its constraint, whatever the name; SQLite's,
+    // in lowercase, names none unless its definition does.
+    let named = CONSTRAINT.captures(&line).filter(|c| POSTGRES_DEFINITION.is_match(&c[3]));
+    if let Some(c) = SQLITE_CONSTRAINT.captures(&line).filter(|_| named.is_none()) {
+        return format!("constraint on {}: {}", &c[1], &c[2]);
+    }
     if let Some(c) = CONSTRAINT.captures(&line) {
         return format!("constraint {} on {}: {}", &c[2], &c[1], lowercase_keywords(&c[3]));
     }
     line
+}
+
+/// A Postgres function or procedure as `pg_get_functiondef` writes it, by its name, its arguments
+/// whole (to the parenthesis that closes them, outside quotes, where a name or a default's string
+/// may hold a line break, shown as `↵`) and what it returns. None for any other line, or one whose arguments don't close.
+fn routine(line: &str) -> Option<String> {
+    routine_parts(line).map(|(_, shown)| shown)
+}
+
+/// A routine's signature and what it returns as `pg_get_functiondef` writes them, which tells two
+/// routines apart, and as `routine` shows them.
+fn routine_parts(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("function CREATE OR REPLACE ")?;
+    let (kind, rest) = rest.strip_prefix("FUNCTION ").map(|r| ("function", r)).or_else(|| rest.strip_prefix("PROCEDURE ").map(|r| ("procedure", r)))?;
+    let (mut depth, mut quote) = (0, None::<char>);
+    let mut end = None;
+    for (k, c) in rest.char_indices() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(k + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+    let raw_returns = rest[end..].strip_prefix("\n RETURNS ").and_then(|r| r.lines().next());
+    let signature = lowercase_keywords(&rest[..end]).replace('\n', "↵");
+    let returns = raw_returns.map(|r| format!(" returns {}", lowercase_keywords(r))).unwrap_or_default();
+    Some((format!("{kind} {}\n{}", &rest[..end], raw_returns.unwrap_or_default()), format!("{kind} {signature}{returns}")))
+}
+
+/// The name `text` starts with, a qualified one whole and a quoted part with its spaces, and what
+/// follows it.
+fn first_name(text: &str) -> (&str, &str) {
+    let mut quoted = false;
+    let end = text.char_indices().find(|&(_, c)| {
+        if c == '"' {
+            quoted = !quoted;
+        }
+        c == ' ' && !quoted
+    });
+    end.map_or((text, ""), |(k, _)| (&text[..k], &text[k..]))
+}
+
+/// `text` split at the first `pattern` outside double quotes.
+fn outside_quotes<'a>(text: &'a str, pattern: &str) -> Option<(&'a str, &'a str)> {
+    let mut quoted = false;
+    for (k, c) in text.char_indices() {
+        if c == '"' {
+            quoted = !quoted;
+        } else if !quoted && text[k..].starts_with(pattern) {
+            return Some((&text[..k], &text[k + pattern.len()..]));
+        }
+    }
+    None
 }
 
 /// SQL's keywords in lowercase, outside its quotes: `PRIMARY KEY (id)` is `primary key (id)`.
@@ -793,21 +961,340 @@ fn lowercase_keywords(sql: &str) -> String {
 /// What changed from `before` to `after`, a line each, readable: `+` what `after` has, `-` what it
 /// lost. An index a constraint of the same name makes (a primary key's, a unique constraint's) goes
 /// with it.
-fn changed_lines(before: &[String], after: &[String]) -> Vec<String> {
-    const MAX: usize = 20;
+fn changed_lines(before: &[String], after: &[String], d: Dialect) -> Vec<String> {
     let (gone, came) = difference(before, after);
+    listed(&gone, &came, before, after, d)
+}
+
+/// The schema at each step of drafting a migration, as `catalog` reads it: before it, after its
+/// tables moved to another schema and after its tables renamed (where it does either), and after it.
+#[cfg(feature = "cli")]
+struct Steps<'a> {
+    /// The database's dialect: Postgres's lines may hold dollar-quoted bodies, and MySQL's name a
+    /// table unquoted.
+    dialect: Dialect,
+    before: &'a [String],
+    moved: Option<&'a [String]>,
+    renamed: Option<&'a [String]>,
+    after: &'a [String],
+}
+
+/// What a migration changes, as `changed_lines` writes it: the difference from the schema before it
+/// to the schema after it. Each table and column it renames (`tables` and `columns`, each the old id
+/// and the new) shows as one line changed in place (`~`) rather than as a drop and an add, and what
+/// only took a renamed table's new name is left out: a line the table renames themselves replaced
+/// with the same object under the new names (a column, the same column of the renamed table), where
+/// both lines are the endpoints'. Whatever else the renames did, such as a view they dropped,
+/// stays listed.
+#[cfg(feature = "cli")]
+fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(String, String)]) -> Vec<String> {
+    let (mut gone, mut came) = difference(steps.before, steps.after);
+    let mut out: Vec<String> = tables.iter().map(|(old, new)| changed_line(&format!("table {}", shown_name(old)), &format!("table {}", shown_name(new)))).collect();
+    // What the table renames replaced, each line before them with the line they left in its place.
+    let mut moved_with: Vec<(String, String)> = Vec::new();
+    if let Some(renamed) = steps.renamed {
+        let (r_gone, r_came) = difference(steps.moved.unwrap_or(steps.before), renamed);
+        // Each renamed table's name as the catalog writes it, schema and all, and as a name starts.
+        let names: Vec<(String, String)> = tables.iter().map(|(old, new)| (shown_id(old), shown_id(new))).collect();
+        let bare: Vec<(String, String)> = names.iter().map(|(old, new)| (crate::sql::last_written(old), crate::sql::last_written(new))).collect();
+        // A column's line names it under its table, whose name alone the rename changes: the same
+        // column, whatever its definition became, as the rename of a sequence named after the
+        // table changes a default.
+        let retabled = |line: &str| -> Option<String> {
+            let name = split_head(line).0.strip_prefix("column ")?;
+            let column = crate::sql::last_written(name);
+            let table = name.strip_suffix(column.as_str())?.strip_suffix('.')?;
+            names.iter().find(|(old, _)| old == table).map(|(_, new)| format!("column {new}.{column}"))
+        };
+        // Any other line: every renamed table's name replaced where it stands whole, and a word
+        // outside parentheses, such as a constraint's or an index's name, may take a renamed
+        // table's new name where it starts with the old, as the renames name what they follow. A
+        // column list never changes.
+        let same_other = |g: &str, c: &str| {
+            let (g, c) = (renamed_in(g, &names, steps.dialect == Dialect::Postgres), c);
+            let (x, y) = (top_words(&g), top_words(c));
+            x.len() == y.len() && x.iter().zip(&y).all(|(a, b)| a == b || (!a.contains('(') && bare.iter().any(|(old, new)| crate::diff::swap_name(a, old, new) == *b)))
+        };
+        for g in &r_gone {
+            // A view is the same view by its name, which a table rename never changes, whatever the
+            // rename changed in its query.
+            let same = |c: &String| match g.split(' ').next() {
+                Some("column") => retabled(g).is_some_and(|h| split_head(c).0 == h),
+                Some("view") => split_head(g).0 == split_head(c).0,
+                _ => same_other(g, c),
+            };
+            if let Some(c) = r_came.iter().find(|c| same(c) && !moved_with.iter().any(|(_, t)| t == *c)) {
+                moved_with.push((g.clone(), c.clone()));
+            }
+        }
+    }
+    for (g, c) in &moved_with {
+        if let (Some(i), Some(j)) = (gone.iter().position(|l| l == g), came.iter().position(|l| l == c)) {
+            gone.remove(i);
+            came.remove(j);
+        }
+    }
+    let is = |line: &str, name: &str| readable(line).strip_prefix(&format!("column {name}")).is_some_and(|rest| rest.is_empty() || rest.starts_with(' '));
+    for (old, new) in columns {
+        let (old, new) = (shown_name(old), shown_name(new));
+        // The old column as the schema before the migration has it: under its table's old name where
+        // its table was renamed too.
+        let before = |line: &String| is(line, &old) || moved_with.iter().any(|(g, c)| g == line && is(c, &old));
+        // Only both lines together make a rename.
+        if let (Some(g), Some(c)) = (gone.iter().position(before), came.iter().position(|l| is(l, &new))) {
+            let (a, b) = (gone.remove(g), came.remove(c));
+            let a = moved_with.iter().find(|(g, _)| *g == a).map_or(a.clone(), |(_, c)| c.clone());
+            out.push(changed_line(&readable(&a), &readable(&b)));
+        }
+    }
+    out.extend(listed(&gone, &came, steps.before, steps.after, steps.dialect));
+    out
+}
+
+/// `line` with each of `names` (an old name and its new, as the catalog writes them) replaced where
+/// it stands as a whole name, all at once: `public.orders` in `public.orders(id)` and
+/// `public.orders.title`, and as a relation constant, `'public.orders'::regclass`, but not in
+/// `public.orders_archive`, inside a quoted name, `"public.orders"`, or inside a string,
+/// `'public.orders'`, or on Postgres a dollar-quoted body, whose text a rename never changes.
+#[cfg(feature = "cli")]
+fn renamed_in(line: &str, names: &[(String, String)], postgres: bool) -> String {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let (mut out, mut at, mut prev) = (String::new(), 0, None::<char>);
+    while let Some(c) = line[at..].chars().next() {
+        let rest = &line[at..];
+        if prev.is_none_or(|p| !ident(p) && p != '.') {
+            if let Some((old, new)) = names.iter().find(|(old, _)| rest.starts_with(old.as_str()) && rest[old.len()..].chars().next().is_none_or(|n| !ident(n))) {
+                out.push_str(new);
+                at += old.len();
+                prev = old.chars().last();
+                continue;
+            }
+        }
+        // A dollar-quoted body, `$$ … $$` or `$tag$ … $tag$`, is source text Postgres keeps as
+        // written: whole, to its closing tag. Elsewhere a `$` may be part of a name.
+        if postgres && c == '$' && prev.is_none_or(|p| !ident(p)) {
+            let tag_end = rest[1..].find(|t: char| !(t.is_ascii_alphanumeric() || t == '_')).map(|k| k + 1);
+            if let Some(k) = tag_end.filter(|k| rest[*k..].starts_with('$') && rest[1..*k].chars().next().is_none_or(|t| !t.is_ascii_digit())) {
+                let tag = &rest[..=k];
+                let end = rest[tag.len()..].find(tag).map_or(rest.len(), |at| tag.len() + at + tag.len());
+                out.push_str(&rest[..end]);
+                at += end;
+                prev = Some('$');
+                continue;
+            }
+        }
+        if c == '\'' || c == '"' || c == '`' {
+            // A quoted name or a string, whole, to its closing quote (a doubled quote stays inside).
+            let mut end = 1;
+            loop {
+                match rest[end..].find(c) {
+                    Some(k) if rest[end + k + 1..].starts_with(c) => end += k + 2,
+                    Some(k) => {
+                        end += k + 1;
+                        break;
+                    }
+                    None => {
+                        end = rest.len();
+                        break;
+                    }
+                }
+            }
+            let span = &rest[..end];
+            // A relation constant is the relation itself, which Postgres prints by its new name.
+            let relation = (c == '\'' && rest[end..].starts_with("::regclass")).then(|| &span[1..span.len().saturating_sub(1)]);
+            match relation.and_then(|r| names.iter().find(|(old, _)| old == r)) {
+                Some((_, new)) => out.push_str(&format!("'{new}'")),
+                None => out.push_str(span),
+            }
+            at += end;
+            prev = Some(c);
+            continue;
+        }
+        out.push(c);
+        at += c.len_utf8();
+        prev = Some(c);
+    }
+    out
+}
+
+/// A line's words, split at spaces outside parentheses and quotes: `FOREIGN KEY (a, b)` is three.
+#[cfg(feature = "cli")]
+fn top_words(line: &str) -> Vec<&str> {
+    let (mut words, mut start, mut depth, mut quote) = (Vec::new(), 0, 0i32, None::<char>);
+    for (k, c) in line.char_indices() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"' | '`') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => depth -= 1,
+            (None, ' ') if depth == 0 => {
+                if k > start {
+                    words.push(&line[start..k]);
+                }
+                start = k + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < line.len() {
+        words.push(&line[start..]);
+    }
+    words
+}
+
+/// The lines of `changed_lines`, from what went and what came, of the whole schemas `before` and
+/// `after` in dialect `d`.
+fn listed(gone: &[String], came: &[String], before: &[String], after: &[String], d: Dialect) -> Vec<String> {
+    let mysql = d == Dialect::Mysql;
+    const MAX: usize = 20;
+    let (gone, came) = (without_default_grants(gone), without_default_grants(came));
     let constraint_names = |lines: &[String]| -> Vec<String> { lines.iter().filter_map(|l| l.strip_prefix("constraint ")).filter_map(|rest| rest.split(' ').nth(1)).map(str::to_string).collect() };
     let made_by_constraint = |line: &str, names: &[String]| names.iter().any(|n| line.starts_with("index ") && line.contains(&format!(" INDEX {n} ON ")));
     let (gone_names, came_names) = (constraint_names(&gone), constraint_names(&came));
     let gone: Vec<&String> = gone.iter().filter(|l| !made_by_constraint(l, &gone_names)).collect();
     let came: Vec<&String> = came.iter().filter(|l| !made_by_constraint(l, &came_names)).collect();
-    let mut out: Vec<String> = came.iter().take(MAX).map(|l| paint("green", &format!("  + {}", readable(l)))).collect();
-    out.extend(gone.iter().take(MAX).map(|l| paint("red", &format!("  - {}", readable(l)))));
-    let more = gone.len() + came.len() - out.len();
+    // A table one side has and the other doesn't, by its name across each whole schema, came or
+    // went; one both have may have changed its own line, as row level security does.
+    // A name two of one side's tables read as is no one table's, and groups nothing.
+    let names = |lines: &[String]| -> Vec<String> { lines.iter().filter_map(|l| table_name(&readable(l), mysql)).collect() };
+    let (had, has) = (names(before), names(after));
+    let tables: Vec<String> = had.iter().chain(&has).cloned().collect();
+    let once = |name: &String, side: &[String]| side.iter().filter(|t| *t == name).count() == 1;
+    let added: Vec<String> = has.iter().filter(|t| !had.contains(t) && once(t, &has)).cloned().collect();
+    let dropped: Vec<String> = had.iter().filter(|t| !has.contains(t) && once(t, &had)).cloned().collect();
+    // A line both sides read the same, as a function whose body alone changed does, changed in place.
+    let (gone, came, mut out) = in_place(gone, came, "  ");
+    let (came_out, more_came) = marked(&came, "green", '+', MAX, &added, &tables, mysql);
+    out.extend(came_out);
+    let (gone, more_gone) = marked(&gone, "red", '-', MAX, &dropped, &tables, mysql);
+    out.extend(gone);
+    let more = more_came + more_gone;
     if more > 0 {
         out.push(format!("  … and {more} more"));
     }
     out
+}
+
+/// What went and what came, without each function or procedure both sides have by the same
+/// signature (its body alone changed), and each of those as one line changed in place, `indent` in.
+/// Every other line is left where it is.
+fn in_place<'a>(gone: Vec<&'a String>, came: Vec<&'a String>, indent: &str) -> (Vec<&'a String>, Vec<&'a String>, Vec<String>) {
+    let mut by_signature: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    for (k, c) in came.iter().enumerate() {
+        if let Some((signature, _)) = routine_parts(c) {
+            by_signature.entry(signature).or_default().push(k);
+        }
+    }
+    let mut taken = vec![false; came.len()];
+    let mut kept = Vec::new();
+    let mut changed = Vec::new();
+    for g in gone {
+        let found = routine_parts(g).and_then(|(signature, _)| by_signature.get_mut(&signature).and_then(|ks| (!ks.is_empty()).then(|| ks.remove(0))));
+        match found {
+            Some(k) => {
+                taken[k] = true;
+                changed.push(format!("{indent}{} {}", paint("yellow", "~"), readable(g)));
+            }
+            None => kept.push(g),
+        }
+    }
+    (kept, came.into_iter().zip(taken).filter(|(_, t)| !t).map(|(c, _)| c).collect(), changed)
+}
+
+/// The name of the table a readable `table …` line is, quotes and all: `"order items"` whole. On
+/// MySQL, which writes a name unquoted, all before the table's engine and collation; its
+/// `table options` line, a table's settings, is no table.
+fn table_name(line: &str, mysql: bool) -> Option<String> {
+    static MYSQL_TABLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^table (.+) engine=\S+ collate=\S+").expect("a valid pattern"));
+    if mysql {
+        return MYSQL_TABLE.captures(line).map(|c| c[1].to_string());
+    }
+    let rest = line.strip_prefix("table ")?;
+    let mut quote = None;
+    let end = rest
+        .char_indices()
+        .find(|&(_, c)| {
+            match (quote, c) {
+                (Some(q), _) if c == q => quote = None,
+                (None, '"' | '`') => quote = Some(c),
+                (None, ' ') => return true,
+                _ => {}
+            }
+            false
+        })
+        .map_or(rest.len(), |(k, _)| k);
+    Some(rest[..end].to_string())
+}
+
+/// The table a readable line belongs to, of `tables` (every table on either side), and the line as
+/// that table's own, without its name: a column, a constraint, an index, and MySQL's foreign keys
+/// and checks. None where no table, or more than one, could own it, as `t` and `t.archive` could
+/// both own SQLite's `column t.archive.label`.
+fn owner(line: &str, tables: &[String], mysql: bool) -> Option<(String, String)> {
+    // A table's own line is no other's part, as MySQL's `options orders` is no setting of `orders`.
+    if table_name(line, mysql).is_some() {
+        return None;
+    }
+    let of = |table: &String| -> Option<String> {
+        if let Some(rest) = line.strip_prefix("column ") {
+            return rest.strip_prefix(&format!("{table}.")).map(str::to_string);
+        }
+        if let Some(rest) = line.strip_prefix("trigger ") {
+            return rest.split_once(&format!(" on {table}: ")).filter(|(name, _)| !name.contains(' ')).map(|(name, def)| format!("trigger {name}: {def}"));
+        }
+        if let Some(rest) = line.strip_prefix("constraint ") {
+            return rest.split_once(&format!(" on {table}: ")).filter(|(name, _)| !name.contains(' ')).map(|(_, def)| def.to_string()).or_else(|| rest.strip_prefix(&format!("on {table}: ")).map(str::to_string));
+        }
+        // MySQL's foreign keys, checks and a table's settings, each a line of its own.
+        for kind in ["foreign key", "check", "table options"].into_iter().filter(|_| mysql) {
+            if let Some(rest) = line.strip_prefix(&format!("{kind} {table} ")) {
+                return Some(format!("{} {rest}", kind.trim_start_matches("table ")));
+            }
+        }
+        let (kind, rest) = line.strip_prefix("unique index ").map(|rest| ("unique index", rest)).or_else(|| line.strip_prefix("index ").map(|rest| ("index", rest)))?;
+        let (name, rest) = rest.split_once(' ')?;
+        rest.strip_prefix(&format!("on {table} ")).map(|def| format!("{kind} {name} {def}"))
+    };
+    let mut owners = tables.iter().filter_map(|t| of(t).map(|own| (t.clone(), own)));
+    let first = owners.next()?;
+    owners.all(|(t, _)| t == first.0).then_some(first)
+}
+
+/// What came or went, `mark` before each, readable: each table of `grouped` (those that came or
+/// went whole) one line, its columns, constraints and indexes indented under it rather than each
+/// on a line of its own. At most `max` of them, and how many more there are.
+fn marked(lines: &[&String], style: &str, mark: char, max: usize, grouped: &[String], tables: &[String], mysql: bool) -> (Vec<String>, usize) {
+    let lines: Vec<String> = lines.iter().map(|l| readable(l)).collect();
+    // A view's own line, its name alone, says nothing its definition's line doesn't.
+    // A materialized view's definition line reads `view <name> as …`: it takes its kind back from
+    // the view's own line, which then says nothing more, as a view's own line doesn't.
+    let materialized: Vec<String> = lines.iter().filter_map(|l| l.strip_prefix("materialized view ")).filter(|name| lines.iter().any(|d| d.starts_with(&format!("view {name} as ")))).map(str::to_string).collect();
+    let view = |l: &String| l.starts_with("view ") && lines.iter().any(|d| d.starts_with(&format!("{l} as ")));
+    let lines: Vec<String> = lines
+        .iter()
+        .filter(|l| !view(l) && !materialized.iter().any(|name| **l == format!("materialized view {name}")))
+        .map(|l| if materialized.iter().any(|name| l.starts_with(&format!("view {name} as "))) { format!("materialized {l}") } else { l.clone() })
+        .collect();
+    // Only a table whose own line is listed here has its parts under it: one a rename took out of the
+    // list keeps them as lines of their own.
+    let headed: Vec<String> = lines.iter().filter_map(|l| table_name(l, mysql)).filter(|t| grouped.contains(t)).collect();
+    let owned: Vec<Option<(String, String)>> = lines.iter().map(|l| owner(l, tables, mysql).filter(|(t, _)| headed.contains(t))).collect();
+    let mut out = Vec::new();
+    let mut shown = 0;
+    let mut total = 0;
+    for line in lines.iter().zip(&owned).filter(|(_, o)| o.is_none()).map(|(l, _)| l) {
+        total += 1;
+        if shown == max {
+            continue;
+        }
+        shown += 1;
+        out.push(paint(style, &format!("  {mark} {line}")));
+        if let Some(table) = table_name(line, mysql).filter(|t| headed.contains(t)) {
+            out.extend(owned.iter().flatten().filter(|(t, _)| *t == table).map(|(_, own)| paint(style, &format!("      {own}"))));
+        }
+    }
+    (out, total - shown)
 }
 
 /// Prints the refusals of a command that changes something, and says that it changed nothing.
@@ -1015,6 +1502,70 @@ fn data_statements(sql: &str, d: Dialect) -> Vec<String> {
     statements.iter().enumerate().filter(|(k, s)| changes_data(s, d) && !copies_a_rebuild(&statements, *k)).map(|(_, s)| format!("{}…", s.text.split_whitespace().take(3).collect::<Vec<_>>().join(" ").to_lowercase())).collect()
 }
 
+/// Whether `reylo run` applies `sql` as deploy runs a migration: whole or not at all, and touching
+/// no rows deploy would keep. On Postgres a script runs as one transaction (a lone statement that
+/// can't run in one, as a migration's must be); elsewhere one statement does. And SQLite runs it with
+/// foreign keys on, where a migration runs with them off and checks them before it commits, so a
+/// table dropped there takes its children's rows with it: only what touches no rows through them,
+/// anything made, or an index, a view or a trigger dropped.
+fn runs_as_a_migration(sql: &str, d: Dialect) -> bool {
+    let statements = split_statements(sql, d);
+    let word = |s: &crate::sql::Statement, k: usize| s.tokens.get(k).map(crate::sql::Token::upper).unwrap_or_default();
+    match d {
+        Dialect::Postgres => !statements.iter().any(|s| word(s, 0) == "COMMIT"),
+        Dialect::Mysql => statements.len() == 1,
+        Dialect::Sqlite => statements.len() == 1 && statements.iter().all(|s| word(s, 0) == "CREATE" || (word(s, 0) == "DROP" && matches!(word(s, 1).as_str(), "INDEX" | "VIEW" | "TRIGGER"))),
+    }
+}
+
+/// The statements of a migration that write rows, as [`data_statements`] gives them, with the
+/// schema changes that fill what they make ([`fills`]). What they write turns on the rows and
+/// objects they read, so it can change with the order they run in, and no schema shows it was
+/// written.
+fn writes_rows(sql: &str, d: Dialect) -> Vec<String> {
+    let mut out = data_statements(sql, d);
+    out.extend(split_statements(sql, d).iter().filter(|s| fills(s, d)).map(|s| format!("{}…", s.text.split_whitespace().take(3).collect::<Vec<_>>().join(" ").to_lowercase())));
+    out
+}
+
+/// Whether a statement makes what a query fills, read from its words, never a string's or a
+/// comment's: a table made from a query (`create table … as select`, and MySQL's `create table …
+/// select` and `create table … (select …)`, the query outside any parentheses but its own), and a
+/// materialized view, made or refreshed. The parenthesis is MySQL's alone, where a query's words are
+/// reserved: SQLite takes `with` for a column's name.
+fn fills(statement: &crate::sql::Statement, d: Dialect) -> bool {
+    let words: Vec<String> = statement.tokens.iter().map(crate::sql::Token::upper).collect();
+    let word = |k: usize| words.get(k).map(String::as_str).unwrap_or_default();
+    let head: Vec<&str> = (0..6).map(word).collect();
+    if head[..3] == ["REFRESH", "MATERIALIZED", "VIEW"] {
+        return true;
+    }
+    if head[0] != "CREATE" {
+        return false;
+    }
+    if head.windows(2).any(|w| w == ["MATERIALIZED", "VIEW"]) {
+        return true;
+    }
+    let Some(table) = head.iter().position(|w| *w == "TABLE") else { return false };
+    let query = |w: &str| matches!(w, "SELECT" | "WITH" | "VALUES" | "TABLE");
+    // The first word in a parenthesis at the top, past any more of them: a column's name, or a
+    // query's first word, as MySQL takes `create table t (select …)` with no `as`.
+    let opens = |k: usize| (k + 1..words.len()).find(|&n| statement.tokens[n].text != "(").is_some_and(|n| query(word(n)));
+    let mut depth = 0usize;
+    for (k, t) in statement.tokens.iter().enumerate().skip(table + 1) {
+        match t.text.as_str() {
+            "(" if t.kind == crate::sql::TokenKind::Symbol && d == Dialect::Mysql && depth == 0 && opens(k) => return true,
+            "(" if t.kind == crate::sql::TokenKind::Symbol => depth += 1,
+            ")" if t.kind == crate::sql::TokenKind::Symbol => depth = depth.saturating_sub(1),
+            _ if depth > 0 => {}
+            _ if word(k) == "SELECT" => return true,
+            _ if word(k) == "AS" && opens(k) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Whether statement `k` of a file is a rebuild's own copy of a table's rows, which a database the
 /// change is already in needs no more: `insert into t (…) select … from s`, nothing after, where the
 /// file makes `t` before it and drops `s` after it (SQLite's copy into the table that takes the old
@@ -1183,7 +1734,16 @@ fn read_lock(opts: &Options) -> Result<lock::Lock, Problem> {
             .fix("Then run this branch's migrations after main's, which locks them again", &["reylo migrate dev"])),
         lock::State::Invalid(e) => Err(Problem::new("lock-unreadable", format!("Reylo can't read {path} as a lock")).note(unreadable_why(&e)).fix("Write it again from what a database applied", &["reylo migrate history pull"])),
         lock::State::Unreadable(why) => Err(unreadable_lock_problem(opts, &why)),
+        lock::State::Newer(version) => Err(newer_lock_problem(opts, version)),
     }
+}
+
+/// The refusal of a lock a newer Reylo wrote: read by this one's rules, every checksum in it would
+/// look edited, and written again, it would lose what the newer version keeps.
+fn newer_lock_problem(opts: &Options, version: u64) -> Problem {
+    Problem::new("lock-newer", format!("A newer Reylo wrote {}", shown(&opts.lock)))
+        .note(format!("It is a lock of version {version}, and Reylo {} reads version {} and older.", env!("CARGO_PKG_VERSION"), lock::VERSION))
+        .note("Upgrade Reylo to read it.")
 }
 
 /// The refusal of a lock that is there and can't be read: read as none, it would turn its checksums
@@ -1263,10 +1823,12 @@ fn old_lock(opts: &Options) -> Option<Problem> {
 }
 
 /// The refusal of a project that still holds the lock under its old name ([`old_lock`]), or whose
-/// lock is there and can't be read: every command that reads or writes the lock makes it first.
+/// lock is there and can't be read, or was written by a newer Reylo: every command that reads or
+/// writes the lock makes it first, so that none writes over what it can't read.
 fn refuse_lock_file(opts: &Options, log: Log<'_>) -> Option<i32> {
     let unreadable = || match opts.lock_state() {
         lock::State::Unreadable(why) => Some(unreadable_lock_problem(opts, &why)),
+        lock::State::Newer(version) => Some(newer_lock_problem(opts, version)),
         _ => None,
     };
     old_lock(opts).or_else(unreadable).map(|p| refuse(&[p], log))
@@ -1282,7 +1844,7 @@ fn lock_free(opts: &Options) -> bool {
 /// them, must leave the same schema (tables' columns compared as a set, as everywhere). None where
 /// there are none, or they do.
 #[cfg(feature = "cli")]
-async fn late_problem(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[Migration], all: &[Migration]) -> Result<Option<Problem>, Error> {
+async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], pending: &[Migration], all: &[Migration]) -> Result<Option<Problem>, Error> {
     let Some(last) = ran.iter().map(|m| name_order(&m.name)).max() else { return Ok(None) };
     let late: Vec<&Migration> = pending.iter().filter(|m| name_order(&m.name) < last).collect();
     // A database that already ran its migrations out of name order (as a lock, since deleted, had
@@ -1303,7 +1865,7 @@ async fn late_problem(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[M
             (Ok(a), Ok(b)) => Some(
                 Problem::new("history-out-of-order", "This database ran its migrations in another order than a fresh database runs them, and the two end differently")
                     .lines(describe_diff("this database", &crate::catalog::without_comments(&a), "a fresh database", &crate::catalog::without_comments(&b)))
-                    .note("Elsewhere, write a migration that takes both to the same schema.")
+                    .note("Elsewhere, write a migration that leaves both with the same schema.")
                     .fix("On a development database, rebuild it in name order", &["reylo db reset"]),
             ),
             (Err((m, e)), _) | (_, Err((m, e))) => Some(Problem::new("replay-fails", format!("Replaying {m} in a shadow database fails")).note(e)),
@@ -1317,15 +1879,85 @@ async fn late_problem(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[M
     by_name.sort_by(|a, b| name_order(&a.name).cmp(&name_order(&b.name)));
     shadows.push(fresh, by_name.iter().map(Step::of));
     let names = late.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", ");
-    let rename = format!("Give {} a later name, so that every database runs {} after {}", names, if late.len() == 1 { "it" } else { "them" }, after.join(", "));
+    let one = late.len() == 1;
+    // Each late migration under a name after every migration that isn't pending (what this database
+    // ran, and what a run cut off already applied, which may be what it needs), in their order, and
+    // before every other pending one, which may need it: the order the replay above ran. Between
+    // the two no name is one a file has. Where they leave no room, or cross, no command is printed.
+    let done = all.iter().map(|m| m.name.as_str()).filter(|n| !pending.iter().any(|p| p.name == *n));
+    let last_ran = done.max_by(|a, b| name_order(a).cmp(&name_order(b))).unwrap_or_default();
+    let next = pending.iter().map(|m| m.name.as_str()).filter(|n| !late.iter().any(|l| l.name == *n)).min_by(|a, b| name_order(a).cmp(&name_order(b)));
+    let floor = last_ran.split_once('_').and_then(|(at, _)| time::seconds(at)).map_or_else(time::now_seconds, |s| s + 1);
+    let renamed: Vec<String> = late
+        .iter()
+        .enumerate()
+        .map(|(k, m)| {
+            let rest = match m.name.split_once('_') {
+                Some((at, rest)) if time::seconds(at).is_some() => rest,
+                _ => m.name.as_str(),
+            };
+            format!("{}_{rest}", time::stamp(floor + k as i64))
+        })
+        .collect();
+    let fits = renamed.iter().all(|n| name_order(n) > name_order(last_ran) && next.is_none_or(|next| name_order(n) < name_order(next)));
+    let folder = shown(dir);
+    let moves: Vec<String> = late.iter().zip(&renamed).map(|(m, n)| format!("mv {} {}", shell_word(&format!("{folder}/{}", m.name)), shell_word(&format!("{folder}/{n}")))).collect();
+    let lead = format!("Give {} a later name, so that every database runs {} after {}", if one { "it" } else { "them" }, if one { "it" } else { "them" }, after.join(", "));
+    let diff = |a: &[String], b: &[String]| describe_diff("this database", &crate::catalog::without_comments(a), "a fresh database", &crate::catalog::without_comments(b));
     let problem = match (shadows.lines(here).await?, shadows.lines(fresh).await?) {
         (Ok(a), Ok(b)) if crate::catalog::same_schema(&a, &b) => return Ok(None),
-        (Ok(a), Ok(b)) => Problem::new("late-migration-differs", format!("{} {names} {} before {}, which this database already ran, and the two orders end differently", if late.len() == 1 { "Migration" } else { "Migrations" }, if late.len() == 1 { "sorts" } else { "sort" }, after.join(", ")))
-            .lines(describe_diff("this database", &crate::catalog::without_comments(&a), "a fresh database", &crate::catalog::without_comments(&b))),
+        (Ok(a), Ok(b)) => Problem::new("late-migration-differs", format!("{} {names} {} before {}, which this database already ran", if one { "Migration" } else { "Migrations" }, if one { "sorts" } else { "sort" }, after.join(", ")))
+            .note("Run in name order, as on a fresh database, the migrations end differently:")
+            .lines(diff(&a, &b)),
         (Err((m, e)), _) => Problem::new("late-migration-fails", format!("Migration {m} fails when run after what this database already ran")).note(e),
         (_, Err((m, e))) => Problem::new("late-migration-fails", format!("Migration {m} fails when the migrations run in name order, as a fresh database runs them")).note(e),
     };
-    Ok(Some(problem.note(rename)))
+    if !fits {
+        let it = if one { "it" } else { "them" };
+        let names = if one { "a name that sorts" } else { "names that sort" };
+        let note = match next {
+            Some(next) if name_order(next) <= name_order(last_ran) => format!("No name sorts both after {last_ran}, which a run cut off already applied, and before {next}, which is pending: put these migrations in the order they need by hand."),
+            Some(next) => format!("Give {it} {names} after {last_ran} and before {next}, so that every database runs {it} after {}.", after.join(", ")),
+            None => format!("Give {it} {names} after {last_ran}, so that every database runs {it} after {}.", after.join(", ")),
+        };
+        return Ok(Some(problem.note(note)));
+    }
+    let commands: Vec<&str> = moves.iter().map(String::as_str).collect();
+    Ok(Some(problem.fix(lead, &commands)))
+}
+
+/// The refusal of a database that applied its migrations in another order than the lock lists, `order`
+/// being the lock's (`run_order`). Every database runs the lock's order, and nothing else; with no
+/// lock, a late one is proven at deploy, so there is none. Where the lock, its chain intact, runs a
+/// migration this database hasn't run ahead of all it ran since (`history push` moved it there, as
+/// another database ran it, or a merge kept main's lines), a database development commands don't
+/// run on takes its change too and records both: `history push` records them only where they make
+/// what the lock's order makes. Where the one ahead writes rows, which no schema shows ran, that way
+/// isn't offered.
+fn lock_order_problem(opts: &Options, applied: &[&HistoryRow], order: &[Migration], d: Dialect) -> Option<Problem> {
+    if lock_free(opts) {
+        return None;
+    }
+    let k = applied.iter().zip(order).position(|(r, f)| r.name != f.name)?;
+    let problem = Problem::new("history-out-of-order", format!("This database applied {} where {} lists {}", applied[k].name, shown(&opts.lock), order[k].name));
+    let (ahead, since) = (&order[k], &applied[k..]);
+    let moved = !applied.iter().any(|r| r.name == ahead.name) && since.len() < order.len() - k && since.iter().zip(&order[k + 1..]).all(|(r, f)| r.name == f.name);
+    if !moved || !writes_rows(&ahead.sql, d).is_empty() {
+        return Some(
+            problem
+                .note("Every database runs the migrations in the lock's order. Where one ran them otherwise, the lock was merged keeping a branch's lines: keep main's.")
+                .fix("On a development database, apply them in the lock's order", &["reylo migrate dev"]),
+        );
+    }
+    let ran = and_list(&since.iter().map(|r| r.name.clone()).collect::<Vec<_>>());
+    let problem = problem.note(format!("Every database runs the migrations in the lock's order, and this one ran {ran} without {}, which the lock runs first.", ahead.name)).fix("On a development database, apply them in the lock's order", &["reylo migrate dev"]);
+    let record = "reylo migrate history push --url <url>";
+    if runs_as_a_migration(&ahead.sql, d) {
+        let file = shell_word(&format!("{}/{}", shown(&opts.dir), ahead.name));
+        Some(problem.fix("On any other, make its change there too, then record both, running nothing", &[&format!("reylo run --url <url> --file {file}"), record]))
+    } else {
+        Some(problem.fix(format!("On any other, make its change there by hand, as {} makes it, then record both, running nothing", ahead.name), &[record]))
+    }
 }
 
 /// Where a migration falls in name order: init.sql, which holds the schema a project started
@@ -1384,11 +2016,8 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
         }
     }
     let applied_files: Vec<Migration> = applied.iter().filter_map(|r| by_name(&r.name).cloned()).collect();
-    // Every database runs the lock's order, and nothing else; with no lock, a late one is proven at deploy.
-    if problems.is_empty() && !lock_free(opts) {
-        if let Some(k) = applied.iter().zip(&files).position(|(r, f)| r.name != f.name) {
-            problems.push(Problem::new("history-out-of-order", format!("This database applied {} where {} lists {}", applied[k].name, shown(&opts.lock), files[k].name)).note("Every database runs the migrations in the lock's order. Where one ran them otherwise, the lock was merged keeping a branch's lines: keep main's.").fix("On a development database, take it to the lock's order", &["reylo migrate dev"]));
-        }
+    if problems.is_empty() {
+        problems.extend(lock_order_problem(opts, &applied, &files, d));
     }
     // Nothing is recorded without running but what a cut-off run of Reylo's own left (below).
     let records: Vec<Migration> = Vec::new();
@@ -1444,7 +2073,7 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
                 Some(last) => stored_catalog(db, &last.name).await?,
                 None => None,
             } {
-                problem = problem.lines(std::iter::once(String::new()).chain(changed_lines(&stored, &fingerprinted(&live, db.dialect()))).chain([String::new()]));
+                problem = problem.lines(std::iter::once(String::new()).chain(changed_lines(&stored, &fingerprinted(&live, db.dialect()), db.dialect())).chain([String::new()]));
             }
             let problem = problem
                 .fix("If a migration makes this change, record it here, running nothing", &["reylo migrate history push"])
@@ -1471,7 +2100,7 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
         // A lone statement cut off before its row was finished did run, or did not: the database says
         // which, and one that landed is recorded, as the row it started says it ran.
         let started: Vec<String> = history.iter().filter(|r| !r.applied).map(|r| r.name.clone()).collect();
-        let mut run = Run { live: &live, schema_sql: schema_sql.as_deref(), schema: shown(&opts.schema), applied_files: &applied_files, records, pending, started, landed: vec![], d };
+        let mut run = Run { live: &live, url: &opts.url, schema_sql: schema_sql.as_deref(), schema: shown(&opts.schema), applied_files: &applied_files, records, pending, started, landed: vec![], d };
         let result = check_in_shadows(&mut shadows, db, &mut run).await;
         shadows.finish().await;
         let problems = result?;
@@ -1482,6 +2111,8 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
 /// What a check holds the shadows against.
 struct Run<'a> {
     live: &'a [String],
+    /// The target's URL, which a refusal's commands name it by.
+    url: &'a str,
     schema_sql: Option<&'a str>,
     /// schema.sql's path, as a refusal names it.
     schema: String,
@@ -1548,10 +2179,9 @@ async fn schema_problems(shadows: &mut Shadows<'_>, b_lane: usize, b: &[String],
         }
     };
     if a != b {
-        let (only_schema, only_migrations) = difference(&a, b);
-        let problem = match (only_schema.is_empty(), only_migrations.is_empty()) {
-            (false, true) => Problem::new("schema-sql-ahead", "The schema is ahead of the migrations").sql(&lane_plan(shadows, b_lane, a_lane, Some(schema_sql)).await.unwrap_or_default()).fix("To write the changes to a migration file", &["reylo migrate new <name>"]),
-            (true, false) => Problem::new("migrations-ahead", format!("The migrations make what {schema} doesn't declare")).sql(&lane_plan(shadows, a_lane, b_lane, None).await.unwrap_or_default()).note(format!("Add it to {schema}, or take it out of the migration that makes it.")),
+        let problem = match sides(&a, b) {
+            (true, false) => Problem::new("schema-sql-ahead", "The schema is ahead of the migrations").sql(&lane_plan(shadows, b_lane, a_lane, Some(schema_sql)).await.unwrap_or_default()).fix("To write the changes to a migration file", &["reylo migrate new <name>"]),
+            (false, true) => Problem::new("migrations-ahead", format!("The migrations make what {schema} doesn't declare")).sql(&lane_plan(shadows, a_lane, b_lane, None).await.unwrap_or_default()).note(format!("Add it to {schema}, or take it out of the migration that makes it.")),
             _ => Problem::new("schema-sql-disagrees", format!("The migrations and {schema} disagree"))
                 .sql(&lane_plan(shadows, b_lane, a_lane, Some(schema_sql)).await.unwrap_or_default())
                 .note(format!("Change {schema} or the migrations so that they agree."))
@@ -1595,6 +2225,18 @@ async fn drift(shadows: &mut Shadows<'_>, target: &mut Db, run: &Run<'_>, checkp
             }
         }
     }
+    // A later migration that makes exactly this change, as history push moves it ahead of the rest.
+    let mut ahead = None;
+    if hint.is_empty() {
+        let ran: Vec<Migration> = run.applied_files.iter().chain(&run.records).cloned().collect();
+        if let Some(j) = behind(shadows, &ran, &run.pending, &live).await? {
+            let (it, rest) = (&run.pending[j], &run.pending[..j]);
+            if let Some(why) = unmovable(shadows, &ran, &run.pending, j, run.d).await? {
+                return Ok(vec![behind_problem(shadows, target, run.url, &ran, it, rest, &live, Some(why)).await]);
+            }
+            ahead = Some((it.name.clone(), names_of(rest)));
+        }
+    }
     let prefix = shadows.lane();
     shadows.push(prefix, run.applied_files.iter().chain(&run.records).map(Step::of));
     let mut sql = String::new();
@@ -1603,13 +2245,137 @@ async fn drift(shadows: &mut Shadows<'_>, target: &mut Db, run: &Run<'_>, checkp
         sql = plan_text(shadows.db(prefix), target, None).await.unwrap_or_default();
     }
     let mut problem = Problem::new("database-drift", CHANGED_OUTSIDE);
-    problem = if sql.is_empty() { problem.lines(std::iter::once(String::new()).chain(changed_lines(&checkpoint, &live)).chain([String::new()])) } else { problem.sql(&sql) };
+    problem = if sql.is_empty() { problem.lines(std::iter::once(String::new()).chain(changed_lines(&checkpoint, &live, run.d)).chain([String::new()])) } else { problem.sql(&sql) };
     if !hint.is_empty() {
         problem = problem.fix(format!("{} {} exactly this change: record it here, running nothing", hint.join(" and "), if hint.len() == 1 { "makes" } else { "make" }), &["reylo migrate history push"]);
+    } else if let Some((it, rest)) = ahead {
+        problem = problem.fix(format!("Migration {it} makes exactly this change: record it here, running nothing, and deploy runs {rest} after it"), &["reylo migrate history push"]);
     } else {
         problem = keep_fixes(problem, run.schema_sql.is_some().then_some(run.schema.as_str()), only_live.is_empty(), only_history.is_empty());
     }
     Ok(vec![problem])
+}
+
+/// Where the database has, on top of `ran`, exactly what a pending migration other than the next
+/// makes: a change made outside the migrations, written since as one that the lock runs after others
+/// this database hasn't run. It is recorded where the order can move to run it first, as this
+/// database did. The index in `pending` of the newest such, of the last three.
+#[cfg(feature = "cli")]
+async fn behind(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[Migration], live: &[String]) -> Result<Option<usize>, Error> {
+    for j in (1..pending.len()).rev().take(3) {
+        let lane = shadows.lane();
+        shadows.push(lane, ran.iter().chain([&pending[j]]).map(Step::of));
+        if let Ok(lines) = shadows.lines(lane).await? {
+            let made = crate::catalog::without_comments(&lines);
+            if crate::catalog::without_extra_children(live, &made) == made {
+                return Ok(Some(j));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Why `pending[j]`, which makes all this database has on top of `ran`, can't be recorded there,
+/// ahead of `pending[..j]`; None where it can. What writes rows ([`writes_rows`]) is never moved
+/// past, nor recorded by its schema alone: no schema shows that its statements ran, or that they run
+/// the same on the rows after the change. And the two orders must end at the same schema.
+#[cfg(feature = "cli")]
+async fn unmovable(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[Migration], j: usize, d: Dialect) -> Result<Option<String>, Error> {
+    let (it, ahead) = (&pending[j], &pending[..j]);
+    if !writes_rows(&it.sql, d).is_empty() {
+        return Ok(Some("Its data statements can't be told to have run here, so it isn't recorded without running.".into()));
+    }
+    let changing: Vec<Migration> = ahead.iter().filter(|m| !writes_rows(&m.sql, d).is_empty()).cloned().collect();
+    if !changing.is_empty() {
+        let one = changing.len() == 1;
+        return Ok(Some(format!("{} {} {} data, which can run differently after this change, so it can't move ahead of {}.", if one { "Migration" } else { "Migrations" }, names_of(&changing), if one { "changes" } else { "change" }, if one { "it" } else { "them" })));
+    }
+    let reordered: Vec<Migration> = ran.iter().chain([it]).chain(ahead).chain(&pending[j + 1..]).cloned().collect();
+    let original: Vec<Migration> = ran.iter().chain(pending).cloned().collect();
+    if !ends_alike(shadows, &original, &reordered).await? {
+        return Ok(Some(format!("Run ahead of {}, the migrations end differently, so it can't move there.", names_of(ahead))));
+    }
+    Ok(None)
+}
+
+/// Whether two orders of the migrations both replay, and end at the same schema.
+#[cfg(feature = "cli")]
+async fn ends_alike(shadows: &mut Shadows<'_>, a: &[Migration], b: &[Migration]) -> Result<bool, Error> {
+    let (x, y) = (shadows.lane(), shadows.lane());
+    shadows.push(x, a.iter().map(Step::of));
+    shadows.push(y, b.iter().map(Step::of));
+    Ok(match (shadows.lines(x).await?, shadows.lines(y).await?) {
+        (Ok(p), Ok(q)) => crate::catalog::same_schema(&p, &q),
+        _ => false,
+    })
+}
+
+/// The migrations' names, as a sentence lists them.
+#[cfg(feature = "cli")]
+fn names_of(migrations: &[Migration]) -> String {
+    and_list(&migrations.iter().map(|m| m.name.clone()).collect::<Vec<_>>())
+}
+
+/// The refusal for [`behind`] where the order can't move: `it` makes the change, after `ahead`,
+/// which this database hasn't run, on top of `ran`, what its history says it ran, which is where
+/// deploy starts; `why` says why `it` can't run first. The way out keeps the order: the change
+/// undone, so that deploy runs `ahead`, then `it`, as every database does. The
+/// lead names the database at `url`, as every command shows one, with no credential or option, and
+/// both commands take its URL in `--url`, since a command without it reaches the project's own.
+/// The undo is a command only where `reylo run` applies it whole or not at all: on Postgres, which
+/// runs a script as one transaction, and a lone statement elsewhere. A SQLite rebuild needs the
+/// foreign keys off that a migration runs with.
+#[allow(clippy::too_many_arguments)]
+#[cfg(feature = "cli")]
+async fn behind_problem(shadows: &mut Shadows<'_>, target: &mut Db, url: &str, ran: &[Migration], it: &Migration, ahead: &[Migration], live: &[String], why: Option<String>) -> Problem {
+    let names = names_of(ahead);
+    let problem = Problem::new("later-migration-in-place", format!("Migration {} makes this change, but runs after {names}, which this database hasn't run", it.name));
+    let problem = match why {
+        Some(why) => problem.note(why),
+        None => problem,
+    };
+    let problem = match ran.last() {
+        Some(last) => problem.note(format!("It ran the migrations through {}, and then had this change made outside them:", last.name)),
+        None => problem.note("It ran none of the migrations, and then had this change made outside them:"),
+    };
+    let lane = shadows.lane();
+    shadows.push(lane, ran.iter().map(Step::of));
+    let made = match shadows.lines(lane).await {
+        Ok(Ok(lines)) => crate::catalog::without_comments(&lines),
+        _ => vec![],
+    };
+    let (mut change, mut sql) = (None, None);
+    if let Ok(Ok(())) = shadows.open(lane).await {
+        shadows.taint(lane);
+        change = scoped_change(target, shadows.db(lane), &[]).await;
+        if change.is_none() {
+            sql = plan_text(shadows.db(lane), target, None).await;
+        }
+    }
+    let (sql, undo, lost) = match change {
+        Some((sql, undo, lost)) => (Some(sql), Some(undo), lost),
+        None => (sql, None, vec![]),
+    };
+    let problem = match sql {
+        Some(sql) => problem.sql(&sql),
+        None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&made, live, target.dialect())).chain([String::new()])),
+    };
+    let problem = if lost.is_empty() { problem } else { problem.note(format!("Undoing it loses what {} {}.", and_list(&lost), if lost.len() == 1 { "holds" } else { "hold" })) };
+    // What `it` writes may have been written here too, with the change: the undo can't take it back,
+    // and deploy writes it again.
+    let writes = writes_rows(&it.sql, target.dialect());
+    let problem = if writes.is_empty() { problem } else { problem.note(format!("The undo reverses the schema alone: where {} also ran here, reverse what {} wrote first, or deploy writes it again.", and_list(&writes), if writes.len() == 1 { "it" } else { "they" })) };
+    let order = format!("{names} first, and then {}", it.name);
+    let on = shown_url(url);
+    let deploy = "reylo migrate deploy --url <url>";
+    let d = target.dialect();
+    match undo {
+        Some(undo) if runs_as_a_migration(&undo.join("\n"), d) => problem.note("Give both commands the same URL as this one.").fix(format!("Undo it on {on}, so that deploy runs {order}"), &[format!("reylo run --url <url> {}", shell_word(&undo.join(" "))).as_str(), deploy]),
+        // An undo reylo run wouldn't run as a migration does is no script to hand over either: on
+        // SQLite a rebuild copied as written has none of a migration's safeguards (its transaction,
+        // foreign keys off and checked before it commits). The change it reverses is shown above.
+        _ => problem.note(format!("Undo it on {on} by hand, then give deploy the same URL as this command.")).fix(format!("Then deploy, which runs {order}"), &[deploy]),
+    }
 }
 
 /// The ways to keep a change made by hand on a database no development command runs on: written as
@@ -1779,7 +2545,6 @@ fn as_user(url: &str, user: &str) -> String {
     let base = format!("{scheme}://{user}@{host}{}", &rest[end..]);
     if kept.is_empty() { base } else { format!("{base}?{}", kept.join("&")) }
 }
-
 #[cfg(feature = "cli")]
 async fn with_shadows(mut db: Db, opts: &Options) -> Result<(Db, Server, usize), Error> {
     let mut server = shadow_server(&mut db, opts).await?;
@@ -1822,7 +2587,7 @@ async fn late_on(db: &mut Db, opts: &Options, plan: &Plan) -> Result<Option<Prob
         let mut server = shadow_server(db, opts).await?;
         let texts: Vec<&str> = files.iter().map(|f| f.sql.as_str()).collect();
         let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &texts).await;
-        let problem = late_problem(&mut shadows, &plan.ran, &plan.pending, &files).await;
+        let problem = late_problem(&mut shadows, &opts.dir, &plan.ran, &plan.pending, &files).await;
         shadows.finish().await;
         server.close().await;
         problem
@@ -2051,7 +2816,7 @@ async fn deploy_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
     let mut applied: Vec<serde_json::Value> = Vec::new();
     for m in &plan.pending {
         let at = std::time::Instant::now();
-        match run(db, m, true).await {
+        match run_undone(db, m, true).await {
             // Its row holds the fingerprint it left, so that a run cut off after it, or a migration
             // after it that fails and leaves part of itself, is seen by the next run.
             Ok(()) => {
@@ -2059,15 +2824,11 @@ async fn deploy_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
                 rows.row(log, &paint("green", "✓"), &m.name, &format!("applied {}", paint("dim", &format!("· {ms} ms"))));
                 applied.push(serde_json::json!({ "name": m.name, "state": "applied", "ms": ms as u64 }));
             }
-            Err(e) => {
-                failed(&mut rows, m, &e, d, log);
+            Err((e, undone)) => {
+                rows.row(log, &paint("bold red", "✗"), &m.name, "failed");
                 applied.push(serde_json::json!({ "name": m.name, "state": "failed", "error": e.0 }));
-                if started.contains(&m.name.as_str()) {
-                    log("  A run before this one was cut off here, so its change may be in place");
-                    log(&steps(4, &[("See whether it is", &["reylo migrate deploy --dry-run"]), ("Record it if it is, running nothing", &["reylo migrate history push"])]));
-                } else if !may_leave_part(&m.sql, d) {
-                    log(&steps(2, &[("Fix it, lock the fix and deploy again", &["reylo migrate dev", "reylo migrate deploy"])]));
-                }
+                log("");
+                print_problems(&[deploy_failure(m, &e, d, started.contains(&m.name.as_str()), undone)], log);
                 code = 1;
                 break;
             }
@@ -2090,6 +2851,28 @@ fn failed(rows: &mut Rows, m: &Migration, e: &Error, d: Dialect, log: Log<'_>) {
         log("  MySQL commits each statement, so its first statements may be in place");
         log(&steps(4, &[("See which are", &["reylo migrate deploy --dry-run"])]));
     }
+}
+
+/// A migration deploy ran that failed: its error, what of it may be in place, and what to do next.
+/// Where nothing of it is in place ([`run_undone`]), nor of its row, it is said to have rolled back,
+/// and to be fixed and run again; elsewhere, where its change or its row may be in place, the dry run
+/// says which.
+fn deploy_failure(m: &Migration, e: &Error, d: Dialect, started: bool, undone: bool) -> Problem {
+    let problem = Problem::new("migration-failed", format!("The migration {} failed", m.name)).note(&e.0);
+    if started {
+        return problem
+            .note("A run before this one was cut off here, so its change may be in place.")
+            .fix("See whether it is", &["reylo migrate deploy --dry-run"])
+            .fix("Record it if it is, running nothing", &["reylo migrate history push"]);
+    }
+    if !undone {
+        let why = if d == Dialect::Mysql { "MySQL commits each statement, so its first statements may be in place" } else { "It runs outside a transaction, so its change may be in place" };
+        return problem.note(format!("{why}.")).fix("See what is", &["reylo migrate deploy --dry-run"]);
+    }
+    Problem { title: format!("The migration {} failed and was rolled back", m.name), ..problem }
+        .note("Nothing was recorded, so the next deploy runs it again.")
+        .fix("Fix the file, lock the fix and deploy again", &["reylo migrate dev", "reylo migrate deploy"])
+        .fix("If another database already ran it, write a new migration instead", &["reylo migrate new <name>"])
 }
 
 /// What a command says where the fingerprint its last run stored can't be compared.
@@ -2132,7 +2915,7 @@ async fn dry_run_on(opts: &Options, log: Log<'_>) -> Result<i32, Error> {
             let (files, _) = opts.migrations()?;
             let texts: Vec<&str> = files.iter().map(|f| f.sql.as_str()).collect();
             let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &texts).await;
-            let late = late_problem(&mut shadows, &plan.ran, &plan.pending, &files).await;
+            let late = late_problem(&mut shadows, &opts.dir, &plan.ran, &plan.pending, &files).await;
             shadows.finish().await;
             late.map(|late| {
                 plan.problems.extend(late);
@@ -2232,7 +3015,8 @@ pub async fn db_wipe(opts: &Options, in_ci: bool, log: Log<'_>) -> Result<i32, E
         0 => " (none had rows)".to_string(),
         n => format!(" ({n} had rows)"),
     };
-    log(&format!("{} Deleted every row of {} table{} on {}{had}; the schema and the history stay", paint("green", "✓"), tables, if tables == 1 { "" } else { "s" }, shown_url(&opts.url)));
+    log(&format!("{} Deleted every row of {} table{} on {}{had}", paint("green", "✓"), tables, if tables == 1 { "" } else { "s" }, shown_url(&opts.url)));
+    log(&note("The schema and the history stay"));
     Ok(0)
 }
 
@@ -2409,8 +3193,12 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
         shadows.finish().await;
         return Ok(refuse(&agreement, log));
     }
+    // The run the database's history says it ran, where that is how the order starts.
+    let applied: Vec<&HistoryRow> = before_rows.iter().filter(|r| r.applied).collect();
+    let history_run = (!applied.is_empty() && applied.len() <= order.len() && applied.iter().zip(&order).all(|(r, f)| r.name == f.name && same_statements(&r.sql, &f.sql, d))).then_some(applied.len());
     // The replay after each migration, from none: the longest run that equals the database, and
-    // else the one closest to it.
+    // else the one closest to it: the history's run where it is as close as any, since a migration
+    // that changes no schema leaves the run before it just as close.
     let replayed = async {
         let lane = shadows.lane();
         if let Err((_, e)) = shadows.open(lane).await? {
@@ -2419,12 +3207,16 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
         shadows.taint(lane);
         let mut matches: Vec<usize> = Vec::new();
         let mut closest: (usize, usize, Vec<String>) = (usize::MAX, 0, vec![]);
+        let mut at_history: Option<(usize, Vec<String>)> = None;
         for k in 0..=order.len() {
             let now = crate::catalog::without_comments(&catalog(shadows.db(lane)).await?);
             if crate::catalog::without_extra_children(&live, &now) == now {
                 matches.push(k);
             } else {
                 let (a, b) = difference(&now, &live);
+                if Some(k) == history_run {
+                    at_history = Some((a.len() + b.len(), now.clone()));
+                }
                 if a.len() + b.len() < closest.0 {
                     closest = (a.len() + b.len(), k, now);
                 }
@@ -2434,6 +3226,11 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
             }
             if let Err(e) = run(shadows.db(lane), &order[k], false).await {
                 return Ok(Err(format!("{} fails when replayed in a shadow database: {e}", order[k].name)));
+            }
+        }
+        if let (Some(k), Some((distance, lines))) = (history_run, at_history) {
+            if distance == closest.0 {
+                closest = (distance, k, lines);
             }
         }
         Ok::<_, Error>(Ok((matches, closest)))
@@ -2450,7 +3247,52 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
             return Err(e);
         }
     };
-    let Some(mut n) = matches.last().copied() else {
+    // A migration at the end of the run that changes data and nothing a schema shows can't be told
+    // to have run: it stays pending, to run.
+    // One the history says ran, as written, stays recorded.
+    let ran = |m: &Migration| before_rows.iter().any(|r| r.applied && r.name == m.name && same_statements(&r.sql, &m.sql, d));
+    let matched = matches.last().copied().map(|mut n| {
+        while n > 0 && !data_statements(&order[n - 1].sql, d).is_empty() && matches.contains(&(n - 1)) && !ran(&order[n - 1]) {
+            n -= 1;
+        }
+        n
+    });
+    // A later migration that makes all this database has since the run its history ends at, which is
+    // where deploy starts, ran here before those ahead of it: it is recorded, and the order made the
+    // one this database ran, with it right after that run and the rest after it ([`unmovable`] says
+    // where it can't be). It is looked for too where a run that changes data also matches, which
+    // can't be recorded by its schema alone. Where it can't move, the change is undone instead, for
+    // deploy to run the migrations in their order.
+    let unproven = |n: usize| history_run.is_some_and(|h| order[h.min(n)..n].iter().any(|m| !data_statements(&m.sql, d).is_empty()));
+    let mut moved: Option<(Vec<Migration>, usize, String, String)> = None;
+    if let Some(h) = history_run.filter(|&h| !init && h < order.len() && matched.is_none_or(unproven)) {
+        let found = match behind(&mut shadows, &order[..h], &order[h..], &live).await {
+            Ok(Some(j)) => unmovable(&mut shadows, &order[..h], &order[h..], j, d).await.map(|why| Some((j, why))),
+            other => other.map(|_| None),
+        };
+        match found {
+            Ok(None) => {}
+            Ok(Some((j, None))) => {
+                let (it, ahead) = (&order[h + j], &order[h..h + j]);
+                let reordered: Vec<Migration> = order[..h].iter().chain([it]).chain(ahead).chain(&order[h + j + 1..]).cloned().collect();
+                moved = Some((reordered, h + 1, it.name.clone(), names_of(ahead)));
+            }
+            Ok(Some((j, Some(why)))) => {
+                let problem = behind_problem(&mut shadows, db, &opts.url, &order[..h], &order[h + j], &order[h..h + j], &live, Some(why)).await;
+                shadows.finish().await;
+                return Ok(refuse(&[problem], log));
+            }
+            Err(e) => {
+                shadows.finish().await;
+                return Err(e);
+            }
+        }
+    }
+    let (order, matched, moved) = match moved {
+        Some((reordered, n, it, ahead)) => (reordered, Some(n), Some((it, ahead))),
+        None => (order, matched, None),
+    };
+    let Some(n) = matched else {
         // The closest run, and the change from what it makes to this database, as SQL.
         let (_, k, lines) = closest;
         let lane = shadows.lane();
@@ -2465,7 +3307,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
         let problem = Problem::new("history-push-no-match", "No run of the migrations makes this database's schema").note(closest);
         let problem = match sql {
             Some(sql) => problem.sql(&sql),
-            None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&lines, &live)).chain([String::new()])),
+            None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&lines, &live, d)).chain([String::new()])),
         };
         if init {
             return Ok(refuse(&[problem], log));
@@ -2480,12 +3322,18 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
         return Ok(refuse(&[problem], log));
     };
     shadows.finish().await;
-    // A migration at the end of the run that changes data and nothing a schema shows can't be told
-    // to have run: it stays pending, to run.
-    // One the history says ran, as written, stays recorded.
-    let ran = |m: &Migration| before_rows.iter().any(|r| r.applied && r.name == m.name && same_statements(&r.sql, &m.sql, d));
-    while n > 0 && !data_statements(&order[n - 1].sql, d).is_empty() && matches.contains(&(n - 1)) && !ran(&order[n - 1]) {
-        n -= 1;
+    // The lock takes the order first: a history written after it can be written again, where one
+    // written before a lock that never came would be out of its order.
+    let relocked = moved.is_some() && !lock_free(opts);
+    if relocked {
+        let texts: Vec<(String, String)> = order.iter().map(|f| (f.name.clone(), normalized(&f.sql))).collect();
+        let entries = lock::chain(texts.iter().map(|(n, t)| (n.as_str(), t.as_str())));
+        // The order moved ends as the one schema.sql was shown to match, above.
+        let schema = match schema_sql.as_deref() {
+            Some(sql) => Some(lock::schema_sum(&entries.last().map(|e| e.sum.clone()).unwrap_or_default(), sql)),
+            None => l.schema.clone(),
+        };
+        lock::write(&opts.lock, &lock::Lock { schema, entries })?;
     }
     let recorded = &order[..n];
     let before = before_rows;
@@ -2535,12 +3383,20 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
         rows.row(log, &paint("red", "-"), &r.name, "taken out of the history");
     }
     let count = |n: usize| format!("{n} migration{}", if n == 1 { "" } else { "s" });
-    if added.is_empty() && taken.is_empty() {
+    if added.is_empty() && taken.is_empty() && kept < recorded.len() {
+        log(&format!("{} The history now lists {}, in the order they run", paint("green", "✓"), count(recorded.len())));
+    } else if added.is_empty() && taken.is_empty() {
         log(&format!("{} The history already matches this database: {}", paint("green", "✓"), count(recorded.len())));
     } else if added.is_empty() {
         log(&format!("{} The history now lists {}", paint("green", "✓"), count(recorded.len())));
     } else {
         log(&format!("{} Recorded {}, running nothing", paint("green", "✓"), count(added.len())));
+    }
+    // A development database that ran them in the old order has what the new one makes: its history
+    // takes the new order with no rewind, which would drop what they made, rows included.
+    if let (Some((it, ahead)), true) = (&moved, relocked) {
+        log(&format!("{} Wrote {}: {it} now runs before {ahead}, as it did here", paint("green", "✓"), shown(&opts.lock)));
+        log(&then(note(format!("Development databases ran {ahead} first")), &[("To record the lock's new order on one, running nothing", &["reylo migrate history push"])]));
     }
     let pending = &order[n..];
     if !pending.is_empty() {
@@ -2747,7 +3603,7 @@ async fn status_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
                     let mut problem = Problem::new("database-changed", CHANGED_OUTSIDE);
                     if let Some(last) = history.iter().rfind(|r| r.applied) {
                         if let Some(stored) = stored_catalog(db, &last.name).await? {
-                            let lines = changed_lines(&stored, &fingerprinted(&now_lines, db.dialect()));
+                            let lines = changed_lines(&stored, &fingerprinted(&now_lines, db.dialect()), db.dialect());
                             changes = lines.iter().map(|l| l.trim().to_string()).collect();
                             problem = problem.lines(std::iter::once(String::new()).chain(lines).chain([String::new()]));
                         }
@@ -2778,7 +3634,17 @@ async fn status_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
     // A draft leaves the checksum as it was; any other disagreement leaves it nothing to be held to.
     let stamped = if lock_problems.iter().all(Problem::is_drafts) { stamp(opts, schema_sql.as_deref()) } else { Stamp::Unreadable };
     let drafts = !lock_problems.is_empty();
+    // Once the lock and the files agree, the order this database ran them in, as deploy holds it to.
+    let misordered = if out_of_step || drafts {
+        None
+    } else {
+        let applied: Vec<&HistoryRow> = history.iter().filter(|r| r.applied).collect();
+        lock_order_problem(opts, &applied, &order, d)
+    };
+    // Deploy refuses such a database, so running what it hasn't run is offered only where it doesn't.
+    let offer_run = misordered.is_none();
     problems.extend(lock_problems);
+    problems.extend(misordered);
     match stamped {
         // A draft written from schema.sql makes the change the checksum doesn't hold yet, until development locks it.
         Stamp::Changed if drafts => said.push(then(note(format!("Until the drafts are locked, {} isn't held to the lock", shown(&opts.schema))), &[("To lock them", &["reylo migrate dev"])])),
@@ -2803,6 +3669,7 @@ async fn status_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
         log(line);
     }
     match pending.len() {
+        _ if !offer_run => {}
         0 => {}
         1 => log(&then(note(format!("This database hasn't run {}", pending[0].name)), &[("To run it in development", &["reylo migrate dev"]), ("To run it in production", &["reylo migrate deploy"])])),
         n => log(&then(note(format!("This database hasn't run {n} migrations")), &[("To run them in development", &["reylo migrate dev"]), ("To run them in production", &["reylo migrate deploy"])])),
@@ -3004,8 +3871,8 @@ async fn emptied(db: &mut Db, server: &mut Server, opts: &Options, log: Log<'_>)
     }
     match take_to(db, &target, &then, &lines, None).await? {
         Err(Unreached::Refused(problems)) => return Ok(refuse(&problems, log)),
-        Err(Unreached::Differs(lines)) => {
-            let problem = Problem::new("reset-incomplete", "Reylo can't drop everything on this database").lines(lines);
+        Err(Unreached::Differs(now, expect)) => {
+            let problem = Problem::new("reset-incomplete", "Reylo can't drop everything on this database").lines(describe_diff("this database", &now, "an empty database", &expect));
             if d != Dialect::Mysql {
                 return Ok(refuse(&[problem], log));
             }
@@ -3067,7 +3934,7 @@ async fn history_as_it_stands(db: &mut Db, server: &mut Server, opts: &Options) 
     let problem = Problem::new("database-drift", CHANGED_OUTSIDE);
     let problem = match sql {
         Some(sql) => problem.sql(&sql),
-        None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&made, &live)).chain([String::new()])),
+        None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&made, &live, db.dialect())).chain([String::new()])),
     };
     let problem = problem.note("Files written from its history wouldn't make it either.");
     let schema = opts.schema_exists().then(|| shown(&opts.schema));
@@ -3123,20 +3990,21 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
     // development database as it stands, written out as SQL (as `db introspect` prints it). Either
     // way, the development database must have run each migration it applied as it now reads: one
     // edited or deleted since is `migrate dev`'s to settle first.
-    let (target_sql, target_name) = match std::fs::read_to_string(&opts.schema) {
+    let (target_sql, target_name, added) = match std::fs::read_to_string(&opts.schema) {
         Ok(sql) => {
             let problems = ran_as_written(opts, &files).await?;
             if !problems.is_empty() {
                 return Ok(refuse(&problems, log));
             }
-            (sql, shown(&opts.schema))
+            (sql, shown(&opts.schema), vec![])
         }
         Err(_) => match as_its_migrations_leave_it(opts, &files).await? {
-            Ok(sql) => (sql, "this database".to_string()),
+            Ok((sql, added)) => (sql, "this database".to_string(), added),
             Err(problems) => return Ok(refuse(&problems, log)),
         },
     };
-    let drafted = match draft(opts, &files, &target_sql, &target_name, name, choices, log).await? {
+    let added = unneeded_by_history(opts, &files, added).await?;
+    let drafted = match draft(opts, &files, &target_sql, &target_name, &added, name, choices, log).await? {
         Ok(drafted) => drafted,
         Err(problems) => return Ok(refuse(&problems, log)),
     };
@@ -3155,19 +4023,36 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
     match written.as_slice() {
         // With schema.sql, any schema change goes there, so an empty migration is for data; with
         // none, it is as much for a schema change written by hand.
-        [one] if drafted.empty && drafted.target.ends_with(".sql") => log(&format!("{} Wrote {one}, empty: {} has nothing new, so it's for a change to data", paint("green", "✓"), drafted.target)),
-        [one] if drafted.empty => log(&format!("{} Wrote {one}, empty, to write by hand: {} has nothing new", paint("green", "✓"), drafted.target)),
+        [one] if drafted.empty && drafted.target.ends_with(".sql") => {
+            log(&format!("{} Wrote {one}", paint("green", "✓")));
+            log(&note(format!("Empty: {} has nothing new, so it's for a change to data", drafted.target)));
+        }
+        [one] if drafted.empty => {
+            log(&format!("{} Wrote {one}", paint("green", "✓")));
+            log(&note(format!("Empty, to write by hand: {} has nothing new", drafted.target)));
+        }
         [one] => log(&format!("{} Wrote {one}", paint("green", "✓"))),
         many => {
-            if drafted.lock_safe {
-                log(&format!("{} Wrote {} migrations, so that none blocks writes to a table while it reads every row:", paint("green", "✓"), many.len()));
-            } else {
-                log(&format!("{} Wrote {} migrations, one per statement, since MySQL commits each DDL statement on its own:", paint("green", "✓"), many.len()));
-            }
+            // A file past one per commit is the lock-safe shape's.
+            let unblocking = drafted.lock_safe && many.len() > drafted.commits + 1;
+            let why = match (unblocking, drafted.commits > 0) {
+                (true, true) => "so that none blocks writes to a table while it reads every row, and none uses an enum value it adds",
+                (true, false) => "so that none blocks writes to a table while it reads every row",
+                (false, true) => "since Postgres can't use a new enum value in the migration that adds it",
+                (false, false) => "one per statement, since MySQL commits each DDL statement on its own",
+            };
+            log(&format!("{} Wrote {} migrations, {why}:", paint("green", "✓"), many.len()));
             for path in many {
                 log(&format!("    {path}"));
             }
         }
+    }
+    for line in &drafted.changes {
+        log(line);
+    }
+    // The risks stand apart from the diff above them.
+    if !drafted.changes.is_empty() && drafted.notes.first().is_some_and(|n| !n.is_empty()) {
+        log("");
     }
     for note in &drafted.notes {
         log(note);
@@ -3177,9 +4062,11 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
 
 /// The development database as SQL that makes it, for `migrate new` in a project with no schema.sql:
 /// the migration is what it has that the migrations don't make. Refused unless it ran every migration,
-/// each as it now reads, since one it hasn't run would read as something to drop.
+/// each as it now reads, since one it hasn't run would read as something to drop. With it, the
+/// extensions of the project's it has that no file creates, for the migration to make where the
+/// history doesn't need them ([`unneeded_by_history`]).
 #[cfg(feature = "cli")]
-async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Result<Result<String, Vec<Problem>>, Error> {
+async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Result<Result<(String, Vec<String>), Vec<Problem>>, Error> {
     let mut db = Db::open(opts).await?;
     let result = async {
         let d = db.dialect();
@@ -3197,12 +4084,99 @@ async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Resu
         if !problems.is_empty() {
             return Ok(Err(problems));
         }
-        let schemas = if d == Dialect::Postgres { crate::catalog::user_schemas(&mut db).await? } else { vec![] };
-        dump_from(&mut db, opts, &schemas).await.map(Ok)
+        let created = created_extensions(opts);
+        let added: Vec<String> = if d == Dialect::Postgres { project_extensions(&mut db).await?.into_iter().filter(|x| !created.contains(x)).collect() } else { vec![] };
+        Ok(schema_as_sql_on(&mut db, opts, &[], true).await?.map(|sql| (passing_over_existing(&sql, d), added)).map_err(|problem| vec![problem]))
     }
     .await;
     db.close().await;
     result
+}
+
+/// Of `extensions`, those the migrations replay without, which a new migration makes: one a migration
+/// needs is the environment's (a platform's, or one the database had before the project began),
+/// which every shadow keeps, so that the history replays as it did on the database. The history
+/// needs an extension where its replay without it fails, makes anything it doesn't make with it, or
+/// lacks anything it makes with it but what the extension itself brings a shadow (its line, its
+/// schema, their grants, read from an empty one), as a migration that does something only where the
+/// extension is. Each is tried with
+/// those already taken, so that one the history needs takes no other with it.
+#[cfg(feature = "cli")]
+async fn unneeded_by_history(opts: &Options, files: &[Migration], extensions: Vec<String>) -> Result<Vec<String>, Error> {
+    use std::collections::BTreeSet;
+    if extensions.is_empty() {
+        return Ok(extensions);
+    }
+    let mut db = Db::open(opts).await?;
+    let server = Server::open(&mut db, &opts.url, opts.shadow_url.as_deref()).await;
+    db.close().await;
+    let mut server = server?;
+    server.copy_default_privileges(!sets_default_privileges(opts));
+    let texts: Vec<&str> = files.iter().map(|f| f.sql.as_str()).collect();
+    // The catalog's lines of a shadow that leaves out `left`, after the migrations or with none run;
+    // nothing where they fail.
+    let mut lines = async |left: &[String], history: bool| -> Result<Option<BTreeSet<String>>, Error> {
+        server.leave_extensions(created_extensions(opts).into_iter().chain(left.iter().cloned()).collect());
+        server.leave_schemas(created_schemas(opts));
+        let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &texts).await;
+        let lane = shadows.lane();
+        if history {
+            shadows.push(lane, files.iter().map(Step::of));
+        }
+        let lines = shadows.lines(lane).await;
+        shadows.finish().await;
+        Ok(lines?.ok().map(|l| l.into_iter().collect()))
+    };
+    let result = async {
+        let Some(empty) = lines(&[], false).await? else { return Ok(vec![]) };
+        // A history that replays only without them (one that renames a schema to the one an
+        // extension is in) says nothing of which ran beside it: the draft's replay refuses it.
+        let Some(replayed) = lines(&[], true).await? else { return Ok(vec![]) };
+        let mut unneeded = async |left: Vec<String>| -> Result<Option<Vec<String>>, Error> {
+            let (Some(without), Some(empty_without)) = (lines(&left, true).await?, lines(&left, false).await?) else { return Ok(None) };
+            // Each line the replay lost is one they bring a shadow, and it gained none: the history
+            // may make one of those itself, as their schema.
+            let brought: BTreeSet<&String> = empty.difference(&empty_without).collect();
+            Ok((without.is_subset(&replayed) && replayed.difference(&without).all(|l| brought.contains(l))).then_some(left))
+        };
+        if let Some(all) = unneeded(extensions.clone()).await? {
+            return Ok(all);
+        }
+        let mut taken: Vec<String> = Vec::new();
+        for extension in &extensions {
+            if let Some(more) = unneeded(taken.iter().chain([extension]).cloned().collect()).await? {
+                taken = more;
+            }
+        }
+        Ok(taken)
+    }
+    .await;
+    server.close().await;
+    result
+}
+
+/// `sql` with each `create schema` and `create extension` passing over one that exists, as the dump
+/// writes them: as a draft's target, the database's own SQL replays on shadows that already have each
+/// extension the project's files don't create, made in its schema.
+#[cfg(feature = "cli")]
+fn passing_over_existing(sql: &str, d: Dialect) -> String {
+    if d != Dialect::Postgres {
+        return sql.to_string();
+    }
+    let statements: Vec<String> = crate::sql::split_statements(sql, d)
+        .iter()
+        .map(|st| {
+            let text = st.text.trim();
+            let lower = text.to_ascii_lowercase();
+            for create in ["create schema ", "create extension "] {
+                if lower.starts_with(create) && !lower[create.len()..].starts_with("if not exists ") {
+                    return format!("{create}if not exists {};", &text[create.len()..]);
+                }
+            }
+            format!("{text};")
+        })
+        .collect();
+    format!("{}\n", statements.join("\n\n"))
 }
 
 /// For `migrate new` with a schema.sql: what the development database applied that no longer reads as
@@ -3249,6 +4223,11 @@ struct Drafted {
     target: String,
     /// Whether its files are the lock-safe shape's (`locks`), rather than one per MySQL statement.
     lock_safe: bool,
+    /// Where its plan commits partway, each enum's labels before what uses them, a file ending at
+    /// each: how many times.
+    commits: usize,
+    /// What it changes, a line each, as `changed_lines` writes it.
+    changes: Vec<String>,
 }
 
 /// What a plan loses, as a sentence names it: `the column users.bio`, `the table tags`.
@@ -3473,7 +4452,7 @@ fn shown_id(id: &str) -> String {
 /// A name as the shell is to be given it: quoted where it isn't one word, or holds a quote. The
 /// placeholder for a name to write is left to be written over.
 fn shell_word(name: &str) -> String {
-    if name == "<new name>" || name.chars().all(|c| c.is_ascii_alphanumeric() || "_.$-".contains(c)) {
+    if name == "<new name>" || name.chars().all(|c| c.is_ascii_alphanumeric() || "_.$-/".contains(c)) {
         return name.to_string();
     }
     if cfg!(windows) {
@@ -3540,33 +4519,233 @@ struct Guess {
     old: String,
     /// The new name, as `--rename` takes it: `contact`, `invoices`.
     new: String,
-    /// What else changes: `text → citext`, `adds total`.
-    change: String,
-    /// Whether its table is itself one of the guesses, so that dropping that table says it all.
-    in_guessed_table: bool,
+    /// The schema's difference, as the lines it prints: the column's old line and its new; a table's,
+    /// then those of its columns that differ.
+    diff: Vec<String>,
+    /// The id of its table where that table is itself one of the guesses, so that dropping that
+    /// table says it all.
+    owner: Option<String>,
+    /// Its id, a table's new one: what a column's `owner` names, however the names are shown.
+    id: String,
+    /// Whether it is a table, rather than a column.
+    table: bool,
 }
 
-/// The refusal for guesses, with what else the migration asks of `--drop`: one block, and the one
-/// command for each way of settling them all.
-fn guess_problem(guesses: &[Guess], drops: &[(String, String)], narrowed: &[(String, String)], outside: &[String], stated: &Choices, asked: &Asked) -> Problem {
+/// A column's lines in a guess's diff: the old name and definition `a`, and the new. `old` is the name
+/// as a command writes it, `new` the new name as `--rename` takes it. Either may be a rename or a drop
+/// and an add, so neither is shown as the other.
+fn column_diff(old: &str, new: &str, a: &str, b: &str) -> Vec<String> {
+    vec![gone_line(&format!("column {old} {a}")), came_line(&format!("column {} {b}", renamed_to(old, new)))]
+}
+
+/// A line of a refusal's diff that only the old schema has, and one that only the new has.
+fn gone_line(line: &str) -> String {
+    paint("red", &format!("    - {line}"))
+}
+
+fn came_line(line: &str) -> String {
+    paint("green", &format!("    + {line}"))
+}
+
+/// A line of `migrate new`'s summary changed in place, as a rename changes it: `~`, then the line with
+/// the words it changes highlighted.
+fn changed_line(a: &str, b: &str) -> String {
+    format!("  {} {}", paint("yellow", "~"), inline_diff(a, b))
+}
+
+/// The name `old` takes when renamed `new`, as `--rename` takes it: `posts.title` renamed `heading`
+/// is `posts.heading`. A new name that names its schema or table is that already.
+fn renamed_to(old: &str, new: &str) -> String {
+    if crate::sql::last_written(new) != new {
+        return new.to_string();
+    }
+    format!("{}{new}", &old[..old.len() - crate::sql::last_written(old).len()])
+}
+
+/// A line changed in place, as git's word diff shows one: the words only `a` has, then those only `b`
+/// has, highlighted red and green among the words both share. Colour off, they are marked as git
+/// marks them: `posts.[-title-]{+heading+}`. A line's kind and name are compared apart from its
+/// definition, so that the old name lines up with the new and the old type with the new.
+fn inline_diff(a: &str, b: &str) -> String {
+    match (split_head(a), split_head(b)) {
+        ((x, Some(p)), (y, Some(q))) => format!("{} {}", word_diff(x, y), word_diff(p, q)),
+        ((x, None), (y, None)) => word_diff(x, y),
+        _ => word_diff(a, b),
+    }
+}
+
+/// A comparison line's kind and name (`column posts.title`), and the definition after them, if any:
+/// split at the first space outside quotes after the name.
+fn split_head(line: &str) -> (&str, Option<&str>) {
+    let Some(start) = line.find(' ') else { return (line, None) };
+    let mut quote: Option<char> = None;
+    for (k, ch) in line[start + 1..].char_indices() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '`' => quote = Some(ch),
+            None if ch == ' ' => {
+                let at = start + 1 + k;
+                return (&line[..at], Some(&line[at + 1..]));
+            }
+            None => {}
+        }
+    }
+    (line, None)
+}
+
+/// The words of `a` and `b` as `inline_diff` shows them.
+fn word_diff(a: &str, b: &str) -> String {
+    fn tokens(s: &str) -> Vec<&str> {
+        let (mut out, mut start, mut word) = (Vec::new(), 0, false);
+        for (k, ch) in s.char_indices() {
+            let w = ch.is_alphanumeric() || ch == '_';
+            if k > start && !(w && word) {
+                out.push(&s[start..k]);
+                start = k;
+            }
+            word = w;
+        }
+        if start < s.len() {
+            out.push(&s[start..]);
+        }
+        out
+    }
+    fn mark(removed: bool, text: &str) -> String {
+        match (color(), removed) {
+            (true, _) => paint(if removed { "removed" } else { "added" }, text),
+            (false, true) => format!("[-{text}-]"),
+            (false, false) => format!("{{+{text}+}}"),
+        }
+    }
+    if a == b {
+        return a.to_string();
+    }
+    let (a, b) = (tokens(a), tokens(b));
+    // What both start and end with is shared; only what lies between is compared word by word, and
+    // where that is long, as a long default can be, it is shown as replaced whole.
+    let head = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let tail = a[head..].iter().rev().zip(b[head..].iter().rev()).take_while(|(x, y)| x == y).count();
+    let (start, end) = (a[..head].concat(), a[a.len() - tail..].concat());
+    let (a, b) = (&a[head..a.len() - tail], &b[head..b.len() - tail]);
+    const MOST: usize = 10_000;
+    if a.len() * b.len() > MOST {
+        let (gone, came) = (a.concat(), b.concat());
+        let marked = |removed: bool, text: &str| if text.is_empty() { String::new() } else { mark(removed, text) };
+        return format!("{start}{}{}{end}", marked(true, &gone), marked(false, &came));
+    }
+    let (n, m) = (a.len(), b.len());
+    // The longest run of words both share, from each pair of positions to the end.
+    let mut common = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            common[i][j] = if a[i] == b[j] { common[i + 1][j + 1] + 1 } else { common[i + 1][j].max(common[i][j + 1]) };
+        }
+    }
+    let (mut out, mut gone, mut came) = (String::new(), String::new(), String::new());
+    let flush = |out: &mut String, gone: &mut String, came: &mut String| {
+        if !gone.is_empty() {
+            out.push_str(&mark(true, gone));
+        }
+        if !came.is_empty() {
+            out.push_str(&mark(false, came));
+        }
+        gone.clear();
+        came.clear();
+    };
+    let (mut i, mut j) = (0, 0);
+    while i < n || j < m {
+        if i < n && j < m && a[i] == b[j] {
+            flush(&mut out, &mut gone, &mut came);
+            out.push_str(a[i]);
+            (i, j) = (i + 1, j + 1);
+        } else if j < m && (i == n || common[i][j + 1] >= common[i + 1][j]) {
+            // On a tie, what `b` adds goes first, so that a shared word matches its earliest place.
+            came.push_str(b[j]);
+            j += 1;
+        } else {
+            gone.push_str(a[i]);
+            i += 1;
+        }
+    }
+    flush(&mut out, &mut gone, &mut came);
+    format!("{start}{out}{end}")
+}
+
+/// The refusal for guesses, with what else the migration asks of `--drop`. One guess gets the
+/// command for each reading. Several get a line each, its two flags side by side, and the command
+/// to add the picked flags to, since any mix of the two readings may be the right one.
+fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], narrowed: &[(String, String, Option<String>)], outside: &[String], stated: &Choices, asked: &Asked) -> Problem {
+    let subject = asked.subject;
     let one = guesses.len() == 1;
-    let title = if one { "This looks like a rename, but it changes more than the name".to_string() } else { format!("These {} look like renames, but each changes more than its name", guesses.len()) };
-    let (old_width, new_width) = (guesses.iter().map(|g| g.old.chars().count()).max().unwrap_or(0), guesses.iter().map(|g| g.new.chars().count()).max().unwrap_or(0));
-    // A type as schema.sql writes it, rather than as the catalog spells it.
-    let change = |g: &Guess| g.change.replace("character varying", "varchar");
-    let mut problem = Problem::new("rename-guess", title).lines([String::new()]).lines(guesses.iter().map(|g| format!("    {:<old_width$} → {:<new_width$}  {}", g.old, g.new, change(g))));
-    if !drops.is_empty() {
-        problem = problem.lines([String::new()]).note(if drops.len() == 1 { format!("It also drops {} and its data.", drop_phrase(drops)) } else { format!("It also drops {}, with their data.", drop_phrase(drops)) });
+    let kinds = match (guesses.iter().any(|g| g.table), guesses.iter().any(|g| !g.table)) {
+        (true, true) => "tables and columns",
+        (true, false) => "tables",
+        _ => "columns",
+    };
+    let kind = if guesses[0].table { "table" } else { "column" };
+    let title = if one { format!("This {subject} can't tell a rename from a new {kind}") } else { format!("This {subject} can't tell renames from new {kinds}") };
+    // The schema's difference, each guess's lines together; a guess within a guessed table is among
+    // its table's.
+    let diff = guesses.iter().filter(|g| g.owner.is_none()).flat_map(|g| g.diff.iter().cloned());
+    let mut problem = Problem::new("rename-guess", title).lines([String::new()]).lines(diff);
+    // What a rename's change of type would lose, which --drop names by the old name.
+    let guessed = |name: &str| guesses.iter().any(|g| g.old == name);
+    // What it drops whichever way each guess goes: not what a renamed table drops, which its
+    // change says.
+    let others: Vec<(String, String)> = drops.iter().filter(|(_, n, _)| !guessed(n) && outside.contains(n)).map(|(k, n, _)| (k.clone(), n.clone())).collect();
+    if !others.is_empty() {
+        problem = problem.lines([String::new()]).note(if others.len() == 1 { format!("It also drops {} and its data.", drop_phrase(&others)) } else { format!("It also drops {}, with their data.", drop_phrase(&others)) });
+    } else if !narrowed.is_empty() {
+        problem = problem.lines([String::new()]);
     }
-    for (name, why) in narrowed {
-        problem = problem.note(format!("{name} {why}."));
+    for (name, why, _) in narrowed {
+        problem = problem.note(if guessed(name) { format!("As a rename, {name} {why}.") } else { format!("{name} {why}.") });
     }
-    let more: Vec<String> = drops.iter().map(|(_, n)| n.clone()).chain(narrowed.iter().map(|(n, _)| n.clone())).collect();
-    let renames: Vec<(String, String)> = guesses.iter().map(|g| (g.old.clone(), g.new.clone())).collect();
-    let dropped: Vec<String> = guesses.iter().filter(|g| !g.in_guessed_table).map(|g| g.old.clone()).chain(outside.iter().cloned()).collect();
-    problem
-        .fix(if one { "If it is a rename, keeping its rows" } else { "If they are renames, keeping their rows" }, &[&create_command(asked, stated, &more, &renames)])
-        .fix(if one { "If it is new, dropping the old one and its data" } else { "If they are new, dropping the old ones and their data" }, &[&create_command(asked, stated, &dropped, &[])])
+    // Each name --drop may need, with the id of the guessed table it belongs to, if any.
+    let owned: Vec<(String, Option<String>)> = drops.iter().map(|(_, n, o)| (n.clone(), o.clone())).chain(narrowed.iter().map(|(n, _, o)| (n.clone(), o.clone()))).collect();
+    let more: Vec<String> = owned.iter().map(|(n, _)| n.clone()).collect();
+    if one {
+        let renames: Vec<(String, String)> = guesses.iter().map(|g| (g.old.clone(), g.new.clone())).collect();
+        let dropped: Vec<String> = guesses.iter().map(|g| g.old.clone()).chain(outside.iter().cloned()).collect();
+        return problem
+            .fix(format!("To rename the {kind}, keeping its rows"), &[&create_command(asked, stated, &more, &renames)])
+            .fix(format!("To drop the {kind} and its data, and {} a new one", if guesses[0].table { "create" } else { "add" }), &[&create_command(asked, stated, &dropped, &[])]);
+    }
+    // Each line's flags: a rename takes along what its own reading also asks of --drop, the columns
+    // a renamed table drops, and what the rename's change of type loses; a guess within a guessed
+    // table goes with its table's line, which a drop of the table settles. Each is matched to its
+    // table by the table's id, since a column's name may be shown without the schema its table's
+    // carries, as under a search_path.
+    let mut taken: Vec<String> = Vec::new();
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for g in guesses.iter().filter(|g| g.owner.is_none()) {
+        let within: Vec<&Guess> = guesses.iter().filter(|c| g.table && c.owner.as_deref() == Some(g.id.as_str())).collect();
+        let mine: Vec<String> = owned.iter().filter(|(n, o)| *n == g.old || (g.table && o.as_deref() == Some(g.id.as_str())) || within.iter().any(|c| *n == c.old)).map(|(n, _)| n.clone()).collect();
+        let mut keep = vec![format!("--rename {}={}", shell_word(&g.old), shell_word(&g.new))];
+        keep.extend(within.iter().map(|c| format!("--rename {}={}", shell_word(&c.old), shell_word(&c.new))));
+        let mut lost: Vec<String> = Vec::new();
+        for n in &mine {
+            if !lost.contains(n) {
+                lost.push(n.clone());
+            }
+        }
+        if !lost.is_empty() {
+            keep.push(format!("--drop {}", lost.iter().map(|n| shell_word(n)).collect::<Vec<_>>().join(",")));
+        }
+        taken.extend(mine);
+        rows.push((keep.join(" "), format!("--drop {}", shell_word(&g.old))));
+    }
+    let rest: Vec<String> = more.iter().filter(|n| !taken.contains(n)).cloned().collect();
+    let width = rows.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
+    let lead = "For each, rename it to keep its rows, or drop it and add the new one";
+    problem.lines.extend([String::new(), paint("dim", &format!("  {lead}:"))]);
+    for (keep, drop) in &rows {
+        problem.lines.push(format!("    {}{}   or   {}", paint("cyan", keep), " ".repeat(width - keep.chars().count()), paint("cyan", drop)));
+        problem.detail.push(format!("{keep} or {drop}"));
+    }
+    problem.fixed = true;
+    problem.fix("Add the flags you picked to", &[&create_command(asked, stated, &rest, &[])])
 }
 
 /// The refusal of a migration that holds a lock blocking writes to a table with rows while it
@@ -3592,12 +4771,12 @@ fn lock_problem(hazards: &[crate::locks::Hazard], asked: &Asked, choices: &Choic
 /// The problems with what `choices` states about the tables and columns a plan drops (`lost`, as
 /// the plan's ids, and `shown`, as the file names them, one for one): each must be named in
 /// `--drop`, and each name in `--drop` must name only what it drops. `guesses`, renames it won't
-/// assume, are settled with them; `guessed_tables` are the new ids of the tables among them, whose
-/// own columns a drop of the table takes along; `added` are the columns and tables the plan adds, the
+/// assume, are settled with them; `owner` gives the new id of the guessed table an id belongs to,
+/// whose own columns a drop of the table takes along; `added` are the columns and tables the plan adds, the
 /// names a person could mean by a rename.
 #[allow(clippy::too_many_arguments)]
-fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owners: &dyn Fn(&str) -> bool, added: &[String], choices: &Choices, asked: &Asked) -> Vec<Problem> {
-    let mut problems = drop_problems_of(lost, shown, narrowed, guesses, owners, added, choices, asked);
+fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, added: &[String], choices: &Choices, asked: &Asked) -> Vec<Problem> {
+    let mut problems = drop_problems_of(lost, shown, narrowed, guesses, owner, added, choices, asked);
     // Where --force can accept them all, the last says so, once nothing but what it accepts is left.
     if asked.offers_force && !problems.is_empty() && problems.iter().all(|p| DESTRUCTIVE.contains(&p.code)) {
         let stated = Choices { drop: vec![], rename: choices.rename.clone(), ..Default::default() };
@@ -3608,7 +4787,7 @@ fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owners: &dyn Fn(&str) -> bool, added: &[String], choices: &Choices, asked: &Asked) -> Vec<Problem> {
+fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, added: &[String], choices: &Choices, asked: &Asked) -> Vec<Problem> {
     let subject = asked.subject;
     let display = |id: &String| lost.iter().position(|l| l == id).map(|k| shown_id(&shown[k])).or_else(|| narrowed.iter().find(|(n, _, _)| n == id).map(|(_, s, _)| shown_id(s))).unwrap_or_else(|| shown_id(id));
     let mut problems = Vec::new();
@@ -3639,9 +4818,9 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
     let unstated: Vec<&String> = lost.iter().filter(|l| !named.contains(l)).collect();
     let unnamed: Vec<(&String, String, String)> = narrowed.iter().filter(|(id, _, _)| !named.contains(id)).map(|(id, shown, why)| (id, shown_id(shown), why.clone())).collect();
     if !guesses.is_empty() {
-        let drops: Vec<(String, String)> = unstated.iter().map(|l| (l.split(' ').next().unwrap_or_default().to_string(), display(l))).collect();
-        let lossy: Vec<(String, String)> = unnamed.iter().map(|(_, name, why)| (name.clone(), why.clone())).collect();
-        let outside: Vec<String> = unstated.iter().copied().chain(unnamed.iter().map(|(id, _, _)| *id)).filter(|id| !owners(id)).map(&display).collect();
+        let drops: Vec<(String, String, Option<String>)> = unstated.iter().map(|l| (l.split(' ').next().unwrap_or_default().to_string(), display(l), owner(l))).collect();
+        let lossy: Vec<(String, String, Option<String>)> = unnamed.iter().map(|(id, name, why)| (name.clone(), why.clone(), owner(id))).collect();
+        let outside: Vec<String> = unstated.iter().copied().chain(unnamed.iter().map(|(id, _, _)| *id)).filter(|id| owner(id).is_none()).map(&display).collect();
         problems.push(guess_problem(guesses, &drops, &lossy, &outside, &stated, asked));
         return problems;
     }
@@ -3712,6 +4891,8 @@ struct Settled {
     renames: Vec<String>,
     plan: crate::diff::Plan,
     assumed: Vec<(String, String, bool)>,
+    /// The tables renamed, each its old id and its new.
+    tables: Vec<(String, String)>,
 }
 
 /// The plan from `db`, which reads as `current`, to `target`, as `choices` settles it: tables renamed
@@ -3752,8 +4933,14 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
     let mut assumed: Vec<(String, String, bool)> = Vec::new();
     for (old, new, _) in renamed_tables.iter().filter(|(_, _, was_stated)| !was_stated) {
         match crate::diff::column_changes(&current, &target.schema, old, new) {
-            Some(change) => {
-                guesses.push(Guess { old: shown_name(old), new: shown_name(new), change, in_guessed_table: false });
+            Some(columns) => {
+                let line = |(id, def): &(String, String)| format!("column {} {def}", shown_name(id));
+                let mut diff = vec![gone_line(&format!("table {}", shown_name(old))), came_line(&format!("table {}", shown_name(new)))];
+                for (a, b) in columns {
+                    diff.extend(a.as_ref().map(|a| gone_line(&line(a))));
+                    diff.extend(b.as_ref().map(|b| came_line(&line(b))));
+                }
+                guesses.push(Guess { old: shown_name(old), new: shown_name(new), diff, owner: None, id: new.clone(), table: true });
                 guessed_tables.insert(new.clone());
             }
             None => assumed.push((shown_name(old), shown_name(new), true)),
@@ -3797,22 +4984,43 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
         let lost = plan.losses.clone();
         let narrowing: Vec<(String, String)> = plan.narrowings.clone();
         let guessed: Vec<String> = plan.renames.iter().map(|r| r.0.clone()).collect();
+        let paired: Vec<String> = plan.pairs.iter().map(|p| p.0.clone()).collect();
         style(db, &mut plan, &target.schema).await?;
-        let narrowed: Vec<(String, String, String)> = narrowing.iter().zip(&plan.narrowings).map(|((id, why), (shown, _))| (id.clone(), shown.clone(), why.clone())).collect();
-        let owned_by_guess = |id: &str| current.objects.get(id).and_then(|o| o.owner.as_ref()).is_some_and(|t| guessed_tables.contains(t));
+        let mut narrowed: Vec<(String, String, String)> = narrowing.iter().zip(&plan.narrowings).map(|((id, why), (shown, _))| (id.clone(), shown.clone(), why.clone())).collect();
+        let guess_owner = |id: &str| current.objects.get(id).and_then(|o| o.owner.clone()).filter(|t| guessed_tables.contains(t));
         let mut guesses = guesses;
         let mut assumed = assumed;
         for (raw, (old, new, change)) in guessed.iter().zip(&plan.renames) {
             let old = shown_id(old);
             match change {
-                Some(change) => guesses.push(Guess { old, new: new.clone(), change: change.clone(), in_guessed_table: owned_by_guess(raw) }),
+                Some((a, b)) => guesses.push(Guess { diff: column_diff(&old, new, a, b), old, new: new.clone(), owner: guess_owner(raw), id: raw.clone(), table: false }),
                 None => assumed.push((old, new.clone(), false)),
             }
         }
+        // A column dropped as one of another type comes, alone in a table that stays, is asked about
+        // as a guess is: the plan drops it, and --rename keeps its rows. What the rename's change of
+        // type would lose is named as a kept column's is.
+        let (mut lost, mut shown) = (lost, plan.losses.clone());
+        for (raw, (old, new, (a, b), loses)) in paired.iter().zip(&plan.pairs) {
+            if current.objects.get(raw).and_then(|o| o.owner.as_ref()).is_some_and(|t| guessed_tables.contains(t)) {
+                continue;
+            }
+            if let Some(k) = lost.iter().position(|l| l == raw) {
+                lost.remove(k);
+                shown.remove(k);
+            }
+            if let Some(why) = loses {
+                narrowed.push((raw.clone(), old.clone(), why.clone()));
+            }
+            let old = shown_id(old);
+            guesses.push(Guess { diff: column_diff(&old, new, a, b), old, new: new.clone(), owner: None, id: raw.clone(), table: false });
+        }
+        // Tables first, then columns, each by name.
+        guesses.sort_by(|a, b| (!a.table, &a.old).cmp(&(!b.table, &b.old)));
         if let Some(asked) = asked {
             // What the plan adds, the names a person might mean by a rename of what it drops.
             let added: Vec<String> = target.schema.objects.iter().filter(|(id, o)| matches!(o.kind, Some(crate::diff::Kind::Column | crate::diff::Kind::Table)) && !current.objects.contains_key(*id) && !(o.kind == Some(crate::diff::Kind::Column) && o.owner.as_ref().is_some_and(|t| !current.objects.contains_key(t)))).map(|(id, o)| format!("{} {}", if o.kind == Some(crate::diff::Kind::Table) { "table" } else { "column" }, shown_name(id))).collect();
-            let mut problems = drop_problems(&lost, &plan.losses, &narrowed, &guesses, &owned_by_guess, &added, &Choices { drop: columns.drop.clone(), rename: choices.rename.clone(), ..Default::default() }, asked);
+            let mut problems = drop_problems(&lost, &shown, &narrowed, &guesses, &guess_owner, &added, &Choices { drop: columns.drop.clone(), rename: choices.rename.clone(), ..Default::default() }, asked);
             if force {
                 problems.retain(|p| !DESTRUCTIVE.contains(&p.code));
             }
@@ -3830,16 +5038,18 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
             db.script(&format!("{statement};")).await?;
         }
     }
-    settled.map(|r| r.map(|(plan, assumed)| Settled { renames, plan, assumed }))
+    let tables = renamed_tables.iter().map(|(old, new, _)| (old.clone(), new.clone())).collect();
+    settled.map(|r| r.map(|(plan, assumed)| Settled { renames, plan, assumed, tables }))
 }
 
 /// The new migration's text: the diff engine's plan from the migrations replayed in order to
 /// `schema.sql`, run on the replay and compared with `schema.sql` before it is written. A plan that
 /// does not reach it is written all the same, with what remains, for the person (or agent) to finish.
-#[allow(clippy::type_complexity)]
+/// `added` are extensions the shadows leave out beside those the project's files create.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 #[cfg(feature = "cli")]
-async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, migration: &str, choices: &Choices, log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
-    let drafted = |texts: Vec<String>, code: i32, notes: Vec<String>, empty: bool| Drafted { texts, code, notes, empty, target: target_name.to_string(), lock_safe: false };
+async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, added: &[String], migration: &str, choices: &Choices, log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
+    let drafted = |texts: Vec<String>, code: i32, notes: Vec<String>, empty: bool| Drafted { texts, code, notes, empty, target: target_name.to_string(), lock_safe: false, commits: 0, changes: vec![] };
     let mut db = Db::open(opts).await?;
     let mut problems = out_of_reach(&mut db, &opts.url).await?;
     problems.extend(unreadable_grants(&mut db, opts, files, Some(schema_sql)).await?);
@@ -3849,7 +5059,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
     }
     let mut server = Server::open(&mut db, &opts.url, opts.shadow_url.as_deref()).await?;
     server.copy_default_privileges(!sets_default_privileges(opts));
-    server.leave_extensions(created_extensions(opts));
+    server.leave_extensions(created_extensions(opts).into_iter().chain(added.iter().cloned()).collect());
     server.leave_schemas(created_schemas(opts));
     left_out_note(&server, log);
     db.close().await;
@@ -3870,6 +5080,8 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             return Ok(Err(vec![Problem::new("replay-fails", format!("Replaying {m} in a shadow database fails")).note(e)]));
         }
         shadows.taint(c);
+        // What the migrations make, for the summary of what the new one changes.
+        let before = catalog(shadows.db(c)).await?;
         let unread = crate::catalog::unmodeled(shadows.db(a), true).await?;
         unmodeled_note("Reylo doesn't fully compare these in schema.sql, so a migration can leave them, or a change to them, out: check them by hand", &unread, log);
         let mut target = match crate::diff::read(shadows.db(a)).await {
@@ -3884,6 +5096,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
         // table moved to another schema is moved first, keeping its rows: the moves run on the
         // replay before the rest is planned from it.
         let mut moves = Vec::new();
+        let mut moved: Option<Vec<String>> = None;
         if shadows.db(c).dialect() == Dialect::Postgres {
             crate::diff::postgres::declare(shadows.db(a), &mut target, schema_sql).await?;
             moves = crate::diff::postgres::moves(&current, &target);
@@ -3892,6 +5105,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
                 let file = Migration { name: "moves".into(), time: String::new(), path: PathBuf::new(), sql: moves.iter().map(|m| format!("{m};")).collect::<Vec<_>>().join("\n") };
                 run(shadows.db(c), &file, false).await?;
                 current = crate::diff::read(shadows.db(c)).await?;
+                moved = Some(catalog(shadows.db(c)).await?);
             }
         }
         // Tables renamed, as --rename states, or where one goes while one of the same columns comes:
@@ -3901,10 +5115,13 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
         let indexes = if d == Dialect::Postgres { crate::diff::postgres::index_names(shadows.db(a)).await? } else { Default::default() };
         let target = Target { schema: target, indexes };
         let asked = Asked::migration(migration);
-        let Settled { renames, mut plan, assumed } = match settle(shadows.db(c), current, &target, false, choices, Some(&asked), false).await? {
+        let Settled { renames, mut plan, assumed, tables } = match settle(shadows.db(c), current, &target, false, choices, Some(&asked), false).await? {
             Ok(settled) => settled,
             Err(problems) => return Ok(Err(problems)),
         };
+        // The schema the table renames left, for the summary, which shows each as a rename and leaves
+        // out what only took its new name.
+        let renamed = if tables.is_empty() { None } else { Some(catalog(shadows.db(c)).await?) };
         moves.extend(renames);
         if plan.statements.is_empty() && moves.is_empty() {
             return Ok(Ok(drafted(vec![String::new()], 0, vec![], true)));
@@ -3913,6 +5130,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
         // reads them all is written in the shape that doesn't, as several files (`locks`).
         let existing = if d == Dialect::Postgres { crate::locks::existing_tables(shadows.db(c)).await? } else { Default::default() };
         let mut split = crate::locks::lock_safe(&plan, &existing);
+        let commits = plan.statements.iter().filter(|s| *s == crate::diff::COMMIT).count();
         // The plan runs on the replay as `deploy` will run its files: one file in one transaction (on
         // SQLite with foreign keys off until it is checked), on MySQL a file per statement, and the
         // lock-safe shape's files one after another. Each says the locks it holds.
@@ -3958,7 +5176,11 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             }
             (failed, hazards) = run_pieces(shadows.db(c2), pieces(&None, &plan)).await?;
             reached = catalog(shadows.db(c2)).await?;
-            notes.push(format!("  {} Written as one file: split so that none blocks writes while it reads every row, it didn't reach {target_name}", paint("yellow", "!")));
+            notes.push(if commits == 0 {
+                format!("  {} Written as one file: split so that none blocks writes while it reads every row, it didn't reach {target_name}", paint("yellow", "!"))
+            } else {
+                format!("  {} Split only after each new enum value: split so that none blocks writes while it reads every row, it didn't reach {target_name}", paint("yellow", "!"))
+            });
         }
         if !hazards.is_empty() && !choices.blocking && failed.is_none() && reached == wanted {
             return Ok(Err(vec![lock_problem(&hazards, &asked, choices)]));
@@ -3969,19 +5191,22 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
         let split_files = split.as_ref().map(|files| files.len());
         let mut texts = match split {
             Some(mut files) => {
-                // The moves first, in a file of their own where the first is an index built concurrently.
+                // The moves first, in a file of their own where the first is an index built
+                // concurrently; past the files that commit an enum's new labels alone.
                 if !moves.is_empty() {
-                    let first = files[0].iter().filter(|s| !s.starts_with("--")).map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
+                    let at = commits.min(files.len().saturating_sub(1));
+                    let first = files[at].iter().filter(|s| !s.starts_with("--")).map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
                     if runs_alone(&first, d) {
-                        files.insert(0, std::mem::take(&mut moves));
+                        files.insert(at, std::mem::take(&mut moves));
                     } else {
-                        files[0].splice(0..0, std::mem::take(&mut moves));
+                        files[at].splice(0..0, std::mem::take(&mut moves));
                     }
                 }
                 crate::locks::file_texts(&plan, &files)
             }
             None => {
-                plan.statements.splice(0..0, std::mem::take(&mut moves));
+                let at = plan.statements.iter().rposition(|s| s == crate::diff::COMMIT).map_or(0, |c| c + 1);
+                plan.statements.splice(at..at, std::mem::take(&mut moves));
                 plan_files(&plan, d)
             }
         };
@@ -3994,13 +5219,8 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
         if !assumed.is_empty() {
             let one = assumed.len() == 1;
             let names: Vec<String> = assumed.iter().map(|(old, _, _)| old.clone()).collect();
-            if one {
-                notes.push(format!("  {} Written as a rename, keeping its rows: {} → {}", paint("yellow", "!"), assumed[0].0, assumed[0].1));
-            } else {
-                let width = assumed.iter().map(|(old, _, _)| old.chars().count()).max().unwrap_or(0);
-                notes.push(format!("  {} Written as renames, keeping their rows:", paint("yellow", "!")));
-                notes.extend(assumed.iter().map(|(old, new, _)| format!("      {old:<width$} → {new}")));
-            }
+            // The summary above shows each rename.
+            notes.push(format!("  {} {}", paint("yellow", "!"), if one { "Written as a rename, keeping its rows" } else { "Written as renames, keeping their rows" }));
             let unasked = match (assumed.iter().all(|a| a.2), assumed.iter().all(|a| !a.2)) {
                 (true, _) if one => "If they're different tables",
                 (_, true) if one => "If they're different columns",
@@ -4010,7 +5230,8 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             notes.push(format!("      {}", paint("cyan", &create_command(&asked, choices, &names, &[]))));
         }
         if failed.is_none() && reached == wanted {
-            return Ok(Ok(Drafted { lock_safe: split_files.is_some(), ..drafted(texts, 0, notes, false) }));
+            let steps = Steps { dialect: d, before: &before, moved: moved.as_deref(), renamed: renamed.as_deref(), after: &reached };
+            return Ok(Ok(Drafted { lock_safe: split_files.is_some(), commits, changes: summary_lines(&steps, &tables, &plan.renamed), ..drafted(texts, 0, notes, false) }));
         }
         let mut remaining = Vec::new();
         if let Some(f) = &failed {
@@ -4022,7 +5243,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
         notes.push(paint("bold red", &format!("✗ The migration doesn't reach {target_name}: what remains is written at its top, to finish by hand")));
         notes.extend(remaining.iter().map(|r| format!("  {r}")));
         texts[0] = format!("-- This plan does not reach {target_name} yet. What remains:\n{}\n{}", remaining.iter().map(|r| format!("--   {}", r.replace('\n', " "))).collect::<Vec<_>>().join("\n"), texts[0]);
-        Ok(Ok(Drafted { lock_safe: split_files.is_some(), ..drafted(texts, 1, notes, false) }))
+        Ok(Ok(Drafted { lock_safe: split_files.is_some(), commits, ..drafted(texts, 1, notes, false) }))
     }
     .await;
     shadows.finish().await;
@@ -4030,26 +5251,254 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
     result
 }
 
-/// The database's schema as SQL that makes it, for init's schema.sql and `db introspect`: written as
-/// `migrate new` writes a migration (lowercase, unqualified, from Reylo's own reading of the database)
-/// where shadow databases show that text makes exactly what the database's own dump makes; else the
-/// dump, which also holds what Reylo reads by name only.
+/// The database's schema as SQL that makes it, for init's schema.sql, `db introspect` and a `migrate
+/// new` with no schema.sql, or the refusal that says why it can't be written: written as `migrate
+/// new` writes a migration (lowercase, unqualified, from Reylo's own reading of the database) where
+/// a shadow database shows that text makes exactly this schema; else the database's own dump, which
+/// also holds what Reylo reads by name only.
 #[cfg(feature = "cli")]
-async fn schema_as_sql(opts: &Options, schemas: &[String]) -> Result<String, Error> {
+async fn schema_as_sql(opts: &Options, schemas: &[String]) -> Result<Result<String, Problem>, Error> {
     let mut db = Db::open(opts).await?;
-    let result = schema_as_sql_on(&mut db, opts, schemas).await;
+    let result = schema_as_sql_on(&mut db, opts, schemas, true).await;
     db.close().await;
     result
 }
 
+/// `shadowed` is whether the command needs shadow databases anyway: where none can be made, it is
+/// told so, rather than given the dump.
 #[cfg(feature = "cli")]
-async fn schema_as_sql_on(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<String, Error> {
+async fn schema_as_sql_on(db: &mut Db, opts: &Options, schemas: &[String], shadowed: bool) -> Result<Result<String, Problem>, Error> {
+    if db.dialect() != Dialect::Postgres {
+        return checked_against_dump(db, opts, schemas).await.map(Ok);
+    }
+    // Reylo's own SQL, checked against the database itself, needs no pg_dump: only the dump it
+    // falls back on does. It makes every schema, so --schema naming only some of those that hold
+    // anything leaves the dump.
+    let partial = left_out(db, schemas).await?;
+    let why = if !partial.is_empty() {
+        vec![format!("  Reylo's own SQL makes every schema, and --schema leaves out {}", and_list(&partial))]
+    } else {
+        match own_sql(db, opts).await? {
+            Ok(sql) => return Ok(Ok(sql)),
+            Err(NotOwn::NoShadow(e)) if shadowed => return Err(e),
+            Err(NotOwn::NoShadow(e)) => vec![format!("  No shadow database can be made to check Reylo's own SQL for it: {e}")],
+            Err(NotOwn::Short(why)) => why,
+        }
+    };
+    let version: i64 = db.rows("select current_setting('server_version_num') as v").await?.first().and_then(|r| r.first()?.parse().ok()).unwrap_or(0);
+    if let Err(missing) = crate::db::find_pg_dump(version / 10000) {
+        return Ok(Err(pg_dump_problem(&missing, why)));
+    }
+    dump_from(db, opts, schemas).await.map(Ok)
+}
+
+/// What --schema (`schemas`, where it names any) leaves out: each schema of the project's it doesn't
+/// name that Reylo's own SQL would write ([`schemas_to_name`]). Postgres alone has schemas to name.
+#[cfg(feature = "cli")]
+async fn left_out(db: &mut Db, schemas: &[String]) -> Result<Vec<String>, Error> {
+    if schemas.is_empty() || db.dialect() != Dialect::Postgres {
+        return Ok(vec![]);
+    }
+    Ok(schemas_to_name(db).await?.into_iter().filter(|s| !schemas.contains(s)).collect())
+}
+
+/// `schemas`, as --schema names them, with each schema of the project's that what they hold refers
+/// to, said in a note: SQL that made them alone wouldn't run.
+#[cfg(feature = "cli")]
+async fn with_referenced(db: &mut Db, schemas: &[String], log: Log<'_>) -> Result<Vec<String>, Error> {
+    if schemas.is_empty() || db.dialect() != Dialect::Postgres {
+        return Ok(schemas.to_vec());
+    }
+    let project = crate::catalog::user_schemas(db).await?;
+    let mut named = schemas.to_vec();
+    loop {
+        let more: Vec<String> = referenced_schemas(db, &named).await?.into_iter().filter(|s| project.contains(s) && !named.contains(s)).collect();
+        if more.is_empty() {
+            break;
+        }
+        named.extend(more);
+    }
+    if named.len() > schemas.len() {
+        log(&note(format!("Reading {} too, which {} refers to", and_list(&named[schemas.len()..]), and_list(schemas))));
+    }
+    Ok(named)
+}
+
+/// The schemas of the project's that --schema has to name for SQL of them to hold them: each that
+/// holds an object of its own (not one an extension made, nor what comes with another object, as a
+/// table's index or sequence does, nor Reylo's history), and each that holds nothing at all, but
+/// `public`, which every new database has. One that holds an extension alone is made with it.
+#[cfg(feature = "cli")]
+async fn schemas_to_name(db: &mut Db) -> Result<Vec<String>, Error> {
+    let rows = db
+        .rows(&format!(
+            "select n.nspname as name from pg_namespace n where {} and {} and (exists (
+               select 1 from pg_depend d where d.refclassid = 'pg_namespace'::regclass and d.refobjid = n.oid and d.deptype = 'n'
+                 and not exists (select 1 from pg_depend o where o.classid = d.classid and o.objid = d.objid and o.deptype in ('e', 'a', 'i'))
+                 and not (d.classid = 'pg_class'::regclass and d.objid in (select oid from pg_class where relname = '{HISTORY_TABLE}')))
+               or (n.nspname <> 'public' and not exists (select 1 from pg_depend d where d.refclassid = 'pg_namespace'::regclass and d.refobjid = n.oid)))
+             order by 1",
+            crate::catalog::PG_USER_NS,
+            crate::catalog::not_platform_schema("n")
+        ))
+        .await?;
+    Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
+}
+
+/// The schemas outside `named` that what `named` holds refers to: a view's tables, a key's table, a
+/// column's type, a default's sequence, a trigger's function.
+#[cfg(feature = "cli")]
+async fn referenced_schemas(db: &mut Db, named: &[String]) -> Result<Vec<String>, Error> {
+    let list = named.iter().map(|s| crate::db::literal(s)).collect::<Vec<_>>().join(", ");
+    // The schema of what refers: a rule's, a default's, a trigger's and a policy's is its table's.
+    let on_table = |catalog: &str, table: &str| format!("when '{catalog}'::regclass then (select c.relnamespace from {catalog} x join pg_class c on c.oid = x.{table} where x.oid = d.objid)");
+    let rows = db
+        .rows(&format!(
+            "select distinct r.schema as name from pg_depend d
+               cross join lateral (select coalesce(case d.classid {} {} {} {} end,
+                 (select n.oid from pg_namespace n where n.nspname = (pg_identify_object(d.classid, d.objid, 0)).schema)) as ns) o
+               join pg_namespace n on n.oid = o.ns
+               cross join lateral pg_identify_object(d.refclassid, d.refobjid, 0) r
+             where d.deptype = 'n' and d.objid >= 16384 and n.nspname in ({list}) and r.schema is not null and r.schema not in ({list})
+             order by 1",
+            on_table("pg_rewrite", "ev_class"),
+            on_table("pg_attrdef", "adrelid"),
+            on_table("pg_trigger", "tgrelid"),
+            on_table("pg_policy", "polrelid")
+        ))
+        .await?;
+    Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
+}
+
+/// `live` as a shadow that ran SQL written from it reads, where the SQL makes all of it: without the
+/// lines the environment gives a shadow as it is made and `made` lacks, which the SQL leaves to it
+/// (a default privilege, the privileges on what an extension made). Partitions, comments and the
+/// rest stay, for the SQL to make.
+#[cfg(feature = "cli")]
+fn as_made(live: &[String], made: &[String]) -> Vec<String> {
+    use crate::catalog::{DEFAULT_PRIVILEGES, EXTENSION_GRANT};
+    live.iter().filter(|l| !(l.starts_with(DEFAULT_PRIVILEGES) || l.starts_with(EXTENSION_GRANT)) || made.contains(l)).cloned().collect()
+}
+
+/// The refusal of an init whose --schema (`schemas`) leaves out schemas of the project's (`left`):
+/// init.sql must make the whole schema, to be recorded as run.
+#[cfg(feature = "cli")]
+fn schemas_left_out(schemas: &[String], left: &[String]) -> Problem {
+    let flags: Vec<String> = schemas.iter().chain(left).map(|s| format!("--schema {}", shell_word(s))).collect();
+    Problem::new("schemas-left-out", format!("This database's schema is in {} too, which --schema leaves out", and_list(left)))
+        .note("The whole schema has to be in init.sql, to record it as run here.")
+        .fix("Name every schema it's in", &[format!("reylo migrate init {}", flags.join(" ")).as_str()])
+}
+
+/// The extensions of the project's a Postgres database has, by name, lowercase.
+#[cfg(feature = "cli")]
+async fn project_extensions(db: &mut Db) -> Result<Vec<String>, Error> {
+    let rows = db.rows(&format!("select lower(x.extname) as name from pg_extension x join pg_namespace n on n.oid = x.extnamespace where x.extname <> 'plpgsql' and {}", crate::catalog::project_extension("x", "n"))).await?;
+    Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
+}
+
+/// Why Reylo's own SQL for a schema isn't taken: no shadow database can be made to check it, or it
+/// falls short, as lines a person reads.
+#[cfg(feature = "cli")]
+enum NotOwn {
+    NoShadow(Error),
+    Short(Vec<String>),
+}
+
+/// Reylo's own SQL for a Postgres database's schema, the plan `migrate new` would write from an
+/// empty database to this one, where a shadow database that runs it then reads as this database
+/// does; else why not.
+#[cfg(feature = "cli")]
+async fn own_sql(db: &mut Db, opts: &Options) -> Result<Result<String, NotOwn>, Error> {
+    let mut server = match shadow_server(db, opts).await {
+        Ok(server) => server,
+        Err(e) => return Ok(Err(NotOwn::NoShadow(e))),
+    };
+    // The project's extensions are the text's to make, as a fresh database needs them: a shadow that
+    // already had them would hide a plan that leaves them out.
+    server.leave_extensions(project_extensions(db).await?);
+    let result = async {
+        let live = catalog(db).await?;
+        let mut empty = match server.shadow().await {
+            Ok(shadow) => shadow,
+            Err(e) => return Ok(Err(NotOwn::NoShadow(e))),
+        };
+        let planned = plan_text(&mut empty.db, db, None).await;
+        server.drop_shadow(empty).await;
+        let Some(planned) = planned else { return Ok(Err(NotOwn::Short(vec!["  Reylo can't write it as SQL of its own".to_string()]))) };
+        // A blank line between statements, for a file a person reads whole; one with comments of
+        // the plan's own stays as written.
+        let sql = if planned.lines().any(|l| l.trim_start().starts_with("--")) {
+            planned
+        } else {
+            crate::sql::split_statements(&planned, db.dialect()).iter().map(|st| format!("{};", st.text.trim())).collect::<Vec<_>>().join("\n\n")
+        };
+        let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &[sql.as_str()]).await;
+        let lane = shadows.lane();
+        shadows.push(lane, [Step::script("schema.sql", &sql)]);
+        let made = shadows.lines(lane).await;
+        shadows.finish().await;
+        let made = match made? {
+            Ok(made) => made,
+            Err((_, e)) => return Ok(Err(NotOwn::Short(vec![format!("  Reylo's own SQL for it fails on a shadow database: {e}")]))),
+        };
+        let live = as_made(&live, &made);
+        if live == made {
+            return Ok(Ok(format!("{}\n", sql.trim_end())));
+        }
+        let mut why = vec!["  Reylo's own SQL doesn't make all of it:".to_string()];
+        why.extend(changed_lines(&made, &live, db.dialect()));
+        Ok::<_, Error>(Err(NotOwn::Short(why)))
+    }
+    .await;
+    server.close().await;
+    result
+}
+
+/// The refusal of a schema Reylo's own SQL doesn't make, for the reason `why` gives, where no
+/// pg_dump can write it instead.
+#[cfg(feature = "cli")]
+fn pg_dump_problem(missing: &crate::db::NoPgDump, why: Vec<String>) -> Problem {
+    let major = missing.major;
+    let mut problem = Problem::new("pg-dump-missing", format!("Writing this schema as SQL needs pg_dump {major} or newer")).lines(why);
+    for (path, version) in &missing.older {
+        problem = problem.note(format!("The pg_dump at {path} is version {version}, which can't read Postgres {major}"));
+    }
+    problem = problem.note("Reylo looks for it in PGBIN, then where Postgres installs it, then on PATH.");
+    match install_pg_dump(major) {
+        Some(command) => problem.fix(format!("Install pg_dump {major}, then run it again"), &[command.as_str()]),
+        None => problem.note(format!("Run it again where pg_dump {major} or newer is installed.")),
+    }
+}
+
+/// The command that installs pg_dump `major` on this system, where there is one to name: none in a
+/// container with no package manager, as Reylo's own image is.
+#[cfg(feature = "cli")]
+fn install_pg_dump(major: i64) -> Option<String> {
+    let exists = |p: &str| Path::new(p).exists();
+    if cfg!(target_os = "macos") {
+        // The client alone: pg_dump reads every server older than itself.
+        Some("brew install libpq".into())
+    } else if cfg!(windows) {
+        Some("scoop install postgresql".into())
+    } else if !exists("/bin/sh") {
+        None
+    } else if exists("/etc/alpine-release") {
+        Some(format!("apk add postgresql{major}-client"))
+    } else if exists("/etc/redhat-release") {
+        Some(format!("sudo dnf install postgresql{major}"))
+    } else {
+        Some(format!("sudo apt-get install postgresql-client-{major}"))
+    }
+}
+
+/// The schema of a MySQL or SQLite database as SQL that makes it: Reylo's own, where a shadow shows
+/// it makes exactly what the database's own dump makes, else the dump.
+#[cfg(feature = "cli")]
+async fn checked_against_dump(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<String, Error> {
     let dumped = dump_from(db, opts, schemas).await?;
     // Where no shadow database can be made (a role without CREATEDB, and no shadow_url), the dump.
     let Ok(mut server) = shadow_server(db, opts).await else { return Ok(dumped) };
-    // The extensions the dump creates are the text's to make, as a fresh database needs them: a
-    // shadow that already had them would hide a plan that leaves them out.
-    server.leave_extensions(extensions_in(&dumped));
     let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &[dumped.as_str()]).await;
     let styled = async {
         // The plan from an empty database to this one, as `new` writes a migration.
@@ -4132,10 +5581,15 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             // Owners are kept where they aren't the role the file will run as, which owns what it makes.
             let runner = db.rows("select quote_ident(current_user) as u").await?.first().map(|r| r.text("u").to_string()).unwrap_or_default();
             args.push(format!("--exclude-table=*.{HISTORY_TABLE}"));
-            let named_schemas: Vec<String> = if schemas.is_empty() { vec!["public".into()] } else { schemas.to_vec() };
+            // Every schema of the project's, unless --schema names some.
+            let mut named_schemas: Vec<String> = if schemas.is_empty() { crate::catalog::user_schemas(db).await? } else { schemas.to_vec() };
+            if named_schemas.is_empty() {
+                named_schemas.push("public".into());
+            }
             for s in &named_schemas {
+                // A name, matched as it is written: pg_dump reads a pattern, folding what isn't quoted.
                 args.push("--schema".into());
-                args.push(s.clone());
+                args.push(format!("\"{}\"", s.replace('"', "\"\"")));
             }
             // What the platform's roles own in a dumped schema is the platform's, which every
             // comparison leaves out (Tiger Cloud's functions in `public`, its superuser's default
@@ -4252,10 +5706,14 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
                 if s.starts_with("CREATE FOREIGN TABLE ") {
                     kept.append(&mut foreign);
                 }
-                kept.push(match s.strip_prefix("CREATE SCHEMA ") {
+                let s = match s.strip_prefix("CREATE SCHEMA ") {
                     Some(rest) if !rest.starts_with("IF NOT EXISTS ") => format!("CREATE SCHEMA IF NOT EXISTS {rest}"),
                     _ => s.to_string(),
-                });
+                };
+                // A schema made already, for the extensions in it.
+                if !(s.starts_with("CREATE SCHEMA IF NOT EXISTS ") && kept.contains(&s)) {
+                    kept.push(s);
+                }
             }
             kept.append(&mut foreign);
             // Event triggers and publications, which are in no schema, so pg_dump writes neither for a
@@ -4402,6 +5860,22 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
 /// records init.sql without running it, once a shadow shows the database already has its schema.
 #[cfg(feature = "cli")]
 pub async fn init(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32, Error> {
+    // The directories it may make, the deepest first: `reylo/migrations/`, and `reylo/` where it's
+    // new, which the shadows' replay cache goes in too. A run that doesn't start the project takes
+    // them away again, so that init runs again once it can, and a refusal's "Nothing was changed"
+    // holds.
+    // Nothing at the path, not even a link: `exists` follows one, and a link that leads nowhere is
+    // still the user's.
+    let made: Vec<PathBuf> = opts.dir.ancestors().take_while(|d| !d.as_os_str().is_empty() && std::fs::symlink_metadata(d).is_err()).map(Path::to_path_buf).collect();
+    let result = init_in(opts, schemas, log).await;
+    if let (false, Some(top)) = (matches!(result, Ok(0)), made.last()) {
+        let _ = std::fs::remove_dir_all(top);
+    }
+    result
+}
+
+#[cfg(feature = "cli")]
+async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32, Error> {
     if let Some(code) = refuse_lock_file(opts, log) {
         return Ok(code);
     }
@@ -4429,10 +5903,15 @@ pub async fn init(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i3
     // file the role runs makes them as they are here.
     let problems = out_of_reach(&mut db, &opts.url).await;
     let lines = catalog(&mut db).await;
+    let left = left_out(&mut db, schemas).await;
     db.close().await;
     let problems = problems?;
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
+    }
+    let left = left?;
+    if !left.is_empty() {
+        return Ok(refuse(&[schemas_left_out(schemas, &left)], log));
     }
     if !holds_a_schema(&lines?) {
         drop(spinning);
@@ -4450,7 +5929,10 @@ pub async fn init(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i3
     let sql = schema_as_sql(opts, schemas).await?;
     // Recording init.sql replays it on a shadow database, which says so itself.
     drop(spinning);
-    let made_dir = !opts.dir.exists();
+    let sql = match sql {
+        Ok(sql) => sql,
+        Err(problem) => return Ok(refuse(&[problem], log)),
+    };
     std::fs::create_dir_all(&opts.dir)?;
     std::fs::write(&opts.schema, &sql)?;
     let init = opts.dir.join(INIT);
@@ -4461,15 +5943,12 @@ pub async fn init(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i3
     lock::write(&opts.lock, &lock::Lock { schema, entries })?;
     // init.sql is recorded as run, which the tree says. One that can't start (no shadow database can
     // be made) or is refused (init.sql doesn't replay, or doesn't make this schema) leaves no project
-    // behind, so that init runs again once it can, and the refusal's "Nothing was changed" holds.
+    // behind: its files here, and its directories in `init`.
     let mut said: Vec<String> = Vec::new();
     let recorded = history_push_as(opts, true, &mut |l: &str| said.push(l.to_string())).await;
     if !matches!(recorded, Ok(0)) {
         for file in [&opts.schema, &init, &opts.lock] {
             let _ = std::fs::remove_file(file);
-        }
-        if made_dir {
-            let _ = std::fs::remove_dir(&opts.dir);
         }
     }
     let code = match recorded {
@@ -4499,19 +5978,27 @@ pub async fn init(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i3
 
 /// `reylo db introspect`: the database's schema as SQL that makes it, as `init` writes schema.sql;
 /// nothing for an empty database. Writes no file and changes no database: saving it over schema.sql,
-/// whose comments and layout it doesn't keep, is a redirect.
+/// whose comments and layout it doesn't keep, is a redirect. `Err` is the code to exit with, once
+/// `log` has said why it can't be written.
 #[cfg(feature = "cli")]
-pub async fn db_introspect(opts: &Options, schemas: &[String]) -> Result<String, Error> {
+pub async fn db_introspect(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<Result<String, i32>, Error> {
     there(opts)?;
-    let _spinning = crate::terminal::spinner(format!("Introspecting {}", shown_url(&opts.url)));
+    let spinning = crate::terminal::spinner(format!("Introspecting {}", shown_url(&opts.url)));
     let mut db = Db::open(opts).await?;
-    let result = match catalog(&mut db).await {
-        Ok(lines) if holds_a_schema(&lines) => schema_as_sql_on(&mut db, opts, schemas).await,
-        Ok(_) => Ok(String::new()),
-        Err(e) => Err(e),
-    };
+    let result = async {
+        if !holds_a_schema(&catalog(&mut db).await?) {
+            return Ok(Ok(String::new()));
+        }
+        let schemas = with_referenced(&mut db, schemas, &mut *log).await?;
+        schema_as_sql_on(&mut db, opts, &schemas, false).await
+    }
+    .await;
     db.close().await;
-    result
+    drop(spinning);
+    Ok(match result? {
+        Ok(sql) => Ok(sql),
+        Err(problem) => Err(refuse(&[problem], log)),
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -4568,8 +6055,9 @@ const COMMITTED: &str = "The plan commits partway (an enum's new labels, before 
 
 /// Why `take_to` left the database as it was.
 enum Unreached {
-    /// The plan ran, but the database didn't then read as the target: how it differs.
-    Differs(Vec<String>),
+    /// The plan ran, but the database didn't then read as the target: its schema then, and the
+    /// target's, which `differs` describes.
+    Differs(Vec<String>, Vec<String>),
     /// What was stated refused the plan before it ran.
     Refused(Vec<Problem>),
 }
@@ -4597,8 +6085,20 @@ async fn take_to(db: &mut Db, target: &Target, then: &[String], expect: &[String
             Ok(Settled { renames, plan, .. }) => (renames, plan),
             Err(problems) => return Ok(Err(Unreached::Refused(problems))),
         };
+        // Where the plan commits partway, the renames planning ran on the database run again after
+        // the commit, as a migration writes them: an enum's new labels commit alone, and a push that
+        // fails past them leaves every table under its name.
+        let mut statements: Vec<String> = plan.runnable().cloned().collect();
+        if let Some(last) = statements.iter().rposition(|s| s == crate::diff::COMMIT).filter(|_| transactional) {
+            let ran: Vec<String> = renames.iter().filter(|s| !s.starts_with("--")).cloned().collect();
+            if !ran.is_empty() {
+                db.exec("rollback").await?;
+                db.exec("begin").await?;
+                statements.splice(last + 1..last + 1, ran);
+            }
+        }
         let mut committed = false;
-        for s in plan.runnable().chain(then) {
+        for s in statements.iter().chain(then) {
             if let Err(e) = db.script(&format!("{};", s.trim_end().trim_end_matches(';'))).await {
                 return Err(if committed { Error(format!("{}\n{COMMITTED}", e.0)) } else { e });
             }
@@ -4610,7 +6110,7 @@ async fn take_to(db: &mut Db, target: &Target, then: &[String], expect: &[String
         crate::catalog::keep_turso_sequences(db).await?;
         let now = crate::catalog::without_comments(&crate::catalog::without_extra_children(&catalog(db).await?, expect));
         if now != expect {
-            return Ok(Err(Unreached::Differs(describe_diff("this database", &now, "the target", expect))));
+            return Ok(Err(Unreached::Differs(now, expect.to_vec())));
         }
         if transactional {
             db.exec("commit").await?;
@@ -4924,7 +6424,9 @@ async fn relock(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, files: &
     match reach.filter(|_| whole) {
         Some(Reach::SchemaAhead) => log(&then(note("The schema is ahead of the migrations"), &[("To write the changes to a migration file", &["reylo migrate new <name>"])])),
         Some(Reach::MigrationsAhead) => log(&format!("{} The migrations make what {schema} doesn't declare: add it there, or take it out of the migration", paint("yellow", "!"))),
-        Some(Reach::Differ) => log(&then(format!("{} The migrations and {schema} disagree", paint("yellow", "!")), &[("See how", &["reylo migrate deploy --dry-run"])])),
+        // Either may be what's wanted, schema.sql edited or a migration written by hand, so the lead
+        // says what the migration would hold. A dry run would stop at what db push made.
+        Some(Reach::Differ) => log(&then(format!("{} The migrations and {schema} disagree", paint("yellow", "!")), &[(&format!("To write what {schema} has to a migration file"), &["reylo migrate new <name>"])])),
         Some(Reach::SchemaFails(e)) => log(&format!("{} On an empty database, {schema} fails: {}", paint("yellow", "!"), e.lines().next().unwrap_or_default())),
         Some(Reach::Same) | None => {}
     }
@@ -4959,6 +6461,50 @@ enum Reach {
     SchemaFails(String),
 }
 
+/// Whether `a` has what `b` doesn't, and `b` what `a` doesn't, as `difference` finds it, but for an
+/// enum: one whose values in one are the other's with more among them is only the larger one's
+/// change, since a value is added in place (`alter type … add value … after`) and none is taken out.
+#[cfg(feature = "cli")]
+fn sides(a: &[String], b: &[String]) -> (bool, bool) {
+    let (mut only_a, mut only_b) = difference(a, b);
+    let (mut a_more, mut b_more) = (false, false);
+    only_a.retain(|line| {
+        let Some((name, values)) = enum_values(line) else { return true };
+        let Some((i, other)) = only_b.iter().enumerate().find_map(|(i, l)| enum_values(l).filter(|(n, _)| *n == name).map(|(_, v)| (i, v))) else { return true };
+        if within(&other, &values) {
+            a_more = true;
+        } else if within(&values, &other) {
+            b_more = true;
+        } else {
+            return true;
+        }
+        only_b.remove(i);
+        false
+    });
+    (a_more || !only_a.is_empty(), b_more || !only_b.is_empty())
+}
+
+/// An enum's line, `enum <name> (<values as JSON strings>)`, as its name and values. The name ends at
+/// the first space outside its quotes.
+#[cfg(feature = "cli")]
+fn enum_values(line: &str) -> Option<(&str, Vec<String>)> {
+    let rest = line.strip_prefix("enum ")?;
+    let mut quoted = false;
+    let (k, _) = rest.char_indices().find(|&(_, c)| {
+        quoted ^= c == '"';
+        c == ' ' && !quoted
+    })?;
+    let values = rest[k..].strip_prefix(" (")?.strip_suffix(')')?;
+    Some((&rest[..k], serde_json::from_str(&format!("[{values}]")).ok()?))
+}
+
+/// Whether `fewer` is `more` with some of its values left out, in the same order.
+#[cfg(feature = "cli")]
+fn within(fewer: &[String], more: &[String]) -> bool {
+    let mut rest = more.iter();
+    fewer.len() < more.len() && fewer.iter().all(|v| rest.any(|m| m == v))
+}
+
 /// The lock as the database's history makes it: the migrations it ran, in its order, with
 /// schema.sql's checksum where their replay reaches schema.sql. None where the lock already is that.
 #[cfg(feature = "cli")]
@@ -4983,9 +6529,16 @@ async fn locked(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, files: &
         shadows.push(theirs, [Step::script("schema.sql", sql)]);
         let reach = match (shadows.lines(ours).await?, shadows.lines(theirs).await?) {
             (Ok(a), Ok(b)) if a == b => Reach::Same,
-            (Ok(a), Ok(b)) => match difference(&a, &b) {
-                (made, declared) if made.is_empty() && !declared.is_empty() => Reach::SchemaAhead,
-                (made, declared) if !made.is_empty() && declared.is_empty() => Reach::MigrationsAhead,
+            // A database that has schema.sql and not what its migrations make (db push made it) has
+            // what the next migration writes, whatever changed. What it doesn't compare (a comment)
+            // can match both.
+            (Ok(a), Ok(b)) if {
+                let live = catalog(db).await?;
+                crate::catalog::same_schema(&live, &b) && !crate::catalog::same_schema(&live, &a)
+            } => Reach::SchemaAhead,
+            (Ok(a), Ok(b)) => match sides(&a, &b) {
+                (false, true) => Reach::SchemaAhead,
+                (true, false) => Reach::MigrationsAhead,
                 _ => Reach::Differ,
             },
             (_, Err((_, e))) => Reach::SchemaFails(e),
@@ -5079,7 +6632,7 @@ async fn unexplained(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, kep
     if let Ok(Ok(())) = shadows.open(ran).await {
         shadows.taint(ran);
         match scoped_change(db, shadows.db(ran), &explaining).await {
-            Some((sql, statements)) => {
+            Some((sql, statements, _)) => {
                 problem = problem.sql(&sql);
                 undo = Some(statements);
             }
@@ -5115,9 +6668,10 @@ async fn unexplained(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, kep
 /// statements that undo it alone. An object that differs from the history is refused unless one of
 /// `explaining` (schema.sql, the pending migrations) has it as the database does, it is a comment,
 /// or it is a partition, which is data; what is refused comes back from the history, and everything
-/// else stays as it is on the database. None where nothing would change.
+/// else stays as it is on the database. Last, what the undo loses: each table or column it drops or
+/// narrows, by name. None where nothing would change.
 #[cfg(feature = "cli")]
-async fn scoped_change(db: &mut Db, history: &mut Db, explaining: &[crate::diff::Schema]) -> Option<(String, Vec<String>)> {
+async fn scoped_change(db: &mut Db, history: &mut Db, explaining: &[crate::diff::Schema]) -> Option<(String, Vec<String>, Vec<String>)> {
     let mut current = crate::diff::read(db).await.ok()?;
     current.live = true;
     let mut target = crate::diff::read(history).await.ok()?;
@@ -5158,7 +6712,8 @@ async fn scoped_change(db: &mut Db, history: &mut Db, explaining: &[crate::diff:
     let mut change = crate::diff::plan(&target, &current, alterer.as_ref());
     style(db, &mut change, &current).await.ok()?;
     let statements: Vec<String> = undo.runnable().map(|s| format!("{};", s.trim_end().trim_end_matches(';'))).collect();
-    (!statements.is_empty() && !change.statements.is_empty()).then(|| (change.sql(), statements))
+    let lost: Vec<String> = undo.losses.iter().chain(undo.narrowings.iter().map(|(column, _)| column)).map(|l| l.trim_start_matches("column ").trim_start_matches("table ").to_string()).collect();
+    (!statements.is_empty() && !change.statements.is_empty()).then(|| (change.sql(), statements, lost))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5181,12 +6736,15 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
     // Children of a table made at run time are data: never compared, never rewound. Comments are
     // written by what runs, and aren't compared with this database either.
     let at_kept = crate::catalog::without_comments(&at_kept);
+    // The extensions this database has, and the privileges on what they made, which the comparison
+    // with what the migrations kept make leaves out, and which nothing undoes.
+    let extensions: Vec<String> = live.iter().filter(|l| l.starts_with("extension ")).cloned().collect();
     let live = crate::catalog::without_comments(&crate::catalog::without_extra_children(live, &at_kept));
     let live = &live[..];
     let mut pending: Vec<Migration> = files.iter().filter(|f| !kept.iter().any(|k| k.name == f.name)).cloned().collect();
     let rewind_rows: Vec<&&HistoryRow> = applied[keep..].iter().collect();
     if lock_free(opts) {
-        if let Some(problem) = late_problem(shadows, kept, &pending, files).await? {
+        if let Some(problem) = late_problem(shadows, &opts.dir, kept, &pending, files).await? {
             return Ok(refuse(&[problem], log));
         }
     }
@@ -5245,7 +6803,7 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
             None => match take_to(db, &k_target, &forget, &at_kept, None).await {
                 Err(e) => return fail("Rewinding this database failed", e.0, log),
                 Ok(Err(Unreached::Refused(problems))) => return Ok(refuse(&problems, log)),
-                Ok(Err(Unreached::Differs(lines))) => return refused("Rewinding this database wouldn't reach what its migrations make", lines, log),
+                Ok(Err(Unreached::Differs(now, expect))) => return refused("Rewinding this database wouldn't reach what its migrations make", describe_diff("this database", &now, "its migrations", &expect), log),
                 Ok(Ok((_, plan))) => {
                     base = at_kept.clone();
                     plan
@@ -5291,7 +6849,7 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
             shadows.push(lane, kept.iter().chain(&pending[..j]).map(Step::of));
             if let Ok(Ok(lines)) = shadows.lines(lane).await {
                 let (added, removed) = difference(&crate::catalog::without_comments(&lines), &at_kept);
-                if (!added.is_empty() || !removed.is_empty()) && added.iter().all(|l| base.contains(l)) && !removed.iter().any(|l| base.contains(l)) {
+                if (!added.is_empty() || !removed.is_empty()) && added.iter().all(|l| base.contains(l) || extensions.contains(l)) && !removed.iter().any(|l| base.contains(l)) {
                     records = pending.drain(..j).collect();
                     break;
                 }
@@ -5339,7 +6897,7 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
             match take_to(db, &target, &[], &expect, None).await {
                 Err(e) => return fail("Undoing changes no migration made failed", e.0, log),
                 Ok(Err(Unreached::Refused(problems))) => return Ok(refuse(&problems, log)),
-                Ok(Err(Unreached::Differs(lines))) => return refused("Undoing changes no migration made wouldn't reach what the migrations make", lines, log),
+                Ok(Err(Unreached::Differs(now, expect))) => return refused("Undoing changes no migration made wouldn't reach what the migrations make", describe_diff("this database", &now, "the migrations", &expect), log),
                 Ok(Ok((_, plan))) => {
                     rows.open(log);
                     log(&format!("  {} Undid what no migration made, so that {} runs on what the migrations make", paint("yellow", "↺"), pending[0].name));
@@ -5363,7 +6921,7 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
         }
         rows.row(log, &paint("green", "✓"), &m.name, &format!("applied {}", paint("dim", &format!("· {} ms", started.elapsed().as_millis()))));
     }
-    if rewind_rows.is_empty() && records.is_empty() && pending.is_empty() && base == at_kept {
+    if rewind_rows.is_empty() && records.is_empty() && pending.is_empty() {
         log(&format!("{} Up to date with the migrations", paint("green", "✓")));
     }
     Ok(0)
@@ -5479,7 +7037,7 @@ async fn db_push_on(db: &mut Db, server: &mut Server, swept: usize, opts: &Optio
     if schema_sql.as_deref().is_some_and(|sql| crate::sql::is_blank(sql, d)) {
         problems.push(
             Problem::new("schema-sql-empty", format!("Nothing is declared in {}", shown(&opts.schema)))
-                .note("Taking this database to it would drop every table, with its rows.")
+                .note("Synchronizing this database with it would drop every table, with its rows.")
                 .fix("To rebuild this database from its migrations instead", &["reylo db reset"]),
         );
     }
@@ -5511,13 +7069,13 @@ async fn db_push_on(db: &mut Db, server: &mut Server, swept: usize, opts: &Optio
         }
     }
     if !behind.is_empty() {
-        let title = match unrun.as_slice() {
-            [one] if behind.len() == 1 => format!("This database hasn't run {}", one.name),
-            many if behind.len() == many.len() => format!("This database hasn't run {} migrations", many.len()),
-            _ => "This database doesn't match its migrations".to_string(),
+        let (title, fix) = match unrun.as_slice() {
+            [one] if behind.len() == 1 => (format!("This database hasn't run {}", one.name), "Run it first"),
+            many if behind.len() == many.len() => (format!("This database hasn't run {} migrations", many.len()), "Run them first"),
+            _ => ("This database doesn't match its migrations".to_string(), "Make it match its migrations first"),
         };
         let listed = if behind.len() == 1 && unrun.len() == 1 { vec![] } else { behind };
-        problems.push(Problem::new("database-not-at-migrations", title).lines(listed).fix(if unrun.len() == 1 { "Run it first" } else { "Take it to its migrations first" }, &["reylo migrate dev"]));
+        problems.push(Problem::new("database-not-at-migrations", title).lines(listed).fix(fix, &["reylo migrate dev"]));
     }
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
@@ -5565,8 +7123,8 @@ async fn db_push_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Optio
         let (renames, plan) = match take_to(db, &target, &[], &wanted, Some((push, asked))).await {
             Err(e) => return fail(if d == Dialect::Mysql { "reylo db push failed partway" } else { "reylo db push failed" }, e.0, log),
             Ok(Err(Unreached::Refused(problems))) => return Ok(refuse(&problems, log)),
-            Ok(Err(Unreached::Differs(lines))) => {
-                let problem = Problem::new("db-push-incomplete", format!("Reylo can't take this database the rest of the way to {}", shown(&opts.schema))).lines(lines).fix("Write the change as a migration, finishing by hand what it leaves out", &["reylo migrate new <name>"]);
+            Ok(Err(Unreached::Differs(now, expect))) => {
+                let problem = Problem::new("db-push-incomplete", format!("Reylo can't fully synchronize this database with {}", shown(&opts.schema))).lines(describe_diff("this database", &now, &shown(&opts.schema), &expect)).fix("Write the change as a migration, finishing by hand what it leaves out", &["reylo migrate new <name>"]);
                 if d != Dialect::Mysql {
                     return Ok(refuse(&[problem], log));
                 }
@@ -5724,8 +7282,18 @@ pub async fn run_sql(opts: &Options, items: &[(String, String)], log: Log<'_>) -
     let mut db = Db::open(opts).await?;
     let mut code = 0;
     for (label, sql) in items {
-        match db.script(sql).await {
-            Ok(()) => log(&format!("{} {label}", paint("green", "✓"))),
+        match db.script_tables(sql, RUN_ROWS_SHOWN).await {
+            Ok(tables) => {
+                log(&format!("{} {label}", paint("green", "✓")));
+                for (k, table) in tables.iter().enumerate() {
+                    if k > 0 {
+                        log("");
+                    }
+                    for line in table_lines(table) {
+                        log(&line);
+                    }
+                }
+            }
             Err(e) => {
                 log(&paint("bold red", &format!("✗ {label}")));
                 log(&format!("  {e}"));
@@ -5749,9 +7317,404 @@ pub async fn run_sql(opts: &Options, items: &[(String, String)], log: Log<'_>) -
     Ok(code)
 }
 
+/// How many rows `reylo run` shows of what a statement returns.
+#[cfg(feature = "cli")]
+const RUN_ROWS_SHOWN: usize = 50;
+
+/// What a statement returned, as `reylo run` shows it: a table of the rows it kept under its
+/// columns' names, each value on one line, a number set right and null dim, then how many rows it
+/// returned, and how many of those aren't shown.
+#[cfg(feature = "cli")]
+fn table_lines(table: &crate::db::Table) -> Vec<String> {
+    const WIDEST: usize = 60;
+    let cell = |value: &Option<String>| -> Option<String> {
+        let text = value.as_ref()?.replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t");
+        Some(if text.chars().count() > WIDEST { format!("{}…", text.chars().take(WIDEST - 1).collect::<String>()) } else { text })
+    };
+    let rows: Vec<Vec<Option<String>>> = table.rows.iter().map(|row| row.iter().map(cell).collect()).collect();
+    let width = |i: usize| rows.iter().map(|r| r[i].as_ref().map_or(4, |v| v.chars().count())).chain([table.columns[i].chars().count()]).max().unwrap_or(0);
+    let widths: Vec<usize> = (0..table.columns.len()).map(width).collect();
+    let numeric: Vec<bool> = (0..table.columns.len()).map(|i| rows.iter().any(|r| r[i].is_some()) && rows.iter().all(|r| r[i].as_ref().is_none_or(|v| v.parse::<f64>().is_ok()))).collect();
+    let pad = |text: &str, painted: String, i: usize| {
+        let gap = " ".repeat(widths[i] - text.chars().count());
+        if numeric[i] { format!("{gap}{painted}") } else { format!("{painted}{gap}") }
+    };
+    let line = |cells: Vec<String>| format!("  {}", cells.join("  ")).trim_end().to_string();
+    let mut out = vec![line(table.columns.iter().enumerate().map(|(i, c)| pad(c, paint("bold", c), i)).collect())];
+    out.push(line(widths.iter().map(|w| paint("dim", &"─".repeat(*w))).collect()));
+    for row in &rows {
+        out.push(line(row.iter().enumerate().map(|(i, v)| match v {
+            Some(v) => pad(v, v.clone(), i),
+            None => pad("null", paint("dim", "null"), i),
+        }).collect()));
+    }
+    let total = table.total;
+    let counted = format!("  Returned {total} row{}", if total == 1 { "" } else { "s" });
+    out.push(paint("dim", &if total > rows.len() { format!("{counted}, {} not shown", total - rows.len()) } else { counted }));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_printed_run_is_offered_only_where_it_runs_as_a_migration() {
+        for (sql, d) in [
+            ("create index a_id on a (id);", Dialect::Sqlite),
+            ("drop index a_id;", Dialect::Sqlite),
+            ("create table b (id integer);", Dialect::Sqlite),
+            ("drop index a_id on a;", Dialect::Mysql),
+            ("drop index a_id; drop table b;", Dialect::Postgres),
+            ("create index concurrently a_id on a (id);", Dialect::Postgres),
+        ] {
+            assert!(runs_as_a_migration(sql, d), "{sql}");
+        }
+        for (sql, d) in [
+            // With foreign keys on, as reylo run has them, a parent's rows take its children's.
+            ("drop table parent;", Dialect::Sqlite),
+            ("alter table a drop column b;", Dialect::Sqlite),
+            ("drop index a_id; drop index b_id;", Dialect::Sqlite),
+            ("drop index a_id on a; drop table b;", Dialect::Mysql),
+            ("alter type mood add value 'x'; commit; begin; update t set m = 'x';", Dialect::Postgres),
+        ] {
+            assert!(!runs_as_a_migration(sql, d), "{sql}");
+        }
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn a_table_made_from_a_query_is_told_by_its_words() {
+        let fills_all = |sql: &str, d: Dialect| split_statements(sql, d).iter().any(|s| fills(s, d));
+        for (sql, d) in [
+            ("create table snap as select id from a", Dialect::Postgres),
+            ("CREATE TEMP TABLE IF NOT EXISTS snap AS (WITH x AS (SELECT 1) SELECT * FROM x)", Dialect::Postgres),
+            ("create table snap as table a", Dialect::Postgres),
+            ("create table snap (id bigint) engine=InnoDB select id from a", Dialect::Mysql),
+            ("create table snap (select id from a)", Dialect::Mysql),
+            ("create table snap (id bigint) ((select id from a))", Dialect::Mysql),
+            ("create materialized view totals as select count(*) from a", Dialect::Postgres),
+            ("refresh materialized view totals", Dialect::Postgres),
+        ] {
+            assert!(fills_all(sql, d), "{sql}");
+        }
+        for (sql, d) in [
+            ("create table notes (id int, body text default 'select')", Dialect::Sqlite),
+            ("create table notes (with integer)", Dialect::Sqlite),
+            ("create table notes (values text, table text)", Dialect::Sqlite),
+            ("create table notes (id int) -- as select\n", Dialect::Postgres),
+            ("create table t (a int, b int generated always as (a + 1) stored)", Dialect::Postgres),
+            ("create table p partition of parent for values in (1)", Dialect::Postgres),
+            ("create table t (id int) with (fillfactor = 70)", Dialect::Postgres),
+            (r#"create table t ("select" int)"#, Dialect::Postgres),
+            ("create view v as select id from a", Dialect::Postgres),
+        ] {
+            assert!(!fills_all(sql, d), "{sql}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn a_statements_rows_show_as_a_table() {
+        set_color(false);
+        let t = |columns: &[&str], rows: &[&[Option<&str>]], total: usize| crate::db::Table { columns: columns.iter().map(|c| c.to_string()).collect(), rows: rows.iter().map(|r| r.iter().map(|v| v.map(String::from)).collect()).collect(), total };
+        let authors = t(&["name", "score", "bio"], &[&[Some("Ada"), Some("3"), None], &[Some("Grace"), Some("12"), Some("line one\nline two")]], 2);
+        assert_eq!(table_lines(&authors).join("\n"), "  name   score  bio\n  ─────  ─────  ──────────────────\n  Ada        3  null\n  Grace     12  line one\\nline two\n  Returned 2 rows");
+        // Of a statement's rows, those kept are shown, and the count says how many weren't.
+        assert_eq!(table_lines(&t(&["name", "score", "bio"], &[&[Some("Ada"), Some("3"), None]], 51)).join("\n"), "  name  score  bio\n  ────  ─────  ────\n  Ada       3  null\n  Returned 51 rows, 50 not shown");
+        assert_eq!(table_lines(&t(&["n"], &[], 0)).join("\n"), "  n\n  ─\n  Returned 0 rows");
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn a_libsql_script_splits_where_sqlite_ends_each_statement() {
+        // A column named end in a trigger's body, a `;` in a string and in a comment, and a last statement with no `;`.
+        let script = "create trigger t after insert on a begin insert into audit values (new.end); end;\n-- a note; and more\ninsert into a values ('x;y');\n\nselect 1";
+        assert_eq!(crate::db::sqlite_statements(script), ["create trigger t after insert on a begin insert into audit values (new.end); end;", "\n-- a note; and more\ninsert into a values ('x;y');", "\n\nselect 1"]);
+        assert!(crate::db::sqlite_statements("-- nothing;\n").is_empty());
+        // An empty statement is none, a comment before its `;` or not.
+        assert_eq!(crate::db::sqlite_statements("select 1;; -- note\n; select 2;"), ["select 1;", " select 2;"]);
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn an_enum_with_a_value_added_is_only_its_sides_change() {
+        let lines = |values: &str| vec!["table public.t".to_string(), format!("enum public.visibility ({values})")];
+        let (two, three) = (lines(r#""private", "public""#), lines(r#""private", "team", "public""#));
+        assert_eq!(sides(&two, &three), (false, true));
+        assert_eq!(sides(&three, &two), (true, false));
+        // Reordered, or one taken out and another added, each side has what the other doesn't.
+        assert_eq!(sides(&lines(r#""public", "private""#), &two), (true, true));
+        assert_eq!(sides(&lines(r#""private", "team""#), &two), (true, true));
+        // A quoted name with a space and a parenthesis in it is one name.
+        let quoted = |values: &str| vec![format!("enum public.\"state (internal)\" ({values})")];
+        assert_eq!(sides(&quoted(r#""a""#), &quoted(r#""a", "b""#)), (false, true));
+        // A value with a comma in it is one value.
+        assert_eq!(sides(&lines(r#""a, b""#), &lines(r#""a, b", "c""#)), (false, true));
+        assert_eq!(sides(&lines(r#""a""#), &lines(r#""a, b""#)), (true, true));
+        // Another line that differs still counts.
+        let mut more = three.clone();
+        more.push("column public.t.x integer".into());
+        assert_eq!(sides(&more, &two), (true, false));
+        assert_eq!(sides(&[two.clone(), vec!["column public.t.x integer".into()]].concat(), &three), (true, true));
+    }
+
+    #[test]
+    fn a_new_table_lists_what_it_holds_under_it() {
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let made = lines(&[
+            "column public.documents.embedding public.vector(1536)",
+            "column public.documents.id integer not null",
+            "column public.users.bio text",
+            "constraint public.documents documents_pkey PRIMARY KEY (id)",
+            "extension vector schema=public",
+            "index CREATE INDEX documents_embedding ON public.documents USING hnsw (embedding public.vector_cosine_ops)",
+            "index CREATE UNIQUE INDEX documents_pkey ON public.documents USING btree (id)",
+            "table public.documents",
+        ]);
+        let users = lines(&["table public.users", "column public.users.id integer"]);
+        let before: Vec<String> = users.clone();
+        let after: Vec<String> = users.iter().chain(&made).cloned().collect();
+        assert_eq!(
+            changed_lines(&before, &after, Dialect::Postgres),
+            [
+                "  + column users.bio text",
+                "  + extension vector schema=public",
+                "  + table documents",
+                "      embedding vector(1536)",
+                "      id integer not null",
+                "      primary key (id)",
+                "      index documents_embedding using hnsw (embedding vector_cosine_ops)",
+            ]
+        );
+        // A table dropped reads the same way, and SQLite's constraints, which name none, as theirs.
+        assert_eq!(changed_lines(&lines(&["table t strict", "column t.id integer", "constraint t primary key (id)"]), &[], Dialect::Sqlite), ["  - table t strict", "      id integer", "      primary key (id)"]);
+        // A table both sides have is no new table, whatever its own line became.
+        assert_eq!(
+            changed_lines(&lines(&["table public.t", "column public.t.id integer"]), &lines(&["table public.t row level security", "column public.t.id integer", "column public.t.label text"]), Dialect::Postgres),
+            ["  + table t row level security", "  + column t.label text", "  - table t"]
+        );
+        // A line two tables could own, `t` and `t.archive`, stays a line of its own.
+        assert_eq!(
+            changed_lines(&lines(&["table t.archive", "column t.archive.id integer"]), &lines(&["table t.archive", "column t.archive.id integer", "column t.archive.label text", "table t", "column t.id integer"]), Dialect::Sqlite),
+            ["  + column t.archive.label text", "  + table t", "      id integer"]
+        );
+        // A quoted name is one name.
+        assert_eq!(changed_lines(&[], &lines(&["table public.\"order items\"", "column public.\"order items\".id integer"]), Dialect::Postgres), ["  + table \"order items\"", "      id integer"]);
+        assert_eq!(changed_lines(&[], &lines(&["table public.\"orders engine=archive\"", "column public.\"orders engine=archive\".id integer"]), Dialect::Postgres), ["  + table \"orders engine=archive\"", "      id integer"]);
+        // On SQLite, `options` is a table like any other: made strict, it is no new table.
+        assert_eq!(
+            changed_lines(&lines(&["table options", "column options.id integer", "column options.note text"]), &lines(&["table options strict", "column options.id integer"]), Dialect::Sqlite),
+            ["  + table options strict", "  - table options", "  - column options.note text"]
+        );
+        // MySQL writes its names unquoted, a table's as all before its engine. Its foreign keys,
+        // checks and table options go under their table, but for one two tables could own, `orders`
+        // and `orders archive`.
+        assert_eq!(
+            changed_lines(
+                &[],
+                &lines(&[
+                    "table orders engine=InnoDB collate=utf8mb4_0900_ai_ci",
+                    "column orders.id int not null",
+                    "foreign key orders fk_user (user_id) references users (id) on update RESTRICT on delete CASCADE",
+                    "table orders archive engine=InnoDB collate=utf8mb4_0900_ai_ci",
+                    "column orders archive.id int not null",
+                    "check orders archive positive (`id` > 0)",
+                    "table options orders key_block_size=8",
+                ]),
+                Dialect::Mysql
+            ),
+            [
+                "  + table orders engine=InnoDB collate=utf8mb4_0900_ai_ci",
+                "      id int not null",
+                "      foreign key fk_user (user_id) references users (id) on update RESTRICT on delete CASCADE",
+                "      options key_block_size=8",
+                "  + table orders archive engine=InnoDB collate=utf8mb4_0900_ai_ci",
+                "      id int not null",
+                "  + check orders archive positive (`id` > 0)",
+            ]
+        );
+        // A table named `options orders` is a table beside `orders`, made or dropped with it.
+        let both = lines(&["table orders engine=InnoDB collate=c", "column orders.id int not null", "table options orders engine=InnoDB collate=c", "column options orders.id int not null"]);
+        let grouped = ["table orders engine=InnoDB collate=c", "      id int not null", "table options orders engine=InnoDB collate=c", "      id int not null"];
+        assert_eq!(changed_lines(&[], &both, Dialect::Mysql), grouped.map(|l| if l.starts_with("table") { format!("  + {l}") } else { l.to_string() }));
+        assert_eq!(changed_lines(&both, &[], Dialect::Mysql), grouped.map(|l| if l.starts_with("table") { format!("  - {l}") } else { l.to_string() }));
+        // A MySQL table named `options` is a table, by its engine.
+        assert_eq!(
+            changed_lines(&[], &lines(&["table options engine=InnoDB collate=utf8mb4_0900_ai_ci", "column options.id int not null"]), Dialect::Mysql),
+            ["  + table options engine=InnoDB collate=utf8mb4_0900_ai_ci", "      id int not null"]
+        );
+    }
+
+    #[test]
+    fn a_function_a_trigger_and_a_view_read_as_one_line_each() {
+        let function = "function CREATE OR REPLACE FUNCTION public.touch()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\nbegin new.updated_at := now(); return new; end $function$";
+        assert_eq!(readable(function), "function touch() returns trigger");
+        assert_eq!(readable("function CREATE OR REPLACE PROCEDURE public.tidy(IN days integer DEFAULT 30)\n LANGUAGE sql\nAS $procedure$ delete from logs $procedure$"), "procedure tidy(in days integer default 30)");
+        assert_eq!(readable("trigger CREATE TRIGGER users_touch BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.touch()"), "trigger users_touch on users: before update for each row execute function touch()");
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let made = lines(&[
+            "table public.users",
+            "column public.users.id integer",
+            "trigger CREATE TRIGGER users_touch BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.touch()",
+            "view public.pro_users",
+            "view public.pro_users as SELECT id FROM users;",
+        ]);
+        assert_eq!(
+            changed_lines(&[], &made, Dialect::Postgres),
+            ["  + table users", "      id integer", "      trigger users_touch: before update for each row execute function touch()", "  + view pro_users as SELECT id FROM users;"]
+        );
+        // A trigger's table is the name after the ON outside quotes, whole.
+        assert_eq!(
+            readable("trigger CREATE TRIGGER t_upd BEFORE UPDATE OF \"stage ON decoy name\" ON public.\"order items\" FOR EACH ROW EXECUTE FUNCTION public.touch()"),
+            "trigger t_upd on \"order items\": before update of \"stage ON decoy name\" for each row execute function touch()"
+        );
+        // A materialized view's definition takes its kind back.
+        assert_eq!(changed_lines(&[], &lines(&["materialized view public.mat", "view public.mat as SELECT 1;"]), Dialect::Postgres), ["  + materialized view mat as SELECT 1;"]);
+        // A function whose body alone changed reads as changed in place, here and in a headed diff.
+        let one = lines(&["function CREATE OR REPLACE FUNCTION public.rate()\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        let two = lines(&["function CREATE OR REPLACE FUNCTION public.rate()\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 2 $function$"]);
+        assert_eq!(changed_lines(&one, &two, Dialect::Postgres), ["  ~ function rate() returns integer"]);
+        // Two overloads are two functions, even where an argument's default holds a line break.
+        let integer = lines(&["function CREATE OR REPLACE FUNCTION public.rate(a text DEFAULT 'hel\nlo'::text, b integer)\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        let boolean = lines(&["function CREATE OR REPLACE FUNCTION public.rate(a text DEFAULT 'hel\nlo'::text, b boolean)\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        assert_eq!(
+            changed_lines(&integer, &boolean, Dialect::Postgres),
+            ["  + function rate(a text default 'hel↵lo'::text, b boolean) returns integer", "  - function rate(a text default 'hel↵lo'::text, b integer) returns integer"]
+        );
+        // A name with a line break and one with a backslash and an n are two functions, and read so.
+        let broken = lines(&["function CREATE OR REPLACE FUNCTION public.\"line\nbreak\"()\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        let escaped = lines(&["function CREATE OR REPLACE FUNCTION public.\"line\\nbreak\"()\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        assert_eq!(changed_lines(&escaped, &broken, Dialect::Postgres), ["  + function \"line↵break\"() returns integer", "  - function \"line\\nbreak\"() returns integer"]);
+        assert_eq!(describe_diff("this database", &one, "a fresh database", &two), ["", "    --- this database", "    +++ a fresh database", "    ~ function rate() returns integer", ""]);
+    }
+
+    #[test]
+    fn a_postgres_constraint_named_like_a_keyword_keeps_its_name() {
+        assert_eq!(readable("constraint public.t check CHECK ((id > 0))"), "constraint check on t: check ((id > 0))");
+        assert_eq!(readable("constraint t check (id > 0)"), "constraint on t: check (id > 0)");
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn a_rename_reads_as_one_line_changed_in_place() {
+        assert_eq!(inline_diff("column posts.title character varying(100)", "column posts.heading character varying(200)"), "column posts.[-title-]{+heading+} character varying([-100-]{+200+})");
+        assert_eq!(inline_diff("column users.bio character varying(200)", "column users.about text"), "column users.[-bio-]{+about+} [-character varying(200)-]{+text+}");
+        assert_eq!(inline_diff("column users.score bigint", "column users.label varchar(200) collate utf8mb4_0900_ai_ci"), "column users.[-score-]{+label+} [-bigint-]{+varchar(200) collate utf8mb4_0900_ai_ci+}");
+        assert_eq!(inline_diff("column \"My Users\".\"Full Name\" text", "column \"My Users\".\"Display Name\" text"), "column \"My Users\".\"[-Full-]{+Display+} Name\" text");
+        assert_eq!(inline_diff("table orders", "table invoices"), "table [-orders-]{+invoices+}");
+        // A long definition the same on both sides, and one replaced whole past the bound.
+        let long = format!("column t.c jsonb default '{}'", "x ".repeat(5000));
+        assert_eq!(inline_diff(&long, &long.replacen("t.c", "t.d", 1)), long.replacen("t.c", "t.[-c-]{+d+}", 1));
+        let (a, b) = (format!("default {}", "a ".repeat(200)), format!("default {}", "b ".repeat(200)));
+        assert_eq!(word_diff(&a, &b), format!("default [-{}-]{{+{}+}} ", "a ".repeat(200).trim_end(), "b ".repeat(200).trim_end()));
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // A column renamed, beside one dropped and one added.
+        let before = lines(&["table public.posts", "column public.posts.title character varying(100)", "column public.posts.body text"]);
+        let after = lines(&["table public.posts", "column public.posts.heading character varying(200)", "column public.posts.summary text"]);
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: None, after: &after };
+        let columns = vec![("column public.posts.title".to_string(), "column public.posts.heading".to_string())];
+        assert_eq!(summary_lines(&steps, &[], &columns), ["  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})", "  + column posts.summary text", "  - column posts.body text"]);
+        // A table renamed: what only took its new name is left out, a default that changes besides is
+        // listed as it was before and is after, and a column of it renamed is a rename under the
+        // table's new name.
+        let before = lines(&["table public.orders", "column public.orders.id integer not null", "column public.orders.title text", "column public.orders.kind text default 'orders'::text", "constraint public.orders orders_pkey PRIMARY KEY (id)"]);
+        let renamed = lines(&["table public.invoices", "column public.invoices.id integer not null", "column public.invoices.title text", "column public.invoices.kind text default 'orders'::text", "constraint public.invoices invoices_pkey PRIMARY KEY (id)"]);
+        let after = lines(&["table public.invoices", "column public.invoices.id integer not null", "column public.invoices.heading text", "column public.invoices.kind text default 'invoices'::text", "constraint public.invoices invoices_pkey PRIMARY KEY (id)"]);
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string())];
+        let columns = vec![("column public.invoices.title".to_string(), "column public.invoices.heading".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &columns), ["  ~ table [-orders-]{+invoices+}", "  ~ column invoices.[-title-]{+heading+} text", "  + column invoices.kind text default 'invoices'::text", "  - column orders.kind text default 'orders'::text"]);
+        // A column named after another table keeps its identity, and a foreign key between two
+        // renamed tables is left out.
+        let before = lines(&["table public.alpha", "column public.alpha.alpha_code integer", "column public.alpha.beta_code integer"]);
+        let renamed = lines(&["table public.beta", "column public.beta.alpha_code integer", "column public.beta.beta_code integer"]);
+        let after = lines(&["table public.beta", "column public.beta.beta_code integer"]);
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let tables = vec![("table public.alpha".to_string(), "table public.beta".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-alpha-]{+beta+}", "  - column alpha.alpha_code integer"]);
+        let before = lines(&["table public.orders", "table public.clients", "constraint public.orders fk_client FOREIGN KEY (client_id) REFERENCES public.clients(id)"]);
+        let after = lines(&["table public.invoices", "table public.customers", "constraint public.invoices fk_client FOREIGN KEY (client_id) REFERENCES public.customers(id)"]);
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), after: &after };
+        let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string()), ("table public.clients".to_string(), "table public.customers".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}", "  ~ table [-clients-]{+customers+}"]);
+        // A column whose name starts with another renamed table's is no reference to it.
+        let before = lines(&["table public.orders", "table public.clients", "constraint public.orders fk_account FOREIGN KEY (clients_id) REFERENCES public.accounts(id)"]);
+        let after = lines(&["table public.invoices", "table public.customers", "constraint public.invoices fk_account FOREIGN KEY (clients_id) REFERENCES public.accounts(id)"]);
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), after: &after };
+        let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string()), ("table public.clients".to_string(), "table public.customers".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}", "  ~ table [-clients-]{+customers+}"]);
+        // A view that names a renamed table, as Postgres rewrites it, is the same view.
+        let before = lines(&["table public.orders", "view public.order_count as SELECT count(orders.id) AS count FROM (orders JOIN details ON ((orders.id = details.id)));"]);
+        let after = lines(&["table public.invoices", "view public.order_count as SELECT count(invoices.id) AS count FROM (invoices JOIN details ON ((invoices.id = details.id)));"]);
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), after: &after };
+        let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}"]);
+        // A view whose quoted name holds a renamed table's name is another view still.
+        let before = lines(&["table public.alpha", "view public.omega as SELECT 1 AS n;", "view public.\"public.alpha\" as SELECT omega.n FROM omega;", "view public.\"public.omega\" as SELECT alpha.id FROM alpha;"]);
+        let after = lines(&["table public.omega", "view public.\"public.omega\" as SELECT omega.id FROM omega;"]);
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), after: &after };
+        let tables = vec![("table public.alpha".to_string(), "table public.omega".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-alpha-]{+omega+}", "  - view omega as SELECT 1 AS n;", "  - view \"public.alpha\" as SELECT omega.n FROM omega;"]);
+        assert_eq!(renamed_in("view public.\"public.alpha\" as SELECT 1 FROM public.alpha", &[("public.alpha".to_string(), "public.omega".to_string())], true), "view public.\"public.alpha\" as SELECT 1 FROM public.omega");
+        // A function's body is its text as written, while its signature follows the rename.
+        let names = [("public.alpha".to_string(), "public.omega".to_string())];
+        assert_eq!(renamed_in("function public.old_size(arg public.alpha) AS $function$ BEGIN RETURN pg_relation_size('public.alpha'::regclass); END; $function$", &names, true), "function public.old_size(arg public.omega) AS $function$ BEGIN RETURN pg_relation_size('public.alpha'::regclass); END; $function$");
+        assert_eq!(renamed_in("policy public.notes p USING (($1 = 'public.alpha'::regclass))", &names, true), "policy public.notes p USING (($1 = 'public.omega'::regclass))");
+        // Elsewhere a dollar sign is part of a name.
+        assert_eq!(renamed_in("constraint notes $link$ FOREIGN KEY (alpha_id) REFERENCES alpha (id)", &[("alpha".to_string(), "`sales orders`".to_string())], false), "constraint notes $link$ FOREIGN KEY (alpha_id) REFERENCES `sales orders` (id)");
+        // A relation constant follows the rename.
+        assert_eq!(renamed_in("policy public.notes visible USING ((pg_relation_size('public.alpha'::regclass) > 0))", &[("public.alpha".to_string(), "public.omega".to_string())], true), "policy public.notes visible USING ((pg_relation_size('public.omega'::regclass) > 0))");
+        // A string is left as it is, and a double quote inside one quotes no name.
+        assert_eq!(renamed_in("policy public.alpha visible USING ((body = '\"public.alpha\"'::text))", &[("public.alpha".to_string(), "public.omega".to_string())], true), "policy public.omega visible USING ((body = '\"public.alpha\"'::text))");
+        assert_eq!(renamed_in("policy public.notes visible USING ((body = '\"'::text) OR (EXISTS (SELECT 1 FROM public.alpha)))", &[("public.alpha".to_string(), "public.omega".to_string())], true), "policy public.notes visible USING ((body = '\"'::text) OR (EXISTS (SELECT 1 FROM public.omega)))");
+        // Two tables of one name in two schemas, each renamed its own way, with a column of one.
+        let before = lines(&["table east.orders", "table west.orders", "column west.orders.title text", "constraint west.orders orders_pkey PRIMARY KEY (id)"]);
+        let renamed = lines(&["table east.invoices", "table west.shipments", "column west.shipments.title text", "constraint west.shipments shipments_pkey PRIMARY KEY (id)"]);
+        let after = lines(&["table east.invoices", "table west.shipments", "column west.shipments.heading text", "constraint west.shipments shipments_pkey PRIMARY KEY (id)"]);
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let tables = vec![("table east.orders".to_string(), "table east.invoices".to_string()), ("table west.orders".to_string(), "table west.shipments".to_string())];
+        let columns = vec![("column west.shipments.title".to_string(), "column west.shipments.heading".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &columns), ["  ~ table east.[-orders-]{+invoices+}", "  ~ table west.[-orders-]{+shipments+}", "  ~ column west.shipments.[-title-]{+heading+} text"]);
+        // A view the table rename drops, where the table takes its name, stays listed.
+        let before = lines(&["table public.t_data", "column public.t_data.id integer", "view public.data select id from public.t_data", "view public.q select id from public.data"]);
+        let renamed = lines(&["table public.data", "column public.data.id integer"]);
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), after: &renamed };
+        let tables = vec![("table public.t_data".to_string(), "table public.data".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-t_data-]{+data+}", "  - view data select id from t_data", "  - view q select id from data"]);
+        // A table moved to another schema shows as the move's endpoints, never a line in between.
+        let before = lines(&["table public.orders", "column public.orders.status text default 'orders'::text"]);
+        let moved = lines(&["table archive.orders", "column archive.orders.status text default 'orders'::text"]);
+        let after = lines(&["table archive.orders", "column archive.orders.status text default 'archived'::text"]);
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: Some(&moved), renamed: None, after: &after };
+        assert_eq!(summary_lines(&steps, &[], &[]), ["  + table archive.orders", "      status text default 'archived'::text", "  - table orders", "      status text default 'orders'::text"]);
+    }
+
+    #[test]
+    fn a_new_types_default_grant_is_left_out() {
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let made = lines(&["column public.posts.status public.post_status not null default 'draft'::public.post_status", "enum public.post_status (\"draft\", \"published\")", "grant type public.post_status PUBLIC:USAGE"]);
+        assert_eq!(without_default_grants(&made), made[..2]);
+        // On a type both sides have, a grant is a change.
+        let granted = lines(&["grant type public.post_status PUBLIC:USAGE"]);
+        assert_eq!(without_default_grants(&granted), granted);
+        assert_eq!(readable(&made[0]), "column posts.status post_status not null default 'draft'::post_status");
+    }
+
+    #[test]
+    fn an_index_reads_the_same_on_every_database() {
+        // As each database's catalog writes it.
+        assert_eq!(readable("index CREATE INDEX bookmarks_title ON public.bookmarks USING btree (title)"), "index bookmarks_title on bookmarks (title)");
+        assert_eq!(readable("index orders.orders_qty BTREE (qty)"), "index orders_qty on orders (qty)");
+        assert_eq!(readable("index orders.orders_ref unique HASH invisible (ref, qty desc)"), "unique index orders_ref on orders using hash (ref, qty desc) invisible");
+        assert_eq!(readable("index users_name3 create index users_name3 on users (name)"), "index users_name3 on users (name)");
+        assert_eq!(readable("index users_email create unique index if not exists users_email on users (email)"), "unique index users_email on users (email)");
+        // A view and a trigger name themselves once too.
+        assert_eq!(readable("view v_users create view v_users as select id from users"), "view v_users as select id from users");
+        assert_eq!(readable("trigger t create trigger t after insert on users begin select 1; end"), "trigger t after insert on users begin select 1; end");
+        // What is not an index's own line is left as it is.
+        assert_eq!(readable("index options orders.orders_qty key_block_size=8"), "index options orders.orders_qty key_block_size=8");
+    }
 
     #[test]
     fn a_platforms_column_stamp_leaves_the_dump() {

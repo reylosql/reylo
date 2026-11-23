@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { nativeBinary } from "../src/native.ts";
 import { migrate } from "../src/migrate.ts";
 import { ROOT } from "./helpers.ts";
@@ -36,6 +37,17 @@ test("await migrate() runs reylo migrate deploy, resolves to what it ran, and re
     // A draft refuses the deploy, with what to do about it.
     writeFileSync(join(root, "reylo", "migrations", "20991231000000_draft.sql"), "alter table users add column bio text;\n");
     await assert.rejects(migrate({ url: "file:./prod.sqlite" }), /^Error: reylo migrate deploy refused: The lock doesn't list 20991231000000_draft\.sql yet\n  Run it in development, which locks it: reylo migrate dev/);
+    // A migration that fails on this database rolls back, and rejects with what to run next.
+    rmSync(join(root, "reylo", "migrations", "20991231000000_draft.sql"));
+    writeFileSync(join(root, "reylo", "schema.sql"), "create table users (id integer primary key, name text not null);\ncreate unique index users_name on users (name);\n");
+    for (const args of [["new", "unique_name"], ["dev"]]) {
+      const r = spawnSync(nativeBinary(), ["migrate", ...args], { cwd: root, encoding: "utf8", env });
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+    }
+    const prod = new DatabaseSync(join(root, "prod.sqlite"));
+    prod.exec("insert into users (name) values ('ada'), ('ada')");
+    prod.close();
+    await assert.rejects(migrate({ url: "file:./prod.sqlite" }), /^Error: reylo migrate deploy failed: The migration \d{14}_unique_name\.sql failed and was rolled back\n  UNIQUE constraint failed: users\.name\n  Nothing was recorded, so the next deploy runs it again\.\n  Fix the file, lock the fix and deploy again: reylo migrate dev, then reylo migrate deploy\n  If another database already ran it, write a new migration instead: reylo migrate new <name>$/);
   } finally {
     process.chdir(was);
   }

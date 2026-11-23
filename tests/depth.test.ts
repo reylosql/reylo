@@ -8,7 +8,7 @@ import { engine, type Dialect, type Engine, type EngineIo } from "../src/engine.
 import { Session } from "../src/analyze.ts";
 
 // How deeply a statement may nest for the engine to read it: the engine reads at most 1,000
-// levels of libpg_query's parse tree (engine/core/src/stack.rs), the same in every host of the engine, and the
+// levels of Postgres's parse tree (engine/core/src/stack.rs), the same in every host of the engine, and the
 // embedded SQLite reads an expression 350 deep, where SQLite's own bound is 1,000. These are the deepest statements of each shape that parse, as engine/core/src/stack.rs's
 // tests have them.
 function nested(shape: string, n: number): string {
@@ -28,10 +28,10 @@ function nested(shape: string, n: number): string {
 }
 const POSTGRES_BOUNDS: [string, number][] = [["sum", 496], ["concat", 496], ["and_or", 495], ["case", 493], ["coalesce", 495], ["json", 495], ["subquery", 164]];
 const SQLITE_BOUNDS: [string, number][] = [["sum", 350], ["and_or", 348], ["case", 348], ["coalesce", 349], ["subquery", 23]];
-// MySQL's statements are read by sqlparser with a fifth of the bound, 200 levels of its recursion,
-// which a parenthesized operand (`id = 0 or (…)`) and a subquery each spend two of, and at most 500
-// operators, as engine/mysql/src/mysql.rs's tests have them.
-const MYSQL_BOUNDS: [string, number][] = [["sum", 501], ["and_or", 98], ["case", 195], ["coalesce", 196], ["subquery", 97]];
+// MySQL's statements nest to a fifth of the bound, 200 levels, which a parenthesized operand
+// (`id = 0 or (…)`) and a subquery each spend two of, and have at most 500 operators, as
+// engine/mysql/src/mysql.rs's tests have them.
+const MYSQL_BOUNDS: [string, number][] = [["sum", 501], ["and_or", 99], ["case", 198], ["coalesce", 198], ["subquery", 98]];
 
 // A server that describes every statement as one int4 column and answers every catalog query with
 // no rows: enough for the engine to parse the statement and run every pass over its tree.

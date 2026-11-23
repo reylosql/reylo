@@ -1,36 +1,14 @@
-// Reylo: `reylo generate` analyzes each .sql file into reylo/.cache/, whose entries hold the analysis the type check reads.
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+// Reylo, as this checkout builds it: each statement goes through the analysis the type check runs (src/analyze.ts's `Session`, on the engine binary the checkout's build finds), and its parameters and row are read from the TypeScript the mapper renders for them (src/render.ts).
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { Kind } from "../probes.ts";
-import { failed, gitDelta, gitInit, rewrite, sh, workdir, type Answer, type Tool, type TypedValue } from "./lib.ts";
+import { Session } from "../../../src/analyze.ts";
+import { analysisWithBases } from "../../../src/engine-type.ts";
+import { ident, orNull, renderParamType, renderType } from "../../../src/render.ts";
+import type { Card } from "../probes.ts";
+import { failed, gitDelta, gitInit, readTsType, rewrite, workdir, type Answer, type Tool } from "./lib.ts";
 
-const bin = resolve(import.meta.dirname, "../node_modules/.bin/reylo");
-// The declaration the type check shows for a statement, from the installed release's own renderer, which its package exports no path to.
-const { moduleTypes } = await import(resolve(import.meta.dirname, "../node_modules/reylo/src/module-types.js"));
-const version: string = JSON.parse(readFileSync(resolve(import.meta.dirname, "../node_modules/reylo/package.json"), "utf8")).version;
-
-function kindOf(t: any): Kind {
-  if (t.kind === "list" || t.kind === "object" || t.kind === "array" || t.kind === "tuple") return "json";
-  if (t.kind === "enum") return "text";
-  const name = String(t.name ?? "").toLowerCase();
-  if (/^(int|smallint|mediumint|bigint|tinyint|float|double|real|integer|year)|^(int[248]|float[48]|oid)$/.test(name)) return "num";
-  if (/^(numeric|decimal)/.test(name)) return "text";
-  if (/^(bool)/.test(name)) return "bool";
-  if (/^(json|jsonb)$/.test(name)) return "any";
-  if (/^(timestamp|timestamptz|date|time|datetime)/.test(name)) return "time";
-  if (/^(any|unknown|null|blob)$/.test(name) || !name) return "any";
-  return "text";
-}
-function fieldsOf(t: any): string[] | undefined {
-  if (t.schema?.properties) return Object.keys(t.schema.properties);
-  if (t.kind === "object") return (t.fields ?? []).map((f: any) => f.name);
-  if (t.of) return fieldsOf(t.of);
-  if (t.items) return fieldsOf(t.items);
-  return undefined;
-}
-const show = (t: any): string => (t.kind === "json" ? (t.schema ? `json(${JSON.stringify(t.schema)})` : "Json") : t.kind === "scalar" ? t.name : t.kind === "enum" ? (t.labels ?? []).map((l: string) => JSON.stringify(l)).join(" | ") : t.kind === "object" ? `{ ${(t.fields ?? []).map((f: any) => `${f.name}: ${show(f.type)}${f.nullable ? " | null" : ""}`).join("; ")} }` : t.of ? `${show(t.of)}[]` : JSON.stringify(t));
-const value = (c: any): TypedValue => ({ type: `${show(c.type)}${c.nullable ? " | null" : ""}`, kind: kindOf(c.type), nullable: !!c.nullable, fields: fieldsOf(c.type) });
-const normal = (sql: string) => sql.replace(/\$\d+|\?\d*|(?<!:):p\d+\b/g, "?").replace(/\s+/g, " ").trim().replace(/;$/, "");
+const version: string = JSON.parse(readFileSync(resolve(import.meta.dirname, "../../../package.json"), "utf8")).version;
+const CARD: Record<string, Card> = { one: "one", at_most_one: "maybeOne", many: "many", none: "none" };
 
 export const reylo: Tool = {
   id: "reylo",
@@ -44,18 +22,30 @@ export const reylo: Tool = {
     statements.forEach((s, i) => writeFileSync(join(dir, "q", `s${i}.sql`), `${rewrite(s.sql, (n) => `:p${n}`)}\n`));
     gitInit(dir);
     const url = db === "postgres" ? urls.postgres : db === "mysql" ? urls.mysql : `file:${urls.sqlite}`;
-    const run = sh(bin, ["generate", "q"], { cwd: dir, env: { DATABASE_URL: url } });
-    const entries = new Map<string, any>();
-    try {
-      for (const f of readdirSync(join(dir, ".reylo", "queries"))) {
-        const e = JSON.parse(readFileSync(join(dir, ".reylo", "queries", f), "utf8")).analysis;
-        entries.set(normal(e.rewritten.sql), e);
-      }
-    } catch {}
     const answers: Record<string, Answer> = {};
-    for (const s of statements) {
-      const a = entries.get(normal(s.sql));
-      answers[s.key] = a ? { ok: true, params: a.params.map(value), columns: a.columns.map((c: any) => ({ name: c.name, ...value(c) })), cardinality: a.cardinality, shown: (({ params, row }) => ({ params, row }))(moduleTypes(s.sql, a, db)) } : failed(run.all.split("\n").filter((l) => l.includes(`s${statements.indexOf(s)}.sql`)).join(" ") || run.all);
+    let session: Session | undefined;
+    try {
+      session = await Session.open(dir, { ...process.env, DATABASE_URL: url });
+      for (const [i, s] of statements.entries()) {
+        const outcome = await session.analyze(`${rewrite(s.sql, (n) => `:p${n}`)}\n`).catch((e: Error) => ({ ok: false as const, message: e.message }));
+        if (!outcome.ok) { answers[s.key] = failed(`s${i}.sql: ${(outcome as { message: string }).message}`); continue; }
+        const a = analysisWithBases(outcome.analysis);
+        if (a.diagnostics.length) { answers[s.key] = failed(`s${i}.sql: ${a.diagnostics.map((d) => d.message).join("; ")}`); continue; }
+        // Each type as the mapper writes it, and its null as the column's or the parameter's.
+        const column = (c: (typeof a.columns)[number]) => (c.nullable ? orNull(renderType(c.type, false, db)) : renderType(c.type, false, db));
+        const param = (q: (typeof a.params)[number]) => (q.nullable ? orNull(renderParamType(q.type, db, false, q.members)) : renderParamType(q.type, db, false, q.members));
+        const params = a.params.map((q) => ({ ...readTsType(param(q)), nullable: !!q.nullable }));
+        const columns = a.columns.map((c) => ({ name: c.name, ...readTsType(column(c)), nullable: !!c.nullable }));
+        const shown = {
+          params: a.params.length ? `{ ${a.params.map((q) => `${ident(q.name)}${q.nullable || q.optional ? "?" : ""}: ${param(q)}`).join("; ")} }` : "Record<never, never>",
+          row: a.columns.length ? `{ ${a.columns.map((c) => `${ident(c.name)}: ${column(c)}`).join("; ")} }` : "never",
+        };
+        answers[s.key] = { ok: true, params, columns, cardinality: CARD[a.cardinality] ?? null, shown };
+      }
+    } catch (e) {
+      for (const s of statements) answers[s.key] ??= failed((e as Error).message);
+    } finally {
+      await session?.close();
     }
     return { answers, wrote: gitDelta(dir) };
   },

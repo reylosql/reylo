@@ -162,11 +162,13 @@ for (const [p, from] of binaries) {
     ...(p.libc ? { libc: [p.libc] } : {}),
     // Yarn's Plug'n'Play would otherwise keep the binary inside a zip archive, where nothing can start it.
     preferUnplugged: true,
-    files: ["bin"],
+    // The parser's notices: the binary carries code under the licenses NOTICE.md names, Apache-2.0's among them.
+    files: ["bin", "NOTICE.md", "LICENSE-APACHE"],
   };
   writeFileSync(join(to, "package.json"), JSON.stringify(engine, null, 2) + "\n");
   writeFileSync(join(to, "README.md"), readFileSync(join(root, "npm", "engine", "README.md"), "utf8").replaceAll("{platform}", p.platform).replaceAll("{name}", p.name));
   copyFileSync(join(root, "LICENSE"), join(to, "LICENSE"));
+  for (const notice of ["NOTICE.md", "LICENSE-APACHE"]) copyFileSync(join(root, "engine", "syntax", notice), join(to, notice));
   console.log(`dist/engine-${p.platform}: package ${name}@${pkg.version}, bin/${relative(join(to, "bin"), file)} ${statSync(file).size} bytes`);
 }
 

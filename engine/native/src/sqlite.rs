@@ -54,6 +54,11 @@ impl Session {
         Ok(Session { connection: Connection { file, answers: AnswerCache::until_cleared() }, version: crate::engines::sqlite::sqlite_tree::version().to_string() })
     }
 
+    /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
+    pub fn forget(&mut self) {
+        self.connection.answers.clear();
+    }
+
     pub fn analyze(&mut self, sql: &str) -> Result<reylo_engine_core::api::Analysis, crate::Failure> {
         let db = self.connection.file.open().map_err(|e| crate::Failure::Unreachable(e.to_string()))?;
         answers::analyze(&db, sql, &mut self.connection.answers).map_err(|e| crate::Failure::Error(e.to_string()))
@@ -126,6 +131,19 @@ impl Program for Sqlite {
 
 fn closed(id: u64) -> Value {
     json!({ "status": "unreachable", "message": format!("connection {id} is closed") })
+}
+
+/// A database file for reading, as an analysis reads it: read-only, and through a copy of the file and its logs while another process holds it. The copy lasts as long as this does.
+pub struct ReadableFile(File);
+
+impl ReadableFile {
+    pub fn new(path: &str) -> ReadableFile {
+        ReadableFile(File::new(path))
+    }
+
+    pub fn open(&self) -> rusqlite::Result<rusqlite::Connection> {
+        self.0.open()
+    }
 }
 
 impl File {

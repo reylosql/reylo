@@ -44,6 +44,8 @@ for (const [alias, v] of [["pglite-05", "0.5.8"], ["pglite-04", "0.4.6"], ["pgli
 for (const [alias, v] of [["neon-1", "1.1.0"], ["neon-010", "0.10.4"], ["neon-09", "0.9.5"]]) add({ id: `neon@${v}`, bin: NODE26, file: "drivers/neon.ts", args: ["--pkg", alias, "--version", v], meta: { pkg: "@neondatabase/serverless", version: v, target: "Postgres 14 via local Neon proxy", runtime: n26 } });
 add({ id: "pg-promise@12.7.1", bin: NODE26, file: "drivers/pgpromise.ts", args: ["--pkg", "pg-promise", "--version", "12.7.1"], meta: { pkg: "pg-promise", version: "12.7.1", target: "Postgres 14 (local)", runtime: n26 } });
 add({ id: "slonik@49.12.0", bin: NODE26, file: "drivers/slonik.ts", args: ["--pkg", "slonik", "--version", "49.12.0"], meta: { pkg: "slonik", version: "49.12.0", target: "Postgres 14 (local)", runtime: n26 } });
+for (const [alias, v] of [["knex-3", "3.3.0"], ["knex-2", "2.5.1"]]) add({ id: `knex@${v}/pg`, bin: NODE26, file: "drivers/knex.ts", args: ["--pkg", alias, "--version", v], meta: { pkg: "knex (pg)", version: v, target: "Postgres 14 (local)", runtime: n26 } });
+add({ id: "@vercel/postgres@0.10.0", bin: NODE26, file: "drivers/vercel-postgres.ts", args: ["--pkg", "@vercel/postgres", "--version", "0.10.0"], meta: { pkg: "@vercel/postgres", version: "0.10.0", target: "Postgres 14 via local Neon proxy", runtime: n26 } });
 add({ id: "bun-sql-postgres", bin: BUN, file: "drivers/bunsql.ts", args: ["--adapter", "postgres"], meta: { pkg: "Bun.sql (postgres)", version: "1.4.4", target: "Postgres 14 (local)", runtime: "bun" } });
 
 // MySQL family

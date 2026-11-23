@@ -42,6 +42,29 @@ impl Row {
     }
 }
 
+/// What one statement returned: its columns, its first rows, every value as text as a [`Row`]'s is,
+/// and how many rows it returned in all.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Table {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Option<String>>>,
+    pub total: usize,
+}
+
+impl Table {
+    fn new(columns: Vec<String>) -> Table {
+        Table { columns, ..Default::default() }
+    }
+
+    /// Counts a row, keeping it while fewer than `keep` are kept.
+    fn add(&mut self, keep: usize, row: impl FnOnce() -> Vec<Option<String>>) {
+        if self.rows.len() < keep {
+            self.rows.push(row());
+        }
+        self.total += 1;
+    }
+}
+
 pub enum Db {
     #[cfg(feature = "cli")]
     Postgres(tokio_postgres::Client),
@@ -77,11 +100,14 @@ pub trait Session: Send {
     fn exec_with<'a>(&'a mut self, sql: &'a str, params: &'a [&'a str]) -> Answer<'a, ()>;
 }
 
-/// How a script failed: waiting for a lock past its limit, having changed nothing, or otherwise.
+/// How a script failed: waiting for a lock past its limit, having changed nothing; otherwise, with
+/// nothing of it left once its transaction rolled back; or with its change maybe in place, as a
+/// statement run outside a transaction may leave it.
 #[derive(Debug)]
 pub(crate) enum Ran {
     Waited(Error),
     Failed(Error),
+    Partly(Error),
 }
 
 impl From<Error> for Ran {
@@ -159,6 +185,39 @@ fn mysql_create_refused(code: u16, message: &str) -> Option<bool> {
 #[cfg(feature = "cli")]
 pub(crate) fn sqlite_error(e: rusqlite::Error) -> Error {
     Error(e.to_string())
+}
+
+/// The statements of a SQLite script, each ended where SQLite's own reading ends it: at the first `;`
+/// after which the text read so far is complete (`sqlite3_complete`), so that no `;` or `end` inside
+/// a trigger's body, a string or a comment ends one early. Those of nothing but comments before their
+/// `;` are left out.
+#[cfg(feature = "cli")]
+pub(crate) fn sqlite_statements(sql: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (at, _) in sql.match_indices(';') {
+        let Ok(text) = std::ffi::CString::new(&sql[start..=at]) else { continue };
+        // SAFETY: a NUL-terminated text that outlives the call, which only reads it.
+        if unsafe { rusqlite::ffi::sqlite3_complete(text.as_ptr()) } != 0 {
+            out.push(sql[start..=at].to_string());
+            start = at + 1;
+        }
+    }
+    out.push(sql[start..].to_string());
+    out.retain(|s| !crate::sql::is_blank(s.strip_suffix(';').unwrap_or(s), Dialect::Sqlite));
+    out
+}
+
+/// A SQLite value as text: an integer and a real as Rust writes them, a blob's bytes read as UTF-8.
+#[cfg(feature = "cli")]
+fn sqlite_text(value: rusqlite::types::ValueRef<'_>) -> Option<String> {
+    use rusqlite::types::ValueRef::*;
+    match value {
+        Null => None,
+        Integer(v) => Some(v.to_string()),
+        Real(v) => Some(v.to_string()),
+        Text(t) | Blob(t) => Some(String::from_utf8_lossy(t).into_owned()),
+    }
 }
 
 #[cfg(feature = "cli")]
@@ -256,6 +315,16 @@ impl Db {
         }
     }
 
+    /// A connection for reading only: a SQLite file is opened so that nothing can create or checkpoint it.
+    #[cfg(feature = "cli")]
+    pub async fn connect_read_only(url: &str, base: &Path) -> Result<Db, Error> {
+        if Dialect::of_url(url)? == Dialect::Sqlite && !crate::libsql::is_url(url) {
+            let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+            return Ok(Db::Sqlite(rusqlite::Connection::open_with_flags(sqlite_path(url, base), flags).map_err(sqlite_error)?));
+        }
+        Db::connect(url, base).await
+    }
+
     /// The database `opts` names, a SQLite file on libSQL's engine where the project runs there
     /// ([`crate::Options::libsql_engine`]).
     #[cfg(feature = "cli")]
@@ -317,15 +386,7 @@ impl Db {
                 let rows = statement
                     .query_map([], |row| {
                         (0..count)
-                            .map(|i| {
-                                use rusqlite::types::ValueRef::*;
-                                Ok(match row.get_ref(i)? {
-                                    Null => None,
-                                    Integer(v) => Some(v.to_string()),
-                                    Real(v) => Some(v.to_string()),
-                                    Text(t) | Blob(t) => Some(String::from_utf8_lossy(t).into_owned()),
-                                })
-                            })
+                            .map(|i| row.get_ref(i).map(sqlite_text))
                             .collect::<rusqlite::Result<Vec<_>>>()
                     })
                     .map_err(sqlite_error)?
@@ -367,6 +428,95 @@ impl Db {
             self.exec(&statement.text).await?;
         }
         Ok(())
+    }
+
+    /// Runs a script as [`Db::script`] does, and gives what each statement that returns rows returned,
+    /// in order: a `select`'s, or a `returning` clause's, its columns kept where it returned no row,
+    /// and of its rows the first `keep` and their count. Postgres runs it as one simple query, as
+    /// `script` does; elsewhere each statement runs in turn, a libSQL script's split where SQLite's
+    /// own reading ends each statement.
+    #[cfg(feature = "cli")]
+    pub async fn script_tables(&mut self, sql: &str, keep: usize) -> Result<Vec<Table>, Error> {
+        if let Db::Host(_) = self {
+            self.script(sql).await?;
+            return Ok(vec![]);
+        }
+        let mut tables: Vec<Table> = Vec::new();
+        match self {
+            Db::Postgres(client) => {
+                use futures_util::StreamExt;
+                let mut messages = std::pin::pin!(client.simple_query_raw(sql).await.map_err(pg_error)?);
+                while let Some(message) = messages.next().await {
+                    match message.map_err(pg_error)? {
+                        tokio_postgres::SimpleQueryMessage::RowDescription(columns) => tables.push(Table::new(columns.iter().map(|c| c.name().to_string()).collect())),
+                        tokio_postgres::SimpleQueryMessage::Row(row) => {
+                            if tables.is_empty() {
+                                tables.push(Table::new(row.columns().iter().map(|c| c.name().to_string()).collect()));
+                            }
+                            tables.last_mut().expect("a table").add(keep, || (0..row.len()).map(|i| row.get(i).map(String::from)).collect());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Db::Mysql(conn) => {
+                for statement in crate::sql::split_statements(sql, Dialect::Mysql) {
+                    let mut result = conn.query_iter(statement.text.as_str()).await.map_err(mysql_error)?;
+                    // A statement may return several result sets, as a procedure's `call` does.
+                    loop {
+                        let mut table = result.columns().filter(|c| !c.is_empty()).map(|columns| Table::new(columns.iter().map(|c| c.name_str().into_owned()).collect()));
+                        result
+                            .for_each(|row| {
+                                if let Some(table) = table.as_mut() {
+                                    table.add(keep, || (0..row.len()).map(|i| row.as_ref(i).and_then(mysql_text)).collect());
+                                }
+                            })
+                            .await
+                            .map_err(mysql_error)?;
+                        tables.extend(table);
+                        if result.is_empty() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Db::Sqlite(conn) => {
+                use rusqlite::fallible_iterator::FallibleIterator;
+                let mut batch = rusqlite::Batch::new(conn, sql);
+                while let Some(mut statement) = batch.next().map_err(sqlite_error)? {
+                    let columns: Vec<String> = statement.column_names().into_iter().map(String::from).collect();
+                    if columns.is_empty() {
+                        statement.raw_execute().map_err(sqlite_error)?;
+                        continue;
+                    }
+                    let count = columns.len();
+                    let mut table = Table::new(columns);
+                    let mut cursor = statement.raw_query();
+                    while let Some(row) = cursor.next().map_err(sqlite_error)? {
+                        if table.rows.len() < keep {
+                            table.rows.push((0..count).map(|i| row.get_ref(i).map(sqlite_text)).collect::<rusqlite::Result<Vec<_>>>().map_err(sqlite_error)?);
+                        }
+                        table.total += 1;
+                    }
+                    tables.push(table);
+                }
+            }
+            Db::Libsql(remote) => {
+                for statement in sqlite_statements(sql) {
+                    let mut table = remote.query(&statement)?;
+                    table.rows.truncate(keep);
+                    tables.push(table);
+                }
+            }
+            Db::LibsqlLocal(local) => {
+                for statement in sqlite_statements(sql) {
+                    tables.push(local.query(&statement, keep)?);
+                }
+            }
+            Db::Host(_) => {}
+        }
+        tables.retain(|t| !t.columns.is_empty());
+        Ok(tables)
     }
 
     /// Runs a script as [`Db::script`] does, telling a statement that gave up waiting for a lock
@@ -456,7 +606,8 @@ fn host_start(rest: &str) -> usize {
 /// gives one (Neon's endpoint with `-pooler`, Supabase's pooler on port 6543), with the connection
 /// to use instead in `key`, the project file's setting that named it (`direct_url`, `shadow_url`). Such a pooler gives each transaction whichever server session is free, so a
 /// run's session lock outlives the run on the pooler's session and stops the next run that connects
-/// directly, and a setting a run makes for its session reaches the app's queries on it.
+/// directly, and a setting a run makes for its session reaches the app's queries on it. An empty
+/// `key` is a URL no project file names, as an app's own pool has.
 pub fn transaction_pooler(url: &str, key: &str) -> Option<String> {
     let (scheme, rest) = url.split_once("://")?;
     if !matches!(scheme, "postgres" | "postgresql") {
@@ -468,17 +619,33 @@ pub fn transaction_pooler(url: &str, key: &str) -> Option<String> {
         Some((host, port)) if !port.contains(']') => (host, port.parse::<u16>().ok()),
         _ => (authority.as_str(), None),
     };
+    transaction_pooler_at(host, port, &shown_url(url), key)
+}
+
+/// [`transaction_pooler`] of a host and port already parsed, as a driver's connect options hold them, with `shown` naming the connection in the message.
+pub fn transaction_pooler_at(host: &str, port: Option<u16>, shown: &str, key: &str) -> Option<String> {
+    // A name may end in the root's dot, as the same host's absolute form.
+    let host = host.to_ascii_lowercase();
+    let host = host.strip_suffix('.').unwrap_or(&host);
     let (first, domain) = host.split_once('.')?;
-    let shown = shown_url(url);
-    let flag = if key == "direct_url" { " or with --url" } else { "" };
+    let place = match key {
+        "" => String::new(),
+        "direct_url" => ", in direct_url in .reylo.yaml or with --url".to_string(),
+        key => format!(", in {key} in .reylo.yaml"),
+    };
     if let Some(endpoint) = first.strip_suffix("-pooler").filter(|_| domain.ends_with("neon.tech")) {
         return Some(format!(
-            "{shown} is Neon's pooled connection, whose PgBouncer shares server sessions between clients, and a run of reylo migrate holds one: use the direct connection, host {endpoint}.{domain}, in {key} in .reylo.yaml{flag}"
+            "{shown} is Neon's pooled connection, whose PgBouncer shares server sessions between clients, and a run of reylo migrate holds one: use the direct connection, host {endpoint}.{domain}{place}"
         ));
     }
     if domain.ends_with("pooler.supabase.com") && port == Some(6543) {
         return Some(format!(
-            "{shown} is Supabase's transaction pooler, which shares server sessions between clients, and a run of reylo migrate holds one: use its session pooler, port 5432 on the same host, or the direct connection, in {key} in .reylo.yaml{flag}"
+            "{shown} is Supabase's transaction pooler, which shares server sessions between clients, and a run of reylo migrate holds one: use its session pooler, port 5432 on the same host, or the direct connection{place}"
+        ));
+    }
+    if first == "db" && port == Some(6543) && domain.strip_suffix(".supabase.co").is_some_and(|project| !project.contains('.')) {
+        return Some(format!(
+            "{shown} is Supabase's dedicated transaction pooler, which shares server sessions between clients, and a run of reylo migrate holds one: use the direct connection, port 5432 on the same host{place}"
         ));
     }
     None
@@ -499,8 +666,14 @@ pub fn with_database(url: &str, name: &str) -> String {
 }
 
 /// A URL as a heading says it: no credentials and no settings. Whatever is before the last `@` is
-/// taken for credentials, so that a password never shows, even in a form no driver reads.
+/// taken for credentials, so that a password never shows, even in a form no driver reads; but a
+/// SQLite file's URL is its path, whole, as [`sqlite_path`] opens it (an `@` or a `?` is part of
+/// its name), and holds none.
 pub fn shown_url(url: &str) -> String {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("sqlite:") || lower.starts_with("file:") {
+        return url.to_string();
+    }
     let bare = &url[..url.find('?').unwrap_or(url.len())];
     match bare.split_once("://") {
         Some((scheme, rest)) => {
@@ -535,20 +708,106 @@ pub(crate) fn ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-/// pg_dump against `url`, with `args`, its password in its environment rather than on its command
-/// line. pg_dump refuses a server newer than itself, so the one of the server's own `major` version
-/// is looked for first (Homebrew's keg, and the directory Debian's and Ubuntu's packages install it
-/// in, whose PATH wrapper picks a local cluster's version), then the PATH's.
-pub(crate) fn pg_dump(url: &str, major: i64, args: &[String]) -> Result<String, Error> {
-    let version_of = |p: &str| -> i64 {
+thread_local! {
+    static PG_DUMP_DIRS: std::cell::RefCell<Option<Vec<std::path::PathBuf>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Looks for pg_dump on this thread in `dirs` alone (none: nowhere), in place of [`pg_dump_dirs`];
+/// `None` goes back to them. For tests, which run on threads of their own.
+pub fn set_pg_dump_dirs(dirs: Option<Vec<std::path::PathBuf>>) {
+    PG_DUMP_DIRS.with(|d| *d.borrow_mut() = dirs);
+}
+
+/// Where pg_dump is looked for, for a server of `major`'s, in order: `$PGBIN`; each install of that
+/// version (Homebrew's keg, Debian's and Ubuntu's directory, whose PATH wrapper picks a local
+/// cluster's version, PGDG's on RHEL, Alpine's, Postgres.app, Windows' installer); the client
+/// alone (Homebrew's `libpq`); each install of a newer version, the nearest first, since pg_dump
+/// reads every older server; then the PATH's.
+fn pg_dump_dirs(major: i64) -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Some(dirs) = PG_DUMP_DIRS.with(|d| d.borrow().clone()) {
+        return dirs;
+    }
+    // Each place an install of a version goes, as a directory of versions and the bin directory
+    // under the version's: each system's own, since another's path reads as one in the project.
+    let installs: &[(&str, &str, &str)] = if cfg!(windows) {
+        &[(r"C:\Program Files\PostgreSQL", "", "bin")]
+    } else {
+        &[
+            ("/opt/homebrew/opt", "postgresql@", "bin"),
+            ("/usr/local/opt", "postgresql@", "bin"),
+            ("/usr/lib/postgresql", "", "bin"),
+            ("/usr", "pgsql-", "bin"),
+            ("/usr/libexec", "postgresql", ""),
+            ("/Applications/Postgres.app/Contents/Versions", "", "bin"),
+        ]
+    };
+    let bin = |parent: &str, prefix: &str, sub: &str, version: i64| {
+        let dir = PathBuf::from(parent).join(format!("{prefix}{version}"));
+        if sub.is_empty() { dir } else { dir.join(sub) }
+    };
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PGBIN").filter(|v| !v.is_empty()).map(PathBuf::from).into_iter().collect();
+    dirs.extend(installs.iter().map(|&(parent, prefix, sub)| bin(parent, prefix, sub, major)));
+    if !cfg!(windows) {
+        dirs.extend(["/opt/homebrew/opt/libpq/bin", "/usr/local/opt/libpq/bin"].map(PathBuf::from));
+    }
+    let mut newer: Vec<(i64, PathBuf)> = Vec::new();
+    for &(parent, prefix, sub) in installs {
+        let Ok(entries) = std::fs::read_dir(parent) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(version) = name.strip_prefix(prefix).and_then(|v| v.parse::<i64>().ok()).filter(|&v| v > major) {
+                newer.push((version, bin(parent, prefix, sub, version)));
+            }
+        }
+    }
+    newer.sort();
+    dirs.extend(newer.into_iter().map(|(_, dir)| dir));
+    dirs.extend(std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default());
+    dirs
+}
+
+/// Why no pg_dump can dump a server: the version it needs, and the older ones found, each with its
+/// path.
+#[derive(Debug, Clone)]
+pub struct NoPgDump {
+    pub major: i64,
+    pub older: Vec<(String, i64)>,
+}
+
+/// The pg_dump to dump a server of `major`'s with: the first in [`pg_dump_dirs`] of that version or
+/// newer, since pg_dump refuses a server newer than itself.
+pub(crate) fn find_pg_dump(major: i64) -> Result<std::path::PathBuf, NoPgDump> {
+    let version_of = |p: &Path| -> i64 {
         let out = std::process::Command::new(p).arg("--version").output().ok();
         let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
         text.split_whitespace().find_map(|w| w.split('.').next()?.parse().ok()).unwrap_or(0)
     };
-    let candidates = [format!("/opt/homebrew/opt/postgresql@{major}/bin/pg_dump"), format!("/usr/lib/postgresql/{major}/bin/pg_dump"), "pg_dump".to_string()];
-    let Some(binary) = candidates.iter().find(|p| version_of(p) >= major) else {
-        return Err(Error(format!("reading this schema needs pg_dump {major} or newer (the server is Postgres {major})")));
-    };
+    let name = if cfg!(windows) { "pg_dump.exe" } else { "pg_dump" };
+    let mut older: Vec<(String, i64)> = Vec::new();
+    for dir in pg_dump_dirs(major) {
+        let path = dir.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        match version_of(&path) {
+            v if v >= major => return Ok(path),
+            0 => {}
+            v => {
+                let shown = path.display().to_string();
+                if !older.iter().any(|(p, _)| p == &shown) {
+                    older.push((shown, v));
+                }
+            }
+        }
+    }
+    Err(NoPgDump { major, older })
+}
+
+/// pg_dump against `url`, with `args`, its password in its environment rather than on its command
+/// line, with the pg_dump [`find_pg_dump`] finds for the server's `major` version.
+pub(crate) fn pg_dump(url: &str, major: i64, args: &[String]) -> Result<String, Error> {
+    let binary = find_pg_dump(major).map_err(|_| Error(format!("reading this schema needs pg_dump {major} or newer (the server is Postgres {major})")))?;
     let (bare, password) = without_password(url);
     let mut command = std::process::Command::new(binary);
     command.args(args).arg(bare);
@@ -1349,8 +1608,12 @@ mod url_tests {
         assert_eq!(shown_url("mysql://root@127.0.0.1:3306/app?ssl=true"), "mysql://127.0.0.1:3306/app");
         assert_eq!(shown_url("postgres://u:pa/ss@host/app"), "postgres://host/app");
         assert_eq!(shown_url("postgres://host/app?password=secret"), "postgres://host/app");
-        assert_eq!(shown_url("sqlite:./app.db?mode=rwc"), "sqlite:./app.db");
         assert_eq!(shown_url("libsql://app-acme.turso.io?authToken=secret"), "libsql://app-acme.turso.io");
+        // A SQLite file's URL is its name, an @ and a ? in it included, each naming another file
+        // without what comes before or after it.
+        assert_eq!(shown_url("sqlite://team@prod.db"), "sqlite://team@prod.db");
+        assert_eq!(shown_url("file:team@prod.db?mode=ro"), "file:team@prod.db?mode=ro");
+        assert_eq!(sqlite_path("file:team@prod.db?mode=ro", Path::new("/p")), Path::new("/p").join("team@prod.db?mode=ro").to_string_lossy());
         // An @ past the host is no part of the credentials, where a connection is made.
         assert_eq!(with_database("postgres://u@host/d@b", "x"), "postgres://u@host/x");
         assert_eq!(with_database("postgres://host/app?application_name=a@b", "x"), "postgres://host/x?application_name=a@b");
@@ -1364,11 +1627,18 @@ mod url_tests {
         assert!(!neon.contains("secret"), "{neon}");
         let supabase = transaction_pooler("postgres://postgres.abc:secret@aws-1-us-east-1.pooler.supabase.com:6543/postgres", "shadow_url").expect("Supabase's transaction pooler");
         assert!(supabase.contains("port 5432") && supabase.ends_with("in shadow_url in .reylo.yaml") && !supabase.contains("secret"), "{supabase}");
+        // An app's own pool has no project file's key to name.
+        let pool = transaction_pooler("postgres://neondb_owner@ep-late-darkness-bb241gty-pooler.c-15.us-east-1.aws.neon.tech:5432/neondb", "").expect("Neon's pooled host");
+        assert!(pool.ends_with("host ep-late-darkness-bb241gty.c-15.us-east-1.aws.neon.tech"), "{pool}");
+        let dedicated = transaction_pooler("postgres://postgres:secret@db.abc.supabase.co:6543/postgres", "direct_url").expect("Supabase's dedicated pooler");
+        assert!(dedicated.contains("dedicated") && dedicated.contains("direct connection, port 5432") && !dedicated.contains("secret"), "{dedicated}");
+        assert!(transaction_pooler("postgres://postgres@DB.abc.supabase.co.:6543/postgres", "").is_some(), "the host's absolute form");
         // The direct connections, Supabase's session pooler and any other host are no transaction pooler.
         for url in [
             "postgresql://neondb_owner:secret@ep-late-darkness-bb241gty.c-15.us-east-1.aws.neon.tech/neondb?sslmode=require",
             "postgres://postgres.abc:secret@aws-1-us-east-1.pooler.supabase.com:5432/postgres",
             "postgres://postgres:secret@db.abc.supabase.co:5432/postgres",
+            "postgres://u@db.a.b.supabase.co:6543/app",
             "postgres://u@my-pooler.example.com:6543/app",
             "postgres://u@localhost:5432/app",
             "postgres://u@[::1]:6543/app",

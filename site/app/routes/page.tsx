@@ -9,10 +9,12 @@ import { HeroTitle } from '@/components/hero';
 import { getMDXComponents } from '@/components/mdx';
 import { HeroActions } from '@/components/hero';
 import { loadPage } from '@/lib/content';
+import { migrateMovedAnchorsScript } from '@/lib/moved-anchors';
 import { compareTitle, docsTitle, docsUrl, githubUrl, introUrl, migrateDocsUrl, markdownPath, pageGroups, pageLinks, pageTitle, siteUrl } from '@/lib/layout.shared';
 import { ogAlt, ogSize } from '@/lib/og';
 import { unlistedPage } from '@/lib/rust-content';
 import { source } from '@/lib/source';
+import { fetchStars } from '@/lib/stars';
 
 /**
  * The h2s whose h3s stay out of a page's table of contents, by page; none today, since every page's
@@ -25,6 +27,7 @@ const DIALECT_PAGES = new Set(['postgres', 'mysql', 'sqlite', 'clickhouse']);
 /** The pages with no table of contents, by slug, each with the width of its column, which takes the right column's room: a page whose whole point is one wide table. */
 const CENTERED: Record<string, string> = {
   compare: '56rem',
+  'migrate-compare': '56rem',
 };
 
 /**
@@ -37,7 +40,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   // The intro and Reylo Migrate's docs have addresses of their own, /docs and /migrate/docs
   // (app/routes.ts); a prerender asks for each page's data at its address with `.data` after it.
   const pathname = new URL(request.url).pathname.replace(/\.data$/, '').replace(/\/$/, '');
-  const slug = params.slug ?? (pathname === migrateDocsUrl ? 'migrate' : pathname === introUrl ? '' : undefined);
+  const slug = params.slug ?? (pathname === migrateDocsUrl ? 'migrate' : pathname.startsWith('/migrate/') ? `migrate-${pathname.slice('/migrate/'.length)}` : pathname === introUrl ? '' : undefined);
   if (slug === undefined) throw new Response('Not found', { status: 404 });
   const page = source.getPage(slug ? [slug] : []);
   if (!page) throw new Response('Not found', { status: 404 });
@@ -54,7 +57,19 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     tree: source.getPageTree(),
     og: createHash('sha256').update(card).digest('hex').slice(0, 16),
     agentPrompt: agentPrompt === undefined ? undefined : `${agentPrompt}\n`,
+    // The intro's star pill shows the count.
+    stars: slug ? undefined : await fetchStars(),
+    // The type format's page shows its version, or that it is a preview, at the right of its title.
+    typedefs: slug === 'typedefs' ? await typedefsVersion() : undefined,
   };
+}
+
+/** The type format's version, from its JSON Schema's `$id` (none while it is a preview), and the path reylo.dev serves the schema at, as lib/remark-typedefs.ts reads them. */
+async function typedefsVersion(): Promise<{ version: string | null; href: string }> {
+  const id = String(JSON.parse(await readFile('../spec/typedefs.schema.json', 'utf8')).$id);
+  const m = /^https:\/\/reylo\.dev(\/typedefs\/(preview|\d+\.\d+\.\d+)\.json)$/.exec(id);
+  if (!m) throw new Error(`spec/typedefs.schema.json: its $id, ${id}, is no reylo.dev typedefs URL`);
+  return { version: m[2] === 'preview' ? null : m[2]!, href: m[1]! };
 }
 
 /**
@@ -116,13 +131,10 @@ export default function Page({ loaderData }: Route.ComponentProps) {
 }
 
 function PageContent({ loaderData }: Pick<Route.ComponentProps, 'loaderData'>) {
-  const { slug, path, title, tree, url, agentPrompt } = loaderData;
+  const { slug, path, title, tree, url, agentPrompt, stars, typedefs } = loaderData;
   const files = use(loadPage(path));
-  const components = getMDXComponents(slug === '' ? { HeroActions: () => <HeroActions agentPrompt={agentPrompt} /> } : undefined);
+  const components = getMDXComponents(slug === '' ? { HeroActions: () => <HeroActions agentPrompt={agentPrompt} stars={stars} /> } : undefined);
   const main = slug === '';
-  // Reylo Migrate's docs are a site of their own, on one page under its landing page (/migrate): no
-  // list of the docs' pages, so docs-kit draws its table of contents on the left.
-  const standalone = STANDALONE.has(slug);
   // A page named for a file (`.reylo.yaml`) is titled in code, as the list writes it.
   const code = pageGroups.some((g) => g.items.some((item) => 'code' in item && item.code && item.href === url));
 
@@ -146,10 +158,24 @@ function PageContent({ loaderData }: Pick<Route.ComponentProps, 'loaderData'>) {
       toc={((toc) => (toc.length < 2 ? [] : toc))(files.flatMap((file) => file.toc).filter((item) => item.depth <= 3))}
       fold={FOLD[slug] ?? []}
       centered={CENTERED[slug]}
-      pages={standalone ? undefined : { groups: pageGroups, links: pageLinks, linksLabel: 'Links', current: url }}
+      pages={{ groups: pageGroups, links: pageLinks, linksLabel: 'Links', current: url }}
       pageTitle={pageName(slug, title)}
       brand={<Brand />}
       github={githubUrl}
+      // A link to a section of the one page the Migrate docs were goes to that section's page now.
+      before={slug === 'migrate' ? <script dangerouslySetInnerHTML={{ __html: migrateMovedAnchorsScript }} /> : undefined}
+      titleAside={
+        typedefs ? (
+          <p className="typedef-version not-prose">
+            <span className="typedef-badge">{typedefs.version ? <span className="typedef-badge-version">v{typedefs.version}</span> : <span className="typedef-badge-stage">preview</span>}</span>
+            <a className="typedef-schema-button" href={typedefs.href}>
+              View JSON Schema
+            </a>
+          </p>
+        ) : undefined
+      }
+      // The intro asks for a star beside "Copy agent prompt" (components/hero.tsx), so its table of contents doesn't.
+      star={!main}
       footer={<>Released under the MIT License. Copyright © 2026 Colin McDonnell.</>}
     >
       {files.map((file, i) => (
@@ -158,9 +184,6 @@ function PageContent({ loaderData }: Pick<Route.ComponentProps, 'loaderData'>) {
     </DocsShell>
   );
 }
-
-/** The pages that are a site of their own, on one page, outside the docs' page list. */
-const STANDALONE = new Set(['migrate']);
 
 /** The current page's name on the phone's strip, as the list names it. */
 function pageName(slug: string, title: string): string {

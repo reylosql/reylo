@@ -50,6 +50,11 @@ impl Session {
         Ok(Session { connection: Connection { server, answers: AnswerCache::until_cleared() }, version })
     }
 
+    /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
+    pub fn forget(&mut self) {
+        self.connection.answers.clear();
+    }
+
     pub fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
         self.connection.analyze(sql).map_err(|answer| Failure::of(&answer))
     }

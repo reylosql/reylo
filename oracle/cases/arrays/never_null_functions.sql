@@ -1,0 +1,1 @@
+select t.id, array_agg(jsonb_build_object('email', m.email, 'nick', m.nickname)) as objects, array_agg(concat(m.nickname)) as nicks, array_agg(now()) as times, array_agg(current_date) as days, array[json_build_array(t.id, null)] as lists from teams t join members m on m.team_id = t.id group by t.id

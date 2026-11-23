@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Packs the binaries binaries.yml built as a GitHub release carries them: `reylo-<platform>.tar.gz`
 # for each platform of npm/platforms.json, holding `reylo` (`reylo.exe` on Windows) with its
-# execute bit, which an artifact does not keep, and SHA256SUMS over every `reylo-*.tar.gz` in <out>,
+# execute bit, which an artifact does not keep, beside its licenses (LICENSE, and the parser's
+# NOTICE.md and LICENSE-APACHE, for the code the binary carries under them), and SHA256SUMS over every `reylo-*.tar.gz` in <out>,
 # the playground's engine included when it is there. release.yml attaches what this writes, and
 # channels.yml installs from it.
 #
@@ -13,12 +14,13 @@ set -euo pipefail
 binaries="${1:?usage: pack-binaries.sh <binaries> <out>}"
 out="${2:?usage: pack-binaries.sh <binaries> <out>}"
 mkdir -p "$out"
+root="$PWD"
 for platform in $(jq -r '.[].platform' npm/platforms.json); do
   dir="$binaries/engine-$platform"
   exe=reylo
   case "$platform" in win32-*) exe=reylo.exe ;; esac
   [ -f "$dir/$exe" ] || { echo "::error::the build left no $exe for $platform"; exit 1; }
   chmod 755 "$dir/$exe"
-  tar -czf "$out/reylo-$platform.tar.gz" -C "$dir" "$exe"
+  tar -czf "$out/reylo-$platform.tar.gz" -C "$dir" "$exe" -C "$root" LICENSE -C "$root/engine/syntax" NOTICE.md LICENSE-APACHE
 done
 (cd "$out" && sha256sum reylo-*.tar.gz > SHA256SUMS && cat SHA256SUMS)

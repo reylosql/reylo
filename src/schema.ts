@@ -112,7 +112,7 @@ function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean
   if (inJson && isMysqlSet(t)) return { type: "string" };
   if (kind.includes("|")) return { anyOf: kind.split("|").map((k) => kindSchema(k as ScalarKind, t, dialect)) };
   const schema = kindSchema(kind as ScalarKind, t, dialect);
-  if (kind !== "text") return schema;
+  if (kind !== "text") return withInfinity(schema, t);
   if (isMysqlSet(t)) return { type: "string" };
   switch (t.kind) {
     case "text": return { type: "string" };
@@ -127,6 +127,12 @@ function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean
     case "duration": return { type: "string", description: "a length of time as MySQL writes it, up to 838:59:59 either way (-12:00:00.5)" };
     default: return { type: "string", description: `${dialect === "mysql" ? "MySQL" : "pg"} type ${name || t.kind}` };
   }
+}
+
+/** A date or a timestamp that may be infinite, which `.run()` gives, and Postgres writes inside a document, as the text `infinity` or `-infinity`, which no date format admits. */
+function withInfinity(schema: Schema, t: EngineType): Schema {
+  const infinite = (t.kind === "date" || t.kind === "instant" || t.kind === "datetime" || t.kind === "zoned_datetime") && t.infinity === true;
+  return infinite && schema.format !== undefined ? { anyOf: [schema, { enum: ["infinity", "-infinity"] }] } : schema;
 }
 
 /** The JSON form of a value of `kind` as `run` returns it, once JSON: each kind's one representation (src/values.ts). */

@@ -12,12 +12,10 @@ D1 is SQLite, so everything on the [SQLite](/sqlite) page holds for it. A Durabl
 | Database | D1, through its binding |
 | Bundler | Vite, with Cloudflare's Vite plugin |
 | Tests | Vitest inside workerd, with Cloudflare's Vitest plugin |
-| Postgres and MySQL in a Worker | Neon's serverless driver and PlanetScale's need nothing more. postgres.js, `pg`, `mysql2` and `mariadb` need Node's APIs: a compatibility date from 2026-08-04 on, or the `nodejs_compat` flag. Through Hyperdrive, which refuses prepared statements, Reylo runs [`mysql2`](/mysql#mysql2) through `query()` ([Cloudflare Hyperdrive](/hyperdrive)) |
+| Postgres and MySQL in a Worker | Neon's serverless driver and PlanetScale's need nothing more. postgres.js, `pg`, Drizzle Postgres, `mysql2` and `mariadb` need Node's APIs: a compatibility date from 2026-08-04 on, or the `nodejs_compat` flag. Through Hyperdrive, which refuses prepared statements, Reylo runs [`mysql2`](/mysql#mysql2) through `query()` ([Cloudflare Hyperdrive](/hyperdrive)) |
 | Example | [cloudflare-workers](https://github.com/reylosql/reylo/tree/main/examples/cloudflare-workers), a Worker with D1 and a Durable Object that runs locally with no Cloudflare account |
 
-The examples on this page use this schema:
-
-<Details summary="View the schema behind the examples" id="schema">
+<PageSchema>
 
 ```sql file="schema.sql" dialect="sqlite"
 create table users (
@@ -28,7 +26,7 @@ create table users (
 ) strict;
 ```
 
-</Details>
+</PageSchema>
 
 ## Setup
 
@@ -54,7 +52,7 @@ Two notes on the setup:
 The type check reads your schema from a local SQLite file. Point [`direct_url`](/configuration#direct_url) at it:
 
 ```yaml title=".reylo.yaml"
-direct_url: file:./dev.sqlite
+direct_url: sqlite:./dev.sqlite
 ```
 
 Your [migrations](#migrations) create it:
@@ -96,6 +94,21 @@ D1 differs from SQLite in two ways:
 - D1 has no transaction a query can join. Its `batch()` takes D1's own prepared statements.
 - D1 rounds an integer past 2^53, so Reylo throws an error rather than return it, even for a `BIGINT` column.
 
+<Callout title="Blocked functions">
+
+D1 blocks some of SQLite's functions, such as `json_pretty` and `power`. The type check also runs each query on Cloudflare's SQLite, so a blocked function is a type error.
+
+The check runs when your `package.json` has `wrangler` and its config has a D1 database:
+
+```jsonc title="wrangler.jsonc"
+{
+  // ...
+  "d1_databases": [{ "binding": "DB", "database_name": "app" }]
+}
+```
+
+</Callout>
+
 ## Migrations
 
 Write your migrations with [`reylo migrate`](/migrate/docs), and let Wrangler run them on D1:
@@ -131,17 +144,6 @@ wrangler d1 execute DB --remote --command "insert into d1_migrations (name) valu
 wrangler d1 migrations apply DB --remote
 ```
 
-## Blocked functions
-
-D1 blocks some of SQLite's functions, such as `json_pretty` and `power`. The type check also runs each query on Cloudflare's SQLite, as Wrangler runs it locally, so a blocked function is a type error. It does so when your `package.json` has `wrangler` and its config has a D1 database:
-
-```jsonc title="wrangler.jsonc"
-{
-  // ...
-  "d1_databases": [{ "binding": "DB", "database_name": "app" }]
-}
-```
-
 ## Tests
 
 Run the tests inside workerd with Cloudflare's Vitest plugin, and Reylo's beside it:
@@ -159,7 +161,7 @@ export default defineConfig({
 });
 ```
 
-Wrangler makes every imported `.sql` file a text module, and the Vitest plugin applies that rule before Vite runs any plugin. List Wrangler's other text types so that `.sql` is left to Reylo:
+Wrangler makes every imported `.sql` file a text module. The Vitest plugin applies that rule before any Vite plugin runs. List Wrangler's other text types so that `.sql` is left to Reylo:
 
 ```jsonc title="wrangler.jsonc"
 {

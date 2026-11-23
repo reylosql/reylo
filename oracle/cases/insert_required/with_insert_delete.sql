@@ -1,0 +1,1 @@
+with x as (insert into req (name, email) values ('a', 'b') returning id), y as (insert into with_trigger (id) values (1) returning id) delete from src where id in (select id from x union all select id from y)

@@ -18,8 +18,9 @@
    The type is IBM Plex Sans and Geist Mono (app/fonts.css). Every surface and rule is
    a colourless grey, near-black by night and white by day, so the yellow is
    the page's only colour: it marks links, the active table-of-contents entry
-   and inline code. In light mode the yellow darkens to ochre wherever it
-   carries text, so it keeps its contrast on white.
+   and inline code. In light mode the yellow is a fill alone (a button, a rule, a wash, the
+   blade) and what it would colour as text is near-black, since yellow text can't hold its
+   contrast on white; the hero's "fully typed" is the one exception, large enough to read.
 
    The yellow is a lightsaber's: by night the hero recording's yellow, #fbc40e,
    by day a warm gold. By night the yellow that marks something also gives off a little
@@ -38,7 +39,7 @@
   --color-fd-card: hsl(0, 0%, 98%);
   --color-fd-card-foreground: hsl(0, 0%, 16%);
   --color-fd-border: hsl(0, 0%, 89%);
-  --color-fd-primary: hsl(40, 100%, 28%);
+  --color-fd-primary: hsl(0, 0%, 9%);
   --color-fd-primary-foreground: hsl(0, 0%, 100%);
   --color-fd-secondary: hsl(0, 0%, 97%);
   --color-fd-secondary-foreground: hsl(0, 0%, 16%);
@@ -195,6 +196,60 @@
 
 #nd-page .hero-actions .dk-cta {
   margin: 0;
+}
+
+/* "Copy agent prompt" and the star pill, side by side and centred as a pair; the note hangs off the
+   pill's right, outside the pair, so it doesn't pull the pair off centre. */
+#nd-page .hero-cta-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+}
+
+#nd-page .hero-star {
+  position: relative;
+  display: inline-flex;
+}
+
+#nd-page .hero-star-note {
+  position: absolute;
+  left: calc(100% + 0.375rem);
+  top: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  transform: translateY(-50%);
+  color: var(--dk-star);
+  pointer-events: none;
+  user-select: none;
+}
+
+#nd-page .hero-star-note svg {
+  flex: none;
+  width: 44px;
+  height: 24px;
+  margin-top: 2px;
+}
+
+#nd-page .hero-star-note path {
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+#nd-page .hero-star-note > span {
+  white-space: nowrap;
+  font: 600 1.125rem / 1 var(--font-hand);
+  transform: rotate(-3deg);
+}
+
+/* A phone has no room beside the pair for the note. */
+@media (max-width: 767px) {
+  #nd-page .hero-star-note {
+    display: none;
+  }
 }
 
 @media (max-width: 767px) {
@@ -484,6 +539,67 @@
   color: var(--color-fd-muted-foreground);
 }
 
+/* The button at the foot of a callout, as the intro's Reylo Migrate callout ends: the yellow, with
+   dark text in both themes, and none of a prose link's rule or glow. */
+#nd-page .dk-callout-body a.callout-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  /* A pixel over 2.5rem lowers the label the 0.44px it sat high (ink-align.mjs, 2026-11-22). */
+  height: calc(2.5rem + 1px);
+  margin-top: 0.875rem;
+  padding: 0 1.125rem;
+  border-radius: 0.625rem;
+  background: var(--dk-accent);
+  color: hsl(0 0% 6%);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  text-decoration: none;
+  box-shadow: none;
+}
+
+/* The arrow sat 1.5px low against the label's capitals. */
+#nd-page .dk-callout-body a.callout-cta > span {
+  translate: 0 -1.5px;
+}
+
+#nd-page .dk-callout-body a.callout-cta:hover {
+  color: hsl(0 0% 6%);
+  filter: brightness(1.08);
+}
+
+/* The glow of the yellow marks by night, in four strengths of one light (a bright near light, a gold
+   one, then a wide amber falloff): soft for the wordmark, whose solid shape blooms; medium for the
+   homepage's star note; strong and strongest for the thinnest marks, the docs' star note, which sits
+   small in the margin, and the heading blades. */
+:root {
+  --saber-glow: drop-shadow(0 0 2px rgb(255 214 60 / 0.8)) drop-shadow(0 0 6px rgb(255 200 31 / 0.6)) drop-shadow(0 0 14px rgb(255 184 0 / 0.35));
+  --saber-text-glow: 0 0 2px rgb(255 214 60 / 0.6), 0 0 8px rgb(255 200 31 / 0.55), 0 0 18px rgb(255 184 0 / 0.3);
+  /* Brighter for the thinner marks: the handwritten note, with a paler core, and the 3px blade. */
+  --saber-glow-strong: drop-shadow(0 0 1.5px rgb(255 244 196 / 0.9)) drop-shadow(0 0 6px rgb(255 200 31 / 0.8)) drop-shadow(0 0 18px rgb(255 184 0 / 0.5));
+  --saber-text-glow-strong: 0 0 1.5px rgb(255 244 196 / 0.8), 0 0 8px rgb(255 200 31 / 0.75), 0 0 22px rgb(255 184 0 / 0.45);
+  --saber-glow-strongest: drop-shadow(0 0 2px rgb(255 224 96 / 1)) drop-shadow(0 0 9px rgb(255 200 31 / 0.85)) drop-shadow(0 0 26px rgb(255 184 0 / 0.55));
+  --saber-text-glow-strongest: 0 0 2px rgb(255 224 96 / 0.85), 0 0 11px rgb(255 200 31 / 0.8), 0 0 28px rgb(255 184 0 / 0.5);
+  /* Softer, for the wordmark, a large solid shape that the medium glow made bloom. */
+  --saber-glow-soft: drop-shadow(0 0 2px rgb(255 200 31 / 0.55)) drop-shadow(0 0 7px rgb(255 184 0 / 0.4));
+}
+
+/* A table's declaration in its hover (lib/table-hovers.ts): a statement keeps its lines, where a
+   Twoslash type wraps to the popup's width. */
+.reylo-table-decl code {
+  white-space: pre;
+}
+
+/* As wide as its longest line where the window allows, and scrolled where it doesn't. */
+.fd-twoslash-popover:has(.reylo-table-decl) {
+  width: max-content;
+  max-width: min(46rem, calc(100vw - 2rem));
+}
+
+.reylo-table-decl {
+  overflow-x: auto;
+}
+
 /* ── Saber light ───────────────────────────────────────────────────────────────
    By night the yellow gives off a little light, as a lightsaber's blade does: a soft gold glow
    under each link's rule and around the step numbers, the callout's bulb and the "Leave a star!"
@@ -505,21 +621,32 @@
 }
 
 .dark .dk-star svg {
-  filter: drop-shadow(0 0 4px rgb(255 200 31 / 0.6));
+  filter: var(--saber-glow-strongest);
+}
+
+.dark .dk-star {
+  color: #ffd43b;
 }
 
 .dark .dk-star span {
-  text-shadow: 0 0 10px rgb(255 184 0 / 0.55);
+  text-shadow: var(--saber-text-glow-strongest);
 }
 
-/* The wordmark in the chrome (components/brand.tsx) is the yellow, as the hero's mark is, and by
-   night it gives off the same tight gold light as the callout's bulb and the star note. */
+/* The wordmark in the chrome (components/brand.tsx) is the accent: the yellow by night, where it
+   gives off the saber glow, and near-black by day, as brand/ sets the mark on white. */
 .reylo-brand {
-  color: var(--dk-accent);
+  color: var(--color-fd-primary);
 }
 
 .dark .reylo-brand svg {
-  filter: drop-shadow(0 0 4px rgb(255 200 31 / 0.55));
+  filter: var(--saber-glow-soft);
+}
+
+/* The sidebar scrolls, so it clips: 28px of room left of the wordmark, where docs-kit leaves 12px,
+   keeps the glow's wide amber falloff from ending in a straight edge. */
+.dk-pages-scroll {
+  margin-inline-start: -1.75rem;
+  padding-inline-start: 1.75rem;
 }
 
 /* ── The comparison, /compare (components/compare-table.tsx) ──
@@ -533,17 +660,18 @@
 .reylo-compare-scroll {
   overflow-x: auto;
   margin-inline: -18px;
-  padding: 24px 18px 20px;
+  padding: 30px 18px 20px;
 }
 
 .reylo-compare-grid {
   --reylo-lw: 138px;
   --reylo-g1: 10px;
-  --reylo-rw: 84px;
+  --reylo-rw: 96px;
   --reylo-g2: 16px;
   --reylo-rows: 46px;
   display: grid;
-  grid-template-columns: var(--reylo-lw) var(--reylo-g1) var(--reylo-rw) var(--reylo-g2) repeat(var(--reylo-tools), minmax(58px, 1fr));
+  /* `--reylo-span`: the tracks a table with fewer tools keeps, so that its columns are as wide as the widest table's on the same page. The migration table stands alone, so it keeps its own. */
+  grid-template-columns: var(--reylo-lw) var(--reylo-g1) var(--reylo-rw) var(--reylo-g2) repeat(var(--reylo-span, var(--reylo-tools)), minmax(58px, 1fr));
   position: relative;
   font-size: 14px;
 }
@@ -552,7 +680,7 @@
   .reylo-compare-grid {
     --reylo-lw: 176px;
     --reylo-g1: 14px;
-    --reylo-rw: 104px;
+    --reylo-rw: 122px;
     --reylo-g2: 24px;
     --reylo-rows: 50px;
     font-size: 15px;
@@ -579,7 +707,7 @@
     left: 0;
     z-index: 3;
     background: var(--color-fd-background);
-    margin-block: -24px -20px;
+    margin-block: -30px -20px;
   }
 
   .reylo-compare-row-label,
@@ -766,21 +894,30 @@ a.reylo-compare-name:hover {
 }
 
 /* A label that has a popup keeps a dotted rule, as a Twoslash name does, so a reader sees it can be hovered. */
+/* A row's label shows what the row asks on hover. It carries no rule at rest; on hover a dotted underline follows each line of the text. */
 .reylo-compare-label {
   padding: 0;
   border: 0;
-  border-bottom: 1px dotted color-mix(in oklab, currentColor 35%, transparent);
   background: none;
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: default;
+  text-decoration: underline dotted transparent;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+}
+
+.reylo-compare-label:hover,
+.reylo-compare-label[data-state='open'] {
+  text-decoration-color: color-mix(in oklab, currentColor 45%, transparent);
 }
 
 .reylo-compare-frame {
   position: relative;
   z-index: 1;
-  margin: -14px 0 -6px;
+  /* Room around Reylo's wordmark: 19px of column on each side of it, and 20px above. */
+  margin: -20px 0 -6px;
   border: 2px solid var(--dk-accent);
   border-radius: 12px;
   background: color-mix(in srgb, var(--dk-accent) 5%, transparent);
@@ -1140,6 +1277,16 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   width: auto;
 }
 
+/* The wordmark brand/ draws (components/wordmark.tsx, components/migrate-wordmark.tsx), as the docs'
+   chrome has it (components/brand.tsx): 24px tall, lit as one shape by the glow on the svg. */
+.ml-brand.ml-wordmark svg {
+  height: 1.5rem;
+}
+
+.dark .ml-brand.ml-wordmark {
+  text-shadow: none;
+}
+
 .ml-links {
   display: flex;
   gap: 1.75rem;
@@ -1198,6 +1345,10 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   font-size: 1rem;
 }
 
+.ml-hero .ml-docs-primary {
+  height: calc(3.5rem - 1px);
+}
+
 .ml-hero-visual .ml-code,
 .ml-hero-visual .ml-term {
   font-size: 0.9375rem;
@@ -1214,9 +1365,10 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
 .ml-h1 {
   position: relative;
   margin: 0 0 2rem;
-  /* "SQL-first" kept whole on its line, the rest wrapping under it, three lines in all. */
-  font-size: clamp(2.25rem, 5.4vw, 5rem);
-  font-weight: 600;
+  /* "SQL-first" kept whole on its line, the rest wrapping under it, three lines in all. A size down
+     from 5rem and a weight down from 600, so the headline doesn't shout over the page. */
+  font-size: clamp(2.25rem, 4.75vw, 4.375rem);
+  font-weight: 550;
   line-height: 0.98;
   letter-spacing: -0.04em;
 }
@@ -1236,7 +1388,7 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
 
 .ml-h1 em {
   font-style: normal;
-  color: var(--color-fd-primary);
+  color: var(--dk-accent);
 }
 
 .ml-lede {
@@ -1422,11 +1574,11 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
 }
 
 .dark .ml-brand {
-  text-shadow: 0 0 10px rgb(255 184 0 / 0.45);
+  text-shadow: var(--saber-text-glow);
 }
 
 .dark .ml-brand svg {
-  filter: drop-shadow(0 0 4px rgb(255 200 31 / 0.55));
+  filter: var(--saber-glow-soft);
 }
 
 /* Windows: an editor or a terminal, with a title bar. */
@@ -1515,6 +1667,17 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
 
 .ml-wn {
   color: #fbc40e;
+}
+
+/* The words a line changes in place, as the CLI highlights them: the old on red, the new on green. */
+.ml-rm {
+  color: #ffafaf;
+  background: #5f0000;
+}
+
+.ml-ad {
+  color: #afffaf;
+  background: #005f00;
 }
 
 .ml-mu {
@@ -1633,6 +1796,41 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   padding: 1.25rem 1.375rem;
 }
 
+/* The comparison table (components/compare-table.tsx), centred under its heading, at the width of the docs' column it was laid out for. */
+.ml-table {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 5.5rem 3rem 3rem;
+  border-top: 1px solid var(--color-fd-border);
+  text-align: center;
+}
+
+.ml-table h2 {
+  margin: 0 0 1rem;
+  font-size: 2.75rem;
+  font-weight: 600;
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+
+.ml-table > p {
+  margin: 0 0 1.5rem;
+  font-size: 1.1875rem;
+  line-height: 1.6;
+  color: var(--color-fd-muted-foreground);
+}
+
+.dark .ml-table > p {
+  color: hsl(0 0% 80%);
+}
+
+.ml-table .reylo-compare {
+  max-width: 60rem;
+  margin-inline: auto;
+  text-align: left;
+}
+
 .ml-end {
   position: relative;
   padding-block: 8rem 9rem;
@@ -1640,15 +1838,19 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   text-align: center;
 }
 
+/* A pixel shorter than the command beside it, which it would otherwise outweigh: a solid yellow
+   reads taller than an outlined box of the same height. The margins keep it centred on the box. */
 .ml-docs-primary {
-  border-color: var(--color-fd-primary);
-  background: var(--color-fd-primary);
+  height: calc(4rem - 1px);
+  margin-block: 0.5px;
+  border-color: var(--dk-accent);
+  background: var(--dk-accent);
   color: hsl(0 0% 6%);
   font-weight: 600;
 }
 
 .ml-docs-primary:hover {
-  background: var(--color-fd-primary);
+  background: var(--dk-accent);
   filter: brightness(1.08);
 }
 
@@ -1664,6 +1866,11 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
 
 .ml-centered .ml-big {
   justify-content: center;
+}
+
+/* The arrow of a centred "Read the docs" (4rem tall, 17px) sat 1.3px low on both landings. */
+.ml-centered .ml-docs-primary svg {
+  translate: 0 -0.94px;
 }
 
 .ml-docs-link {
@@ -1737,7 +1944,7 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
 
 @media (max-width: 1023px) {
   .ml-h1 {
-    font-size: 4.5rem;
+    font-size: 3.9375rem;
   }
 
   .ml-hero {
@@ -1761,6 +1968,7 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   .ml-hero,
   .ml-row,
   .ml-end,
+  .ml-table,
   .ml-foot {
     padding-inline: 1.25rem;
   }
@@ -1776,7 +1984,8 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   }
 
   .ml-row-text h2,
-  .ml-end h2 {
+  .ml-end h2,
+  .ml-table h2 {
     font-size: 2rem;
   }
 
@@ -1816,6 +2025,11 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
     display: none;
   }
 
+  /* The header's Comparison link doesn't fit beside the others on a phone; the footer keeps it. */
+  .ml-links .ml-compare {
+    display: none;
+  }
+
   .ml-editor {
     width: auto;
   }
@@ -1839,10 +2053,12 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   visibility: hidden;
 }
 
-/* The file icon in an editor's bar sat 0.63px high against the file name's cap band
-   (optical-spacing's ink-align.mjs, 2026-11-17). A transform moves no layout. */
+/* The file icon in an editor's bar, nudged onto the file name's cap band: 0.625px down measured it
+   0.63px high on 2026-11-17, and a pixel low wherever a window landed on a whole pixel by
+   2026-11-22, so 0.125px lands it level in every window (optical-spacing's ink-align.mjs). A
+   transform moves no layout. */
 .ml-bar svg {
-  translate: 0 0.625px;
+  translate: 0 0.125px;
 }
 
 /* The brand's mark sat 0.56px high against its small-caps name, and the GitHub icon 0.31px high
@@ -1912,23 +2128,43 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   color: var(--color-fd-foreground);
 }
 
-/* Every kind is drawn in one cell and all but the chosen one hidden, so the editor holds the tallest
-   one's height and nothing below it moves as the tabs change. */
-.ml-kinds-body {
+/* Every database's migration is drawn in one cell and all but the chosen one hidden, so the window
+   holds the tallest one's height and nothing below it moves as the tabs change. */
+.ml-stack {
   display: grid;
 }
 
-.ml-kinds-body > .ml-sql {
+.ml-stack > .ml-sql {
   grid-area: 1 / 1;
   visibility: hidden;
 }
 
-.ml-kinds-body > .ml-sql[data-on] {
+.ml-stack > .ml-sql[data-on] {
   visibility: visible;
 }
 
-/* The first row's migration: SQLite's rebuild wraps rather than scrolls, and the window keeps its
-   height as the tabs turn. */
+/* The diff row's edit: wide enough for the view's longest line, and room at its foot for the
+   migrations window that overlaps it. */
+.ml-edit {
+  width: 86%;
+}
+
+.ml-edit .ml-code {
+  padding-bottom: 2.5rem;
+}
+
+/* A gap in an edited file, the lines left out. */
+.ml-gap {
+  color: var(--ml-win-dim);
+}
+
+/* The diff row's migrations: about nine lines tall, whichever tab shows, each scrolling past that
+   (SQLite's rebuild runs to 25 lines), so the row stays the size of the others. */
+.ml-dialects .ml-stack {
+  max-height: 13rem;
+  overflow-y: auto;
+}
+
 .ml-dialects .ml-sql {
   min-height: 0;
   white-space: pre-wrap;
@@ -1940,80 +2176,82 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   overflow-wrap: anywhere;
 }
 
-/* A host the whole flow has been run on, marked in the tile's corner. */
-.ml-hosts span {
-  position: relative;
-}
-
-.ml-tested {
-  position: absolute;
-  top: 0.4375rem;
-  right: 0.4375rem;
-  padding: 0 0.375rem;
-  line-height: 1.125rem;
-  border: 1px solid color-mix(in oklab, var(--color-fd-primary) 45%, transparent);
+/* ── The star pill (components/star-pill.tsx), on the homepage's nav and the intro ── */
+/* GitHub's star button, unstarred. Only the border warms on hover. */
+.star-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4375rem;
+  height: 2.125rem;
+  padding: 0 0.875rem 0 0.625rem;
+  border: 1px solid var(--color-fd-border);
   border-radius: 999px;
-  font-size: 0.625rem;
-  font-style: normal;
-  font-weight: 600;
-  color: var(--color-fd-primary);
-}
-
-/* A query's block with its schema a hover away (components/schema-query.tsx): "View schema" under
-   the block's bottom right, dotted, and the schema in a popover under it, kept open while the
-   pointer is on either. The popover's top padding bridges the gap, so the pointer can cross it. */
-.schema-query-foot {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: -0.375rem;
-  margin-bottom: 1rem;
-}
-
-.schema-query-link {
-  position: relative;
-  font-size: 0.8125rem;
-  color: var(--color-fd-muted-foreground);
-  text-decoration: underline dotted;
-  text-decoration-color: color-mix(in oklab, currentColor 60%, transparent);
-  text-underline-offset: 0.25rem;
-  cursor: help;
-  outline: none;
-}
-
-.schema-query-link:hover,
-.schema-query-link:focus-visible {
   color: var(--color-fd-foreground);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  transition: border-color 0.15s;
 }
 
-.schema-query-pop {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  z-index: 40;
+.star-pill:hover {
+  border-color: var(--color-fd-primary);
+}
+
+.star-pill svg {
+  width: 1.0625rem;
+  height: 1.0625rem;
+}
+
+.star-pill .star-pill-star {
+  width: 0.875rem;
+  height: 0.875rem;
+  margin-left: 0.125rem;
+  color: var(--color-fd-muted-foreground);
+}
+
+/* Beside the docs' pill buttons ("Copy agent prompt"), at their height and type size. */
+.star-pill-lg {
+  height: 2.5rem;
+  gap: 0.5rem;
+  padding: 0 1.125rem 0 0.875rem;
+  font-size: 0.875rem;
+}
+
+.star-pill-lg svg {
+  width: 1.125rem;
+  height: 1.125rem;
+}
+
+
+/* A ```terminal line changed in place (lib/rehype-terminal-diff.ts), as the CLI draws it: its ~ yellow and the words it changes highlighted. Fumadocs' selector for every span of a code block, and the class. */
+.shiki:not(.not-fumadocs-codeblock *) code span.term-changed {
+  color: #9a6700;
+}
+
+.dark .shiki:not(.not-fumadocs-codeblock *) code span.term-changed {
+  color: #fbc40e;
+}
+
+.shiki:not(.not-fumadocs-codeblock *) code span.term-marker {
   display: none;
-  width: min(36rem, calc(100vw - 2.5rem));
-  padding-top: 0.5rem;
 }
 
-.schema-query-link:hover .schema-query-pop,
-.schema-query-link:focus-within .schema-query-pop {
-  display: block;
+.shiki:not(.not-fumadocs-codeblock *) code span.term-removed {
+  color: #82071e;
+  background: #ffebe9;
 }
 
-.schema-query-card {
-  display: block;
-  max-height: min(34rem, 70vh);
-  overflow: auto;
-  border-radius: 0.875rem;
-  box-shadow: 0 24px 60px -12px rgb(0 0 0 / 0.6);
-  text-decoration: none;
+.shiki:not(.not-fumadocs-codeblock *) code span.term-added {
+  color: #116329;
+  background: #dafbe1;
 }
 
-.schema-query-card > * {
-  margin: 0 !important;
+.dark .shiki:not(.not-fumadocs-codeblock *) code span.term-removed {
+  color: #ffafaf;
+  background: #5f0000;
 }
 
-/* A size down, so the schema's longest lines fit the popover, narrower than the column, unwrapped. */
-.schema-query-card {
-  --dk-code-size: 12px;
+.dark .shiki:not(.not-fumadocs-codeblock *) code span.term-added {
+  color: #afffaf;
+  background: #005f00;
 }

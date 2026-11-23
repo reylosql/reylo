@@ -195,7 +195,7 @@ async fn scenario<DB: reylo::migrate::Database>(p: &Project, pool: impl AsyncFn(
     broken.lock();
     let failed = broken.migrator().run(&pool(&broken).await).await.unwrap_err();
     assert_eq!(failed.applied(), NAMES, "{failed}");
-    assert!(failed.to_string().starts_with("reylo migrate deploy failed") && failed.to_string().contains("nowhere"), "{failed}");
+    assert!(failed.to_string().lines().next().is_some_and(|lead| lead.starts_with("reylo migrate deploy failed: 20260104000000_broken.sql: ") && lead.contains("nowhere")), "{failed}");
 
     // With no lock, a migration that sorts before one the database ran is replayed in a shadow
     // database, which the app has none of: refused, for the command line to deploy, even where
@@ -241,6 +241,27 @@ async fn postgres() {
     p2.migrator().run(&app2).await.unwrap();
     let held: i64 = sqlx::query_scalar(text("select count(*) from pg_locks where locktype = 'advisory' and database = (select oid from pg_database where datname = current_database())")).fetch_one(&app2).await.unwrap();
     assert_eq!(held, 0);
+}
+
+/// A run holds a session, so neither call starts on a transaction pooler, and the pool never
+/// connects. The project is SQLite's, which needs no server: only its files are read.
+#[cfg(all(feature = "postgres", feature = "sqlite"))]
+#[tokio::test]
+async fn a_transaction_pooler_is_refused() {
+    let p = Project::new(Kind::Sqlite).await.expect("SQLite needs no server");
+    let migrator = p.migrator();
+    for (url, says) in [
+        ("postgres://app:secret@ep-late-darkness-bb241gty-pooler.c-15.us-east-1.aws.neon.tech/app?sslmode=require", "host ep-late-darkness-bb241gty.c-15.us-east-1.aws.neon.tech"),
+        ("postgres://app.abc:secret@aws-1-us-east-1.pooler.supabase.com:6543/app?sslmode=require", "port 5432"),
+        ("postgres://app:secret@db.abc.supabase.co:6543/app?sslmode=require", "port 5432"),
+        ("postgres://ops%2Fbatch:secret@ep-late-darkness-bb241gty-pooler.c-15.us-east-1.aws.neon.tech/app?sslmode=require", "host ep-late-darkness-bb241gty.c-15.us-east-1.aws.neon.tech"),
+    ] {
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect_lazy(url).unwrap();
+        let refused = [migrator.run(&pool).await.unwrap_err().to_string(), migrator.status(&pool).await.unwrap_err().to_string()];
+        for message in refused {
+            assert!(message.contains(says) && !message.contains("secret"), "{message}");
+        }
+    }
 }
 
 #[cfg(feature = "mysql")]

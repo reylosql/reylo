@@ -69,7 +69,7 @@ def main() -> int:
         print(f"{crate} {version} is on crates.io already, with the same files, packed from another commit or lock")
         return 0
     shown = ", ".join(differ[:10]) + (f" and {len(differ) - 10} more" if len(differ) > 10 else "")
-    print(f"{crate} {version} is on crates.io with other files than this checkout packs ({shown}), and crates.io never takes a version twice: give {crate} a new version (a parser copy's in its own Cargo.toml and where the root Cargo.toml's [workspace.dependencies] pins it; any other crate's with the release's)", file=sys.stderr)
+    print(f"{crate} {version} is on crates.io with other files than this checkout packs ({shown}), and crates.io never takes a version twice: give {crate} a new version, with the release's", file=sys.stderr)
     return 1
 
 

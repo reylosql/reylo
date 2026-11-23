@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Reylo's analysis engine for MySQL: the server's prepare metadata and a sqlparser tree, the row-count proof and the nested JSON shapes, over the core's protocol."
+description = "Reylo's analysis engine for MySQL: the server's prepare metadata and the statement's syntax tree, the row-count proof and the nested JSON shapes, over the core's protocol."
 
 [lib]
 name = "reylo_engine_mysql"
@@ -16,6 +16,6 @@ reylo-engine-build.workspace = true
 
 [dependencies]
 reylo-engine-core.workspace = true
-sqlparser = { workspace = true, features = ["std"] }
+syntax.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "unbounded_depth"] }

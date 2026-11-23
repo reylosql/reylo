@@ -1,6 +1,7 @@
 //! `reylo analyze`: each statement's type descriptor (spec/index.ts), read from the database the
-//! project names, as the type check reads it: a YAML document per statement, or with
-//! `--format json` one line of JSON per statement.
+//! project names, as the type check reads it: JSON by default, laid out compactly in a terminal and
+//! one line per statement otherwise; or a YAML document per statement, the statement's TypeScript
+//! types, or its Rust module for sqlx.
 
 use reylo_engine::project::{self, Project};
 use reylo_engine_core::api::{utf16_offset, Analysis};
@@ -9,17 +10,25 @@ use reylo_engine_core::types::{Cardinality, DialectVersion, Diagnostic, Kind, Re
 use reylo_engine::Failure;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-pub const USAGE: &str = "Usage: reylo analyze <file.sql | directory | 'glob' | -> ... [--url <url>] [--format yaml | json]
-       reylo analyze --sql <statement> [--url <url>] [--format yaml | json]
+pub const USAGE: &str = "Usage: reylo analyze <file.sql | directory | 'glob' | -> ... [--url <url>] [--format <format>]
+       reylo analyze --sql <statement> [--url <url>] [--format <format>]
 
-Prints each statement's type descriptor, with the file it was read from: as YAML, a document per
-statement (--format yaml, the default), or as one line of JSON per statement (--format json).
-Each diagnostic is also written to standard error, as file:line:column and the message, with a
-caret under its place. A directory is searched for .sql files, leaving out node_modules, dist,
-build, out, target, coverage, hidden directories and what git ignores; a glob in quotes, as
-'src/**/*.sql', is expanded by Reylo; - reads one statement from standard input.
+Prints each statement's type descriptor as JSON, with the file it was read from when there are
+several: laid out in a terminal, each object on one line where it fits, and otherwise one line per
+statement. Each diagnostic is also written to standard error, as file:line:column and the
+message, with a caret under its place. A directory is searched for .sql files, leaving out
+node_modules, dist, build, out, target, coverage, hidden directories and what git ignores; a glob
+in quotes, as 'src/**/*.sql', is expanded by Reylo; - reads one statement from standard input.
+
+Formats:
+  json                      The type descriptor, the default
+  yaml                      The type descriptor, a YAML document per statement
+  typescript                Its parameters and what .run() resolves to, as TypeScript types
+  rust                      Its module for sqlx, as reylo generate rust-sqlx writes it
+
 The database is --url, else the project file's direct_url, else DATABASE_URL, from the
 environment or the .env files; a relative SQLite path in --url is read from the working
 directory, one in the project's URL from the project's root. A statement the engine cannot
@@ -27,23 +36,41 @@ analyze is printed with one diagnostic that says why. Exits with 1 when any stat
 diagnostic, and with 2 when the database cannot be reached or the statements cannot be read.";
 
 
-/// How standard output writes each descriptor.
+/// How standard output writes each statement.
 #[derive(Clone, Copy, PartialEq)]
 enum Format {
-    /// A YAML document per statement, `---` between two ([`crate::yaml`]).
-    Yaml,
-    /// One line of JSON per statement.
+    /// Its descriptor as JSON: laid out compactly in a terminal, a blank line between two
+    /// ([`crate::compact_json`]), and one line each where standard output is a pipe or a file.
     Json,
+    /// Its descriptor as a YAML document, `---` between two ([`crate::yaml`]).
+    Yaml,
+    /// Its parameters and what `.run()` resolves to ([`crate::typescript`]).
+    TypeScript,
+    /// Its module for sqlx, as `reylo generate rust-sqlx` writes it.
+    Rust,
+}
+
+/// What the formats take beyond the analysis: the project file's settings for TypeScript, and the
+/// crate's for Rust.
+struct Settings {
+    codecs: Value,
+    allow_nested_arrays: bool,
+    /// The working directory, which a statement of no file takes the Rust crate of.
+    cwd: PathBuf,
+    terminal: bool,
 }
 
 /// One statement to analyze, and the file it was read from.
 struct Input {
+    /// The file as messages and the output name it.
     file: Option<String>,
+    /// The file on disk, whose Rust crate its module is for.
+    path: Option<PathBuf>,
     sql: String,
 }
 
 /// One database's statements, over one connection.
-enum Session {
+pub(crate) enum Session {
     Postgres(reylo_engine::postgres::Session),
     Mysql(reylo_engine::mysql::Session),
     Sqlite(reylo_engine::sqlite::Session),
@@ -52,7 +79,7 @@ enum Session {
 
 impl Session {
     /// `base` is the directory a relative SQLite path is read from.
-    async fn open(dialect: &str, url: &str, base: &Path) -> Result<Session, Failure> {
+    pub(crate) async fn open(dialect: &str, url: &str, base: &Path) -> Result<Session, Failure> {
         Ok(match dialect {
             "postgres" => Session::Postgres(reylo_engine::postgres::Session::open(url).await?),
             "mysql" => Session::Mysql(reylo_engine::mysql::Session::open(url).await?),
@@ -61,7 +88,7 @@ impl Session {
         })
     }
 
-    fn version(&self) -> &str {
+    pub(crate) fn version(&self) -> &str {
         match self {
             Session::Postgres(s) => &s.version,
             Session::Mysql(s) => &s.version,
@@ -70,7 +97,27 @@ impl Session {
         }
     }
 
-    async fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
+    /// Drops what the session remembers of the schema.
+    pub(crate) fn forget(&mut self) {
+        match self {
+            Session::Postgres(s) => s.forget(),
+            Session::Mysql(s) => s.forget(),
+            Session::Sqlite(s) => s.forget(),
+            Session::Clickhouse(s) => s.forget(),
+        }
+    }
+
+    /// Has the server give up on a lock after `seconds`. SQLite's analysis takes none.
+    /// Sets the session up for text an editor sends on its own: giving up on a lock after `seconds`, and read-only where parsing a statement can run code, as on Postgres. A SQLite file is opened read-only already, and ClickHouse's HTTP interface keeps no session: its description of a statement takes no lock and writes nothing.
+    pub(crate) async fn for_an_editor(&mut self, seconds: u32) -> Result<(), String> {
+        match self {
+            Session::Postgres(s) => s.for_an_editor(seconds).await,
+            Session::Mysql(s) => s.for_an_editor(seconds).await,
+            Session::Sqlite(_) | Session::Clickhouse(_) => Ok(()),
+        }
+    }
+
+    pub(crate) async fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
         match self {
             Session::Postgres(s) => s.analyze(sql).await,
             Session::Mysql(s) => s.analyze(sql).await,
@@ -83,7 +130,7 @@ impl Session {
 pub fn run(args: &[String]) -> i32 {
     let mut url: Option<String> = None;
     let mut sql: Option<String> = None;
-    let mut format = Format::Yaml;
+    let mut format = Format::Json;
     let mut paths: Vec<String> = Vec::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -97,7 +144,7 @@ pub fn run(args: &[String]) -> i32 {
                 Some(value) if arg == "--sql" => sql = Some(value.clone()),
                 Some(value) => match format_of(value) {
                     Some(given) => format = given,
-                    None => return usage(&format!("--format takes yaml or json, not {value}")),
+                    None => return usage(&format!("--format takes json, yaml, typescript or rust, not {value}")),
                 },
                 None => return usage(&format!("{arg} takes a value")),
             },
@@ -105,7 +152,7 @@ pub fn run(args: &[String]) -> i32 {
             _ if arg.starts_with("--sql=") => sql = Some(arg["--sql=".len()..].to_string()),
             _ if arg.starts_with("--format=") => match format_of(&arg["--format=".len()..]) {
                 Some(given) => format = given,
-                None => return usage(&format!("--format takes yaml or json, not {}", &arg["--format=".len()..])),
+                None => return usage(&format!("--format takes json, yaml, typescript or rust, not {}", &arg["--format=".len()..])),
             },
             _ if arg.starts_with('-') && arg != "-" => return usage(&format!("unknown option {arg}")),
             _ => paths.push(arg.clone()),
@@ -124,7 +171,7 @@ pub fn run(args: &[String]) -> i32 {
     if let Some(notice) = project.notice() {
         eprintln!("reylo analyze: {notice}");
     }
-    let mut inputs: Vec<Input> = sql.map(|sql| Input { file: None, sql }).into_iter().collect();
+    let mut inputs: Vec<Input> = sql.map(|sql| Input { file: None, path: None, sql }).into_iter().collect();
     for path in &paths {
         match read_inputs(path, &cwd) {
             Ok(found) => inputs.extend(found),
@@ -152,19 +199,32 @@ pub fn run(args: &[String]) -> i32 {
             return fail(&format!("Cannot read the SQLite URL {url} ({source}): {why}."));
         }
     }
+    // The Rust crate runs its queries on sqlx, which has no ClickHouse driver.
+    if dialect == "clickhouse" && format == Format::Rust {
+        return fail("Cannot print a Rust module for ClickHouse: the Rust crate runs its queries on sqlx, which has no ClickHouse driver. Its types print with --format typescript.");
+    }
+    let settings = Settings {
+        codecs: serde_json::to_value(&project.config.js.codecs).unwrap_or(Value::Null),
+        allow_nested_arrays: project.config.allow_nested_arrays.unwrap_or(false),
+        cwd: cwd.clone(),
+        terminal: std::io::stdout().is_terminal(),
+    };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
-    runtime.block_on(analyze_all(dialect, url, given, &base, &project, inputs, format))
+    runtime.block_on(analyze_all(dialect, url, given, &base, &project, inputs, format, &settings))
 }
 
 fn format_of(name: &str) -> Option<Format> {
     match name {
-        "yaml" => Some(Format::Yaml),
         "json" => Some(Format::Json),
+        "yaml" => Some(Format::Yaml),
+        "typescript" => Some(Format::TypeScript),
+        "rust" => Some(Format::Rust),
         _ => None,
     }
 }
 
-async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, project: &Project, inputs: Vec<Input>, format: Format) -> i32 {
+#[allow(clippy::too_many_arguments)]
+async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, project: &Project, inputs: Vec<Input>, format: Format, settings: &Settings) -> i32 {
     let mut session = match Session::open(dialect, &url, base).await {
         Ok(session) => session,
         // A command in `direct_url` that makes a short-lived token is run again once the token is
@@ -187,12 +247,25 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
         _ => Dialect::Sqlite,
     };
     let mut flagged = false;
+    // Whether a statement is printed yet, which the next one is set apart from.
+    let mut shown = false;
+    // The Rust crates' features, read once for each crate.
+    let mut crates = std::collections::BTreeMap::new();
+    // A run of one statement prints it alone, since the caller named its file; a run of several
+    // names each one's file, which tells them apart.
+    let several = inputs.len() > 1;
     for (at, input) in inputs.into_iter().enumerate() {
+        // The analysis, for the formats that read more than the descriptor; none where the engine
+        // could not analyze the statement.
+        let mut analyzed: Option<Value> = None;
         let descriptor = match session.analyze(&input.sql).await {
             Ok(analysis) => {
                 let mut descriptor = analysis.descriptor(&input.sql, version.clone());
                 if project.strict_params() && analysis.diagnostics.is_empty() {
                     descriptor.diagnostics.extend(untyped_params(&input.sql, &analysis, engine_dialect, project));
+                }
+                if matches!(format, Format::TypeScript | Format::Rust) {
+                    analyzed = serde_json::to_value(&analysis).ok();
                 }
                 descriptor
             }
@@ -219,20 +292,69 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
         };
         flagged |= !descriptor.diagnostics.is_empty();
         report(input.file.as_deref(), &input.sql, &descriptor.diagnostics);
-        let mut line = Map::new();
-        if let Some(file) = input.file {
-            line.insert("file".into(), Value::String(file));
-        }
-        if let Ok(Value::Object(fields)) = serde_json::to_value(&descriptor) {
-            line.extend(fields);
-        }
+        // Two statements a person reads are a blank line apart; a pipe takes a line each.
+        let gap = shown && (format != Format::Json || settings.terminal);
+        let file = input.file.as_deref().filter(|_| several);
+        let header = file.map(|file| format!("// {file}\n")).unwrap_or_default();
         match format {
-            Format::Json => println!("{}", Value::Object(line)),
-            Format::Yaml => {
-                if at > 0 {
-                    println!("---");
+            Format::Json | Format::Yaml => {
+                let mut line = Map::new();
+                if let Some(file) = file {
+                    line.insert("file".into(), Value::String(file.to_string()));
                 }
-                print!("{}", crate::yaml::document(&Value::Object(line)));
+                if let Ok(Value::Object(fields)) = serde_json::to_value(&descriptor) {
+                    line.extend(fields);
+                }
+                let line = Value::Object(line);
+                if format == Format::Yaml {
+                    if at > 0 {
+                        println!("---");
+                    }
+                    print!("{}", crate::yaml::document(&line));
+                } else {
+                    if gap {
+                        println!();
+                    }
+                    println!("{}", if settings.terminal { crate::compact_json::compact(&line) } else { line.to_string() });
+                }
+                shown = true;
+            }
+            Format::TypeScript => {
+                let printed = match &analyzed {
+                    Some(analysis) => crate::typescript::printed(analysis, dialect, &settings.codecs, settings.allow_nested_arrays),
+                    None => crate::typescript::Printed::unknown(),
+                };
+                if gap {
+                    println!();
+                }
+                print!("{header}{}", printed.text());
+                shown = true;
+            }
+            Format::Rust => {
+                // A statement with a diagnostic has no module: what it says is on standard error.
+                let Some(analysis) = analyzed.as_ref().filter(|_| descriptor.diagnostics.is_empty()) else { continue };
+                let rust_dialect = match dialect {
+                    "postgres" => reylo_build::Dialect::Postgres,
+                    "mysql" => reylo_build::Dialect::Mysql,
+                    _ => reylo_build::Dialect::Sqlite,
+                };
+                // The crate a file is in names the types its module may use, as for `reylo generate`;
+                // a statement of no file takes the working directory's.
+                let dir = input.path.as_deref().and_then(Path::parent).unwrap_or(&settings.cwd);
+                let options = reylo_build::generate::options_for(dir, &mut crates);
+                match reylo_build::generate::module_text(rust_dialect, options, analysis) {
+                    Ok(module) => {
+                        if gap {
+                            println!();
+                        }
+                        print!("{header}{module}");
+                        shown = true;
+                    }
+                    Err(message) => {
+                        flagged = true;
+                        eprintln!("{}: {message}", input.file.as_deref().unwrap_or("<statement>"));
+                    }
+                }
             }
         }
     }
@@ -275,7 +397,7 @@ fn byte_offset(text: &str, utf16: usize) -> usize {
 /// A parameter nothing in the statement types is an error at its first use, unless the project
 /// file says `allow_untyped_params: true`, as the type check says it (src/module-types.ts). A statement
 /// the engine refused already was not analyzed to its end, and is not asked.
-fn untyped_params(sql: &str, analysis: &Analysis, dialect: Dialect, project: &Project) -> Vec<Diagnostic> {
+pub(crate) fn untyped_params(sql: &str, analysis: &Analysis, dialect: Dialect, project: &Project) -> Vec<Diagnostic> {
     // A MySQL session reads its strings by its sql_mode, which the lexer alone does not know: the
     // placeholders are the ones the analysis read.
     let placeholders: Vec<(String, usize, usize)> = match dialect {
@@ -303,13 +425,13 @@ fn read_inputs(path: &str, cwd: &Path) -> Result<Vec<Input>, String> {
     if path == "-" {
         let mut sql = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut sql).map_err(|e| format!("cannot read standard input: {e}"))?;
-        return Ok(vec![Input { file: None, sql }]);
+        return Ok(vec![Input { file: None, path: None, sql }]);
     }
     reylo_build::files::sql_files(path, cwd)?
         .into_iter()
         .map(|file| {
             let sql = std::fs::read_to_string(&file).map_err(|e| format!("cannot read {}: {e}", shown(cwd, &file)))?;
-            Ok(Input { file: Some(shown(cwd, &file)), sql })
+            Ok(Input { file: Some(shown(cwd, &file)), path: Some(cwd.join(&file)), sql })
         })
         .collect()
 }

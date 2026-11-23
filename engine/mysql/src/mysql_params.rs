@@ -1,5 +1,5 @@
 //! Which MySQL parameters the caller may pass null for, by the rule of Postgres and SQLite
-//! (`postgres::nullable_params`), read off the `sqlparser` tree, since MySQL's prepare says nothing
+//! (`postgres::nullable_params`), read off the statement's syntax tree, since MySQL's prepare says nothing
 //! of a parameter's nullability: one cast to `nullable(…)`, and one that is, bare, with no cast,
 //! the whole value written to a column that may hold null (a row of an INSERT's or a REPLACE's
 //! VALUES, the SELECT that feeds one, its SET list, an UPDATE's SET, ON DUPLICATE KEY UPDATE),
@@ -13,7 +13,7 @@ use crate::host::{as_str, Host, Lazy};
 use crate::lex;
 use crate::mysql::by_table;
 use crate::mysql_keys::Cte;
-use sqlparser::ast::{self, Expr, FunctionArg, FunctionArgExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins};
+use syntax::mysql::ast::{self, Expr, FunctionArg, FunctionArgExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins};
 use std::collections::{HashMap, HashSet};
 
 /// Each column of the named tables of the current schema, whether it may hold NULL, its `extra`,
@@ -516,8 +516,6 @@ pub(crate) fn nullable(statement: &Statement, names: &Names, host: &Host, marked
 /// columns it reads in turn. A column an expression reads otherwise, as through `coalesce`, may be
 /// NULL, and so may any column of an expression the parser does not read.
 fn refused_by(rows: &[Vec<serde_json::Value>]) -> HashMap<String, HashSet<String>> {
-    use sqlparser::dialect::MySqlDialect;
-    use sqlparser::parser::Parser;
     // Per table, each generated column's strict columns, and the NOT NULL generated columns.
     let mut strict: HashMap<&str, HashMap<String, Vec<String>>> = HashMap::new();
     let mut not_null: HashMap<&str, Vec<String>> = HashMap::new();
@@ -527,8 +525,7 @@ fn refused_by(rows: &[Vec<serde_json::Value>]) -> HashMap<String, HashSet<String
         if !extra.contains("GENERATED") || extra.contains("DEFAULT_GENERATED") {
             continue;
         }
-        let dialect = MySqlDialect {};
-        let read = crate::mysql::check_clause(expression).and_then(|text| Parser::new(&dialect).try_with_sql(&text).and_then(|mut p| p.parse_expr()).ok());
+        let read = crate::mysql::check_clause(expression).and_then(|text| crate::mysql::parse_expr(&text));
         let reads = read.map(|e| crate::mysql_nulls::nulls_with(&e).into_iter().filter_map(|parts| parts.last().cloned()).collect()).unwrap_or_default();
         let column = column.to_ascii_lowercase();
         if nullable.eq_ignore_ascii_case("NO") {
@@ -555,8 +552,6 @@ fn refused_by(rows: &[Vec<serde_json::Value>]) -> HashMap<String, HashSet<String
 /// (lower case): one of its conjuncts tests the column IS NOT NULL, which a null makes false where
 /// any other test of it would be unknown, and so pass.
 fn refuses_null(clause: &str, column: &str) -> bool {
-    use sqlparser::dialect::MySqlDialect;
-    use sqlparser::parser::Parser;
     fn conjunct(e: &Expr, column: &str) -> bool {
         match e {
             Expr::Nested(inner) => conjunct(inner, column),
@@ -569,8 +564,7 @@ fn refuses_null(clause: &str, column: &str) -> bool {
             _ => false,
         }
     }
-    let dialect = MySqlDialect {};
-    Parser::new(&dialect).try_with_sql(clause).and_then(|mut p| p.parse_expr()).is_ok_and(|e| conjunct(&e, column))
+    crate::mysql::parse_expr(clause).is_some_and(|e| conjunct(&e, column))
 }
 
 /// The tables of the current schema the statement reads and writes, as it names them, for the
@@ -1179,9 +1173,7 @@ mod tests {
 
     /// The tables `sql` reads and writes, as [`super::tables`] names them.
     fn tables(sql: &str) -> (Vec<String>, Vec<String>) {
-        use sqlparser::dialect::MySqlDialect;
-        use sqlparser::parser::Parser;
-        let statement = Parser::parse_sql(&MySqlDialect {}, sql).unwrap().pop().unwrap();
+        let statement = crate::mysql::parse_default(sql).unwrap().pop().unwrap();
         let mut t = super::tables(&statement);
         t.read.sort();
         t.read.dedup();

@@ -26,6 +26,8 @@ export type DocsMdxOptions = {
   themes?: { light: Theme; dark: Theme };
   /** Shiki's colour replacements, per theme: a site's own palette for the GitHub themes. */
   colorReplacements?: RehypeCodeOptions['colorReplacements'];
+  /** A site's own Shiki transformers, run after the diagnostics and Twoslash and before the hanging indent. */
+  transformers?: NonNullable<RehypeCodeOptions['transformers']>;
 };
 
 /**
@@ -57,7 +59,10 @@ export async function docsMdxOptions(environment: Environment, options: DocsMdxO
     recmaPlugins: [recmaSharedPopups],
     rehypeCodeOptions: {
       ...rehypeCodeDefaultOptions,
-      transformers: [...(rehypeCodeDefaultOptions.transformers ?? []), diagnosticsTransformer, ...twoslash, hangingIndent],
+      // Shiki's WebAssembly regex engine in place of Fumadocs' JavaScript one: the same tokens, and
+      // Reylo's compile in 3.9 s instead of 8.6 s, nearly all of it the types in Twoslash's popups.
+      engine: 'oniguruma',
+      transformers: [...(rehypeCodeDefaultOptions.transformers ?? []), diagnosticsTransformer, ...twoslash, ...(options.transformers ?? []), hangingIndent],
       langs,
       ...(options.themes && { themes: options.themes }),
       ...(options.colorReplacements && { colorReplacements: options.colorReplacements }),

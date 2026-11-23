@@ -22,7 +22,7 @@ static LOCK: Mutex<()> = Mutex::new(());
 /// The version of the tree's format, which the walker writes as the tree's first member
 /// (`REYLO_TREE_VERSION` in `csrc/reylo_sqlite.c`): a tree of another is refused, by both numbers,
 /// before anything in it is read. A change to what either side reads or writes moves both.
-pub const TREE_VERSION: u32 = 2;
+pub const TREE_VERSION: u32 = 3;
 
 #[derive(Debug, Deserialize)]
 #[serde(remote = "Self", rename_all = "camelCase", deny_unknown_fields)]
@@ -112,6 +112,9 @@ pub struct TableInfo {
     /// A NOT NULL, UNIQUE or PRIMARY KEY of the table is declared ON CONFLICT IGNORE: a write
     /// that breaks it, with no OR clause of its own, skips the row.
     pub ignores: bool,
+    /// A NOT NULL of the table is declared ON CONFLICT IGNORE: a write of NULL to it, with no OR
+    /// clause of its own, skips the row.
+    pub ignores_null: bool,
     /// The PRIMARY KEY or a UNIQUE of the table is declared ON CONFLICT REPLACE: a write that
     /// breaks it, with no OR clause of its own, deletes the row it conflicts with.
     pub replaces: bool,
@@ -128,6 +131,11 @@ pub struct ColumnInfo {
     pub not_null: bool,
     /// A CHECK of the table tests the column IS NOT NULL among its conjuncts: a write of NULL fails.
     pub checked_not_null: bool,
+    /// A generated column, which no INSERT writes.
+    pub generated: bool,
+    /// The column declares a DEFAULT other than the bare `NULL`, which an INSERT that leaves it out
+    /// writes.
+    pub has_default: bool,
 }
 
 #[derive(Debug, Deserialize)]

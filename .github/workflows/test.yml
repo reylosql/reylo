@@ -64,7 +64,7 @@ jobs:
           # the docs claim.
           everything() {
             echo engine=true
-            echo 'tests=-p reylo-engine-core -p reylo-engine-postgres -p reylo-engine-sqlite -p reylo-engine-mysql -p reylo-engine-clickhouse -p reylo-engine -p reylo-migrate -p reylo-cli -p reylo-oracle -p reylo-build -p reylo --features reylo/mysql,reylo/sqlite'
+            echo 'tests=-p reylo-engine-core -p reylo-sql -p reylo-engine-postgres -p reylo-engine-sqlite -p reylo-engine-mysql -p reylo-engine-clickhouse -p reylo-engine -p reylo-migrate -p reylo-cli -p reylo-oracle -p reylo-build -p reylo --features reylo/mysql,reylo/sqlite'
             echo "shards=[\"postgres\",\"sqlite\",\"mysql-1\",\"mysql-2\",\"mysql-slow\",\"clickhouse\"${1-}]"
             echo playground=true
           }
@@ -80,10 +80,10 @@ jobs:
           # A renamed file counts at both paths, so a file moved out of a path that runs everything still does.
           files=$(git diff --name-only --no-renames "$base" HEAD)
           echo "$files"
-          # Core, the crate the oracle answers through, the oracle's own code and its mutations, the build, the code lists the
+          # Core, the syntax crate, the crate the oracle answers through, the oracle's own code and its mutations, the build, the code lists the
           # oracle reads, the format's schema and examples the engine's tests and the oracle read, the validators'
           # measurements the engine's tests read, and CI itself reach every database.
-          if grep -qE '^(\.cargo/|engine/(core|build-support|native|wasip2)/|engine/build\.sh$|oracle/src/|oracle/Cargo\.toml$|oracle/mutations\.json$|Cargo\.(toml|lock)$|rust-toolchain|src/error-codes-|spec/typedefs\.schema\.json$|spec/examples\.json$|wiki/json-schema-checks/|\.github/)' <<<"$files"; then
+          if grep -qE '^(\.cargo/|engine/(core|syntax|build-support|native|wasip2)/|engine/build\.sh$|oracle/src/|oracle/Cargo\.toml$|oracle/mutations\.json$|Cargo\.(toml|lock)$|rust-toolchain|src/error-codes-|spec/typedefs\.schema\.json$|spec/examples\.json$|wiki/json-schema-checks/|\.github/)' <<<"$files"; then
             everything >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -270,8 +270,8 @@ jobs:
 
   # The engine's sources, beyond the binary the loader's tests run: the whole workspace built natively,
   # with no warning, and the tests of the crates the change reaches run. sccache keeps each crate's and
-  # each C file's object between runs, libpg_query's and SQLite's included, which rust-cache does not
-  # keep, since they are the workspace's own.
+  # each C file's object between runs, SQLite's included, which rust-cache does not keep, since they
+  # are the workspace's own.
   engine:
     needs: scope
     if: ${{ !github.event.repository.private && needs.scope.outputs.engine == 'true' }}
@@ -279,10 +279,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     # The migrations' tests (engine/migrate/tests) build schemas on these and skip each database whose URL is
-    # unset; their Turso scenarios start a libSQL server each, the sqld that REYLO_TEST_SQLD names.
+    # unset, and the Rust demos read pgvector's vectors from the Postgres; their Turso scenarios start a libSQL server each, the sqld that REYLO_TEST_SQLD names.
+    # The editor server's ClickHouse test (engine/cli/tests/lsp.rs) runs on the ClickHouse, and is skipped without one.
     services:
       postgres:
-        image: postgres:18
+        image: pgvector/pgvector:pg18
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
@@ -303,19 +304,32 @@ jobs:
           --health-interval 2s
           --health-timeout 5s
           --health-retries 60
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.8
+        env:
+          CLICKHOUSE_PASSWORD: reylo
+        ports:
+          - 28123:8123
+        options: >-
+          --health-cmd "clickhouse-client --password reylo --query 'SELECT 1'"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 60
+          --ulimit nofile=262144:262144
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: sccache
       CARGO_INCREMENTAL: "0"
       REYLO_TEST_PG: postgres://postgres@127.0.0.1:25432/postgres
       REYLO_TEST_MYSQL: mysql://root@127.0.0.1:23306
+      REYLO_TEST_CLICKHOUSE: http://default:reylo@127.0.0.1:28123
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # The patched parser crate (reylo-pg-query) and the SQLite amalgamation: cargo resolves nothing without them.
+      # The SQLite amalgamation: cargo resolves nothing without it.
       - run: engine/build.sh --prepare
       - name: Build the workspace, with no warning
         run: |
@@ -359,9 +373,10 @@ jobs:
     name: Build a project from the packed Rust crates
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # pgvector's image, for the projects' vectors.
     services:
       postgres:
-        image: postgres:18
+        image: pgvector/pgvector:pg18
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:

@@ -15,9 +15,17 @@ export default [
   index('routes/home.tsx'),
   route('docs', 'routes/page.tsx', { id: 'docs' }),
   route(':slug', 'routes/page.tsx'),
-  // Reylo Migrate: its landing page, and its docs (content/docs/migrate.mdx) under it.
+  // Reylo Migrate: its landing page, and under it its docs, content/docs/migrate.mdx at /migrate/docs
+  // and each content/docs/migrate-<name>.mdx at /migrate/<name>: usage, the CLI and the comparison
+  // with other migration tools.
   route('migrate', 'routes/migrate.tsx'),
   route('migrate/docs', 'routes/page.tsx', { id: 'migrate-docs' }),
+  route('migrate/usage', 'routes/page.tsx', { id: 'migrate-usage' }),
+  route('migrate/cli', 'routes/page.tsx', { id: 'migrate-cli' }),
+  route('migrate/compare', 'routes/page.tsx', { id: 'migrate-compare' }),
+  // The blog: its list of posts, and each post (content/blog, lib/blog.ts).
+  route('blog', 'routes/blog.tsx'),
+  route('blog/:slug', 'routes/blog-post.tsx'),
   ...markdown.map((file) => route(file, 'routes/markdown.ts', { id: `markdown/${file}` })),
   route('404', 'routes/not-found.tsx'),
   // The playground, full screen (components/play.tsx).
@@ -33,4 +41,5 @@ export default [
   route('sitemap.xml', 'routes/sitemap.ts'),
   route('manifest.webmanifest', 'routes/manifest.ts'),
   route('opengraph-image.png', 'routes/opengraph-image.tsx'),
+  route('migrate/opengraph-image.png', 'routes/migrate-opengraph-image.tsx'),
 ] satisfies RouteConfig;

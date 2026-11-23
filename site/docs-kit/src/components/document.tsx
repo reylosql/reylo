@@ -1,5 +1,5 @@
 import { RootProvider } from 'fumadocs-ui/provider/react-router';
-import type { ReactNode } from 'react';
+import type { ComponentProps, ReactNode } from 'react';
 import { Links, Meta, Scripts, ScrollRestoration } from 'react-router';
 import { KEEP_IN_PLACE_SCRIPT, TABS_PREPAINT_SCRIPT, tabsRestoreScript } from './head-scripts';
 import { SearchDialog, SearchIndexUrl, SearchKeys } from './search-trigger';
@@ -18,6 +18,7 @@ export function DocsDocument({
   tabs = {},
   head,
   search,
+  theme,
   children,
 }: {
   className?: string;
@@ -27,6 +28,8 @@ export function DocsDocument({
   head?: ReactNode;
   /** A site of several pages: the address of its search index (README, "Search"), which turns the search on. */
   search?: { index: string };
+  /** The theme provider's settings (next-themes'), as `{ defaultTheme: 'dark', enableSystem: false }` for a site that is dark unless its reader picks light. */
+  theme?: ComponentProps<typeof RootProvider>['theme'];
   children: ReactNode;
 }) {
   const scripts = [Object.keys(tabs).length > 0 ? tabsRestoreScript(tabs) : '', TABS_PREPAINT_SCRIPT, KEEP_IN_PLACE_SCRIPT].filter(Boolean).join('\n');
@@ -42,7 +45,7 @@ export function DocsDocument({
       </head>
       <body className="flex flex-col min-h-screen">
         <SearchIndexUrl value={search?.index}>
-          <RootProvider search={search ? { SearchDialog } : { enabled: false }}>
+          <RootProvider search={search ? { SearchDialog } : { enabled: false }} theme={theme}>
             {search ? <SearchKeys /> : null}
             {children}
           </RootProvider>
