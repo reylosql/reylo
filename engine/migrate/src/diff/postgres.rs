@@ -3,12 +3,12 @@
 //! with an empty search_path so that every name is qualified, and every dependency is the server's
 //! own record of it (`pg_depend`): nothing of the database is parsed. The objects are those the
 //! comparator reads, with the same exclusions: the platform's roles' objects, extensions' members,
-//! and Reylo's history table, and also the comments and privileges it does not read. What the plan
+//! and the history tables, Reylo's own and other tools', and also the comments and privileges it does not read. What the plan
 //! creates an object with is then the text `schema.sql` declared it with, where `declare` can match
 //! the two, since the server's rendering of an expression is not always one it reads back to itself.
 
 use super::{Alterer, Change, Kind, Object, Schema, TypeClass};
-use crate::catalog::{not_extension, not_platform, not_platform_schema, project_extension, project_relation, HISTORY_TABLE, PG_USER_NS};
+use crate::catalog::{not_extension, not_history, not_platform, not_platform_schema, pg_not_history, pg_not_history_schema, project_extension, project_relation, PG_USER_NS};
 use crate::db::{Db, Row};
 use crate::{Dialect, Error};
 use regex::Regex;
@@ -233,14 +233,18 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
     let mut s = Schema::default();
     let mut ids = Ids::default();
     let ns = PG_USER_NS;
-    let history = HISTORY_TABLE;
+    // The history tables, and what comes with them, are left out: `c` or `t` the `pg_class` row.
+    let kept_c = pg_not_history("c");
+    let kept_t = pg_not_history("t");
+    let kept_rel = not_history("c.relname");
 
     for r in db
         .rows(&format!(
-            "select n.oid, format('%I', n.nspname) as name, {} as acl from pg_namespace n where {ns} and {} and {}",
+            "select n.oid, format('%I', n.nspname) as name, {} as acl from pg_namespace n where {ns} and {} and {} and {}",
             acl("n.nspacl", 'n', "n.nspowner"),
             not_extension("pg_namespace", "n"),
-            not_platform_schema("n")
+            not_platform_schema("n"),
+            pg_not_history_schema("n")
         ))
         .await?
     {
@@ -476,7 +480,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
               (select d.refobjsubid from pg_depend d where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'a' and d.refobjsubid > 0) as owned_att,
               c.relpersistence = 'u' as unlogged
             from pg_sequence s join pg_class c on c.oid = s.seqrelid join pg_namespace n on n.oid = c.relnamespace
-            where {ns} and {} and {}
+            where {ns} and {} and {} and {kept_c}
               and not exists (select 1 from pg_depend d where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'i')",
             acl_in("c.relacl", 's', "c.relowner", Some("c.relnamespace")),
             not_extension("pg_class", "c"),
@@ -560,7 +564,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                 when 'i' then (select format('using index %I', ic.relname) from pg_index i join pg_class ic on ic.oid = i.indexrelid where i.indrelid = c.oid and i.indisreplident) end end as replica,
               (select i.indexrelid from pg_index i where i.indrelid = c.oid and i.indisreplident) as replica_index
             from pg_class c join pg_namespace n on n.oid = c.relnamespace
-            where c.relkind in ('r', 'p', 'v', 'm', 'f', 'c') and {ns} and {} and {} and c.relname <> '{history}'
+            where c.relkind in ('r', 'p', 'v', 'm', 'f', 'c') and {ns} and {} and {} and {kept_c}
               and not exists (select 1 from pg_depend e where e.classid = 'pg_type'::regclass and e.objid = c.reltype and e.deptype = 'e')",
             acl_in("c.relacl", 'r', "c.relowner", Some("c.relnamespace")),
             acl_in("t.typacl", 'T', "t.typowner", Some("t.typnamespace")),
@@ -633,7 +637,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
               case when co.contype in ('p', 'u', 'x') then (select format('%I.%I', inn.nspname, ic.relname) from pg_class ic join pg_namespace inn on inn.oid = ic.relnamespace where ic.oid = co.conindid) end as index_name,
               c.relkind = 'p' and co.contype in ('p', 'u', 'x') and not coalesce((select i.indisvalid from pg_index i where i.indexrelid = co.conindid), true) as alone
             from pg_constraint co join pg_class c on c.oid = co.conrelid join pg_namespace n on n.oid = c.relnamespace
-            where co.contype not in ('n', 't') and co.conislocal and co.coninhcount = 0 and {ns} and c.relname <> '{history}' and {} and {}
+            where co.contype not in ('n', 't') and co.conislocal and co.coninhcount = 0 and {ns} and {kept_c} and {} and {}
             order by co.contype, co.conname",
             project_relation("c", "n"),
             not_extension("pg_constraint", "co")
@@ -717,7 +721,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
               case when a.attfdwoptions is not null then {} end as fdwoptions
             from pg_attribute a join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace join pg_type t on t.oid = a.atttypid
             left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
-            where a.attnum > 0 and not a.attisdropped and c.relkind in ('r', 'p', 'v', 'm', 'f', 'c') and {ns} and {} and {} and c.relname <> '{history}'
+            where a.attnum > 0 and not a.attisdropped and c.relkind in ('r', 'p', 'v', 'm', 'f', 'c') and {ns} and {} and {} and {kept_c}
             order by a.attrelid, a.attnum",
             // Postgres 18 records a column's NOT NULL as a constraint, which may be kept from the
             // table's children (NO INHERIT).
@@ -1233,7 +1237,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
               i.indisvalid as valid, t.relkind = 'p' as partitioned, i.indisclustered as clustered, format('%I.%I', tn.nspname, t.relname) as table_name,
               (select string_agg(a.attnum || '=' || a.attstattarget, ',' order by a.attnum) from pg_attribute a where a.attrelid = i.indexrelid and coalesce(a.attstattarget, -1) >= 0) as stattargets
             from pg_index i join pg_class c on c.oid = i.indexrelid join pg_namespace n on n.oid = c.relnamespace join pg_class t on t.oid = i.indrelid join pg_namespace tn on tn.oid = t.relnamespace
-            where {ns} and {} and {} and t.relname <> '{history}'",
+            where {ns} and {} and {} and {kept_t}",
             not_extension("pg_class", "c"),
             project_relation("t", "n")
         ))
@@ -1497,7 +1501,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         .rows(&format!(
             "select tg.oid, format('%I', tg.tgname) as name, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, pg_get_triggerdef(tg.oid, false) as def, tg.tgenabled as enabled
             from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace join pg_proc f on f.oid = tg.tgfoid
-            where not tg.tgisinternal and tg.tgparentid = 0 and {ns} and {} and {}",
+            where not tg.tgisinternal and tg.tgparentid = 0 and {ns} and {} and {} and {kept_rel}",
             not_extension("pg_class", "c"),
             not_platform("f.proowner")
         ))
@@ -1532,7 +1536,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             "select format('%I', tg.tgname) as name, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, tg.tgenabled as enabled, tg.tgparentid as parent,
               (select p.tgenabled from pg_trigger p where p.oid = tg.tgparentid) as parent_enabled
             from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace
-            where tg.tgparentid <> 0 and tg.tgenabled <> (select p.tgenabled from pg_trigger p where p.oid = tg.tgparentid) and {ns} and {}",
+            where tg.tgparentid <> 0 and tg.tgenabled <> (select p.tgenabled from pg_trigger p where p.oid = tg.tgparentid) and {ns} and {} and {kept_rel}",
             not_extension("pg_class", "c")
         ))
         .await?
@@ -1561,12 +1565,12 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
     }
 
     for r in db
-        .rows(
+        .rows(&format!(
             "select p.oid, format('%I', p.polname) as name, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, p.polcmd as cmd, p.polpermissive as permissive,
               (select string_agg(case when r = 0 then 'public' else quote_ident(pg_get_userbyid(r)) end, ', ' order by 1) from unnest(p.polroles) r) as roles,
               pg_get_expr(p.polqual, p.polrelid) as qual, pg_get_expr(p.polwithcheck, p.polrelid) as check
-            from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace",
-        )
+            from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace where {kept_rel}",
+        ))
         .await?
     {
         let (rel, name) = (r.text("rel"), r.text("name"));
@@ -1601,7 +1605,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
     for r in db
         .rows(&format!(
             "select r.oid, r.ev_class, format('%I', r.rulename) as name, format('%I.%I', n.nspname, c.relname) as rel, pg_get_ruledef(r.oid, false) as def, r.rulename = '_RETURN' as view, r.ev_enabled as enabled
-            from pg_rewrite r join pg_class c on c.oid = r.ev_class join pg_namespace n on n.oid = c.relnamespace where {ns} and {}",
+            from pg_rewrite r join pg_class c on c.oid = r.ev_class join pg_namespace n on n.oid = c.relnamespace where {ns} and {} and {kept_rel}",
             project_relation("c", "n")
         ))
         .await?
@@ -2160,7 +2164,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         .rows(&format!(
             "select format('%s', k.classid::regclass) as cls, k.objid, o.type, o.identity, format('%I', pg_get_userbyid(k.owner)) as owner
             from ({}) k, lateral pg_identify_object(k.classid, k.objid, 0) o where k.owner <> {}",
-            crate::catalog::owned_objects(HISTORY_TABLE),
+            crate::catalog::owned_objects(),
             crate::catalog::runner()
         ))
         .await?

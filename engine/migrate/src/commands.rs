@@ -3072,7 +3072,7 @@ async fn wipe_rows_on(db: &mut Db) -> Result<usize, Error> {
             schema.objects.values().filter(|o| o.kind == Some(crate::diff::Kind::Table) && !o.extra.iter().any(|l| l.starts_with("shape foreign"))).filter_map(|o| o.id.strip_prefix("table ").map(String::from)).collect()
         }
         Dialect::Mysql => db
-            .rows(&format!("select table_name as n from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE' and table_name <> '{HISTORY_TABLE}'"))
+            .rows(&format!("select table_name as n from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE' and {}", crate::catalog::not_history("table_name")))
             .await?
             .iter()
             .map(|r| format!("`{}`", r.text("n").replace('`', "``")))
@@ -3081,7 +3081,8 @@ async fn wipe_rows_on(db: &mut Db) -> Result<usize, Error> {
         // vector index's are libSQL's: deleting from them directly breaks it.
         Dialect::Sqlite => db
             .rows(&format!(
-                "select name as n from pragma_table_list where schema = 'main' and type in ('table', 'virtual') and name not like 'sqlite_%' and name <> '{HISTORY_TABLE}' and name {} and {}",
+                "select name as n from pragma_table_list where schema = 'main' and type in ('table', 'virtual') and name not like 'sqlite_%' and {} and name {} and {}",
+                crate::catalog::not_history("name"),
                 crate::catalog::NOT_TURSO_OWN,
                 crate::catalog::NOT_LIBSQL_VECTOR_OWN
             ))
@@ -3146,7 +3147,8 @@ async fn wipe_rows_on(db: &mut Db) -> Result<usize, Error> {
             }
             sql.push_str(&after);
             let has_sequence = db.rows("select count(*) > 0 as ok from sqlite_schema where name = 'sqlite_sequence'").await?.first().is_some_and(|r| r.flag("ok"));
-            let reset = if has_sequence { "delete from sqlite_sequence;" } else { "" };
+            // The counters of the tables it empties: a history table keeps its own.
+            let reset = if has_sequence { format!("delete from sqlite_sequence where {};", crate::catalog::not_history("name")) } else { String::new() };
             let turso = crate::catalog::holds_turso_tables(db).await?;
             let restart = crate::catalog::turso_sequences(db, turso, true).await?;
             let result = db.script(&format!("begin; {sql} {reset} {restart} commit;")).await;
@@ -5382,7 +5384,7 @@ async fn with_referenced(db: &mut Db, schemas: &[String], log: Log<'_>) -> Resul
 
 /// The schemas of the project's that --schema has to name for SQL of them to hold them: each that
 /// holds an object of its own (not one an extension made, nor what comes with another object, as a
-/// table's index or sequence does, nor Reylo's history), and each that holds nothing at all, but
+/// table's index or sequence does, nor a history table), and each that holds nothing at all, but
 /// `public`, which every new database has. One that holds an extension alone is made with it.
 #[cfg(feature = "cli")]
 async fn schemas_to_name(db: &mut Db) -> Result<Vec<String>, Error> {
@@ -5391,11 +5393,12 @@ async fn schemas_to_name(db: &mut Db) -> Result<Vec<String>, Error> {
             "select n.nspname as name from pg_namespace n where {} and {} and (exists (
                select 1 from pg_depend d where d.refclassid = 'pg_namespace'::regclass and d.refobjid = n.oid and d.deptype = 'n'
                  and not exists (select 1 from pg_depend o where o.classid = d.classid and o.objid = d.objid and o.deptype in ('e', 'a', 'i'))
-                 and not (d.classid = 'pg_class'::regclass and d.objid in (select oid from pg_class where relname = '{HISTORY_TABLE}')))
+                 and not (d.classid = 'pg_class'::regclass and d.objid in (select oid from pg_class where not {})))
                or (n.nspname <> 'public' and not exists (select 1 from pg_depend d where d.refclassid = 'pg_namespace'::regclass and d.refobjid = n.oid)))
              order by 1",
             crate::catalog::PG_USER_NS,
-            crate::catalog::not_platform_schema("n")
+            crate::catalog::not_platform_schema("n"),
+            crate::catalog::not_history("relname")
         ))
         .await?;
     Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
@@ -5638,7 +5641,19 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             let mut args: Vec<String> = ["--schema-only", "--no-publications", "--no-subscriptions", "--no-security-labels", "--no-tablespaces"].map(String::from).to_vec();
             // Owners are kept where they aren't the role the file will run as, which owns what it makes.
             let runner = db.rows("select quote_ident(current_user) as u").await?.first().map(|r| r.text("u").to_string()).unwrap_or_default();
-            args.push(format!("--exclude-table=*.{HISTORY_TABLE}"));
+            // The history tables, and the sequences they own, each named as it is written: pg_dump
+            // folds what isn't quoted.
+            let history = db
+                .rows(&format!(
+                    "select format('\"%s\".\"%s\"', replace(n.nspname, '\"', '\"\"'), replace(c.relname, '\"', '\"\"')) as p
+                    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind in ('r', 'p', 'S') and {} and not {}",
+                    crate::catalog::PG_USER_NS,
+                    crate::catalog::pg_not_history("c")
+                ))
+                .await?;
+            for r in &history {
+                args.push(format!("--exclude-table={}", r.text("p")));
+            }
             // Every schema of the project's, unless --schema names some.
             let mut named_schemas: Vec<String> = if schemas.is_empty() { crate::catalog::user_schemas(db).await? } else { schemas.to_vec() };
             if named_schemas.is_empty() {
@@ -5853,9 +5868,10 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
         Dialect::Sqlite => {
             let rows = db
                 .rows(&format!(
-                    "select sql from sqlite_schema where sql is not null and name not like 'sqlite_%' and tbl_name <> '{HISTORY_TABLE}'
+                    "select sql from sqlite_schema where sql is not null and name not like 'sqlite_%' and {}
                       and name not in (select name from pragma_table_list where type = 'shadow') and name {turso} and tbl_name {turso} and {}
                     order by case type when 'table' then 0 when 'index' then 1 when 'view' then 2 else 3 end, rowid",
+                    crate::catalog::not_history("tbl_name"),
                     crate::catalog::NOT_LIBSQL_VECTOR_OWN,
                     turso = crate::catalog::NOT_TURSO_OWN
                 ))
@@ -5866,7 +5882,7 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             static AUTO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" AUTO_INCREMENT=\d+").expect("a valid pattern"));
             static DEFINER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" DEFINER=\S+").expect("a valid pattern"));
             let mut out = vec!["set foreign_key_checks = 0;".to_string()];
-            let tables = db.rows(&format!("select table_name as n, table_type as t from information_schema.tables where table_schema = database() and table_name <> '{HISTORY_TABLE}' order by table_type, table_name")).await?;
+            let tables = db.rows(&format!("select table_name as n, table_type as t from information_schema.tables where table_schema = database() and {} order by table_type, table_name", crate::catalog::not_history("table_name"))).await?;
             for t in tables.iter().filter(|t| t.text("t") == "BASE TABLE") {
                 let row = db.rows(&format!("show create table `{}`", t.text("n"))).await?;
                 out.push(format!("{};", AUTO.replace(row.first().map(|r| r.text("Create Table")).unwrap_or_default(), "")));
@@ -5895,7 +5911,7 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
                 let row = db.rows(&format!("show create view `{name}`")).await?;
                 out.push(format!("{};", DEFINER.replace(row.first().map(|r| r.text("Create View")).unwrap_or_default(), "")));
             }
-            for r in db.rows("select trigger_name as n from information_schema.triggers where trigger_schema = database()").await? {
+            for r in db.rows(&format!("select trigger_name as n from information_schema.triggers where trigger_schema = database() and {}", crate::catalog::not_history("event_object_table"))).await? {
                 let row = db.rows(&format!("show create trigger `{}`", r.text("n"))).await?;
                 out.push(format!("{};", DEFINER.replace(row.first().map(|x| x.text("SQL Original Statement")).unwrap_or_default(), "")));
             }
