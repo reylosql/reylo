@@ -1324,11 +1324,14 @@ pub struct Problem {
     fixed: bool,
     /// Whether it is the lock's drafts, which some commands pass over.
     drafts: bool,
+    /// What each command it suggests states, without `--blocking`: for `migrate new` to try, and to
+    /// add `--blocking` to where the migration it writes would need it.
+    readings: Vec<Choices>,
 }
 
 impl Problem {
     fn new(code: &'static str, title: impl Into<String>) -> Problem {
-        Problem { code, title: title.into(), lines: vec![], detail: vec![], sql: None, notes: vec![], fixes: vec![], fixed: false, drafts: false }
+        Problem { code, title: title.into(), lines: vec![], detail: vec![], sql: None, notes: vec![], fixes: vec![], fixed: false, drafts: false, readings: vec![] }
     }
 
     /// The refusal as `--json` gives it.
@@ -1379,6 +1382,14 @@ impl Problem {
         self.lines.push(paint("dim", &format!("  {}:", what.as_ref())));
         self.lines.extend(commands.iter().map(|c| format!("    {}", paint("cyan", c))));
         self
+    }
+
+    /// `fix`, with the command that states `reading`, which it records; with `--blocking` where
+    /// `asked` knows the migration that reading writes holds a lock that needs it.
+    fn offer(mut self, what: impl AsRef<str>, asked: &Asked, reading: Choices) -> Problem {
+        let command = command_line(asked, &asked.blocking(&reading), &[], &[], false);
+        self.readings.push(reading);
+        self.fix(what, &[&command])
     }
 
     fn lines(mut self, lines: impl IntoIterator<Item = String>) -> Problem {
@@ -3945,7 +3956,7 @@ async fn history_as_it_stands(db: &mut Db, server: &mut Server, opts: &Options) 
 /// migration is unapplied, so that its time comes after theirs.
 /// What the person writing a migration states about it: the tables and columns it may drop, with
 /// their rows, and the columns it renames.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Choices {
     /// Names as written: `users.nickname`, `audit_log`, `billing.invoices`, a schema's name.
     pub drop: Vec<String>,
@@ -4468,16 +4479,35 @@ struct Asked {
     subject: &'static str,
     head: String,
     offers_force: bool,
+    /// What suggested commands state, without `--blocking`, where the migration each writes holds a
+    /// lock that `--blocking` accepts: each such command takes the flag.
+    rewrites: Vec<Choices>,
 }
 
 impl Asked {
-    fn migration(name: &str) -> Asked {
-        Asked { subject: "migration", head: format!("reylo migrate new {name}"), offers_force: false }
+    fn migration(name: &str, rewrites: &[Choices]) -> Asked {
+        Asked { subject: "migration", head: format!("reylo migrate new {name}"), offers_force: false, rewrites: rewrites.to_vec() }
     }
 
     fn push(watch: bool) -> Asked {
-        Asked { subject: "push", head: if watch { "reylo db push --watch".to_string() } else { "reylo db push".to_string() }, offers_force: true }
+        Asked { subject: "push", head: if watch { "reylo db push --watch".to_string() } else { "reylo db push".to_string() }, offers_force: true, rewrites: vec![] }
     }
+
+    /// `reading`, with `--blocking` where the migration it writes needs it.
+    fn blocking(&self, reading: &Choices) -> Choices {
+        Choices { blocking: reading.blocking || self.rewrites.contains(reading), ..reading.clone() }
+    }
+}
+
+/// What `choices` states, with `more_drops` and `renames` added: what a suggested command states.
+fn reading(choices: &Choices, more_drops: &[String], renames: &[(String, String)]) -> Choices {
+    let mut drop: Vec<String> = Vec::new();
+    for name in choices.drop.iter().chain(more_drops) {
+        if !drop.contains(name) {
+            drop.push(name.clone());
+        }
+    }
+    Choices { drop, rename: choices.rename.iter().chain(renames).cloned().collect(), blocking: choices.blocking }
 }
 
 /// The refusals `--force` accepts: what a change drops, a type change that loses values, and a rename
@@ -4709,8 +4739,8 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], 
         let renames: Vec<(String, String)> = guesses.iter().map(|g| (g.old.clone(), g.new.clone())).collect();
         let dropped: Vec<String> = guesses.iter().map(|g| g.old.clone()).chain(outside.iter().cloned()).collect();
         return problem
-            .fix(format!("To rename the {kind}, keeping its rows"), &[&create_command(asked, stated, &more, &renames)])
-            .fix(format!("To drop the {kind} and its data, and {} a new one", if guesses[0].table { "create" } else { "add" }), &[&create_command(asked, stated, &dropped, &[])]);
+            .offer(format!("To rename the {kind}, keeping its rows"), asked, reading(stated, &more, &renames))
+            .offer(format!("To drop the {kind} and its data, and {} a new one", if guesses[0].table { "create" } else { "add" }), asked, reading(stated, &dropped, &[]));
     }
     // Each line's flags: a rename takes along what its own reading also asks of --drop, the columns
     // a renamed table drops, and what the rename's change of type loses; a guess within a guessed
@@ -4719,11 +4749,13 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], 
     // carries, as under a search_path.
     let mut taken: Vec<String> = Vec::new();
     let mut rows: Vec<(String, String)> = Vec::new();
+    // What each line's rename states, its renames and its drops, and what its drop does.
+    let mut keeps: Vec<(Vec<(String, String)>, Vec<String>)> = Vec::new();
     for g in guesses.iter().filter(|g| g.owner.is_none()) {
         let within: Vec<&Guess> = guesses.iter().filter(|c| g.table && c.owner.as_deref() == Some(g.id.as_str())).collect();
         let mine: Vec<String> = owned.iter().filter(|(n, o)| *n == g.old || (g.table && o.as_deref() == Some(g.id.as_str())) || within.iter().any(|c| *n == c.old)).map(|(n, _)| n.clone()).collect();
-        let mut keep = vec![format!("--rename {}={}", shell_word(&g.old), shell_word(&g.new))];
-        keep.extend(within.iter().map(|c| format!("--rename {}={}", shell_word(&c.old), shell_word(&c.new))));
+        let renames: Vec<(String, String)> = std::iter::once(g).chain(within.iter().copied()).map(|c| (c.old.clone(), c.new.clone())).collect();
+        let mut keep: Vec<String> = renames.iter().map(|(old, new)| format!("--rename {}={}", shell_word(old), shell_word(new))).collect();
         let mut lost: Vec<String> = Vec::new();
         for n in &mine {
             if !lost.contains(n) {
@@ -4735,8 +4767,20 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], 
         }
         taken.extend(mine);
         rows.push((keep.join(" "), format!("--drop {}", shell_word(&g.old))));
+        keeps.push((renames, lost));
     }
     let rest: Vec<String> = more.iter().filter(|n| !taken.contains(n)).cloned().collect();
+    // A line's rename takes `--blocking` where its migration needs it, the other lines dropped.
+    let olds: Vec<String> = guesses.iter().filter(|g| g.owner.is_none()).map(|g| g.old.clone()).collect();
+    let mut readings = Vec::new();
+    for (k, (renames, lost)) in keeps.iter().enumerate() {
+        let drops: Vec<String> = rest.iter().chain(lost).cloned().chain(olds.iter().enumerate().filter(|(j, _)| *j != k).map(|(_, o)| o.clone())).collect();
+        let r = reading(stated, &drops, renames);
+        if asked.blocking(&r).blocking && !stated.blocking {
+            rows[k].0.push_str(" --blocking");
+        }
+        readings.push(r);
+    }
     let width = rows.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
     let lead = "For each, rename it to keep its rows, or drop it and add the new one";
     problem.lines.extend([String::new(), paint("dim", &format!("  {lead}:"))]);
@@ -4745,6 +4789,7 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], 
         problem.detail.push(format!("{keep} or {drop}"));
     }
     problem.fixed = true;
+    problem.readings.extend(readings);
     problem.fix("Add the flags you picked to", &[&create_command(asked, stated, &rest, &[])])
 }
 
@@ -4772,11 +4817,11 @@ fn lock_problem(hazards: &[crate::locks::Hazard], asked: &Asked, choices: &Choic
 /// the plan's ids, and `shown`, as the file names them, one for one): each must be named in
 /// `--drop`, and each name in `--drop` must name only what it drops. `guesses`, renames it won't
 /// assume, are settled with them; `owner` gives the new id of the guessed table an id belongs to,
-/// whose own columns a drop of the table takes along; `added` are the columns and tables the plan adds, the
-/// names a person could mean by a rename.
+/// whose own columns a drop of the table takes along; `candidates` gives, for a table or column it
+/// drops, the names a person could mean by its rename.
 #[allow(clippy::too_many_arguments)]
-fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, added: &[String], choices: &Choices, asked: &Asked) -> Vec<Problem> {
-    let mut problems = drop_problems_of(lost, shown, narrowed, guesses, owner, added, choices, asked);
+fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, candidates: &dyn Fn(&str) -> Vec<String>, choices: &Choices, asked: &Asked) -> Vec<Problem> {
+    let mut problems = drop_problems_of(lost, shown, narrowed, guesses, owner, candidates, choices, asked);
     // Where --force can accept them all, the last says so, once nothing but what it accepts is left.
     if asked.offers_force && !problems.is_empty() && problems.iter().all(|p| DESTRUCTIVE.contains(&p.code)) {
         let stated = Choices { drop: vec![], rename: choices.rename.clone(), ..Default::default() };
@@ -4787,7 +4832,7 @@ fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, added: &[String], choices: &Choices, asked: &Asked) -> Vec<Problem> {
+fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, candidates: &dyn Fn(&str) -> Vec<String>, choices: &Choices, asked: &Asked) -> Vec<Problem> {
     let subject = asked.subject;
     let display = |id: &String| lost.iter().position(|l| l == id).map(|k| shown_id(&shown[k])).or_else(|| narrowed.iter().find(|(n, _, _)| n == id).map(|(_, s, _)| shown_id(s))).unwrap_or_else(|| shown_id(id));
     let mut problems = Vec::new();
@@ -4831,22 +4876,31 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
             [one] => format!("This {subject} drops {} and {}", drop_phrase(&what), if one.starts_with("table ") { "its rows" } else { "its data" }),
             _ => format!("This {subject} drops {}, with their data", drop_phrase(&what)),
         };
-        let mut problem = Problem::new("drops-data", title)
-            .fix(if list.len() == 1 { "To drop it" } else { "To drop them" }, &[&create_command(asked, &stated, &list, &[])]);
+        let mut problem = Problem::new("drops-data", title).offer(if list.len() == 1 { "To drop it" } else { "To drop them" }, asked, reading(&stated, &list, &[]));
         // Where something comes as these go, any of them may be renamed: which became which is
-        // for the person to say, so the command names no new name for them.
-        // What the plan adds of the same kind: a table renamed is a table, a column a column.
-        let kinds: Vec<&str> = unstated.iter().filter_map(|l| l.split(' ').next()).collect();
-        let like: Vec<String> = added.iter().filter(|a| kinds.contains(&a.split(' ').next().unwrap_or_default())).map(|a| a.split_once(' ').map_or(a.clone(), |(_, n)| n.to_string())).collect();
+        // for the person to say, so the command names no new name for them. Each is offered only
+        // where something it could be renamed to comes.
+        let mut like: Vec<String> = Vec::new();
+        let mut renames: Vec<(String, String)> = Vec::new();
+        for l in &unstated {
+            let could = candidates(l);
+            if !could.is_empty() {
+                renames.push((display(l), "<new name>".to_string()));
+            }
+            for c in could {
+                if !like.contains(&c) {
+                    like.push(c);
+                }
+            }
+        }
         if !like.is_empty() {
-            let renames: Vec<(String, String)> = list.iter().map(|old| (old.clone(), "<new name>".to_string())).collect();
-            let what = format!("If {} renamed instead, as {}", if list.len() == 1 { "it was" } else { "any were" }, like.join(", "));
+            let what = format!("If {} renamed instead, as {}", if renames.len() == 1 { "it was" } else { "any were" }, like.join(", "));
             problem = problem.fix(what, &[&create_command(asked, &stated, &[], &renames)]);
         }
         problems.push(problem);
     }
     for (_, name, why) in &unnamed {
-        problems.push(Problem::new("loses-data", format!("Column {name} {why}")).fix("To accept that", &[&create_command(asked, &stated, std::slice::from_ref(name), &[])]));
+        problems.push(Problem::new("loses-data", format!("Column {name} {why}")).offer("To accept that", asked, reading(&stated, std::slice::from_ref(name), &[])));
     }
     problems
 }
@@ -4985,6 +5039,7 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
         let narrowing: Vec<(String, String)> = plan.narrowings.clone();
         let guessed: Vec<String> = plan.renames.iter().map(|r| r.0.clone()).collect();
         let paired: Vec<String> = plan.pairs.iter().map(|p| p.0.clone()).collect();
+        let claimed: std::collections::BTreeSet<String> = plan.renamed.iter().map(|(_, new)| new.clone()).collect();
         style(db, &mut plan, &target.schema).await?;
         let mut narrowed: Vec<(String, String, String)> = narrowing.iter().zip(&plan.narrowings).map(|((id, why), (shown, _))| (id.clone(), shown.clone(), why.clone())).collect();
         let guess_owner = |id: &str| current.objects.get(id).and_then(|o| o.owner.clone()).filter(|t| guessed_tables.contains(t));
@@ -5018,9 +5073,14 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
         // Tables first, then columns, each by name.
         guesses.sort_by(|a, b| (!a.table, &a.old).cmp(&(!b.table, &b.old)));
         if let Some(asked) = asked {
-            // What the plan adds, the names a person might mean by a rename of what it drops.
-            let added: Vec<String> = target.schema.objects.iter().filter(|(id, o)| matches!(o.kind, Some(crate::diff::Kind::Column | crate::diff::Kind::Table)) && !current.objects.contains_key(*id) && !(o.kind == Some(crate::diff::Kind::Column) && o.owner.as_ref().is_some_and(|t| !current.objects.contains_key(t)))).map(|(id, o)| format!("{} {}", if o.kind == Some(crate::diff::Kind::Table) { "table" } else { "column" }, shown_name(id))).collect();
-            let mut problems = drop_problems(&lost, &shown, &narrowed, &guesses, &guess_owner, &added, &Choices { drop: columns.drop.clone(), rename: choices.rename.clone(), ..Default::default() }, asked);
+            // The names a person might mean by a rename of what the plan drops: a table it creates,
+            // and a column it adds to the table the dropped one was in, that nothing renames onto.
+            let candidates = |id: &str| -> Vec<String> {
+                let Some(gone) = current.objects.get(id).filter(|o| matches!(o.kind, Some(crate::diff::Kind::Column | crate::diff::Kind::Table))) else { return vec![] };
+                let table = gone.kind == Some(crate::diff::Kind::Table);
+                target.schema.objects.iter().filter(|(new, o)| o.kind == gone.kind && !current.objects.contains_key(*new) && !claimed.contains(*new) && (table || (o.owner.is_some() && o.owner == gone.owner))).map(|(new, _)| shown_name(new)).collect()
+            };
+            let mut problems = drop_problems(&lost, &shown, &narrowed, &guesses, &guess_owner, &candidates, &Choices { drop: columns.drop.clone(), rename: choices.rename.clone(), ..Default::default() }, asked);
             if force {
                 problems.retain(|p| !DESTRUCTIVE.contains(&p.code));
             }
@@ -5049,6 +5109,40 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 #[cfg(feature = "cli")]
 async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, added: &[String], migration: &str, choices: &Choices, log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
+    let first = draft_with(opts, files, schema_sql, target_name, added, migration, choices, &[], log).await?;
+    // On Postgres, each command a refusal suggests is tried, and takes `--blocking` where the
+    // migration it writes would be refused for nothing else: one more run would only add it.
+    let readings: Vec<Choices> = match &first {
+        Err(problems) if !choices.blocking && Dialect::of_url(&opts.url).ok() == Some(Dialect::Postgres) => {
+            let mut out: Vec<Choices> = Vec::new();
+            for r in problems.iter().flat_map(|p| &p.readings) {
+                if !out.contains(r) {
+                    out.push(r.clone());
+                }
+            }
+            out
+        }
+        _ => return Ok(first),
+    };
+    let mut rewrites = Vec::new();
+    for r in readings {
+        if let Ok(Err(problems)) = draft_with(opts, files, schema_sql, target_name, added, migration, &r, &[], &mut |_: &str| {}).await {
+            if !problems.is_empty() && problems.iter().all(|p| p.code == "blocks-writes") {
+                rewrites.push(r);
+            }
+        }
+    }
+    if rewrites.is_empty() {
+        return Ok(first);
+    }
+    draft_with(opts, files, schema_sql, target_name, added, migration, choices, &rewrites, &mut |_: &str| {}).await
+}
+
+/// `draft`, with the suggested commands `rewrites` names (each as it states its flags, without
+/// `--blocking`) taking `--blocking`.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[cfg(feature = "cli")]
+async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, added: &[String], migration: &str, choices: &Choices, rewrites: &[Choices], log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
     let drafted = |texts: Vec<String>, code: i32, notes: Vec<String>, empty: bool| Drafted { texts, code, notes, empty, target: target_name.to_string(), lock_safe: false, commits: 0, changes: vec![] };
     let mut db = Db::open(opts).await?;
     let mut problems = out_of_reach(&mut db, &opts.url).await?;
@@ -5114,7 +5208,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
         let d = shadows.db(c).dialect();
         let indexes = if d == Dialect::Postgres { crate::diff::postgres::index_names(shadows.db(a)).await? } else { Default::default() };
         let target = Target { schema: target, indexes };
-        let asked = Asked::migration(migration);
+        let asked = Asked::migration(migration, rewrites);
         let Settled { renames, mut plan, assumed, tables } = match settle(shadows.db(c), current, &target, false, choices, Some(&asked), false).await? {
             Ok(settled) => settled,
             Err(problems) => return Ok(Err(problems)),
