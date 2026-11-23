@@ -874,7 +874,10 @@ fn readable(line: &str) -> String {
         return format!("constraint on {}: {}", &c[1], &c[2]);
     }
     if let Some(c) = CONSTRAINT.captures(&line) {
-        return format!("constraint {} on {}: {}", &c[2], &c[1], lowercase_keywords(&c[3]));
+        // Postgres's definition of a constraint not validated ends in its own NOT VALID, which the
+        // catalog line marks again.
+        let def = c[3].strip_suffix(" not valid").filter(|d| d.ends_with(" NOT VALID")).unwrap_or(&c[3]);
+        return format!("constraint {} on {}: {}", &c[2], &c[1], lowercase_keywords(def));
     }
     line
 }
@@ -7805,6 +7808,11 @@ mod tests {
         assert!(!alters_rows("alter table people alter column id set not null;", pg));
         assert!(!alters_rows("alter table users drop index users_org_email, add unique key users_email (email)", Dialect::Mysql));
         assert!(!alters_rows("create unique index concurrently users_email on users (email);", pg));
+    }
+
+    #[test]
+    fn a_constraint_not_validated_is_said_so_once() {
+        assert_eq!(readable("constraint public.users users_plan_check CHECK ((plan = 'free'::text)) NOT VALID not valid"), "constraint users_plan_check on public.users: check ((plan = 'free'::text)) not valid");
     }
 
     #[test]

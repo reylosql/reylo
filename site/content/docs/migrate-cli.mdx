@@ -304,19 +304,20 @@ A migration can also fail on rows the database already holds. The refusal gives 
 ```terminal
 $ reylo migrate deploy
 Applying to postgres://db.example.com/app
-  ✓ 20261123193559_drop_team_plan.sql    applied · 45 ms
-  ✗ 20261123193600_drop_team_plan_2.sql  failed
+  ✓ 20261123211603_drop_team_plan.sql    applied · 44 ms
+  ✗ 20261123211604_drop_team_plan_2.sql  failed
 
-✗ The migration 20261123193600_drop_team_plan_2.sql failed on rows that break users_plan_check
+✗ The migration 20261123211604_drop_team_plan_2.sql failed on rows that break users_plan_check
   check constraint "users_plan_check" of relation "users" is violated by some row
-  The migration before it, 20261123193559_drop_team_plan.sql, added users_plan_check without checking the rows already in users, so it holds new writes and not those rows.
+  The migration before it, 20261123211603_drop_team_plan.sql, added users_plan_check without checking the rows already in users: rows written from now on are held to it, and those aren't.
   Nothing was recorded, so the next deploy runs it again.
 
   List the rows that break it:
     select * from users where not (plan = ANY (ARRAY['free'::text, 'pro'::text]));
   Fix them here, then deploy again:
     reylo migrate deploy
-  If the rows are right and only development ran 20261123193600_drop_team_plan_2.sql, change users_plan_check in reylo/schema.sql, delete it and write the replacement:
+  If the rows are right and only development ran 20261123211604_drop_team_plan_2.sql, change users_plan_check in reylo/schema.sql and delete it, then take it off development and write the replacement:
+    reylo migrate dev
     reylo migrate new <name>
     reylo migrate dev
 ```
