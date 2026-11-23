@@ -1072,6 +1072,19 @@ fn data_statements(sql: &str, d: Dialect) -> Vec<String> {
     statements.iter().enumerate().filter(|(k, s)| changes_data(s, d) && !copies_a_rebuild(&statements, *k)).map(|(_, s)| format!("{}…", s.text.split_whitespace().take(3).collect::<Vec<_>>().join(" ").to_lowercase())).collect()
 }
 
+/// The statements of a migration that write rows, as [`data_statements`] gives them, with the
+/// schema changes that fill what they make: a table made from a query (`create table … as select`,
+/// MySQL's `create table … select`) and a materialized view, made or refreshed. What they write
+/// turns on the rows and objects they read, so it can change with the order they run in, and no
+/// schema shows it was written. Read from the text, so a word in a string counts too.
+#[cfg(feature = "cli")]
+fn writes_rows(sql: &str, d: Dialect) -> Vec<String> {
+    static FILLS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)^\s*(create\b.*\btable\b.*\b(as\s*\(?\s*(select|with|values|table)\b|select\b)|create\b.*\bmaterialized\s+view\b|refresh\s+materialized\s+view\b)").expect("a valid pattern"));
+    let mut out = data_statements(sql, d);
+    out.extend(split_statements(sql, d).iter().filter(|s| FILLS.is_match(&s.text)).map(|s| format!("{}…", s.text.split_whitespace().take(3).collect::<Vec<_>>().join(" ").to_lowercase())));
+    out
+}
+
 /// Whether statement `k` of a file is a rebuild's own copy of a table's rows, which a database the
 /// change is already in needs no more: `insert into t (…) select … from s`, nothing after, where the
 /// file makes `t` before it and drops `s` after it (SQLite's copy into the table that takes the old
@@ -1752,16 +1765,16 @@ async fn behind(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[Migrati
 }
 
 /// Why `pending[j]`, which makes all this database has on top of `ran`, can't be recorded there,
-/// ahead of `pending[..j]`; None where it can. What changes data is never moved past, nor
-/// recorded by its schema alone: no schema shows that its statements ran, or that they run the same
-/// on the rows after the change. And the two orders must end at the same schema.
+/// ahead of `pending[..j]`; None where it can. What writes rows ([`writes_rows`]) is never moved
+/// past, nor recorded by its schema alone: no schema shows that its statements ran, or that they run
+/// the same on the rows after the change. And the two orders must end at the same schema.
 #[cfg(feature = "cli")]
 async fn unmovable(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[Migration], j: usize, d: Dialect) -> Result<Option<String>, Error> {
     let (it, ahead) = (&pending[j], &pending[..j]);
-    if !data_statements(&it.sql, d).is_empty() {
+    if !writes_rows(&it.sql, d).is_empty() {
         return Ok(Some("Its data statements can't be told to have run here, so it isn't recorded without running.".into()));
     }
-    let changing: Vec<Migration> = ahead.iter().filter(|m| !data_statements(&m.sql, d).is_empty()).cloned().collect();
+    let changing: Vec<Migration> = ahead.iter().filter(|m| !writes_rows(&m.sql, d).is_empty()).cloned().collect();
     if !changing.is_empty() {
         let one = changing.len() == 1;
         return Ok(Some(format!("{} {} {} data, which can run differently after this change, so it can't move ahead of {}.", if one { "Migration" } else { "Migrations" }, names_of(&changing), if one { "changes" } else { "change" }, if one { "it" } else { "them" })));
@@ -1837,6 +1850,10 @@ async fn behind_problem(shadows: &mut Shadows<'_>, target: &mut Db, url: &str, r
         None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&made, live)).chain([String::new()])),
     };
     let problem = if lost.is_empty() { problem } else { problem.note(format!("Undoing it loses what {} {}.", and_list(&lost), if lost.len() == 1 { "holds" } else { "hold" })) };
+    // What `it` writes may have been written here too, with the change: the undo can't take it back,
+    // and deploy writes it again.
+    let writes = writes_rows(&it.sql, target.dialect());
+    let problem = if writes.is_empty() { problem } else { problem.note(format!("The undo reverses the schema alone: where {} also ran here, reverse what {} wrote first, or deploy writes it again.", and_list(&writes), if writes.len() == 1 { "it" } else { "they" })) };
     let order = format!("{names} first, and then {}", it.name);
     let on = shown_url(url);
     let deploy = "reylo migrate deploy --url <url>";

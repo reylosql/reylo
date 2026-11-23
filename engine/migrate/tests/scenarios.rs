@@ -457,6 +457,7 @@ for_each_dialect!(
     a_hotfix_that_cannot_move_ahead_is_undone_then_deployed,
     history_push_takes_a_database_to_a_reordered_lock_keeping_its_rows,
     a_hotfix_whose_migration_changes_data_is_undone_then_deployed,
+    a_hotfix_moves_past_no_table_made_from_a_query_and_is_none,
     history_push_follows_a_renamed_migration,
     a_failed_migration_leaves_nothing,
     files_that_cannot_run_atomically_are_refused,
@@ -1416,6 +1417,9 @@ async fn a_hotfix_whose_migration_changes_data_is_undone_then_deployed(mut p: P)
     assert_eq!(p.history_push().await, 1);
     let out = p.output();
     assert_has!(&out, refused);
+    // The undo takes back the index alone: what the update wrote, where it ran here too, is the
+    // operator's to take back, or deploy writes it again.
+    assert_has!(&out, r"  The undo reverses the schema alone: where update users set… also ran here, reverse what it wrote first, or deploy writes it again\.\n  Give both commands");
     assert_eq!(p.dry_run().await, 1);
     assert_has!(p.output(), refused);
     p.exec(&undo_on(&out)).await;
@@ -1423,6 +1427,48 @@ async fn a_hotfix_whose_migration_changes_data_is_undone_then_deployed(mut p: P)
     assert_eq!(p.history().await, [users, nick, email]);
     let rows = p.rows("select nick from users").await;
     assert_eq!(rows.iter().map(|r| r.text("nick").to_string()).collect::<Vec<_>>(), ["y"]);
+}
+
+async fn a_hotfix_moves_past_no_table_made_from_a_query_and_is_none(mut p: P) {
+    let int = p.t.int;
+    p.linear();
+    let (a, snap, index) = ("20261027100000_a.sql", "20261027110000_snap.sql", "20261027120000_a_index.sql");
+    p.file(a, &format!("create table a (id {int});"));
+    p.schema(&format!("create table a (id {int}); create table snap as select id from a; create index a_id on a (id);"));
+    p.lock(&[a]);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into a values (1), (2)").await;
+    // A table made from a query holds what it read when it ran: it is never moved behind a change,
+    // nor recorded by its schema alone.
+    p.exec("create index a_id on a (id)").await;
+    p.file(snap, "create table snap as select id from a;");
+    p.file(index, "create index a_id on a (id);");
+    p.lock(&[a, snap, index]);
+    p.output();
+    assert_eq!(p.history_push().await, 1);
+    let out = p.output();
+    assert_has!(&out, r"✗ Migration 20261027120000_a_index\.sql makes this change, but runs after 20261027110000_snap\.sql, which this database hasn't run\n  Migration 20261027110000_snap\.sql changes data, which can run differently after this change, so it can't move ahead of it\.");
+    p.exec(&undo_on(&out)).await;
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.history().await, [a, snap, index]);
+    assert_eq!(p.rows("select * from snap").await.len(), 2);
+    // And one made by hand, empty, is not the table the migration fills.
+    let (b, copy) = ("20261027130000_b.sql", "20261027140000_copy.sql");
+    // As each database types a column a query makes: SQLite by its affinity alone.
+    let made = if p.d == Dialect::Sqlite { "INT" } else { int };
+    p.exec(&format!("create table copy (id {made})")).await;
+    p.file(b, &format!("create table b (id {int});"));
+    p.file(copy, "create table copy as select id from a;");
+    p.schema(&format!("create table a (id {int}); create table snap as select id from a; create index a_id on a (id); create table b (id {int}); create table copy as select id from a;"));
+    p.lock(&[a, snap, index, b, copy]);
+    p.output();
+    assert_eq!(p.history_push().await, 1);
+    let out = p.output();
+    assert_has!(&out, r"✗ Migration 20261027140000_copy\.sql makes this change, but runs after 20261027130000_b\.sql, which this database hasn't run\n  Its data statements can't be told to have run here, so it isn't recorded without running\.");
+    assert_has!(&out, r"The undo reverses the schema alone: where create table copy… also ran here");
+    p.exec(&undo_on(&out)).await;
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.rows("select * from copy").await.len(), 2);
 }
 
 async fn a_hotfix_that_cannot_move_ahead_is_undone_then_deployed(mut p: P) {
