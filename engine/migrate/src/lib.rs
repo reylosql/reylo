@@ -80,7 +80,7 @@ impl Dialect {
             "libsql" | "https" | "http" | "wss" | "ws" => Ok(Dialect::Sqlite),
             // ClickHouse, whose statements Reylo types and whose schema it does not migrate.
             // Its URL carries secrets in its query too, a token or a header's value, so the message names the server alone.
-            "clickhouse+http" | "clickhouse+https" => Err(Error(format!("Reylo's migrations and reylo run don't support ClickHouse yet, which this URL names: {}", redact(url.split(['?', '#']).next().unwrap_or(url))))),
+            "clickhouse+http" | "clickhouse+https" => Err(Error(format!("Reylo's migrations and reylo run don't support ClickHouse yet, which this URL names: {}", redact(url).split(['?', '#']).next().unwrap_or_default()))),
             // A bare path, or one on a Windows drive (`C:\app.db`): any other scheme names a database Reylo doesn't read.
             _ if scheme.len() <= 1 && (lower == ":memory:" || [".db", ".sqlite", ".sqlite3"].iter().any(|e| lower.ends_with(e))) => Ok(Dialect::Sqlite),
             _ => Err(Error(format!("no database for the URL's scheme: {}", redact(url)))),
@@ -159,5 +159,8 @@ mod tests {
         // ClickHouse's URL keeps secrets in its query, which the refusal leaves out.
         let refusal = Dialect::of_url("clickhouse+https://app:p@ss@db.example:8443/shop?access_token=SECRET&http_header_X-Key=SECRET").unwrap_err().0;
         assert!(refusal.ends_with("clickhouse+https://…@db.example:8443/shop") && !refusal.contains("SECRET") && !refusal.contains("ss@"), "{refusal}");
+        // A password that holds a `?` is hidden before the query is left out.
+        let cut = Dialect::of_url("clickhouse+https://app:pa?ss@db.example:8443/shop?access_token=SECRET").unwrap_err().0;
+        assert!(cut.ends_with("clickhouse+https://…@db.example:8443/shop") && !cut.contains("app:pa"), "{cut}");
     }
 }
