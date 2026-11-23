@@ -122,6 +122,10 @@ async fn describe(client: &Client, sql: &str) -> Result<Result<Describe, DbError
             // The session's end rather than the statement's answer: the replay ends as on a
             // lost connection, and nothing is kept as the statement's error.
             Some(_) if ended(&e) => Err(HostError(format!("{ENDED}: {}", pg_message(&e)))),
+            // Another session's lock on a table the statement names, waited for until `lock_timeout`:
+            // not the statement's answer either, so nothing is kept as its error, and the next
+            // analysis asks again.
+            Some(d) if *d.code() == ::tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE => Err(HostError(locked(client).await)),
             Some(d) => {
                 let position = match d.position() {
                     Some(::tokio_postgres::error::ErrorPosition::Original(p)) => Some(*p as usize),
@@ -133,6 +137,35 @@ async fn describe(client: &Client, sql: &str) -> Result<Result<Describe, DbError
             None => Err(HostError(format!("the describe did not reach the server: {e}"))),
         },
     }
+}
+
+/// The sessions of the database that hold, or wait for, a lock on a table that keeps a statement from
+/// being described: the lock modes that conflict with reading a table or writing its rows. Each with
+/// its table, its client, its state and what it runs, the holders first.
+const LOCKED_BY: &str = "select l.relation::pg_catalog.regclass::pg_catalog.text, l.pid, a.application_name, a.state, a.query from pg_catalog.pg_locks l left join pg_catalog.pg_stat_activity a on a.pid OPERATOR(pg_catalog.=) l.pid where l.locktype OPERATOR(pg_catalog.=) 'relation' and l.mode OPERATOR(pg_catalog.=) any (array['ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock']::pg_catalog.text[]) and l.pid OPERATOR(pg_catalog.<>) pg_catalog.pg_backend_pid() and l.database OPERATOR(pg_catalog.=) (select oid from pg_catalog.pg_database where datname OPERATOR(pg_catalog.=) pg_catalog.current_database()) order by l.granted desc, l.pid limit 3";
+
+/// Why a describe waited out `lock_timeout`, naming the sessions that hold the lock where the server
+/// shows them.
+async fn locked(client: &Client) -> String {
+    let holders = client.query(LOCKED_BY, &[]).await.map(|rows| rows.iter().map(holder).collect::<Vec<_>>()).unwrap_or_default();
+    let by = if holders.is_empty() { String::new() } else { format!(": {}", holders.join("; ")) };
+    format!("A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_timeout{by}. Run it again once the lock is released")
+}
+
+/// One session of [`LOCKED_BY`], as `users by pid 4242 (psql, idle in transaction: alter table users add column email text)`.
+fn holder(row: &::tokio_postgres::Row) -> String {
+    let table: Option<String> = row.get(0);
+    let pid: i32 = row.get(1);
+    let about: Vec<String> = [row.get::<_, Option<String>>(2), row.get::<_, Option<String>>(3)].into_iter().flatten().filter(|s| !s.is_empty()).collect();
+    let query: String = row.get::<_, Option<String>>(4).unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ");
+    let query = if query.chars().count() > 80 { format!("{}…", query.chars().take(80).collect::<String>()) } else { query };
+    let detail = match (about.is_empty(), query.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => format!(" ({})", about.join(", ")),
+        (true, false) => format!(" ({query})"),
+        (false, false) => format!(" ({}: {query})", about.join(", ")),
+    };
+    format!("{} by pid {pid}{detail}", table.unwrap_or_else(|| "a table".to_string()))
 }
 
 /// The rows of a catalog query over `client`, its statement taken from `prepared` where there is one.

@@ -25,6 +25,14 @@ const ACCESS_DENIED: u16 = 1045;
 /// The connection attribute that carries the token of the host's bridge to a Unix socket.
 const BRIDGE_ATTRIBUTE: &str = "reylo_bridge";
 
+/// What every analysis connection runs once it opens: a `lock_wait_timeout` as long as a connection
+/// may take to open, so that a metadata lock on a table a statement names ends the analysis with a
+/// message rather than stalling the type check until it is released. The usual one is an `alter
+/// table` waiting behind another session's open transaction, behind which every new statement on the
+/// table queues, a prepare included. MySQL's own default waits a year. A shorter one the session
+/// already has is kept.
+const LOCK_WAIT: &str = "set session lock_wait_timeout = cast(least(@@session.lock_wait_timeout, 10) as unsigned)";
+
 #[derive(Default)]
 pub struct Mysql {
     connections: HashMap<u64, Connection>,
@@ -94,8 +102,9 @@ pub struct Session {
 
 impl Session {
     pub async fn open(url: &str) -> Result<Session, Failure> {
-        let (conn, version) = open(url).await?;
-        Ok(Session { connection: Connection { conn, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), setup: None }, version })
+        let (mut conn, version) = open(url).await?;
+        let setup = lock_wait(&mut conn).await;
+        Ok(Session { connection: Connection { conn, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), setup }, version })
     }
 
     /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
@@ -130,9 +139,10 @@ impl Program for Mysql {
                 let url = request["url"].as_str().unwrap_or_default();
                 let bridge = request["bridge"].as_str().map(String::from);
                 match connect(url, bridge.as_deref()).await {
-                    Ok((conn, version)) => {
+                    Ok((mut conn, version)) => {
+                        let setup = lock_wait(&mut conn).await;
                         self.next += 1;
-                        self.connections.insert(self.next, Connection { conn, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), setup: None });
+                        self.connections.insert(self.next, Connection { conn, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), setup });
                         json!({ "status": "opened", "conn": self.next, "version": version })
                     }
                     Err(failure) => failure,
@@ -197,6 +207,12 @@ async fn rows(conn: &mut Conn, text: String) -> mysql_async::Result<Vec<Vec<Valu
         rows.push(row.unwrap().into_iter().zip(&types).map(|(value, code)| answers::decoded(value, *code)).collect());
     }
     Ok(rows)
+}
+
+/// [`LOCK_WAIT`] run on a new connection, and kept as what a connection that replaces it runs, where
+/// the server took it. A server that refuses it is analyzed as before, under its own setting.
+async fn lock_wait(conn: &mut Conn) -> Option<String> {
+    conn.query_drop(LOCK_WAIT).await.ok().map(|()| LOCK_WAIT.to_string())
 }
 
 fn closed(id: u64) -> Value {

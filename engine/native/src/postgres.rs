@@ -20,6 +20,14 @@ use tokio_postgres::{Client, Config};
 /// waits on it, in the editor and in CI.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// What every analysis connection runs once it opens: a `lock_timeout` as long as a connection may
+/// take to open, so that a session holding a lock on a table a statement names (an `alter table`
+/// left open in another client, a `vacuum full`) ends the analysis with a message rather than
+/// stalling the type check until its transaction ends. Postgres's own default waits forever. A
+/// shorter `lock_timeout` the session already has, from the URL's `options`, the role or the
+/// database, is kept.
+const LOCK_WAIT: &str = "select pg_catalog.set_config('lock_timeout', '10s', false) from pg_catalog.pg_settings where name OPERATOR(pg_catalog.=) 'lock_timeout' and (setting::pg_catalog.int8 OPERATOR(pg_catalog.=) 0 or setting::pg_catalog.int8 OPERATOR(pg_catalog.>) 10000)";
+
 /// The URL parameters tokio-postgres reads itself. libpq's TLS settings are read here (`sslmode`,
 /// `sslrootcert`, `sslcert`, `sslkey`, `sslpassword`), and `ssl`, which node-postgres and
 /// postgres.js read; any other parameter is left out, since tokio-postgres refuses a parameter it
@@ -172,7 +180,8 @@ impl Session {
             return Err(Failure::Error(refusal));
         }
         let Started { client, version, date_style } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
-        Ok(Session { connection: Connection { client, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup: None }, version: server_version(&version) })
+        let setup = lock_wait(&client).await;
+        Ok(Session { connection: Connection { client, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup }, version: server_version(&version) })
     }
 
     /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
@@ -211,8 +220,9 @@ impl Program for Postgres {
                 }
                 match connect(url, bridge.as_deref()).await {
                     Ok(Started { client, version, date_style }) => {
+                        let setup = lock_wait(&client).await;
                         self.next += 1;
-                        self.connections.insert(self.next, Connection { client, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup: None });
+                        self.connections.insert(self.next, Connection { client, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup });
                         json!({ "status": "opened", "conn": self.next, "version": server_version(&version) })
                     }
                     Err(failure) => failure,
@@ -284,6 +294,13 @@ impl Program for Postgres {
             _ => return None,
         })
     }
+}
+
+/// [`LOCK_WAIT`] run on a new connection, and kept as what a connection that replaces it runs, where
+/// the server took it. A server that refuses it, one that speaks Postgres's protocol without its
+/// catalog, is analyzed as before, under its own `lock_timeout`.
+async fn lock_wait(client: &Client) -> Option<String> {
+    client.batch_execute(LOCK_WAIT).await.ok().map(|()| LOCK_WAIT.to_string())
 }
 
 fn closed(conn: u64) -> Value {

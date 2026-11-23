@@ -676,8 +676,10 @@ test("a MySQL server is not refused: the type check goes on to read its schema",
     const schema = await session.schema();
     assert.ok(!schema.fatal);
     assert.match(schema.value ?? "", /^[0-9a-f]{16}$/);
+    // The version, the bound on waiting for a table's lock, then the schema's fingerprint.
     assert.equal(server.queries[0], "select version()");
-    assert.equal(server.queries.length, 2);
+    assert.equal(server.queries[1], "set session lock_wait_timeout = cast(least(@@session.lock_wait_timeout, 10) as unsigned)");
+    assert.equal(server.queries.length, 3);
   } finally {
     await session.close();
     await server.close();
