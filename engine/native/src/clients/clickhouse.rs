@@ -120,7 +120,9 @@ impl Server {
                 _ => {}
             }
         }
-        let config = ureq::Agent::config_builder().http_status_as_error(false).timeout_connect(Some(CONNECT_TIMEOUT)).timeout_global(Some(QUERY_TIMEOUT)).build();
+        // No redirect is followed, as `@clickhouse/client` follows none: one would carry the login's
+        // headers to whatever host it names. Its answer is then one the interface does not give.
+        let config = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).timeout_connect(Some(CONNECT_TIMEOUT)).timeout_global(Some(QUERY_TIMEOUT)).build();
         Ok(Server { agent: ureq::Agent::new_with_config(config), endpoint: format!("{scheme}://{host}{pathname}/"), parameters, headers })
     }
 
@@ -219,6 +221,34 @@ mod tests {
         let proxied = Server::of("HTTP://localhost/analytics?pathname=/clickhouse/&access_token=t0ken").unwrap();
         assert_eq!(proxied.endpoint, "http://localhost/clickhouse/");
         assert_eq!(proxied.headers, [("Authorization".to_string(), "Bearer t0ken".to_string())]);
+    }
+
+    #[test]
+    fn a_redirect_is_not_followed_and_the_login_goes_nowhere_else() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let (first, other) = (TcpListener::bind("127.0.0.1:0").unwrap(), TcpListener::bind("127.0.0.1:0").unwrap());
+        other.set_nonblocking(true).unwrap();
+        let location = format!("http://{}/", other.local_addr().unwrap());
+        let url = format!("http://app:secret@{}/shop", first.local_addr().unwrap());
+        let redirecting = std::thread::spawn(move || {
+            let (mut stream, _) = first.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            // The request's head and its one line of SQL.
+            while !request.windows(8).any(|w| w == b"SELECT 1") {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            stream.write_all(format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).unwrap();
+        });
+        let outcome = Server::of(&url).unwrap().ask("SELECT 1").unwrap();
+        redirecting.join().unwrap();
+        assert!(matches!(&outcome, Outcome::Foreign(what) if what == "HTTP 302"));
+        assert!(other.accept().is_err(), "the redirect's host was asked");
     }
 
     #[test]

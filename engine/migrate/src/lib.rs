@@ -79,7 +79,8 @@ impl Dialect {
             // A libSQL server's database, Turso Cloud's among them, named as `@libsql/client` names it.
             "libsql" | "https" | "http" | "wss" | "ws" => Ok(Dialect::Sqlite),
             // ClickHouse, whose statements Reylo types and whose schema it does not migrate.
-            "clickhouse+http" | "clickhouse+https" => Err(Error(format!("Reylo has no migrations for ClickHouse, which this URL names: {}", redact(url)))),
+            // Its URL carries secrets in its query too, a token or a header's value, so the message names the server alone.
+            "clickhouse+http" | "clickhouse+https" => Err(Error(format!("Reylo has no migrations for ClickHouse, which this URL names: {}", redact(url.split(['?', '#']).next().unwrap_or(url))))),
             // A bare path, or one on a Windows drive (`C:\app.db`): any other scheme names a database Reylo doesn't read.
             _ if scheme.len() <= 1 && (lower == ":memory:" || [".db", ".sqlite", ".sqlite3"].iter().any(|e| lower.ends_with(e))) => Ok(Dialect::Sqlite),
             _ => Err(Error(format!("no database for the URL's scheme: {}", redact(url)))),
@@ -100,11 +101,15 @@ impl Dialect {
     }
 }
 
-/// The URL with its user and password left out, for a message.
+/// The URL with its user and password left out, for a message: what stands before the last `@` of
+/// its host's part, since a password may hold one unescaped.
 pub fn redact(url: &str) -> String {
-    match (url.find("://"), url.find('@')) {
-        (Some(s), Some(at)) if at > s => format!("{}//…{}", &url[..s + 1], &url[at..]),
-        _ => url.to_string(),
+    let Some(s) = url.find("://") else { return url.to_string() };
+    let host = s + 3;
+    let end = url[host..].find(['/', '?', '#']).map_or(url.len(), |i| host + i);
+    match url[host..end].rfind('@') {
+        Some(at) => format!("{}//…{}", &url[..s + 1], &url[host + at..]),
+        None => url.to_string(),
     }
 }
 
@@ -144,5 +149,11 @@ mod tests {
         assert!(Dialect::of_url("duckdb:./app.db").is_err());
         assert_eq!(percent_decode("a%20b%2"), "a b%2");
         assert_eq!(redact("postgres://u:p@h/db"), "postgres://…@h/db");
+        // A password with an `@` of its own, and an `@` past the host, which is no login's.
+        assert_eq!(redact("mysql://u:p@ss@h:3306/db"), "mysql://…@h:3306/db");
+        assert_eq!(redact("postgres://h/db?user=a@b"), "postgres://h/db?user=a@b");
+        // ClickHouse's URL keeps secrets in its query, which the refusal leaves out.
+        let refusal = Dialect::of_url("clickhouse+https://app:p@ss@db.example:8443/shop?access_token=SECRET&http_header_X-Key=SECRET").unwrap_err().0;
+        assert!(refusal.ends_with("clickhouse+https://…@db.example:8443/shop") && !refusal.contains("SECRET") && !refusal.contains("ss@"), "{refusal}");
     }
 }
