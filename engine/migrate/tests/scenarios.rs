@@ -2504,45 +2504,46 @@ async fn a_run_cut_off_goes_on_where_its_schema_is_unchanged(mut p: P) {
     if p.d == Dialect::Mysql {
         return;
     }
-    // Cut off after b committed, before the run read its fingerprint: on Postgres its connection ends
-    // in c, so the read fails; on SQLite, b's row reads as such a run leaves it.
-    p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
-    p.file("20261027110000_b.sql", &format!("create table b (id {int});"));
-    let c = p.dir.join("migrations").join("20261027120000_c.sql");
-    let cut_off = async |p: &mut P| {
+    // Cut off after `last` committed, before the run read its fingerprint: on Postgres its connection
+    // ends in `next`, so the read fails; on SQLite, the row reads as such a run leaves it.
+    let migrations = p.dir.join("migrations");
+    let cut_off = async |p: &mut P, last: &str, next: &str| {
         if p.d == Dialect::Postgres {
-            p.file("20261027120000_c.sql", "select pg_terminate_backend(pg_backend_pid());");
+            p.file(next, "select pg_terminate_backend(pg_backend_pid());");
             assert_eq!(p.migrate().await, 1, "{}", p.peek());
+            std::fs::remove_file(migrations.join(next)).unwrap();
         } else {
-            let _ = std::fs::remove_file(&c);
             assert_eq!(p.migrate().await, 0, "{}", p.peek());
-            p.exec("update __reylo_migrations set fingerprint = 'pending:' || (select schema_version from pragma_schema_version) where name = '20261027110000_b.sql'").await;
+            p.exec(&format!("update __reylo_migrations set fingerprint = 'pending:' || (select schema_version from pragma_schema_version) where name = '{last}'")).await;
         }
-        p.file("20261027120000_c.sql", &format!("create table c (id {int});"));
         p.output();
     };
-    cut_off(&mut p).await;
+    p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
+    p.file("20261027110000_b.sql", &format!("create table b (id {int});"));
+    cut_off(&mut p, "20261027110000_b.sql", "20261027120000_c.sql").await;
     assert_eq!(p.history().await, ["20261027100000_a.sql", "20261027110000_b.sql"]);
     // Nothing changed the schema since: the next run goes on, and stores the fingerprint.
     p.status().await;
     assert_has!(p.output(), "Unchanged since a run was cut off after its last migration");
+    p.file("20261027120000_c.sql", &format!("create table c (id {int});"));
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_has!(p.output(), "Applied 1 migration");
     let rows = p.rows("select name from __reylo_migrations where fingerprint not like 'pending%'").await;
     assert_eq!(rows.iter().map(|r| r.text("name")).collect::<Vec<_>>(), ["20261027120000_c.sql"]);
     // Something did: refused.
-    p.exec("drop table c").await;
-    p.exec("delete from __reylo_migrations where name = '20261027120000_c.sql'").await;
-    p.exec("drop table b").await;
-    p.exec("delete from __reylo_migrations where name = '20261027110000_b.sql'").await;
-    cut_off(&mut p).await;
+    p.file("20261027130000_d.sql", &format!("create table d (id {int});"));
+    cut_off(&mut p, "20261027130000_d.sql", "20261027140000_e.sql").await;
     p.exec(&format!("create table stray (id {int})")).await;
     assert_eq!(p.migrate().await, 1);
-    assert_has!(p.output(), r"A run was cut off after 20261027110000_b\.sql applied");
+    assert_has!(p.output(), r"A run was cut off after 20261027130000_d\.sql applied");
 }
 
 async fn a_rewind_that_fails_leaves_the_row_before_it_unverified(mut p: P) {
     let int = p.t.int;
+    // MySQL reads the schema before each migration, so each row holds its own fingerprint.
+    if p.d == Dialect::Mysql {
+        return;
+    }
     p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
     p.file("20261027110000_b.sql", &format!("create table b (id {int});"));
     assert_eq!(p.dev().await, 0, "{}", p.peek());
