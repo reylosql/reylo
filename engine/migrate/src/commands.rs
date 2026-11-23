@@ -963,17 +963,16 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
 
 /// `line` with each of `names` (an old name and its new, as the catalog writes them) replaced where
 /// it stands as a whole name, all at once: `public.orders` in `public.orders(id)` and
-/// `public.orders.title`, but not in `public.orders_archive`, inside a quoted name,
-/// `"public.orders"`, or inside a string, `'public.orders'`, whose text a rename never changes.
+/// `public.orders.title`, and as a relation constant, `'public.orders'::regclass`, but not in
+/// `public.orders_archive`, inside a quoted name, `"public.orders"`, or inside a string,
+/// `'public.orders'`, whose text a rename never changes.
 #[cfg(feature = "cli")]
 fn renamed_in(line: &str, names: &[(String, String)]) -> String {
     let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
-    // The quote a quoted name or a string is open in: a name is never replaced inside either, and a
-    // `"` inside a string opens none.
-    let (mut out, mut at, mut prev, mut quote) = (String::new(), 0, None::<char>, None::<char>);
+    let (mut out, mut at, mut prev) = (String::new(), 0, None::<char>);
     while let Some(c) = line[at..].chars().next() {
         let rest = &line[at..];
-        if quote.is_none() && prev.is_none_or(|p| !ident(p) && p != '.') {
+        if prev.is_none_or(|p| !ident(p) && p != '.') {
             if let Some((old, new)) = names.iter().find(|(old, _)| rest.starts_with(old.as_str()) && rest[old.len()..].chars().next().is_none_or(|n| !ident(n))) {
                 out.push_str(new);
                 at += old.len();
@@ -981,11 +980,33 @@ fn renamed_in(line: &str, names: &[(String, String)]) -> String {
                 continue;
             }
         }
-        quote = match quote {
-            Some(q) if c == q => None,
-            None if c == '"' || c == '`' || c == '\'' => Some(c),
-            q => q,
-        };
+        if c == '\'' || c == '"' || c == '`' {
+            // A quoted name or a string, whole, to its closing quote (a doubled quote stays inside).
+            let mut end = 1;
+            loop {
+                match rest[end..].find(c) {
+                    Some(k) if rest[end + k + 1..].starts_with(c) => end += k + 2,
+                    Some(k) => {
+                        end += k + 1;
+                        break;
+                    }
+                    None => {
+                        end = rest.len();
+                        break;
+                    }
+                }
+            }
+            let span = &rest[..end];
+            // A relation constant is the relation itself, which Postgres prints by its new name.
+            let relation = (c == '\'' && rest[end..].starts_with("::regclass")).then(|| &span[1..span.len().saturating_sub(1)]);
+            match relation.and_then(|r| names.iter().find(|(old, _)| old == r)) {
+                Some((_, new)) => out.push_str(&format!("'{new}'")),
+                None => out.push_str(span),
+            }
+            at += end;
+            prev = Some(c);
+            continue;
+        }
         out.push(c);
         at += c.len_utf8();
         prev = Some(c);
@@ -6833,6 +6854,8 @@ mod tests {
         let tables = vec![("table public.alpha".to_string(), "table public.omega".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-alpha-]{+omega+}", "  - view omega as SELECT 1 AS n;", "  - view \"public.alpha\" as SELECT omega.n FROM omega;"]);
         assert_eq!(renamed_in("view public.\"public.alpha\" as SELECT 1 FROM public.alpha", &[("public.alpha".to_string(), "public.omega".to_string())]), "view public.\"public.alpha\" as SELECT 1 FROM public.omega");
+        // A relation constant follows the rename.
+        assert_eq!(renamed_in("policy public.notes visible USING ((pg_relation_size('public.alpha'::regclass) > 0))", &[("public.alpha".to_string(), "public.omega".to_string())]), "policy public.notes visible USING ((pg_relation_size('public.omega'::regclass) > 0))");
         // A string is left as it is, and a double quote inside one quotes no name.
         assert_eq!(renamed_in("policy public.alpha visible USING ((body = '\"public.alpha\"'::text))", &[("public.alpha".to_string(), "public.omega".to_string())]), "policy public.omega visible USING ((body = '\"public.alpha\"'::text))");
         assert_eq!(renamed_in("policy public.notes visible USING ((body = '\"'::text) OR (EXISTS (SELECT 1 FROM public.alpha)))", &[("public.alpha".to_string(), "public.omega".to_string())]), "policy public.notes visible USING ((body = '\"'::text) OR (EXISTS (SELECT 1 FROM public.omega)))");
