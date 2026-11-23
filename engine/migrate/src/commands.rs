@@ -1124,6 +1124,10 @@ fn table_name(line: &str, mysql: bool) -> Option<String> {
 /// and checks. None where no table, or more than one, could own it, as `t` and `t.archive` could
 /// both own SQLite's `column t.archive.label`.
 fn owner(line: &str, tables: &[String], mysql: bool) -> Option<(String, String)> {
+    // A table's own line is no other's part, as MySQL's `options orders` is no setting of `orders`.
+    if table_name(line, mysql).is_some() {
+        return None;
+    }
     let of = |table: &String| -> Option<String> {
         if let Some(rest) = line.strip_prefix("column ") {
             return rest.strip_prefix(&format!("{table}.")).map(str::to_string);
@@ -7049,6 +7053,11 @@ mod tests {
                 "  + check orders archive positive (`id` > 0)",
             ]
         );
+        // A table named `options orders` is a table beside `orders`, made or dropped with it.
+        let both = lines(&["table orders engine=InnoDB collate=c", "column orders.id int not null", "table options orders engine=InnoDB collate=c", "column options orders.id int not null"]);
+        let grouped = ["table orders engine=InnoDB collate=c", "      id int not null", "table options orders engine=InnoDB collate=c", "      id int not null"];
+        assert_eq!(changed_lines(&[], &both, Dialect::Mysql), grouped.map(|l| if l.starts_with("table") { format!("  + {l}") } else { l.to_string() }));
+        assert_eq!(changed_lines(&both, &[], Dialect::Mysql), grouped.map(|l| if l.starts_with("table") { format!("  - {l}") } else { l.to_string() }));
         // A MySQL table named `options` is a table, by its engine.
         assert_eq!(
             changed_lines(&[], &lines(&["table options engine=InnoDB collate=utf8mb4_0900_ai_ci", "column options.id int not null"]), Dialect::Mysql),
