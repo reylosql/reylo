@@ -65,7 +65,7 @@ test("the migration commands and reylo run are the binary's, with their output a
   assert.doesNotMatch(dbHelp.out, /\n  (init|new|dev|deploy|status|lock|history)\b/);
   // The docs show each help as it is, the CLI page's Rust lines where the docs show Rust (site/lib/rust-content.ts).
   // A checkout on Windows may write a page with CRLF line endings.
-  for (const page of ["migrate.mdx", "cli.mdx"]) {
+  for (const page of ["migrate-cli.mdx", "cli.mdx"]) {
     const text = readFileSync(join(import.meta.dirname, "..", "site", "content", "docs", page), "utf8").replaceAll("\r\n", "\n").replace(/^<\/?Rust>\n/gm, "");
     for (const block of page === "cli.mdx" ? [help.out, migrate.out, dbHelp.out] : [migrate.out, dbHelp.out]) assert.ok(text.includes(`\`\`\`terminal\n${block}\`\`\``), `${page}: ${block.split("\n")[0]}`);
   }
