@@ -231,16 +231,17 @@ fn module(file: &Path, shown: &str, options: &mut BTreeMap<PathBuf, Options>) ->
     crate::module(dialect, options, &analysis, Span::call_site(), &Overrides::default(), true).map_err(|e| format!("{shown}: {e}"))
 }
 
-/// A file's stem as a module's name: its words in snake_case, written raw where that is a keyword.
-/// Words are ASCII letters and digits, which `_`, `-`, `.` and spaces separate and a capital starts
-/// (`getUser` and `get-user` are each `get_user`; `HTTPStatus` is `http_status`). A stem with any
-/// other character, or whose name would start with a digit, has none.
+/// A file's stem as a module's name: its words in snake_case, written raw where that is a keyword
+/// of any edition, `gen` included, which syn reads as a name and Rust 2024 reserves. Words are ASCII
+/// letters and digits, which `_`, `-`, `.` and spaces separate and a capital starts (`getUser` and
+/// `get-user` are each `get_user`; `HTTPStatus` is `http_status`). A stem with any other character,
+/// or whose name would start with a digit, has none.
 pub fn module_name(stem: &str) -> Option<String> {
     let name = file_words(stem)?.join("_");
     if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
         return None;
     }
-    if syn::parse_str::<syn::Ident>(&name).is_ok() {
+    if name != "gen" && syn::parse_str::<syn::Ident>(&name).is_ok() {
         return Some(name);
     }
     let raw = format!("r#{name}");
@@ -514,6 +515,7 @@ mod tests {
         assert_eq!(module_name("user2Posts").as_deref(), Some("user2_posts"));
         assert_eq!(module_name("list users.v2").as_deref(), Some("list_users_v2"));
         assert_eq!(module_name("type").as_deref(), Some("r#type"));
+        assert_eq!(module_name("Gen").as_deref(), Some("r#gen"));
         assert_eq!(module_name("1st"), None);
         assert_eq!(module_name("self"), None);
         assert_eq!(module_name("é"), None);
