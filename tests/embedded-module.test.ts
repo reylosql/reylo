@@ -165,6 +165,8 @@ test("the lock refuses what the command line refuses: a key it doesn't know, a k
     ["migrations:\n  - hash: c86e9de4\n", "the entry at its line 2 has no name"],
     ["migrations:\n  - a.sql\n", '"a.sql" is a migration\'s name and its hash'],
     ["schema: c7bf681b\nschema:\nmigrations:\n", "its line 2 gives `schema` a second time"],
+    ["migrations:\n  - a.sql c86e9de4\n- b.sql 78ad08c0\n", "its line 3 doesn't parse"],
+    ["migrations:\n- name: a.sql\n  hash: c86e9de4\n  - name: b.sql\n    hash: 78ad08c0\n", "its line 4 doesn't parse"],
   ] as const) {
     assert.deepEqual(readLock(text), { error: why }, text);
   }

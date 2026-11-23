@@ -69,6 +69,7 @@ export function readLock(text: string): { schema?: string; entries: LockEntry[] 
   const items: { at: number; first: string; more: [number, string][] }[] = [];
   let section: "migrations" | "other" | undefined;
   const seen = new Set<string>();
+  let itemIndent: number | undefined;
   const lines = text.split(/\r?\n/);
   for (const [k, line] of lines.entries()) {
     const at = k + 1;
@@ -86,9 +87,12 @@ export function readLock(text: string): { schema?: string; entries: LockEntry[] 
     }
     if (section === "other") continue;
     if (section !== "migrations") return { error: `its line ${at} doesn't parse` };
+    // Every entry at the first one's indentation, and an entry's further lines deeper than it.
+    const indent = line.length - line.trimStart().length;
     const item = /^\s*-\s+(.*)$/.exec(line);
-    if (item) items.push({ at, first: item[1]!, more: [] });
-    else if (items.length) items.at(-1)!.more.push([at, line]);
+    itemIndent ??= item ? indent : undefined;
+    if (item && indent === itemIndent) items.push({ at, first: item[1]!, more: [] });
+    else if (!item && items.length && indent > itemIndent!) items.at(-1)!.more.push([at, line]);
     else return { error: `its line ${at} doesn't parse` };
   }
   const entries: LockEntry[] = [];
