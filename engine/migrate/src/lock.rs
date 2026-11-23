@@ -22,6 +22,13 @@ pub const OLD_LOCK: &str = "reylo-lock.yaml";
 
 const HEADER: &str = "# On a conflict, keep main's and run reylo migrate dev\n";
 
+/// The version of the lock's format: how its checksums are taken (`checksum`, `schema_sum` and the
+/// text `canonical` keeps) and how it is written. A lock with none is version 1, as written up to
+/// 0.8.2. A change to any of them moves it, so that a lock written by the old rules is still
+/// checked by them, and a Reylo that reads an older version refuses a newer lock rather than read
+/// its checksums by the wrong rules, which would show every migration as edited.
+pub const VERSION: u64 = 1;
+
 /// The lock: its migrations in order, and schema.sql's checksum where one was proven.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lock {
@@ -51,7 +58,16 @@ pub enum State {
     /// It holds git's conflict markers.
     Conflicted,
     Invalid(String),
+    /// A newer Reylo wrote it: its version, above `VERSION`.
+    Newer(u64),
     Lock(Lock),
+}
+
+/// The lock's version alone, read before the rest, which a newer version may write differently.
+#[derive(Deserialize)]
+struct Versioned {
+    #[serde(default)]
+    version: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -285,6 +301,12 @@ pub fn of_text(text: &str) -> State {
     if MARKER.is_match(text) {
         return State::Conflicted;
     }
+    match serde_yaml::from_str::<Versioned>(text).map(|v| v.version.unwrap_or(VERSION)) {
+        Ok(0) => return State::Invalid("version 0 isn't a lock's version".to_string()),
+        Ok(v) if v > VERSION => return State::Newer(v),
+        Err(e) => return State::Invalid(e.to_string()),
+        Ok(_) => {}
+    }
     match parse(text) {
         Ok(lock) => State::Lock(lock),
         Err(e) => State::Invalid(e),
@@ -292,7 +314,7 @@ pub fn of_text(text: &str) -> State {
 }
 
 pub fn render(lock: &Lock) -> String {
-    let mut out = HEADER.to_string();
+    let mut out = format!("{HEADER}version: {VERSION}\n");
     if let Some(schema) = &lock.schema {
         out.push_str(&format!("schema: {}\n", scalar(schema)));
     }
@@ -348,7 +370,8 @@ mod tests {
         let State::Lock(lock) = of_text(objects) else { panic!("{objects}") };
         assert_eq!(lock.entries[1], Entry { name: "20261104140347_add_bio.sql".into(), sum: "78ad08c0".into() });
         assert_eq!(of_text(strings), State::Lock(lock.clone()));
-        assert_eq!(render(&lock), format!("{HEADER}{objects}"));
+        assert_eq!(render(&lock), format!("{HEADER}version: 1\n{objects}"));
+        assert_eq!(of_text(&format!("version: 1\n{objects}")), State::Lock(lock.clone()));
         // Its keys in either order, and as a flow mapping.
         let swapped = objects.replace("  - name: 20261104140347_add_bio.sql\n    checksum: 78ad08c0\n", "  - checksum: 78ad08c0\n    name: 20261104140347_add_bio.sql\n");
         assert_eq!(of_text(&swapped), State::Lock(lock.clone()));
@@ -386,6 +409,13 @@ mod tests {
         ] {
             assert!(matches!(of_text(text), State::Invalid(e) if e.contains(why)), "{text}: {:?}", of_text(text));
         }
+    }
+
+    #[test]
+    fn a_lock_a_newer_reylo_wrote_is_refused_by_its_version() {
+        assert_eq!(of_text("version: 2\nmigrations:\n  - name: a.sql\n    checksum: c86e9de4\n    transaction: false\n"), State::Newer(2));
+        assert!(matches!(of_text("version: 0\nmigrations:\n"), State::Invalid(e) if e.contains("version 0")));
+        assert!(matches!(of_text("version: one\nmigrations:\n"), State::Invalid(_)));
     }
 
     #[test]

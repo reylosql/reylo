@@ -152,6 +152,7 @@ test("the lock reads as the command line reads it: keys in either order, quoted 
   assert.deepEqual(readLock(objects.replace("  - name: 20261104120000_users.sql\n    checksum: c86e9de4\n", "  - { name: 20261104120000_users.sql, checksum: c86e9de4 }\n")), lock);
   assert.deepEqual(readLock("schema: c7bf681b\nmigrations:\n  - 20261104120000_users.sql c86e9de4\n  - 20261104140347_add_bio.sql 00123456\n"), lock);
   assert.deepEqual(readLock("migrations:\n"), { entries: [] });
+  assert.deepEqual(readLock(`version: 1\n${objects}`), lock);
   // A list written without indentation, as YAML allows.
   assert.deepEqual(readLock(objects.replace(/^  (- |  )/gm, "$1")), lock);
   assert.deepEqual(readLock("schema: c7bf681b\nmigrations:\n- 20261104120000_users.sql c86e9de4\n- 20261104140347_add_bio.sql 00123456\n"), lock);
@@ -165,11 +166,17 @@ test("the lock refuses what the command line refuses: a key it doesn't know, a k
     ["migrations:\n  - checksum: c86e9de4\n", "the entry at its line 2 has no name"],
     ["migrations:\n  - a.sql\n", '"a.sql" is a migration\'s name and its checksum'],
     ["schema: c7bf681b\nschema:\nmigrations:\n", "its line 2 gives `schema` a second time"],
+    ["version: 0\nmigrations:\n", "`version: 0` isn't a lock's version"],
+    ["version: one\nmigrations:\n", "`version: one` isn't a lock's version"],
     ["migrations:\n  - a.sql c86e9de4\n- b.sql 78ad08c0\n", "its line 3 doesn't parse"],
     ["migrations:\n- name: a.sql\n  checksum: c86e9de4\n  - name: b.sql\n    checksum: 78ad08c0\n", "its line 4 doesn't parse"],
   ] as const) {
     assert.deepEqual(readLock(text), { error: why }, text);
   }
+});
+
+test("a lock a newer Reylo wrote is refused by its version, whatever the rest holds", () => {
+  assert.deepEqual(readLock("version: 2\nmigrations:\n  - name: a.sql\n    checksum: c86e9de4\n    transaction: false\n"), { newer: 2 });
 });
 
 test("a lock the command line refuses gives migrate its error, and a quoted schema checksum is still held to schema.sql", async () => {
@@ -181,6 +188,9 @@ test("a lock the command line refuses gives migrate its error, and a quoted sche
   // A name that isn't a migration file, a directory's included.
   writeFileSync(lock, text.replace(/^  - name: \S+$/m, "  - name: ."));
   assert.match((await projectMigrations(root)).error ?? "", /^The lock lists \., which reylo\/migrations doesn't have/);
+  assert.match(text, /^# On a conflict, keep main's and run reylo migrate dev\nversion: 1\nschema: /);
+  writeFileSync(lock, text.replace(/^version: 1$/m, "version: 2"));
+  assert.match((await projectMigrations(root)).error ?? "", /^A newer Reylo wrote reylo\/reylo\.lock: it is a lock of version 2, and this reylo reads version 1 and older, so upgrade reylo to read it$/);
   writeFileSync(lock, text.replace(/^(    checksum: .*)$/m, "$1\n    transaction: false"));
   assert.match((await projectMigrations(root)).error ?? "", /^Reylo can't read reylo\/reylo\.lock as a lock, since its line \d+ has `transaction`, which an entry doesn't have: write it again from a database that ran its migrations, with reylo migrate history pull$/);
   assert.match(text, /^schema: '?[0-9a-f]{8}'?$/m);

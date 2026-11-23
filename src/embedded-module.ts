@@ -42,6 +42,9 @@ export function schemaChecksum(last: string, sql: string): string {
   return digest(["schema\n", last, "\n", canonical(sql)]);
 }
 
+/** The version of the lock's format this reads, and older (`VERSION` in engine/migrate/src/lock.rs). */
+const LOCK_VERSION = 1;
+
 /** A lock's entry: a migration's name and its checksum. */
 type LockEntry = { name: string; sum: string };
 
@@ -50,9 +53,10 @@ type LockEntry = { name: string; sum: string };
  * read: `schema`, the checksum of schema.sql, and `migrations`, each entry an object with its
  * `name` and its `checksum`, in either order, or, as locks were written up to 0.8.2, one string,
  * `<file> <checksum>`. An entry with a key it doesn't know, or with a key twice, is refused, as the
- * command line refuses it; a top-level key it doesn't know is passed over, as there.
+ * command line refuses it; a top-level key it doesn't know is passed over, as there. A lock whose
+ * `version` is above the one it reads, which a newer Reylo wrote, is `newer`, and read no further.
  */
-export function readLock(text: string): { schema?: string; entries: LockEntry[] } | { error: string } {
+export function readLock(text: string): { schema?: string; entries: LockEntry[] } | { error: string } | { newer: number } {
   // A plain value up to a comment, or a quoted one as written.
   const scalar = (raw: string) => {
     const v = raw.trim();
@@ -67,6 +71,13 @@ export function readLock(text: string): { schema?: string; entries: LockEntry[] 
   };
   let schema: string | undefined;
   const items: { at: number; first: string; more: [number, string][] }[] = [];
+  // The version first: a newer one may write the rest in a way this doesn't read.
+  const versions = [...text.matchAll(/^version:(.*)$/gm)].map((m) => m[1]!.trim().replace(/\s+#.*$/, ""));
+  if (versions.length === 1) {
+    const v = versions[0]!;
+    if (!/^[0-9]+$/.test(v) || Number(v) === 0) return { error: `\`version: ${v}\` isn't a lock's version` };
+    if (Number(v) > LOCK_VERSION) return { newer: Number(v) };
+  }
   let section: "migrations" | "other" | undefined;
   const seen = new Set<string>();
   let itemIndent: number | undefined;
@@ -157,6 +168,7 @@ export async function projectMigrations(root: string): Promise<{ list?: Migratio
     // Two branches that each added a migration leave git's markers in the lock.
     if (/^(<{7}|={7}|>{7})( |$)/m.test(lock)) return { error: `The lock has a merge conflict, in ${shown}/reylo.lock: keep main's lines, then run reylo migrate dev, which adds this branch's migrations back`, watched };
     const read = readLock(lock);
+    if ("newer" in read) return { error: `A newer Reylo wrote ${shown}/reylo.lock: it is a lock of version ${read.newer}, and this reylo reads version ${LOCK_VERSION} and older, so upgrade reylo to read it`, watched };
     if ("error" in read) return { error: `Reylo can't read ${shown}/reylo.lock as a lock, since ${read.error}: write it again from a database that ran its migrations, with reylo migrate history pull`, watched };
     const { entries } = read;
     names = entries.map((e) => e.name);

@@ -1262,6 +1262,9 @@ fn read_lock(opts: &Options) -> Result<lock::Lock, Problem> {
             .fix("Then run this branch's migrations after main's, which locks them again", &["reylo migrate dev"])),
         lock::State::Invalid(e) => Err(Problem::new("lock-unreadable", format!("Reylo can't read {path} as a lock")).note(unreadable_why(&e)).fix("Write it again from what a database applied", &["reylo migrate history pull"])),
         lock::State::Unreadable(why) => Err(unreadable_lock_problem(opts, &why)),
+        lock::State::Newer(version) => Err(Problem::new("lock-newer", format!("A newer Reylo wrote {path}"))
+            .note(format!("It is a lock of version {version}, and Reylo {} reads version {} and older.", env!("CARGO_PKG_VERSION"), lock::VERSION))
+            .note("Upgrade Reylo to read it.")),
     }
 }
 

@@ -325,6 +325,7 @@ Your migrations run in one order: the lockfile's, or their names'.
 The lockfile lists your migrations in order, each with a checksum chained to the one before. A migration it doesn't list yet is a draft, free to edit:
 
 ```yaml title="reylo.lock"
+version: 1
 schema: c7bf681b
 migrations:
   - name: 20261104120000_users.sql
