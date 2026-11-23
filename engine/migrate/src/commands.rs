@@ -4529,6 +4529,9 @@ fn remade_tables(lost: &[String], from: &crate::diff::Schema, to: &crate::diff::
         let keep = keep_rows(id, from, to);
         out.push(RemadeTable { id: id.clone(), why, parts, keep });
     }
+    // A partition made again with its table goes with it: the table's copy holds its rows.
+    let parts: Vec<String> = out.iter().flat_map(|r| r.parts.clone()).collect();
+    out.retain(|r| !parts.contains(&r.id));
     out
 }
 
@@ -4924,6 +4927,10 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
         }
         if subject == "migration" {
             problem = problem.note("To keep the rows, add these lines to the migration it writes:").sql(&r.keep);
+            // The blank line that closes the statements is the one before what follows.
+            if problem.lines.last().is_some_and(|l| l.is_empty()) {
+                problem.lines.pop();
+            }
         }
         remakes.push(problem);
         // Each command from here on drops it too, so that any of them writes the migration.
