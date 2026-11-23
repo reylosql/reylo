@@ -1822,6 +1822,43 @@ async fn rows_failures_on_postgres_say_only_what_they_know(mut p: P) {
     let out = p.output();
     assert_has!(&out, r"    select \(email collate public\.folded\), count\(\*\) from people where \(email collate public\.folded\) is not null group by \(email collate public\.folded\) having count\(\*\) > 1;\n");
     assert_eq!(p.rows(&listed_query(&out)).await.len(), 1);
+    std::fs::remove_file(p.dir.join("migrations").join("20261027150001_folded.sql")).unwrap();
+
+    // A key whose operator class compares otherwise than its type (`text_ops` on `citext`): no
+    // query, since `group by` would take 'b' and 'B' as one where the index doesn't.
+    p.file("20261027160000_citext.sql", "create extension if not exists citext;\nalter table people add column handle citext;\n");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("update people set handle = case id when 1 then 'c' when 2 then 'b' else 'B' end").await;
+    p.exec("insert into people (id, handle) values (4, 'c')").await;
+    p.file("20261027160001_handle.sql", "create unique index concurrently people_handle on people (handle text_ops);\n");
+    p.output();
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    let out = p.output();
+    assert_has!(&out, r"failed on rows that break people_handle\n[\s\S]*  Fix the rows that break it here, then deploy again:\n");
+    assert!(!out.contains("List the rows"), "{out}");
+    std::fs::remove_file(p.dir.join("migrations").join("20261027160001_handle.sql")).unwrap();
+
+    // A check dropped and added under its own name in one transaction: after the rollback the
+    // catalog holds the old one, whose definition isn't the one that failed.
+    p.file("20261027170000_tighten.sql", "alter table people add constraint people_handle_short check (length(handle) < 10);\n");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027170001_tighten_more.sql", "alter table people drop constraint people_handle_short;\nalter table people add constraint people_handle_short check (handle in ('b', 'B'));\n");
+    p.output();
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    let out = p.output();
+    assert_has!(&out, r"failed on rows that break people_handle_short\n[\s\S]*  Fix the rows that break it here, then deploy again:\n");
+    assert!(!out.contains("List the rows"), "{out}");
+    std::fs::remove_file(p.dir.join("migrations").join("20261027170001_tighten_more.sql")).unwrap();
+
+    // A column named by a reserved word is quoted in the query.
+    p.file("20261027180000_order.sql", "alter table people add column \"order\" int;\n");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027180001_order_required.sql", "alter table people alter column \"order\" set not null;\n");
+    p.output();
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    let out = p.output();
+    assert_has!(&out, r#"    select \* from people where "order" is null;\n"#);
+    assert_eq!(p.rows(&listed_query(&out)).await.len(), 4);
 }
 
 /// On Postgres 18, a NOT NULL added `not valid` and then validated is named by its column, as
@@ -1921,24 +1958,24 @@ async fn a_unique_index_the_rows_break_lists_the_duplicates(mut p: P) {
         return;
     }
     let (int, text) = (p.t.int, p.t.text);
-    let base = format!("create table users (id {int} primary key, org {int}, email {text});\ncreate unique index users_org_email on users (org, email);");
+    let base = format!("create table users (id {int} primary key, org {int}, email {text});\ncreate unique index users_email on users (org, email);");
     p.schema(&base);
     p.file("20261027100000_users.sql", &format!("create table users (id {int} primary key, org {int}, email {text});"));
-    p.file("20261027100001_users_index.sql", "create unique index users_org_email on users (org, email);");
+    p.file("20261027100001_users_index.sql", "create unique index users_email on users (org, email);");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     p.exec("insert into users values (1, 1, 'a'), (2, 2, 'a'), (3, 1, 'b'), (4, 1, null), (5, 2, null)").await;
     p.schema(&format!("create table users (id {int} primary key, org {int}, email {text});\ncreate unique index users_email on users (email);"));
     if p.d == Dialect::Postgres {
-        p.file("20261027110000_email.sql", "drop index users_org_email;\n");
+        p.file("20261027110000_email.sql", "drop index users_email;\n");
         p.file("20261027110001_email_2.sql", "create unique index concurrently users_email on users (email);\n");
     } else {
-        p.file("20261027110000_email.sql", "alter table users drop index users_org_email, add unique key users_email (email);\n");
+        p.file("20261027110000_email.sql", "alter table users drop index users_email, add unique key users_email (email);\n");
     }
     p.output();
     assert_eq!(p.migrate().await, 1, "{}", p.peek());
     let out = p.output();
     if p.d == Dialect::Postgres {
-        assert_has!(&out, r"✗ The migration 20261027110001_email_2\.sql failed on rows that break users_email\n  could not create unique index .users_email.[^\n]*\n  The migration before it, 20261027110000_email\.sql, of the same change is applied, so users_org_email is dropped and not yet replaced\.\n  Nothing was recorded, so the next deploy runs it again\.\n\n  List the rows that break it:\n    select email, count\(\*\) from users where email is not null group by email having count\(\*\) > 1;\n  Fix them here, then deploy again:\n    reylo migrate deploy\n  If the rows are right and only development ran 20261027110001_email_2\.sql, change users_email in [^\n]*schema\.sql and delete it, then take it off development and write the replacement:\n    reylo migrate dev\n    reylo migrate new <name>\n");
+        assert_has!(&out, r"✗ The migration 20261027110001_email_2\.sql failed on rows that break users_email\n  could not create unique index .users_email.[^\n]*\n  The migration before it, 20261027110000_email\.sql, of the same change is applied, so users_email is dropped and not yet replaced\.\n  Nothing was recorded, so the next deploy runs it again\.\n\n  List the rows that break it:\n    select email, count\(\*\) from users where email is not null group by email having count\(\*\) > 1;\n  Fix them here, then deploy again:\n    reylo migrate deploy\n  If the rows are right and only development ran 20261027110001_email_2\.sql, change users_email in [^\n]*schema\.sql and delete it, then take it off development and write the replacement:\n    reylo migrate dev\n    reylo migrate new <name>\n");
         // The invalid index the build left is gone, so the next deploy builds it again.
         assert!(p.rows("select 1 from pg_class where relname = 'users_email'").await.is_empty());
     } else {

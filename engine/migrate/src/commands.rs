@@ -2918,8 +2918,12 @@ fn orphans_of(table: &str, cols: &[String], parent: &str, refs: &[String], full:
 /// column's (a nondeterministic one takes values as equal that the column's doesn't), its predicate,
 /// and whether its NULLs are distinct. Read before the index is dropped.
 async fn duplicates_query(db: &mut Db, b: &Breach) -> Option<String> {
+    // A key whose operator class isn't its type's own compares by an equality `group by` doesn't
+    // use (`text_ops` on a `citext` column), so its duplicates can't be listed.
     let sql = format!(
         "select i.indrelid::regclass::text as t, pg_get_expr(i.indpred, i.indrelid, true) as pred, coalesce((to_jsonb(i) ->> 'indnullsnotdistinct')::boolean, false) as nnd,
+           not exists (select 1 from generate_series(1, i.indnkeyatts) k join pg_opclass o on o.oid = i.indclass[k - 1]
+             where not o.opcdefault or (i.indkey[k - 1] > 0 and o.opcintype <> (select a.atttypid from pg_attribute a where a.attrelid = i.indrelid and a.attnum = i.indkey[k - 1]))) as own,
            (select string_agg(pg_get_indexdef(i.indexrelid, k, true) || coalesce((select ' collate ' || quote_ident(n.nspname) || '.' || quote_ident(co.collname) from pg_collation co join pg_namespace n on n.oid = co.collnamespace
                where co.oid = i.indcollation[k - 1] and co.oid <> coalesce((select a.attcollation from pg_attribute a where a.attrelid = i.indrelid and a.attnum = i.indkey[k - 1] and i.indkey[k - 1] > 0), 100)), ''), chr(31) order by k)
              from generate_series(1, i.indnkeyatts) k) as keys
@@ -2929,6 +2933,9 @@ async fn duplicates_query(db: &mut Db, b: &Breach) -> Option<String> {
     );
     let rows = db.rows(&sql).await.ok()?;
     let r = rows.first()?;
+    if !r.flag("own") {
+        return None;
+    }
     let keys: Vec<String> = r.get("keys")?.split('\u{1f}').map(String::from).collect();
     Some(duplicates_of(r.text("t"), &keys, r.get("pred"), !r.flag("nnd")))
 }
@@ -3013,6 +3020,13 @@ fn alters_rows(sql: &str, d: Dialect) -> bool {
 /// The constraints and indexes a migration drops and doesn't make again, by name as written: a
 /// changed `check` is dropped and added under its own name.
 fn dropped_by(sql: &str, d: Dialect) -> Vec<String> {
+    let (mut dropped, made) = dropped_and_made(sql, d);
+    dropped.retain(|n| !made.contains(n));
+    dropped
+}
+
+/// The constraints and indexes a migration drops, and those it makes, by name as written.
+fn dropped_and_made(sql: &str, d: Dialect) -> (Vec<String>, Vec<String>) {
     let (mut dropped, mut made) = (Vec::new(), Vec::new());
     for s in split_statements(sql, d) {
         let up: Vec<String> = s.tokens.iter().map(|t| t.upper()).collect();
@@ -3028,8 +3042,7 @@ fn dropped_by(sql: &str, d: Dialect) -> Vec<String> {
             }
         }
     }
-    dropped.retain(|n| !made.contains(n));
-    dropped
+    (dropped, made)
 }
 
 /// The query that lists the rows a MySQL statement found breaking the constraint it adds, read off
@@ -3114,31 +3127,71 @@ fn mysql_rows_query(sql: &str, b: &Breach) -> Option<String> {
 
 /// The migrations of one change `migrate new` wrote as several files, `<name>`, `<name>_2`, …, each a
 /// second after the one before: those of `m`'s change among `names`, and which of them come before it.
+/// A name that ends in `_<n>` reads two ways, as a change's first file and as its nth, so a change
+/// whose own name ends so (`tighten_2`, then `tighten_2_2`) is found too.
 fn same_change<'a>(m: &str, names: impl IntoIterator<Item = &'a str>) -> (Vec<String>, Vec<String>) {
-    // The change's base name, and this file's place in it: 1 for `<name>`, n for `<name>_n`.
-    let parts = |name: &str| -> Option<(i64, String, i64)> {
-        let c = NAME.captures(name)?;
-        let at = time::seconds(&c[1])?;
-        let stem = &c[2];
-        match stem.rsplit_once('_') {
-            Some((base, n)) if n.parse::<i64>().is_ok_and(|n| n >= 2) => Some((at, base.to_string(), n.parse().ok()?)),
-            _ => Some((at, stem.to_string(), 1)),
+    // Each reading: the time of the change's first file, its name, and this file's place in it.
+    let readings = |name: &str| -> Vec<(i64, String, i64)> {
+        let Some(c) = NAME.captures(name) else { return vec![] };
+        let Some(at) = time::seconds(&c[1]) else { return vec![] };
+        let stem = c[2].to_string();
+        let mut out = vec![(at, stem.clone(), 1)];
+        if let Some((base, n)) = stem.rsplit_once('_') {
+            if let Ok(n) = n.parse::<i64>() {
+                if n >= 2 {
+                    out.push((at - (n - 1), base.to_string(), n));
+                }
+            }
         }
+        out
     };
-    let Some((at, base, n)) = parts(m) else { return (vec![], vec![]) };
-    // Its first file's time, from which every file of the change is a second further for each place.
-    let first = at - (n - 1);
-    let mut before = Vec::new();
-    let mut after = Vec::new();
+    let mine = readings(m);
+    let (mut before, mut after) = (Vec::new(), Vec::new());
     for name in names {
-        // `<name>_2` may be a change's whole name, so a file is of this one only where its time fits.
-        let matches = |(t, b, k): (i64, String, i64)| b == base && t == first + (k - 1);
-        match parts(name) {
-            Some(p @ (_, _, k)) if k != n && matches(p.clone()) => (if k < n { &mut before } else { &mut after }).push(name.to_string()),
-            _ => {}
+        let place = readings(name).into_iter().find_map(|(first, base, k)| mine.iter().find(|(f, b, n)| *f == first && *b == base && *n != k).map(|(_, _, n)| k < *n));
+        match place {
+            Some(true) => before.push(name.to_string()),
+            Some(false) => after.push(name.to_string()),
+            None => {}
         }
     }
     (before, after)
+}
+
+/// The tables (and domains) a migration's statements change or index, by their last name part,
+/// lowercased and unquoted: what a file of one change shares with the others.
+fn tables_of(sql: &str, d: Dialect) -> Vec<String> {
+    let mut out = Vec::new();
+    for s in split_statements(sql, d) {
+        let up: Vec<String> = s.tokens.iter().map(|t| t.upper()).collect();
+        let at = match (up.first().map(String::as_str), up.get(1).map(String::as_str)) {
+            (Some("ALTER"), Some("TABLE" | "DOMAIN" | "INDEX")) => Some(2),
+            (Some("CREATE"), _) => up.iter().position(|w| w == "ON").map(|k| k + 1),
+            (Some("DROP"), Some("INDEX")) => Some(2),
+            _ => None,
+        };
+        let Some(mut k) = at else { continue };
+        while matches!(up.get(k).map(String::as_str), Some("ONLY" | "IF" | "EXISTS" | "CONCURRENTLY")) {
+            k += 1;
+        }
+        // A dotted name's last part.
+        while s.tokens.get(k + 1).is_some_and(|t| t.text == ".") && s.tokens.get(k + 2).is_some() {
+            k += 2;
+        }
+        out.extend(s.tokens.get(k).map(|t| t.text.trim_matches(['"', '`']).to_lowercase()));
+    }
+    out
+}
+
+/// Whether two migrations change a table, an index or a constraint in common, as the files of one
+/// change do: Postgres's `drop index` names no table, only the index the next file builds again.
+fn related(a: &str, b: &str, d: Dialect) -> bool {
+    let objects = |sql: &str| -> Vec<String> {
+        let (dropped, made) = dropped_and_made(sql, d);
+        tables_of(sql, d).into_iter().chain(dropped.iter().chain(&made).map(|n| n.to_lowercase())).collect()
+    };
+    let theirs = objects(b);
+    objects(a).iter().any(|o| theirs.contains(o))
 }
 
 /// The constraints a pending Postgres migration validates that are in place unchecked (`not valid`),
@@ -3180,8 +3233,9 @@ async fn partway_lines(db: &mut Db, ran: &[&HistoryRow], pending: &[&Migration])
     let mut out = Vec::new();
     let mut json = Vec::new();
     for f in pending {
-        let (before, _) = same_change(&f.name, ran.iter().map(|r| r.name.as_str()));
-        let (earlier, after) = same_change(&f.name, pending.iter().map(|p| p.name.as_str()));
+        let d = db.dialect();
+        let (before, _) = same_change(&f.name, ran.iter().filter(|r| related(&f.sql, &r.sql, d)).map(|r| r.name.as_str()));
+        let (earlier, after) = same_change(&f.name, pending.iter().filter(|p| related(&f.sql, &p.sql, d)).map(|p| p.name.as_str()));
         // Said once for each change, at the first of its migrations still to run.
         if before.is_empty() || !earlier.is_empty() {
             continue;
@@ -3220,18 +3274,31 @@ async fn rows_failure(db: &mut Db, opts: &Options, m: &Migration, f: &Failure, r
         _ if b.table.is_empty() => "the table".to_string(),
         _ => b.table.clone(),
     };
+    // A constraint the migration makes, as a `check` dropped and added under its own name, is in the
+    // catalog after the rollback as it was before: its definition there isn't the one that failed.
+    let made = dropped_and_made(&m.sql, d).1.contains(&b.name);
+    let catalog = if d == Dialect::Postgres && !made { pg_constraint_rows(db, b).await } else { None };
     let (query, unchecked, column) = match d {
-        Dialect::Postgres => match pg_constraint_rows(db, b).await {
+        Dialect::Postgres => match catalog {
             Some(c) => (c.query.or_else(|| b.rows.clone()), c.unchecked, c.column.or_else(|| b.column.clone())),
             // A NOT NULL a statement set, rather than validated, is named by its column.
-            None if b.kind == Breaks::NotNull => (b.column.as_ref().map(|c| format!("select * from {table} where {c} is null;")), false, b.column.clone()),
+            None if b.kind == Breaks::NotNull => {
+                let column = match &b.column {
+                    Some(c) => db.rows(&format!("select quote_ident({}) as q", crate::db::literal(c))).await.ok().and_then(|rows| rows.first().map(|r| r.text("q").to_string())),
+                    None => None,
+                };
+                (column.as_ref().map(|c| format!("select * from {table} where {c} is null;")), false, column)
+            }
             None => (b.rows.clone(), false, None),
         },
         Dialect::Mysql => (mysql_rows_query(&m.sql, b), false, None),
         Dialect::Sqlite => return None,
     };
-    let (before, _) = same_change(&m.name, ran.iter().map(String::as_str));
-    let (_, after) = same_change(&m.name, pending.iter().map(|p| p.name.as_str()));
+    // The migrations of the same change, by their names and the tables they share with it.
+    let files = opts.migrations().map(|(files, _)| files).unwrap_or_default();
+    let text = |name: &str| files.iter().find(|f| f.name == name).map(|f| f.sql.as_str());
+    let (before, _) = same_change(&m.name, ran.iter().map(String::as_str).filter(|n| text(n).is_some_and(|sql| related(&m.sql, sql, d))));
+    let (_, after) = same_change(&m.name, pending.iter().filter(|p| related(&m.sql, &p.sql, d)).map(|p| p.name.as_str()));
     // An index built under a name of its own, which a later migration of the change renames to the
     // one it replaces, is named as schema.sql names it.
     let renamed = pending.iter().filter(|p| after.contains(&p.name)).flat_map(|p| split_statements(&p.sql, d)).find_map(|s| {
@@ -3253,7 +3320,6 @@ async fn rows_failure(db: &mut Db, opts: &Options, m: &Migration, f: &Failure, r
         many => Some(format!("The migrations before it, {},", many.join(", "))),
     };
     // The migrations before it, as the files have them, to say what they did.
-    let files = opts.migrations().map(|(files, _)| files).unwrap_or_default();
     let texts: Vec<&str> = files.iter().filter(|f| before.contains(&f.name)).map(|f| f.sql.as_str()).collect();
     let added = texts.iter().any(|sql| sql.contains(&b.name));
     if unchecked {
@@ -7877,6 +7943,15 @@ mod tests {
     }
 
     #[test]
+    fn the_files_of_one_change_share_a_table_or_an_index() {
+        let pg = Dialect::Postgres;
+        assert!(related("alter table people add constraint people_mood check (mood <> 'x') not valid;", "alter table people validate constraint people_mood;", pg));
+        assert!(related("drop index users_email;", "create unique index concurrently users_email on users (email);", pg));
+        assert!(related("create unique index concurrently users_email_new on users (email);", "drop index users_email;\nalter index users_email_new rename to users_email;", pg));
+        assert!(!related("alter table teams add column note text;", "alter table people validate constraint people_mood;", pg));
+    }
+
+    #[test]
     fn what_a_migration_drops_is_read_by_name() {
         assert_eq!(dropped_by("drop index concurrently if exists users_email;\nalter table users drop constraint \"Users_Key\";", Dialect::Postgres), ["users_email", "Users_Key"]);
         assert_eq!(dropped_by("alter table users drop index users_org_email, add unique key users_email (email)", Dialect::Mysql), ["users_org_email"]);
@@ -7902,6 +7977,9 @@ mod tests {
     fn a_change_written_as_several_files_is_told_by_name_and_time() {
         let names = ["20261027110000_ab.sql", "20261027110001_ab_2.sql", "20261027110002_ab_3.sql", "20261027110005_ab_2.sql", "20261027110001_other.sql"];
         assert_eq!(same_change("20261027110001_ab_2.sql", names), (vec!["20261027110000_ab.sql".to_string()], vec!["20261027110002_ab_3.sql".to_string()]));
+        // A change whose own name ends in `_2`, as `tighten_2`, then `tighten_2_2`.
+        assert_eq!(same_change("20261027110001_tighten_2_2.sql", ["20261027110000_tighten_2.sql"]).0, ["20261027110000_tighten_2.sql"]);
+        assert_eq!(same_change("20261027110000_tighten_2.sql", ["20261027110001_tighten_2_2.sql"]).1, ["20261027110001_tighten_2_2.sql"]);
         // Over midnight, by the time each name gives.
         assert_eq!(same_change("20261028000000_ab_2.sql", ["20261027235959_ab.sql"]).0, ["20261027235959_ab.sql"]);
     }

@@ -122,7 +122,7 @@ pub(crate) struct Breach {
     pub name: String,
     /// The table, schema-qualified where the server said (Postgres), else as the error named it.
     pub table: String,
-    /// The column a NOT NULL is on, where the server said.
+    /// The column a NOT NULL is on, where the server said, unquoted.
     pub column: Option<String>,
     /// A query that lists the rows that break it, where the database could say.
     pub rows: Option<String>,
@@ -137,13 +137,9 @@ pub(crate) enum Breaks {
     NotNull,
 }
 
-/// A Postgres name as SQL writes it: bare where it is a lowercase word, else in double quotes.
-pub(crate) fn pg_ident(s: &str) -> String {
-    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') && !s.as_bytes()[0].is_ascii_digit() {
-        s.to_string()
-    } else {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    }
+/// A Postgres name in double quotes, which reads as the name whatever it is: a reserved word too.
+pub(crate) fn pg_quoted(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
 }
 
 /// What a Postgres error says of a row that breaks a constraint, by its SQLSTATE: a `check`, a
@@ -167,11 +163,11 @@ pub(crate) fn pg_breach(e: &tokio_postgres::Error) -> Option<Breach> {
     }
     .to_string();
     let table = match (d.schema(), d.table()) {
-        (Some(schema), Some(table)) => format!("{}.{}", pg_ident(schema), pg_ident(table)),
-        (None, Some(table)) => pg_ident(table),
+        (Some(schema), Some(table)) => format!("{}.{}", pg_quoted(schema), pg_quoted(table)),
+        (None, Some(table)) => pg_quoted(table),
         _ => return None,
     };
-    Some(Breach { kind, name, table, column: d.column().map(pg_ident), rows: None })
+    Some(Breach { kind, name, table, column: d.column().map(String::from), rows: None })
 }
 
 /// What a MySQL error says of a row that breaks a constraint: a `check` (3819), a foreign key
