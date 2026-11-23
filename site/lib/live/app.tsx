@@ -70,13 +70,15 @@ export type FromChannel =
   | ({ kind: 'schema'; id: number } & ({ ok: true; catalog: Catalog } | ({ ok: false } & SchemaFailure)));
 
 export type Labels = {
+  /** Before it connects, in a post's embed that starts on the reader's first edit. */
+  idle?: string;
   /** While it connects: "Starting Postgres 18…". */
   loading: string;
   /** Before the reason it failed: "Postgres could not start in this browser". */
   failed: string;
 };
 
-type Status = { kind: 'loading' } | { kind: 'ready'; label: string; ms?: number } | { kind: 'failed'; message: string };
+type Status = { kind: 'idle' } | { kind: 'loading' } | { kind: 'ready'; label: string; ms?: number } | { kind: 'failed'; message: string };
 
 // What a statement that takes no parameters takes, as the types are written.
 const voidLines: Token[][] = [[{ content: 'void', style: '--shiki-light:#D73A49;--shiki-dark:#F97583' }]];
@@ -138,6 +140,7 @@ function StatusLine({ status, labels }: { status: Status; labels: Labels }) {
   return (
     <span className="play-status" data-kind={status.kind} role="status">
       <span className="play-dot" aria-hidden="true" />
+      {status.kind === 'idle' && labels.idle}
       {status.kind === 'loading' && labels.loading}
       {status.kind === 'ready' && status.label}
       {status.kind === 'failed' && `${labels.failed}: ${status.message}`}
@@ -313,7 +316,15 @@ function schemaDiagnostics(failure: SchemaFailure | undefined) {
   return [{ message, code: 0, source: code ? `postgres(${code})` : 'postgres', line, column, endLine: line, endColumn: column }];
 }
 
-export function PlayApp({ data, connect, theme, labels, home, github, api, about, pitch, schemaEditable = false }: { data: PlayData; connect(): Channel; theme: Theme; labels: Labels; home: string; github: string; api: ApiDocs; about: About; /** One line on what Reylo is, centred in the bar: the docs' playground, which a reader may reach knowing nothing of it. */ pitch?: ReactNode; /** The schema card can be edited: the docs' playground, never `reylo play`, which reads the project's own database. */ schemaEditable?: boolean }) {
+/**
+ * The playground inside a page of its own (a blog post): no bar, the state in the query's head, and
+ * the page's address and focus left alone. `lazy` connects on the reader's first edit, so the page
+ * downloads Postgres and the engine only for a reader who uses them; until then the build's types
+ * show, an example's included.
+ */
+export type Embed = { lazy: boolean; /** The full playground, which "Open in the playground" links with the query shown. */ play: string };
+
+export function PlayApp({ data, connect, theme, labels, home, github, api, about, pitch, schemaEditable = false, embed }: { data: PlayData; connect(): Channel; theme: Theme; labels: Labels; home: string; github: string; api: ApiDocs; about: About; /** One line on what Reylo is, centred in the bar: the docs' playground, which a reader may reach knowing nothing of it. */ pitch?: ReactNode; /** The schema card can be edited: the docs' playground, never `reylo play`, which reads the project's own database. */ schemaEditable?: boolean; embed?: Embed }) {
   const [apiOpen, setApiOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   // One object per page's data: the effects below depend on it.
@@ -324,7 +335,11 @@ export function PlayApp({ data, connect, theme, labels, home, github, api, about
   const [result, setResult] = useState<LiveResult>(first.result);
   // The last answer without errors, whose types stay up, dimmed, while the query has an error.
   const [good, setGood] = useState<LiveResult>(first.result);
-  const [status, setStatus] = useState<Status>({ kind: 'loading' });
+  const [status, setStatus] = useState<Status>({ kind: embed?.lazy ? 'idle' : 'loading' });
+  // Whether it has connected: at once, except in an embed that waits for the reader's first edit,
+  // and where in the query that edit was, for the editor's cursor.
+  const [live, setLive] = useState(!embed?.lazy);
+  const wake = useRef<{ x: number; y: number }>(undefined);
   const [schemaOpen, setSchemaOpen] = useState(false);
   const viewSchema = useRef<HTMLButtonElement>(null);
   const closeSchema = useRef<HTMLButtonElement>(null);
@@ -362,8 +377,12 @@ export function PlayApp({ data, connect, theme, labels, home, github, api, about
   // The address follows the query: the example's name while it is one, else the text itself.
   const remember = useCallback(
     (text: string) => {
-      const url = new URL(location.href);
       const named = data.examples.find((e) => e.sql === text);
+      if (embed) {
+        setExample(named?.slug);
+        return;
+      }
+      const url = new URL(location.href);
       url.searchParams.delete('q');
       url.searchParams.delete('example');
       url.searchParams.delete('schema');
@@ -377,9 +396,11 @@ export function PlayApp({ data, connect, theme, labels, home, github, api, about
   );
 
   useEffect(() => {
-    const params = new URLSearchParams(location.search);
+    if (!live) return;
+    // An embed's query is its own, never the address's.
+    const params = new URLSearchParams(embed ? '' : location.search);
     const named = data.examples.find((e) => e.slug === params.get('example'));
-    const start = params.get('q') ?? named?.sql ?? first.sql;
+    const start = params.get('q') ?? named?.sql ?? (embed ? latest.current : first.sql);
     // A schema of the reader's own: no types from the build, `…` until the tab's answer.
     const linked = schemaEditable ? params.get('schema') : null;
     latest.current = start;
@@ -390,7 +411,7 @@ export function PlayApp({ data, connect, theme, labels, home, github, api, about
       setResult(nothing(start));
       setGood(nothing(start));
     }
-    if (start !== first.sql) {
+    if (start !== first.sql && !embed) {
       setSql(start);
       setExample(data.examples.find((e) => e.sql === start)?.slug);
       const built = data.examples.find((e) => e.sql === start);
@@ -430,6 +451,7 @@ export function PlayApp({ data, connect, theme, labels, home, github, api, about
       }
     };
     w.onerror = (e) => setStatus({ kind: 'failed', message: e.message || 'the worker stopped' });
+    setStatus((s) => (s.kind === 'idle' ? { kind: 'loading' } : s));
     let cancelled = false;
     if (linked) {
       // The link's schema goes first, so the first answer is against it.
@@ -475,6 +497,8 @@ export function PlayApp({ data, connect, theme, labels, home, github, api, about
       const view = editor.current.view;
       requestAnimationFrame(() => {
         view.requestMeasure();
+        // An embed takes the focus once the editor shows (below).
+        if (embed) return;
         view.focus();
         view.dispatch({ selection: { anchor: view.state.doc.length } });
       });
@@ -486,7 +510,20 @@ export function PlayApp({ data, connect, theme, labels, home, github, api, about
       editor.current?.view.destroy();
       editor.current = undefined;
     };
-  }, [data, first, remember, connect]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [data, first, remember, connect, live]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // An embed takes the focus only from the reader's own click, once the editor shows, with its cursor where they clicked.
+  useEffect(() => {
+    const view = editor.current?.view;
+    const at = wake.current;
+    if (!embed || !editing || !view || !at) return;
+    wake.current = undefined;
+    view.requestMeasure();
+    requestAnimationFrame(() => {
+      view.contentDOM.focus({ preventScroll: true });
+      view.dispatch({ selection: { anchor: view.posAtCoords(at) ?? view.state.doc.length } });
+    });
+  }, [editing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // DDL for the worker, whose answer, by its id, onSchema takes.
   function sendSchema(channel: Channel | undefined, ddl: string) {
@@ -610,8 +647,9 @@ export function PlayApp({ data, connect, theme, labels, home, github, api, about
   const report = () => reportUrl(github, sql, schemaEditable && !custom ? undefined : schemaText, shown, schemaEditable ? pageLink(sql) : undefined);
 
   return (
-    <div id="nd-page" className="play">
+    <div id={embed ? undefined : 'nd-page'} className={embed ? 'play play-embed not-prose' : 'play'}>
       {schemaEditable && <script dangerouslySetInnerHTML={{ __html: schemaLinkScript }} />}
+      {!embed && (
       <header className="play-bar">
         <a href={home} className="play-brand" aria-label="Reylo docs">
           <Wordmark className="play-wordmark" />
@@ -635,18 +673,28 @@ export function PlayApp({ data, connect, theme, labels, home, github, api, about
           <ThemeButton theme={theme} />
         </nav>
       </header>
+      )}
       <ApiDialog api={api} open={apiOpen} onClose={() => setApiOpen(false)} />
       <AboutDialog about={about} open={aboutOpen} onClose={() => setAboutOpen(false)} />
       <main className="play-main">
         <section className="play-pane play-query" aria-label="Query">
           <div className="play-pane-head">
             <span className="play-label">Query</span>
+            {embed && <StatusLine status={status} labels={labels} />}
             <span className="play-grow" />
             {data.examples.length > 0 && <ExamplePicker examples={data.examples} current={example} onPick={pick} />}
           </div>
           <div
             className="play-scroll play-editor"
+            tabIndex={live ? undefined : 0}
+            onFocus={() => setLive(true)}
             onPointerDown={(e) => {
+              // An embed's first click starts it, and the editor opens with its cursor there.
+              if (!live) {
+                wake.current = { x: e.clientX, y: e.clientY };
+                setLive(true);
+                return;
+              }
               // Below the last line, or beside the code: the editor takes the click, at the end.
               const view = editor.current?.view;
               if (!view || view.contentDOM.contains(e.target as Node)) return;
@@ -699,7 +747,16 @@ export function PlayApp({ data, connect, theme, labels, home, github, api, about
             )}
           </div>
           {/* At the pane's bottom left, under the scrolling types. */}
-          {!blank && !failing && shown.returns !== undefined && (
+          {embed && (
+            <p className="play-report play-open">
+              {/* The full playground, with the query shown here. */}
+              <a href={`${embed.play}?${new URLSearchParams({ q: sql })}`} onPointerDown={(e) => (e.currentTarget.href = `${embed.play}?${new URLSearchParams({ q: latest.current })}`)}>
+                Open in the playground
+                <Icon d={OUT} size={12} />
+              </a>
+            </p>
+          )}
+          {!embed && !blank && !failing && shown.returns !== undefined && (
             <p className="play-report">
               {/* The issue's text is written as the link is followed, from the query, schema and types shown then. */}
               <a

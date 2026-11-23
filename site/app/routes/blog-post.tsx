@@ -1,9 +1,12 @@
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { use, useMemo } from 'react';
 import { DocsShell } from 'docs-kit/shell';
 import type { Root } from 'fumadocs-core/page-tree';
 import type { Route } from './+types/blog-post';
 import { Brand } from '@/components/brand';
 import { getMDXComponents } from '@/components/mdx';
+import { PlayDataContext } from '@/components/play-embed';
 import { blogUrl, posts } from '@/lib/blog';
 import { loadPost } from '@/lib/blog-content';
 import { blogMeta } from '@/lib/blog-meta';
@@ -15,7 +18,10 @@ import { source } from '@/lib/source';
 export async function loader({ params }: Route.LoaderArgs) {
   const post = posts.find((p) => p.slug === params.slug);
   if (!post) throw new Response('Not found', { status: 404 });
-  return { post, tree: source.getPageTree(), og: await ogHash() };
+  // The playground's data, for a post that embeds it (components/play-embed.tsx).
+  const embeds = readFileSync(path.join('content', 'blog', post.path), 'utf8').includes('<PlayEmbed');
+  const play = embeds ? await (await import('@/lib/live/play-data')).playData() : undefined;
+  return { post, tree: source.getPageTree(), og: await ogHash(), play };
 }
 
 export function meta({ loaderData }: Route.MetaArgs): Route.MetaDescriptors {
@@ -55,7 +61,9 @@ function PostContent({ loaderData }: Pick<Route.ComponentProps, 'loaderData'>) {
           </>
         )}
       </p>
-      <file.default components={getMDXComponents()} />
+      <PlayDataContext value={loaderData.play}>
+        <file.default components={getMDXComponents()} />
+      </PlayDataContext>
     </DocsShell>
   );
 }
