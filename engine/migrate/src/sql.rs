@@ -604,12 +604,11 @@ pub fn escapes_shadow(statement: &Statement, dialect: Dialect) -> Option<(String
             let call_of: Vec<Option<&str>> = (0..t.len())
                 .map(|k| {
                     let inside = calls.last().copied().flatten();
-                    // A parenthesis a query opens in is no call, whatever word comes before it:
-                    // `insert into trim (select …)` names a table `trim`. Being innermost, it is the
-                    // one that decides for the query's `from`, however many wrap it.
-                    let query = words.get(k + 1).is_some_and(|w| matches!(w.as_str(), "SELECT" | "WITH" | "TABLE" | "VALUES"));
+                    // A word in a table's place is no function, whatever its name: `insert into trim
+                    // (…)` names a table `trim`, as `app.trim (…)` does.
+                    let table = k > 1 && (OBJECT_KEYWORDS.contains(&words[k - 2].as_str()) || matches!(words[k - 2].as_str(), "." | "INSERT" | "REPLACE"));
                     match words[k].as_str() {
-                        "(" => calls.push((k > 0 && t[k - 1].kind == TokenKind::Word && !query).then(|| words[k - 1].as_str())),
+                        "(" => calls.push((k > 0 && t[k - 1].kind == TokenKind::Word && !table).then(|| words[k - 1].as_str())),
                         ")" => drop(calls.pop()),
                         _ => {}
                     }
@@ -967,6 +966,9 @@ mod tests {
         assert!(shadow_problem("update events set y = (select max(x) from app.t)", Dialect::Mysql).is_some());
         assert!(shadow_problem("insert into trim (select id from sample.source)", Dialect::Mysql).is_some());
         assert!(shadow_problem("insert into trim ((select id from sample.source))", Dialect::Mysql).is_some());
+        assert!(shadow_problem("insert into trim ((select 1) union all select id from sample.source)", Dialect::Mysql).is_some());
+        assert!(shadow_problem("insert trim ((select 1) union all select id from sample.source)", Dialect::Mysql).is_some());
+        assert!(shadow_problem("insert into app.trim (select id from source)", Dialect::Mysql).is_some());
         assert_eq!(shadow_problem("update events as e set cleaned = trim(('x') from e.name), c = trim((select 'x') from e.name)", Dialect::Mysql), None);
         assert_eq!(shadow_problem("create view v as select u.email from users u left join posts p on p.user_id = u.id where u.name like p.title", Dialect::Mysql), None);
         assert!(shadow_problem("create index i on app.users (email)", Dialect::Mysql).is_some());
