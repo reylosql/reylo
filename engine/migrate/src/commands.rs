@@ -1268,7 +1268,7 @@ fn read_lock(opts: &Options) -> Result<lock::Lock, Problem> {
 /// The refusal of a lock that is there and can't be read: read as none, it would turn its checksums
 /// off and deploy its drafts.
 fn unreadable_lock_problem(opts: &Options, why: &str) -> Problem {
-    Problem::new("lock-unreadable", format!("Reylo can't read {}: {why}", shown(&opts.lock))).note("Read as no lock, it would run the migrations in name order, drafts and all, with no checksum to hold them to.")
+    Problem::new("lock-unreadable", format!("Reylo can't read {}: {why}", shown(&opts.lock))).note("Read as no lock, it would run the migrations in name order, drafts and all, with no hash to hold them to.")
 }
 
 /// Why a lock doesn't read, as a person can act on it: the line the YAML parser stopped at.
@@ -2087,7 +2087,7 @@ fn stamp(opts: &Options, schema_sql: Option<&str>) -> Stamp {
 /// The refusal of a schema.sql whose text isn't the one the lock's checksum is of.
 fn stamp_problem(opts: &Options) -> Problem {
     Problem::new("schema-sql-changed", "The schema changed since the lock was written")
-        .note(format!("The lock holds a checksum of {} from when the migrations last matched it.", shown(&opts.schema)))
+        .note(format!("The lock holds a hash of {} from when the migrations last matched it.", shown(&opts.schema)))
         .fix("If the schema changed, write its migration and run it", &["reylo migrate new <name>", "reylo migrate dev"])
         .fix("If only formatting or comments changed, check it again", &["reylo migrate dev"])
 }
@@ -2098,9 +2098,9 @@ fn stamp_line(opts: &Options, stamped: Stamp) -> String {
         Stamp::NoSchema => schema_line(opts),
         Stamp::Proven => format!("{} The migrations match {}", paint("green", "✓"), shown(&opts.schema)),
         Stamp::Changed => then(note("The schema changed since the lock was written"), &[("To write the changes to a migration file and run it", &["reylo migrate new <name>", "reylo migrate dev"])]),
-        Stamp::NoLock => then(note(format!("With no lock to hold its checksum, {} is checked against the migrations by a dry run", shown(&opts.schema))), &[("To check it", &["reylo migrate deploy --dry-run"])]),
+        Stamp::NoLock => then(note(format!("With no lock to hold its hash, {} is checked against the migrations by a dry run", shown(&opts.schema))), &[("To check it", &["reylo migrate deploy --dry-run"])]),
         Stamp::Unreadable => note(format!("Once the lock agrees with the files, {} is checked against it", shown(&opts.schema))),
-        Stamp::Unproven => then(note(format!("The lock holds no checksum of {} yet", shown(&opts.schema))), &[("To write one, once the migrations match it", &["reylo migrate dev"])]),
+        Stamp::Unproven => then(note(format!("The lock holds no hash of {} yet", shown(&opts.schema))), &[("To write one, once the migrations match it", &["reylo migrate dev"])]),
     }
 }
 
@@ -2972,9 +2972,9 @@ async fn status_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
 
 /// The refusal of a lock that holds no checksum of schema.sql: written while the migrations didn't make it.
 fn unproven_problem(opts: &Options) -> Problem {
-    Problem::new("schema-sql-unproven", format!("The lock holds no checksum of {}", shown(&opts.schema)))
+    Problem::new("schema-sql-unproven", format!("The lock holds no hash of {}", shown(&opts.schema)))
         .note(format!("The migrations didn't match {} when the lock was written.", shown(&opts.schema)))
-        .fix("Write what they don't make as a migration, and run it in development, which writes the checksum", &["reylo migrate new <name>", "reylo migrate dev"])
+        .fix("Write what they don't make as a migration, and run it in development, which writes the hash", &["reylo migrate new <name>", "reylo migrate dev"])
 }
 
 /// When each applied migration ran, by name, in UTC: ISO 8601 to the second.

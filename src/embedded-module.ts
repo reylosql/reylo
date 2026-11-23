@@ -47,9 +47,9 @@ type LockEntry = { name: string; sum: string };
 
 /**
  * A lock's text, read as `lock::of_text` reads it (engine/migrate/src/lock.rs), or why it doesn't
- * read: `schema`, the checksum of schema.sql, and `migrations`, each entry an object with its
- * `name` and its `checksum`, in either order, or, as locks were written up to 0.8.2, one string,
- * `<file> <checksum>`. An entry with a key it doesn't know, or with a key twice, is refused, as the
+ * read: `schema`, the hash of schema.sql, and `migrations`, each entry an object with its `name`
+ * and its `hash`, in either order, or, as locks were written up to 0.8.2, one string,
+ * `<file> <hash>`. An entry with a key it doesn't know, or with a key twice, is refused, as the
  * command line refuses it; a top-level key it doesn't know is passed over, as there.
  */
 export function readLock(text: string): { schema?: string; entries: LockEntry[] } | { error: string } {
@@ -99,7 +99,7 @@ export function readLock(text: string): { schema?: string; entries: LockEntry[] 
       // An entry as written up to 0.8.2: its name and its checksum, split by a space.
       const line = scalar(first);
       const space = line.indexOf(" ");
-      if (space < 0 || more.length) return { error: `"${line}" is a migration's name and its checksum` };
+      if (space < 0 || more.length) return { error: `"${line}" is a migration's name and its hash` };
       entries.push({ name: line.slice(0, space).trim(), sum: line.slice(space + 1).trim() });
       continue;
     }
@@ -107,13 +107,13 @@ export function readLock(text: string): { schema?: string; entries: LockEntry[] 
     for (const [line, field] of fields) {
       const kv = pair(field);
       if (!kv) return { error: `its line ${line} doesn't parse` };
-      const key = kv[0] === "name" ? "name" : kv[0] === "checksum" ? "sum" : undefined;
+      const key = kv[0] === "name" ? "name" : kv[0] === "hash" ? "sum" : undefined;
       if (!key) return { error: `its line ${line} has \`${kv[0]}\`, which an entry doesn't have` };
       if (entry[key] !== undefined) return { error: `its line ${line} gives \`${kv[0]}\` a second time` };
       entry[key] = scalar(kv[1]);
     }
     if (!entry.name) return { error: `the entry at its line ${at} has no name` };
-    if (!entry.sum) return { error: `the entry at its line ${at} has no checksum` };
+    if (!entry.sum) return { error: `the entry at its line ${at} has no hash` };
     entries.push({ name: entry.name, sum: entry.sum });
   }
   return { ...(schema !== undefined && { schema }), entries };

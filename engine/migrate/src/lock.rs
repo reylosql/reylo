@@ -62,7 +62,7 @@ struct LockFile {
     migrations: Vec<EntryFile>,
 }
 
-/// An entry of `migrations`: an object with its `name` and its `checksum`, or, as locks were
+/// An entry of `migrations`: an object with its `name` and its `hash`, or, as locks were
 /// written up to 0.8.2, one string with the two split by a space. Each value is read as the text
 /// it is, so a checksum of digits alone keeps its leading zeros. A key it doesn't know is refused,
 /// since a later version wrote it and this one would drop it when it writes the lock again, and so
@@ -76,10 +76,10 @@ impl<'de> Deserialize<'de> for EntryFile {
         impl<'de> serde::de::Visitor<'de> for Visitor {
             type Value = EntryFile;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a migration's name and its checksum")
+                f.write_str("a migration's name and its hash")
             }
             fn visit_str<E: serde::de::Error>(self, line: &str) -> Result<EntryFile, E> {
-                let (name, sum) = line.trim().split_once(' ').ok_or_else(|| E::custom(format!("\"{line}\" is a migration's name and its checksum")))?;
+                let (name, sum) = line.trim().split_once(' ').ok_or_else(|| E::custom(format!("\"{line}\" is a migration's name and its hash")))?;
                 Ok(EntryFile(Entry { name: name.trim().to_string(), sum: sum.trim().to_string() }))
             }
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<EntryFile, A::Error> {
@@ -88,13 +88,13 @@ impl<'de> Deserialize<'de> for EntryFile {
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "name" if name.is_some() => return Err(A::Error::duplicate_field("name")),
-                        "checksum" if sum.is_some() => return Err(A::Error::duplicate_field("checksum")),
+                        "hash" if sum.is_some() => return Err(A::Error::duplicate_field("hash")),
                         "name" => name = Some(map.next_value::<String>()?),
-                        "checksum" => sum = Some(map.next_value::<String>()?),
-                        _ => return Err(A::Error::unknown_field(&key, &["name", "checksum"])),
+                        "hash" => sum = Some(map.next_value::<String>()?),
+                        _ => return Err(A::Error::unknown_field(&key, &["name", "hash"])),
                     }
                 }
-                Ok(EntryFile(Entry { name: name.ok_or_else(|| A::Error::missing_field("name"))?, sum: sum.ok_or_else(|| A::Error::missing_field("checksum"))? }))
+                Ok(EntryFile(Entry { name: name.ok_or_else(|| A::Error::missing_field("name"))?, sum: sum.ok_or_else(|| A::Error::missing_field("hash"))? }))
             }
         }
         deserializer.deserialize_any(Visitor)
@@ -298,7 +298,7 @@ pub fn render(lock: &Lock) -> String {
     }
     out.push_str("migrations:\n");
     for e in &lock.entries {
-        out.push_str(&format!("  - name: {}\n    checksum: {}\n", scalar(&e.name), scalar(&e.sum)));
+        out.push_str(&format!("  - name: {}\n    hash: {}\n", scalar(&e.name), scalar(&e.sum)));
     }
     out
 }
@@ -334,7 +334,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         write(&dir.join(LOCK), &lock).unwrap();
         assert_eq!(read(&dir.join(LOCK)), State::Lock(lock.clone()));
-        assert!(text.contains("\n  - name: 20261101000000_a.sql\n    checksum: "), "{text}");
+        assert!(text.contains("\n  - name: 20261101000000_a.sql\n    hash: "), "{text}");
         assert_eq!(lock.entries[1].sum, checksum(&lock.entries[0].sum, "20261102000000_b.sql", "create table b (id int)"));
         std::fs::write(dir.join(LOCK), format!("{text}<<<<<<< HEAD\n")).unwrap();
         assert_eq!(read(&dir.join(LOCK)), State::Conflicted);
@@ -343,20 +343,20 @@ mod tests {
 
     #[test]
     fn a_lock_written_up_to_0_8_2_reads_as_its_entries() {
-        let objects = "schema: c7bf681b\nmigrations:\n  - name: 20261104120000_users.sql\n    checksum: c86e9de4\n  - name: 20261104140347_add_bio.sql\n    checksum: 78ad08c0\n";
+        let objects = "schema: c7bf681b\nmigrations:\n  - name: 20261104120000_users.sql\n    hash: c86e9de4\n  - name: 20261104140347_add_bio.sql\n    hash: 78ad08c0\n";
         let strings = "schema: c7bf681b\nmigrations:\n  - 20261104120000_users.sql c86e9de4\n  - 20261104140347_add_bio.sql 78ad08c0\n";
         let State::Lock(lock) = of_text(objects) else { panic!("{objects}") };
         assert_eq!(lock.entries[1], Entry { name: "20261104140347_add_bio.sql".into(), sum: "78ad08c0".into() });
         assert_eq!(of_text(strings), State::Lock(lock.clone()));
         assert_eq!(render(&lock), format!("{HEADER}{objects}"));
         // Its keys in either order, and as a flow mapping.
-        let swapped = objects.replace("  - name: 20261104140347_add_bio.sql\n    checksum: 78ad08c0\n", "  - checksum: 78ad08c0\n    name: 20261104140347_add_bio.sql\n");
+        let swapped = objects.replace("  - name: 20261104140347_add_bio.sql\n    hash: 78ad08c0\n", "  - hash: 78ad08c0\n    name: 20261104140347_add_bio.sql\n");
         assert_eq!(of_text(&swapped), State::Lock(lock.clone()));
-        assert_eq!(of_text(&objects.replace("  - name: 20261104120000_users.sql\n    checksum: c86e9de4\n", "  - { name: 20261104120000_users.sql, checksum: c86e9de4 }\n")), State::Lock(lock.clone()));
+        assert_eq!(of_text(&objects.replace("  - name: 20261104120000_users.sql\n    hash: c86e9de4\n", "  - { name: 20261104120000_users.sql, hash: c86e9de4 }\n")), State::Lock(lock.clone()));
     }
 
     #[test]
-    fn a_checksum_yaml_would_read_as_a_number_is_quoted_and_read_as_written() {
+    fn a_hash_yaml_would_read_as_a_number_is_quoted_and_read_as_written() {
         let lock = Lock {
             schema: Some("01234567".into()),
             entries: vec![
@@ -367,7 +367,7 @@ mod tests {
             ],
         };
         let text = render(&lock);
-        for line in ["schema: '01234567'\n", "checksum: '00123456'\n", "checksum: '1e234567'\n", "checksum: '0b101101'\n", "checksum: 1e2345ab\n"] {
+        for line in ["schema: '01234567'\n", "hash: '00123456'\n", "hash: '1e234567'\n", "hash: '0b101101'\n", "hash: 1e2345ab\n"] {
             assert!(text.contains(line), "{line}{text}");
         }
         assert_eq!(of_text(&text), State::Lock(lock.clone()));
@@ -376,13 +376,13 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_needs_its_name_and_checksum_and_no_other_key() {
+    fn an_entry_needs_its_name_and_hash_and_no_other_key() {
         for (text, why) in [
-            ("migrations:\n  - name: a.sql\n", "missing field `checksum`"),
-            ("migrations:\n  - checksum: c86e9de4\n", "missing field `name`"),
-            ("migrations:\n  - name: a.sql\n    checksum: c86e9de4\n    transaction: false\n", "unknown field `transaction`"),
-            ("migrations:\n  - a.sql\n", "\"a.sql\" is a migration's name and its checksum"),
-            ("migrations:\n  - name: a.sql\n    checksum: 00000000\n    checksum: c86e9de4\n", "duplicate field `checksum`"),
+            ("migrations:\n  - name: a.sql\n", "missing field `hash`"),
+            ("migrations:\n  - hash: c86e9de4\n", "missing field `name`"),
+            ("migrations:\n  - name: a.sql\n    hash: c86e9de4\n    transaction: false\n", "unknown field `transaction`"),
+            ("migrations:\n  - a.sql\n", "\"a.sql\" is a migration's name and its hash"),
+            ("migrations:\n  - name: a.sql\n    hash: 00000000\n    hash: c86e9de4\n", "duplicate field `hash`"),
         ] {
             assert!(matches!(of_text(text), State::Invalid(e) if e.contains(why)), "{text}: {:?}", of_text(text));
         }
@@ -394,7 +394,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(read(&dir.join(LOCK)), State::Missing);
-        std::fs::write(dir.join(LOCK), b"migrations:\n  - name: a.sql\n    checksum: \xff\n").unwrap();
+        std::fs::write(dir.join(LOCK), b"migrations:\n  - name: a.sql\n    hash: \xff\n").unwrap();
         assert!(matches!(read(&dir.join(LOCK)), State::Unreadable(why) if why.contains("UTF-8")));
         std::fs::remove_file(dir.join(LOCK)).unwrap();
         std::fs::create_dir(dir.join(LOCK)).unwrap();
