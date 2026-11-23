@@ -926,7 +926,13 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
             x.len() == y.len() && x.iter().zip(&y).all(|(a, b)| a == b || (!a.contains('(') && bare.iter().any(|(old, new)| crate::diff::swap_name(a, old, new) == *b)))
         };
         for g in &r_gone {
-            let same = |c: &String| if g.starts_with("column ") { retabled(g).is_some_and(|h| split_head(c).0 == h) } else { same_other(g, c) };
+            // A view is the same view by its name, which a table rename leaves alone, whatever the
+            // rename changed in its query.
+            let same = |c: &String| match g.split(' ').next() {
+                Some("column") => retabled(g).is_some_and(|h| split_head(c).0 == h),
+                Some("view") => split_head(&renamed_in(g, &names)).0 == split_head(c).0,
+                _ => same_other(g, c),
+            };
             if let Some(c) = r_came.iter().find(|c| same(c) && !moved_with.iter().any(|(_, t)| t == *c)) {
                 moved_with.push((g.clone(), c.clone()));
             }
@@ -6806,6 +6812,12 @@ mod tests {
         let steps = Steps { before: &before, moved: None, renamed: Some(&after), after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string()), ("table public.clients".to_string(), "table public.customers".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}", "  ~ table [-clients-]{+customers+}"]);
+        // A view that names a renamed table, as Postgres rewrites it, is the same view.
+        let before = lines(&["table public.orders", "view public.order_count as SELECT count(orders.id) AS count FROM (orders JOIN details ON ((orders.id = details.id)));"]);
+        let after = lines(&["table public.invoices", "view public.order_count as SELECT count(invoices.id) AS count FROM (invoices JOIN details ON ((invoices.id = details.id)));"]);
+        let steps = Steps { before: &before, moved: None, renamed: Some(&after), after: &after };
+        let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}"]);
         // Two tables of one name in two schemas, each renamed its own way, with a column of one.
         let before = lines(&["table east.orders", "table west.orders", "column west.orders.title text", "constraint west.orders orders_pkey PRIMARY KEY (id)"]);
         let renamed = lines(&["table east.invoices", "table west.shipments", "column west.shipments.title text", "constraint west.shipments shipments_pkey PRIMARY KEY (id)"]);
