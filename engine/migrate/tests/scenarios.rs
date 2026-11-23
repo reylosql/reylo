@@ -1616,10 +1616,11 @@ async fn each_run_leaves_its_fingerprint_on_its_newest_row(mut p: P) {
     p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
     p.file("20261027110000_note.sql", &format!("alter table a add column note {text};"));
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
-    // Read once, after the run's last migration: only the newest row's is compared.
+    // Read once, after the run's last migration: only the newest row's is compared. MySQL commits each
+    // statement, so a migration there may leave part of itself, and the schema is read before each.
     let fingerprints = async |p: &P| p.rows("select name, fingerprint from __reylo_migrations order by name").await.iter().map(|r| r.get("fingerprint").map(str::to_string)).collect::<Vec<_>>();
     let first = fingerprints(&p).await;
-    assert!(first[0].is_none() && first[1].as_deref().is_some_and(|f| f != "pending"), "{first:?}");
+    assert!(first[0].is_none() == (p.d != Dialect::Mysql) && first[1].as_deref().is_some_and(|f| f != "pending"), "{first:?}");
     p.schema(&format!("create table a (id {int}, note {text}); create table b (id {int});"));
     p.file("20261027120000_b.sql", &format!("create table b (id {int});"));
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
