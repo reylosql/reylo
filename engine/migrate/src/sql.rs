@@ -597,7 +597,24 @@ pub fn escapes_shadow(statement: &Statement, dialect: Dialect) -> Option<(String
             let renames = words.first().is_some_and(|f| f == "RENAME");
             let first_on = words.iter().position(|w| w == "ON");
             let first_like = words.iter().position(|w| w == "LIKE");
+            // The function each token is an argument of, innermost: `from` inside `extract(year from
+            // e.at)`, `trim(… from …)` and `substring(… from …)` takes a value, never a table.
+            let mut calls: Vec<Option<&str>> = Vec::new();
+            let call_of: Vec<Option<&str>> = (0..t.len())
+                .map(|k| {
+                    let inside = calls.last().copied().flatten();
+                    match words[k].as_str() {
+                        "(" => calls.push((k > 0 && t[k - 1].kind == TokenKind::Word).then(|| words[k - 1].as_str())),
+                        ")" => drop(calls.pop()),
+                        _ => {}
+                    }
+                    inside
+                })
+                .collect();
             for k in 0..t.len() {
+                if words[k] == "FROM" && call_of[k].is_some_and(|f| matches!(f, "EXTRACT" | "TRIM" | "SUBSTRING" | "SUBSTR" | "MID")) {
+                    continue;
+                }
                 let names_table = OBJECT_KEYWORDS.contains(&words[k].as_str())
                     || (Some(k) == first_on && (created("INDEX") || created("TRIGGER")))
                     || (Some(k) == first_like && created("TABLE"))
@@ -632,9 +649,10 @@ pub fn escapes_shadow(statement: &Statement, dialect: Dialect) -> Option<(String
 /// What to do with a statement of the server's setup: a role, a database, a server setting.
 const SERVER_INSTEAD: &str = "Run it outside the migrations, with the server's setup.";
 
-/// What to do with a role, or a grant of one, which a `do` block can also keep in a migration: its
-/// code isn't checked, so it runs in every shadow too, and must be safe to run again.
-const PG_ROLE_INSTEAD: &str = "Run it outside the migrations, with the server's setup, or keep it in a do block written to run twice: Reylo doesn't check inside one, so every shadow runs it too, on the shadow's server.";
+/// What to do with a role, or a grant of one: a `do` block's code isn't checked, but runs in every
+/// shadow, on the target's own server unless `shadow_url` names another, so a dry run would change
+/// the target's roles.
+const PG_ROLE_INSTEAD: &str = "Run it outside the migrations, with the server's setup. Reylo doesn't check inside a do block, but every shadow runs one on its server, the database's own unless shadow_url names another.";
 
 /// A statement a shadow can't replay.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -657,20 +675,19 @@ pub fn shadow_problem(sql: &str, dialect: Dialect) -> Option<String> {
     unreplayable(sql, dialect).map(|u| format!("{}: {}", u.statement, u.why))
 }
 
-/// The statement on one line, as written but for its spacing, up to a string a password follows
-/// (`password 'x'`, MySQL's `identified by 'x'`), and its first 16 tokens of a long one: each cut
-/// marked `…`.
+/// The statement on one line, as written but for its spacing, its first 16 tokens of a long one,
+/// and every string as `'…'`: a string may hold a password (`password 'x'`, a subscription's
+/// connection string), and a refusal is printed and logged.
 pub fn quoted(statement: &Statement) -> String {
     const SHOWN: usize = 16;
     let t = &statement.tokens;
-    let secret = t.iter().position(|x| matches!(x.upper().as_str(), "PASSWORD" | "IDENTIFIED")).and_then(|k| (k..t.len()).find(|&j| t[j].kind == TokenKind::Str));
-    let end = secret.unwrap_or(t.len()).min(SHOWN);
+    let end = t.len().min(SHOWN);
     let mut out = String::new();
     for k in 0..end {
         if k > 0 && t[k - 1].end != t[k].start {
             out.push(' ');
         }
-        out.push_str(&t[k].text);
+        out.push_str(if t[k].kind == TokenKind::Str { "'…'" } else { &t[k].text });
     }
     if end < t.len() {
         out.push_str(" …");
@@ -896,13 +913,13 @@ mod tests {
         // The statement whole, on one line, with what to do instead.
         let grant = unreplayable("grant app\n  to bob;", Dialect::Postgres).unwrap();
         assert_eq!(grant.statement, "grant app to bob");
-        assert!(grant.instead.is_some_and(|i| i.contains("do block")));
+        assert_eq!(grant.instead, Some(PG_ROLE_INSTEAD));
         assert_eq!(unreplayable("create database app", Dialect::Postgres).unwrap().instead, Some(SERVER_INSTEAD));
         assert_eq!(unreplayable("create table app.t (id int)", Dialect::Mysql).unwrap().instead, None);
-        // Never a password, and never past a long statement's first 16 tokens.
-        assert_eq!(shadow_problem("create role app login password 'secret'", Dialect::Postgres).unwrap(), "create role app login password …: it changes a role, which belongs to the server");
-        assert_eq!(unreplayable("create user 'r'@'%' identified by 'secret'", Dialect::Mysql).unwrap().statement, "create user 'r'@'%' identified by …");
-        assert_eq!(unreplayable("set password for 'r'@'%' = 'secret'", Dialect::Mysql).unwrap().statement, "set password for …");
+        // Never a string, which may hold a password, and never past a long statement's first 16 tokens.
+        assert_eq!(shadow_problem("create role app login password 'secret'", Dialect::Postgres).unwrap(), "create role app login password '…': it changes a role, which belongs to the server");
+        assert_eq!(unreplayable("alter subscription s connection 'host=db password=secret'", Dialect::Postgres).unwrap().statement, "alter subscription s connection '…'");
+        assert_eq!(unreplayable("create user 'r'@'%' identified by 'secret'", Dialect::Mysql).unwrap().statement, "create user '…'@'…' identified by '…'");
         assert_eq!(unreplayable("create table app.t (a int, b int, c int, d int)", Dialect::Mysql).unwrap().statement, "create table app.t (a int, b int, c int, d …");
         assert!(shadow_problem("create user bob", Dialect::Postgres).is_some());
         assert_eq!(shadow_problem("create user mapping for current_user server s options (user 'u'); alter user mapping for public server s options (set user 'v'); drop user mapping for public server s", Dialect::Postgres), None);
@@ -932,6 +949,9 @@ mod tests {
         assert!(!grants_on_objects("create table grants (id int); insert into grants values (1)"));
         assert!(shadow_problem("create table app.users (id int)", Dialect::Mysql).unwrap().contains("names the database app"));
         assert_eq!(shadow_problem("create table users (id int)", Dialect::Mysql), None);
+        // A `from` that takes a value, not a table.
+        assert_eq!(shadow_problem("update events as e set y = extract (year from e.at), s = trim(leading 'x' from e.name), t = substring(e.name from 2) where e.id in (select id from events)", Dialect::Mysql), None);
+        assert!(shadow_problem("update events set y = (select max(x) from app.t)", Dialect::Mysql).is_some());
         assert_eq!(shadow_problem("create view v as select u.email from users u left join posts p on p.user_id = u.id where u.name like p.title", Dialect::Mysql), None);
         assert!(shadow_problem("create index i on app.users (email)", Dialect::Mysql).is_some());
         assert!(shadow_problem("create trigger t before insert on app.users for each row set new.x = 1", Dialect::Mysql).is_some());

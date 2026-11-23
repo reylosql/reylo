@@ -583,18 +583,12 @@ Each database makes them its own way:
 - **MySQL:** on your database's server, with `create database`, so your user needs the `CREATE` privilege on every database. PlanetScale refuses `create database`, so point `shadow_url` at a plain MySQL 8.4 server.
 - **SQLite:** in memory. There's nothing to grant. A [Turso](/turso#migrations) database's shadows run on libSQL's own engine.
 
-A migration that would reach past its shadow is refused by every command, `deploy` and `status` included. That's one that changes a role, a database, a tablespace or a server setting. On MySQL, it's also one that names a database, as in `app.users`.
+A migration that would reach past its shadow is refused by every command, `deploy` and `status` included. That's one that:
 
-Make roles with your server's setup, outside the migrations. To keep one in a migration, put it in a `do` block that can run twice. Reylo doesn't check inside one, so every shadow runs it too, on the shadow's server:
+- changes a role, a database, a tablespace or a server setting
+- on MySQL, names a database, as in `app.users`
 
-```sql title="20261020200000_reader.sql"
-do $$ begin
-  if not exists (select from pg_roles where rolname = 'reader') then
-    create role reader nologin;
-  end if;
-  grant reader to app;
-end $$;
-```
+Make roles with your server's setup, outside the migrations. Reylo doesn't check inside a `do` block, but every shadow runs one on its server, your database's own unless `shadow_url` names another.
 
 Where your role can't create a database, point `shadow_url` at a server that can, running the same version:
 

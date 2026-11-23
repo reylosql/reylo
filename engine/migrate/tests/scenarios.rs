@@ -4388,7 +4388,7 @@ mod adversarial {
         p.file("20261027100000_t.sql", "create table t (id int);");
         p.file("20261027110000_roles.sql", &format!("grant {reader}\n  to {writer};"));
         // The whole statement, why, and what to do instead.
-        let refused = format!(r"✗ Migration 20261027110000_roles\.sql can't be replayed in a shadow database\n\n    grant {reader} to {writer}\n\n  It grants or revokes a role, which belongs to the server\.\n  Run it outside the migrations, with the server's setup, or keep it in a do block written to run twice");
+        let refused = format!(r"✗ Migration 20261027110000_roles\.sql can't be replayed in a shadow database\n\n    grant {reader} to {writer}\n\n  It grants or revokes a role, which belongs to the server\.\n  Run it outside the migrations, with the server's setup\. Reylo doesn't check inside a do block, but every shadow runs one on its server");
         assert_eq!(p.dry_run().await, 1);
         assert_has!(p.output(), &refused);
         // A deploy refuses what its dry run does: once it ran, every command that replays would.
