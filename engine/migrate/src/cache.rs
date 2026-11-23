@@ -790,7 +790,7 @@ mod tests {
     }
 
     /// The digest of the catalog reader's code when `READER` was last set.
-    const READER_CODE: &str = "f5ee0be0ff76";
+    const READER_CODE: &str = "47b1e8d8cee1";
 
     #[test]
     fn the_catalog_reader_keeps_its_version() {

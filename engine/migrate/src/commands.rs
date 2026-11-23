@@ -2671,26 +2671,47 @@ fn holds_a_schema(lines: &[String]) -> bool {
     lines.iter().any(|l| !EMPTY.iter().any(|kind| l.starts_with(kind)) && !(l.starts_with("owner ") && l.ends_with(" (schema)")))
 }
 
-/// Whether a database holds anything init and introspect write: a schema, a grant on a schema to a
-/// role of its own, or a default privilege that isn't a platform's role's. A grant on a schema to
-/// PUBLIC is a new database's, and one to a platform's role or a default privilege for it is what a
-/// new database there may have already (Supabase grants its API's roles every new table), so a
-/// database with only those still starts empty.
+/// Whether a database holds anything init and introspect write: a schema, or a grant on a schema or a
+/// default privilege that a new database on its server lacks. A new database's `public` grants
+/// PUBLIC `USAGE`, and `CREATE` too before Postgres 15. On a platform's server, a new database may
+/// grant the platform's roles more (Supabase grants its API's roles every new table), so a database
+/// with only those still starts empty there.
 #[cfg(feature = "cli")]
-fn holds_sql(lines: &[String]) -> bool {
-    let platform = |grantee: &str| crate::catalog::PLATFORM_ROLES.contains(&grantee);
+fn holds_sql(lines: &[String], new: &NewDatabase) -> bool {
+    let platform = |grantee: &str| new.platform && crate::catalog::PLATFORM_ROLES.contains(&grantee);
     holds_a_schema(lines)
         || lines.iter().any(|l| {
             if let Some(rest) = l.strip_prefix("grant schema ") {
-                let acl = &rest[crate::catalog::name_at(rest).len()..];
-                acl.trim().split(',').filter_map(|g| g.rsplit_once(':')).any(|(grantee, _)| grantee != "PUBLIC" && !platform(grantee))
+                let name = crate::catalog::name_at(rest);
+                let given = |grantee: &str, privilege: &str| name == "public" && grantee == "PUBLIC" && (privilege == "USAGE" || (privilege == "CREATE" && new.public_create));
+                rest[name.len()..].trim().split(',').filter_map(|g| g.rsplit_once(':')).any(|(grantee, privilege)| !given(grantee, privilege) && !platform(grantee))
             } else if l.starts_with(crate::catalog::DEFAULT_PRIVILEGES) {
                 let tail = l.trim_end_matches(" with grant option");
-                tail.rsplit_once(" to ").or_else(|| tail.rsplit_once(" from ")).is_some_and(|(_, grantee)| !platform(grantee))
+                tail.rsplit_once(" to ").or_else(|| tail.rsplit_once(" from ")).is_none_or(|(_, grantee)| !platform(grantee))
             } else {
                 false
             }
         })
+}
+
+/// What a new database on a server has that [`holds_sql`] needs to know.
+#[cfg(feature = "cli")]
+#[derive(Default)]
+struct NewDatabase {
+    /// Whether the server is a platform's, as Supabase's is.
+    platform: bool,
+    /// Whether a new database's `public` grants PUBLIC `CREATE`, as before Postgres 15.
+    public_create: bool,
+}
+
+#[cfg(feature = "cli")]
+async fn new_database(db: &mut Db) -> Result<NewDatabase, Error> {
+    if db.dialect() != Dialect::Postgres {
+        return Ok(NewDatabase::default());
+    }
+    let rows = db.rows(&format!("select ({})::text as platform, (current_setting('server_version_num')::int < 150000)::text as public_create", crate::catalog::platform_names())).await?;
+    let r = rows.first().ok_or_else(|| Error("no answer".into()))?;
+    Ok(NewDatabase { platform: r.text("platform") == "true", public_create: r.text("public_create") == "true" })
 }
 
 /// Whether a migration that fails can leave part of what it did: on MySQL, whose statements commit as
@@ -5929,9 +5950,11 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     let lines = catalog(&mut db).await;
     let left = left_out(&mut db, schemas).await;
     let roles = named_roles(&mut db).await;
+    let new = new_database(&mut db).await;
     db.close().await;
     let problems = problems?;
     let mut roles = roles?;
+    let new = new?;
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
     }
@@ -5939,7 +5962,7 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     if !left.is_empty() {
         return Ok(refuse(&[schemas_left_out(schemas, &left)], log));
     }
-    if !holds_sql(&lines?) {
+    if !holds_sql(&lines?, &new) {
         drop(spinning);
         std::fs::create_dir_all(&opts.dir)?;
         std::fs::write(&opts.schema, "")?;
@@ -6038,7 +6061,8 @@ pub async fn db_introspect(opts: &Options, schemas: &[String], log: Log<'_>) -> 
     let spinning = crate::terminal::spinner(format!("Introspecting {}", shown_url(&opts.url)));
     let mut db = Db::open(opts).await?;
     let result = async {
-        if !holds_sql(&catalog(&mut db).await?) {
+        let new = new_database(&mut db).await?;
+        if !holds_sql(&catalog(&mut db).await?, &new) {
             return Ok(Ok(String::new()));
         }
         let schemas = with_referenced(&mut db, schemas, &mut *log).await?;
@@ -7418,11 +7442,20 @@ mod tests {
     #[cfg(feature = "cli")]
     #[test]
     fn a_grant_to_a_role_of_its_own_is_sql_to_write() {
+        use super::{NewDatabase, holds_sql};
         let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(!super::holds_sql(&lines(&["schema public", "grant schema public PUBLIC:USAGE,anon:USAGE,service_role:USAGE*", "default privileges in schema public grant select on tables to anon"])));
-        assert!(super::holds_sql(&lines(&["schema public", "grant schema public PUBLIC:USAGE,reporting:CREATE"])));
-        assert!(super::holds_sql(&lines(&["schema public", "default privileges in schema public grant select on tables to reporting with grant option"])));
-        assert!(super::holds_sql(&lines(&["schema public", "default privileges revoke execute on functions from public"])));
+        let stock = NewDatabase::default();
+        let supabase = NewDatabase { platform: true, ..NewDatabase::default() };
+        let platform = lines(&["schema public", "grant schema public PUBLIC:USAGE,anon:USAGE,service_role:USAGE*", "default privileges in schema public grant select on tables to anon"]);
+        assert!(!holds_sql(&platform, &supabase));
+        assert!(holds_sql(&platform, &stock), "anon is a role of the project's on a server of no platform");
+        assert!(!holds_sql(&lines(&["schema public", "grant schema public PUBLIC:USAGE"]), &stock));
+        assert!(holds_sql(&lines(&["schema public", "grant schema public PUBLIC:CREATE,PUBLIC:USAGE"]), &stock));
+        assert!(!holds_sql(&lines(&["schema public", "grant schema public PUBLIC:CREATE,PUBLIC:USAGE"]), &NewDatabase { public_create: true, ..NewDatabase::default() }));
+        assert!(holds_sql(&lines(&["schema public", "schema reports", "grant schema reports PUBLIC:USAGE"]), &stock));
+        assert!(holds_sql(&lines(&["schema public", "grant schema public PUBLIC:USAGE,reporting:CREATE"]), &supabase));
+        assert!(holds_sql(&lines(&["schema public", "default privileges in schema public grant select on tables to reporting with grant option"]), &supabase));
+        assert!(holds_sql(&lines(&["schema public", "default privileges revoke execute on functions from public"]), &supabase));
         assert!(super::names("grant select on table t to ops_read;", "ops_read"));
         assert!(!super::names("grant select on table t to ops_readwrite;", "ops_read"));
         assert!(!super::names("create table ops_read_log (id int);", "ops_read"));
