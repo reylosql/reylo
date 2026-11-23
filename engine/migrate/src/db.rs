@@ -1038,6 +1038,15 @@ async fn mysql_revoke_on(admin: &mut mysql_async::Conn, name: &str) {
     }
 }
 
+/// Whether a default privilege's or a schema grant's statement, as Reylo writes it, grants to (or
+/// revokes from) a platform's role, which the platform gives every database it makes: Supabase's
+/// `anon`, `authenticated` and `service_role`.
+fn to_platform_role(statement: &str) -> bool {
+    let tail = statement.trim_end_matches(" with grant option");
+    let grantee = tail.rsplit_once(" to ").or_else(|| tail.rsplit_once(" from ")).map(|(_, g)| g);
+    grantee.is_some_and(|g| crate::catalog::PLATFORM_ROLES.contains(&g))
+}
+
 pub(crate) fn literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -1068,7 +1077,8 @@ pub enum Server {
         settings: Vec<String>,
         /// The target's default privileges (`alter default privileges`), which grant on what a
         /// migration creates, as a platform's do (Supabase's grant every new table to its API's
-        /// roles); made again in each shadow unless the project sets its own.
+        /// roles); made again in each shadow unless the project sets its own, but for those to a
+        /// platform's role, which are the environment's whatever the project sets.
         privileges: Vec<String>,
         copy_privileges: bool,
         /// The target's extensions, each `(name, schema)`, made again in each shadow but those the
@@ -1088,8 +1098,10 @@ pub enum Server {
         /// is on the target, and left out where the shadows' role may not become it.
         owned: Owned,
         /// The target's privileges on the schemas a shadow has without the project making them
-        /// (`public`, and those its extensions are in), as `grant` statements.
+        /// (`public`, and those its extensions are in), as `grant` statements; made again in each
+        /// shadow, or only those to a platform's role where SQL is written to make the database whole.
         schema_grants: Vec<String>,
+        copy_schema_grants: bool,
     },
     Mysql {
         admin: mysql_async::Conn,
@@ -1222,7 +1234,7 @@ impl Server {
                 let schemas: Vec<String> = std::iter::once("public".to_string()).chain(extensions.iter().map(|(_, s)| s.clone())).filter(|s| !platform.contains(s)).collect();
                 let schema_grants = schema_grants(target, &schemas).await?;
                 let owned = owned_by_platform(target, &admin, url, version).await?;
-                Ok(Server::Postgres { admin, url: server_url.to_string(), create, locale: unknown_locale, settings, privileges, copy_privileges: true, extensions, leave: vec![], environment, environment_role, owned, schema_grants })
+                Ok(Server::Postgres { admin, url: server_url.to_string(), create, locale: unknown_locale, settings, privileges, copy_privileges: true, extensions, leave: vec![], environment, environment_role, owned, schema_grants, copy_schema_grants: true })
             }
             Dialect::Mysql => {
                 let admin = crate::db::open_mysql(&with_database(server_url, "")).await?;
@@ -1279,7 +1291,7 @@ impl Server {
     /// privileges) but not its database settings, which a copy does not take. The lock named after
     /// it is held until it is dropped; a copy that fails releases it.
     pub(crate) async fn pg_shadow(&mut self, template: Option<&str>) -> Result<Shadow, Error> {
-        let Server::Postgres { admin, url, create, locale, settings, privileges, copy_privileges, extensions, leave, environment, environment_role, owned, schema_grants, .. } = self else { return Err(Error("not a Postgres server".into())) };
+        let Server::Postgres { admin, url, create, locale, settings, privileges, copy_privileges, extensions, leave, environment, environment_role, owned, schema_grants, copy_schema_grants, .. } = self else { return Err(Error("not a Postgres server".into())) };
         let name = random_name();
         admin.batch_execute(&format!("select pg_advisory_lock(hashtextextended('{name}', 0))")).await.map_err(pg_error)?;
         let made = async {
@@ -1328,9 +1340,9 @@ impl Server {
         let mut db = Db::Postgres(client);
         // For the session too, where the database may not take the setting from the role connected.
         mark_platform_names(&mut db, settings).await;
-        if *copy_privileges && template.is_none() {
+        if template.is_none() {
             // A role or schema the shadow's server lacks leaves that one out; the comparison says what follows.
-            for statement in privileges.iter() {
+            for statement in privileges.iter().filter(|s| *copy_privileges || to_platform_role(s)) {
                 let _ = db.exec(statement).await;
             }
         }
@@ -1351,7 +1363,7 @@ impl Server {
             for (_, schema) in owned.extensions.iter().filter(|(e, s)| owned.role.is_some() && !leave.contains(&e.to_lowercase()) && !platform_schema(s) && s != "pg_catalog") {
                 let _ = db.exec(&format!("create schema if not exists {}", ident(schema))).await;
             }
-            for statement in schema_grants.iter() {
+            for statement in schema_grants.iter().filter(|s| *copy_schema_grants || to_platform_role(s)) {
                 let _ = db.exec(statement).await;
             }
             if let (Some(role), false) = (environment_role.as_deref(), environment.is_empty()) {
@@ -1428,10 +1440,23 @@ impl Server {
     }
 
     /// Whether shadows take the target's default privileges: not where the project's own SQL sets
-    /// default privileges, which would then grant on what its earlier migrations made.
+    /// default privileges, which would then grant on what its earlier migrations made. Those to a
+    /// platform's role they take either way.
     pub fn copy_default_privileges(&mut self, on: bool) {
         if let Server::Postgres { copy_privileges, .. } = self {
             *copy_privileges = on;
+        }
+    }
+
+    /// Shadows take only the environment's privileges: the target's default privileges and grants
+    /// on its schemas that grant to a platform's role. For SQL written to make the database whole
+    /// (init's, introspect's), which makes the rest itself: a default privilege or a grant on
+    /// `public` that a migration made is no new database's, and one made by hand is this database's
+    /// all the same.
+    pub fn copy_platform_privileges_only(&mut self) {
+        if let Server::Postgres { copy_privileges, copy_schema_grants, .. } = self {
+            *copy_privileges = false;
+            *copy_schema_grants = false;
         }
     }
 
@@ -1557,6 +1582,17 @@ pub(crate) async fn default_privileges(target: &mut Db) -> Result<Vec<String>, E
 #[cfg(test)]
 mod url_tests {
     use super::*;
+
+    #[test]
+    fn a_grant_to_a_platforms_role_is_the_environments() {
+        assert!(to_platform_role("alter default privileges in schema public grant select on tables to anon"));
+        assert!(to_platform_role("alter default privileges in schema public grant select on tables to service_role with grant option"));
+        assert!(to_platform_role("alter default privileges revoke usage on types from authenticated"));
+        assert!(to_platform_role("grant usage on schema public to anon"));
+        assert!(!to_platform_role("alter default privileges in schema public grant select on tables to ops_readonly"));
+        assert!(!to_platform_role("alter default privileges revoke execute on functions from public"));
+        assert!(!to_platform_role("grant usage on schema public to \"anon reader\""));
+    }
 
     #[test]
     fn a_locale_is_spelled_as_the_shadow_server_spells_it() {

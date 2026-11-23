@@ -117,7 +117,7 @@ Declare your schema in plain SQL, as you would on the database. Reylo Migrate co
 - Triggers, functions (Postgres and MySQL), and procedures and events (MySQL)
 - Partitions (Postgres and MySQL)
 - Row level security policies, sequences, extensions and schemas (Postgres)
-- Grants and comments (Postgres and MySQL)
+- Grants and comments (Postgres and MySQL), and default privileges (Postgres)
 - `STRICT` and `WITHOUT ROWID` tables (SQLite)
 
 #### Enums and domains
@@ -185,7 +185,14 @@ create policy documents_own on documents
 
 ```sql
 grant select on room_totals to reporting;
+alter default privileges in schema public grant select on tables to reporting;
 comment on column users.verified_at is 'When they confirmed their email';
+```
+
+Roles belong to the server, so a migration can't create one. Create each role your grants name on a new server before you deploy to it:
+
+```sql
+create role reporting nologin;
 ```
 
 On MySQL, an account sees only its own grants unless it may read the privilege tables. An account that isn't an administrator needs them granted:

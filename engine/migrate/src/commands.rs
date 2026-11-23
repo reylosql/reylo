@@ -5415,8 +5415,10 @@ async fn own_sql(db: &mut Db, opts: &Options) -> Result<Result<String, NotOwn>, 
         Err(e) => return Ok(Err(NotOwn::NoShadow(e))),
     };
     // The project's extensions are the text's to make, as a fresh database needs them: a shadow that
-    // already had them would hide a plan that leaves them out.
+    // already had them would hide a plan that leaves them out. So are its default privileges and
+    // its grants on `public`, but for those a platform gives every database.
     server.leave_extensions(project_extensions(db).await?);
+    server.copy_platform_privileges_only();
     let result = async {
         let live = catalog(db).await?;
         let mut empty = match server.shadow().await {
@@ -5904,8 +5906,10 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     let problems = out_of_reach(&mut db, &opts.url).await;
     let lines = catalog(&mut db).await;
     let left = left_out(&mut db, schemas).await;
+    let roles = named_roles(&mut db).await;
     db.close().await;
     let problems = problems?;
+    let roles = roles?;
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
     }
@@ -5973,7 +5977,32 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     log(&entry(branch(false), &dir_name, ""));
     log(&entry(&format!("│   {}", branch(true)), INIT, "the same, recorded as run here"));
     log(&entry(branch(true), &file_name(&opts.lock), "the order the migrations run in"));
+    if !roles.is_empty() {
+        let named = if roles.len() == 1 { format!("the role {}", roles[0]) } else { format!("the roles {}", and_list(&roles)) };
+        log(&note(format!("{INIT} names {named}: make {} on each new server before it runs there, since a migration may not", if roles.len() == 1 { "it" } else { "them" })));
+    }
     Ok(code)
+}
+
+/// The roles the database names, as an owner, a grantee or a policy's role, that a new server
+/// lacks: none of the role that runs the migrations, a platform's, or Postgres's own. A migration
+/// may make no role, so they are the server's to have first.
+#[cfg(feature = "cli")]
+async fn named_roles(db: &mut Db) -> Result<Vec<String>, Error> {
+    if db.dialect() != Dialect::Postgres {
+        return Ok(vec![]);
+    }
+    let rows = db
+        .rows(&format!(
+            "select distinct quote_ident(r.rolname) as r from pg_shdepend d join pg_roles r on r.oid = d.refobjid
+            where d.dbid = (select oid from pg_database where datname = current_database()) and d.refclassid = 'pg_authid'::regclass
+              and d.deptype in ('o', 'a', 'r') and r.oid <> {} and r.rolname !~ '^pg_' and {}
+            order by 1",
+            crate::catalog::runner(),
+            crate::catalog::not_platform("r.oid")
+        ))
+        .await?;
+    Ok(rows.iter().map(|r| r.text("r").to_string()).collect())
 }
 
 /// `reylo db introspect`: the database's schema as SQL that makes it, as `init` writes schema.sql;

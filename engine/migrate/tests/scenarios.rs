@@ -3298,6 +3298,7 @@ on!(
     an_extension_left_in_a_schema_of_the_projects_own_stops_no_push,
     a_partition_dropped_at_run_time_is_data,
     init_creates_the_extensions_its_schema_uses,
+    init_writes_the_default_privileges_and_grants_a_migration_made,
     init_writes_the_event_triggers_it_compares,
     init_writes_the_publications_it_compares,
     a_dump_keeps_a_function_body_as_written,
@@ -5553,6 +5554,33 @@ create trigger kids_note after insert on kids begin update parents set name = na
         p.url = q.url.clone();
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         assert_eq!(q.history().await, ["init.sql"]);
+    }
+
+    /// Default privileges and grants a migration made, as Prisma's migrations make them for a role a
+    /// `do` block makes: init.sql makes them, which a new database lacks, and names the role, which a
+    /// new server may lack. A new database deployed from it has the grants this one has.
+    pub async fn init_writes_the_default_privileges_and_grants_a_migration_made(mut p: P) {
+        p.exec("do $$ begin create role madv_ops_read nologin; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec("create table mints (id int primary key); create table users (id int primary key)").await;
+        p.exec("grant usage on schema public to madv_ops_read; grant select, insert on all tables in schema public to madv_ops_read; alter default privileges in schema public grant select, insert on tables to madv_ops_read; revoke insert on mints from madv_ops_read").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"» init\.sql names the role madv_ops_read: make it on each new server before it runs there, since a migration may not");
+        let init = std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap();
+        assert_has!(&init, r"(?m)^alter default privileges in schema public grant insert on tables to madv_ops_read;$");
+        assert_has!(&init, r"(?m)^alter default privileges in schema public grant select on tables to madv_ops_read;$");
+        assert_has!(&init, r"(?m)^grant usage on schema public to madv_ops_read;$");
+        p.strict = true;
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        let grants = "select string_agg(table_name || ':' || privilege_type, ',' order by table_name, privilege_type) as g from information_schema.role_table_grants where grantee = 'madv_ops_read'";
+        assert_eq!(q.rows(grants).await[0].text("g"), "mints:SELECT,users:INSERT,users:SELECT");
+        assert_eq!(q.rows("select has_schema_privilege('madv_ops_read', 'public', 'usage')::text as u").await[0].text("u"), "true");
+        q.exec("create table later (id int)").await;
+        assert_eq!(q.rows("select has_table_privilege('madv_ops_read', 'later', 'insert')::text as i").await[0].text("i"), "true", "the default privileges made");
     }
 
     pub async fn an_extension_in_a_schema_of_its_own_is_dumped_after_it(mut p: P) {
