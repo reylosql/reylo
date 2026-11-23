@@ -265,7 +265,7 @@ Applying to postgres://db.example.com/app
 It needs no shadow database. It refuses to run:
 
 - **On an edited schema file.** A `schema.sql` that doesn't match the lock's checksum.
-- **On a database changed by hand.** Each migration stores a fingerprint of the schema. A database that no longer matches it is refused, even for a hand-added index.
+- **On a database changed by hand.** Each deploy stores a fingerprint of the schema it leaves. A database that no longer matches it is refused, even for a hand-added index.
 
 The refusal shows the change:
 

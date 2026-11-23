@@ -474,7 +474,10 @@ async fn fingerprint_of(db: &mut Db, lines: &[String]) -> Result<String, Error> 
     Ok(format!("{}:{version}:{}", crate::cache::reader_id(), crate::cache::hex(&digest.finish())))
 }
 
+/// Stores `value` on `name`'s row. Only the newest row's fingerprint is compared, so the pending marks
+/// a run left on the rows before it, whose schema it never read ([`Runs`]), are cleared.
 async fn set_fingerprint(db: &mut Db, name: &str, value: &str) -> Result<(), Error> {
+    db.exec_with(&format!("update {HISTORY_TABLE} set fingerprint = null where fingerprint = {} and name <> {}", db.param(1), db.param(2)), &[&PENDING, &name]).await?;
     db.exec_with(&format!("update {HISTORY_TABLE} set fingerprint = {} where name = {}", db.param(1), db.param(2)), &[&value, &name]).await
 }
 
@@ -573,7 +576,7 @@ fn user_suffix() -> String {
 /// What a row's fingerprint says while its run hasn't read it yet: written in the migration's own
 /// transaction, so that a run cut off before it reads one leaves a row the next deploy refuses
 /// rather than one with nothing to compare. The read follows the commit, so the migration's locks
-/// are not held for it.
+/// are not held for it, and comes once a run of migrations ends ([`Runs`]).
 const PENDING: &str = "pending";
 
 /// The migration's row: applied now, or marked started; with the fingerprint of the schema it left,
@@ -591,16 +594,60 @@ async fn insert_row(db: &mut Db, m: &Migration, applied: bool, fingerprint: Opti
 
 // ---------------------------------------------------------------------------------------------
 // Running a migration: in one transaction with its history row, or, for a file that cannot run in
-// one, alone, with a row marked started before it and finished after it. The row then gets the
-// fingerprint of the schema the migration left: after the commit, once its locks are released, over
-// a row marked pending in the same transaction; and for a lone statement in the update that finishes
-// its row. No run cut off between the two leaves an applied row with nothing to compare.
+// one, alone, with a row marked started before it and finished after it. Either way the row is
+// applied marked pending, and gets the fingerprint of the schema the run left once the run ends
+// ([`Runs`]). No run cut off between the two leaves an applied row with nothing to compare.
 
-pub(crate) async fn run(db: &mut Db, m: &Migration, record: bool) -> Result<(), Error> {
-    run_undone(db, m, record).await.map_err(|(e, _)| e)
+/// Runs a migration and records nothing of it, as a shadow's replay and the check of its locks do.
+pub(crate) async fn run(db: &mut Db, m: &Migration) -> Result<(), Error> {
+    run_undone(db, m, false).await.map_err(|(e, _)| e)
 }
 
-/// Runs a migration as [`run`] does; a failure says whether nothing of the migration is known to be
+/// Migrations run one after another, each recorded, with the fingerprint of the schema they leave
+/// read once, onto the newest row, rather than after each: only the newest row's is ever compared,
+/// nothing but the run changes the schema while it holds the lock, and each read is of the whole
+/// catalog, so a read after each made a long history run from empty, as a new database's does, cost
+/// its length times its schema. A migration that may leave part of itself when it fails has the
+/// fingerprint read before it, so that the next run sees what it left as a change; after one that
+/// fails and leaves nothing, the schema is the one the migrations before it left, and is read then.
+struct Runs {
+    /// The newest row the run wrote, while it is marked pending.
+    unread: Option<String>,
+}
+
+impl Runs {
+    fn new() -> Runs {
+        Runs { unread: None }
+    }
+
+    /// Runs `m` and records it; a failure says whether nothing of it is in place, as [`run_undone`]'s
+    /// does.
+    async fn run(&mut self, db: &mut Db, m: &Migration) -> Result<(), (Error, bool)> {
+        if may_leave_part(&m.sql, db.dialect()) {
+            self.finish(db).await;
+        }
+        let result = run_undone(db, m, true).await;
+        match result {
+            Ok(()) => self.unread = Some(m.name.clone()),
+            Err((_, true)) => self.finish(db).await,
+            // What it may have left must not be read as the schema the rows before it left: they stay
+            // pending, as a run cut off leaves them.
+            Err(_) => self.unread = None,
+        }
+        result
+    }
+
+    /// Stores the fingerprint of the schema the run left on its newest row. A fingerprint that can't
+    /// be read leaves the row pending, which the next deploy refuses, rather than reading as a
+    /// migration that failed.
+    async fn finish(&mut self, db: &mut Db) {
+        if let Some(name) = self.unread.take() {
+            let _ = store_fingerprint(db, &name).await;
+        }
+    }
+}
+
+/// Runs a migration, with its row where `record` says; a failure says whether nothing of it is known to be
 /// in place: never on MySQL, which commits each DDL statement, nor where a statement run outside a
 /// transaction may have left part of itself, or finished before its row could be written.
 async fn run_undone(db: &mut Db, m: &Migration, record: bool) -> Result<(), (Error, bool)> {
@@ -725,13 +772,7 @@ async fn run_once(db: &mut Db, m: &Migration, record: bool) -> Result<(), Ran> {
         // The statement is in place from here, so a failure is no longer one that left nothing.
         reset.map_err(Ran::Partly)?;
         if record {
-            let recorded = async {
-                let lines = catalog(db).await?;
-                let value = fingerprint_of(db, &lines).await?;
-                db.exec_with(&format!("update {HISTORY_TABLE} set applied_at = {}, fingerprint = {} where name = {}", now_sql(d), db.param(1), db.param(2)), &[&value, &m.name]).await?;
-                store_catalog(db, &m.name, &lines).await
-            };
-            recorded.await.map_err(Ran::Partly)?;
+            db.exec_with(&format!("update {HISTORY_TABLE} set applied_at = {}, fingerprint = {} where name = {}", now_sql(d), db.param(1), db.param(2)), &[&PENDING, &m.name]).await.map_err(Ran::Partly)?;
         }
         return Ok(());
     }
@@ -766,13 +807,7 @@ async fn run_once(db: &mut Db, m: &Migration, record: bool) -> Result<(), Ran> {
     }
     let on = if d == Dialect::Sqlite { db.exec("pragma foreign_keys = on").await } else { Ok(()) };
     result?;
-    on.map_err(Ran::Partly)?;
-    // The migration has committed: a fingerprint that can't be read now leaves its row pending,
-    // which the next deploy refuses, rather than reading as a migration that failed.
-    if record {
-        let _ = store_fingerprint(db, &m.name).await;
-    }
-    Ok(())
+    on.map_err(Ran::Partly)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2814,11 +2849,10 @@ async fn deploy_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
     let d = db.dialect();
     let mut code = 0;
     let mut applied: Vec<serde_json::Value> = Vec::new();
+    let mut runs = Runs::new();
     for m in &plan.pending {
         let at = std::time::Instant::now();
-        match run_undone(db, m, true).await {
-            // Its row holds the fingerprint it left, so that a run cut off after it, or a migration
-            // after it that fails and leaves part of itself, is seen by the next run.
+        match runs.run(db, m).await {
             Ok(()) => {
                 let ms = at.elapsed().as_millis();
                 rows.row(log, &paint("green", "✓"), &m.name, &format!("applied {}", paint("dim", &format!("· {ms} ms"))));
@@ -2834,6 +2868,7 @@ async fn deploy_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
             }
         }
     }
+    runs.finish(db).await;
     set_result(serde_json::json!({ "migrations": applied }));
     if code == 0 {
         log(&format!("{} Applied {} migration{}", paint("green", "✓"), plan.pending.len(), if plan.pending.len() == 1 { "" } else { "s" }));
@@ -3224,7 +3259,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
             if k == order.len() {
                 break;
             }
-            if let Err(e) = run(shadows.db(lane), &order[k], false).await {
+            if let Err(e) = run(shadows.db(lane), &order[k]).await {
                 return Ok(Err(format!("{} fails when replayed in a shadow database: {e}", order[k].name)));
             }
         }
@@ -5103,7 +5138,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             crate::diff::postgres::style_statements(shadows.db(c), &mut moves, &target.verbatim).await?;
             if !moves.is_empty() {
                 let file = Migration { name: "moves".into(), time: String::new(), path: PathBuf::new(), sql: moves.iter().map(|m| format!("{m};")).collect::<Vec<_>>().join("\n") };
-                run(shadows.db(c), &file, false).await?;
+                run(shadows.db(c), &file).await?;
                 current = crate::diff::read(shadows.db(c)).await?;
                 moved = Some(catalog(shadows.db(c)).await?);
             }
@@ -5172,7 +5207,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             shadows.taint(c2);
             if !moves.is_empty() {
                 let file = Migration { name: "moves".into(), time: String::new(), path: PathBuf::new(), sql: moves.iter().map(|m| format!("{m};")).collect::<Vec<_>>().join("\n") };
-                run(shadows.db(c2), &file, false).await?;
+                run(shadows.db(c2), &file).await?;
             }
             (failed, hazards) = run_pieces(shadows.db(c2), pieces(&None, &plan)).await?;
             reached = catalog(shadows.db(c2)).await?;
@@ -6349,14 +6384,16 @@ async fn dev_without_shadows(db: &mut Db, opts: &Options, files: &[Migration], a
     if !pending.is_empty() {
         ensure_history(db).await?;
     }
+    let mut runs = Runs::new();
     for m in &pending {
         let started = std::time::Instant::now();
-        if let Err(e) = run(db, m, true).await {
+        if let Err((e, _)) = runs.run(db, m).await {
             failed(&mut rows, m, &e, d, log);
             return Ok(Some(1));
         }
         rows.row(log, &paint("green", "✓"), &m.name, &format!("applied {}", paint("dim", &format!("· {} ms", started.elapsed().as_millis()))));
     }
+    runs.finish(db).await;
     if pending.is_empty() {
         log(&format!("{} Up to date with the migrations", paint("green", "✓")));
     }
@@ -6867,7 +6904,7 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
                 if let Ok(Ok(())) = run_to(shadows.db(lane), &statements, &[], &base).await {
                     runs = true;
                     for m in &pending {
-                        if run(shadows.db(lane), m, false).await.is_err() {
+                        if run(shadows.db(lane), m).await.is_err() {
                             runs = false;
                             break;
                         }
@@ -6913,14 +6950,16 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
         insert_row(db, m, true, None).await?;
         rows.row(log, &paint("green", "+"), &m.name, "recorded: already in place");
     }
+    let mut runs = Runs::new();
     for m in &pending {
         let started = std::time::Instant::now();
-        if let Err(e) = run(db, m, true).await {
+        if let Err((e, _)) = runs.run(db, m).await {
             failed(&mut rows, m, &e, d, log);
             return Ok(1);
         }
         rows.row(log, &paint("green", "✓"), &m.name, &format!("applied {}", paint("dim", &format!("· {} ms", started.elapsed().as_millis()))));
     }
+    runs.finish(db).await;
     if rewind_rows.is_empty() && records.is_empty() && pending.is_empty() {
         log(&format!("{} Up to date with the migrations", paint("green", "✓")));
     }

@@ -384,7 +384,7 @@ async fn storage(db: &mut Db) -> Result<BTreeMap<String, Stored>, Error> {
 /// elsewhere it runs the file and says nothing.
 pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard>, Error> {
     if db.dialect() != Dialect::Postgres {
-        run(db, m, false).await?;
+        run(db, m).await?;
         return Ok(vec![]);
     }
     let before = storage(db).await?;
@@ -475,7 +475,7 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
         }
         }
     });
-    run(db, m, false).await?;
+    run(db, m).await?;
     // A table renamed keeps its storage; one given new storage was copied, but for a truncate,
     // which empties it at once. An index given new storage on a table that wasn't copied was
     // built again, reading every row while its table's lock blocks reads and writes.
