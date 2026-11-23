@@ -908,7 +908,7 @@ async fn db_push_refuses_a_schema_that_declares_nothing(mut p: P) {
     p.schema("-- emptied\n\n");
     p.output();
     assert_eq!(p.db_push().await, 1);
-    assert_has!(p.output(), r"✗ Nothing is declared in \S*schema\.sql\n  Taking this database to it would drop every table, with its rows\.");
+    assert_has!(p.output(), r"✗ Nothing is declared in \S*schema\.sql\n  Synchronizing this database with it would drop every table, with its rows\.");
     assert_eq!(p.rows("select name from users").await.len(), 1);
 }
 
@@ -3143,7 +3143,7 @@ async fn a_lock_that_cant_be_read_is_refused() {
     assert_eq!(p.dev().await, 0, "{}", p.peek());
     p.file("20261027110000_draft.sql", "create table b (id integer);");
     let lock = p.dir.join(reylo_migrate::lock::LOCK);
-    std::fs::write(&lock, b"migrations:\n  - 20261027100000_a.sql \xff\n").unwrap();
+    std::fs::write(&lock, b"migrations:\n  - name: 20261027100000_a.sql\n    checksum: \xff\n").unwrap();
     p.output();
     assert_eq!(p.migrate().await, 1);
     assert_has!(p.output(), r"✗ Reylo can't read \S*reylo\.lock: [^\n]*UTF-8");
@@ -3153,6 +3153,35 @@ async fn a_lock_that_cant_be_read_is_refused() {
     assert_eq!(p.status().await, 1);
     assert_eq!(p.dev().await, 1);
     assert_eq!(p.output().matches("Reylo can't read").count(), 3);
+    assert_eq!(p.history().await, ["20261027100000_a.sql"]);
+}
+
+/// A lock a newer Reylo wrote is refused by every command, and none writes over it: history pull
+/// and lock would otherwise write it again from one database's history, by this version's rules,
+/// losing what that database hasn't run.
+#[tokio::test(flavor = "current_thread")]
+async fn a_lock_a_newer_reylo_wrote_is_refused_and_kept() {
+    let mut p = P::new(Dialect::Sqlite).await.unwrap();
+    p.linear();
+    p.schema("create table a (id integer);");
+    p.file("20261027100000_a.sql", "create table a (id integer);");
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    p.file("20261027110000_b.sql", "create table b (id integer);");
+    let lock = p.dir.join(reylo_migrate::lock::LOCK);
+    let newer = "version: 2\nmigrations:\n  - name: 20261027100000_a.sql\n    checksum: 0123abcd\n  - name: 20261027110000_b.sql\n    checksum: 4567cdef\n    after: 20261027100000_a.sql\n";
+    std::fs::write(&lock, newer).unwrap();
+    p.output();
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote \S*reylo\.lock[\s\S]*It is a lock of version 2, and Reylo \S+ reads version 1 and older\.[\s\S]*Upgrade Reylo to read it\.");
+    assert_eq!(p.status().await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote");
+    assert_eq!(p.dev().await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote");
+    assert_eq!(p.run(async |o, log| reylo_migrate::history_pull(o, log).await).await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote");
+    assert_eq!(p.run(async |o, log| reylo_migrate::lock_from_history(o, log).await).await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote");
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), newer);
     assert_eq!(p.history().await, ["20261027100000_a.sql"]);
 }
 

@@ -215,3 +215,50 @@ const MOVED: Record<string, string> = {
  * goes to its page, and a link to any other heading to the intro's.
  */
 export const movedAnchorsScript = `(function(){var h=location.hash.slice(1);if(!h)return;var m=${JSON.stringify(MOVED)};location.replace(m[h]||'/docs#'+h)})()`;
+
+/**
+ * Where a link to a section of Reylo Migrate's docs goes, now that they are pages of their own
+ * (/migrate/usage and /migrate/cli) rather than one at /migrate/docs: the anchor the one page gave
+ * each heading, and its place now. A frozen list, as `MOVED` is.
+ */
+const MIGRATE_MOVED: Record<string, string> = {
+  "workflows": "/migrate/usage#workflows",
+  "trying-a-change": "/migrate/usage#trying-a-change",
+  "dropping-and-renaming": "/migrate/usage#dropping-and-renaming",
+  "switching-branches": "/migrate/usage#switching-branches",
+  "deploying": "/migrate/usage#deploying",
+  "starting-over": "/migrate/usage#starting-over",
+  "adopting-a-hotfix": "/migrate/usage#adopting-a-hotfix",
+  "schema-schemasql": "/migrate/usage#schema-schemasql",
+  "enums-and-domains": "/migrate/usage#enums-and-domains",
+  "generated-columns": "/migrate/usage#generated-columns",
+  "exclusion-constraints": "/migrate/usage#exclusion-constraints",
+  "partial-indexes": "/migrate/usage#partial-indexes",
+  "materialized-views": "/migrate/usage#materialized-views",
+  "functions-and-triggers": "/migrate/usage#functions-and-triggers",
+  "row-level-security": "/migrate/usage#row-level-security",
+  "grants-and-comments": "/migrate/usage#grants-and-comments",
+  "schemaless-mode": "/migrate/usage#schemaless-mode",
+  "ordering": "/migrate/usage#ordering",
+  "lockfile": "/migrate/usage#lockfile",
+  "lock-free-mode": "/migrate/usage#lock-free-mode",
+  "cli-reylo-migrate": "/migrate/cli",
+  "init": "/migrate/cli#init",
+  "new": "/migrate/cli#new",
+  "dev": "/migrate/cli#dev",
+  "deploy": "/migrate/cli#deploy",
+  "status": "/migrate/cli#status",
+  "lock": "/migrate/cli#lock",
+  "history-push": "/migrate/cli#history-push",
+  "history-pull": "/migrate/cli#history-pull",
+  "db-push": "/migrate/cli#push",
+  "db-reset": "/migrate/cli#reset",
+  "db-wipe": "/migrate/cli#wipe",
+  "db-introspect": "/migrate/cli#introspect",
+  "configuration": "/migrate/cli#configuration",
+  "api": "/migrate/usage#api",
+};
+
+/** On /migrate/docs: a link to a section that moved goes to its page; any other stays. */
+export const migrateMovedAnchorsScript = `(function(){var m=${JSON.stringify(MIGRATE_MOVED)}[location.hash.slice(1)];if(m)location.replace(m)})()`;
+

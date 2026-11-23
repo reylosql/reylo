@@ -1,5 +1,5 @@
 {
-  "at": "2026-11-22",
+  "at": "2026-11-23",
   "tools": {
     "reylo": {
       "name": "Reylo Migrate",
@@ -8,13 +8,34 @@
         "sql-schema": {
           "state": "y"
         },
+        "check": {
+          "state": "y"
+        },
+        "expression-indexes": {
+          "state": "y"
+        },
+        "partial-indexes": {
+          "state": "y"
+        },
+        "generated-columns": {
+          "state": "y"
+        },
+        "domains": {
+          "state": "y"
+        },
         "views": {
           "state": "y"
         },
-        "functions-triggers": {
+        "functions": {
+          "state": "y"
+        },
+        "triggers": {
           "state": "y"
         },
         "rls": {
+          "state": "y"
+        },
+        "extensions": {
           "state": "y"
         },
         "three-dialects": {
@@ -60,46 +81,74 @@
           "state": "n",
           "note": "The schema is Prisma's own schema language, and `prisma migrate dev --schema schema.sql` rejects SQL as invalid schema lines."
         },
+        "check": {
+          "state": "n",
+          "note": "Prisma's schema has no check constraint: `prisma db pull` leaves it out with a warning, and `prisma migrate dev` writes an empty migration."
+        },
+        "expression-indexes": {
+          "state": "n",
+          "note": "Prisma's schema has no expression index: `prisma db pull` leaves it out with a warning, and `prisma migrate dev` writes an empty migration."
+        },
+        "partial-indexes": {
+          "state": "p",
+          "note": "Only behind the `partialIndexes` preview feature, which `prisma db pull` turns on."
+        },
+        "generated-columns": {
+          "state": "n",
+          "note": "Prisma's schema has no computed column: `prisma db pull` writes it as a `dbgenerated` default, which `prisma migrate deploy` fails to run."
+        },
+        "domains": {
+          "state": "n",
+          "note": "Prisma's schema has no domain: `prisma db pull` types the column as `Int`, and `prisma migrate dev` adds it as a plain `integer`."
+        },
         "views": {
           "state": "n",
-          "note": "With the `views` preview feature, `prisma db pull` writes the view, but `prisma migrate dev --create-only` writes an empty migration for a changed query."
+          "note": "With the `views` preview feature, `prisma db pull` writes the view, but `prisma migrate dev` writes an empty migration for it."
         },
-        "functions-triggers": {
+        "functions": {
           "state": "n",
-          "note": "Prisma's schema cannot declare a function or trigger: `prisma db pull` leaves both out, and `prisma migrate dev --create-only` writes an empty migration."
+          "note": "Prisma's schema has no function: `prisma db pull` leaves it out, and `prisma migrate dev` writes an empty migration."
+        },
+        "triggers": {
+          "state": "n",
+          "note": "Prisma's schema has no trigger: `prisma db pull` leaves it out, and `prisma migrate dev` writes an empty migration."
         },
         "rls": {
           "state": "n",
-          "note": "Prisma's schema cannot declare a policy: `prisma db pull` warns that row level security is not supported, and `prisma migrate dev --create-only` writes an empty migration."
+          "note": "Prisma's schema has no policy: `prisma db pull` warns that row level security isn't supported, and `prisma migrate dev` writes an empty migration."
+        },
+        "extensions": {
+          "state": "p",
+          "note": "Only behind the `postgresqlExtensions` preview feature, and `prisma db pull` leaves the extension out."
         },
         "three-dialects": {
           "state": "y"
         },
         "renames": {
           "state": "n",
-          "note": "`prisma migrate dev` warns that the column's values will be lost and, once confirmed, writes a drop and an add, so `prisma migrate deploy` empties the column."
+          "note": "On a rename, `prisma migrate dev` warns that the column's values will be lost and, once confirmed, writes a drop and an add, so `prisma migrate deploy` empties the column."
         },
         "data-loss": {
           "state": "y"
         },
         "view-dependencies": {
           "state": "n",
-          "note": "`prisma migrate dev --create-only` writes a bare `set data type`, which `prisma migrate deploy` cannot run while a view reads the column."
+          "note": "For a column a view reads, `prisma migrate dev --create-only` writes a bare `set data type`, which `prisma migrate deploy` cannot run."
         },
         "non-blocking": {
           "state": "n",
-          "note": "`prisma migrate dev --create-only` writes a plain `create index`, and `@@index` takes no `concurrently` argument."
+          "note": "Prisma writes a plain `create index`, and `@@index` takes no `concurrently` argument."
         },
         "shadow": {
           "state": "y"
         },
         "drift": {
           "state": "n",
-          "note": "`prisma migrate deploy` ran the pending migration on a database with a hand-added column without a word, and `prisma migrate status` listed only the pending migration."
+          "note": "On a database with a hand-added column, `prisma migrate deploy` ran the pending migration without a word, and `prisma migrate status` listed only the pending migration."
         },
         "out-of-order": {
           "state": "n",
-          "note": "`prisma migrate deploy` ran a merged migration that sorts before one already run without a word."
+          "note": "A merged migration that sorts before one already run was run by `prisma migrate deploy` without a word."
         },
         "branch-switch": {
           "state": "n",
@@ -107,7 +156,7 @@
         },
         "lockfile": {
           "state": "n",
-          "note": "`migration_lock.toml` holds only the database provider, so two branches' migrations merged in git without a conflict."
+          "note": "Prisma's `migration_lock.toml` holds only the database provider, so two branches' migrations merged in git without a conflict."
         },
         "open-source": {
           "state": "y"
@@ -122,15 +171,39 @@
           "state": "n",
           "note": "The schema is TypeScript: `drizzle-kit generate` finds no schema in a `.sql` file."
         },
+        "check": {
+          "state": "y"
+        },
+        "expression-indexes": {
+          "state": "y"
+        },
+        "partial-indexes": {
+          "state": "y"
+        },
+        "generated-columns": {
+          "state": "y"
+        },
+        "domains": {
+          "state": "n",
+          "note": "Drizzle's schema has no domain: `drizzle-kit pull` writes the column as a custom type, and `drizzle-kit migrate` fails because the domain was never created."
+        },
         "views": {
           "state": "y"
         },
-        "functions-triggers": {
+        "functions": {
           "state": "n",
-          "note": "Drizzle's schema cannot declare a trigger or a trigger function: `drizzle-kit pull` leaves both out, and `drizzle-kit generate` finds no changes."
+          "note": "Drizzle's schema has no function: `drizzle-kit pull` leaves it out, and `drizzle-kit generate` finds no changes."
+        },
+        "triggers": {
+          "state": "n",
+          "note": "Drizzle's schema has no trigger: `drizzle-kit pull` leaves it out, and `drizzle-kit generate` finds no changes."
         },
         "rls": {
           "state": "y"
+        },
+        "extensions": {
+          "state": "n",
+          "note": "Drizzle's schema has no extension: `drizzle-kit pull` leaves it out, and `drizzle-kit generate` finds no changes."
         },
         "three-dialects": {
           "state": "y"
@@ -140,35 +213,35 @@
         },
         "data-loss": {
           "state": "p",
-          "note": "`drizzle-kit push` asks to confirm the lost data, but `drizzle-kit generate` writes the drop without asking and `drizzle-kit migrate` runs it."
+          "note": "The `drizzle-kit push` command asks to confirm the lost data, but `drizzle-kit generate` writes the drop without asking and `drizzle-kit migrate` runs it."
         },
         "view-dependencies": {
           "state": "n",
-          "note": "`drizzle-kit generate` writes a bare `set data type`, which fails while a view reads the column."
+          "note": "For a column a view reads, `drizzle-kit generate` writes a bare `set data type`, which fails."
         },
         "non-blocking": {
           "state": "n",
-          "note": "`drizzle-kit generate` writes a plain `create index`, and Drizzle 1.0's index builder has no `.concurrently()`."
+          "note": "Drizzle writes a plain `create index`, and its index builder has no `.concurrently()`."
         },
         "shadow": {
           "state": "n",
-          "note": "`drizzle-kit generate` writes the migration from snapshots without opening a database, and `drizzle-kit migrate` runs it straight on the target."
+          "note": "Drizzle writes the migration from snapshots without opening a database, and `drizzle-kit migrate` runs it straight on the target."
         },
         "drift": {
           "state": "n",
-          "note": "`drizzle-kit migrate` ran the pending migration on a database with a hand-added column without a word."
+          "note": "On a database with a hand-added column, `drizzle-kit migrate` ran the pending migration without a word."
         },
         "out-of-order": {
           "state": "n",
-          "note": "`drizzle-kit migrate` ran a merged migration that sorts before one already run without a word, even when the two migrations end in different schemas in each order."
+          "note": "A merged migration that sorts before one already run was run by `drizzle-kit migrate` without a word, even when the two migrations end in different schemas in each order."
         },
         "branch-switch": {
           "state": "n",
-          "note": "`drizzle-kit migrate` left the other branch's table in place unmentioned, and after `drizzle-kit push` removed it, `drizzle-kit migrate` failed with \"relation already exists\"."
+          "note": "After a switch, `drizzle-kit migrate` left the other branch's table in place unmentioned, and after `drizzle-kit push` removed it, `drizzle-kit migrate` failed with \"relation already exists\"."
         },
         "lockfile": {
           "state": "n",
-          "note": "Each `drizzle-kit generate` writes its own folder, so two branches' migrations merged in git without a conflict."
+          "note": "Each migration is a folder of its own, so two branches' migrations merged in git without a conflict."
         },
         "open-source": {
           "state": "y"
@@ -182,17 +255,41 @@
         "sql-schema": {
           "state": "y"
         },
+        "check": {
+          "state": "y"
+        },
+        "expression-indexes": {
+          "state": "y"
+        },
+        "partial-indexes": {
+          "state": "y"
+        },
+        "generated-columns": {
+          "state": "y"
+        },
+        "domains": {
+          "state": "p",
+          "note": "The free standard build refuses domains until `atlas login`, and the community build adds the column without creating its domain."
+        },
         "views": {
           "state": "p",
-          "note": "Atlas Pro only: the free standard build refuses views until `atlas login`, and the community build ignores the change."
+          "note": "The free standard build refuses views until `atlas login`, and the community build ignores them."
         },
-        "functions-triggers": {
+        "functions": {
           "state": "p",
-          "note": "Atlas Pro only: the free standard build refuses functions until `atlas login`, and the community build ignores the change."
+          "note": "The free standard build refuses functions until `atlas login`, and the community build ignores them."
+        },
+        "triggers": {
+          "state": "p",
+          "note": "The free standard build refuses a trigger's function until `atlas login`, and the community build ignores both."
         },
         "rls": {
           "state": "p",
-          "note": "Atlas Pro only: the free standard build refuses policies until `atlas login`, and the community build ignores the change."
+          "note": "The free standard build refuses policies until `atlas login`, and the community build ignores them."
+        },
+        "extensions": {
+          "state": "p",
+          "note": "The free standard build refuses extensions until `atlas login`, and the community build ignores them."
         },
         "three-dialects": {
           "state": "y"
@@ -202,11 +299,11 @@
         },
         "data-loss": {
           "state": "p",
-          "note": "`atlas migrate diff` writes the drop and `atlas migrate apply` runs it without asking; `atlas schema apply` asks to approve every plan alike."
+          "note": "With `atlas migrate diff`, the drop is written and `atlas migrate apply` runs it without asking, while `atlas schema apply` asks to approve every plan alike."
         },
         "view-dependencies": {
           "state": "p",
-          "note": "Atlas Pro only: the free standard build refuses the view until `atlas login`, and the community build's `alter column type` fails on it."
+          "note": "The free standard build refuses the view until `atlas login`, and the community build's `alter column type` fails on it."
         },
         "non-blocking": {
           "state": "p",
@@ -217,14 +314,14 @@
         },
         "drift": {
           "state": "p",
-          "note": "Atlas Pro only: the free builds' `atlas migrate apply` ran the pending migration on a database with a hand-added column without a word."
+          "note": "On a database with a hand-added column, the free builds' `atlas migrate apply` ran the pending migration without a word."
         },
         "out-of-order": {
           "state": "y"
         },
         "branch-switch": {
           "state": "n",
-          "note": "`atlas migrate apply` refused this branch's migration as out of order, or ran it beside the other branch's table, and the community build has no `atlas migrate down`."
+          "note": "After a switch, `atlas migrate apply` refused this branch's migration as out of order, or ran it beside the other branch's table, and the community build has no `atlas migrate down`."
         },
         "lockfile": {
           "state": "y"
@@ -242,13 +339,34 @@
         "sql-schema": {
           "state": "y"
         },
+        "check": {
+          "state": "y"
+        },
+        "expression-indexes": {
+          "state": "y"
+        },
+        "partial-indexes": {
+          "state": "y"
+        },
+        "generated-columns": {
+          "state": "y"
+        },
+        "domains": {
+          "state": "y"
+        },
         "views": {
           "state": "y"
         },
-        "functions-triggers": {
+        "functions": {
+          "state": "y"
+        },
+        "triggers": {
           "state": "y"
         },
         "rls": {
+          "state": "y"
+        },
+        "extensions": {
           "state": "y"
         },
         "three-dialects": {
@@ -266,14 +384,14 @@
         },
         "non-blocking": {
           "state": "n",
-          "note": "`pgdelta schema apply` writes a plain `create index`, even for an index declared `concurrently`."
+          "note": "It writes a plain `create index`, even for an index declared `concurrently`."
         },
         "shadow": {
           "state": "y"
         },
         "drift": {
           "state": "p",
-          "note": "`pgdelta apply` refuses a plan whose database changed by hand since it was planned, but it keeps no migration history to deploy."
+          "note": "Its `apply` refuses a plan whose database changed by hand since it was planned, but it keeps no migration history to deploy."
         },
         "out-of-order": {
           "state": "n",
@@ -281,7 +399,7 @@
         },
         "branch-switch": {
           "state": "p",
-          "note": "`pgdelta schema apply` takes the database to this branch's schema and keeps the rest, but it keeps no migrations to rewind."
+          "note": "Its `schema apply` takes the database to this branch's schema and keeps the rest, but it keeps no migrations to rewind."
         },
         "lockfile": {
           "state": "n",
@@ -298,54 +416,81 @@
       "cells": {
         "sql-schema": {
           "state": "n",
-          "note": "`liquibase diff-changelog` compares two live databases, so the target schema has to be built into a second database first."
+          "note": "Liquibase's `diff-changelog` compares two live databases, so the target schema has to be built into a second database first."
+        },
+        "check": {
+          "state": "n",
+          "note": "For a new or changed check constraint, `liquibase diff-changelog` writes nothing."
+        },
+        "expression-indexes": {
+          "state": "y"
+        },
+        "partial-indexes": {
+          "state": "n",
+          "note": "For a new partial index, `liquibase diff-changelog` leaves out the `where` clause, so the index covers every row, and it writes nothing when the clause changes."
+        },
+        "generated-columns": {
+          "state": "p",
+          "note": "For a new computed column, `liquibase diff-changelog` writes it, but it writes a changed expression as an `addDefaultValue` that `liquibase update` fails to run."
+        },
+        "domains": {
+          "state": "n",
+          "note": "For a column of a new domain, `liquibase diff-changelog` adds the column without creating the domain, so `liquibase update` fails."
         },
         "views": {
           "state": "p",
           "note": "On MySQL, `liquibase diff-changelog` copies the view's query with the reference database's name in it, so the view reads the wrong database unless both share a name."
         },
-        "functions-triggers": {
+        "functions": {
           "state": "n",
-          "note": "`liquibase diff-changelog` writes nothing for a changed function or trigger, and refuses `--diff-types=functions,triggers` as unknown types."
+          "note": "For a new or changed function, `liquibase diff-changelog` writes nothing, and it refuses `--diff-types=functions` as an unknown type."
+        },
+        "triggers": {
+          "state": "n",
+          "note": "For a new or changed trigger, `liquibase diff-changelog` writes nothing, and it refuses `--diff-types=triggers` as an unknown type."
         },
         "rls": {
           "state": "n",
-          "note": "`liquibase diff-changelog` writes nothing for a changed policy, and refuses `--diff-types=policies` as an unknown type."
+          "note": "For a new or changed policy, `liquibase diff-changelog` writes nothing, and it refuses `--diff-types=policies` as an unknown type."
+        },
+        "extensions": {
+          "state": "n",
+          "note": "For a new extension, `liquibase diff-changelog` writes nothing."
         },
         "three-dialects": {
           "state": "y"
         },
         "renames": {
           "state": "n",
-          "note": "`liquibase diff-changelog` writes an `addColumn` and a `dropColumn`, and `liquibase update` loses the column's rows."
+          "note": "On a rename, `liquibase diff-changelog` writes an `addColumn` and a `dropColumn`, and `liquibase update` loses the column's rows."
         },
         "data-loss": {
           "state": "n",
-          "note": "`liquibase diff-changelog` writes the `dropColumn`, and `liquibase update` runs it without asking."
+          "note": "Liquibase writes the `dropColumn`, and `liquibase update` runs it without asking."
         },
         "view-dependencies": {
           "state": "n",
-          "note": "`liquibase diff-changelog` writes a bare `modifyDataType`, which `liquibase update` cannot run while a view reads the column."
+          "note": "For a column a view reads, `liquibase diff-changelog` writes a bare `modifyDataType`, which `liquibase update` cannot run."
         },
         "non-blocking": {
           "state": "n",
-          "note": "`liquibase diff-changelog` writes a plain `createIndex`."
+          "note": "Liquibase writes a plain `createIndex`."
         },
         "shadow": {
           "state": "n",
-          "note": "`liquibase update` runs the changelog straight on the target, and no command tries it on a throwaway database first."
+          "note": "Liquibase runs the changelog straight on the target, and no command tries it on a throwaway database first."
         },
         "drift": {
           "state": "n",
-          "note": "`liquibase update` ran the pending changeset on a database with a hand-added column without a word."
+          "note": "On a database with a hand-added column, `liquibase update` ran the pending changeset without a word."
         },
         "out-of-order": {
           "state": "n",
-          "note": "`liquibase update` ran a changeset that sorts before ones already run without a word."
+          "note": "A changeset that sorts before ones already run was run by `liquibase update` without a word."
         },
         "branch-switch": {
           "state": "n",
-          "note": "`liquibase update` ran this branch's changeset and left the other branch's table in place unmentioned."
+          "note": "After a switch, `liquibase update` ran this branch's changeset and left the other branch's table in place unmentioned."
         },
         "lockfile": {
           "state": "y"
@@ -360,30 +505,27 @@
       "name": "Flyway",
       "version": "13.13.0",
       "cells": {
-        "shadow": {
-          "state": "p",
-          "note": "Flyway Enterprise only: Community refuses `flyway diff` with a shadow build environment, and `flyway migrate` runs straight on the target."
-        },
-        "drift": {
-          "state": "p",
-          "note": "Flyway Enterprise only: Community refuses `flyway check -drift`, and `flyway migrate` ran the pending migration on a database with a hand-added column without a word."
-        },
-        "out-of-order": {
-          "state": "y"
-        },
-        "branch-switch": {
-          "state": "n",
-          "note": "`flyway migrate` refused with a checksum mismatch on the other branch's migration, leaving its table in place, and `flyway undo` needs a Redgate edition."
-        },
-        "lockfile": {
-          "state": "n",
-          "note": "Two branches' `V2__…` files merged in git without a conflict, and `flyway migrate` then refused with \"Found more than one migration with version 2\"."
-        },
-        "open-source": {
-          "state": "p",
-          "note": "The Apache-2.0 OSS edition has no `diff`, `check` or `undo`, which are in Redgate's editions under its EULA."
-        },
         "sql-schema": {
+          "state": "n",
+          "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
+        },
+        "check": {
+          "state": "n",
+          "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
+        },
+        "expression-indexes": {
+          "state": "n",
+          "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
+        },
+        "partial-indexes": {
+          "state": "n",
+          "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
+        },
+        "generated-columns": {
+          "state": "n",
+          "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
+        },
+        "domains": {
           "state": "n",
           "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
         },
@@ -391,11 +533,19 @@
           "state": "n",
           "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
         },
-        "functions-triggers": {
+        "functions": {
+          "state": "n",
+          "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
+        },
+        "triggers": {
           "state": "n",
           "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
         },
         "rls": {
+          "state": "n",
+          "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
+        },
+        "extensions": {
           "state": "n",
           "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
         },
@@ -418,6 +568,29 @@
         "non-blocking": {
           "state": "n",
           "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
+        },
+        "shadow": {
+          "state": "p",
+          "note": "Flyway Enterprise only: Community refuses `flyway diff` with a shadow build environment, and `flyway migrate` runs straight on the target."
+        },
+        "drift": {
+          "state": "p",
+          "note": "Flyway Enterprise only: Community refuses `flyway check -drift`, and `flyway migrate` ran the pending migration on a database with a hand-added column without a word."
+        },
+        "out-of-order": {
+          "state": "y"
+        },
+        "branch-switch": {
+          "state": "n",
+          "note": "After a switch, `flyway migrate` refused with a checksum mismatch on the other branch's migration, leaving its table in place, and `flyway undo` needs a Redgate edition."
+        },
+        "lockfile": {
+          "state": "n",
+          "note": "Two branches' `V2__…` files merged in git without a conflict, and `flyway migrate` then refused with \"Found more than one migration with version 2\"."
+        },
+        "open-source": {
+          "state": "p",
+          "note": "The Apache-2.0 OSS edition has no `diff`, `check` or `undo`, which are in Redgate's editions under its EULA."
         }
       }
     }

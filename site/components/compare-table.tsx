@@ -89,7 +89,7 @@ export function CompareTable({ set }: { set?: CompareSetName }) {
   return (
     <div className="reylo-compare">
       <div className="reylo-compare-scroll">
-        <div className="reylo-compare-grid not-prose" style={{ '--reylo-tools': compareTools.length, '--reylo-span': Math.max(compareTools.length, compareSet().tools.length) } as CSSProperties}>
+        <div className="reylo-compare-grid not-prose" style={{ '--reylo-tools': compareTools.length, '--reylo-span': set === 'migrate' ? compareTools.length : Math.max(compareTools.length, compareSet().tools.length) } as CSSProperties}>
           <div className="reylo-compare-corner" style={{ gridRow: 1, gridColumn: 1 }} />
           <div className="reylo-compare-head" style={{ gridRow: 1, gridColumn: 3 }}>
             <span className="reylo-compare-name reylo-compare-brand">

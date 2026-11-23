@@ -247,15 +247,17 @@ create table users (
 create table tags (name text primary key, color text) without rowid;
 ```
 
----
-
-### Compared with Prisma
+<Callout title="Compared with Prisma">
 
 Prisma's schema language is lossy: it describes part of the database, and the rest never reaches the schema file. It has no CHECK constraints, triggers, functions, row level security, grants or comments, and Prisma Migrate ignores a change to a view. Each of those goes into SQL you [add to a migration by hand](https://www.prisma.io/docs/orm/v7/prisma-migrate/workflows/unsupported-database-features).
 
-### Compared with Supabase
+</Callout>
+
+<Callout title="Compared with Supabase">
 
 Supabase introduced [declarative schemas](https://supabase.com/docs/guides/local-development/declarative-database-schemas) in 2025: plain SQL files in `supabase/schemas/`, diffed into migrations. They work on Postgres, for projects on Supabase. Reylo Migrate takes the same approach to MySQL and SQLite, on any host.
+
+</Callout>
 
 ## The most advanced multi-dialect diff engine
 
@@ -373,21 +375,25 @@ On Postgres, the check is added `not valid` and validated in a second migration,
 
 The same holds on hosted databases: Supabase, Neon, PlanetScale and Turso among them. A platform's own objects, such as Supabase's `auth.users`, are left alone.
 
----
-
-### Compared with pg-delta
+<Callout title="Compared with pg-delta">
 
 Supabase's [pg-delta](https://supabase.com/blog/declarative-schemas-2-0-pg-delta) works the same way: it "never parses SQL to understand it", and resolves every state in a real Postgres. It became the default diff engine of Supabase's CLI this month, and it supports Postgres alone. Reylo Migrate's engine reimplements that design in Rust. It's at parity with pg-delta on Postgres, and carries the same approach to MySQL and SQLite.
 
-### Compared with Atlas
+</Callout>
+
+<Callout title="Compared with Atlas">
 
 [Atlas](https://atlasgo.io) works out each change on a dev database too, from a schema in SQL or in its own HCL, on several databases. Its free builds leave out views, triggers, functions, policies and more. The [community build](https://atlasgo.io/community-edition) ignores a change to one, and the standard build asks you to log in to [Atlas Pro](https://atlasgo.io/pricing), at $9 per user a month. Drift detection is in Pro too. Reylo Migrate is MIT licensed, with nothing held back for a paid tier.
 
-### Compared with Liquibase
+</Callout>
+
+<Callout title="Compared with Liquibase">
 
 [Liquibase](https://www.liquibase.com) keeps each change as a changeset you write in XML, YAML or SQL, and its `diff-changelog` command writes changesets from the difference between two databases. That diff has no functions, triggers or policies. It writes a renamed column as a drop and an add, which loses the column's rows, and it drops a column without asking. Since 5.0, Liquibase's license is the FSL, which isn't an open source license.
 
-### Compared with Prisma and Drizzle
+</Callout>
+
+<Callout title="Compared with Prisma and Drizzle">
 
 Prisma and Drizzle Kit write each migration from their own model of the schema, which leaves out what in the database depends on what. Retype a column that a view reads, and both write a bare type change that fails when it runs. Both write a plain `create index`, which blocks writes on a busy table. Prisma writes a renamed column as a drop and an add, which empties it, and Drizzle's `generate` writes a dropped column without asking.
 
@@ -398,6 +404,8 @@ Their most-upvoted open requests are for what `schema.sql` already holds:
 - **Comments:** [prisma/orm#8703](https://github.com/prisma/orm/issues/8703) and [drizzle-team/drizzle-orm#886](https://github.com/drizzle-team/drizzle-orm/issues/886), over 200 each
 - **Partitions:** [drizzle-team/drizzle-orm#2854](https://github.com/drizzle-team/drizzle-orm/issues/2854) and [prisma/orm#1708](https://github.com/prisma/orm/issues/1708), over 100 each
 - **Generated columns:** [prisma/orm#6336](https://github.com/prisma/orm/issues/6336), over 100
+
+</Callout>
 
 ## Schemaless mode
 
@@ -426,15 +434,17 @@ create table users (
 );
 ```
 
----
-
-### Compared with Rails
+<Callout title="Compared with Rails">
 
 Schemaless mode is how Rails works: migrations are the source of truth, and `schema.rb` is dumped from the database after they run, as `reylo db introspect` prints it. Rails leaves the migration for you to write, where Reylo Migrate can draft it from the change you made to your development database.
 
-### Compared with Django
+</Callout>
+
+<Callout title="Compared with Django">
 
 With a `schema.sql`, Reylo Migrate works the way Django does, where `makemigrations` writes each migration from a change to your models. Django's models stop at what its ORM can declare, so a trigger or a function goes into a hand-written `RunSQL` step. In `schema.sql`, it's one more statement.
+
+</Callout>
 
 ## Migration ordering
 
@@ -449,13 +459,13 @@ migrations:
 
 Two branches that each add a migration conflict on the lock in git, before either reaches a database. The second branch to merge keeps main's lines, then runs `reylo migrate dev`, which runs its migrations after main's and adds them back. Every database then runs every migration in one order, and an edit to a locked migration fails its checksum. On a busy team, though, every two branches that add migrations conflict, even when they touch different tables.
 
----
-
-### Compared with Drizzle
+<Callout title="Compared with Drizzle">
 
 Drizzle Kit kept a journal, `meta/_journal.json`, through its 0.x releases, and two branches that each added a migration conflicted on it. Its maintainers called that folder structure "completely unusable due to git incompatibility" in [a 2024 discussion](https://github.com/drizzle-team/drizzle-orm/discussions/2832). Drizzle 1.0, now a release candidate, removes the journal and runs migrations in any order. Some teams want that, and some want the conflict. Reylo Migrate gives each team the choice: keep `reylo.lock` for strict ordering, or delete it.
 
-### Compared with other tools
+</Callout>
+
+<Callout title="Compared with other tools">
 
 A file built to make parallel branches conflict is an old idea, and most tools that keep a strict order have one:
 
@@ -472,6 +482,8 @@ A file built to make parallel branches conflict is an old idea, and most tools t
 | [Drizzle 1.0](https://github.com/drizzle-team/drizzle-orm/releases/tag/v1.0.0-beta.16), [dbmate](https://github.com/amacneil/dbmate/issues/159#issuecomment-698449138) | Nothing | Run in any order |
 
 [Zenefits wrote the pattern up in 2015](https://web.archive.org/web/20180520172740/https://engineering.zenefits.com/2015/11/using-old-ideas-to-solve-new-problems/), after migrations from parallel branches kept merging cleanly in git and then breaking the main branch. It went "from having four merge errors every week to having none". The tools without such a file take the other side of the trade: their branches never conflict, so a collision shows up when the migrations run, or not at all. Even Rails, when it added a full list of versions to `schema.rb` in 2026, sorted the list so that parallel branches wouldn't conflict on it ([rails/rails#58166](https://github.com/rails/rails/pull/58166)).
+
+</Callout>
 
 ## Lock-free integrity
 
@@ -516,15 +528,17 @@ $ reylo migrate lock
 ✓ The migrations match reylo/schema.sql
 ```
 
----
-
-### Compared with Kysely
+<Callout title="Compared with Kysely">
 
 [Kysely's migrator](https://github.com/kysely-org/kysely/blob/master/src/migration/migrator.ts) refuses any migration that sorts before one already run. With `allowUnorderedMigrations` on, it runs every one of them without a check. Reylo Migrate checks whether the order changes the result, and refuses only where it does.
 
-### Compared with Flyway
+</Callout>
+
+<Callout title="Compared with Flyway">
 
 [Flyway's `outOfOrder` setting](https://documentation.red-gate.com/fd/flyway-out-of-order-setting-277579015.html) is the same switch. Off, the default, a migration that sorts before one already run fails validation, and nothing runs. On, it runs, and Flyway warns that the migration "may not be reproducible".
+
+</Callout>
 
 ## A typical workflow
 

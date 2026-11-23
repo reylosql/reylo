@@ -157,6 +157,10 @@ export function DocsShell({
     </>
   );
 
+  // The entries the table of contents lists. A page with none has no column for it, not one that
+  // says "No headings": its room stays, so the page's column sits where every other page's does.
+  const listed = centered ? [] : foldToc(toc, fold);
+
   if (pages) {
     return (
       <DocsLayout
@@ -173,14 +177,14 @@ export function DocsShell({
         <TopRow brand={brand} github={github} paged />
         <PageListMenu list={pages} brand={brand} github={github} title={pageTitle ?? ''} />
         <DocsPage
-          toc={centered ? [] : foldToc(toc, fold)}
-          tableOfContent={centered ? { enabled: false } : { style: 'clerk', container: { className: 'ps-4 pt-8' }, footer: (
+          toc={listed}
+          tableOfContent={!listed.length ? { enabled: false } : { style: 'clerk', container: { className: 'ps-4 pt-8' }, footer: (
                   <>
                     <TocFollow />
                     {star && toc.length ? <TocStar github={github} /> : null}
                   </>
                 ) }}
-          tableOfContentPopover={centered ? { enabled: false } : undefined}
+          tableOfContentPopover={!listed.length ? { enabled: false } : undefined}
           breadcrumb={{ enabled: false }}
           footer={{ enabled: false }}
         >

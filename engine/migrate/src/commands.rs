@@ -1670,7 +1670,16 @@ fn read_lock(opts: &Options) -> Result<lock::Lock, Problem> {
             .fix("Then run this branch's migrations after main's, which locks them again", &["reylo migrate dev"])),
         lock::State::Invalid(e) => Err(Problem::new("lock-unreadable", format!("Reylo can't read {path} as a lock")).note(unreadable_why(&e)).fix("Write it again from what a database applied", &["reylo migrate history pull"])),
         lock::State::Unreadable(why) => Err(unreadable_lock_problem(opts, &why)),
+        lock::State::Newer(version) => Err(newer_lock_problem(opts, version)),
     }
+}
+
+/// The refusal of a lock a newer Reylo wrote: read by this one's rules, every checksum in it would
+/// look edited, and written again, it would lose what the newer version keeps.
+fn newer_lock_problem(opts: &Options, version: u64) -> Problem {
+    Problem::new("lock-newer", format!("A newer Reylo wrote {}", shown(&opts.lock)))
+        .note(format!("It is a lock of version {version}, and Reylo {} reads version {} and older.", env!("CARGO_PKG_VERSION"), lock::VERSION))
+        .note("Upgrade Reylo to read it.")
 }
 
 /// The refusal of a lock that is there and can't be read: read as none, it would turn its checksums
@@ -1750,10 +1759,12 @@ fn old_lock(opts: &Options) -> Option<Problem> {
 }
 
 /// The refusal of a project that still holds the lock under its old name ([`old_lock`]), or whose
-/// lock is there and can't be read: every command that reads or writes the lock makes it first.
+/// lock is there and can't be read, or was written by a newer Reylo: every command that reads or
+/// writes the lock makes it first, so that none writes over what it can't read.
 fn refuse_lock_file(opts: &Options, log: Log<'_>) -> Option<i32> {
     let unreadable = || match opts.lock_state() {
         lock::State::Unreadable(why) => Some(unreadable_lock_problem(opts, &why)),
+        lock::State::Newer(version) => Some(newer_lock_problem(opts, version)),
         _ => None,
     };
     old_lock(opts).or_else(unreadable).map(|p| refuse(&[p], log))
@@ -1790,7 +1801,7 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
             (Ok(a), Ok(b)) => Some(
                 Problem::new("history-out-of-order", "This database ran its migrations in another order than a fresh database runs them, and the two end differently")
                     .lines(describe_diff("this database", &crate::catalog::without_comments(&a), "a fresh database", &crate::catalog::without_comments(&b)))
-                    .note("Elsewhere, write a migration that takes both to the same schema.")
+                    .note("Elsewhere, write a migration that leaves both with the same schema.")
                     .fix("On a development database, rebuild it in name order", &["reylo db reset"]),
             ),
             (Err((m, e)), _) | (_, Err((m, e))) => Some(Problem::new("replay-fails", format!("Replaying {m} in a shadow database fails")).note(e)),
@@ -1862,7 +1873,7 @@ fn lock_order_problem(opts: &Options, applied: &[&HistoryRow], order: &[Migratio
     Some(
         Problem::new("history-out-of-order", format!("This database applied {} where {} lists {}", applied[k].name, shown(&opts.lock), order[k].name))
             .note("Every database runs the migrations in the lock's order. Where one ran them otherwise, the lock was merged keeping a branch's lines: keep main's.")
-            .fix("On a development database, take it to the lock's order", &["reylo migrate dev"]),
+            .fix("On a development database, apply them in the lock's order", &["reylo migrate dev"]),
     )
 }
 
@@ -6732,7 +6743,7 @@ async fn db_push_on(db: &mut Db, server: &mut Server, swept: usize, opts: &Optio
     if schema_sql.as_deref().is_some_and(|sql| crate::sql::is_blank(sql, d)) {
         problems.push(
             Problem::new("schema-sql-empty", format!("Nothing is declared in {}", shown(&opts.schema)))
-                .note("Taking this database to it would drop every table, with its rows.")
+                .note("Synchronizing this database with it would drop every table, with its rows.")
                 .fix("To rebuild this database from its migrations instead", &["reylo db reset"]),
         );
     }
@@ -6764,13 +6775,13 @@ async fn db_push_on(db: &mut Db, server: &mut Server, swept: usize, opts: &Optio
         }
     }
     if !behind.is_empty() {
-        let title = match unrun.as_slice() {
-            [one] if behind.len() == 1 => format!("This database hasn't run {}", one.name),
-            many if behind.len() == many.len() => format!("This database hasn't run {} migrations", many.len()),
-            _ => "This database doesn't match its migrations".to_string(),
+        let (title, fix) = match unrun.as_slice() {
+            [one] if behind.len() == 1 => (format!("This database hasn't run {}", one.name), "Run it first"),
+            many if behind.len() == many.len() => (format!("This database hasn't run {} migrations", many.len()), "Run them first"),
+            _ => ("This database doesn't match its migrations".to_string(), "Make it match its migrations first"),
         };
         let listed = if behind.len() == 1 && unrun.len() == 1 { vec![] } else { behind };
-        problems.push(Problem::new("database-not-at-migrations", title).lines(listed).fix(if unrun.len() == 1 { "Run it first" } else { "Take it to its migrations first" }, &["reylo migrate dev"]));
+        problems.push(Problem::new("database-not-at-migrations", title).lines(listed).fix(fix, &["reylo migrate dev"]));
     }
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
@@ -6819,7 +6830,7 @@ async fn db_push_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Optio
             Err(e) => return fail(if d == Dialect::Mysql { "reylo db push failed partway" } else { "reylo db push failed" }, e.0, log),
             Ok(Err(Unreached::Refused(problems))) => return Ok(refuse(&problems, log)),
             Ok(Err(Unreached::Differs(now, expect))) => {
-                let problem = Problem::new("db-push-incomplete", format!("Reylo can't take this database the rest of the way to {}", shown(&opts.schema))).lines(describe_diff("this database", &now, &shown(&opts.schema), &expect)).fix("Write the change as a migration, finishing by hand what it leaves out", &["reylo migrate new <name>"]);
+                let problem = Problem::new("db-push-incomplete", format!("Reylo can't fully synchronize this database with {}", shown(&opts.schema))).lines(describe_diff("this database", &now, &shown(&opts.schema), &expect)).fix("Write the change as a migration, finishing by hand what it leaves out", &["reylo migrate new <name>"]);
                 if d != Dialect::Mysql {
                     return Ok(refuse(&[problem], log));
                 }

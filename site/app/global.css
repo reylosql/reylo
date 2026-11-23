@@ -670,7 +670,7 @@
   --reylo-g2: 16px;
   --reylo-rows: 46px;
   display: grid;
-  /* `--reylo-span`: the tracks a table with fewer tools keeps, so that its columns are as wide as the widest table's. */
+  /* `--reylo-span`: the tracks a table with fewer tools keeps, so that its columns are as wide as the widest table's on the same page. The migration table stands alone, so it keeps its own. */
   grid-template-columns: var(--reylo-lw) var(--reylo-g1) var(--reylo-rw) var(--reylo-g2) repeat(var(--reylo-span, var(--reylo-tools)), minmax(58px, 1fr));
   position: relative;
   font-size: 14px;
@@ -894,15 +894,23 @@ a.reylo-compare-name:hover {
 }
 
 /* A label that has a popup keeps a dotted rule, as a Twoslash name does, so a reader sees it can be hovered. */
+/* A row's label shows what the row asks on hover. It carries no rule at rest; on hover a dotted underline follows each line of the text. */
 .reylo-compare-label {
   padding: 0;
   border: 0;
-  border-bottom: 1px dotted color-mix(in oklab, currentColor 35%, transparent);
   background: none;
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: default;
+  text-decoration: underline dotted transparent;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+}
+
+.reylo-compare-label:hover,
+.reylo-compare-label[data-state='open'] {
+  text-decoration-color: color-mix(in oklab, currentColor 45%, transparent);
 }
 
 .reylo-compare-frame {
@@ -1788,6 +1796,41 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   padding: 1.25rem 1.375rem;
 }
 
+/* The comparison table (components/compare-table.tsx), centred under its heading, at the width of the docs' column it was laid out for. */
+.ml-table {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 5.5rem 3rem 3rem;
+  border-top: 1px solid var(--color-fd-border);
+  text-align: center;
+}
+
+.ml-table h2 {
+  margin: 0 0 1rem;
+  font-size: 2.75rem;
+  font-weight: 600;
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+
+.ml-table > p {
+  margin: 0 0 1.5rem;
+  font-size: 1.1875rem;
+  line-height: 1.6;
+  color: var(--color-fd-muted-foreground);
+}
+
+.dark .ml-table > p {
+  color: hsl(0 0% 80%);
+}
+
+.ml-table .reylo-compare {
+  max-width: 60rem;
+  margin-inline: auto;
+  text-align: left;
+}
+
 .ml-end {
   position: relative;
   padding-block: 8rem 9rem;
@@ -1925,6 +1968,7 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   .ml-hero,
   .ml-row,
   .ml-end,
+  .ml-table,
   .ml-foot {
     padding-inline: 1.25rem;
   }
@@ -1940,7 +1984,8 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   }
 
   .ml-row-text h2,
-  .ml-end h2 {
+  .ml-end h2,
+  .ml-table h2 {
     font-size: 2rem;
   }
 

@@ -13,12 +13,12 @@ const names = readdirSync('content/docs')
   .filter(builtPage)
   .map((name) => name.slice(0, -'.mdx'.length));
 // The intro is index.mdx, at /docs, under the homepage at /; Reylo Migrate's docs are migrate.mdx, at
-// /migrate/docs, and its comparison migrate-compare.mdx, at /migrate/compare, under its landing page
-// at /migrate.
+// /migrate/docs, and each migrate-<name>.mdx (usage, the CLI, the comparison) at /migrate/<name>,
+// under its landing page at /migrate.
 const posts = readdirSync('content/blog')
   .filter((name) => name.endsWith('.mdx'))
   .map((name) => `/blog/${name.slice(0, -'.mdx'.length)}`);
-const routes = ['/', '/migrate', ...names.map((name) => (name === 'index' ? '/docs' : name === 'migrate' ? '/migrate/docs' : name === 'migrate-compare' ? '/migrate/compare' : `/${name}`)), '/blog', ...posts];
+const routes = ['/', '/migrate', ...names.map((name) => (name === 'index' ? '/docs' : name === 'migrate' ? '/migrate/docs' : name.startsWith('migrate-') ? `/migrate/${name.slice('migrate-'.length)}` : `/${name}`)), '/blog', ...posts];
 
 export default {
   ssr: false,

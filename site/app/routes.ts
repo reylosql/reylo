@@ -15,10 +15,13 @@ export default [
   index('routes/home.tsx'),
   route('docs', 'routes/page.tsx', { id: 'docs' }),
   route(':slug', 'routes/page.tsx'),
-  // Reylo Migrate: its landing page, and its docs (content/docs/migrate.mdx) and its comparison with
-  // other migration tools (content/docs/migrate-compare.mdx) under it.
+  // Reylo Migrate: its landing page, and under it its docs, content/docs/migrate.mdx at /migrate/docs
+  // and each content/docs/migrate-<name>.mdx at /migrate/<name>: usage, the CLI and the comparison
+  // with other migration tools.
   route('migrate', 'routes/migrate.tsx'),
   route('migrate/docs', 'routes/page.tsx', { id: 'migrate-docs' }),
+  route('migrate/usage', 'routes/page.tsx', { id: 'migrate-usage' }),
+  route('migrate/cli', 'routes/page.tsx', { id: 'migrate-cli' }),
   route('migrate/compare', 'routes/page.tsx', { id: 'migrate-compare' }),
   // The blog: its list of posts, and each post (content/blog, lib/blog.ts).
   route('blog', 'routes/blog.tsx'),
