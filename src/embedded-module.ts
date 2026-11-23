@@ -68,13 +68,17 @@ export function readLock(text: string): { schema?: string; entries: LockEntry[] 
   let schema: string | undefined;
   const items: { at: number; first: string; more: [number, string][] }[] = [];
   let section: "migrations" | "other" | undefined;
+  const seen = new Set<string>();
   const lines = text.split(/\r?\n/);
   for (const [k, line] of lines.entries()) {
     const at = k + 1;
     if (!line.trim() || line.trim().startsWith("#")) continue;
-    if (!/^\s/.test(line)) {
+    // A top-level key, but for an entry of `migrations` written without indentation, as YAML allows.
+    if (!/^\s/.test(line) && !(section === "migrations" && line.startsWith("- "))) {
       const top = pair(line);
       if (!top) return { error: `its line ${at} doesn't parse` };
+      if (seen.has(top[0])) return { error: `its line ${at} gives \`${top[0]}\` a second time` };
+      seen.add(top[0]);
       section = top[0] === "migrations" ? "migrations" : "other";
       if (top[0] === "schema") schema = scalar(top[1]) || undefined;
       if (section === "migrations" && scalar(top[1]) !== "" && scalar(top[1]) !== "[]") return { error: `its line ${at} doesn't parse` };
@@ -152,7 +156,8 @@ export async function projectMigrations(root: string): Promise<{ list?: Migratio
     if ("error" in read) return { error: `Reylo can't read ${shown}/reylo.lock as a lock, since ${read.error}: write it again from a database that ran its migrations, with reylo migrate history pull`, watched };
     const { entries } = read;
     names = entries.map((e) => e.name);
-    const missing = names.filter((n) => !existsSync(join(migrationsDir, n)));
+    // Only a name among the migrations read above is one (`links` in engine/migrate/src/commands.rs).
+    const missing = names.filter((n) => !migrations.includes(n));
     if (missing.length) return { error: `The lock lists ${missing.join(", ")}, which ${shown}/migrations doesn't have: write it back from a database that ran it, with reylo migrate history pull`, watched };
     // Each entry's checksum chains its file's text to the entry before it (`links` in engine/migrate/src/commands.rs).
     for (const [k, e] of entries.entries()) {

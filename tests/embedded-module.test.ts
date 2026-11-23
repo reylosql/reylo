@@ -152,6 +152,9 @@ test("the lock reads as the command line reads it: keys in either order, quoted 
   assert.deepEqual(readLock(objects.replace("  - name: 20261104120000_users.sql\n    checksum: c86e9de4\n", "  - { name: 20261104120000_users.sql, checksum: c86e9de4 }\n")), lock);
   assert.deepEqual(readLock("schema: c7bf681b\nmigrations:\n  - 20261104120000_users.sql c86e9de4\n  - 20261104140347_add_bio.sql 00123456\n"), lock);
   assert.deepEqual(readLock("migrations:\n"), { entries: [] });
+  // A list written without indentation, as YAML allows.
+  assert.deepEqual(readLock(objects.replace(/^  (- |  )/gm, "$1")), lock);
+  assert.deepEqual(readLock("schema: c7bf681b\nmigrations:\n- 20261104120000_users.sql c86e9de4\n- 20261104140347_add_bio.sql 00123456\n"), lock);
 });
 
 test("the lock refuses what the command line refuses: a key it doesn't know, a key twice, an entry without its name or checksum", () => {
@@ -161,6 +164,7 @@ test("the lock refuses what the command line refuses: a key it doesn't know, a k
     ["migrations:\n  - name: a.sql\n", "the entry at its line 2 has no checksum"],
     ["migrations:\n  - checksum: c86e9de4\n", "the entry at its line 2 has no name"],
     ["migrations:\n  - a.sql\n", '"a.sql" is a migration\'s name and its checksum'],
+    ["schema: c7bf681b\nschema:\nmigrations:\n", "its line 2 gives `schema` a second time"],
   ] as const) {
     assert.deepEqual(readLock(text), { error: why }, text);
   }
@@ -172,6 +176,9 @@ test("a lock the command line refuses gives migrate its error, and a quoted sche
   migrate(root, "lock");
   const lock = join(root, "reylo", "reylo.lock");
   const text = readFileSync(lock, "utf8");
+  // A name that isn't a migration file, a directory's included.
+  writeFileSync(lock, text.replace(/^  - name: \S+$/m, "  - name: ."));
+  assert.match((await projectMigrations(root)).error ?? "", /^The lock lists \., which reylo\/migrations doesn't have/);
   writeFileSync(lock, text.replace(/^(    checksum: .*)$/m, "$1\n    transaction: false"));
   assert.match((await projectMigrations(root)).error ?? "", /^Reylo can't read reylo\/reylo\.lock as a lock, since its line \d+ has `transaction`, which an entry doesn't have: write it again from a database that ran its migrations, with reylo migrate history pull$/);
   assert.match(text, /^schema: '?[0-9a-f]{8}'?$/m);
