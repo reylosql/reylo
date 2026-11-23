@@ -655,20 +655,24 @@ impl Alterer for SqliteAlterer {
             }
             None => true,
         });
-        // The indexes each one's content reads, through views, by the target's schema.
+        // The indexes each one's content reads, through views, by the target's schema: the
+        // relations a view's FROM and JOIN name (a table-valued call to an index among them,
+        // `join 'notes_fts'('word')`), never an alias.
         let schemas = self.schemas.borrow();
         let reads = |name: &str| -> BTreeSet<String> {
             let mut out = BTreeSet::new();
             let Some((_, to)) = schemas.as_ref() else { return out };
-            let (mut queue, mut seen) = (to.objects.get(&format!("table {name}")).map(|o| o.deps.iter().cloned().collect::<Vec<_>>()).unwrap_or_default(), BTreeSet::new());
-            while let Some(id) = queue.pop() {
-                let Some(o) = to.objects.get(&id).filter(|_| seen.insert(id.clone())) else { continue };
-                match o.kind {
-                    Some(Kind::View) => queue.extend(o.deps.iter().cloned()),
-                    Some(Kind::Table) if Info::of(o).content.is_some() => {
-                        out.insert(fold(&Info::of(o).name));
+            let Some(content) = to.objects.get(&format!("table {name}")).and_then(|o| Info::of(o).content).map(|(c, ..)| c) else { return out };
+            let (mut queue, mut seen) = (vec![content], BTreeSet::new());
+            while let Some(view) = queue.pop() {
+                let Some(o) = to.objects.get(&format!("view {view}")).filter(|_| seen.insert(view.clone())) else { continue };
+                let tokens = tokenize(o.create.first().map_or("", String::as_str), Dialect::Sqlite);
+                let read = (1..tokens.len()).filter(|&k| matches!(tokens[k].kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Str) && (matches!(tokens[k - 1].upper().as_str(), "FROM" | "JOIN") || tokens[k - 1].text == ","));
+                for n in read.map(|k| fold(&unquote(&tokens[k]))) {
+                    if to.objects.get(&format!("table {n}")).is_some_and(|t| Info::of(t).content.is_some()) {
+                        out.insert(n.clone());
                     }
-                    _ => {}
+                    queue.push(n);
                 }
             }
             out.remove(name);
