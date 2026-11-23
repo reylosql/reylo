@@ -67,7 +67,7 @@
             "column": 59
           },
           "source": "reylo(10)",
-          "message": "{total:Decimal(18, 4)} is written to the column total, a Decimal(12, 2), and ClickHouse changes a value the column cannot hold into one it can, without an error. Declare the parameter as the column's type: {total:Decimal(12, 2)}."
+          "message": "{total:Decimal(18, 4)} is written as it is to the column total, of the type Decimal(12, 2). ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Declare the parameter as the column's type, {total:Decimal(12, 2)}, or write the conversion out, as CAST({total:Decimal(18, 4)}, 'Decimal(12, 2)') does."
         }
       ]
     },

@@ -12,6 +12,7 @@ enum_semicolon.sql: many (e: Enum8('a;b')) -> { e: Enum8('a;b') }
 filters.sql: many (ids: UInt64[], pattern: String(UTF-8, ill-formed), since: DateTime64, low: UInt8, high: UInt8, role: Enum8('admin' | 'member'), tag: String(UTF-8, ill-formed)) -> { id: UInt64, name: String(UTF-8, ill-formed) }
 group_array_size.sql: one (most: UInt8) -> { some: UInt64[] }
 heredoc_tag.sql: many (n: UInt8) -> { s: String(UTF-8, ill-formed), n: UInt8 }
+in_against.sql: many (ids: UInt64[], age: UInt8) -> { id: UInt64 }
 in_function.sql: many (extra: UInt32, since: String(UTF-8, ill-formed)) -> { id: UInt64, pinned: UInt8 }
 in_selected.sql: many (ids: UInt64[], a: UInt64, b: UInt64, pairs: (UInt64, String(UTF-8, ill-formed))[], least: Decimal(18,2)) -> { id: UInt64, found: UInt8, neither: UInt8, paired: UInt8, ordered: UInt8 }
 limit_pair.sql: many (skip: UInt32, count: UInt32) -> { id: UInt64, name: String(UTF-8, ill-formed) }

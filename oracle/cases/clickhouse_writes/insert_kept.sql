@@ -1,1 +1,1 @@
-INSERT INTO users (id, name, age, balance, created, role, tags, plan) VALUES ({id:UInt32}, {name:String}, {age:UInt8}, {balance:Decimal(9, 2)}, {created:DateTime}, {role:Enum8('admin' = 1, 'member' = 2)}, {tags:Array(String)}, {plan:String})
+INSERT INTO users (id, name, age, balance, created, role, tags, plan) VALUES ({id:UInt32}, {name:String}, {age:UInt8}, {balance:Decimal(9, 2)}, {created:DateTime64(3, 'UTC')}, {role:Enum8('admin' = 1)}, {tags:Array(String)}, {plan:String})

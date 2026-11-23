@@ -1,0 +1,1 @@
+INSERT INTO FUNCTION null('id UInt64') VALUES ({id:UInt64})

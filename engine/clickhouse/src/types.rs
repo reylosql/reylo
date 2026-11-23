@@ -312,194 +312,124 @@ impl Named {
     }
 }
 
-/// An integer type's width and whether it is unsigned, by its name.
-/// What a scalar type holds, as far as writing one type's value into a column of another goes.
-enum Held {
-    /// Whole numbers, from the least to the most: an integer's.
-    Whole(f64, f64),
-    /// A decimal, by its digits and those of them after the point.
-    Decimal(u32, u32),
-    /// A float, by the bits of a whole number it holds exactly: 8, 24 or 53.
-    Float(i32),
-    Bool,
-    /// A `String` or a `FixedString`.
-    Text,
-    /// A count of days in 16 bits, of days in 32, and of seconds in 32.
-    Date,
-    Date32,
-    DateTime,
-    /// An instant, by its digits after the second.
-    DateTime64(u32),
-    /// A column of `IPv4`: an address in 32 bits.
-    Address4,
-    /// A column of `Time` or `Time64`, by its digits after the second: a count of seconds within
-    /// 999:59:59 either side of zero.
-    Time(u32),
-    /// Anything else, of which nothing is said.
-    Other,
-}
-
-/// What a type holds: a value's, or with `column` that of the column it is written to, which an
-/// address and a time of day are more than a value of one is.
-fn held(t: &Named, column: bool) -> Held {
-    if let Some((bits, unsigned)) = integer(&t.name) {
-        let top = 2f64.powi(bits as i32 - i32::from(!unsigned));
-        return Held::Whole(if unsigned { 0.0 } else { -top }, top - 1.0);
-    }
-    match t.name.as_str() {
-        "IPv4" if column => Held::Address4,
-        "Time" if column => Held::Time(0),
-        "Time64" if column => Held::Time(t.number(0).unwrap_or(3)),
-        // An enum's value is written to a number's column as its number.
-        "Enum8" | "Enum16" if !column => {
-            let numbers = t.args.iter().filter_map(|a| if let Arg::Label(_, n) = a { Some(*n as f64) } else { None });
-            let (least, most) = numbers.fold((f64::INFINITY, f64::NEG_INFINITY), |(least, most), n| (least.min(n), most.max(n)));
-            if least > most {
-                Held::Other
-            } else {
-                Held::Whole(least, most)
-            }
-        }
-        "Decimal" => Held::Decimal(t.number(0).unwrap_or(10), t.number(1).unwrap_or(0)),
-        "Decimal32" => Held::Decimal(9, t.number(0).unwrap_or(0)),
-        "Decimal64" => Held::Decimal(18, t.number(0).unwrap_or(0)),
-        "Decimal128" => Held::Decimal(38, t.number(0).unwrap_or(0)),
-        "Decimal256" => Held::Decimal(76, t.number(0).unwrap_or(0)),
-        "BFloat16" => Held::Float(8),
-        "Float32" => Held::Float(24),
-        "Float64" => Held::Float(53),
-        "Bool" => Held::Bool,
-        "String" | "FixedString" => Held::Text,
-        "Date" => Held::Date,
-        "Date32" => Held::Date32,
-        "DateTime" => Held::DateTime,
-        "DateTime64" => Held::DateTime64(t.number(0).unwrap_or(3)),
-        _ => Held::Other,
-    }
-}
-
-/// Whether ClickHouse, writing a value of the type `from` into a column of the type `to`, may
-/// change the value and raise no error. Each answer is what a server does with the ends of the
-/// one type's values written to the other by `INSERT … VALUES`, measured pair by pair on
-/// ClickHouse 26.9:
-///
-/// - A whole number outside the column's range wraps into it, and one outside a date's or a
-///   time's count is cut to it; a number into a `Bool` is true or false.
-/// - A fraction is cut from a whole number, a decimal's or an instant's digits past the column's
-///   are dropped, and a number of more digits than a float keeps is rounded to the nearest float.
-/// - A string is read as whatever the column can make of it: `300` wraps into a `UInt8`, `1.5` is
-///   cut to a whole decimal, and a text that is no date is read as one.
-/// - A time is dropped from a date, a date past a `DateTime`'s years wraps, and a NULL becomes
-///   the default of a column that takes none.
-/// - An enum's value is its number: one outside a whole number's range wraps into it, and one
-///   another enum gives another label becomes that label.
-/// - A `UInt64` past 32 bits wraps into an `IPv4`, a number past 999:59:59 is cut to a `Time`, and
-///   a `Variant` takes a value as the member that reads it, changed as that member's column would
-///   change it, unless a member is the value's own type.
-///
-/// What ClickHouse refuses aloud is none of these: a number too big for a decimal, a decimal
-/// into a whole number it does not fit or into a date, a signed or a wider number into an `IPv4`,
-/// a number or a text into an enum that has none of it. An array's elements, a tuple's and a
-/// map's keys and values are each written the same way.
-pub fn narrows(from: &Named, to: &Named) -> bool {
-    let nullable = |t: &Named| match (t.name.as_str(), t.args.as_slice()) {
-        // A Variant holds NULL with no Nullable around it.
-        ("Nullable" | "Variant", _) => true,
-        ("LowCardinality", [Arg::Type(inner)]) => inner.name == "Nullable",
-        _ => false,
+/// A type as a column's values are written: without the names that change no value. A
+/// `LowCardinality` is its type, a `SimpleAggregateFunction` the type it aggregates, and `Nested`
+/// and the geometric types are the arrays and tuples they stand for.
+pub fn plain(t: &Named) -> Named {
+    let args = |args: &[Arg]| -> Vec<Arg> {
+        args.iter()
+            .map(|a| match a {
+                Arg::Type(t) => Arg::Type(plain(t)),
+                Arg::Member(name, t) => Arg::Member(name.clone(), plain(t)),
+                other => other.clone(),
+            })
+            .collect()
     };
-    if nullable(from) && !nullable(to) {
+    match (t.name.as_str(), t.args.as_slice()) {
+        ("LowCardinality", [Arg::Type(inner)]) | ("SimpleAggregateFunction", [_, Arg::Type(inner)]) => plain(inner),
+        ("Nested", members) => Named { name: "Array".into(), args: vec![Arg::Type(Named { name: "Tuple".into(), args: args(members) })] },
+        (name, []) => geometry(name).and_then(parse).unwrap_or_else(|| t.clone()),
+        _ => Named { name: t.name.clone(), args: args(&t.args) },
+    }
+}
+
+/// A float's bits of a whole number it holds exactly, by its name.
+fn float_bits(name: &str) -> Option<u32> {
+    Some(match name {
+        "BFloat16" => 8,
+        "Float32" => 24,
+        "Float64" => 53,
+        _ => return None,
+    })
+}
+
+/// A decimal's digits, and those of them after the point.
+fn decimal_digits(t: &Named) -> Option<(u32, u32)> {
+    Some(match t.name.as_str() {
+        "Decimal" => (t.number(0).unwrap_or(10), t.number(1).unwrap_or(0)),
+        "Decimal32" => (9, t.number(0).unwrap_or(0)),
+        "Decimal64" => (18, t.number(0).unwrap_or(0)),
+        "Decimal128" => (38, t.number(0).unwrap_or(0)),
+        "Decimal256" => (76, t.number(0).unwrap_or(0)),
+        _ => return None,
+    })
+}
+
+/// Whether a column of the type `column` keeps every value of the type `from` as it is.
+///
+/// ClickHouse converts what a statement writes to the column's type, and where the column cannot
+/// hold the value it changes it and raises no error: 300 wraps into a `UInt8` as 44, the text
+/// `2` becomes an enum's second label, a NULL the default of a column that takes none, and a
+/// named tuple's members go to the column's by their names. The types are too many to say of each
+/// pair what is lost, so only what is known to lose nothing is kept:
+///
+/// - the column's own type, a time zone aside, which changes no instant;
+/// - a value that is never NULL in a `Nullable` column, and a member's own type in a `Variant`;
+/// - a whole number in a column of whole numbers that holds its whole range, a float in a wider
+///   float, a decimal in one with no fewer digits either side of the point, and an enum in one
+///   that has each of its labels at the same number;
+/// - an array, a tuple or a map whose elements are each kept, a tuple's names the column's own
+///   where both name them.
+pub fn kept(from: &Named, column: &Named) -> bool {
+    keeps(&plain(column), &plain(from))
+}
+
+fn keeps(to: &Named, from: &Named) -> bool {
+    let inner = |t: &'_ Named| -> Option<Named> {
+        match (t.name.as_str(), t.args.as_slice()) {
+            ("Nullable", [Arg::Type(inner)]) => Some(inner.clone()),
+            _ => None,
+        }
+    };
+    match (inner(from), inner(to)) {
+        (Some(from), Some(to)) => return keeps(&to, &from),
+        (None, Some(to)) => return keeps(&to, from),
+        // A Variant holds NULL with no Nullable around it.
+        (Some(from), None) => return to.name == "Variant" && keeps(to, &from),
+        (None, None) => {}
+    }
+    if to == from {
         return true;
     }
-    let (from, to) = (from.bare(), to.bare());
-    // The types a type holds values of, each in its place.
-    fn parts(t: &Named) -> Option<Vec<&Named>> {
-        matches!(t.name.as_str(), "Array" | "Tuple" | "Map").then(|| t.args.iter().filter_map(|a| if let Arg::Type(t) | Arg::Member(_, t) = a { Some(t) } else { None }).collect())
-    }
-    if let (Some(held), Some(into)) = (parts(from), parts(to)) {
-        return from.name == to.name && held.len() == into.len() && held.iter().zip(&into).any(|(held, into)| narrows(held, into));
-    }
-    // A Variant keeps a value of a member's own type as it is, and reads any other as one of its members.
     if to.name == "Variant" {
-        let members: Vec<&Named> = to.args.iter().filter_map(|a| if let Arg::Type(t) = a { Some(t) } else { None }).collect();
-        return !members.iter().any(|member| member.bare() == from) && members.iter().any(|member| narrows(from, member));
+        return to.args.iter().any(|a| matches!(a, Arg::Type(member) if member == from));
     }
-    // An enum written to another goes by its number: a label the column names otherwise becomes that one.
+    if let (Some((bits, unsigned)), Some((into, into_unsigned))) = (integer(&from.name), integer(&to.name)) {
+        return if unsigned == into_unsigned { bits <= into } else { unsigned && bits < into };
+    }
+    if let (Some(bits), Some(into)) = (float_bits(&from.name), float_bits(&to.name)) {
+        return bits <= into;
+    }
+    if let (Some((digits, scale)), Some((into, into_scale))) = (decimal_digits(from), decimal_digits(to)) {
+        return scale <= into_scale && digits - scale.min(digits) <= into - into_scale.min(into);
+    }
     let labels = |t: &'_ Named| -> Vec<(String, i64)> { t.args.iter().filter_map(|a| if let Arg::Label(label, n) = a { Some((label.clone(), *n)) } else { None }).collect() };
-    if from.name.starts_with("Enum") && to.name.starts_with("Enum") {
-        let into = labels(to);
-        return labels(from).iter().any(|(label, n)| into.iter().any(|(other, m)| m == n && other != label));
-    }
-    // Whether whole numbers from `least` to `most` all lie within a range.
-    let outside = |(least, most): (f64, f64), (into_least, into_most): (f64, f64)| least < into_least || most > into_most;
-    match (held(from, false), held(to, true)) {
-        // A string holds any value's text, and a Bool is 0 or 1, which every type but a date keeps.
-        (Held::Other, _) | (_, Held::Other | Held::Text) | (Held::Bool, _) => false,
-        // An IPv4 takes a whole number of 32 bits or fewer, refuses a signed one and one of 128
-        // bits or more, and wraps the one between.
-        (_, Held::Address4) => from.name == "UInt64",
-        // A time of day keeps a count of seconds within its range, and cuts any other to it.
-        (source, Held::Time(into)) => match source {
-            Held::Whole(a, b) => outside((a, b), (-3599999.0, 3599999.0)),
-            Held::Decimal(_, scale) => scale > into,
-            _ => true,
-        },
-        // A Bool's own text is read, and any other refused; any number is true or false.
-        (source, Held::Bool) => !matches!(source, Held::Text),
-        (source, Held::Whole(least, most)) => match source {
-            Held::Whole(a, b) => outside((a, b), (least, most)),
-            // A decimal with no digit after the point is refused where it does not fit.
-            Held::Decimal(_, scale) => scale > 0,
-            Held::Date => outside((0.0, 65535.0), (least, most)),
-            Held::Date32 => outside((-25567.0, 120529.0), (least, most)),
-            Held::DateTime => outside((0.0, 4294967295.0), (least, most)),
-            _ => true,
-        },
-        (source, Held::Float(bits)) => {
-            let exact = 2f64.powi(bits);
-            match source {
-                Held::Float(own) => bits < own,
-                Held::Whole(a, b) => b > exact || -a > exact,
-                // A decimal fraction is no binary one.
-                Held::Decimal(digits, scale) => scale > 0 || 10f64.powi(digits as i32) - 1.0 > exact,
-                Held::DateTime => 4294967295.0 > exact,
-                Held::DateTime64(scale) => bits < 53 || scale > 6,
-                Held::Text => true,
-                _ => false,
-            }
+    match (from.name.as_str(), to.name.as_str()) {
+        ("Enum8" | "Enum16", "Enum8" | "Enum16") => {
+            let into = labels(to);
+            labels(from).iter().all(|label| into.contains(label))
         }
-        // A number too big for a decimal is refused, and so is a date.
-        (source, Held::Decimal(_, into)) => match source {
-            Held::Decimal(_, scale) | Held::DateTime64(scale) => scale > into,
-            Held::Float(_) | Held::Text => true,
-            _ => false,
-        },
-        (source, Held::Date) => match source {
-            Held::Whole(a, b) => outside((a, b), (0.0, 65535.0)),
-            Held::Date | Held::Decimal(..) => false,
-            _ => true,
-        },
-        // A Date32 keeps every count of days 16 bits hold, of either sign.
-        (source, Held::Date32) => match source {
-            Held::Whole(a, b) => outside((a, b), (-32768.0, 65535.0)),
-            Held::Date | Held::Date32 | Held::Decimal(..) => false,
-            _ => true,
-        },
-        (source, Held::DateTime) => match source {
-            Held::Whole(a, b) => outside((a, b), (0.0, 4294967295.0)),
-            Held::DateTime | Held::Decimal(..) => false,
-            _ => true,
-        },
-        // A DateTime64 keeps every count of seconds 32 bits hold, of either sign.
-        (source, Held::DateTime64(into)) => match source {
-            Held::Whole(a, b) => outside((a, b), (-2147483648.0, 4294967295.0)),
-            Held::Decimal(_, scale) | Held::DateTime64(scale) => scale > into,
-            Held::Float(_) | Held::Text => true,
-            _ => false,
-        },
+        ("DateTime", "DateTime") => true,
+        ("DateTime64", "DateTime64") => from.number(0) == to.number(0),
+        ("Array", "Array") | ("Map", "Map") | ("Tuple", "Tuple") => {
+            let parts = |t: &'_ Named| -> Option<Vec<(Option<String>, Named)>> {
+                t.args
+                    .iter()
+                    .map(|a| match a {
+                        Arg::Type(t) => Some((None, t.clone())),
+                        Arg::Member(name, t) => Some((Some(name.clone()), t.clone())),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let (Some(held), Some(into)) = (parts(from), parts(to)) else { return false };
+            held.len() == into.len() && held.iter().zip(&into).all(|((name, held), (into_name, into))| (name.is_none() || into_name.is_none() || name == into_name) && keeps(into, held))
+        }
+        _ => false,
     }
 }
 
+/// An integer type's width and whether it is unsigned, by its name.
 fn integer(name: &str) -> Option<(u32, bool)> {
     let (digits, unsigned) = match name.strip_prefix("UInt") {
         Some(digits) => (digits, true),
@@ -666,110 +596,73 @@ mod tests {
     }
 
     #[test]
-    fn a_type_narrows_into_a_column_that_changes_its_values_in_silence() {
-        let narrows = |from: &str, to: &str| super::narrows(&parse(from).unwrap(), &parse(to).unwrap());
+    fn a_column_keeps_its_own_type_and_what_is_known_to_lose_nothing() {
+        let kept = |from: &str, to: &str| super::kept(&parse(from).unwrap(), &parse(to).unwrap());
+        let held: &[(&str, &[&str])] = &[
+            // The column's own type, under the names that change no value, and a time zone aside.
+            ("UInt8", &["UInt8", "LowCardinality(UInt8)", "Nullable(UInt8)", "LowCardinality(Nullable(UInt8))", "SimpleAggregateFunction(max, UInt8)"]),
+            ("String", &["String", "LowCardinality(String)", "Nullable(String)"]),
+            ("Nullable(String)", &["Nullable(String)", "LowCardinality(Nullable(String))"]),
+            ("DateTime", &["DateTime('UTC')"]),
+            ("DateTime64(3, 'UTC')", &["DateTime64(3)", "DateTime64(3, 'Europe/Berlin')"]),
+            ("Decimal(9, 2)", &["Decimal32(2)"]),
+            ("Tuple(Float64, Float64)", &["Point"]),
+            ("Array(Tuple(a UInt8, b String))", &["Nested(a UInt8, b String)"]),
+            ("FixedString(2)", &["FixedString(2)"]),
+            ("JSON", &["JSON"]),
+            // A whole number where the column holds its whole range, a float in a wider one, and a decimal with room either side of the point.
+            ("UInt8", &["UInt16", "UInt64", "UInt256", "Int16", "Int64"]),
+            ("Int8", &["Int16", "Int256"]),
+            ("BFloat16", &["Float32", "Float64"]),
+            ("Float32", &["Float64"]),
+            ("Decimal(9, 2)", &["Decimal(18, 2)", "Decimal(18, 4)", "Decimal64(4)"]),
+            // An enum whose labels the column has, each at its number.
+            ("Enum8('a' = 1)", &["Enum8('a' = 1, 'b' = 2)", "Enum16('a' = 1, 'b' = 2)"]),
+            // A member's own type in a Variant, and a NULL.
+            ("UInt64", &["Variant(UInt64, String)", "Variant(String, LowCardinality(UInt64))"]),
+            ("Nullable(String)", &["Variant(UInt64, String)"]),
+            // Elements kept each in its place, and a tuple's names where both sides name them.
+            ("Array(UInt8)", &["Array(UInt64)", "Array(Nullable(UInt8))"]),
+            ("Tuple(a UInt8, b String)", &["Tuple(a UInt16, b String)", "Tuple(UInt8, String)"]),
+            ("Tuple(UInt8, String)", &["Tuple(a UInt8, b String)"]),
+            ("Map(String, UInt8)", &["Map(LowCardinality(String), Nullable(UInt8))"]),
+        ];
+        for (from, columns) in held {
+            for to in *columns {
+                assert!(kept(from, to), "{from} into {to}");
+            }
+        }
+        // None of these is kept. ClickHouse 26.9 writes most of them with no error, and the column
+        // holds another value: a number wrapped, cut or rounded, a text read as what the column
+        // makes of it, a NULL become a default, an instant's digits or its years lost, a tuple's
+        // members moved. The rest it refuses only as the statement runs, or keeps by a rule that is
+        // not written down here.
         let changed: &[(&str, &[&str])] = &[
-            // A whole number outside the column's range, of either sign, and into a float past the bits it keeps.
-            ("UInt64", &["UInt8", "Int64", "Float64", "Bool", "Date", "Date32", "DateTime", "DateTime64(3)"]),
-            ("Int8", &["UInt8", "UInt64", "Bool", "Date", "DateTime"]),
-            ("UInt8", &["Int8", "Bool"]),
-            ("Int32", &["Int16", "UInt32", "Float32", "Date", "Date32", "DateTime"]),
-            ("UInt32", &["Float32", "Date32"]),
-            ("Int64", &["Float64", "DateTime64(6)"]),
-            // A fraction cut off, digits past the column's dropped, and a number rounded to the nearest float.
-            ("Float64", &["Int32", "Float32", "Decimal(9, 2)", "Decimal(9, 0)", "Bool", "Date", "DateTime", "DateTime64(3)"]),
-            ("Float32", &["BFloat16", "UInt8", "Decimal(18, 4)"]),
-            ("Decimal(9, 2)", &["Int64", "Float64", "Decimal(9, 0)", "Decimal(18, 1)", "Bool"]),
-            ("Decimal(18, 4)", &["Decimal(9, 2)", "DateTime64(3)"]),
-            ("Decimal(9, 0)", &["Float32", "Bool"]),
-            ("Decimal(18, 0)", &["Float64"]),
-            // A string is read as whatever the column makes of it.
-            ("String", &["UInt8", "Int64", "Float32", "Float64", "Decimal(9, 0)", "Decimal(9, 2)", "Date", "Date32", "DateTime", "DateTime64(3)"]),
-            ("FixedString(3)", &["Decimal(9, 0)", "UInt8"]),
-            // A time dropped from a date, digits from an instant, a date past a DateTime's years, and a date into a number too narrow for its count.
-            ("DateTime64(6, 'UTC')", &["DateTime64(3, 'UTC')", "DateTime", "Date", "Date32", "UInt8", "Int64", "Float32", "Decimal(9, 0)", "Decimal(18, 4)", "Bool"]),
-            ("DateTime64(3)", &["DateTime", "Decimal(9, 2)", "UInt32"]),
-            ("DateTime", &["Date", "Date32", "UInt16", "Int32", "Float32", "Bool"]),
-            ("Date32", &["Date", "DateTime", "UInt32", "Int16"]),
-            ("Date", &["DateTime", "UInt8", "Int16", "Bool"]),
-            // A NULL becomes the default of a column that takes none.
-            ("Nullable(UInt8)", &["UInt8"]),
-            ("LowCardinality(Nullable(String))", &["String"]),
-            ("Nullable(Int64)", &["Nullable(Float64)"]),
-            // An enum is its number, and its label where another enum names that number otherwise.
-            ("Enum16('a' = 1000)", &["UInt8", "Int8", "Bool"]),
-            ("Enum8('a' = -1)", &["UInt8", "UInt64"]),
-            ("Enum8('a' = 1)", &["Enum8('b' = 1)", "Enum16('a' = 2, 'b' = 1)"]),
-            // An address of 32 bits, a time of day within its hours, and a Variant by the member that reads the value.
-            ("UInt64", &["IPv4", "Time", "Time64(3)", "Variant(UInt8, String)", "Variant(String, Date)"]),
-            ("UInt32", &["Time"]),
-            ("Float64", &["Time", "Time64(3)", "Variant(Float32, String)"]),
-            ("Decimal(9, 4)", &["Time64(3)"]),
-            ("Int16", &["Variant(UInt8, String)"]),
-            ("Array(UInt64)", &["Array(IPv4)"]),
-            // What an array, a tuple and a map hold is written the same way, each in its place.
-            ("Array(UInt64)", &["Array(UInt8)"]),
-            ("Tuple(UInt64, String)", &["Tuple(UInt8, String)"]),
-            ("Tuple(n UInt8, at DateTime64(6))", &["Tuple(n UInt8, at DateTime64(3))"]),
-            ("Map(String, UInt64)", &["Map(String, UInt8)"]),
-            ("Array(Nullable(UInt8))", &["Array(UInt8)"]),
+            ("UInt64", &["UInt8", "Int64", "Float64", "Bool", "Date", "DateTime", "DateTime64(3)", "IPv4", "Time", "Variant(UInt8, String)", "Dynamic", "String"]),
+            ("Int8", &["UInt8", "UInt64"]),
+            ("UInt8", &["Int8", "Bool", "Float32", "Date", "Variant(UInt64, String)", "Decimal(9, 0)"]),
+            ("Float64", &["Float32", "Int32", "Decimal(9, 2)"]),
+            ("Decimal(18, 4)", &["Decimal(18, 2)", "Decimal(9, 4)", "Float64"]),
+            ("String", &["UInt8", "Date", "Array(UInt8)", "Enum8('a' = 1, 'b' = 2)", "FixedString(2)", "UUID", "JSON", "Variant(UInt8, Date)"]),
+            ("Nullable(UInt8)", &["UInt8", "UInt64"]),
+            ("Bool", &["Date", "UInt8"]),
+            ("Date", &["Date32", "BFloat16", "UInt16"]),
+            ("Date32", &["Date", "DateTime64(9)"]),
+            ("DateTime", &["Date", "DateTime64(3)"]),
+            ("DateTime64(6)", &["DateTime64(3)", "DateTime64(9)", "DateTime"]),
+            ("Enum8('a' = 1)", &["Enum8('a' = 2)", "Enum8('b' = 1)", "UInt8"]),
+            ("Enum16('a' = 1000)", &["UInt8"]),
+            ("IPv6", &["IPv4"]),
+            ("FixedString(2)", &["FixedString(4)", "String"]),
+            ("JSON", &["JSON(max_dynamic_paths = 8)"]),
             ("Array(Array(Float64))", &["Array(Array(Float32))"]),
-            ("Array(String)", &["Array(Decimal(9, 0))"]),
+            ("Array(Nullable(UInt8))", &["Array(UInt8)"]),
+            ("Tuple(a UInt8, b UInt8)", &["Tuple(b UInt8, a UInt8)", "Tuple(a UInt8)"]),
+            ("Map(String, UInt64)", &["Map(String, UInt8)"]),
         ];
         for (from, columns) in changed {
             for to in *columns {
-                assert!(narrows(from, to), "{from} into {to}");
-            }
-        }
-        let kept: &[(&str, &[&str])] = &[
-            // The same type, a wider one, and a float that holds every one of the numbers.
-            ("UInt8", &["UInt8", "UInt64", "Int16", "Nullable(UInt8)", "Float32", "BFloat16", "String", "Date", "Date32", "DateTime", "DateTime64(3)"]),
-            ("Int16", &["Float32", "Date32", "DateTime64(0)", "Int64"]),
-            ("UInt16", &["Date", "Date32", "Float32"]),
-            ("UInt32", &["Float64", "DateTime", "DateTime64(3)", "Int64"]),
-            ("Int32", &["Float64", "DateTime64(3)"]),
-            // A number too big for a decimal is refused, and one it holds is kept, whatever digits the column declares.
-            ("Int32", &["Decimal(9, 0)", "Decimal(1, 0)", "Decimal(9, 2)"]),
-            ("Int8", &["Decimal(1, 0)"]),
-            ("UInt64", &["Decimal(9, 2)", "Decimal(18, 0)"]),
-            // A decimal with no digit after the point is a whole number: a float that holds its digits keeps it, and a whole number or a date it does not fit refuses it.
-            ("Decimal(9, 0)", &["Float64", "Int32", "UInt8", "Decimal(1, 0)", "Decimal(18, 4)", "Date", "DateTime64(3)"]),
-            ("Decimal32(0)", &["Float64"]),
-            ("Decimal(15, 0)", &["Float64"]),
-            ("Decimal(18, 0)", &["UInt8", "Decimal(9, 0)"]),
-            ("Decimal(9, 2)", &["Decimal(18, 4)", "DateTime64(3)", "Date", "String"]),
-            ("Float32", &["Float64", "String"]),
-            ("BFloat16", &["Float32"]),
-            // A Bool is 0 or 1, and its own text is the only one a Bool reads.
-            ("Bool", &["UInt8", "Float32", "Decimal(9, 0)", "String", "Bool"]),
-            ("String", &["Bool", "LowCardinality(String)", "FixedString(2)", "UUID", "IPv4"]),
-            // A date into a wider one, and into a number that holds its count.
-            ("Date", &["Date32", "DateTime64(3)", "UInt16", "Int32", "Float32", "String"]),
-            ("Date32", &["DateTime64(3)", "Int32", "Float32"]),
-            ("DateTime", &["DateTime64(3)", "UInt32", "Int64", "Float64"]),
-            ("DateTime64(3)", &["DateTime64(6)", "Decimal(18, 4)", "Float64", "String"]),
-            // An enum's number where the column holds it, its label in a string, and an enum that names each number alike or not at all.
-            ("Enum16('a' = 1000)", &["UInt16", "Int32", "Float32", "String"]),
-            ("Enum8('a' = -1)", &["Int8", "String"]),
-            ("Enum8('a' = 1)", &["Enum8('a' = 1, 'b' = 2)", "Enum8('a' = 2)", "Enum16('a' = 1)"]),
-            // An address from the numbers it holds, and what an IPv4, an IPv6 and a UUID refuse aloud.
-            ("UInt32", &["IPv4"]),
-            ("UInt16", &["IPv4", "Time", "Time64(3)"]),
-            ("Int64", &["IPv4"]),
-            ("UInt128", &["IPv4", "IPv6", "UUID"]),
-            ("IPv4", &["UInt32", "UInt64", "IPv6", "String"]),
-            ("Decimal(9, 2)", &["Time64(3)"]),
-            // A Variant keeps a value of a member's type, a NULL, and a value its members read whole.
-            ("UInt8", &["Variant(UInt8, String)", "Variant(UInt64, String)"]),
-            ("String", &["Variant(UInt8, String)"]),
-            ("Nullable(UInt8)", &["Variant(UInt8, String)"]),
-            ("Array(UInt8)", &["Array(UInt64)"]),
-            ("Tuple(a UInt8, b String)", &["Tuple(a UInt16, b String)"]),
-            ("Map(String, UInt8)", &["Map(LowCardinality(String), Nullable(UInt8))"]),
-        ];
-        for (from, columns) in kept {
-            for to in *columns {
-                assert!(!narrows(from, to), "{from} into {to}");
+                assert!(!kept(from, to), "{from} into {to}");
             }
         }
     }

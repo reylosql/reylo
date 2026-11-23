@@ -9,8 +9,9 @@
 //!   which returns no row over an empty input, and from a view that aggregates, which the tree
 //!   leaves a table. An `arrayJoin` after the aggregation makes several rows of the one, and so
 //!   does a `WITH FILL`, so neither is bounded. A `HAVING`, a `QUALIFY`, an `OFFSET`, a `LIMIT`
-//!   or a `LIMIT BY` may drop the row, and a `SETTINGS` clause may turn it off
-//!   (`empty_result_for_aggregation_by_empty_set`): at most one row.
+//!   or a `LIMIT BY` may drop the row, and so may a `SETTINGS` clause that names a setting which
+//!   drops rows (`empty_result_for_aggregation_by_empty_set`, `limit`, `offset`,
+//!   `additional_result_filter`): at most one row.
 //!
 //! The tree's text is the server's to change, so what is not recognized proves nothing.
 
@@ -98,6 +99,10 @@ pub fn unread(lines: &[&str]) -> Option<String> {
         .map(|name| format!("The statement's SETTINGS turns on {name}, which changes what a result holds beside its rows, and Reylo reads rows alone: take the setting out."))
 }
 
+/// The settings that may drop the one row an aggregate returns, which a `SETTINGS` clause names
+/// as the session's own are read (`ROW_SETTINGS`).
+const DROPS: [&str; 4] = ["empty_result_for_aggregation_by_empty_set", "limit", "offset", "additional_result_filter"];
+
 /// What the tree's lines prove. `limit_given` says the statement writes a parameter as its LIMIT,
 /// whose value the tree shows as the analysis's stand-in, not as a number the statement fixes.
 pub fn rows(lines: &[&str], limit_given: bool) -> Rows {
@@ -106,14 +111,16 @@ pub fn rows(lines: &[&str], limit_given: bool) -> Rows {
     let body = |name: &str| sections.iter().find(|(heading, _)| *heading == name).map(|(_, body)| body.as_slice());
     let has = |name: &str| sections.iter().any(|(heading, _)| *heading == name);
     let ties = root.contains("is_limit_with_ties: 1");
-    // The LIMIT's first line is its value; under it, the expression it was folded from.
+    // The LIMIT's first line is its value; under it, the expression it was folded from. A value
+    // with nothing under it is a number the statement writes, whatever its parameters are.
     let limit = match body("LIMIT") {
         None => Some(None),
-        Some(body) => body.first().and_then(|line| constant(line)).filter(|_| !limit_given).map(Some),
+        Some(body) => body.first().and_then(|line| constant(line)).filter(|_| body.len() == 1 || !limit_given).map(Some),
     };
-    let settings = lines.iter().any(|l| l.trim_start().starts_with("SETTINGS"));
+    // A SETTINGS clause, the statement's own or a subquery's, that names a setting which drops rows.
+    let settings = lines.iter().filter_map(|l| l.trim_start().strip_prefix("SETTINGS ")).any(|set| set.split_whitespace().any(|pair| DROPS.iter().any(|name| pair.strip_prefix(name).is_some_and(|rest| rest.starts_with('=')))));
     let grouped = root.contains("is_group_by") || root.contains("group_by_type") || has("GROUP BY");
-    let dropped = ["HAVING", "QUALIFY", "OFFSET", "LIMIT BY", "LIMIT BY LIMIT", "WINDOW"].iter().any(|s| has(s));
+    let dropped = ["HAVING", "QUALIFY", "OFFSET", "LIMIT BY", "LIMIT BY LIMIT"].iter().any(|s| has(s));
     let filled = lines.iter().any(|l| l.contains("with_fill: 1"));
     let projection = body("PROJECTION").map(own).unwrap_or_default();
     let aggregated = projection.iter().any(|l| l.contains("function_type: aggregate"));
@@ -175,6 +182,18 @@ mod tests {
             assert_eq!((found.one, found.at_most_one), (false, bounded), "{after}");
         }
         assert_eq!(read(&AGGREGATE.replace("QUERY id: 0", "QUERY id: 0, is_group_by_with_totals: 1"), false), Rows::default());
+        // A setting that drops rows, named with others, in the statement's clause or a subquery's;
+        // any other setting leaves the row, and so does a window the statement names.
+        for (after, one) in [
+            ("  SETTINGS join_use_nulls=1 offset=1", false),
+            ("  SETTINGS max_threads=2 additional_result_filter=n > 5", false),
+            ("  JOIN TREE\n    QUERY id: 3, is_subquery: 1\n      SETTINGS limit=1", false),
+            ("  SETTINGS join_use_nulls=1 max_threads=2", true),
+            ("  SETTINGS limits=1 max_offset=2", true),
+            ("  WINDOW\n    LIST id: 4, nodes: 1\n      WINDOW id: 5, alias: w, frame_type: RANGE", true),
+        ] {
+            assert_eq!(read(&format!("{AGGREGATE}\n{after}"), false).one, one, "{after}");
+        }
         // An arrayJoin in what the aggregate reads multiplies its input, not its row.
         let read_from = format!("{AGGREGATE}\n  WHERE\n    FUNCTION id: 9, function_name: arrayJoin, function_type: ordinary, result_type: UInt8");
         assert!(read(&read_from, false).one);
@@ -192,8 +211,13 @@ mod tests {
     fn a_limit_of_one_is_at_most_one_row() {
         let limited = "QUERY id: 0\n  PROJECTION\n    LIST id: 1, nodes: 1\n      COLUMN id: 2, column_name: id, result_type: UInt64, source_id: 3\n  JOIN TREE\n    TABLE id: 3, table_name: app.users\n  LIMIT\n    CONSTANT id: 4, constant_value: UInt64_1, constant_value_type: UInt64";
         assert_eq!(read(limited, false), Rows { at_most_one: true, one: false, aggregate: false });
-        // A parameter as the limit is whatever the caller passes.
-        assert_eq!(read(limited, true), Rows::default());
+        // A parameter as the limit is whatever the caller passes: the tree shows the value it was
+        // read with, and under it what the value was folded from. A number the statement writes
+        // has nothing under it, and bounds the rows whatever the statement's parameters are.
+        let folded = format!("{limited}\n      EXPRESSION\n        FUNCTION id: 5, function_name: CAST, function_type: ordinary, result_type: UInt64");
+        assert_eq!(read(&folded, true), Rows::default());
+        assert_eq!(read(&folded, false), Rows { at_most_one: true, one: false, aggregate: false });
+        assert_eq!(read(limited, true), Rows { at_most_one: true, one: false, aggregate: false });
         assert_eq!(read(&limited.replace("QUERY id: 0", "QUERY id: 0, is_limit_with_ties: 1"), false), Rows::default());
         assert_eq!(read(&limited.replace("UInt64_1,", "UInt64_2,"), false), Rows::default());
         // A set operation's root is no query, and neither is text the engine does not know.
