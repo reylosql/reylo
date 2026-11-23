@@ -159,7 +159,13 @@ pub(crate) fn pg_breach(e: &tokio_postgres::Error) -> Option<Breach> {
         c if *c == SqlState::NOT_NULL_VIOLATION => Breaks::NotNull,
         _ => return None,
     };
-    let name = d.constraint().or(d.column())?.to_string();
+    // A check, a foreign key and a unique index are named by their constraint; a NOT NULL may be
+    // named by its column alone. A domain's check is named by neither as it is in the table.
+    let name = match kind {
+        Breaks::NotNull => d.constraint().or(d.column())?,
+        _ => d.constraint()?,
+    }
+    .to_string();
     let table = match (d.schema(), d.table()) {
         (Some(schema), Some(table)) => format!("{}.{}", pg_ident(schema), pg_ident(table)),
         (None, Some(table)) => pg_ident(table),
@@ -185,7 +191,8 @@ pub(crate) fn mysql_breach(code: u16, message: &str) -> Option<Breach> {
         1452 => Some(Breach { kind: Breaks::ForeignKey, name: between("CONSTRAINT `", "` FOREIGN KEY")?, ..Breach::default() }),
         // Duplicate entry 'a' for key 'users.email'
         1062 => {
-            let key = between("' for key '", "'").or_else(|| message.rsplit_once(" for key '").map(|(_, k)| k.trim_end_matches('\'').to_string()))?;
+            // The last ` for key '…'`, since the duplicated value comes first and may hold the words.
+            let key = message.rsplit_once(" for key '").map(|(_, k)| k.trim_end_matches(['\'', '.']).to_string())?;
             let (table, name) = key.rsplit_once('.').map(|(t, n)| (t.to_string(), n.to_string())).unwrap_or((String::new(), key));
             Some(Breach { kind: Breaks::Unique, name, table, ..Breach::default() })
         }
