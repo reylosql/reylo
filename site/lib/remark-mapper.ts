@@ -83,6 +83,12 @@ export type DialectName = (typeof DIALECTS)[number];
 export type Dialect = 'postgres' | 'mysql' | 'sqlite' | 'clickhouse';
 const DIALECT_OF: Record<string, Dialect> = { postgres: 'postgres', mysql: 'mysql', sqlite: 'sqlite', clickhouse: 'clickhouse' };
 export const DIALECT_NAME: Record<Dialect, DialectName> = { postgres: 'Postgres', mysql: 'MySQL', sqlite: 'SQLite', clickhouse: 'ClickHouse' };
+/**
+ * The dialects one statement can be written for at once: those that take Reylo's own placeholders.
+ * ClickHouse writes each parameter with its type, so no statement with one is its own and another
+ * dialect's, and a card that reads alike on each of these speaks for every dialect a card can.
+ */
+export const SHARED: readonly Dialect[] = ['postgres', 'mysql', 'sqlite'];
 /** The client an example calls `db`: the one Basic usage builds in each dialect. */
 const CLIENT: Record<Dialect, string> = {
   postgres: 'import("postgres").Sql',
@@ -559,7 +565,7 @@ function renderInferenceCards(tree: MdNode, blocks: Block[], modules: Modules, p
     // A card that every dialect shows alike, the same statement with the same types, needs no tabs:
     // it shows the one panel's rows. Elsewhere the database switch goes on the Query row's line, but
     // on a database's own page, which is that database's throughout.
-    const same = dialects.length === DIALECTS.length && panels.every((panel) => JSON.stringify(panel.children) === JSON.stringify(panels[0]!.children));
+    const same = SHARED.every((d) => dialects.includes(d)) && panels.every((panel) => JSON.stringify(panel.children) === JSON.stringify(panels[0]!.children));
     if (!same && !DIALECT_PAGE.test(page)) {
       for (const panel of panels) {
         const query = panel.children!.find((row) => row.name === 'InferenceCardRow' && attr(row, 'label') === 'Query')!;
