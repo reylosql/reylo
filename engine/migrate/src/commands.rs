@@ -2671,6 +2671,28 @@ fn holds_a_schema(lines: &[String]) -> bool {
     lines.iter().any(|l| !EMPTY.iter().any(|kind| l.starts_with(kind)) && !(l.starts_with("owner ") && l.ends_with(" (schema)")))
 }
 
+/// Whether a database holds anything init and introspect write: a schema, a grant on a schema to a
+/// role of its own, or a default privilege that isn't a platform's role's. A grant on a schema to
+/// PUBLIC is a new database's, and one to a platform's role or a default privilege for it is what a
+/// new database there may have already (Supabase grants its API's roles every new table), so a
+/// database with only those still starts empty.
+#[cfg(feature = "cli")]
+fn holds_sql(lines: &[String]) -> bool {
+    let platform = |grantee: &str| crate::catalog::PLATFORM_ROLES.contains(&grantee);
+    holds_a_schema(lines)
+        || lines.iter().any(|l| {
+            if let Some(rest) = l.strip_prefix("grant schema ") {
+                let acl = &rest[crate::catalog::name_at(rest).len()..];
+                acl.trim().split(',').filter_map(|g| g.rsplit_once(':')).any(|(grantee, _)| grantee != "PUBLIC" && !platform(grantee))
+            } else if l.starts_with(crate::catalog::DEFAULT_PRIVILEGES) {
+                let tail = l.trim_end_matches(" with grant option");
+                tail.rsplit_once(" to ").or_else(|| tail.rsplit_once(" from ")).is_some_and(|(_, grantee)| !platform(grantee))
+            } else {
+                false
+            }
+        })
+}
+
 /// Whether a migration that fails can leave part of what it did: on MySQL, whose statements commit as
 /// they go, and a statement that runs outside a transaction.
 fn may_leave_part(sql: &str, d: Dialect) -> bool {
@@ -5372,12 +5394,12 @@ async fn referenced_schemas(db: &mut Db, named: &[String]) -> Result<Vec<String>
 
 /// `live` as a shadow that ran SQL written from it reads, where the SQL makes all of it: without the
 /// lines the environment gives a shadow as it is made and `made` lacks, which the SQL leaves to it
-/// (a default privilege, the privileges on what an extension made). Partitions, comments and the
+/// (the privileges on what an extension made). Default privileges, partitions, comments and the
 /// rest stay, for the SQL to make.
 #[cfg(feature = "cli")]
 fn as_made(live: &[String], made: &[String]) -> Vec<String> {
-    use crate::catalog::{DEFAULT_PRIVILEGES, EXTENSION_GRANT};
-    live.iter().filter(|l| !(l.starts_with(DEFAULT_PRIVILEGES) || l.starts_with(EXTENSION_GRANT)) || made.contains(l)).cloned().collect()
+    use crate::catalog::EXTENSION_GRANT;
+    live.iter().filter(|l| !l.starts_with(EXTENSION_GRANT) || made.contains(l)).cloned().collect()
 }
 
 /// The refusal of an init whose --schema (`schemas`) leaves out schemas of the project's (`left`):
@@ -5416,9 +5438,9 @@ async fn own_sql(db: &mut Db, opts: &Options) -> Result<Result<String, NotOwn>, 
     };
     // The project's extensions are the text's to make, as a fresh database needs them: a shadow that
     // already had them would hide a plan that leaves them out. So are its default privileges and
-    // its grants on `public`, but for those a platform gives every database.
+    // its grants on `public`.
     server.leave_extensions(project_extensions(db).await?);
-    server.copy_platform_privileges_only();
+    server.copy_no_privileges();
     let result = async {
         let live = catalog(db).await?;
         let mut empty = match server.shadow().await {
@@ -5909,7 +5931,7 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     let roles = named_roles(&mut db).await;
     db.close().await;
     let problems = problems?;
-    let roles = roles?;
+    let mut roles = roles?;
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
     }
@@ -5917,7 +5939,7 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     if !left.is_empty() {
         return Ok(refuse(&[schemas_left_out(schemas, &left)], log));
     }
-    if !holds_a_schema(&lines?) {
+    if !holds_sql(&lines?) {
         drop(spinning);
         std::fs::create_dir_all(&opts.dir)?;
         std::fs::write(&opts.schema, "")?;
@@ -5942,6 +5964,7 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     let init = opts.dir.join(INIT);
     std::fs::write(&init, &sql)?;
     // The history is the lock's: init.sql is its first line, and reaches schema.sql.
+    roles.retain(|role| names(&sql, role));
     let entries = lock::chain([(INIT, sql.as_str())]);
     let schema = Some(lock::schema_sum(&entries[0].sum, &sql));
     lock::write(&opts.lock, &lock::Lock { schema, entries })?;
@@ -5986,7 +6009,7 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
 
 /// The roles the database names, as an owner, a grantee or a policy's role, that a new server
 /// lacks: none of the role that runs the migrations, a platform's, or Postgres's own. A migration
-/// may make no role, so they are the server's to have first.
+/// may make no role, so they are the server's to have first, where the SQL written names them.
 #[cfg(feature = "cli")]
 async fn named_roles(db: &mut Db) -> Result<Vec<String>, Error> {
     if db.dialect() != Dialect::Postgres {
@@ -6015,7 +6038,7 @@ pub async fn db_introspect(opts: &Options, schemas: &[String], log: Log<'_>) -> 
     let spinning = crate::terminal::spinner(format!("Introspecting {}", shown_url(&opts.url)));
     let mut db = Db::open(opts).await?;
     let result = async {
-        if !holds_a_schema(&catalog(&mut db).await?) {
+        if !holds_sql(&catalog(&mut db).await?) {
             return Ok(Ok(String::new()));
         }
         let schemas = with_referenced(&mut db, schemas, &mut *log).await?;
@@ -7288,6 +7311,13 @@ fn drop_phrase(items: &[(String, String)]) -> String {
         .join(", and ")
 }
 
+/// Whether `sql` names `role`, written as `quote_ident` writes it, as a word of its own.
+#[cfg(feature = "cli")]
+fn names(sql: &str, role: &str) -> bool {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
+    sql.match_indices(role).any(|(k, _)| !word(sql[..k].chars().next_back()) && !word(sql[k + role.len()..].chars().next()))
+}
+
 /// `a`, `a and b`, `a, b and c`.
 fn and_list(items: &[String]) -> String {
     match items {
@@ -7385,6 +7415,19 @@ fn table_lines(table: &crate::db::Table) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "cli")]
+    #[test]
+    fn a_grant_to_a_role_of_its_own_is_sql_to_write() {
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(!super::holds_sql(&lines(&["schema public", "grant schema public PUBLIC:USAGE,anon:USAGE,service_role:USAGE*", "default privileges in schema public grant select on tables to anon"])));
+        assert!(super::holds_sql(&lines(&["schema public", "grant schema public PUBLIC:USAGE,reporting:CREATE"])));
+        assert!(super::holds_sql(&lines(&["schema public", "default privileges in schema public grant select on tables to reporting with grant option"])));
+        assert!(super::holds_sql(&lines(&["schema public", "default privileges revoke execute on functions from public"])));
+        assert!(super::names("grant select on table t to ops_read;", "ops_read"));
+        assert!(!super::names("grant select on table t to ops_readwrite;", "ops_read"));
+        assert!(!super::names("create table ops_read_log (id int);", "ops_read"));
+    }
+
     use super::*;
 
     #[test]

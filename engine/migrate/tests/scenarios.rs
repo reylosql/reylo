@@ -3299,6 +3299,7 @@ on!(
     a_partition_dropped_at_run_time_is_data,
     init_creates_the_extensions_its_schema_uses,
     init_writes_the_default_privileges_and_grants_a_migration_made,
+    init_writes_a_database_of_grants_alone,
     init_writes_the_event_triggers_it_compares,
     init_writes_the_publications_it_compares,
     a_dump_keeps_a_function_body_as_written,
@@ -5581,6 +5582,16 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(q.rows("select has_schema_privilege('madv_ops_read', 'public', 'usage')::text as u").await[0].text("u"), "true");
         q.exec("create table later (id int)").await;
         assert_eq!(q.rows("select has_table_privilege('madv_ops_read', 'later', 'insert')::text as i").await[0].text("i"), "true", "the default privileges made");
+    }
+
+    /// A database whose only change from a new one is a grant on `public`: init writes it, and
+    /// introspect prints it, rather than starting an empty project.
+    pub async fn init_writes_a_database_of_grants_alone(mut p: P) {
+        p.exec("do $$ begin create role madv_ops_read nologin; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec("grant create on schema public to madv_ops_read").await;
+        assert_has!(introspect(&p.opts()).await, r"(?m)^grant create on schema public to madv_ops_read;$");
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap(), r"(?m)^grant create on schema public to madv_ops_read;$");
     }
 
     pub async fn an_extension_in_a_schema_of_its_own_is_dumped_after_it(mut p: P) {
