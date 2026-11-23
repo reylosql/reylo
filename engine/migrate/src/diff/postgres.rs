@@ -2769,13 +2769,17 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
         for o in &columns {
             let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
             let Some(name) = not_null_name(o) else { continue };
-            let wanted = crate::diff::swap_name(&name, old, new);
-            let kept = target.objects.get(&format!("column {new_rel}.{column}"));
-            let takes = match kept {
-                Some(t) => not_null_name(t).as_deref() == Some(wanted.as_str()),
-                None => generated_not_null(&name, old_rel, &unquoted(column)) && generated_not_null(&wanted, new_rel, &unquoted(column)) && !held(&wanted),
+            let Some(kept) = target.objects.get(&format!("column {new_rel}.{column}")) else {
+                // The name Postgres would make, as it holds it and as a statement writes it.
+                let made = default_not_null(new_rel, &unquoted(column));
+                if generated_not_null(&name, old_rel, &unquoted(column)) && unquoted(&name) != made && !held(&made) {
+                    let written = if made.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') { made } else { crate::db::ident(&made) };
+                    out.push(format!("alter table {new_rel} rename constraint {name} to {written}"));
+                }
+                continue;
             };
-            if wanted != name && takes {
+            let wanted = crate::diff::swap_name(&name, old, new);
+            if wanted != name && not_null_name(kept).as_deref() == Some(wanted.as_str()) {
                 out.push(format!("alter table {new_rel} rename constraint {name} to {wanted}"));
             }
         }

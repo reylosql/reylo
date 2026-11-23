@@ -3656,6 +3656,22 @@ mod adversarial {
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         assert_eq!(p.rows("select conname from pg_constraint where conrelid = 'people'::regclass and contype = 'c'").await.iter().map(|r| r.text("conname").to_string()).collect::<Vec<_>>(), ["people_email_not_null"]);
         assert_eq!(p.rows("select handle from people").await[0].text("handle"), "h");
+        p.output();
+        // A new name of mixed case, whose not null's name Postgres would not fold to a held one.
+        let people = "create table parent (handle text, constraint people_email_not_null check (handle <> '')); create table people () inherits (parent);";
+        let folk = "create table folk (handle text, constraint kin_email_not_null check (handle <> ''));";
+        p.file("20991231000002_t.sql", "create table folk (handle text, constraint kin_email_not_null check (handle <> '')); create table relatives (email text not null) inherits (folk);");
+        p.schema(&format!("{members} {people} {folk} create table relatives (email text not null) inherits (folk);"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into relatives values ('h', 'e')").await;
+        p.output();
+        p.schema(&format!(r#"{members} {people} {folk} create table "Kin" () inherits (folk);"#));
+        let choices = reylo_migrate::Choices { drop: vec!["relatives.email".into()], rename: vec![("relatives".into(), "Kin".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "kin", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.rows(r#"select handle from "Kin""#).await[0].text("handle"), "h");
     }
 
     /// A column whose not null has a name of its own, renamed with a change to its definition: the
