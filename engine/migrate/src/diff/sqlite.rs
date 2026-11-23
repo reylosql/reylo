@@ -12,9 +12,12 @@
 //! it, so those tables are rebuilt with it, at any depth, referencing the new one, each filled after
 //! and dropped before what it references: the file keeps every row on whatever runs it, foreign keys
 //! on or off. Only tables that reference each other have no such order, and defer their keys to the
-//! commit, for the one transaction.
+//! commit, for the one transaction. An external-content full-text table (FTS4 or FTS5 with
+//! `content='notes'`) holds an index of its content table's rows and none of its own: it is made
+//! again with nothing lost, and each time it is made its index is rebuilt from those rows, as it is
+//! where a rebuild of its content table gives the rows other keys than the index has.
 
-use super::{Alterer, Change, Kind, Object, Schema};
+use super::{Alterer, Change, Kind, Object, Schema, ROWS_ELSEWHERE};
 use crate::catalog::HISTORY_TABLE;
 use crate::db::{Db, Row};
 use crate::sql::{tokenize, Token, TokenKind};
@@ -265,6 +268,11 @@ struct Info {
     autoincrement: bool,
     /// Whether its rows have a rowid no column of it names (no INTEGER PRIMARY KEY, not WITHOUT ROWID).
     bare_rowid: bool,
+    /// The column that is its rowid (its INTEGER PRIMARY KEY), folded.
+    alias: Option<String>,
+    /// An external-content full-text table's content table, folded, and the column of it its index
+    /// is keyed on, folded, or `rowid`.
+    content: Option<(String, String)>,
     /// Each column's flags: `a` added in place (`add column` takes it on a table with rows), `d`
     /// dropped in place, `g` generated (no insert writes it), `n` not null with nothing to fill it.
     flags: BTreeMap<String, String>,
@@ -284,6 +292,11 @@ impl Info {
                 out.push(flag.to_string());
             }
         }
+        out.extend(self.alias.iter().map(|c| format!("alias{SEP}{c}")));
+        if let Some((table, key)) = &self.content {
+            out.push(format!("content{SEP}{table}{SEP}{key}"));
+            out.push(ROWS_ELSEWHERE.to_string());
+        }
         out.extend(self.flags.iter().map(|(c, f)| format!("column{SEP}{c}{SEP}{f}")));
         out.extend(self.goes.iter().map(|(id, fingerprint, drop, create, rank)| format!("goes{SEP}{id}{SEP}{fingerprint}{SEP}{drop}{SEP}{create}{SEP}{rank}")));
         out.extend(self.taken.iter().map(|t| format!("taken{SEP}{t}")));
@@ -299,6 +312,8 @@ impl Info {
                 ["virtual"] => info.virtual_table = true,
                 ["autoincrement"] => info.autoincrement = true,
                 ["rowid"] => info.bare_rowid = true,
+                ["alias", c] => info.alias = Some(c.to_string()),
+                ["content", table, key] => info.content = Some((table.to_string(), key.to_string())),
                 ["column", c, flags] => {
                     info.flags.insert(c.to_string(), flags.to_string());
                 }
@@ -377,8 +392,25 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
         match r.text("type") {
             "table" if sql.to_ascii_uppercase().starts_with("CREATE VIRTUAL") => {
                 let id = format!("table {folded}");
-                infos.insert(id.clone(), Info { name: name.to_string(), virtual_table: true, ..Info::default() });
-                s.add(Object { id, kind: Some(Kind::Table), def: format!("virtual {}", canonical(&tokens)), create: vec![written(sql)], drop: vec![format!("drop table {}", quote(name))], ..Object::default() });
+                let content = external_content(&tokens);
+                let mut create = vec![written(sql)];
+                let mut deps = BTreeSet::new();
+                // An external-content index is made after its content table, as the target has
+                // it, and filled from its rows: made over a table that has rows, or made again,
+                // its index would otherwise be empty, and every search would miss them.
+                if let Some((table, read_columns, key)) = &content {
+                    if let Some(relation) = relations.get(table).filter(|r| **r != id) {
+                        deps.insert(relation.clone());
+                        for c in read_columns.iter().chain([key]) {
+                            if columns.get(table).is_some_and(|ps| ps.iter().any(|p| p.column.as_deref() == Some(c.as_str()))) {
+                                deps.insert(format!("column {table}.{c}"));
+                            }
+                        }
+                        create.push(rebuild(name));
+                    }
+                }
+                infos.insert(id.clone(), Info { name: name.to_string(), virtual_table: true, content: content.map(|(table, _, key)| (table, key)), ..Info::default() });
+                s.add(Object { id, kind: Some(Kind::Table), def: format!("virtual {}", canonical(&tokens)), create, drop: vec![format!("drop table {}", quote(name))], deps, ..Object::default() });
             }
             "table" => {
                 let id = format!("table {folded}");
@@ -401,6 +433,7 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
                     name: name.to_string(),
                     autoincrement: tokens.iter().any(|t| t.upper() == "AUTOINCREMENT"),
                     bare_rowid: !wr && !alias,
+                    alias: alias.then(|| fold(keys[0].text("name"))),
                     taken: names.iter().filter(|n| n.starts_with("new_") || n.starts_with("reylo_aside_")).cloned().collect(),
                     ..Info::default()
                 };
@@ -824,6 +857,7 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
         }
         out.extend(standing.iter().map(|name| format!("drop index {}", quote(name))));
         out.extend(coming.into_iter().map(|(_, create)| create));
+        out.extend(reindexed(&a, &b, &renamed, &old_parts, &new_parts, &named, schemas));
         return Some(out);
     }
     if cycle {
@@ -890,7 +924,91 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
     let mut again: Vec<(usize, String)> = keys.into_iter().chain(coming).collect();
     again.sort();
     out.extend(again.into_iter().map(|(_, create)| create));
+    out.extend(reindexed(&a, &b, &renamed, &old_parts, &new_parts, &named, schemas));
     Some(out)
+}
+
+/// The statement that fills an external-content full-text table's index from its content table.
+fn rebuild(name: &str) -> String {
+    let q = quote(name);
+    format!("insert into {q} ({q}) values ('rebuild')")
+}
+
+/// What an FTS4 or FTS5 table's text says of the table whose text it indexes (`content='notes'`):
+/// that table's name, the columns it reads there, and the one its index is keyed on
+/// (`content_rowid`, else the rowid), each folded. None for one that keeps its own text, and for a
+/// contentless one (`content=''`), whose text is nowhere to rebuild it from.
+fn external_content(tokens: &[Token]) -> Option<(String, Vec<String>, String)> {
+    let using = tokens.iter().position(|t| t.upper() == "USING")?;
+    let module = fold(&tokens.get(using + 1)?.text);
+    if !matches!(module.as_str(), "fts4" | "fts5") || tokens.get(using + 2)?.text != "(" {
+        return None;
+    }
+    let mut args: Vec<Vec<&Token>> = vec![Vec::new()];
+    let mut depth = 0;
+    for t in &tokens[using + 3..] {
+        match t.text.as_str() {
+            ")" if depth == 0 => break,
+            "," if depth == 0 => {
+                args.push(Vec::new());
+                continue;
+            }
+            "(" => depth += 1,
+            ")" => depth -= 1,
+            _ => {}
+        }
+        if let Some(arg) = args.last_mut() {
+            arg.push(t);
+        }
+    }
+    let (mut content, mut key, mut columns) = (None, "rowid".to_string(), Vec::new());
+    for arg in args.iter().filter(|a| !a.is_empty()) {
+        if arg.get(1).is_some_and(|t| t.text == "=") {
+            let value = fold(&arg[2..].iter().map(|t| unquote(t)).collect::<String>());
+            match fold(&arg[0].text).as_str() {
+                "content" => content = Some(value),
+                // FTS4 keys its index on the content table's rowid, whatever its options say.
+                "content_rowid" if module == "fts5" => key = value,
+                _ => {}
+            }
+        } else {
+            columns.push(fold(&unquote(arg[0])));
+        }
+    }
+    Some((content.filter(|c| !c.is_empty())?, columns, key))
+}
+
+/// The rebuilds of the external-content indexes over the table `a` (`b` in the target) that its
+/// rebuild leaves keyed on rows that are no longer there: where the column the index is keyed on,
+/// or the rowid, is not copied as it was. An index the plan makes again rebuilds itself.
+fn reindexed(a: &Info, b: &Info, renamed: &BTreeMap<String, String>, old_parts: &[Part], new_parts: &[Part], named: &[String], schemas: Option<&(Schema, Schema)>) -> Vec<String> {
+    let Some((from, to)) = schemas else { return Vec::new() };
+    let table = fold(&a.name);
+    let old_name = |c: &str| renamed.get(c).cloned().unwrap_or_else(|| c.to_string());
+    let find = |ps: &[Part], c: &str| ps.iter().find(|p| p.column.as_deref() == Some(c)).map(Part::definition);
+    // The rebuild's statements write each column by its name before the plan's renames.
+    let kept = |key: &str| -> bool {
+        let old = old_name(key);
+        if find(new_parts, &old).is_none() && find(old_parts, &old).is_none() && matches!(key, "rowid" | "oid" | "_rowid_") {
+            // The rowid is copied where neither table has a column that is it, and is the column
+            // that is it, copied, where both have that one.
+            let copied = a.bare_rowid && b.bare_rowid && ["rowid", "_rowid_", "oid"].into_iter().any(|n| !named.iter().any(|c| c == n));
+            let aliased = b.alias.as_deref().is_some_and(|c| a.alias.as_deref() == Some(old_name(c).as_str()));
+            return copied || aliased;
+        }
+        // A column copied as it was keeps its values.
+        let Some(def) = find(new_parts, &old) else { return false };
+        !b.flag(key, 'g') && find(old_parts, &old) == Some(def)
+    };
+    to.objects
+        .values()
+        .filter(|o| from.objects.get(&o.id).is_some_and(|f| f.def == o.def))
+        .filter_map(|o| {
+            let info = Info::of(o);
+            let (content, key) = info.content.as_ref()?;
+            (*content == table && !kept(key)).then(|| rebuild(&info.name))
+        })
+        .collect()
 }
 
 /// Where a unique index's stored text names the index and its table; None for anything else.
@@ -1053,6 +1171,18 @@ mod tests {
         let written_as = BTreeMap::from([("full_name".to_string(), "full_name".to_string())]);
         let sql = "CREATE TABLE name (id integer primary key, name text check (length(name) > 0), boss text references people (name))";
         assert_eq!(before_renames(sql, &renamed, &written_as), "CREATE TABLE name (id integer primary key, full_name text check (length(full_name) > 0), boss text references people (name))");
+    }
+
+    #[test]
+    fn reads_what_a_full_text_table_indexes() {
+        let content = |sql: &str| external_content(&tokenize(sql, Dialect::Sqlite));
+        let notes = |columns: &[&str], key: &str| Some(("notes".to_string(), columns.iter().map(|c| c.to_string()).collect(), key.to_string()));
+        assert_eq!(content("CREATE VIRTUAL TABLE f USING fts5(body, content='notes', content_rowid='id', tokenize='porter')"), notes(&["body"], "id"));
+        assert_eq!(content("create virtual table f using FTS5(Title, body UNINDEXED, content = \"Notes\")"), notes(&["title", "body"], "rowid"));
+        assert_eq!(content("create virtual table f using fts4(body, content=notes, tokenize=porter)"), notes(&["body"], "rowid"));
+        assert_eq!(content("create virtual table f using fts5(body, content='')"), None);
+        assert_eq!(content("create virtual table f using fts5(body, tokenize='unicode61 remove_diacritics 2')"), None);
+        assert_eq!(content("create virtual table f using rtree(id, x0, x1)"), None);
     }
 
     #[test]
