@@ -1,6 +1,6 @@
 ---
 name: reylo
-description: "Use in a project that imports .sql files with Reylo, which a tsconfig.json whose contentMappers names reylo, a .reylo.yaml file or a reylo dependency shows: writing or changing a .sql query, calling its .run(), .runSync() or .with(), passing it a database client, tracing or logging its queries, fixing an error the type check reports in a .sql file, or evaluating, planning or carrying out a move of a project's queries to Reylo from Prisma Client."
+description: "Use in a project that imports .sql files with Reylo, which a tsconfig.json whose contentMappers names reylo, a .reylo.yaml file, a reylo dependency or a file reylo generate wrote shows: writing or changing a .sql query, calling its .run(), .runSync() or .with(), passing it a database client, tracing or logging its queries, fixing an error the type check reports in a .sql file, or evaluating, planning or carrying out a move of a project's queries to Reylo from Prisma Client."
 ---
 
 # Reylo
@@ -54,6 +54,7 @@ On an error the database raised, `.run()` throws the driver's own error and `.tr
 
 - Find the project file, `.reylo.yaml` or `.reylo.yml`, beside `package.json`. Its `direct_url`, or `DATABASE_URL` without one, is the dev database the type check reads the schema from, and its scheme names the database: `postgres://`, `mysql://`, `sqlite:` for SQLite. Reylo reads `.env.local` and `.env` as `dotenv` does, so a value there that holds a `#` is quoted.
 - The type check is `tsc --noEmit --runExternalCode` on TypeScript 7.1, usually a `typecheck` script. Run it before and after a change.
+- A project may import its queries from one generated file instead of each `.sql` file, as in `import { getUser } from "./queries.ts"`, a file whose first line says `reylo generate typescript` wrote it. Each export is named after its `.sql` file in camelCase, with its types as `getUser.Params` and `getUser.Row`, and the file needs no content mapper or TypeScript 7.1. Never edit it: change the `.sql` file, then run the command again with the paths its first line names, as `npx reylo generate typescript 'src/queries/**/*.sql' --out src/queries.ts` (https://reylo.dev/typescript#codegen).
 
 ## Writing a query
 
