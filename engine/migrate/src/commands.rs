@@ -784,9 +784,10 @@ fn describe_diff(label_a: &str, a: &[String], label_b: &str, b: &[String]) -> Ve
     const MAX: usize = 20;
     let (only_a, only_b) = difference(a, b);
     let (only_a, only_b) = (without_default_grants(&only_a), without_default_grants(&only_b));
-    let mut changes: Vec<String> = only_a.iter().take(MAX).map(|l| paint("red", &format!("    - {}", readable(l)))).collect();
+    let (only_a, only_b, mut changes) = in_place(only_a.iter().collect(), only_b.iter().collect(), "    ");
+    changes.extend(only_a.iter().take(MAX).map(|l| paint("red", &format!("    - {}", readable(l)))));
     changes.extend(only_b.iter().take(MAX).map(|l| paint("green", &format!("    + {}", readable(l)))));
-    let more = only_a.len() + only_b.len() - changes.len();
+    let more = only_a.len().saturating_sub(MAX) + only_b.len().saturating_sub(MAX);
     if more > 0 {
         changes.push(format!("    … and {more} more"));
     }
@@ -816,7 +817,6 @@ fn readable(line: &str) -> String {
     static SQLITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(index|view|trigger) \S+ create (unique )?(?:temp |temporary )?(?:index|view|trigger) (?:if not exists )?(\S+) (.*)$").expect("a valid pattern"));
     static CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) (\S+) (.*)$").expect("a valid pattern"));
     static FUNCTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)^function CREATE OR REPLACE (FUNCTION|PROCEDURE) ([^\n]+)\n(?: RETURNS ([^\n]+)\n)?").expect("a valid pattern"));
-    static TRIGGER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^trigger CREATE (CONSTRAINT )?TRIGGER (\S+) (.+?) ON (\S+) (.*)$").expect("a valid pattern"));
     static POSTGRES_DEFINITION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:PRIMARY KEY|UNIQUE|CHECK|FOREIGN KEY|EXCLUDE|NOT NULL)\b").expect("a valid pattern"));
     static SQLITE_CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) ((?:primary key|unique|check|foreign key|constraint)\b.*)$").expect("a valid pattern"));
     static PUBLIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s(,]|::)(?:public|"public")\."#).expect("a valid pattern"));
@@ -838,8 +838,15 @@ fn readable(line: &str) -> String {
         let returns = c.get(3).map(|r| format!(" returns {}", lowercase_keywords(r.as_str()))).unwrap_or_default();
         return format!("{} {}{returns}", c[1].to_lowercase(), lowercase_keywords(&c[2]));
     }
-    if let Some(c) = TRIGGER.captures(&line) {
-        return format!("{}trigger {} on {}: {} {}", if c.get(1).is_some() { "constraint " } else { "" }, &c[2], &c[4], lowercase_keywords(&c[3]), lowercase_keywords(&c[5]));
+    if let Some(rest) = line.strip_prefix("trigger CREATE ") {
+        let (constraint, rest) = rest.strip_prefix("CONSTRAINT ").map_or(("", rest), |rest| ("constraint ", rest));
+        // The table is the name after the first ON outside quotes, which a column's quoted name may hold.
+        if let Some((name, rest)) = rest.strip_prefix("TRIGGER ").map(first_name) {
+            if let Some((when, after)) = outside_quotes(rest.trim_start(), " ON ") {
+                let (table, rest) = first_name(after);
+                return format!("{constraint}trigger {name} on {table}: {} {}", lowercase_keywords(when), lowercase_keywords(rest.trim_start()));
+            }
+        }
     }
     // Postgres's, whose definition is in capitals, names its constraint, whatever the name; SQLite's,
     // in lowercase, names none unless its definition does.
@@ -851,6 +858,32 @@ fn readable(line: &str) -> String {
         return format!("constraint {} on {}: {}", &c[2], &c[1], lowercase_keywords(&c[3]));
     }
     line
+}
+
+/// The name `text` starts with, a qualified one whole and a quoted part with its spaces, and what
+/// follows it.
+fn first_name(text: &str) -> (&str, &str) {
+    let mut quoted = false;
+    let end = text.char_indices().find(|&(_, c)| {
+        if c == '"' {
+            quoted = !quoted;
+        }
+        c == ' ' && !quoted
+    });
+    end.map_or((text, ""), |(k, _)| (&text[..k], &text[k..]))
+}
+
+/// `text` split at the first `pattern` outside double quotes.
+fn outside_quotes<'a>(text: &'a str, pattern: &str) -> Option<(&'a str, &'a str)> {
+    let mut quoted = false;
+    for (k, c) in text.char_indices() {
+        if c == '"' {
+            quoted = !quoted;
+        } else if !quoted && text[k..].starts_with(pattern) {
+            return Some((&text[..k], &text[k + pattern.len()..]));
+        }
+    }
+    None
 }
 
 /// SQL's keywords in lowercase, outside its quotes: `PRIMARY KEY (id)` is `primary key (id)`.
@@ -1095,7 +1128,10 @@ fn listed(gone: &[String], came: &[String], before: &[String], after: &[String],
     let once = |name: &String, side: &[String]| side.iter().filter(|t| *t == name).count() == 1;
     let added: Vec<String> = has.iter().filter(|t| !had.contains(t) && once(t, &has)).cloned().collect();
     let dropped: Vec<String> = had.iter().filter(|t| !has.contains(t) && once(t, &had)).cloned().collect();
-    let (mut out, more_came) = marked(&came, "green", '+', MAX, &added, &tables, mysql);
+    // A line both sides read the same, as a function whose body alone changed does, changed in place.
+    let (gone, came, mut out) = in_place(gone, came, "  ");
+    let (came_out, more_came) = marked(&came, "green", '+', MAX, &added, &tables, mysql);
+    out.extend(came_out);
     let (gone, more_gone) = marked(&gone, "red", '-', MAX, &dropped, &tables, mysql);
     out.extend(gone);
     let more = more_came + more_gone;
@@ -1103,6 +1139,25 @@ fn listed(gone: &[String], came: &[String], before: &[String], after: &[String],
         out.push(format!("  … and {more} more"));
     }
     out
+}
+
+/// What went and what came, without each pair of lines that read the same (as a function's does
+/// when its body alone changed), and each such pair as one line changed in place, `indent` in.
+fn in_place<'a>(gone: Vec<&'a String>, came: Vec<&'a String>, indent: &str) -> (Vec<&'a String>, Vec<&'a String>, Vec<String>) {
+    let mut came: Vec<Option<&String>> = came.into_iter().map(Some).collect();
+    let mut kept = Vec::new();
+    let mut changed = Vec::new();
+    for g in gone {
+        let text = readable(g);
+        match came.iter_mut().find(|c| c.is_some_and(|c| readable(c) == text)) {
+            Some(c) => {
+                *c = None;
+                changed.push(format!("{indent}{} {text}", paint("yellow", "~")));
+            }
+            None => kept.push(g),
+        }
+    }
+    (kept, came.into_iter().flatten().collect(), changed)
 }
 
 /// The name of the table a readable `table …` line is, quotes and all: `"order items"` whole. On
@@ -1170,8 +1225,15 @@ fn owner(line: &str, tables: &[String], mysql: bool) -> Option<(String, String)>
 fn marked(lines: &[&String], style: &str, mark: char, max: usize, grouped: &[String], tables: &[String], mysql: bool) -> (Vec<String>, usize) {
     let lines: Vec<String> = lines.iter().map(|l| readable(l)).collect();
     // A view's own line, its name alone, says nothing its definition's line doesn't.
-    let view = |l: &String| (l.starts_with("view ") || l.starts_with("materialized view ")) && lines.iter().any(|d| d.starts_with(&format!("{l} as ")));
-    let lines: Vec<String> = lines.iter().filter(|l| !view(l)).cloned().collect();
+    // A materialized view's definition line reads `view <name> as …`: it takes its kind back from
+    // the view's own line, which then says nothing more, as a view's own line doesn't.
+    let materialized: Vec<String> = lines.iter().filter_map(|l| l.strip_prefix("materialized view ")).filter(|name| lines.iter().any(|d| d.starts_with(&format!("view {name} as ")))).map(str::to_string).collect();
+    let view = |l: &String| l.starts_with("view ") && lines.iter().any(|d| d.starts_with(&format!("{l} as ")));
+    let lines: Vec<String> = lines
+        .iter()
+        .filter(|l| !view(l) && !materialized.iter().any(|name| **l == format!("materialized view {name}")))
+        .map(|l| if materialized.iter().any(|name| l.starts_with(&format!("view {name} as "))) { format!("materialized {l}") } else { l.clone() })
+        .collect();
     // Only a table whose own line is listed here has its parts under it: one a rename took out of the
     // list keeps them as lines of their own.
     let headed: Vec<String> = lines.iter().filter_map(|l| table_name(l, mysql)).filter(|t| grouped.contains(t)).collect();
@@ -7100,6 +7162,18 @@ mod tests {
             changed_lines(&[], &made, Dialect::Postgres),
             ["  + table users", "      id integer", "      trigger users_touch: before update for each row execute function touch()", "  + view pro_users as SELECT id FROM users;"]
         );
+        // A trigger's table is the name after the ON outside quotes, whole.
+        assert_eq!(
+            readable("trigger CREATE TRIGGER t_upd BEFORE UPDATE OF \"stage ON decoy name\" ON public.\"order items\" FOR EACH ROW EXECUTE FUNCTION public.touch()"),
+            "trigger t_upd on \"order items\": before update of \"stage ON decoy name\" for each row execute function touch()"
+        );
+        // A materialized view's definition takes its kind back.
+        assert_eq!(changed_lines(&[], &lines(&["materialized view public.mat", "view public.mat as SELECT 1;"]), Dialect::Postgres), ["  + materialized view mat as SELECT 1;"]);
+        // A function whose body alone changed reads as changed in place, here and in a headed diff.
+        let one = lines(&["function CREATE OR REPLACE FUNCTION public.rate()\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        let two = lines(&["function CREATE OR REPLACE FUNCTION public.rate()\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 2 $function$"]);
+        assert_eq!(changed_lines(&one, &two, Dialect::Postgres), ["  ~ function rate() returns integer"]);
+        assert_eq!(describe_diff("this database", &one, "a fresh database", &two), ["", "    --- this database", "    +++ a fresh database", "    ~ function rate() returns integer", ""]);
     }
 
     #[test]
