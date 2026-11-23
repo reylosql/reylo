@@ -3672,6 +3672,21 @@ mod adversarial {
         assert!(!out.contains("doesn't reach"), "{out}");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         assert_eq!(p.rows(r#"select handle from "Kin""#).await[0].text("handle"), "h");
+        p.output();
+        // A new name that opens with a digit, and one at Postgres's 63 bytes, whose dropped
+        // columns' not nulls Postgres would name past its limit.
+        let kin = r#"create table "Kin" () inherits (folk);"#;
+        let long = "a".repeat(63);
+        p.file("20991231000004_t.sql", "create table ledger (note text, email text not null); create table wide (note text, email text not null, handle text not null);");
+        p.schema(&format!("{members} {people} {folk} {kin} create table ledger (note text, email text not null); create table wide (note text, email text not null, handle text not null);"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        p.schema(&format!(r#"{members} {people} {folk} {kin} create table "123" (note text); create table {long} (note text);"#));
+        let choices = reylo_migrate::Choices { drop: vec!["ledger.email".into(), "wide.email".into(), "wide.handle".into()], rename: vec![("ledger".into(), "123".into()), ("wide".into(), long.clone())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "names", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
     }
 
     /// A column whose not null has a name of its own, renamed with a change to its definition: the

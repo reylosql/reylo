@@ -2770,11 +2770,12 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
             let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
             let Some(name) = not_null_name(o) else { continue };
             let Some(kept) = target.objects.get(&format!("column {new_rel}.{column}")) else {
-                // The name Postgres would make, as it holds it and as a statement writes it.
+                // The name Postgres would make, as it holds it: left alone where Postgres would
+                // shorten it, which it does its own way.
                 let made = default_not_null(new_rel, &unquoted(column));
-                if generated_not_null(&name, old_rel, &unquoted(column)) && unquoted(&name) != made && !held(&made) {
-                    let written = if made.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') { made } else { crate::db::ident(&made) };
-                    out.push(format!("alter table {new_rel} rename constraint {name} to {written}"));
+                let whole = format!("{}_{}_not_null", unquoted(split_last(new_rel).1), unquoted(column)).len() <= 63;
+                if whole && generated_not_null(&name, old_rel, &unquoted(column)) && unquoted(&name) != made && !held(&made) {
+                    out.push(format!("alter table {new_rel} rename constraint {name} to {}", declared::quote_ident(&made)));
                 }
                 continue;
             };
