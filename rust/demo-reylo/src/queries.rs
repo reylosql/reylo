@@ -223,3 +223,11 @@ pub mod count_vectors {
 /// A vector parameter beside columns that serde can write: the row derives `Serialize`.
 #[reylo::query("select vector_dims(:v::vector) as dimensions")]
 pub mod dimensions {}
+
+/// A vector parameter declared as its values, with no cast: bound through the codec as a vector.
+#[reylo::query("select id from items order by embedding <-> :near limit 1")]
+pub mod nearest_item_by_values {
+    pub struct Params {
+        pub near: Vec<f32>,
+    }
+}

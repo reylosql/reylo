@@ -249,8 +249,8 @@ pub fn module(dialect: Dialect, options: Options, analysis: &Value, span: Span, 
                             _ => quote!(#from(#v)),
                         })
                     }
-                    // A vector the crate declares as its `pgvector::Vector`, under any name and in any
-                    // `Option`s and `Vec`s, is bound through reylo's codec; a field of another type,
+                    // A vector the crate declares as its `pgvector::Vector`, under any name, or as a
+                    // `Vec<f32>`, in any `Option`s and `Vec`s, is bound through reylo's codec; a field of another type,
                     // as `String` for `:v::vector::text`, as it is. The compiler picks which by the
                     // field's type, through the items `vector_binds` writes into the module.
                     None if shape.bound_via() => {
@@ -440,8 +440,8 @@ impl Conversions {
 
 /// The items a `Params` field the crate declares for a vector parameter is bound through:
 /// `(&&__ReyloBind(v)).reylo_bind()` takes the codec's method where `v` is the crate's own
-/// `pgvector::Vector`, in any `Option`s and `Vec`s, and binds any other value as it is, one
-/// dereference further on. They are written in the module, against the crate's own `pgvector`,
+/// `pgvector::Vector` or a `Vec<f32>`, in any `Option`s and `Vec`s, and binds any other value as
+/// it is, one dereference further on. They are written in the module, against the crate's own `pgvector`,
 /// since reylo depends on no version of it.
 fn vector_bind_items() -> TokenStream {
     quote! {
@@ -456,6 +456,13 @@ fn vector_bind_items() -> TokenStream {
             type Bound = ::reylo::__private::PgVector;
             fn bound(&self) -> Self::Bound {
                 ::reylo::__private::PgVector(self.to_vec())
+            }
+        }
+        // A vector's values as they are, which no operator of pgvector's takes as a `real[]`.
+        impl __ReyloVectorCodec for ::std::vec::Vec<f32> {
+            type Bound = ::reylo::__private::PgVector;
+            fn bound(&self) -> Self::Bound {
+                ::reylo::__private::PgVector(::core::clone::Clone::clone(self))
             }
         }
         impl<T: __ReyloVectorCodec> __ReyloVectorCodec for ::core::option::Option<T> {

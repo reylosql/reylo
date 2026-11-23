@@ -164,5 +164,7 @@ async fn main() -> Result<(), sqlx::Error> {
     assert_eq!(format!("{n:?}"), "Some(2)");
     let row = dimensions::Query { v: pgvector::Vector::from(vec![1.0, 2.0]) }.run(&pool).await?;
     println!("26. dimensions  {}", serde_json::to_string(&row).expect("json"));
+    let by_values = nearest_item_by_values::Query { near: vec![0.0, 0.0, 1.0] }.run(&pool).await?;
+    assert_eq!(by_values.map(|r| r.id), Some(2));
     Ok(())
 }
