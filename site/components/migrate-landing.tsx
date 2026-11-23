@@ -287,7 +287,7 @@ function usePlayer(script: Script, onEdit?: (edited: boolean) => void): Line[] {
   return lines;
 }
 
-/** A printed line in the CLI's colours: ✓ and + green, ✗ and - red, !, ↺ and ~ yellow; a » note and the lead over a command (an indented line from a capital to a colon) dim whole; the command on its own line cyan; the words a ~ line changes in place, written as the CLI writes them where colour is off (`[-title-]{+heading+}`), highlighted red and green. */
+/** A printed line in the CLI's colours: ✓ and + green, ✗ and - red, !, ↺ and ~ yellow; a » note, the lead over a command (an indented line from a capital to a colon) and a diff's `---` and `+++` headers dim whole; the command on its own line cyan; the words a ~ line changes in place, written as the CLI writes them where colour is off (`[-title-]{+heading+}`), highlighted red and green. */
 function paint(line: string): ReactNode {
   const changed = line.match(/^(\s*)~ (.*)$/);
   if (changed) {
@@ -307,7 +307,7 @@ function paint(line: string): ReactNode {
       </>
     );
   }
-  if (/^\s*» /.test(line) || /^\s+[A-Z].*:$/.test(line)) return <span className="ml-mu">{line}</span>;
+  if (/^\s*» /.test(line) || /^\s+[A-Z].*:$/.test(line) || /^\s+(---|\+\+\+) /.test(line)) return <span className="ml-mu">{line}</span>;
   const m = line.match(/^(\s*)(✓|✗|!|\+|-|↺)(\s.*)?$/);
   if (m) {
     const cls = m[2] === '✓' || m[2] === '+' ? 'ml-ok' : m[2] === '✗' || m[2] === '-' ? 'ml-er' : 'ml-wn';
@@ -437,7 +437,9 @@ const LOCK_FREE: Script = [
   '✗ Migration 20261105080000_no_nick.sql sorts before 20261105090000_nick.sql, which this database already ran',
   '  Run in name order, as on a fresh database, the migrations end differently:',
   '',
-  '    + a fresh database: column users.nick text',
+  '    --- this database',
+  '    +++ a fresh database',
+  '    + column users.nick text',
   '',
   '  Give it a later name, so that every database runs it after 20261105090000_nick.sql:',
   '    mv reylo/migrations/20261105080000_no_nick.sql reylo/migrations/20261105090001_no_nick.sql',
@@ -457,6 +459,7 @@ const PUSH: Script = [
   '✓ This database matches reylo/schema.sql',
   '$ reylo migrate new add_nick',
   '✓ Wrote reylo/migrations/20261104150000_add_nick.sql',
+  '  + column users.nick text',
 ];
 
 const HAND_CHANGE: Script = [

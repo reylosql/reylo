@@ -3463,20 +3463,21 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
     // development database as it stands, written out as SQL (as `db introspect` prints it). Either
     // way, the development database must have run each migration it applied as it now reads: one
     // edited or deleted since is `migrate dev`'s to settle first.
-    let (target_sql, target_name) = match std::fs::read_to_string(&opts.schema) {
+    let (target_sql, target_name, added) = match std::fs::read_to_string(&opts.schema) {
         Ok(sql) => {
             let problems = ran_as_written(opts, &files).await?;
             if !problems.is_empty() {
                 return Ok(refuse(&problems, log));
             }
-            (sql, shown(&opts.schema))
+            (sql, shown(&opts.schema), vec![])
         }
         Err(_) => match as_its_migrations_leave_it(opts, &files).await? {
-            Ok(sql) => (sql, "this database".to_string()),
+            Ok((sql, added)) => (sql, "this database".to_string(), added),
             Err(problems) => return Ok(refuse(&problems, log)),
         },
     };
-    let drafted = match draft(opts, &files, &target_sql, &target_name, name, choices, log).await? {
+    let added = unneeded_by_history(opts, &files, added).await?;
+    let drafted = match draft(opts, &files, &target_sql, &target_name, &added, name, choices, log).await? {
         Ok(drafted) => drafted,
         Err(problems) => return Ok(refuse(&problems, log)),
     };
@@ -3534,9 +3535,11 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
 
 /// The development database as SQL that makes it, for `migrate new` in a project with no schema.sql:
 /// the migration is what it has that the migrations don't make. Refused unless it ran every migration,
-/// each as it now reads, since one it hasn't run would read as something to drop.
+/// each as it now reads, since one it hasn't run would read as something to drop. With it, the
+/// extensions of the project's it has that no file creates, for the migration to make where the
+/// history doesn't need them ([`unneeded_by_history`]).
 #[cfg(feature = "cli")]
-async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Result<Result<String, Vec<Problem>>, Error> {
+async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Result<Result<(String, Vec<String>), Vec<Problem>>, Error> {
     let mut db = Db::open(opts).await?;
     let result = async {
         let d = db.dialect();
@@ -3554,10 +3557,74 @@ async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Resu
         if !problems.is_empty() {
             return Ok(Err(problems));
         }
-        Ok(schema_as_sql_on(&mut db, opts, &[], true).await?.map(|sql| passing_over_existing(&sql, d)).map_err(|problem| vec![problem]))
+        let created = created_extensions(opts);
+        let added: Vec<String> = if d == Dialect::Postgres { project_extensions(&mut db).await?.into_iter().filter(|x| !created.contains(x)).collect() } else { vec![] };
+        Ok(schema_as_sql_on(&mut db, opts, &[], true).await?.map(|sql| (passing_over_existing(&sql, d), added)).map_err(|problem| vec![problem]))
     }
     .await;
     db.close().await;
+    result
+}
+
+/// Of `extensions`, those the migrations replay without, which a new migration makes: one a migration
+/// needs is the environment's (a platform's, or one the database had before the project began),
+/// which every shadow keeps, so that the history replays as it did on the database. The history
+/// needs an extension where its replay without it fails, makes anything it doesn't make with it, or
+/// lacks anything it makes with it but what the extension itself brings a shadow (its line, its
+/// schema, their grants, read from an empty one), as a migration that does something only where the
+/// extension is. Each is tried with
+/// those already taken, so that one the history needs takes no other with it.
+#[cfg(feature = "cli")]
+async fn unneeded_by_history(opts: &Options, files: &[Migration], extensions: Vec<String>) -> Result<Vec<String>, Error> {
+    use std::collections::BTreeSet;
+    if extensions.is_empty() {
+        return Ok(extensions);
+    }
+    let mut db = Db::open(opts).await?;
+    let server = Server::open(&mut db, &opts.url, opts.shadow_url.as_deref()).await;
+    db.close().await;
+    let mut server = server?;
+    server.copy_default_privileges(!sets_default_privileges(opts));
+    let texts: Vec<&str> = files.iter().map(|f| f.sql.as_str()).collect();
+    // The catalog's lines of a shadow that leaves out `left`, after the migrations or with none run;
+    // nothing where they fail.
+    let mut lines = async |left: &[String], history: bool| -> Result<Option<BTreeSet<String>>, Error> {
+        server.leave_extensions(created_extensions(opts).into_iter().chain(left.iter().cloned()).collect());
+        server.leave_schemas(created_schemas(opts));
+        let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &texts).await;
+        let lane = shadows.lane();
+        if history {
+            shadows.push(lane, files.iter().map(Step::of));
+        }
+        let lines = shadows.lines(lane).await;
+        shadows.finish().await;
+        Ok(lines?.ok().map(|l| l.into_iter().collect()))
+    };
+    let result = async {
+        let Some(empty) = lines(&[], false).await? else { return Ok(vec![]) };
+        // A history that replays only without them (one that renames a schema to the one an
+        // extension is in) says nothing of which ran beside it: the draft's replay refuses it.
+        let Some(replayed) = lines(&[], true).await? else { return Ok(vec![]) };
+        let mut unneeded = async |left: Vec<String>| -> Result<Option<Vec<String>>, Error> {
+            let (Some(without), Some(empty_without)) = (lines(&left, true).await?, lines(&left, false).await?) else { return Ok(None) };
+            // Each line the replay lost is one they bring a shadow, and it gained none: the history
+            // may make one of those itself, as their schema.
+            let brought: BTreeSet<&String> = empty.difference(&empty_without).collect();
+            Ok((without.is_subset(&replayed) && replayed.difference(&without).all(|l| brought.contains(l))).then_some(left))
+        };
+        if let Some(all) = unneeded(extensions.clone()).await? {
+            return Ok(all);
+        }
+        let mut taken: Vec<String> = Vec::new();
+        for extension in &extensions {
+            if let Some(more) = unneeded(taken.iter().chain([extension]).cloned().collect()).await? {
+                taken = more;
+            }
+        }
+        Ok(taken)
+    }
+    .await;
+    server.close().await;
     result
 }
 
@@ -4451,9 +4518,10 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
 /// The new migration's text: the diff engine's plan from the migrations replayed in order to
 /// `schema.sql`, run on the replay and compared with `schema.sql` before it is written. A plan that
 /// does not reach it is written all the same, with what remains, for the person (or agent) to finish.
-#[allow(clippy::type_complexity)]
+/// `added` are extensions the shadows leave out beside those the project's files create.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 #[cfg(feature = "cli")]
-async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, migration: &str, choices: &Choices, log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
+async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, added: &[String], migration: &str, choices: &Choices, log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
     let drafted = |texts: Vec<String>, code: i32, notes: Vec<String>, empty: bool| Drafted { texts, code, notes, empty, target: target_name.to_string(), lock_safe: false, commits: 0, changes: vec![] };
     let mut db = Db::open(opts).await?;
     let mut problems = out_of_reach(&mut db, &opts.url).await?;
@@ -4464,7 +4532,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
     }
     let mut server = Server::open(&mut db, &opts.url, opts.shadow_url.as_deref()).await?;
     server.copy_default_privileges(!sets_default_privileges(opts));
-    server.leave_extensions(created_extensions(opts));
+    server.leave_extensions(created_extensions(opts).into_iter().chain(added.iter().cloned()).collect());
     server.leave_schemas(created_schemas(opts));
     left_out_note(&server, log);
     db.close().await;

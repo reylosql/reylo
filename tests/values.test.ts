@@ -5,7 +5,8 @@ import { execute, type QueryModule } from "./run.ts";
 import { renderParamType, renderType } from "../src/render.ts";
 import { typeSchema } from "../src/schema.ts";
 import { coerce, columnKind, DecodeError, duration, hstore, hstoreText, instant, kindType, money, numbersInJson, parseRow, postgresInterval, postgresLiteral, postgresYear, rowMasks, scalarKind, textDecoder, withinDimensions } from "../src/values.ts";
-import type { EngineType } from "../src/engine-type.ts";
+import type { EngineType, JsonSchema } from "../src/engine-type.ts";
+import { validate } from "../src/json-schema.ts";
 import { array, field, lite, my, oneOf, pg, record } from "./descriptors.ts";
 import type { Columns } from "../src/values.ts";
 import { pgPool } from "./stand-ins.ts";
@@ -568,7 +569,15 @@ test("the kinds: a BIGINT is a BigInt, and an integer a temporary table may wide
   assert.equal(renderType(pg("int8"), true), "number", "inside a JSON document, as the database writes it");
   assert.deepEqual(typeSchema(pg("int8"), "postgres"), { type: "integer", format: "int64" });
   assert.deepEqual(typeSchema(pg("int8"), "postgres", true), { type: ["integer", "string"], format: "int64" }, "a parameter, as every driver binds it");
-  assert.deepEqual(typeSchema(pg("timestamptz"), "postgres"), { type: "string", format: "date-time" });
+  // `.run()` gives an infinite date or timestamp as the text Postgres writes for it, which no date format admits.
+  assert.deepEqual(typeSchema({ kind: "instant", tick: "1/1000000", label: "timestamptz" } as EngineType, "postgres"), { type: "string", format: "date-time" });
+  for (const [t, format] of [[pg("timestamptz"), "date-time"], [pg("date"), "date"]] as const) {
+    for (const [input, inJson] of [[false, false], [true, false], [false, true]]) {
+      const schema = typeSchema(t as EngineType, "postgres", input, inJson);
+      assert.deepEqual(schema, { anyOf: [{ type: "string", format }, { enum: ["infinity", "-infinity"] }] });
+      for (const v of ["infinity", "-infinity", format === "date" ? "2026-11-22" : "2026-11-22T10:00:00Z"]) assert.equal(validate(schema as JsonSchema, v), undefined, v);
+    }
+  }
   // RFC 3339's date-time, which JSON Schema's format names, needs an offset, which a wall-clock value has none of, as a result or as the parameter's text.
   const wallClock = { type: "string", description: "a date and time without a time zone, as the database wrote it (2026-10-20T10:00:00.123456)" };
   for (const input of [false, true]) {
