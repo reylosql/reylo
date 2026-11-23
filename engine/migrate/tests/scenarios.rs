@@ -2994,6 +2994,7 @@ on!(
     the_dump_reads_a_schema_named_with_capitals,
     new_without_schema_sql_replays_beside_the_environments_extensions,
     new_without_schema_sql_makes_an_extension_added_by_hand,
+    new_lists_none_of_an_extensions_own_objects,
     new_without_schema_sql_keeps_only_the_extensions_the_history_needs,
     new_without_schema_sql_makes_an_extension_no_migration_uses,
     new_without_schema_sql_keeps_an_extension_a_migration_branches_on,
@@ -3401,6 +3402,20 @@ mod adversarial {
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "email", &Default::default(), log).await).await, 0, "{}", p.peek());
         let written = p.files().into_iter().find(|f| f.ends_with("_email.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
         assert_has!(std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap(), r"(?i)add column email text");
+    }
+
+    /// What `migrate new` lists under the file is what the migration changes: an extension, and none
+    /// of what the extension makes itself, such as tablefunc's composite types.
+    pub async fn new_lists_none_of_an_extensions_own_objects(mut p: P) {
+        p.file("20261122100000_users.sql", "create table users (id int primary key);");
+        p.schema("create table users (id int primary key);");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.schema("create extension tablefunc; create table users (id int primary key);");
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tablefunc", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"✓ Wrote \S*_tablefunc\.sql\n  \+ extension tablefunc ");
+        assert!(!out.contains("crosstab"), "{out}");
     }
 
     /// With no schema.sql, an extension added by hand since the migrations began, and a column of its
