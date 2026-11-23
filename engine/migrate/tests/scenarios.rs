@@ -1263,13 +1263,15 @@ async fn leaves_out_another_tools_history(mut p: P, app: &str) -> String {
     assert_eq!(q.rows("select * from DATABASECHANGELOGLOCK").await.len(), 1);
     q.exec("insert into knex_migrations (name) values ('two.js')").await;
     assert_eq!(q.rows("select id from knex_migrations where name = 'two.js'").await[0].text("id"), "101");
-    // A migration that drops it later is no change to the schema.
-    p.file("20261123100000_drop_prisma.sql", "drop table _prisma_migrations;");
+    // A migration that drops it later is no change to the schema, and replays on a database that
+    // never had it.
+    p.file("20261123100000_drop_prisma.sql", "drop table if exists _prisma_migrations;");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     assert_eq!(q.history().await, ["init.sql", "20261123100000_drop_prisma.sql"]);
     // Nor is dropping a schema that held nothing but another tool's history.
     if p.d == Dialect::Postgres {
-        q.exec("drop schema drizzle cascade").await;
+        q.exec("drop schema if exists drizzle cascade").await;
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     }
     schema
