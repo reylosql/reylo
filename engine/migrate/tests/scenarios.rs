@@ -2998,9 +2998,8 @@ on!(
     new_without_schema_sql_makes_an_extension_no_migration_uses,
     new_without_schema_sql_keeps_an_extension_a_migration_branches_on,
     new_without_schema_sql_makes_an_extension_beside_two_the_history_needs_either_of,
-    new_without_schema_sql_makes_an_extension_in_a_schema_a_migration_renamed,
+    new_without_schema_sql_refuses_an_extension_in_a_schema_a_migration_renamed,
     new_without_schema_sql_makes_an_extension_in_a_schema_a_migration_makes,
-    new_without_schema_sql_keeps_a_branched_on_extension_beside_a_renamed_schema,
     a_pushed_extension_is_recorded_once_its_migration_makes_it,
     an_extension_in_a_projects_schema_is_the_projects_whoever_owns_it,
     an_extension_a_platform_role_owns_in_a_projects_schema_is_the_projects,
@@ -3516,43 +3515,17 @@ mod adversarial {
     }
 
     /// With no schema.sql, an extension added by hand in the schema a migration renamed another to:
-    /// a shadow made with it can't replay the rename, so it is the new migration's, which a new
-    /// database runs.
-    pub async fn new_without_schema_sql_makes_an_extension_in_a_schema_a_migration_renamed(mut p: P) {
+    /// a shadow made with it can't replay the rename, and one made without it can't say which of the
+    /// history's extensions the database had when it ran, so `migrate new` refuses and writes nothing.
+    pub async fn new_without_schema_sql_refuses_an_extension_in_a_schema_a_migration_renamed(mut p: P) {
         p.file("20261122100000_staging.sql", "create schema staging; create table staging.t (id int primary key);");
         p.file("20261122100001_rename.sql", "alter schema staging rename to extensions;");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         p.exec("create extension citext with schema extensions; alter table extensions.t add column c extensions.citext").await;
         p.output();
-        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "c", &Default::default(), log).await).await, 0, "{}", p.peek());
-        let written = p.files().into_iter().find(|f| f.ends_with("_c.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
-        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap(), r"(?i)create extension (if not exists )?citext");
-        let q = P::new(p.d).await.unwrap();
-        p.url = q.url.clone();
-        assert_eq!(p.migrate().await, 0, "{}", p.peek());
-    }
-
-    /// With no schema.sql, an extension added by hand in the schema a migration renamed another to,
-    /// beside one the database had before that a migration branches on: the first is the new
-    /// migration's, the second stays in the shadows, and a new database that has it runs the draft.
-    pub async fn new_without_schema_sql_keeps_a_branched_on_extension_beside_a_renamed_schema(mut p: P) {
-        p.exec("create extension hstore").await;
-        p.file("20261122100000_staging.sql", "create schema staging; create table staging.t (id int primary key);");
-        p.file("20261122100001_rename.sql", "alter schema staging rename to extensions;");
-        p.file("20261122100002_props.sql", "do $$ begin if exists (select 1 from pg_extension where extname = 'hstore') then alter table extensions.t add column props hstore; end if; end $$;");
-        assert_eq!(p.dev().await, 0, "{}", p.peek());
-        p.exec("create extension citext with schema extensions; alter table extensions.t add column c extensions.citext").await;
-        p.output();
-        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "c", &Default::default(), log).await).await, 0, "{}", p.peek());
-        let written = p.files().into_iter().find(|f| f.ends_with("_c.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
-        let text = std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap();
-        assert_has!(&text, r"(?i)create extension (if not exists )?citext");
-        assert!(!text.to_lowercase().contains("props") && !text.to_lowercase().contains("hstore"), "{text}");
-        assert_eq!(p.dev().await, 0, "{}", p.peek());
-        let q = P::new(p.d).await.unwrap();
-        q.exec("create extension hstore").await;
-        p.url = q.url.clone();
-        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_ne!(p.run(async |o, log| reylo_migrate::create(o, "c", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_has!(p.output(), r#"Replaying 20261122100001_rename\.sql in a shadow database fails\n  schema "extensions" already exists"#);
+        assert!(!p.files().iter().any(|f| f.ends_with("_c.sql")), "{:?}", p.files());
     }
 
     /// With no schema.sql, an extension added by hand in a schema a migration makes: the history
