@@ -1757,9 +1757,10 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                 // goes is the table's loss.
                 let in_lost_table = o.kind == Some(Kind::Column) && o.owner.as_ref().is_some_and(|t| drops.contains(t));
                 // A foreign table's rows are its server's, and an external-content index's its
-                // content table's.
+                // content table's, unless it is made again as a table that holds its own.
                 let table = if o.kind == Some(Kind::Column) { o.owner.as_ref().and_then(|t| from.objects.get(t)) } else { Some(o) };
-                let foreign = table.is_some_and(|t| t.extra.iter().any(|l| l.starts_with("shape foreign") || l == ROWS_ELSEWHERE));
+                let elsewhere = |t: &Object| t.extra.iter().any(|l| l == ROWS_ELSEWHERE);
+                let foreign = table.is_some_and(|t| t.extra.iter().any(|l| l.starts_with("shape foreign")) || (elsewhere(t) && to.objects.get(&t.id).is_none_or(elsewhere)));
                 // A generated column's values are its expression's, which loses nothing, and so
                 // are those of a column held from one (a partition's).
                 let marked = |c: &Object| c.extra.iter().any(|l| l == GENERATED);

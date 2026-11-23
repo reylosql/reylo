@@ -27,6 +27,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Separates the fields of an `extra` line, a character no SQL text holds.
 const SEP: char = '\u{1f}';
 
+/// Separates the items of one field of an `extra` line, another such character.
+const LIST: char = '\u{1e}';
+
 /// SQLite's keywords: a name that is one is quoted where a statement writes it.
 const KEYWORDS: &[&str] = &[
     "abort", "action", "add", "after", "all", "alter", "always", "analyze", "and", "as", "asc", "attach", "autoincrement", "before", "begin", "between", "by", "cascade", "case", "cast", "check", "collate",
@@ -270,9 +273,9 @@ struct Info {
     bare_rowid: bool,
     /// The column that is its rowid (its INTEGER PRIMARY KEY), folded.
     alias: Option<String>,
-    /// An external-content full-text table's content table, folded, and the column of it its index
-    /// is keyed on, folded, or `rowid`.
-    content: Option<(String, String)>,
+    /// An external-content full-text table's content table, the column of it its index is keyed
+    /// on (or `rowid`), and the columns it indexes, each folded.
+    content: Option<(String, String, Vec<String>)>,
     /// Each column's flags: `a` added in place (`add column` takes it on a table with rows), `d`
     /// dropped in place, `g` generated (no insert writes it), `n` not null with nothing to fill it.
     flags: BTreeMap<String, String>,
@@ -293,8 +296,8 @@ impl Info {
             }
         }
         out.extend(self.alias.iter().map(|c| format!("alias{SEP}{c}")));
-        if let Some((table, key)) = &self.content {
-            out.push(format!("content{SEP}{table}{SEP}{key}"));
+        if let Some((table, key, read)) = &self.content {
+            out.push(format!("content{SEP}{table}{SEP}{key}{SEP}{}", read.join(&LIST.to_string())));
             out.push(ROWS_ELSEWHERE.to_string());
         }
         out.extend(self.flags.iter().map(|(c, f)| format!("column{SEP}{c}{SEP}{f}")));
@@ -313,7 +316,7 @@ impl Info {
                 ["autoincrement"] => info.autoincrement = true,
                 ["rowid"] => info.bare_rowid = true,
                 ["alias", c] => info.alias = Some(c.to_string()),
-                ["content", table, key] => info.content = Some((table.to_string(), key.to_string())),
+                ["content", table, key, read] => info.content = Some((table.to_string(), key.to_string(), read.split(LIST).filter(|c| !c.is_empty()).map(String::from).collect())),
                 ["column", c, flags] => {
                     info.flags.insert(c.to_string(), flags.to_string());
                 }
@@ -336,12 +339,13 @@ impl Info {
 pub async fn read(db: &mut Db) -> Result<Schema, Error> {
     let list: BTreeMap<String, Row> = db.rows("select name, type, strict, wr from pragma_table_list where schema = 'main'").await?.into_iter().map(|r| (fold(r.text("name")), r)).collect();
     let shadow = |name: &str| list.get(&fold(name)).is_some_and(|r| r.text("type") == "shadow");
-    let rows: Vec<Row> = db
+    let all: Vec<Row> = db
         .rows(&format!("select type, name, tbl_name as tbl, sql from sqlite_schema where name not like 'sqlite_%' and tbl_name <> '{HISTORY_TABLE}' and name {turso} and tbl_name {turso} and sql is not null and {} order by rowid", crate::catalog::NOT_LIBSQL_VECTOR_OWN, turso = crate::catalog::NOT_TURSO_OWN))
-        .await?
-        .into_iter()
-        .filter(|r| !shadow(r.text("tbl")))
-        .collect();
+        .await?;
+    // SQLite takes a table named as a full-text table's own (`docs_content`) for one, whoever made
+    // it: one that an external-content index reads its text from is the project's.
+    let contents: BTreeSet<String> = all.iter().filter(|r| r.text("type") == "table").filter_map(|r| external_content(&tokenize(r.text("sql"), Dialect::Sqlite))).map(|(table, ..)| table).collect();
+    let rows: Vec<Row> = all.into_iter().filter(|r| contents.contains(&fold(r.text("tbl"))) || !shadow(r.text("tbl"))).collect();
 
     // Every table's and view's id by its folded name, and each table's columns.
     let mut relations: BTreeMap<String, String> = BTreeMap::new();
@@ -406,10 +410,18 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
                                 deps.insert(format!("column {table}.{c}"));
                             }
                         }
-                        create.push(rebuild(name));
+                        // The rebuild reads each column it indexes, and its key, from the content
+                        // table or view, and fails on one that lacks any: an index that can't be
+                        // filled is made as it was written.
+                        let has: BTreeSet<String> = db.rows(&format!("select name from pragma_table_xinfo({})", literal(table))).await?.iter().map(|r| fold(r.text("name"))).collect();
+                        let rowid = relation.starts_with("table ") && list.get(table).is_some_and(|o| o.text("wr") != "1");
+                        let keyed = has.contains(key) || (matches!(key.as_str(), "rowid" | "oid" | "_rowid_") && rowid);
+                        if keyed && read_columns.iter().all(|c| has.contains(c)) {
+                            create.push(rebuild(name));
+                        }
                     }
                 }
-                infos.insert(id.clone(), Info { name: name.to_string(), virtual_table: true, content: content.map(|(table, _, key)| (table, key)), ..Info::default() });
+                infos.insert(id.clone(), Info { name: name.to_string(), virtual_table: true, content: content.map(|(table, read, key)| (table, key, read)), ..Info::default() });
                 s.add(Object { id, kind: Some(Kind::Table), def: format!("virtual {}", canonical(&tokens)), create, drop: vec![format!("drop table {}", quote(name))], deps, ..Object::default() });
             }
             "table" => {
@@ -427,8 +439,10 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
                 let hidden: BTreeMap<String, String> = xinfo.iter().map(|c| (fold(c.text("name")), c.text("hidden").to_string())).collect();
                 let keys: Vec<&Row> = xinfo.iter().filter(|c| c.text("pk") != "0").collect();
                 let wr = option.is_some_and(|o| o.text("wr") == "1");
-                // A lone INTEGER PRIMARY KEY is the rowid itself.
-                let alias = !wr && keys.len() == 1 && keys[0].text("type").eq_ignore_ascii_case("integer");
+                // A lone INTEGER PRIMARY KEY is the rowid itself, but where the column says
+                // `primary key desc`, which SQLite keeps as an ordinary column.
+                let descending = |key: &Row| table_parts.iter().any(|p| p.column.as_deref() == Some(fold(key.text("name")).as_str()) && p.words().windows(3).any(|w| w == ["PRIMARY", "KEY", "DESC"]));
+                let alias = !wr && keys.len() == 1 && keys[0].text("type").eq_ignore_ascii_case("integer") && !descending(keys[0]);
                 let mut info = Info {
                     name: name.to_string(),
                     autoincrement: tokens.iter().any(|t| t.upper() == "AUTOINCREMENT"),
@@ -706,8 +720,11 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
     let (children, cycle) = schemas.map_or_else(|| (Vec::new(), false), |(f, t)| children_of(f, t, &from.id));
     let family: Vec<(Info, Info)> = std::iter::once((Info::of(from), Info::of(to))).chain(children.iter().map(|(x, y)| (Info::of(x), Info::of(y)))).collect();
 
-    // What goes with them and the planner leaves be: the same on both sides.
-    let kept = |x: &(String, String, String, String, usize), other: &Info| other.goes.iter().any(|y| y.0 == x.0 && y.1 == x.1);
+    // What goes with them and the planner leaves be: the same on both sides, and on no column of
+    // the table that the change drops, which the planner replaces it for.
+    let dropped: BTreeSet<String> = old_columns.iter().map(|(c, _)| c).filter(|c| !new_columns.iter().any(|(n, _)| n == *c) && !renamed.values().any(|o| o == *c)).map(|c| format!("column {}.{c}", fold(&a.name))).collect();
+    let on_dropped = |id: &str| schemas.and_then(|(f, _)| f.objects.get(id)).is_some_and(|o| o.deps.iter().any(|d| dropped.contains(d)));
+    let kept = |x: &(String, String, String, String, usize), other: &Info| other.goes.iter().any(|y| y.0 == x.0 && y.1 == x.1) && !on_dropped(&x.0);
     let mut going: BTreeMap<String, &(String, String, String, String, usize)> = BTreeMap::new();
     let mut coming: BTreeMap<String, &(String, String, String, String, usize)> = BTreeMap::new();
     for (x, y) in &family {
@@ -857,7 +874,7 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
         }
         out.extend(standing.iter().map(|name| format!("drop index {}", quote(name))));
         out.extend(coming.into_iter().map(|(_, create)| create));
-        out.extend(reindexed(&a, &b, &renamed, &old_parts, &new_parts, &named, schemas));
+        out.extend(reindexed(&a, &b, &renamed, &old_parts, &new_parts, &named, schemas, &on_dropped));
         return Some(out);
     }
     if cycle {
@@ -924,7 +941,7 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
     let mut again: Vec<(usize, String)> = keys.into_iter().chain(coming).collect();
     again.sort();
     out.extend(again.into_iter().map(|(_, create)| create));
-    out.extend(reindexed(&a, &b, &renamed, &old_parts, &new_parts, &named, schemas));
+    out.extend(reindexed(&a, &b, &renamed, &old_parts, &new_parts, &named, schemas, &on_dropped));
     Some(out)
 }
 
@@ -940,7 +957,7 @@ fn rebuild(name: &str) -> String {
 /// contentless one (`content=''`), whose text is nowhere to rebuild it from.
 fn external_content(tokens: &[Token]) -> Option<(String, Vec<String>, String)> {
     let using = tokens.iter().position(|t| t.upper() == "USING")?;
-    let module = fold(&tokens.get(using + 1)?.text);
+    let module = fold(&unquote(tokens.get(using + 1)?));
     if !matches!(module.as_str(), "fts4" | "fts5") || tokens.get(using + 2)?.text != "(" {
         return None;
     }
@@ -979,14 +996,29 @@ fn external_content(tokens: &[Token]) -> Option<(String, Vec<String>, String)> {
 }
 
 /// The rebuilds of the external-content indexes over the table `a` (`b` in the target) that its
-/// rebuild leaves keyed on rows that are no longer there: where the column the index is keyed on,
-/// or the rowid, is not copied as it was. An index the plan makes again rebuilds itself.
-fn reindexed(a: &Info, b: &Info, renamed: &BTreeMap<String, String>, old_parts: &[Part], new_parts: &[Part], named: &[String], schemas: Option<&(Schema, Schema)>) -> Vec<String> {
+/// rebuild leaves out of step with their rows: where the column the index is keyed on, or the
+/// rowid, is not copied as it was, or a column it indexes changes, as a type's affinity converts
+/// its values or a generated column's expression gives others. An index whose content is a view
+/// over the table is rebuilt whatever changes, as the view's rows are not read here. An index the
+/// plan makes again rebuilds itself, as it is where the plan makes a view it reads through again
+/// (`replaced`), which takes the index along.
+#[allow(clippy::too_many_arguments)]
+fn reindexed(a: &Info, b: &Info, renamed: &BTreeMap<String, String>, old_parts: &[Part], new_parts: &[Part], named: &[String], schemas: Option<&(Schema, Schema)>, replaced: &dyn Fn(&str) -> bool) -> Vec<String> {
     let Some((from, to)) = schemas else { return Vec::new() };
     let table = fold(&a.name);
     let old_name = |c: &str| renamed.get(c).cloned().unwrap_or_else(|| c.to_string());
     let find = |ps: &[Part], c: &str| ps.iter().find(|p| p.column.as_deref() == Some(c)).map(Part::definition);
-    // The rebuild's statements write each column by its name before the plan's renames.
+    // The rebuild's statements write each column by its name before the plan's renames. A column's
+    // values change in the copy only where its affinity does, which converts them, and a generated
+    // column's with its expression, or any column it may read.
+    let columns_same = old_parts.iter().chain(new_parts).filter_map(|p| p.column.as_deref()).all(|c| find(old_parts, c) == find(new_parts, c));
+    let same = |c: &str| {
+        let (was, is) = (find(old_parts, &old_name(c)), find(new_parts, &old_name(c)));
+        if b.flag(c, 'g') || a.flag(&old_name(c), 'g') {
+            return was == is && columns_same;
+        }
+        was.zip(is).is_some_and(|(was, is)| affinity(&was) == affinity(&is))
+    };
     let kept = |key: &str| -> bool {
         let old = old_name(key);
         if find(new_parts, &old).is_none() && find(old_parts, &old).is_none() && matches!(key, "rowid" | "oid" | "_rowid_") {
@@ -996,17 +1028,34 @@ fn reindexed(a: &Info, b: &Info, renamed: &BTreeMap<String, String>, old_parts: 
             let aliased = b.alias.as_deref().is_some_and(|c| a.alias.as_deref() == Some(old_name(c).as_str()));
             return copied || aliased;
         }
-        // A column copied as it was keeps its values.
-        let Some(def) = find(new_parts, &old) else { return false };
-        !b.flag(key, 'g') && find(old_parts, &old) == Some(def)
+        same(key)
     };
+    // Whether a view of the target reads the table, through other views or not, none of which the
+    // plan makes again.
+    let over_table = |view: &str| -> bool {
+        let (mut queue, mut seen) = (vec![view.to_string()], BTreeSet::new());
+        while let Some(id) = queue.pop() {
+            let Some(o) = to.objects.get(&id).filter(|o| o.kind == Some(Kind::View) && seen.insert(id.clone())) else { continue };
+            if replaced(&id) {
+                return false;
+            }
+            if o.deps.contains(&format!("table {table}")) {
+                return true;
+            }
+            queue.extend(o.deps.iter().cloned());
+        }
+        false
+    };
+    let unchanged = |id: &str| from.objects.get(id).zip(to.objects.get(id)).is_some_and(|(f, t)| f.def == t.def);
     to.objects
         .values()
-        .filter(|o| from.objects.get(&o.id).is_some_and(|f| f.def == o.def))
+        .filter(|o| unchanged(&o.id))
         .filter_map(|o| {
             let info = Info::of(o);
-            let (content, key) = info.content.as_ref()?;
-            (*content == table && !kept(key)).then(|| rebuild(&info.name))
+            let (content, key, read) = info.content.as_ref()?;
+            let view = format!("view {content}");
+            let stale = if *content == table { !kept(key) || !read.iter().all(|c| same(c)) } else { unchanged(&view) && over_table(&view) };
+            (stale && o.create.len() > 1).then(|| rebuild(&info.name))
         })
         .collect()
 }

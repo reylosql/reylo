@@ -1152,8 +1152,12 @@ fn listed(gone: &[String], came: &[String], before: &[String], after: &[String],
     let constraint_names = |lines: &[String]| -> Vec<String> { lines.iter().filter_map(|l| l.strip_prefix("constraint ")).filter_map(|rest| rest.split(' ').nth(1)).map(str::to_string).collect() };
     let made_by_constraint = |line: &str, names: &[String]| names.iter().any(|n| line.starts_with("index ") && line.contains(&format!(" INDEX {n} ON ")));
     let (gone_names, came_names) = (constraint_names(&gone), constraint_names(&came));
-    let gone: Vec<&String> = gone.iter().filter(|l| !made_by_constraint(l, &gone_names)).collect();
-    let came: Vec<&String> = came.iter().filter(|l| !made_by_constraint(l, &came_names)).collect();
+    // A SQLite virtual table's own tables (FTS5's `_data`, an R-tree's `_node`) come and go with it,
+    // which is listed for them.
+    let shadows = if d == Dialect::Sqlite { shadow_tables(before.iter().chain(after)) } else { Vec::new() };
+    let own = |line: &str| shadows.iter().any(|t| table_name(line, false).as_ref() == Some(t) || line.starts_with(&format!("column {t}.")) || line.starts_with(&format!("constraint {t} ")));
+    let gone: Vec<&String> = gone.iter().filter(|l| !made_by_constraint(l, &gone_names) && !own(l)).collect();
+    let came: Vec<&String> = came.iter().filter(|l| !made_by_constraint(l, &came_names) && !own(l)).collect();
     // A table one side has and the other doesn't, by its name across each whole schema, came or
     // went; one both have may have changed its own line, as row level security does.
     // A name two of one side's tables read as is no one table's, and groups nothing.
@@ -1205,6 +1209,26 @@ fn in_place<'a>(gone: Vec<&'a String>, came: Vec<&'a String>, indent: &str) -> (
 /// The name of the table a readable `table …` line is, quotes and all: `"order items"` whole. On
 /// MySQL, which writes a name unquoted, all before the table's engine and collation; its
 /// `table options` line, a table's settings, is no table.
+/// The tables SQLite's virtual tables in the catalog's `lines` keep for themselves, by their names:
+/// FTS3, FTS4 and FTS5's and an R-tree's, each named after its table.
+fn shadow_tables<'a>(lines: impl Iterator<Item = &'a String> + Clone) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in lines.clone() {
+        let Some((name, module)) = table_name(line, false).zip(line.split(" using ").nth(1)) else { continue };
+        // A full-text table whose text is another's, or nowhere, keeps no `_content` of its own:
+        // a table of that name is the project's.
+        let content = lines.clone().any(|l| l.starts_with(&format!("column {name}.content =")));
+        let suffixes: &[&str] = match module.split(' ').next().unwrap_or_default() {
+            "fts5" => &["data", "idx", "content", "docsize", "config"],
+            "fts3" | "fts4" => &["content", "segments", "segdir", "docsize", "stat"],
+            "rtree" | "rtree_i32" | "geopoly" => &["node", "parent", "rowid"],
+            _ => &[],
+        };
+        out.extend(suffixes.iter().filter(|s| !(content && **s == "content")).map(|s| format!("{name}_{s}")));
+    }
+    out
+}
+
 fn table_name(line: &str, mysql: bool) -> Option<String> {
     static MYSQL_TABLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^table (.+) engine=\S+ collate=\S+").expect("a valid pattern"));
     if mysql {
@@ -7357,6 +7381,29 @@ fn table_lines(table: &crate::db::Table) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_virtual_tables_own_tables_are_left_out_of_its_summary() {
+        let lines = |l: &[&str]| -> Vec<String> { l.iter().map(|s| s.to_string()).collect() };
+        let before = lines(&["table notes", "column notes.id integer primary key"]);
+        let mut after = before.clone();
+        after.extend(lines(&[
+            "table notes_fts using fts5",
+            "column notes_fts.body",
+            "column notes_fts.content = 'notes'",
+            "table notes_fts_config without rowid",
+            "column notes_fts_config.k primary key",
+            "table notes_fts_data",
+            "column notes_fts_data.id integer primary key",
+            "table box using rtree",
+            "table box_node",
+            "table notes_fts_archive",
+            "table notes_fts_content",
+        ]));
+        let shown = changed_lines(&before, &after, Dialect::Sqlite).join("\n");
+        assert!(shown.contains("notes_fts using fts5") && shown.contains("notes_fts_archive") && shown.contains("notes_fts_content") && shown.contains("box using rtree"), "{shown}");
+        assert!(!shown.contains("notes_fts_config") && !shown.contains("notes_fts_data") && !shown.contains("box_node"), "{shown}");
+    }
 
     #[test]
     fn a_printed_run_is_offered_only_where_it_runs_as_a_migration() {
