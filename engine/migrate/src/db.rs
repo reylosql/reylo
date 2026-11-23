@@ -116,6 +116,27 @@ impl From<Error> for Ran {
     }
 }
 
+/// The sql_mode a MySQL session whose `mode` isn't strict runs a table's change under: its own,
+/// with strict mode on, so that the change fails on a value its new type can't hold (an enum's
+/// label it no longer lists, a string too long, a number out of range) rather than storing another
+/// in its place, as a change fails on a value it can't keep on Postgres. Strict mode also makes the
+/// modes that refuse a zero date or a division by zero errors where they were warnings, which would
+/// fail a change on values the table took under its own mode: those are left out, which keeps such
+/// values as that mode does. None where `mode` is strict already.
+pub fn strict_mode(mode: &str) -> Option<String> {
+    let modes: Vec<&str> = mode.split(',').map(str::trim).filter(|m| !m.is_empty()).collect();
+    if modes.iter().any(|m| matches!(*m, "STRICT_TRANS_TABLES" | "STRICT_ALL_TABLES" | "TRADITIONAL")) {
+        return None;
+    }
+    let mut strict: Vec<&str> = modes.into_iter().filter(|m| !matches!(*m, "NO_ZERO_DATE" | "NO_ZERO_IN_DATE" | "ERROR_FOR_DIVISION_BY_ZERO")).collect();
+    strict.push("STRICT_ALL_TABLES");
+    Some(strict.join(","))
+}
+
+fn set_sql_mode(mode: &str) -> String {
+    format!("set session sql_mode = '{}'", mode.replace('\\', "\\\\").replace('\'', "''"))
+}
+
 #[cfg(feature = "cli")]
 pub(crate) fn pg_error(e: tokio_postgres::Error) -> Error {
     match e.as_db_error() {
@@ -424,10 +445,39 @@ impl Db {
         if self.dialect() != Dialect::Mysql {
             return self.exec(sql).await;
         }
+        let mut locked = false;
         for statement in crate::sql::split_statements(sql, Dialect::Mysql) {
-            self.exec(&statement.text).await?;
+            let restore = if crate::sql::alters_table(&statement) { self.make_strict().await? } else { None };
+            let ran = self.exec(&statement.text).await;
+            // The session's own mode is set back whether the change ran or failed.
+            let back = match restore {
+                Some(mode) => self.exec(&set_sql_mode(&mode)).await,
+                None => Ok(()),
+            };
+            if let Err(e) = ran.and(back) {
+                self.unlock(locked).await;
+                return Err(e);
+            }
+            locked = (locked || crate::sql::locks_tables(&statement)) && !crate::sql::unlocks_tables(&statement);
         }
         Ok(())
+    }
+
+    /// Releases the tables a MySQL script locked (`lock tables`) and failed before it unlocked them,
+    /// so that the session can go on: it reaches no other table while it holds them.
+    async fn unlock(&mut self, locked: bool) {
+        if locked {
+            let _ = self.exec("unlock tables").await;
+        }
+    }
+
+    /// Sets a MySQL session whose sql_mode isn't strict to [`strict_mode`] for a table's change, and
+    /// gives its own mode, to set back after; None where it is strict already.
+    async fn make_strict(&mut self) -> Result<Option<String>, Error> {
+        let mode = self.rows("select @@session.sql_mode as m").await?.first().map(|r| r.text("m").to_string()).unwrap_or_default();
+        let Some(strict) = strict_mode(&mode) else { return Ok(None) };
+        self.exec(&set_sql_mode(&strict)).await?;
+        Ok(Some(mode))
     }
 
     /// Runs a script as [`Db::script`] does, and gives what each statement that returns rows returned,
@@ -535,14 +585,39 @@ impl Db {
                 }
             }),
             #[cfg(feature = "cli")]
-            Db::Mysql(conn) => {
+            Db::Mysql(_) => {
+                let mut locked = false;
                 for statement in crate::sql::split_statements(sql, Dialect::Mysql) {
-                    if let Err(e) = conn.query_drop(&statement.text).await {
+                    let restore = match crate::sql::alters_table(&statement) {
+                        true => match self.make_strict().await {
+                            Ok(restore) => restore,
+                            Err(e) => {
+                                self.unlock(locked).await;
+                                return Err(Ran::Failed(e));
+                            }
+                        },
+                        false => None,
+                    };
+                    let Db::Mysql(conn) = &mut *self else { unreachable!("a MySQL session") };
+                    let ran = conn.query_drop(&statement.text).await;
+                    // The session's own mode is set back whether the change ran or failed; failing to
+                    // after it ran leaves the change in place.
+                    let back = match restore {
+                        Some(mode) => self.exec(&set_sql_mode(&mode)).await,
+                        None => Ok(()),
+                    };
+                    if let Err(e) = ran {
+                        self.unlock(locked).await;
                         // ER_LOCK_WAIT_TIMEOUT: a metadata lock, or a row's, waited past its limit.
                         let waited = matches!(&e, mysql_async::Error::Server(s) if s.code == 1205);
                         let e = mysql_error(e);
                         return Err(if waited { Ran::Waited(e) } else { Ran::Failed(e) });
                     }
+                    if let Err(e) = back {
+                        self.unlock(locked).await;
+                        return Err(Ran::Partly(e));
+                    }
+                    locked = (locked || crate::sql::locks_tables(&statement)) && !crate::sql::unlocks_tables(&statement);
                 }
                 Ok(())
             }
@@ -1557,6 +1632,15 @@ pub(crate) async fn default_privileges(target: &mut Db) -> Result<Vec<String>, E
 #[cfg(test)]
 mod url_tests {
     use super::*;
+
+    #[test]
+    fn a_table_change_runs_strict_where_the_session_isnt() {
+        assert_eq!(strict_mode("ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_DATE"), None);
+        assert_eq!(strict_mode("TRADITIONAL"), None);
+        assert_eq!(strict_mode("").as_deref(), Some("STRICT_ALL_TABLES"));
+        assert_eq!(strict_mode("NO_ENGINE_SUBSTITUTION").as_deref(), Some("NO_ENGINE_SUBSTITUTION,STRICT_ALL_TABLES"));
+        assert_eq!(strict_mode("ANSI_QUOTES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO").as_deref(), Some("ANSI_QUOTES,STRICT_ALL_TABLES"));
+    }
 
     #[test]
     fn a_locale_is_spelled_as_the_shadow_server_spells_it() {

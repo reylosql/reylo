@@ -1254,8 +1254,21 @@ fn alter_table(from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeS
     if !first.is_empty() {
         out.push(format!("alter table {} {}", to.q, first.join(", ")));
     }
-    let repartitions = from.partition != to.partition;
-    let apart = repartitions && !from.partition.is_empty() && (to.partition.is_empty() || !clauses.is_empty());
+    // A partition taken out of a range or list table is dropped with its rows, first, in place:
+    // what follows partitions what is left.
+    let (dropped, kept) = dropped_partitions(&from.partition, &to.partition);
+    if !dropped.is_empty() {
+        out.push(format!("alter table {} drop partition {}", to.q, dropped.join(", ")));
+    }
+    let partition = kept.unwrap_or_else(|| from.partition.clone());
+    let repartitions = if dropped.is_empty() { from.partition != to.partition } else { partition_list(&partition) != partition_list(&to.partition) };
+    // A change to the partitions alone that MySQL makes in place, where partitioning the whole
+    // table again copies every row while it blocks writes.
+    if let Some(change) = (repartitions && clauses.is_empty() && later.is_empty()).then(|| partitions_changed(&partition, &to.partition)).flatten() {
+        out.push(format!("alter table {} {change}", to.q));
+        return out;
+    }
+    let apart = repartitions && !partition.is_empty() && (to.partition.is_empty() || !clauses.is_empty());
     if apart {
         out.push(format!("alter table {} remove partitioning", to.q));
     }
@@ -1271,6 +1284,133 @@ fn alter_table(from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeS
     out
 }
 
+/// A partitioning clause in parts: what comes before its list of partitions (`partition by range
+/// (year(taken_on))`), and each partition's definition, as written. None where it lists none (`hash
+/// (id) partitions 4`) or something follows the list.
+fn partition_list(text: &str) -> Option<(String, Vec<String>)> {
+    let tokens = tokenize(text, Dialect::Mysql);
+    let mut depth = 0;
+    let open = tokens.iter().enumerate().position(|(k, t)| {
+        match t.text.as_str() {
+            "(" if depth == 0 && tokens.get(k + 1).is_some_and(|n| n.upper() == "PARTITION") => return true,
+            "(" => depth += 1,
+            ")" => depth -= 1,
+            _ => {}
+        }
+        false
+    })?;
+    let (mut parts, mut depth, mut start) = (Vec::new(), 0, tokens[open].end);
+    for t in &tokens[open..] {
+        match t.text.as_str() {
+            "(" => depth += 1,
+            "," if depth == 1 => {
+                parts.push(text[start..t.start].trim().to_string());
+                start = t.end;
+            }
+            ")" => {
+                depth -= 1;
+                if depth == 0 {
+                    parts.push(text[start..t.start].trim().to_string());
+                    return text[t.end..].trim().is_empty().then(|| (text[..tokens[open].start].trim().to_string(), parts));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The partitions of a range or list table that `new`, partitioning it the same way, no longer
+/// names, as `old` writes them, and `old` without them; none where it names none of `old`'s, which
+/// is the table partitioned anew.
+fn dropped_partitions(old: &str, new: &str) -> (Vec<String>, Option<String>) {
+    let (Some((head, a)), Some((other, b))) = (partition_list(old), partition_list(new)) else { return (vec![], None) };
+    let kind = head.to_ascii_lowercase();
+    if head != other || !(kind.starts_with("partition by range") || kind.starts_with("partition by list")) {
+        return (vec![], None);
+    }
+    let named: Vec<String> = b.iter().map(|p| partition_key(p)).collect();
+    let (gone, kept): (Vec<&String>, Vec<&String>) = a.iter().partition(|p| !named.contains(&partition_key(p)));
+    if gone.is_empty() || kept.is_empty() {
+        return (vec![], None);
+    }
+    let kept: Vec<&str> = kept.iter().map(|p| p.as_str()).collect();
+    (gone.iter().map(|p| partition_name(p)).collect(), Some(format!("{head} ({})", kept.join(", "))))
+}
+
+/// A partition's name as MySQL compares it, unquoted and in lowercase.
+fn partition_key(definition: &str) -> String {
+    tokenize(definition, Dialect::Mysql).get(1).and_then(name_of).unwrap_or_default().to_lowercase()
+}
+
+/// A partition's name, as its definition writes it.
+fn partition_name(definition: &str) -> String {
+    tokenize(definition, Dialect::Mysql).get(1).map(|t| t.text.clone()).unwrap_or_default()
+}
+
+/// What a range partition's definition says it holds values below: `(2027)`, or `maxvalue`.
+fn partition_bound(definition: &str) -> Option<String> {
+    let tokens = tokenize(definition, Dialect::Mysql);
+    let k = tokens.windows(3).position(|w| w[0].upper() == "VALUES" && w[1].upper() == "LESS" && w[2].upper() == "THAN")? + 3;
+    let first = tokens.get(k)?;
+    if first.text != "(" {
+        return Some(first.text.to_ascii_lowercase());
+    }
+    let mut depth = 0;
+    for t in &tokens[k..] {
+        match t.text.as_str() {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(definition[first.start..t.end].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The clause that takes a range or list table's partitions from `old` to `new` in place, where the
+/// way they are partitioned stays (subpartitions aside): partitions appended to the list are added
+/// (`add partition`, which copies no rows and blocks no writes); a run of a range table's partitions
+/// that changes is reorganized (`reorganize partition … into`, which copies only those partitions'
+/// rows), with the partition after it where the run's last bound changes, so that it covers what it
+/// did. A list table's other changes, and a partition removed, are None: MySQL's `reorganize` of
+/// list partitions deletes the rows whose value the new lists lack, where partitioning the whole
+/// table again fails on such a row.
+fn partitions_changed(old: &str, new: &str) -> Option<String> {
+    let ((head, a), (other, b)) = (partition_list(old)?, partition_list(new)?);
+    let kind = head.to_ascii_lowercase();
+    let range = kind.starts_with("partition by range");
+    if head != other || !(range || kind.starts_with("partition by list")) || [old, new].iter().any(|t| t.to_ascii_lowercase().contains("subpartition")) {
+        return None;
+    }
+    if b.len() > a.len() && b[..a.len()] == a[..] {
+        return Some(format!("add partition ({})", b[a.len()..].join(", ")));
+    }
+    if !range {
+        return None;
+    }
+    let before = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let after = a[before..].iter().rev().zip(b[before..].iter().rev()).take_while(|(x, y)| x == y).count();
+    let (mut run, mut into) = (a[before..a.len() - after].to_vec(), b[before..b.len() - after].to_vec());
+    if into.is_empty() {
+        return None;
+    }
+    // A run may change what it covers only at the table's end, and only to cover more.
+    if run.is_empty() || run.last().and_then(|p| partition_bound(p)) != into.last().and_then(|p| partition_bound(p)) {
+        if after > 0 {
+            run.push(a[a.len() - after].clone());
+            into.push(b[b.len() - after].clone());
+        } else if run.is_empty() || into.last().and_then(|p| partition_bound(p)).as_deref() != Some("maxvalue") {
+            return None;
+        }
+    }
+    Some(format!("reorganize partition {} into ({})", run.iter().map(|p| partition_name(p)).collect::<Vec<_>>().join(", "), into.join(", ")))
+}
+
 /// What a table and its columns carry beside the body: the names of the table's foreign keys, and
 /// of the indexes those keys made for themselves, each a JSON list.
 const KEYS: &str = "foreign keys ";
@@ -1283,26 +1423,93 @@ fn made_by_keys(from: &[String], to: &[String]) -> BTreeSet<String> {
     list(to, OWN).into_iter().filter(|n| !had.contains(n)).collect()
 }
 
+/// MySQL's alterer. A plan's `alter table` runs under a strict sql_mode wherever the session's isn't
+/// (`db::strict_mode`), so a change to a type that can't hold one of a column's values fails on it,
+/// and loses nothing.
 #[derive(Default)]
 pub struct MysqlAlterer {
     decided: super::Decided,
-    /// Whether the session's sql_mode is not strict, so that a column changed to a type that can't
-    /// hold one of its values clamps or cuts the value short where a strict one fails the change.
-    clamps: bool,
+    /// The triggers both schemas have, which a plan may drop and make again.
+    swaps: std::cell::RefCell<Vec<Swap>>,
 }
 
 impl MysqlAlterer {
-    /// The alterer for a session whose sql_mode is `mode`.
-    pub fn for_mode(mode: &str) -> MysqlAlterer {
-        let strict = mode.split(',').any(|m| matches!(m.trim(), "STRICT_TRANS_TABLES" | "STRICT_ALL_TABLES" | "TRADITIONAL"));
-        MysqlAlterer { clamps: !strict, ..MysqlAlterer::default() }
-    }
-
     /// The columns of a table renamed between two of its bodies: the planner's decision where it
     /// made one, else its rule.
     fn pairs(&self, table: &str, from: &Body, to: &Body) -> Vec<(String, String)> {
         self.decided.of(table).unwrap_or_else(|| renames(from, to))
     }
+}
+
+/// A trigger both schemas have: the statement that drops it as the first has it, the one that makes
+/// it as the second has it, and the tables it is on in each, as a statement names them.
+#[derive(Debug)]
+struct Swap {
+    drop: String,
+    create: String,
+    tables: Vec<String>,
+}
+
+/// The table a `create trigger` is on, as it names it: the name after its event's `on`.
+fn trigger_table(create: &str) -> Option<String> {
+    let tokens = tokenize(create, Dialect::Mysql);
+    let at = tokens.windows(2).position(|w| matches!(w[0].upper().as_str(), "INSERT" | "UPDATE" | "DELETE") && w[1].upper() == "ON")?;
+    tokens.get(at + 2).map(|t| t.text.clone())
+}
+
+/// The plan's triggers dropped and made again, written as one statement group under `lock tables`
+/// on their tables. MySQL has no `create or replace trigger`, and commits each DDL statement on its
+/// own: between a trigger's drop and its create, a write to its table would run without it, and if
+/// the create failed the table would stay without it. Under the lock, a write waits for both, then
+/// runs with the new trigger. The drops move to just before the first of the creates, past the
+/// plan's other changes, which a trigger never holds back on MySQL; where anything but triggers
+/// still falls between them, they stay as they are, and a comment above each drop says what runs
+/// without the trigger.
+fn lock_swaps(swaps: &[Swap], statements: &mut Vec<String>) {
+    let at = |s: &String, statements: &[String]| statements.iter().position(|t| t == s);
+    let swapped: Vec<&Swap> = swaps.iter().filter(|w| matches!((at(&w.drop, statements), at(&w.create, statements)), (Some(d), Some(c)) if d < c)).collect();
+    if swapped.is_empty() {
+        return;
+    }
+    let drops: Vec<String> = statements.iter().filter(|s| swapped.iter().any(|w| w.drop == **s)).cloned().collect();
+    let mut moved: Vec<String> = statements.iter().filter(|s| !drops.contains(*s)).cloned().collect();
+    let first = swapped.iter().filter_map(|w| at(&w.create, &moved)).min().expect("a create");
+    let last = swapped.iter().filter_map(|w| at(&w.create, &moved)).max().expect("a create");
+    moved.splice(first..first, drops.iter().cloned());
+    let group = &moved[first..=last + drops.len()];
+    let mut tables: Vec<String> = Vec::new();
+    for s in group {
+        let named = match swapped.iter().find(|w| w.drop == *s || w.create == *s) {
+            Some(w) => w.tables.clone(),
+            // Another trigger made among them, on a table that goes under the lock too.
+            None => match trigger_table(s).filter(|_| is_trigger_create(s)) {
+                Some(table) => vec![table],
+                None => {
+                    for w in &swapped {
+                        let name = w.drop.trim_start_matches("drop trigger ");
+                        let k = statements.iter().position(|s| *s == w.drop).expect("a drop");
+                        statements.insert(k, format!("-- Until {name} is made again, writes to {} run without it", w.tables.first().map(String::as_str).unwrap_or("its table")));
+                    }
+                    return;
+                }
+            },
+        };
+        for t in named {
+            if !tables.contains(&t) {
+                tables.push(t);
+            }
+        }
+    }
+    let body: Vec<&str> = group.iter().map(|s| s.trim_end().trim_end_matches(';')).collect();
+    let locked = format!("lock tables {} write;\n{};\nunlock tables", tables.join(" write, "), body.join(";\n"));
+    moved.splice(first..=last + drops.len(), [locked]);
+    *statements = moved;
+}
+
+/// Whether a statement makes a trigger, whatever its definer.
+fn is_trigger_create(s: &str) -> bool {
+    let words: Vec<String> = tokenize(s, Dialect::Mysql).iter().take_while(|t| t.upper() != "ON").map(Token::upper).collect();
+    words.first().is_some_and(|w| w == "CREATE") && words.iter().any(|w| w == "TRIGGER")
 }
 
 /// `text` with each name after its first parenthesis that names one of `columns` in another case
@@ -1375,97 +1582,6 @@ fn type_class(def: &str) -> super::TypeClass {
     }
 }
 
-/// Whether every value of the MySQL type `a` is a value of `b` too, so that a change from one to the
-/// other keeps every value under any sql_mode. Where it can't tell, no.
-fn holds_all(a: &str, b: &str) -> bool {
-    let (a, b) = (a.trim().to_lowercase(), b.trim().to_lowercase());
-    if a == b {
-        return true;
-    }
-    let parse = |t: &str| -> (String, Vec<u32>, bool) {
-        let name: String = t.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
-        let args = t.find('(').and_then(|o| Some(&t[o + 1..o + t[o..].find(')')?])).map(|x| x.split(',').filter_map(|n| n.trim().parse().ok()).collect()).unwrap_or_default();
-        (name, args, t.split_whitespace().any(|w| w == "unsigned"))
-    };
-    let ((x, xa, xu), (y, ya, yu)) = (parse(&a), parse(&b));
-    let bytes = |n: &str| match n {
-        "tinyint" => Some(1),
-        "smallint" => Some(2),
-        "mediumint" => Some(3),
-        "int" | "integer" => Some(4),
-        "bigint" => Some(8),
-        _ => None,
-    };
-    // The digits of an integer type's widest value, and a sign.
-    let digits = |n: u32, unsigned: bool| [0, 3, 5, 8, 10, 0, 0, 0, 20][n as usize] - u32::from(!unsigned && n == 8) + u32::from(!unsigned);
-    // The most characters a value of a string type can hold (each of one byte), and the fewest
-    // it is sure to hold (each of four, in utf8mb4): a change keeps every value where the source's
-    // most fit the target's fewest.
-    let most = |n: &str, args: &[u32]| -> Option<u64> {
-        match n {
-            "char" | "varchar" => Some(u64::from(args.first().copied().unwrap_or(1))),
-            "tinytext" => Some(255),
-            "text" => Some(65_535),
-            "mediumtext" => Some(16_777_215),
-            "longtext" => Some(4_294_967_295),
-            _ => None,
-        }
-    };
-    let fewest = |n: &str, args: &[u32]| -> Option<u64> {
-        match n {
-            "char" | "varchar" => Some(u64::from(args.first().copied().unwrap_or(1))),
-            "tinytext" => Some(63),
-            "text" => Some(16_383),
-            "mediumtext" => Some(4_194_303),
-            "longtext" => Some(1_073_741_823),
-            _ => None,
-        }
-    };
-    let set = |t: &str| -> Vec<String> { t.find('(').map(|o| t[o + 1..t.len().saturating_sub(1)].split(',').map(|l| l.trim().to_string()).collect()).unwrap_or_default() };
-    let precision = |args: &[u32]| args.first().copied().unwrap_or(0);
-    match (x.as_str(), y.as_str()) {
-        (p, q) if bytes(p).is_some() && bytes(q).is_some() => {
-            let (m, n) = (bytes(p).unwrap(), bytes(q).unwrap());
-            match (xu, yu) {
-                (false, true) => false,
-                (true, false) => n > m,
-                _ => n >= m,
-            }
-        }
-        (p, "decimal" | "numeric") if bytes(p).is_some() => {
-            let (dp, ds) = (ya.first().copied().unwrap_or(10), ya.get(1).copied().unwrap_or(0));
-            (!yu || xu) && dp - ds >= digits(bytes(p).unwrap(), true)
-        }
-        (p, "double" | "real") if bytes(p).is_some() => ya.is_empty() && bytes(p).unwrap() <= 4 && (!yu || xu),
-        (p, "float") if bytes(p).is_some() => ya.is_empty() && bytes(p).unwrap() <= 2 && (!yu || xu),
-        (p, q) if bytes(p).is_some() && fewest(q, &ya).is_some() => fewest(q, &ya).unwrap() >= u64::from(digits(bytes(p).unwrap(), xu)),
-        ("decimal" | "numeric", "decimal" | "numeric") => {
-            let (p1, s1) = (xa.first().copied().unwrap_or(10), xa.get(1).copied().unwrap_or(0));
-            let (p2, s2) = (ya.first().copied().unwrap_or(10), ya.get(1).copied().unwrap_or(0));
-            (!yu || xu) && s2 >= s1 && p2 - s2 >= p1 - s1
-        }
-        ("float", "double" | "real") => xa.is_empty() && ya.is_empty() && (!yu || xu),
-        ("char" | "varchar" | "tinytext" | "text" | "mediumtext" | "longtext", q) if fewest(q, &ya).is_some() => {
-            // A char drops the trailing spaces a varchar or text value has.
-            fewest(q, &ya).unwrap() >= most(&x, &xa).unwrap() && (x == "char" || y != "char")
-        }
-        ("varbinary", "varbinary") => ya.first().copied().unwrap_or(0) >= xa.first().copied().unwrap_or(0),
-        ("varbinary", "blob" | "mediumblob" | "longblob") => true,
-        ("tinyblob", "blob" | "mediumblob" | "longblob") | ("blob", "mediumblob" | "longblob") | ("mediumblob", "longblob") => true,
-        ("enum", "enum") | ("set", "set") => {
-            let to = set(&b);
-            set(&a).iter().all(|l| to.contains(l))
-        }
-        ("date", "datetime") => true,
-        ("datetime", "datetime") | ("timestamp", "timestamp" | "datetime") | ("time", "time") => precision(&ya) >= precision(&xa),
-        ("year", q) => bytes(q).is_some_and(|n| n >= 2),
-        ("bit", "bit") => ya.first().copied().unwrap_or(1) >= xa.first().copied().unwrap_or(1),
-        ("json", "longtext") => true,
-        (_, "longtext") => bytes(&x).is_some() || matches!(x.as_str(), "decimal" | "numeric" | "float" | "double" | "date" | "datetime" | "timestamp" | "time" | "year"),
-        _ => false,
-    }
-}
-
 /// The type a column's definition opens with: `decimal(10,2) unsigned` of `decimal(10,2) unsigned not null`.
 fn type_of(def: &str) -> String {
     let words: Vec<&str> = def.split_whitespace().collect();
@@ -1493,11 +1609,28 @@ fn privilege_parts(statement: &str) -> Option<(bool, &str, &str)> {
 }
 
 impl Alterer for MysqlAlterer {
-    /// The privileges granted (or revoked) on one object to one account, which MySQL takes in one
+    fn schemas(&self, from: &Schema, to: &Schema) {
+        let swaps = from
+            .objects
+            .values()
+            .filter(|o| o.kind == Some(Kind::Trigger) && o.owner.is_some())
+            .filter_map(|a| {
+                let b = to.objects.get(&a.id)?;
+                let (drop, create) = (a.drop.first()?.clone(), b.create.first()?.clone());
+                let tables = [trigger_table(a.create.first()?), trigger_table(&create)].into_iter().flatten().collect();
+                Some(Swap { drop, create, tables })
+            })
+            .collect();
+        *self.swaps.borrow_mut() = swaps;
+    }
+
+    /// A trigger dropped and made again goes under `lock tables` ([`lock_swaps`]); then the
+    /// privileges granted (or revoked) on one object to one account, which MySQL takes in one
     /// statement, written as one where the plan has them one after another: `grant select, update
     /// (email) on users to … with grant option`. Only those side by side: one further on may wait
     /// for what the plan makes between them (a column it grants on).
     fn finish(&self, statements: &mut Vec<String>) {
+        lock_swaps(&self.swaps.borrow(), statements);
         // Each statement, or a run of grants (or of revokes) on one object to one account.
         let mut runs: Vec<(String, Option<(bool, Vec<String>, String)>)> = Vec::new();
         for s in statements.drain(..) {
@@ -1547,18 +1680,21 @@ impl Alterer for MysqlAlterer {
             _ => {}
         }
         let (a, b) = (type_of(&from.def), type_of(&to.def));
-        if let Some(why) = super::narrowing(&type_class(&a), &type_class(&b)) {
-            return Some(format!("changes from {a} to {b}, which {why}"));
-        }
-        // Other changes fail on a value the new type can't hold, but only under a strict sql_mode.
-        if self.clamps && !holds_all(&a, &b) {
-            return Some(format!("changes from {a} to {b}, which clamps or cuts short a value it can't hold, since this session's sql_mode isn't strict"));
-        }
-        None
+        super::narrowing(&type_class(&a), &type_class(&b)).map(|why| format!("changes from {a} to {b}, which {why}"))
     }
 
     fn decide(&self, renames: &[(String, String)]) {
         self.decided.set(renames);
+    }
+
+    /// The partitions a table's change drops with their rows, each `partition <table>.<partition>`.
+    fn loses(&self, from: &Object, to: &Object) -> Vec<String> {
+        let (Some(a), Some(b), Some(table)) = (Body::from_json(&from.def), Body::from_json(&to.def), from.id.strip_prefix("table ")) else { return vec![] };
+        if from.kind != Some(Kind::Table) {
+            return vec![];
+        }
+        let (dropped, _) = dropped_partitions(&a.partition, &b.partition);
+        dropped.iter().map(|p| format!("partition {table}.{}", tokenize(p, Dialect::Mysql).first().and_then(name_of).unwrap_or_else(|| p.clone()))).collect()
     }
 
     /// A column renamed: the table's whole statement, with the rename among its clauses, which
@@ -1633,16 +1769,57 @@ mod tests {
     }
 
     #[test]
-    fn a_change_that_keeps_every_value_needs_no_strict_mode() {
-        for (a, b) in [("tinyint", "int"), ("int unsigned", "bigint"), ("int", "decimal(12,0)"), ("smallint", "varchar(6)"), ("varchar(10)", "text"), ("text", "mediumtext"), ("tinytext", "varchar(255)"), ("char(4)", "varchar(4)"), ("decimal(5,2)", "decimal(7,3)"), ("enum('a','b')", "enum('b','a','c')"), ("date", "datetime"), ("datetime(3)", "datetime(6)"), ("float", "double"), ("int", "longtext")] {
-            assert!(holds_all(a, b), "{a} to {b}");
-        }
-        for (a, b) in [("tinytext", "varchar(63)"), ("longtext", "mediumtext"), ("varchar(20000)", "text"), ("int", "tinyint"), ("int", "int unsigned"), ("int unsigned", "int"), ("varchar(10)", "varchar(3)"), ("varchar(4)", "char(4)"), ("decimal(5,2)", "decimal(5,1)"), ("enum('a','b')", "enum('a')"), ("datetime", "timestamp"), ("datetime(6)", "datetime"), ("double", "float"), ("bigint", "double"), ("int", "varchar(5)")] {
-            assert!(!holds_all(a, b), "{a} to {b}");
-        }
-        let column = |def: &str| Object { kind: Some(Kind::Column), def: def.into(), ..Object::default() };
-        assert_eq!(MysqlAlterer::for_mode("ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES").narrows(&column("int"), &column("tinyint")), None);
-        assert!(MysqlAlterer::for_mode("NO_ENGINE_SUBSTITUTION").narrows(&column("int"), &column("tinyint")).is_some());
-        assert_eq!(MysqlAlterer::for_mode("").narrows(&column("int"), &column("bigint")), None);
+    fn changes_partitions_in_place_where_mysql_can() {
+        let range = |parts: &[(&str, &str)]| format!("partition by range (year(taken_on)) ({})", parts.iter().map(|(n, b)| format!("partition {n} values less than {b} engine = innodb")).collect::<Vec<_>>().join(", "));
+        let (p26, p27, p28, max) = (("p2026", "(2027)"), ("p2027", "(2028)"), ("p2028", "(2029)"), ("pmax", "maxvalue"));
+        // Appended: added, with no row copied.
+        assert_eq!(partitions_changed(&range(&[p26, p27]), &range(&[p26, p27, p28, max])).as_deref(), Some("add partition (partition p2028 values less than (2029) engine = innodb, partition pmax values less than maxvalue engine = innodb)"));
+        // Before the last: the partition after takes part, so the run covers what it did.
+        assert_eq!(partitions_changed(&range(&[p26, p27, max]), &range(&[p26, p27, p28, max])).as_deref(), Some("reorganize partition pmax into (partition p2028 values less than (2029) engine = innodb, partition pmax values less than maxvalue engine = innodb)"));
+        let (p10, p30) = (("p10", "(10)"), ("p30", "(30)"));
+        assert_eq!(partitions_changed(&range(&[p10, ("p20", "(20)"), p30]), &range(&[p10, ("p20", "(15)"), p30])).as_deref(), Some("reorganize partition p20, p30 into (partition p20 values less than (15) engine = innodb, partition p30 values less than (30) engine = innodb)"));
+        // The last made to hold every value above it.
+        assert_eq!(partitions_changed(&range(&[p26, p27]), &range(&[p26, ("p2027", "maxvalue")])).as_deref(), Some("reorganize partition p2027 into (partition p2027 values less than maxvalue engine = innodb)"));
+        // Covering less at the end, a partition removed, a list's change but an appended partition,
+        // hash and subpartitions: none.
+        assert_eq!(partitions_changed(&range(&[p26, p27, max]), &range(&[p26, p27])), None);
+        assert_eq!(partitions_changed(&range(&[p26, p27, p28]), &range(&[p27, p28])), None);
+        let list = |parts: &[&str]| format!("partition by list columns(region) ({})", parts.iter().map(|p| format!("partition {p} engine = innodb")).collect::<Vec<_>>().join(", "));
+        assert_eq!(partitions_changed(&list(&["pa values in ('a', 'b')"]), &list(&["pa values in ('a', 'b')", "pc values in ('c')"])).as_deref(), Some("add partition (partition pc values in ('c') engine = innodb)"));
+        assert_eq!(partitions_changed(&list(&["pa values in ('a', 'b')", "pc values in ('c')"]), &list(&["pa values in ('a')", "pc values in ('c')"])), None);
+        assert_eq!(partitions_changed("partition by hash (id) partitions 2", "partition by hash (id) partitions 4"), None);
+        // A partition taken out is dropped, with its rows; partitioned another way, or taken out
+        // with every other, the table is partitioned anew.
+        assert_eq!(dropped_partitions(&range(&[p26, p27, max]), &range(&[p27, max])), (vec!["p2026".to_string()], Some(range(&[p27, max]))));
+        assert_eq!(dropped_partitions(&range(&[p26, p27, p28]), &range(&[p26, p28, max])).0, ["p2027"]);
+        assert_eq!(dropped_partitions(&list(&["pa values in ('a')", "`pB` values in ('b')"]), &list(&["pa values in ('a')"])).0, ["`pB`"]);
+        assert_eq!(dropped_partitions(&range(&[p26, p27]), &range(&[p26, p27]).replace("year(taken_on))", "taken_on)")).0, Vec::<String>::new());
+        assert_eq!(dropped_partitions(&range(&[p26]), &range(&[p27])).0, Vec::<String>::new());
+        assert_eq!(dropped_partitions(&range(&[p26, p27]), "").0, Vec::<String>::new());
+        assert_eq!(partitions_changed(&range(&[p26]), &range(&[p26, p27]).replace("year(taken_on))", "taken_on)")), None);
+    }
+
+    #[test]
+    fn swaps_a_trigger_under_a_lock_on_its_table() {
+        let swap = |name: &str, table: &str, body: &str, was: &str| Swap { drop: format!("drop trigger {name}"), create: format!("create trigger {name} before update on {table} for each row {body}"), tables: vec![table.into(), was.into()] };
+        let (a, b) = (swap("a_touch", "a", "set new.n = 2", "a"), swap("b_touch", "b", "set new.n = 3", "b"));
+        let mut plan = vec![a.drop.clone(), b.drop.clone(), "alter table a add column m int".into(), a.create.clone(), "create trigger a_new after insert on a for each row set @x = 1".into(), b.create.clone(), "create view v as select 1".into()];
+        lock_swaps(&[a, b], &mut plan);
+        assert_eq!(
+            plan,
+            [
+                "alter table a add column m int",
+                "lock tables a write, b write;\ndrop trigger a_touch;\ndrop trigger b_touch;\ncreate trigger a_touch before update on a for each row set new.n = 2;\ncreate trigger a_new after insert on a for each row set @x = 1;\ncreate trigger b_touch before update on b for each row set new.n = 3;\nunlock tables",
+                "create view v as select 1",
+            ]
+        );
+        // Anything else between two creates leaves them as they are, saying what runs without one.
+        let a = swap("a_touch", "a", "set new.n = 2", "a");
+        let b = swap("b_touch", "b", "set new.n = 3", "b");
+        let mut plan = vec![a.drop.clone(), b.drop.clone(), a.create.clone(), "create view v as select 1".into(), b.create.clone()];
+        lock_swaps(&[a, b], &mut plan);
+        assert_eq!(plan[0], "-- Until a_touch is made again, writes to a run without it");
+        assert_eq!(plan[2], "-- Until b_touch is made again, writes to b run without it");
+        assert_eq!(plan.len(), 7);
     }
 }

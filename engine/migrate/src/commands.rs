@@ -4232,10 +4232,9 @@ struct Drafted {
 
 /// What a plan loses, as a sentence names it: `the column users.bio`, `the table tags`.
 fn described(loss: &str) -> String {
-    match (loss.strip_prefix("column "), loss.strip_prefix("table ")) {
-        (Some(column), _) => format!("the column {column}"),
-        (_, Some(table)) => format!("the table {table}"),
-        _ => loss.to_string(),
+    match loss.split_once(' ') {
+        Some((kind, name)) => format!("the {kind} {name}"),
+        None => loss.to_string(),
     }
 }
 
@@ -4250,7 +4249,7 @@ fn plan_files(plan: &crate::diff::Plan, d: Dialect) -> Vec<String> {
     let mut files: Vec<String> = Vec::new();
     let mut pending = String::new();
     for loss in &plan.losses {
-        pending.push_str(&format!("-- loses data: {}\n", loss.trim_start_matches("column ").trim_start_matches("table ")));
+        pending.push_str(&format!("-- loses data: {}\n", shown_id(loss)));
     }
     for (column, why) in &plan.narrowings {
         pending.push_str(&format!("-- loses data: {} {why}\n", column.trim_start_matches("column ")));
@@ -4828,7 +4827,7 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
         let list: Vec<String> = unstated.iter().map(|l| display(l)).collect();
         let what: Vec<(String, String)> = unstated.iter().map(|l| (l.split(' ').next().unwrap_or_default().to_string(), display(l))).collect();
         let title = match unstated.as_slice() {
-            [one] => format!("This {subject} drops {} and {}", drop_phrase(&what), if one.starts_with("table ") { "its rows" } else { "its data" }),
+            [one] => format!("This {subject} drops {} and {}", drop_phrase(&what), if one.starts_with("column ") { "its data" } else { "its rows" }),
             _ => format!("This {subject} drops {}, with their data", drop_phrase(&what)),
         };
         let mut problem = Problem::new("drops-data", title)
@@ -5211,7 +5210,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             }
         };
         for loss in &plan.losses {
-            notes.push(format!("  {} Drops {} and its {}", paint("yellow", "!"), described(loss), if loss.starts_with("table ") { "rows" } else { "data" }));
+            notes.push(format!("  {} Drops {} and its {}", paint("yellow", "!"), described(loss), if loss.starts_with("column ") { "data" } else { "rows" }));
         }
         for (column, why) in &plan.narrowings {
             notes.push(format!("  {} Column {} {why}", paint("yellow", "!"), column.trim_start_matches("column ")));
@@ -6712,7 +6711,7 @@ async fn scoped_change(db: &mut Db, history: &mut Db, explaining: &[crate::diff:
     let mut change = crate::diff::plan(&target, &current, alterer.as_ref());
     style(db, &mut change, &current).await.ok()?;
     let statements: Vec<String> = undo.runnable().map(|s| format!("{};", s.trim_end().trim_end_matches(';'))).collect();
-    let lost: Vec<String> = undo.losses.iter().chain(undo.narrowings.iter().map(|(column, _)| column)).map(|l| l.trim_start_matches("column ").trim_start_matches("table ").to_string()).collect();
+    let lost: Vec<String> = undo.losses.iter().chain(undo.narrowings.iter().map(|(column, _)| column)).map(|l| shown_id(l)).collect();
     (!statements.is_empty() && !change.statements.is_empty()).then(|| (change.sql(), statements, lost))
 }
 
@@ -7229,7 +7228,7 @@ fn dropped_items(plan: &crate::diff::Plan, counts: &std::collections::BTreeMap<S
         .losses
         .iter()
         .map(|l| {
-            let name = l.trim_start_matches("column ").trim_start_matches("table ");
+            let name = shown_id(l);
             match counts.get(l).copied() {
                 Some(1) => format!("{name} (1 row)"),
                 Some(n) if n > 1 => format!("{name} ({n} rows)"),

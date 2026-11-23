@@ -335,6 +335,71 @@ pub struct Hazard {
     pub what: String,
 }
 
+/// Runs a MySQL file as `deploy` runs it, saying where its `alter table`, on a table that was there
+/// before it ran, blocks writes to it while it reads every row. That is MySQL's own answer: the
+/// statement runs first with `lock=none`, which MySQL refuses where the change can't let writes
+/// through (a column's type changed, which copies the table, a table partitioned anew, partitions
+/// reorganized), and otherwise makes as it is.
+async fn mysql_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard>, Error> {
+    let statements = crate::sql::split_statements(&m.sql, Dialect::Mysql);
+    let tried = match statements.as_slice() {
+        [one] if crate::sql::alters_table(one) => without_lock(&one.text),
+        _ => None,
+    };
+    let Some((table, tried)) = tried else {
+        run(db, m, false).await?;
+        return Ok(vec![]);
+    };
+    let there = db.rows("select table_name as t from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE'").await?;
+    if !there.iter().any(|r| r.text("t").eq_ignore_ascii_case(&table)) {
+        run(db, m, false).await?;
+        return Ok(vec![]);
+    }
+    match db.script(&tried).await {
+        Ok(()) => Ok(vec![]),
+        Err(e) if e.0.contains("LOCK=NONE is not supported") => {
+            run(db, m, false).await?;
+            Ok(vec![Hazard { what: mysql_hazard(&statements[0].text, &table), table }])
+        }
+        // A statement that fails for its own reasons fails the same way as written.
+        Err(_) => run(db, m, false).await.map(|()| vec![]),
+    }
+}
+
+/// What a MySQL `alter table` that blocks writes does to `table`, as a sentence's predicate.
+fn mysql_hazard(statement: &str, table: &str) -> String {
+    let lower = statement.to_ascii_lowercase();
+    if let Some(at) = lower.find("reorganize partition ") {
+        let names = statement[at + "reorganize partition ".len()..].split(" into ").next().unwrap_or_default().trim();
+        return format!("reorganizes {table}'s partitions {names}, copying their rows while it blocks writes to it");
+    }
+    if lower.contains(" partition by ") || lower.contains(" remove partitioning") {
+        return format!("partitions {table} anew, copying every row while it blocks writes to it");
+    }
+    if lower.contains(" modify column ") || lower.contains(" change column ") || lower.contains(" convert to ") {
+        return format!("rewrites {table}, copying every row while it blocks writes to it");
+    }
+    format!("blocks writes to {table} while it reads every row")
+}
+
+/// A MySQL `alter table` with `lock=none` among its clauses, and the table it alters, unquoted: the
+/// clause goes first, and before a partitioning clause with no comma, as MySQL's grammar has it.
+fn without_lock(statement: &str) -> Option<(String, String)> {
+    let tokens = crate::sql::tokenize(statement, Dialect::Mysql);
+    let (name, next) = match tokens.as_slice() {
+        [alter, table, name, next, ..] if alter.upper() == "ALTER" && table.upper() == "TABLE" => (name, next),
+        _ => return None,
+    };
+    // A qualified name (`app.users`) is refused by the shadow check before it runs.
+    if next.text == "." {
+        return None;
+    }
+    let unquoted = name.text.trim_matches('`').replace("``", "`");
+    let options = matches!(next.upper().as_str(), "PARTITION" | "REMOVE");
+    let rest = &statement[next.start..];
+    Some((unquoted, format!("{}lock=none{} {rest}", &statement[..next.start], if options { "" } else { "," })))
+}
+
 /// The check constraints that prove a column holds no null: (table, column) to (name, validated).
 async fn not_null_proofs(db: &mut Db) -> Result<BTreeMap<(String, String), (String, bool)>, Error> {
     static PROOF: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#"^CHECK \(\(?("(?:[^"]|"")+"|[a-z_][a-z0-9_$]*) IS NOT NULL\)?\)(?: NOT VALID)?$"#).expect("a valid pattern"));
@@ -380,9 +445,12 @@ async fn storage(db: &mut Db) -> Result<BTreeMap<String, Stored>, Error> {
 /// while it reads every row: the parse tree for a scan (a validated constraint, an index built
 /// without `concurrently`, a `set not null` no validated check proves, a validation after an
 /// earlier statement of the file took a lock that blocks writes, which it holds until the file
-/// commits), and the storage of tables and their indexes for a copy or a rebuild. Postgres only;
-/// elsewhere it runs the file and says nothing.
+/// commits), and the storage of tables and their indexes for a copy or a rebuild. On MySQL, as the
+/// server answers ([`mysql_watched`]); on SQLite it runs the file and says nothing.
 pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard>, Error> {
+    if db.dialect() == Dialect::Mysql {
+        return mysql_watched(db, m).await;
+    }
     if db.dialect() != Dialect::Postgres {
         run(db, m, false).await?;
         return Ok(vec![]);
@@ -514,6 +582,23 @@ mod tests {
 
     fn existing(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn asks_mysql_to_change_a_table_letting_writes_through() {
+        let tried = |s: &str| without_lock(s).map(|(t, s)| format!("{t}: {s}"));
+        assert_eq!(tried("alter table people modify column mood enum('ok') not null").as_deref(), Some("people: alter table people lock=none, modify column mood enum('ok') not null"));
+        assert_eq!(tried("alter table readings\n  modify column level tinyint,\n  modify column code varchar(3)").as_deref(), Some("readings: alter table readings\n  lock=none, modify column level tinyint,\n  modify column code varchar(3)"));
+        // A partitioning clause takes the option before it with no comma.
+        assert_eq!(tried("alter table m partition by hash (id) partitions 4").as_deref(), Some("m: alter table m lock=none partition by hash (id) partitions 4"));
+        assert_eq!(tried("alter table `order` remove partitioning").as_deref(), Some("order: alter table `order` lock=none remove partitioning"));
+        assert_eq!(tried("alter table m add partition (partition p2 values less than (3))").as_deref(), Some("m: alter table m lock=none, add partition (partition p2 values less than (3))"));
+        assert_eq!(tried("create table t (id int)"), None);
+        assert_eq!(tried("alter table app.users add column bio text"), None);
+        assert_eq!(mysql_hazard("alter table m reorganize partition p1, pmax into (partition p2 values less than (3), partition pmax values less than maxvalue)", "m"), "reorganizes m's partitions p1, pmax, copying their rows while it blocks writes to it");
+        assert_eq!(mysql_hazard("alter table m partition by hash (id) partitions 4", "m"), "partitions m anew, copying every row while it blocks writes to it");
+        assert_eq!(mysql_hazard("alter table p modify column n bigint", "p"), "rewrites p, copying every row while it blocks writes to it");
+        assert_eq!(mysql_hazard("alter table p add fulltext index f (body)", "p"), "blocks writes to p while it reads every row");
     }
 
     #[test]

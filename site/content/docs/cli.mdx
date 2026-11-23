@@ -200,7 +200,7 @@ Commands:
   init                     Start from this database
     --schema <name>        A schema to read; repeat for more (Postgres; all by default)
   new <name>               Write the next migration, from schema.sql or this database
-    --drop <names>         Accept what it drops: tables and columns
+    --drop <names>         Accept what it drops: tables, columns and partitions
     --rename <old>=<new>   Say a table or column was renamed
     --blocking             Accept a statement that blocks writes while it reads every row
   dev                      Apply pending migrations, rewinding if needed (may drop data), and write the lockfile
@@ -296,7 +296,7 @@ Usage: reylo db <command> [flags]
 
 Commands:
   push                     Synchronize this database with schema.sql (may be destructive)
-    --drop <names>         Accept what it drops: tables and columns
+    --drop <names>         Accept what it drops: tables, columns and partitions
     --rename <old>=<new>   Say a table or column was renamed
     --force                Accept everything it drops
     --watch                Push again on each save
