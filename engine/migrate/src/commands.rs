@@ -5128,7 +5128,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
         }
         // On Postgres, a plan that would hold a lock that blocks writes to a table with rows while it
         // reads them all is written in the shape that doesn't, as several files (`locks`).
-        let existing = if d == Dialect::Postgres { crate::locks::existing_tables(shadows.db(c)).await? } else { Default::default() };
+        let existing = if d == Dialect::Postgres { crate::locks::existing(shadows.db(c)).await? } else { Default::default() };
         let mut split = crate::locks::lock_safe(&plan, &existing);
         let commits = plan.statements.iter().filter(|s| *s == crate::diff::COMMIT).count();
         // The plan runs on the replay as `deploy` will run its files: one file in one transaction (on
@@ -5158,29 +5158,42 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             Err((_, e)) => return Ok(Err(vec![fails_problem(target_name, e)])),
         };
         let mut reached = catalog(shadows.db(c)).await?;
-        // Where the lock-safe shape doesn't reach the target (a statement that needs a constraint
-        // validated, or a column not null, before the last file), the plan is one file, on a new
-        // replay, as the planner wrote it.
+        // Where the lock-safe shape doesn't reach the target, each on a new replay: the same shape
+        // with each index the plan replaces dropped before its replacement is built (a statement
+        // between that needs the old one gone), then the plan as one file, as the planner wrote it
+        // (a statement that needs a constraint validated, or a column not null, before the last file).
         let mut notes = Vec::new();
         if split.is_some() && (failed.is_some() || reached != wanted) {
-            split = None;
-            let c2 = shadows.lane();
-            shadows.push(c2, files.iter().map(Step::of));
-            if let Err((m, e)) = shadows.open(c2).await? {
-                return Ok(Err(vec![Problem::new("replay-fails", format!("Replaying {m} in a shadow database fails")).note(e)]));
+            let dropping_first = crate::locks::lock_safe_dropping_first(&plan, &existing).filter(|f| Some(f) != split.as_ref());
+            let mut tries = vec![None];
+            if dropping_first.is_some() {
+                tries.insert(0, dropping_first);
             }
-            shadows.taint(c2);
-            if !moves.is_empty() {
-                let file = Migration { name: "moves".into(), time: String::new(), path: PathBuf::new(), sql: moves.iter().map(|m| format!("{m};")).collect::<Vec<_>>().join("\n") };
-                run(shadows.db(c2), &file, false).await?;
+            for shape in tries {
+                let c2 = shadows.lane();
+                shadows.push(c2, files.iter().map(Step::of));
+                if let Err((m, e)) = shadows.open(c2).await? {
+                    return Ok(Err(vec![Problem::new("replay-fails", format!("Replaying {m} in a shadow database fails")).note(e)]));
+                }
+                shadows.taint(c2);
+                if !moves.is_empty() {
+                    let file = Migration { name: "moves".into(), time: String::new(), path: PathBuf::new(), sql: moves.iter().map(|m| format!("{m};")).collect::<Vec<_>>().join("\n") };
+                    run(shadows.db(c2), &file, false).await?;
+                }
+                (failed, hazards) = run_pieces(shadows.db(c2), pieces(&shape, &plan)).await?;
+                reached = catalog(shadows.db(c2)).await?;
+                let note = match (&shape, commits) {
+                    (Some(_), _) => format!("  {} Drops each index it replaces before it builds the new one: built first, the new ones didn't reach {target_name}", paint("yellow", "!")),
+                    (None, 0) => format!("  {} Written as one file: split so that none blocks writes while it reads every row, it didn't reach {target_name}", paint("yellow", "!")),
+                    (None, _) => format!("  {} Split only after each new enum value: split so that none blocks writes while it reads every row, it didn't reach {target_name}", paint("yellow", "!")),
+                };
+                let last = shape.is_none();
+                split = shape;
+                if last || (failed.is_none() && reached == wanted) {
+                    notes.push(note);
+                    break;
+                }
             }
-            (failed, hazards) = run_pieces(shadows.db(c2), pieces(&None, &plan)).await?;
-            reached = catalog(shadows.db(c2)).await?;
-            notes.push(if commits == 0 {
-                format!("  {} Written as one file: split so that none blocks writes while it reads every row, it didn't reach {target_name}", paint("yellow", "!"))
-            } else {
-                format!("  {} Split only after each new enum value: split so that none blocks writes while it reads every row, it didn't reach {target_name}", paint("yellow", "!"))
-            });
         }
         if !hazards.is_empty() && !choices.blocking && failed.is_none() && reached == wanted {
             return Ok(Err(vec![lock_problem(&hazards, &asked, choices)]));

@@ -3,31 +3,82 @@
 //! app's writes to that table for as long as it runs, which on a large table is an outage. Most such
 //! changes have a shape that doesn't: a constraint added `not valid` and validated in a later
 //! transaction (validation blocks no writes), a `not null` proven by a validated check first, an
-//! index built `concurrently` in a file of its own. `lock_safe` writes a plan in those shapes, as
-//! several files; `run_watched` runs a file on a shadow and says which of its statements still hold
-//! such a lock, reading the parse tree for the scans and the tables' storage for the rewrites, so
-//! that whether a statement copies a table is Postgres's own answer, not a list of rules.
+//! index built `concurrently` in a file of its own. An index the plan replaces is dropped only once
+//! its replacement is built, in one transaction with what takes the new one in its place, so that
+//! the table is never without it. `lock_safe` writes a plan in those shapes, as several files;
+//! `run_watched` runs a file on a shadow and says which of its statements still hold such a lock,
+//! reading the parse tree for the scans and the tables' storage for the rewrites, so that whether a
+//! statement copies a table is Postgres's own answer, not a list of rules.
 
 use crate::commands::{run, Migration};
 use crate::db::Db;
 use crate::diff::postgres::quote_ident;
 use crate::diff::Plan;
 use crate::{Dialect, Error};
-use syntax::postgres::protobuf::{node::Node as N, AlterTableType as At, ConstrType, RangeVar};
+use syntax::postgres::protobuf::{node::Node as N, AlterTableType as At, ConstrType, ObjectType, RangeVar};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The plain tables of `db` (not partitioned ones, where neither `not valid` foreign keys nor
-/// concurrent index builds are taken on every supported version), each under the name a
-/// statement on the search path writes it with and under its qualified name.
-pub async fn existing_tables(db: &mut Db) -> Result<BTreeSet<String>, Error> {
-    let rows = db
-        .rows(
-            r"select c.oid::regclass::text as shown, format('%I.%I', n.nspname, c.relname) as qualified
+/// What a plan finds in the database it changes, for `lock_safe`.
+#[derive(Clone, Debug, Default)]
+pub struct Existing {
+    /// Each plain table and materialized view (not a partitioned table, where neither `not valid`
+    /// foreign keys nor concurrent index builds are taken on every supported version), under the
+    /// name a statement on the search path writes it with and under its qualified name, to its
+    /// qualified name.
+    pub tables: BTreeMap<String, String>,
+    /// Each index of those, under both names, to its table's qualified name and its own name as
+    /// the server stores it.
+    pub indexes: BTreeMap<String, (String, String)>,
+    /// The name of every relation, as the server stores it: a temporary name is one none holds.
+    pub names: BTreeSet<String>,
+}
+
+impl Existing {
+    /// The tables named, each under that name alone, with no index.
+    pub fn of(tables: &[&str]) -> Existing {
+        Existing { tables: tables.iter().map(|t| (t.to_string(), t.to_string())).collect(), names: tables.iter().map(|t| crate::sql::last_written(t)).collect(), ..Existing::default() }
+    }
+
+    /// With an index named `index` (as a statement names it) on `table`.
+    pub fn with_index(mut self, index: &str, table: &str) -> Existing {
+        let stored = crate::sql::last_written(index);
+        self.indexes.insert(index.to_string(), (table.to_string(), stored.clone()));
+        self.names.insert(stored);
+        self
+    }
+}
+
+/// The tables and materialized views of `db`, their indexes, and every relation's name.
+pub async fn existing(db: &mut Db) -> Result<Existing, Error> {
+    const OWN: &str = r"n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\_%'";
+    let tables = db
+        .rows(&format!(
+            "select c.oid::regclass::text as shown, format('%I.%I', n.nspname, c.relname) as qualified
             from pg_class c join pg_namespace n on n.oid = c.relnamespace
-            where c.relkind = 'r' and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\_%'",
-        )
+            where c.relkind in ('r', 'm') and {OWN}"
+        ))
         .await?;
-    Ok(rows.iter().flat_map(|r| [r.text("shown").to_string(), r.text("qualified").to_string()]).collect())
+    let indexes = db
+        .rows(&format!(
+            "select i.indexrelid::regclass::text as shown, format('%I.%I', n.nspname, c.relname) as qualified, c.relname as stored, format('%I.%I', tn.nspname, t.relname) as table_name
+            from pg_index i join pg_class c on c.oid = i.indexrelid join pg_namespace n on n.oid = c.relnamespace
+              join pg_class t on t.oid = i.indrelid join pg_namespace tn on tn.oid = t.relnamespace
+            where t.relkind in ('r', 'm') and {OWN}"
+        ))
+        .await?;
+    let names = db.rows(&format!("select c.relname as stored from pg_class c join pg_namespace n on n.oid = c.relnamespace where {OWN}")).await?;
+    let mut out = Existing { names: names.iter().map(|r| r.text("stored").to_string()).collect(), ..Existing::default() };
+    for r in &tables {
+        for name in [r.text("shown"), r.text("qualified")] {
+            out.tables.insert(name.to_string(), r.text("qualified").to_string());
+        }
+    }
+    for r in &indexes {
+        for name in [r.text("shown"), r.text("qualified")] {
+            out.indexes.insert(name.to_string(), (r.text("table_name").to_string(), r.text("stored").to_string()));
+        }
+    }
+    Ok(out)
 }
 
 /// A relation as a statement names it: `users`, `billing.invoices`, each part quoted as needed.
@@ -37,6 +88,18 @@ fn named(r: &RangeVar) -> String {
     } else {
         format!("{}.{}", quote_ident(&r.schemaname), quote_ident(&r.relname))
     }
+}
+
+/// A name a list of parts makes (`drop index billing.invoices_due`), each quoted as needed.
+fn named_parts(parts: &[syntax::postgres::protobuf::Node]) -> Option<String> {
+    let parts: Option<Vec<String>> = parts
+        .iter()
+        .map(|p| match &p.node {
+            Some(N::String(s)) => Some(quote_ident(&s.sval)),
+            _ => None,
+        })
+        .collect();
+    parts.filter(|p| !p.is_empty()).map(|p| p.join("."))
 }
 
 /// The one statement `sql` holds, parsed.
@@ -60,11 +123,16 @@ fn key_columns(keys: &[syntax::postgres::protobuf::Node]) -> Option<Vec<String>>
 /// column's, cut where a name would pass Postgres's 63 bytes.
 fn not_null_check(column: &str) -> String {
     const SUFFIX: &str = "_not_null";
-    let mut end = column.len().min(63 - SUFFIX.len());
-    while !column.is_char_boundary(end) {
+    format!("{}{SUFFIX}", cut(column, 63 - SUFFIX.len()))
+}
+
+/// `name` cut to at most `bytes` bytes, on a character's boundary.
+fn cut(name: &str, bytes: usize) -> &str {
+    let mut end = name.len().min(bytes);
+    while !name.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}{SUFFIX}", &column[..end])
+    &name[..end]
 }
 
 /// Whether a boolean option is on: written bare (`concurrently`), or with a value Postgres reads as
@@ -87,10 +155,10 @@ fn is<T: Into<i32>>(field: i32, value: T) -> bool {
 /// The columns, as (table as the statement names it, column), that a statement of `plan` needs not
 /// null when it runs: one given an identity, and the key of a primary key added to a table. Their
 /// `set not null` can't wait for the last file.
-fn needs_not_null(plan: &Plan) -> BTreeSet<(String, String)> {
+fn needs_not_null(trees: &[Option<N>]) -> BTreeSet<(String, String)> {
     let mut out = BTreeSet::new();
-    for statement in plan.statements.iter().filter(|s| !s.starts_with("--")) {
-        let Some(N::AlterTableStmt(a)) = parsed(statement) else { continue };
+    for tree in trees {
+        let Some(N::AlterTableStmt(a)) = tree else { continue };
         let Some(rel) = a.relation.as_ref().map(named) else { continue };
         for cmd in &a.cmds {
             let Some(N::AlterTableCmd(cmd)) = &cmd.node else { continue };
@@ -125,23 +193,95 @@ fn needs_not_null(plan: &Plan) -> BTreeSet<(String, String)> {
 /// parent, which must have its not nulls as it joins.
 enum Shape {
     /// Kept as it is, in the file being written.
-    Kept(String),
+    Kept,
     /// In the file being written; then, in the last file, a validation (a scan that blocks no
     /// writes) and what finishes the change once every validation has run (`set not null`, which
     /// holds a lock that blocks reads and writes until the file commits).
     Later(String, String, Vec<String>),
-    /// In a file of its own, then statements for the file after it.
-    Alone(String, Vec<String>),
+    /// An index built concurrently in a file of its own, then what takes it as the plan's in the
+    /// file after.
+    Built(Build),
 }
 
-/// `statement` in the shape that holds no lock that blocks writes to a table in `existing` while
-/// it reads every row.
-fn shape(statement: &str, existing: &BTreeSet<String>, needs_not_null: &BTreeSet<(String, String)>) -> Shape {
-    let kept = || Shape::Kept(statement.to_string());
-    let Some(node) = parsed(statement) else { return kept() };
+/// An index the plan builds on a table that has rows.
+struct Build {
+    /// The table, by its qualified name.
+    table: String,
+    /// The index's name, as the server stores it: the constraint's, for a key.
+    name: String,
+    what: Built,
+}
+
+enum Built {
+    /// `create index`, as the plan writes it, and the schema its table is named in (`billing.`).
+    Index { statement: String, schema: String },
+    /// A unique constraint or a primary key: its index, then the constraint added over it.
+    Key { rel: String, primary: bool, columns: Vec<String>, including: Vec<String>, nulls_not_distinct: bool, deferral: &'static str },
+}
+
+/// `create [unique] index [if not exists] <name> on`, its name apart.
+static NAMED: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#"(?is)^(\s*create\s+(?:unique\s+)?index)\s+((?:if\s+not\s+exists\s+)?)("(?:[^"]|"")+"|[^\s"(]+)(\s+on\s)"#).expect("a valid pattern"));
+
+/// A name as the server stores it: unquoted, folded to lower case.
+fn stored(name: &str) -> String {
+    match name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) {
+        Some(inner) => inner.replace("\"\"", "\""),
+        None => name.to_lowercase(),
+    }
+}
+
+impl Build {
+    /// Whether it can be built under another name than its own.
+    fn renamable(&self) -> bool {
+        match &self.what {
+            Built::Index { statement, .. } => NAMED.captures(statement).is_some_and(|c| stored(&c[3]) == self.name),
+            Built::Key { .. } => true,
+        }
+    }
+
+    /// The statement that builds it concurrently, under the name `under`.
+    fn create(&self, under: &str) -> String {
+        match &self.what {
+            Built::Index { statement, .. } => {
+                let statement = statement.trim_end();
+                match NAMED.captures(statement).filter(|_| under != self.name) {
+                    Some(c) => format!("{} concurrently {}{}{}{}", &c[1], &c[2], quote_ident(under), &c[4], &statement[c.get(0).map_or(0, |m| m.end())..]),
+                    // Under its own name, the statement as the plan writes it.
+                    None => {
+                        static CREATE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)^(\s*create\s+(?:unique\s+)?index)\b").expect("a valid pattern"));
+                        CREATE.replace(statement, "$1 concurrently").into_owned()
+                    }
+                }
+            }
+            Built::Key { rel, columns, including, nulls_not_distinct, .. } => {
+                let include = if including.is_empty() { String::new() } else { format!(" include ({})", including.join(", ")) };
+                format!("create unique index concurrently {} on {rel} ({}){include}{}", quote_ident(under), columns.join(", "), if *nulls_not_distinct { " nulls not distinct" } else { "" })
+            }
+        }
+    }
+
+    /// What takes the index built under `under` as the plan's: the constraint added over it, which
+    /// takes the constraint's name, or the index renamed to its own.
+    fn finish(&self, under: &str) -> Vec<String> {
+        match &self.what {
+            Built::Index { schema, .. } if under != self.name => vec![format!("alter index {schema}{} rename to {}", quote_ident(under), quote_ident(&self.name))],
+            Built::Index { .. } => vec![],
+            Built::Key { rel, primary, deferral, .. } => {
+                vec![format!("alter table {rel} add constraint {} {} using index {}{deferral}", quote_ident(&self.name), if *primary { "primary key" } else { "unique" }, quote_ident(under))]
+            }
+        }
+    }
+}
+
+/// `statement` (whose parse tree is `tree`) in the shape that holds no lock that blocks writes to a
+/// table in `tables` while it reads every row.
+fn shape(statement: &str, tree: Option<&N>, tables: &BTreeMap<String, String>, needs_not_null: &BTreeSet<(String, String)>) -> Shape {
+    let kept = || Shape::Kept;
+    let Some(node) = tree else { return kept() };
     match node {
         N::AlterTableStmt(a) => {
-            let Some(rel) = a.relation.as_ref().map(named).filter(|r| existing.contains(r)) else { return kept() };
+            let Some(rel) = a.relation.as_ref().map(named) else { return kept() };
+            let Some(table) = tables.get(&rel) else { return kept() };
             let [cmd] = a.cmds.as_slice() else { return kept() };
             let Some(N::AlterTableCmd(cmd)) = &cmd.node else { return kept() };
             if is(cmd.subtype, At::AtAddConstraint) {
@@ -153,12 +293,18 @@ fn shape(statement: &str, existing: &BTreeSet<String>, needs_not_null: &BTreeSet
                 if is(c.contype, ConstrType::ConstrCheck) || is(c.contype, ConstrType::ConstrForeign) {
                     return Shape::Later(format!("{} not valid", statement.trim_end()), format!("alter table {rel} validate constraint {}", quote_ident(&c.conname)), vec![]);
                 }
-                // Its index built concurrently, then taken as the constraint's.
-                let plain = c.including.is_empty() && c.options.is_empty() && !c.nulls_not_distinct && !c.deferrable && c.indexname.is_empty() && c.indexspace.is_empty() && c.access_method.is_empty() && !c.without_overlaps;
-                if is(c.contype, ConstrType::ConstrUnique) && plain {
-                    let Some(columns) = key_columns(&c.keys) else { return kept() };
-                    let name = quote_ident(&c.conname);
-                    return Shape::Alone(format!("create unique index concurrently {name} on {rel} ({})", columns.join(", ")), vec![format!("alter table {rel} add constraint {name} unique using index {name}")]);
+                // Its index built concurrently, then taken as the constraint's, which carries its
+                // deferral: an index takes no other storage parameters or tablespace in that place.
+                let plain = c.options.is_empty() && c.indexname.is_empty() && c.indexspace.is_empty() && c.access_method.is_empty() && !c.without_overlaps && c.where_clause.is_none();
+                let primary = is(c.contype, ConstrType::ConstrPrimary);
+                if (is(c.contype, ConstrType::ConstrUnique) || primary) && plain {
+                    let (Some(columns), Some(including)) = (key_columns(&c.keys), key_columns(&c.including)) else { return kept() };
+                    let deferral = match (c.deferrable, c.initdeferred) {
+                        (_, true) => " deferrable initially deferred",
+                        (true, false) => " deferrable",
+                        _ => "",
+                    };
+                    return Shape::Built(Build { table: table.clone(), name: c.conname.clone(), what: Built::Key { rel, primary, columns, including, nulls_not_distinct: c.nulls_not_distinct, deferral } });
                 }
                 return kept();
             }
@@ -176,35 +322,213 @@ fn shape(statement: &str, existing: &BTreeSet<String>, needs_not_null: &BTreeSet
             }
             kept()
         }
-        N::IndexStmt(i) if !i.concurrent && i.relation.as_ref().map(named).is_some_and(|r| existing.contains(&r)) => {
-            static CREATE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)^(\s*create\s+(?:unique\s+)?index)\b").expect("a valid pattern"));
+        N::IndexStmt(i) if !i.concurrent => {
+            let Some(relation) = i.relation.as_ref() else { return kept() };
+            let Some(table) = tables.get(&named(relation)) else { return kept() };
+            static CREATE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)^\s*create\s+(?:unique\s+)?index\b").expect("a valid pattern"));
             if !CREATE.is_match(statement) {
                 return kept();
             }
-            Shape::Alone(CREATE.replace(statement.trim_end(), "$1 concurrently").into_owned(), vec![])
+            let schema = if relation.schemaname.is_empty() { String::new() } else { format!("{}.", quote_ident(&relation.schemaname)) };
+            Shape::Built(Build { table: table.clone(), name: i.idxname.clone(), what: Built::Index { statement: statement.to_string(), schema } })
         }
         _ => kept(),
+    }
+}
+
+/// The index a statement drops on a table in `tables`, as (its table, its name as stored): `drop
+/// index`, or a constraint dropped whose index is named for it (a unique constraint or a key).
+fn dropped_index(tree: Option<&N>, existing: &Existing, tables: &BTreeMap<String, String>) -> Option<(String, String)> {
+    match tree? {
+        N::DropStmt(d) if is(d.remove_type, ObjectType::ObjectIndex) && !d.concurrent => {
+            let [object] = d.objects.as_slice() else { return None };
+            let Some(N::List(parts)) = &object.node else { return None };
+            let (table, name) = existing.indexes.get(&named_parts(&parts.items)?)?;
+            tables.values().any(|t| t == table).then(|| (table.clone(), name.clone()))
+        }
+        N::AlterTableStmt(a) => {
+            let table = tables.get(&named(a.relation.as_ref()?))?;
+            let [cmd] = a.cmds.as_slice() else { return None };
+            let Some(N::AlterTableCmd(cmd)) = &cmd.node else { return None };
+            if !is(cmd.subtype, At::AtDropConstraint) {
+                return None;
+            }
+            existing.indexes.values().find(|(t, name)| t == table && *name == cmd.name).cloned()
+        }
+        _ => None,
+    }
+}
+
+/// The foreign key a statement drops, as (its table, its name), where the plan adds it again later,
+/// at the statement it is added in, referencing the table that is the third.
+fn dropped_foreign_key(trees: &[Option<N>], k: usize, existing: &Existing, tables: &BTreeMap<String, String>) -> Option<(String, usize, String)> {
+    let Some(N::AlterTableStmt(a)) = trees[k].as_ref() else { return None };
+    let table = tables.get(&named(a.relation.as_ref()?))?;
+    let [cmd] = a.cmds.as_slice() else { return None };
+    let Some(N::AlterTableCmd(cmd)) = &cmd.node else { return None };
+    if !is(cmd.subtype, At::AtDropConstraint) || existing.indexes.values().any(|(t, name)| t == table && *name == cmd.name) {
+        return None;
+    }
+    trees.iter().enumerate().skip(k + 1).find_map(|(m, tree)| {
+        let Some(N::AlterTableStmt(b)) = tree else { return None };
+        (tables.get(&named(b.relation.as_ref()?)) == Some(table)).then_some(())?;
+        let [added] = b.cmds.as_slice() else { return None };
+        let Some(N::AlterTableCmd(added)) = &added.node else { return None };
+        let Some(N::Constraint(c)) = added.def.as_ref().and_then(|d| d.node.as_ref()) else { return None };
+        if !is(added.subtype, At::AtAddConstraint) || !is(c.contype, ConstrType::ConstrForeign) || c.conname != cmd.name {
+            return None;
+        }
+        Some((table.clone(), m, tables.get(&named(c.pktable.as_ref()?))?.clone()))
+    })
+}
+
+/// Whether a statement does something to `table` that an index of it kept a while longer would
+/// change: drops or retypes a column, rewrites it, moves, renames or drops it.
+fn disturbs(tree: Option<&N>, table: &str, tables: &BTreeMap<String, String>) -> bool {
+    let names = |r: Option<&RangeVar>| r.and_then(|r| tables.get(&named(r))).is_some_and(|t| t == table);
+    match tree {
+        Some(N::AlterTableStmt(a)) if names(a.relation.as_ref()) => a.cmds.iter().any(|cmd| {
+            let Some(N::AlterTableCmd(cmd)) = &cmd.node else { return true };
+            ![
+                At::AtAddColumn,
+                At::AtColumnDefault,
+                At::AtDropNotNull,
+                At::AtSetNotNull,
+                At::AtSetStatistics,
+                At::AtSetOptions,
+                At::AtResetOptions,
+                At::AtSetStorage,
+                At::AtSetCompression,
+                At::AtAddConstraint,
+                At::AtValidateConstraint,
+                At::AtDropConstraint,
+                At::AtChangeOwner,
+                At::AtSetRelOptions,
+                At::AtResetRelOptions,
+                At::AtEnableTrig,
+                At::AtEnableAlwaysTrig,
+                At::AtEnableReplicaTrig,
+                At::AtDisableTrig,
+                At::AtEnableRowSecurity,
+                At::AtDisableRowSecurity,
+                At::AtForceRowSecurity,
+                At::AtNoForceRowSecurity,
+                At::AtAddIdentity,
+                At::AtSetIdentity,
+                At::AtDropIdentity,
+            ]
+            .into_iter()
+            .any(|ok| is(cmd.subtype, ok))
+        }),
+        Some(N::DropStmt(d)) => d.objects.iter().any(|o| matches!(&o.node, Some(N::List(parts)) if named_parts(&parts.items).and_then(|n| tables.get(&n)).is_some_and(|t| t == table))),
+        Some(N::RenameStmt(r)) => names(r.relation.as_ref()),
+        Some(N::AlterObjectSchemaStmt(o)) => names(o.relation.as_ref()),
+        _ => false,
+    }
+}
+
+/// A name for an index built while the one it replaces is still there: the index's own with
+/// `_new` after it, or `_new2` and on where one of those is taken, cut to fit 63 bytes.
+fn temporary(name: &str, taken: &mut BTreeSet<String>) -> String {
+    let mut n = 1;
+    loop {
+        let suffix = if n == 1 { "_new".to_string() } else { format!("_new{n}") };
+        let candidate = format!("{}{suffix}", cut(name, 63 - suffix.len()));
+        if taken.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
     }
 }
 
 /// `plan`'s statements as files that hold no lock blocking writes to a table in `existing` (one
 /// that already has rows) while they read every row: where any statement does, the files in order,
 /// comments kept with the statement they come before; `None` where the plan holds no such lock.
-pub fn lock_safe(plan: &Plan, existing: &BTreeSet<String>) -> Option<Vec<Vec<String>>> {
+/// An index (or a key's) the plan drops on a table it builds another on goes once that one is
+/// built: where the new one takes its name, the new one is built under a temporary name and takes
+/// it in the same transaction as the drop.
+pub fn lock_safe(plan: &Plan, existing: &Existing) -> Option<Vec<Vec<String>>> {
     // A statement's tree is cloned and dropped here, a level at a time.
-    syntax::postgres::on_deep_stack(|| plan_lock_safe(plan, existing))
+    syntax::postgres::on_deep_stack(|| plan_lock_safe(plan, existing, true))
 }
 
-fn plan_lock_safe(plan: &Plan, existing: &BTreeSet<String>) -> Option<Vec<Vec<String>>> {
-    // A table the plan makes (again, perhaps partitioned now) holds no rows the plan reads under a
-    // lock: none of it is the database's as it stands.
-    let made: BTreeSet<String> = plan.statements.iter().filter_map(|s| match parsed(s) {
-        Some(N::CreateStmt(c)) => c.relation.as_ref().map(named),
-        _ => None,
-    }).collect();
-    let existing: BTreeSet<String> = existing.iter().filter(|t| !made.contains(*t)).cloned().collect();
-    let existing = &existing;
-    let needs_not_null = needs_not_null(plan);
+/// `lock_safe`, but with each index the plan drops dropped where the plan has it, before what
+/// replaces it is built: for a plan whose replacements, built first, don't reach its target.
+pub fn lock_safe_dropping_first(plan: &Plan, existing: &Existing) -> Option<Vec<Vec<String>>> {
+    syntax::postgres::on_deep_stack(|| plan_lock_safe(plan, existing, false))
+}
+
+fn plan_lock_safe(plan: &Plan, existing: &Existing, build_first: bool) -> Option<Vec<Vec<String>>> {
+    let trees: Vec<Option<N>> = plan.statements.iter().map(|s| if s.starts_with("--") || s == crate::diff::COMMIT { None } else { parsed(s) }).collect();
+    // A table or materialized view the plan makes (again, perhaps partitioned now) holds no rows the
+    // plan reads under a lock: none of it is the database's as it stands.
+    let made: BTreeSet<String> = trees
+        .iter()
+        .filter_map(|t| match t {
+            Some(N::CreateStmt(c)) => c.relation.as_ref().map(named),
+            Some(N::CreateTableAsStmt(c)) => c.into.as_ref().and_then(|i| i.rel.as_ref()).map(named),
+            _ => None,
+        })
+        .map(|name| existing.tables.get(&name).cloned().unwrap_or(name))
+        .collect();
+    let tables: BTreeMap<String, String> = existing.tables.iter().filter(|(_, t)| !made.contains(*t)).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let needs_not_null = needs_not_null(&trees);
+    let mut shapes: Vec<Option<Shape>> = plan.statements.iter().zip(&trees).map(|(s, t)| (!s.starts_with("--") && s != crate::diff::COMMIT).then(|| shape(s, t.as_ref(), &tables, &needs_not_null))).collect();
+
+    // Each drop that waits for a build, by the build it waits for: the foreign keys first, then the
+    // indexes, each in the plan's order. And the temporary name of each build that needs one.
+    let mut waits: BTreeMap<usize, (Vec<usize>, Vec<usize>)> = BTreeMap::new();
+    let mut deferred: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut temporary_names: BTreeMap<usize, String> = BTreeMap::new();
+    if build_first {
+        let builds: Vec<(usize, &Build)> = shapes.iter().enumerate().filter_map(|(k, s)| match s {
+            Some(Shape::Built(b)) => Some((k, b)),
+            _ => None,
+        }).collect();
+        let mut taken = existing.names.clone();
+        for tree in &trees {
+            match tree {
+                Some(N::IndexStmt(i)) => {
+                    taken.insert(i.idxname.clone());
+                }
+                Some(N::CreateStmt(c)) => {
+                    taken.extend(c.relation.as_ref().map(|r| r.relname.clone()));
+                }
+                _ => {}
+            }
+        }
+        let drops: Vec<(usize, String, String)> = trees.iter().enumerate().filter_map(|(k, t)| dropped_index(t.as_ref(), existing, &tables).map(|(table, name)| (k, table, name))).collect();
+        for (k, table, name) in &drops {
+            // The build that takes its name, else the last on its table.
+            let same = builds.iter().find(|(j, b)| j > k && b.table == *table && b.name == *name && !temporary_names.contains_key(j));
+            let Some(&(j, build)) = same.or_else(|| builds.iter().filter(|(j, b)| j > k && b.table == *table).last()) else { continue };
+            if same.is_some() && !build.renamable() {
+                continue;
+            }
+            if (k + 1..j).any(|m| disturbs(trees[m].as_ref(), table, &tables)) {
+                continue;
+            }
+            deferred.insert(*k, j);
+            waits.entry(j).or_default().1.push(*k);
+            if same.is_some() {
+                temporary_names.insert(j, temporary(name, &mut taken));
+            }
+        }
+        // A foreign key on a key the plan drops is dropped with it, in the same transaction, where
+        // the plan adds it again after: each of the key's table's drops must wait, and it goes with
+        // the first of them.
+        for k in 0..trees.len() {
+            let Some((table, added, referenced)) = dropped_foreign_key(&trees, k, existing, &tables) else { continue };
+            let on: Vec<&(usize, String, String)> = drops.iter().filter(|(d, t, _)| *t == referenced && *d > k).collect();
+            let Some(j) = on.iter().filter_map(|(d, _, _)| deferred.get(d)).min().copied() else { continue };
+            if on.iter().any(|(d, _, _)| !deferred.contains_key(d)) || added < j || (k + 1..j).any(|m| disturbs(trees[m].as_ref(), &table, &tables)) {
+                continue;
+            }
+            deferred.insert(k, j);
+            waits.entry(j).or_default().0.push(k);
+        }
+    }
+
     let mut files: Vec<Vec<String>> = Vec::new();
     let mut current: Vec<String> = Vec::new();
     // The last file: every validation first, then what finishes the changes, so that no
@@ -212,13 +536,15 @@ fn plan_lock_safe(plan: &Plan, existing: &BTreeSet<String>) -> Option<Vec<Vec<St
     let (mut validations, mut finishes): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
     let mut comments: Vec<String> = Vec::new();
     let mut changed = false;
+    // The drops that wait for a build, each with the comments above it.
+    let mut held: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     // The session's settings in force (`set check_function_bodies = off` around functions). Each
     // file is whole on its own: one that ends with a setting still in force resets it, and the
     // file after a lone index build sets it again, since a deploy cut off between the files starts
     // the next run there, in a new session.
     let mut settings: Vec<String> = Vec::new();
     let resets = |settings: &[String]| -> Vec<String> { settings.iter().map(|s| format!("reset {}", setting_name(s))).collect() };
-    for statement in &plan.statements {
+    for (k, statement) in plan.statements.iter().enumerate() {
         if statement.starts_with("--") {
             comments.push(statement.clone());
             continue;
@@ -244,19 +570,26 @@ fn plan_lock_safe(plan: &Plan, existing: &BTreeSet<String>) -> Option<Vec<Vec<St
         } else if let Some(name) = lower.strip_prefix("reset ") {
             settings.retain(|s| setting_name(s) != name.trim());
         }
-        match shape(statement, existing, &needs_not_null) {
-            Shape::Kept(s) => {
+        if deferred.contains_key(&k) {
+            changed = true;
+            let mut with = std::mem::take(&mut comments);
+            with.push(statement.clone());
+            held.insert(k, with);
+            continue;
+        }
+        match shapes[k].take() {
+            None | Some(Shape::Kept) => {
                 current.append(&mut comments);
-                current.push(s);
+                current.push(statement.clone());
             }
-            Shape::Later(s, validation, finish) => {
+            Some(Shape::Later(s, validation, finish)) => {
                 changed = true;
                 current.append(&mut comments);
                 current.push(s);
                 validations.push(validation);
                 finishes.extend(finish);
             }
-            Shape::Alone(s, after) => {
+            Some(Shape::Built(build)) => {
                 changed = true;
                 // What came before goes in a file of its own, unless it is only settings, which
                 // the file after this one repeats.
@@ -266,12 +599,17 @@ fn plan_lock_safe(plan: &Plan, existing: &BTreeSet<String>) -> Option<Vec<Vec<St
                 } else {
                     current.retain(|s| s.starts_with("--"));
                 }
+                let under = temporary_names.get(&k).cloned().unwrap_or_else(|| build.name.clone());
                 let mut alone = std::mem::take(&mut current);
                 alone.append(&mut comments);
-                alone.push(s);
+                alone.push(build.create(&under));
                 files.push(alone);
                 current.extend(settings.iter().cloned());
-                current.extend(after);
+                let (keys, indexes) = waits.remove(&k).unwrap_or_default();
+                for d in keys.into_iter().chain(indexes) {
+                    current.extend(held.remove(&d).unwrap_or_default());
+                }
+                current.extend(build.finish(&under));
             }
         }
     }
@@ -402,6 +740,11 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
     // again concurrently, which blocks no writes; and the tables whose every index it so rebuilds.
     let mut made: BTreeSet<String> = BTreeSet::new();
     let mut reindexed: BTreeSet<String> = BTreeSet::new();
+    // The columns an earlier statement of the file made not null, by table; and each primary key
+    // added over an index, as (table, index, those columns then), whose key columns not yet not
+    // null it checks every row of.
+    let mut nulled: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut keyed: Vec<(String, String, BTreeSet<String>)> = Vec::new();
     let mut add = |table: &str, what: String| {
         let hazard = Hazard { table: table.to_string(), what };
         if !hazards.contains(&hazard) {
@@ -436,8 +779,16 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                                 add(&table, format!("checks every row of {table} while it blocks writes to it"));
                             } else if (is(c.contype, ConstrType::ConstrUnique) || is(c.contype, ConstrType::ConstrPrimary) || is(c.contype, ConstrType::ConstrExclusion)) && c.indexname.is_empty() {
                                 add(&table, format!("builds an index on {table} while it blocks reads and writes to it"));
+                            } else if !c.indexname.is_empty() {
+                                // The index takes the constraint's name.
+                                made.insert(c.conname.clone());
+                                if is(c.contype, ConstrType::ConstrPrimary) {
+                                    let set = nulled.iter().filter(|(t, _)| *t == table).map(|(_, column)| column.clone()).collect();
+                                    keyed.push((table.clone(), c.indexname.clone(), set));
+                                }
                             }
                         } else if is(cmd.subtype, At::AtSetNotNull) {
+                            nulled.insert((table.clone(), cmd.name.clone()));
                             let proven = proofs.get(&(table.clone(), cmd.name.clone())).is_some_and(|(name, valid)| *valid || validated.contains(&(table.clone(), name.clone())));
                             if !proven {
                                 add(&table, format!("checks every row of {table} for a null in {} while it blocks reads and writes to it", quote_ident(&cmd.name)));
@@ -463,6 +814,9 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                         reindexed.extend(resolve(&named(rel)));
                     }
                 }
+                Some(N::RenameStmt(r)) if is(r.rename_type, ObjectType::ObjectIndex) => {
+                    made.insert(r.newname.clone());
+                }
                 Some(N::TruncateStmt(t)) => {
                     for r in &t.relations {
                         if let Some(N::RangeVar(r)) = &r.node {
@@ -475,6 +829,23 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
         }
         }
     });
+    for (table, index, set) in keyed {
+        let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
+        let open = db
+            .rows(&format!(
+                "select a.attname as name from pg_index i join pg_class c on c.oid = i.indexrelid join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
+                where i.indrelid = to_regclass({}) and c.relname = {} and not a.attnotnull order by a.attnum",
+                literal(&table),
+                literal(&index)
+            ))
+            .await?;
+        for column in open.iter().map(|r| r.text("name").to_string()).filter(|c| !set.contains(c)) {
+            let hazard = Hazard { table: table.clone(), what: format!("checks every row of {table} for a null in {} while it blocks reads and writes to it", quote_ident(&column)) };
+            if !hazards.contains(&hazard) {
+                hazards.push(hazard);
+            }
+        }
+    }
     run(db, m, false).await?;
     // A table renamed keeps its storage; one given new storage was copied, but for a truncate,
     // which empties it at once. An index given new storage on a table that wasn't copied was
@@ -512,8 +883,12 @@ mod tests {
         Plan { statements: statements.iter().map(|s| s.to_string()).collect(), ..Plan::default() }
     }
 
-    fn existing(names: &[&str]) -> BTreeSet<String> {
-        names.iter().map(|s| s.to_string()).collect()
+    fn existing(names: &[&str]) -> Existing {
+        Existing::of(names)
+    }
+
+    fn strings(statements: &[&str]) -> Vec<String> {
+        statements.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
@@ -567,7 +942,9 @@ mod tests {
     fn keeps_a_not_null_an_identity_or_a_primary_key_needs() {
         // Adding an identity, or a primary key, refuses a column not yet not null.
         assert_eq!(lock_safe(&plan(&["alter table v alter column r set not null", "alter table v alter column r add generated always as identity"]), &existing(&["v"])), None);
-        assert_eq!(lock_safe(&plan(&["alter table v alter column r set not null", "alter table v add constraint v_pkey primary key (r)"]), &existing(&["v"])), None);
+        // The key's index is built concurrently after it, all the same.
+        let files = lock_safe(&plan(&["alter table v alter column r set not null", "alter table v add constraint v_pkey primary key (r)"]), &existing(&["v"])).unwrap();
+        assert_eq!(files[0], strings(&["alter table v alter column r set not null"]));
         // Another column's is still proven first.
         let files = lock_safe(&plan(&["alter table v alter column r set not null", "alter table v alter column r add generated always as identity", "alter table v alter column s set not null"]), &existing(&["v"])).unwrap();
         assert_eq!(files[0], vec!["alter table v alter column r set not null".to_string(), "alter table v alter column r add generated always as identity".to_string(), "alter table v add constraint s_not_null check (s is not null) not valid".to_string()]);
@@ -622,10 +999,152 @@ mod tests {
     }
 
     #[test]
+    fn builds_a_deferrable_key_concurrently_alone() {
+        let files = lock_safe(
+            &plan(&[
+                "alter table teams add constraint teams_name_key unique (name) deferrable",
+                "alter table teams add constraint teams_code_key unique nulls not distinct (code) include (name) deferrable initially deferred",
+                "alter table teams add constraint teams_pkey primary key (id) initially deferred",
+            ]),
+            &existing(&["teams"]),
+        )
+        .unwrap();
+        assert_eq!(
+            files,
+            vec![
+                strings(&["create unique index concurrently teams_name_key on teams (name)"]),
+                strings(&["alter table teams add constraint teams_name_key unique using index teams_name_key deferrable"]),
+                strings(&["create unique index concurrently teams_code_key on teams (code) include (name) nulls not distinct"]),
+                strings(&["alter table teams add constraint teams_code_key unique using index teams_code_key deferrable initially deferred"]),
+                strings(&["create unique index concurrently teams_pkey on teams (id)"]),
+                strings(&["alter table teams add constraint teams_pkey primary key using index teams_pkey deferrable initially deferred"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_an_index_on_a_materialized_view_concurrently() {
+        let files = lock_safe(&plan(&["create index room_totals_total on room_totals (total desc)"]), &existing(&["room_totals"])).unwrap();
+        assert_eq!(files, vec![strings(&["create index concurrently room_totals_total on room_totals (total desc)"])]);
+        // One the plan makes again has no rows the plan reads under a lock.
+        let remade = ["drop materialized view room_totals", "create materialized view room_totals as select 1 as total", "create index room_totals_total on room_totals (total desc)"];
+        assert_eq!(lock_safe(&plan(&remade), &existing(&["room_totals"])), None);
+    }
+
+    #[test]
+    fn builds_a_changed_index_before_dropping_the_old_one() {
+        let at = existing(&["users"]).with_index("users_email_lower", "users");
+        let files = lock_safe(&plan(&["drop index users_email_lower", "create unique index users_email_lower on users (lower(trim(email)))"]), &at).unwrap();
+        assert_eq!(
+            files,
+            vec![
+                strings(&["create unique index concurrently users_email_lower_new on users (lower(trim(email)))"]),
+                strings(&["drop index users_email_lower", "alter index users_email_lower_new rename to users_email_lower"]),
+            ]
+        );
+        // A schema the table is named in is the index's.
+        let at = existing(&["billing.invoices"]).with_index("billing.invoices_due", "billing.invoices");
+        let files = lock_safe(&plan(&["drop index billing.invoices_due", "create index invoices_due on billing.invoices (due desc)"]), &at).unwrap();
+        assert_eq!(files[1], strings(&["drop index billing.invoices_due", "alter index billing.invoices_due_new rename to invoices_due"]));
+    }
+
+    #[test]
+    fn takes_a_temporary_name_no_relation_holds() {
+        let at = existing(&["users", "users_n_new"]).with_index("users_n", "users");
+        let files = lock_safe(&plan(&["drop index users_n", "create index users_n on users (n desc)"]), &at).unwrap();
+        assert_eq!(files[0], strings(&["create index concurrently users_n_new2 on users (n desc)"]));
+        // Cut to fit 63 bytes.
+        let long = "i".repeat(63);
+        let at = existing(&["users"]).with_index(&long, "users");
+        let files = lock_safe(&plan(&[&format!("drop index {long}"), &format!("create index {long} on users (n desc)")]), &at).unwrap();
+        assert_eq!(files[0], vec![format!("create index concurrently {}_new on users (n desc)", "i".repeat(59))]);
+    }
+
+    #[test]
+    fn builds_a_changed_key_before_dropping_the_old_one() {
+        let at = existing(&["invites"]).with_index("invites_email_team", "invites");
+        let files = lock_safe(&plan(&["alter table invites drop constraint invites_email_team", "alter table invites add constraint invites_email_team unique (email, team_id)"]), &at).unwrap();
+        assert_eq!(
+            files,
+            vec![
+                strings(&["create unique index concurrently invites_email_team_new on invites (email, team_id)"]),
+                strings(&["alter table invites drop constraint invites_email_team", "alter table invites add constraint invites_email_team unique using index invites_email_team_new"]),
+            ]
+        );
+        // Under another name, the old one goes once the new one is in place.
+        let at = existing(&["t"]).with_index("t_org_email_key", "t");
+        let files = lock_safe(&plan(&["alter table t drop constraint t_org_email_key", "alter table t add constraint t_email_key unique (email)"]), &at).unwrap();
+        assert_eq!(files, vec![strings(&["create unique index concurrently t_email_key on t (email)"]), strings(&["alter table t drop constraint t_org_email_key", "alter table t add constraint t_email_key unique using index t_email_key"])]);
+        // An index made a constraint, and a constraint made an index.
+        let at = existing(&["t"]).with_index("t_n_key", "t");
+        let files = lock_safe(&plan(&["drop index t_n_key", "alter table t add constraint t_n_key unique (n)"]), &at).unwrap();
+        assert_eq!(files[1], strings(&["drop index t_n_key", "alter table t add constraint t_n_key unique using index t_n_key_new"]));
+        let files = lock_safe(&plan(&["alter table t drop constraint t_n_key", "create unique index t_n_key on t (n)"]), &at).unwrap();
+        assert_eq!(files[1], strings(&["alter table t drop constraint t_n_key", "alter index t_n_key_new rename to t_n_key"]));
+    }
+
+    #[test]
+    fn drops_a_replaced_index_once_its_tables_last_build_is_done() {
+        let at = existing(&["t", "u"]).with_index("t_a", "t");
+        let files = lock_safe(&plan(&["drop index t_a", "alter table t add column c int", "create index t_b on t (b)", "create index t_c on t (c)", "create index u_x on u (x)"]), &at).unwrap();
+        assert_eq!(
+            files,
+            vec![
+                strings(&["alter table t add column c int"]),
+                strings(&["create index concurrently t_b on t (b)"]),
+                strings(&["create index concurrently t_c on t (c)"]),
+                strings(&["drop index t_a"]),
+                strings(&["create index concurrently u_x on u (x)"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn drops_first_where_a_statement_between_changes_the_table() {
+        // A column dropped or retyped may take the old index with it, or build it again.
+        let at = existing(&["t"]).with_index("t_a", "t");
+        for between in ["alter table t drop column n", "alter table t alter column n type bigint", "alter table t rename to t2"] {
+            let files = lock_safe(&plan(&["drop index t_a", between, "create index t_a on t (m)"]), &at).unwrap();
+            assert_eq!(files, vec![strings(&["drop index t_a", between]), strings(&["create index concurrently t_a on t (m)"])], "{between}");
+        }
+        // As the shape that drops first writes it.
+        let files = lock_safe_dropping_first(&plan(&["drop index t_a", "create index t_a on t (m)"]), &at).unwrap();
+        assert_eq!(files, vec![strings(&["drop index t_a"]), strings(&["create index concurrently t_a on t (m)"])]);
+    }
+
+    #[test]
+    fn drops_a_foreign_key_on_a_replaced_key_with_it() {
+        let at = existing(&["t", "u"]).with_index("t_code_key", "t");
+        let files = lock_safe(
+            &plan(&[
+                "alter table u drop constraint u_code_fkey",
+                "alter table t drop constraint t_code_key",
+                "alter table t add constraint t_code_key unique nulls not distinct (code)",
+                "alter table u add constraint u_code_fkey foreign key (code) references t(code)",
+            ]),
+            &at,
+        )
+        .unwrap();
+        assert_eq!(
+            files,
+            vec![
+                strings(&["create unique index concurrently t_code_key_new on t (code) nulls not distinct"]),
+                strings(&[
+                    "alter table u drop constraint u_code_fkey",
+                    "alter table t drop constraint t_code_key",
+                    "alter table t add constraint t_code_key unique using index t_code_key_new",
+                    "alter table u add constraint u_code_fkey foreign key (code) references t(code) not valid",
+                ]),
+                strings(&["alter table u validate constraint u_code_fkey"]),
+            ]
+        );
+    }
+
+    #[test]
     fn keeps_what_has_no_lock_safe_shape() {
-        // Deferrable, or with options the index can't carry into the constraint.
-        assert_eq!(lock_safe(&plan(&["alter table users add constraint k unique (email) deferrable"]), &existing(&["users"])), None);
-        assert_eq!(lock_safe(&plan(&["alter table users add constraint k unique nulls not distinct (email)"]), &existing(&["users"])), None);
+        // With options the index can't carry into the constraint.
+        assert_eq!(lock_safe(&plan(&["alter table users add constraint k unique (email) with (fillfactor = 70)"]), &existing(&["users"])), None);
+        assert_eq!(lock_safe(&plan(&["alter table users add constraint k unique (email) using index tablespace fast"]), &existing(&["users"])), None);
         // Already not valid, or already concurrent.
         assert_eq!(lock_safe(&plan(&["alter table users add constraint c check (n > 0) not valid", "create index concurrently i on users (n)"]), &existing(&["users"])), None);
         // Qualified names match the table's qualified name.

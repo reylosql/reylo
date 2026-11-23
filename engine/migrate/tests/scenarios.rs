@@ -3355,6 +3355,14 @@ on!(
     new_refuses_a_check_on_a_partitioned_table_until_blocking,
     new_refuses_an_index_built_again_until_blocking,
     a_concurrent_reindex_is_said_to_block_nothing,
+    new_builds_a_changed_index_before_it_drops_the_old_one,
+    a_changed_unique_index_that_fails_to_build_leaves_the_old_one,
+    new_adds_a_deferrable_key_over_an_index_built_concurrently,
+    new_builds_an_index_on_a_materialized_view_concurrently,
+    new_renames_an_index_changed_only_in_its_name,
+    new_drops_a_foreign_key_on_a_replaced_key_with_it,
+    dev_rewinds_a_changed_index,
+    a_primary_key_added_over_an_index_says_it_checks_for_nulls,
 );
 
 #[tokio::test(flavor = "current_thread")]
@@ -4743,6 +4751,229 @@ mod adversarial {
         p.output();
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
         assert!(!p.output().contains(" It "), "nothing pending holds a lock");
+    }
+
+    /// The files `reylo migrate new <name>` wrote, in order, each as its text.
+    fn written(p: &P, name: &str) -> Vec<String> {
+        p.files().into_iter().filter(|f| f.contains(&format!("_{name}"))).map(|f| std::fs::read_to_string(p.dir.join("migrations").join(f)).unwrap()).collect()
+    }
+
+    /// Each index of the database, with its definition and whether it is valid.
+    async fn indexes(p: &P) -> Vec<String> {
+        p.rows("select c.relname || ' ' || i.indisvalid || ' ' || pg_get_indexdef(i.indexrelid) as line from pg_index i join pg_class c on c.oid = i.indexrelid join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' order by 1")
+            .await
+            .iter()
+            .map(|r| r.text("line").to_string())
+            .collect()
+    }
+
+    pub async fn new_builds_a_changed_index_before_it_drops_the_old_one(mut p: P) {
+        let v1 = "create table users (id int primary key, email text not null);
+            create table posts (id int primary key, created_at timestamptz not null, score int);
+            create table invites (id int primary key, email text, team_id int, constraint invites_email_team unique nulls not distinct (email, team_id));
+            create unique index users_email_lower on users (lower(email));
+            create index posts_recent on posts (created_at desc, score asc nulls first);";
+        p.schema(v1);
+        p.file("20261027100000_v1.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into users values (1, 'a@x'), (2, 'b@x'); insert into posts values (1, now(), 1); insert into invites values (1, 'a@x', null)").await;
+        p.output();
+        p.schema(
+            "create table users (id int primary key, email text not null);
+            create table posts (id int primary key, created_at timestamptz not null, score int);
+            create table invites (id int primary key, email text, team_id int, constraint invites_email_team unique (email, team_id));
+            create unique index users_email_lower on users (lower(trim(email)));
+            create index posts_recent on posts (created_at asc, score desc nulls last);",
+        );
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "change", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let made = written(&p, "change");
+        let all = made.join("-- next\n");
+        // Each replacement built concurrently under a name of its own, alone, before anything is
+        // dropped; then the old one dropped in the transaction that takes the new one in its place.
+        for (build, swap) in [
+            ("create unique index concurrently users_email_lower_new on users (lower(trim(email)));", "drop index users_email_lower;\nalter index users_email_lower_new rename to users_email_lower;"),
+            ("create index concurrently posts_recent_new on posts (created_at asc, score desc nulls last);", "drop index posts_recent;\nalter index posts_recent_new rename to posts_recent;"),
+            ("create unique index concurrently invites_email_team_new on invites (email, team_id);", "alter table invites drop constraint invites_email_team;\nalter table invites add constraint invites_email_team unique using index invites_email_team_new;"),
+        ] {
+            let at = made.iter().position(|f| f.trim() == build).unwrap_or_else(|| panic!("no file builds {build}:\n{all}"));
+            assert!(made[at + 1].contains(swap), "the file after {build} takes it in place:\n{all}");
+            assert!(made[..at].iter().all(|f| !f.contains(swap.lines().next().unwrap())), "nothing is dropped before its replacement is built:\n{all}");
+        }
+        // Deployed up to the first build alone, the old index still holds.
+        let later: Vec<(String, String)> = p.files().into_iter().filter(|f| f.contains("_change")).skip(1).map(|f| (f.clone(), std::fs::read_to_string(p.dir.join("migrations").join(&f)).unwrap())).collect();
+        for (f, _) in &later {
+            std::fs::remove_file(p.dir.join("migrations").join(f)).unwrap();
+        }
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert!(p.try_rows("insert into users values (3, 'A@x')").await.is_err(), "the old unique index still holds");
+        for (f, sql) in &later {
+            p.file(f, sql);
+        }
+        p.output();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.check_every_way().await.0, 0, "the migrations reach schema.sql");
+        let now = indexes(&p).await;
+        assert!(now.iter().all(|l| !l.contains("_new") && l.contains(" true ")), "{now:#?}");
+        assert!(now.iter().any(|l| l.starts_with("users_email_lower true CREATE UNIQUE INDEX users_email_lower ON public.users USING btree (lower(TRIM(BOTH FROM email)))")), "{now:#?}");
+    }
+
+    pub async fn a_changed_unique_index_that_fails_to_build_leaves_the_old_one(mut p: P) {
+        let v1 = "create table users (id int primary key, org int not null, email text not null); create unique index users_email on users (org, email);";
+        p.schema(v1);
+        p.file("20261027100000_v1.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        p.schema("create table users (id int primary key, org int not null, email text not null); create unique index users_email on users (email);");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "by_email", &Default::default(), log).await).await, 0, "{}", p.peek());
+        p.output();
+        // Rows the new key refuses, written before the deploy.
+        p.exec("insert into users values (1, 1, 'a'), (2, 2, 'a')").await;
+        assert_eq!(p.migrate().await, 1, "the build fails on the duplicates");
+        p.output();
+        let now = indexes(&p).await;
+        assert!(now.iter().any(|l| l.starts_with("users_email true ") && l.contains("(org, email)")), "the old index is there, and valid: {now:#?}");
+        assert!(now.iter().all(|l| !l.contains("users_email_new")), "the failed build left nothing: {now:#?}");
+        assert!(p.try_rows("insert into users values (3, 1, 'a')").await.is_err(), "the old key still holds");
+        p.exec("delete from users where id = 2").await;
+        assert_eq!(p.migrate().await, 0, "the next deploy runs it again:\n{}", p.peek());
+        p.output();
+        assert_eq!(p.check_every_way().await.0, 0);
+    }
+
+    pub async fn new_adds_a_deferrable_key_over_an_index_built_concurrently(mut p: P) {
+        let v1 = "create table teams (id int not null, name text not null, code text); create table users (id int primary key, team_id int); create table tags (id int not null);";
+        p.schema(v1);
+        p.file("20261027100000_v1.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into teams values (1, 'a', 'x'), (2, 'b', null); insert into tags values (1)").await;
+        p.output();
+        // A foreign key needs a key that isn't deferrable: the deferrable primary key is another table's.
+        p.schema(
+            "create table teams (id int not null, name text not null, code text,
+              constraint teams_pkey primary key (id),
+              constraint teams_name_key unique (name) deferrable,
+              constraint teams_code_key unique nulls not distinct (code) include (name) deferrable initially deferred);
+            create table users (id int primary key, team_id int references teams (id) deferrable initially deferred);
+            create table tags (id int not null, constraint tags_pkey primary key (id) deferrable);",
+        );
+        // No --blocking: each key's index is built concurrently, then taken by the key.
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "keys", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("deferrable deferrable") && !out.contains("deferred deferrable"), "each deferral is shown once:\n{out}");
+        assert_has!(&out, r"\+ constraint teams_name_key on teams: unique \(name\) deferrable(\n|$)");
+        assert_has!(&out, r"\+ constraint users_team_id_fkey on users: foreign key \(team_id\) references teams\(id\) deferrable initially deferred(\n|$)");
+        let all = written(&p, "keys").join("-- next\n");
+        for statement in [
+            "create unique index concurrently teams_pkey on teams (id);",
+            "alter table teams add constraint teams_pkey primary key using index teams_pkey;",
+            "create unique index concurrently tags_pkey on tags (id);",
+            "alter table tags add constraint tags_pkey primary key using index tags_pkey deferrable;",
+            "alter table teams add constraint teams_name_key unique using index teams_name_key deferrable;",
+            "create unique index concurrently teams_code_key on teams (code) include (name) nulls not distinct;",
+            "alter table teams add constraint teams_code_key unique using index teams_code_key deferrable initially deferred;",
+        ] {
+            assert!(all.contains(statement), "{statement}:\n{all}");
+        }
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.check_every_way().await.0, 0, "the migrations reach schema.sql");
+    }
+
+    pub async fn new_builds_an_index_on_a_materialized_view_concurrently(mut p: P) {
+        let v1 = "create table bookings (room int not null, total numeric not null);
+            create materialized view room_totals as select room, sum(total) as total from bookings group by room;
+            create unique index room_totals_room on room_totals (room);";
+        p.schema(v1);
+        p.file("20261027100000_v1.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into bookings values (1, 10), (2, 20); refresh materialized view room_totals").await;
+        p.output();
+        let v2 = format!("{v1}\ncreate index room_totals_total on room_totals (total desc);");
+        p.schema(&v2);
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "by_total", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(written(&p, "by_total"), vec!["create index concurrently room_totals_total on room_totals (total desc);\n".to_string()]);
+        let out = p.output();
+        assert!(!out.contains(" It "), "nothing holds a lock:\n{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.check_every_way().await.0, 0);
+        // A changed query makes the view again, which still blocks.
+        p.schema(&v2.replace("sum(total) as total", "sum(total) as total, count(*) as n"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "count", &Default::default(), log).await).await, 1);
+        assert_has!(p.output(), r"reylo migrate new count --blocking");
+    }
+
+    pub async fn new_renames_an_index_changed_only_in_its_name(mut p: P) {
+        let v1 = "create table t (id int primary key, n int); create index t_a on t (n);";
+        p.schema(v1);
+        p.file("20261027100000_v1.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into t values (1, 1)").await;
+        p.output();
+        p.schema("create table t (id int primary key, n int); create index t_b on t (n);");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "rename", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("keeping its rows"), "{out}");
+        assert_eq!(written(&p, "rename"), vec!["alter index t_a rename to t_b;\n".to_string()]);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.check_every_way().await.0, 0);
+    }
+
+    pub async fn new_drops_a_foreign_key_on_a_replaced_key_with_it(mut p: P) {
+        let v1 = "create table t (id int primary key, code text, constraint t_code_key unique (code)); create table u (id int primary key, code text references t (code));";
+        p.schema(v1);
+        p.file("20261027100000_v1.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into t values (1, 'a'); insert into u values (1, 'a')").await;
+        p.output();
+        p.schema("create table t (id int primary key, code text, constraint t_code_key unique nulls not distinct (code)); create table u (id int primary key, code text references t (code));");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "nulls", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let made = written(&p, "nulls");
+        assert_eq!(made[0], "create unique index concurrently t_code_key_new on t (code) nulls not distinct;\n", "{made:#?}");
+        // The key's foreign key goes in the transaction that replaces the key, and comes back there.
+        assert!(made[1].starts_with("alter table u drop constraint u_code_fkey;\nalter table t drop constraint t_code_key;\nalter table t add constraint t_code_key unique using index t_code_key_new;\n"), "{made:#?}");
+        assert!(made[1].contains("not valid") && made[2].contains("validate constraint u_code_fkey"), "{made:#?}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.check_every_way().await.0, 0);
+    }
+
+    pub async fn dev_rewinds_a_changed_index(mut p: P) {
+        let v1 = "create table users (id int primary key, email text not null); create unique index users_email_lower on users (lower(email));";
+        p.schema(v1);
+        p.file("20261027100000_v1.sql", v1);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("insert into users values (1, 'a@x')").await;
+        p.schema("create table users (id int primary key, email text not null); create unique index users_email_lower on users (lower(trim(email)));");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "trim", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        // Both files taken back out, and schema.sql with them: dev rewinds the pair.
+        for f in p.files().into_iter().filter(|f| f.contains("_trim")) {
+            std::fs::remove_file(p.dir.join("migrations").join(f)).unwrap();
+        }
+        p.schema(v1);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        let now = indexes(&p).await;
+        assert!(now.iter().any(|l| l.starts_with("users_email_lower true ") && l.ends_with("(lower(email))")), "{now:#?}");
+        assert!(now.iter().all(|l| !l.contains("_new")), "{now:#?}");
+        assert_eq!(p.rows("select count(*)::text as n from users").await[0].text("n"), "1", "a rewind keeps the rows");
+    }
+
+    pub async fn a_primary_key_added_over_an_index_says_it_checks_for_nulls(mut p: P) {
+        p.file("20261027100000_t.sql", "create table t (id int, n int);");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into t values (1, 1)").await;
+        // Written by hand: the key's column isn't yet not null, so adding the key reads every row.
+        p.file("20261027110000_index.sql", "create unique index concurrently t_new on t (id);");
+        p.file("20261027120000_key.sql", "alter table t add constraint t_pkey primary key using index t_new;");
+        p.schema("create table t (id int not null, n int, constraint t_pkey primary key (id));");
+        p.output();
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"_key\.sql\n      ! It checks every row of t for a null in id while it blocks reads and writes to it");
     }
 
     pub async fn new_refuses_a_table_rewrite_until_blocking(mut p: P) {

@@ -932,6 +932,26 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
             renames.insert(new_id.clone(), (old_id.clone(), statements));
         }
     }
+    // An index of a table that goes while one alike but for its name comes is renamed, which builds
+    // nothing: where each is the other's only match, nothing hangs on either (a comment, a setting,
+    // a key that references it), and the new name is no relation's in the schema the plan starts from.
+    let held_by = |s: &Schema, id: &str| s.objects.values().any(|o| o.owner.as_deref() == Some(id) || o.deps.contains(id) || o.goes_with.as_deref() == Some(id));
+    let plain_index = |s: &Schema, id: &str| s.objects.get(id).is_some_and(|o| o.kind == Some(Kind::Index) && o.goes_with.is_none() && o.after.is_empty() && !o.def.contains('\n') && !held_by(s, id));
+    let named_relations: BTreeSet<String> = from.objects.values().filter(|o| matches!(o.kind, Some(Kind::Table | Kind::View | Kind::Sequence | Kind::Index))).filter_map(|o| o.id.split_once(' ').map(|(_, n)| last_written(n))).collect();
+    let gone_indexes: Vec<String> = drops.iter().filter(|id| !to.objects.contains_key(id.as_str()) && plain_index(from, id.as_str()) && !renames.values().any(|(old, _)| old == *id)).cloned().collect();
+    let come_indexes: Vec<String> = creates.iter().filter(|id| !from.objects.contains_key(id.as_str()) && plain_index(to, id.as_str()) && !renames.contains_key(id.as_str())).cloned().collect();
+    let alike = |old: &str, new: &str| from.objects[old].owner == to.objects[new].owner && alterer.renames_as(&from.objects[old], &to.objects[new]);
+    let mut index_renames = Vec::new();
+    for old_id in &gone_indexes {
+        let [new_id] = come_indexes.iter().filter(|n| alike(old_id.as_str(), n.as_str())).collect::<Vec<&String>>()[..] else { continue };
+        if gone_indexes.iter().filter(|o| alike(o.as_str(), new_id.as_str())).count() != 1 || named_relations.contains(&last_written(new_id.strip_prefix("index ").unwrap_or(new_id))) {
+            continue;
+        }
+        if let Some(statements) = alterer.rename(&from.objects[old_id], &to.objects[new_id]) {
+            index_renames.push((new_id.clone(), (old_id.clone(), statements)));
+        }
+    }
+    renames.extend(index_renames);
     for (new_id, (old_id, _)) in &renames {
         drops.remove(old_id);
         creates.remove(new_id);
@@ -1768,7 +1788,8 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                 if let Some((old_id, _)) = renames.get(id).filter(|_| !followers.contains(id)) {
                     plan.renamed.push((old_id.clone(), id.clone()));
                 }
-                if let Some((old_id, _)) = renames.get(id).filter(|(old_id, _)| !stated.contains(old_id) && !followers.contains(id)) {
+                // A column's, which keeps its rows: an index renamed holds none, and is no guess.
+                if let Some((old_id, _)) = renames.get(id).filter(|(old_id, _)| !stated.contains(old_id) && !followers.contains(id) && from.objects[old_id].kind == Some(Kind::Column)) {
                     // The guess is written down with what to write instead, should the two columns
                     // be two: the old one's drop and the new one's add.
                     let new_name = last_written(id);
