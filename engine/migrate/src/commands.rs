@@ -1073,16 +1073,53 @@ fn data_statements(sql: &str, d: Dialect) -> Vec<String> {
 }
 
 /// The statements of a migration that write rows, as [`data_statements`] gives them, with the
-/// schema changes that fill what they make: a table made from a query (`create table … as select`,
-/// MySQL's `create table … select`) and a materialized view, made or refreshed. What they write
-/// turns on the rows and objects they read, so it can change with the order they run in, and no
-/// schema shows it was written. Read from the text, so a word in a string counts too.
+/// schema changes that fill what they make ([`fills`]). What they write turns on the rows and
+/// objects they read, so it can change with the order they run in, and no schema shows it was
+/// written.
 #[cfg(feature = "cli")]
 fn writes_rows(sql: &str, d: Dialect) -> Vec<String> {
-    static FILLS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)^\s*(create\b.*\btable\b.*\b(as\s*\(?\s*(select|with|values|table)\b|select\b)|create\b.*\bmaterialized\s+view\b|refresh\s+materialized\s+view\b)").expect("a valid pattern"));
     let mut out = data_statements(sql, d);
-    out.extend(split_statements(sql, d).iter().filter(|s| FILLS.is_match(&s.text)).map(|s| format!("{}…", s.text.split_whitespace().take(3).collect::<Vec<_>>().join(" ").to_lowercase())));
+    out.extend(split_statements(sql, d).iter().filter(|s| fills(s)).map(|s| format!("{}…", s.text.split_whitespace().take(3).collect::<Vec<_>>().join(" ").to_lowercase())));
     out
+}
+
+/// Whether a statement makes what a query fills, read from its words, never a string's or a
+/// comment's: a table made from a query (`create table … as select`, and MySQL's `create table …
+/// select`, the query outside any parentheses but its own), and a materialized view, made or
+/// refreshed.
+#[cfg(feature = "cli")]
+fn fills(statement: &crate::sql::Statement) -> bool {
+    let words: Vec<String> = statement.tokens.iter().map(crate::sql::Token::upper).collect();
+    let word = |k: usize| words.get(k).map(String::as_str).unwrap_or_default();
+    let head: Vec<&str> = (0..6).map(word).collect();
+    if head[..3] == ["REFRESH", "MATERIALIZED", "VIEW"] {
+        return true;
+    }
+    if head[0] != "CREATE" {
+        return false;
+    }
+    if head.windows(2).any(|w| w == ["MATERIALIZED", "VIEW"]) {
+        return true;
+    }
+    let Some(table) = head.iter().position(|w| *w == "TABLE") else { return false };
+    let query = |w: &str| matches!(w, "SELECT" | "WITH" | "VALUES" | "TABLE");
+    let mut depth = 0usize;
+    for (k, t) in statement.tokens.iter().enumerate().skip(table + 1) {
+        match t.text.as_str() {
+            "(" if t.kind == crate::sql::TokenKind::Symbol => depth += 1,
+            ")" if t.kind == crate::sql::TokenKind::Symbol => depth = depth.saturating_sub(1),
+            _ if depth > 0 => {}
+            _ if word(k) == "SELECT" => return true,
+            _ if word(k) == "AS" => {
+                let next = (k + 1..words.len()).find(|&n| statement.tokens[n].text != "(");
+                if next.is_some_and(|n| query(word(n))) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Whether statement `k` of a file is a rebuild's own copy of a table's rows, which a database the
@@ -6233,6 +6270,33 @@ pub async fn run_sql(opts: &Options, items: &[(String, String)], log: Log<'_>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn a_table_made_from_a_query_is_told_by_its_words() {
+        let fills_all = |sql: &str, d: Dialect| split_statements(sql, d).iter().any(fills);
+        for (sql, d) in [
+            ("create table snap as select id from a", Dialect::Postgres),
+            ("CREATE TEMP TABLE IF NOT EXISTS snap AS (WITH x AS (SELECT 1) SELECT * FROM x)", Dialect::Postgres),
+            ("create table snap as table a", Dialect::Postgres),
+            ("create table snap (id bigint) engine=InnoDB select id from a", Dialect::Mysql),
+            ("create materialized view totals as select count(*) from a", Dialect::Postgres),
+            ("refresh materialized view totals", Dialect::Postgres),
+        ] {
+            assert!(fills_all(sql, d), "{sql}");
+        }
+        for (sql, d) in [
+            ("create table notes (id int, body text default 'select')", Dialect::Sqlite),
+            ("create table notes (id int) -- as select\n", Dialect::Postgres),
+            ("create table t (a int, b int generated always as (a + 1) stored)", Dialect::Postgres),
+            ("create table p partition of parent for values in (1)", Dialect::Postgres),
+            ("create table t (id int) with (fillfactor = 70)", Dialect::Postgres),
+            (r#"create table t ("select" int)"#, Dialect::Postgres),
+            ("create view v as select id from a", Dialect::Postgres),
+        ] {
+            assert!(!fills_all(sql, d), "{sql}");
+        }
+    }
 
     #[test]
     #[cfg(feature = "cli")]
