@@ -153,6 +153,7 @@ test("the lock reads as the command line reads it: keys in either order, quoted 
   assert.deepEqual(readLock("schema: c7bf681b\nmigrations:\n  - 20261104120000_users.sql c86e9de4\n  - 20261104140347_add_bio.sql 00123456\n"), lock);
   assert.deepEqual(readLock("migrations:\n"), { entries: [] });
   assert.deepEqual(readLock(`version: 1\n${objects}`), lock);
+  for (const text of ["version: '1'\nmigrations:\n", "version:\nmigrations:\n", "migrations:\n"]) assert.deepEqual(readLock(text), { entries: [] }, text);
   // A list written without indentation, as YAML allows.
   assert.deepEqual(readLock(objects.replace(/^  (- |  )/gm, "$1")), lock);
   assert.deepEqual(readLock("schema: c7bf681b\nmigrations:\n- 20261104120000_users.sql c86e9de4\n- 20261104140347_add_bio.sql 00123456\n"), lock);
@@ -166,8 +167,7 @@ test("the lock refuses what the command line refuses: a key it doesn't know, a k
     ["migrations:\n  - checksum: c86e9de4\n", "the entry at its line 2 has no name"],
     ["migrations:\n  - a.sql\n", '"a.sql" is a migration\'s name and its checksum'],
     ["schema: c7bf681b\nschema:\nmigrations:\n", "its line 2 gives `schema` a second time"],
-    ["version: 0\nmigrations:\n", "`version: 0` isn't a lock's version"],
-    ["version: one\nmigrations:\n", "`version: one` isn't a lock's version"],
+    ...["0", "01", "+1", "0x2", "1.0", "one"].map((v) => [`version: ${v}\nmigrations:\n`, `\`version: ${v}\` isn't a lock's version`] as const),
     ["migrations:\n  - a.sql c86e9de4\n- b.sql 78ad08c0\n", "its line 3 doesn't parse"],
     ["migrations:\n- name: a.sql\n  checksum: c86e9de4\n  - name: b.sql\n    checksum: 78ad08c0\n", "its line 4 doesn't parse"],
   ] as const) {

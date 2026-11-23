@@ -71,11 +71,12 @@ export function readLock(text: string): { schema?: string; entries: LockEntry[] 
   };
   let schema: string | undefined;
   const items: { at: number; first: string; more: [number, string][] }[] = [];
-  // The version first: a newer one may write the rest in a way this doesn't read.
-  const versions = [...text.matchAll(/^version:(.*)$/gm)].map((m) => m[1]!.trim().replace(/\s+#.*$/, ""));
-  if (versions.length === 1) {
+  // The version first: a newer one may write the rest in a way this doesn't read. It is a version
+  // only as digits with no leading zero, as `of_text` reads it; none, as YAML's null, is version 1.
+  const versions = [...text.matchAll(/^version:(.*)$/gm)].map((m) => scalar(m[1]!));
+  if (versions.length === 1 && !["", "~", "null"].includes(versions[0]!)) {
     const v = versions[0]!;
-    if (!/^[0-9]+$/.test(v) || Number(v) === 0) return { error: `\`version: ${v}\` isn't a lock's version` };
+    if (!/^[1-9][0-9]{0,8}$/.test(v)) return { error: `\`version: ${v}\` isn't a lock's version` };
     if (Number(v) > LOCK_VERSION) return { newer: Number(v) };
   }
   let section: "migrations" | "other" | undefined;

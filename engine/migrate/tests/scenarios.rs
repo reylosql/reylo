@@ -3145,6 +3145,35 @@ async fn a_lock_that_cant_be_read_is_refused() {
     assert_eq!(p.history().await, ["20261027100000_a.sql"]);
 }
 
+/// A lock a newer Reylo wrote is refused by every command, and none writes over it: history pull
+/// and lock would otherwise write it again from one database's history, by this version's rules,
+/// losing what that database hasn't run.
+#[tokio::test(flavor = "current_thread")]
+async fn a_lock_a_newer_reylo_wrote_is_refused_and_kept() {
+    let mut p = P::new(Dialect::Sqlite).await.unwrap();
+    p.linear();
+    p.schema("create table a (id integer);");
+    p.file("20261027100000_a.sql", "create table a (id integer);");
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    p.file("20261027110000_b.sql", "create table b (id integer);");
+    let lock = p.dir.join(reylo_migrate::lock::LOCK);
+    let newer = "version: 2\nmigrations:\n  - name: 20261027100000_a.sql\n    checksum: 0123abcd\n  - name: 20261027110000_b.sql\n    checksum: 4567cdef\n    after: 20261027100000_a.sql\n";
+    std::fs::write(&lock, newer).unwrap();
+    p.output();
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote \S*reylo\.lock[\s\S]*It is a lock of version 2, and Reylo \S+ reads version 1 and older\.[\s\S]*Upgrade Reylo to read it\.");
+    assert_eq!(p.status().await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote");
+    assert_eq!(p.dev().await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote");
+    assert_eq!(p.run(async |o, log| reylo_migrate::history_pull(o, log).await).await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote");
+    assert_eq!(p.run(async |o, log| reylo_migrate::lock_from_history(o, log).await).await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote");
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), newer);
+    assert_eq!(p.history().await, ["20261027100000_a.sql"]);
+}
+
 /// mysqldump writes a view as one statement over several executable comments, which MySQL runs:
 /// each migration runs it, and a database that loses it is told apart. A comment gated above the
 /// server's version runs nothing, and is no error.

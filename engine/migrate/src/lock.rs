@@ -63,12 +63,16 @@ pub enum State {
     Lock(Lock),
 }
 
-/// The lock's version alone, read before the rest, which a newer version may write differently.
+/// The lock's version alone, read before the rest, which a newer version may write differently: as
+/// its text, which is a version only as digits with no leading zero, so that every reader of the
+/// lock (`readLock` in src/embedded-module.ts too) takes the same text for the same version.
 #[derive(Deserialize)]
 struct Versioned {
     #[serde(default)]
-    version: Option<u64>,
+    version: Option<String>,
 }
+
+static VERSION_TEXT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[1-9][0-9]{0,8}$").expect("a valid pattern"));
 
 #[derive(Deserialize)]
 struct LockFile {
@@ -301,10 +305,10 @@ pub fn of_text(text: &str) -> State {
     if MARKER.is_match(text) {
         return State::Conflicted;
     }
-    match serde_yaml::from_str::<Versioned>(text).map(|v| v.version.unwrap_or(VERSION)) {
-        Ok(0) => return State::Invalid("version 0 isn't a lock's version".to_string()),
-        Ok(v) if v > VERSION => return State::Newer(v),
+    match serde_yaml::from_str::<Versioned>(text).map(|v| v.version) {
         Err(e) => return State::Invalid(e.to_string()),
+        Ok(Some(v)) if !VERSION_TEXT.is_match(&v) => return State::Invalid(format!("`version: {v}` isn't a lock's version")),
+        Ok(Some(v)) if v.parse::<u64>().is_ok_and(|v| v > VERSION) => return State::Newer(v.parse().unwrap_or_default()),
         Ok(_) => {}
     }
     match parse(text) {
@@ -414,8 +418,13 @@ mod tests {
     #[test]
     fn a_lock_a_newer_reylo_wrote_is_refused_by_its_version() {
         assert_eq!(of_text("version: 2\nmigrations:\n  - name: a.sql\n    checksum: c86e9de4\n    transaction: false\n"), State::Newer(2));
-        assert!(matches!(of_text("version: 0\nmigrations:\n"), State::Invalid(e) if e.contains("version 0")));
-        assert!(matches!(of_text("version: one\nmigrations:\n"), State::Invalid(_)));
+        for version in ["0", "01", "+1", "0x2", "1.0", "one"] {
+            let text = format!("version: {version}\nmigrations:\n");
+            assert!(matches!(of_text(&text), State::Invalid(ref e) if e.contains(&format!("`version: {version}` isn't a lock's version"))), "{text}: {:?}", of_text(&text));
+        }
+        for text in ["version: '1'\nmigrations:\n", "version:\nmigrations:\n", "migrations:\n"] {
+            assert_eq!(of_text(text), State::Lock(Lock::default()), "{text}");
+        }
     }
 
     #[test]

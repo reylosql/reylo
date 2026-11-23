@@ -1262,10 +1262,16 @@ fn read_lock(opts: &Options) -> Result<lock::Lock, Problem> {
             .fix("Then run this branch's migrations after main's, which locks them again", &["reylo migrate dev"])),
         lock::State::Invalid(e) => Err(Problem::new("lock-unreadable", format!("Reylo can't read {path} as a lock")).note(unreadable_why(&e)).fix("Write it again from what a database applied", &["reylo migrate history pull"])),
         lock::State::Unreadable(why) => Err(unreadable_lock_problem(opts, &why)),
-        lock::State::Newer(version) => Err(Problem::new("lock-newer", format!("A newer Reylo wrote {path}"))
-            .note(format!("It is a lock of version {version}, and Reylo {} reads version {} and older.", env!("CARGO_PKG_VERSION"), lock::VERSION))
-            .note("Upgrade Reylo to read it.")),
+        lock::State::Newer(version) => Err(newer_lock_problem(opts, version)),
     }
+}
+
+/// The refusal of a lock a newer Reylo wrote: read by this one's rules, every checksum in it would
+/// look edited, and written again, it would lose what the newer version keeps.
+fn newer_lock_problem(opts: &Options, version: u64) -> Problem {
+    Problem::new("lock-newer", format!("A newer Reylo wrote {}", shown(&opts.lock)))
+        .note(format!("It is a lock of version {version}, and Reylo {} reads version {} and older.", env!("CARGO_PKG_VERSION"), lock::VERSION))
+        .note("Upgrade Reylo to read it.")
 }
 
 /// The refusal of a lock that is there and can't be read: read as none, it would turn its checksums
@@ -1345,10 +1351,12 @@ fn old_lock(opts: &Options) -> Option<Problem> {
 }
 
 /// The refusal of a project that still holds the lock under its old name ([`old_lock`]), or whose
-/// lock is there and can't be read: every command that reads or writes the lock makes it first.
+/// lock is there and can't be read, or was written by a newer Reylo: every command that reads or
+/// writes the lock makes it first, so that none writes over what it can't read.
 fn refuse_lock_file(opts: &Options, log: Log<'_>) -> Option<i32> {
     let unreadable = || match opts.lock_state() {
         lock::State::Unreadable(why) => Some(unreadable_lock_problem(opts, &why)),
+        lock::State::Newer(version) => Some(newer_lock_problem(opts, version)),
         _ => None,
     };
     old_lock(opts).or_else(unreadable).map(|p| refuse(&[p], log))
