@@ -1076,7 +1076,6 @@ fn data_statements(sql: &str, d: Dialect) -> Vec<String> {
 /// schema changes that fill what they make ([`fills`]). What they write turns on the rows and
 /// objects they read, so it can change with the order they run in, and no schema shows it was
 /// written.
-#[cfg(feature = "cli")]
 fn writes_rows(sql: &str, d: Dialect) -> Vec<String> {
     let mut out = data_statements(sql, d);
     out.extend(split_statements(sql, d).iter().filter(|s| fills(s, d)).map(|s| format!("{}…", s.text.split_whitespace().take(3).collect::<Vec<_>>().join(" ").to_lowercase())));
@@ -1088,7 +1087,6 @@ fn writes_rows(sql: &str, d: Dialect) -> Vec<String> {
 /// select` and `create table … (select …)`, the query outside any parentheses but its own), and a
 /// materialized view, made or refreshed. The parenthesis is MySQL's alone, where a query's words are
 /// reserved: SQLite takes `with` for a column's name.
-#[cfg(feature = "cli")]
 fn fills(statement: &crate::sql::Statement, d: Dialect) -> bool {
     let words: Vec<String> = statement.tokens.iter().map(crate::sql::Token::upper).collect();
     let word = |k: usize| words.get(k).map(String::as_str).unwrap_or_default();
@@ -1473,17 +1471,38 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
 
 /// The refusal of a database that applied its migrations in another order than the lock lists, `order`
 /// being the lock's (`run_order`). Every database runs the lock's order, and nothing else; with no
-/// lock, a late one is proven at deploy, so there is none.
-fn lock_order_problem(opts: &Options, applied: &[&HistoryRow], order: &[Migration]) -> Option<Problem> {
+/// lock, a late one is proven at deploy, so there is none. Where the lock, its chain intact, runs a
+/// migration this database hasn't run ahead of all it ran since (`history push` moved it there, as
+/// another database ran it, or a merge kept main's lines), a database development commands don't
+/// run on takes its change too and records both: `history push` records them only where they make
+/// what the lock's order makes. Where the one ahead writes rows, which no schema shows ran, that way
+/// isn't offered.
+fn lock_order_problem(opts: &Options, applied: &[&HistoryRow], order: &[Migration], d: Dialect) -> Option<Problem> {
     if lock_free(opts) {
         return None;
     }
     let k = applied.iter().zip(order).position(|(r, f)| r.name != f.name)?;
-    Some(
-        Problem::new("history-out-of-order", format!("This database applied {} where {} lists {}", applied[k].name, shown(&opts.lock), order[k].name))
-            .note("Every database runs the migrations in the lock's order. Where one ran them otherwise, the lock was merged keeping a branch's lines: keep main's.")
-            .fix("On a development database, take it to the lock's order", &["reylo migrate dev"]),
-    )
+    let problem = Problem::new("history-out-of-order", format!("This database applied {} where {} lists {}", applied[k].name, shown(&opts.lock), order[k].name));
+    let (ahead, since) = (&order[k], &applied[k..]);
+    let moved = !applied.iter().any(|r| r.name == ahead.name) && since.len() < order.len() - k && since.iter().zip(&order[k + 1..]).all(|(r, f)| r.name == f.name);
+    if !moved || !writes_rows(&ahead.sql, d).is_empty() {
+        return Some(
+            problem
+                .note("Every database runs the migrations in the lock's order. Where one ran them otherwise, the lock was merged keeping a branch's lines: keep main's.")
+                .fix("On a development database, take it to the lock's order", &["reylo migrate dev"]),
+        );
+    }
+    let ran = and_list(&since.iter().map(|r| r.name.clone()).collect::<Vec<_>>());
+    let problem = problem.note(format!("Every database runs the migrations in the lock's order, and this one ran {ran} without {}, which the lock runs first.", ahead.name)).fix("On a development database, take it to the lock's order", &["reylo migrate dev"]);
+    let record = "reylo migrate history push --url <url>";
+    // What `reylo run` applies whole: on Postgres a file runs as one transaction, or a lone statement
+    // that can't run in one, as a migration must be; elsewhere a lone statement.
+    if d == Dialect::Postgres || split_statements(&ahead.sql, d).len() == 1 {
+        let file = shell_word(&format!("{}/{}", shown(&opts.dir), ahead.name));
+        Some(problem.fix("On any other, make its change there too, then record both, running nothing", &[&format!("reylo run --url <url> --file {file}"), record]))
+    } else {
+        Some(problem.fix(format!("On any other, make its change there by hand, as {} makes it, then record both, running nothing", ahead.name), &[record]))
+    }
 }
 
 /// Where a migration falls in name order: init.sql, which holds the schema a project started
@@ -1543,7 +1562,7 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
     }
     let applied_files: Vec<Migration> = applied.iter().filter_map(|r| by_name(&r.name).cloned()).collect();
     if problems.is_empty() {
-        problems.extend(lock_order_problem(opts, &applied, &files));
+        problems.extend(lock_order_problem(opts, &applied, &files, d));
     }
     // Nothing is recorded without running but what a cut-off run of Reylo's own left (below).
     let records: Vec<Migration> = Vec::new();
@@ -3144,7 +3163,7 @@ async fn status_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
         None
     } else {
         let applied: Vec<&HistoryRow> = history.iter().filter(|r| r.applied).collect();
-        lock_order_problem(opts, &applied, &order)
+        lock_order_problem(opts, &applied, &order, d)
     };
     // Deploy refuses such a database, so running what it hasn't run is offered only where it doesn't.
     let offer_run = misordered.is_none();

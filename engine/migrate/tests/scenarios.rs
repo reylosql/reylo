@@ -455,6 +455,7 @@ for_each_dialect!(
     a_hotfix_by_hand_is_recorded_once_it_is_a_migration,
     a_hotfix_behind_a_pending_migration_moves_ahead_of_it,
     a_hotfix_that_cannot_move_ahead_is_undone_then_deployed,
+    a_server_that_ran_what_a_hotfix_moved_ahead_of_takes_its_change,
     history_push_takes_a_database_to_a_reordered_lock_keeping_its_rows,
     a_hotfix_whose_migration_changes_data_is_undone_then_deployed,
     a_hotfix_moves_past_no_table_made_from_a_query_and_is_none,
@@ -1217,7 +1218,7 @@ async fn status_reports_a_history_out_of_the_locks_order(mut p: P) {
     p.file(tags, &format!("alter table a add column tags {int};"));
     p.lock(&[a, tags, status]);
     p.output();
-    let refusal = r"✗ This database applied 20261027120000_status\.sql where \S*reylo\.lock lists 20261027110000_tags\.sql\n  Every database runs the migrations in the lock's order\.";
+    let refusal = r"✗ This database applied 20261027120000_status\.sql where \S*reylo\.lock lists 20261027110000_tags\.sql\n  Every database runs the migrations in the lock's order, and this one ran 20261027120000_status\.sql without 20261027110000_tags\.sql, which the lock runs first\.";
     assert_eq!(p.migrate().await, 1);
     assert_has!(p.output(), refusal);
     // Status says the same, and doesn't offer the deploy that refuses.
@@ -1489,6 +1490,35 @@ async fn a_hotfix_moves_past_no_table_made_from_a_query_and_is_none(mut p: P) {
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_eq!(p.history().await, [a, snap, index, b, copy, notes, c]);
     assert_eq!(p.rows("select * from notes").await.len(), 1);
+}
+
+async fn a_server_that_ran_what_a_hotfix_moved_ahead_of_takes_its_change(mut p: P) {
+    let (int, text) = (p.t.int, p.t.text);
+    p.linear();
+    let table = format!("create table users (id {int}, email {text}, nick {text});");
+    let (users, nick, email) = ("20261027100000_users.sql", "20261027120000_nick_index.sql", "20261027130000_email_index.sql");
+    p.schema(&format!("{table} create index users_nick on users (nick); create index users_email on users (email);"));
+    p.file(users, &table);
+    p.file(nick, "create index users_nick on users (nick);");
+    p.lock(&[users, nick]);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into users values (1, 'a@b.co', null)").await;
+    // Production's history push moved the hotfix's migration ahead of the one this server already ran.
+    p.file(email, "create index users_email on users (email);");
+    p.lock(&[users, email, nick]);
+    p.output();
+    let refused = r"✗ This database applied 20261027120000_nick_index\.sql where \S*reylo\.lock lists 20261027130000_email_index\.sql\n  Every database runs the migrations in the lock's order, and this one ran 20261027120000_nick_index\.sql without 20261027130000_email_index\.sql, which the lock runs first\.\n\n  On a development database, take it to the lock's order:\n    reylo migrate dev\n  On any other, make its change there too, then record both, running nothing:\n    reylo run --url <url> --file \S+20261027130000_email_index\.sql\n    reylo migrate history push --url <url>";
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), refused);
+    assert_eq!(p.status().await, 1);
+    assert_has!(p.output(), refused);
+    // Its change made here too, as the command runs the file, both are recorded in the lock's order.
+    p.exec("create index users_email on users (email);").await;
+    assert_eq!(p.history_push().await, 0, "{}", p.peek());
+    assert_eq!(p.history().await, [users, email, nick]);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_has!(p.output(), "Up to date");
+    assert_eq!(p.rows("select * from users").await.len(), 1);
 }
 
 async fn a_hotfix_that_cannot_move_ahead_is_undone_then_deployed(mut p: P) {
