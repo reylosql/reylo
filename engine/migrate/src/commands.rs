@@ -815,6 +815,8 @@ fn readable(line: &str) -> String {
     static MYSQL_INDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^index ([^.\s]+)\.(\S+) (unique )?(\w+)((?: invisible)?(?: comment "(?:[^"\\]|\\.)*")?) (\(.*\))$"#).expect("a valid pattern"));
     static SQLITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(index|view|trigger) \S+ create (unique )?(?:temp |temporary )?(?:index|view|trigger) (?:if not exists )?(\S+) (.*)$").expect("a valid pattern"));
     static CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) (\S+) (.*)$").expect("a valid pattern"));
+    static FUNCTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)^function CREATE OR REPLACE (FUNCTION|PROCEDURE) ([^\n]+)\n(?: RETURNS ([^\n]+)\n)?").expect("a valid pattern"));
+    static TRIGGER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^trigger CREATE (CONSTRAINT )?TRIGGER (\S+) (.+?) ON (\S+) (.*)$").expect("a valid pattern"));
     static POSTGRES_DEFINITION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:PRIMARY KEY|UNIQUE|CHECK|FOREIGN KEY|EXCLUDE|NOT NULL)\b").expect("a valid pattern"));
     static SQLITE_CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) ((?:primary key|unique|check|foreign key|constraint)\b.*)$").expect("a valid pattern"));
     static PUBLIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s(,]|::)(?:public|"public")\."#).expect("a valid pattern"));
@@ -829,6 +831,15 @@ fn readable(line: &str) -> String {
     }
     if let Some(c) = SQLITE.captures(&line) {
         return format!("{}{} {} {}", c.get(2).map_or("", |m| m.as_str()), &c[1], &c[3], &c[4]);
+    }
+    // A function by its signature and what it returns, not its body, which Postgres writes over
+    // several lines; a trigger by its name and table, as a constraint is.
+    if let Some(c) = FUNCTION.captures(&line) {
+        let returns = c.get(3).map(|r| format!(" returns {}", lowercase_keywords(r.as_str()))).unwrap_or_default();
+        return format!("{} {}{returns}", c[1].to_lowercase(), lowercase_keywords(&c[2]));
+    }
+    if let Some(c) = TRIGGER.captures(&line) {
+        return format!("{}trigger {} on {}: {} {}", if c.get(1).is_some() { "constraint " } else { "" }, &c[2], &c[4], lowercase_keywords(&c[3]), lowercase_keywords(&c[5]));
     }
     // Postgres's, whose definition is in capitals, names its constraint, whatever the name; SQLite's,
     // in lowercase, names none unless its definition does.
@@ -1132,6 +1143,9 @@ fn owner(line: &str, tables: &[String], mysql: bool) -> Option<(String, String)>
         if let Some(rest) = line.strip_prefix("column ") {
             return rest.strip_prefix(&format!("{table}.")).map(str::to_string);
         }
+        if let Some(rest) = line.strip_prefix("trigger ") {
+            return rest.split_once(&format!(" on {table}: ")).filter(|(name, _)| !name.contains(' ')).map(|(name, def)| format!("trigger {name}: {def}"));
+        }
         if let Some(rest) = line.strip_prefix("constraint ") {
             return rest.split_once(&format!(" on {table}: ")).filter(|(name, _)| !name.contains(' ')).map(|(_, def)| def.to_string()).or_else(|| rest.strip_prefix(&format!("on {table}: ")).map(str::to_string));
         }
@@ -1155,6 +1169,9 @@ fn owner(line: &str, tables: &[String], mysql: bool) -> Option<(String, String)>
 /// on a line of its own. At most `max` of them, and how many more there are.
 fn marked(lines: &[&String], style: &str, mark: char, max: usize, grouped: &[String], tables: &[String], mysql: bool) -> (Vec<String>, usize) {
     let lines: Vec<String> = lines.iter().map(|l| readable(l)).collect();
+    // A view's own line, its name alone, says nothing its definition's line doesn't.
+    let view = |l: &String| (l.starts_with("view ") || l.starts_with("materialized view ")) && lines.iter().any(|d| d.starts_with(&format!("{l} as ")));
+    let lines: Vec<String> = lines.iter().filter(|l| !view(l)).cloned().collect();
     // Only a table whose own line is listed here has its parts under it: one a rename took out of the
     // list keeps them as lines of their own.
     let headed: Vec<String> = lines.iter().filter_map(|l| table_name(l, mysql)).filter(|t| grouped.contains(t)).collect();
@@ -7062,6 +7079,26 @@ mod tests {
         assert_eq!(
             changed_lines(&[], &lines(&["table options engine=InnoDB collate=utf8mb4_0900_ai_ci", "column options.id int not null"]), Dialect::Mysql),
             ["  + table options engine=InnoDB collate=utf8mb4_0900_ai_ci", "      id int not null"]
+        );
+    }
+
+    #[test]
+    fn a_function_a_trigger_and_a_view_read_as_one_line_each() {
+        let function = "function CREATE OR REPLACE FUNCTION public.touch()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\nbegin new.updated_at := now(); return new; end $function$";
+        assert_eq!(readable(function), "function touch() returns trigger");
+        assert_eq!(readable("function CREATE OR REPLACE PROCEDURE public.tidy(IN days integer DEFAULT 30)\n LANGUAGE sql\nAS $procedure$ delete from logs $procedure$"), "procedure tidy(in days integer default 30)");
+        assert_eq!(readable("trigger CREATE TRIGGER users_touch BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.touch()"), "trigger users_touch on users: before update for each row execute function touch()");
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let made = lines(&[
+            "table public.users",
+            "column public.users.id integer",
+            "trigger CREATE TRIGGER users_touch BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.touch()",
+            "view public.pro_users",
+            "view public.pro_users as SELECT id FROM users;",
+        ]);
+        assert_eq!(
+            changed_lines(&[], &made, Dialect::Postgres),
+            ["  + table users", "      id integer", "      trigger users_touch: before update for each row execute function touch()", "  + view pro_users as SELECT id FROM users;"]
         );
     }
 
