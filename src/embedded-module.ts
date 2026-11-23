@@ -42,6 +42,79 @@ export function schemaChecksum(last: string, sql: string): string {
   return digest(["schema\n", last, "\n", canonical(sql)]);
 }
 
+/** A lock's entry: a migration's name and its checksum. */
+type LockEntry = { name: string; sum: string };
+
+/**
+ * A lock's text, read as `lock::of_text` reads it (engine/migrate/src/lock.rs), or why it doesn't
+ * read: `schema`, the checksum of schema.sql, and `migrations`, each entry an object with its
+ * `name` and its `checksum`, in either order, or, as locks were written up to 0.8.2, one string,
+ * `<file> <checksum>`. An entry with a key it doesn't know, or with a key twice, is refused, as the
+ * command line refuses it; a top-level key it doesn't know is passed over, as there.
+ */
+export function readLock(text: string): { schema?: string; entries: LockEntry[] } | { error: string } {
+  // A plain value up to a comment, or a quoted one as written.
+  const scalar = (raw: string) => {
+    const v = raw.trim();
+    if (/^'.*'$/.test(v)) return v.slice(1, -1).replace(/''/g, "'");
+    if (/^".*"$/.test(v)) return v.slice(1, -1);
+    return v.replace(/\s+#.*$/, "");
+  };
+  // `key: value` pairs, as a block mapping's line or a flow mapping's `{ a: b, c: d }`.
+  const pair = (raw: string): [string, string] | undefined => {
+    const m = /^([A-Za-z_]+):(?:\s+(.*))?$/.exec(raw.trim());
+    return m ? [m[1]!, m[2] ?? ""] : undefined;
+  };
+  let schema: string | undefined;
+  const items: { at: number; first: string; more: [number, string][] }[] = [];
+  let section: "migrations" | "other" | undefined;
+  const lines = text.split(/\r?\n/);
+  for (const [k, line] of lines.entries()) {
+    const at = k + 1;
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+    if (!/^\s/.test(line)) {
+      const top = pair(line);
+      if (!top) return { error: `its line ${at} doesn't parse` };
+      section = top[0] === "migrations" ? "migrations" : "other";
+      if (top[0] === "schema") schema = scalar(top[1]) || undefined;
+      if (section === "migrations" && scalar(top[1]) !== "" && scalar(top[1]) !== "[]") return { error: `its line ${at} doesn't parse` };
+      continue;
+    }
+    if (section === "other") continue;
+    if (section !== "migrations") return { error: `its line ${at} doesn't parse` };
+    const item = /^\s*-\s+(.*)$/.exec(line);
+    if (item) items.push({ at, first: item[1]!, more: [] });
+    else if (items.length) items.at(-1)!.more.push([at, line]);
+    else return { error: `its line ${at} doesn't parse` };
+  }
+  const entries: LockEntry[] = [];
+  for (const { at, first, more } of items) {
+    const flow = /^\{(.*)\}$/.exec(first.trim());
+    const fields = flow ? flow[1]!.split(",").filter((f) => f.trim()).map((f) => [at, f] as [number, string]) : pair(first) ? [[at, first] as [number, string], ...more] : undefined;
+    if (!fields) {
+      // An entry as written up to 0.8.2: its name and its checksum, split by a space.
+      const line = scalar(first);
+      const space = line.indexOf(" ");
+      if (space < 0 || more.length) return { error: `"${line}" is a migration's name and its checksum` };
+      entries.push({ name: line.slice(0, space).trim(), sum: line.slice(space + 1).trim() });
+      continue;
+    }
+    const entry: Partial<LockEntry> = {};
+    for (const [line, field] of fields) {
+      const kv = pair(field);
+      if (!kv) return { error: `its line ${line} doesn't parse` };
+      const key = kv[0] === "name" ? "name" : kv[0] === "checksum" ? "sum" : undefined;
+      if (!key) return { error: `its line ${line} has \`${kv[0]}\`, which an entry doesn't have` };
+      if (entry[key] !== undefined) return { error: `its line ${line} gives \`${kv[0]}\` a second time` };
+      entry[key] = scalar(kv[1]);
+    }
+    if (!entry.name) return { error: `the entry at its line ${at} has no name` };
+    if (!entry.sum) return { error: `the entry at its line ${at} has no checksum` };
+    entries.push({ name: entry.name, sum: entry.sum });
+  }
+  return { ...(schema !== undefined && { schema }), entries };
+}
+
 /** A migration's file name, as `read_migrations` reads it (engine/migrate/src/commands.rs). */
 const MIGRATION = /^(init\.sql|\d{14}_[a-z0-9_]+\.sql)$/;
 
@@ -75,10 +148,9 @@ export async function projectMigrations(root: string): Promise<{ list?: Migratio
     const lock = readFileSync(lockPath, "utf8");
     // Two branches that each added a migration leave git's markers in the lock.
     if (/^(<{7}|={7}|>{7})( |$)/m.test(lock)) return { error: `The lock has a merge conflict, in ${shown}/reylo.lock: keep main's lines, then run reylo migrate dev, which adds this branch's migrations back`, watched };
-    // Each entry is `- name: <file>` with `checksum: <hex>` on the line below it, quoted where it is
-    // digits alone (`render` in engine/migrate/src/lock.rs), or, as locks were written up to 0.8.2,
-    // `- <file> <hex>`.
-    const entries = [...lock.matchAll(/^\s*-\s+(?:name:\s*(\S+\.sql)\s*\n\s*checksum:\s*'?([0-9a-f]+)'?|(\S+\.sql)\s+([0-9a-f]+))\s*$/gm)].map((m) => ({ name: (m[1] ?? m[3])!, sum: (m[2] ?? m[4])! }));
+    const read = readLock(lock);
+    if ("error" in read) return { error: `Reylo can't read ${shown}/reylo.lock as a lock, since ${read.error}: write it again from a database that ran its migrations, with reylo migrate history pull`, watched };
+    const { entries } = read;
     names = entries.map((e) => e.name);
     const missing = names.filter((n) => !existsSync(join(migrationsDir, n)));
     if (missing.length) return { error: `The lock lists ${missing.join(", ")}, which ${shown}/migrations doesn't have: write it back from a database that ran it, with reylo migrate history pull`, watched };
@@ -98,7 +170,7 @@ export async function projectMigrations(root: string): Promise<{ list?: Migratio
       return { error, watched: [...watched, ...migrations.map((n) => join(migrationsDir, n))] };
     }
     // The checksum of schema.sql from when the migrations last reached it, which a deploy holds it to (`stamp`).
-    const schemaSum = /^schema:\s*'?([0-9a-f]+)'?\s*$/m.exec(lock)?.[1];
+    const schemaSum = read.schema;
     if (schemaSum !== undefined && existsSync(schemaPath) && schemaChecksum(entries.at(-1)?.sum ?? "", readFileSync(schemaPath, "utf8")) !== schemaSum) {
       return { error: `The schema changed since the lock was written, in ${shown}/schema.sql: if the schema changed, write its migration and run it with reylo migrate new <name> and reylo migrate dev; if only formatting or comments changed, check it again with reylo migrate dev`, watched: [...watched, ...names.map((n) => join(migrationsDir, n))] };
     }

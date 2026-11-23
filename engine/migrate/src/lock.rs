@@ -64,8 +64,10 @@ struct LockFile {
 
 /// An entry of `migrations`: an object with its `name` and its `checksum`, or, as locks were
 /// written up to 0.8.2, one string with the two split by a space. Each value is read as the text
-/// it is, so a checksum of digits alone keeps its leading zeros. A key it doesn't know is refused:
-/// a later version wrote it, and this one would drop it when it writes the lock again.
+/// it is, so a checksum of digits alone keeps its leading zeros. A key it doesn't know is refused,
+/// since a later version wrote it and this one would drop it when it writes the lock again, and so
+/// is a key given twice, which would leave the bundlers' reader (`readLock` in
+/// src/embedded-module.ts) and this one to pick different values.
 struct EntryFile(Entry);
 
 impl<'de> Deserialize<'de> for EntryFile {
@@ -85,6 +87,8 @@ impl<'de> Deserialize<'de> for EntryFile {
                 let (mut name, mut sum) = (None, None);
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
+                        "name" if name.is_some() => return Err(A::Error::duplicate_field("name")),
+                        "checksum" if sum.is_some() => return Err(A::Error::duplicate_field("checksum")),
                         "name" => name = Some(map.next_value::<String>()?),
                         "checksum" => sum = Some(map.next_value::<String>()?),
                         _ => return Err(A::Error::unknown_field(&key, &["name", "checksum"])),
@@ -337,6 +341,10 @@ mod tests {
         assert_eq!(lock.entries[1], Entry { name: "20261104140347_add_bio.sql".into(), sum: "78ad08c0".into() });
         assert_eq!(of_text(strings), State::Lock(lock.clone()));
         assert_eq!(render(&lock), format!("{HEADER}{objects}"));
+        // Its keys in either order, and as a flow mapping.
+        let swapped = objects.replace("  - name: 20261104140347_add_bio.sql\n    checksum: 78ad08c0\n", "  - checksum: 78ad08c0\n    name: 20261104140347_add_bio.sql\n");
+        assert_eq!(of_text(&swapped), State::Lock(lock.clone()));
+        assert_eq!(of_text(&objects.replace("  - name: 20261104120000_users.sql\n    checksum: c86e9de4\n", "  - { name: 20261104120000_users.sql, checksum: c86e9de4 }\n")), State::Lock(lock.clone()));
     }
 
     #[test]
@@ -356,6 +364,7 @@ mod tests {
             ("migrations:\n  - checksum: c86e9de4\n", "missing field `name`"),
             ("migrations:\n  - name: a.sql\n    checksum: c86e9de4\n    transaction: false\n", "unknown field `transaction`"),
             ("migrations:\n  - a.sql\n", "\"a.sql\" is a migration's name and its checksum"),
+            ("migrations:\n  - name: a.sql\n    checksum: 00000000\n    checksum: c86e9de4\n", "duplicate field `checksum`"),
         ] {
             assert!(matches!(of_text(text), State::Invalid(e) if e.contains(why)), "{text}: {:?}", of_text(text));
         }

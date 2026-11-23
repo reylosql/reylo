@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rename
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { nativeBinary } from "../src/native.ts";
-import { embeddedModule, lockChecksum, projectMigrations } from "../src/embedded-module.ts";
+import { embeddedModule, lockChecksum, projectMigrations, readLock } from "../src/embedded-module.ts";
 
 // What Reylo's bundler plugins put in place of reylo's placeholder module: the migrations `reylo
 // migrate deploy` runs, in its order, which each Durable Object holds its history against when it
@@ -140,6 +140,45 @@ test("a lock written up to 0.8.2, each entry one line, gives the same migrations
   assert.match(readFileSync(lock, "utf8"), /^migrations:\n  - \d{14}_users\.sql [0-9a-f]{8}\n  - \d{14}_bio\.sql [0-9a-f]{8}\n$/m);
   assert.deepEqual(await projectMigrations(root), before);
   assert.equal(before.list?.length, 2);
+});
+
+test("the lock reads as the command line reads it: keys in either order, quoted values, entries written up to 0.8.2", () => {
+  const lock = { schema: "c7bf681b", entries: [{ name: "20261104120000_users.sql", sum: "c86e9de4" }, { name: "20261104140347_add_bio.sql", sum: "00123456" }] };
+  const objects = "# On a conflict, keep main's and run reylo migrate dev\nschema: c7bf681b\nmigrations:\n  - name: 20261104120000_users.sql\n    checksum: c86e9de4\n  - name: 20261104140347_add_bio.sql\n    checksum: '00123456'\n";
+  assert.deepEqual(readLock(objects), lock);
+  assert.deepEqual(readLock(objects.replace(/\n/g, "\r\n")), lock);
+  assert.deepEqual(readLock(objects.replace("schema: c7bf681b", 'schema: "c7bf681b"')), lock);
+  assert.deepEqual(readLock(objects.replace("  - name: 20261104120000_users.sql\n    checksum: c86e9de4\n", "  - checksum: c86e9de4\n    name: 20261104120000_users.sql\n")), lock);
+  assert.deepEqual(readLock(objects.replace("  - name: 20261104120000_users.sql\n    checksum: c86e9de4\n", "  - { name: 20261104120000_users.sql, checksum: c86e9de4 }\n")), lock);
+  assert.deepEqual(readLock("schema: c7bf681b\nmigrations:\n  - 20261104120000_users.sql c86e9de4\n  - 20261104140347_add_bio.sql 00123456\n"), lock);
+  assert.deepEqual(readLock("migrations:\n"), { entries: [] });
+});
+
+test("the lock refuses what the command line refuses: a key it doesn't know, a key twice, an entry without its name or checksum", () => {
+  for (const [text, why] of [
+    ["migrations:\n  - name: a.sql\n    checksum: c86e9de4\n    transaction: false\n", "its line 4 has `transaction`, which an entry doesn't have"],
+    ["migrations:\n  - name: a.sql\n    checksum: 00000000\n    checksum: c86e9de4\n", "its line 4 gives `checksum` a second time"],
+    ["migrations:\n  - name: a.sql\n", "the entry at its line 2 has no checksum"],
+    ["migrations:\n  - checksum: c86e9de4\n", "the entry at its line 2 has no name"],
+    ["migrations:\n  - a.sql\n", '"a.sql" is a migration\'s name and its checksum'],
+  ] as const) {
+    assert.deepEqual(readLock(text), { error: why }, text);
+  }
+});
+
+test("a lock the command line refuses gives migrate its error, and a quoted schema checksum is still held to schema.sql", async () => {
+  const root = project();
+  await change(root, "users", "create table users (id integer primary key, name text not null);\n");
+  migrate(root, "lock");
+  const lock = join(root, "reylo", "reylo.lock");
+  const text = readFileSync(lock, "utf8");
+  writeFileSync(lock, text.replace(/^(    checksum: .*)$/m, "$1\n    transaction: false"));
+  assert.match((await projectMigrations(root)).error ?? "", /^Reylo can't read reylo\/reylo\.lock as a lock, since its line \d+ has `transaction`, which an entry doesn't have: write it again from a database that ran its migrations, with reylo migrate history pull$/);
+  assert.match(text, /^schema: '?[0-9a-f]{8}'?$/m);
+  writeFileSync(lock, text.replace(/^schema: '?([0-9a-f]+)'?$/m, 'schema: "$1"'));
+  assert.equal((await projectMigrations(root)).error, undefined);
+  writeFileSync(join(root, "reylo", "schema.sql"), "create table users (id integer primary key, name text);\n");
+  assert.match((await projectMigrations(root)).error ?? "", /^The schema changed since the lock was written/);
 });
 
 test("with no lock, the migrations run in name order, init.sql first", async () => {
