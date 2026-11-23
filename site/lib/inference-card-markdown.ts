@@ -1,5 +1,5 @@
 import { toAgentMarkdown } from 'docs-kit/remark-sections';
-import { hashOf, INFERENCE_CARD, readModules, SHARED, type Dialect, type Modules } from './remark-mapper.ts';
+import { hashOf, INFERENCE_CARD, readModules, type Dialect, type Modules } from './remark-mapper.ts';
 import { DIALECTS } from './dialects.ts';
 import { formatType, resultType } from '../../src/type-format.ts';
 
@@ -53,7 +53,7 @@ function cardMarkdown(body: string, modules: Modules): string {
   const withSchema = shown.filter((d) => schemas.has(d));
   const oneSchema = new Set(withSchema.map((d) => schemas.get(d))).size === 1;
   const schemaText = withSchema.map((d) => `\`\`\`sql\n-- Schema${oneSchema && withSchema.length === shown.length ? '' : ` (${name(d)})`}\n${schemas.get(d)}\n\`\`\``).slice(0, oneSchema ? 1 : undefined);
-  const every = parts.length === 1 && SHARED.every((d) => parts[0]!.dialects.includes(d));
+  const every = parts.length === 1 && parts[0]!.dialects.length === ALL.length;
   const typed = parts.map((p) => (every ? p.text : `${label(p.dialects)}:\n\n${p.text}`));
   return [...schemaText, ...typed].join('\n\n');
 }

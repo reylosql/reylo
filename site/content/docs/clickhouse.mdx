@@ -75,13 +75,13 @@ Your client takes the URL without the prefix, `http://` or `https://`.
 | `http_header_<name>=` | A header on every request |
 | `pathname=` | A path in front of the interface, behind a proxy |
 
-The type check runs no statement, and sends no setting but those the URL names. A user who can only read is enough for a `SELECT`, a `DELETE` and an `UPDATE`. An `INSERT` needs a user who may insert, since ClickHouse builds one to check it.
+The type check sets the format it reads and the settings the URL names, and no other. A user who can only read is enough for a `SELECT`, a `DELETE` and an `UPDATE`. An `INSERT` needs a user who may insert, since ClickHouse builds one to check it.
 
 ## Where types come from [#sources]
 
 Reylo types each query from ClickHouse's own description of it.
 
-Reylo asks the live database to [`DESCRIBE`](https://clickhouse.com/docs/sql-reference/statements/describe-table) the query, which gives each column's exact type without running anything. ClickHouse's types say everything a result can hold: a column can be null only where its type is `Nullable`. Reylo adds how many rows the query returns, from [`EXPLAIN QUERY TREE`](https://clickhouse.com/docs/sql-reference/statements/explain).
+Reylo asks the live database to [`DESCRIBE`](https://clickhouse.com/docs/sql-reference/statements/describe-table) the query, which gives each column's exact type without running it. A scalar subquery is the exception: ClickHouse computes one as it reads the query. ClickHouse's types say everything a result can hold: a column can be null only where its type is `Nullable`. Reylo adds how many rows the query returns, from [`EXPLAIN QUERY TREE`](https://clickhouse.com/docs/sql-reference/statements/explain).
 
 ## Data types
 
@@ -104,7 +104,7 @@ Each ClickHouse type has one TypeScript type:
 | `Tuple(T1, T2)` | a tuple | `[1, "a"]` |
 | `Tuple(x T1, y T2)`, a tuple with names | an object of its fields | `{ x: 1, y: "a" }` |
 | `Map(K, V)` | an array of its pairs, since a map's keys can repeat | `[{ key: "color", value: "red" }]` |
-| `Nested(…)` | an array of objects | `[{ sku: "A1", quantity: 2 }]` |
+| `Nested(…)`, read by its name | an array of objects | `[{ sku: "A1", quantity: 2 }]` |
 | `Nullable(T)` | `T \| null` | `null` |
 | `LowCardinality(T)` | the type of `T` | `"pro"` |
 | `Variant(T1, T2)` | the union of its types, or `null` | `7` |
@@ -226,7 +226,7 @@ Every result names its columns' types beside its rows, and `.run()` holds them a
 Reylo infers how many rows a query returns from its aggregates and its `LIMIT`:
 
 - **An aggregate** with no `GROUP BY` returns exactly one row.
-- **A `LIMIT 1`** returns at most one row.
+- **A `LIMIT 1`**, written as a number, returns at most one row.
 - **Everything else** returns any number of rows. ClickHouse enforces no unique key. A table's primary key is the order its rows are stored in, and two rows can share it. So `WHERE id = {id:UInt64}` can return several rows, and a lookup by key says `LIMIT 1`.
 
 How a lookup and an aggregate come back:
@@ -410,8 +410,8 @@ VALUES ({id:UInt64}, {user:UInt64}, {total:Decimal(18, 4)}, now64(3))
 That holds in `VALUES`, in the list of an `INSERT … SELECT` and in an `UPDATE`'s assignment. A type the column holds every value of passes too:
 
 - a whole number of fewer bits, as a `UInt8` in a `UInt64` column
-- a `Float32` in a `Float64` column, and a decimal with fewer digits
-- an enum whose labels the column's enum has
+- a `Float32` in a `Float64` column, and a decimal with no more digits on either side of the point
+- an enum whose labels the column's enum has, at the same numbers
 - a type that takes no null, in a `Nullable` column
 
 To write a value of another type, convert it in the query. What a query computes or converts is ClickHouse's to convert:
@@ -421,7 +421,7 @@ INSERT INTO orders (id, user_id, total, placed_at)
 VALUES ({id:UInt64}, {user:UInt64}, {total:Decimal(12, 2)}, {placed:String}::DateTime64(3, 'UTC'))
 ```
 
-To insert many rows in one query, pass them as one array of tuples:
+To insert many rows in one query, pass them as one array of tuples. Give each element its column's type, since a value read from the array isn't held to its column:
 
 ```sql tab="ch_add_orders.sql" dialect="clickhouse"
 INSERT INTO orders (id, user_id, total, placed_at)
@@ -488,19 +488,21 @@ What Reylo can't type on ClickHouse, and what to do instead:
 | A `JSON`, `Dynamic`, `AggregateFunction`, interval, `Time` or `Time64` column | Select it as a type Reylo reads ([above](#unread-types)) |
 | A `String` or `FixedString` value that isn't UTF-8 text, such as a hash's bytes | Select it as text: `hex(x)` or `base64Encode(x)` |
 | A `Tuple` with no elements, as `tuple()` returns | Leave it out of the result |
-| A parameter whose value changes the result's types, or of the type `Identifier` or `Variant` | Write the value in the query, or declare the parameter with one type |
+| A parameter whose value changes the result's types, one that is a partition's id, or one of the type `Identifier` or `Variant` | Write the value in the query, or declare the parameter with one type |
 | A `DateTime64` parameter given an instant within the second before 1970, which ClickHouse reads as one after it unless the type names UTC | Declare the parameter with the zone, as `DateTime64(3, 'UTC')` |
 | A parameter whose text is over 128 KiB, such as an array of several thousand ids | Send fewer values at a time, or raise the server's `http_max_field_value_size` |
 | A bare `:name`, which declares no type | `{name:Type}`, or `:name::Type` |
 | A column with no name of its own, such as `count()` beside another column | Give it an alias: `count() AS orders` |
 | An `INSERT … FORMAT`, whose rows are the request's body | `VALUES` with parameters, or your client's `insert()` |
-| A row of `VALUES` past the 32nd, or one that writes `DEFAULT` or a map in braces | None: its parameters are held to their columns, and the rest is checked when the query runs |
-| A parameter written to a column the query doesn't name: after a `*`, or into a table function | Name the columns, or convert the parameter in the query |
-| What only running a write shows, such as a table whose engine takes no `UPDATE`, or an update of a key column | None: the type check runs nothing |
+| A row of `VALUES` past the 32nd, one that writes `DEFAULT` or a map in braces, and any row for a `Variant` or `Dynamic` column | None: its parameters are held to their columns, and the rest is checked when the query runs |
+| A parameter written to a column the query doesn't name: after a `*`, in a `SELECT` in parentheses, or into a table function | Name the columns, and write the `SELECT` outside parentheses. None for a table function |
+| A parameter in a value that `VALUES` writes to a `Dynamic` column, which ClickHouse may store as the placeholder's own text | Write the row as an `INSERT … SELECT` |
+| A `String` parameter written to a `Variant` of several types, which ClickHouse reads as any of them | None |
+| What only running a write shows, such as a table whose engine takes no `UPDATE`, or an update of a key column | None: the type check runs no write |
 | An `ALTER TABLE` with several commands | One statement for each command |
 | `WITH TOTALS` and the `extremes` setting, whose extra rows a typed result has no place for | `WITH ROLLUP`, whose totals are rows, or a second query |
 | A `SETTINGS` clause that names the result's format, `default_format` | Leave it out: Reylo asks for the format it reads |
 | A statement other than a `SELECT`, an `INSERT`, a `DELETE` or an `UPDATE`, such as `CREATE TABLE`, `SHOW TABLES` or an `ALTER` that changes the table | Run it on your client |
 | A `clickhouse+https://` server whose certificate no public authority signed, such as a self-signed one | None: the type check verifies the certificate against Mozilla's roots |
-| A server before 25.11, which doesn't mark an error that ends a result | None: the type check says so and stops, and `.run()` refuses a result from one |
+| A server before 25.11, or a proxy that drops the `X-ClickHouse-Exception-Tag` header, where an error that ends a result isn't marked | None: the type check stops at an older server, and `.run()` refuses the result |
 | The Rust crate | None: sqlx has no ClickHouse driver |
