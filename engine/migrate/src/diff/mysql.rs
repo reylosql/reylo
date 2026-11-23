@@ -1262,13 +1262,13 @@ fn alter_table(from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeS
     }
     let partition = kept.unwrap_or_else(|| from.partition.clone());
     let repartitions = if dropped.is_empty() { from.partition != to.partition } else { partition_list(&partition) != partition_list(&to.partition) };
-    // A change to the partitions alone that MySQL makes in place, where partitioning the whole
-    // table again copies every row while it blocks writes.
-    if let Some(change) = (repartitions && clauses.is_empty() && later.is_empty()).then(|| partitions_changed(&partition, &to.partition)).flatten() {
-        out.push(format!("alter table {} {change}", to.q));
-        return out;
-    }
-    let apart = repartitions && !partition.is_empty() && (to.partition.is_empty() || !clauses.is_empty());
+    // A change to the partitions that MySQL makes in place, where partitioning the whole table again
+    // copies every row while it blocks writes: in a statement after the table's own, unless that
+    // changes a column the partitioning reads.
+    let keeps_its_columns = from.columns.iter().filter(|c| reads(&from.partition, &c.name)).all(|c| !old_of.values().any(|o| *o == c.name) && to.column(&c.name).is_some_and(|now| now.def() == c.def()));
+    let in_place = (repartitions && keeps_its_columns).then(|| partitions_changed(&partition, &to.partition)).flatten();
+    let anew = repartitions && in_place.is_none();
+    let apart = anew && !partition.is_empty() && (to.partition.is_empty() || !clauses.is_empty());
     if apart {
         out.push(format!("alter table {} remove partitioning", to.q));
     }
@@ -1278,7 +1278,9 @@ fn alter_table(from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeS
         _ => out.push(format!("alter table {}\n  {}", to.q, clauses.join(",\n  "))),
     }
     out.extend(later.iter().map(|c| format!("alter table {} {c}", to.q)));
-    if repartitions && !to.partition.is_empty() {
+    if let Some(change) = in_place {
+        out.push(format!("alter table {} {change}", to.q));
+    } else if anew && !to.partition.is_empty() {
         out.push(format!("alter table {} {}", to.q, to.partition));
     }
     out
@@ -1465,9 +1467,9 @@ fn trigger_table(create: &str) -> Option<String> {
 /// the create failed the table would stay without it. Under the lock, a write waits for the group,
 /// then runs with the new trigger. The drops move later, to just before the creates, past what
 /// can't break the trigger they drop ([`crossable`]); what can, a change to its table that renames
-/// or drops a column, goes under the lock with them. Where the group would hold anything but
-/// triggers and changes to tables, it isn't written so, and a comment above each drop says what
-/// runs without the trigger.
+/// or drops a column, goes under the lock with them, and runs before the drops. Where the group
+/// would hold anything but triggers and changes to tables, it isn't written so, and a comment above
+/// each drop says what runs without the trigger.
 fn lock_swaps(swaps: &[Swap], statements: &mut Vec<String>) {
     let at = |s: &String, statements: &[String]| statements.iter().position(|t| t == s);
     let swapped: Vec<&Swap> = swaps.iter().filter(|w| matches!((at(&w.drop, statements), at(&w.create, statements)), (Some(d), Some(c)) if d < c)).collect();
@@ -1506,7 +1508,10 @@ fn lock_swaps(swaps: &[Swap], statements: &mut Vec<String>) {
             }
         }
     }
-    let body: Vec<&str> = group.iter().map(|s| s.trim_end().trim_end_matches(';')).collect();
+    // Under the lock, no write runs until the end, so the tables change first: a change that fails
+    // on a row leaves the old trigger in place, where the drop before it would have left none.
+    let (changes, triggers): (Vec<&String>, Vec<&String>) = group.iter().partition(|s| altered_table(s).is_some());
+    let body: Vec<&str> = changes.into_iter().chain(triggers).map(|s| s.trim_end().trim_end_matches(';')).collect();
     let locked = format!("lock tables {} write;\n{};\nunlock tables", tables.join(" write, "), body.join(";\n"));
     moved.splice(from..=end, notes.into_iter().chain([locked]));
     *statements = moved;
@@ -1745,7 +1750,9 @@ impl Alterer for MysqlAlterer {
         if y == "char" && matches!(x.as_str(), "varchar" | "tinytext" | "text" | "mediumtext" | "longtext") {
             return Some(format!("changes from {a} to {b}, which drops the trailing spaces of its values"));
         }
-        if y == "binary" && (matches!(x.as_str(), "varbinary" | "tinyblob" | "blob" | "mediumblob" | "longblob") || (x == "binary" && a != b)) {
+        // A shorter `binary` fails on a value too long for it, as any narrower type does.
+        let length = |t: &str| t.split(['(', ')']).nth(1).and_then(|n| n.trim().parse::<u32>().ok()).unwrap_or(1);
+        if y == "binary" && (x != "binary" || length(&b) > length(&a)) {
             return Some(format!("changes from {a} to {b}, which pads its values with zero bytes to its length"));
         }
         super::narrowing(&type_class(&a), &type_class(&b)).map(|why| format!("changes from {a} to {b}, which {why}"))
@@ -1893,7 +1900,7 @@ mod tests {
         // A change that renames a column the trigger reads goes under the lock, and its comment above.
         assert_eq!(
             swapped(&["drop trigger a_touch", "-- n is renamed m, keeping its rows.", "alter table a rename column n to m", "create trigger a_touch before update on a for each row set new.m = 2"]),
-            ["-- n is renamed m, keeping its rows.", "lock tables a write;\ndrop trigger a_touch;\nalter table a rename column n to m;\ncreate trigger a_touch before update on a for each row set new.m = 2;\nunlock tables"]
+            ["-- n is renamed m, keeping its rows.", "lock tables a write;\nalter table a rename column n to m;\ndrop trigger a_touch;\ncreate trigger a_touch before update on a for each row set new.m = 2;\nunlock tables"]
         );
         // So would a function it calls, which isn't a table's change: written apart, saying so.
         let plan = swapped(&["drop trigger a_touch", "drop function f", "create function f () returns int return 2", "create trigger a_touch before update on a for each row set new.m = 2"]);

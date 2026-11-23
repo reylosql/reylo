@@ -119,17 +119,17 @@ impl From<Error> for Ran {
 /// The sql_mode a MySQL session whose `mode` isn't strict runs a table's change under: its own,
 /// with strict mode on, so that the change fails on a value its new type can't hold (an enum's
 /// label it no longer lists, a string too long, a number out of range) rather than storing another
-/// in its place, as a change fails on a value it can't keep on Postgres. Strict mode also makes the
-/// modes that refuse a zero date or a division by zero errors where they were warnings, which would
-/// fail a change on values the table took under its own mode: those are left out, which keeps such
-/// values as that mode does. None where `mode` is strict already.
+/// in its place, as a change fails on a value it can't keep on Postgres. Strict mode also refuses
+/// dates a session that isn't strict takes (a zero date, `2026-02-31`) and a division by zero,
+/// where the table may hold such values the change copies: so the modes that refuse them are left
+/// out, and invalid dates allowed, which keeps them as they are. None where `mode` is strict already.
 pub fn strict_mode(mode: &str) -> Option<String> {
     let modes: Vec<&str> = mode.split(',').map(str::trim).filter(|m| !m.is_empty()).collect();
     if modes.iter().any(|m| matches!(*m, "STRICT_TRANS_TABLES" | "STRICT_ALL_TABLES" | "TRADITIONAL")) {
         return None;
     }
-    let mut strict: Vec<&str> = modes.into_iter().filter(|m| !matches!(*m, "NO_ZERO_DATE" | "NO_ZERO_IN_DATE" | "ERROR_FOR_DIVISION_BY_ZERO")).collect();
-    strict.push("STRICT_ALL_TABLES");
+    let mut strict: Vec<&str> = modes.into_iter().filter(|m| !matches!(*m, "NO_ZERO_DATE" | "NO_ZERO_IN_DATE" | "ERROR_FOR_DIVISION_BY_ZERO" | "ALLOW_INVALID_DATES")).collect();
+    strict.extend(["ALLOW_INVALID_DATES", "STRICT_ALL_TABLES"]);
     Some(strict.join(","))
 }
 
@@ -1637,9 +1637,9 @@ mod url_tests {
     fn a_table_change_runs_strict_where_the_session_isnt() {
         assert_eq!(strict_mode("ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_DATE"), None);
         assert_eq!(strict_mode("TRADITIONAL"), None);
-        assert_eq!(strict_mode("").as_deref(), Some("STRICT_ALL_TABLES"));
-        assert_eq!(strict_mode("NO_ENGINE_SUBSTITUTION").as_deref(), Some("NO_ENGINE_SUBSTITUTION,STRICT_ALL_TABLES"));
-        assert_eq!(strict_mode("ANSI_QUOTES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO").as_deref(), Some("ANSI_QUOTES,STRICT_ALL_TABLES"));
+        assert_eq!(strict_mode("").as_deref(), Some("ALLOW_INVALID_DATES,STRICT_ALL_TABLES"));
+        assert_eq!(strict_mode("NO_ENGINE_SUBSTITUTION").as_deref(), Some("NO_ENGINE_SUBSTITUTION,ALLOW_INVALID_DATES,STRICT_ALL_TABLES"));
+        assert_eq!(strict_mode("ANSI_QUOTES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,ALLOW_INVALID_DATES").as_deref(), Some("ANSI_QUOTES,ALLOW_INVALID_DATES,STRICT_ALL_TABLES"));
     }
 
     #[test]

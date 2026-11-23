@@ -2983,10 +2983,12 @@ async fn pending_hazards(shadows: &mut Shadows<'_>, ran: &[Migration], pending: 
         return Ok(vec![]);
     }
     shadows.taint(lane);
+    // On MySQL, where a change is a migration per statement, a table a pending one made has no rows.
+    let there = if shadows.db(lane).dialect() == Dialect::Mysql { Some(crate::locks::mysql_tables(shadows.db(lane)).await?) } else { None };
     let mut out = Vec::new();
     for m in pending {
         match crate::locks::run_watched(shadows.db(lane), m).await {
-            Ok(found) => out.extend(found.into_iter().map(|h| (m.name.clone(), h))),
+            Ok(found) => out.extend(found.into_iter().filter(|h| there.as_ref().is_none_or(|t| t.contains(&h.table.to_lowercase()))).map(|h| (m.name.clone(), h))),
             // The check already tried each pending migration: one that fails here says nothing more.
             Err(_) => break,
         }
@@ -5164,7 +5166,12 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             }
             Ok((None, hazards))
         };
+        // On MySQL each statement is a file of its own: a table an earlier one made has no rows.
+        let there = if d == Dialect::Mysql { Some(crate::locks::mysql_tables(shadows.db(c)).await?) } else { None };
         let (mut failed, mut hazards) = run_pieces(shadows.db(c), pieces(&split, &plan)).await?;
+        if let Some(there) = &there {
+            hazards.retain(|h| there.contains(&h.table.to_lowercase()));
+        }
         let wanted = match shadows.lines(a).await? {
             Ok(lines) => lines,
             Err((_, e)) => return Ok(Err(vec![fails_problem(target_name, e)])),
