@@ -188,6 +188,38 @@ pub const POSTGRES_NEVER_NULL: &[&str] = &[
     "concat", "quote_nullable", "num_nulls", "num_nonnulls",
     "json_build_object", "json_build_array", "jsonb_build_object", "jsonb_build_array",
 ];
+/// The type a never-null built-in returns ([`POSTGRES_NEVER_NULL`], and of no argument
+/// [`POSTGRES_NO_ARGUMENT_NEVER_NULL`]), where it is the one type whatever the arguments: none is
+/// an array, so an array built of its values holds no NULL element (`array_agg(now())`). `random`
+/// of no argument is a `float8`.
+fn never_null_type(name: &str) -> Option<u32> {
+    Some(match name {
+        "now" | "clock_timestamp" | "statement_timestamp" | "transaction_timestamp" => oid::TIMESTAMPTZ,
+        "gen_random_uuid" | "uuidv4" => oid::UUID,
+        "random" => oid::FLOAT8,
+        "concat" | "quote_nullable" | "version" => oid::TEXT,
+        "num_nulls" | "num_nonnulls" | "pg_backend_pid" => oid::INT4,
+        "json_build_object" | "json_build_array" => oid::JSON,
+        "jsonb_build_object" | "jsonb_build_array" => oid::JSONB,
+        "current_database" => oid::NAME,
+        "txid_current" => oid::INT8,
+        _ => return None,
+    })
+}
+/// The type an SQL value function returns: `current_timestamp` and the rest, each of one type.
+fn sql_value_type(op: i32) -> Option<u32> {
+    use protobuf::SqlValueFunctionOp as Op;
+    Some(match Op::try_from(op).ok()? {
+        Op::SvfopCurrentDate => oid::DATE,
+        Op::SvfopCurrentTime | Op::SvfopCurrentTimeN => oid::TIMETZ,
+        Op::SvfopCurrentTimestamp | Op::SvfopCurrentTimestampN => oid::TIMESTAMPTZ,
+        Op::SvfopLocaltime | Op::SvfopLocaltimeN => oid::TIME,
+        Op::SvfopLocaltimestamp | Op::SvfopLocaltimestampN => oid::TIMESTAMP,
+        Op::SvfopCurrentRole | Op::SvfopCurrentUser | Op::SvfopUser | Op::SvfopSessionUser | Op::SvfopCurrentCatalog => oid::NAME,
+        // NULL where no schema of the search path exists, which the reader settles first.
+        Op::SvfopCurrentSchema | Op::SqlvalueFunctionOpUndefined => return None,
+    })
+}
 /// Postgres built-ins that answer NULL only when their first argument is NULL: `concat_ws` skips
 /// a NULL value but not a NULL separator, and `format` writes a NULL value as nothing (`%s`), as
 /// `NULL` (`%L`) or raises (`%I`), but answers NULL for a NULL format.
@@ -791,8 +823,8 @@ fn plan_here(sql: &str, dialect: Dialect, trust: &Trust, columns: &Columns) -> P
         };
         // A grouping key is NULL in the rows a grouping set leaves it out of, whatever it is.
         let claim = match &keys {
-            Some(keys) if keys.reaches(position, &rt.name, val, starred, trust) => claim.map(|c| Expr::Nullable(Box::new(c))),
-            _ => claim,
+            Some(keys) => claim.map(|c| keys.null(c, Some((position, rt.name.as_str(), starred)), val, trust)),
+            None => claim,
         };
         if plan.star {
             plan.tail.push(claim);
@@ -855,27 +887,48 @@ impl GroupingKeys {
                     }
                 }
             }
-            keys.trees.push(canonical(v).to_string());
+            keys.trees.push(key_tree(v).to_string());
         }
         let mut keys = GroupingKeys { trees: Vec::new(), names: Vec::new(), positions: Vec::new() };
         for item in &s.group_clause {
             collect(&canonical(&serde_json::to_value(item).unwrap_or_default()), false, &mut keys);
         }
+        // A key that names an output column, by its name or its position, is that column's
+        // expression, which another column may hold too (`ARRAY[concat(x)]` beside `concat(x) AS
+        // k` under `ROLLUP (k)`). An input column of the name would come first, so this may add an
+        // expression the grouping sets leave alone, which costs precision only.
+        for (position, target) in s.target_list.iter().enumerate() {
+            let Some(NodeEnum::ResTarget(rt)) = target.node.as_ref() else { continue };
+            let Some(val) = rt.val.as_deref() else { continue };
+            if (!rt.name.is_empty() && keys.names.contains(&rt.name)) || keys.positions.contains(&(position + 1)) {
+                keys.trees.push(key_tree(&serde_json::to_value(val).unwrap_or_default()).to_string());
+            }
+        }
         keys
     }
 
-    /// Whether the output column at `position` (from 0), named `name`, of the expression `val`, is
-    /// or holds a grouping key outside an aggregate: by its name (which an input column's of the
-    /// same name would take first, so this may say yes for nothing), by its position (which a `*`
-    /// before it moves), or by an expression it holds.
-    fn reaches(&self, position: usize, name: &str, val: &Node, starred: bool, trust: &Trust) -> bool {
-        if (!name.is_empty() && self.names.iter().any(|n| n == name)) || (!self.positions.is_empty() && (starred || self.positions.contains(&(position + 1)))) {
-            return true;
+    /// What the expression `val`, read as `claim`, is where grouping sets null their keys: NULL
+    /// where it is a key or holds one outside an aggregate: by its output column's name (which an
+    /// input column's of the same name would take first, so this may say yes for nothing), by its
+    /// position (which a `*` before it moves), or by an expression it holds. Where the key is the whole
+    /// value it is the value's nullable self; where it sits inside, an array of it may hold the
+    /// NULL as an element (`ARRAY[a]` under `ROLLUP (a)`), and nothing is known. `column` is the
+    /// output column's position, name and whether a `*` stands before it, where `val` is one.
+    fn null(&self, claim: Expr, column: Option<(usize, &str, bool)>, val: &Node, trust: &Trust) -> Expr {
+        let tree = key_tree(&serde_json::to_value(val).unwrap_or_default());
+        let named = column.is_some_and(|(position, name, starred)| (!name.is_empty() && self.names.iter().any(|n| n == name)) || (!self.positions.is_empty() && (starred || self.positions.contains(&(position + 1)))));
+        // A key below the value's root may be NULL inside it, whether or not the value is a key too.
+        if self.holds(&tree, trust, true) {
+            Expr::Nullable(Box::new(unsure_elements(claim)))
+        } else if named || self.trees.contains(&tree.to_string()) {
+            Expr::Nullable(Box::new(claim))
+        } else {
+            claim
         }
-        self.holds(&canonical(&serde_json::to_value(val).unwrap_or_default()), trust)
     }
 
-    fn holds(&self, v: &serde_json::Value, trust: &Trust) -> bool {
+    /// Whether `v` is or holds a key outside an aggregate, `v` itself left out with `below`.
+    fn holds(&self, v: &serde_json::Value, trust: &Trust, below: bool) -> bool {
         // An aggregate's arguments and GROUPING's are read before the grouping sets null anything.
         if v.pointer("/node/GroupingFunc").is_some() {
             return false;
@@ -891,14 +944,62 @@ impl GroupingKeys {
                 return false;
             }
         }
-        if v.get("node").is_some() && self.trees.contains(&v.to_string()) {
+        if !below && v.get("node").is_some() && self.trees.contains(&v.to_string()) {
             return true;
         }
         match v {
-            serde_json::Value::Object(map) => map.values().any(|v| self.holds(v, trust)),
-            serde_json::Value::Array(items) => items.iter().any(|v| self.holds(v, trust)),
+            serde_json::Value::Object(map) => map.values().any(|v| self.holds(v, trust, false)),
+            serde_json::Value::Array(items) => items.iter().any(|v| self.holds(v, trust, false)),
             _ => false,
         }
+    }
+}
+
+/// A parse tree as a grouping key is compared: [`canonical`], with each column reference by its
+/// last name alone, so that `t.x` and `x` compare equal. Two columns of one name in different
+/// tables compare equal too, which only reads more as a key.
+fn key_tree(v: &serde_json::Value) -> serde_json::Value {
+    fn unqualified(v: serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(mut map) => {
+                if let Some(fields) = map.get_mut("ColumnRef").and_then(|c| c.get_mut("fields")).and_then(|f| f.as_array_mut()) {
+                    if fields.len() > 1 {
+                        fields.drain(..fields.len() - 1);
+                    }
+                }
+                map.into_iter().map(|(k, v)| (k, unqualified(v))).collect()
+            }
+            serde_json::Value::Array(items) => items.into_iter().map(unqualified).collect(),
+            other => other,
+        }
+    }
+    unqualified(canonical(v))
+}
+
+/// An expression a grouping set may null a value inside: each array it builds may hold that NULL
+/// as an element, so each element is read as nullable, which keeps its type and so how the array
+/// nests ([`items_nesting`]); a nested `ARRAY[…]` keeps its rows. A call that builds an array of
+/// its arguments, and a call a user's overload may stand for, say nothing.
+fn unsure_elements(expr: Expr) -> Expr {
+    let each = |operands: Vec<Expr>| operands.into_iter().map(unsure_elements).collect::<Vec<_>>();
+    match expr {
+        Expr::Array { non_null, items } => Expr::Array {
+            non_null,
+            items: items.into_iter().map(|item| match item {
+                Expr::Array { .. } => unsure_elements(item),
+                item => Expr::Nullable(Box::new(item)),
+            }).collect(),
+        },
+        Expr::Nullable(inner) => Expr::Nullable(Box::new(unsure_elements(*inner))),
+        Expr::Narrowed(inner) => Expr::Narrowed(Box::new(unsure_elements(*inner))),
+        Expr::Guarded(inner, types) => Expr::Guarded(Box::new(unsure_elements(*inner)), types),
+        Expr::NotJsonb(inner) => Expr::NotJsonb(Box::new(unsure_elements(*inner))),
+        Expr::NotJsonbItems(inner) => Expr::NotJsonbItems(Box::new(unsure_elements(*inner))),
+        Expr::NotRow(inner, shared) => Expr::NotRow(Box::new(unsure_elements(*inner)), shared),
+        Expr::Every(operands, ty) => Expr::Every(each(operands), ty),
+        Expr::Any(operands, ty) => Expr::Any(each(operands), ty),
+        Expr::Call(_) | Expr::Trusted(_) => Expr::Unknown,
+        other => other,
     }
 }
 
@@ -1193,11 +1294,16 @@ fn items_nesting(items: &[Expr], leaves: Option<&[DescribedColumn]>, is_array: &
             // A nested constructor is a row of the result, one level over its own nesting.
             Expr::Array { items, .. } => return items_nesting(items, leaves, is_array).map(|n| Nesting { rows: n.rows + 1, ..n }),
             _ => {
-                let type_oid = match item {
+                // Whether an element may be NULL says nothing of its type.
+                let typed = match item {
+                    Expr::Nullable(inner) => inner.as_ref(),
+                    item => item,
+                };
+                let type_oid = match typed {
                     Expr::Unread(type_oid) => *type_oid,
                     // `||`, `array_append` and `array_prepend` of an array are of its type.
                     Expr::Every(operands, Ty::Concat | Ty::Appends) => operands.iter().find_map(|o| resolve(o, leaves).type_oid.filter(|t| is_array(*t) == Some(true))),
-                    _ => resolve(item, leaves).type_oid,
+                    _ => resolve(typed, leaves).type_oid,
                 };
                 match type_oid.map(|t| (t, is_array(t))) {
                     Some((t, Some(true))) => return Some(Nesting { rows: 0, element: Some(t) }),
@@ -1343,13 +1449,20 @@ pub fn keeps_one_row(select: &SelectStmt, target: &Node, dialect: Dialect, trust
         Some(Some(NodeEnum::AConst(c))) => matches!(c.val.as_ref(), Some(protobuf::a_const::Val::Ival(i)) if i.ival >= 1),
         Some(_) => false,
     };
-    set_kind(select).is_none() && select.values_lists.is_empty() && select.group_clause.is_empty() && select.having_clause.is_none() && select.limit_offset.is_none() && limit_keeps && one_value(target, dialect, trust)
+    set_kind(select).is_none() && select.values_lists.is_empty() && select.group_clause.is_empty() && select.having_clause.is_none() && select.limit_offset.is_none() && limit_keeps && one_value(target, dialect, trust) && clauses_one_value(select, dialect, trust)
+}
+
+/// Whether a SELECT's ORDER BY, DISTINCT ON and window definitions call nothing that may return a
+/// set: they are entries of its target list, and a set of none leaves it no row
+/// (`SELECT now() ORDER BY generate_series(1, 0)`).
+fn clauses_one_value(select: &SelectStmt, dialect: Dialect, trust: &Trust) -> bool {
+    [&select.sort_clause, &select.distinct_clause, &select.window_clause].iter().flat_map(|c| c.iter()).all(|n| one_value(n, dialect, trust))
 }
 
 /// Whether a SELECT is one row whatever it reads: no FROM, no WHERE, nothing that groups or
 /// limits it, and a target that is one value ([`one_value`]).
 pub fn one_row(select: &SelectStmt, target: &Node, dialect: Dialect, trust: &Trust) -> bool {
-    select.from_clause.is_empty() && select.where_clause.is_none() && single_row(select) && one_value(target, dialect, trust)
+    select.from_clause.is_empty() && select.where_clause.is_none() && single_row(select) && one_value(target, dialect, trust) && clauses_one_value(select, dialect, trust)
 }
 
 /// Whether a target is one value for the row it is computed over, never a set of them. A
@@ -1384,7 +1497,8 @@ pub fn one_value(target: &Node, dialect: Dialect, trust: &Trust) -> bool {
                     let Some(n) = name(f.get("funcname")) else { return false };
                     let arity = f.get("args").and_then(Value::as_array).map_or(0, Vec::len);
                     if [FUNCTIONS, POSTGRES_GROUPED, POSTGRES_GROUPED_NEVER_NULL, POSTGRES_GROUPED_JSON].iter().any(|list| list.contains(&n)) && trust.aggregates(n, arity) {
-                        return true;
+                        // An inline window's PARTITION BY and ORDER BY run over the rows.
+                        return f.get("over").is_none_or(|o| walk(o, trust));
                     }
                     if !trust.returns_no_set(Kind::Function, n) || POSTGRES_SET_RETURNING.contains(&n) || !postgres_function_names().contains(&n) {
                         return false;
@@ -1434,6 +1548,12 @@ pub(crate) fn targets_lockstep(top: &NodeEnum, targets: &[Node], dialect: Dialec
     dialect == Dialect::Postgres && calls > 1
 }
 
+/// [`targets_lockstep`] of a subquery's SELECT, whose select list is its own.
+fn select_lockstep(s: &SelectStmt, dialect: Dialect, trust: &Trust) -> bool {
+    let calls = [&s.target_list, &s.sort_clause, &s.distinct_clause, &s.group_clause, &s.window_clause].iter().flat_map(|c| c.iter()).map(|t| set_calls(t, trust)).sum::<usize>();
+    dialect == Dialect::Postgres && calls > 1
+}
+
 /// How many calls in a target may return a set, as [`one_value`] reads them: every call of a
 /// function the rules do not read for a built-in that returns no set, and every operator but the
 /// built-in ones the rules read. A subquery is a value of its own, and an aggregate's arguments
@@ -1457,7 +1577,8 @@ pub(crate) fn set_calls(target: &Node, trust: &Trust) -> usize {
                 if let Some(f) = map.get("FuncCall") {
                     let arity = f.get("args").and_then(Value::as_array).map_or(0, Vec::len);
                     match name(f.get("funcname")) {
-                        Some(n) if [FUNCTIONS, POSTGRES_GROUPED, POSTGRES_GROUPED_NEVER_NULL, POSTGRES_GROUPED_JSON].iter().any(|list| list.contains(&n)) && trust.aggregates(n, arity) => return 0,
+                        // Its inline window's PARTITION BY and ORDER BY are the target list's.
+                        Some(n) if [FUNCTIONS, POSTGRES_GROUPED, POSTGRES_GROUPED_NEVER_NULL, POSTGRES_GROUPED_JSON].iter().any(|list| list.contains(&n)) && trust.aggregates(n, arity) => return f.get("over").map_or(0, |o| walk(o, trust)),
                         Some(n) if trust.returns_no_set(Kind::Function, n) && !POSTGRES_SET_RETURNING.contains(&n) && postgres_function_names().contains(&n) => {}
                         _ => own = 1,
                     }
@@ -2062,7 +2183,7 @@ impl Reader<'_> {
             // `CURRENT_SCHEMA` is NULL where no schema of the search path exists.
             Some(NodeEnum::SqlvalueFunction(v)) if v.op == protobuf::SqlValueFunctionOp::SvfopCurrentSchema as i32 => Expr::Unknown,
             // `current_timestamp`, `current_user` and the rest of the SQL value functions.
-            Some(NodeEnum::SqlvalueFunction(_)) => Expr::NonNull(None),
+            Some(NodeEnum::SqlvalueFunction(v)) => Expr::NonNull(sql_value_type(v.op)),
             // `merge_action()` names the action that produced the row a MERGE returns.
             Some(NodeEnum::MergeSupportFunc(_)) if self.dialect == Dialect::Postgres => Expr::NonNull(Some(oid::TEXT)),
             // Where the host types its parameters without null, a parameter is a non-null value.
@@ -2160,7 +2281,7 @@ impl Reader<'_> {
             (Dialect::Postgres, "array_agg", 1) if self.trust.builtin("array_agg") => Expr::Array { non_null: false, items: f.args.iter().map(|a| self.read(a)).collect() },
             // `random(min, max)` is strict, and raises rather than answering NULL where `min > max`.
             (Dialect::Postgres, "random", 2) if self.trust.builtin("random") => Expr::Every(self.args(f, projection), Ty::Unknown),
-            (Dialect::Postgres, n, args) if POSTGRES_NEVER_NULL.contains(&n) && (args == 0 || !POSTGRES_NO_ARGUMENT.contains(&n)) && self.trust.builtin(n) => Expr::NonNull(None),
+            (Dialect::Postgres, n, args) if POSTGRES_NEVER_NULL.contains(&n) && (args == 0 || !POSTGRES_NO_ARGUMENT.contains(&n)) && self.trust.builtin(n) => Expr::NonNull(never_null_type(n)),
             // `unnest(ARRAY[…])` gives the elements written, a nested array's flattened: none NULL
             // where none of them is and each is a value of a scalar type. An element that is an
             // array itself (`array[tags]`, `array['{NULL}'::int[]]`) makes the array one of more
@@ -2174,7 +2295,7 @@ impl Reader<'_> {
                 None => Expr::Unknown,
             },
             (Dialect::Postgres, POSTGRES_ENUM_RANGE, 1 | 2) if self.trust.builtin(POSTGRES_ENUM_RANGE) => Expr::Array { non_null: true, items: Vec::new() },
-            (Dialect::Postgres, n, 0) if POSTGRES_NO_ARGUMENT_NEVER_NULL.contains(&n) && self.trust.builtin(n) => Expr::NonNull(None),
+            (Dialect::Postgres, n, 0) if POSTGRES_NO_ARGUMENT_NEVER_NULL.contains(&n) && self.trust.builtin(n) => Expr::NonNull(never_null_type(n)),
             (Dialect::Postgres, n, 1) if POSTGRES_TOTAL_ONE_ARGUMENT.contains(&n) && self.trust.builtin(n) => Expr::Every(self.args(f, projection), Ty::Is(oid::TEXT)),
             (Dialect::Postgres, n, 2..) if POSTGRES_SERIES.contains(&n) && self.trust.builtin(n) => Expr::NonNull(None),
             (Dialect::Postgres, n, 2) if POSTGRES_DATE_PARTS.contains(&n) && self.trust.builtin(n) => {
@@ -2295,9 +2416,9 @@ impl Reader<'_> {
             ("array_agg", 1) => (Claim::Array(false), None),
             ("array_remove", 2) => (Claim::Removed(is_null_literal(&f.args[1])), None),
             ("random", 2) => (Claim::Every(None, Ty::Unknown), None),
-            (n, args) if POSTGRES_NEVER_NULL.contains(&n) && (args == 0 || !POSTGRES_NO_ARGUMENT.contains(&n)) => (Claim::NonNull(None), None),
+            (n, args) if POSTGRES_NEVER_NULL.contains(&n) && (args == 0 || !POSTGRES_NO_ARGUMENT.contains(&n)) => (Claim::NonNull(never_null_type(n)), None),
             ("uuidv7", 0) => (Claim::NonNull(Some(oid::UUID)), None),
-            (n, 0) if POSTGRES_NO_ARGUMENT_NEVER_NULL.contains(&n) => (Claim::NonNull(None), None),
+            (n, 0) if POSTGRES_NO_ARGUMENT_NEVER_NULL.contains(&n) => (Claim::NonNull(never_null_type(n)), None),
             (n, 1) if POSTGRES_TOTAL_ONE_ARGUMENT.contains(&n) => (Claim::Every(None, Ty::Is(oid::TEXT)), None),
             (n, 2..) if POSTGRES_SERIES.contains(&n) => (Claim::NonNull(None), None),
             (n, 2) if POSTGRES_DATE_PARTS.contains(&n) => (Claim::Every(None, Ty::Unknown), (!monotonic_field(&f.args[0])).then_some((1, TIMES_OF_DAY))),
@@ -2411,8 +2532,11 @@ impl Reader<'_> {
             Some(outside) => level.within(outside.clone()),
             None => level,
         };
-        let mut inner_reader = Reader { dialect: self.dialect, trust: self.trust, columns: self.columns, withs, rows: None, leaves: None, sources: Vec::new(), grouped: false, narrowed: Vec::new(), scope, windows: &select.window_clause, fields: self.fields, lockstep: false };
+        let lockstep = select_lockstep(select, self.dialect, self.trust);
+        let mut inner_reader = Reader { dialect: self.dialect, trust: self.trust, columns: self.columns, withs, rows: None, leaves: None, sources: Vec::new(), grouped: false, narrowed: Vec::new(), scope, windows: &select.window_clause, fields: self.fields, lockstep };
         let value = inner_reader.read(inner);
+        // The subquery's own grouping sets null their keys in its rows, as the statement's do.
+        let value = if select.group_clause.iter().any(|g| matches!(g.node, Some(NodeEnum::GroupingSet(_)))) { GroupingKeys::of(select).null(value, None, inner, self.trust) } else { value };
         if array {
             // Its elements are the subquery's values: arrays of arrays where they are arrays
             // ([`Nesting`]), and as the subquery's target says otherwise. A column it collects is
@@ -4680,6 +4804,66 @@ mod tests {
         let raises = Trust { jsonb_casts_raise: true, ..Trust::default() };
         let before_18 = items_nullable(&plan("SELECT ARRAY['1'::jsonb]::int[]", Dialect::Postgres, &raises).head[0].clone().expect("a claim"), Some(&[]), &is_array);
         assert_eq!(before_18, Some(false));
+        // A never-null built-in of one fixed type that is no array is a non-null element, its
+        // arguments' nullability aside; a parameter is of whatever type the server gives it, so
+        // an array of one may be of arrays.
+        for sql in [
+            "SELECT array_agg(jsonb_build_object('a', a)) FROM t GROUP BY b",
+            "SELECT array_agg(json_build_array(a)) FROM t",
+            "SELECT array_agg(concat(a, 'x')) FROM t",
+            "SELECT array_agg(now()) FROM t",
+            "SELECT array_agg(gen_random_uuid()) FROM t",
+            "SELECT array_agg(current_timestamp) FROM t",
+            "SELECT ARRAY[jsonb_build_object('a', 1), jsonb_build_object('b', a)] FROM t",
+        ] {
+            assert_eq!(items(sql, &[col(true, oid::TEXT)]), Some(false), "{sql}");
+        }
+        assert_eq!(items("SELECT array_agg(current_schema) FROM t", &[]), Some(true));
+        let params = Trust { non_null_params: true, ..Trust::default() };
+        let param = items_nullable(&plan("SELECT array_agg($1) FROM t", Dialect::Postgres, &params).head[0].clone().expect("a claim"), Some(&[]), &is_array);
+        assert_eq!(param, None);
+        let shadowed = Trust { shadowed: ["concat".to_string()].into_iter().collect(), ..Trust::default() };
+        let user_concat = items_nullable(&plan("SELECT array_agg(concat(a)) FROM t", Dialect::Postgres, &shadowed).head[0].clone().expect("a claim"), Some(&[col(false, oid::TEXT)]), &is_array);
+        assert_ne!(user_concat, Some(false));
+        // A grouping set nulls a key inside the array, a window over it reads it nulled, and a
+        // subquery's own grouping sets, its ORDER BY's set of no rows and the NULLs a longer set
+        // pads a shorter one with reach its value too.
+        for sql in [
+            "SELECT ARRAY[concat(a)] FROM t GROUP BY ROLLUP (concat(a))",
+            "SELECT array_agg(concat(a)) OVER () FROM t GROUP BY ROLLUP (concat(a))",
+            "SELECT ARRAY(SELECT concat(a) FROM t GROUP BY ROLLUP (concat(a)))",
+            "SELECT (SELECT ARRAY[concat(a)] FROM t GROUP BY ROLLUP (concat(a)) LIMIT 1)",
+            "SELECT ARRAY[(SELECT now() ORDER BY generate_series(1, 0))]",
+            "SELECT ARRAY[(SELECT DISTINCT ON (generate_series(1, 0)) concat('x'))]",
+            "SELECT ARRAY(SELECT unnest(ARRAY[now()])::text ORDER BY generate_series(1, 3))",
+        ] {
+            assert_ne!(items(sql, &[col(true, oid::TEXT)]), Some(false), "{sql}");
+        }
+        // A key named by its alias or position, or written with a qualifier the select list
+        // leaves off, and an inline window's set of no rows.
+        for sql in [
+            "SELECT ARRAY(SELECT concat('x') AS k GROUP BY ROLLUP (k))",
+            "SELECT ARRAY(SELECT concat('x') GROUP BY ROLLUP (1))",
+            "SELECT ARRAY[concat(t.a)] FROM t GROUP BY ROLLUP (concat(a))",
+            "SELECT ARRAY[(SELECT concat(count(*) OVER (PARTITION BY generate_series(1, 0))))]",
+        ] {
+            assert_ne!(items(sql, &[col(true, oid::TEXT)]), Some(false), "{sql}");
+        }
+        // A qualified name is the input column's, never an output alias; and a column that is a
+        // key may hold another.
+        assert_ne!(items("SELECT ARRAY[concat(t.x)] AS k FROM t GROUP BY ROLLUP (concat(t.x), t.k)", &[]), Some(false));
+        assert_ne!(items("SELECT ARRAY[concat(x)] AS k FROM t GROUP BY ROLLUP (concat(x), k)", &[]), Some(false));
+        let beside = pg("SELECT concat(a) AS k, ARRAY[concat(a)] FROM t GROUP BY ROLLUP (k)").head[1].clone().expect("a claim");
+        assert_ne!(items_nullable(&beside, Some(&[]), &is_array), Some(false));
+        // The array keeps its rows where a key inside it may be NULL.
+        let nested = claim("SELECT ARRAY[[length(a)::int]] FROM t GROUP BY ROLLUP (length(a)::int)");
+        assert_ne!(items_nullable(&nested, Some(&[]), &is_array), Some(false));
+        assert_eq!(nesting(&nested, Some(&[]), &|t| Some(t == 1009)), Some(Nesting { rows: 1, element: None }));
+        assert_eq!(items("SELECT ARRAY[concat(a)] FROM t GROUP BY ROLLUP (b)", &[]), Some(false));
+        assert_eq!(items("SELECT array_agg(concat(a)) FROM t GROUP BY ROLLUP (concat(a))", &[]), Some(false));
+        assert_eq!(items("SELECT ARRAY(SELECT concat(a) FROM t GROUP BY b)", &[]), Some(false));
+        assert_eq!(items("SELECT ARRAY[(SELECT now() ORDER BY 1)]", &[]), Some(false));
+        assert!(!first(&pg("SELECT (SELECT count(*) FROM t ORDER BY generate_series(1, 0)) AS n")).non_null);
     }
 
     #[test]

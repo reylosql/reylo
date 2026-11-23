@@ -1,6 +1,6 @@
 ---
 title: Postgres
-description: How Reylo types SQL queries on Postgres. Each column's type in TypeScript<Rust> and Rust</Rust>, null values, row counts, parameters, drivers and limits.
+description: How Reylo infers types from SQL queries on Postgres. Each column's type in TypeScript<Rust> and Rust</Rust>, null values, row counts, parameters, drivers and limits.
 ---
 
 <p className="dk-subheader">How Reylo types queries on Postgres</p>
@@ -14,9 +14,7 @@ description: How Reylo types SQL queries on Postgres. Each column's type in Type
 | Drivers | <Rust>In TypeScript, </Rust>postgres.js, `pg`, `pg-promise`, `Bun.sql`, PGlite, Neon, `@vercel/postgres`, Slonik and Drizzle Postgres, Drizzle over `pg`, postgres.js, Neon, PGlite, `Bun.sql` or Drizzle Postgres, and Knex over `pg` ([Drivers](#drivers))<Rust>; in Rust, sqlx</Rust> |
 | Type checking | Reylo's engine connects to Postgres itself, so your project needs no driver for it |
 
-The examples on this page use this schema:
-
-<Details summary="View the schema behind the examples" id="schema">
+<PageSchema>
 
 ```sql file="schema.sql"
 create extension if not exists pg_jsonschema;
@@ -59,7 +57,7 @@ create table events (
 );
 ```
 
-</Details>
+</PageSchema>
 
 ## Where types come from [#sources]
 
@@ -129,17 +127,19 @@ In Rust, `#[reylo::query]` writes these types:
 | `json`, `jsonb` a JSON Schema `CHECK` holds | sqlx's `Json` of what the schema admits |
 | JSON the statement builds (`jsonb_build_object`, `jsonb_agg`) | sqlx's `Json` of what it builds |
 | `bytea` | `Vec<u8>` |
-| An array | a `Vec` of its element type, each element an `Option` |
+| An array | a `Vec` of its element type; in a column, each element an `Option` where it may be `NULL` |
 | An enum, or `text` a `CHECK` lists values for | an enum the module holds |
 | A domain | its base type |
 | A row value of a table, a subquery or a composite type | not yet |
-| `point`, `box`, `circle` and the other geometric types | not yet |
+| `point`, `box`, `circle` and the other geometric types | sqlx's `PgPoint`, `PgBox`, `PgCircle` and the rest |
 | A range or a multirange | not yet |
-| pgvector's `vector`, `halfvec` | not yet |
-| `hstore` | not yet |
+| pgvector's `vector` | `pgvector::Vector` |
+| pgvector's `halfvec` | not yet |
+| `hstore` | sqlx's `PgHstore` |
+| `void`, as `pg_sleep` returns | `()` |
 | Every other type (`inet`, `tsvector`, `xml`, …) | not yet |
 
-A type that is not yet written fails to compile and says to cast it to `text`. The decimal, date and uuid types come from the [features you turn on](/rust#install). A value its Rust type can't hold, such as `infinity` in a `date`, is an error when the row is read.
+A type that is not yet written fails to compile and says to cast it to `text`. The decimal, date, uuid and vector types come from the [features you turn on](/rust#install). A value its Rust type can't hold, such as `infinity` in a `date`, is an error when the row is read. A parameter of `hstore` or `vector` needs the extension's schema on the connection's `search_path`.
 
 </LanguagePanel>
 </LanguagePanels>
@@ -609,6 +609,7 @@ How a nested array comes back:
 <Rules>
 
 - **Arrays of rows.** An `array(…)` is `[]` over no rows, where an `array_agg` of the same rows is `null`. An element is `null` only where an outer join nulls its whole row. Each level of nesting escapes the quotes inside it again, so build deeply nested rows as JSON instead.
+- **The row's alias.** Give the subquery an alias that no table in the query has as a column, as `o` above. Where a column has that name, Postgres reads the column in place of the row, and Reylo types the result as a `string`.
 
 **Geometric types**
 
@@ -881,7 +882,10 @@ Pass the `sql` function, or a transaction, savepoint or reserved connection take
 import postgres from "postgres";
 import getUser from "./pg_get_user.sql";
 
-const db = postgres(process.env.DATABASE_URL);
+const db = postgres(process.env.DATABASE_URL, {
+  // plan each run with its values, so optional filters keep their indexes
+  connection: { plan_cache_mode: "force_custom_plan" },
+});
 const user = await getUser.run(db, { id: 1 });
 
 await db.begin(async (tx) => {
@@ -896,7 +900,7 @@ reserved.release();
 
 Reylo prepares its queries on each connection, as postgres.js prepares its own. Behind a pooler in transaction mode, such as PgBouncer, create the client with `prepare: false`. Reylo's queries then run unprepared too. A client created with `transform.row` isn't supported.
 
-After five runs of a prepared statement, Postgres can switch to one generic plan. A query with [optional filters](/inference#filter-indexes) then reads the whole table. To plan each run with its values, create the client with `connection: { plan_cache_mode: "force_custom_plan" }`.
+Setting `plan_cache_mode` plans each run with its values. Without it, Postgres can switch to one generic plan after five runs of a prepared statement. A query with [optional filters](/inference#dynamic-filtering) then reads the whole table.
 
 ### `pg-promise`
 
@@ -947,7 +951,10 @@ Pass the client, or a transaction, savepoint or reserved connection taken from i
 import { SQL } from "bun";
 import getUser from "./pg_get_user.sql";
 
-const db = new SQL(process.env.DATABASE_URL);
+const db = new SQL(process.env.DATABASE_URL, {
+  // plan each run with its values, so optional filters keep their indexes
+  connection: { plan_cache_mode: "force_custom_plan" },
+});
 const user = await getUser.run(db, { id: 1 });
 
 await db.begin(async (tx) => {
@@ -960,7 +967,7 @@ await getUser.run(reserved, { id: 1 });
 reserved.release();
 ```
 
-Bun.sql prepares each statement once per connection. So a query with [optional filters](/inference#filter-indexes) needs `connection: { plan_cache_mode: "force_custom_plan" }` to keep using an index.
+Bun.sql prepares each statement once per connection. Setting `plan_cache_mode` keeps a query with [optional filters](/inference#dynamic-filtering) using its indexes.
 
 From Bun 1.4.4, Reylo decodes the bytes Bun receives itself, so each type comes back as on the other drivers. Before 1.4.4, Bun loses a timestamp's microseconds and dates before 1 AD. It also fails on some arrays, such as a `NULL` in an `int4[]`.
 
@@ -1008,7 +1015,7 @@ import getUser from "./pg_get_user.sql";
 const user = await getUser.run(sql, { id: 1 });
 ```
 
-The package is deprecated on npm: Reylo's types accept its client, but Reylo's tests don't run it.
+The package is deprecated on npm, but Reylo still runs on it, with `createPool()` and `createClient()` too.
 
 ### Drizzle Postgres
 

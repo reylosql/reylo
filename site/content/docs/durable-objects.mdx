@@ -14,9 +14,7 @@ A Durable Object's database is SQLite, so everything on the [SQLite](/sqlite) pa
 | Tests | Vitest inside workerd, with Cloudflare's Vitest plugin |
 | Example | [cloudflare-workers](https://github.com/reylosql/reylo/tree/main/examples/cloudflare-workers), a Worker with D1 and a Durable Object that runs locally with no Cloudflare account |
 
-The examples on this page use this schema:
-
-<Details summary="View the schema behind the examples" id="schema">
+<PageSchema>
 
 ```sql file="schema.sql" dialect="sqlite"
 create table users (
@@ -27,7 +25,7 @@ create table users (
 ) strict;
 ```
 
-</Details>
+</PageSchema>
 
 ## Setup
 
@@ -53,7 +51,7 @@ Two notes on the setup:
 The type check reads your schema from a local SQLite file. Point [`direct_url`](/configuration#direct_url) at it:
 
 ```yaml title=".reylo.yaml"
-direct_url: file:./dev.sqlite
+direct_url: sqlite:./dev.sqlite
 ```
 
 Your [migrations](#migrations) create it:
@@ -107,6 +105,22 @@ On a Durable Object:
 - Each object is a database of its own: before its tables exist, a query fails with the database's own error.
 - The storage rounds an integer past 2^53, so Reylo throws rather than return one, even from a `BIGINT` column. It can't bind a `bigint` parameter past 2^53 either. Reylo rejects one unless it's written to a `BIGINT` column.
 
+<Callout title="Blocked functions">
+
+Durable Objects block some of SQLite's functions, such as `json_pretty` and `power`. The type check also runs each query on Cloudflare's SQLite, so a blocked function is a type error.
+
+The check runs when your `package.json` has `wrangler` and its config has a SQLite-backed Durable Object:
+
+```jsonc title="wrangler.jsonc"
+{
+  // ...
+  // a durable object class with a sqlite database
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Board"] }]
+}
+```
+
+</Callout>
+
 ## Migrations
 
 A Durable Object runs its migrations on itself. Pass its storage to `migrate` in its constructor:
@@ -134,18 +148,6 @@ How the migrations reach the object:
 - Each object runs the ones it hasn't run when it starts, each in a transaction. It records them in `__reylo_migrations`, so a deploy reaches every object the next time it runs.
 - An object that ran a migration the bundle lacks, or one edited since, throws and runs nothing.
 - A Durable Object keeps foreign keys on during a migration. A migration from `reylo migrate new` keeps every row: it rebuilds the tables that reference a rebuilt table along with it. A rebuild you write by hand drops a table others still reference. The drop then fails and rolls back, or deletes or nulls their rows under `on delete cascade` or `on delete set null`.
-
-## Blocked functions
-
-Durable Objects block some of SQLite's functions, such as `json_pretty` and `power`. The type check also runs each query on Cloudflare's SQLite, so a blocked function is a type error. It does so when your `package.json` has `wrangler` and its config has a SQLite-backed Durable Object:
-
-```jsonc title="wrangler.jsonc"
-{
-  // ...
-  // a durable object class with a sqlite database
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Board"] }]
-}
-```
 
 ## Tests
 

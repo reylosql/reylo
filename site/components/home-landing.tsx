@@ -2,7 +2,7 @@ import { createContext, useContext, useRef, useState, type CSSProperties, type R
 import { createPortal } from 'react-dom';
 import data from 'virtual:home-examples';
 import { DATABASES, HOSTS } from './host-logos';
-import { Foot, Nav } from './home-chrome';
+import { Foot, Install, Nav } from './home-chrome';
 import { FileIcon } from './migrate-landing';
 import type { HomeExample, HomeVariant, Line } from '@/lib/home-examples';
 import { introUrl } from '@/lib/layout.shared';
@@ -21,8 +21,39 @@ import './home-landing.css';
 type Dialect = 'postgres' | 'mysql' | 'sqlite';
 
 /** The examples the homepage shows, by the Inference section's anchors, in its order. Named parameters are left out: `:name` is Reylo's addition to SQL, not what Reylo infers. */
-const SHOWN = ['left-joins', 'computed-columns', 'nullable-parameters', 'unique-keys', 'aggregates', 'window-functions', 'subqueries:2', 'returning-inserts', 'unions', 'json', 'json-schema', 'oneof'];
-const EXAMPLES = SHOWN.map((id) => data.examples.find((e) => e.id === id)).filter((e): e is HomeExample => !!e);
+const SHOWN = [
+  'left-joins',
+  'left-joins:2',
+  'computed-columns',
+  'nullable-parameters',
+  'filtering-by-a-list',
+  'unique-keys',
+  'aggregates',
+  'aggregates:2',
+  'window-functions',
+  'returning-inserts',
+  'returning-inserts:2',
+  'returning-inserts:4',
+  'unions',
+  'json',
+  'json-schema',
+  // The longest queries last, so that clicking through in order meets the short ones first.
+  'oneof',
+  'subqueries:2',
+  'bulk-inserts',
+  'nested-fetching',
+  'typed-json:2',
+];
+/** A tab's own name and caption where the card is a later one in its section, whose heading and lede lean on the card before it. */
+const OWN: Record<string, { title?: string; lede?: string }> = {
+  'left-joins:2': { title: 'Narrowing in where' },
+  'aggregates:2': { title: 'Rollups' },
+  'returning-inserts:2': { title: 'Upserts', lede: 'An upsert returns one row, whether it inserts the row or updates it.' },
+  'returning-inserts:4': { title: 'Old and new' },
+};
+const EXAMPLES = SHOWN.map((id) => data.examples.find((e) => e.id === id))
+  .filter((e): e is HomeExample => !!e)
+  .map((e) => ({ ...e, ...OWN[e.id] }));
 
 
 const DIALECT_NAMES: Record<Dialect, string> = { postgres: 'Postgres', mysql: 'MySQL', sqlite: 'SQLite' };
@@ -46,57 +77,6 @@ export function HomeLanding({ stars }: { stars?: number }) {
 /* ── The nav ─────────────────────────────────────────────────────────────── */
 
 /* ── The install ────────────────────────────────────────────────────────── */
-
-const INSTALL = 'npm add reylo';
-
-function CopyIcon({ done }: { done: boolean }) {
-  return done ? (
-    <svg viewBox="0 0 16 16" aria-hidden="true">
-      <path d="M3 8.5l3.2 3.2L13 4.8" />
-    </svg>
-  ) : (
-    <svg viewBox="0 0 16 16" aria-hidden="true">
-      <rect x="5.25" y="5.25" width="8.5" height="8.5" rx="1.75" />
-      <path d="M10.75 5.25v-1.5a1.5 1.5 0 0 0-1.5-1.5h-5.5a1.5 1.5 0 0 0-1.5 1.5v5.5a1.5 1.5 0 0 0 1.5 1.5h1.5" />
-    </svg>
-  );
-}
-
-/** The install command, with "Read the docs", which opens the docs at their top: side by side where the width allows. `centered` centres the two. */
-function Install({ centered }: { centered?: boolean }) {
-  const [copied, setCopied] = useState(false);
-  const command = INSTALL;
-  return (
-    <div className={`ml-install rh-install${centered ? ' ml-centered' : ''}`}>
-      <div className="ml-big">
-        <div className="ml-box">
-          <div className="ml-cmd">
-            <span className="ml-dollar">$</span>
-            <span>{command}</span>
-            <button
-              type="button"
-              className="ml-copybtn"
-              aria-label="Copy the command"
-              onClick={() => {
-                void navigator.clipboard.writeText(command);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1400);
-              }}
-            >
-              <CopyIcon done={copied} />
-            </button>
-          </div>
-        </div>
-        <a className="ml-docs ml-docs-primary" href={introUrl}>
-          Read the docs
-          <svg viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M2.5 8h11M9 3.5 13.5 8 9 12.5" />
-          </svg>
-        </a>
-      </div>
-    </div>
-  );
-}
 
 /* ── Code ───────────────────────────────────────────────────────────────── */
 
@@ -254,8 +234,9 @@ function Examples() {
   return (
     <section className="rh-examples">
       <header className="rh-section-head">
-        <h2>What Reylo infers</h2>
-        <p>Parameters, columns, nullability, cardinality and nested JSON shapes, from your database's own analysis of each query.</p>
+        <h2>The full power of SQL in the palm of your hand</h2>
+        <Blade />
+        <p>No lossy DSL and no CRUD-limited ORM. Reylo gives you (and your agents) back the freedom to write complex queries without sacrificing DRY.</p>
       </header>
       <div className="rh-ex">
         <Card variant={example.variants[shown]!} dialects={Object.keys(example.variants) as Dialect[]} dialect={shown} onDialect={setDialect} tabs={tabs} />
@@ -389,6 +370,11 @@ const FEATURES: { title: string; body: ReactNode; icon: ReactNode }[] = [
   },
 ];
 
+/** The rule under a section's heading: a short blade, about a lightsaber's proportions, in the yellow, lit by night. */
+function Blade() {
+  return <span className="rh-blade" aria-hidden="true" />;
+}
+
 /** The databases and hosts in two rows, as even as their count allows, each centred. */
 const LOGOS = [...DATABASES, ...HOSTS];
 const LOGO_ROWS = [LOGOS.slice(0, Math.ceil(LOGOS.length / 2)), LOGOS.slice(Math.ceil(LOGOS.length / 2))];
@@ -398,6 +384,7 @@ function Features() {
     <section className="rh-features">
       <header className="rh-section-head">
         <h2>Why Reylo</h2>
+        <Blade />
       </header>
       <div className="rh-grid">
         {FEATURES.map((f) => (
@@ -443,6 +430,7 @@ function End() {
   return (
     <section className="ml-end rh-end">
       <h2>Ship faster with Reylo</h2>
+        <Blade />
       <Install centered />
     </section>
   );

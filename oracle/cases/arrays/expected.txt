@@ -2,6 +2,7 @@ agg_inner.sql: many () -> { id: int4, emails: text(¬NUL)[] } key (id)
 agg_left.sql: many () -> { id: int4, emails: text(¬NUL)?[] } key (id)
 any_param.sql: many (emails: text(¬NUL)?[]) -> { id: int4 } key (id)
 appended.sql: many () -> { tagged: text(¬NUL)?[]?, appended: int4?[]?, prepended: int4?[]?, doc: json { a: text(¬NUL)?[]? }, literal: text(¬NUL)[] }
+appended_common_type.sql: many () -> { a: int8?[][], b: int8?[][] }
 columns.sql: at_most_one (id: int4) -> { tags: text(¬NUL)?[], scores: int4?[]? }
 constructors.sql: at_most_one (id: int4) -> { nicks: text(¬NUL)?[], emails: text(¬NUL)[], nums: int4[] }
 deeper.sql: many () -> { cube: int4?[][][], rows_agg: int4[][], rows_built: int4?[][], wrapped: int4?[][], scalars: int4[] }
@@ -12,6 +13,20 @@ domain_cast_subquery.sql: one () -> { rows_of: int4?[][] }
 domain_elements.sql: many () -> { one: public.int_list(int4?[])?[], held: public.int_list(int4?[])?[], either: public.int_list(int4?[])?[], rows_of: public.int_list(int4?[])?[], doc: json { a: public.int_list(int4?[])?[] } }
 json_nested.sql: many () -> { doc: json { stacked: int4?[][], pair: int4?[][] } }
 nested.sql: at_most_one (id: int4) -> { stacked: int4?[][], pair: int4?[][], literal: int4?[][], rows_of: int4?[][] }
+never_null_functions.sql: many () -> { id: int4, objects: jsonb[], nicks: text(¬NUL)[], times: timestamptz[], days: date[], lists: json[] } key (id)
+never_null_nested.sql: one () -> { grid: jsonb[][]?, maybe: text(¬NUL)?[]?, joined: text(¬NUL)?[]? }
 slices.sql: at_most_one (i: int4, id: int4) -> { head: text(¬NUL)?[]?, head2: text(¬NUL)?[]?, one: text(¬NUL)? }
 subqueries.sql: one () -> { emails: text(¬NUL)[], nicks: text(¬NUL)?[] }
 subquery_rows.sql: one () -> { nicks: text(¬NUL)?[][] }
+trap_appended_common_type.sql: many () -> { a: int8?[][]? }
+trap_empty_subquery.sql: one () -> { a: timestamptz?[], b: text(¬NUL)?[], c: int8? }
+trap_padded_subquery.sql: one () -> { a: text(¬NUL)?[] }
+trap_rollup_alias.sql: one () -> { a: text(¬NUL)?[], b: text(¬NUL)?[] }
+trap_rollup_appended.sql: many () -> { a: int4?[][]? }
+trap_rollup_array.sql: many () -> { a: text(¬NUL)?[]?, b: jsonb?[]? }
+trap_rollup_beside.sql: many () -> { k: text(¬NUL)?, a: text(¬NUL)?[]? }
+trap_rollup_input_name.sql: many () -> { k: text(¬NUL)?[]? }
+trap_rollup_nested.sql: many () -> { a: int4?[][]? }
+trap_rollup_qualified.sql: many () -> { a: text(¬NUL)?[]? }
+trap_rollup_window.sql: many () -> { a: text(¬NUL)?[]? }
+trap_subquery_rollup.sql: one () -> { a: text(¬NUL)?[], b: text(¬NUL)?[]? }

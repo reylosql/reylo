@@ -1,6 +1,6 @@
 # Reylo example: Rolldown
 
-A small HTTP server on `node:http` that Rolldown bundles, with `reylo/rolldown`, into one ES module, `dist/server.mjs`, which runs with plain `node`: no preload, no TypeScript and no `node_modules`. Its queries run on Postgres through postgres.js, and the bundle carries the driver, Reylo's run time and each query's analysis. It is the setup of [Rolldown](https://reylo.dev/typescript#setup-rolldown) in the docs.
+A small HTTP server on `node:http` that Rolldown bundles, with `reylo/rolldown`, into one ES module, `dist/server.mjs`, which runs with plain `node`: no preload, no TypeScript and no `node_modules`. Its queries run on Postgres through postgres.js, and the bundle carries the driver, Reylo's run time and each query's analysis. It is the setup of [Rolldown](https://reylo.dev/typescript#setup-vite) in the docs.
 
 ## Run it
 

@@ -32,12 +32,13 @@ export async function migrate(options: MigrateOptions): Promise<string[]> {
     throw new Error(`reylo migrate deploy failed: ${(err || out).trim()}`);
   }
   if (!deploy.ok) {
+    // A migration that failed is said so, its refusal (what of it is in place, and what to run) or its error leading.
+    const failed = deploy.result?.migrations?.find((m) => m.state === "failed");
     if (deploy.problems?.length) {
       const lines = deploy.problems.flatMap((p) => [p.title, ...(p.notes ?? []).map((n) => `  ${n}`), ...(p.fixes ?? []).map((f) => `  ${f.what}: ${f.commands.join(", then ")}`)]);
-      throw new Error(`reylo migrate deploy refused: ${lines.join("\n")}`);
+      throw new Error(`reylo migrate deploy ${failed ? "failed" : "refused"}: ${lines.join("\n")}`);
     }
-    // A migration that failed leads, then the log, which says what ran before it and what to do.
-    const failed = deploy.result?.migrations?.find((m) => m.state === "failed");
+    // With no refusal, the log follows, which says what ran before it.
     const log = (deploy.log ?? []).join("\n");
     const lead = failed ? `${failed.name}: ${failed.error ?? "failed"}` : (deploy.error ?? log);
     throw new Error(`reylo migrate deploy failed: ${lead}${failed && log ? `\n${log}` : ""}`);

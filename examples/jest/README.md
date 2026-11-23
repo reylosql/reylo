@@ -9,7 +9,7 @@ nub run build              # at the repository root, once: the example links the
 
 cd examples/jest
 nub install                # or pnpm install (npm does not take link: dependencies)
-cp .env.example .env       # DATABASE_URL=file:./app.db
+cp .env.example .env       # DATABASE_URL=sqlite:./app.db
 nub run setup              # creates app.db from setup.sql: ada and bob, two posts by ada
 nub run typecheck          # tsc --noEmit --runExternalCode, over the app, the tests and setup.ts
 nub run test               # Jest with ES modules: "Tests: 3 passed, 3 total"
@@ -30,7 +30,7 @@ Each test runs inside a transaction that it rolls back, so `app.db` stays as `se
 - In `jest.config.js`, the ES module run, `transform` sends `.sql` files to `reylo/jest`, since Jest loads tests through its own runtime, which no preload reaches. The `extensionsToTreatAsEsm` option lists `.sql` beside `.ts`, so a query's module is an ES module like the test that imports it. No transform claims the `.ts` files, so Jest strips their types itself, through Node.
 - The CommonJS run, `jest.cjs.config.js`, has the same transformer, which writes CommonJS when Jest asks for it; `babel-jest` for `.js` as well as `.ts`, because a CommonJS run must compile the tests' `import`s and Reylo's runtime, an ES module; and `transformIgnorePatterns`, which lets Babel compile `reylo` inside `node_modules`. Its Babel presets are preset-env, which compiles ES modules only when Jest asks for CommonJS (see Notes), and preset-typescript.
 - The `queries/` directory holds one statement per `.sql` file. The module `src/blog.ts` imports them, and so does `src/blog.test.ts`, which also calls one directly. A CommonJS test written by hand reads a query as `require("../queries/get_user.sql").default`; Babel writes that for the TypeScript tests here.
-- The `.env` file sets `DATABASE_URL=file:./app.db`, a path that starts at `package.json`. The type check and the transformer analyze each statement against it, and `src/db.ts` opens the same file.
+- The `.env` file sets `DATABASE_URL=sqlite:./app.db`, a path that starts at `package.json`. The type check and the transformer analyze each statement against it, and `src/db.ts` opens the same file.
 - The `.vscode/` and `.zed/` directories hold the editor settings from [reylo.dev/#editors](https://reylo.dev/#editors), which run the project's TypeScript with content mappers on.
 
 ## In your own project

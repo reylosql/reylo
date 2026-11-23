@@ -4302,6 +4302,11 @@ pub fn nest(col: &DescribedColumn, registry: &crate::pgtypes::TypeRegistry) -> T
     let named = |kind| Type { kind, label: label.clone(), comment: comment.clone(), title: title.clone() };
     match (col.nested, kind) {
         (Some(infer::Nesting { rows, element }), TyKind::Array(array)) => {
+            // The arrays the innermost ones collect are of the type the statement reads them as
+            // (a domain's kept), where their elements are of the type the server described:
+            // `array_append` of an `int4[]` and a `bigint` is an `int8[]`.
+            let base = |oid: u32| registry.get(registry.resolve_domain(oid)).and_then(|t| t.elem);
+            let element = element.map(|oid| if base(oid) == base(col.type_oid) { oid } else { col.type_oid });
             let mut inner = match element {
                 Some(oid) => named(TyKind::Array(level(registry.render_typmod(oid, col.typmod)))),
                 None => with_items(named(TyKind::Array(array)), col.nullable_items),

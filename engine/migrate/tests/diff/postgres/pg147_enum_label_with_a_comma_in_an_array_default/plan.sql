@@ -1,5 +1,4 @@
-alter type mood rename to mood__old;
-create type mood as enum ('a', 'b,c');
-alter table t alter column m type mood[] using m::text[]::mood[];
-drop type mood__old;
+-- file 1 of 2
+alter type mood add value 'b,c' after 'a';
+-- file 2 of 2
 alter table t alter column m set default '{"b,c"}'::mood[];

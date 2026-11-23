@@ -160,7 +160,7 @@ jobs:
     # ...
     env:
       # the path starts at package.json
-      DATABASE_URL: file:./app.db
+      DATABASE_URL: sqlite:./app.db
     steps:
       # ...
       # or your migrations

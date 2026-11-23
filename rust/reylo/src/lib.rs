@@ -18,6 +18,8 @@ pub use reylo_macros::migrate;
 
 mod enums;
 mod exact;
+#[cfg(all(feature = "postgres", feature = "pgvector"))]
+mod vector;
 pub use enums::{Covers, Enum, EnumId, HasLabel, HasLabels, Label, Labels, UnexpectedRow};
 pub use exact::Exact;
 
@@ -49,6 +51,8 @@ pub mod __private {
     pub type ArgumentBuffer<'q, DB> = <DB as sqlx::Database>::ArgumentBuffer<'q>;
 
     pub use futures_core::stream::BoxStream;
+    #[cfg(all(feature = "postgres", feature = "pgvector"))]
+    pub use crate::vector::PgVector;
 
     /// Whether a value of the enum of `a_type` and `a_labels` casts into the enum of `b_type` and
     /// `b_labels`, in a constant: a Postgres enum type's into the same type with the same values in

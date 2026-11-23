@@ -4,18 +4,23 @@ description: "SQL-first schema modeling and migrations for Postgres, SQLite and 
 date: 2026-11-21
 ---
 
-Reylo Migrate is SQL-first schema modeling and migrations for Postgres, SQLite and MySQL.
+Reylo Migrate is SQL-first schema modeling and migrations for Postgres, MySQL and SQLite.
 
 - **Schema in SQL:** model your schema in `schema.sql`
-- **Your whole database:** checks, indexes, triggers, functions, views and more, all tracked
+- **Your whole database:** checks, indexes, triggers, functions, views, policies and more, all tracked
 - **Preflight checks:** each migration is tried on a shadow database before it runs
 - **Strict ordering:** an optional lockfile, `reylo.lock`, fixes the order migrations run in
 
+Compared with the migration tools teams use today:
+
+<CompareTable set="migrate" />
+
 ## Schema modeling
 
-Your schema is plain SQL in one file, not a DSL like Prisma's.
+Your schema is plain SQL in one file, not a lossy DSL like Prisma's. You write it the way you'd write it against the database:
 
 ```sql title="schema.sql"
+-- tables, with check constraints
 create table users (
   id integer primary key,
   email text not null check (email like '%@%'),
@@ -23,19 +28,384 @@ create table users (
   updated_at timestamptz not null default now()
 );
 
+-- partial indexes
 create index users_unverified on users (id) where verified_at is null;
 
+-- custom functions
+create function touch() returns trigger language plpgsql as $$
+begin new.updated_at := now(); return new; end $$;
+
+-- triggers
+create trigger users_touch before update on users
+  for each row execute function touch();
+
+-- views
+create view verified_users as
+  select id, email from users where verified_at is not null;
+```
+
+Change any of it, and `reylo migrate new` writes the migration. It compares every kind of object each database has:
+
+- **Postgres:** tables, columns, constraints (exclusion constraints included), indexes, generated and identity columns, views and materialized views, triggers and event triggers, functions, procedures and aggregates, enums, domains, composite and range types, partitions and table inheritance, row level security policies, sequences, schemas, extensions, grants and default privileges, comments, collations, publications, rules, extended statistics, foreign data wrappers, servers and foreign tables
+- **MySQL:** tables, columns, constraints, indexes, generated columns, views, triggers, functions, procedures, events, enums, partitions, grants and comments
+- **SQLite:** tables (`STRICT` and `WITHOUT ROWID` ones included), columns, constraints, indexes, generated columns, views and triggers
+
+Operators, casts, text search configurations and a few rarer kinds are compared by name only, so you write their changes by hand. Each kind is declared in `schema.sql` as you would on the database:
+
+```sql tab="Tables"
+create table users (
+  id integer primary key,
+  email text not null unique,
+  name text,
+  created_at timestamptz not null default now(),
+  check (email like '%@%')
+);
+
+create table posts (
+  id integer primary key,
+  author_id integer not null references users on delete cascade,
+  title text not null,
+  published_at timestamptz
+);
+```
+
+```sql tab="Indexes"
+create unique index users_email_lower on users (lower(email));
+create index posts_drafts on posts (author_id) where published_at is null;
+create index posts_title_search on posts using gin (to_tsvector('english', title));
+```
+
+```sql tab="Generated columns"
+create table line_items (
+  id bigint generated always as identity primary key,
+  price numeric not null,
+  qty integer not null,
+  total numeric generated always as (price * qty) stored
+);
+```
+
+```sql tab="Views"
+create view big_bookings as
+  select id, room, total from bookings where total > 1000;
+
+create materialized view room_totals as
+  select room, sum(total) as total from bookings group by room;
+create unique index room_totals_room on room_totals (room);
+```
+
+```sql tab="Triggers"
 create function touch() returns trigger language plpgsql as $$
 begin new.updated_at := now(); return new; end $$;
 
 create trigger users_touch before update on users
   for each row execute function touch();
-
-create view verified_users as
-  select id, email from users where verified_at is not null;
 ```
 
-Change any of it, and `reylo migrate new` writes the migration. It tracks enums, domains, generated columns, materialized views, partitions, row level security policies, grants and comments too, on each database that has them.
+```sql tab="Functions"
+create function normalize_email(email text) returns text
+  language sql immutable
+  return lower(trim(email));
+
+create procedure purge_users(before timestamptz)
+  language sql
+  begin atomic
+    delete from users where created_at < before;
+  end;
+
+create aggregate product(numeric) (sfunc = numeric_mul, stype = numeric, initcond = '1');
+```
+
+```sql tab="Types"
+create type mood as enum ('sad', 'ok', 'happy');
+create domain email as text check (value like '%@%');
+create type address as (street text, city text, zip text);
+create type floatrange as range (subtype = float8);
+```
+
+```sql tab="Partitions"
+create table events (
+  id bigint not null,
+  at timestamptz not null,
+  payload jsonb,
+  primary key (id, at)
+) partition by range (at);
+
+create table events_2026 partition of events
+  for values from ('2026-01-01') to ('2027-01-01');
+```
+
+```sql tab="Grants"
+grant select on room_totals to reporting;
+grant select, insert on bookings to app;
+grant update (total) on bookings to app;
+```
+
+```sql tab="Comments"
+comment on table users is 'People who signed up';
+comment on column users.verified_at is 'When they confirmed their email';
+```
+
+```sql tab="Policies"
+alter table documents enable row level security;
+
+create policy documents_own on documents
+  using (owner_id = current_setting('app.user_id')::integer);
+```
+
+```sql tab="Exclusion constraints"
+create extension btree_gist;
+
+create table bookings (
+  room integer not null,
+  during tstzrange not null,
+  exclude using gist (room with =, during with &&)
+);
+```
+
+```sql tab="Sequences"
+create sequence invoice_numbers start 1000 increment 10;
+
+create table invoices (
+  number bigint primary key default nextval('invoice_numbers'),
+  total numeric not null
+);
+```
+
+```sql tab="Schemas"
+create extension citext;
+create schema billing;
+
+create table billing.invoices (id integer primary key, email citext not null);
+```
+
+```sql tab="Default privileges"
+alter default privileges grant select on tables to reporting;
+```
+
+```sql tab="Collations"
+create collation natural_sort (provider = icu, locale = 'en-u-kn-true');
+
+create table files (id integer primary key, name text collate natural_sort not null);
+```
+
+```sql tab="Publications"
+create publication orders_feed for table orders where (status <> 'draft');
+```
+
+```sql tab="Event triggers"
+create function log_ddl() returns event_trigger language plpgsql as $$
+begin raise notice 'ddl: %', tg_tag; end $$;
+
+create event trigger log_ddl on ddl_command_end execute function log_ddl();
+```
+
+```sql tab="Rules"
+create rule accounts_soft_delete as on delete to accounts
+  do instead update accounts set deleted = true where id = old.id;
+```
+
+```sql tab="Statistics"
+create statistics addresses_city_zip (dependencies) on city, zip from addresses;
+```
+
+```sql tab="Foreign tables"
+create extension postgres_fdw;
+
+create server warehouse foreign data wrapper postgres_fdw
+  options (host 'warehouse.internal', dbname 'analytics');
+
+create foreign table remote_orders (id integer, total numeric)
+  server warehouse options (table_name 'orders');
+```
+
+```sql tab="Inheritance"
+create table vehicles (id integer primary key, wheels integer not null);
+create table trucks (payload integer) inherits (vehicles);
+```
+
+```sql tab="MySQL routines"
+create function normalize_email(email varchar(255)) returns varchar(255) deterministic
+  return lower(trim(email));
+
+create procedure purge_users(in cutoff int)
+  delete from users where id < cutoff;
+
+create trigger users_touch before update on users
+  for each row set new.updated_at = now();
+
+create event nightly_purge on schedule every 1 day
+  do call purge_users(0);
+```
+
+```sql tab="SQLite tables"
+create table users (
+  id integer primary key,
+  email text not null unique check (email like '%@%'),
+  created_at text not null default (datetime('now'))
+) strict;
+
+create table tags (name text primary key, color text) without rowid;
+```
+
+<Callout title="Compared with Prisma">
+
+Prisma's schema language is lossy: it describes part of the database, and the rest never reaches the schema file. It has no CHECK constraints, triggers, functions, row level security, grants or comments, and Prisma Migrate ignores a change to a view. Each of those goes into SQL you [add to a migration by hand](https://www.prisma.io/docs/orm/v7/prisma-migrate/workflows/unsupported-database-features).
+
+</Callout>
+
+<Callout title="Compared with Supabase">
+
+Supabase introduced [declarative schemas](https://supabase.com/docs/guides/local-development/declarative-database-schemas) in 2025: plain SQL files in `supabase/schemas/`, diffed into migrations. They work on Postgres, for projects on Supabase. Reylo Migrate takes the same approach to MySQL and SQLite, on any host.
+
+</Callout>
+
+## The most advanced multi-dialect diff engine
+
+Reylo Migrate never guesses what your SQL means from its text. It builds `schema.sql` in one shadow database and your migrations in another, and reads both back from the database's own catalog. The migration it writes is the difference between the two, ordered by the database's own dependency records. Before it writes the file, it runs that migration on a shadow and checks that the result matches `schema.sql`.
+
+So it knows what depends on what you change. Retype a column that a view and a materialized view both read:
+
+```sql title="schema.sql"
+create table bookings (
+  id integer primary key,
+  room integer not null,
+  total integer not null -- [!code --]
+  total bigint not null -- [!code ++]
+);
+
+create view big_bookings as
+  select id, room, total from bookings where total > 1000;
+
+create materialized view room_totals as
+  select room, sum(total) as total from bookings group by room;
+```
+
+Postgres makes that change by copying the whole table, while it blocks every read and write. So Reylo Migrate refuses until you accept it:
+
+```terminal
+$ reylo migrate new widen_total
+✗ This migration rewrites bookings, copying every row while it blocks reads and writes to it
+  On a table with many rows, the app's writes wait for as long as that takes.
+  To change a column without copying its table, add a column, fill it in batches, then swap the two, each step a migration of its own.
+
+  Where the table is small enough to wait for:
+    reylo migrate new widen_total --blocking
+
+Nothing was changed.
+```
+
+With `--blocking`, it writes the migration, taking each view down and putting it back around the change:
+
+```sql title="20261104150000_widen_total.sql"
+drop view big_bookings;
+drop materialized view room_totals;
+alter table bookings alter column total type bigint;
+create view big_bookings as
+  select id, room, total from bookings where total > 1000;
+create materialized view room_totals as
+  select room, sum(total) as total from bookings group by room;
+```
+
+Nothing that loses data is written without your say. Drop the `room` column, and the migration is refused until you name it:
+
+```terminal
+$ reylo migrate new drop_room
+✗ This migration drops the column bookings.room and its data
+
+  To drop it:
+    reylo migrate new drop_room --drop bookings.room
+
+Nothing was changed.
+```
+
+The same care goes into every migration it writes:
+
+- **Lossy type changes** are refused the same way, as when a `numeric` becomes a `bigint` and its values would be rounded.
+- **Renames** are kept as renames, with their rows, where a column is replaced by one just like it.
+- **Constraints and indexes** never block writes on Postgres: a constraint is validated in a migration of its own, and an index is built concurrently.
+- **Locks** on a busy table are given up after half a second and tried again, so the migration doesn't hold up your app's queries.
+
+It works the same way on Postgres, MySQL and SQLite: one schema file, the same commands, the same checks. The migrations differ, because each database changes a schema its own way. Give posts a slug, and require every title to have text:
+
+```sql title="schema.sql"
+create table posts (
+  id integer primary key,
+  author_id integer not null,
+  title text not null,
+  slug text, -- [!code ++]
+  check (title <> ''), -- [!code ++]
+  foreign key (author_id) references users (id)
+);
+```
+
+Each database gets the migration it needs:
+
+```sql tab="Postgres"
+-- 20261104150000_post_slug.sql
+alter table posts add column slug text;
+alter table posts add constraint posts_title_check check (title <> '') not valid;
+
+-- 20261104150001_post_slug_2.sql
+alter table posts validate constraint posts_title_check;
+```
+
+```sql tab="MySQL"
+-- 20261104150000_post_slug.sql
+alter table posts
+  add column slug text,
+  add constraint posts_chk_1 check ((title <> _utf8mb4''));
+```
+
+```sql tab="SQLite"
+-- 20261104150000_post_slug.sql
+create table new_posts (
+  id integer primary key,
+  author_id integer not null,
+  title text not null,
+  slug text,
+  check (title <> ''),
+  foreign key (author_id) references users (id)
+);
+insert into new_posts (id, author_id, title) select id, author_id, title from posts;
+drop table posts;
+alter table new_posts rename to posts;
+```
+
+On Postgres, the check is added `not valid` and validated in a second migration, which reads every row without blocking writes. MySQL commits each schema change on its own, outside any transaction, so each migration is one statement. Here, one `alter table` makes both changes. SQLite can't add a check to a table, so the table is rebuilt with its rows, and so is any table that references it.
+
+The same holds on hosted databases: Supabase, Neon, PlanetScale and Turso among them. A platform's own objects, such as Supabase's `auth.users`, are left alone.
+
+<Callout title="Compared with pg-delta">
+
+Supabase's [pg-delta](https://supabase.com/blog/declarative-schemas-2-0-pg-delta) works the same way: it "never parses SQL to understand it", and resolves every state in a real Postgres. It became the default diff engine of Supabase's CLI this month, and it supports Postgres alone. Reylo Migrate's engine reimplements that design in Rust. It's at parity with pg-delta on Postgres, and carries the same approach to MySQL and SQLite.
+
+</Callout>
+
+<Callout title="Compared with Atlas">
+
+[Atlas](https://atlasgo.io) works out each change on a dev database too, from a schema in SQL or in its own HCL, on several databases. Its free builds leave out views, triggers, functions, policies and more. The [community build](https://atlasgo.io/community-edition) ignores a change to one, and the standard build asks you to log in to [Atlas Pro](https://atlasgo.io/pricing), at $9 per user a month. Drift detection is in Pro too. Reylo Migrate is MIT licensed, with nothing held back for a paid tier.
+
+</Callout>
+
+<Callout title="Compared with Liquibase">
+
+[Liquibase](https://www.liquibase.com) keeps each change as a changeset you write in XML, YAML or SQL, and its `diff-changelog` command writes changesets from the difference between two databases. That diff has no functions, triggers or policies. It writes a renamed column as a drop and an add, which loses the column's rows, and it drops a column without asking. Since 5.0, Liquibase's license is the FSL, which isn't an open source license.
+
+</Callout>
+
+<Callout title="Compared with Prisma and Drizzle">
+
+Prisma and Drizzle Kit write each migration from their own model of the schema, which leaves out what in the database depends on what. Retype a column that a view reads, and both write a bare type change that fails when it runs. Both write a plain `create index`, which blocks writes on a busy table. Prisma writes a renamed column as a drop and an add, which empties it, and Drizzle's `generate` writes a dropped column without asking.
+
+Their most-upvoted open requests are for what `schema.sql` already holds:
+
+- **Triggers:** [drizzle-team/drizzle-orm#843](https://github.com/drizzle-team/drizzle-orm/issues/843), over 500 upvotes
+- **CHECK constraints:** [prisma/orm#3388](https://github.com/prisma/orm/issues/3388), nearly 300
+- **Comments:** [prisma/orm#8703](https://github.com/prisma/orm/issues/8703) and [drizzle-team/drizzle-orm#886](https://github.com/drizzle-team/drizzle-orm/issues/886), over 200 each
+- **Partitions:** [drizzle-team/drizzle-orm#2854](https://github.com/drizzle-team/drizzle-orm/issues/2854) and [prisma/orm#1708](https://github.com/prisma/orm/issues/1708), over 100 each
+- **Generated columns:** [prisma/orm#6336](https://github.com/prisma/orm/issues/6336), over 100
+
+</Callout>
 
 ## Schemaless mode
 
@@ -52,11 +422,33 @@ $ reylo migrate new add_bio
   + column users.bio text
 ```
 
-See the database's schema at any time with `reylo db introspect`.
+You still see the whole schema whenever you want it, printed from the database:
+
+```terminal
+$ reylo db introspect
+create table users (
+  id integer not null,
+  email text not null,
+  bio text,
+  constraint users_pkey primary key (id)
+);
+```
+
+<Callout title="Compared with Rails">
+
+Schemaless mode is how Rails works: migrations are the source of truth, and `schema.rb` is dumped from the database after they run, as `reylo db introspect` prints it. Rails leaves the migration for you to write, where Reylo Migrate can draft it from the change you made to your development database.
+
+</Callout>
+
+<Callout title="Compared with Django">
+
+With a `schema.sql`, Reylo Migrate works the way Django does, where `makemigrations` writes each migration from a change to your models. Django's models stop at what its ORM can declare, so a trigger or a function goes into a hand-written `RunSQL` step. In `schema.sql`, it's one more statement.
+
+</Callout>
 
 ## Migration ordering
 
-An optional lockfile, `reylo.lock`, lists your migrations in order, each with a checksum chained to the one before:
+An optional lockfile, `reylo.lock`, lists your migrations in the order they run, each with a checksum chained to the one before:
 
 ```yaml title="reylo.lock"
 schema: c7bf681b
@@ -65,11 +457,51 @@ migrations:
   - 20261104140347_add_bio.sql 78ad08c0
 ```
 
-Two branches that each add a migration conflict on it in git, before either reaches a database. For a team that writes many migrations, those conflicts add up.
+Two branches that each add a migration conflict on the lock in git, before either reaches a database. The second branch to merge keeps main's lines, then runs `reylo migrate dev`, which runs its migrations after main's and adds them back. Every database then runs every migration in one order, and an edit to a locked migration fails its checksum. On a busy team, though, every two branches that add migrations conflict, even when they touch different tables.
+
+<Callout title="Compared with Drizzle">
+
+Drizzle Kit kept a journal, `meta/_journal.json`, through its 0.x releases, and two branches that each added a migration conflicted on it. Its maintainers called that folder structure "completely unusable due to git incompatibility" in [a 2024 discussion](https://github.com/drizzle-team/drizzle-orm/discussions/2832). Drizzle 1.0, now a release candidate, removes the journal and runs migrations in any order. Some teams want that, and some want the conflict. Reylo Migrate gives each team the choice: keep `reylo.lock` for strict ordering, or delete it.
+
+</Callout>
+
+<Callout title="Compared with other tools">
+
+A file built to make parallel branches conflict is an old idea, and most tools that keep a strict order have one:
+
+| Tool | What holds the order | Two branches that each add a migration |
+| --- | --- | --- |
+| [Sentry](https://github.com/getsentry/sentry/pull/15942), since 2019 | `migrations_lockfile.txt`, each app's newest migration | Conflict in git |
+| [django-linear-migrations](https://github.com/adamchainz/django-linear-migrations) | `max_migration.txt`, each app's newest migration | Conflict in git, fixed by its `rebase_migration` command |
+| [Atlas](https://atlasgo.io/concepts/migration-directory-integrity) | `atlas.sum`, a hash of every file | Conflict in git, fixed by `atlas migrate rebase` |
+| [Rails](https://github.com/rails/rails/issues/41128) | The newest version, in `schema.rb` | Conflict in git |
+| [Sqitch](https://github.com/sqitchers/sqitch/blob/b08e5c8a773ee4ab5ea4ab7cf6f7a16c55d6994e/lib/sqitchtutorial.pod#L1185-L1210) | `sqitch.plan`, every change in order | Conflict in git, which its own tutorial turns off with git's union merge |
+| [EF Core 11](https://github.com/dotnet/efcore/issues/37688) | The newest migration's ID, in the model snapshot | Conflict in git, new in 2026 |
+| [Django](https://docs.djangoproject.com/en/5.2/ref/django-admin/#cmdoption-makemigrations-merge), [Alembic](https://alembic.sqlalchemy.org/en/latest/branches.html) | Each migration names its parent | Refused when migrations next run, until a merge migration joins them |
+| [Prisma](https://www.prisma.io/docs/guides/v7/database/schema-changes) | Folder names, with `migration_lock.toml` holding only the database provider | No conflict in git |
+| [Drizzle 1.0](https://github.com/drizzle-team/drizzle-orm/releases/tag/v1.0.0-beta.16), [dbmate](https://github.com/amacneil/dbmate/issues/159#issuecomment-698449138) | Nothing | Run in any order |
+
+[Zenefits wrote the pattern up in 2015](https://web.archive.org/web/20180520172740/https://engineering.zenefits.com/2015/11/using-old-ideas-to-solve-new-problems/), after migrations from parallel branches kept merging cleanly in git and then breaking the main branch. It went "from having four merge errors every week to having none". The tools without such a file take the other side of the trade: their branches never conflict, so a collision shows up when the migrations run, or not at all. Even Rails, when it added a full list of versions to `schema.rb` in 2026, sorted the list so that parallel branches wouldn't conflict on it ([rails/rails#58166](https://github.com/rails/rails/pull/58166)).
+
+</Callout>
 
 ## Lock-free integrity
 
-Delete `reylo.lock`, and migrations run in name order until `reylo migrate lock` writes it again.
+Delete `reylo.lock`, and migrations run in name order:
+
+```terminal
+$ reylo migrate status
+Migrations on postgres://localhost:5432/app
+  ✓ 20261104120000_users.sql    applied 2026-11-04 12:00 UTC
+  ✓ 20261104140347_add_bio.sql  applied 2026-11-04 14:03 UTC
+✓ Unchanged since its last migration
+» With no lock, migrations run in name order
+  To write one:
+    reylo migrate lock
+» With no lock to hold its checksum, reylo/schema.sql is checked against the migrations by a dry run
+  To check it:
+    reylo migrate deploy --dry-run
+```
 
 Without a lock, a merged migration can sort before one a database already ran. Reylo replays both orders on a shadow database, and refuses where they end differently:
 
@@ -88,6 +520,26 @@ $ reylo migrate deploy
 Nothing was changed.
 ```
 
+To go back to strict ordering, write the lock again from the order your database ran its migrations in:
+
+```terminal
+$ reylo migrate lock
+✓ Wrote reylo/reylo.lock: 2 migrations, in the order this database ran them
+✓ The migrations match reylo/schema.sql
+```
+
+<Callout title="Compared with Kysely">
+
+[Kysely's migrator](https://github.com/kysely-org/kysely/blob/master/src/migration/migrator.ts) refuses any migration that sorts before one already run. With `allowUnorderedMigrations` on, it runs every one of them without a check. Reylo Migrate checks whether the order changes the result, and refuses only where it does.
+
+</Callout>
+
+<Callout title="Compared with Flyway">
+
+[Flyway's `outOfOrder` setting](https://documentation.red-gate.com/fd/flyway-out-of-order-setting-277579015.html) is the same switch. Off, the default, a migration that sorts before one already run fails validation, and nothing runs. On, it runs, and Flyway warns that the migration "may not be reproducible".
+
+</Callout>
+
 ## A typical workflow
 
 Write a migration, run it in development, then deploy it:
@@ -96,8 +548,65 @@ Write a migration, run it in development, then deploy it:
 reylo migrate new add_bio    # write the next migration, from schema.sql
 reylo migrate dev            # run it on your development database
 reylo migrate deploy         # run what the lock lists, when you deploy
+```
 
-reylo db push --watch        # or, while you prototype, push schema.sql on every save
+The two commands that run migrations do different jobs. In development, `reylo migrate dev` takes your database to whatever the current branch holds. Switch branches, and it rewinds what the other branch ran before it runs what's new:
+
+```terminal
+$ git switch feature-b
+Switched to branch 'feature-b'
+
+$ reylo migrate dev
+Applying to postgres://localhost:5432/app
+  ↺ 20261104120000_add_tags.sql   rewound: it isn't in the migrations
+    ! Dropped tags (3 rows)
+  ✓ 20261104130000_add_posts.sql  applied · 43 ms
+✓ Wrote reylo/reylo.lock
+```
+
+In production, `reylo migrate deploy` runs only what the lock lists, and needs no shadow database. It stores a fingerprint of the schema with each migration, so it refuses a database someone changed by hand:
+
+```terminal
+$ reylo migrate deploy
+✗ This database was changed outside its migrations
+
+  + column users.hotfix bigint
+
+  If a migration makes this change, record it here, running nothing:
+    reylo migrate history push
+  If none does, write one and run it in development, then record it here:
+    reylo migrate new <name>
+    reylo migrate dev
+    reylo migrate history push
+  To see which migrations it matches:
+    reylo migrate deploy --dry-run
+
+Nothing was changed.
+```
+
+While you prototype, skip the migration. The `reylo db push` command takes your development database straight to `schema.sql`, and `--watch` pushes again on every save:
+
+```terminal
+$ reylo db push
+Pushing reylo/schema.sql to postgres://localhost:5432/app
+  + alter table users add column bio text;
+✓ This database matches reylo/schema.sql
+
+$ reylo db push --watch
+Watching reylo/schema.sql and reylo/migrations: each save pushes again (Ctrl-C stops)
+```
+
+Once the change is right, write its migration. Your development database already has it, so `reylo migrate dev` records it without running it again:
+
+```terminal
+$ reylo migrate new add_bio
+✓ Wrote reylo/migrations/20261104140347_add_bio.sql
+  + column users.bio text
+
+$ reylo migrate dev
+Applying to postgres://localhost:5432/app
+  + 20261104140347_add_bio.sql  recorded: already in place
+✓ Wrote reylo/reylo.lock
 ```
 
 ## Get started
@@ -107,7 +616,8 @@ Reylo Migrate completes the Reylo toolkit. Reylo infers types from SQL queries, 
 Start from your existing database:
 
 ```bash tab="npm"
-npx reylo migrate init
+npm i -g reylo
+reylo migrate init
 ```
 
 ```bash tab="Homebrew"

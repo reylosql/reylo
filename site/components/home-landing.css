@@ -69,7 +69,8 @@
 }
 
 .dark .rh-star-note {
-  filter: drop-shadow(0 0 5px rgb(255 184 0 / 0.5));
+  color: #ffd43b;
+  filter: var(--saber-glow);
 }
 
 /* ── Code ── */
@@ -160,7 +161,7 @@
 
 .rh-switch button[data-state='active'] {
   color: var(--color-fd-primary);
-  background: color-mix(in oklab, var(--color-fd-primary) 14%, transparent);
+  background: color-mix(in oklab, var(--dk-accent) 14%, transparent);
 }
 
 /* A table's name in a statement: a dotted underline, as Twoslash marks what it can show; on hover or
@@ -262,6 +263,12 @@
   white-space: nowrap;
 }
 
+/* The Migrate landing's headline, "SQL-first schema and migrations.", whose yellow line is too long to
+   keep whole: it wraps into two, three lines in all, as the homepage's are. */
+.rh-h1.ml-h1-migrate em {
+  white-space: normal;
+}
+
 /* The headline is three lines, each kept whole, at the size that fits its longest, "into
    TypeScript," (6.66 times the font size), in the words' column: never a fourth line, at any width. */
 .rh .ml-hero-words {
@@ -351,6 +358,7 @@
   font-size: 2.75rem;
   font-weight: 600;
   letter-spacing: -0.03em;
+  text-wrap: balance;
 }
 
 .rh-section-head p {
@@ -358,6 +366,34 @@
   font-size: 1.1875rem;
   color: var(--color-fd-muted-foreground);
   text-wrap: balance;
+}
+
+/* The blade under each heading, 72 by 3px, about a lightsaber's proportions, in the yellow, lit by
+   night with the strongest of the saber glows (app/global.css). Its margins put it halfway, by eye,
+   between the heading's baseline and the sentence's lowercase under it. */
+.rh-blade {
+  display: block;
+  width: 4.5rem;
+  height: 3px;
+  margin: 1rem auto 0;
+  border-radius: 999px;
+  background: var(--dk-accent);
+}
+
+.dark .rh-blade {
+  filter: var(--saber-glow-strongest);
+}
+
+.rh-section-head .rh-blade + p {
+  margin-top: 0.78125rem;
+}
+
+.rh-end h2 {
+  margin-bottom: 0;
+}
+
+.rh-end .rh-blade {
+  margin-bottom: 2.5rem;
 }
 
 /* One card, centred, as wide as the docs' column: the examples' names as tabs across its top, in
@@ -399,9 +435,9 @@
 }
 
 .rh-ex-caption {
-  margin: 0.875rem 0 0;
+  margin: 0.75rem 0 0;
   text-align: center;
-  font-size: 0.9375rem;
+  font-size: 0.8125rem;
   color: var(--color-fd-muted-foreground);
   text-wrap: balance;
 }
@@ -530,6 +566,16 @@
   line-height: 2.125rem;
 }
 
+/* The Migrate landing's rows, whose 1.08 and 1.6 line heights fell between pixels and left the icons in
+   their windows' bars a pixel low. */
+.rh .ml-row-text h2 {
+  line-height: 3rem;
+}
+
+.rh .ml-row-text p {
+  line-height: 1.875rem;
+}
+
 .rh .ml-seg button {
   line-height: 1.25rem;
 }
@@ -552,15 +598,11 @@
 }
 
 /* ── Optical nudges, each measured with ink-align.mjs on 2026-11-19 ──
-   main.ts's icon in hero B sat 1.06px low (a 0.5px lift lands it, the svg snapping on its own); the
-   arrow of a centred "Get started" (4rem tall, 17px) 1.3px low. */
+   main.ts's icon in hero B sat 1.06px low (a 0.5px lift lands it, the svg snapping on its own). */
 .rh-import-ts .ml-bar svg {
   translate: 0 -0.5px;
 }
 
-.rh .ml-centered .ml-docs-primary svg {
-  translate: 0 -0.94px;
-}
 
 /* ── Narrower windows ── */
 @media (max-width: 1023px) {
@@ -582,6 +624,11 @@
 @media (max-width: 639px) {
   .rh-links > a:not(:first-child) {
     display: none;
+  }
+
+  /* Reylo Migrate's wordmark is nearly twice as wide as Reylo's, so it is smaller there to leave room. */
+  .ml-wordmark svg[aria-label='Reylo Migrate'] {
+    height: 1.125rem;
   }
 
 }

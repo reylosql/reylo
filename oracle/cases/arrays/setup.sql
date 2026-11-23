@@ -10,3 +10,5 @@ create table lists (id int primary key, x int_list, y int_list not null default 
 -- Cast or computed to its base type, the domain's array is an array again, which an array of it
 -- nests a level deeper.
 insert into lists values (1, '{1,NULL}', '{2}');
+create table grouped (x text not null, k text not null);
+insert into grouped values ('a', 'b');

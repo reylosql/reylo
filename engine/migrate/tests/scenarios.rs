@@ -366,6 +366,16 @@ fn same_run(out: &str) -> String {
 
 /// Drops the replay caches only this test's target used, which would otherwise stay on the test
 /// server for a week.
+/// `db introspect`'s SQL, which the test expects it to write.
+async fn introspect(opts: &Options) -> String {
+    let mut said = Vec::new();
+    match reylo_migrate::db_introspect(opts, &[], &mut |l: &str| said.push(l.to_string())).await {
+        Ok(Ok(sql)) => sql,
+        Ok(Err(_)) => panic!("introspect refused:\n{}", said.join("\n")),
+        Err(e) => panic!("introspect: {e}"),
+    }
+}
+
 async fn forget(url: &str) {
     let _ = reylo_migrate::cache::forget(url).await;
 }
@@ -904,7 +914,7 @@ async fn db_push_refuses_a_schema_that_declares_nothing(mut p: P) {
     p.schema("-- emptied\n\n");
     p.output();
     assert_eq!(p.db_push().await, 1);
-    assert_has!(p.output(), r"✗ Nothing is declared in \S*schema\.sql\n  Taking this database to it would drop every table, with its rows\.");
+    assert_has!(p.output(), r"✗ Nothing is declared in \S*schema\.sql\n  Synchronizing this database with it would drop every table, with its rows\.");
     assert_eq!(p.rows("select name from users").await.len(), 1);
 }
 
@@ -1281,9 +1291,9 @@ async fn db_introspect_prints_the_schema(p: P) {
     let int = p.t.int;
     // A SQLite file is made by opening it: introspect refuses one that isn't there.
     p.exec("select 1").await;
-    assert_eq!(reylo_migrate::db_introspect(&p.opts(), &[]).await.unwrap(), "", "an empty database has no schema");
+    assert_eq!(introspect(&p.opts()).await, "", "an empty database has no schema");
     p.exec(&format!("create table hand_made (id {int});")).await;
-    let text = reylo_migrate::db_introspect(&p.opts(), &[]).await.unwrap();
+    let text = introspect(&p.opts()).await;
     assert!(has(&text, "(?i)create table .*hand_made"), "{text}");
     assert!(!p.dir.join("schema.sql").exists(), "it writes no file");
 }
@@ -1507,7 +1517,7 @@ async fn a_server_that_ran_what_a_hotfix_moved_ahead_of_takes_its_change(mut p: 
     p.file(email, "create index users_email on users (email);");
     p.lock(&[users, email, nick]);
     p.output();
-    let refused = r"✗ This database applied 20261027120000_nick_index\.sql where \S*reylo\.lock lists 20261027130000_email_index\.sql\n  Every database runs the migrations in the lock's order, and this one ran 20261027120000_nick_index\.sql without 20261027130000_email_index\.sql, which the lock runs first\.\n\n  On a development database, take it to the lock's order:\n    reylo migrate dev\n  On any other, make its change there too, then record both, running nothing:\n    reylo run --url <url> --file \S+20261027130000_email_index\.sql\n    reylo migrate history push --url <url>";
+    let refused = r"✗ This database applied 20261027120000_nick_index\.sql where \S*reylo\.lock lists 20261027130000_email_index\.sql\n  Every database runs the migrations in the lock's order, and this one ran 20261027120000_nick_index\.sql without 20261027130000_email_index\.sql, which the lock runs first\.\n\n  On a development database, apply them in the lock's order:\n    reylo migrate dev\n  On any other, make its change there too, then record both, running nothing:\n    reylo run --url <url> --file \S+20261027130000_email_index\.sql\n    reylo migrate history push --url <url>";
     assert_eq!(p.migrate().await, 1);
     assert_has!(p.output(), refused);
     assert_eq!(p.status().await, 1);
@@ -1630,6 +1640,8 @@ async fn a_failed_migration_leaves_nothing(mut p: P) {
     p.file("20261027110000_b.sql", &format!("create table b (id {int}); alter table a {change};"));
     p.schema(&format!("create table a (id {int}{column}); create table b (id {int});"));
     assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    // Said as every refusal is: what failed, that nothing of it stays, and what to run next.
+    assert_has!(p.output(), r"  ✗ 20261027110000_b\.sql  failed\n\n✗ The migration 20261027110000_b\.sql failed and was rolled back\n  [^\n]+\n  Nothing was recorded, so the next deploy runs it again\.\n\n  Fix the file, lock the fix and deploy again:\n    reylo migrate dev\n    reylo migrate deploy\n  If another database already ran it, write a new migration instead:\n    reylo migrate new <name>$");
     assert!(p.try_rows("select 1 from b").await.is_err(), "b rolled back with the file");
     assert_eq!(p.history().await, ["20261027100000_a.sql"]);
 }
@@ -1719,7 +1731,7 @@ async fn a_lone_statement_cut_off_with_no_fingerprint_to_compare(mut p: P) {
     p.output();
     // Run again, it fails where it landed, and says how to find out.
     assert_eq!(p.migrate().await, 1);
-    assert_has!(p.output(), r"✗ 20261027110000_index\.sql  failed[^\n]*\n[\s\S]*A run before this one was cut off here, so its change may be in place\n    See whether it is:\n      reylo migrate deploy --dry-run\n    Record it if it is, running nothing:\n      reylo migrate history push");
+    assert_has!(p.output(), r"✗ 20261027110000_index\.sql  failed\n[\s\S]*A run before this one was cut off here, so its change may be in place\.\n\n  See whether it is:\n    reylo migrate deploy --dry-run\n  Record it if it is, running nothing:\n    reylo migrate history push");
     assert_eq!(p.dry_run().await, 1);
     assert_has!(p.output(), r"20261027110000_index\.sql makes exactly this change[^\n]*\n    reylo migrate history push");
     assert_eq!(p.history_push().await, 0, "{}", p.peek());
@@ -2178,7 +2190,10 @@ async fn create_lists_every_rename_it_assumes(mut p: P) {
     p.output();
     p.schema(&format!("create table users (id {id}, about {text}); create table posts (id {id}, heading {text});"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "names", &Default::default(), log).await).await, 0, "{}", p.peek());
-    assert_has!(p.output(), r"  ! Written as renames, keeping their rows:\n      posts\.title → heading\n      users\.bio   → about\n    Where any aren't renames, delete the file, then:\n      reylo migrate new [a-z_]+ --drop posts\.title,users\.bio");
+    let out = p.output();
+    assert_has!(&out, r"\n  ~ column posts\.\[-title-\]\{\+heading\+\} ");
+    assert_has!(&out, r"\n  ~ column users\.\[-bio-\]\{\+about\+\} ");
+    assert_has!(&out, r"  ! Written as renames, keeping their rows\n    Where any aren't renames, delete the file, then:\n      reylo migrate new [a-z_]+ --drop posts\.title,users\.bio");
 }
 
 /// What a suggested `reylo migrate new` line states.
@@ -2202,7 +2217,7 @@ fn choices_of(line: &str) -> reylo_migrate::Choices {
 /// The command a refusal of several guesses prints for adding flags to, with the flags of each line
 /// it picks: the rename on the left, where `keep` says, else the drop on the right.
 fn picked(out: &str, keep: impl Fn(usize) -> bool) -> String {
-    let rows: Vec<&str> = out.lines().skip_while(|l| !l.contains("For each, rename to keep its rows")).skip(1).take_while(|l| l.starts_with("    --")).collect();
+    let rows: Vec<&str> = out.lines().skip_while(|l| !l.contains("For each, rename it to keep its rows")).skip(1).take_while(|l| l.starts_with("    --")).collect();
     let base: Vec<&str> = out.lines().skip_while(|l| !l.contains("Add the flags you picked to")).skip(1).take_while(|l| l.starts_with("    ")).collect();
     assert!(!rows.is_empty() && !base.is_empty(), "{out}");
     let flags: Vec<&str> = rows
@@ -2230,7 +2245,7 @@ async fn create_settles_every_guess_with_one_command(mut p: P) {
     p.schema(&format!("create table users (id {id}, handle {long}); create table invoices (id {id}, a {text}, b {text}, c {text}, total {int}); create table posts (id {id});"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tidy", &Default::default(), log).await).await, 1);
     let out = p.output();
-    assert_has!(&out, r"✗ This migration can't tell renames from new tables and columns\n\n    orders     → invoices  adds total, drops legacy\n    users\.nick → handle    [^\n]+\n\n  It also drops the columns posts\.old_a and posts\.old_b, with their data\.\n\n  For each, rename to keep its rows, or drop it:\n    --rename orders=invoices --drop invoices\.legacy   or   --drop orders\n    --rename users\.nick=handle                        or   --drop users\.nick\n  Add the flags you picked to:\n    reylo migrate new tidy --drop posts\.old_a,posts\.old_b\n");
+    assert_has!(&out, r"✗ This migration can't tell renames from new tables and columns\n\n    - table orders\n    \+ table invoices\n    - column orders\.legacy [^\n]+\n    \+ column invoices\.total [^\n]+\n    - column users\.nick [^\n]+\n    \+ column users\.handle [^\n]+\n\n  It also drops the columns posts\.old_a and posts\.old_b, with their data\.\n\n  For each, rename it to keep its rows, or drop it and add the new one:\n    --rename orders=invoices --drop invoices\.legacy   or   --drop orders\n    --rename users\.nick=handle                        or   --drop users\.nick\n  Add the flags you picked to:\n    reylo migrate new tidy --drop posts\.old_a,posts\.old_b\n");
     let (keeps, drops) = (picked(&out, |_| true), picked(&out, |_| false));
     let made = |p: &P| p.files().into_iter().filter(|f| f.contains("_tidy")).collect::<Vec<_>>();
     // The second command, as printed, is one the next create takes.
@@ -2263,11 +2278,11 @@ async fn create_asks_about_a_column_replaced_by_one_of_another_type(mut p: P) {
     p.schema(&format!("create table users (id {id}, label {text});"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "label", &Default::default(), log).await).await, 1);
     let out = p.output();
-    assert_has!(&out, r"✗ This migration can't tell a rename from a new column\n\n    users\.score → label  [^\n]+ → [^\n]+\n\n  If it is a rename, keeping its rows:\n    reylo migrate new label --rename users\.score=label\n  If it is new, dropping the old one and its data:\n    reylo migrate new label --drop users\.score\n");
+    assert_has!(&out, r"✗ This migration can't tell a rename from a new column\n\n    - column users\.score [^\n]+\n    \+ column users\.label [^\n]+\n\n  To rename the column, keeping its rows:\n    reylo migrate new label --rename users\.score=label\n  To drop the column and its data, and add a new one:\n    reylo migrate new label --drop users\.score\n");
     assert!(p.files().iter().all(|f| !f.contains("_label")), "nothing is written");
     let command = |out: &str, after: &str| out.lines().skip_while(|l| !l.contains(after)).skip(1).take_while(|l| l.starts_with("    ")).collect::<Vec<_>>().join("\n");
     // Taken as new, the old column is dropped.
-    let choices = choices_of(&command(&out, "If it is new"));
+    let choices = choices_of(&command(&out, "To drop the column"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "label", &choices, log).await).await, 0, "{}", p.peek());
     for f in p.files().into_iter().filter(|f| f.contains("_label")) {
         std::fs::remove_file(p.dir.join("migrations").join(f)).unwrap();
@@ -2275,9 +2290,9 @@ async fn create_asks_about_a_column_replaced_by_one_of_another_type(mut p: P) {
     p.output();
     // Taken as a rename, its values are converted, keeping its rows; on Postgres that rewrites the
     // table, which --blocking accepts.
-    let choices = reylo_migrate::Choices { blocking: true, ..choices_of(&command(&out, "If it is a rename")) };
+    let choices = reylo_migrate::Choices { blocking: true, ..choices_of(&command(&out, "To rename the column")) };
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "label", &choices, log).await).await, 0, "{}", p.peek());
-    p.output();
+    assert_has!(p.output(), r"\n  ~ column users\.\[-score-\]\{\+label\+\} ");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_eq!(p.rows("select label from users").await[0].text("label"), "7");
     p.output();
@@ -2319,7 +2334,7 @@ async fn commands_create_prints_for_names_with_spaces_run_as_printed(mut p: P) {
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "names", &Default::default(), log).await).await, 1);
     let out = p.output();
     let command = |out: &str, after: &str| out.lines().skip_while(|l| !l.contains(after)).skip(1).take_while(|l| l.starts_with("    ")).collect::<Vec<_>>().join("\n");
-    let (keeps, drops) = (command(&out, "If it is a rename"), command(&out, "If it is new"));
+    let (keeps, drops) = (command(&out, "To rename the column"), command(&out, "To drop the column"));
     let choices = choices_of_shell(&drops);
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "names", &choices, log).await).await, 0, "{drops}\n{}", p.peek());
     for f in p.files().into_iter().filter(|f| f.contains("_names")) {
@@ -2482,7 +2497,9 @@ async fn create_renames_a_table_keeping_its_rows(mut p: P) {
     // One table goes while one of its columns comes: renamed, and the foreign key on it follows.
     p.schema(&format!("create table accounts (id {id}, email {text}); create table posts (id {int}, user_id {int}, foreign key (user_id) references accounts (id));"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "accounts", &Default::default(), log).await).await, 0, "{}", p.peek());
-    assert_has!(p.output(), r"✓ Wrote [^\n]+\n(?:  [-+] [^\n]+\n)*  ! Written as a rename, keeping its rows: users → accounts\n    If they're different tables, delete the file, then:");
+    let out = p.output();
+    assert_has!(&out, r"✓ Wrote [^\n]+\n  ~ table \[-users-\]\{\+accounts\+\}[^\n]*\n(?:  [-+~] [^\n]+\n)*\n  ! Written as a rename, keeping its rows\n    If they're different tables, delete the file, then:");
+    assert!(!out.contains("column users.email") && !out.contains("column accounts.email"), "a column that only moves with its table isn't listed: {out}");
     let sql = sql_of(&p, "accounts");
     assert!(sql.contains("rename to accounts") && !sql.contains("drop table"), "{sql}");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
@@ -2496,6 +2513,12 @@ async fn create_renames_a_table_keeping_its_rows(mut p: P) {
     assert_has!(p.output(), r"drops the table accounts and its rows\n\n  To drop it:\n    reylo migrate new members --drop accounts\n  If it was renamed instead, as members:\n    reylo migrate new members --rename accounts=<new name>");
     let choices = reylo_migrate::Choices { drop: vec![], rename: vec![("accounts".into(), "members".into()), ("accounts.email".into(), "address".into())], ..Default::default() };
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "members", &choices, log).await).await, 0, "{}", p.peek());
+    // Both renames read as renames, the column's under the table's new name, named as --rename names
+    // it through the table's old name.
+    let out = p.output();
+    assert_has!(&out, r"  ~ table \[-accounts-\]\{\+members\+\}\n");
+    assert_has!(&out, r"  ~ column members\.\[-email-\]\{\+address\+\} ");
+    assert!(!out.contains("column members.address") && !out.contains("column accounts.email") && !out.contains("column members.email"), "{out}");
     p.output();
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_eq!(p.rows("select address from members").await[0].text("address"), "a");
@@ -2844,7 +2867,7 @@ async fn create_assumes_a_rename_where_one_goes_and_one_comes(mut p: P) {
     p.schema(&format!("create table users (id {id}, handle {long}); create table members (id {int}, email {short}, name {short}, joined {int});"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "renames", &Default::default(), log).await).await, 1);
     let out = p.output();
-    assert_has!(&out, r"✗ This migration can't tell renames from new tables and columns\n\n    accounts   → members  adds joined\n    users\.nick → handle   [^\n]+ → [^\n]+\n\n  For each, rename to keep its rows, or drop it:\n    --rename accounts=members    or   --drop accounts\n    --rename users\.nick=handle   or   --drop users\.nick\n  Add the flags you picked to:\n    reylo migrate new renames\n\nNothing was changed\.");
+    assert_has!(&out, r"✗ This migration can't tell renames from new tables and columns\n\n    - table accounts\n    \+ table members\n    \+ column members\.joined [^\n]+\n    - column users\.nick [^\n]+\n    \+ column users\.handle [^\n]+\n\n  For each, rename it to keep its rows, or drop it and add the new one:\n    --rename accounts=members    or   --drop accounts\n    --rename users\.nick=handle   or   --drop users\.nick\n  Add the flags you picked to:\n    reylo migrate new renames\n\nNothing was changed\.");
     assert_eq!(p.files().len(), 2, "nothing is written");
     // The second command, which takes them for new ones.
     let choices = reylo_migrate::Choices { drop: vec!["accounts".into(), "users.nick".into()], rename: vec![], ..Default::default() };
@@ -3039,7 +3062,7 @@ async fn create_states_what_it_drops_and_renames(mut p: P) {
     // Dropping one leaves the other alone with its definition: renamed, keeping its rows.
     let choices = create(&["users.legacy"], &[]);
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tidy", &choices, log).await).await, 0, "{}", p.peek());
-    assert_has!(p.output(), r"  ! Written as a rename, keeping its rows: users\.middle_name → nickname\n    If they're different columns, delete the file, then:\n      reylo migrate new tidy --drop users\.legacy,users\.middle_name");
+    assert_has!(p.output(), r"  ~ column users\.\[-middle_name-\]\{\+nickname\+\}[^\n]*\n(?:  [-+~] [^\n]+\n)*\n(?:  ! [^\n]+\n)*  ! Written as a rename, keeping its rows\n    If they're different columns, delete the file, then:\n      reylo migrate new tidy --drop users\.legacy,users\.middle_name");
     let sql = made(&p).iter().map(|f| std::fs::read_to_string(p.dir.join("migrations").join(f)).unwrap()).collect::<String>();
     assert!(sql.contains("rename column middle_name to nickname") && sql.contains("drop column legacy"), "{sql}");
     take_back(&p);
@@ -3202,6 +3225,7 @@ on!(
     a_migration_that_creates_a_role_is_refused,
     an_object_the_comparison_does_not_read_is_not_a_match,
     a_failed_concurrent_index_leaves_nothing,
+    a_failed_lone_statement_may_leave_its_change,
     a_platforms_objects_are_left_out,
     reylo_run_runs_inline_sql_and_files,
     history_push_leaves_a_data_migration_pending,
@@ -3227,6 +3251,21 @@ on!(
     a_projects_extension_in_pg_catalog_is_written,
     a_hypertable_is_said_to_be_unread,
     a_dump_makes_a_schema_its_extensions_share_once,
+    init_introspect_and_new_need_no_pg_dump,
+    introspect_with_no_check_and_no_pg_dump_says_how_to_get_one,
+    init_reads_every_schema_a_view_crosses,
+    introspect_of_some_schemas_is_their_dump,
+    the_dump_reads_a_schema_named_with_capitals,
+    new_without_schema_sql_replays_beside_the_environments_extensions,
+    new_without_schema_sql_makes_an_extension_added_by_hand,
+    new_lists_none_of_an_extensions_own_objects,
+    new_without_schema_sql_keeps_only_the_extensions_the_history_needs,
+    new_without_schema_sql_makes_an_extension_no_migration_uses,
+    new_without_schema_sql_keeps_an_extension_a_migration_branches_on,
+    new_without_schema_sql_makes_an_extension_beside_two_the_history_needs_either_of,
+    new_without_schema_sql_refuses_an_extension_in_a_schema_a_migration_renamed,
+    new_without_schema_sql_makes_an_extension_in_a_schema_a_migration_makes,
+    a_pushed_extension_is_recorded_once_its_migration_makes_it,
     an_extension_in_a_projects_schema_is_the_projects_whoever_owns_it,
     an_extension_a_platform_role_owns_in_a_projects_schema_is_the_projects,
     init_writes_the_privileges_on_an_extensions_schema,
@@ -3278,6 +3317,9 @@ on!(
     a_renamed_tables_sequence_keeps_counting,
     a_table_renamed_as_it_gains_a_column_keeps_its_rows_and_index,
     an_enum_label_a_partition_uses_is_committed_first,
+    an_enum_label_a_default_uses_is_committed_first,
+    a_push_that_fails_past_an_enum_commit_keeps_what_it_drops,
+    a_push_that_fails_past_an_enum_commit_undoes_its_renames,
     a_foreign_table_is_renamed_as_stated,
     a_partitioned_table_is_renamed_with_its_partitions,
     a_table_renamed_onto_a_views_name_drops_the_view_first,
@@ -3469,7 +3511,7 @@ mod adversarial {
         assert_eq!(reylo_migrate::init(&opts, &[], &mut |l: &str| out.push(l.to_string())).await.unwrap_or_else(|e| panic!("init: {e}")), 0, "{}", out.join("\n"));
         let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
         assert!(schema.starts_with("create table users (") && !schema.contains("cloud_admin"), "{schema}");
-        assert_eq!(reylo_migrate::db_introspect(&opts, &[]).await.unwrap(), schema);
+        assert_eq!(introspect(&opts).await, schema);
         p.strict = true;
         assert_eq!(p.status().await, 0, "{}", p.peek());
         p.output();
@@ -3512,9 +3554,312 @@ mod adversarial {
         // A shadows' server that answers nothing leaves the dump, with no role made for it: a new
         // role would change every replay cache's key on the server under the scenarios beside it.
         let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
-        let text = reylo_migrate::db_introspect(&opts, &[]).await.unwrap();
+        let text = introspect(&opts).await;
         assert_eq!(text.matches("CREATE SCHEMA IF NOT EXISTS extensions").count(), 1, "{text}");
         assert!(text.contains("CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA extensions") && text.contains("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions"), "{text}");
+    }
+
+    /// With no pg_dump anywhere, init, introspect and a `migrate new` with no schema.sql write Reylo's
+    /// own SQL, checked against the database on a shadow: only the dump they fall back on needs one.
+    pub async fn init_introspect_and_new_need_no_pg_dump(mut p: P) {
+        reylo_migrate::db::set_pg_dump_dirs(Some(vec![]));
+        p.exec("create table users (id int primary key, email text not null); create view emails as select email from users").await;
+        let text = introspect(&p.opts()).await;
+        assert_has!(text.clone(), r"create table users \(");
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        assert_eq!(std::fs::read_to_string(p.dir.join("schema.sql")).unwrap(), text);
+        assert_eq!(p.history().await, ["init.sql"]);
+        // With no schema.sql, the migration is what the database has beyond the migrations.
+        std::fs::remove_file(p.dir.join("schema.sql")).unwrap();
+        p.exec("alter table users add column bio text").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "bio", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_bio.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap(), r"(?i)add column bio text");
+        reylo_migrate::db::set_pg_dump_dirs(None);
+    }
+
+    /// Where Reylo's own SQL can't be checked (no shadow database can be made here) and no pg_dump can
+    /// dump the database instead, introspect says why, what it found and how to get one.
+    pub async fn introspect_with_no_check_and_no_pg_dump_says_how_to_get_one(p: P) {
+        p.exec("create table users (id int primary key)").await;
+        let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
+        let mut dirs = vec![];
+        // A pg_dump too old to read the server, which is named.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let bin = p.dir.join("old-bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("pg_dump"), "#!/bin/sh\necho 'pg_dump (PostgreSQL) 9.6.24'\n").unwrap();
+            std::fs::set_permissions(bin.join("pg_dump"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            dirs.push(bin);
+        }
+        reylo_migrate::db::set_pg_dump_dirs(Some(dirs));
+        let mut said = Vec::new();
+        let result = reylo_migrate::db_introspect(&opts, &[], &mut |l: &str| said.push(l.to_string())).await;
+        reylo_migrate::db::set_pg_dump_dirs(None);
+        let said = said.join("\n");
+        assert!(matches!(result, Ok(Err(1))), "{said}");
+        assert_has!(said.clone(), r"^✗ Writing this schema as SQL needs pg_dump (\d+) or newer\n  No shadow database can be made to check Reylo's own SQL for it: ");
+        #[cfg(unix)]
+        assert_has!(said.clone(), r"\n  The pg_dump at \S+/old-bin/pg_dump is version 9, which can't read Postgres \d+\n");
+        assert_has!(said.clone(), r"\n  Reylo looks for it in PGBIN, then where Postgres installs it, then on PATH\.\n");
+        assert_has!(said, r"\n  Install pg_dump \d+, then run it again:\n    \S[^\n]*\n\nNothing was changed\.$");
+    }
+
+    /// A view in `public` on a table in another schema, which has a key to `public`: init reads every
+    /// schema, so its init.sql makes both and a new database replays it. --schema naming one of them
+    /// is refused before anything is written, with the command that names both, and introspect
+    /// --schema reads what the schema it names refers to.
+    pub async fn init_reads_every_schema_a_view_crosses(mut p: P) {
+        p.exec("create schema billing; create table customers (id serial primary key, name text not null); create table billing.invoices (id serial primary key, customer_id int references customers (id), total numeric(10,2)); create view unpaid as select c.name, i.total from customers c join billing.invoices i on i.customer_id = c.id").await;
+        for (named, other) in [("public", "billing"), ("billing", "public")] {
+            assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[named.to_string()], log).await).await, 1, "{}", p.peek());
+            assert_has!(p.output(), &format!(r"^✗ This database's schema is in {other} too, which --schema leaves out\n[\s\S]*\n  Name every schema it's in:\n    reylo migrate init --schema {named} --schema {other}\n\nNothing was changed\.$"));
+            assert!(!p.dir.join("schema.sql").exists() && p.files().is_empty(), "init wrote files");
+        }
+        // A refusal leaves what was there, a link that leads nowhere included.
+        #[cfg(unix)]
+        {
+            let link = p.dir.join("linked");
+            std::os::unix::fs::symlink(p.dir.join("nowhere"), &link).unwrap();
+            let opts = Options { dir: link.join("migrations"), schema: link.join("schema.sql"), lock: link.join(reylo_migrate::lock::LOCK), cache: link.join(".cache"), ..p.opts() };
+            assert_eq!(reylo_migrate::init(&opts, &["public".to_string()], &mut |_: &str| {}).await.unwrap(), 1);
+            assert!(std::fs::symlink_metadata(&link).is_ok(), "init took the link away");
+        }
+        let mut said = Vec::new();
+        let text = match reylo_migrate::db_introspect(&p.opts(), &["public".to_string()], &mut |l: &str| said.push(l.to_string())).await {
+            Ok(Ok(text)) => text,
+            other => panic!("introspect: {:?}\n{}", other.map_err(|e| e.0), said.join("\n")),
+        };
+        assert_eq!(said.join("\n"), "» Reading billing too, which public refers to");
+        assert_has!(text.clone(), r"create table billing\.invoices \(");
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        assert_eq!(std::fs::read_to_string(p.dir.join("schema.sql")).unwrap(), text);
+        let q = P::new(p.d).await.unwrap();
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(q.history().await, ["init.sql"]);
+        assert_eq!(q.rows("select 1 from information_schema.views where table_name = 'unpaid'").await.len(), 1);
+    }
+
+    /// The dump reads a schema whose name has capitals as it is named: pg_dump folds what --schema
+    /// gives it unless it is quoted.
+    pub async fn the_dump_reads_a_schema_named_with_capitals(p: P) {
+        p.exec(r#"create schema "CaseSensitive"; create table "CaseSensitive".items (id int); create table users (id int primary key)"#).await;
+        // A shadows' server that answers nothing leaves the dump.
+        let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
+        let text = introspect(&opts).await;
+        assert!(text.contains(r#"CREATE TABLE "CaseSensitive".items"#) && text.contains("CREATE TABLE public.users"), "{text}");
+    }
+
+    /// With no schema.sql, the migration is what the database has beyond its migrations, its own SQL
+    /// replayed on shadows that have each extension no migration creates, in its schema: one the
+    /// migrations use as the environment gives it, and one made by hand in a schema of its own.
+    pub async fn new_without_schema_sql_replays_beside_the_environments_extensions(mut p: P) {
+        p.exec("create extension citext").await;
+        p.file("20261122100000_users.sql", "create table users (id int primary key, name citext);");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("create schema extensions; create extension pg_trgm with schema extensions; alter table users add column email text").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "email", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_email.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap(), r"(?i)add column email text");
+    }
+
+    /// What `migrate new` lists under the file is what the migration changes: an extension, and none
+    /// of what the extension makes itself, such as tablefunc's composite types.
+    pub async fn new_lists_none_of_an_extensions_own_objects(mut p: P) {
+        p.file("20261122100000_users.sql", "create table users (id int primary key);");
+        p.schema("create table users (id int primary key);");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.schema("create extension tablefunc; create table users (id int primary key);");
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tablefunc", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"✓ Wrote \S*_tablefunc\.sql\n  \+ extension tablefunc ");
+        assert!(!out.contains("crosstab"), "{out}");
+    }
+
+    /// With no schema.sql, an extension added by hand since the migrations began, and a column of its
+    /// type: `migrate new` makes the extension too, after a `migrate dev` that runs nothing, and a new
+    /// database runs the migrations.
+    pub async fn new_without_schema_sql_makes_an_extension_added_by_hand(mut p: P) {
+        p.file("20261122100000_users.sql", "create table users (id int primary key);");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("create schema extensions; create extension citext with schema extensions; alter table users add column email extensions.citext").await;
+        p.dev().await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "email", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_email.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        let text = std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap();
+        assert_has!(&text, r"(?i)create extension (if not exists )?citext");
+        assert_has!(&text, r"(?i)add column email extensions\.citext");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(q.rows("select 1 from pg_extension where extname = 'citext'").await.len(), 1);
+    }
+
+    /// With no schema.sql, an extension added by hand that a migration then uses without making it,
+    /// and another added by hand after, with a column of its type: the history replays only with the
+    /// first, so `migrate new` keeps it in its shadows and makes the second, and a new database that
+    /// has the first runs the migrations.
+    pub async fn new_without_schema_sql_keeps_only_the_extensions_the_history_needs(mut p: P) {
+        p.file("20261122100000_users.sql", "create table users (id int primary key);");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("create extension citext").await;
+        p.file("20261122100001_name.sql", "alter table users add column name citext;");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("create extension hstore; alter table users add column tags hstore").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tags", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_tags.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        let text = std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap();
+        assert_has!(&text, r"(?i)create extension (if not exists )?hstore");
+        assert_has!(&text, r"(?i)add column tags (public\.)?hstore");
+        assert!(!text.to_lowercase().contains("citext"), "{text}");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        q.exec("create extension citext").await;
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(q.rows("select 1 from pg_extension where extname = 'hstore'").await.len(), 1);
+    }
+
+    /// With no schema.sql, an extension the database had before its history began that no migration
+    /// uses, as after a dump restored it before the history table: `migrate new` makes it too, so a
+    /// new database runs the migrations.
+    pub async fn new_without_schema_sql_makes_an_extension_no_migration_uses(mut p: P) {
+        p.exec("create extension hstore").await;
+        p.file("20261122100000_users.sql", "create table users (id int primary key);");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("alter table users add column tags hstore").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tags", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_tags.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap(), r"(?i)create extension (if not exists )?hstore");
+        let q = P::new(p.d).await.unwrap();
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    }
+
+    /// With no schema.sql, a migration that adds a column only where an extension is: the history
+    /// replays without the extension but makes less, so `migrate new` keeps it in its shadows and
+    /// writes only the new change, which a new database that has the extension runs.
+    pub async fn new_without_schema_sql_keeps_an_extension_a_migration_branches_on(mut p: P) {
+        p.exec("create extension citext").await;
+        p.file("20261122100000_users.sql", "create table users (id int primary key);");
+        p.file("20261122100001_email.sql", "do $$ begin if exists (select 1 from pg_extension where extname = 'citext') then alter table users add column email citext; end if; end $$;");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("alter table users add column note text").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "note", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_note.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        let text = std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap();
+        assert_has!(&text, r"(?i)add column note text");
+        assert!(!text.to_lowercase().contains("email") && !text.to_lowercase().contains("citext"), "{text}");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        q.exec("create extension citext").await;
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    }
+
+    /// With no schema.sql, a history that needs one of two extensions, and a third added by hand: the
+    /// third is still the new migration's, and a new database that has the first two runs it.
+    pub async fn new_without_schema_sql_makes_an_extension_beside_two_the_history_needs_either_of(mut p: P) {
+        p.exec("create extension citext; create extension hstore").await;
+        p.file("20261122100000_users.sql", "create table users (id int primary key);");
+        p.file(
+            "20261122100001_name.sql",
+            "do $$ begin if exists (select 1 from pg_extension where extname = 'citext') then alter table users add column name citext; elsif exists (select 1 from pg_extension where extname = 'hstore') then alter table users add column name hstore; else raise exception 'neither citext nor hstore'; end if; end $$;",
+        );
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("create extension cube; alter table users add column corner cube").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "corner", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_corner.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        let text = std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap();
+        assert_has!(&text, r"(?i)create extension (if not exists )?cube");
+        assert!(!text.to_lowercase().contains("add column name"), "{text}");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        q.exec("create extension citext; create extension hstore").await;
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(q.rows("select 1 from pg_extension where extname = 'cube'").await.len(), 1);
+    }
+
+    /// With no schema.sql, an extension added by hand in the schema a migration renamed another to:
+    /// a shadow made with it can't replay the rename, and one made without it can't say which of the
+    /// history's extensions the database had when it ran, so `migrate new` refuses and writes nothing.
+    pub async fn new_without_schema_sql_refuses_an_extension_in_a_schema_a_migration_renamed(mut p: P) {
+        p.file("20261122100000_staging.sql", "create schema staging; create table staging.t (id int primary key);");
+        p.file("20261122100001_rename.sql", "alter schema staging rename to extensions;");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("create extension citext with schema extensions; alter table extensions.t add column c extensions.citext").await;
+        p.output();
+        assert_ne!(p.run(async |o, log| reylo_migrate::create(o, "c", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_has!(p.output(), r#"Replaying 20261122100001_rename\.sql in a shadow database fails\n  schema "extensions" already exists"#);
+        assert!(!p.files().iter().any(|f| f.ends_with("_c.sql")), "{:?}", p.files());
+    }
+
+    /// With no schema.sql, an extension added by hand in a schema a migration makes: the history
+    /// makes the schema with or without it, so it is the new migration's, which a new database runs.
+    pub async fn new_without_schema_sql_makes_an_extension_in_a_schema_a_migration_makes(mut p: P) {
+        p.file("20261122100000_users.sql", "create schema if not exists \"app data\"; create table \"app data\".users (id int primary key);");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("create extension citext with schema \"app data\"; alter table \"app data\".users add column email \"app data\".citext").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "email", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_email.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap(), r"(?i)create extension (if not exists )?citext");
+        let q = P::new(p.d).await.unwrap();
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    }
+
+    /// An extension schema.sql makes in a schema of its own, pushed to the development database, then
+    /// written as a migration: dev records the migration as in place, counting the extensions the
+    /// database has, and a new database runs it.
+    pub async fn a_pushed_extension_is_recorded_once_its_migration_makes_it(mut p: P) {
+        p.schema("create table users (id int primary key);");
+        p.file("20261122100000_users.sql", "create table users (id int primary key);");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.schema("create schema extensions; create extension pg_trgm with schema extensions; create table users (id int primary key, email text);");
+        assert_eq!(p.db_push().await, 0, "{}", p.peek());
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "trgm", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_trgm.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join(&written)).unwrap(), r"(?i)create extension (if not exists )?pg_trgm");
+        p.output();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"_trgm\.sql +recorded: already in place");
+        let q = P::new(p.d).await.unwrap();
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(q.rows("select 1 from pg_extension where extname = 'pg_trgm'").await.len(), 1);
+    }
+
+    /// Introspect of some of the schemas that hold anything is their dump, which Reylo's own SQL,
+    /// making every schema, can't write; with no pg_dump, it says so.
+    pub async fn introspect_of_some_schemas_is_their_dump(p: P) {
+        p.exec("create schema scratch; create table scratch.notes (id int); create schema empty; create table users (id int primary key)").await;
+        let public = ["public".to_string()];
+        let mut said = Vec::new();
+        reylo_migrate::db::set_pg_dump_dirs(Some(vec![]));
+        let result = reylo_migrate::db_introspect(&p.opts(), &public, &mut |l: &str| said.push(l.to_string())).await;
+        reylo_migrate::db::set_pg_dump_dirs(None);
+        assert!(matches!(result, Ok(Err(1))), "{}", said.join("\n"));
+        assert_has!(said.join("\n"), r"^✗ Writing this schema as SQL needs pg_dump \d+ or newer\n  Reylo's own SQL makes every schema, and --schema leaves out empty and scratch\n");
+        let mut said = Vec::new();
+        let text = match reylo_migrate::db_introspect(&p.opts(), &public, &mut |l: &str| said.push(l.to_string())).await {
+            Ok(Ok(text)) => text,
+            other => panic!("introspect: {:?}\n{}", other.map_err(|e| e.0), said.join("\n")),
+        };
+        assert!(text.contains("CREATE TABLE public.users") && !text.contains("scratch") && !text.contains("empty"), "{text}");
     }
 
     /// A database whose `public` its own role owns outright, not through `pg_database_owner`: one made
@@ -3563,7 +3908,9 @@ mod adversarial {
         p.exec("create function public.theirs() returns int language sql as 'select 1'; alter function public.theirs() owner to madv_other").await;
         p.url = as_role(&p.url, "madv_app");
         p.exec("create table users (id int primary key)").await;
-        let opts = p.opts();
+        // In a directory init makes, as a new project's `reylo/` is.
+        let home = p.dir.join("reylo");
+        let opts = Options { dir: home.join("migrations"), schema: home.join("schema.sql"), lock: home.join(reylo_migrate::lock::LOCK), cache: home.join(".cache"), ..p.opts() };
         let mut out = Vec::new();
         let code = reylo_migrate::init(&opts, &[], &mut |l: &str| out.push(l.to_string())).await.unwrap_or_else(|e| panic!("init: {e}"));
         let said = out.join("\n");
@@ -3571,9 +3918,7 @@ mod adversarial {
         assert_has!(said.clone(), r"Replaying init\.sql in a shadow database fails");
         assert_has!(said.clone(), r"Nothing was changed\.$");
         assert!(!said.contains("Started"), "{said}");
-        assert!(!p.dir.join("schema.sql").exists(), "init left schema.sql:\n{said}");
-        assert!(!p.dir.join(reylo_migrate::lock::LOCK).exists(), "init left the lock");
-        assert!(p.files().is_empty(), "init left {:?}", p.files());
+        assert!(!home.exists(), "init left {}:\n{said}", home.display());
         assert!(p.history().await.is_empty(), "init recorded {:?}", p.history().await);
     }
 
@@ -3600,7 +3945,7 @@ mod adversarial {
         assert_eq!(code, 0, "{}", out.join("\n"));
         let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
         assert!(schema.trim_start().starts_with("create table users (") && schema.matches(';').count() == 1, "the project's table alone:\n{schema}");
-        assert_eq!(reylo_migrate::db_introspect(&opts, &[]).await.unwrap(), schema);
+        assert_eq!(introspect(&opts).await, schema);
         p.strict = true;
         assert_eq!(p.status().await, 0, "{}", p.peek());
         // A second database, made as the platform makes one, taken to the migrations.
@@ -3690,7 +4035,7 @@ mod adversarial {
         let admin = p.url.clone();
         p.url = as_role(&admin, "madv_app");
         let opts = p.opts();
-        let text = reylo_migrate::db_introspect(&opts, &[]).await.unwrap_or_else(|e| panic!("introspect: {e}"));
+        let text = introspect(&opts).await;
         assert_has!(&text, r"(?i)create table (public\.)?customers \(");
         assert_has!(&text, r"(?i)create table (public\.)?orders \(");
         let mut out = Vec::new();
@@ -3727,7 +4072,7 @@ mod adversarial {
         assert_eq!(code, 0, "{}", out.join("\n"));
         let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
         assert!(schema.contains("create table customers (") && schema.contains("create table orders ("), "{schema}");
-        assert_eq!(reylo_migrate::db_introspect(&opts, &[]).await.unwrap(), schema);
+        assert_eq!(introspect(&opts).await, schema);
         p.strict = true;
         assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
@@ -4006,10 +4351,24 @@ mod adversarial {
         p.schema("create table t (x int); create unique index t_x on t (x);");
         p.output();
         assert_eq!(p.migrate().await, 1);
-        assert_has!(p.output(), "could not create unique index");
+        assert_has!(p.output(), r"✗ The migration 20261027110000_unique\.sql failed and was rolled back\n  could not create unique index[^\n]*\n  Nothing was recorded, so the next deploy runs it again\.\n\n  Fix the file, lock the fix and deploy again:");
         assert!(p.rows("select 1 from pg_class where relname = 't_x'").await.is_empty(), "the invalid index was dropped");
         p.exec("delete from t where ctid = (select max(ctid) from t)").await;
         assert_eq!(p.migrate().await, 0, "the file runs again as written:\n{}", p.peek());
+    }
+
+    pub async fn a_failed_lone_statement_may_leave_its_change(mut p: P) {
+        p.schema("create table t (x int);");
+        p.file("20261027100000_t.sql", "create table t (x int);");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        // Run outside a transaction, a statement other than an index build may leave part of itself,
+        // as a detach left pending: deploy never says it rolled back.
+        p.file("20261027110000_drop.sql", "drop index concurrently t_missing;");
+        p.output();
+        assert_eq!(p.migrate().await, 1);
+        let out = p.output();
+        assert_has!(&out, r"✗ The migration 20261027110000_drop\.sql failed\n  [^\n]*t_missing[^\n]*\n  It runs outside a transaction, so its change may be in place\.\n\n  See what is:\n    reylo migrate deploy --dry-run$");
+        assert!(!out.contains("rolled back"), "{out}");
     }
 
     pub async fn a_platforms_objects_are_left_out(mut p: P) {
@@ -4081,7 +4440,7 @@ mod adversarial {
         assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
         let text = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
         assert!(text.contains("function user_count()") && text.contains("create table quotas"), "{text}");
-        assert_eq!(reylo_migrate::db_introspect(&p.opts(), &[]).await.unwrap(), text);
+        assert_eq!(introspect(&p.opts()).await, text);
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     }
 
@@ -4090,6 +4449,11 @@ mod adversarial {
         assert_eq!(p.run(async |o, log| reylo_migrate::run_sql(o, &items, log).await).await, 0, "{}", p.peek());
         assert_eq!(p.rows("select x from t order by x").await.iter().map(|r| r.text("x").to_string()).collect::<Vec<_>>(), ["1", "2"]);
         assert_eq!(p.rows("select to_regclass('__reylo_migrations') as t").await[0].get("t"), None, "records nothing");
+        // What each statement returns is shown under its line, its columns where it returned no row.
+        p.output();
+        let items = [("rows".to_string(), "select x from t order by x; select x from t where false; update t set x = x returning x".to_string())];
+        assert_eq!(p.run(async |o, log| reylo_migrate::run_sql(o, &items, log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.output(), "✓ rows\n  x\n  ─\n  1\n  2\n  Returned 2 rows\n\n  x\n  ─\n  Returned 0 rows\n\n  x\n  ─\n  1\n  2\n  Returned 2 rows");
     }
 
     pub async fn history_push_leaves_a_data_migration_pending(mut p: P) {
@@ -4619,6 +4983,64 @@ mod adversarial {
         p.exec("insert into t values (2, 'ap')").await;
         p.output();
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    }
+
+    pub async fn an_enum_label_a_default_uses_is_committed_first(mut p: P) {
+        let v1 = "create type visibility as enum ('private', 'public'); create table bookmarks (id int primary key, visibility visibility not null default 'private'); create view public_bookmarks as select id from bookmarks where visibility = 'public';";
+        let v2 = "create type visibility as enum ('private', 'public', 'org'); create table bookmarks (id int primary key, visibility visibility not null default 'org'); create view public_bookmarks as select id from bookmarks where visibility = 'public';";
+        p.schema(v1);
+        p.file("20261027100000_bookmarks.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into bookmarks values (1, 'public')").await;
+        // Postgres refuses a label added and used in one transaction: the label is a migration of
+        // its own, before the default, which copies no table and needs no `--blocking`.
+        p.schema(v2);
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "org_default", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"✓ Wrote 2 migrations, since Postgres can't use a new enum value in the migration that adds it:");
+        let made: Vec<String> = p.files().into_iter().filter(|f| f.contains("_org_default")).collect();
+        assert_eq!(made.len(), 2, "{made:?}");
+        let first = std::fs::read_to_string(p.dir.join("migrations").join(&made[0])).unwrap();
+        let second = std::fs::read_to_string(p.dir.join("migrations").join(&made[1])).unwrap();
+        assert_eq!(first.trim(), "alter type visibility add value 'org' after 'public';");
+        assert_eq!(second.trim(), "alter table bookmarks alter column visibility set default 'org';");
+        p.output();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into bookmarks (id) values (2)").await;
+        assert_eq!(p.rows("select 1 from bookmarks where visibility = 'org'").await.len(), 1);
+    }
+
+    pub async fn a_push_that_fails_past_an_enum_commit_keeps_what_it_drops(mut p: P) {
+        let v1 = "create type mood as enum ('a'); create table items (i int, m mood default 'a'); create table old_notes (body text); create table x (c mood); create view v as select c from x;";
+        p.file("20261027100000_items.sql", v1);
+        p.schema(v1);
+        assert_eq!(p.dev_then_push().await, 0, "{}", p.peek());
+        p.exec("insert into items values (-1, 'a')").await;
+        p.exec("insert into old_notes values ('kept')").await;
+        p.output();
+        // The new label commits first, alone: the check its row fails after it undoes the drop, and
+        // the column's move off the type with the view over it.
+        p.schema("create type mood as enum ('a', 'b'); create table items (i int check (i > 0), m mood default 'b'); create table x (c text); create view v as select c from x;");
+        assert_eq!(p.db_push_with(&push(&["old_notes"], &[], false)).await, 1, "{}", p.peek());
+        assert_eq!(p.rows("select body from old_notes").await.len(), 1);
+        assert_eq!(p.rows("select 1 from pg_views where viewname = 'v'").await.len(), 1);
+        assert_eq!(p.rows("select 1 from information_schema.columns where table_name = 'x' and udt_name = 'mood'").await.len(), 1);
+        assert_eq!(p.rows("select 1 from pg_enum where enumlabel = 'b'").await.len(), 1);
+    }
+
+    pub async fn a_push_that_fails_past_an_enum_commit_undoes_its_renames(mut p: P) {
+        p.file("20261027100000_data.sql", "create type mood as enum ('a'); create table items (i int, m mood default 'a'); create table t_data (id int, name text); create view data as select * from t_data; create view q as select * from data;");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into t_data values (1, 'a')").await;
+        p.exec("insert into items values (-1, 'a')").await;
+        p.output();
+        // The new label commits first, alone: the rename, and the views it drops, run after it, and
+        // the check its row fails undoes them.
+        p.schema("create type mood as enum ('a', 'b'); create table items (i int check (i > 0), m mood default 'b'); create table data (id int, name text); create view q as select * from data;");
+        assert_eq!(p.db_push_with(&push(&[], &[("t_data", "data")], false)).await, 1, "{}", p.peek());
+        assert_eq!(p.rows("select name from t_data").await.len(), 1);
+        assert_eq!(p.rows("select 1 from pg_views where viewname in ('data', 'q')").await.len(), 2);
+        assert_eq!(p.rows("select 1 from pg_enum where enumlabel = 'b'").await.len(), 1);
     }
 
     pub async fn a_renamed_tables_sequence_keeps_counting(mut p: P) {
@@ -5282,7 +5704,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
         p.exec("create index docs_emb on docs (libsql_vector_idx(emb))").await;
         p.exec("insert into docs (emb) values (vector32('[1,2,3]')), (vector32('[3,2,1]'))").await;
         let own = ["docs_emb_shadow", "libsql_vector_meta_shadow"];
-        let sql = reylo_migrate::db_introspect(&p.opts(), &[]).await.unwrap();
+        let sql = introspect(&p.opts()).await;
         assert!(sql.contains("docs_emb on docs") && sql.contains("x_shadow") && !own.iter().any(|t| sql.contains(t)), "{sql}");
         let mut db = Db::connect(&p.url, &p.dir).await.unwrap();
         let lines = catalog(&mut db).await.unwrap();
@@ -5328,7 +5750,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
         // A table of that name that the engine didn't define is never dropped or emptied.
         let stray = "__turso_internal_seq___turso_internal_autoincrement_stray";
         p.exec(&format!("create table {stray} (note text); insert into {stray} values ('kept');")).await;
-        let sql = reylo_migrate::db_introspect(&p.opts(), &[]).await.unwrap();
+        let sql = introspect(&p.opts()).await;
         assert!(sql.contains("create table posts") && !sql.contains("__turso"), "{sql}");
         let mut db = Db::connect(&p.url, &p.dir).await.unwrap();
         let lines = catalog(&mut db).await.unwrap();
@@ -5379,7 +5801,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
     pub async fn a_virtual_tables_own_tables_are_not_in_the_dump(mut p: P) {
         p.file("20261027100000_docs.sql", "create table docs (id integer primary key, body text); create virtual table docs_fts using fts5(body, content='docs', content_rowid='id');");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
-        let sql = reylo_migrate::db_introspect(&p.opts(), &[]).await.unwrap();
+        let sql = introspect(&p.opts()).await;
         assert!(!sql.contains("docs_fts_data"), "{sql}");
         p.exec("alter table docs add column extra int").await;
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "extra", &Default::default(), log).await).await, 0, "{}", p.peek());
@@ -5404,7 +5826,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
         assert!(p.try_rows("insert into docs (id, emb) values (2, null) returning id").await.is_err(), "the column is not null");
-        let sql = reylo_migrate::db_introspect(&p.opts(), &[]).await.unwrap();
+        let sql = introspect(&p.opts()).await;
         assert!(sql.contains("libsql_vector_idx") && !sql.contains("_shadow"), "{sql}");
     }
 

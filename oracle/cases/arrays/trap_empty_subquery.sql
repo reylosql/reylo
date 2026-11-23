@@ -1,0 +1,1 @@
+select array[(select now() order by generate_series(1, 0))] as a, array[(select distinct on (generate_series(1, 0)) concat('x'))] as b, (select count(*) from teams order by generate_series(1, 0)) as c

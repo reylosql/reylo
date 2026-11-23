@@ -50,7 +50,9 @@ test("the migration commands and reylo run are the binary's, with their output a
   const root = project();
   const help = reylo(root, ["--help"]);
   assert.equal(help.status, 0, help.err);
-  for (const usage of ["  migrate <command>", "  db <command>", "  run \"<sql>\""]) assert.ok(help.out.includes(usage), usage);
+  for (const usage of ["  migrate <command>", "  db <command>", "  run <sql>"]) assert.ok(help.out.includes(usage), usage);
+  // Plumbing a language's tooling runs is no command of a person's.
+  assert.doesNotMatch(help.out, /\n  (engine|lsp)\b/);
   const migrate = reylo(root, ["migrate", "--help"]);
   assert.equal(migrate.status, 0, migrate.err);
   assert.match(migrate.out, /^Usage: reylo migrate <command> \[flags\]\n/);
@@ -61,17 +63,21 @@ test("the migration commands and reylo run are the binary's, with their output a
   assert.match(dbHelp.out, /^Usage: reylo db <command> \[flags\]\n/);
   assert.match(dbHelp.out, /\n  introspect  /);
   assert.doesNotMatch(dbHelp.out, /\n  (init|new|dev|deploy|status|lock|history)\b/);
-  // The docs show each group's help as it is.
+  // The docs show each help as it is, the CLI page's Rust lines where the docs show Rust (site/lib/rust-content.ts).
   // A checkout on Windows may write a page with CRLF line endings.
   for (const page of ["migrate.mdx", "cli.mdx"]) {
-    const text = readFileSync(join(import.meta.dirname, "..", "site", "content", "docs", page), "utf8").replaceAll("\r\n", "\n");
-    for (const help of [migrate.out, dbHelp.out]) assert.ok(text.includes(`\`\`\`terminal\n${help}\`\`\``), `${page}: ${help.split("\n")[0]}`);
+    const text = readFileSync(join(import.meta.dirname, "..", "site", "content", "docs", page), "utf8").replaceAll("\r\n", "\n").replace(/^<\/?Rust>\n/gm, "");
+    for (const block of page === "cli.mdx" ? [help.out, migrate.out, dbHelp.out] : [migrate.out, dbHelp.out]) assert.ok(text.includes(`\`\`\`terminal\n${block}\`\`\``), `${page}: ${block.split("\n")[0]}`);
   }
   const run = reylo(root, ["run", "insert into users (name) values ('ada')", "insert into users (name) values ('grace')"]);
   assert.equal(run.status, 0, run.err);
   const db = new DatabaseSync(join(root, "app.db"));
   assert.deepEqual({ ...db.prepare("select count(*) as n from users").get() }, { n: 2 });
   db.close();
+  // What a statement returns is printed under it, and a change prints its line alone.
+  const rows = reylo(root, ["run", "select id, name from users order by id", "update users set name = name"]);
+  assert.equal(rows.status, 0, rows.err);
+  assert.equal(rows.out, "✓ select id, name from users order by id\n  id  name\n  ──  ─────\n   1  ada\n   2  grace\n  Returned 2 rows\n✓ update users set name = name\n");
   // A flag's value after an `=` is its value, so that this runs on the database it names.
   const other = join(root, "other.db");
   // A SQLite file that isn't there is refused, never made, as the migrations' commands refuse it.

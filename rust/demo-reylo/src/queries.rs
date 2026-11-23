@@ -141,3 +141,93 @@ pub async fn user_page(pool: &PgPool, id: i32) -> sqlx::Result<Option<UserPage>>
     let titles = titles_by_author::Query { author: id }.run(pool).await?;
     Ok(Some(UserPage { user, titles }))
 }
+
+/// The geometric types and hstore, each sqlx's own type.
+#[reylo::query("select pin, area, route, outline, reach, edge, axis, attrs from places where id = :id")]
+pub mod get_place {}
+
+/// A point and an hstore as parameters.
+#[reylo::query("update places set pin = :pin, attrs = :attrs where id = :id")]
+pub mod move_place {}
+
+/// A function that returns nothing, as `()`.
+#[reylo::query("select pg_sleep(0) as slept")]
+pub mod nap {}
+
+/// An array parameter: a `Vec` of its element type, none of them NULL.
+#[reylo::query("select id from users where id <> all(:skip::int[]) order by id")]
+pub mod users_but {}
+
+/// pgvector's `vector`, read and bound as the crate's own `pgvector::Vector`.
+#[reylo::query("select id, embedding from items order by embedding <-> :near limit 1")]
+pub mod nearest_item {}
+
+/// A vector parameter the crate declares itself, bound through the same codec.
+#[reylo::query("select id from items order by embedding <-> :near limit 1")]
+pub mod nearest_item_id {
+    pub struct Params {
+        pub near: pgvector::Vector,
+    }
+}
+
+/// A vector parameter the crate declares as another type sqlx binds, cast in the statement.
+#[reylo::query("select :near::vector::text as near")]
+pub mod vector_text {
+    pub struct Params {
+        pub near: Vec<f32>,
+    }
+}
+
+/// An enum type whose name is quoted mixed case, bound and read back.
+#[reylo::query("insert into resources (kind) values (:kind) returning id, kind")]
+pub mod insert_resource {}
+
+/// A vector parameter the crate declares under a name of its own, bound through the codec.
+#[reylo::query("select id from items order by embedding <-> :near limit 1")]
+pub mod nearest_item_renamed {
+    use pgvector::Vector as Embedding;
+
+    pub struct Params {
+        pub near: Embedding,
+    }
+}
+
+/// An array of the quoted enum type, bound and read back.
+#[reylo::query("select :kinds::\"ResourceKind\"[] as kinds")]
+pub mod resource_kinds {}
+
+/// A nullable array of vectors the crate declares, its elements bound through the codec.
+#[reylo::query("select :near::nullable(vector[])::text as shown")]
+pub mod vectors_text {
+    pub struct Params {
+        pub near: Option<Vec<pgvector::Vector>>,
+    }
+}
+
+/// A vector parameter declared as text, bound as it is.
+#[reylo::query("select :v::vector::text as shown")]
+pub mod vector_from_text {
+    pub struct Params {
+        pub v: String,
+    }
+}
+
+/// An array of vectors declared with NULL elements, each one bound through the codec.
+#[reylo::query("select array_length(:vs::vector[], 1) as n")]
+pub mod count_vectors {
+    pub struct Params {
+        pub vs: Vec<Option<pgvector::Vector>>,
+    }
+}
+
+/// A vector parameter beside columns that serde can write: the row derives `Serialize`.
+#[reylo::query("select vector_dims(:v::vector) as dimensions")]
+pub mod dimensions {}
+
+/// A vector parameter declared as its values, with no cast: bound through the codec as a vector.
+#[reylo::query("select id from items order by embedding <-> :near limit 1")]
+pub mod nearest_item_by_values {
+    pub struct Params {
+        pub near: Vec<f32>,
+    }
+}

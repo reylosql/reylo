@@ -754,7 +754,7 @@ code {
    the tabs, still at the right. `--dk-switch-on` is the wash, which the head
    script's first-paint rules read too. */
 :root {
-  --dk-switch-on: color-mix(in oklab, var(--color-fd-primary) 14%, transparent);
+  --dk-switch-on: color-mix(in oklab, var(--dk-accent) 14%, transparent);
 }
 
 #nd-page .dk-variant-switch {
@@ -1125,7 +1125,7 @@ code {
   height: 2.125rem;
   padding: 0 0.875rem;
   border-radius: 0.5rem;
-  background: var(--color-fd-primary);
+  background: var(--dk-accent);
   color: hsl(0 0% 6%);
   font-size: 0.875rem;
   font-weight: 600;
@@ -2395,4 +2395,10 @@ html:has(.dk-search[open]) {
   white-space: nowrap;
   font: 600 1.125rem / 1 var(--font-hand);
   transform: rotate(-3deg);
+}
+
+/* A code tab's rule under the chosen tab is the accent, a rule rather than text, so a light theme
+   that darkens `--color-fd-primary` for its text still draws it in the brand colour. */
+[role='tab'][data-state='active'] > div.absolute.bottom-0 {
+  background-color: var(--dk-accent);
 }

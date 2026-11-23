@@ -19,6 +19,7 @@ The model is [zod.dev](https://zod.dev): one short sentence, then the example.
 | Hyperdrive refuses prepared statements, so Reylo runs `mysql2` there through `query()`, with each value written into the statement. | Hyperdrive refuses prepared statements. So Reylo runs `mysql2` there through `query()`, with each value written into the statement. |
 | These are typed `boolean`: comparisons, `IN`, `BETWEEN`, `LIKE`, … and a `CASE` whose every value is one of them. | A sentence, then the list as a code block or table. |
 
+- **One fact at a time, each with its own example.** A feature with several behaviors gets a sentence and an example for each, in turn, never one sentence that joins them. Not "To override `DATABASE_URL`, set `direct_url` in `.reylo.yaml`. It reads other variables, with a fallback after `:-` as in a shell:" over one example, but "To override `DATABASE_URL`, set `direct_url` in `.reylo.yaml`:", its example; "You can interpolate other environment variables:", its example; "You can define fallbacks with `:-`, as in a shell:", its example.
 - **A link is part of a sentence that says something.** A parenthetical link after a fact is fine: "Prints what Reylo infers for each statement ([Inference](/inference))". A sentence whose only job is to point elsewhere is not (below).
 - **An enumeration leaves the sentence.** Three or more code tokens in a row become a list, a table or a code block.
 - **Imperative and direct.** "Hover over a query to see its types." Not "When you hover over a query, its types are shown."

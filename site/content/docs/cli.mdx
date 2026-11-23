@@ -49,7 +49,6 @@ Commands:
     --format <format>      json, the default, yaml or typescript
 <Rust>
     --format rust          Print each statement's Rust module for sqlx
-
   generate <generator>     Write each .sql file's module for a language
     --out <file>           Write every module into one file
 </Rust>
@@ -192,19 +191,19 @@ queries/broken.sql:4:7: column u.emial does not exist (42703)
 
 ## `reylo migrate`
 
-Write, check and run your [migrations](/migrate/docs#cli-reylo-migrate):
+Write, check and run your [migrations](/migrate/cli):
 
 ```terminal
 Usage: reylo migrate <command> [flags]
 
 Commands:
   init                     Start from this database
-    --schema <name>        A schema to read (Postgres; public by default)
+    --schema <name>        A schema to read; repeat for more (Postgres; all by default)
   new <name>               Write the next migration, from schema.sql or this database
     --drop <names>         Accept what it drops: tables and columns
     --rename <old>=<new>   Say a table or column was renamed
     --blocking             Accept a statement that blocks writes while it reads every row
-  dev                      Take this database to the migrations, and lock them
+  dev                      Apply all unapplied migrations and regenerate the lockfile
   deploy                   Run what the lock lists, with no shadow database
     --dry-run              Try it on a shadow database, running nothing here
   status                   Check that this database and the files are in step
@@ -224,7 +223,7 @@ Starts your migrations from an existing database:
 
 ```sh
 reylo migrate init
-reylo migrate init --schema app
+reylo migrate init --schema public --schema billing
 ```
 
 ### `new`
@@ -240,7 +239,7 @@ reylo migrate new add_bio --blocking
 
 ### `dev`
 
-Takes your development database to your migrations, and writes the lock:
+Applies all unapplied migrations to your development database and regenerates the lockfile:
 
 ```sh
 reylo migrate dev
@@ -290,13 +289,13 @@ reylo migrate history pull --url $PROD_URL
 
 ## `reylo db`
 
-Push `schema.sql` to a [development database](/migrate/docs#db-push), reset it, wipe it or read its schema:
+Push `schema.sql` to a [development database](/migrate/cli#push), reset it, wipe it or read its schema:
 
 ```terminal
 Usage: reylo db <command> [flags]
 
 Commands:
-  push                     Take this database to schema.sql, unrecorded
+  push                     Synchronize this database with schema.sql (may be destructive)
     --drop <names>         Accept what it drops: tables and columns
     --rename <old>=<new>   Say a table or column was renamed
     --force                Accept everything it drops
@@ -304,7 +303,7 @@ Commands:
   reset                    Rebuild this database from the migrations
   wipe                     Delete every row, keeping the schema
   introspect               Print this database's schema as SQL
-    --schema <name>        A schema to read (Postgres; public by default)
+    --schema <name>        A schema to read; repeat for more (Postgres; all by default)
 
 Flags:
   --url <url>              The database, in place of direct_url
@@ -314,7 +313,7 @@ Flags:
 
 ### `push`
 
-Takes your development database to `schema.sql`, with no migration:
+Synchronizes your development database with `schema.sql`, writing no migration:
 
 ```sh
 reylo db push
@@ -364,6 +363,18 @@ It runs the statements you pass as text, then each `--file`, in order:
 ```terminal
 $ reylo run 'alter table users add column bio text'
 ✓ alter table users add column bio text
+```
+
+A statement that returns rows prints them, up to 50:
+
+```terminal
+$ reylo run 'select id, email, bio from users'
+✓ select id, email, bio from users
+  id  email              bio
+  ──  ─────────────────  ───────────────────────
+   1  ada@example.com    Wrote the first program
+   2  grace@example.com  null
+  Returned 2 rows
 ```
 
 On a SQLite file that isn't there, it refuses rather than make an empty database.
