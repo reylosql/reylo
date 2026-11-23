@@ -2996,6 +2996,8 @@ on!(
     new_without_schema_sql_makes_an_extension_added_by_hand,
     new_without_schema_sql_keeps_only_the_extensions_the_history_needs,
     new_without_schema_sql_makes_an_extension_no_migration_uses,
+    new_without_schema_sql_keeps_an_extension_a_migration_branches_on,
+    new_without_schema_sql_makes_an_extension_beside_two_the_history_needs_either_of,
     a_pushed_extension_is_recorded_once_its_migration_makes_it,
     an_extension_in_a_projects_schema_is_the_projects_whoever_owns_it,
     an_extension_a_platform_role_owns_in_a_projects_schema_is_the_projects,
@@ -3461,6 +3463,53 @@ mod adversarial {
         let q = P::new(p.d).await.unwrap();
         p.url = q.url.clone();
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    }
+
+    /// With no schema.sql, a migration that adds a column only where an extension is: the history
+    /// replays without the extension but makes less, so `migrate new` keeps it in its shadows and
+    /// writes only the new change, which a new database that has the extension runs.
+    pub async fn new_without_schema_sql_keeps_an_extension_a_migration_branches_on(mut p: P) {
+        p.exec("create extension citext").await;
+        p.file("20261122100000_users.sql", "create table users (id int primary key);");
+        p.file("20261122100001_email.sql", "do $$ begin if exists (select 1 from pg_extension where extname = 'citext') then alter table users add column email citext; end if; end $$;");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("alter table users add column note text").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "note", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_note.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        let text = std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap();
+        assert_has!(&text, r"(?i)add column note text");
+        assert!(!text.to_lowercase().contains("email") && !text.to_lowercase().contains("citext"), "{text}");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        q.exec("create extension citext").await;
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    }
+
+    /// With no schema.sql, a history that needs one of two extensions, and a third added by hand: the
+    /// third is still the new migration's, and a new database that has the first two runs it.
+    pub async fn new_without_schema_sql_makes_an_extension_beside_two_the_history_needs_either_of(mut p: P) {
+        p.exec("create extension citext; create extension hstore").await;
+        p.file("20261122100000_users.sql", "create table users (id int primary key);");
+        p.file(
+            "20261122100001_name.sql",
+            "do $$ begin if exists (select 1 from pg_extension where extname = 'citext') then alter table users add column name citext; elsif exists (select 1 from pg_extension where extname = 'hstore') then alter table users add column name hstore; else raise exception 'neither citext nor hstore'; end if; end $$;",
+        );
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("create extension cube; alter table users add column corner cube").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "corner", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_corner.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        let text = std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap();
+        assert_has!(&text, r"(?i)create extension (if not exists )?cube");
+        assert!(!text.to_lowercase().contains("add column name"), "{text}");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        q.exec("create extension citext; create extension hstore").await;
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(q.rows("select 1 from pg_extension where extname = 'cube'").await.len(), 1);
     }
 
     /// An extension schema.sql makes in a schema of its own, pushed to the development database, then

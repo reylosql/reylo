@@ -3379,11 +3379,15 @@ async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Resu
 }
 
 /// Of `extensions`, those the migrations replay without, which a new migration makes: one a migration
-/// uses without making it is the environment's (a platform's, or one the database had before the
-/// project began), which every shadow keeps, so that the history replays as it did on the database.
-/// Each is tried on its own; where the history needs several together, the shadows keep them all.
+/// needs is the environment's (a platform's, or one the database had before the project began),
+/// which every shadow keeps, so that the history replays as it did on the database. The history
+/// needs an extension where its replay without it fails, or makes anything else than it makes with
+/// it, as a migration that does something only where the extension is; what the extension itself
+/// brings a shadow (its line, its schema, their grants) is read from an empty one. Each is tried with
+/// those already taken, so that one the history needs takes no other with it.
 #[cfg(feature = "cli")]
 async fn unneeded_by_history(opts: &Options, files: &[Migration], extensions: Vec<String>) -> Result<Vec<String>, Error> {
+    use std::collections::BTreeSet;
     if extensions.is_empty() {
         return Ok(extensions);
     }
@@ -3393,27 +3397,38 @@ async fn unneeded_by_history(opts: &Options, files: &[Migration], extensions: Ve
     let mut server = server?;
     server.copy_default_privileges(!sets_default_privileges(opts));
     let texts: Vec<&str> = files.iter().map(|f| f.sql.as_str()).collect();
-    let mut replays_without = async |left: &[String]| -> Result<bool, Error> {
+    // The catalog's lines of a shadow that leaves out `left`, after the migrations or with none run;
+    // nothing where they fail.
+    let mut lines = async |left: &[String], history: bool| -> Result<Option<BTreeSet<String>>, Error> {
         server.leave_extensions(created_extensions(opts).into_iter().chain(left.iter().cloned()).collect());
         server.leave_schemas(created_schemas(opts));
         let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &texts).await;
         let lane = shadows.lane();
-        shadows.push(lane, files.iter().map(Step::of));
+        if history {
+            shadows.push(lane, files.iter().map(Step::of));
+        }
         let lines = shadows.lines(lane).await;
         shadows.finish().await;
-        Ok(lines?.is_ok())
+        Ok(lines?.ok().map(|l| l.into_iter().collect()))
     };
     let result = async {
-        if replays_without(&extensions).await? {
-            return Ok(extensions);
+        let (Some(replayed), Some(empty)) = (lines(&[], true).await?, lines(&[], false).await?) else { return Ok(vec![]) };
+        let mut unneeded = async |left: Vec<String>| -> Result<Option<Vec<String>>, Error> {
+            let (Some(without), Some(empty_without)) = (lines(&left, true).await?, lines(&left, false).await?) else { return Ok(None) };
+            let brought: BTreeSet<&String> = empty.difference(&empty_without).collect();
+            let rest: BTreeSet<&String> = replayed.iter().filter(|l| !brought.contains(l)).collect();
+            Ok((without.iter().collect::<BTreeSet<_>>() == rest).then_some(left))
+        };
+        if let Some(all) = unneeded(extensions.clone()).await? {
+            return Ok(all);
         }
-        let mut unneeded = Vec::new();
+        let mut taken: Vec<String> = Vec::new();
         for extension in &extensions {
-            if replays_without(std::slice::from_ref(extension)).await? {
-                unneeded.push(extension.clone());
+            if let Some(more) = unneeded(taken.iter().chain([extension]).cloned().collect()).await? {
+                taken = more;
             }
         }
-        Ok(if !unneeded.is_empty() && replays_without(&unneeded).await? { unneeded } else { vec![] })
+        Ok(taken)
     }
     .await;
     server.close().await;
