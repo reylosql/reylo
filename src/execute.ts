@@ -252,6 +252,8 @@ export type Runtime<D extends Dialect = Dialect> = {
   readErrorSync?(error: unknown): QueryError<D> | undefined;
   /** A column's raw value as `.run()` gives it, as a Standard Query's `decode` maps it (src/standard-query.ts). */
   decoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined): (v: never) => unknown;
+  /** The bound statement's values in the database's raw form, where `.run()` writes each itself and checks it as it does: ClickHouse's text of each parameter. */
+  encode?(query: QueryModule<D>, bound: Bound): unknown[];
 };
 
 /** Placeholders' places in a statement: `[start, end]` for each, at JavaScript's offsets, in text order. */
@@ -618,11 +620,14 @@ export function sentText(query: QueryModule, text: string): string {
  * The statement and its values in the database's raw form, which a Standard Query's `encode`
  * returns (src/standard-query.ts), bound as `.run()` binds them, its checks included: on Postgres
  * each value's text, which a driver binds with no declared type, so the server reads it as the
- * parameter's type; on MySQL and SQLite each value as a driver binds it.
+ * parameter's type; on MySQL and SQLite each value as a driver binds it; on ClickHouse each
+ * value's text as its parameter's type reads it, refused where the server would change it.
  */
 export function rawStatement(query: QueryModule, params: unknown): { text: string; values: unknown[] } {
   checkParams(query, params);
-  const { text, values, names } = statement(query, params);
+  const bound = statement(query, params);
+  const { text, values, names } = bound;
+  if (query.runtime.encode) return { text, values: query.runtime.encode(query, bound) };
   if (query.dialect !== "postgres") return { text, values };
   return { text, values: values.map((v, i) => postgresText(query, names[i]!, v)) };
 }

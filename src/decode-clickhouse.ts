@@ -53,11 +53,14 @@ class Truncated extends Error {}
 // TextDecoder and TextEncoder are globals in every runtime Reylo supports; they are typed here rather
 // than through the DOM lib or Node's, which a project that type-checks Reylo's sources need not have.
 // Nothing is made as the module loads, so a bundle of another dialect's queries drops it whole.
-type Coders = { TextDecoder: new (label?: string, options?: { ignoreBOM?: boolean }) => { decode(bytes: Uint8Array): string }; TextEncoder: new () => { encode(text: string): Uint8Array } };
+type Coders = { TextDecoder: new (label?: string, options?: { ignoreBOM?: boolean; fatal?: boolean }) => { decode(bytes: Uint8Array): string }; TextEncoder: new () => { encode(text: string): Uint8Array } };
 const coders = (): Coders => globalThis as unknown as Coders;
 let decoder: { decode(bytes: Uint8Array): string } | undefined;
 /** Text as its UTF-8 bytes say, a byte that is none of it read as U+FFFD, and a byte order mark kept. */
 const utf8 = (bytes: Uint8Array): string => (decoder ??= new (coders().TextDecoder)("utf-8", { ignoreBOM: true })).decode(bytes);
+let strict: { decode(bytes: Uint8Array): string } | undefined;
+/** A value's bytes as the text they are, where they are UTF-8: any others throw, since a decoder that replaced them would change the value and say nothing. */
+const utf8Strict = (bytes: Uint8Array): string => (strict ??= new (coders().TextDecoder)("utf-8", { ignoreBOM: true, fatal: true })).decode(bytes);
 /** A text's UTF-8 bytes. */
 const utf8Bytes = (text: string): Uint8Array => new (coders().TextEncoder)().encode(text);
 
@@ -97,6 +100,19 @@ class Reader {
   text(length: number): string {
     const start = this.take(length);
     return utf8(this.bytes.subarray(start, start + length));
+  }
+
+  /**
+   * A `String`'s or a `FixedString`'s value, which holds any bytes: a JavaScript string holds
+   * text alone, so one that is no UTF-8 is refused by its column rather than returned changed.
+   */
+  value(length: number, column: string): string {
+    const start = this.take(length);
+    try {
+      return utf8Strict(this.bytes.subarray(start, start + length));
+    } catch {
+      throw new DecodeError(`Column "${column}" holds bytes that are not UTF-8 text, which a string cannot return as they are: select them as text, as hex(${column}) or base64Encode(${column}) does.`);
+    }
   }
 }
 
@@ -251,12 +267,12 @@ function readerOf(type: Named, column: string): Read {
         return scratch.getFloat32(0);
       };
     case "String":
-      return (r) => r.text(r.varint());
+      return (r) => r.value(r.varint(), column);
     case "FixedString": {
       const a = t.args[0];
       const length = a !== undefined && "number" in a ? Number(a.number) : NaN;
       if (!Number.isInteger(length)) throw unread(type, column);
-      return (r) => r.text(length);
+      return (r) => r.value(length, column);
     }
     // Two 64-bit halves, each with its low byte first.
     case "UUID":
@@ -705,17 +721,27 @@ function tooLong(error: unknown, names: readonly string[], settings: Readonly<Re
   return Object.assign(new Error(`${own}: the parameter "${longest.name}" is ${longest.bytes} bytes as ClickHouse's text, and the server takes 131072 of one unless its http_max_field_value_size is raised. Send fewer values at a time.`, { cause: error }), code === undefined ? {} : { code });
 }
 
-/** A ClickHouse statement's rows on an `@clickhouse/client` client, or undefined on any other client. */
-async function runClickhouse(c: Client, query: QueryModule<"clickhouse">, { text, values, names, marks }: Bound): Promise<unknown[] | undefined> {
-  if (!isClient(c)) return undefined;
+/**
+ * Each parameter of a bound statement as the text of its type, in binding order, which is how
+ * `.run()` sends one and what a Standard Query's `encode` returns: refused where the type cannot
+ * hold the value, since the server would change it and say nothing.
+ */
+function texts(query: QueryModule<"clickhouse">, { text, values, names, marks }: Bound): string[] {
   if (marks === undefined && names.length > 0) throw new TypeError("Reylo cannot bind this ClickHouse statement's parameters: each goes as its declared type's text, which Reylo reads at its placeholder, and a query defined by hand needs `marks` there, the place of each placeholder in its text, which a build step writes.");
   const types = typesOf(query, text, marks ?? []);
-  const settings: Record<string, string> = { default_format: FORMAT };
-  names.forEach((name, i) => {
+  return names.map((name, i) => {
     const type = types.get(name);
     if (type === undefined) throw new ParameterError(`Parameter "${name}" has no type in the statement: a ClickHouse parameter is written with one, as {${name}:UInt64}.`);
-    settings[`param_${name}`] = valueText(type, values[i], name);
+    return valueText(type, values[i], name);
   });
+}
+
+/** A ClickHouse statement's rows on an `@clickhouse/client` client, or undefined on any other client. */
+async function runClickhouse(c: Client, query: QueryModule<"clickhouse">, bound: Bound): Promise<unknown[] | undefined> {
+  if (!isClient(c)) return undefined;
+  const { text, names } = bound;
+  const settings: Record<string, string> = { default_format: FORMAT };
+  texts(query, bound).forEach((value, i) => (settings[`param_${names[i]}`] = value));
   let response: { stream?: unknown; response_headers?: unknown } | undefined;
   try {
     response = await c.exec({ query: text, clickhouse_settings: settings });
@@ -748,7 +774,7 @@ function clickhouseDecoder(_name: string, _kind: Kind): (v: unknown) => unknown 
 }
 
 /** ClickHouse's half of the run time (src/execute.ts, `Runtime`), which `defineClickhouseQuery` passes. */
-export const clickhouse: Runtime<"clickhouse"> = { dialect: "clickhouse", run: runClickhouse, readError: readClickhouseError, decoder: clickhouseDecoder };
+export const clickhouse: Runtime<"clickhouse"> = { dialect: "clickhouse", run: runClickhouse, readError: readClickhouseError, decoder: clickhouseDecoder, encode: texts };
 
 /** The parts of this module its tests hold to the server's own text and bytes. */
 export const internals = { rowsOf, valueText, typesOf, midStreamError, ipv6Text, decimalText };
