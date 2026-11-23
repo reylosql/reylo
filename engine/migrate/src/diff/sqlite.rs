@@ -639,28 +639,46 @@ impl Alterer for SqliteAlterer {
         *self.schemas.borrow_mut() = Some((from.clone(), to.clone()));
     }
 
-    /// The rebuild of a full-text index a table's rebuild wrote runs once, after every other
-    /// statement, where the plan's renames have given its key the name the target reads it by and
-    /// every view it reads through is back; and not at all where the plan makes the index again,
-    /// whose rebuild follows its create.
+    /// Every full-text index's rebuild runs once, after every other statement: where the plan's
+    /// renames have given its key the name the target reads it by, and every view it reads
+    /// through is back. Each comes after those of the indexes its content reads (a view that
+    /// searches another index), and an index a table's rebuild refreshes that the plan makes again
+    /// is rebuilt once, as it is made.
     fn finish(&self, statements: &mut Vec<String>) {
-        let made: BTreeSet<String> = statements.iter().filter_map(|s| made_virtual(s)).collect();
-        let (mut out, mut later): (Vec<String>, Vec<String>) = (Vec::with_capacity(statements.len()), Vec::new());
-        let mut previous: Option<String> = None;
-        for s in statements.drain(..) {
-            match rebuilt(&s) {
-                Some(name) if previous.as_deref().and_then(made_virtual).as_deref() == Some(name.as_str()) => out.push(s.clone()),
-                Some(name) => {
-                    if !made.contains(&name) && !later.contains(&s) {
-                        later.push(s.clone());
-                    }
+        let mut rebuilds: Vec<(String, String)> = Vec::new();
+        statements.retain(|s| match rebuilt(s) {
+            Some(name) => {
+                if !rebuilds.iter().any(|(n, _)| *n == name) {
+                    rebuilds.push((name, s.clone()));
                 }
-                None => out.push(s.clone()),
+                false
             }
-            previous = Some(s);
+            None => true,
+        });
+        // The indexes each one's content reads, through views, by the target's schema.
+        let schemas = self.schemas.borrow();
+        let reads = |name: &str| -> BTreeSet<String> {
+            let mut out = BTreeSet::new();
+            let Some((_, to)) = schemas.as_ref() else { return out };
+            let (mut queue, mut seen) = (to.objects.get(&format!("table {name}")).map(|o| o.deps.iter().cloned().collect::<Vec<_>>()).unwrap_or_default(), BTreeSet::new());
+            while let Some(id) = queue.pop() {
+                let Some(o) = to.objects.get(&id).filter(|_| seen.insert(id.clone())) else { continue };
+                match o.kind {
+                    Some(Kind::View) => queue.extend(o.deps.iter().cloned()),
+                    Some(Kind::Table) if Info::of(o).content.is_some() => {
+                        out.insert(fold(&Info::of(o).name));
+                    }
+                    _ => {}
+                }
+            }
+            out.remove(name);
+            out
+        };
+        while !rebuilds.is_empty() {
+            let waiting: Vec<String> = rebuilds.iter().map(|(n, _)| n.clone()).collect();
+            let next = rebuilds.iter().position(|(n, _)| reads(n).iter().all(|r| !waiting.contains(r))).unwrap_or(0);
+            statements.push(rebuilds.remove(next).1);
         }
-        out.extend(later);
-        *statements = out;
     }
 
     fn decide(&self, renames: &[(String, String)]) {
@@ -1110,12 +1128,6 @@ fn rebuilt(statement: &str) -> Option<String> {
     (words.len() == 10 && words[0] == "insert" && words[1] == "into" && words[8] == "'rebuild'" && name_of(&tokens[2]) == name_of(&tokens[4])).then(|| name_of(&tokens[2])).flatten()
 }
 
-/// The full-text table a statement makes, folded.
-fn made_virtual(statement: &str) -> Option<String> {
-    let tokens = tokenize(statement, Dialect::Sqlite);
-    let at = name_at(&tokens)?;
-    tokens[..at].iter().any(|t| t.upper() == "VIRTUAL").then(|| name_of(&tokens[at])).flatten()
-}
 
 /// Where a unique index's stored text names the index and its table; None for anything else.
 fn unique_index(tokens: &[Token]) -> Option<(usize, usize)> {
