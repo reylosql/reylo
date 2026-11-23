@@ -359,9 +359,9 @@ fn dropped_index(tree: Option<&N>, existing: &Existing, tables: &BTreeMap<String
     }
 }
 
-/// The foreign key a statement drops, as (its table, its name), where the plan adds it again later,
-/// at the statement it is added in, referencing the table that is the third.
-fn dropped_foreign_key(trees: &[Option<N>], k: usize, existing: &Existing, tables: &BTreeMap<String, String>) -> Option<(String, usize, String)> {
+/// The foreign key a statement drops, as (its table, its name, the statement the plan adds it again
+/// in, the table it references), where the plan adds it again later.
+fn dropped_foreign_key(trees: &[Option<N>], k: usize, existing: &Existing, tables: &BTreeMap<String, String>) -> Option<(String, String, usize, String)> {
     let Some(N::AlterTableStmt(a)) = trees[k].as_ref() else { return None };
     let table = tables.get(&named(a.relation.as_ref()?))?;
     let [cmd] = a.cmds.as_slice() else { return None };
@@ -378,13 +378,14 @@ fn dropped_foreign_key(trees: &[Option<N>], k: usize, existing: &Existing, table
         if !is(added.subtype, At::AtAddConstraint) || !is(c.contype, ConstrType::ConstrForeign) || c.conname != cmd.name {
             return None;
         }
-        Some((table.clone(), m, tables.get(&named(c.pktable.as_ref()?))?.clone()))
+        Some((table.clone(), cmd.name.clone(), m, tables.get(&named(c.pktable.as_ref()?))?.clone()))
     })
 }
 
-/// Whether a statement does something to `table` that an index of it kept a while longer would
-/// change: drops or retypes a column, rewrites it, moves, renames or drops it.
-fn disturbs(tree: Option<&N>, table: &str, tables: &BTreeMap<String, String>) -> bool {
+/// Whether a statement does something to `table` that its index or constraint `name`, kept a while
+/// longer, would change: drops or retypes a column, rewrites the table, moves, renames or drops it,
+/// or renames `name` or another constraint to it. A column renamed takes its indexes with it.
+fn disturbs(tree: Option<&N>, table: &str, name: &str, tables: &BTreeMap<String, String>) -> bool {
     let names = |r: Option<&RangeVar>| r.and_then(|r| tables.get(&named(r))).is_some_and(|t| t == table);
     match tree {
         Some(N::AlterTableStmt(a)) if names(a.relation.as_ref()) => a.cmds.iter().any(|cmd| {
@@ -421,7 +422,7 @@ fn disturbs(tree: Option<&N>, table: &str, tables: &BTreeMap<String, String>) ->
             .any(|ok| is(cmd.subtype, ok))
         }),
         Some(N::DropStmt(d)) => d.objects.iter().any(|o| matches!(&o.node, Some(N::List(parts)) if named_parts(&parts.items).and_then(|n| tables.get(&n)).is_some_and(|t| t == table))),
-        Some(N::RenameStmt(r)) => names(r.relation.as_ref()),
+        Some(N::RenameStmt(r)) => names(r.relation.as_ref()) && !(is(r.rename_type, ObjectType::ObjectColumn) || (is(r.rename_type, ObjectType::ObjectTabconstraint) && r.subname != name && r.newname != name)),
         Some(N::AlterObjectSchemaStmt(o)) => names(o.relation.as_ref()),
         _ => false,
     }
@@ -505,7 +506,7 @@ fn plan_lock_safe(plan: &Plan, existing: &Existing, build_first: bool) -> Option
             if same.is_some() && !build.renamable() {
                 continue;
             }
-            if (k + 1..j).any(|m| disturbs(trees[m].as_ref(), table, &tables)) {
+            if (k + 1..j).any(|m| disturbs(trees[m].as_ref(), table, name, &tables)) {
                 continue;
             }
             deferred.insert(*k, j);
@@ -518,10 +519,10 @@ fn plan_lock_safe(plan: &Plan, existing: &Existing, build_first: bool) -> Option
         // the plan adds it again after: each of the key's table's drops must wait, and it goes with
         // the first of them.
         for k in 0..trees.len() {
-            let Some((table, added, referenced)) = dropped_foreign_key(&trees, k, existing, &tables) else { continue };
+            let Some((table, name, added, referenced)) = dropped_foreign_key(&trees, k, existing, &tables) else { continue };
             let on: Vec<&(usize, String, String)> = drops.iter().filter(|(d, t, _)| *t == referenced && *d > k).collect();
             let Some(j) = on.iter().filter_map(|(d, _, _)| deferred.get(d)).min().copied() else { continue };
-            if on.iter().any(|(d, _, _)| !deferred.contains_key(d)) || added < j || (k + 1..j).any(|m| disturbs(trees[m].as_ref(), &table, &tables)) {
+            if on.iter().any(|(d, _, _)| !deferred.contains_key(d)) || added < j || (k + 1..j).any(|m| disturbs(trees[m].as_ref(), &table, &name, &tables)) {
                 continue;
             }
             deferred.insert(k, j);
@@ -1110,6 +1111,32 @@ mod tests {
         // As the shape that drops first writes it.
         let files = lock_safe_dropping_first(&plan(&["drop index t_a", "create index t_a on t (m)"]), &at).unwrap();
         assert_eq!(files, vec![strings(&["drop index t_a"]), strings(&["create index concurrently t_a on t (m)"])]);
+    }
+
+    #[test]
+    fn builds_first_around_a_column_renamed_under_the_index() {
+        let at = existing(&["posts"]).with_index("posts_pkey", "posts");
+        let files = lock_safe(
+            &plan(&[
+                "alter table posts drop constraint posts_pkey",
+                "alter table posts rename column pid to post_id",
+                "alter table posts rename constraint posts_pid_not_null to posts_post_id_not_null",
+                "alter table posts add constraint posts_pkey primary key (post_id)",
+            ]),
+            &at,
+        )
+        .unwrap();
+        assert_eq!(
+            files,
+            vec![
+                strings(&["alter table posts rename column pid to post_id", "alter table posts rename constraint posts_pid_not_null to posts_post_id_not_null"]),
+                strings(&["create unique index concurrently posts_pkey_new on posts (post_id)"]),
+                strings(&["alter table posts drop constraint posts_pkey", "alter table posts add constraint posts_pkey primary key using index posts_pkey_new"]),
+            ]
+        );
+        // A constraint renamed to the name the drop takes is no longer the one it dropped.
+        let files = lock_safe(&plan(&["alter table posts drop constraint posts_pkey", "alter table posts rename constraint posts_old to posts_pkey", "create index posts_pkey on posts (n)"]), &at).unwrap();
+        assert_eq!(files[0], strings(&["alter table posts drop constraint posts_pkey", "alter table posts rename constraint posts_old to posts_pkey"]));
     }
 
     #[test]

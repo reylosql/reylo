@@ -3363,6 +3363,7 @@ on!(
     new_drops_a_foreign_key_on_a_replaced_key_with_it,
     dev_rewinds_a_changed_index,
     a_primary_key_added_over_an_index_says_it_checks_for_nulls,
+    new_keeps_a_key_while_a_column_under_it_is_renamed,
 );
 
 #[tokio::test(flavor = "current_thread")]
@@ -4961,6 +4962,29 @@ mod adversarial {
         assert!(now.iter().any(|l| l.starts_with("users_email_lower true ") && l.ends_with("(lower(email))")), "{now:#?}");
         assert!(now.iter().all(|l| !l.contains("_new")), "{now:#?}");
         assert_eq!(p.rows("select count(*)::text as n from users").await[0].text("n"), "1", "a rewind keeps the rows");
+    }
+
+    pub async fn new_keeps_a_key_while_a_column_under_it_is_renamed(mut p: P) {
+        let v1 = "create table posts (pid int primary key, title text); create index posts_title on posts (title, pid);";
+        p.schema(v1);
+        p.file("20261027100000_v1.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into posts values (1, 'a')").await;
+        p.output();
+        p.schema("create table posts (post_id int primary key, title text); create index posts_title on posts (title, post_id);");
+        let choices = reylo_migrate::Choices { rename: vec![("posts.pid".into(), "post_id".into())], ..Default::default() };
+        // The key and the index are built again under the new column's name, beside the old ones.
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "rename_pid", &choices, log).await).await, 0, "{}", p.peek());
+        let made = written(&p, "rename_pid");
+        let all = made.join("-- next\n");
+        for (build, swap) in [("create unique index concurrently posts_pkey_new on posts (post_id);", "alter table posts drop constraint posts_pkey;"), ("create index concurrently posts_title_new on posts (title, post_id);", "drop index posts_title;")] {
+            let at = made.iter().position(|f| f.contains(build)).unwrap_or_else(|| panic!("no file builds {build}:\n{all}"));
+            assert!(made[..=at].iter().all(|f| !f.contains(swap)), "{swap} waits for {build}:\n{all}");
+        }
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.check_every_way().await.0, 0);
+        assert_eq!(p.rows("select count(*)::text as n from posts").await[0].text("n"), "1");
     }
 
     pub async fn a_primary_key_added_over_an_index_says_it_checks_for_nulls(mut p: P) {
