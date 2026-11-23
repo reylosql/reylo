@@ -71,6 +71,13 @@ test("the files a path names: a file, a directory searched, or a glob", () => {
   assert.deepEqual(names(sqlFiles("src/u*", root)), ["src/users/get.sql"]);
   assert.deepEqual(names(sqlFiles("other/x.sql", root)), ["other/x.sql"]);
   assert.equal(sqlFiles("nowhere", root), "nowhere does not exist");
+  // A glob the Rust generator would refuse is refused, rather than matching nothing.
+  assert.equal(sqlFiles("src/[bad", root), "src/[bad is not a glob Reylo reads: invalid range pattern");
+  assert.equal(sqlFiles("src/[!]", root), "src/[!] is not a glob Reylo reads: invalid range pattern");
+  assert.equal(sqlFiles("src/***/*.sql", root), "src/***/*.sql is not a glob Reylo reads: wildcards are either regular `*` or recursive `**`");
+  assert.equal(sqlFiles("src/a**.sql", root), "src/a**.sql is not a glob Reylo reads: recursive wildcards must form a single path component");
+  assert.deepEqual(names(sqlFiles("src/[a]*.sql", root)), ["src/a.sql"]);
+  assert.deepEqual(names(sqlFiles("**/x.sql", root)), ["other/x.sql"]);
 });
 
 test("reylo generate typescript writes one module that type-checks with no content mapper and runs with no build step", async () => {
@@ -160,6 +167,32 @@ test("Postgres: the module carries JSON shapes and enum types, and runs on a dri
     assert.equal(run.status, 0, run.stderr);
     assert.deepEqual(JSON.parse(run.stdout), { mood: "happy", card: { id: 1, name: "ada" }, tags: ["x"] });
   } finally {
+    await drop();
+  }
+});
+
+test("Postgres: a codec's library is found where the module imports it, not only beside the .sql files", { skip: pgLive }, async () => {
+  const { url, drop } = await postgresDatabase("generate_codecs", "create table prices (id int primary key, price numeric(20,2) not null)");
+  try {
+    // The queries are one package's and the module another's, beside it.
+    const root = project({
+      "app/package.json": `{ "type": "module" }`,
+      "app/.env": `DATABASE_URL=${url}\n`,
+      "app/.reylo.yaml": "js:\n  codecs:\n    decimal: decimal.js\n",
+      "app/sql/get_price.sql": "select price from prices where id = :id\n",
+      "web/package.json": `{ "type": "module" }`,
+    });
+    mkdirSync(join(root, "app", "node_modules"));
+    symlinkSync(join(ROOT, "node_modules", "decimal.js"), join(root, "app", "node_modules", "decimal.js"));
+    const out = join(root, "web", "queries.ts");
+    assert.deepEqual(await generate(["app/sql"], out, root), { ok: false, errors: ["web/queries.ts: js.codecs.decimal is decimal.js in the project file, and no decimal.js is installed where this file can import it: install it (npm install decimal.js), or set js.codecs.decimal to string."] });
+    assert.equal(existsSync(out), false);
+    mkdirSync(join(root, "web", "node_modules"));
+    symlinkSync(join(ROOT, "node_modules", "decimal.js"), join(root, "web", "node_modules", "decimal.js"));
+    assert.deepEqual(await generate(["app/sql"], out, root), { ok: true, path: out, changed: true });
+    assert.match(readFileSync(out, "utf8"), /^import ReyloDecimal from "decimal\.js";$/m);
+  } finally {
+    await closeSessions();
     await drop();
   }
 });

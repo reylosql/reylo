@@ -9,10 +9,11 @@ import { dirname, extname, isAbsolute, matchesGlob, relative, resolve, sep } fro
 import { styleText } from "node:util";
 import { Session } from "./analyze.ts";
 import { leadingComment, statementAfter, docComment } from "./doc-comment.ts";
-import { compiledText, DEFINE, moduleDefinition, moduleImports, moduleInputOf, type ModuleInput } from "./loader.ts";
+import { compiledText, DEFINE, moduleDefinition, moduleImports, moduleInputOf, moduleLibraries, type ModuleInput } from "./loader.ts";
 import { moduleTypes, reyloImport } from "./module-types.ts";
-import { PROJECT_FILE } from "./project.ts";
+import { geojsonTypesProblem, libraryProblem, PROJECT_FILE } from "./project.ts";
 import type { Lexed } from "./engine.ts";
+import type { Library } from "./codecs.ts";
 
 export const GENERATE_TYPESCRIPT_USAGE = `Usage: reylo generate typescript <file.sql | directory | 'glob'> ... --out <file.ts>
 
@@ -115,6 +116,13 @@ export async function generate(inputs: string[], out: string, base: string): Pro
   if (errors.length) return { ok: false, errors };
   const decimals = new Set(queries.flatMap((q) => q.imports.filter((i) => i.startsWith("import ReyloDecimal "))));
   if (decimals.size > 1) return { ok: false, errors: [`the queries' projects name different decimal libraries in js.codecs.decimal: generate each project's queries into a file of its own`] };
+  // The module imports each codec's library, and names @types/geojson's types, from its own place,
+  // which can be another package than the one the .sql files are in, beside which the build found them.
+  const problems = [
+    ...[...new Set(queries.flatMap((q) => q.libraries))].map((library) => libraryProblem(library, dirname(out))),
+    queries.some((q) => q.types.some((t) => t.includes(`import("geojson")`))) ? geojsonTypesProblem(dirname(out)) : undefined,
+  ].filter((problem) => problem !== undefined);
+  if (problems.length) return { ok: false, errors: problems.map((problem) => `${shown(base, out)}: ${problem}`) };
 
   const from = inputs.map((input) => shown(dirname(out), resolve(base, input))).map((p) => (p === "." ? "its own directory" : p));
   const text = [
@@ -128,7 +136,7 @@ export async function generate(inputs: string[], out: string, base: string): Pro
   return write(out, text, shown(base, out));
 }
 
-type Query = { text: string; types: string[]; imports: string[] };
+type Query = { text: string; types: string[]; imports: string[]; libraries: Library[] };
 
 /** One file's export: its definition and its types, with the libraries it imports; or why it cannot be written, each line naming the file. */
 async function queryOf(name: string, file: string, base: string): Promise<Query | string[]> {
@@ -179,7 +187,7 @@ async function queryOf(name: string, file: string, base: string): Promise<Query 
     `  type QueryError = ${indent(types.queryError)};`,
     `}`,
   ].join("\n");
-  return { text, types: [types.params, types.row, types.columns ?? ""], imports };
+  return { text, types: [types.params, types.row, types.columns ?? ""], imports, libraries: [...moduleLibraries(input)] };
 }
 
 /** `type` indented to sit inside the namespace, its first line where it starts. */
@@ -214,6 +222,8 @@ export function exportName(stem: string): string | undefined {
  */
 export function sqlFiles(path: string, base: string): string[] | string {
   if (/[*?[]/.test(path)) {
+    const problem = globProblem(path);
+    if (problem) return `${path} is not a glob Reylo reads: ${problem}`;
     const pattern = resolve(base, path).split(sep).join("/");
     const root = resolve(base, globRoot(path));
     const matches = (p: string) => matchesGlob(p.split(sep).join("/").toLowerCase(), pattern.toLowerCase());
@@ -231,6 +241,30 @@ export function sqlFiles(path: string, base: string): string[] | string {
     return `${path} does not exist`;
   }
   return stat.isDirectory() ? search(full) : [full];
+}
+
+/**
+ * Why `path` is no glob, by the rules of the glob crate `reylo generate rust-sqlx` reads one with,
+ * so that both refuse the same typos rather than match nothing: a run of more than two `*`, a `**`
+ * that is not a whole path component, or a `[` that no `]` closes after a character (two for `[!`).
+ */
+export function globProblem(path: string): string | undefined {
+  const separator = (c: string | undefined) => c === undefined || c === "/" || c === "\\";
+  for (let i = 0; i < path.length; i++) {
+    if (path[i] === "*") {
+      let stars = 1;
+      while (path[i + stars] === "*") stars++;
+      if (stars > 2) return "wildcards are either regular `*` or recursive `**`";
+      if (stars === 2 && !(separator(path[i - 1]) && separator(path[i + 2]))) return "recursive wildcards must form a single path component";
+      i += stars - 1;
+    } else if (path[i] === "[") {
+      const from = path[i + 1] === "!" ? i + 3 : i + 2;
+      const close = from <= path.length ? path.indexOf("]", from) : -1;
+      if (close < 0) return "invalid range pattern";
+      i = close;
+    }
+  }
+  return undefined;
 }
 
 /** The directory a glob's matches are all under: its path up to the first wildcard. */
