@@ -1079,16 +1079,17 @@ fn data_statements(sql: &str, d: Dialect) -> Vec<String> {
 #[cfg(feature = "cli")]
 fn writes_rows(sql: &str, d: Dialect) -> Vec<String> {
     let mut out = data_statements(sql, d);
-    out.extend(split_statements(sql, d).iter().filter(|s| fills(s)).map(|s| format!("{}…", s.text.split_whitespace().take(3).collect::<Vec<_>>().join(" ").to_lowercase())));
+    out.extend(split_statements(sql, d).iter().filter(|s| fills(s, d)).map(|s| format!("{}…", s.text.split_whitespace().take(3).collect::<Vec<_>>().join(" ").to_lowercase())));
     out
 }
 
 /// Whether a statement makes what a query fills, read from its words, never a string's or a
 /// comment's: a table made from a query (`create table … as select`, and MySQL's `create table …
 /// select` and `create table … (select …)`, the query outside any parentheses but its own), and a
-/// materialized view, made or refreshed.
+/// materialized view, made or refreshed. The parenthesis is MySQL's alone, where a query's words are
+/// reserved: SQLite takes `with` for a column's name.
 #[cfg(feature = "cli")]
-fn fills(statement: &crate::sql::Statement) -> bool {
+fn fills(statement: &crate::sql::Statement, d: Dialect) -> bool {
     let words: Vec<String> = statement.tokens.iter().map(crate::sql::Token::upper).collect();
     let word = |k: usize| words.get(k).map(String::as_str).unwrap_or_default();
     let head: Vec<&str> = (0..6).map(word).collect();
@@ -1109,7 +1110,7 @@ fn fills(statement: &crate::sql::Statement) -> bool {
     let mut depth = 0usize;
     for (k, t) in statement.tokens.iter().enumerate().skip(table + 1) {
         match t.text.as_str() {
-            "(" if t.kind == crate::sql::TokenKind::Symbol && depth == 0 && opens(k) => return true,
+            "(" if t.kind == crate::sql::TokenKind::Symbol && d == Dialect::Mysql && depth == 0 && opens(k) => return true,
             "(" if t.kind == crate::sql::TokenKind::Symbol => depth += 1,
             ")" if t.kind == crate::sql::TokenKind::Symbol => depth = depth.saturating_sub(1),
             _ if depth > 0 => {}
@@ -6273,7 +6274,7 @@ mod tests {
     #[cfg(feature = "cli")]
     #[test]
     fn a_table_made_from_a_query_is_told_by_its_words() {
-        let fills_all = |sql: &str, d: Dialect| split_statements(sql, d).iter().any(fills);
+        let fills_all = |sql: &str, d: Dialect| split_statements(sql, d).iter().any(|s| fills(s, d));
         for (sql, d) in [
             ("create table snap as select id from a", Dialect::Postgres),
             ("CREATE TEMP TABLE IF NOT EXISTS snap AS (WITH x AS (SELECT 1) SELECT * FROM x)", Dialect::Postgres),
@@ -6288,6 +6289,8 @@ mod tests {
         }
         for (sql, d) in [
             ("create table notes (id int, body text default 'select')", Dialect::Sqlite),
+            ("create table notes (with integer)", Dialect::Sqlite),
+            ("create table notes (values text, table text)", Dialect::Sqlite),
             ("create table notes (id int) -- as select\n", Dialect::Postgres),
             ("create table t (a int, b int generated always as (a + 1) stored)", Dialect::Postgres),
             ("create table p partition of parent for values in (1)", Dialect::Postgres),

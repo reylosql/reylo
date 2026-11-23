@@ -1471,15 +1471,17 @@ async fn a_hotfix_moves_past_no_table_made_from_a_query_and_is_none(mut p: P) {
     p.exec(&undo_on(&out)).await;
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_eq!(p.rows("select * from copy").await.len(), 2);
-    // A query's word in a string makes no table from a query: the table made by hand is recorded
-    // ahead of the one this database hasn't run, its row kept.
+    // A query's word in a string, or a column's name (SQLite's `with`), makes no table from a query:
+    // the table made by hand is recorded ahead of the one this database hasn't run, its row kept.
     let (c, notes) = ("20261027150000_c.sql", "20261027160000_notes.sql");
     let text = p.t.text;
-    p.exec(&format!("create table notes (id {int}, body {text} default 'select')")).await;
-    p.exec("insert into notes (id) values (1)").await;
+    let id = if p.d == Dialect::Sqlite { "with" } else { "id" };
+    let table = format!("create table notes ({id} {int}, body {text} default 'select')");
+    p.exec(&table).await;
+    p.exec(&format!("insert into notes ({id}) values (1)")).await;
     p.file(c, &format!("create table c (id {int});"));
-    p.file(notes, &format!("create table notes (id {int}, body {text} default 'select');"));
-    p.schema(&format!("create table a (id {int}); create table snap as select id from a; create index a_id on a (id); create table b (id {int}); {fill} create table c (id {int}); create table notes (id {int}, body {text} default 'select');"));
+    p.file(notes, &format!("{table};"));
+    p.schema(&format!("create table a (id {int}); create table snap as select id from a; create index a_id on a (id); create table b (id {int}); {fill} create table c (id {int}); {table};"));
     p.lock(&[a, snap, index, b, copy, c, notes]);
     p.output();
     assert_eq!(p.history_push().await, 0, "{}", p.peek());
