@@ -515,6 +515,7 @@
           "$ref": "#/$defs/Type"
         },
         "values": {
+          "description": "No two share a `value`, whatever their names, as rule 7 says: `uniqueItems` only refuses two entries that are wholly the same.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/EnumValue"

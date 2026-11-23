@@ -203,6 +203,7 @@ export interface EnumType extends Base {
   kind: "enum";
   /** A kind whose values the format writes as text: a boolean (`"true"`), a number, text, bytes, a UUID, a date, a time or a duration. Never itself an enum. */
   type: Type;
+  /** No two share a `value`, whatever their names, as rule 7 says: `uniqueItems` only refuses two entries that are wholly the same. */
   values: EnumValue[];
 }
 

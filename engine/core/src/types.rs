@@ -1931,6 +1931,7 @@ mod tests {
         refused(json!({"kind": "enum", "type": {"kind": "struct", "fields": []}, "values": [{"value": "x"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "enum", "type": {"kind": "text"}, "values": [{"value": "a"}]}, "values": [{"value": "a"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "text"}, "values": [{"value": "a"}, {"value": "a"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "text"}, "values": [{"value": "a", "name": "A"}, {"value": "a", "name": "Alias"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "boolean"}, "values": [{"value": "true"}, {"value": "false"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "boolean"}, "values": [{"value": "yes"}]}));
         // Unions and intersections: two members at least, null never one, and no intersection one struct writes.
