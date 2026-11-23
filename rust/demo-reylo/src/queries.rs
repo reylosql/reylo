@@ -203,3 +203,23 @@ pub mod vectors_text {
         pub near: Option<Vec<pgvector::Vector>>,
     }
 }
+
+/// A vector parameter declared as text, bound as it is.
+#[reylo::query("select :v::vector::text as shown")]
+pub mod vector_from_text {
+    pub struct Params {
+        pub v: String,
+    }
+}
+
+/// An array of vectors declared with NULL elements, each one bound through the codec.
+#[reylo::query("select array_length(:vs::vector[], 1) as n")]
+pub mod count_vectors {
+    pub struct Params {
+        pub vs: Vec<Option<pgvector::Vector>>,
+    }
+}
+
+/// A vector parameter beside columns that serde can write: the row derives `Serialize`.
+#[reylo::query("select vector_dims(:v::vector) as dimensions")]
+pub mod dimensions {}

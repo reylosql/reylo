@@ -230,6 +230,7 @@ pub fn module(dialect: Dialect, options: Options, analysis: &Value, span: Span, 
         check_names(p, params.iter().map(|p| p.name.as_str()), "parameter", "a parameter of the statement")?;
     }
     let mut param_fields = Vec::new();
+    let mut vector_binds = false;
     let mut encodes = std::collections::HashMap::new();
     let mut borrows = false;
     for param in &params {
@@ -248,9 +249,14 @@ pub fn module(dialect: Dialect, options: Options, analysis: &Value, span: Span, 
                             _ => quote!(#from(#v)),
                         })
                     }
-                    // A vector is bound through reylo's codec from whatever type the crate declares
-                    // that has `.to_vec()`, as `pgvector::Vector` under any name or `Vec<f32>`.
-                    None if shape.bound_via() => shape.encode(this),
+                    // A vector the crate declares as its `pgvector::Vector`, under any name and in any
+                    // `Option`s and `Vec`s, is bound through reylo's codec; a field of another type,
+                    // as `String` for `:v::vector::text`, as it is. The compiler picks which by the
+                    // field's type, through the items `vector_binds` writes into the module.
+                    None if shape.bound_via() => {
+                        vector_binds = true;
+                        quote!((&&__ReyloBind(::core::clone::Clone::clone(#this))).reylo_bind())
+                    }
                     None => quote!(::core::clone::Clone::clone(#this)),
                 };
                 (quote!(#written), encode)
@@ -361,9 +367,11 @@ pub fn module(dialect: Dialect, options: Options, analysis: &Value, span: Span, 
     let finished = types.finish(&overrides.taken)?;
     let nested = &finished.items;
     let converts = &conversions.tokens;
+    let vector_binds = vector_binds.then(vector_bind_items);
     let tokens = quote! {
         #(#nested)*
         #(#converts)*
+        #vector_binds
         /// The statement as it is sent, its parameters written as the database's own placeholders.
         pub const SQL: &str = #text;
         #doc
@@ -427,6 +435,61 @@ impl Conversions {
         });
         self.made.push((key.0, key.1, into.clone(), from.clone()));
         Ok((into, from))
+    }
+}
+
+/// The items a `Params` field the crate declares for a vector parameter is bound through:
+/// `(&&__ReyloBind(v)).reylo_bind()` takes the codec's method where `v` is the crate's own
+/// `pgvector::Vector`, in any `Option`s and `Vec`s, and binds any other value as it is, one
+/// dereference further on. They are written in the module, against the crate's own `pgvector`,
+/// since reylo depends on no version of it.
+fn vector_bind_items() -> TokenStream {
+    quote! {
+        #[doc(hidden)]
+        struct __ReyloBind<T>(T);
+        #[doc(hidden)]
+        trait __ReyloVectorCodec {
+            type Bound;
+            fn bound(&self) -> Self::Bound;
+        }
+        impl __ReyloVectorCodec for ::pgvector::Vector {
+            type Bound = ::reylo::__private::PgVector;
+            fn bound(&self) -> Self::Bound {
+                ::reylo::__private::PgVector(self.to_vec())
+            }
+        }
+        impl<T: __ReyloVectorCodec> __ReyloVectorCodec for ::core::option::Option<T> {
+            type Bound = ::core::option::Option<T::Bound>;
+            fn bound(&self) -> Self::Bound {
+                self.as_ref().map(__ReyloVectorCodec::bound)
+            }
+        }
+        impl<T: __ReyloVectorCodec> __ReyloVectorCodec for ::std::vec::Vec<T> {
+            type Bound = ::std::vec::Vec<T::Bound>;
+            fn bound(&self) -> Self::Bound {
+                self.iter().map(__ReyloVectorCodec::bound).collect()
+            }
+        }
+        #[doc(hidden)]
+        trait __ReyloBindVector {
+            type Bound;
+            fn reylo_bind(self) -> Self::Bound;
+        }
+        impl<T: __ReyloVectorCodec> __ReyloBindVector for &&__ReyloBind<T> {
+            type Bound = T::Bound;
+            fn reylo_bind(self) -> T::Bound {
+                self.0.bound()
+            }
+        }
+        #[doc(hidden)]
+        trait __ReyloBindAsIs<T> {
+            fn reylo_bind(self) -> T;
+        }
+        impl<T: ::core::clone::Clone> __ReyloBindAsIs<T> for &__ReyloBind<T> {
+            fn reylo_bind(self) -> T {
+                ::core::clone::Clone::clone(&self.0)
+            }
+        }
     }
 }
 

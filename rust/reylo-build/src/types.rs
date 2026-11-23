@@ -310,11 +310,14 @@ impl Types {
 
     /// A parameter's Rust type, `Option` where it may be null; text is borrowed, a `&'a str`.
     pub fn param(&mut self, t: &Type, nullable: bool, label: &str) -> syn::Result<(Shape, bool)> {
+        // Whether the row derives `Serialize` turns on its columns alone.
+        let serialize = self.serialize;
         let (shape, borrowed) = if self.is_string(t) {
             (Shape::Leaf { ty: quote!(&'a str), leaf: Leaf::Plain, enumeration: None }, true)
         } else {
             (self.value(t, label, Use::Param)?, false)
         };
+        self.serialize = serialize;
         Ok((if nullable { Shape::Option(Box::new(shape)) } else { shape }, borrowed))
     }
 

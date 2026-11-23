@@ -157,5 +157,12 @@ async fn main() -> Result<(), sqlx::Error> {
     let none = vectors_text::Query { near: None }.run(&pool).await?.shown;
     let some = vectors_text::Query { near: Some(vec![pgvector::Vector::from(vec![1.0, 2.0])]) }.run(&pool).await?.shown;
     assert!(format!("{none:?}") == "None" && format!("{some:?}").contains("[1,2]"), "{none:?} {some:?}");
+
+    let shown = vector_from_text::Query { v: "[1,2]".to_string() }.run(&pool).await?.shown;
+    assert!(format!("{shown:?}").contains("[1,2]"), "{shown:?}");
+    let n = count_vectors::Query { vs: vec![Some(pgvector::Vector::from(vec![1.0])), None] }.run(&pool).await?.n;
+    assert_eq!(format!("{n:?}"), "Some(2)");
+    let row = dimensions::Query { v: pgvector::Vector::from(vec![1.0, 2.0]) }.run(&pool).await?;
+    println!("26. dimensions  {}", serde_json::to_string(&row).expect("json"));
     Ok(())
 }
