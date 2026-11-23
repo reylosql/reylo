@@ -8,8 +8,10 @@ conditional_cast.sql: many () -> { v: String(UTF-8, ill-formed) }
 constant_format.sql: many (format: String(UTF-8, ill-formed), minutes: UInt8) -> { name: String(UTF-8, ill-formed), shown: String(UTF-8, ill-formed), slot: DateTime }
 day_text.sql: many (day: String(UTF-8, ill-formed)) -> { id: UInt64 }
 dollar_names.sql: many (p$q: UInt8) -> { a$b$: UInt8, q: UInt8, c$b$: UInt8 }
+enum_semicolon.sql: many (e: Enum8('a;b')) -> { e: Enum8('a;b') }
 filters.sql: many (ids: UInt64[], pattern: String(UTF-8, ill-formed), since: DateTime64, low: UInt8, high: UInt8, role: Enum8('admin' | 'member'), tag: String(UTF-8, ill-formed)) -> { id: UInt64, name: String(UTF-8, ill-formed) }
 group_array_size.sql: one (most: UInt8) -> { some: UInt64[] }
+heredoc_tag.sql: many (n: UInt8) -> { s: String(UTF-8, ill-formed), n: UInt8 }
 in_function.sql: many (extra: UInt32, since: String(UTF-8, ill-formed)) -> { id: UInt64, pinned: UInt8 }
 in_selected.sql: many (ids: UInt64[], a: UInt64, b: UInt64, pairs: (UInt64, String(UTF-8, ill-formed))[], least: Decimal(18,2)) -> { id: UInt64, found: UInt8, neither: UInt8, paired: UInt8, ordered: UInt8 }
 limit_pair.sql: many (skip: UInt32, count: UInt32) -> { id: UInt64, name: String(UTF-8, ill-formed) }

@@ -227,6 +227,37 @@ test("ClickHouse: a value's text is the server's own", { skip: clickhouseLive, t
   }
 });
 
+test("ClickHouse: bytes that are no UTF-8 text are refused by their column, never returned changed", { skip: clickhouseLive, timeout: 120_000 }, async () => {
+  const client = driver("@clickhouse/client").createClient({ url: CLICKHOUSE! });
+  try {
+    await assert.rejects(byHand("SELECT unhex('ff00') AS raw").run(client, {}), /^TypeError: Column "raw" holds bytes that are not UTF-8 text, which a string cannot return as they are: select them as text, as hex\(raw\) or base64Encode\(raw\) does\.$/);
+    // A digest in a FixedString, and a value inside an array.
+    await assert.rejects(byHand("SELECT MD5('a') AS digest").run(client, {}), /Column "digest" holds bytes that are not UTF-8 text/);
+    await assert.rejects(byHand("SELECT ['ok', unhex('c328')] AS list").run(client, {}), /Column "list" holds bytes that are not UTF-8 text/);
+    // The same bytes as text, and text of every width, come back as they are.
+    assert.deepEqual(await byHand("SELECT hex(MD5('a')) AS digest, 'h\u00e9llo \u2713 \ud83d\ude00' AS text, toFixedString('ab', 4) AS padded").run(client, {}), [{ digest: "0CC175B9C0F1B6A831C399E269772661", text: "h\u00e9llo \u2713 \ud83d\ude00", padded: "ab\0\0" }]);
+  } finally {
+    await client.close();
+  }
+});
+
+test("ClickHouse: a session's setting that adds to a describe or filters a result is read past", { skip: clickhouseLive, timeout: 120_000 }, async () => {
+  const db = await clickhouseDatabase("reylo_clickhouse_session", SCHEMA);
+  try {
+    // describe_include_subcolumns lists each tuple's element, array's sizes and nullable's flag after the columns.
+    const shapes = { "shapes.sql": "SELECT tuple(1, 'a') AS t, [1] AS arr, CAST(NULL, 'Nullable(UInt8)') AS n" };
+    const plain = types((await declarations(project(db.url), shapes))["shapes.sql"]!).row;
+    assert.match(plain, /^\{ t: .+; arr: .+; n: .+ \}$/);
+    assert.equal(types((await declarations(project(`${db.url}?ch_describe_include_subcolumns=1`), shapes))["shapes.sql"]!).row, plain);
+    // A filter every result passes may drop the one row an aggregate returns.
+    const counted = { "count.sql": "SELECT count() AS n FROM users" };
+    assert.equal(returns((await declarations(project(db.url), counted))["count.sql"]!), "one");
+    assert.equal(returns((await declarations(project(`${db.url}?ch_additional_result_filter=1`), counted))["count.sql"]!), "maybeOne");
+  } finally {
+    await db.drop();
+  }
+});
+
 test("ClickHouse: each parameter is written as its type's text, and comes back as given", { skip: clickhouseLive, timeout: 120_000 }, async () => {
   const client = driver("@clickhouse/client").createClient({ url: CLICKHOUSE! });
   try {
@@ -270,6 +301,12 @@ test("ClickHouse: a value its parameter's type cannot hold is refused before the
     await assert.rejects(byHand("SELECT {p:JSON} AS p", ["p"]).run(client, { p: {} }), /Parameter "p" has the ClickHouse type JSON, which Reylo does not write/);
     // The place inside the parameter is named.
     await assert.rejects(byHand("SELECT {p:Array(Tuple(n UInt8, s String))} AS p", ["p"]).run(client, { p: [{ n: 1, s: "a" }, { n: 300, s: "b" }] }), /^TypeError: Parameter "p" at \[1\]\.n has the ClickHouse type UInt8, which holds 0 to 255; got 300\.$/);
+    // A Standard Query's encode writes each value as `.run()` sends it, and refuses what `.run()` refuses.
+    const standard = byHand("SELECT {p:UInt8} AS p, {s:Nullable(String)} AS s", ["p", "s"])["~standard"].query;
+    assert.deepEqual(standard.encode({ p: 255, s: null }), ["255", "\\N"]);
+    assert.deepEqual(standard.encode({ p: 0, s: "ada" }), ["0", "ada"]);
+    assert.throws(() => standard.encode({ p: 300, s: null }), /^TypeError: Parameter "p" has the ClickHouse type UInt8, which holds 0 to 255; got 300\.$/);
+    assert.throws(() => standard.encode({ p: "x", s: null }), /^TypeError: Parameter "p" has the ClickHouse type UInt8/);
   } finally {
     await client.close();
   }
@@ -516,9 +553,29 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
       "alter_add.sql": "ALTER TABLE orders ADD COLUMN z UInt8",
       // ClickHouse fits what a statement inserts into the column, in silence: 1.2345 would go in as 1.23.
       "wide.sql": "INSERT INTO orders (id, user_id, total, note) VALUES ({id:UInt64}, {user:UInt32}, {total:Decimal(18, 4)}, {note:Nullable(String)})",
+      // And what a SELECT's list or an assignment writes as it is, the same way.
+      "copy_one.sql": "INSERT INTO orders (id, user_id, total, note) SELECT {id:UInt64}, {user:UInt64}, {total:Decimal(18, 2)} AS total, {note:Nullable(String)}",
+      "copy_wide.sql": "INSERT INTO orders (id, user_id, total) SELECT {id:UInt64}, {user:UInt64}, {total:Decimal(18, 4)}",
+      "set_wide.sql": "UPDATE orders SET total = {total:Decimal(18, 4)} WHERE id = {id:UInt64}",
+      "alter_wide.sql": "ALTER TABLE orders UPDATE total = {total:Decimal(18, 4)} WHERE id = {id:UInt64}",
+      // Each row of VALUES is checked as the SELECT of its values.
+      "bad_value.sql": "INSERT INTO orders (id, user_id, total) VALUES ({id:UInt64}, 1, 0), ({id:UInt64}, nope + 1, 0)",
+      "bad_count.sql": "INSERT INTO orders (id, user_id) VALUES ({id:UInt64}, 1, 2)",
+      "bad_type.sql": "INSERT INTO orders (id, user_id) VALUES ({id:UInt64}, 'abc')",
+      // A partition's expression is read with the condition, and several commands are no one statement's.
+      "remove_in.sql": "DELETE FROM orders IN PARTITION tuple() WHERE id = {id:UInt64}",
+      "remove_in_bad.sql": "DELETE FROM orders IN PARTITION tuple() WHERE nope = {id:UInt64}",
+      "alter_two.sql": "ALTER TABLE orders UPDATE note = 'x' WHERE id = {id:UInt64}, DELETE WHERE id = 0",
     };
     const found = await transform(root, files);
-    for (const name of ["add.sql", "copy.sql", "remove.sql", "set.sql", "alter_set.sql"] as const) assert.deepEqual(found[name]!.diagnostics, [], name);
+    for (const name of ["add.sql", "copy.sql", "remove.sql", "set.sql", "alter_set.sql", "copy_one.sql", "remove_in.sql"] as const) assert.deepEqual(found[name]!.diagnostics, [], name);
+    for (const name of ["copy_wide.sql", "set_wide.sql", "alter_wide.sql"] as const) assert.deepEqual(marked(files[name], found[name]!.diagnostics), [["{total:Decimal(18, 4)} is written to the column total, a Decimal(18, 2), and ClickHouse changes a value the column cannot hold into one it can, without an error. Declare the parameter as the column's type: {total:Decimal(18, 2)}.", "{total:Decimal(18, 4)}"]], name);
+    assert.match(found["bad_value.sql"]!.diagnostics[0]!.messageText, /^Unknown expression or function identifier `nope`/);
+    assert.equal(marked(files["bad_value.sql"], found["bad_value.sql"]!.diagnostics)[0]![1], "({id:UInt64}, nope + 1, 0)");
+    assert.match(found["bad_count.sql"]!.diagnostics[0]!.messageText, /^Number of columns doesn't match/);
+    assert.match(found["bad_type.sql"]!.diagnostics[0]!.messageText, /^Cannot parse string 'abc' as UInt64/);
+    assert.match(found["remove_in_bad.sql"]!.diagnostics[0]!.messageText, /^Unknown expression or function identifier `nope`/);
+    assert.match(found["alter_two.sql"]!.diagnostics[0]!.messageText, /^Reylo types an ALTER TABLE of one command, an UPDATE or a DELETE, and this one has 2/);
     assert.match(found["set_bad.sql"]!.diagnostics[0]!.messageText, /`nope`/);
     assert.match(found["alter_add.sql"]!.diagnostics[0]!.messageText, /^Reylo types an ALTER TABLE that changes rows, with UPDATE or DELETE, and ADD COLUMN is neither/);
     assert.deepEqual(marked(files["wide.sql"], found["wide.sql"]!.diagnostics), [["{total:Decimal(18, 4)} is written to the column total, a Decimal(18, 2), and ClickHouse changes a value the column cannot hold into one it can, without an error. Declare the parameter as the column's type: {total:Decimal(18, 2)}.", "{total:Decimal(18, 4)}"]]);
@@ -537,6 +594,12 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
     assert.equal(await add.run(db.client, { id: 11, user: 2, total: "5.25" }), undefined);
     await assert.rejects(add.run(db.client, { id: 12, total: "1" } as never), /Parameter "user" is missing, and the statement takes no null for it/);
     const read = byHand("SELECT id, total, note FROM orders ORDER BY id");
+    assert.deepEqual(await read.run(db.client, {}), [{ id: 10n, total: "9.99", note: "first" }, { id: 11n, total: "5.25", note: null }]);
+    // What a SELECT's list writes is what was given: the row comes back as it went in.
+    const copy = await built(root, "copy_one", files["copy_one.sql"]);
+    await copy.run(db.client, { id: 12, user: 2, total: "0.01", note: "copied" });
+    assert.deepEqual((await read.run(db.client, {})).at(-1), { id: 12n, total: "0.01", note: "copied" });
+    await (await built(root, "remove_in", files["remove_in.sql"])).run(db.client, { id: 12 });
     assert.deepEqual(await read.run(db.client, {}), [{ id: 10n, total: "9.99", note: "first" }, { id: 11n, total: "5.25", note: null }]);
     const remove = await built(root, "remove", files["remove.sql"]);
     await remove.run(db.client, { id: 10 });

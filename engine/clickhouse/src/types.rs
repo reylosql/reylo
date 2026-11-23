@@ -330,16 +330,36 @@ enum Held {
     DateTime,
     /// An instant, by its digits after the second.
     DateTime64(u32),
+    /// A column of `IPv4`: an address in 32 bits.
+    Address4,
+    /// A column of `Time` or `Time64`, by its digits after the second: a count of seconds within
+    /// 999:59:59 either side of zero.
+    Time(u32),
     /// Anything else, of which nothing is said.
     Other,
 }
 
-fn held(t: &Named) -> Held {
+/// What a type holds: a value's, or with `column` that of the column it is written to, which an
+/// address and a time of day are more than a value of one is.
+fn held(t: &Named, column: bool) -> Held {
     if let Some((bits, unsigned)) = integer(&t.name) {
         let top = 2f64.powi(bits as i32 - i32::from(!unsigned));
         return Held::Whole(if unsigned { 0.0 } else { -top }, top - 1.0);
     }
     match t.name.as_str() {
+        "IPv4" if column => Held::Address4,
+        "Time" if column => Held::Time(0),
+        "Time64" if column => Held::Time(t.number(0).unwrap_or(3)),
+        // An enum's value is written to a number's column as its number.
+        "Enum8" | "Enum16" if !column => {
+            let numbers = t.args.iter().filter_map(|a| if let Arg::Label(_, n) = a { Some(*n as f64) } else { None });
+            let (least, most) = numbers.fold((f64::INFINITY, f64::NEG_INFINITY), |(least, most), n| (least.min(n), most.max(n)));
+            if least > most {
+                Held::Other
+            } else {
+                Held::Whole(least, most)
+            }
+        }
         "Decimal" => Held::Decimal(t.number(0).unwrap_or(10), t.number(1).unwrap_or(0)),
         "Decimal32" => Held::Decimal(9, t.number(0).unwrap_or(0)),
         "Decimal64" => Held::Decimal(18, t.number(0).unwrap_or(0)),
@@ -371,13 +391,20 @@ fn held(t: &Named) -> Held {
 ///   cut to a whole decimal, and a text that is no date is read as one.
 /// - A time is dropped from a date, a date past a `DateTime`'s years wraps, and a NULL becomes
 ///   the default of a column that takes none.
+/// - An enum's value is its number: one outside a whole number's range wraps into it, and one
+///   another enum gives another label becomes that label.
+/// - A `UInt64` past 32 bits wraps into an `IPv4`, a number past 999:59:59 is cut to a `Time`, and
+///   a `Variant` takes a value as the member that reads it, changed as that member's column would
+///   change it, unless a member is the value's own type.
 ///
 /// What ClickHouse refuses aloud is none of these: a number too big for a decimal, a decimal
-/// into a whole number it does not fit or into a date. An array's elements, a tuple's and a
+/// into a whole number it does not fit or into a date, a signed or a wider number into an `IPv4`,
+/// a number or a text into an enum that has none of it. An array's elements, a tuple's and a
 /// map's keys and values are each written the same way.
 pub fn narrows(from: &Named, to: &Named) -> bool {
     let nullable = |t: &Named| match (t.name.as_str(), t.args.as_slice()) {
-        ("Nullable", _) => true,
+        // A Variant holds NULL with no Nullable around it.
+        ("Nullable" | "Variant", _) => true,
         ("LowCardinality", [Arg::Type(inner)]) => inner.name == "Nullable",
         _ => false,
     };
@@ -392,11 +419,31 @@ pub fn narrows(from: &Named, to: &Named) -> bool {
     if let (Some(held), Some(into)) = (parts(from), parts(to)) {
         return from.name == to.name && held.len() == into.len() && held.iter().zip(&into).any(|(held, into)| narrows(held, into));
     }
+    // A Variant keeps a value of a member's own type as it is, and reads any other as one of its members.
+    if to.name == "Variant" {
+        let members: Vec<&Named> = to.args.iter().filter_map(|a| if let Arg::Type(t) = a { Some(t) } else { None }).collect();
+        return !members.iter().any(|member| member.bare() == from) && members.iter().any(|member| narrows(from, member));
+    }
+    // An enum written to another goes by its number: a label the column names otherwise becomes that one.
+    let labels = |t: &'_ Named| -> Vec<(String, i64)> { t.args.iter().filter_map(|a| if let Arg::Label(label, n) = a { Some((label.clone(), *n)) } else { None }).collect() };
+    if from.name.starts_with("Enum") && to.name.starts_with("Enum") {
+        let into = labels(to);
+        return labels(from).iter().any(|(label, n)| into.iter().any(|(other, m)| m == n && other != label));
+    }
     // Whether whole numbers from `least` to `most` all lie within a range.
     let outside = |(least, most): (f64, f64), (into_least, into_most): (f64, f64)| least < into_least || most > into_most;
-    match (held(from), held(to)) {
+    match (held(from, false), held(to, true)) {
         // A string holds any value's text, and a Bool is 0 or 1, which every type but a date keeps.
         (Held::Other, _) | (_, Held::Other | Held::Text) | (Held::Bool, _) => false,
+        // An IPv4 takes a whole number of 32 bits or fewer, refuses a signed one and one of 128
+        // bits or more, and wraps the one between.
+        (_, Held::Address4) => from.name == "UInt64",
+        // A time of day keeps a count of seconds within its range, and cuts any other to it.
+        (source, Held::Time(into)) => match source {
+            Held::Whole(a, b) => outside((a, b), (-3599999.0, 3599999.0)),
+            Held::Decimal(_, scale) => scale > into,
+            _ => true,
+        },
         // A Bool's own text is read, and any other refused; any number is true or false.
         (source, Held::Bool) => !matches!(source, Held::Text),
         (source, Held::Whole(least, most)) => match source {
@@ -593,7 +640,12 @@ fn decimal(precision: u32, scale: u32, written: bool) -> Type {
 fn tuple(t: &Named, written: bool) -> Result<Type, Unread> {
     let slot = |t: &Named| read(t, written);
     let unread = || Unread(t.name.clone());
-    if !t.args.is_empty() && t.args.iter().all(|a| matches!(a, Arg::Member(..))) {
+    // A tuple with no elements is written as no bytes at all, so a result of such columns alone
+    // does not say how many rows it has.
+    if t.args.is_empty() {
+        return Err(Unread(format!("{} with no elements", t.name)));
+    }
+    if t.args.iter().all(|a| matches!(a, Arg::Member(..))) {
         let fields = t.args.iter().map(|a| {
             let Arg::Member(name, ty) = a else { unreachable!("every argument is a member") };
             slot(ty).map(|s| Field::new(name.clone(), s.ty, s.nullable))
@@ -644,6 +696,17 @@ mod tests {
             ("Nullable(UInt8)", &["UInt8"]),
             ("LowCardinality(Nullable(String))", &["String"]),
             ("Nullable(Int64)", &["Nullable(Float64)"]),
+            // An enum is its number, and its label where another enum names that number otherwise.
+            ("Enum16('a' = 1000)", &["UInt8", "Int8", "Bool"]),
+            ("Enum8('a' = -1)", &["UInt8", "UInt64"]),
+            ("Enum8('a' = 1)", &["Enum8('b' = 1)", "Enum16('a' = 2, 'b' = 1)"]),
+            // An address of 32 bits, a time of day within its hours, and a Variant by the member that reads the value.
+            ("UInt64", &["IPv4", "Time", "Time64(3)", "Variant(UInt8, String)", "Variant(String, Date)"]),
+            ("UInt32", &["Time"]),
+            ("Float64", &["Time", "Time64(3)", "Variant(Float32, String)"]),
+            ("Decimal(9, 4)", &["Time64(3)"]),
+            ("Int16", &["Variant(UInt8, String)"]),
+            ("Array(UInt64)", &["Array(IPv4)"]),
             // What an array, a tuple and a map hold is written the same way, each in its place.
             ("Array(UInt64)", &["Array(UInt8)"]),
             ("Tuple(UInt64, String)", &["Tuple(UInt8, String)"]),
@@ -685,6 +748,21 @@ mod tests {
             ("Date32", &["DateTime64(3)", "Int32", "Float32"]),
             ("DateTime", &["DateTime64(3)", "UInt32", "Int64", "Float64"]),
             ("DateTime64(3)", &["DateTime64(6)", "Decimal(18, 4)", "Float64", "String"]),
+            // An enum's number where the column holds it, its label in a string, and an enum that names each number alike or not at all.
+            ("Enum16('a' = 1000)", &["UInt16", "Int32", "Float32", "String"]),
+            ("Enum8('a' = -1)", &["Int8", "String"]),
+            ("Enum8('a' = 1)", &["Enum8('a' = 1, 'b' = 2)", "Enum8('a' = 2)", "Enum16('a' = 1)"]),
+            // An address from the numbers it holds, and what an IPv4, an IPv6 and a UUID refuse aloud.
+            ("UInt32", &["IPv4"]),
+            ("UInt16", &["IPv4", "Time", "Time64(3)"]),
+            ("Int64", &["IPv4"]),
+            ("UInt128", &["IPv4", "IPv6", "UUID"]),
+            ("IPv4", &["UInt32", "UInt64", "IPv6", "String"]),
+            ("Decimal(9, 2)", &["Time64(3)"]),
+            // A Variant keeps a value of a member's type, a NULL, and a value its members read whole.
+            ("UInt8", &["Variant(UInt8, String)", "Variant(UInt64, String)"]),
+            ("String", &["Variant(UInt8, String)"]),
+            ("Nullable(UInt8)", &["Variant(UInt8, String)"]),
             ("Array(UInt8)", &["Array(UInt64)"]),
             ("Tuple(a UInt8, b String)", &["Tuple(a UInt16, b String)"]),
             ("Map(String, UInt8)", &["Map(LowCardinality(String), Nullable(UInt8))"]),
@@ -766,7 +844,7 @@ mod tests {
 
     #[test]
     fn a_type_the_run_time_does_not_read_is_refused_by_name() {
-        for (name, refused) in [("JSON", "JSON"), ("Array(Dynamic)", "Dynamic"), ("AggregateFunction(sum, UInt64)", "AggregateFunction"), ("Tuple(a IntervalDay)", "IntervalDay"), ("Nullable(Time)", "Time")] {
+        for (name, refused) in [("JSON", "JSON"), ("Array(Dynamic)", "Dynamic"), ("AggregateFunction(sum, UInt64)", "AggregateFunction"), ("Tuple(a IntervalDay)", "IntervalDay"), ("Nullable(Time)", "Time"), ("Tuple()", "Tuple with no elements"), ("Array(Tuple())", "Tuple with no elements")] {
             assert_eq!(slot(&parse(name).unwrap()), Err(Unread(refused.into())));
         }
     }

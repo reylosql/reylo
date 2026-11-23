@@ -10,7 +10,10 @@
 //!
 //! ClickHouse has no transaction to roll a run back in, so a statement that reads runs as often as
 //! its parameters have values, on both databases, and a statement that writes runs once, on the
-//! first, after every read. A parameter's values are its type's own: an integer's ends, a float's
+//! first, after every read. A write with a read-back beside it, a SELECT in `<statement>.reads`
+//! that takes its parameters, runs with each of their values instead, and the read-back after
+//! each must answer 1: that the table holds what the write was given, which ClickHouse changes
+//! in silence where a column cannot hold a value. A parameter's values are its type's own: an integer's ends, a float's
 //! NaN and infinity, a decimal's largest, the empty string and one past ASCII, the first and last
 //! date and instant, each label of an enum, NULL where the type takes it, an array of none and of
 //! one. Each goes as the text the run time writes for it (`param_<name>`).
@@ -28,6 +31,7 @@ use reylo_engine::engines::clickhouse::types::{self, Arg, Named};
 use reylo_engine::AnswerCache;
 use reylo_engine_core::dialect::Dialect;
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -129,12 +133,14 @@ pub fn mutate(case: &Path, server: &mut Server, timeout_ms: u64, mutations: &[(u
     let (databases, states) = build(case, server)?;
     let outcome: Result<Report, String> = (|| {
         let mut analyzed = Vec::new();
+        let mut reads = HashMap::new();
         for (n, m) in mutations {
             let sql = fs::read_to_string(case.join(&m.file)).map_err(|e| format!("{}: {e}", m.file))?;
             let analysis = answers::analyze(&states[0], &sql, &mut AnswerCache::default()).map_err(|e| format!("{}: {e}", m.file))?;
+            reads.extend(read_back_of(case, &m.file).map(|read| (m.label(*n), read)));
             analyzed.push((m.label(*n), sql, m.apply(serde_json::to_value(&analysis).map_err(|e| e.to_string())?)?));
         }
-        Ok(check(&states, &analyzed, timeout_ms))
+        Ok(check(&states, &analyzed, &reads, timeout_ms))
     })();
     for database in &databases {
         let _ = exec(&server.admin, &format!("DROP DATABASE IF EXISTS {database}"));
@@ -147,6 +153,7 @@ pub fn run(case: &Path, server: &mut Server, keep: bool, timeout_ms: u64, given:
     let (databases, states) = build(case, server)?;
     let mut lines = Vec::new();
     let mut analyzed = Vec::new();
+    let reads: HashMap<String, String> = statements.iter().filter_map(|(file, _)| read_back_of(case, file).map(|read| (file.clone(), read))).collect();
     for (file, sql) in statements {
         let analysis = match given.get(&format!("{name}/{file}")) {
             Some(answer) => answer.clone(),
@@ -160,7 +167,7 @@ pub fn run(case: &Path, server: &mut Server, keep: bool, timeout_ms: u64, given:
         analyzed.push((file, sql, analysis));
     }
     // A value that contradicts a type is a failure whatever expected.txt says.
-    let report = check(&states, &analyzed, timeout_ms);
+    let report = check(&states, &analyzed, &reads, timeout_ms);
     if !keep {
         for database in &databases {
             let _ = exec(&server.admin, &format!("DROP DATABASE IF EXISTS {database}"));
@@ -427,7 +434,34 @@ fn scalar_text(value: &Value) -> Option<String> {
     }
 }
 
-fn check(states: &[Http], analyzed: &[(String, String, Value)], timeout_ms: u64) -> Report {
+/// A write's read-back, where its case holds one: the SELECT in `<statement>.reads` beside it,
+/// which takes the statement's parameters by their names and answers one row of one column, 1
+/// where the table holds what the write was given.
+fn read_back_of(case: &Path, file: &str) -> Option<String> {
+    fs::read_to_string(case.join(file).with_extension("reads")).ok()
+}
+
+/// What a write's read-back says is wrong, if anything, run with the values the write was given.
+fn read_back(http: &Http, read: &str, params: &[(String, Named)], values: &[String], fields: &[(String, String)]) -> Option<String> {
+    let named = match parameters(read) {
+        Ok(named) => named,
+        Err(why) => return Some(format!("its read-back is no statement the oracle runs: {why}")),
+    };
+    let mut request = fields.to_vec();
+    for (name, _) in &named {
+        match params.iter().position(|(own, _)| own == name) {
+            Some(at) => request.push((format!("param_{name}"), values[at].clone())),
+            None => return Some(format!("its read-back takes the parameter {name}, which the statement has not")),
+        }
+    }
+    match ask(http, read, &request) {
+        Ok((_, rows)) if rows.len() == 1 && rows[0].len() == 1 && (rows[0][0] == 1 || rows[0][0] == "1" || rows[0][0] == true) => None,
+        Ok((_, rows)) => Some(format!("reads back otherwise than it was written: its read-back answered {}", Value::from(rows))),
+        Err(e) => Some(format!("its read-back failed: {}", unversioned(&e))),
+    }
+}
+
+fn check(states: &[Http], analyzed: &[(String, String, Value)], reads: &HashMap<String, String>, timeout_ms: u64) -> Report {
     let mut problems = Vec::new();
     let mut tallies: Vec<Tally> = analyzed.iter().map(|_| Tally::default()).collect();
     let fields = settings(timeout_ms);
@@ -459,7 +493,9 @@ fn check(states: &[Http], analyzed: &[(String, String, Value)], timeout_ms: u64)
             // A pool always holds a value, so the stand-in for an empty one is never bound.
             let all = assignments(&pools, &"\\N".to_string());
             // Each run with its state's place: the seeded database is the first, the empty one the second.
-            let runs: Vec<(usize, &Http, &Vec<String>)> = if writes { all.first().map(|values| (0, &states[0], values)).into_iter().collect() } else { states.iter().enumerate().flat_map(|(state, http)| all.iter().map(move |values| (state, http, values))).collect() };
+            // A write runs once, or with each assignment where a read-back says what each one stored.
+            let read = reads.get(file);
+            let runs: Vec<(usize, &Http, &Vec<String>)> = if writes { all.iter().take(if read.is_some() { all.len() } else { 1 }).map(|values| (0, &states[0], values)).collect() } else { states.iter().enumerate().flat_map(|(state, http)| all.iter().map(move |values| (state, http, values))).collect() };
             for (state, http, values) in runs {
                 let mut request = fields.clone();
                 request.extend(params.iter().zip(values).map(|((name, _), value)| (format!("param_{name}"), value.clone())));
@@ -480,6 +516,10 @@ fn check(states: &[Http], analyzed: &[(String, String, Value)], timeout_ms: u64)
                     // A statement typed as returning nothing returns no column and no row.
                     if !returned.is_empty() || !rows.is_empty() {
                         problems.push(format!("{file}: returned {} column(s) and {} row(s), typed none (with {})", returned.len(), rows.len(), shown()));
+                    }
+                    // What it stored is what it was given: ClickHouse changes a value a column cannot hold, and says nothing.
+                    if let Some(why) = read.and_then(|read| read_back(http, read, &params, values, &fields)) {
+                        problems.push(format!("{file}: {why} (with {})", shown()));
                     }
                     continue;
                 }

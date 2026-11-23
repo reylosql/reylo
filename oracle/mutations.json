@@ -49,5 +49,6 @@
   { "check": "a column count that differs, on ClickHouse", "statement": "clickhouse_nulls/left_join.sql", "pointer": "/columns", "value": [], "problem": "returned 5 column(s), typed 0" },
   { "check": "a column the server names otherwise, on ClickHouse", "statement": "clickhouse_nulls/left_join.sql", "pointer": "/columns/1/name", "value": "label", "problem": "column name is typed as \"label\"" },
   { "check": "a column whose type the server names otherwise, on ClickHouse", "statement": "clickhouse_nulls/left_join.sql", "pointer": "/columns/1/described", "value": "UInt8", "problem": "column name came back as a String, typed UInt8" },
-  { "check": "the empty state, on ClickHouse", "statement": "clickhouse_nulls/aggregates.sql", "pointer": "/columns/6/nullable", "value": false, "problem": "column last_or_null holds NULL, typed non-null (with than = 0; every table empty)" }
+  { "check": "the empty state, on ClickHouse", "statement": "clickhouse_nulls/aggregates.sql", "pointer": "/columns/6/nullable", "value": false, "problem": "column last_or_null holds NULL, typed non-null (with than = 0; every table empty)" },
+  { "check": "a write whose row reads back otherwise than it was written, on ClickHouse", "statement": "clickhouse_writes/insert_values.sql", "pointer": "/rewritten/sql", "value": "INSERT INTO orders (id, user_id, total, note, placed) VALUES ({id:UInt64} + 1, {user:UInt64}, {total:Decimal(18, 2)}, {note:Nullable(String)}, {placed:Date})", "problem": "reads back otherwise than it was written" }
 ]

@@ -544,7 +544,18 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
             b'$' => {
                 // A `$` inside a ClickHouse name is the name's (`a$b$`), and opens no heredoc.
                 let named = clickhouse && (prev_is_name_char(b, i) || (i > 0 && b[i - 1] == b'$'));
-                if (dialect == Dialect::Postgres || clickhouse) && !named {
+                // ClickHouse's heredoc: its tag is whatever stands up to the next `$` (`$1$hi$1$`),
+                // and it is one only where the tag closes it later.
+                if clickhouse && !named {
+                    let tag = find_bytes(b, b"$", i + 1).map(|stop| &b[i..=stop]);
+                    if let Some((tag, close)) = tag.and_then(|tag| find_bytes(b, tag, i + tag.len()).map(|close| (tag, close))) {
+                        opaque.push((i, close + tag.len()));
+                        i = close + tag.len();
+                        last = Last::Other;
+                        continue;
+                    }
+                }
+                if dialect == Dialect::Postgres {
                     if let Some(tag_end) = dollar_tag_end(b, i) {
                         let tag = &b[i..tag_end];
                         match find_bytes(b, tag, tag_end) {
@@ -911,7 +922,8 @@ fn past_comments(sql: &str, lexed: &Lexed, mut i: usize) -> usize {
 /// parse refuses several (`AnalyzeError` in `analyze.rs`).
 pub fn one_statement(sql: &str, lexed: &Lexed, kinds: &[&str]) -> Result<Statement, String> {
     let bytes = sql.as_bytes();
-    let in_text = |i: usize| lexed.opaque.iter().any(|&(start, end)| start <= i && i < end);
+    // A `;` inside a placeholder is its type's, as in ClickHouse's `{e:Enum8('a;b' = 1)}`.
+    let in_text = |i: usize| lexed.opaque.iter().any(|&(start, end)| start <= i && i < end) || lexed.placeholders.iter().any(|p| p.start <= i && i < p.end);
     if let Some(semicolon) = (0..bytes.len()).find(|&i| bytes[i] == b';' && !in_text(i)) {
         let mut i = semicolon + 1;
         loop {
@@ -1010,6 +1022,12 @@ mod tests {
         // or a `!`, block comments nest, and a heredoc quotes.
         assert!(l("SELECT 'it\\'s {a:UInt8}', `{b:UInt8}\\``, \"{c:UInt8}\\\"\" # {d:UInt8}\n #! {e:UInt8}\n /* {f:UInt8} /* {g:UInt8} */ {h:UInt8} */, $q${i:UInt8}$q$ -- {j:UInt8}").params.is_empty());
         assert_eq!(l("SELECT 1 #{k:UInt8}").params, ["k"]);
+        // A heredoc's tag is whatever stands up to the next `$`, digits and spaces too, and a `$` that no tag closes opens none.
+        assert!(l("SELECT $1$ {a:UInt8} $1$, $ x ${b:UInt8}$ x $, $${c:UInt8}$$").params.is_empty());
+        assert_eq!(l("SELECT 1 $ {a:UInt8} $, {b:UInt8}").params, ["a", "b"]);
+        // A `;` in a placeholder's type is the type's: the statement is one.
+        let labelled = "SELECT {e:Enum8('a;b' = 1)} AS e;";
+        assert_eq!(one_statement(labelled, &l(labelled), &["select"]), Ok(Statement::Query));
         // One statement writes its parameters one way.
         let e = lex("SELECT {a:UInt8}, :b::UInt8", Dialect::Clickhouse).unwrap_err();
         assert_eq!(e.message, ":b and {a:UInt8} are written two ways; write every parameter of a statement one way, as {name:Type} or as :name::Type");
