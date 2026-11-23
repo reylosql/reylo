@@ -3,8 +3,8 @@
 //! own renderings (Postgres's `pg_get_*def`, MySQL's information_schema, SQLite's stored `create`
 //! text, rendered again token by token) are kept as they are, with internal references resolved to
 //! names. Columns are compared as a set, by name; what changes as rows are written (a sequence's
-//! current value, MySQL's next AUTO_INCREMENT, `sqlite_sequence`) is left out, and so is Reylo's own
-//! history table.
+//! current value, MySQL's next AUTO_INCREMENT, `sqlite_sequence`) is left out, and so are the history
+//! tables, Reylo's own and other migration tools'.
 
 use crate::db::{literal, Db, Row};
 use crate::sql::{tokenize, Token, TokenKind};
@@ -12,6 +12,94 @@ use crate::{Dialect, Error};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const HISTORY_TABLE: &str = "__reylo_migrations";
+
+/// The history tables other migration tools keep, each left out as Reylo's own is: no catalog, diff,
+/// dump or wipe reads them. A project that moves to Reylo Migrate starts from its own schema, and a
+/// database that still holds its old tool's table, which that tool may go on reading until the move
+/// is done, matches the files. Each is known by a name no table of an application's takes; a
+/// generic one (TypeORM's `migrations`) is not listed.
+pub const OTHER_HISTORY_TABLES: &[&str] = &[
+    // Prisma Migrate.
+    "_prisma_migrations",
+    // Drizzle Kit, on Postgres in a schema of its own, `drizzle`.
+    "__drizzle_migrations",
+    // Knex.
+    "knex_migrations",
+    "knex_migrations_lock",
+    // Kysely.
+    "kysely_migration",
+    "kysely_migration_lock",
+    // node-pg-migrate.
+    "pgmigrations",
+    // Sequelize.
+    "SequelizeMeta",
+    // MikroORM.
+    "mikro_orm_migrations",
+    // Rails, Ecto, golang-migrate and dbmate; `ar_internal_metadata` is Rails' own.
+    "schema_migrations",
+    "ar_internal_metadata",
+    // Flyway.
+    "flyway_schema_history",
+    // Liquibase.
+    "databasechangelog",
+    "databasechangeloglock",
+    // goose.
+    "goose_db_version",
+    // SQLx.
+    "_sqlx_migrations",
+    // Diesel.
+    "__diesel_schema_migrations",
+    // Alembic.
+    "alembic_version",
+    // Django.
+    "django_migrations",
+    // Entity Framework Core.
+    "__EFMigrationsHistory",
+    // Atlas, on Postgres in a schema of its own of the same name.
+    "atlas_schema_revisions",
+];
+
+/// Every history table's name as a SQL list: Reylo's own and other tools'.
+fn history_names() -> String {
+    [HISTORY_TABLE].iter().chain(OTHER_HISTORY_TABLES).map(|t| format!("'{t}'")).collect::<Vec<_>>().join(", ")
+}
+
+/// A condition on a column of table names that holds for every name but a history table's,
+/// [`HISTORY_TABLE`] or one of [`OTHER_HISTORY_TABLES`]. It reads alike in every dialect.
+pub(crate) fn not_history(column: &str) -> String {
+    format!("{column} not in ({})", history_names())
+}
+
+/// Whether `name` is a history table's, Reylo's own or another tool's.
+pub(crate) fn is_history(name: &str) -> bool {
+    name == HISTORY_TABLE || OTHER_HISTORY_TABLES.contains(&name)
+}
+
+/// Whether the `pg_class` row `c` is no history table and comes with none: a history table's
+/// indexes, its sequences (`serial` or identity) and its TOAST table go with it.
+pub(crate) fn pg_not_history(c: &str) -> String {
+    format!(
+        "({} and not exists (select 1 from pg_depend hd join pg_class ht on ht.oid = hd.refobjid where hd.classid = 'pg_class'::regclass and hd.objid = {c}.oid and hd.refclassid = 'pg_class'::regclass and hd.deptype in ('a', 'i') and ht.relname in ({})))",
+        not_history(&format!("{c}.relname")),
+        history_names()
+    )
+}
+
+/// Whether the schema `n` (a `pg_namespace` row) is no history table's own: one, `public` aside,
+/// that holds a history table and nothing else of its own (Drizzle Kit's `drizzle`, Atlas's
+/// `atlas_schema_revisions`) is left out with it. What comes with another object (a table's row type,
+/// index or sequence) or an extension made is not the schema's own.
+pub(crate) fn pg_not_history_schema(n: &str) -> String {
+    format!(
+        "not ({n}.nspname <> 'public' and exists (select 1 from pg_class hc where hc.relnamespace = {n}.oid and hc.relkind = 'r' and hc.relname in ({names}))
+          and not exists (select 1 from pg_depend hd where hd.refclassid = 'pg_namespace'::regclass and hd.refobjid = {n}.oid and hd.deptype = 'n'
+            and not exists (select 1 from pg_depend ho where ho.classid = hd.classid and ho.objid = hd.objid and ho.deptype in ('e', 'a', 'i'))
+            and not (hd.classid = 'pg_class'::regclass and hd.objid in (select hc.oid from pg_class hc where hc.relname in ({names}))))
+          and not exists (select 1 from pg_class hc where hc.relnamespace = {n}.oid and hc.relkind in ('r', 'p', 'v', 'm', 'f', 'S', 'c') and {}))",
+        pg_not_history("hc"),
+        names = history_names()
+    )
+}
 
 /// A condition on a `sqlite_schema` or `pragma_table_list` row's `name` that holds for every object
 /// but those a libSQL vector index keeps for itself: `<index>_shadow`, the table the index is kept in,
@@ -293,10 +381,10 @@ fn json(text: &str) -> String {
 // ---------------------------------------------------------------------------------------------
 // Postgres. Every query runs with an empty search_path, so every rendering names its schema.
 
-/// The schemas of a Postgres database that no platform owns, by name.
+/// The schemas of a Postgres database that no platform owns and no history table keeps, by name.
 pub async fn user_schemas(db: &mut Db) -> Result<Vec<String>, Error> {
     let ns = PG_USER_NS;
-    let rows = db.rows(&format!("select n.nspname as name from pg_namespace n where {ns} and {} order by 1", not_platform_schema("n"))).await?;
+    let rows = db.rows(&format!("select n.nspname as name from pg_namespace n where {ns} and {} and {} order by 1", not_platform_schema("n"), pg_not_history_schema("n"))).await?;
     Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
 }
 
@@ -441,9 +529,10 @@ pub(crate) async fn out_of_reach_relations(db: &mut Db) -> Result<Vec<(String, S
               case when n.nspname = 'public' then quote_ident(c.relname) else format('%I.%I', n.nspname, c.relname) end as name,
               format('%I.%I', n.nspname, c.relname) as qualified
             from pg_class c join pg_namespace n on n.oid = c.relnamespace
-            where c.relkind in ('r', 'p', 'v', 'm', 'S', 'f') and {PG_USER_NS} and c.relname <> '{HISTORY_TABLE}' and {} and {} and {}
+            where c.relkind in ('r', 'p', 'v', 'm', 'S', 'f') and {PG_USER_NS} and {} and {} and {} and {}
               and not exists (select 1 from pg_depend d where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.refclassid = 'pg_class'::regclass and d.deptype in ('a', 'i'))
             order by 1, n.nspname <> 'public', 3",
+            pg_not_history("c"),
             beyond_reach("c.relowner"),
             not_platform_schema("n"),
             not_extension("pg_class", "c")
@@ -587,15 +676,15 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
     let mut lines = Vec::new();
     let ns = PG_USER_NS;
     let version: i64 = db.rows("select current_setting('server_version_num') as v").await?.first().and_then(|r| r.first()?.parse().ok()).unwrap_or(0);
-    let history = HISTORY_TABLE;
 
     for r in db
         .rows(&format!(
-            "select n.nspname as name, {} as acl, {} as owner_lacks, obj_description(n.oid, 'pg_namespace') as comment from pg_namespace n where {ns} and {} and {}",
+            "select n.nspname as name, {} as acl, {} as owner_lacks, obj_description(n.oid, 'pg_namespace') as comment from pg_namespace n where {ns} and {} and {} and {}",
             acl("n.nspacl", "n.nspowner", 'n'),
             owner_lacks("n.nspacl", "n.nspowner", 'n'),
             not_extension("pg_namespace", "n"),
-            not_platform_schema("n")
+            not_platform_schema("n"),
+            pg_not_history_schema("n")
         ))
         .await?
     {
@@ -647,11 +736,12 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
               (select format('server %I', fs.srvname) || coalesce(' options (' || (select string_agg(o, ', ' order by o) from unnest(ft.ftoptions) o) || ')', '')
                  from pg_foreign_table ft join pg_foreign_server fs on fs.oid = ft.ftserver where ft.ftrelid = c.oid) as foreign_server
             from pg_class c join pg_namespace n on n.oid = c.relnamespace
-            where c.relkind in ('r', 'p', 'v', 'm', 'f', 'c') and {ns} and {} and {} and c.relname <> '{history}'
+            where c.relkind in ('r', 'p', 'v', 'm', 'f', 'c') and {ns} and {} and {} and {}
               and not exists (select 1 from pg_depend e where e.classid = 'pg_type'::regclass and e.objid = c.reltype and e.deptype = 'e')",
             owner_lacks("c.relacl", "c.relowner", 'r'),
             not_extension("pg_class", "c"),
-            project_relation("c", "n")
+            project_relation("c", "n"),
+            pg_not_history("c")
         ))
         .await?
     {
@@ -748,11 +838,12 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
                  from aclexplode(a.attacl) x where x.grantee <> c.relowner) as acl
             from pg_attribute a join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace join pg_type t on t.oid = a.atttypid
             left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
-            where a.attnum > 0 and not a.attisdropped and c.relkind in ('r', 'p', 'v', 'm', 'f', 'c') and {ns} and {} and {} and c.relname <> '{history}'
+            where a.attnum > 0 and not a.attisdropped and c.relkind in ('r', 'p', 'v', 'm', 'f', 'c') and {ns} and {} and {} and {}
               and not exists (select 1 from pg_depend e where e.classid = 'pg_type'::regclass and e.objid = c.reltype and e.deptype = 'e')",
             identity_options("a"),
             not_extension("pg_class", "c"),
-            project_relation("c", "n")
+            project_relation("c", "n"),
+            pg_not_history("c")
         ))
         .await?
     {
@@ -810,9 +901,10 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             left join pg_class fc on fc.oid = co.confrelid left join pg_namespace fn on fn.oid = fc.relnamespace
             left join pg_class c on c.oid = co.conrelid left join pg_namespace n on n.oid = c.relnamespace
             left join pg_type t on t.oid = co.contypid left join pg_namespace tn on tn.oid = t.typnamespace
-            where co.contype <> 'n' and coalesce(n.nspname, tn.nspname) not in ('pg_catalog', 'information_schema') and coalesce(c.relname, '') <> '{history}'
+            where co.contype <> 'n' and coalesce(n.nspname, tn.nspname) not in ('pg_catalog', 'information_schema') and (c.oid is null or {})
               and not exists (select 1 from pg_depend e where e.classid = 'pg_class'::regclass and e.objid = co.conrelid and e.deptype = 'e')
               and {} and {}",
+            pg_not_history("c"),
             format!("(case when c.oid is not null then {} else {} end)", project_relation("c", "n"), not_platform("t.typowner")),
             not_extension("pg_constraint", "co")
         ))
@@ -832,10 +924,11 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
               (select string_agg(a.attnum || '=' || a.attstattarget, ',' order by a.attnum) from pg_attribute a where a.attrelid = i.indexrelid and coalesce(a.attstattarget, -1) >= 0) as stattargets,
               (select format('%I.%I', pn.nspname, pc.relname) from pg_inherits h join pg_class pc on pc.oid = h.inhparent join pg_namespace pn on pn.oid = pc.relnamespace where h.inhrelid = i.indexrelid) as parent
             from pg_index i join pg_class c on c.oid = i.indexrelid join pg_namespace n on n.oid = c.relnamespace join pg_class t on t.oid = i.indrelid
-            where {ns} and {} and {} and t.relname <> '{history}'
+            where {ns} and {} and {} and {}
               and not exists (select 1 from pg_depend e where e.classid = 'pg_class'::regclass and e.objid = t.oid and e.deptype = 'e')",
             not_extension("pg_class", "c"),
-            project_relation("t", "n")
+            project_relation("t", "n"),
+            pg_not_history("t")
         ))
         .await?
     {
@@ -865,10 +958,11 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
               (select format('%I.%I.%I', tn.nspname, t.relname, a.attname) from pg_depend d join pg_class t on t.oid = d.refobjid join pg_namespace tn on tn.oid = t.relnamespace
                  join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'a') as owned
             from pg_sequence s join pg_class c on c.oid = s.seqrelid join pg_namespace n on n.oid = c.relnamespace
-            where {ns} and {} and {}
+            where {ns} and {} and {} and {}
               and not exists (select 1 from pg_depend d where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'i')",
             not_extension("pg_class", "c"),
-            project_relation("c", "n")
+            project_relation("c", "n"),
+            pg_not_history("c")
         ))
         .await?
     {
@@ -937,9 +1031,10 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
         .rows(&format!(
             "select pg_get_triggerdef(tg.oid, false) as def, tg.tgenabled as enabled
             from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace join pg_proc f on f.oid = tg.tgfoid
-            where not tg.tgisinternal and {ns} and {} and {}",
+            where not tg.tgisinternal and {ns} and {} and {} and {}",
             not_extension("pg_class", "c"),
-            not_platform("f.proowner")
+            not_platform("f.proowner"),
+            not_history("c.relname")
         ))
         .await?
     {
@@ -948,12 +1043,13 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
     }
 
     for r in db
-        .rows(
+        .rows(&format!(
             "select format('%I.%I', n.nspname, c.relname) as rel, p.polname as name, p.polcmd as cmd, p.polpermissive as permissive,
               (select string_agg(case when r = 0 then 'PUBLIC' else pg_get_userbyid(r) end, ',' order by 1) from unnest(p.polroles) r) as roles,
               pg_get_expr(p.polqual, p.polrelid) as qual, pg_get_expr(p.polwithcheck, p.polrelid) as check
-            from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace",
-        )
+            from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace where {}",
+            not_history("c.relname")
+        ))
         .await?
     {
         lines.push(format!(
@@ -974,7 +1070,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             from pg_aggregate a join pg_proc p on p.oid = a.aggfnoid join pg_namespace n on n.oid = p.pronamespace
             where {ns} and {} and {}
             union all select 'rule ' || pg_get_ruledef(r.oid, false) || case r.ev_enabled when 'O' then '' else ' enabled=' || r.ev_enabled::text end from pg_rewrite r join pg_class c on c.oid = r.ev_class join pg_namespace n on n.oid = c.relnamespace
-            where r.rulename <> '_RETURN' and {ns} and {} and {} and {}
+            where r.rulename <> '_RETURN' and {ns} and {} and {} and {} and {}
             union all select 'statistics ' || pg_get_statisticsobjdef(s.oid) from pg_statistic_ext s join pg_namespace n on n.oid = s.stxnamespace where {ns} and {}",
             aggregate_options("p"),
             not_extension("pg_proc", "p"),
@@ -982,6 +1078,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             project_relation("c", "n"),
             not_extension("pg_class", "c"),
             not_extension("pg_rewrite", "r"),
+            not_history("c.relname"),
             format!("({} or {})", not_platform("s.stxowner"), not_platform_schema("n"))
         ))
         .await?
@@ -996,28 +1093,28 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             "select coalesce((select 'sequence of identity ' || format('%I.%I.%I', tn.nspname, tc.relname, ta.attname) from pg_depend d join pg_class tc on tc.oid = d.refobjid join pg_namespace tn on tn.oid = tc.relnamespace
                 join pg_attribute ta on ta.attrelid = tc.oid and ta.attnum = d.refobjsubid where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.refclassid = 'pg_class'::regclass and d.deptype = 'i'),
                 'sequence ' || format('%I.%I', n.nspname, c.relname)) as name, {} as acl, obj_description(c.oid, 'pg_class') as comment, {} as owner_lacks
-            from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind = 'S' and {ns} and {} and {}
+            from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind = 'S' and {ns} and {} and {} and {}
             union all select 'function ' || format('%s', p.oid::regprocedure), {}, obj_description(p.oid, 'pg_proc'), {}
             from pg_proc p join pg_namespace n on n.oid = p.pronamespace where {ns} and {} and {}
             union all select 'type ' || format('%I.%I', n.nspname, t.typname), {}, obj_description(t.oid, 'pg_type'), {}
             from pg_type t join pg_namespace n on n.oid = t.typnamespace where (t.typtype in ('e', 'd', 'r', 'b') or exists (select 1 from pg_class ct where ct.oid = t.typrelid and ct.relkind = 'c')) and t.typelem = 0 and {ns} and {} and {}
             union all select 'index ' || format('%I.%I', n.nspname, c.relname), null, obj_description(c.oid, 'pg_class'), null
-            from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind in ('i', 'I') and {ns} and {} and {}
+            from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind in ('i', 'I') and {ns} and {} and {} and {}
             union all select 'constraint ' || format('%I', co.conname) || ' on ' || case when cc.oid is not null then format('%I.%I', cn.nspname, cc.relname) else format('%I.%I', tn.nspname, ct.typname) end, null, obj_description(co.oid, 'pg_constraint'), null
             from pg_constraint co left join pg_class cc on cc.oid = co.conrelid left join pg_namespace cn on cn.oid = cc.relnamespace
               left join pg_type ct on ct.oid = co.contypid left join pg_namespace tn on tn.oid = ct.typnamespace
-            where coalesce(cn.nspname, tn.nspname) not in ('pg_catalog', 'information_schema') and coalesce(cc.relname, '') <> '{history}'
+            where coalesce(cn.nspname, tn.nspname) not in ('pg_catalog', 'information_schema') and (cc.oid is null or {})
             union all select 'statistics ' || format('%I.%I', n.nspname, sx.stxname), null, obj_description(sx.oid, 'pg_statistic_ext'), null
             from pg_statistic_ext sx join pg_namespace n on n.oid = sx.stxnamespace where {ns}
             union all select 'trigger ' || format('%I', tg.tgname) || ' on ' || format('%I.%I', n.nspname, c.relname), null, obj_description(tg.oid, 'pg_trigger'), null
-            from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace where not tg.tgisinternal and {ns}
+            from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace where not tg.tgisinternal and {ns} and {}
             union all select 'policy ' || format('%I', po.polname) || ' on ' || format('%I.%I', n.nspname, c.relname), null, obj_description(po.oid, 'pg_policy'), null
-            from pg_policy po join pg_class c on c.oid = po.polrelid join pg_namespace n on n.oid = c.relnamespace
+            from pg_policy po join pg_class c on c.oid = po.polrelid join pg_namespace n on n.oid = c.relnamespace where {}
             union all select 'collation ' || format('%I.%I', n.nspname, co.collname), null, obj_description(co.oid, 'pg_collation'), null
             from pg_collation co join pg_namespace n on n.oid = co.collnamespace where {ns} and {}
             union all select 'publication ' || format('%I', pb.pubname), null, obj_description(pb.oid, 'pg_publication'), null from pg_publication pb
             union all select 'rule ' || format('%I', ru.rulename) || ' on ' || format('%I.%I', n.nspname, c.relname), null, obj_description(ru.oid, 'pg_rewrite'), null
-            from pg_rewrite ru join pg_class c on c.oid = ru.ev_class join pg_namespace n on n.oid = c.relnamespace where ru.rulename <> '_RETURN' and {ns}
+            from pg_rewrite ru join pg_class c on c.oid = ru.ev_class join pg_namespace n on n.oid = c.relnamespace where ru.rulename <> '_RETURN' and {ns} and {}
             union all select 'event trigger ' || format('%I', et.evtname), null, obj_description(et.oid, 'pg_event_trigger'), null from pg_event_trigger et where {}
             union all select 'foreign data wrapper ' || format('%I', w.fdwname), {}, obj_description(w.oid, 'pg_foreign_data_wrapper'), null from pg_foreign_data_wrapper w where {}
             union all select 'server ' || format('%I', sv.srvname), {}, obj_description(sv.oid, 'pg_foreign_server'), null from pg_foreign_server sv where {}
@@ -1028,6 +1125,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             owner_lacks("c.relacl", "c.relowner", 's'),
             not_extension("pg_class", "c"),
             project_relation("c", "n"),
+            pg_not_history("c"),
             acl("p.proacl", "p.proowner", 'f'),
             owner_lacks("p.proacl", "p.proowner", 'f'),
             not_extension("pg_proc", "p"),
@@ -1038,6 +1136,11 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             not_platform("t.typowner"),
             not_extension("pg_class", "c"),
             project_relation("c", "n"),
+            pg_not_history("c"),
+            pg_not_history("cc"),
+            not_history("c.relname"),
+            not_history("c.relname"),
+            not_history("c.relname"),
             not_extension("pg_collation", "co"),
             not_extension("pg_event_trigger", "et"),
             acl("w.fdwacl", "w.fdwowner", 'F'),
@@ -1185,7 +1288,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
     let owner = format!(
         "case when k.classid = 'pg_namespace'::regclass and o.identity = 'public' and k.owner = {runner} and k.owner = (select datdba from pg_database where datname = current_database()) then coalesce(to_regrole('pg_database_owner')::oid, k.owner) else k.owner end"
     );
-    for r in db.rows(&format!("select format('owner %s is %I (%s)', o.identity, pg_get_userbyid({owner}), o.type) as line from ({}) k, lateral pg_identify_object(k.classid, k.objid, 0) o where {owner} <> {runner}", owned_objects(&history))).await? {
+    for r in db.rows(&format!("select format('owner %s is %I (%s)', o.identity, pg_get_userbyid({owner}), o.type) as line from ({}) k, lateral pg_identify_object(k.classid, k.objid, 0) o where {owner} <> {runner}", owned_objects())).await? {
         lines.push(r.text("line").to_string());
     }
 
@@ -1371,16 +1474,16 @@ pub(crate) fn runner() -> String {
 /// The objects whose owner is compared, each `classid, objid, owner`: relations (but indexes, which
 /// take their table's), routines (but those made with a range type), types (but arrays and a
 /// relation's own row type), schemas, collations, publications and foreign servers; none an
-/// extension or a platform owns, and not Reylo's history table.
-pub(crate) fn owned_objects(history: &str) -> String {
+/// extension or a platform owns, and no history table's.
+pub(crate) fn owned_objects() -> String {
     let ns = PG_USER_NS;
     [
         // A sequence a column owns (`serial`) has its table's owner, and moves with it; a partition
         // has an owner of its own.
-        format!("select 'pg_class'::regclass as classid, c.oid as objid, c.relowner as owner from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind in ('r', 'p', 'v', 'm', 'f', 'S', 'c') and c.relname <> '{history}' and {ns} and {} and {} and not (c.relkind = 'S' and exists (select 1 from pg_depend dep where dep.classid = 'pg_class'::regclass and dep.objid = c.oid and dep.refclassid = 'pg_class'::regclass and dep.deptype in ('a', 'i')))", not_extension("pg_class", "c"), project_relation("c", "n")),
+        format!("select 'pg_class'::regclass as classid, c.oid as objid, c.relowner as owner from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind in ('r', 'p', 'v', 'm', 'f', 'S', 'c') and {} and {ns} and {} and {} and not (c.relkind = 'S' and exists (select 1 from pg_depend dep where dep.classid = 'pg_class'::regclass and dep.objid = c.oid and dep.refclassid = 'pg_class'::regclass and dep.deptype in ('a', 'i')))", pg_not_history("c"), not_extension("pg_class", "c"), project_relation("c", "n")),
         format!("select 'pg_proc'::regclass, p.oid, p.proowner from pg_proc p join pg_namespace n on n.oid = p.pronamespace where {ns} and {} and {} and not exists (select 1 from pg_depend dep where dep.classid = 'pg_proc'::regclass and dep.objid = p.oid and dep.deptype = 'i')", not_extension("pg_proc", "p"), not_platform("p.proowner")),
         format!("select 'pg_type'::regclass, t.oid, t.typowner from pg_type t join pg_namespace n on n.oid = t.typnamespace where t.typtype in ('b', 'd', 'e', 'r') and t.typcategory <> 'A' and {ns} and {} and {} and not exists (select 1 from pg_depend dep where dep.classid = 'pg_type'::regclass and dep.objid = t.oid and dep.deptype = 'i')", not_extension("pg_type", "t"), not_platform("t.typowner")),
-        format!("select 'pg_namespace'::regclass, n.oid, n.nspowner from pg_namespace n where {ns} and {} and {}", not_extension("pg_namespace", "n"), not_platform_schema("n")),
+        format!("select 'pg_namespace'::regclass, n.oid, n.nspowner from pg_namespace n where {ns} and {} and {} and {}", not_extension("pg_namespace", "n"), not_platform_schema("n"), pg_not_history_schema("n")),
         format!("select 'pg_collation'::regclass, c.oid, c.collowner from pg_collation c join pg_namespace n on n.oid = c.collnamespace where {ns} and {} and {}", not_extension("pg_collation", "c"), not_platform("c.collowner")),
         format!("select 'pg_publication'::regclass, p.oid, p.pubowner from pg_publication p where {}", not_platform("p.pubowner")),
         format!("select 'pg_foreign_server'::regclass, s.oid, s.srvowner from pg_foreign_server s where {}", not_platform("s.srvowner")),
@@ -1398,13 +1501,13 @@ pub(crate) fn owned_objects(history: &str) -> String {
 async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
     let name = db.rows("select database() as name").await?.first().map(|r| r.text("name").to_string()).unwrap_or_default();
     let strip = |s: &str| s.replace(&format!("`{name}`."), "").replace(&format!("{name}."), "");
-    let history = HISTORY_TABLE;
+    let kept = not_history("table_name");
     let mut lines = Vec::new();
 
     for r in db
         .rows(&format!(
             "select table_name as name, table_type as type, engine as engine, table_collation as collation, create_options as options, table_comment as comment
-            from information_schema.tables where table_schema = database() and table_name <> '{history}'"
+            from information_schema.tables where table_schema = database() and {kept}"
         ))
         .await?
     {
@@ -1426,7 +1529,7 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
         .rows(&format!(
             "select table_name as t, column_name as c, column_type as type, is_nullable as nullable, column_default as def, extra as extra,
               character_set_name as charset, collation_name as collation, generation_expression as gen, column_comment as comment, srs_id as srs
-            from information_schema.columns where table_schema = database() and table_name <> '{history}'"
+            from information_schema.columns where table_schema = database() and {kept}"
         ))
         .await?
     {
@@ -1457,7 +1560,7 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
         .rows(&format!(
             "select table_name as t, index_name as i, non_unique as nonunique, seq_in_index as seq, column_name as col, sub_part as sub,
               collation as coll, expression as expr, index_type as type, is_visible as visible, index_comment as comment
-            from information_schema.statistics where table_schema = database() and table_name <> '{history}' order by table_name, index_name, seq_in_index"
+            from information_schema.statistics where table_schema = database() and {kept} order by table_name, index_name, seq_in_index"
         ))
         .await?
     {
@@ -1603,7 +1706,7 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
         .rows(&format!(
             "select table_name as t, partition_name as p, subpartition_name as sp, partition_method as method, partition_expression as expr,
               subpartition_method as submethod, subpartition_expression as subexpr, partition_description as bound
-            from information_schema.partitions where table_schema = database() and partition_name is not null and table_name <> '{history}'
+            from information_schema.partitions where table_schema = database() and partition_name is not null and {kept}
             order by table_name, partition_ordinal_position, subpartition_ordinal_position"
         ))
         .await?
@@ -1628,7 +1731,7 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
     // and engine attributes; a column's storage, format and engine attributes; a partitioning's key
     // algorithm, and each partition's comment and row limits).
     let tables: Vec<String> = db
-        .rows(&format!("select table_name as t from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE' and table_name <> '{history}'"))
+        .rows(&format!("select table_name as t from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE' and {kept}"))
         .await?
         .iter()
         .map(|r| r.text("t").to_string())
@@ -1686,8 +1789,8 @@ impl MysqlGrant {
 /// The privileges on the database's tables, views, columns and routines, from the server's
 /// privilege tables, or None where the account reading may not read them, as an account with the
 /// database's privileges alone may not: information_schema shows such an account its own privileges
-/// only. Its own are left out, as an owner's are on Postgres, and so are those on Reylo's history
-/// table. A table's grant option is a privilege of its own, which a grant on one of its columns
+/// only. Its own are left out, as an owner's are on Postgres, and so are those on the history
+/// tables. A table's grant option is a privilege of its own, which a grant on one of its columns
 /// may give.
 pub(crate) async fn mysql_grants(db: &mut Db) -> Result<Option<Vec<MysqlGrant>>, Error> {
     let queries = [
@@ -1707,7 +1810,7 @@ pub(crate) async fn mysql_grants(db: &mut Db) -> Result<Option<Vec<MysqlGrant>>,
     let mut out = Vec::new();
     for r in &rows {
         let (user, host, name) = (r.text("u"), r.text("h"), r.text("n"));
-        if (user == my_user && host == my_host) || name == HISTORY_TABLE {
+        if (user == my_user && host == my_host) || is_history(name) {
             continue;
         }
         let kind = match r.text("k") {
@@ -1818,7 +1921,7 @@ const SQLITE_TABLE_CONSTRAINT: &[&str] = &["constraint", "primary", "unique", "c
 
 async fn sqlite(db: &mut Db) -> Result<Vec<String>, Error> {
     let mut lines = Vec::new();
-    let rows = db.rows(&format!("select type, name, tbl_name as tbl, sql from sqlite_schema where name not like 'sqlite_%' and tbl_name <> '{HISTORY_TABLE}' and name {NOT_TURSO_OWN} and tbl_name {NOT_TURSO_OWN} and {NOT_LIBSQL_VECTOR_OWN}")).await?;
+    let rows = db.rows(&format!("select type, name, tbl_name as tbl, sql from sqlite_schema where name not like 'sqlite_%' and {} and name {NOT_TURSO_OWN} and tbl_name {NOT_TURSO_OWN} and {NOT_LIBSQL_VECTOR_OWN}", not_history("tbl_name"))).await?;
     let options: BTreeMap<String, Row> = db.rows("select name, strict, wr from pragma_table_list where schema = 'main'").await?.into_iter().map(|r| (r.text("name").to_string(), r)).collect();
     for r in rows {
         let Some(sql) = r.get("sql") else { continue };

@@ -106,6 +106,24 @@ $ reylo migrate deploy --url $PROD_URL
 
 It moves yours past no migration that changes data. Past one, it refuses and says to undo your change on production, then deploy. It prints the undo where it can run it safely. A server that ran them before yours, such as staging, takes your change too. Its deploy refusal gives the commands.
 
+### Moving from another tool
+
+Start from a database your old tool migrated, then record the baseline on every other database:
+
+```terminal
+# write schema.sql and init.sql from your development database
+$ reylo migrate init
+
+# record init.sql as run on production, running nothing
+$ reylo migrate history push --url $PROD_URL
+```
+
+Reylo leaves the old tool's history table out of both files and every comparison. Drop it once nothing reads it:
+
+```sql
+drop table _prisma_migrations;
+```
+
 ## Schema <code className="dk-aside">schema.sql</code> [#schema-schemasql]
 
 Declare your schema in plain SQL, as you would on the database. Reylo Migrate compares and migrates:

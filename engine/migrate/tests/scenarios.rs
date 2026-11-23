@@ -457,6 +457,7 @@ for_each_dialect!(
     ddl_run_by_hand_then_written_is_recorded,
     a_change_by_hand_with_schema_sql_is_told_to_write_the_migration,
     init_writes_and_records_the_baseline,
+    init_leaves_out_another_tools_history,
     a_migration_the_lock_lacks_is_a_draft,
     status_reports_a_history_out_of_the_locks_order,
     a_rebased_migration_is_rewound_by_dev,
@@ -1197,6 +1198,46 @@ async fn init_writes_and_records_the_baseline(mut p: P) {
     p.url = q.url.clone();
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_eq!(q.history().await, ["init.sql", "20261028100000_nick.sql"]);
+}
+
+/// Another migration tool's history: a table of Prisma Migrate's and one of Knex's, whose key is a
+/// sequence the table owns, and on Postgres Drizzle Kit's, in a schema of its own.
+fn other_tools_history(p: &P) -> String {
+    let (id, text) = (p.t.id, p.t.text);
+    let mut sql = format!(
+        "create table _prisma_migrations (id {text} primary key, migration_name {text} not null); insert into _prisma_migrations values ('a', '0_init');
+         create table knex_migrations (id {id}, name {text}); insert into knex_migrations (name) values ('one.js');"
+    );
+    if p.d == Dialect::Postgres {
+        sql.push_str("create schema drizzle; create table drizzle.__drizzle_migrations (id serial primary key, hash text not null); insert into drizzle.__drizzle_migrations (hash) values ('h');");
+    }
+    sql
+}
+
+async fn init_leaves_out_another_tools_history(mut p: P) {
+    let (id, text) = (p.t.id, p.t.text);
+    let app = format!("create table users (id {id}, email {text} not null);");
+    p.exec(&format!("{app}{}", other_tools_history(&p))).await;
+    assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+    p.output();
+    let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
+    assert!(has(&schema, "(?i)create table .*users"), "{schema}");
+    assert!(!has(&schema, "(?i)prisma|knex|drizzle"), "{schema}");
+    assert_eq!(std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap(), schema);
+    assert!(!has(&introspect(&p.opts()).await, "(?i)prisma|knex|drizzle"));
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    // Another database that still holds the old tool's history matches init.sql, and keeps it.
+    let q = P::new(p.d).await.unwrap();
+    q.exec(&format!("{app}{}", other_tools_history(&q))).await;
+    p.url = q.url.clone();
+    assert_eq!(p.history_push().await, 0, "{}", p.peek());
+    assert_eq!(q.history().await, ["init.sql"]);
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    assert_eq!(q.rows("select * from _prisma_migrations").await.len(), 1);
+    // A migration that drops it later is no change to the schema.
+    p.file("20261123100000_drop_prisma.sql", "drop table _prisma_migrations;");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(q.history().await, ["init.sql", "20261123100000_drop_prisma.sql"]);
 }
 
 async fn a_migration_the_lock_lacks_is_a_draft(mut p: P) {

@@ -73,6 +73,28 @@ $ reylo migrate init
 
 It reads every schema. Where its own SQL can't make your schema exactly, it writes the database's own dump, which on Postgres needs `pg_dump` of your server's version or newer.
 
+It leaves out the history tables of other migration tools, as it leaves out its own:
+
+| Tool | Table |
+| --- | --- |
+| Prisma Migrate | `_prisma_migrations` |
+| Drizzle Kit | `__drizzle_migrations`, in its `drizzle` schema on Postgres |
+| Knex | `knex_migrations`, `knex_migrations_lock` |
+| Kysely | `kysely_migration`, `kysely_migration_lock` |
+| node-pg-migrate | `pgmigrations` |
+| Sequelize | `SequelizeMeta` |
+| MikroORM | `mikro_orm_migrations` |
+| Rails, Ecto, golang-migrate, dbmate | `schema_migrations`, and Rails' `ar_internal_metadata` |
+| Flyway | `flyway_schema_history` |
+| Liquibase | `databasechangelog`, `databasechangeloglock` |
+| goose | `goose_db_version` |
+| SQLx | `_sqlx_migrations` |
+| Diesel | `__diesel_schema_migrations` |
+| Alembic | `alembic_version` |
+| Django | `django_migrations` |
+| Entity Framework Core | `__EFMigrationsHistory` |
+| Atlas | `atlas_schema_revisions`, in its schema of that name on Postgres |
+
 ### `new`
 
 Writes the next migration, from your change to `schema.sql`.
