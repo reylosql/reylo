@@ -2919,11 +2919,14 @@ fn orphans_of(table: &str, cols: &[String], parent: &str, refs: &[String], full:
 /// and whether its NULLs are distinct. Read before the index is dropped.
 async fn duplicates_query(db: &mut Db, b: &Breach) -> Option<String> {
     // A key whose operator class isn't its type's own compares by an equality `group by` doesn't
-    // use (`text_ops` on a `citext` column), so its duplicates can't be listed.
+    // use (`text_ops` on a `citext` column or expression), so its duplicates can't be listed. The
+    // index's own column has each key's type, an expression's too; a type with no default class
+    // of its own (`varchar`) takes another's, by the same equality.
     let sql = format!(
         "select i.indrelid::regclass::text as t, pg_get_expr(i.indpred, i.indrelid, true) as pred, coalesce((to_jsonb(i) ->> 'indnullsnotdistinct')::boolean, false) as nnd,
            not exists (select 1 from generate_series(1, i.indnkeyatts) k join pg_opclass o on o.oid = i.indclass[k - 1]
-             where not o.opcdefault or (i.indkey[k - 1] > 0 and o.opcintype <> (select a.atttypid from pg_attribute a where a.attrelid = i.indrelid and a.attnum = i.indkey[k - 1]))) as own,
+               join pg_attribute ia on ia.attrelid = i.indexrelid and ia.attnum = k
+             where not o.opcdefault or (o.opcintype <> ia.atttypid and exists (select 1 from pg_opclass t where t.opcmethod = o.opcmethod and t.opcdefault and t.opcintype = ia.atttypid))) as own,
            (select string_agg(pg_get_indexdef(i.indexrelid, k, true) || coalesce((select ' collate ' || quote_ident(n.nspname) || '.' || quote_ident(co.collname) from pg_collation co join pg_namespace n on n.oid = co.collnamespace
                where co.oid = i.indcollation[k - 1] and co.oid <> coalesce((select a.attcollation from pg_attribute a where a.attrelid = i.indrelid and a.attnum = i.indkey[k - 1] and i.indkey[k - 1] > 0), 100)), ''), chr(31) order by k)
              from generate_series(1, i.indnkeyatts) k) as keys
@@ -3030,7 +3033,14 @@ fn dropped_and_made(sql: &str, d: Dialect) -> (Vec<String>, Vec<String>) {
     let (mut dropped, mut made) = (Vec::new(), Vec::new());
     for s in split_statements(sql, d) {
         let up: Vec<String> = s.tokens.iter().map(|t| t.upper()).collect();
-        let name_after = |k: usize| s.tokens.iter().skip(k).find(|t| !matches!(t.upper().as_str(), "CONCURRENTLY" | "IF" | "NOT" | "EXISTS")).map(|t| t.text.trim_matches(['"', '`']).to_string());
+        // A name as the server keeps it: a quoted one as written, an unquoted one folded to lowercase,
+        // as Postgres folds it and MySQL compares it.
+        let name_after = |k: usize| {
+            s.tokens.iter().skip(k).find(|t| !matches!(t.upper().as_str(), "CONCURRENTLY" | "IF" | "NOT" | "EXISTS")).map(|t| match t.kind {
+                crate::sql::TokenKind::Quoted if d == Dialect::Postgres => t.text.trim_matches('"').replace("\"\"", "\""),
+                _ => t.text.trim_matches(['"', '`']).to_lowercase(),
+            })
+        };
         for k in 0..up.len() {
             let what = up.get(k + 1).map(String::as_str);
             if up[k] == "DROP" && matches!(what, Some("INDEX" | "CONSTRAINT" | "CHECK")) {
@@ -3233,9 +3243,8 @@ async fn partway_lines(db: &mut Db, ran: &[&HistoryRow], pending: &[&Migration])
     let mut out = Vec::new();
     let mut json = Vec::new();
     for f in pending {
-        let d = db.dialect();
-        let (before, _) = same_change(&f.name, ran.iter().filter(|r| related(&f.sql, &r.sql, d)).map(|r| r.name.as_str()));
-        let (earlier, after) = same_change(&f.name, pending.iter().filter(|p| related(&f.sql, &p.sql, d)).map(|p| p.name.as_str()));
+        let (before, _) = same_change(&f.name, ran.iter().map(|r| r.name.as_str()));
+        let (earlier, after) = same_change(&f.name, pending.iter().map(|p| p.name.as_str()));
         // Said once for each change, at the first of its migrations still to run.
         if before.is_empty() || !earlier.is_empty() {
             continue;
@@ -3276,7 +3285,7 @@ async fn rows_failure(db: &mut Db, opts: &Options, m: &Migration, f: &Failure, r
     };
     // A constraint the migration makes, as a `check` dropped and added under its own name, is in the
     // catalog after the rollback as it was before: its definition there isn't the one that failed.
-    let made = dropped_and_made(&m.sql, d).1.contains(&b.name);
+    let made = dropped_and_made(&m.sql, d).1.iter().any(|n| if d == Dialect::Postgres { *n == b.name } else { n.eq_ignore_ascii_case(&b.name) });
     let catalog = if d == Dialect::Postgres && !made { pg_constraint_rows(db, b).await } else { None };
     let (query, unchecked, column) = match d {
         Dialect::Postgres => match catalog {
@@ -3296,8 +3305,9 @@ async fn rows_failure(db: &mut Db, opts: &Options, m: &Migration, f: &Failure, r
     };
     // The migrations of the same change, by their names and the tables they share with it.
     let files = opts.migrations().map(|(files, _)| files).unwrap_or_default();
-    let text = |name: &str| files.iter().find(|f| f.name == name).map(|f| f.sql.as_str());
-    let (before, _) = same_change(&m.name, ran.iter().map(String::as_str).filter(|n| text(n).is_some_and(|sql| related(&m.sql, sql, d))));
+    // What is applied is said by the names `migrate new` gives a change's files; one it splits across
+    // tables shares no object between them. A file offered for deletion must share one too.
+    let (before, _) = same_change(&m.name, ran.iter().map(String::as_str));
     let (_, after) = same_change(&m.name, pending.iter().filter(|p| related(&m.sql, &p.sql, d)).map(|p| p.name.as_str()));
     // An index built under a name of its own, which a later migration of the change renames to the
     // one it replaces, is named as schema.sql names it.

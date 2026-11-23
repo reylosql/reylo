@@ -476,6 +476,7 @@ for_each_dialect!(
     a_unique_index_the_rows_break_lists_the_duplicates,
     a_unique_index_built_under_a_new_name_is_named_as_schema_sql_names_it,
     a_failure_the_file_caused_is_not_blamed_on_the_rows,
+    a_change_split_across_tables_is_said_partway,
     rows_failures_on_postgres_say_only_what_they_know,
     a_not_null_the_rows_break_is_named_by_its_column,
     files_that_cannot_run_atomically_are_refused,
@@ -1837,12 +1838,30 @@ async fn rows_failures_on_postgres_say_only_what_they_know(mut p: P) {
     assert_has!(&out, r"failed on rows that break people_handle\n[\s\S]*  Fix the rows that break it here, then deploy again:\n");
     assert!(!out.contains("List the rows"), "{out}");
     std::fs::remove_file(p.dir.join("migrations").join("20261027160001_handle.sql")).unwrap();
+    // The same in an expression, whose type the index's own column has.
+    p.file("20261027160001_handle.sql", "create unique index concurrently people_handle on people ((coalesce(handle, ''::citext)) text_ops);\n");
+    p.output();
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    let out = p.output();
+    assert!(out.contains("failed on rows that break people_handle") && !out.contains("List the rows"), "{out}");
+    std::fs::remove_file(p.dir.join("migrations").join("20261027160001_handle.sql")).unwrap();
+    // A `varchar` key, which takes `text`'s class and its equality, is listed.
+    p.file("20261027160002_code.sql", "alter table people add column code varchar(10);\n");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("update people set code = 'x'").await;
+    p.file("20261027160003_code_2.sql", "create unique index concurrently people_code on people (code);\n");
+    p.output();
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    let out = p.output();
+    assert_eq!(p.rows(&listed_query(&out)).await.len(), 1);
+    std::fs::remove_file(p.dir.join("migrations").join("20261027160003_code_2.sql")).unwrap();
 
     // A check dropped and added under its own name in one transaction: after the rollback the
     // catalog holds the old one, whose definition isn't the one that failed.
     p.file("20261027170000_tighten.sql", "alter table people add constraint people_handle_short check (length(handle) < 10);\n");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
-    p.file("20261027170001_tighten_more.sql", "alter table people drop constraint people_handle_short;\nalter table people add constraint people_handle_short check (handle in ('b', 'B'));\n");
+    // Named unquoted in capitals, which Postgres folds.
+    p.file("20261027170001_tighten_more.sql", "alter table people drop constraint PEOPLE_HANDLE_SHORT;\nalter table people add constraint PEOPLE_HANDLE_SHORT check (handle in ('b', 'B'));\n");
     p.output();
     assert_eq!(p.migrate().await, 1, "{}", p.peek());
     let out = p.output();
@@ -1880,6 +1899,28 @@ async fn a_not_null_the_rows_break_is_named_by_its_column(mut p: P) {
     let out = p.output();
     assert_has!(&out, r"✗ The migration 20261027110001_nick_2\.sql failed on rows with nulls in people\.nick\n[\s\S]*    select \* from people where nick is null;\n[\s\S]*change people\.nick in ");
     assert_eq!(p.rows(&listed_query(&out)).await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1"]);
+}
+
+/// A change `migrate new` split across two tables, an index on each in a file of its own: the files
+/// share no table, and the applied one is still said to be of the change, by deploy and by status.
+/// The refusal offers only the failed file for deletion.
+async fn a_change_split_across_tables_is_said_partway(mut p: P) {
+    if p.d != Dialect::Postgres {
+        return;
+    }
+    let base = "create table a (id bigint primary key, x int);\ncreate table b (id bigint primary key, x int);";
+    p.schema(base);
+    p.file("20261027100000_ab.sql", base);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into a values (1, 1), (2, 2); insert into b values (1, 1), (2, 1)").await;
+    p.schema(&format!("{base}\ncreate unique index a_x on a (x);\ncreate unique index b_x on b (x);"));
+    p.file("20261027110000_unique_x.sql", "create unique index concurrently a_x on a (x);\n");
+    p.file("20261027110001_unique_x_2.sql", "create unique index concurrently b_x on b (x);\n");
+    p.output();
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    assert_has!(p.output(), r"  The migration before it, 20261027110000_unique_x\.sql, of the same change is applied\.\n[\s\S]*only development ran 20261027110001_unique_x_2\.sql, change b_x in ");
+    assert_eq!(p.status().await, 1);
+    assert_has!(p.output(), r"» This database ran part of one change: 20261027110000_unique_x\.sql, and not 20261027110001_unique_x_2\.sql\n");
 }
 
 /// A changed unique index built under a name of its own before the old one is dropped, and renamed
