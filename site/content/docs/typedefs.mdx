@@ -506,7 +506,7 @@ One of several types.
 
 A union is flat, of two members or more, and lists its members in the order of the kinds. A union of structs that each give one field a different literal is a discriminated union. Each value says which member it is by that field.
 
-<TypeDef holds={["12", "\"abc\""]} types={{"postgres": ["inet", "cidr"], "sqlite": ["any column outside a strict table"]}}>
+<TypeDef holds={["12", "\"abc\""]} types={{"postgres": ["inet", "cidr"], "sqlite": ["any column outside a strict table"], "clickhouse": ["Variant"]}}>
 
 ```jsonc
 // An integer or text
@@ -557,7 +557,7 @@ One of several alternatives, each named by a tag.
 
 Every value carries its tag beside the value, even where the value is null. Unlike a union's members, two alternatives may hold one type.
 
-<TypeDef holds={["{ \"tag\": \"num\", \"value\": 1 }"]} types={{"clickhouse": ["Variant"]}}>
+<TypeDef holds={["{ \"tag\": \"num\", \"value\": 1 }"]} types={{}}>
 
 ```jsonc
 // A number or text, each tagged

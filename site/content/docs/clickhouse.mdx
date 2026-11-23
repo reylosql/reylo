@@ -15,7 +15,7 @@ ClickHouse support is in preview. Its types and parameter syntax may still chang
 
 | | |
 | --- | --- |
-| ClickHouse versions | 25.11 or later; tested on 25.11 through 26.10 |
+| ClickHouse versions | 25.11 or later |
 | Connection | A `clickhouse+http://` or `clickhouse+https://` URL, the server's HTTP interface, in `DATABASE_URL` or [`direct_url`](/configuration#direct_url) |
 | Client | `@clickhouse/client` or `@clickhouse/client-web` ([Client](#client)) |
 | Type checking | Reylo's engine asks ClickHouse itself, over HTTP, so your project needs no client for it |
@@ -70,12 +70,12 @@ Your client takes the URL without the prefix, `http://` or `https://`.
 | In the URL | What it sets |
 | --- | --- |
 | `clickhouse_setting_<name>=`, or `ch_<name>=` | A setting of the session, as `ch_join_use_nulls=1` |
-| `role=` | A role to run as |
+| `role=` | A role for the type check to run as. Your client takes its role as an option, so leave it out of the client's URL |
 | `access_token=` | A bearer token, in place of a user and password |
 | `http_header_<name>=` | A header on every request |
 | `pathname=` | A path in front of the interface, behind a proxy |
 
-A read-only user is enough. The type check runs no statement and changes no setting.
+The type check runs no statement, and sends no setting but those the URL names. A user who can only read is enough for a `SELECT`, a `DELETE` and an `UPDATE`. An `INSERT` needs a user who may insert, since ClickHouse builds one to check it.
 
 ## Where types come from [#sources]
 
@@ -91,7 +91,7 @@ Each ClickHouse type has one TypeScript type:
 | --- | --- | --- |
 | `Int8`, `Int16`, `Int32`, `UInt8`, `UInt16`, `UInt32` | `number` | `2026` |
 | `Int64` to `Int256`, `UInt64` to `UInt256`, `count()` | `bigint` | `9007199254740993n` |
-| `Float32`, `Float64` | `number` | `1.5` |
+| `Float32`, `Float64`, `BFloat16` | `number` | `1.5` |
 | `Decimal` | `string` | `"12.5"` |
 | `Bool` | `boolean` | `true` |
 | `String`, `FixedString` | `string` | `"Ada"` |
@@ -128,7 +128,7 @@ LIMIT 1
 
 Reylo reads every result in ClickHouse's `RowBinaryWithNamesAndTypes` format, whatever JSON settings your client has. A `UInt64` past 2^53 keeps every digit, and a `Float64` can be `NaN` or `Infinity`.
 
-A `Float32` is the number it stores, as a `Float32Array` gives one: `0.1` kept in a `Float32` column reads `0.10000000149011612`, where ClickHouse prints `0.1`.
+A `Float32` is the number it stores, as a `Float32Array` gives one: `0.1` kept in a `Float32` column reads `0.10000000149011612`, where ClickHouse prints `0.1`. A `FixedString(4)` that holds `ab` reads `"ab\0\0"`, with the null bytes ClickHouse fills it with.
 
 ### Decimals
 
@@ -178,11 +178,11 @@ A column of one of these types is an error at the type check, which says what to
 
 ## Nullability
 
-A column can be null only where ClickHouse says its type is `Nullable`.
+A column can be null only where ClickHouse says its type is `Nullable`, or a `Variant`.
 
 ClickHouse doesn't make a value `NULL` the way other databases do, and Reylo reads each case from the server:
 
-- **A `LEFT JOIN`'s missing row** holds each column's default value, `0` or `''`, not `NULL`. With the setting `join_use_nulls`, its columns are `Nullable` instead.
+- **A `LEFT JOIN`'s missing row** holds each column's default value, `0` or `''`, not `NULL`. With the setting `join_use_nulls`, its columns are `Nullable` instead. An array or a map can't be, and stays empty.
 - **An aggregate over no rows**, such as `max(total)`, returns the type's default value. Its `-OrNull` form, `maxOrNull(total)`, returns `NULL`.
 - **A scalar subquery** is `Nullable`, since it can return no row.
 
@@ -259,7 +259,7 @@ An aggregate returns at most one row where something can drop its row:
 
 | Where | What drops the row |
 | --- | --- |
-| The query | `HAVING`, `OFFSET`, `WITH TIES` |
+| The query | `HAVING`, `QUALIFY`, `OFFSET`, `LIMIT BY`, `WITH TIES`, a `LIMIT` of 0 or of a parameter |
 | The session's settings | `limit`, `offset`, `empty_result_for_aggregation_by_empty_set`, `additional_result_filter` |
 
 ## Parameters
@@ -288,7 +288,7 @@ A parameter accepts the same values `.run()` returns for its type:
 | --- | --- |
 | `Int8` to `Int32`, `UInt8` to `UInt32` | `number` |
 | `Int64` to `Int256`, `UInt64` to `UInt256` | `number` or `bigint` |
-| `Float32`, `Float64` | `number` |
+| `Float32`, `Float64`, `BFloat16` | `number` |
 | `Decimal` | `string` |
 | `Bool` | `boolean` |
 | `String`, `FixedString`, `UUID`, `IPv4`, `IPv6` | `string` |
@@ -324,6 +324,7 @@ Reylo checks each value against its type before the query runs. ClickHouse doesn
 - a date that isn't on the calendar, such as 30 February
 - a string that holds half of a surrogate pair
 - a named tuple with a member missing, or one the type doesn't have
+- a `null`, or an empty slot of an array, where the type isn't `Nullable`
 
 ### Where a parameter can't go [#constant-positions]
 
@@ -397,16 +398,28 @@ VALUES ({id:UInt64}, {user:UInt64}, {total:Decimal(12, 2)}, now64(3))
 The type check has ClickHouse check each write without running it:
 
 - **An `INSERT`** is built, each row of its `VALUES` as the `SELECT` of its values. A table, a column or a value that doesn't fit is an error.
-- **A `DELETE` or an `UPDATE`** is checked as the `SELECT` of the rows it changes and the values it writes. So are `ALTER TABLE … UPDATE` and `ALTER TABLE … DELETE`.
+- **A `DELETE` or an `UPDATE`** is checked as the `SELECT` of the rows it changes and the values it writes. So are `ALTER TABLE … UPDATE` and `ALTER TABLE … DELETE`. A value its column doesn't take is an error.
 
-ClickHouse fits whatever a query writes into its column, and says nothing where that changes the value. A `UInt64` of 300 goes into a `UInt8` column as 44. So a parameter written straight to a column declares a type the column holds every value of:
+ClickHouse converts whatever a query writes to its column's type, and says nothing where that changes the value. A `UInt64` of 300 goes into a `UInt8` column as 44. So a parameter written straight to a column declares the column's own type:
 
 ```sql tab="ch_add_wide.sql" dialect="clickhouse" errors
 INSERT INTO orders (id, user_id, total, placed_at)
 VALUES ({id:UInt64}, {user:UInt64}, {total:Decimal(18, 4)}, now64(3))
 ```
 
-That holds in `VALUES`, in the list of an `INSERT … SELECT` and in an `UPDATE`'s assignment. A value the query computes first, as `{n:UInt64} + 1` or a column it reads, is converted as ClickHouse converts it.
+That holds in `VALUES`, in the list of an `INSERT … SELECT` and in an `UPDATE`'s assignment. A type the column holds every value of passes too:
+
+- a whole number of fewer bits, as a `UInt8` in a `UInt64` column
+- a `Float32` in a `Float64` column, and a decimal with fewer digits
+- an enum whose labels the column's enum has
+- a type that takes no null, in a `Nullable` column
+
+To write a value of another type, convert it in the query. What a query computes or converts is ClickHouse's to convert:
+
+```sql tab="ch_add_placed.sql" dialect="clickhouse"
+INSERT INTO orders (id, user_id, total, placed_at)
+VALUES ({id:UInt64}, {user:UInt64}, {total:Decimal(12, 2)}, {placed:String}::DateTime64(3, 'UTC'))
+```
 
 To insert many rows in one query, pass them as one array of tuples:
 
@@ -459,7 +472,7 @@ How Reylo uses your client:
 
 - Reylo decodes results itself. Your client's format and JSON settings don't apply to Reylo's queries, and Reylo's don't change yours.
 - Each parameter goes to the server as ClickHouse's own query parameter, never written into the query's text.
-- The settings your client is made with apply to every query it runs, Reylo's included. Reylo sends none of its own, so a read-only user can run every query.
+- The settings your client is made with apply to every query it runs, Reylo's included. Reylo adds only the format it reads and each parameter, which a read-only user may send too.
 - ClickHouse has no transactions across statements. Each query is its own.
 
 ## Migrations
@@ -481,10 +494,13 @@ What Reylo can't type on ClickHouse, and what to do instead:
 | A bare `:name`, which declares no type | `{name:Type}`, or `:name::Type` |
 | A column with no name of its own, such as `count()` beside another column | Give it an alias: `count() AS orders` |
 | An `INSERT … FORMAT`, whose rows are the request's body | `VALUES` with parameters, or your client's `insert()` |
+| A row of `VALUES` past the 32nd, or one that writes `DEFAULT` or a map in braces | None: its parameters are held to their columns, and the rest is checked when the query runs |
+| A parameter written to a column the query doesn't name: after a `*`, or into a table function | Name the columns, or convert the parameter in the query |
+| What only running a write shows, such as a table whose engine takes no `UPDATE`, or an update of a key column | None: the type check runs nothing |
 | An `ALTER TABLE` with several commands | One statement for each command |
 | `WITH TOTALS` and the `extremes` setting, whose extra rows a typed result has no place for | `WITH ROLLUP`, whose totals are rows, or a second query |
 | A `SETTINGS` clause that names the result's format, `default_format` | Leave it out: Reylo asks for the format it reads |
 | A statement other than a `SELECT`, an `INSERT`, a `DELETE` or an `UPDATE`, such as `CREATE TABLE`, `SHOW TABLES` or an `ALTER` that changes the table | Run it on your client |
 | A `clickhouse+https://` server whose certificate no public authority signed, such as a self-signed one | None: the type check verifies the certificate against Mozilla's roots |
-| A server before 25.11, which doesn't mark an error that ends a result | None: the type check says so and stops |
+| A server before 25.11, which doesn't mark an error that ends a result | None: the type check says so and stops, and `.run()` refuses a result from one |
 | The Rust crate | None: sqlx has no ClickHouse driver |

@@ -193,7 +193,7 @@ Dates and times are ISO 8601 strings, never a `Date`, so they keep [full precisi
 | `Map(K, V)` | an array of `{ key, value }` pairs |
 | `Nullable(T)` | `T \| null` |
 | `LowCardinality(T)` | the type of `T` |
-| `JSON`, `Dynamic`, `AggregateFunction`, an interval | not yet: select it as text, as `toJSONString(x)` |
+| `JSON`, `Dynamic`, `AggregateFunction`, an interval, `Time`, `Time64` | not yet: select it as [a type Reylo reads](/clickhouse#unread-types) |
 
 </LanguagePanel>
 <LanguagePanel value="Rust">
