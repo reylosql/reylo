@@ -177,11 +177,12 @@ fn lex_on(sql: &str, dialect: Dialect, server: Option<u64>) -> (Vec<Token>, Vec<
             continue;
         }
         let start = i;
-        // Postgres dollar quotes: $$ … $$ and $tag$ … $tag$.
+        // Postgres dollar quotes: $$ … $$ and $tag$ … $tag$, whose tag may hold any letter, as an
+        // identifier may (a byte past ASCII is part of one).
         if ch == b'$' && postgres {
             let mut j = i + 1;
-            if j < n && (b[j].is_ascii_alphabetic() || b[j] == b'_') {
-                while j < n && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+            if j < n && (b[j].is_ascii_alphabetic() || b[j] == b'_' || b[j] >= 0x80) {
+                while j < n && (b[j].is_ascii_alphanumeric() || b[j] == b'_' || b[j] >= 0x80) {
                     j += 1;
                 }
             }
@@ -603,8 +604,11 @@ pub fn escapes_shadow(statement: &Statement, dialect: Dialect) -> Option<(String
             let call_of: Vec<Option<&str>> = (0..t.len())
                 .map(|k| {
                     let inside = calls.last().copied().flatten();
+                    // A parenthesis that holds a query is no call, whatever word comes before it:
+                    // `insert into trim (select …)` names a table `trim`.
+                    let query = words.get(k + 1).is_some_and(|w| matches!(w.as_str(), "SELECT" | "WITH" | "TABLE" | "VALUES" | "("));
                     match words[k].as_str() {
-                        "(" => calls.push((k > 0 && t[k - 1].kind == TokenKind::Word).then(|| words[k - 1].as_str())),
+                        "(" => calls.push((k > 0 && t[k - 1].kind == TokenKind::Word && !query).then(|| words[k - 1].as_str())),
                         ")" => drop(calls.pop()),
                         _ => {}
                     }
@@ -677,11 +681,14 @@ pub fn shadow_problem(sql: &str, dialect: Dialect) -> Option<String> {
 
 /// The statement on one line, as written but for its spacing, its first 16 tokens of a long one,
 /// and every string as `'…'`: a string may hold a password (`password 'x'`, a subscription's
-/// connection string), and a refusal is printed and logged.
+/// connection string), and a refusal is printed and logged. It stops at the word that brings one in,
+/// too, since a string the lexer reads otherwise than the server (Postgres with
+/// `standard_conforming_strings` off) would show what follows.
 pub fn quoted(statement: &Statement) -> String {
     const SHOWN: usize = 16;
     let t = &statement.tokens;
-    let end = t.len().min(SHOWN);
+    let secret = t.iter().position(|x| matches!(x.upper().as_str(), "PASSWORD" | "IDENTIFIED" | "CONNECTION" | "OPTIONS")).map_or(t.len(), |k| k + 1);
+    let end = t.len().min(SHOWN).min(secret);
     let mut out = String::new();
     for k in 0..end {
         if k > 0 && t[k - 1].end != t[k].start {
@@ -917,9 +924,14 @@ mod tests {
         assert_eq!(unreplayable("create database app", Dialect::Postgres).unwrap().instead, Some(SERVER_INSTEAD));
         assert_eq!(unreplayable("create table app.t (id int)", Dialect::Mysql).unwrap().instead, None);
         // Never a string, which may hold a password, and never past a long statement's first 16 tokens.
-        assert_eq!(shadow_problem("create role app login password 'secret'", Dialect::Postgres).unwrap(), "create role app login password '…': it changes a role, which belongs to the server");
-        assert_eq!(unreplayable("alter subscription s connection 'host=db password=secret'", Dialect::Postgres).unwrap().statement, "alter subscription s connection '…'");
-        assert_eq!(unreplayable("create user 'r'@'%' identified by 'secret'", Dialect::Mysql).unwrap().statement, "create user '…'@'…' identified by '…'");
+        assert_eq!(shadow_problem("create role app login password 'secret'", Dialect::Postgres).unwrap(), "create role app login password …: it changes a role, which belongs to the server");
+        assert_eq!(unreplayable("alter subscription s connection 'host=db password=secret'", Dialect::Postgres).unwrap().statement, "alter subscription s connection …");
+        // Nor what follows the word a password comes after, however the lexer read the string.
+        assert_eq!(unreplayable(r"create role app password 'a\'b secret'", Dialect::Postgres).unwrap().statement, "create role app password …");
+        assert_eq!(unreplayable("create role app password $é$secret$é$ login", Dialect::Postgres).unwrap().statement, "create role app password …");
+        assert_eq!(split_statements("create role app password $é$sec;ret$é$; select 1", Dialect::Postgres).len(), 2);
+        assert_eq!(unreplayable("create user 'r'@'%' identified by 'secret'", Dialect::Mysql).unwrap().statement, "create user '…'@'…' identified …");
+        assert_eq!(unreplayable("grant app_role to 'r'@'%'", Dialect::Mysql).unwrap().statement, "grant app_role to '…'@'…'");
         assert_eq!(unreplayable("create table app.t (a int, b int, c int, d int)", Dialect::Mysql).unwrap().statement, "create table app.t (a int, b int, c int, d …");
         assert!(shadow_problem("create user bob", Dialect::Postgres).is_some());
         assert_eq!(shadow_problem("create user mapping for current_user server s options (user 'u'); alter user mapping for public server s options (set user 'v'); drop user mapping for public server s", Dialect::Postgres), None);
@@ -952,6 +964,7 @@ mod tests {
         // A `from` that takes a value, not a table.
         assert_eq!(shadow_problem("update events as e set y = extract (year from e.at), s = trim(leading 'x' from e.name), t = substring(e.name from 2) where e.id in (select id from events)", Dialect::Mysql), None);
         assert!(shadow_problem("update events set y = (select max(x) from app.t)", Dialect::Mysql).is_some());
+        assert!(shadow_problem("insert into trim (select id from sample.source)", Dialect::Mysql).is_some());
         assert_eq!(shadow_problem("create view v as select u.email from users u left join posts p on p.user_id = u.id where u.name like p.title", Dialect::Mysql), None);
         assert!(shadow_problem("create index i on app.users (email)", Dialect::Mysql).is_some());
         assert!(shadow_problem("create trigger t before insert on app.users for each row set new.x = 1", Dialect::Mysql).is_some());
