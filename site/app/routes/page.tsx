@@ -9,6 +9,7 @@ import { HeroTitle } from '@/components/hero';
 import { getMDXComponents } from '@/components/mdx';
 import { HeroActions } from '@/components/hero';
 import { loadPage } from '@/lib/content';
+import { migrateMovedAnchorsScript } from '@/lib/moved-anchors';
 import { compareTitle, docsTitle, docsUrl, githubUrl, introUrl, migrateDocsUrl, markdownPath, pageGroups, pageLinks, pageTitle, siteUrl } from '@/lib/layout.shared';
 import { ogAlt, ogSize } from '@/lib/og';
 import { unlistedPage } from '@/lib/rust-content';
@@ -26,6 +27,7 @@ const DIALECT_PAGES = new Set(['postgres', 'mysql', 'sqlite']);
 /** The pages with no table of contents, by slug, each with the width of its column, which takes the right column's room: a page whose whole point is one wide table. */
 const CENTERED: Record<string, string> = {
   compare: '56rem',
+  'migrate-compare': '56rem',
 };
 
 /**
@@ -38,7 +40,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   // The intro and Reylo Migrate's docs have addresses of their own, /docs and /migrate/docs
   // (app/routes.ts); a prerender asks for each page's data at its address with `.data` after it.
   const pathname = new URL(request.url).pathname.replace(/\.data$/, '').replace(/\/$/, '');
-  const slug = params.slug ?? (pathname === migrateDocsUrl ? 'migrate' : pathname === introUrl ? '' : undefined);
+  const slug = params.slug ?? (pathname === migrateDocsUrl ? 'migrate' : pathname.startsWith('/migrate/') ? `migrate-${pathname.slice('/migrate/'.length)}` : pathname === introUrl ? '' : undefined);
   if (slug === undefined) throw new Response('Not found', { status: 404 });
   const page = source.getPage(slug ? [slug] : []);
   if (!page) throw new Response('Not found', { status: 404 });
@@ -133,9 +135,6 @@ function PageContent({ loaderData }: Pick<Route.ComponentProps, 'loaderData'>) {
   const files = use(loadPage(path));
   const components = getMDXComponents(slug === '' ? { HeroActions: () => <HeroActions agentPrompt={agentPrompt} stars={stars} /> } : undefined);
   const main = slug === '';
-  // Reylo Migrate's docs are a site of their own, on one page under its landing page (/migrate): no
-  // list of the docs' pages, so docs-kit draws its table of contents on the left.
-  const standalone = STANDALONE.has(slug);
   // A page named for a file (`.reylo.yaml`) is titled in code, as the list writes it.
   const code = pageGroups.some((g) => g.items.some((item) => 'code' in item && item.code && item.href === url));
 
@@ -159,10 +158,12 @@ function PageContent({ loaderData }: Pick<Route.ComponentProps, 'loaderData'>) {
       toc={((toc) => (toc.length < 2 ? [] : toc))(files.flatMap((file) => file.toc).filter((item) => item.depth <= 3))}
       fold={FOLD[slug] ?? []}
       centered={CENTERED[slug]}
-      pages={standalone ? undefined : { groups: pageGroups, links: pageLinks, linksLabel: 'Links', current: url }}
+      pages={{ groups: pageGroups, links: pageLinks, linksLabel: 'Links', current: url }}
       pageTitle={pageName(slug, title)}
       brand={<Brand />}
       github={githubUrl}
+      // A link to a section of the one page the Migrate docs were goes to that section's page now.
+      before={slug === 'migrate' ? <script dangerouslySetInnerHTML={{ __html: migrateMovedAnchorsScript }} /> : undefined}
       titleAside={
         typedefs ? (
           <p className="typedef-version not-prose">
@@ -183,9 +184,6 @@ function PageContent({ loaderData }: Pick<Route.ComponentProps, 'loaderData'>) {
     </DocsShell>
   );
 }
-
-/** The pages that are a site of their own, on one page, outside the docs' page list. */
-const STANDALONE = new Set(['migrate']);
 
 /** The current page's name on the phone's strip, as the list names it. */
 function pageName(slug: string, title: string): string {

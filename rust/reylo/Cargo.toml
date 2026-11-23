@@ -61,3 +61,6 @@ time = ["dep:time", "sqlx?/time", "reylo-macros/time"]
 uuid = ["dep:uuid", "sqlx?/uuid", "reylo-macros/uuid"]
 rust_decimal = ["dep:rust_decimal", "sqlx?/rust_decimal", "sqlx08?/rust_decimal", "reylo-macros/rust_decimal"]
 bigdecimal = ["dep:bigdecimal", "sqlx?/bigdecimal", "sqlx08?/bigdecimal", "reylo-macros/bigdecimal"]
+# pgvector's `vector` as the crate's own `pgvector::Vector`, whatever its version, read and bound
+# through reylo's codec (src/vector.rs) on the sqlx the queries run on.
+pgvector = ["reylo-macros/pgvector"]

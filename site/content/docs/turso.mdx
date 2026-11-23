@@ -128,7 +128,7 @@ steps:
 Migrations on Turso:
 
 - Every `reylo migrate` and `reylo db` command runs on Turso Cloud and on any libSQL server. It takes the same URLs as `@libsql/client`. Add `?tls=0` to a `libsql://` URL for a server without TLS.
-- From code, pass the same URL: `migrate({ url })` ([API](/migrate/docs#api)).
+- From code, pass the same URL: `migrate({ url })` ([API](/migrate/usage#api)).
 - Shadow databases are in memory, on libSQL's own engine as Turso Cloud runs it. That includes Turso Cloud's extra functions, such as `uuid4` and `regexp_like`.
 - Migrations can use libSQL's own SQL, such as a vector index or `alter table … alter column`. Then every command opens your local file on libSQL's engine too.
 - Tables named `__turso_internal_…` belong to Turso's engine. Reylo leaves them out of `schema.sql` and every plan, and keeps them in step when a table changes.

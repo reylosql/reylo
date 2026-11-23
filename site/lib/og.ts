@@ -3,3 +3,5 @@ export const ogSize = { width: 1200, height: 630 };
 
 export const ogAlt =
   'Reylo: import .sql files into TypeScript, fully typed. Code imports getAuthor from "./get_author.sql" and runs it, and the result is typed { id: number; name: string; post_count: number } | null.';
+
+export const migrateOgAlt = 'Reylo Migrate: SQL-first schema and migrations.';

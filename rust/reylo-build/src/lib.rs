@@ -94,6 +94,8 @@ pub struct Options {
     pub dates: Option<Dates>,
     pub uuid: bool,
     pub decimals: Option<Decimals>,
+    /// pgvector's `vector` as the crate's own `pgvector::Vector`.
+    pub pgvector: bool,
 }
 
 /// What the query's module, as the crate wrote it, holds in place of the generated items.
@@ -188,7 +190,10 @@ pub fn module(dialect: Dialect, options: Options, analysis: &Value, span: Span, 
         gets.push(quote!(let #local = ::reylo::sqlx::Row::try_get::<#decode, _>(row, #index)?;));
         if !shape.decoded_as_is() {
             let decoded = shape.decode(quote!(#local), &column.name);
-            gets.push(quote!(let #local = #decoded;));
+            // Typed, since a vector converts into the field's type with `From`, which the crate's
+            // own row would take through `Into` again.
+            let ty = shape.ty();
+            gets.push(quote!(let #local: #ty = #decoded;));
         }
         let own = row_partial.and_then(|p| p.fields.iter().find(|f| f.name == column.name));
         let (ty, value) = if whole_row {
@@ -225,6 +230,7 @@ pub fn module(dialect: Dialect, options: Options, analysis: &Value, span: Span, 
         check_names(p, params.iter().map(|p| p.name.as_str()), "parameter", "a parameter of the statement")?;
     }
     let mut param_fields = Vec::new();
+    let mut vector_binds = false;
     let mut encodes = std::collections::HashMap::new();
     let mut borrows = false;
     for param in &params {
@@ -242,6 +248,14 @@ pub fn module(dialect: Dialect, options: Options, analysis: &Value, span: Span, 
                             types::Leaf::Label => quote!(<#ty as ::reylo::Enum>::label(#from(#v))),
                             _ => quote!(#from(#v)),
                         })
+                    }
+                    // A vector the crate declares as its `pgvector::Vector`, under any name, or as a
+                    // `Vec<f32>`, in any `Option`s and `Vec`s, is bound through reylo's codec; a field of another type,
+                    // as `String` for `:v::vector::text`, as it is. The compiler picks which by the
+                    // field's type, through the items `vector_binds` writes into the module.
+                    None if shape.bound_via() => {
+                        vector_binds = true;
+                        quote!((&&__ReyloBind(::core::clone::Clone::clone(#this))).reylo_bind())
                     }
                     None => quote!(::core::clone::Clone::clone(#this)),
                 };
@@ -353,9 +367,11 @@ pub fn module(dialect: Dialect, options: Options, analysis: &Value, span: Span, 
     let finished = types.finish(&overrides.taken)?;
     let nested = &finished.items;
     let converts = &conversions.tokens;
+    let vector_binds = vector_binds.then(vector_bind_items);
     let tokens = quote! {
         #(#nested)*
         #(#converts)*
+        #vector_binds
         /// The statement as it is sent, its parameters written as the database's own placeholders.
         pub const SQL: &str = #text;
         #doc
@@ -419,6 +435,68 @@ impl Conversions {
         });
         self.made.push((key.0, key.1, into.clone(), from.clone()));
         Ok((into, from))
+    }
+}
+
+/// The items a `Params` field the crate declares for a vector parameter is bound through:
+/// `(&&__ReyloBind(v)).reylo_bind()` takes the codec's method where `v` is the crate's own
+/// `pgvector::Vector` or a `Vec<f32>`, in any `Option`s and `Vec`s, and binds any other value as
+/// it is, one dereference further on. They are written in the module, against the crate's own `pgvector`,
+/// since reylo depends on no version of it.
+fn vector_bind_items() -> TokenStream {
+    quote! {
+        #[doc(hidden)]
+        struct __ReyloBind<T>(T);
+        #[doc(hidden)]
+        trait __ReyloVectorCodec {
+            type Bound;
+            fn bound(&self) -> Self::Bound;
+        }
+        impl __ReyloVectorCodec for ::pgvector::Vector {
+            type Bound = ::reylo::__private::PgVector;
+            fn bound(&self) -> Self::Bound {
+                ::reylo::__private::PgVector(self.to_vec())
+            }
+        }
+        // A vector's values as they are, which no operator of pgvector's takes as a `real[]`.
+        impl __ReyloVectorCodec for ::std::vec::Vec<f32> {
+            type Bound = ::reylo::__private::PgVector;
+            fn bound(&self) -> Self::Bound {
+                ::reylo::__private::PgVector(::core::clone::Clone::clone(self))
+            }
+        }
+        impl<T: __ReyloVectorCodec> __ReyloVectorCodec for ::core::option::Option<T> {
+            type Bound = ::core::option::Option<T::Bound>;
+            fn bound(&self) -> Self::Bound {
+                self.as_ref().map(__ReyloVectorCodec::bound)
+            }
+        }
+        impl<T: __ReyloVectorCodec> __ReyloVectorCodec for ::std::vec::Vec<T> {
+            type Bound = ::std::vec::Vec<T::Bound>;
+            fn bound(&self) -> Self::Bound {
+                self.iter().map(__ReyloVectorCodec::bound).collect()
+            }
+        }
+        #[doc(hidden)]
+        trait __ReyloBindVector {
+            type Bound;
+            fn reylo_bind(self) -> Self::Bound;
+        }
+        impl<T: __ReyloVectorCodec> __ReyloBindVector for &&__ReyloBind<T> {
+            type Bound = T::Bound;
+            fn reylo_bind(self) -> T::Bound {
+                self.0.bound()
+            }
+        }
+        #[doc(hidden)]
+        trait __ReyloBindAsIs<T> {
+            fn reylo_bind(self) -> T;
+        }
+        impl<T: ::core::clone::Clone> __ReyloBindAsIs<T> for &__ReyloBind<T> {
+            fn reylo_bind(self) -> T {
+                ::core::clone::Clone::clone(&self.0)
+            }
+        }
     }
 }
 

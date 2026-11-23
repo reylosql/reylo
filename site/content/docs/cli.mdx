@@ -191,7 +191,7 @@ queries/broken.sql:4:7: column u.emial does not exist (42703)
 
 ## `reylo migrate`
 
-Write, check and run your [migrations](/migrate/docs#cli-reylo-migrate):
+Write, check and run your [migrations](/migrate/cli):
 
 ```terminal
 Usage: reylo migrate <command> [flags]
@@ -203,7 +203,7 @@ Commands:
     --drop <names>         Accept what it drops: tables and columns
     --rename <old>=<new>   Say a table or column was renamed
     --blocking             Accept a statement that blocks writes while it reads every row
-  dev                      Take this database to the migrations, and lock them
+  dev                      Apply all unapplied migrations and regenerate the lockfile
   deploy                   Run what the lock lists, with no shadow database
     --dry-run              Try it on a shadow database, running nothing here
   status                   Check that this database and the files are in step
@@ -239,7 +239,7 @@ reylo migrate new add_bio --blocking
 
 ### `dev`
 
-Takes your development database to your migrations, and writes the lock:
+Applies all unapplied migrations to your development database and regenerates the lockfile:
 
 ```sh
 reylo migrate dev
@@ -289,13 +289,13 @@ reylo migrate history pull --url $PROD_URL
 
 ## `reylo db`
 
-Push `schema.sql` to a [development database](/migrate/docs#db-push), reset it, wipe it or read its schema:
+Push `schema.sql` to a [development database](/migrate/cli#push), reset it, wipe it or read its schema:
 
 ```terminal
 Usage: reylo db <command> [flags]
 
 Commands:
-  push                     Take this database to schema.sql, unrecorded
+  push                     Synchronize this database with schema.sql (may be destructive)
     --drop <names>         Accept what it drops: tables and columns
     --rename <old>=<new>   Say a table or column was renamed
     --force                Accept everything it drops
@@ -313,7 +313,7 @@ Flags:
 
 ### `push`
 
-Takes your development database to `schema.sql`, with no migration:
+Synchronizes your development database with `schema.sql`, writing no migration:
 
 ```sh
 reylo db push

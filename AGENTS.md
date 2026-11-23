@@ -201,6 +201,7 @@ Everything `reylo` prints for a person follows one set of marks and one layout. 
 | ! | yellow | a risk: data lost, a rename taken for granted, a run cut off, a statement that blocks writes |
 | » | dim, the whole line | a note: something to know, and maybe act on |
 | + and - | green and red | added and removed |
+| ~ | yellow | changed in place, as a rename is: the words it changes highlighted red and green, or marked `[-old-]{+new+}` where colour is off |
 | ↺ | yellow | rewound |
 | ↓ | green | pulled |
 | · | dim | a pending migration's row, and the separator before a timing |

@@ -1,8 +1,10 @@
 import { useEffect, useState, type ReactNode } from 'react';
+import { CompareTable } from './compare-table';
 import { DATABASES, HOSTS, type Logo } from './host-logos';
+import { Install, Nav } from './home-chrome';
 import { MigrateWordmark } from './migrate-wordmark';
 import { VARIADIC_SQUARE, VARIADIC_SQUARES } from './variadic-mark';
-import { githubUrl, migrateDocsUrl } from '@/lib/layout.shared';
+import { githubUrl, migrateCompareUrl, migrateDocsUrl } from '@/lib/layout.shared';
 
 /**
  * Reylo Migrate's landing page, at /migrate (app/routes/migrate.tsx): a hero split in half, the
@@ -13,36 +15,32 @@ import { githubUrl, migrateDocsUrl } from '@/lib/layout.shared';
  */
 export function MigrateLanding({ stars }: { stars?: number }) {
   return (
-    <div className="ml">
-      <nav className="ml-nav">
-        <a className="ml-brand ml-wordmark" href="/migrate" aria-label="Reylo Migrate">
-          <MigrateWordmark />
-        </a>
-        <div className="ml-links">
-          <a href={migrateDocsUrl}>Docs</a>
-          <a href="/">Reylo</a>
-          <a href={githubUrl} className="ml-gh">
-            <GitHubIcon />
-            <span className="ml-gh-label">GitHub</span>
-            {stars ? <span className="ml-stars">{starCount(stars)}</span> : null}
-          </a>
-        </div>
-      </nav>
+    <div className="ml rh">
+      <Nav
+        stars={stars}
+        brand={{ href: '/migrate', label: 'Reylo Migrate', mark: <MigrateWordmark /> }}
+        links={[
+          ['Docs', migrateDocsUrl],
+          ['Comparison', migrateCompareUrl],
+          ['Reylo', '/'],
+          ['Blog', '/blog'],
+        ]}
+      />
 
-      <header className="ml-hero">
+      <header className="ml-hero rh-hero-split">
         <div className="ml-hero-words">
-          <h1 className="ml-h1">
+          <h1 className="ml-h1 rh-h1 ml-h1-migrate">
             <span>SQL-first</span> <em>schema and migrations.</em>
           </h1>
           <p className="ml-lede">Model your schema in <code>schema.sql</code>. Generate migrations, or write your own. Works on Postgres, MySQL and SQLite.</p>
-          <Install />
+          <Install docs={migrateDocsUrl} />
         </div>
         <div className="ml-hero-visual">
           <SchemaToMigration />
         </div>
       </header>
 
-      <Row n={1} title="Use the full power of your database" visual={<FullSchema />}>
+      <Row n={1} title="Use the full power of your database" visual={<SchemaKinds />}>
         <p>No lossy or limited DSLs. Declare views, functions, triggers, policies, checks, computed columns, and more.</p>
       </Row>
 
@@ -86,9 +84,15 @@ export function MigrateLanding({ stars }: { stars?: number }) {
         <p>One command introspects your current schema, generates <code>schema.sql</code>, and creates your initial <code>migrations/init.sql</code>.</p>
       </Row>
 
+      <section className="ml-table">
+        <h2>Compared with other migration tools</h2>
+        <p>Hover a cross to see why.</p>
+        <CompareTable set="migrate" />
+      </section>
+
       <section className="ml-end">
         <h2>Ship faster with Reylo</h2>
-        <Install centered />
+        <Install centered docs={migrateDocsUrl} />
       </section>
 
       <footer className="ml-foot">
@@ -97,7 +101,8 @@ export function MigrateLanding({ stars }: { stars?: number }) {
         </a>
         <div className="ml-foot-links">
           <a href={migrateDocsUrl}>Docs</a>
-          <a href={`${migrateDocsUrl}#cli-reylo-migrate`}>CLI</a>
+          <a href={'/migrate/cli'}>CLI</a>
+          <a href={migrateCompareUrl}>Comparison</a>
           <a href="/">Reylo</a>
           <a href={githubUrl}>GitHub</a>
           <a href="https://www.npmjs.com/package/reylo">npm</a>
@@ -146,62 +151,6 @@ function Row({ n, title, visual, flip, children }: { n: number; title: ReactNode
   );
 }
 
-const INSTALLS = { brew: 'brew install reylosql/tap/reylo', npm: 'npm i reylo', curl: 'curl -fsSL https://reylo.dev/install.sh | sh' } as const;
-
-/** The install command, by package manager: the managers as tabs over its upper left, a copy button at its end, and the docs button, filled with the yellow. `centered` is the closing call to action's, which centres the two side by side. */
-function Install({ centered }: { centered?: boolean }) {
-  const [kind, setKind] = useState<keyof typeof INSTALLS>('brew');
-  const [copied, setCopied] = useState(false);
-  const command = INSTALLS[kind];
-  return (
-    <div className={centered ? 'ml-install ml-centered' : 'ml-install'}>
-      <div className="ml-big">
-        <div className="ml-box">
-          <div className="ml-seg" role="tablist">
-            {(Object.keys(INSTALLS) as (keyof typeof INSTALLS)[]).map((k) => (
-              <button key={k} type="button" role="tab" aria-selected={k === kind} className={k === kind ? 'on' : undefined} onClick={() => setKind(k)}>
-                {k}
-              </button>
-            ))}
-          </div>
-          <div className="ml-cmd">
-            <span className="ml-dollar">$</span>
-            <span>{command}</span>
-            <button
-              type="button"
-              className="ml-copybtn"
-              aria-label="Copy the command"
-              onClick={() => {
-                void navigator.clipboard.writeText(command);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1400);
-              }}
-            >
-              {copied ? (
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <path d="M3 8.5l3.2 3.2L13 4.8" />
-                </svg>
-              ) : (
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <rect x="5.25" y="5.25" width="8.5" height="8.5" rx="1.75" />
-                  <path d="M10.75 5.25v-1.5a1.5 1.5 0 0 0-1.5-1.5h-5.5a1.5 1.5 0 0 0-1.5 1.5v5.5a1.5 1.5 0 0 0 1.5 1.5h1.5" />
-                </svg>
-              )}
-            </button>
-          </div>
-        </div>
-        <a className="ml-docs ml-docs-primary" href={migrateDocsUrl}>
-          Read the docs
-          <svg viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M2.5 8h11M9 3.5 13.5 8 9 12.5" />
-          </svg>
-        </a>
-      </div>
-    </div>
-  );
-}
-
-/** Whether the reader asked for less motion: then every player shows its last frame and stays. */
 export function stillPlease(): boolean {
   return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
@@ -287,12 +236,30 @@ function usePlayer(script: Script, onEdit?: (edited: boolean) => void): Line[] {
   return lines;
 }
 
-/** A printed line in the CLI's colours: ✓ and + green, ✗ red, ! and ↺ yellow; a » note and the lead over a command (an indented line from a capital to a colon) dim whole; the command on its own line cyan. */
+/** A printed line in the CLI's colours: ✓ and + green, ✗ and - red, !, ↺ and ~ yellow; a » note, the lead over a command (an indented line from a capital to a colon) and a diff's `---` and `+++` headers dim whole; the command on its own line cyan; the words a ~ line changes in place, written as the CLI writes them where colour is off (`[-title-]{+heading+}`), highlighted red and green. */
 function paint(line: string): ReactNode {
-  if (/^\s*» /.test(line) || /^\s+[A-Z].*:$/.test(line)) return <span className="ml-mu">{line}</span>;
-  const m = line.match(/^(\s*)(✓|✗|!|\+|↺)(\s.*)?$/);
+  const changed = line.match(/^(\s*)~ (.*)$/);
+  if (changed) {
+    return (
+      <>
+        {changed[1]}
+        <span className="ml-wn">~</span>{' '}
+        {changed[2].split(/(\[-.*?-\]|\{\+.*?\+\})/).map((part, i) =>
+          i % 2 ? (
+            <span key={i} className={part.startsWith('[') ? 'ml-rm' : 'ml-ad'}>
+              {part.slice(2, -2)}
+            </span>
+          ) : (
+            part
+          ),
+        )}
+      </>
+    );
+  }
+  if (/^\s*» /.test(line) || /^\s+[A-Z].*:$/.test(line) || /^\s+(---|\+\+\+) /.test(line)) return <span className="ml-mu">{line}</span>;
+  const m = line.match(/^(\s*)(✓|✗|!|\+|-|↺)(\s.*)?$/);
   if (m) {
-    const cls = m[2] === '✓' || m[2] === '+' ? 'ml-ok' : m[2] === '✗' ? 'ml-er' : 'ml-wn';
+    const cls = m[2] === '✓' || m[2] === '+' ? 'ml-ok' : m[2] === '✗' || m[2] === '-' ? 'ml-er' : 'ml-wn';
     return (
       <>
         {m[1]}
@@ -367,10 +334,12 @@ const RENAMES: Script = [
   '$ reylo migrate new tidy_columns',
   "✗ This migration can't tell renames from new columns",
   '',
-  '    posts.title → heading  varchar(100) → varchar(200)',
-  '    users.bio   → about    varchar(200) → text',
+  '    - column posts.title character varying(100)',
+  '    + column posts.heading character varying(200)',
+  '    - column users.bio character varying(200)',
+  '    + column users.about text',
   '',
-  '  For each, rename to keep its rows, or drop it:',
+  '  For each, rename it to keep its rows, or drop it and add the new one:',
   '    --rename posts.title=heading   or   --drop posts.title',
   '    --rename users.bio=about       or   --drop users.bio',
   '  Add the flags you picked to:',
@@ -379,6 +348,10 @@ const RENAMES: Script = [
   'Nothing was changed.',
   '$ reylo migrate new tidy_columns --rename posts.title=heading --drop users.bio',
   '✓ Wrote reylo/migrations/20261104150000_tidy_columns.sql',
+  '  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})',
+  '  + column users.about text',
+  '  - column users.bio character varying(200)',
+  '',
   '  ! Drops the column users.bio and its data',
 ];
 
@@ -413,7 +386,9 @@ const LOCK_FREE: Script = [
   '✗ Migration 20261105080000_no_nick.sql sorts before 20261105090000_nick.sql, which this database already ran',
   '  Run in name order, as on a fresh database, the migrations end differently:',
   '',
-  '    + a fresh database: column users.nick text',
+  '    --- this database',
+  '    +++ a fresh database',
+  '    + column users.nick text',
   '',
   '  Give it a later name, so that every database runs it after 20261105090000_nick.sql:',
   '    mv reylo/migrations/20261105080000_no_nick.sql reylo/migrations/20261105090001_no_nick.sql',
@@ -433,6 +408,7 @@ const PUSH: Script = [
   '✓ This database matches reylo/schema.sql',
   '$ reylo migrate new add_nick',
   '✓ Wrote reylo/migrations/20261104150000_add_nick.sql',
+  '  + column users.nick text',
 ];
 
 const HAND_CHANGE: Script = [
@@ -547,20 +523,169 @@ function Sql({ text }: { text: string }) {
   );
 }
 
-/** A whole schema.sql on Postgres, checked with `reylo db push`: an enum, a domain, an identity, a check, a generated column, a partial index, a view, a trigger and a policy. */
-const FULL_SCHEMA = "create type plan as enum ('free', 'pro', 'team');\n\ncreate domain email as text check (value ~ '^[^@\\s]+@[^@\\s]+$');\n\ncreate table users (\n  id bigint generated always as identity primary key,\n  email email not null unique,\n  plan plan not null default 'free',\n  created_at timestamptz not null default now()\n);\n\ncreate table posts (\n  id bigint generated always as identity primary key,\n  author_id bigint not null references users on delete cascade,\n  title text not null check (length(title) <= 200),\n  slug text generated always as (lower(replace(title, ' ', '-'))) stored,\n  published_at timestamptz,\n  updated_at timestamptz not null default now()\n);\n\ncreate index posts_feed on posts (published_at desc)\n  where published_at is not null;\n\ncreate view feed as\n  select p.id, p.title, u.email as author\n  from posts p join users u on u.id = p.author_id\n  where p.published_at is not null;\n\ncreate function touch() returns trigger language plpgsql as $$\nbegin\n  new.updated_at := now();\n  return new;\nend $$;\n\ncreate trigger posts_touch before update on posts\n  for each row execute function touch();\n\nalter table posts enable row level security;\n\ncreate policy own_posts on posts\n  using (author_id = current_setting('app.user_id')::bigint);";
+/** What schema.sql can declare, one kind at a time, from the docs' examples. */
+const KINDS: { name: string; sql: ReactNode }[] = [
+  {
+    name: 'Views',
+    sql: (
+      <>
+        {kw('create view')} active_users {kw('as')}{'\n'}
+        {'  '}
+        {kw('select')} id, email {kw('from')} users {kw('where')} deleted_at {kw('is null')};{'\n'}
+        {'\n'}
+        {kw('create materialized view')} daily_signups {kw('as')}{'\n'}
+        {'  '}
+        {kw('select')} date_trunc({ty("'day'")}, created_at) {kw('as')} day, count(*){'\n'}
+        {'  '}
+        {kw('from')} users {kw('group by')} 1;
+      </>
+    ),
+  },
+  {
+    name: 'Functions',
+    sql: (
+      <>
+        {kw('create function')} slugify(t {ty('text')}) {kw('returns')} {ty('text')}{'\n'}
+        {'  '}
+        {kw('language')} sql {kw('immutable')} {kw('as')} {'$$'}{'\n'}
+        {'    '}
+        {kw('select')} lower(regexp_replace(t, {ty("'[^a-z0-9]+'")}, {ty("'-'")}, {ty("'gi'")})){'\n'}
+        {'  '}
+        {'$$'};
+      </>
+    ),
+  },
+  {
+    name: 'Triggers',
+    sql: (
+      <>
+        {kw('create function')} touch() {kw('returns trigger language')} plpgsql {kw('as')} {'$$'}{'\n'}
+        {kw('begin')} new.updated_at := now(); {kw('return')} new; {kw('end')} {'$$'};{'\n'}
+        {'\n'}
+        {kw('create trigger')} users_touch {kw('before update on')} users{'\n'}
+        {'  '}
+        {kw('for each row execute function')} touch();
+      </>
+    ),
+  },
+  {
+    name: 'Indexes',
+    sql: (
+      <>
+        {kw('create index')} users_unverified {kw('on')} users (created_at){'\n'}
+        {'  '}
+        {kw('where')} verified_at {kw('is null')};{'\n'}
+        {'\n'}
+        {kw('create unique index')} users_email {kw('on')} users (lower(email));
+      </>
+    ),
+  },
+  {
+    name: 'Policies',
+    sql: (
+      <>
+        {kw('alter table')} documents {kw('enable row level security')};{'\n'}
+        {kw('create policy')} documents_own {kw('on')} documents{'\n'}
+        {'  '}
+        {kw('using')} (owner_id = current_setting({ty("'app.user_id'")})::{ty('integer')});
+      </>
+    ),
+  },
+  {
+    name: 'Checks',
+    sql: (
+      <>
+        {kw('create table')} bookings ({'\n'}
+        {'  '}seats {ty('integer')} {kw('not null check')} (seats {'>'} 0),{'\n'}
+        {'  '}starts_at {ty('timestamptz')} {kw('not null')},{'\n'}
+        {'  '}ends_at {ty('timestamptz')} {kw('not null')},{'\n'}
+        {'  '}
+        {kw('check')} (ends_at {'>'} starts_at){'\n'}
+        );
+      </>
+    ),
+  },
+  {
+    name: 'Computed',
+    sql: (
+      <>
+        {kw('create table')} line_items ({'\n'}
+        {'  '}price {ty('numeric')} {kw('not null')},{'\n'}
+        {'  '}qty {ty('integer')} {kw('not null')},{'\n'}
+        {'  '}total {ty('numeric')} {kw('generated always as')} (price * qty) {kw('stored')}{'\n'}
+        );
+      </>
+    ),
+  },
+  {
+    name: 'JSON Schema',
+    sql: (
+      <>
+        {kw('create table')} events ({'\n'}
+        {'  '}payload {ty('jsonb')} {kw('not null check')} (jsonb_matches_schema({ty("'{")}{'\n'}
+        {'    '}
+        {ty('"type": "object",')}
+        {'\n'}
+        {'    '}
+        {ty('"properties": { "x": { "type": "integer" } },')}
+        {'\n'}
+        {'    '}
+        {ty('"required": ["x"]')}
+        {'\n'}
+        {'  '}
+        {ty("}'")}, payload)){'\n'}
+        );
+      </>
+    ),
+  },
+  {
+    name: 'And more',
+    sql: (
+      <>
+        {kw('create extension if not exists')} btree_gist;{'\n'}
+        {kw('create type')} mood {kw('as enum')} ({ty("'sad'")}, {ty("'ok'")}, {ty("'happy'")});{'\n'}
+        {kw('create domain')} email {kw('as')} {ty('text')} {kw('check')} (value {kw('like')} {ty("'%@%'")});{'\n'}
+        {kw('create type')} floatrange {kw('as range')} (subtype = {ty('float8')});{'\n'}
+        {kw('create table')} rooms (room {ty('int')}, during {ty('tstzrange')},{'\n'}
+        {'  '}
+        {kw('exclude using')} gist (room {kw('with')} =, during {kw('with')} &&));{'\n'}
+        {kw('grant select on')} active_users {kw('to')} reporting;{'\n'}
+        {kw('comment on table')} users {kw('is')} {ty("'The people who sign in'")};
+      </>
+    ),
+  },
+];
 
-/** The first row's schema.sql, in an editor. */
-function FullSchema() {
+/** The kinds as tabs over an editor; none turns by itself. */
+function SchemaKinds() {
+  const [at, setAt] = useState(0);
   return (
-    <div className="ml-win ml-full" aria-hidden="true">
+    <div className="ml-win ml-kinds">
       <div className="ml-bar">
         <FileIcon />
         reylo/schema.sql
       </div>
-      <pre className="ml-sql">
-        <Sql text={FULL_SCHEMA} />
-      </pre>
+      <div className="ml-tabs" role="tablist">
+        {KINDS.map((k, i) => (
+          <button
+            key={k.name}
+            type="button"
+            role="tab"
+            aria-selected={i === at}
+            className={i === at ? 'on' : undefined}
+            onClick={() => setAt(i)}
+          >
+            {k.name}
+          </button>
+        ))}
+      </div>
+      <div className="ml-stack">
+        {KINDS.map((k, i) => (
+          <pre key={k.name} className="ml-sql" data-on={i === at || undefined}>
+            {k.sql}
+          </pre>
+        ))}
+      </div>
     </div>
   );
 }
@@ -568,20 +693,16 @@ function FullSchema() {
 /** One edit to schema.sql: `posts.title` made required and checked, a column added, and the view over it widened; `…` marks lines left out. */
 const EDIT: [gutter: ' ' | '-' | '+' | '…', text: string][] = [
   [' ', 'create table posts ('],
-  [' ', '  id integer primary key,'],
-  [' ', '  author_id integer not null,'],
+  ['…', ''],
   ['-', '  title text,'],
   ['+', "  title text not null check (length(title) <= 200),"],
   ['+', '  published boolean not null default false,'],
-  [' ', '  body text not null,'],
-  [' ', '  foreign key (author_id) references users (id)'],
-  [' ', ');'],
   ['…', ''],
   [' ', 'create view post_titles as'],
   ['-', '  select p.id, p.title, u.name as author'],
   ['+', '  select p.id, p.title, p.published, u.name as author'],
-  [' ', '  from posts p join users u on u.id = p.author_id;'],
-];
+  ['…', ''],
+]
 
 /**
  * The migrations `reylo migrate new tighten_posts` wrote for that edit, run with reylo 0.8.1 on
@@ -682,39 +803,14 @@ function DialectMigrations() {
   );
 }
 
-/** Schemaless: the migration file, empty until `reylo migrate new` writes it, over the terminal that changes the database and makes it. */
+/** Schemaless: the terminal that changes the database and writes the migration from it. */
 function Schemaless() {
-  const [edited, setEdited] = useState(true);
-  const lines = usePlayer(SCHEMALESS, setEdited);
-  return (
-    <div className="ml-pair">
-      <div className="ml-win ml-editor" aria-hidden="true">
-        <div className="ml-bar">
-          <FileIcon />
-          reylo/migrations/20261104140347_add_bio.sql
-        </div>
-        <pre className="ml-code">
-          <span className={edited ? 'ml-l ml-add' : 'ml-l ml-pending'} data-g="+">
-            {kw('alter table')} users {kw('add column')} bio {ty('text')};
-          </span>
-          {/* Room under the line, so the terminal's corner doesn't cover it. */}
-          <span className="ml-l" data-g=" ">
-            {' '}
-          </span>
-          <span className="ml-l" data-g=" ">
-            {' '}
-          </span>
-        </pre>
-      </div>
-      <TermWindow lines={lines} script={SCHEMALESS} className="ml-under" />
-    </div>
-  );
+  const lines = usePlayer(SCHEMALESS);
+  return <TermWindow lines={lines} script={SCHEMALESS} />;
 }
 
 /** Where Reylo Migrate runs, as each host's logo over its name. */
 function Hosts() {
-  // A tile says "Tested" only once every tile can: a grid where some do reads as if the rest failed.
-  const chips = [...DATABASES, ...HOSTS].every((t) => t.tested);
   const tile = (t: Logo) => (
     <span key={t.name}>
       <svg viewBox={t.viewBox} fill="currentColor" aria-hidden="true">
@@ -723,7 +819,6 @@ function Hosts() {
         ))}
       </svg>
       {t.name}
-      {chips ? <em className="ml-tested">Tested</em> : null}
     </span>
   );
   return (

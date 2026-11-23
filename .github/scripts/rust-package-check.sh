@@ -114,17 +114,30 @@ manifest fresh '[dependencies]
 reylo = { version = "='"$version"'", features = ["postgres"] }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# The oldest release reylo takes, 0.4.0, the first with Clone, Debug and PartialEq on its Vector
+# as a generated row derives them, where the sqlx 0.8 project below is on the newest.
+pgvector = "=0.4.0"
+
+# The pgvector feature of reylo, forwarded through a feature of the project, which the generator
+# in the build script reads from Cargo as the macro does.
+[features]
+default = ["vector"]
+vector = ["reylo/pgvector"]
 
 [build-dependencies]
 reylo-build = "='"$version"'"' > "$project/Cargo.toml"
 cat > "$project/schema.sql" <<'EOF'
-create table users (id int primary key, name text not null, nickname text);
+create extension vector;
+create table users (id int primary key, name text not null, nickname text, embedding vector(2));
 create table posts (id serial primary key, author_id int not null references users (id), title text not null);
-insert into users values (1, 'ada', 'countess'), (2, 'bob', null);
+insert into users values (1, 'ada', 'countess', '[1,2]'), (2, 'bob', null, null);
 insert into posts (author_id, title) values (1, 'hello');
 EOF
 cat > "$project/queries/titles.sql" <<'EOF'
 select u.name, p.title from users u left join posts p on p.author_id = u.id order by u.id
+EOF
+cat > "$project/queries/nearest.sql" <<'EOF'
+select id from users where embedding is not null order by embedding <-> :near limit 1
 EOF
 cat > "$project/build.rs" <<'EOF'
 fn main() {
@@ -138,6 +151,9 @@ mod get_user {}
 
 #[reylo::query("select count(*) as n from users")]
 mod count_users {}
+
+#[reylo::query("select id, embedding from users where embedding = :embedding")]
+mod by_embedding {}
 
 mod queries {
     include!(concat!(env!("OUT_DIR"), "/queries.rs"));
@@ -155,6 +171,11 @@ $(migrate_main PgPool)
     let titles: Vec<queries::titles::Row> = queries::titles::Query.run(&pool).await?;
     let title: &Option<String> = &titles[1].title;
     assert_eq!(title, &None);
+    // A vector, in a module the build script wrote and in one the macro wrote.
+    let nearest = queries::nearest::Query { near: pgvector::Vector::from(vec![1.0, 2.5]) }.run(&pool).await?;
+    assert_eq!(nearest.map(|r| r.id), Some(1));
+    let found = by_embedding::Query { embedding: pgvector::Vector::from(vec![1.0, 2.0]) }.run(&pool).await?;
+    assert_eq!(found.iter().map(|r| (r.id, r.embedding.as_ref().map(|v| v.to_vec()))).collect::<Vec<_>>(), [(1, Some(vec![1.0, 2.0]))]);
     println!("a project outside the workspace built Reylo from its packages, ran its queries and migrated a database");
     Ok(())
 }
@@ -165,17 +186,21 @@ echo '::group::a new project on sqlx 0.9, built from the packages and run'
 (cd "$project" && DATABASE_URL="$server/reylo_fresh" MIGRATE_URL="$server/reylo_fresh_migrate" cargo run -q)
 echo '::endgroup::'
 
-# --- sqlx 0.8 on Postgres: a borrowed parameter's stream, an enum bound, an exact numeric ---------
+# --- sqlx 0.8 on Postgres: a borrowed parameter's stream, an enum bound, an exact numeric, a vector -
 project="$projects/fresh-sqlx08"
 mkdir -p "$project/src"
 manifest fresh-sqlx08 '[dependencies]
-reylo = { version = "='"$version"'", default-features = false, features = ["sqlx_0_8", "postgres", "migrate", "rust_decimal", "chrono"] }
+reylo = { version = "='"$version"'", default-features = false, features = ["sqlx_0_8", "postgres", "migrate", "rust_decimal", "chrono", "pgvector"] }
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "rust_decimal", "chrono"] }
+# The pgvector of the project, whose Vector the queries take, with its sqlx support on, which Cargo
+# resolves to sqlx 0.9: the vectors go through the codec of reylo on sqlx 0.8 all the same.
+pgvector = { version = "0.4", features = ["sqlx"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 futures-util = { version = "0.3", default-features = false }' > "$project/Cargo.toml"
 cat > "$project/schema.sql" <<'EOF'
-create table items (id int primary key, name text not null, status text not null check (status in ('draft', 'done')), price numeric, due date);
-insert into items values (1, 'a', 'draft', 1.50, '2026-11-17'), (2, 'b', 'done', 1e40, 'infinity');
+create extension vector;
+create table items (id int primary key, name text not null, status text not null check (status in ('draft', 'done')), price numeric, due date, embedding vector(2));
+insert into items values (1, 'a', 'draft', 1.50, '2026-11-17', '[1,2]'), (2, 'b', 'done', 1e40, 'infinity', null);
 EOF
 migrations "$project" text
 cat > "$project/src/main.rs" <<EOF
@@ -192,6 +217,9 @@ mod price {}
 
 #[reylo::query("select due from items where id = :id")]
 mod due {}
+
+#[reylo::query("select id, embedding from items where embedding = :embedding")]
+mod item_by_embedding {}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -212,6 +240,9 @@ $(migrate_main PgPool)
     let date: Option<reylo::sqlx::types::chrono::NaiveDate> = due::Query { id: 1 }.run(&pool).await?.expect("a").due;
     assert_eq!(date.map(|d| d.to_string()), Some("2026-11-17".to_string()));
     assert!(due::Query { id: 2 }.run(&pool).await.is_err());
+    // A vector on sqlx 0.8, beside a pgvector whose own sqlx support is on 0.9.
+    let found = item_by_embedding::Query { embedding: pgvector::Vector::from(vec![1.0, 2.0]) }.run(&pool).await?;
+    assert_eq!(found.iter().map(|r| (r.id, r.embedding.as_ref().map(|v| v.to_vec()))).collect::<Vec<_>>(), [(1, Some(vec![1.0, 2.0]))]);
     println!("a project on sqlx 0.8 built Reylo from its packages, ran its Postgres queries and migrated a database");
     Ok(())
 }
@@ -219,6 +250,7 @@ EOF
 psql "$pg" -v ON_ERROR_STOP=1 -q -c 'drop database if exists reylo_fresh_sqlx08' -c 'create database reylo_fresh_sqlx08' -c 'drop database if exists reylo_fresh_sqlx08_migrate' -c 'create database reylo_fresh_sqlx08_migrate'
 psql "$server/reylo_fresh_sqlx08" -v ON_ERROR_STOP=1 -q -f "$project/schema.sql"
 echo '::group::a new project on sqlx 0.8 and Postgres'
+(cd "$project" && cargo generate-lockfile -q && cargo tree -q -p pgvector -e normal --depth 1 | grep -q 'sqlx v0.9') || { echo "the project's pgvector did not resolve to sqlx 0.9, so the check checks nothing" >&2; exit 1; }
 (cd "$project" && DATABASE_URL="$server/reylo_fresh_sqlx08" MIGRATE_URL="$server/reylo_fresh_sqlx08_migrate" cargo run -q)
 echo '::endgroup::'
 
