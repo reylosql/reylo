@@ -606,7 +606,7 @@ pub fn escapes_shadow(statement: &Statement, dialect: Dialect) -> Option<(String
                     let inside = calls.last().copied().flatten();
                     // A parenthesis that holds a query is no call, whatever word comes before it:
                     // `insert into trim (select …)` names a table `trim`.
-                    let query = words.get(k + 1).is_some_and(|w| matches!(w.as_str(), "SELECT" | "WITH" | "TABLE" | "VALUES" | "("));
+                    let query = words[k + 1..].iter().find(|w| w.as_str() != "(").is_some_and(|w| matches!(w.as_str(), "SELECT" | "WITH" | "TABLE" | "VALUES"));
                     match words[k].as_str() {
                         "(" => calls.push((k > 0 && t[k - 1].kind == TokenKind::Word && !query).then(|| words[k - 1].as_str())),
                         ")" => drop(calls.pop()),
@@ -965,6 +965,8 @@ mod tests {
         assert_eq!(shadow_problem("update events as e set y = extract (year from e.at), s = trim(leading 'x' from e.name), t = substring(e.name from 2) where e.id in (select id from events)", Dialect::Mysql), None);
         assert!(shadow_problem("update events set y = (select max(x) from app.t)", Dialect::Mysql).is_some());
         assert!(shadow_problem("insert into trim (select id from sample.source)", Dialect::Mysql).is_some());
+        assert!(shadow_problem("insert into trim ((select id from sample.source))", Dialect::Mysql).is_some());
+        assert_eq!(shadow_problem("update events as e set cleaned = trim(('x') from e.name)", Dialect::Mysql), None);
         assert_eq!(shadow_problem("create view v as select u.email from users u left join posts p on p.user_id = u.id where u.name like p.title", Dialect::Mysql), None);
         assert!(shadow_problem("create index i on app.users (email)", Dialect::Mysql).is_some());
         assert!(shadow_problem("create trigger t before insert on app.users for each row set new.x = 1", Dialect::Mysql).is_some());
