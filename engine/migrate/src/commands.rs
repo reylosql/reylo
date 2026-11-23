@@ -883,6 +883,8 @@ fn changed_lines(before: &[String], after: &[String]) -> Vec<String> {
 /// tables moved to another schema and after its tables renamed (where it does either), and after it.
 #[cfg(feature = "cli")]
 struct Steps<'a> {
+    /// Whether the database is Postgres, whose lines may hold dollar-quoted bodies.
+    postgres: bool,
     before: &'a [String],
     moved: Option<&'a [String]>,
     renamed: Option<&'a [String]>,
@@ -921,7 +923,7 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
         // table's new name where it starts with the old, as the renames name what they follow. A
         // column list never changes.
         let same_other = |g: &str, c: &str| {
-            let (g, c) = (renamed_in(g, &names), c);
+            let (g, c) = (renamed_in(g, &names, steps.postgres), c);
             let (x, y) = (top_words(&g), top_words(c));
             x.len() == y.len() && x.iter().zip(&y).all(|(a, b)| a == b || (!a.contains('(') && bare.iter().any(|(old, new)| crate::diff::swap_name(a, old, new) == *b)))
         };
@@ -965,9 +967,9 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
 /// it stands as a whole name, all at once: `public.orders` in `public.orders(id)` and
 /// `public.orders.title`, and as a relation constant, `'public.orders'::regclass`, but not in
 /// `public.orders_archive`, inside a quoted name, `"public.orders"`, or inside a string,
-/// `'public.orders'`, or a dollar-quoted body, whose text a rename never changes.
+/// `'public.orders'`, or on Postgres a dollar-quoted body, whose text a rename never changes.
 #[cfg(feature = "cli")]
-fn renamed_in(line: &str, names: &[(String, String)]) -> String {
+fn renamed_in(line: &str, names: &[(String, String)], postgres: bool) -> String {
     let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
     let (mut out, mut at, mut prev) = (String::new(), 0, None::<char>);
     while let Some(c) = line[at..].chars().next() {
@@ -981,8 +983,8 @@ fn renamed_in(line: &str, names: &[(String, String)]) -> String {
             }
         }
         // A dollar-quoted body, `$$ … $$` or `$tag$ … $tag$`, is source text Postgres keeps as
-        // written: whole, to its closing tag.
-        if c == '$' && prev.is_none_or(|p| !ident(p)) {
+        // written: whole, to its closing tag. Elsewhere a `$` may be part of a name.
+        if postgres && c == '$' && prev.is_none_or(|p| !ident(p)) {
             let tag_end = rest[1..].find(|t: char| !(t.is_ascii_alphanumeric() || t == '_')).map(|k| k + 1);
             if let Some(k) = tag_end.filter(|k| rest[*k..].starts_with('$') && rest[1..*k].chars().next().is_none_or(|t| !t.is_ascii_digit())) {
                 let tag = &rest[..=k];
@@ -4633,7 +4635,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             notes.push(format!("      {}", paint("cyan", &create_command(&asked, choices, &names, &[]))));
         }
         if failed.is_none() && reached == wanted {
-            let steps = Steps { before: &before, moved: moved.as_deref(), renamed: renamed.as_deref(), after: &reached };
+            let steps = Steps { postgres: d == Dialect::Postgres, before: &before, moved: moved.as_deref(), renamed: renamed.as_deref(), after: &reached };
             return Ok(Ok(Drafted { lock_safe: split_files.is_some(), commits, changes: summary_lines(&steps, &tables, &plan.renamed), ..drafted(texts, 0, notes, false) }));
         }
         let mut remaining = Vec::new();
@@ -6822,7 +6824,7 @@ mod tests {
         // A column renamed, beside one dropped and one added.
         let before = lines(&["table public.posts", "column public.posts.title character varying(100)", "column public.posts.body text"]);
         let after = lines(&["table public.posts", "column public.posts.heading character varying(200)", "column public.posts.summary text"]);
-        let steps = Steps { before: &before, moved: None, renamed: None, after: &after };
+        let steps = Steps { postgres: true, before: &before, moved: None, renamed: None, after: &after };
         let columns = vec![("column public.posts.title".to_string(), "column public.posts.heading".to_string())];
         assert_eq!(summary_lines(&steps, &[], &columns), ["  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})", "  + column posts.summary text", "  - column posts.body text"]);
         // A table renamed: what only took its new name is left out, a default that changes besides is
@@ -6831,7 +6833,7 @@ mod tests {
         let before = lines(&["table public.orders", "column public.orders.id integer not null", "column public.orders.title text", "column public.orders.kind text default 'orders'::text", "constraint public.orders orders_pkey PRIMARY KEY (id)"]);
         let renamed = lines(&["table public.invoices", "column public.invoices.id integer not null", "column public.invoices.title text", "column public.invoices.kind text default 'orders'::text", "constraint public.invoices invoices_pkey PRIMARY KEY (id)"]);
         let after = lines(&["table public.invoices", "column public.invoices.id integer not null", "column public.invoices.heading text", "column public.invoices.kind text default 'invoices'::text", "constraint public.invoices invoices_pkey PRIMARY KEY (id)"]);
-        let steps = Steps { before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&renamed), after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string())];
         let columns = vec![("column public.invoices.title".to_string(), "column public.invoices.heading".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &columns), ["  ~ table [-orders-]{+invoices+}", "  ~ column invoices.[-title-]{+heading+} text", "  + column invoices.kind text default 'invoices'::text", "  - column orders.kind text default 'orders'::text"]);
@@ -6840,61 +6842,63 @@ mod tests {
         let before = lines(&["table public.alpha", "column public.alpha.alpha_code integer", "column public.alpha.beta_code integer"]);
         let renamed = lines(&["table public.beta", "column public.beta.alpha_code integer", "column public.beta.beta_code integer"]);
         let after = lines(&["table public.beta", "column public.beta.beta_code integer"]);
-        let steps = Steps { before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&renamed), after: &after };
         let tables = vec![("table public.alpha".to_string(), "table public.beta".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-alpha-]{+beta+}", "  - column alpha.alpha_code integer"]);
         let before = lines(&["table public.orders", "table public.clients", "constraint public.orders fk_client FOREIGN KEY (client_id) REFERENCES public.clients(id)"]);
         let after = lines(&["table public.invoices", "table public.customers", "constraint public.invoices fk_client FOREIGN KEY (client_id) REFERENCES public.customers(id)"]);
-        let steps = Steps { before: &before, moved: None, renamed: Some(&after), after: &after };
+        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&after), after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string()), ("table public.clients".to_string(), "table public.customers".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}", "  ~ table [-clients-]{+customers+}"]);
         // A column whose name starts with another renamed table's is no reference to it.
         let before = lines(&["table public.orders", "table public.clients", "constraint public.orders fk_account FOREIGN KEY (clients_id) REFERENCES public.accounts(id)"]);
         let after = lines(&["table public.invoices", "table public.customers", "constraint public.invoices fk_account FOREIGN KEY (clients_id) REFERENCES public.accounts(id)"]);
-        let steps = Steps { before: &before, moved: None, renamed: Some(&after), after: &after };
+        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&after), after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string()), ("table public.clients".to_string(), "table public.customers".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}", "  ~ table [-clients-]{+customers+}"]);
         // A view that names a renamed table, as Postgres rewrites it, is the same view.
         let before = lines(&["table public.orders", "view public.order_count as SELECT count(orders.id) AS count FROM (orders JOIN details ON ((orders.id = details.id)));"]);
         let after = lines(&["table public.invoices", "view public.order_count as SELECT count(invoices.id) AS count FROM (invoices JOIN details ON ((invoices.id = details.id)));"]);
-        let steps = Steps { before: &before, moved: None, renamed: Some(&after), after: &after };
+        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&after), after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}"]);
         // A view whose quoted name holds a renamed table's name is another view still.
         let before = lines(&["table public.alpha", "view public.omega as SELECT 1 AS n;", "view public.\"public.alpha\" as SELECT omega.n FROM omega;", "view public.\"public.omega\" as SELECT alpha.id FROM alpha;"]);
         let after = lines(&["table public.omega", "view public.\"public.omega\" as SELECT omega.id FROM omega;"]);
-        let steps = Steps { before: &before, moved: None, renamed: Some(&after), after: &after };
+        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&after), after: &after };
         let tables = vec![("table public.alpha".to_string(), "table public.omega".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-alpha-]{+omega+}", "  - view omega as SELECT 1 AS n;", "  - view \"public.alpha\" as SELECT omega.n FROM omega;"]);
-        assert_eq!(renamed_in("view public.\"public.alpha\" as SELECT 1 FROM public.alpha", &[("public.alpha".to_string(), "public.omega".to_string())]), "view public.\"public.alpha\" as SELECT 1 FROM public.omega");
+        assert_eq!(renamed_in("view public.\"public.alpha\" as SELECT 1 FROM public.alpha", &[("public.alpha".to_string(), "public.omega".to_string())], true), "view public.\"public.alpha\" as SELECT 1 FROM public.omega");
         // A function's body is its text as written, while its signature follows the rename.
         let names = [("public.alpha".to_string(), "public.omega".to_string())];
-        assert_eq!(renamed_in("function public.old_size(arg public.alpha) AS $function$ BEGIN RETURN pg_relation_size('public.alpha'::regclass); END; $function$", &names), "function public.old_size(arg public.omega) AS $function$ BEGIN RETURN pg_relation_size('public.alpha'::regclass); END; $function$");
-        assert_eq!(renamed_in("policy public.notes p USING (($1 = 'public.alpha'::regclass))", &names), "policy public.notes p USING (($1 = 'public.omega'::regclass))");
+        assert_eq!(renamed_in("function public.old_size(arg public.alpha) AS $function$ BEGIN RETURN pg_relation_size('public.alpha'::regclass); END; $function$", &names, true), "function public.old_size(arg public.omega) AS $function$ BEGIN RETURN pg_relation_size('public.alpha'::regclass); END; $function$");
+        assert_eq!(renamed_in("policy public.notes p USING (($1 = 'public.alpha'::regclass))", &names, true), "policy public.notes p USING (($1 = 'public.omega'::regclass))");
+        // Elsewhere a dollar sign is part of a name.
+        assert_eq!(renamed_in("constraint notes $link$ FOREIGN KEY (alpha_id) REFERENCES alpha (id)", &[("alpha".to_string(), "`sales orders`".to_string())], false), "constraint notes $link$ FOREIGN KEY (alpha_id) REFERENCES `sales orders` (id)");
         // A relation constant follows the rename.
-        assert_eq!(renamed_in("policy public.notes visible USING ((pg_relation_size('public.alpha'::regclass) > 0))", &[("public.alpha".to_string(), "public.omega".to_string())]), "policy public.notes visible USING ((pg_relation_size('public.omega'::regclass) > 0))");
+        assert_eq!(renamed_in("policy public.notes visible USING ((pg_relation_size('public.alpha'::regclass) > 0))", &[("public.alpha".to_string(), "public.omega".to_string())], true), "policy public.notes visible USING ((pg_relation_size('public.omega'::regclass) > 0))");
         // A string is left as it is, and a double quote inside one quotes no name.
-        assert_eq!(renamed_in("policy public.alpha visible USING ((body = '\"public.alpha\"'::text))", &[("public.alpha".to_string(), "public.omega".to_string())]), "policy public.omega visible USING ((body = '\"public.alpha\"'::text))");
-        assert_eq!(renamed_in("policy public.notes visible USING ((body = '\"'::text) OR (EXISTS (SELECT 1 FROM public.alpha)))", &[("public.alpha".to_string(), "public.omega".to_string())]), "policy public.notes visible USING ((body = '\"'::text) OR (EXISTS (SELECT 1 FROM public.omega)))");
+        assert_eq!(renamed_in("policy public.alpha visible USING ((body = '\"public.alpha\"'::text))", &[("public.alpha".to_string(), "public.omega".to_string())], true), "policy public.omega visible USING ((body = '\"public.alpha\"'::text))");
+        assert_eq!(renamed_in("policy public.notes visible USING ((body = '\"'::text) OR (EXISTS (SELECT 1 FROM public.alpha)))", &[("public.alpha".to_string(), "public.omega".to_string())], true), "policy public.notes visible USING ((body = '\"'::text) OR (EXISTS (SELECT 1 FROM public.omega)))");
         // Two tables of one name in two schemas, each renamed its own way, with a column of one.
         let before = lines(&["table east.orders", "table west.orders", "column west.orders.title text", "constraint west.orders orders_pkey PRIMARY KEY (id)"]);
         let renamed = lines(&["table east.invoices", "table west.shipments", "column west.shipments.title text", "constraint west.shipments shipments_pkey PRIMARY KEY (id)"]);
         let after = lines(&["table east.invoices", "table west.shipments", "column west.shipments.heading text", "constraint west.shipments shipments_pkey PRIMARY KEY (id)"]);
-        let steps = Steps { before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&renamed), after: &after };
         let tables = vec![("table east.orders".to_string(), "table east.invoices".to_string()), ("table west.orders".to_string(), "table west.shipments".to_string())];
         let columns = vec![("column west.shipments.title".to_string(), "column west.shipments.heading".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &columns), ["  ~ table east.[-orders-]{+invoices+}", "  ~ table west.[-orders-]{+shipments+}", "  ~ column west.shipments.[-title-]{+heading+} text"]);
         // A view the table rename drops, where the table takes its name, stays listed.
         let before = lines(&["table public.t_data", "column public.t_data.id integer", "view public.data select id from public.t_data", "view public.q select id from public.data"]);
         let renamed = lines(&["table public.data", "column public.data.id integer"]);
-        let steps = Steps { before: &before, moved: None, renamed: Some(&renamed), after: &renamed };
+        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&renamed), after: &renamed };
         let tables = vec![("table public.t_data".to_string(), "table public.data".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-t_data-]{+data+}", "  - view data select id from t_data", "  - view q select id from data"]);
         // A table moved to another schema shows as the move's endpoints, never a line in between.
         let before = lines(&["table public.orders", "column public.orders.status text default 'orders'::text"]);
         let moved = lines(&["table archive.orders", "column archive.orders.status text default 'orders'::text"]);
         let after = lines(&["table archive.orders", "column archive.orders.status text default 'archived'::text"]);
-        let steps = Steps { before: &before, moved: Some(&moved), renamed: None, after: &after };
+        let steps = Steps { postgres: true, before: &before, moved: Some(&moved), renamed: None, after: &after };
         assert_eq!(summary_lines(&steps, &[], &[]), ["  + table archive.orders", "  + column archive.orders.status text default 'archived'::text", "  - table orders", "  - column orders.status text default 'orders'::text"]);
     }
 
