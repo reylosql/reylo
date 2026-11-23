@@ -93,7 +93,7 @@ Commands:
     --drop <names>         Accept what it drops: tables and columns
     --rename <old>=<new>   Say a table or column was renamed
     --blocking             Accept a statement that blocks writes while it reads every row
-  dev                      Apply all unapplied migrations and regenerate the lockfile
+  dev                      Apply all unapplied migrations (rewinding as needed) and write the lockfile (possibly destructive)
   deploy                   Run what the lock lists, with no shadow database
     --dry-run              Try it on a shadow database, running nothing here
   status                   Check that this database and the files are in step
