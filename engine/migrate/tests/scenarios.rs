@@ -1925,7 +1925,10 @@ async fn create_lists_every_rename_it_assumes(mut p: P) {
     p.output();
     p.schema(&format!("create table users (id {id}, about {text}); create table posts (id {id}, heading {text});"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "names", &Default::default(), log).await).await, 0, "{}", p.peek());
-    assert_has!(p.output(), r"  ! Written as renames, keeping their rows:\n      posts\.title → heading\n      users\.bio   → about\n    Where any aren't renames, delete the file, then:\n      reylo migrate new [a-z_]+ --drop posts\.title,users\.bio");
+    let out = p.output();
+    assert_has!(&out, r"\n  ~ column posts\.\[-title-\]\{\+heading\+\} ");
+    assert_has!(&out, r"\n  ~ column users\.\[-bio-\]\{\+about\+\} ");
+    assert_has!(&out, r"  ! Written as renames, keeping their rows\n    Where any aren't renames, delete the file, then:\n      reylo migrate new [a-z_]+ --drop posts\.title,users\.bio");
 }
 
 /// What a suggested `reylo migrate new` line states.
@@ -1949,7 +1952,7 @@ fn choices_of(line: &str) -> reylo_migrate::Choices {
 /// The command a refusal of several guesses prints for adding flags to, with the flags of each line
 /// it picks: the rename on the left, where `keep` says, else the drop on the right.
 fn picked(out: &str, keep: impl Fn(usize) -> bool) -> String {
-    let rows: Vec<&str> = out.lines().skip_while(|l| !l.contains("For each, rename to keep its rows")).skip(1).take_while(|l| l.starts_with("    --")).collect();
+    let rows: Vec<&str> = out.lines().skip_while(|l| !l.contains("For each, rename it to keep its rows")).skip(1).take_while(|l| l.starts_with("    --")).collect();
     let base: Vec<&str> = out.lines().skip_while(|l| !l.contains("Add the flags you picked to")).skip(1).take_while(|l| l.starts_with("    ")).collect();
     assert!(!rows.is_empty() && !base.is_empty(), "{out}");
     let flags: Vec<&str> = rows
@@ -1977,7 +1980,7 @@ async fn create_settles_every_guess_with_one_command(mut p: P) {
     p.schema(&format!("create table users (id {id}, handle {long}); create table invoices (id {id}, a {text}, b {text}, c {text}, total {int}); create table posts (id {id});"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tidy", &Default::default(), log).await).await, 1);
     let out = p.output();
-    assert_has!(&out, r"✗ This migration can't tell renames from new tables and columns\n\n    orders     → invoices  adds total, drops legacy\n    users\.nick → handle    [^\n]+\n\n  It also drops the columns posts\.old_a and posts\.old_b, with their data\.\n\n  For each, rename to keep its rows, or drop it:\n    --rename orders=invoices --drop invoices\.legacy   or   --drop orders\n    --rename users\.nick=handle                        or   --drop users\.nick\n  Add the flags you picked to:\n    reylo migrate new tidy --drop posts\.old_a,posts\.old_b\n");
+    assert_has!(&out, r"✗ This migration can't tell renames from new tables and columns\n\n    - table orders\n    \+ table invoices\n    - column orders\.legacy [^\n]+\n    \+ column invoices\.total [^\n]+\n    - column users\.nick [^\n]+\n    \+ column users\.handle [^\n]+\n\n  It also drops the columns posts\.old_a and posts\.old_b, with their data\.\n\n  For each, rename it to keep its rows, or drop it and add the new one:\n    --rename orders=invoices --drop invoices\.legacy   or   --drop orders\n    --rename users\.nick=handle                        or   --drop users\.nick\n  Add the flags you picked to:\n    reylo migrate new tidy --drop posts\.old_a,posts\.old_b\n");
     let (keeps, drops) = (picked(&out, |_| true), picked(&out, |_| false));
     let made = |p: &P| p.files().into_iter().filter(|f| f.contains("_tidy")).collect::<Vec<_>>();
     // The second command, as printed, is one the next create takes.
@@ -2010,11 +2013,11 @@ async fn create_asks_about_a_column_replaced_by_one_of_another_type(mut p: P) {
     p.schema(&format!("create table users (id {id}, label {text});"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "label", &Default::default(), log).await).await, 1);
     let out = p.output();
-    assert_has!(&out, r"✗ This migration can't tell a rename from a new column\n\n    users\.score → label  [^\n]+ → [^\n]+\n\n  If it is a rename, keeping its rows:\n    reylo migrate new label --rename users\.score=label\n  If it is new, dropping the old one and its data:\n    reylo migrate new label --drop users\.score\n");
+    assert_has!(&out, r"✗ This migration can't tell a rename from a new column\n\n    - column users\.score [^\n]+\n    \+ column users\.label [^\n]+\n\n  To rename the column, keeping its rows:\n    reylo migrate new label --rename users\.score=label\n  To drop the column and its data, and add a new one:\n    reylo migrate new label --drop users\.score\n");
     assert!(p.files().iter().all(|f| !f.contains("_label")), "nothing is written");
     let command = |out: &str, after: &str| out.lines().skip_while(|l| !l.contains(after)).skip(1).take_while(|l| l.starts_with("    ")).collect::<Vec<_>>().join("\n");
     // Taken as new, the old column is dropped.
-    let choices = choices_of(&command(&out, "If it is new"));
+    let choices = choices_of(&command(&out, "To drop the column"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "label", &choices, log).await).await, 0, "{}", p.peek());
     for f in p.files().into_iter().filter(|f| f.contains("_label")) {
         std::fs::remove_file(p.dir.join("migrations").join(f)).unwrap();
@@ -2022,9 +2025,9 @@ async fn create_asks_about_a_column_replaced_by_one_of_another_type(mut p: P) {
     p.output();
     // Taken as a rename, its values are converted, keeping its rows; on Postgres that rewrites the
     // table, which --blocking accepts.
-    let choices = reylo_migrate::Choices { blocking: true, ..choices_of(&command(&out, "If it is a rename")) };
+    let choices = reylo_migrate::Choices { blocking: true, ..choices_of(&command(&out, "To rename the column")) };
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "label", &choices, log).await).await, 0, "{}", p.peek());
-    p.output();
+    assert_has!(p.output(), r"\n  ~ column users\.\[-score-\]\{\+label\+\} ");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_eq!(p.rows("select label from users").await[0].text("label"), "7");
     p.output();
@@ -2066,7 +2069,7 @@ async fn commands_create_prints_for_names_with_spaces_run_as_printed(mut p: P) {
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "names", &Default::default(), log).await).await, 1);
     let out = p.output();
     let command = |out: &str, after: &str| out.lines().skip_while(|l| !l.contains(after)).skip(1).take_while(|l| l.starts_with("    ")).collect::<Vec<_>>().join("\n");
-    let (keeps, drops) = (command(&out, "If it is a rename"), command(&out, "If it is new"));
+    let (keeps, drops) = (command(&out, "To rename the column"), command(&out, "To drop the column"));
     let choices = choices_of_shell(&drops);
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "names", &choices, log).await).await, 0, "{drops}\n{}", p.peek());
     for f in p.files().into_iter().filter(|f| f.contains("_names")) {
@@ -2229,7 +2232,9 @@ async fn create_renames_a_table_keeping_its_rows(mut p: P) {
     // One table goes while one of its columns comes: renamed, and the foreign key on it follows.
     p.schema(&format!("create table accounts (id {id}, email {text}); create table posts (id {int}, user_id {int}, foreign key (user_id) references accounts (id));"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "accounts", &Default::default(), log).await).await, 0, "{}", p.peek());
-    assert_has!(p.output(), r"✓ Wrote [^\n]+\n(?:  [-+] [^\n]+\n)*  ! Written as a rename, keeping its rows: users → accounts\n    If they're different tables, delete the file, then:");
+    let out = p.output();
+    assert_has!(&out, r"✓ Wrote [^\n]+\n  ~ table \[-users-\]\{\+accounts\+\}[^\n]*\n(?:  [-+~] [^\n]+\n)*\n  ! Written as a rename, keeping its rows\n    If they're different tables, delete the file, then:");
+    assert!(!out.contains("column users.email") && !out.contains("column accounts.email"), "a column that only moves with its table isn't listed: {out}");
     let sql = sql_of(&p, "accounts");
     assert!(sql.contains("rename to accounts") && !sql.contains("drop table"), "{sql}");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
@@ -2591,7 +2596,7 @@ async fn create_assumes_a_rename_where_one_goes_and_one_comes(mut p: P) {
     p.schema(&format!("create table users (id {id}, handle {long}); create table members (id {int}, email {short}, name {short}, joined {int});"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "renames", &Default::default(), log).await).await, 1);
     let out = p.output();
-    assert_has!(&out, r"✗ This migration can't tell renames from new tables and columns\n\n    accounts   → members  adds joined\n    users\.nick → handle   [^\n]+ → [^\n]+\n\n  For each, rename to keep its rows, or drop it:\n    --rename accounts=members    or   --drop accounts\n    --rename users\.nick=handle   or   --drop users\.nick\n  Add the flags you picked to:\n    reylo migrate new renames\n\nNothing was changed\.");
+    assert_has!(&out, r"✗ This migration can't tell renames from new tables and columns\n\n    - table accounts\n    \+ table members\n    \+ column members\.joined [^\n]+\n    - column users\.nick [^\n]+\n    \+ column users\.handle [^\n]+\n\n  For each, rename it to keep its rows, or drop it and add the new one:\n    --rename accounts=members    or   --drop accounts\n    --rename users\.nick=handle   or   --drop users\.nick\n  Add the flags you picked to:\n    reylo migrate new renames\n\nNothing was changed\.");
     assert_eq!(p.files().len(), 2, "nothing is written");
     // The second command, which takes them for new ones.
     let choices = reylo_migrate::Choices { drop: vec!["accounts".into(), "users.nick".into()], rename: vec![], ..Default::default() };
@@ -2786,7 +2791,7 @@ async fn create_states_what_it_drops_and_renames(mut p: P) {
     // Dropping one leaves the other alone with its definition: renamed, keeping its rows.
     let choices = create(&["users.legacy"], &[]);
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tidy", &choices, log).await).await, 0, "{}", p.peek());
-    assert_has!(p.output(), r"  ! Written as a rename, keeping its rows: users\.middle_name → nickname\n    If they're different columns, delete the file, then:\n      reylo migrate new tidy --drop users\.legacy,users\.middle_name");
+    assert_has!(p.output(), r"  ~ column users\.\[-middle_name-\]\{\+nickname\+\}[^\n]*\n(?:  [-+~] [^\n]+\n)*\n(?:  ! [^\n]+\n)*  ! Written as a rename, keeping its rows\n    If they're different columns, delete the file, then:\n      reylo migrate new tidy --drop users\.legacy,users\.middle_name");
     let sql = made(&p).iter().map(|f| std::fs::read_to_string(p.dir.join("migrations").join(f)).unwrap()).collect::<String>();
     assert!(sql.contains("rename column middle_name to nickname") && sql.contains("drop column legacy"), "{sql}");
     take_back(&p);

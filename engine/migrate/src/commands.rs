@@ -237,6 +237,9 @@ pub fn paint(style: &str, text: &str) -> String {
         "cyan" => "36",
         "bold red" => "1;31",
         "bold" => "1",
+        // A diff's words removed and added within a line: light text on a dark red or green.
+        "removed" => "38;5;217;48;5;52",
+        "added" => "38;5;157;48;5;22",
         _ => "0",
     };
     format!("\x1b[{code}m{text}\x1b[0m")
@@ -850,9 +853,62 @@ fn lowercase_keywords(sql: &str) -> String {
 /// lost. An index a constraint of the same name makes (a primary key's, a unique constraint's) goes
 /// with it.
 fn changed_lines(before: &[String], after: &[String]) -> Vec<String> {
-    const MAX: usize = 20;
     let (gone, came) = difference(before, after);
-    let (gone, came) = (without_default_grants(&gone), without_default_grants(&came));
+    listed(&gone, &came)
+}
+
+/// What a migration changes, as `changed_lines` writes it, but with each of `renames` (an old name and
+/// the new one, as `--rename` takes them) shown as one line changed in place (`~`) rather than as a
+/// drop and an add: a column's line, and a table's, whose columns that change come after it and whose objects
+/// that only take its new name are left out.
+fn summary_lines(before: &[String], after: &[String], renames: &[(String, String)]) -> Vec<String> {
+    let (mut gone, mut came) = difference(before, after);
+    let mut out = Vec::new();
+    let is = |line: &str, kind: &str, name: &str| {
+        let line = readable(line);
+        line.strip_prefix(&format!("{kind} {name}")).is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+    };
+    let take = |lines: &mut Vec<String>, kind: &str, name: &str| lines.iter().position(|l| is(l, kind, name)).map(|k| lines.remove(k));
+    for (old, new) in renames {
+        let old = old.strip_prefix("public.").unwrap_or(old.as_str());
+        let new = renamed_to(old, new);
+        let new = new.strip_prefix("public.").unwrap_or(&new);
+        let (Some(a), Some(b)) = (take(&mut gone, "table", old), take(&mut came, "table", new)) else {
+            if let (Some(a), Some(b)) = (take(&mut gone, "column", old), take(&mut came, "column", new)) {
+                out.push(changed_line(&readable(&a), &readable(&b)));
+            }
+            continue;
+        };
+        out.push(changed_line(&readable(&a), &readable(&b)));
+        // What only takes the table's new name went with it.
+        let (old_bare, new_bare) = (crate::sql::last_written(old), crate::sql::last_written(new));
+        gone.retain(|g| {
+            let moved = crate::diff::swap_name(g, &old_bare, &new_bare);
+            match came.iter().position(|c| *c == moved) {
+                Some(k) => {
+                    came.remove(k);
+                    false
+                }
+                None => true,
+            }
+        });
+        // A column of it that changes, changed in place.
+        for a in gone.clone() {
+            let Some(column) = readable(&a).strip_prefix(&format!("column {old}.")).and_then(|rest| rest.split(' ').next()).map(str::to_string) else { continue };
+            if let Some(b) = take(&mut came, "column", &format!("{new}.{column}")) {
+                gone.retain(|g| *g != a);
+                out.push(changed_line(&readable(&a), &readable(&b)));
+            }
+        }
+    }
+    out.extend(listed(&gone, &came));
+    out
+}
+
+/// The lines of `changed_lines`, from what went and what came.
+fn listed(gone: &[String], came: &[String]) -> Vec<String> {
+    const MAX: usize = 20;
+    let (gone, came) = (without_default_grants(gone), without_default_grants(came));
     let constraint_names = |lines: &[String]| -> Vec<String> { lines.iter().filter_map(|l| l.strip_prefix("constraint ")).filter_map(|rest| rest.split(' ').nth(1)).map(str::to_string).collect() };
     let made_by_constraint = |line: &str, names: &[String]| names.iter().any(|n| line.starts_with("index ") && line.contains(&format!(" INDEX {n} ON ")));
     let (gone_names, came_names) = (constraint_names(&gone), constraint_names(&came));
@@ -3294,6 +3350,10 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
     for line in &drafted.changes {
         log(line);
     }
+    // The risks stand apart from the diff above them.
+    if !drafted.changes.is_empty() && drafted.notes.first().is_some_and(|n| !n.is_empty()) {
+        log("");
+    }
     for note in &drafted.notes {
         log(note);
     }
@@ -3667,8 +3727,9 @@ struct Guess {
     old: String,
     /// The new name, as `--rename` takes it: `contact`, `invoices`.
     new: String,
-    /// What else changes: `text → citext`, `adds total`.
-    change: String,
+    /// The schema's difference, as the lines it prints: the column's old line and its new; a table's,
+    /// then those of its columns that differ.
+    diff: Vec<String>,
     /// The id of its table where that table is itself one of the guesses, so that dropping that
     /// table says it all.
     owner: Option<String>,
@@ -3676,6 +3737,132 @@ struct Guess {
     id: String,
     /// Whether it is a table, rather than a column.
     table: bool,
+}
+
+/// A column's lines in a guess's diff: the old name and definition `a`, and the new. `old` is the name
+/// as a command writes it, `new` the new name as `--rename` takes it. Either may be a rename or a drop
+/// and an add, so neither is shown as the other.
+fn column_diff(old: &str, new: &str, a: &str, b: &str) -> Vec<String> {
+    vec![gone_line(&format!("column {old} {a}")), came_line(&format!("column {} {b}", renamed_to(old, new)))]
+}
+
+/// A line of a refusal's diff that only the old schema has, and one that only the new has.
+fn gone_line(line: &str) -> String {
+    paint("red", &format!("    - {line}"))
+}
+
+fn came_line(line: &str) -> String {
+    paint("green", &format!("    + {line}"))
+}
+
+/// A line of `migrate new`'s summary changed in place, as a rename changes it: `~`, then the line with
+/// the words it changes highlighted.
+fn changed_line(a: &str, b: &str) -> String {
+    format!("  {} {}", paint("yellow", "~"), inline_diff(a, b))
+}
+
+/// The name `old` takes when renamed `new`, as `--rename` takes it: `posts.title` renamed `heading`
+/// is `posts.heading`. A new name that names its schema or table is that already.
+fn renamed_to(old: &str, new: &str) -> String {
+    if crate::sql::last_written(new) != new {
+        return new.to_string();
+    }
+    format!("{}{new}", &old[..old.len() - crate::sql::last_written(old).len()])
+}
+
+/// A line changed in place, as git's word diff shows one: the words only `a` has, then those only `b`
+/// has, highlighted red and green among the words both share. Colour off, they are marked as git
+/// marks them: `posts.[-title-]{+heading+}`. A line's kind and name are compared apart from its
+/// definition, so that the old name lines up with the new and the old type with the new.
+fn inline_diff(a: &str, b: &str) -> String {
+    match (split_head(a), split_head(b)) {
+        ((x, Some(p)), (y, Some(q))) => format!("{} {}", word_diff(x, y), word_diff(p, q)),
+        ((x, None), (y, None)) => word_diff(x, y),
+        _ => word_diff(a, b),
+    }
+}
+
+/// A comparison line's kind and name (`column posts.title`), and the definition after them, if any:
+/// split at the first space outside quotes after the name.
+fn split_head(line: &str) -> (&str, Option<&str>) {
+    let Some(start) = line.find(' ') else { return (line, None) };
+    let mut quote: Option<char> = None;
+    for (k, ch) in line[start + 1..].char_indices() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if ch == '"' || ch == '`' => quote = Some(ch),
+            None if ch == ' ' => {
+                let at = start + 1 + k;
+                return (&line[..at], Some(&line[at + 1..]));
+            }
+            None => {}
+        }
+    }
+    (line, None)
+}
+
+/// The words of `a` and `b` as `inline_diff` shows them.
+fn word_diff(a: &str, b: &str) -> String {
+    fn tokens(s: &str) -> Vec<&str> {
+        let (mut out, mut start, mut word) = (Vec::new(), 0, false);
+        for (k, ch) in s.char_indices() {
+            let w = ch.is_alphanumeric() || ch == '_';
+            if k > start && !(w && word) {
+                out.push(&s[start..k]);
+                start = k;
+            }
+            word = w;
+        }
+        if start < s.len() {
+            out.push(&s[start..]);
+        }
+        out
+    }
+    fn mark(removed: bool, text: &str) -> String {
+        match (color(), removed) {
+            (true, _) => paint(if removed { "removed" } else { "added" }, text),
+            (false, true) => format!("[-{text}-]"),
+            (false, false) => format!("{{+{text}+}}"),
+        }
+    }
+    let (a, b) = (tokens(a), tokens(b));
+    let (n, m) = (a.len(), b.len());
+    // The longest run of words both share, from each pair of positions to the end.
+    let mut common = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            common[i][j] = if a[i] == b[j] { common[i + 1][j + 1] + 1 } else { common[i + 1][j].max(common[i][j + 1]) };
+        }
+    }
+    let (mut out, mut gone, mut came) = (String::new(), String::new(), String::new());
+    let flush = |out: &mut String, gone: &mut String, came: &mut String| {
+        if !gone.is_empty() {
+            out.push_str(&mark(true, gone));
+        }
+        if !came.is_empty() {
+            out.push_str(&mark(false, came));
+        }
+        gone.clear();
+        came.clear();
+    };
+    let (mut i, mut j) = (0, 0);
+    while i < n || j < m {
+        if i < n && j < m && a[i] == b[j] {
+            flush(&mut out, &mut gone, &mut came);
+            out.push_str(a[i]);
+            (i, j) = (i + 1, j + 1);
+        } else if j < m && (i == n || common[i][j + 1] >= common[i + 1][j]) {
+            // On a tie, what `b` adds goes first, so that a shared word matches its earliest place.
+            came.push_str(b[j]);
+            j += 1;
+        } else {
+            gone.push_str(a[i]);
+            i += 1;
+        }
+    }
+    flush(&mut out, &mut gone, &mut came);
+    out
 }
 
 /// The refusal for guesses, with what else the migration asks of `--drop`. One guess gets the
@@ -3689,11 +3876,12 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], 
         (true, false) => "tables",
         _ => "columns",
     };
-    let title = if one { format!("This {subject} can't tell a rename from a new {}", if guesses[0].table { "table" } else { "column" }) } else { format!("This {subject} can't tell renames from new {kinds}") };
-    let (old_width, new_width) = (guesses.iter().map(|g| g.old.chars().count()).max().unwrap_or(0), guesses.iter().map(|g| g.new.chars().count()).max().unwrap_or(0));
-    // A type as schema.sql writes it, rather than as the catalog spells it.
-    let change = |g: &Guess| g.change.replace("character varying", "varchar");
-    let mut problem = Problem::new("rename-guess", title).lines([String::new()]).lines(guesses.iter().map(|g| format!("    {:<old_width$} → {:<new_width$}  {}", g.old, g.new, change(g))));
+    let kind = if guesses[0].table { "table" } else { "column" };
+    let title = if one { format!("This {subject} can't tell a rename from a new {kind}") } else { format!("This {subject} can't tell renames from new {kinds}") };
+    // The schema's difference, each guess's lines together; a guess within a guessed table is among
+    // its table's.
+    let diff = guesses.iter().filter(|g| g.owner.is_none()).flat_map(|g| g.diff.iter().cloned());
+    let mut problem = Problem::new("rename-guess", title).lines([String::new()]).lines(diff);
     // What a rename's change of type would lose, which --drop names by the old name.
     let guessed = |name: &str| guesses.iter().any(|g| g.old == name);
     // What it drops whichever way each guess goes: not what a renamed table drops, which its
@@ -3714,8 +3902,8 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], 
         let renames: Vec<(String, String)> = guesses.iter().map(|g| (g.old.clone(), g.new.clone())).collect();
         let dropped: Vec<String> = guesses.iter().map(|g| g.old.clone()).chain(outside.iter().cloned()).collect();
         return problem
-            .fix("If it is a rename, keeping its rows", &[&create_command(asked, stated, &more, &renames)])
-            .fix("If it is new, dropping the old one and its data", &[&create_command(asked, stated, &dropped, &[])]);
+            .fix(format!("To rename the {kind}, keeping its rows"), &[&create_command(asked, stated, &more, &renames)])
+            .fix(format!("To drop the {kind} and its data, and {} a new one", if guesses[0].table { "create" } else { "add" }), &[&create_command(asked, stated, &dropped, &[])]);
     }
     // Each line's flags: a rename takes along what its own reading also asks of --drop, the columns
     // a renamed table drops, and what the rename's change of type loses; a guess within a guessed
@@ -3743,8 +3931,8 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], 
     }
     let rest: Vec<String> = more.iter().filter(|n| !taken.contains(n)).cloned().collect();
     let width = rows.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
-    let lead = "For each, rename to keep its rows, or drop it";
-    problem.lines.extend([String::new(), format!("  {lead}:")]);
+    let lead = "For each, rename it to keep its rows, or drop it and add the new one";
+    problem.lines.extend([String::new(), paint("dim", &format!("  {lead}:"))]);
     for (keep, drop) in &rows {
         problem.lines.push(format!("    {}{}   or   {}", paint("cyan", keep), " ".repeat(width - keep.chars().count()), paint("cyan", drop)));
         problem.detail.push(format!("{keep} or {drop}"));
@@ -3936,8 +4124,14 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
     let mut assumed: Vec<(String, String, bool)> = Vec::new();
     for (old, new, _) in renamed_tables.iter().filter(|(_, _, was_stated)| !was_stated) {
         match crate::diff::column_changes(&current, &target.schema, old, new) {
-            Some(change) => {
-                guesses.push(Guess { old: shown_name(old), new: shown_name(new), change, owner: None, id: new.clone(), table: true });
+            Some(columns) => {
+                let line = |(id, def): &(String, String)| format!("column {} {def}", shown_name(id));
+                let mut diff = vec![gone_line(&format!("table {}", shown_name(old))), came_line(&format!("table {}", shown_name(new)))];
+                for (a, b) in columns {
+                    diff.extend(a.as_ref().map(|a| gone_line(&line(a))));
+                    diff.extend(b.as_ref().map(|b| came_line(&line(b))));
+                }
+                guesses.push(Guess { old: shown_name(old), new: shown_name(new), diff, owner: None, id: new.clone(), table: true });
                 guessed_tables.insert(new.clone());
             }
             None => assumed.push((shown_name(old), shown_name(new), true)),
@@ -3990,7 +4184,7 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
         for (raw, (old, new, change)) in guessed.iter().zip(&plan.renames) {
             let old = shown_id(old);
             match change {
-                Some(change) => guesses.push(Guess { old, new: new.clone(), change: change.clone(), owner: guess_owner(raw), id: raw.clone(), table: false }),
+                Some((a, b)) => guesses.push(Guess { diff: column_diff(&old, new, a, b), old, new: new.clone(), owner: guess_owner(raw), id: raw.clone(), table: false }),
                 None => assumed.push((old, new.clone(), false)),
             }
         }
@@ -3998,7 +4192,7 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
         // as a guess is: the plan drops it, and --rename keeps its rows. What the rename's change of
         // type would lose is named as a kept column's is.
         let (mut lost, mut shown) = (lost, plan.losses.clone());
-        for (raw, (old, new, change, loses)) in paired.iter().zip(&plan.pairs) {
+        for (raw, (old, new, (a, b), loses)) in paired.iter().zip(&plan.pairs) {
             if current.objects.get(raw).and_then(|o| o.owner.as_ref()).is_some_and(|t| guessed_tables.contains(t)) {
                 continue;
             }
@@ -4009,7 +4203,8 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
             if let Some(why) = loses {
                 narrowed.push((raw.clone(), old.clone(), why.clone()));
             }
-            guesses.push(Guess { old: shown_id(old), new: new.clone(), change: change.clone(), owner: None, id: raw.clone(), table: false });
+            let old = shown_id(old);
+            guesses.push(Guess { diff: column_diff(&old, new, a, b), old, new: new.clone(), owner: None, id: raw.clone(), table: false });
         }
         // Tables first, then columns, each by name.
         guesses.sort_by(|a, b| (!a.table, &a.old).cmp(&(!b.table, &b.old)));
@@ -4200,13 +4395,8 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
         if !assumed.is_empty() {
             let one = assumed.len() == 1;
             let names: Vec<String> = assumed.iter().map(|(old, _, _)| old.clone()).collect();
-            if one {
-                notes.push(format!("  {} Written as a rename, keeping its rows: {} → {}", paint("yellow", "!"), assumed[0].0, assumed[0].1));
-            } else {
-                let width = assumed.iter().map(|(old, _, _)| old.chars().count()).max().unwrap_or(0);
-                notes.push(format!("  {} Written as renames, keeping their rows:", paint("yellow", "!")));
-                notes.extend(assumed.iter().map(|(old, new, _)| format!("      {old:<width$} → {new}")));
-            }
+            // The summary above shows each rename.
+            notes.push(format!("  {} {}", paint("yellow", "!"), if one { "Written as a rename, keeping its rows" } else { "Written as renames, keeping their rows" }));
             let unasked = match (assumed.iter().all(|a| a.2), assumed.iter().all(|a| !a.2)) {
                 (true, _) if one => "If they're different tables",
                 (_, true) if one => "If they're different columns",
@@ -4216,7 +4406,8 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             notes.push(format!("      {}", paint("cyan", &create_command(&asked, choices, &names, &[]))));
         }
         if failed.is_none() && reached == wanted {
-            return Ok(Ok(Drafted { lock_safe: split_files.is_some(), changes: changed_lines(&before, &reached), ..drafted(texts, 0, notes, false) }));
+            let renamed: Vec<(String, String)> = choices.rename.iter().cloned().chain(assumed.iter().map(|(old, new, _)| (old.clone(), new.clone()))).collect();
+            return Ok(Ok(Drafted { lock_safe: split_files.is_some(), changes: summary_lines(&before, &reached, &renamed), ..drafted(texts, 0, notes, false) }));
         }
         let mut remaining = Vec::new();
         if let Some(f) = &failed {
@@ -6034,6 +6225,27 @@ mod tests {
         more.push("column public.t.x integer".into());
         assert_eq!(sides(&more, &two), (true, false));
         assert_eq!(sides(&[two.clone(), vec!["column public.t.x integer".into()]].concat(), &three), (true, true));
+    }
+
+    #[test]
+    fn a_rename_reads_as_one_line_changed_in_place() {
+        assert_eq!(inline_diff("column posts.title character varying(100)", "column posts.heading character varying(200)"), "column posts.[-title-]{+heading+} character varying([-100-]{+200+})");
+        assert_eq!(inline_diff("column users.bio character varying(200)", "column users.about text"), "column users.[-bio-]{+about+} [-character varying(200)-]{+text+}");
+        assert_eq!(inline_diff("column users.score bigint", "column users.label varchar(200) collate utf8mb4_0900_ai_ci"), "column users.[-score-]{+label+} [-bigint-]{+varchar(200) collate utf8mb4_0900_ai_ci+}");
+        assert_eq!(inline_diff("column \"My Users\".\"Full Name\" text", "column \"My Users\".\"Display Name\" text"), "column \"My Users\".\"[-Full-]{+Display+} Name\" text");
+        assert_eq!(inline_diff("table orders", "table invoices"), "table [-orders-]{+invoices+}");
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // A column renamed, beside one dropped and one added.
+        let before = lines(&["table public.posts", "column public.posts.title character varying(100)", "column public.posts.body text"]);
+        let after = lines(&["table public.posts", "column public.posts.heading character varying(200)", "column public.posts.summary text"]);
+        let renames = vec![("posts.title".to_string(), "heading".to_string())];
+        assert_eq!(summary_lines(&before, &after, &renames), ["  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})", "  + column posts.summary text", "  - column posts.body text"]);
+        // A table renamed: what only takes its new name is left out, and a column of it that changes
+        // is changed in place.
+        let before = lines(&["table public.users", "column public.users.id integer not null", "column public.users.nick text", "constraint public.users users_pkey PRIMARY KEY (id)"]);
+        let after = lines(&["table public.accounts", "column public.accounts.id integer not null", "column public.accounts.nick character varying(40)", "constraint public.accounts accounts_pkey PRIMARY KEY (id)", "column public.accounts.joined date"]);
+        let renames = vec![("users".to_string(), "accounts".to_string())];
+        assert_eq!(summary_lines(&before, &after, &renames), ["  ~ table [-users-]{+accounts+}", "  ~ column [-users-]{+accounts+}.nick [-text-]{+character varying(40)+}", "  + column accounts.joined date"]);
     }
 
     #[test]
