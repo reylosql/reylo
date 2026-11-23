@@ -548,48 +548,49 @@ re!(MYSQL_ELSEWHERE, r"^(USE|INSTALL|UNINSTALL|FLUSH|KILL|PURGE|SHUTDOWN|RESTART
 /// (a role, a database, a tablespace, a server setting) or, on MySQL, names a database runs against
 /// the real one: `create role` in a shadow makes the role the target's migration then fails to
 /// create, and `create table app.users` writes into `app`. Each statement is read by its own words,
-/// so code that runs inside a `do` block or a function is not checked.
-pub fn escapes_shadow(statement: &Statement, dialect: Dialect) -> Option<String> {
+/// so code that runs inside a `do` block or a function is not checked. With why, what to do instead,
+/// where why doesn't say.
+pub fn escapes_shadow(statement: &Statement, dialect: Dialect) -> Option<(String, Option<&'static str>)> {
     let h = head(statement, 8);
     let words: Vec<String> = statement.tokens.iter().map(|t| if t.kind == TokenKind::Word { t.text.to_ascii_uppercase() } else { t.text.clone() }).collect();
     match dialect {
         Dialect::Postgres => {
             // A user mapping is the database's, as its server is.
             if PG_ROLE.is_match(&h) && !h.split(' ').nth(2).is_some_and(|w| w == "MAPPING") {
-                return Some("it changes a role, which belongs to the server".into());
+                return Some(("it changes a role, which belongs to the server".into(), Some(PG_ROLE_INSTEAD)));
             }
             if PG_SERVER.is_match(&h) {
-                return Some("it changes the server itself (a database, a tablespace, a subscription or a server setting)".into());
+                return Some(("it changes the server itself (a database, a tablespace, a subscription or a server setting)".into(), Some(SERVER_INSTEAD)));
             }
             if PG_OWNED.is_match(&h) {
-                return Some("it acts on everything a role owns".into());
+                return Some(("it acts on everything a role owns".into(), Some(SERVER_INSTEAD)));
             }
             if PG_LABEL.is_match(&h) && PG_LABEL_SERVER.is_match(&words.join(" ")) {
-                return Some("it labels a role, a database or a tablespace, which belong to the server".into());
+                return Some(("it labels a role, a database or a tablespace, which belong to the server".into(), Some(PG_ROLE_INSTEAD)));
             }
             if GRANT.is_match(&h) && !words.iter().any(|w| w == "ON") {
-                return Some("it grants or revokes a role, which belongs to the server".into());
+                return Some(("it grants or revokes a role, which belongs to the server".into(), Some(PG_ROLE_INSTEAD)));
             }
             if GRANT.is_match(&h) && PG_GRANT_SERVER.is_match(&words.join(" ")) {
-                return Some("it grants or revokes a privilege on a database, a tablespace or a setting, which belong to the server".into());
+                return Some(("it grants or revokes a privilege on a database, a tablespace or a setting, which belong to the server".into(), Some(PG_ROLE_INSTEAD)));
             }
             None
         }
         Dialect::Mysql => {
             if MYSQL_ACCOUNT.is_match(&h) {
-                return Some("it changes an account, which belongs to the server".into());
+                return Some(("it changes an account, which belongs to the server".into(), Some(SERVER_INSTEAD)));
             }
             if GRANT.is_match(&h) {
                 return mysql_grant_reach(&words, statement);
             }
             if MYSQL_SERVER.is_match(&h) {
-                return Some("it changes the server itself".into());
+                return Some(("it changes the server itself".into(), Some(SERVER_INSTEAD)));
             }
             if sets_server(statement) {
-                return Some("it changes a server setting".into());
+                return Some(("it changes a server setting".into(), Some(SERVER_INSTEAD)));
             }
             if MYSQL_ELSEWHERE.is_match(&h) {
-                return Some("it acts on the server or another database".into());
+                return Some(("it acts on the server or another database".into(), Some(SERVER_INSTEAD)));
             }
             let t = &statement.tokens;
             let created = |w: &str| words.first().is_some_and(|f| f == "CREATE") && words.iter().take(6).any(|x| x == w);
@@ -611,26 +612,70 @@ pub fn escapes_shadow(statement: &Statement, dialect: Dialect) -> Option<String>
                 let Some(at) = at else { continue };
                 let name = |x: Option<&Token>| x.is_some_and(|x| matches!(x.kind, TokenKind::Word | TokenKind::Quoted));
                 if name(t.get(at)) && t.get(at + 1).is_some_and(|d| d.text == ".") && name(t.get(at + 2)) {
-                    return Some(format!("it names the database {}: in a shadow it would reach that database itself, so leave names unqualified", t[at].text));
+                    return Some((format!("it names the database {}: in a shadow it would reach that database itself, so leave names unqualified", t[at].text), None));
                 }
                 if let Some(database) = qualified_at(t, at) {
-                    return Some(format!("it names the database {database}: in a shadow it would reach that database itself, so leave names unqualified"));
+                    return Some((format!("it names the database {database}: in a shadow it would reach that database itself, so leave names unqualified"), None));
                 }
             }
             None
         }
         Dialect::Sqlite => {
             if h.starts_with("ATTACH") || h.starts_with("DETACH") {
-                return Some("it attaches another database file".into());
+                return Some(("it attaches another database file".into(), Some("Attach it on the connection that reads it, outside the migrations.")));
             }
             None
         }
     }
 }
 
-/// The first statement of `sql` that would reach past a shadow, however a server reads it, with why.
+/// What to do with a statement of the server's setup: a role, a database, a server setting.
+const SERVER_INSTEAD: &str = "Run it outside the migrations, with the server's setup.";
+
+/// What to do with a role, or a grant of one, which a `do` block can also keep in a migration: its
+/// code isn't checked, so it runs in every shadow too, and must be safe to run again.
+const PG_ROLE_INSTEAD: &str = "Run it outside the migrations, with the server's setup, or keep it in a do block written to run twice: Reylo doesn't check inside one, so every shadow runs it too, on the shadow's server.";
+
+/// A statement a shadow can't replay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unreplayable {
+    /// The statement on one line, as [`quoted`] shows it.
+    pub statement: String,
+    /// Why it would reach past the shadow, as a clause: "it grants or revokes a role, …".
+    pub why: String,
+    /// What to do instead, where why doesn't say.
+    pub instead: Option<&'static str>,
+}
+
+/// The first statement of `sql` that would reach past a shadow, however a server reads it.
+pub fn unreplayable(sql: &str, dialect: Dialect) -> Option<Unreplayable> {
+    read_every_way(sql, dialect).iter().flatten().find_map(|s| escapes_shadow(s, dialect).map(|(why, instead)| Unreplayable { statement: quoted(s), why, instead }))
+}
+
+/// The same, as one line: the statement, then why.
 pub fn shadow_problem(sql: &str, dialect: Dialect) -> Option<String> {
-    read_every_way(sql, dialect).iter().flatten().find_map(|s| escapes_shadow(s, dialect).map(|why| format!("{}: {why}", head(s, 3).to_lowercase())))
+    unreplayable(sql, dialect).map(|u| format!("{}: {}", u.statement, u.why))
+}
+
+/// The statement on one line, as written but for its spacing, up to a string a password follows
+/// (`password 'x'`, MySQL's `identified by 'x'`), and its first 16 tokens of a long one: each cut
+/// marked `…`.
+pub fn quoted(statement: &Statement) -> String {
+    const SHOWN: usize = 16;
+    let t = &statement.tokens;
+    let secret = t.iter().position(|x| matches!(x.upper().as_str(), "PASSWORD" | "IDENTIFIED")).and_then(|k| (k..t.len()).find(|&j| t[j].kind == TokenKind::Str));
+    let end = secret.unwrap_or(t.len()).min(SHOWN);
+    let mut out = String::new();
+    for k in 0..end {
+        if k > 0 && t[k - 1].end != t[k].start {
+            out.push(' ');
+        }
+        out.push_str(&t[k].text);
+    }
+    if end < t.len() {
+        out.push_str(" …");
+    }
+    out
 }
 
 /// Whether the MySQL file grants or revokes a privilege on one of the database's objects.
@@ -645,22 +690,22 @@ pub fn grants_on_objects(sql: &str) -> bool {
 /// a column or a routine of its own, which the database keeps (`grant select on users to …`). A
 /// role's grant, a proxy's, and a privilege on every database or the server are the server's;
 /// `on app.users` names a database, and `on *` stands for the whole database, which is no object a
-/// schema holds.
-fn mysql_grant_reach(words: &[String], statement: &Statement) -> Option<String> {
-    let Some(on) = words.iter().position(|w| w == "ON") else { return Some("it grants or revokes a role, which belongs to the server".into()) };
+/// schema holds. With what to do instead, as [`escapes_shadow`] gives it.
+fn mysql_grant_reach(words: &[String], statement: &Statement) -> Option<(String, Option<&'static str>)> {
+    let Some(on) = words.iter().position(|w| w == "ON") else { return Some(("it grants or revokes a role, which belongs to the server".into(), Some(SERVER_INSTEAD))) };
     if words[..on].iter().any(|w| w == "PROXY") {
-        return Some("it grants or revokes a proxy, which belongs to the server".into());
+        return Some(("it grants or revokes a proxy, which belongs to the server".into(), Some(SERVER_INSTEAD)));
     }
     let at = on + 1 + usize::from(words.get(on + 1).is_some_and(|w| matches!(w.as_str(), "TABLE" | "FUNCTION" | "PROCEDURE")));
     let t = &statement.tokens;
     if words.get(at).is_some_and(|w| w == "*") || words.get(at + 2).is_some_and(|w| w == "*") {
-        return Some("it grants or revokes a privilege on a whole database or the server, which belong to the server: grant on a table, a column or a routine".into());
+        return Some(("it grants or revokes a privilege on a whole database or the server, which belong to the server: grant on a table, a column or a routine".into(), None));
     }
     if t.get(at + 1).is_some_and(|d| d.text == ".") {
-        return Some(format!("it names the database {}: in a shadow it would reach that database itself, so leave names unqualified", t[at].text));
+        return Some((format!("it names the database {}: in a shadow it would reach that database itself, so leave names unqualified", t[at].text), None));
     }
     if let Some(database) = qualified_at(t, at) {
-        return Some(format!("it names the database {database}: in a shadow it would reach that database itself, so leave names unqualified"));
+        return Some((format!("it names the database {database}: in a shadow it would reach that database itself, so leave names unqualified"), None));
     }
     None
 }
@@ -848,6 +893,17 @@ mod tests {
     fn refuses_what_reaches_past_a_shadow() {
         assert!(shadow_problem("create role app", Dialect::Postgres).is_some());
         assert!(shadow_problem("grant app to bob", Dialect::Postgres).is_some());
+        // The statement whole, on one line, with what to do instead.
+        let grant = unreplayable("grant app\n  to bob;", Dialect::Postgres).unwrap();
+        assert_eq!(grant.statement, "grant app to bob");
+        assert!(grant.instead.is_some_and(|i| i.contains("do block")));
+        assert_eq!(unreplayable("create database app", Dialect::Postgres).unwrap().instead, Some(SERVER_INSTEAD));
+        assert_eq!(unreplayable("create table app.t (id int)", Dialect::Mysql).unwrap().instead, None);
+        // Never a password, and never past a long statement's first 16 tokens.
+        assert_eq!(shadow_problem("create role app login password 'secret'", Dialect::Postgres).unwrap(), "create role app login password …: it changes a role, which belongs to the server");
+        assert_eq!(unreplayable("create user 'r'@'%' identified by 'secret'", Dialect::Mysql).unwrap().statement, "create user 'r'@'%' identified by …");
+        assert_eq!(unreplayable("set password for 'r'@'%' = 'secret'", Dialect::Mysql).unwrap().statement, "set password for …");
+        assert_eq!(unreplayable("create table app.t (a int, b int, c int, d int)", Dialect::Mysql).unwrap().statement, "create table app.t (a int, b int, c int, d …");
         assert!(shadow_problem("create user bob", Dialect::Postgres).is_some());
         assert_eq!(shadow_problem("create user mapping for current_user server s options (user 'u'); alter user mapping for public server s options (set user 'v'); drop user mapping for public server s", Dialect::Postgres), None);
         assert_eq!(shadow_problem("grant select on a to app", Dialect::Postgres), None);

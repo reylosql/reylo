@@ -7,7 +7,7 @@ use crate::db::{shown_url, Db, Ran, Server};
 use crate::lock;
 #[cfg(feature = "cli")]
 use crate::replay::{Shadows, Step};
-use crate::sql::{atomicity_problem, changes_data, runs_alone, shadow_problem, split_statements};
+use crate::sql::{atomicity_problem, changes_data, runs_alone, split_statements, unreplayable};
 use crate::{time, Dialect, Error};
 use regex::Regex;
 use std::path::{Path, PathBuf};
@@ -2031,11 +2031,15 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
     if server.is_some() {
         let schema_name = opts.schema.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "schema.sql".into());
         for (name, sql) in files.iter().map(|f| (f.name.as_str(), f.sql.as_str())).chain(schema_sql.as_deref().map(|s| (schema_name.as_str(), s))) {
-            if let Some(why) = shadow_problem(sql, d) {
-                problems.push(Problem::new("not-replayable", format!("Migration {name} can't be replayed in a shadow database")).note(why));
-            }
+            problems.extend(replay_problem(name, sql, d));
         }
         problems.extend(unreadable_grants(db, opts, &files, schema_sql.as_deref()).await?);
+    } else {
+        // A deploy replays nothing, but runs no migration a shadow can't replay: once it ran, every
+        // command that replays the migrations, status and the dry run among them, would refuse it.
+        for p in &pending {
+            problems.extend(replay_problem(&p.name, &p.sql, d).map(|problem| problem.note("A deploy needs no shadow, but once it ran this, every command that replays the migrations would refuse it.")));
+        }
     }
     if !problems.is_empty() {
         return Ok(Plan { problems: with_stamp(problems), ..Plan::default() });
@@ -6234,11 +6238,24 @@ fn file_problems(opts: &Options, files: &[Migration], strays: &[String], schema_
     }
     let schema_name = opts.schema.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "schema.sql".into());
     for (name, sql) in files.iter().map(|f| (f.name.as_str(), f.sql.as_str())).chain(schema_sql.map(|s| (schema_name.as_str(), s))) {
-        if let Some(why) = shadow_problem(sql, d) {
-            problems.push(Problem::new("not-replayable", format!("Migration {name} can't be replayed in a shadow database")).note(why));
-        }
+        problems.extend(replay_problem(name, sql, d));
     }
     problems
+}
+
+/// The refusal of a file with a statement a shadow can't replay: the statement, why, and what to
+/// do instead.
+fn replay_problem(name: &str, sql: &str, d: Dialect) -> Option<Problem> {
+    let u = unreplayable(sql, d)?;
+    let mut why = u.why;
+    if let Some(first) = why.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    let problem = Problem::new("not-replayable", format!("Migration {name} can't be replayed in a shadow database")).sql(&u.statement).note(format!("{why}."));
+    Some(match u.instead {
+        Some(instead) => problem.note(instead),
+        None => problem,
+    })
 }
 
 #[cfg(feature = "cli")]

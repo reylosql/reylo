@@ -3238,6 +3238,7 @@ on!(
     a_database_time_zone_does_not_change_defaults,
     grants_compare_without_their_grantor,
     a_migration_that_creates_a_role_is_refused,
+    a_role_grant_is_refused_by_deploy_too,
     an_object_the_comparison_does_not_read_is_not_a_match,
     a_failed_concurrent_index_leaves_nothing,
     a_failed_lone_statement_may_leave_its_change,
@@ -4376,8 +4377,32 @@ mod adversarial {
         p.file("20261027100000_t.sql", "create table t (id int);");
         p.file("20261027110000_role.sql", &format!("create role {role};"));
         assert_eq!(p.dry_run().await, 1);
-        assert_has!(p.output(), r"can't be replayed in a shadow database\n  [^\n]*create role");
+        assert_has!(p.output(), &format!(r"can't be replayed in a shadow database\n\n    create role {role}\n\n  It changes a role, which belongs to the server\.\n  Run it outside the migrations"));
         assert!(p.rows(&format!("select 1 from pg_roles where rolname = '{role}'")).await.is_empty(), "no shadow created the role on the server");
+    }
+
+    pub async fn a_role_grant_is_refused_by_deploy_too(mut p: P) {
+        let (reader, writer) = (format!("madv_reader_{}", std::process::id()), format!("madv_writer_{}", std::process::id()));
+        p.exec(&format!("drop role if exists {writer}; drop role if exists {reader}; create role {reader} nologin; create role {writer} nologin")).await;
+        let member = format!("select 1 from pg_auth_members m join pg_roles r on r.oid = m.roleid join pg_roles w on w.oid = m.member where r.rolname = '{reader}' and w.rolname = '{writer}'");
+        p.file("20261027100000_t.sql", "create table t (id int);");
+        p.file("20261027110000_roles.sql", &format!("grant {reader}\n  to {writer};"));
+        // The whole statement, why, and what to do instead.
+        let refused = format!(r"✗ Migration 20261027110000_roles\.sql can't be replayed in a shadow database\n\n    grant {reader} to {writer}\n\n  It grants or revokes a role, which belongs to the server\.\n  Run it outside the migrations, with the server's setup, or keep it in a do block written to run twice");
+        assert_eq!(p.dry_run().await, 1);
+        assert_has!(p.output(), &refused);
+        // A deploy refuses what its dry run does: once it ran, every command that replays would.
+        assert_eq!(p.migrate().await, 1);
+        assert_has!(p.output(), &refused);
+        assert!(p.rows(&member).await.is_empty(), "nothing was granted");
+        assert!(p.rows("select 1 from pg_class where relname = 't'").await.is_empty(), "nothing ran");
+        // In a do block, it runs, and every command takes it.
+        p.file("20261027110000_roles.sql", &format!("do $$ begin grant {reader} to {writer}; end $$;"));
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert!(!p.rows(&member).await.is_empty(), "the grant ran");
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        p.exec(&format!("drop role {writer}; drop role {reader}")).await;
     }
 
     pub async fn an_object_the_comparison_does_not_read_is_not_a_match(mut p: P) {
@@ -5517,7 +5542,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
         p.exec("create table t (id int)").await;
         p.file("20261027110000_row.sql", &format!("insert {}.t values (1);", p.name));
         assert_eq!(p.dry_run().await, 1);
-        assert_has!(p.output(), r"Migration 20261027110000_row\.sql can't be replayed in a shadow database\n  [^\n]*names the database");
+        assert_has!(p.output(), &format!(r"Migration 20261027110000_row\.sql can't be replayed in a shadow database\n\n    insert {}\.t values \(1\)\n\n  It names the database {}: in a shadow", p.name, p.name));
         assert!(p.rows("select id from t").await.is_empty(), "no shadow wrote into the database it named");
     }
 
