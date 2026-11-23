@@ -180,6 +180,48 @@ $ reylo migrate new tidy_columns --rename posts.title=heading --drop users.bio
 
 It asks wherever a table loses one column and gains one, whatever their types. A rename casts each value to the new type, and a value the database can't cast fails the migration. With one such column, it prints both commands whole.
 
+Postgres can't partition a table in place:
+
+```sql title="schema.sql"
+create table users (id integer primary key, name text); -- [!code --]
+create table users (id integer primary key, name text) partition by hash (id); -- [!code ++]
+create table users_p0 partition of users for values with (modulus 2, remainder 0); -- [!code ++]
+create table users_p1 partition of users for values with (modulus 2, remainder 1); -- [!code ++]
+```
+
+So the migration creates it again, and is refused:
+
+```terminal
+$ reylo migrate new partition_users
+✗ Postgres can't make users a partitioned table in place
+  A table is partitioned only when it's created, so this migration drops users and its rows to create it again.
+  To keep the rows, write it with --drop, then edit it: copy the rows of users aside before it's dropped, and back once it's created again.
+
+  To write it, dropping the rows:
+    reylo migrate new partition_users --drop users
+
+Nothing was changed.
+```
+
+To keep the rows, add the copies to the migration it writes:
+
+```sql title="20261123120000_partition_users.sql"
+-- loses data: users
+create table users_rows as select * from users; -- [!code ++]
+drop table users;
+create table users (
+  id integer not null,
+  name text,
+  constraint users_pkey primary key (id)
+) partition by hash (id);
+create table users_p0 partition of users for values with (modulus 2, remainder 0);
+create table users_p1 partition of users for values with (modulus 2, remainder 1);
+insert into users select * from users_rows; -- [!code ++]
+drop table users_rows; -- [!code ++]
+```
+
+The same goes for a partitioned table made plain, and a changed partition key.
+
 With no schema change, the migration is empty, for a data change:
 
 ```terminal
