@@ -3715,6 +3715,23 @@ mod adversarial {
         assert!(!out.contains("doesn't reach"), "{out}");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         assert_eq!(p.rows("select x from renamed").await[0].text("x"), "original");
+        p.output();
+        // Of two such columns, one dropped and one renamed beside a column added: the renamed one's
+        // not null takes the name Postgres numbers, and the rename is still inferred.
+        let before = format!("{before} create table renamed (id integer primary key, x text default 'missing' not null, joined integer); create table {edge} (note text);");
+        let wider = "c".repeat(63);
+        p.file("20991231000008_t.sql", "create table clash (note text, abcdefghijklmnopqrstuvwxyzxa text default 'missing' not null, abcdefghijklmnopqrstuvwxyzxb text default 'missing' not null);");
+        p.schema(&format!("{before} create table clash (note text, abcdefghijklmnopqrstuvwxyzxa text default 'missing' not null, abcdefghijklmnopqrstuvwxyzxb text default 'missing' not null);"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into clash values ('n', 'discard', 'original')").await;
+        p.output();
+        p.schema(&format!("{before} create table {wider} (note text, x text default 'missing' not null, joined integer);"));
+        let choices = reylo_migrate::Choices { drop: vec!["clash.abcdefghijklmnopqrstuvwxyzxa".into()], rename: vec![("clash".into(), wider.clone())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "clash", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.rows(&format!("select x from {wider}")).await[0].text("x"), "original");
     }
 
     /// A column whose not null has a name of its own, renamed with a change to its definition: the

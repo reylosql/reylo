@@ -2772,9 +2772,14 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
             let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
             let Some(name) = not_null_name(o) else { continue };
             let Some(kept) = target.objects.get(&format!("column {new_rel}.{column}")) else {
-                // The name Postgres would make, as it holds it.
-                let made = default_not_null(new_rel, &unquoted(column));
-                if generated_not_null(&name, old_rel, &unquoted(column)) && unquoted(&name) != made && !held(&made) && !given.contains(&made) {
+                // The name Postgres would make, as it holds it: with a number after its label where
+                // that is held, as Postgres numbers it.
+                let column = unquoted(column);
+                if !generated_not_null(&name, old_rel, &column) {
+                    continue;
+                }
+                let made = (0..100).map(|n| not_null_named(new_rel, &column, &if n == 0 { "not_null".to_string() } else { format!("not_null{n}") })).find(|m| *m == unquoted(&name) || (!held(m) && !given.contains(m)));
+                if let Some(made) = made.filter(|m| *m != unquoted(&name)) {
                     out.push(format!("alter table {new_rel} rename constraint {name} to {}", declared::quote_ident(&made)));
                     given.push(made);
                 }
@@ -3211,20 +3216,26 @@ fn dollar_block(body: &str) -> String {
 }
 
 /// Whether `name` is one Postgres gives a not null it makes on `table`'s `column`, the column's name
-/// as Postgres holds it: its name for it, or with a number after where another constraint of the
-/// schema held that name.
+/// as Postgres holds it: its name for it, or the one it gives where another constraint of the schema
+/// held that name, with a number after its label.
 fn generated_not_null(name: &str, table: &str, column: &str) -> bool {
     let name = unquoted(name);
-    let made = default_not_null(table, column);
-    name.strip_prefix(made.as_str()).is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_digit()))
+    let number = name.len() - name.bytes().rev().take_while(u8::is_ascii_digit).count();
+    name[..number].ends_with("_not_null") && not_null_named(table, column, &name[number - "not_null".len()..]) == name
 }
 
 /// The name Postgres gives a not null it makes on a table's column, the column's name and its own as
-/// Postgres holds them: past 63 bytes, the longer of the table's and the column's names is shortened
-/// a byte at a time until it fits, each then cut at a character's edge (`makeObjectName`).
+/// Postgres holds them.
 fn default_not_null(table: &str, column: &str) -> String {
+    not_null_named(table, column, "not_null")
+}
+
+/// The name Postgres makes of a table's name, a column's and `label` (`not_null`, or `not_null1` where
+/// that was taken): past 63 bytes, the longer of the table's and the column's names is shortened a
+/// byte at a time until it fits, each then cut at a character's edge (`makeObjectName`).
+fn not_null_named(table: &str, column: &str, label: &str) -> String {
     let table = unquoted(split_last(table).1);
-    let room = 63 - "_not_null".len() - 1;
+    let room = 63usize.saturating_sub(label.len() + 2);
     let (mut a, mut b) = (table.len(), column.len());
     while a + b > room {
         if a > b {
@@ -3239,7 +3250,7 @@ fn default_not_null(table: &str, column: &str) -> String {
         }
         s[..n].to_string()
     };
-    format!("{}_{}_not_null", clip(&table, a), clip(column, b))
+    format!("{}_{}_{label}", clip(&table, a), clip(column, b))
 }
 
 /// A name as Postgres holds it, from how it is written: a quoted one without its quotes.
