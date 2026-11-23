@@ -303,9 +303,17 @@ pub fn render(lock: &Lock) -> String {
     out
 }
 
-/// A value as YAML writes it: quoted where YAML would read it as something other than its text, as a
-/// checksum of digits alone, which every YAML reader would take for a number.
+/// A checksum some YAML reader would take for a number: digits alone (an integer, or in YAML 1.1 an
+/// octal one), digits around an `e` (a float in YAML 1.2, however large), or `0b` and binary digits
+/// (an integer in YAML 1.1).
+static NUMERIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:[0-9]+(?:[eE][0-9]+)?|0b[01]+)$").expect("a valid pattern"));
+
+/// A value as YAML writes it, quoted where a YAML reader would take it for something other than its
+/// text.
 fn scalar(value: &str) -> String {
+    if NUMERIC.is_match(value) {
+        return format!("'{value}'");
+    }
     serde_yaml::to_string(value).map_or_else(|_| value.to_string(), |text| text.trim_end().to_string())
 }
 
@@ -348,10 +356,20 @@ mod tests {
     }
 
     #[test]
-    fn a_checksum_of_digits_alone_is_quoted_and_read_as_written() {
-        let lock = Lock { schema: Some("01234567".into()), entries: vec![Entry { name: "init.sql".into(), sum: "00123456".into() }, Entry { name: "20261101000000_a.sql".into(), sum: "1e234567".into() }] };
+    fn a_checksum_yaml_would_read_as_a_number_is_quoted_and_read_as_written() {
+        let lock = Lock {
+            schema: Some("01234567".into()),
+            entries: vec![
+                Entry { name: "init.sql".into(), sum: "00123456".into() },
+                Entry { name: "20261101000000_a.sql".into(), sum: "1e234567".into() },
+                Entry { name: "20261102000000_b.sql".into(), sum: "0b101101".into() },
+                Entry { name: "20261103000000_c.sql".into(), sum: "1e2345ab".into() },
+            ],
+        };
         let text = render(&lock);
-        assert!(text.contains("schema: '01234567'\n") && text.contains("checksum: '00123456'\n") && text.contains("checksum: '1e234567'\n"), "{text}");
+        for line in ["schema: '01234567'\n", "checksum: '00123456'\n", "checksum: '1e234567'\n", "checksum: '0b101101'\n", "checksum: 1e2345ab\n"] {
+            assert!(text.contains(line), "{line}{text}");
+        }
         assert_eq!(of_text(&text), State::Lock(lock.clone()));
         // Unquoted, as by hand, it still reads as its text.
         assert_eq!(of_text(&text.replace('\'', "")), State::Lock(lock));
