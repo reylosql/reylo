@@ -231,7 +231,7 @@ fn children(lines: &[String]) -> Vec<(String, String)> {
 
 /// The qualified name `text` opens with, as `format('%I.%I')` writes it: quoted parts keep their
 /// spaces, and a comma outside quotes ends it, as in a list of the tables a child inherits from.
-fn name_at(text: &str) -> &str {
+pub(crate) fn name_at(text: &str) -> &str {
     let mut quoted = false;
     for (k, c) in text.char_indices() {
         match c {
