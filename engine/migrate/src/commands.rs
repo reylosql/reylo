@@ -1584,7 +1584,7 @@ fn fills_existing(statement: &crate::sql::Statement) -> bool {
         let mut depth = 0usize;
         for i in k + 1..t.len() {
             match t[i].text.as_str() {
-                "(" if t[i].kind == TokenKind::Symbol && t[i - 1].kind == TokenKind::Word && i > k + 1 => return true,
+                "(" if t[i].kind == TokenKind::Symbol && matches!(t[i - 1].kind, TokenKind::Word | TokenKind::Quoted) && i > k + 1 => return true,
                 "(" if t[i].kind == TokenKind::Symbol => depth += 1,
                 ")" if t[i].kind == TokenKind::Symbol => depth = depth.saturating_sub(1),
                 "," if t[i].kind == TokenKind::Symbol && depth == 0 => return false,
@@ -2023,14 +2023,16 @@ fn lock_order_problem(opts: &Options, applied: &[&HistoryRow], order: &[Migratio
                 .fix("On any other, do the same", &["reylo migrate history push --url <url>"]),
         );
     }
-    if let Some(lacking) = lacking.filter(|l| !moved && l.iter().all(|m| writes_rows(&m.sql, d).is_empty() && runs_as_a_migration(&m.sql, d))) {
-        let files: Vec<String> = lacking.iter().map(|m| format!("--file {}", shell_word(&format!("{}/{}", shown(&opts.dir), m.name)))).collect();
+    // Their files may not run as written after what it ran since (a column they change renamed), and
+    // deploy replays nothing to tell: the change is made by hand, and `history push` checks it.
+    if let Some(lacking) = lacking.filter(|l| !moved && l.iter().all(|m| writes_rows(&m.sql, d).is_empty())) {
         let names: Vec<String> = lacking.iter().map(|m| m.name.clone()).collect();
+        let one = names.len() == 1;
         return Some(
             problem
                 .note(format!("Every database runs the migrations in the lock's order, and this one ran them in another, without {}.", and_list(&names)))
                 .fix("On a development database, apply them in the lock's order", &["reylo migrate dev"])
-                .fix(format!("On any other, make {} change there too, then record them all, running nothing", if names.len() == 1 { "its" } else { "their" }), &[&format!("reylo run --url <url> {}", files.join(" ")), "reylo migrate history push --url <url>"]),
+                .fix(format!("On any other, make the change {} {} there by hand, then record them all, running nothing", and_list(&names), if one { "makes" } else { "make" }), &["reylo migrate history push --url <url>"]),
         );
     }
     if !moved || !writes_rows(&ahead.sql, d).is_empty() {
@@ -2395,7 +2397,8 @@ async fn unmovable(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[Migr
 /// Whether two orders of the migrations both replay, and reach the same schema at the end of the
 /// first `block` of each, where they hold the same migrations, and at their ends: a migration after
 /// the block that fills rows sees the same schema either way, though a later one could make the
-/// two ends alike again.
+/// two ends alike again. Both are replays, so every line is compared, a partition one has and the
+/// other lacks included: the next insert lands in it or not.
 #[cfg(feature = "cli")]
 async fn ends_alike(shadows: &mut Shadows<'_>, a: &[Migration], b: &[Migration], block: usize) -> Result<bool, Error> {
     let (x, y) = (shadows.lane(), shadows.lane());
@@ -2403,7 +2406,7 @@ async fn ends_alike(shadows: &mut Shadows<'_>, a: &[Migration], b: &[Migration],
         shadows.push(x, a[from..to].iter().map(Step::of));
         shadows.push(y, b[from..to].iter().map(Step::of));
         let alike = match (shadows.lines(x).await?, shadows.lines(y).await?) {
-            (Ok(p), Ok(q)) => crate::catalog::same_schema(&p, &q),
+            (Ok(p), Ok(q)) => crate::catalog::same(&crate::catalog::without_comments(&p), &crate::catalog::without_comments(&q)),
             _ => false,
         };
         if !alike {
@@ -2430,25 +2433,32 @@ fn run_of(migrations: &[Migration]) -> String {
 
 /// Where the database has what `order` makes without one migration, `order[k]`, and with those
 /// after it up to `order[m]`: a database that skipped one, as another tool or a hand can leave it.
-/// It is at or after `from`, where the history's run ends, and is looked for only among those whose
-/// change is all that the database and some later prefix of `order` differ by, as `stages` (the
-/// catalog after each prefix) shows: a few replays, and never one per migration. The latest such, of
-/// the last three, with the longest run after it, but for the migrations at its end that change data
-/// and nothing a schema shows, which can't be told to have run.
+/// It is at or after `from`, where the history's run ends, and is looked for only among the three
+/// whose change accounts for the most of what the database and some later prefix of `order` differ
+/// by, as `stages` (the catalog after each prefix) shows, the latest first among equals: a few
+/// replays, and never one per migration, which decide. A line can hold what two migrations change
+/// (a column's default and its nullability), so a change need not account for all of it. With the
+/// longest run after it, but for the migrations at its end that change data and nothing a schema
+/// shows, which can't be told to have run.
 #[cfg(feature = "cli")]
 async fn skipped(shadows: &mut Shadows<'_>, order: &[Migration], stages: &[Vec<String>], from: usize, live: &[String], d: Dialect) -> Result<Option<(usize, usize)>, Error> {
     if stages.len() <= order.len() {
         return Ok(None);
     }
     let apart: Vec<(Vec<String>, Vec<String>)> = stages.iter().map(|stage| difference(stage, &crate::catalog::without_extra_children(live, stage))).collect();
-    let candidates: Vec<usize> = (from..order.len().saturating_sub(1))
-        .rev()
-        .filter(|&k| {
-            let (gone, came) = difference(&stages[k], &stages[k + 1]);
-            !(gone.is_empty() && came.is_empty()) && apart[k + 2..].iter().any(|(only_stage, only_live)| !(only_stage.is_empty() && only_live.is_empty()) && only_stage.iter().all(|l| came.contains(l)) && only_live.iter().all(|l| gone.contains(l)))
-        })
-        .take(3)
-        .collect();
+    // How much of the difference at its best later prefix a migration's change accounts for.
+    let share = |k: usize| -> f64 {
+        let (gone, came) = difference(&stages[k], &stages[k + 1]);
+        let (gone, came): (std::collections::BTreeSet<&String>, std::collections::BTreeSet<&String>) = (gone.iter().collect(), came.iter().collect());
+        apart[k + 2..]
+            .iter()
+            .filter(|(only_stage, only_live)| !(only_stage.is_empty() && only_live.is_empty()))
+            .map(|(only_stage, only_live)| (only_stage.iter().filter(|l| came.contains(l)).count() + only_live.iter().filter(|l| gone.contains(l)).count()) as f64 / (only_stage.len() + only_live.len()) as f64)
+            .fold(0.0, f64::max)
+    };
+    let mut ranked: Vec<(f64, usize)> = (from..order.len().saturating_sub(1)).map(|k| (share(k), k)).filter(|(s, _)| *s > 0.0).collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
+    let candidates: Vec<usize> = ranked.into_iter().take(3).map(|(_, k)| k).collect();
     for k in candidates {
         let lane = shadows.lane();
         shadows.push(lane, order[..k].iter().map(Step::of));
@@ -7990,6 +8000,21 @@ mod tests {
         assert_eq!(without_entries_of(&dump, &owners, &["public".to_string()]), format!("SET check_function_bodies = false;\n\n{table}"));
         // In a schema of the platform's, the table is the platform's too.
         assert_eq!(without_entries_of(&dump, &owners, &[]), "SET check_function_bodies = false;\n\n");
+    }
+
+    #[test]
+    fn a_change_that_fills_existing_rows_is_told_by_its_words() {
+        let fills = |sql: &str| split_statements(sql, Dialect::Postgres).iter().any(fills_existing);
+        assert!(fills("alter table t add column v int default f()"));
+        assert!(fills("alter table t add column v int default \"Backfill\"()"));
+        assert!(fills("alter table t add column v int default public.f(1)"));
+        assert!(fills("alter table t add column v int not null default (now())"));
+        assert!(fills("alter table t add column v int generated always as (id * 2) stored"));
+        assert!(fills("alter table t alter column n type bigint using n::bigint"));
+        assert!(!fills("alter table t add column v int default 1"));
+        assert!(!fills("alter table t add column v numeric(10, 2) default 0, add column w int default 2"));
+        assert!(!fills("alter table t alter column n set default f()"));
+        assert!(!fills("create table t (v int default f())"));
     }
 
     #[test]

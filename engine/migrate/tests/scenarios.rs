@@ -3320,6 +3320,8 @@ on!(
     a_skipped_migration_found_by_what_a_later_one_changes,
     a_skipped_migration_moves_only_where_both_orders_agree_before_what_follows,
     a_skipped_function_moves_past_no_column_it_fills,
+    a_skipped_migration_moves_past_no_partition_it_leaves,
+    a_skipped_migration_is_found_where_another_changes_the_same_column,
     a_history_out_of_the_locks_order_moves_nothing_more,
     the_history_table_takes_no_default_privileges,
     a_role_that_cannot_create_databases_is_told_of_shadow_url,
@@ -3710,6 +3712,40 @@ mod adversarial {
         assert_eq!(p.history().await, [a, b, c]);
     }
 
+    /// A partition one order leaves and the other doesn't decides where the next insert lands: the
+    /// two orders differ there, and the skipped migration doesn't move.
+    pub async fn a_skipped_migration_moves_past_no_partition_it_leaves(mut p: P) {
+        p.linear();
+        let (a, b, c, d, e) = ("20261027100000_m.sql", "20261027110000_m_p.sql", "20261027120000_c.sql", "20261027130000_row.sql", "20261027140000_e.sql");
+        p.file(a, "create table m (id int, v int) partition by range (id); create table m_default partition of m default; create table audit (id int);");
+        p.file(b, "create table m_p partition of m for values from (0) to (10); create index audit_id on audit (id);");
+        p.file(c, "drop table if exists m_p; create table c (id int);");
+        p.file(d, "insert into m values (1, 1); create table d (id int);");
+        p.file(e, "drop table if exists m_p;");
+        p.lock(&[a, b, c, d, e]);
+        p.exec("create table m (id int, v int) partition by range (id); create table m_default partition of m default; create table audit (id int); create table c (id int);").await;
+        p.output();
+        assert_eq!(p.history_push().await, 1);
+        assert_has!(p.output(), r"It has what they make without 20261027110000_m_p\.sql\. Run after 20261027120000_c\.sql, the migrations end differently, so it can't move there\.");
+        assert_eq!(p.locked(), [a, b, c, d, e]);
+    }
+
+    /// A column's default and its nullability share a line of the catalog: a skipped migration that
+    /// makes the column not null is still found where a later one gives it a default.
+    pub async fn a_skipped_migration_is_found_where_another_changes_the_same_column(mut p: P) {
+        p.linear();
+        let (a, b, c) = ("20261027100000_t.sql", "20261027110000_b.sql", "20261027120000_c.sql");
+        p.file(a, "create table t (id int primary key, n int);");
+        p.file(b, "create index t_n on t (n); alter table t alter column n set not null;");
+        p.file(c, "alter table t alter column n set default 2; create table c (id int);");
+        p.lock(&[a, b, c]);
+        p.exec("create table t (id int primary key, n int); alter table t alter column n set default 2; create table c (id int);").await;
+        assert_eq!(p.history_push().await, 0, "{}", p.peek());
+        assert_eq!(p.locked(), [a, c, b]);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.history().await, [a, c, b]);
+    }
+
     /// A database whose history ran the lock's migrations in another order, after another database
     /// moved one, moves nothing in the lock again: deploy says to make the change it lacks and record
     /// the lock's order.
@@ -3729,7 +3765,7 @@ mod adversarial {
         assert_has!(p.output(), r"✗ No run of the migrations makes this database's schema");
         assert_eq!(p.locked(), [a, c, d, b]);
         assert_eq!(p.migrate().await, 1);
-        assert_has!(p.output(), r"✗ This database applied 20261027110000_b\.sql where \S*reylo\.lock lists 20261027120000_c\.sql\n  Every database runs the migrations in the lock's order, and this one ran them in another, without 20261027130000_d\.sql\.\n\n  On a development database, apply them in the lock's order:\n    reylo migrate dev\n  On any other, make its change there too, then record them all, running nothing:\n    reylo run --url <url> --file \S+20261027130000_d\.sql\n    reylo migrate history push --url <url>");
+        assert_has!(p.output(), r"✗ This database applied 20261027110000_b\.sql where \S*reylo\.lock lists 20261027120000_c\.sql\n  Every database runs the migrations in the lock's order, and this one ran them in another, without 20261027130000_d\.sql\.\n\n  On a development database, apply them in the lock's order:\n    reylo migrate dev\n  On any other, make the change 20261027130000_d\.sql makes there by hand, then record them all, running nothing:\n    reylo migrate history push --url <url>");
         p.exec("create table d (id int primary key)").await;
         assert_eq!(p.history_push().await, 0, "{}", p.peek());
         assert_eq!(p.history().await, [a, c, d, b]);
