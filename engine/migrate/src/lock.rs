@@ -63,7 +63,7 @@ struct LockFile {
 }
 
 /// An entry of `migrations`: an object with its `name` and its `checksum`, or, as locks were
-/// written up to 0.8.3, one string with the two split by a space. Each value is read as the text
+/// written up to 0.8.2, one string with the two split by a space. Each value is read as the text
 /// it is, so a checksum of digits alone keeps its leading zeros. A key it doesn't know is refused:
 /// a later version wrote it, and this one would drop it when it writes the lock again.
 struct EntryFile(Entry);
@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lock_written_up_to_0_8_3_reads_as_its_entries() {
+    fn a_lock_written_up_to_0_8_2_reads_as_its_entries() {
         let objects = "schema: c7bf681b\nmigrations:\n  - name: 20261104120000_users.sql\n    checksum: c86e9de4\n  - name: 20261104140347_add_bio.sql\n    checksum: 78ad08c0\n";
         let strings = "schema: c7bf681b\nmigrations:\n  - 20261104120000_users.sql c86e9de4\n  - 20261104140347_add_bio.sql 78ad08c0\n";
         let State::Lock(lock) = of_text(objects) else { panic!("{objects}") };

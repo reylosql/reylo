@@ -127,7 +127,7 @@ test("a migration edited after it was locked, or lines merged out of order, give
   assert.match((await projectMigrations(root)).error ?? "", new RegExp(`^The lock was merged out of order at ${bio!.replace(".", "\\.")}`));
 });
 
-test("a lock written up to 0.8.3, each entry one line, gives the same migrations", async () => {
+test("a lock written up to 0.8.2, each entry one line, gives the same migrations", async () => {
   const root = project();
   await change(root, "users", "create table users (id integer primary key, name text not null);\n");
   await change(root, "bio", "create table users (id integer primary key, name text not null, bio text);\n");

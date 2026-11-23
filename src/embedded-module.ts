@@ -76,7 +76,7 @@ export async function projectMigrations(root: string): Promise<{ list?: Migratio
     // Two branches that each added a migration leave git's markers in the lock.
     if (/^(<{7}|={7}|>{7})( |$)/m.test(lock)) return { error: `The lock has a merge conflict, in ${shown}/reylo.lock: keep main's lines, then run reylo migrate dev, which adds this branch's migrations back`, watched };
     // Each entry is `- name: <file>` with `checksum: <hex>` on the line below it, quoted where it is
-    // digits alone (`render` in engine/migrate/src/lock.rs), or, as locks were written up to 0.8.3,
+    // digits alone (`render` in engine/migrate/src/lock.rs), or, as locks were written up to 0.8.2,
     // `- <file> <hex>`.
     const entries = [...lock.matchAll(/^\s*-\s+(?:name:\s*(\S+\.sql)\s*\n\s*checksum:\s*'?([0-9a-f]+)'?|(\S+\.sql)\s+([0-9a-f]+))\s*$/gm)].map((m) => ({ name: (m[1] ?? m[3])!, sum: (m[2] ?? m[4])! }));
     names = entries.map((e) => e.name);
