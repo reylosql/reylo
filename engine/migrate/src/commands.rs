@@ -1382,7 +1382,7 @@ async fn late_problem(shadows: &mut Shadows<'_>, dir: &Path, ran: &[Migration], 
             (Ok(a), Ok(b)) => Some(
                 Problem::new("history-out-of-order", "This database ran its migrations in another order than a fresh database runs them, and the two end differently")
                     .lines(describe_diff("this database", &crate::catalog::without_comments(&a), "a fresh database", &crate::catalog::without_comments(&b)))
-                    .note("Elsewhere, write a migration that takes both to the same schema.")
+                    .note("Elsewhere, write a migration that leaves both with the same schema.")
                     .fix("On a development database, rebuild it in name order", &["reylo db reset"]),
             ),
             (Err((m, e)), _) | (_, Err((m, e))) => Some(Problem::new("replay-fails", format!("Replaying {m} in a shadow database fails")).note(e)),
@@ -1454,7 +1454,7 @@ fn lock_order_problem(opts: &Options, applied: &[&HistoryRow], order: &[Migratio
     Some(
         Problem::new("history-out-of-order", format!("This database applied {} where {} lists {}", applied[k].name, shown(&opts.lock), order[k].name))
             .note("Every database runs the migrations in the lock's order. Where one ran them otherwise, the lock was merged keeping a branch's lines: keep main's.")
-            .fix("On a development database, take it to the lock's order", &["reylo migrate dev"]),
+            .fix("On a development database, apply them in the lock's order", &["reylo migrate dev"]),
     )
 }
 
@@ -6166,7 +6166,7 @@ async fn db_push_on(db: &mut Db, server: &mut Server, swept: usize, opts: &Optio
     if schema_sql.as_deref().is_some_and(|sql| crate::sql::is_blank(sql, d)) {
         problems.push(
             Problem::new("schema-sql-empty", format!("Nothing is declared in {}", shown(&opts.schema)))
-                .note("Taking this database to it would drop every table, with its rows.")
+                .note("Synchronizing this database with it would drop every table, with its rows.")
                 .fix("To rebuild this database from its migrations instead", &["reylo db reset"]),
         );
     }
@@ -6204,7 +6204,7 @@ async fn db_push_on(db: &mut Db, server: &mut Server, swept: usize, opts: &Optio
             _ => "This database doesn't match its migrations".to_string(),
         };
         let listed = if behind.len() == 1 && unrun.len() == 1 { vec![] } else { behind };
-        problems.push(Problem::new("database-not-at-migrations", title).lines(listed).fix(if unrun.len() == 1 { "Run it first" } else { "Take it to its migrations first" }, &["reylo migrate dev"]));
+        problems.push(Problem::new("database-not-at-migrations", title).lines(listed).fix(if unrun.len() == 1 { "Run it first" } else { "Apply its migrations first" }, &["reylo migrate dev"]));
     }
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
@@ -6253,7 +6253,7 @@ async fn db_push_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Optio
             Err(e) => return fail(if d == Dialect::Mysql { "reylo db push failed partway" } else { "reylo db push failed" }, e.0, log),
             Ok(Err(Unreached::Refused(problems))) => return Ok(refuse(&problems, log)),
             Ok(Err(Unreached::Differs(now, expect))) => {
-                let problem = Problem::new("db-push-incomplete", format!("Reylo can't take this database the rest of the way to {}", shown(&opts.schema))).lines(describe_diff("this database", &now, &shown(&opts.schema), &expect)).fix("Write the change as a migration, finishing by hand what it leaves out", &["reylo migrate new <name>"]);
+                let problem = Problem::new("db-push-incomplete", format!("Reylo can't fully synchronize this database with {}", shown(&opts.schema))).lines(describe_diff("this database", &now, &shown(&opts.schema), &expect)).fix("Write the change as a migration, finishing by hand what it leaves out", &["reylo migrate new <name>"]);
                 if d != Dialect::Mysql {
                     return Ok(refuse(&[problem], log));
                 }

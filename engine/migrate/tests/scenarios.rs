@@ -908,7 +908,7 @@ async fn db_push_refuses_a_schema_that_declares_nothing(mut p: P) {
     p.schema("-- emptied\n\n");
     p.output();
     assert_eq!(p.db_push().await, 1);
-    assert_has!(p.output(), r"✗ Nothing is declared in \S*schema\.sql\n  Taking this database to it would drop every table, with its rows\.");
+    assert_has!(p.output(), r"✗ Nothing is declared in \S*schema\.sql\n  Synchronizing this database with it would drop every table, with its rows\.");
     assert_eq!(p.rows("select name from users").await.len(), 1);
 }
 
