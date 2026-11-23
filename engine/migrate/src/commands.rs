@@ -3381,9 +3381,10 @@ async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Resu
 /// Of `extensions`, those the migrations replay without, which a new migration makes: one a migration
 /// needs is the environment's (a platform's, or one the database had before the project began),
 /// which every shadow keeps, so that the history replays as it did on the database. The history
-/// needs an extension where its replay without it fails, or makes anything else than it makes with
-/// it, as a migration that does something only where the extension is; what the extension itself
-/// brings a shadow (its line, its schema, their grants) is read from an empty one. Each is tried with
+/// needs an extension where its replay without it fails, makes anything it doesn't make with it, or
+/// lacks anything it makes with it but what the extension itself brings a shadow (its line, its
+/// schema, their grants, read from an empty one), as a migration that does something only where the
+/// extension is. Where the history replays only without them, none is the environment's. Each is tried with
 /// those already taken, so that one the history needs takes no other with it.
 #[cfg(feature = "cli")]
 async fn unneeded_by_history(opts: &Options, files: &[Migration], extensions: Vec<String>) -> Result<Vec<String>, Error> {
@@ -3412,12 +3413,18 @@ async fn unneeded_by_history(opts: &Options, files: &[Migration], extensions: Ve
         Ok(lines?.ok().map(|l| l.into_iter().collect()))
     };
     let result = async {
-        let (Some(replayed), Some(empty)) = (lines(&[], true).await?, lines(&[], false).await?) else { return Ok(vec![]) };
+        let Some(empty) = lines(&[], false).await? else { return Ok(vec![]) };
+        let Some(replayed) = lines(&[], true).await? else {
+            // The history replays only without them, as one that renames a schema to the one an
+            // extension is in: none is the environment's.
+            return Ok(if lines(&extensions, true).await?.is_some() { extensions.clone() } else { vec![] });
+        };
         let mut unneeded = async |left: Vec<String>| -> Result<Option<Vec<String>>, Error> {
             let (Some(without), Some(empty_without)) = (lines(&left, true).await?, lines(&left, false).await?) else { return Ok(None) };
+            // Each line the replay lost is one they bring a shadow, and it gained none: the history
+            // may make one of those itself, as their schema.
             let brought: BTreeSet<&String> = empty.difference(&empty_without).collect();
-            let rest: BTreeSet<&String> = replayed.iter().filter(|l| !brought.contains(l)).collect();
-            Ok((without.iter().collect::<BTreeSet<_>>() == rest).then_some(left))
+            Ok((without.is_subset(&replayed) && replayed.difference(&without).all(|l| brought.contains(l))).then_some(left))
         };
         if let Some(all) = unneeded(extensions.clone()).await? {
             return Ok(all);
