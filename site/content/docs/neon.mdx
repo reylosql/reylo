@@ -14,11 +14,9 @@ Neon is Postgres, so everything on the [Postgres](/postgres) page holds for it.
 | Queries run on | `@neondatabase/serverless`, `pg`, postgres.js or Drizzle Postgres, through the pooled connection string |
 | Transactions | On a `Pool`'s client over a WebSocket, not on `neon()` over HTTP |
 | Branches | Each has connection strings of its own, to type against its schema |
-| Edge runtimes | Neon's driver, on the [Next.js edge runtime](/nextjs#the-edge-runtime) and in [Cloudflare Workers](/d1#setup) |
+| Edge runtimes | Neon's driver, on [Next.js](/nextjs)'s edge runtime and in [Cloudflare Workers](/d1#setup) |
 
-The examples on this page use this schema:
-
-<Details summary="View the schema behind the examples" id="schema">
+<PageSchema>
 
 ```sql file="schema.sql" dialect="postgres"
 create table users (
@@ -28,7 +26,7 @@ create table users (
 );
 ```
 
-</Details>
+</PageSchema>
 
 ## Connection strings
 
@@ -242,5 +240,5 @@ export default {
 In a Worker:
 
 - In a Worker, it needs no `nodejs_compat` flag, only the [Vite plugin](/d1#setup) that loads `.sql` files there.
-- Use it the same way on the [Next.js edge runtime](/nextjs#the-edge-runtime).
+- Use it the same way on [Next.js](/nextjs)'s edge runtime.
 - In an edge runtime, connect, use and close a `Pool` or `Client` within one request.

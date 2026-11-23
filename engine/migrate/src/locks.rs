@@ -306,14 +306,18 @@ fn does_something(statements: &[String]) -> bool {
 }
 
 /// The files' texts, as `reylo migrate new` writes them: what the plan loses as comments at the top
-/// of the first, then each statement.
+/// of the first that drops anything, then each statement.
 pub fn file_texts(plan: &Plan, files: &[Vec<String>]) -> Vec<String> {
+    // What the plan loses heads the first file past its commits, which drops it: the files before
+    // each hold only an enum's new labels.
+    let commits = plan.statements.iter().filter(|s| *s == crate::diff::COMMIT).count();
+    let losing = commits.min(files.len().saturating_sub(1));
     files
         .iter()
         .enumerate()
         .map(|(k, statements)| {
             let mut head = Plan { statements: statements.clone(), ..Plan::default() };
-            if k == 0 {
+            if k == losing {
                 head.losses = plan.losses.clone();
                 head.narrowings = plan.narrowings.clone();
             }

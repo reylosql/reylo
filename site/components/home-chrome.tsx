@@ -1,5 +1,6 @@
 import { StarPill } from './star-pill';
-import { Mark, VariadicMark } from './migrate-landing';
+import { Wordmark } from './wordmark';
+import { VariadicMark } from './migrate-landing';
 import { githubUrl, introUrl } from '@/lib/layout.shared';
 import './home-landing.css';
 
@@ -13,9 +14,8 @@ import './home-landing.css';
 export function Nav({ stars }: { stars?: number }) {
   return (
     <nav className="ml-nav rh-nav">
-      <a className="ml-brand" href="/">
-        <Mark />
-        Reylo
+      <a className="ml-brand ml-wordmark" href="/" aria-label="Reylo">
+        <Wordmark />
       </a>
       <div className="ml-links rh-links">
         <a href={introUrl}>Docs</a>

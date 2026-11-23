@@ -64,13 +64,14 @@ export const pageGroups = [
   {
     label: 'Deployment',
     items: [
-      { title: 'Cloudflare D1', href: '/d1' },
-      { title: 'Durable Objects', href: '/durable-objects' },
-      { title: 'Cloudflare Hyperdrive', href: '/hyperdrive' },
+      // The biggest hosts first, then the rest by how many projects use them.
       { title: 'Neon', href: '/neon' },
       { title: 'Supabase', href: '/supabase' },
+      { title: 'Durable Objects', href: '/durable-objects' },
       { title: 'PlanetScale', href: '/planetscale' },
+      { title: 'Cloudflare D1', href: '/d1' },
       { title: 'Turso', href: '/turso' },
+      { title: 'Cloudflare Hyperdrive', href: '/hyperdrive' },
       { title: 'Next.js', href: '/nextjs' },
       { title: 'CI', href: '/deployment' },
     ],

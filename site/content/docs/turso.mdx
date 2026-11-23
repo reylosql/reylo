@@ -21,9 +21,7 @@ Turso Cloud runs libSQL, a fork of SQLite, so everything on the [SQLite](/sqlite
 | Rust | Types against the same local file; sqlx has no libSQL client, so its queries can't run on Turso Cloud |
 </Rust>
 
-The examples on this page use this schema:
-
-<Details summary="View the schema behind the examples" id="schema">
+<PageSchema>
 
 ```sql file="schema.sql" dialect="sqlite"
 create table users (
@@ -41,7 +39,7 @@ create table docs (
 create index docs_emb on docs (libsql_vector_idx(emb));
 ```
 
-</Details>
+</PageSchema>
 
 ## Turso Cloud
 
@@ -99,12 +97,12 @@ Point [`direct_url`](/configuration#direct_url) at it:
 
 ```yaml title=".reylo.yaml"
 # the path starts at package.json
-direct_url: file:./dev.db
+direct_url: sqlite:./dev.db
 ```
 
 Why a local file:
 
-- A `DATABASE_URL` that holds your `libsql://` URL fails the type check, which reads only `file:` and `sqlite:` URLs for SQLite. A `direct_url` wins over it.
+- A `DATABASE_URL` that holds your `libsql://` URL fails the type check, which reads a `sqlite:` URL for SQLite. A `direct_url` wins over it.
 - In development, your app can open the same file: `createClient({ url: "file:dev.db" })` needs no auth token.
 - In CI, [run your migrations into the file](/deployment#sqlite) before the type check. The job needs no Turso token.
 

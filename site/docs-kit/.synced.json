@@ -1,6 +1,6 @@
 {
   "from": "/Users/colin/Documents/docs-kit",
-  "commit": "92b7c2f",
+  "commit": "ca7111c",
   "files": {
     "package.json": "af6396782b451920bfadc86f431074008257e5062bb8a4a5f7408ade217bcc04",
     "README.md": "fb05c59ca63df8c590ef074cdc7e35085d9644253a11673dd51e3bc4f9526dda",
@@ -29,7 +29,7 @@
     "src/mdx/diagnostics.ts": "45bfb8f90ff186fa441dd7a750db5ac892286eec6ee380e4c928c5b1deac23b0",
     "src/mdx/hanging-indent.ts": "8a6c1d306dbe02467b7ac7820a4507bc907ac6c714e65f2c3f60de36aedd22cc",
     "src/mdx/index.ts": "c2fbd156994a1f05af580f7a06e5ee35b29bac2eb484c81bbc64e1ae31e1b29f",
-    "src/mdx/options.ts": "f0c443fcb220d3110e908fd1c6d748ef68e1ecf2d8798221e23d5d0d2154c211",
+    "src/mdx/options.ts": "8d0978798069051f68df14a4c8819330157e4dcb4d423cd8b8fb4573386002b5",
     "src/mdx/recma-shared-popups.ts": "b12d67312b9875a469adba9ed4ca77b788f8f7958c0119451a9b4e16638ae427",
     "src/mdx/remark-sections.ts": "f24119c0c1840f91d496ac454af460ae90108be6aad41b4090def52d3a40185c",
     "src/mdx/twoslash.ts": "845c73de8f06b79245ca7558b704f756919b19376bb4faaf63b1a78bbde21faa",

@@ -36,8 +36,8 @@ DATABASE_URL=mysql://root@localhost:3306/app
 ```
 
 ```sh title=".env" tab="SQLite" tab-group="dialect"
-# or sqlite:; the path starts at package.json
-DATABASE_URL=file:./app.db
+# the path starts at package.json
+DATABASE_URL=sqlite:./app.db
 ```
 
 Point it at a direct connection, not a pooler. A pooler in transaction mode, such as PgBouncer, can fail to describe a query. You can interpolate other variables from your environment to construct a connection string.

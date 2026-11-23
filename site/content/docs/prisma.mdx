@@ -11,12 +11,10 @@ description: How to move a Prisma project's queries to Reylo. The schema changes
 | --- | --- |
 | Stays | `schema.prisma` and Prisma Migrate |
 | Goes | Prisma Client, its generated types and `prisma generate` |
-| Needs | TypeScript 7.1 (currently in nightly builds), and a migrated database wherever the type check or the build runs |
+| Needs | TypeScript 7.1 (in beta), and a migrated database wherever the type check or the build runs |
 | Examples | Postgres |
 
-The examples on this page use this schema:
-
-<Details summary="View the schema behind the examples" id="schema">
+<PageSchema>
 
 ```sql file="schema.sql" dialect="postgres"
 create table users (
@@ -36,7 +34,7 @@ create table posts (
 );
 ```
 
-</Details>
+</PageSchema>
 
 ## Why move
 

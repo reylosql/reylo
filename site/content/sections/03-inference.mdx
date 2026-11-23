@@ -438,13 +438,11 @@ const posts = await searchPosts.run(db, { filters: await request.json() });
 
 Each filter read with `->>` is a value the database can plan with. On Postgres and MySQL, a filter left out drops out of the plan, and one given can use an index.
 
-<Details summary="Which filters use an index, in each dialect" id="filter-indexes">
+<Callout type="warning" title="Indexes">
 
-- **Postgres** plans each run with its values on pg and PGlite. On postgres.js and Bun.sql, it can switch to one generic plan after five runs, which reads the whole table. To keep planning each run with its values, create the client with `connection: { plan_cache_mode: "force_custom_plan" }`. The same filter read from `jsonb_to_record` reads the whole table under every plan.
-- **MySQL** plans each run with its values. The same filter read from `json_table` reads the whole table.
-- **SQLite** plans a statement before its values are bound, so a filter that may be left out reads every row.
+A given filter can use an index on Postgres only when each run is planned with its values. Every Postgres driver plans each run, except postgres.js and Bun.sql, and Drizzle over them. Create those clients with `connection: { plan_cache_mode: "force_custom_plan" }` ([postgres.js](/postgres#postgresjs)), or after five runs Postgres can switch to a plan that reads the whole table. MySQL plans each run. SQLite reads every row for this query.
 
-</Details>
+</Callout>
 
 ## Unique keys
 
@@ -713,14 +711,14 @@ An insert that returns its row resolves to exactly that row:
 
 ```sql file="inferred_create_user.sql" dialect="postgres"
 insert into users (name)
-values (:name::text)
-returning id
+values (:name)
+returning id, name, created_at
 ```
 
 ```sql file="inferred_create_user.sql" dialect="sqlite"
 insert into users (name)
-values (:name::text)
-returning id
+values (:name)
+returning id, name, created_at
 ```
 
 </InferenceCard>
@@ -731,6 +729,7 @@ So does an upsert, whether it inserts the row or updates it:
 
 ```sql file="upserts.sql" dialect="postgres" play="Upserts"
 insert into users (name, email)
+-- the cast makes email required, though its column takes null
 values (:name, :email::text)
 on conflict (email) do update
   set name = excluded.name
@@ -739,6 +738,7 @@ returning id, name
 
 ```sql file="upserts.sql" dialect="sqlite"
 insert into users (name, email)
+-- the cast makes email required, though its column takes null
 values (:name, :email::text)
 on conflict (email) do update
   set name = excluded.name
@@ -794,6 +794,7 @@ create table events (
 ```
 
 ```sql file="inferred_event_kinds.sql" dialect="postgres"
+-- hover events: kind's check constraint lists its values
 select id, kind
 from events
 order by id desc
@@ -978,12 +979,14 @@ create table events (
 ```
 
 ```sql file="inferred_event_payloads.sql" dialect="postgres"
+-- hover events: payload's type comes from its JSON Schema
 select id, payload
 from events
 where id = :id::int
 ```
 
 ```sql file="inferred_event_payloads.sql" dialect="mysql"
+-- hover events: payload's type comes from its JSON Schema
 select id, payload
 from events
 where id = :id::int
@@ -1025,9 +1028,30 @@ A schema can nest objects and arrays, and check every value in them:
 
 <InferenceCard>
 
+```sql schema dialect="postgres"
+create table orders (
+  id serial primary key,
+  details jsonb not null
+);
+```
+
+```sql schema dialect="mysql"
+create table orders (
+  id int auto_increment primary key,
+  details json not null
+);
+```
+
+```sql schema dialect="sqlite"
+create table orders (
+  id integer primary key,
+  details text not null
+) strict;
+```
+
 ```sql file="record_order.sql" dialect="all"
-insert into events (kind, payload)
-values ('order', :order::json('{
+insert into orders (details)
+values (:order::json('{
   "type": "object",
   "properties": {
     "customer": { "type": "string", "format": "email" },
@@ -1465,12 +1489,14 @@ create table events (
 ```
 
 ```sql file="inferred_event_payloads_union.sql" dialect="postgres"
+-- hover events: payload's type comes from its JSON Schema
 select id, payload
 from events
 where id = :id::int
 ```
 
 ```sql file="inferred_event_payloads_union.sql" dialect="mysql"
+-- hover events: payload's type comes from its JSON Schema
 select id, payload
 from events
 where id = :id::int

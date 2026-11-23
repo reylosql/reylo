@@ -37,7 +37,7 @@ test("await migrate() runs reylo migrate deploy, resolves to what it ran, and re
     // A draft refuses the deploy, with what to do about it.
     writeFileSync(join(root, "reylo", "migrations", "20991231000000_draft.sql"), "alter table users add column bio text;\n");
     await assert.rejects(migrate({ url: "file:./prod.sqlite" }), /^Error: reylo migrate deploy refused: The lock doesn't list 20991231000000_draft\.sql yet\n  Run it in development, which locks it: reylo migrate dev/);
-    // A migration that fails leads the error, with its own, before the log.
+    // A migration that fails on this database rolls back, and rejects with what to run next.
     rmSync(join(root, "reylo", "migrations", "20991231000000_draft.sql"));
     writeFileSync(join(root, "reylo", "schema.sql"), "create table users (id integer primary key, name text not null);\ncreate unique index users_name on users (name);\n");
     for (const args of [["new", "unique_name"], ["dev"]]) {
@@ -47,7 +47,7 @@ test("await migrate() runs reylo migrate deploy, resolves to what it ran, and re
     const prod = new DatabaseSync(join(root, "prod.sqlite"));
     prod.exec("insert into users (name) values ('ada'), ('ada')");
     prod.close();
-    await assert.rejects(migrate({ url: "file:./prod.sqlite" }), /^Error: reylo migrate deploy failed: \d{14}_unique_name\.sql: UNIQUE constraint failed: users\.name\nApplying to /);
+    await assert.rejects(migrate({ url: "file:./prod.sqlite" }), /^Error: reylo migrate deploy failed: The migration \d{14}_unique_name\.sql failed and was rolled back\n  UNIQUE constraint failed: users\.name\n  Nothing was recorded, so the next deploy runs it again\.\n  Fix the file, lock the fix and deploy again: reylo migrate dev, then reylo migrate deploy\n  If another database already ran it, write a new migration instead: reylo migrate new <name>$/);
   } finally {
     process.chdir(was);
   }

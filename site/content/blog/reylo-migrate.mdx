@@ -16,6 +16,7 @@ Reylo Migrate is SQL-first schema modeling and migrations for Postgres, SQLite a
 Your schema is plain SQL in one file, not a DSL like Prisma's.
 
 ```sql title="schema.sql"
+-- tables, with check constraints
 create table users (
   id integer primary key,
   email text not null check (email like '%@%'),
@@ -23,14 +24,18 @@ create table users (
   updated_at timestamptz not null default now()
 );
 
+-- partial indexes
 create index users_unverified on users (id) where verified_at is null;
 
+-- custom functions
 create function touch() returns trigger language plpgsql as $$
 begin new.updated_at := now(); return new; end $$;
 
+-- triggers
 create trigger users_touch before update on users
   for each row execute function touch();
 
+-- views
 create view verified_users as
   select id, email from users where verified_at is not null;
 ```

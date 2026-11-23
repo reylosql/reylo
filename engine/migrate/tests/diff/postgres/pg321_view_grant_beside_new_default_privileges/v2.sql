@@ -1,0 +1,10 @@
+create table kept (id integer primary key);
+create table bookings (id integer primary key, room integer not null, total numeric not null);
+create view room_totals as select room, sum(total) as total from bookings group by room;
+grant select on room_totals to diff_reporting;
+grant select, insert, update (total) on bookings to diff_app;
+alter default privileges grant select on tables to diff_reporting;
+create view rooms as select distinct room from bookings;
+create schema reports;
+alter default privileges in schema reports grant insert on tables to diff_app;
+create table reports.daily (day date primary key);

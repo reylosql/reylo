@@ -2,6 +2,7 @@ import path from 'node:path';
 import { createHighlighter } from 'shiki';
 import type { Plugin } from 'vite';
 import { pageFiles } from './page-files.ts';
+import { declarations } from './table-hovers.ts';
 import { collect, collectFiles, DIALECT_NAME, type Dialect, type MdNode, INFERENCE_CARD, isStatement, moduleTypes, type Modules, parsePage, readModules, SCHEMA_FILE } from './remark-mapper.ts';
 import { formatType, resultType } from '../../src/type-format.ts';
 
@@ -44,33 +45,6 @@ const slug = (s: string) => s.toLowerCase().replace(/`/g, '').replace(/[^a-z0-9]
 
 /** A paragraph's first sentence, without the colon that hands off to its example. */
 const firstSentence = (text: string) => (/^(.*?[.:])(\s|$)/.exec(text)?.[1] ?? text).replace(/:$/, '.');
-
-/** Each `create table` of a schema, by the table's name, with the comment lines above it. */
-function declarations(schema: string): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const statement of statements(schema)) {
-    const name = /^(?:\s*--[^\n]*\n)*\s*create\s+(?:temporary\s+)?table\s+(?:if\s+not\s+exists\s+)?[`"]?(\w+)/i.exec(statement)?.[1];
-    if (name) out.set(name.toLowerCase(), `${statement.trim()};`);
-  }
-  return out;
-}
-
-/** A script's statements, split at each semicolon outside a string. */
-function statements(script: string): string[] {
-  const out: string[] = [];
-  let start = 0;
-  for (let i = 0; i < script.length; i++) {
-    const c = script[i];
-    if (c === "'") i = script.indexOf("'", i + 1) < 0 ? script.length : script.indexOf("'", i + 1);
-    else if (c === '-' && script[i + 1] === '-') i = script.indexOf('\n', i) < 0 ? script.length : script.indexOf('\n', i);
-    else if (c === ';') {
-      out.push(script.slice(start, i));
-      start = i + 1;
-    }
-  }
-  if (script.slice(start).trim()) out.push(script.slice(start));
-  return out;
-}
 
 /** Where a statement names one of the tables, as [start, end, table]: an identifier outside strings and comments, not after a dot. */
 function tableNames(sql: string, tables: Map<string, string>): [number, number, string][] {
@@ -194,7 +168,8 @@ export async function buildHomeData(site = process.cwd(), modules: Modules = rea
   const ts = main.split('\n').filter((l) => !l.startsWith('// @')).join('\n').replace(/\n+author\?\.[\s\S]*$/, '');
   const data: HomeData = {
     examples,
-    intro: { ...statement(intro.node.value, pageTables.postgres ?? new Map()), ts: lines(ts, 'ts'), type: lines(`const author: ${formatType(resultType(row, cardinality), 44)}`, 'ts') },
+    // The hero shows the statement without the docs' leading comment, which points at the hovers.
+    intro: { ...statement(intro.node.value.replace(/^(?:--[^\n]*\n)+/, ''), pageTables.postgres ?? new Map()), ts: lines(ts, 'ts'), type: lines(`const author: ${formatType(resultType(row, cardinality), 44)}`, 'ts') },
   };
   highlighter.dispose();
   return data;

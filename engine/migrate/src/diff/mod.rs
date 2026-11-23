@@ -74,6 +74,11 @@ pub enum Kind {
 /// it leaves where the target doesn't name it.
 pub const ENVIRONMENTS: &str = "may be the environment's";
 
+/// An `extra` line of a revoke of what an object is given as it is made (by its owner's default
+/// privileges), which stands for nothing on an object already there: made and dropped only with
+/// its owner. Its `after` names what gives the privilege.
+pub const AS_MADE: &str = "revoked as it is made";
+
 /// One object of a schema.
 #[derive(Clone, Debug, Default)]
 pub struct Object {
@@ -104,6 +109,15 @@ pub struct Object {
     pub after: BTreeSet<String>,
 }
 
+/// Whether a grant an object is given as it is made, by what its `after` names (its owner's default
+/// privileges), is given by those alone where the plan makes them: they are there only after the
+/// objects it makes, since grants come after the objects they are on. A grant with grant option is
+/// given only by those that carry it, whose definition says so as the grant's does.
+fn given_by_new(o: &Object, to: &Schema, creates: &BTreeSet<String>) -> bool {
+    let by: Vec<&String> = o.after.iter().filter(|a| to.objects.get(*a).is_some_and(|d| o.def != "true" || d.def == "true")).collect();
+    o.kind == Some(Kind::Grant) && !by.is_empty() && by.iter().all(|a| creates.contains(*a))
+}
+
 /// How an object's definition changes when it differs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Change {
@@ -111,8 +125,9 @@ pub enum Change {
     #[default]
     Replace,
     /// Changed in place by statements its database decides from both definitions; `blocks` says
-    /// whether the change is refused while a view, rule, policy or trigger depends on it (a
-    /// column's type), so those are dropped before it and created again after.
+    /// whether every change of it is refused while a view, rule, policy or trigger depends on it, so
+    /// those are dropped before it and created again after. A change refused only for what it
+    /// changes (a column's type, an enum's labels removed) is the alterer's `remakes`.
     Alter { blocks: bool },
 }
 
@@ -163,9 +178,10 @@ pub trait Alterer: Send {
         let _ = (from, to);
         None
     }
-    /// Whether a blocking change of `from` to `to` changes the object under the functions that
-    /// depend on it (an enum made again, a column's type), so that each is made again around the
-    /// change rather than left on what it was, or refusing the change.
+    /// Whether a change of `from` to `to` changes the object under what depends on it (an enum
+    /// made again, a column's type), which the server refuses while a view, rule, policy or trigger
+    /// is on it: those go before the change and come back after, and so do the functions that
+    /// depend on it, rather than being left on what it was, or refusing the change.
     fn remakes(&self, from: &Object, to: &Object) -> bool {
         let _ = (from, to);
         false
@@ -337,15 +353,18 @@ pub const COMMIT: &str = "commit;\nbegin";
 
 impl Plan {
     /// The plan as the plans each transaction runs: one, or several where it commits partway, the
-    /// first with what the whole loses.
+    /// last with what the whole loses, since those before it hold only an enum's new labels.
     pub fn transactions(&self) -> Vec<Plan> {
-        let mut out = vec![Plan { losses: self.losses.clone(), renames: self.renames.clone(), narrowings: self.narrowings.clone(), ..Plan::default() }];
+        let mut out = vec![Plan::default()];
         for s in &self.statements {
             if s == COMMIT {
                 out.push(Plan::default());
             } else if let Some(last) = out.last_mut() {
                 last.statements.push(s.clone());
             }
+        }
+        if let Some(last) = out.last_mut() {
+            (last.losses, last.renames, last.narrowings) = (self.losses.clone(), self.renames.clone(), self.narrowings.clone());
         }
         out
     }
@@ -1106,6 +1125,21 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         }
     }
 
+    // A revoke of what an object is given as it is made is made only with its owner, or with the
+    // change of the column that makes it (an identity's sequence), and dropped only with its owner:
+    // an object already there was never given it. One made is kept even where what gives it is new,
+    // since the role the plan runs as makes the object, under its own default privileges.
+    let as_made = |o: &Object| o.extra.iter().any(|l| l == AS_MADE);
+    let made = |w: &String| creates.contains(w) || (alters.contains_key(w) && to.objects.get(w).is_some_and(|c| c.kind == Some(Kind::Column)));
+    let unmade: Vec<String> = creates.iter().filter(|id| to.objects.get(*id).is_some_and(|o| as_made(o) && o.owner.as_ref().is_none_or(|w| !made(w)))).cloned().collect();
+    let undropped: Vec<String> = drops.iter().filter(|id| from.objects.get(*id).is_some_and(|o| as_made(o) && o.owner.as_ref().is_none_or(|w| !drops.contains(w)))).cloned().collect();
+    for id in unmade {
+        creates.remove(&id);
+    }
+    for id in undropped {
+        drops.remove(&id);
+    }
+
     // An object goes with its owner: a dropped table's columns need no statement of their own, and
     // a created table's inline columns neither, unless the drops depend on each other in a circle
     // that dropping one of them first breaks.
@@ -1121,7 +1155,7 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
     // plan makes too is made by name, before that one attaches it.
     let created_with_owner = |id: &str| {
         let o = &to.objects[id];
-        o.inline && o.owner.as_deref().is_some_and(|w| creates.contains(w)) && o.goes_with.as_deref().is_none_or(|g| !creates.contains(g))
+        o.inline && o.owner.as_deref().is_some_and(|w| creates.contains(w)) && o.goes_with.as_deref().is_none_or(|g| !creates.contains(g)) && !given_by_new(o, to, &creates)
     };
 
     // A column whose new default calls a function the plan makes, which reads the column, changes
@@ -1654,6 +1688,18 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         }
     }
 
+    // Where the plan commits partway (an enum's labels added before what uses them), the change that
+    // commits needs nothing but its type, which is there, and everything else runs after it: what
+    // commits first is the labels alone, so a deploy or a push that stops after it has dropped
+    // nothing, nor left an object to make again in a migration it never ran.
+    let commits: BTreeSet<usize> = (0..ops.len()).filter(|k| matches!(&ops[*k], Op::Alter(id) if alters[id].iter().any(|s| s == COMMIT))).collect();
+    for &k in &commits {
+        after[k].clear();
+        for other in (0..ops.len()).filter(|o| !commits.contains(o)) {
+            after[other].insert(k);
+        }
+    }
+
     // Kahn's order, taking the ready op of the earliest kind (drops first, then changes, then
     // creates), so the plan reads in the order a person would write it.
     let rank = |op: &Op| -> (u8, i32, String) {
@@ -1706,8 +1752,10 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                 // A foreign table's rows are its server's.
                 let table = if o.kind == Some(Kind::Column) { o.owner.as_ref().and_then(|t| from.objects.get(t)) } else { Some(o) };
                 let foreign = table.is_some_and(|t| t.extra.iter().any(|l| l.starts_with("shape foreign")));
-                // A generated column's values are its expression's, which loses nothing.
-                let generated = o.extra.iter().any(|l| l == GENERATED);
+                // A generated column's values are its expression's, which loses nothing, and so
+                // are those of a column held from one (a partition's).
+                let marked = |c: &Object| c.extra.iter().any(|l| l == GENERATED);
+                let generated = marked(o) || (o.kind == Some(Kind::Column) && o.deps.iter().any(|d| from.objects.get(d).is_some_and(|c| c.kind == Some(Kind::Column) && c.owner != o.owner && marked(c))));
                 if matches!(o.kind, Some(Kind::Table | Kind::Column)) && !in_lost_table && !foreign && !generated {
                     plan.losses.push(id.clone());
                 }

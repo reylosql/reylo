@@ -9,9 +9,7 @@ description: Reylo is an engine that infers type information from SQL queries, r
 
 Reylo is a type inference engine for SQL. It lets you import SQL queries into your TypeScript files with full type information.
 
-If you have a query like this:
-
-<SchemaQuery>
+<PageSchema>
 
 ```sql file="schema.sql" tab="Postgres" tab-group="dialect"
 create extension if not exists pg_jsonschema;
@@ -115,15 +113,18 @@ create table events (
 ) strict;
 ```
 
+</PageSchema>
+
+If you have a query like this:
+
 ```sql title="get_author.sql"
+-- hover a table to see its declaration
 select u.id, u.name, count(p.id)::int as post_count
 from users u
 left join posts p on p.user_id = u.id
 where u.id = :id::int
 group by u.id
 ```
-
-</SchemaQuery>
 
 You can import it like this. Hover over `author` to see the inferred type!
 
@@ -134,12 +135,13 @@ import getAuthor from "./get_author.sql";
 
 const db = postgres(process.env.DATABASE_URL);
 const author = await getAuthor.run(db, { id: 1 });
-
-author?.
-//      ^|
 ```
 
+<Callout title="Content mappers">
+
 Reylo relies on the Content Mapper API (introduced in TypeScript 7.1) to let you directly import `.sql` files into TypeScript.
+
+</Callout>
 
 Reylo infers type information about both the parameters and the return types. Throughout the docs, you will see "inference cards" like this where you can quickly see both a query and its inferred type information.
 
@@ -151,7 +153,11 @@ select id, name, email from users where id = :id::int
 
 </InferenceCard>
 
-Reylo gets type information about a query by sending it to a *live dev database* and getting back the database's own type descriptors. It then maps these to TypeScript types. Reylo is the perfect option for the agent era:
+Reylo gets type information about a query by sending it to a *live dev database* and getting back the database's own type descriptors. It then maps these to TypeScript types.
+
+<HowItWorksDiagram />
+
+Reylo is the perfect option for the agent era:
 
 <div className="dk-features">
 
@@ -189,8 +195,12 @@ author.
 
 </Rust>
 
-### Migrations
+---
 
-Reylo [writes a migration](/migrate/docs) from each change you make to `schema.sql`, and runs the migrations on your database:
+<Callout title="Looking for a schema migration tool?">
 
-<MigrationsDiagram />
+Try Reylo Migrate. Model your schema in `schema.sql`, then generate migrations or write your own.
+
+<a className="callout-cta" href="/migrate/docs">Read the Reylo Migrate docs <span aria-hidden="true">→</span></a>
+
+</Callout>

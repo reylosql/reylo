@@ -156,7 +156,7 @@ const MOVED: Record<string, string> = {
   "search-several-columns": "/typescript#run",
   "setup": "/typescript#setup",
   "setup-bun": "/typescript#setup-bun",
-  "setup-cloudflare-workers": "/typescript#setup-cloudflare-workers",
+  "setup-cloudflare-workers": "/d1",
   "setup-esbuild": "/typescript#setup-esbuild",
   "setup-jest": "/typescript#setup-jest",
   "setup-nextjs": "/typescript#setup-nextjs",

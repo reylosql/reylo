@@ -21,8 +21,39 @@ import './home-landing.css';
 type Dialect = 'postgres' | 'mysql' | 'sqlite';
 
 /** The examples the homepage shows, by the Inference section's anchors, in its order. Named parameters are left out: `:name` is Reylo's addition to SQL, not what Reylo infers. */
-const SHOWN = ['left-joins', 'computed-columns', 'nullable-parameters', 'unique-keys', 'aggregates', 'window-functions', 'subqueries:2', 'returning-inserts', 'unions', 'json', 'json-schema', 'oneof'];
-const EXAMPLES = SHOWN.map((id) => data.examples.find((e) => e.id === id)).filter((e): e is HomeExample => !!e);
+const SHOWN = [
+  'left-joins',
+  'left-joins:2',
+  'computed-columns',
+  'nullable-parameters',
+  'filtering-by-a-list',
+  'unique-keys',
+  'aggregates',
+  'aggregates:2',
+  'window-functions',
+  'returning-inserts',
+  'returning-inserts:2',
+  'returning-inserts:4',
+  'unions',
+  'json',
+  'json-schema',
+  // The longest queries last, so that clicking through in order meets the short ones first.
+  'oneof',
+  'subqueries:2',
+  'bulk-inserts',
+  'nested-fetching',
+  'typed-json:2',
+];
+/** A tab's own name and caption where the card is a later one in its section, whose heading and lede lean on the card before it. */
+const OWN: Record<string, { title?: string; lede?: string }> = {
+  'left-joins:2': { title: 'Narrowing in where' },
+  'aggregates:2': { title: 'Rollups' },
+  'returning-inserts:2': { title: 'Upserts', lede: 'An upsert returns one row, whether it inserts the row or updates it.' },
+  'returning-inserts:4': { title: 'Old and new' },
+};
+const EXAMPLES = SHOWN.map((id) => data.examples.find((e) => e.id === id))
+  .filter((e): e is HomeExample => !!e)
+  .map((e) => ({ ...e, ...OWN[e.id] }));
 
 
 const DIALECT_NAMES: Record<Dialect, string> = { postgres: 'Postgres', mysql: 'MySQL', sqlite: 'SQLite' };
@@ -47,7 +78,7 @@ export function HomeLanding({ stars }: { stars?: number }) {
 
 /* ── The install ────────────────────────────────────────────────────────── */
 
-const INSTALL = 'npm add reylo';
+const INSTALL = 'npm i reylo';
 
 function CopyIcon({ done }: { done: boolean }) {
   return done ? (
@@ -254,8 +285,9 @@ function Examples() {
   return (
     <section className="rh-examples">
       <header className="rh-section-head">
-        <h2>What Reylo infers</h2>
-        <p>Parameters, columns, nullability, cardinality and nested JSON shapes, from your database's own analysis of each query.</p>
+        <h2>The full power of SQL in the palm of your hand</h2>
+        <Blade />
+        <p>No lossy DSL and no CRUD-limited ORM. Reylo gives you (and your agents) back the freedom to write complex queries without sacrificing DRY.</p>
       </header>
       <div className="rh-ex">
         <Card variant={example.variants[shown]!} dialects={Object.keys(example.variants) as Dialect[]} dialect={shown} onDialect={setDialect} tabs={tabs} />
@@ -389,6 +421,11 @@ const FEATURES: { title: string; body: ReactNode; icon: ReactNode }[] = [
   },
 ];
 
+/** The rule under a section's heading: a short blade, about a lightsaber's proportions, in the yellow, lit by night. */
+function Blade() {
+  return <span className="rh-blade" aria-hidden="true" />;
+}
+
 /** The databases and hosts in two rows, as even as their count allows, each centred. */
 const LOGOS = [...DATABASES, ...HOSTS];
 const LOGO_ROWS = [LOGOS.slice(0, Math.ceil(LOGOS.length / 2)), LOGOS.slice(Math.ceil(LOGOS.length / 2))];
@@ -398,6 +435,7 @@ function Features() {
     <section className="rh-features">
       <header className="rh-section-head">
         <h2>Why Reylo</h2>
+        <Blade />
       </header>
       <div className="rh-grid">
         {FEATURES.map((f) => (
@@ -443,6 +481,7 @@ function End() {
   return (
     <section className="ml-end rh-end">
       <h2>Ship faster with Reylo</h2>
+        <Blade />
       <Install centered />
     </section>
   );

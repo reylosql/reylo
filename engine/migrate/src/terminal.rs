@@ -116,6 +116,15 @@ pub fn println(text: &str) {
     let _ = out.flush();
 }
 
+/// `println` on stderr: for a command whose stdout is its result alone (`db introspect`'s SQL).
+pub fn eprintln(text: &str) {
+    let mut l = line();
+    clear(&mut l);
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(err, "{text}");
+    let _ = err.flush();
+}
+
 /// `text` cut to `columns` of the terminal's cells, so that the spinner's line never wraps, which
 /// would leave a line behind that a repaint can't reach.
 fn fitted(text: &str, columns: usize) -> String {

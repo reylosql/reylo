@@ -15,9 +15,7 @@ A Supabase project is a Postgres database, so everything on the [Postgres](/post
 | Migrations | The Supabase CLI's, in `supabase/migrations`, applied to the local database, or [`reylo migrate`](/migrate/docs) through the session pooler or the direct connection, never port 6543 |
 | JavaScript client | Calls Supabase's REST API, so `.run()` doesn't take it ([Drivers](#drivers)) |
 
-The examples on this page use this schema:
-
-<Details summary="View the schema behind the examples" id="schema">
+<PageSchema>
 
 ```sql file="schema.sql" dialect="postgres"
 create table notes (
@@ -29,7 +27,7 @@ create table notes (
 );
 ```
 
-</Details>
+</PageSchema>
 
 ## Connection
 
