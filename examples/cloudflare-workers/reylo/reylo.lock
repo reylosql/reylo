@@ -1,4 +1,5 @@
 # On a conflict, keep main's and run reylo migrate dev
 schema: 1838d124
 migrations:
-  - 20261021000000_users_and_posts.sql 258a4848
+  - name: 20261021000000_users_and_posts.sql
+    checksum: 258a4848

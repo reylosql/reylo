@@ -3132,7 +3132,7 @@ async fn a_lock_that_cant_be_read_is_refused() {
     assert_eq!(p.dev().await, 0, "{}", p.peek());
     p.file("20261027110000_draft.sql", "create table b (id integer);");
     let lock = p.dir.join(reylo_migrate::lock::LOCK);
-    std::fs::write(&lock, b"migrations:\n  - 20261027100000_a.sql \xff\n").unwrap();
+    std::fs::write(&lock, b"migrations:\n  - name: 20261027100000_a.sql\n    checksum: \xff\n").unwrap();
     p.output();
     assert_eq!(p.migrate().await, 1);
     assert_has!(p.output(), r"✗ Reylo can't read \S*reylo\.lock: [^\n]*UTF-8");

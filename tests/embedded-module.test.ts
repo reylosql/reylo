@@ -94,7 +94,7 @@ test("a lock with git's conflict markers, or one that lists a file the folder la
   const [users] = readdirSync(join(root, "reylo", "migrations"));
   const lock = join(root, "reylo", "reylo.lock");
   const text = readFileSync(lock, "utf8");
-  writeFileSync(lock, text.replace(/^migrations:\n/m, "migrations:\n<<<<<<< HEAD\n  - 20261110000000_a.sql 0123abcd\n=======\n  - 20261110000000_b.sql 4567cdef\n>>>>>>> branch\n"));
+  writeFileSync(lock, text.replace(/^migrations:\n/m, "migrations:\n<<<<<<< HEAD\n  - name: 20261110000000_a.sql\n    checksum: 0123abcd\n=======\n  - name: 20261110000000_b.sql\n    checksum: 4567cdef\n>>>>>>> branch\n"));
   assert.match((await projectMigrations(root)).error ?? "", /^The lock has a merge conflict, in reylo\/reylo\.lock: keep main's lines, then run reylo migrate dev/);
   assert.match((await embeddedModule(root)).code, /^export const embedded = \{"error":"The lock has a merge conflict, in reylo\/reylo\.lock/);
   writeFileSync(lock, text);
@@ -120,12 +120,26 @@ test("a migration edited after it was locked, or lines merged out of order, give
   // line is chained after users, not after the line before it.
   const lock = join(root, "reylo", "reylo.lock");
   const lines = readFileSync(lock, "utf8");
-  const [first] = lines.match(/^  - .*$/gm)!;
+  const sum = /^    checksum: '?([0-9a-f]+)'?$/m.exec(lines)![1]!;
   const age = "20990101000000_age.sql";
   writeFileSync(join(root, "reylo", "migrations", age), "alter table users add column age int;\n");
-  const sum = first!.split(" ").pop()!;
-  writeFileSync(lock, lines.replace(/^  - .*\n(?![\s\S]*^  - )/m, (bioLine) => `  - ${age} ${lockChecksum(sum, age, "alter table users add column age int;")}\n${bioLine}`));
+  writeFileSync(lock, lines.replace(/^  - name: .*\n    checksum: .*\n(?![\s\S]*^  - )/m, (bioEntry) => `  - name: ${age}\n    checksum: '${lockChecksum(sum, age, "alter table users add column age int;")}'\n${bioEntry}`));
   assert.match((await projectMigrations(root)).error ?? "", new RegExp(`^The lock was merged out of order at ${bio!.replace(".", "\\.")}`));
+});
+
+test("a lock written up to 0.8.3, each entry one line, gives the same migrations", async () => {
+  const root = project();
+  await change(root, "users", "create table users (id integer primary key, name text not null);\n");
+  await change(root, "bio", "create table users (id integer primary key, name text not null, bio text);\n");
+  migrate(root, "lock");
+  const lock = join(root, "reylo", "reylo.lock");
+  const text = readFileSync(lock, "utf8");
+  assert.match(text, /^migrations:\n  - name: \d{14}_users\.sql\n    checksum: '?[0-9a-f]{8}'?\n  - name: \d{14}_bio\.sql\n/m);
+  const before = await projectMigrations(root);
+  writeFileSync(lock, text.replace(/^  - name: (\S+)\n    checksum: '?([0-9a-f]+)'?$/gm, "  - $1 $2"));
+  assert.match(readFileSync(lock, "utf8"), /^migrations:\n  - \d{14}_users\.sql [0-9a-f]{8}\n  - \d{14}_bio\.sql [0-9a-f]{8}\n$/m);
+  assert.deepEqual(await projectMigrations(root), before);
+  assert.equal(before.list?.length, 2);
 });
 
 test("with no lock, the migrations run in name order, init.sql first", async () => {

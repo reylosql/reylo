@@ -1,16 +1,16 @@
-//! `reylo.lock`, the project's lock: the migrations in the order they run, each its name and a checksum chained to the line before, and
+//! `reylo.lock`, the project's lock: the migrations in the order they run, each its name and a checksum chained to the entry before, and
 //! the checksum of `schema.sql` from the last time the migrations were proven to reach it. Two
 //! branches that each add a migration both append to it, so git conflicts on it when the second one
 //! merges, which is the point: before anything is deployed, one branch's migrations must move after
 //! the other's (keep main's lines, then `reylo migrate dev`). The chain makes an edit, a
 //! deletion or a reordering visible without a database: a wrong "accept both" breaks it at the
-//! first line out of place. Only Reylo writes it, after applying what it lists to a development
+//! first entry out of place. Only Reylo writes it, after applying what it lists to a development
 //! database (`dev`) or reading what a database applied (`history pull`), so its checksums certify
 //! what ran.
 
 use crate::cache::{hex, Sha256};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -54,12 +54,47 @@ pub enum State {
     Lock(Lock),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct LockFile {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     schema: Option<String>,
     #[serde(default)]
-    migrations: Vec<String>,
+    migrations: Vec<EntryFile>,
+}
+
+/// An entry of `migrations`: an object with its `name` and its `checksum`, or, as locks were
+/// written up to 0.8.3, one string with the two split by a space. Each value is read as the text
+/// it is, so a checksum of digits alone keeps its leading zeros. A key it doesn't know is refused:
+/// a later version wrote it, and this one would drop it when it writes the lock again.
+struct EntryFile(Entry);
+
+impl<'de> Deserialize<'de> for EntryFile {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = EntryFile;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a migration's name and its checksum")
+            }
+            fn visit_str<E: serde::de::Error>(self, line: &str) -> Result<EntryFile, E> {
+                let (name, sum) = line.trim().split_once(' ').ok_or_else(|| E::custom(format!("\"{line}\" is a migration's name and its checksum")))?;
+                Ok(EntryFile(Entry { name: name.trim().to_string(), sum: sum.trim().to_string() }))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<EntryFile, A::Error> {
+                use serde::de::Error;
+                let (mut name, mut sum) = (None, None);
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "name" => name = Some(map.next_value::<String>()?),
+                        "checksum" => sum = Some(map.next_value::<String>()?),
+                        _ => return Err(A::Error::unknown_field(&key, &["name", "checksum"])),
+                    }
+                }
+                Ok(EntryFile(Entry { name: name.ok_or_else(|| A::Error::missing_field("name"))?, sum: sum.ok_or_else(|| A::Error::missing_field("checksum"))? }))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
 }
 
 static MARKER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^(<<<<<<<|=======|>>>>>>>)( |$)").expect("a valid pattern"));
@@ -228,12 +263,7 @@ pub fn chain<'a>(migrations: impl IntoIterator<Item = (&'a str, &'a str)>) -> Ve
 
 fn parse(text: &str) -> Result<Lock, String> {
     let file: LockFile = serde_yaml::from_str(text).map_err(|e| e.to_string())?;
-    let mut entries = Vec::new();
-    for line in file.migrations {
-        let (name, sum) = line.trim().split_once(' ').ok_or_else(|| format!("\"{line}\" is a migration's name and its checksum"))?;
-        entries.push(Entry { name: name.trim().to_string(), sum: sum.trim().to_string() });
-    }
-    Ok(Lock { schema: file.schema, entries })
+    Ok(Lock { schema: file.schema, entries: file.migrations.into_iter().map(|e| e.0).collect() })
 }
 
 /// The lock at `path`. Only a lock that isn't there is missing: one that is there and can't be read,
@@ -260,13 +290,19 @@ pub fn of_text(text: &str) -> State {
 pub fn render(lock: &Lock) -> String {
     let mut out = HEADER.to_string();
     if let Some(schema) = &lock.schema {
-        out.push_str(&format!("schema: {schema}\n"));
+        out.push_str(&format!("schema: {}\n", scalar(schema)));
     }
     out.push_str("migrations:\n");
     for e in &lock.entries {
-        out.push_str(&format!("  - {} {}\n", e.name, e.sum));
+        out.push_str(&format!("  - name: {}\n    checksum: {}\n", scalar(&e.name), scalar(&e.sum)));
     }
     out
+}
+
+/// A value as YAML writes it: quoted where YAML would read it as something other than its text, as a
+/// checksum of digits alone, which every YAML reader would take for a number.
+fn scalar(value: &str) -> String {
+    serde_yaml::to_string(value).map_or_else(|_| value.to_string(), |text| text.trim_end().to_string())
 }
 
 pub fn write(path: &Path, lock: &Lock) -> std::io::Result<()> {
@@ -286,11 +322,43 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         write(&dir.join(LOCK), &lock).unwrap();
         assert_eq!(read(&dir.join(LOCK)), State::Lock(lock.clone()));
-        assert!(text.contains("  - 20261101000000_a.sql "), "{text}");
+        assert!(text.contains("\n  - name: 20261101000000_a.sql\n    checksum: "), "{text}");
         assert_eq!(lock.entries[1].sum, checksum(&lock.entries[0].sum, "20261102000000_b.sql", "create table b (id int)"));
         std::fs::write(dir.join(LOCK), format!("{text}<<<<<<< HEAD\n")).unwrap();
         assert_eq!(read(&dir.join(LOCK)), State::Conflicted);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_lock_written_up_to_0_8_3_reads_as_its_entries() {
+        let objects = "schema: c7bf681b\nmigrations:\n  - name: 20261104120000_users.sql\n    checksum: c86e9de4\n  - name: 20261104140347_add_bio.sql\n    checksum: 78ad08c0\n";
+        let strings = "schema: c7bf681b\nmigrations:\n  - 20261104120000_users.sql c86e9de4\n  - 20261104140347_add_bio.sql 78ad08c0\n";
+        let State::Lock(lock) = of_text(objects) else { panic!("{objects}") };
+        assert_eq!(lock.entries[1], Entry { name: "20261104140347_add_bio.sql".into(), sum: "78ad08c0".into() });
+        assert_eq!(of_text(strings), State::Lock(lock.clone()));
+        assert_eq!(render(&lock), format!("{HEADER}{objects}"));
+    }
+
+    #[test]
+    fn a_checksum_of_digits_alone_is_quoted_and_read_as_written() {
+        let lock = Lock { schema: Some("01234567".into()), entries: vec![Entry { name: "init.sql".into(), sum: "00123456".into() }, Entry { name: "20261101000000_a.sql".into(), sum: "1e234567".into() }] };
+        let text = render(&lock);
+        assert!(text.contains("schema: '01234567'\n") && text.contains("checksum: '00123456'\n") && text.contains("checksum: '1e234567'\n"), "{text}");
+        assert_eq!(of_text(&text), State::Lock(lock.clone()));
+        // Unquoted, as by hand, it still reads as its text.
+        assert_eq!(of_text(&text.replace('\'', "")), State::Lock(lock));
+    }
+
+    #[test]
+    fn an_entry_needs_its_name_and_checksum_and_no_other_key() {
+        for (text, why) in [
+            ("migrations:\n  - name: a.sql\n", "missing field `checksum`"),
+            ("migrations:\n  - checksum: c86e9de4\n", "missing field `name`"),
+            ("migrations:\n  - name: a.sql\n    checksum: c86e9de4\n    transaction: false\n", "unknown field `transaction`"),
+            ("migrations:\n  - a.sql\n", "\"a.sql\" is a migration's name and its checksum"),
+        ] {
+            assert!(matches!(of_text(text), State::Invalid(e) if e.contains(why)), "{text}: {:?}", of_text(text));
+        }
     }
 
     #[test]
@@ -299,7 +367,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(read(&dir.join(LOCK)), State::Missing);
-        std::fs::write(dir.join(LOCK), b"migrations:\n  - a.sql \xff\n").unwrap();
+        std::fs::write(dir.join(LOCK), b"migrations:\n  - name: a.sql\n    checksum: \xff\n").unwrap();
         assert!(matches!(read(&dir.join(LOCK)), State::Unreadable(why) if why.contains("UTF-8")));
         std::fs::remove_file(dir.join(LOCK)).unwrap();
         std::fs::create_dir(dir.join(LOCK)).unwrap();

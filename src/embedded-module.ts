@@ -75,7 +75,10 @@ export async function projectMigrations(root: string): Promise<{ list?: Migratio
     const lock = readFileSync(lockPath, "utf8");
     // Two branches that each added a migration leave git's markers in the lock.
     if (/^(<{7}|={7}|>{7})( |$)/m.test(lock)) return { error: `The lock has a merge conflict, in ${shown}/reylo.lock: keep main's lines, then run reylo migrate dev, which adds this branch's migrations back`, watched };
-    const entries = [...lock.matchAll(/^\s*-\s+(\S+\.sql)\s+([0-9a-f]+)\s*$/gm)].map((m) => ({ name: m[1]!, sum: m[2]! }));
+    // Each entry is `- name: <file>` with `checksum: <hex>` on the line below it, quoted where it is
+    // digits alone (`render` in engine/migrate/src/lock.rs), or, as locks were written up to 0.8.3,
+    // `- <file> <hex>`.
+    const entries = [...lock.matchAll(/^\s*-\s+(?:name:\s*(\S+\.sql)\s*\n\s*checksum:\s*'?([0-9a-f]+)'?|(\S+\.sql)\s+([0-9a-f]+))\s*$/gm)].map((m) => ({ name: (m[1] ?? m[3])!, sum: (m[2] ?? m[4])! }));
     names = entries.map((e) => e.name);
     const missing = names.filter((n) => !existsSync(join(migrationsDir, n)));
     if (missing.length) return { error: `The lock lists ${missing.join(", ")}, which ${shown}/migrations doesn't have: write it back from a database that ran it, with reylo migrate history pull`, watched };
@@ -95,7 +98,7 @@ export async function projectMigrations(root: string): Promise<{ list?: Migratio
       return { error, watched: [...watched, ...migrations.map((n) => join(migrationsDir, n))] };
     }
     // The checksum of schema.sql from when the migrations last reached it, which a deploy holds it to (`stamp`).
-    const schemaSum = /^schema:\s*(\S+)\s*$/m.exec(lock)?.[1];
+    const schemaSum = /^schema:\s*'?([0-9a-f]+)'?\s*$/m.exec(lock)?.[1];
     if (schemaSum !== undefined && existsSync(schemaPath) && schemaChecksum(entries.at(-1)?.sum ?? "", readFileSync(schemaPath, "utf8")) !== schemaSum) {
       return { error: `The schema changed since the lock was written, in ${shown}/schema.sql: if the schema changed, write its migration and run it with reylo migrate new <name> and reylo migrate dev; if only formatting or comments changed, check it again with reylo migrate dev`, watched: [...watched, ...names.map((n) => join(migrationsDir, n))] };
     }
