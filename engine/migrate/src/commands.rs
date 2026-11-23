@@ -965,7 +965,7 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
 /// it stands as a whole name, all at once: `public.orders` in `public.orders(id)` and
 /// `public.orders.title`, and as a relation constant, `'public.orders'::regclass`, but not in
 /// `public.orders_archive`, inside a quoted name, `"public.orders"`, or inside a string,
-/// `'public.orders'`, whose text a rename never changes.
+/// `'public.orders'`, or a dollar-quoted body, whose text a rename never changes.
 #[cfg(feature = "cli")]
 fn renamed_in(line: &str, names: &[(String, String)]) -> String {
     let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
@@ -977,6 +977,19 @@ fn renamed_in(line: &str, names: &[(String, String)]) -> String {
                 out.push_str(new);
                 at += old.len();
                 prev = old.chars().last();
+                continue;
+            }
+        }
+        // A dollar-quoted body, `$$ … $$` or `$tag$ … $tag$`, is source text Postgres keeps as
+        // written: whole, to its closing tag.
+        if c == '$' && prev.is_none_or(|p| !ident(p)) {
+            let tag_end = rest[1..].find(|t: char| !(t.is_ascii_alphanumeric() || t == '_')).map(|k| k + 1);
+            if let Some(k) = tag_end.filter(|k| rest[*k..].starts_with('$') && rest[1..*k].chars().next().is_none_or(|t| !t.is_ascii_digit())) {
+                let tag = &rest[..=k];
+                let end = rest[tag.len()..].find(tag).map_or(rest.len(), |at| tag.len() + at + tag.len());
+                out.push_str(&rest[..end]);
+                at += end;
+                prev = Some('$');
                 continue;
             }
         }
@@ -6854,6 +6867,10 @@ mod tests {
         let tables = vec![("table public.alpha".to_string(), "table public.omega".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-alpha-]{+omega+}", "  - view omega as SELECT 1 AS n;", "  - view \"public.alpha\" as SELECT omega.n FROM omega;"]);
         assert_eq!(renamed_in("view public.\"public.alpha\" as SELECT 1 FROM public.alpha", &[("public.alpha".to_string(), "public.omega".to_string())]), "view public.\"public.alpha\" as SELECT 1 FROM public.omega");
+        // A function's body is its text as written, while its signature follows the rename.
+        let names = [("public.alpha".to_string(), "public.omega".to_string())];
+        assert_eq!(renamed_in("function public.old_size(arg public.alpha) AS $function$ BEGIN RETURN pg_relation_size('public.alpha'::regclass); END; $function$", &names), "function public.old_size(arg public.omega) AS $function$ BEGIN RETURN pg_relation_size('public.alpha'::regclass); END; $function$");
+        assert_eq!(renamed_in("policy public.notes p USING (($1 = 'public.alpha'::regclass))", &names), "policy public.notes p USING (($1 = 'public.omega'::regclass))");
         // A relation constant follows the rename.
         assert_eq!(renamed_in("policy public.notes visible USING ((pg_relation_size('public.alpha'::regclass) > 0))", &[("public.alpha".to_string(), "public.omega".to_string())]), "policy public.notes visible USING ((pg_relation_size('public.omega'::regclass) > 0))");
         // A string is left as it is, and a double quote inside one quotes no name.
