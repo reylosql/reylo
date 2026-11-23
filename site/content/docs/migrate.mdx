@@ -322,15 +322,15 @@ Your migrations run in one order: the lockfile's, or their names'.
 
 ### Lockfile <code className="dk-aside">reylo.lock</code> [#lockfile-reylolock]
 
-The lockfile lists your migrations in order, each with a hash chained to the one before. A migration it doesn't list yet is a draft, free to edit:
+The lockfile lists your migrations in order, each with a checksum chained to the one before. A migration it doesn't list yet is a draft, free to edit:
 
 ```yaml title="reylo.lock"
 schema: c7bf681b
 migrations:
   - name: 20261104120000_users.sql
-    hash: c86e9de4
+    checksum: c86e9de4
   - name: 20261104140347_add_bio.sql
-    hash: 78ad08c0
+    checksum: 78ad08c0
 ```
 
 Two branches that each add a migration conflict on the lock in git. Keep main's lines, then run `reylo migrate dev` to add yours after them.
@@ -352,7 +352,7 @@ Migrations on postgres://localhost:5432/app
 » With no lock, migrations run in name order
   To write one:
     reylo migrate lock
-» With no lock to hold its hash, reylo/schema.sql is checked against the migrations by a dry run
+» With no lock to hold its checksum, reylo/schema.sql is checked against the migrations by a dry run
   To check it:
     reylo migrate deploy --dry-run
 ```
@@ -377,7 +377,7 @@ Nothing was changed.
 You give up:
 
 - **The same data everywhere.** No check can show that data written in two orders matches.
-- **Hashes.** A migration edited before any database ran it goes unseen.
+- **Checksums.** A migration edited before any database ran it goes unseen.
 
 Only a missing lock turns it on. A `reylo.lock` that is there and can't be read is refused by every command.
 
@@ -660,7 +660,7 @@ Applying to postgres://db.example.com/app
 
 It needs no shadow database. It refuses to run:
 
-- **On an edited schema file.** A `schema.sql` that doesn't match the lock's hash.
+- **On an edited schema file.** A `schema.sql` that doesn't match the lock's checksum.
 - **On a database changed by hand.** Each migration stores a fingerprint of the schema. A database that no longer matches it is refused, even for a hand-added index.
 
 The refusal shows the change:
@@ -745,7 +745,7 @@ Migrations on postgres://localhost:5432/app
 ✓ The migration files match reylo/reylo.lock
 
 ✗ The schema changed since the lock was written
-  The lock holds a hash of reylo/schema.sql from when the migrations last matched it.
+  The lock holds a checksum of reylo/schema.sql from when the migrations last matched it.
 
   If the schema changed, write its migration and run it:
     reylo migrate new <name>

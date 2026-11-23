@@ -2,4 +2,4 @@
 schema: 1838d124
 migrations:
   - name: 20261021000000_users_and_posts.sql
-    hash: 258a4848
+    checksum: 258a4848

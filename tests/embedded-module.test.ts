@@ -64,7 +64,7 @@ test("the bundle carries the locked migrations in the lock's order, and a draft 
   assert.deepEqual(await names(root), [users, bio, age]);
 });
 
-test("a file that isn't a migration, or a schema.sql the lock's hash isn't of, gives migrate the deploy's refusal", async () => {
+test("a file that isn't a migration, or a schema.sql the lock's checksum isn't of, gives migrate the deploy's refusal", async () => {
   const root = project();
   await change(root, "users", "create table users (id integer primary key, name text not null);\n");
   migrate(root, "lock");
@@ -94,7 +94,7 @@ test("a lock with git's conflict markers, or one that lists a file the folder la
   const [users] = readdirSync(join(root, "reylo", "migrations"));
   const lock = join(root, "reylo", "reylo.lock");
   const text = readFileSync(lock, "utf8");
-  writeFileSync(lock, text.replace(/^migrations:\n/m, "migrations:\n<<<<<<< HEAD\n  - name: 20261110000000_a.sql\n    hash: 0123abcd\n=======\n  - name: 20261110000000_b.sql\n    hash: 4567cdef\n>>>>>>> branch\n"));
+  writeFileSync(lock, text.replace(/^migrations:\n/m, "migrations:\n<<<<<<< HEAD\n  - name: 20261110000000_a.sql\n    checksum: 0123abcd\n=======\n  - name: 20261110000000_b.sql\n    checksum: 4567cdef\n>>>>>>> branch\n"));
   assert.match((await projectMigrations(root)).error ?? "", /^The lock has a merge conflict, in reylo\/reylo\.lock: keep main's lines, then run reylo migrate dev/);
   assert.match((await embeddedModule(root)).code, /^export const embedded = \{"error":"The lock has a merge conflict, in reylo\/reylo\.lock/);
   writeFileSync(lock, text);
@@ -120,10 +120,10 @@ test("a migration edited after it was locked, or lines merged out of order, give
   // line is chained after users, not after the line before it.
   const lock = join(root, "reylo", "reylo.lock");
   const lines = readFileSync(lock, "utf8");
-  const sum = /^    hash: '?([0-9a-f]+)'?$/m.exec(lines)![1]!;
+  const sum = /^    checksum: '?([0-9a-f]+)'?$/m.exec(lines)![1]!;
   const age = "20990101000000_age.sql";
   writeFileSync(join(root, "reylo", "migrations", age), "alter table users add column age int;\n");
-  writeFileSync(lock, lines.replace(/^  - name: .*\n    hash: .*\n(?![\s\S]*^  - )/m, (bioEntry) => `  - name: ${age}\n    hash: '${lockChecksum(sum, age, "alter table users add column age int;")}'\n${bioEntry}`));
+  writeFileSync(lock, lines.replace(/^  - name: .*\n    checksum: .*\n(?![\s\S]*^  - )/m, (bioEntry) => `  - name: ${age}\n    checksum: '${lockChecksum(sum, age, "alter table users add column age int;")}'\n${bioEntry}`));
   assert.match((await projectMigrations(root)).error ?? "", new RegExp(`^The lock was merged out of order at ${bio!.replace(".", "\\.")}`));
 });
 
@@ -134,9 +134,9 @@ test("a lock written up to 0.8.2, each entry one line, gives the same migrations
   migrate(root, "lock");
   const lock = join(root, "reylo", "reylo.lock");
   const text = readFileSync(lock, "utf8");
-  assert.match(text, /^migrations:\n  - name: \d{14}_users\.sql\n    hash: '?[0-9a-f]{8}'?\n  - name: \d{14}_bio\.sql\n/m);
+  assert.match(text, /^migrations:\n  - name: \d{14}_users\.sql\n    checksum: '?[0-9a-f]{8}'?\n  - name: \d{14}_bio\.sql\n/m);
   const before = await projectMigrations(root);
-  writeFileSync(lock, text.replace(/^  - name: (\S+)\n    hash: '?([0-9a-f]+)'?$/gm, "  - $1 $2"));
+  writeFileSync(lock, text.replace(/^  - name: (\S+)\n    checksum: '?([0-9a-f]+)'?$/gm, "  - $1 $2"));
   assert.match(readFileSync(lock, "utf8"), /^migrations:\n  - \d{14}_users\.sql [0-9a-f]{8}\n  - \d{14}_bio\.sql [0-9a-f]{8}\n$/m);
   assert.deepEqual(await projectMigrations(root), before);
   assert.equal(before.list?.length, 2);
@@ -144,12 +144,12 @@ test("a lock written up to 0.8.2, each entry one line, gives the same migrations
 
 test("the lock reads as the command line reads it: keys in either order, quoted values, entries written up to 0.8.2", () => {
   const lock = { schema: "c7bf681b", entries: [{ name: "20261104120000_users.sql", sum: "c86e9de4" }, { name: "20261104140347_add_bio.sql", sum: "00123456" }] };
-  const objects = "# On a conflict, keep main's and run reylo migrate dev\nschema: c7bf681b\nmigrations:\n  - name: 20261104120000_users.sql\n    hash: c86e9de4\n  - name: 20261104140347_add_bio.sql\n    hash: '00123456'\n";
+  const objects = "# On a conflict, keep main's and run reylo migrate dev\nschema: c7bf681b\nmigrations:\n  - name: 20261104120000_users.sql\n    checksum: c86e9de4\n  - name: 20261104140347_add_bio.sql\n    checksum: '00123456'\n";
   assert.deepEqual(readLock(objects), lock);
   assert.deepEqual(readLock(objects.replace(/\n/g, "\r\n")), lock);
   assert.deepEqual(readLock(objects.replace("schema: c7bf681b", 'schema: "c7bf681b"')), lock);
-  assert.deepEqual(readLock(objects.replace("  - name: 20261104120000_users.sql\n    hash: c86e9de4\n", "  - hash: c86e9de4\n    name: 20261104120000_users.sql\n")), lock);
-  assert.deepEqual(readLock(objects.replace("  - name: 20261104120000_users.sql\n    hash: c86e9de4\n", "  - { name: 20261104120000_users.sql, hash: c86e9de4 }\n")), lock);
+  assert.deepEqual(readLock(objects.replace("  - name: 20261104120000_users.sql\n    checksum: c86e9de4\n", "  - checksum: c86e9de4\n    name: 20261104120000_users.sql\n")), lock);
+  assert.deepEqual(readLock(objects.replace("  - name: 20261104120000_users.sql\n    checksum: c86e9de4\n", "  - { name: 20261104120000_users.sql, checksum: c86e9de4 }\n")), lock);
   assert.deepEqual(readLock("schema: c7bf681b\nmigrations:\n  - 20261104120000_users.sql c86e9de4\n  - 20261104140347_add_bio.sql 00123456\n"), lock);
   assert.deepEqual(readLock("migrations:\n"), { entries: [] });
   // A list written without indentation, as YAML allows.
@@ -157,22 +157,22 @@ test("the lock reads as the command line reads it: keys in either order, quoted 
   assert.deepEqual(readLock("schema: c7bf681b\nmigrations:\n- 20261104120000_users.sql c86e9de4\n- 20261104140347_add_bio.sql 00123456\n"), lock);
 });
 
-test("the lock refuses what the command line refuses: a key it doesn't know, a key twice, an entry without its name or hash", () => {
+test("the lock refuses what the command line refuses: a key it doesn't know, a key twice, an entry without its name or checksum", () => {
   for (const [text, why] of [
-    ["migrations:\n  - name: a.sql\n    hash: c86e9de4\n    transaction: false\n", "its line 4 has `transaction`, which an entry doesn't have"],
-    ["migrations:\n  - name: a.sql\n    hash: 00000000\n    hash: c86e9de4\n", "its line 4 gives `hash` a second time"],
-    ["migrations:\n  - name: a.sql\n", "the entry at its line 2 has no hash"],
-    ["migrations:\n  - hash: c86e9de4\n", "the entry at its line 2 has no name"],
-    ["migrations:\n  - a.sql\n", '"a.sql" is a migration\'s name and its hash'],
+    ["migrations:\n  - name: a.sql\n    checksum: c86e9de4\n    transaction: false\n", "its line 4 has `transaction`, which an entry doesn't have"],
+    ["migrations:\n  - name: a.sql\n    checksum: 00000000\n    checksum: c86e9de4\n", "its line 4 gives `checksum` a second time"],
+    ["migrations:\n  - name: a.sql\n", "the entry at its line 2 has no checksum"],
+    ["migrations:\n  - checksum: c86e9de4\n", "the entry at its line 2 has no name"],
+    ["migrations:\n  - a.sql\n", '"a.sql" is a migration\'s name and its checksum'],
     ["schema: c7bf681b\nschema:\nmigrations:\n", "its line 2 gives `schema` a second time"],
     ["migrations:\n  - a.sql c86e9de4\n- b.sql 78ad08c0\n", "its line 3 doesn't parse"],
-    ["migrations:\n- name: a.sql\n  hash: c86e9de4\n  - name: b.sql\n    hash: 78ad08c0\n", "its line 4 doesn't parse"],
+    ["migrations:\n- name: a.sql\n  checksum: c86e9de4\n  - name: b.sql\n    checksum: 78ad08c0\n", "its line 4 doesn't parse"],
   ] as const) {
     assert.deepEqual(readLock(text), { error: why }, text);
   }
 });
 
-test("a lock the command line refuses gives migrate its error, and a quoted schema hash is still held to schema.sql", async () => {
+test("a lock the command line refuses gives migrate its error, and a quoted schema checksum is still held to schema.sql", async () => {
   const root = project();
   await change(root, "users", "create table users (id integer primary key, name text not null);\n");
   migrate(root, "lock");
@@ -181,7 +181,7 @@ test("a lock the command line refuses gives migrate its error, and a quoted sche
   // A name that isn't a migration file, a directory's included.
   writeFileSync(lock, text.replace(/^  - name: \S+$/m, "  - name: ."));
   assert.match((await projectMigrations(root)).error ?? "", /^The lock lists \., which reylo\/migrations doesn't have/);
-  writeFileSync(lock, text.replace(/^(    hash: .*)$/m, "$1\n    transaction: false"));
+  writeFileSync(lock, text.replace(/^(    checksum: .*)$/m, "$1\n    transaction: false"));
   assert.match((await projectMigrations(root)).error ?? "", /^Reylo can't read reylo\/reylo\.lock as a lock, since its line \d+ has `transaction`, which an entry doesn't have: write it again from a database that ran its migrations, with reylo migrate history pull$/);
   assert.match(text, /^schema: '?[0-9a-f]{8}'?$/m);
   writeFileSync(lock, text.replace(/^schema: '?([0-9a-f]+)'?$/m, 'schema: "$1"'));

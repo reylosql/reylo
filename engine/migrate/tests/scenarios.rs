@@ -596,7 +596,7 @@ async fn status_refuses_a_lock_with_no_checksum_of_schema_sql(mut p: P) {
     assert_eq!(p.run(async |o, log| reylo_migrate::lock_from_history(o, log).await).await, 0, "{}", p.peek());
     p.output();
     assert_eq!(p.status().await, 1);
-    assert_has!(p.output(), r"✗ The lock holds no hash of \S*schema\.sql");
+    assert_has!(p.output(), r"✗ The lock holds no checksum of \S*schema\.sql");
 }
 
 async fn dev_that_fails_on_a_locked_migration_keeps_the_lock(mut p: P) {
@@ -1845,7 +1845,7 @@ async fn a_locked_project_runs_its_lock(mut p: P) {
     // schema.sql that moves with no migration is seen by status too.
     p.schema(&format!("create table users (id {id}, email {text}, bio {int});"));
     assert_eq!(p.status().await, 1);
-    assert_has!(p.output(), r"The schema changed since the lock was written\n  The lock holds a hash");
+    assert_has!(p.output(), r"The schema changed since the lock was written\n  The lock holds a checksum");
     p.schema(&format!("create table users (id {id}, email {text});"));
     // Deleting the lock turns linear history off, and reylo migrate lock turns it back on.
     std::fs::remove_file(p.dir.join(reylo_migrate::lock::LOCK)).unwrap();
@@ -3132,7 +3132,7 @@ async fn a_lock_that_cant_be_read_is_refused() {
     assert_eq!(p.dev().await, 0, "{}", p.peek());
     p.file("20261027110000_draft.sql", "create table b (id integer);");
     let lock = p.dir.join(reylo_migrate::lock::LOCK);
-    std::fs::write(&lock, b"migrations:\n  - name: 20261027100000_a.sql\n    hash: \xff\n").unwrap();
+    std::fs::write(&lock, b"migrations:\n  - name: 20261027100000_a.sql\n    checksum: \xff\n").unwrap();
     p.output();
     assert_eq!(p.migrate().await, 1);
     assert_has!(p.output(), r"✗ Reylo can't read \S*reylo\.lock: [^\n]*UTF-8");
