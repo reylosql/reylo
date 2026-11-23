@@ -58,8 +58,9 @@ use reylo_engine_core::types::{Cardinality, StatementKind, Type};
 use serde_json::Value;
 
 /// The settings of the session that may drop the one row an aggregate returns: the three that
-/// leave it are off, `0`, by default, and the filter every result passes is empty.
-pub const ROW_SETTINGS: &str = "SELECT name, value FROM system.settings WHERE name IN ('empty_result_for_aggregation_by_empty_set', 'limit', 'offset', 'additional_result_filter')";
+/// leave it are off, `0`, by default, and the filter every result passes is empty. With them,
+/// the one that leaves each shard's rows of a distributed table unmerged, which bounds nothing.
+pub const ROW_SETTINGS: &str = "SELECT name, value FROM system.settings WHERE name IN ('empty_result_for_aggregation_by_empty_set', 'limit', 'offset', 'additional_result_filter', 'distributed_group_by_no_merge')";
 
 const DESCRIBE: &str = "DESCRIBE (\n";
 const TREE: &str = "EXPLAIN QUERY TREE\n";
@@ -808,17 +809,21 @@ pub fn analyze(sql: &str, host: &Host) -> Lazy<Analysis> {
         return refuse(unread);
     }
     // How many rows: what the tree proves, where the session's settings leave an aggregate its row.
-    // A limit a parameter gives is the caller's, and so is whatever a parameter the server reads as
-    // a constant decides, whose first value the tree was read with.
-    let limit_given = parameters.positions.iter().any(|p| matches!(p, Position::Limit | Position::Constant));
+    // A limit a parameter gives is the caller's: the tree shows it folded from the value it was
+    // read with, which is no number the statement fixes.
     let lines: Vec<&str> = tree.as_ref().map(|rows| rows.iter().filter_map(|row| row.first().and_then(as_str)).flat_map(str::lines).collect()).unwrap_or_default();
     // What a result in rows cannot carry, or a setting of the statement's own would write otherwise.
     if let Some(message) = crate::tree::unread(&lines) {
         return refuse(vec![whole(sql, message, 10, None)]);
     }
-    let proven = crate::tree::rows(&lines, limit_given);
-    let defaults = settings.ok().is_some_and(|rows| rows.len() == 4 && rows.iter().all(|row| row.get(1).and_then(as_str) == Some(if row.first().and_then(as_str) == Some("additional_result_filter") { "" } else { "0" })));
-    let (cardinality, reason) = if proven.one && defaults {
+    let proven = crate::tree::rows(&lines);
+    // The session's settings, each by its name: one the server does not list is not at its default.
+    let session = settings.ok().unwrap_or_default();
+    let value = |name: &str| session.iter().find(|row| row.first().and_then(as_str) == Some(name)).and_then(|row| row.get(1).and_then(as_str));
+    let defaults = ["empty_result_for_aggregation_by_empty_set", "limit", "offset"].iter().all(|name| value(name) == Some("0")) && value("additional_result_filter") == Some("");
+    let (cardinality, reason) = if value(crate::tree::UNMERGED).is_some_and(|merge| merge != "0") {
+        (Cardinality::Many, Some("the session's distributed_group_by_no_merge has each shard of a distributed table answer for itself, so nothing bounds a result"))
+    } else if proven.one && defaults {
         (Cardinality::One, None)
     } else if proven.one {
         (Cardinality::AtMostOne, Some("a setting of the session (empty_result_for_aggregation_by_empty_set, limit, offset or additional_result_filter) may drop the aggregate's one row"))
@@ -1127,16 +1132,33 @@ fn write(sql: &str, lexed: &Lexed, parameters: &Parameters, body: &str, asked: &
     if let Some(start) = written.as_ref().and_then(|w| w.format) {
         return refuse(vec![Diagnostic { message: "An INSERT … FORMAT takes its rows from the request's body, which a typed statement does not have: write the rows as VALUES, or as a SELECT, with parameters.".into(), start, length: "format".len(), code: 10, server_code: None }]);
     }
+    // An INSERT whose rows the text does not show, with a parameter among them that nothing would
+    // hold to its column: a SELECT in parentheses, the statement's own or a set operation's branch.
+    if insert && !lexed.placeholders.is_empty() {
+        match written.as_ref().map(|w| w.unread) {
+            None => return refuse(vec![whole(sql, "Reylo cannot read what this INSERT writes, so nothing would hold its parameters to their columns. Write its rows as VALUES or as a SELECT, outside parentheses.", 10, None)]),
+            Some(Some(start)) => return refuse(vec![Diagnostic { message: "This SELECT stands in parentheses, where Reylo does not read what an INSERT writes, and it holds a parameter, which nothing would hold to its column. Write the SELECT outside parentheses.".into(), start, length: 1, code: 10, server_code: None }]),
+            Some(None) => {}
+        }
+    }
+    // A partition's id is a string of the statement's text, where the server takes a parameter
+    // alone and nothing a check can write for one.
+    let names_partition = |p: &&Placeholder| {
+        let (id, start) = word_before(body, code_before(body, lexed, p.start));
+        id == "id" && word_before(body, code_before(body, lexed, start)).0 == "partition"
+    };
+    if let Some(p) = lexed.placeholders.iter().find(names_partition) {
+        return refuse(vec![at(p, format!("Reylo types no parameter as a partition's id, which the server reads from the statement's text where a write is checked: write the id in the statement, in place of {}.", &sql[p.start..p.end]), 10)]);
+    }
     let ask = |text: String| host.query(&text, Vec::new(), Scope::Statement);
     let most = parameters.constants.iter().map(Vec::len).max().unwrap_or(1);
     let first = parameters.joint(0);
     let columns = parameters.columns(&first);
     let select = if insert { None } else { as_select(body, lexed, &code) };
     let values = written.as_ref().and_then(|w| w.rows.as_ref());
-    let rows: Vec<(usize, usize)> = values.map(|(_, rows)| rows.iter().copied().filter(|&(start, end)| reads_as_select(body, lexed, &code, start, end)).take(ROWS_CHECKED).collect()).unwrap_or_default();
     // What the server is asked of the statement with its parameters written one way: of an
-    // INSERT … VALUES, each row as the SELECT of its values.
-    let questions = |choice: &Choice| -> Vec<String> {
+    // INSERT … VALUES, each of `rows` as the SELECT of its values.
+    let questions = |choice: &Choice, rows: &[(usize, usize)]| -> Vec<String> {
         let text = parameters.text(body, lexed, choice);
         match (&select, values) {
             (_, Some((values, _))) if !rows.is_empty() => rows.iter().map(|&(start, end)| format!("{PIPELINE}{}SELECT {}", &text.sql[..moved(&text, *values)], &text.sql[moved(&text, start)..moved(&text, end)])).collect(),
@@ -1145,15 +1167,17 @@ fn write(sql: &str, lexed: &Lexed, parameters: &Parameters, body: &str, asked: &
             (None, _) => Vec::new(),
         }
     };
-    let asked_as = |choice: &Choice| -> Vec<Lazy<Described>> { questions(choice).into_iter().map(ask).collect() };
+    let asked_as = |choice: &Choice, rows: &[(usize, usize)]| -> Vec<Lazy<Described>> { questions(choice, rows).into_iter().map(ask).collect() };
     let parsed = ask(format!("{AST}{}", asked.sql));
-    // The table's columns, where a parameter is written to one as it is.
+    // The table's columns: of an INSERT … VALUES, whose rows VALUES reads by them, and of any
+    // write that gives a column a parameter as it is.
     let as_it_is = written.as_ref().is_some_and(|w| !w.written.is_empty()) || assigned.as_ref().is_some_and(|(_, pairs)| !pairs.is_empty());
-    let table = written.as_ref().and_then(|w| w.table.as_ref()).or(assigned.as_ref().map(|(table, _)| table)).filter(|_| as_it_is);
+    let table = written.as_ref().and_then(|w| w.table.as_ref()).or(assigned.as_ref().map(|(table, _)| table)).filter(|_| as_it_is || values.is_some());
     let table = table.map(|table| own_columns(ask(format!("DESCRIBE TABLE {table}"))));
     // Whether the text reads as the SELECT it is checked as.
     let reads = select.as_ref().map(|edits| ask(format!("{AST}{}", edited(&parameters.text(body, lexed, &columns), edits))));
-    let (as_columns, as_first) = (asked_as(&columns), asked_as(&first));
+    // Asked with the rest, where which rows are asked does not wait on the table's columns.
+    let early = values.is_none().then(|| (asked_as(&columns, &[]), asked_as(&first, &[])));
     let parsed = match parsed? {
         Ok(rows) => rows,
         Err(e) => return refuse(vec![server_error(sql, lexed, parameters, asked, AST, &e)]),
@@ -1184,26 +1208,38 @@ fn write(sql: &str, lexed: &Lexed, parameters: &Parameters, body: &str, asked: &
             }
         }
     }
-    // Each parameter written as it is, and the column the text and the table's description say it
-    // is written to, by its name and its type: none where they do not say.
     let of_table: Option<Rows> = match table {
         Some(answer) => answer?.ok(),
         None => None,
     };
     let text = |row: &Vec<Value>, i: usize| row.get(i).and_then(as_str).unwrap_or_default().to_string();
     let named = |name: &String| of_table.as_ref()?.iter().find(|row| text(row, 0) == *name).map(|row| (text(row, 0), text(row, 1)));
+    // The columns an INSERT writes, in the order of its values, each by its name and its type:
+    // none where the text and the table's description do not say them.
+    let into: Option<Vec<(String, String)>> = written.as_ref().and_then(|w| match &w.listed {
+        Listed::Names(names) => names.iter().map(|name| named(name)).collect(),
+        // With no list, every column but the ones the table computes itself, in its order.
+        Listed::Table => of_table.as_ref().map(|rows| rows.iter().filter(|row| !matches!(text(row, 2).as_str(), "MATERIALIZED" | "ALIAS" | "EPHEMERAL")).map(|row| (text(row, 0), text(row, 1))).collect()),
+        Listed::Unread => None,
+    });
+    let holds = |described: &str, names: &[&str]| types::parse(described).is_some_and(|ty| names.iter().any(|name| ty.holds(name)));
+    // VALUES reads a value for a column that holds a Dynamic by its text where it can, and stores
+    // a placeholder's own text for the parameter's value: `({d:UInt64} + 1)` is kept as that text.
+    if let (Some(w), Some(into)) = (written.as_ref().filter(|w| w.rows.is_some()), &into) {
+        let mut stored: Vec<Diagnostic> = w.valued.iter().filter_map(|&(place, k)| into.get(place).filter(|(_, described)| holds(described, &["Dynamic"])).map(|(name, described)| not_computed(sql, lexed, k, name, described))).collect();
+        if !stored.is_empty() {
+            stored.sort_by_key(|d| d.start);
+            return refuse(stored);
+        }
+    }
+    // Each parameter written as it is, and the column it is written to: none where the text and
+    // the table's description do not say it.
     let mut placed: Vec<(usize, Option<(String, String)>)> = Vec::new();
     if let Some(w) = &written {
-        let columns: Option<Vec<(String, String)>> = match &w.listed {
-            Listed::Names(names) => names.iter().map(|name| named(name)).collect(),
-            // With no list, every column but the ones the table computes itself, in its order.
-            Listed::Table => of_table.as_ref().map(|rows| rows.iter().filter(|row| !matches!(text(row, 2).as_str(), "MATERIALIZED" | "ALIAS" | "EPHEMERAL")).map(|row| (text(row, 0), text(row, 1))).collect()),
-            Listed::Unread => None,
-        };
         for &(place, k) in &w.written {
-            match (place, &columns) {
+            match (place, &into) {
                 // A value past the last column is one too many, which the server's own check says.
-                (Some(place), Some(columns)) => placed.extend(columns.get(place).map(|column| (k, Some(column.clone())))),
+                (Some(place), Some(into)) => placed.extend(into.get(place).map(|column| (k, Some(column.clone())))),
                 _ => placed.push((k, None)),
             }
         }
@@ -1212,11 +1248,20 @@ fn write(sql: &str, lexed: &Lexed, parameters: &Parameters, body: &str, asked: &
         placed.extend(pairs.iter().map(|(name, k)| (*k, name.as_ref().and_then(|name| named(name)))));
     }
     let typed_column = |column: &Option<(String, String)>| column.as_ref().and_then(|(name, described)| Some((name.clone(), types::parse(described)?)));
-    let mut unkept: Vec<Diagnostic> = placed.iter().filter_map(|(k, column)| typed_column(column).filter(|(_, column)| !types::kept(&parameters.types[*k], column)).map(|(name, column)| not_kept(sql, lexed, *k, &name, &column))).collect();
+    let mut unkept: Vec<Diagnostic> = placed.iter().filter_map(|(k, column)| typed_column(column).filter(|(_, column)| !types::kept(&parameters.types[*k], column)).map(|(name, column)| not_kept(sql, lexed, parameters, *k, &name, &column))).collect();
     if !unkept.is_empty() {
         unkept.sort_by_key(|d| d.start);
         return refuse(unkept);
     }
+    // The rows of VALUES asked as SELECTs. None where one of the columns holds a Variant or a
+    // Dynamic: VALUES reads a value for one by the column's type, and a SELECT by the value's
+    // own, so a 5 that VALUES writes as the Variant's UInt64 is a UInt8 the SELECT refuses.
+    let by_column = into.as_ref().is_some_and(|into| into.iter().any(|(_, described)| holds(described, &["Variant", "Dynamic"])));
+    let rows: Vec<(usize, usize)> = match values {
+        Some((_, rows)) if !by_column => rows.iter().copied().filter(|&(start, end)| reads_as_select(body, lexed, &code, start, end)).take(ROWS_CHECKED).collect(),
+        _ => Vec::new(),
+    };
+    let (as_columns, as_first) = early.unwrap_or_else(|| (asked_as(&columns, &rows), asked_as(&first, &rows)));
     // Each question is one the server takes with the parameters written one way or the other.
     let mut failed: Vec<(usize, DbError)> = Vec::new();
     let count = as_columns.len();
@@ -1227,7 +1272,7 @@ fn write(sql: &str, lexed: &Lexed, parameters: &Parameters, body: &str, asked: &
     }
     if !failed.is_empty() {
         // A value may have been computed with: each later value of every parameter at once.
-        let later: Vec<Vec<Lazy<Described>>> = (1..most).map(|j| asked_as(&parameters.joint(j))).collect();
+        let later: Vec<Vec<Lazy<Described>>> = (1..most).map(|j| asked_as(&parameters.joint(j), &rows)).collect();
         let mut taken = vec![false; count];
         for answers in later {
             for (i, answer) in answers.into_iter().enumerate() {
@@ -1245,7 +1290,7 @@ fn write(sql: &str, lexed: &Lexed, parameters: &Parameters, body: &str, asked: &
         }
     }
     // A statement the server takes, whose text does not say where a parameter is written.
-    let mut unplaced: Vec<Diagnostic> = placed.iter().filter(|(_, column)| typed_column(column).is_none()).map(|(k, _)| not_placed(sql, lexed, parameters, *k)).collect();
+    let mut unplaced: Vec<Diagnostic> = placed.iter().filter(|(_, column)| typed_column(column).is_none()).map(|(k, _)| not_placed(sql, lexed, *k)).collect();
     if !unplaced.is_empty() {
         unplaced.sort_by_key(|d| d.start);
         return refuse(unplaced);
@@ -1266,28 +1311,38 @@ fn declaration<'a>(sql: &'a str, p: &'a Placeholder) -> (String, impl Fn(&str) -
 }
 
 /// The refusal of a parameter written as it is to a column that does not keep its type's every value.
-fn not_kept(sql: &str, lexed: &Lexed, k: usize, name: &str, column: &Named) -> Diagnostic {
+fn not_kept(sql: &str, lexed: &Lexed, parameters: &Parameters, k: usize, name: &str, column: &Named) -> Diagnostic {
     let p = &lexed.placeholders[k];
     let (written, declared) = declaration(sql, p);
     // The type a parameter declares for the column: the column's, without what only a column has.
     let into = types::plain(column);
-    let cast = format!("CAST({written}, {})", types::quoted(&into.to_string()));
-    let fix = if into.name == "Variant" {
-        "Declare the parameter as one of the types the column holds.".to_string()
-    } else if types::parameter(&into).is_ok() {
-        format!("Declare the parameter as the column's type, {}, or write the conversion out, as {cast} does.", declared(&into.to_string()))
+    let converts = "ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error.";
+    let text = matches!(types::plain(&parameters.types[k]).bare().name.as_str(), "String" | "FixedString");
+    let why = if into.name == "Variant" && text {
+        "ClickHouse reads a text written to a Variant as whichever of its types the text reads as, so the column would not hold the text as it was given: 123 is stored as a number where the Variant has one.".to_string()
+    } else if into.name == "Variant" {
+        format!("{converts} Declare the parameter as one of the types the column holds.")
+    } else if into.holds("Variant") || types::parameter(&into).is_err() {
+        // A type no parameter declares: a Dynamic, a JSON, an array of a Variant.
+        format!("{converts} No parameter declares that type: convert the value in the statement, as CAST({written}, {}) does.", types::quoted(&into.to_string()))
     } else {
-        format!("Write the conversion out, as {cast} does.")
+        format!("{converts} Declare the parameter as the column's type, {}.", declared(&into.to_string()))
     };
-    at(p, format!("{written} is written as it is to the column {name}, of the type {column}. ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. {fix}"), 10)
+    at(p, format!("{written} is written as it is to the column {name}, of the type {column}. {why}"), 10)
 }
 
 /// The refusal of a parameter written as it is where the statement's text does not say to which column.
-fn not_placed(sql: &str, lexed: &Lexed, parameters: &Parameters, k: usize) -> Diagnostic {
+fn not_placed(sql: &str, lexed: &Lexed, k: usize) -> Diagnostic {
     let p = &lexed.placeholders[k];
     let (written, _) = declaration(sql, p);
-    let own = types::quoted(&parameters.types[k].to_string());
-    at(p, format!("{written} is written as it is to a column the statement's text does not name, so nothing holds it to that column's type. Write the table and each column by its name, with no * before the parameter, or write the conversion out, as CAST({written}, {own}) does."), 10)
+    at(p, format!("{written} is written as it is to a column the statement's text does not name, so nothing holds it to that column's type. Write the table and each column by its name, with no * before the parameter."), 10)
+}
+
+/// The refusal of a parameter in a value that VALUES writes to a column that holds a Dynamic.
+fn not_computed(sql: &str, lexed: &Lexed, k: usize, name: &str, described: &str) -> Diagnostic {
+    let p = &lexed.placeholders[k];
+    let (written, _) = declaration(sql, p);
+    at(p, format!("{written} is in a value that VALUES writes to the column {name}, of the type {described}. ClickHouse's VALUES reads a value for a Dynamic by its text where it can, and stores the placeholder's own text in place of the parameter's value. Write the row as an INSERT … SELECT, which computes each value."), 10)
 }
 
 /// A stretch of the statement without its comments, which stand for nothing.
@@ -1429,8 +1484,14 @@ struct Inserted {
     /// Where `VALUES` starts, and each row after it, from past its `(` to its `)`: none of an
     /// `INSERT … SELECT`.
     rows: Option<(usize, Vec<(usize, usize)>)>,
+    /// Every parameter in a value of a row of VALUES, alone or within what the value computes:
+    /// the value's place in its row, and the parameter's index.
+    valued: Vec<(usize, usize)>,
     /// Where the word `FORMAT` is, of an INSERT that reads its rows in one.
     format: Option<usize>,
+    /// Where a SELECT in parentheses opens that is a set operation's branch and holds a parameter:
+    /// its list is not read, so nothing would hold the parameter to its column.
+    unread: Option<usize>,
 }
 
 /// The words outside every parenthesis, lowercased, each with where it starts.
@@ -1468,10 +1529,14 @@ fn inserted(body: &str, lexed: &Lexed, code: &[(usize, u8, usize)]) -> Option<In
             let mut start = after + 1;
             let mut names = Some(Vec::with_capacity(cuts.len()));
             for cut in cuts {
-                names = names.and_then(|mut names: Vec<String>| {
-                    names.push(column_name(plain(body, lexed, start, cut).trim())?);
-                    Some(names)
-                });
+                let name = plain(body, lexed, start, cut);
+                // A comma after the last name is one ClickHouse takes.
+                if !(cut == close && name.trim().is_empty() && start > after + 1) {
+                    names = names.and_then(|mut names: Vec<String>| {
+                        names.push(column_name(name.trim())?);
+                        Some(names)
+                    });
+                }
                 start = cut + 1;
             }
             names.map_or(Listed::Unread, Listed::Names)
@@ -1479,10 +1544,19 @@ fn inserted(body: &str, lexed: &Lexed, code: &[(usize, u8, usize)]) -> Option<In
         _ => Listed::Table,
     };
     if top[source].1 == "format" {
-        return Some(Inserted { table, listed, written: Vec::new(), rows: None, format: Some(top[source].0) });
+        return Some(Inserted { table, listed, written: Vec::new(), rows: None, valued: Vec::new(), format: Some(top[source].0), unread: None });
     }
     let mut written = Vec::new();
     if top[source].1 == "values" {
+        let mut valued = Vec::new();
+        // Each parameter of a value, by the value's place: the placeholders stand in the text's order.
+        let mut next = lexed.placeholders.partition_point(|p| p.start < top[source].0);
+        let mut within = |place: usize, to: usize| {
+            while lexed.placeholders.get(next).is_some_and(|p| p.end <= to) {
+                valued.push((place, next));
+                next += 1;
+            }
+        };
         // Each row's values, a level inside its parentheses.
         let from = top[source].0 + "values".len();
         let mut rows = Vec::new();
@@ -1496,25 +1570,51 @@ fn inserted(body: &str, lexed: &Lexed, code: &[(usize, u8, usize)]) -> Option<In
                 }
                 (b',', 1) => {
                     written.extend(alone(body, lexed, item, at).map(|k| (Some(place), k)));
+                    within(place, at);
                     place += 1;
                     item = at + 1;
                 }
                 (b')', 0) => {
                     written.extend(alone(body, lexed, item, at).map(|k| (Some(place), k)));
+                    within(place, at);
                     rows.push((open, at));
                 }
                 _ => {}
             }
         }
-        return Some(Inserted { table, listed, written, rows: Some((top[source].0, rows)), format: None });
+        return Some(Inserted { table, listed, written, rows: Some((top[source].0, rows)), valued, format: None, unread: None });
     }
+    // Whether a parenthesis at `open` holds a SELECT, as a set operation's branch does, and no list.
+    let selects = |open: usize| {
+        b.get(open) == Some(&b'(') && {
+            let word: String = body[code_after(body, lexed, open + 1)..].bytes().take_while(u8::is_ascii_alphabetic).map(|c| c.to_ascii_lowercase() as char).collect();
+            matches!(word.as_str(), "select" | "with")
+        }
+    };
     // Each SELECT outside every parenthesis: the items of its list, up to the clause after it.
     let ends = |word: &str, at: usize| match word {
         "select" | "from" | "prewhere" | "where" | "group" | "having" | "window" | "qualify" | "order" | "limit" | "offset" | "union" | "intersect" | "settings" | "into" => true,
-        // A function and a `*`'s modifier are written with these words too, each before a `(`.
-        "format" | "except" => b.get(code_after(body, lexed, at + word.len())) != Some(&b'('),
+        // A function is written with this word too, before a `(`.
+        "format" => b.get(code_after(body, lexed, at + word.len())) != Some(&b'('),
+        // And a `*`'s modifier with this one, before the list of the columns it leaves out.
+        "except" => {
+            let next = code_after(body, lexed, at + word.len());
+            b.get(next) != Some(&b'(') || selects(next)
+        }
         _ => false,
     };
+    // A set operation's branch in parentheses that holds a parameter.
+    let operator = |i: usize| match top[i].1.as_str() {
+        "union" | "except" | "intersect" => true,
+        "all" | "distinct" => i > 0 && matches!(top[i - 1].1.as_str(), "union" | "except" | "intersect"),
+        _ => false,
+    };
+    let unread = (source..top.len()).filter(|&i| operator(i)).map(|i| code_after(body, lexed, top[i].0 + top[i].1.len())).find(|&open| {
+        selects(open) && {
+            let close = between(code, open + 1, body.len()).iter().find(|&&(_, byte, depth)| byte == b')' && depth == 0).map_or(body.len(), |&(at, _, _)| at);
+            lexed.placeholders.iter().any(|p| p.start > open && p.end <= close)
+        }
+    });
     for (i, (select, _)) in top.iter().enumerate().filter(|(i, (_, word))| *i >= source && word == "select") {
         let mut from = select + "select".len();
         // DISTINCT, and the columns it is told by where it names them, are no part of the first item.
@@ -1537,7 +1637,7 @@ fn inserted(body: &str, lexed: &Lexed, code: &[(usize, u8, usize)]) -> Option<In
             start = cut + 1;
         }
     }
-    Some(Inserted { table, listed, written, rows: None, format: None })
+    Some(Inserted { table, listed, written, rows: None, valued: Vec::new(), format: None, unread })
 }
 
 /// What an UPDATE writes to a column as it is: the table, as the statement names it, and each
@@ -2247,12 +2347,12 @@ mod tests {
         let sql = "INSERT INTO shop.`order lines` VALUES ({id:UInt64}, {total:Decimal(18, 4)}, {note:Nullable(String)}), (1 + {id:UInt64}, 2, 'x')";
         let wide = run(sql, &table);
         assert_eq!(wide.diagnostics.iter().map(|d| &sql[d.start..d.start + d.length]).collect::<Vec<_>>(), ["{id:UInt64}", "{total:Decimal(18, 4)}", "{note:Nullable(String)}"]);
-        assert_eq!(wide.diagnostics[0].message, "{id:UInt64} is written as it is to the column id, of the type UInt8. ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Declare the parameter as the column's type, {id:UInt8}, or write the conversion out, as CAST({id:UInt64}, 'UInt8') does.");
-        assert!(wide.diagnostics[2].message.contains("to the column note, of the type LowCardinality(String).") && wide.diagnostics[2].message.ends_with("Declare the parameter as the column's type, {note:String}, or write the conversion out, as CAST({note:Nullable(String)}, 'String') does."), "{}", wide.diagnostics[2].message);
+        assert_eq!(wide.diagnostics[0].message, "{id:UInt64} is written as it is to the column id, of the type UInt8. ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Declare the parameter as the column's type, {id:UInt8}.");
+        assert!(wide.diagnostics[2].message.contains("to the column note, of the type LowCardinality(String).") && wide.diagnostics[2].message.ends_with("Declare the parameter as the column's type, {note:String}."), "{}", wide.diagnostics[2].message);
         // By the columns the statement lists, in its order; a cast is the parameter's type too.
         let listed = run("INSERT INTO shop.`order lines` (note, id) VALUES (:note::String, :id::UInt16)", &table);
         assert_eq!(listed.diagnostics.len(), 1, "{:?}", listed.diagnostics);
-        assert!(listed.diagnostics[0].message.starts_with(":id::UInt16 is written as it is to the column id, of the type UInt8.") && listed.diagnostics[0].message.ends_with("Declare the parameter as the column's type, :id::UInt8, or write the conversion out, as CAST(:id::UInt16, 'UInt8') does."), "{}", listed.diagnostics[0].message);
+        assert!(listed.diagnostics[0].message.starts_with(":id::UInt16 is written as it is to the column id, of the type UInt8.") && listed.diagnostics[0].message.ends_with("Declare the parameter as the column's type, :id::UInt8."), "{}", listed.diagnostics[0].message);
         // A comment beside a parameter, or in the list of columns, is no part of what is written.
         let sql = "INSERT INTO shop.`order lines` (note /* its text */, id -- the key\n) VALUES (/* the note */ {note:String}, {id:UInt16} /* too wide */)";
         let commented = run(sql, &table);
@@ -2295,19 +2395,34 @@ mod tests {
             _ => table(sent),
         };
         let altered = run("ALTER TABLE u UPDATE a = {x:UInt64} WHERE id = 1", &parse);
-        assert_eq!(altered.diagnostics[0].message, "{x:UInt64} is written as it is to the column a, of the type UInt8. ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Declare the parameter as the column's type, {x:UInt8}, or write the conversion out, as CAST({x:UInt64}, 'UInt8') does.");
-        // A column whose type no parameter declares takes a value the statement converts, and a Variant a value of one of its types.
-        assert_eq!(refused("INSERT INTO u (id, d) VALUES ({i:UInt8}, {x:UInt64})")[0].1, "{x:UInt64} is written as it is to the column d, of the type Dynamic. ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Write the conversion out, as CAST({x:UInt64}, 'Dynamic') does.");
+        assert_eq!(altered.diagnostics[0].message, "{x:UInt64} is written as it is to the column a, of the type UInt8. ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Declare the parameter as the column's type, {x:UInt8}.");
+        // A column whose type no parameter declares takes a value the statement converts.
+        assert_eq!(refused("INSERT INTO u (id, d) SELECT {i:UInt8}, {x:UInt64}")[0].1, "{x:UInt64} is written as it is to the column d, of the type Dynamic. ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. No parameter declares that type: convert the value in the statement, as CAST({x:UInt64}, 'Dynamic') does.");
+        assert!(held("INSERT INTO u (id, d) SELECT {i:UInt8}, {x:UInt64}::Dynamic").is_empty());
+        // VALUES stores the text of a value for a Dynamic where it reads as data, a placeholder's own included: no parameter stands in one.
+        assert_eq!(refused("INSERT INTO u (id, d) VALUES ({i:UInt8}, {x:UInt64})")[0].1, "{x:UInt64} is in a value that VALUES writes to the column d, of the type Dynamic. ClickHouse's VALUES reads a value for a Dynamic by its text where it can, and stores the placeholder's own text in place of the parameter's value. Write the row as an INSERT … SELECT, which computes each value.");
+        assert_eq!(held("INSERT INTO u (id, d) VALUES ({i:UInt8}, ({x:UInt64} + 1)), ({i:UInt8}, [{s:String}])"), ["{x:UInt64}", "{s:String}"]);
+        // A Variant takes a value of one of its types, but a text, which it reads as whichever of them the text reads as.
         assert!(refused("INSERT INTO u (id, v) VALUES ({i:UInt8}, {x:UInt8})")[0].1.ends_with("Declare the parameter as one of the types the column holds."));
-        assert!(held("INSERT INTO u (id, v) VALUES ({i:UInt8}, {x:UInt64}), ({i:UInt8}, {s:Nullable(String)})").is_empty());
+        assert!(held("INSERT INTO u (id, v) VALUES ({i:UInt8}, {x:UInt64})").is_empty());
+        assert!(refused("INSERT INTO u (id, v) SELECT {i:UInt8}, {s:Nullable(String)}")[0].1.ends_with("of the type Variant(UInt64, String). ClickHouse reads a text written to a Variant as whichever of its types the text reads as, so the column would not hold the text as it was given: 123 is stored as a number where the Variant has one."));
         // Where the text does not say which column a parameter is written to, nothing holds it: after a `*`,
         // in a list of columns that is more than names, and to a table function.
         let unplaced = refused("INSERT INTO u SELECT * EXCEPT (at), {x:UInt64} FROM u");
-        assert_eq!(unplaced, [("{x:UInt64}".to_string(), "{x:UInt64} is written as it is to a column the statement's text does not name, so nothing holds it to that column's type. Write the table and each column by its name, with no * before the parameter, or write the conversion out, as CAST({x:UInt64}, 'UInt64') does.".to_string())]);
+        assert_eq!(unplaced, [("{x:UInt64}".to_string(), "{x:UInt64} is written as it is to a column the statement's text does not name, so nothing holds it to that column's type. Write the table and each column by its name, with no * before the parameter.".to_string())]);
         assert_eq!(held("INSERT INTO u SELECT {i:UInt8}, untuple(({x:UInt8}, now64(3))), {f:String}"), ["{f:String}"]);
         assert_eq!(held("INSERT INTO u (* EXCEPT (at)) VALUES ({i:UInt8}, {x:UInt8})"), ["{i:UInt8}", "{x:UInt8}"]);
         assert_eq!(held("INSERT INTO FUNCTION remote('other', db.u) (id) VALUES ({i:UInt8})"), ["{i:UInt8}"]);
         assert!(held("INSERT INTO FUNCTION remote('other', db.u) (id) VALUES ({i:UInt8} + 0)").is_empty());
+        // A comma after the last column is ClickHouse's to take, and a set operation's EXCEPT is no `*`'s.
+        assert_eq!(held("INSERT INTO u (id, a,) VALUES ({i:UInt8}, {x:UInt64})"), ["{x:UInt64}"]);
+        assert_eq!(held("INSERT INTO u (id, a) SELECT {i:UInt8}, {x:UInt64} EXCEPT (SELECT 1, 2)"), ["{x:UInt64}"]);
+        // A SELECT in parentheses is not read, so one that holds a parameter is refused: the statement's own, and a set operation's branch.
+        let whole = refused("INSERT INTO u (id, a) (SELECT 1, {x:UInt64})");
+        assert!(whole[0].1.starts_with("Reylo cannot read what this INSERT writes, so nothing would hold its parameters to their columns."), "{whole:?}");
+        let branch = refused("INSERT INTO u (id, a) SELECT 1, {y:UInt8} UNION ALL (SELECT 3, {x:UInt64})");
+        assert_eq!(branch.iter().map(|(at, message)| (at.as_str(), message.starts_with("This SELECT stands in parentheses"))).collect::<Vec<_>>(), [("(", true)]);
+        assert!(held("INSERT INTO u (id, a) SELECT 1, {y:UInt8} UNION ALL (SELECT 3, 4)").is_empty());
     }
 
     #[test]
@@ -2329,6 +2444,21 @@ mod tests {
         let sent = asked.borrow();
         assert!(sent.iter().any(|s| s == "EXPLAIN PIPELINE\nINSERT INTO t (id, u) SELECT materialize(defaultValueOfTypeName('UInt8')), generateUUIDv4()"), "{sent:?}");
         assert!(!sent.iter().any(|s| s.starts_with(PIPELINE) && (s.contains("DEFAULT") || s.contains("'a'"))), "{sent:?}");
+        drop(sent);
+        // VALUES reads a value for a Variant by the column's type, and a SELECT by the value's own: a 5 is
+        // the Variant's UInt64 to the one and a UInt8 to the other, so no row of such a table is asked as a SELECT.
+        asked.borrow_mut().clear();
+        let variant = |sent: &str| {
+            asked.borrow_mut().push(sent.to_string());
+            match sent {
+                "DESCRIBE TABLE t" => Ok(vec![vec![json!("id"), json!("UInt8"), json!("")], vec![json!("v"), json!("Variant(String, UInt64)"), json!("")]]),
+                _ if sent.contains("SELECT") => Err(error("Code: 70. DB::Exception: Cannot convert. (CANNOT_CONVERT_TYPE) (version 26.9)", "70")),
+                _ => Ok(Vec::new()),
+            }
+        };
+        let read = run("INSERT INTO t (id, v) VALUES (1, 5), ({id:UInt8}, 'x')", &variant);
+        assert!(read.diagnostics.is_empty(), "{:?}", read.diagnostics);
+        assert!(asked.borrow().iter().any(|s| s == "EXPLAIN PIPELINE\nINSERT INTO t (id, v) VALUES (1, 5), (materialize(defaultValueOfTypeName('UInt8')), 'x')"), "{:?}", asked.borrow());
     }
 
     #[test]
@@ -2370,6 +2500,10 @@ mod tests {
         assert_eq!(described("DELETE FROM t ON CLUSTER main IN PARTITION tuple() WHERE id = {id:UInt64}"), "DESCRIBE (\nSELECT 1 FROM t  WHERE ( tuple() ) IS NOT NULL AND id = materialize(defaultValueOfTypeName('UInt64'))\n)");
         // Each value an UPDATE writes is converted to its column's type, as the UPDATE converts it.
         assert_eq!(described("UPDATE t ON CLUSTER 'c' SET a = 1 IN PARTITION ID '2024' WHERE id = 1"), "DESCRIBE (\nFROM t  SELECT a , CAST( 1, toTypeName(a)) WHERE ( '2024' ) IS NOT NULL AND id = 1\n)");
+        // A partition's id is the statement's to write: no check can stand a value in for a parameter there.
+        let by_parameter = "DELETE FROM t IN PARTITION ID {part:String} WHERE id = 1";
+        let refused_id = run(by_parameter, &ok);
+        assert_eq!(refused_id.diagnostics.iter().map(|d| (&by_parameter[d.start..d.start + d.length], d.message.as_str())).collect::<Vec<_>>(), [("{part:String}", "Reylo types no parameter as a partition's id, which the server reads from the statement's text where a write is checked: write the id in the statement, in place of {part:String}.")]);
         assert_eq!(described("UPDATE t SET a = b + 1 -- one more\n, `n.x` = [1] /* all of it */ WHERE id = 1"), "DESCRIBE (\nFROM t SELECT a , CAST( b + 1, toTypeName(a)) -- one more\n, `n.x` , CAST( [1], toTypeName(`n.x`)) /* all of it */ WHERE id = 1\n)");
         // A statement the edits make no SELECT of is refused, with what the server says of that SELECT.
         let unparsed = |sent: &str| if sent.starts_with(AST) && sent.contains("SELECT") { Err(error("Code: 62. DB::Exception: Syntax error: failed at position 20 (x). (SYNTAX_ERROR) (version 26.9)", "62")) } else { Ok(Vec::new()) };

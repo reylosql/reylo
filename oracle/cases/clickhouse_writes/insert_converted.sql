@@ -1,1 +1,1 @@
-INSERT INTO things (id, d) VALUES ({id:UInt64}, {d:UInt64}::Dynamic)
+INSERT INTO things (id, d) SELECT {id:UInt64}, {d:UInt64}::Dynamic

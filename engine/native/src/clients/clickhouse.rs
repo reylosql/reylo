@@ -15,7 +15,8 @@ pub type Describe = <Clickhouse as Database>::Describe;
 /// How long a connection attempt may take, as the other programs'.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long one of the engine's queries may take, none of which reads a table's rows.
+/// How long one of the engine's queries may take. None reads a table's rows but through a scalar
+/// subquery of the statement, which the server computes as it reads one.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The most of an answer that is read: a describe's or a query tree's is a few kilobytes.

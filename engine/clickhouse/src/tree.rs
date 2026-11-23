@@ -2,8 +2,10 @@
 //! TREE`, a line a node, two spaces a level). ClickHouse enforces no unique key, a primary key
 //! being a sort key, so no `WHERE id = …` bounds a result. Two things do:
 //!
-//! - `LIMIT 1`, written as a number, which the tree gives as a constant: at most one row. `WITH
-//!   TIES` lifts the bound, and a set operation's root is no query.
+//! - `LIMIT 1`, written as a number, which the tree gives as a constant with nothing under it: at
+//!   most one row. A limit the server folded from an expression is none the statement fixes: a
+//!   parameter's stand-in is one, and so is a subquery's answer, computed as the tree is built.
+//!   `WITH TIES` lifts the bound, and a set operation's root is no query.
 //! - An aggregate with no `GROUP BY`: one row, whatever it reads, an empty input included. The
 //!   tree is what tells it from an aggregate grouped by nothing (`GROUP BY ()`) or by a constant,
 //!   which returns no row over an empty input, and from a view that aggregates, which the tree
@@ -11,7 +13,8 @@
 //!   does a `WITH FILL`, so neither is bounded. A `HAVING`, a `QUALIFY`, an `OFFSET`, a `LIMIT`
 //!   or a `LIMIT BY` may drop the row, and so may a `SETTINGS` clause that names a setting which
 //!   drops rows (`empty_result_for_aggregation_by_empty_set`, `limit`, `offset`,
-//!   `additional_result_filter`): at most one row.
+//!   `additional_result_filter`): at most one row. One that names `distributed_group_by_no_merge`
+//!   leaves each shard's rows unmerged, and bounds nothing.
 //!
 //! The tree's text is the server's to change, so what is not recognized proves nothing.
 
@@ -103,27 +106,36 @@ pub fn unread(lines: &[&str]) -> Option<String> {
 /// as the session's own are read (`ROW_SETTINGS`).
 const DROPS: [&str; 4] = ["empty_result_for_aggregation_by_empty_set", "limit", "offset", "additional_result_filter"];
 
-/// What the tree's lines prove. `limit_given` says the statement writes a parameter as its LIMIT,
-/// whose value the tree shows as the analysis's stand-in, not as a number the statement fixes.
-pub fn rows(lines: &[&str], limit_given: bool) -> Rows {
+/// The setting that has each shard of a distributed table answer for itself: a row for each, of an
+/// aggregate or within a limit.
+pub const UNMERGED: &str = "distributed_group_by_no_merge";
+
+/// What the tree's lines prove.
+pub fn rows(lines: &[&str]) -> Rows {
     let Some(root) = lines.first().filter(|l| l.starts_with("QUERY id: ")) else { return Rows::default() };
+    // A setting a SETTINGS clause names, the statement's own or a subquery's. A string a clause
+    // sets may hold a line break, which parts the clause's line, so each line's words are read.
+    let set = |names: &[&str]| lines.iter().flat_map(|l| l.split_whitespace()).any(|pair| names.iter().any(|name| pair.strip_prefix(*name).is_some_and(|rest| rest.starts_with('='))));
+    if set(&[UNMERGED]) {
+        return Rows::default();
+    }
     let sections = sections(lines);
     let body = |name: &str| sections.iter().find(|(heading, _)| *heading == name).map(|(_, body)| body.as_slice());
     let has = |name: &str| sections.iter().any(|(heading, _)| *heading == name);
     let ties = root.contains("is_limit_with_ties: 1");
-    // The LIMIT's first line is its value; under it, the expression it was folded from. A value
-    // with nothing under it is a number the statement writes, whatever its parameters are.
+    // The LIMIT's first line is its value; under it, the expression it was folded from, where it
+    // was: a value with nothing under it is a number the statement writes.
     let limit = match body("LIMIT") {
         None => Some(None),
-        Some(body) => body.first().and_then(|line| constant(line)).filter(|_| body.len() == 1 || !limit_given).map(Some),
+        Some(body) => body.first().filter(|_| body.len() == 1).and_then(|line| constant(line)).map(Some),
     };
-    // A SETTINGS clause, the statement's own or a subquery's, that names a setting which drops rows.
-    let settings = lines.iter().filter_map(|l| l.trim_start().strip_prefix("SETTINGS ")).any(|set| set.split_whitespace().any(|pair| DROPS.iter().any(|name| pair.strip_prefix(name).is_some_and(|rest| rest.starts_with('=')))));
+    let settings = set(&DROPS);
     let grouped = root.contains("is_group_by") || root.contains("group_by_type") || has("GROUP BY");
     let dropped = ["HAVING", "QUALIFY", "OFFSET", "LIMIT BY", "LIMIT BY LIMIT"].iter().any(|s| has(s));
     let filled = lines.iter().any(|l| l.contains("with_fill: 1"));
     let projection = body("PROJECTION").map(own).unwrap_or_default();
-    let aggregated = projection.iter().any(|l| l.contains("function_type: aggregate"));
+    // A function's own line: a constant's text may hold the same words.
+    let aggregated = projection.iter().any(|l| l.trim_start().starts_with("FUNCTION ") && l.contains("function_type: aggregate"));
     // An arrayJoin in what the statement computes after it aggregates; one in what it reads, its
     // tables and its WHERE, multiplies the rows the aggregate takes in.
     let multiplied = sections.iter().filter(|(heading, _)| !matches!(*heading, "JOIN TREE" | "WHERE" | "PREWHERE")).any(|(_, body)| own(body).iter().any(|l| l.contains("function_name: arrayJoin,")));
@@ -149,20 +161,20 @@ mod tests {
         assert_eq!(unread(&["QUERY id: 0", "  JOIN TREE", "    QUERY id: 3, is_subquery: 1", "      SETTINGS extremes=1"]), None);
     }
 
-    fn read(tree: &str, limit_given: bool) -> Rows {
+    fn read(tree: &str) -> Rows {
         let lines: Vec<&str> = tree.lines().collect();
-        rows(&lines, limit_given)
+        rows(&lines)
     }
 
     const AGGREGATE: &str = "QUERY id: 0\n  PROJECTION COLUMNS\n    n UInt64\n  PROJECTION\n    LIST id: 1, nodes: 1\n      FUNCTION id: 2, function_name: count, function_type: aggregate, result_type: UInt64\n  JOIN TREE\n    TABLE id: 3, alias: __table1, table_name: app.users";
 
     #[test]
     fn an_aggregate_with_no_group_by_is_one_row() {
-        assert_eq!(read(AGGREGATE, false), Rows { at_most_one: true, one: true, aggregate: true });
+        assert_eq!(read(AGGREGATE), Rows { at_most_one: true, one: true, aggregate: true });
         let limited = format!("{AGGREGATE}\n  LIMIT\n    CONSTANT id: 4, constant_value: UInt64_10, constant_value_type: UInt64");
-        assert_eq!(read(&limited, false), Rows { at_most_one: true, one: true, aggregate: true });
+        assert_eq!(read(&limited), Rows { at_most_one: true, one: true, aggregate: true });
         let one = format!("{AGGREGATE}\n  LIMIT\n    CONSTANT id: 4, constant_value: UInt64_1, constant_value_type: UInt64");
-        assert_eq!(read(&one, false), Rows { at_most_one: true, one: true, aggregate: true });
+        assert_eq!(read(&one), Rows { at_most_one: true, one: true, aggregate: true });
     }
 
     #[test]
@@ -178,10 +190,10 @@ mod tests {
             ("  ORDER BY\n    LIST id: 6, nodes: 1\n      SORT id: 7, sort_direction: ASCENDING, with_fill: 0\n        FUNCTION id: 8, function_name: arrayJoin, function_type: ordinary, result_type: UInt8", false),
             ("  QUALIFY\n    FUNCTION id: 4, function_name: equals, function_type: ordinary, result_type: UInt8", true),
         ] {
-            let found = read(&format!("{AGGREGATE}\n{after}"), false);
+            let found = read(&format!("{AGGREGATE}\n{after}"));
             assert_eq!((found.one, found.at_most_one), (false, bounded), "{after}");
         }
-        assert_eq!(read(&AGGREGATE.replace("QUERY id: 0", "QUERY id: 0, is_group_by_with_totals: 1"), false), Rows::default());
+        assert_eq!(read(&AGGREGATE.replace("QUERY id: 0", "QUERY id: 0, is_group_by_with_totals: 1")), Rows::default());
         // A setting that drops rows, named with others, in the statement's clause or a subquery's;
         // any other setting leaves the row, and so does a window the statement names.
         for (after, one) in [
@@ -191,37 +203,45 @@ mod tests {
             ("  SETTINGS join_use_nulls=1 max_threads=2", true),
             ("  SETTINGS limits=1 max_offset=2", true),
             ("  WINDOW\n    LIST id: 4, nodes: 1\n      WINDOW id: 5, alias: w, frame_type: RANGE", true),
+            // A string a clause sets may hold a line break, and the settings after it stand on the next line.
+            ("  SETTINGS log_comment=a\nb empty_result_for_aggregation_by_empty_set=1", false),
+            // An aggregate's limit folded from a subquery's answer may be none.
+            ("  LIMIT\n    CONSTANT id: 4, constant_value: UInt64_1, constant_value_type: UInt64\n      EXPRESSION\n        QUERY id: 5, is_subquery: 1", false),
         ] {
-            assert_eq!(read(&format!("{AGGREGATE}\n{after}"), false).one, one, "{after}");
+            assert_eq!(read(&format!("{AGGREGATE}\n{after}")).one, one, "{after}");
         }
+        // Each shard of a distributed table answers for itself where the statement says so: nothing is bounded.
+        assert_eq!(read(&format!("{AGGREGATE}\n  SETTINGS distributed_group_by_no_merge=1")), Rows::default());
+        // A constant's text is no function's line.
+        let quoted = AGGREGATE.replace("      FUNCTION id: 2, function_name: count, function_type: aggregate, result_type: UInt64", "      CONSTANT id: 2, constant_value: \\'x, function_type: aggregate\\', constant_value_type: String");
+        assert_eq!(read(&quoted), Rows::default());
         // An arrayJoin in what the aggregate reads multiplies its input, not its row.
         let read_from = format!("{AGGREGATE}\n  WHERE\n    FUNCTION id: 9, function_name: arrayJoin, function_type: ordinary, result_type: UInt8");
-        assert!(read(&read_from, false).one);
+        assert!(read(&read_from).one);
         // An arrayJoin in the list makes several rows of the one, and an aggregate inside a
         // subquery is the subquery's.
         let joined = AGGREGATE.replace("      FUNCTION id: 2, function_name: count, function_type: aggregate, result_type: UInt64", "      FUNCTION id: 2, function_name: count, function_type: aggregate, result_type: UInt64\n      FUNCTION id: 7, function_name: arrayJoin, function_type: ordinary, result_type: UInt8");
-        assert_eq!(read(&joined, false), Rows::default());
+        assert_eq!(read(&joined), Rows::default());
         let inner = "QUERY id: 0\n  PROJECTION\n    LIST id: 1, nodes: 1\n      CONSTANT id: 2, constant_value: UInt64_5, constant_value_type: Nullable(UInt64)\n        EXPRESSION\n          QUERY id: 3, is_subquery: 1\n            PROJECTION\n              LIST id: 4, nodes: 1\n                FUNCTION id: 5, function_name: count, function_type: aggregate, result_type: UInt64\n  JOIN TREE\n    TABLE id: 10, table_name: app.users";
-        assert_eq!(read(inner, false), Rows::default());
+        assert_eq!(read(inner), Rows::default());
         // A view that aggregates is a table to the statement that reads it.
-        assert_eq!(read("QUERY id: 0\n  PROJECTION\n    LIST id: 1, nodes: 1\n      COLUMN id: 2, column_name: n, result_type: UInt64, source_id: 3\n  JOIN TREE\n    TABLE id: 3, alias: __table1, table_name: app.counted", false), Rows::default());
+        assert_eq!(read("QUERY id: 0\n  PROJECTION\n    LIST id: 1, nodes: 1\n      COLUMN id: 2, column_name: n, result_type: UInt64, source_id: 3\n  JOIN TREE\n    TABLE id: 3, alias: __table1, table_name: app.counted"), Rows::default());
     }
 
     #[test]
     fn a_limit_of_one_is_at_most_one_row() {
         let limited = "QUERY id: 0\n  PROJECTION\n    LIST id: 1, nodes: 1\n      COLUMN id: 2, column_name: id, result_type: UInt64, source_id: 3\n  JOIN TREE\n    TABLE id: 3, table_name: app.users\n  LIMIT\n    CONSTANT id: 4, constant_value: UInt64_1, constant_value_type: UInt64";
-        assert_eq!(read(limited, false), Rows { at_most_one: true, one: false, aggregate: false });
-        // A parameter as the limit is whatever the caller passes: the tree shows the value it was
-        // read with, and under it what the value was folded from. A number the statement writes
-        // has nothing under it, and bounds the rows whatever the statement's parameters are.
-        let folded = format!("{limited}\n      EXPRESSION\n        FUNCTION id: 5, function_name: CAST, function_type: ordinary, result_type: UInt64");
-        assert_eq!(read(&folded, true), Rows::default());
-        assert_eq!(read(&folded, false), Rows { at_most_one: true, one: false, aggregate: false });
-        assert_eq!(read(limited, true), Rows { at_most_one: true, one: false, aggregate: false });
-        assert_eq!(read(&limited.replace("QUERY id: 0", "QUERY id: 0, is_limit_with_ties: 1"), false), Rows::default());
-        assert_eq!(read(&limited.replace("UInt64_1,", "UInt64_2,"), false), Rows::default());
+        assert_eq!(read(limited), Rows { at_most_one: true, one: false, aggregate: false });
+        // A limit folded from an expression is not the statement's to fix: a parameter as the
+        // limit is written as a cast when the tree is asked, and a subquery's answer is computed
+        // as the tree is built. The tree shows under the value what it was folded from.
+        for folded in ["      EXPRESSION\n        FUNCTION id: 5, function_name: CAST, function_type: ordinary, result_type: UInt64", "      EXPRESSION\n        QUERY id: 5, is_subquery: 1"] {
+            assert_eq!(read(&format!("{limited}\n{folded}")), Rows::default());
+        }
+        assert_eq!(read(&limited.replace("QUERY id: 0", "QUERY id: 0, is_limit_with_ties: 1")), Rows::default());
+        assert_eq!(read(&limited.replace("UInt64_1,", "UInt64_2,")), Rows::default());
         // A set operation's root is no query, and neither is text the engine does not know.
-        assert_eq!(read("UNION id: 0, union_mode: UNION_ALL\n  QUERIES\n    LIST id: 1, nodes: 2", false), Rows::default());
-        assert_eq!(read("", false), Rows::default());
+        assert_eq!(read("UNION id: 0, union_mode: UNION_ALL\n  QUERIES\n    LIST id: 1, nodes: 2"), Rows::default());
+        assert_eq!(read(""), Rows::default());
     }
 }

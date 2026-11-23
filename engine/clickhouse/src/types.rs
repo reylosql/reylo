@@ -364,7 +364,8 @@ fn decimal_digits(t: &Named) -> Option<(u32, u32)> {
 /// pair what is lost, so only what is known to lose nothing is kept:
 ///
 /// - the column's own type, a time zone aside, which changes no instant;
-/// - a value that is never NULL in a `Nullable` column, and a member's own type in a `Variant`;
+/// - a value that is never NULL in a `Nullable` column, and a member's own type in a `Variant`,
+///   but a text in a `Variant` of more than text, which the server reads as any member it can;
 /// - a whole number in a column of whole numbers that holds its whole range, a float in a wider
 ///   float, a decimal in one with no fewer digits either side of the point, and an enum in one
 ///   that has each of its labels at the same number;
@@ -392,7 +393,11 @@ fn keeps(to: &Named, from: &Named) -> bool {
         return true;
     }
     if to.name == "Variant" {
-        return to.args.iter().any(|a| matches!(a, Arg::Type(member) if member == from));
+        // A text written to a Variant is read as whichever of its types the text reads as (the
+        // server's cast_string_to_variant_use_inference), so only a Variant of text alone keeps one.
+        let members = to.args.iter().filter(|a| matches!(a, Arg::Type(_))).count();
+        let text = matches!(from.name.as_str(), "String" | "FixedString");
+        return (!text || members == 1) && to.args.iter().any(|a| matches!(a, Arg::Type(member) if member == from));
     }
     if let (Some((bits, unsigned)), Some((into, into_unsigned))) = (integer(&from.name), integer(&to.name)) {
         return if unsigned == into_unsigned { bits <= into } else { unsigned && bits < into };
@@ -620,7 +625,9 @@ mod tests {
             ("Enum8('a' = 1)", &["Enum8('a' = 1, 'b' = 2)", "Enum16('a' = 1, 'b' = 2)"]),
             // A member's own type in a Variant, and a NULL.
             ("UInt64", &["Variant(UInt64, String)", "Variant(String, LowCardinality(UInt64))"]),
-            ("Nullable(String)", &["Variant(UInt64, String)"]),
+            ("Nullable(UInt64)", &["Variant(UInt64, String)"]),
+            ("String", &["Variant(String)"]),
+            ("Array(String)", &["Array(Variant(String))"]),
             // Elements kept each in its place, and a tuple's names where both sides name them.
             ("Array(UInt8)", &["Array(UInt64)", "Array(Nullable(UInt8))"]),
             ("Tuple(a UInt8, b String)", &["Tuple(a UInt16, b String)", "Tuple(UInt8, String)"]),
@@ -643,7 +650,10 @@ mod tests {
             ("UInt8", &["Int8", "Bool", "Float32", "Date", "Variant(UInt64, String)", "Decimal(9, 0)"]),
             ("Float64", &["Float32", "Int32", "Decimal(9, 2)"]),
             ("Decimal(18, 4)", &["Decimal(18, 2)", "Decimal(9, 4)", "Float64"]),
-            ("String", &["UInt8", "Date", "Array(UInt8)", "Enum8('a' = 1, 'b' = 2)", "FixedString(2)", "UUID", "JSON", "Variant(UInt8, Date)"]),
+            // A text in a Variant of more than text is stored as the member its text reads as: 123 as a number.
+            ("String", &["UInt8", "Date", "Array(UInt8)", "Enum8('a' = 1, 'b' = 2)", "FixedString(2)", "UUID", "JSON", "Variant(UInt8, Date)", "Variant(UInt64, String)"]),
+            ("Nullable(String)", &["Variant(UInt64, String)"]),
+            ("Array(String)", &["Array(Variant(String, Date))"]),
             ("Nullable(UInt8)", &["UInt8", "UInt64"]),
             ("Bool", &["Date", "UInt8"]),
             ("Date", &["Date32", "BFloat16", "UInt16"]),

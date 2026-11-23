@@ -11,6 +11,7 @@ count_group_nothing.sql: many () -> { n: UInt64 }
 count_grouped.sql: many () -> { plan: String(UTF-8, ill-formed), n: UInt64 }
 count_having.sql: at_most_one (least: UInt64) -> { n: UInt64 }
 count_in_subquery.sql: many () -> { next: UInt64 }
+count_limit_subquery.sql: at_most_one () -> { n: UInt64 }
 count_limit_zero.sql: at_most_one () -> { n: UInt64 }
 count_limited.sql: one () -> { n: UInt64 }
 count_of_array_join.sql: one () -> { n: UInt64, letters: UInt64 }
@@ -29,6 +30,7 @@ limit_given.sql: many (count: UInt64) -> { id: UInt64 }
 limit_one.sql: at_most_one (id: UInt64) -> { id: UInt64, name: String(UTF-8, ill-formed) }
 limit_one_formatted.sql: at_most_one (format: String(UTF-8, ill-formed)) -> { shown: String(UTF-8, ill-formed) }
 limit_one_offset.sql: at_most_one () -> { id: UInt64, name: String(UTF-8, ill-formed) }
+limit_subquery.sql: many () -> { id: UInt64 }
 limit_ties.sql: many () -> { id: UInt64 }
 limit_two.sql: many () -> { id: UInt64 }
 no_table.sql: many (n: UInt8) -> { one: UInt8, next: UInt16 }

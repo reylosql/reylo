@@ -10,4 +10,5 @@ insert_select_alone.sql: none (id: UInt64, user: UInt64, total: Decimal(18,2), n
 insert_several.sql: none (a: UInt64, b: UInt64) -> {  }
 insert_things.sql: none (id: UInt64, format: String(UTF-8, ill-formed), v: UInt64, tags: UInt8[], skus: String(UTF-8, ill-formed)[]) -> {  }
 insert_values.sql: none (id: UInt64, user: UInt64, total: Decimal(18,2), note: String(UTF-8, ill-formed)?, placed: Date) -> {  }
+insert_variant_literal.sql: none (id: UInt64) -> {  }
 read_back.sql: many () -> { id: UInt64, user_id: UInt64, total: Decimal(19,2), note: String(UTF-8, ill-formed)? }
