@@ -2924,11 +2924,11 @@ async fn dry_run_on(opts: &Options, log: Log<'_>) -> Result<i32, Error> {
         }
         other => other,
     };
-    // What each pending migration blocks while it reads every row of a table, on Postgres: said,
-    // not refused, since `migrate new` asked when it was written, and a hand-written one is its
-    // author's to judge.
+    // What each pending migration blocks while it reads every row of a table, on Postgres and
+    // MySQL: said, not refused, since `migrate new` asked when it was written, and a hand-written
+    // one is its author's to judge.
     let hazards = match &result {
-        Ok(plan) if plan.ok() && db.dialect() == Dialect::Postgres && !plan.pending.is_empty() => {
+        Ok(plan) if plan.ok() && matches!(db.dialect(), Dialect::Postgres | Dialect::Mysql) && !plan.pending.is_empty() => {
             let texts: Vec<&str> = plan.ran.iter().chain(&plan.pending).map(|f| f.sql.as_str()).collect();
             let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &texts).await;
             let found = pending_hazards(&mut shadows, &plan.ran, &plan.pending).await;
@@ -4319,6 +4319,11 @@ fn resolve_by(ids: &[String], written: &str, exact: bool) -> Result<Vec<String>,
             _ => {}
         }
     }
+    // A column and a MySQL partition of one table may share a name: one name for both is no answer.
+    let kinds: std::collections::BTreeSet<&str> = exact_hits.iter().filter_map(|id: &String| id.split(' ').next()).collect();
+    if kinds.len() > 1 {
+        return Err(exact_hits);
+    }
     match (exact_hits.is_empty(), by_suffix.len(), by_schema.is_empty()) {
         (false, 0, _) => Ok(exact_hits),
         (true, 0, _) => Ok(by_schema),
@@ -4811,6 +4816,9 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
                 named.extend(hits);
                 stated.drop.push(w.clone());
             }
+            Err(could) if could.iter().filter_map(|c| c.split(' ').next()).collect::<std::collections::BTreeSet<_>>().len() > 1 => {
+                problems.push(Problem::new("drop-name-ambiguous", format!("The --drop flag names {w}, which is both {}", and_list(&could.iter().map(|c| described(c)).collect::<Vec<_>>()))).note("Make one of the changes in schema.sql and write its migration, then the other."))
+            }
             Err(could) => problems.push(Problem::new("drop-name-ambiguous", format!("The --drop flag names {w}, which could be any of {}", could.iter().map(&display).collect::<Vec<_>>().join(", "))).note("Name each with its table, and its schema where two share a name.")),
         }
     }
@@ -4830,8 +4838,13 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
             [one] => format!("This {subject} drops {} and {}", drop_phrase(&what), if one.starts_with("column ") { "its data" } else { "its rows" }),
             _ => format!("This {subject} drops {}, with their data", drop_phrase(&what)),
         };
-        let mut problem = Problem::new("drops-data", title)
-            .fix(if list.len() == 1 { "To drop it" } else { "To drop them" }, &[&create_command(asked, &stated, &list, &[])]);
+        // A column and a MySQL partition of one table may share a name, which --drop can't tell apart.
+        let shared: Vec<&(String, String)> = what.iter().filter(|(_, n)| what.iter().filter(|(_, m)| m == n).count() > 1).collect();
+        let mut problem = match shared.as_slice() {
+            [] => Problem::new("drops-data", title).fix(if list.len() == 1 { "To drop it" } else { "To drop them" }, &[&create_command(asked, &stated, &list, &[])]),
+            [(a, name), (b, _), ..] => Problem::new("drops-data", title).note(format!("A {a} and a {b} share the name {name}: make one of the changes in schema.sql and write its migration, then the other.")),
+            [_] => unreachable!("a name shared by one"),
+        };
         // Where something comes as these go, any of them may be renamed: which became which is
         // for the person to say, so the command names no new name for them.
         // What the plan adds of the same kind: a table renamed is a table, a column a column.
