@@ -120,7 +120,7 @@ export async function generate(inputs: string[], out: string, base: string): Pro
   // which can be another package than the one the .sql files are in, beside which the build found them.
   const problems = [
     ...[...new Set(queries.flatMap((q) => q.libraries))].map((library) => libraryProblem(library, dirname(out))),
-    queries.some((q) => q.types.some((t) => t.includes(`import("geojson")`))) ? geojsonTypesProblem(dirname(out)) : undefined,
+    queries.some((q) => q.geojson) ? geojsonTypesProblem(dirname(out)) : undefined,
   ].filter((problem) => problem !== undefined);
   if (problems.length) return { ok: false, errors: problems.map((problem) => `${shown(base, out)}: ${problem}`) };
 
@@ -136,7 +136,7 @@ export async function generate(inputs: string[], out: string, base: string): Pro
   return write(out, text, shown(base, out));
 }
 
-type Query = { text: string; types: string[]; imports: string[]; libraries: Library[] };
+type Query = { text: string; types: string[]; imports: string[]; libraries: Library[]; geojson: boolean };
 
 /** One file's export: its definition and its types, with the libraries it imports; or why it cannot be written, each line naming the file. */
 async function queryOf(name: string, file: string, base: string): Promise<Query | string[]> {
@@ -187,7 +187,11 @@ async function queryOf(name: string, file: string, base: string): Promise<Query 
     `  type QueryError = ${indent(types.queryError)};`,
     `}`,
   ].join("\n");
-  return { text, types: [types.params, types.row, types.columns ?? ""], imports, libraries: [...moduleLibraries(input)] };
+  // A type names GeoJSON's only where the project's codecs say so, and outside the doc comments a
+  // column's database comment writes, read in one pass with the strings as reyloImport reads them.
+  const code = (t: string) => t.replace(/"(?:[^"\\]|\\.)*"|\/\*[\s\S]*?\*\//g, (m) => (m.startsWith('"') ? m : ""));
+  const geojson = project.codecs.geometry !== undefined && [types.params, types.row, types.columns ?? ""].some((t) => code(t).includes(`import("geojson")`));
+  return { text, types: [types.params, types.row, types.columns ?? ""], imports, libraries: [...moduleLibraries(input)], geojson };
 }
 
 /** `type` indented to sit inside the namespace, its first line where it starts. */
@@ -246,7 +250,8 @@ export function sqlFiles(path: string, base: string): string[] | string {
 /**
  * Why `path` is no glob, by the rules of the glob crate `reylo generate rust-sqlx` reads one with,
  * so that both refuse the same typos rather than match nothing: a run of more than two `*`, a `**`
- * that is not a whole path component, or a `[` that no `]` closes after a character (two for `[!`).
+ * that is not a whole path component, or a `[` that no `]` in its path component closes after a
+ * character (two for `[!`).
  */
 export function globProblem(path: string): string | undefined {
   const separator = (c: string | undefined) => c === undefined || c === "/" || c === "\\";
@@ -260,7 +265,8 @@ export function globProblem(path: string): string | undefined {
     } else if (path[i] === "[") {
       const from = path[i + 1] === "!" ? i + 3 : i + 2;
       const close = from <= path.length ? path.indexOf("]", from) : -1;
-      if (close < 0) return "invalid range pattern";
+      const end = path.slice(i).search(/[/\\]/);
+      if (close < 0 || (end >= 0 && close > i + end)) return "invalid range pattern";
       i = close;
     }
   }

@@ -74,6 +74,7 @@ test("the files a path names: a file, a directory searched, or a glob", () => {
   // A glob the Rust generator would refuse is refused, rather than matching nothing.
   assert.equal(sqlFiles("src/[bad", root), "src/[bad is not a glob Reylo reads: invalid range pattern");
   assert.equal(sqlFiles("src/[!]", root), "src/[!] is not a glob Reylo reads: invalid range pattern");
+  assert.equal(sqlFiles("src/[a/*.sql]", root), "src/[a/*.sql] is not a glob Reylo reads: invalid range pattern");
   assert.equal(sqlFiles("src/***/*.sql", root), "src/***/*.sql is not a glob Reylo reads: wildcards are either regular `*` or recursive `**`");
   assert.equal(sqlFiles("src/a**.sql", root), "src/a**.sql is not a glob Reylo reads: recursive wildcards must form a single path component");
   assert.deepEqual(names(sqlFiles("src/[a]*.sql", root)), ["src/a.sql"]);
@@ -172,13 +173,13 @@ test("Postgres: the module carries JSON shapes and enum types, and runs on a dri
 });
 
 test("Postgres: a codec's library is found where the module imports it, not only beside the .sql files", { skip: pgLive }, async () => {
-  const { url, drop } = await postgresDatabase("generate_codecs", "create table prices (id int primary key, price numeric(20,2) not null)");
+  const { url, drop } = await postgresDatabase("generate_codecs", `create table prices (id int primary key, price numeric(20,2) not null); comment on column prices.price is 'Not import("geojson"), which a geometry is typed with'`);
   try {
     // The queries are one package's and the module another's, beside it.
     const root = project({
       "app/package.json": `{ "type": "module" }`,
       "app/.env": `DATABASE_URL=${url}\n`,
-      "app/.reylo.yaml": "js:\n  codecs:\n    decimal: decimal.js\n",
+      "app/.reylo.yaml": "js:\n  codecs:\n    decimal: decimal.js\n    geometry: GeoJSON\n",
       "app/sql/get_price.sql": "select price from prices where id = :id\n",
       "web/package.json": `{ "type": "module" }`,
     });
@@ -191,6 +192,8 @@ test("Postgres: a codec's library is found where the module imports it, not only
     symlinkSync(join(ROOT, "node_modules", "decimal.js"), join(root, "web", "node_modules", "decimal.js"));
     assert.deepEqual(await generate(["app/sql"], out, root), { ok: true, path: out, changed: true });
     assert.match(readFileSync(out, "utf8"), /^import ReyloDecimal from "decimal\.js";$/m);
+    // A column's comment that names GeoJSON's types asks for no @types/geojson.
+    assert.match(readFileSync(out, "utf8"), /Not import\("geojson"\)/);
   } finally {
     await closeSessions();
     await drop();
