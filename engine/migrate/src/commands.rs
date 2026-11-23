@@ -7873,7 +7873,7 @@ mod tests {
 
     #[test]
     fn a_constraint_not_validated_is_said_so_once() {
-        assert_eq!(readable("constraint public.users users_plan_check CHECK ((plan = 'free'::text)) NOT VALID not valid"), "constraint users_plan_check on public.users: check ((plan = 'free'::text)) not valid");
+        assert_eq!(readable("constraint public.users users_plan_check CHECK ((plan = 'free'::text)) NOT VALID not valid"), "constraint users_plan_check on users: check ((plan = 'free'::text)) not valid");
     }
 
     #[test]
