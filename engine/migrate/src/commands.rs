@@ -1981,7 +1981,7 @@ fn run_order(opts: &Options, files: &[Migration]) -> Vec<Migration> {
 pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> Result<Plan, Error> {
     let d = db.dialect();
     let (files, strays) = opts.migrations()?;
-    let mut problems: Vec<Problem> = stray_problem(opts, &strays).into_iter().collect();
+    let mut problems: Vec<Problem> = stray_problem(opts, &files, &strays).into_iter().collect();
     // What schema.sql declares is held against the migrations in development and CI, not at deploy;
     // a project without one keeps its schema in its migrations alone.
     let schema_sql = if server.is_some() { opts.schema_text() } else { None };
@@ -6322,8 +6322,7 @@ pub async fn dev(opts: &Options, in_ci: bool, log: Log<'_>) -> Result<i32, Error
 
 /// The files in the migrations directory that aren't migrations, as one refusal: a `.sql` file that
 /// lacks only the time is told the name it needs.
-fn stray_problem(opts: &Options, strays: &[String]) -> Option<Problem> {
-    static BARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z0-9_]+\.sql$").expect("a valid pattern"));
+fn stray_problem(opts: &Options, files: &[Migration], strays: &[String]) -> Option<Problem> {
     let dir = shown(&opts.dir);
     let title = match strays {
         [] => return None,
@@ -6331,10 +6330,72 @@ fn stray_problem(opts: &Options, strays: &[String]) -> Option<Problem> {
         many => format!("Files in {dir} that aren't migrations: {}", many.join(", ")),
     };
     let mut problem = Problem::new("not-a-migration", title).note(format!("A file in {dir} is init.sql or <YYYYMMDDHHMMSS>_<name>.sql, the name in a-z, 0-9 and _."));
-    for s in strays.iter().filter(|s| BARE.is_match(s)) {
-        problem = problem.note(format!("Rename {s} to {}_{s}.", time::stamp(time::now_seconds())));
+    for note in stray_renames(files, strays, time::now_seconds()) {
+        problem = problem.note(note);
     }
     Some(problem)
+}
+
+/// The rename each stray `.sql` file named in a-z, 0-9 and _ needs, as a note. One whose name starts
+/// with a shorter stamp (`20260320_b.sql`, as Prisma accepts) is padded to the full time in place, so
+/// that it runs where its name sorts among the migrations: from the start of its period, else its
+/// end, whichever keeps it between the same neighbours. Any other takes the first second from `now`
+/// that no file has, which puts it last.
+fn stray_renames(files: &[Migration], strays: &[String], now: i64) -> Vec<String> {
+    static BARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z0-9_]+\.sql$").expect("a valid pattern"));
+    static SHORT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{8,13})_([a-z0-9_]+)\.sql$").expect("a valid pattern"));
+    let real = |t: &str| time::seconds(t).map(time::stamp).as_deref() == Some(t);
+    // Each migration, and each stray already given a time, as (its time, its name, the name it is
+    // ordered by now): init.sql runs first whatever its name.
+    let mut placed: Vec<(String, String, String)> = files.iter().map(|f| (f.time.clone(), f.name.clone(), if f.name == INIT { String::new() } else { f.name.clone() })).collect();
+    // Every name a file in the directory has or is told to take, in lowercase, as a filesystem that
+    // ignores case reads it, so that no rename meets another file.
+    let mut taken: std::collections::HashSet<String> = files.iter().map(|f| &f.name).chain(strays).map(|n| n.to_lowercase()).collect();
+    let mut notes = Vec::new();
+    // A name with no stamp, or digits that aren't a date, can take any time from now, so it waits
+    // for those that can only take a time of their own period.
+    let mut unstamped = Vec::new();
+    for s in strays.iter().filter(|s| BARE.is_match(s)) {
+        let Some((short, rest)) = SHORT.captures(s).filter(|m| real(format!("{:0<14}", &m[1]).as_str())).map(|m| (m[1].to_string(), m[2].to_string())) else {
+            unstamped.push(s);
+            continue;
+        };
+        // The start of the stamp's period, and its end: each digit after the prefix the largest that
+        // still makes a time.
+        let start = format!("{short:0<14}");
+        let end = (short.len()..14).fold(short.clone(), |t, _| (0..=9).rev().map(|d| format!("{t}{d}")).find(|t| real(format!("{t:0<14}").as_str())).expect("0 makes a time"));
+        let candidates = [start, end];
+        let before = placed.iter().filter(|p| p.2.as_str() < s.as_str()).count();
+        let keeps = |t: &String| {
+            let name = format!("{t}_{rest}.sql");
+            !taken.contains(&name) && placed.iter().filter(|p| (p.0.as_str(), p.1.as_str()) < (t.as_str(), name.as_str())).count() == before
+        };
+        match candidates.iter().find(|t| keeps(t)) {
+            Some(t) => {
+                let name = format!("{t}_{rest}.sql");
+                notes.push(format!("Rename {s} to {name}."));
+                taken.insert(name.clone());
+                placed.push((t.clone(), name, s.clone()));
+            }
+            None => {
+                let mut by_order: Vec<&(String, String, String)> = placed.iter().collect();
+                by_order.sort_by(|a, b| a.2.cmp(&b.2));
+                let (prev, next) = (before.checked_sub(1).map(|i| &by_order[i].1), by_order.get(before).map(|p| &p.1));
+                notes.push(match (prev, next) {
+                    (Some(p), Some(n)) => format!("Rename {s} with a time that runs it where its name sorts, after {p} and before {n}."),
+                    (Some(p), None) => format!("Rename {s} with a time that runs it where its name sorts, after {p}."),
+                    (None, Some(n)) => format!("Rename {s} with a time that runs it where its name sorts, before {n}."),
+                    (None, None) => format!("Rename {s} with a time no other file has."),
+                });
+            }
+        }
+    }
+    for s in unstamped {
+        let name = (now..).map(|t| format!("{}_{s}", time::stamp(t))).find(|n| !taken.contains(n)).expect("a free second");
+        notes.push(format!("Rename {s} to {name}."));
+        taken.insert(name);
+    }
+    notes
 }
 
 /// The problems no database is needed to see: files that aren't migrations, a migration that can't
@@ -6347,7 +6408,7 @@ fn file_problems(opts: &Options, files: &[Migration], strays: &[String], schema_
             problems.push(Problem::new("merge-conflict-markers", format!("Git's conflict markers are still in {path}")).note("Resolve git's conflict markers (<<<<<<<, =======, >>>>>>>) first."));
         }
     }
-    problems.extend(stray_problem(opts, strays));
+    problems.extend(stray_problem(opts, files, strays));
     for f in files.iter().filter(|f| f.name != INIT) {
         if let Some(why) = atomicity_problem(&f.sql, d) {
             problems.push(Problem::new("not-atomic", format!("Migration {} can't run atomically", f.name)).note(why));
@@ -7478,6 +7539,31 @@ fn table_lines(table: &crate::db::Table) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stray_with_a_shorter_stamp_is_padded_where_its_name_sorts() {
+        let files = |names: &[&str]| -> Vec<Migration> { names.iter().map(|n| Migration { sql: String::new(), name: n.to_string(), time: if *n == INIT { "00000000000000".into() } else { n[..14].to_string() }, path: PathBuf::from(n) }).collect() };
+        let renames_at = |now: &str, names: &[&str], strays: &[&str]| stray_renames(&files(names), &strays.iter().map(|s| s.to_string()).collect::<Vec<_>>(), time::seconds(now).unwrap());
+        let renames = |names: &[&str], strays: &[&str]| renames_at("20261123191900", names, strays);
+        // Between its neighbours, from the start of its day.
+        assert_eq!(renames(&[INIT, "20260101000000_a.sql", "20260401000000_c.sql"], &["20260320_b.sql"]), ["Rename 20260320_b.sql to 20260320000000_b.sql."]);
+        assert_eq!(renames(&[], &["20260320_a.sql", "20260320_b.sql"]), ["Rename 20260320_a.sql to 20260320000000_a.sql.", "Rename 20260320_b.sql to 20260320000000_b.sql."]);
+        // Strays come in name order, and each keeps its place after those before it.
+        assert_eq!(renames(&[], &["202603201230_c.sql", "20260320_a.sql"]), ["Rename 202603201230_c.sql to 20260320123000_c.sql.", "Rename 20260320_a.sql to 20260320235959_a.sql."]);
+        // After a migration of the same day, which its name sorts after, from the end of the day.
+        assert_eq!(renames(&["20260320100000_x.sql", "20260401000000_c.sql"], &["20260320_b.sql"]), ["Rename 20260320_b.sql to 20260320235959_b.sql."]);
+        // A name with no date in front takes the time now, as does one whose digits are no date.
+        assert_eq!(renames(&["20260101000000_a.sql"], &["notes.sql", "20261399_x.sql", "README.md"]), ["Rename notes.sql to 20261123191900_notes.sql.", "Rename 20261399_x.sql to 20261123191900_20261399_x.sql."]);
+        // The end of a period read from the prefix's own digits: 1 of a 9-digit stamp is the hours 10 to 19.
+        assert_eq!(renames(&["20260320180000_a.sql"], &["202603201_b.sql"]), ["Rename 202603201_b.sql to 20260320195959_b.sql."]);
+        // No two renames, nor a rename and a migration, take one name.
+        assert_eq!(renames(&["20261123191900_bar.sql"], &["2026112319190_foo.sql", "bar.sql", "foo.sql"]), ["Rename 2026112319190_foo.sql to 20261123191900_foo.sql.", "Rename bar.sql to 20261123191901_bar.sql.", "Rename foo.sql to 20261123191901_foo.sql."]);
+        // A name that differs only in case is taken, and an unstamped file takes its time after the stamped ones.
+        assert_eq!(renames(&["20260320180000_a.sql"], &["20260320195959_B.sql", "202603201_b.sql"]), ["Rename 202603201_b.sql with a time that runs it where its name sorts, after 20260320180000_a.sql."]);
+        assert_eq!(renames_at("20261123191929", &["20261123191925_a.sql"], &["1_notes.sql", "2026112319192_1_notes.sql"]), ["Rename 2026112319192_1_notes.sql to 20261123191929_1_notes.sql.", "Rename 1_notes.sql to 20261123191930_1_notes.sql."]);
+        // No time of the day keeps it between its neighbours.
+        assert_eq!(renames(&["20260320000000_z.sql", "20260320235959_z.sql", "20260401000000_c.sql"], &["20260320_b.sql"]), ["Rename 20260320_b.sql with a time that runs it where its name sorts, after 20260320235959_z.sql and before 20260401000000_c.sql."]);
+    }
 
     #[test]
     fn a_printed_run_is_offered_only_where_it_runs_as_a_migration() {
