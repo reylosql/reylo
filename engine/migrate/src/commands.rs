@@ -926,11 +926,11 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
             x.len() == y.len() && x.iter().zip(&y).all(|(a, b)| a == b || (!a.contains('(') && bare.iter().any(|(old, new)| crate::diff::swap_name(a, old, new) == *b)))
         };
         for g in &r_gone {
-            // A view is the same view by its name, which a table rename leaves alone, whatever the
+            // A view is the same view by its name, which a table rename never changes, whatever the
             // rename changed in its query.
             let same = |c: &String| match g.split(' ').next() {
                 Some("column") => retabled(g).is_some_and(|h| split_head(c).0 == h),
-                Some("view") => split_head(&renamed_in(g, &names)).0 == split_head(c).0,
+                Some("view") => split_head(g).0 == split_head(c).0,
                 _ => same_other(g, c),
             };
             if let Some(c) = r_came.iter().find(|c| same(c) && !moved_with.iter().any(|(_, t)| t == *c)) {
@@ -963,14 +963,15 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
 
 /// `line` with each of `names` (an old name and its new, as the catalog writes them) replaced where
 /// it stands as a whole name, all at once: `public.orders` in `public.orders(id)` and
-/// `public.orders.title`, but not in `public.orders_archive`.
+/// `public.orders.title`, but not in `public.orders_archive` or inside a quoted name,
+/// `"public.orders"`.
 #[cfg(feature = "cli")]
 fn renamed_in(line: &str, names: &[(String, String)]) -> String {
     let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
-    let (mut out, mut at, mut prev) = (String::new(), 0, None::<char>);
+    let (mut out, mut at, mut prev, mut quote) = (String::new(), 0, None::<char>, None::<char>);
     while let Some(c) = line[at..].chars().next() {
         let rest = &line[at..];
-        if prev.is_none_or(|p| !ident(p) && p != '.') {
+        if quote.is_none() && prev.is_none_or(|p| !ident(p) && p != '.') {
             if let Some((old, new)) = names.iter().find(|(old, _)| rest.starts_with(old.as_str()) && rest[old.len()..].chars().next().is_none_or(|n| !ident(n))) {
                 out.push_str(new);
                 at += old.len();
@@ -978,6 +979,11 @@ fn renamed_in(line: &str, names: &[(String, String)]) -> String {
                 continue;
             }
         }
+        quote = match quote {
+            Some(q) if c == q => None,
+            None if c == '"' || c == '`' => Some(c),
+            q => q,
+        };
         out.push(c);
         at += c.len_utf8();
         prev = Some(c);
@@ -6818,6 +6824,13 @@ mod tests {
         let steps = Steps { before: &before, moved: None, renamed: Some(&after), after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}"]);
+        // A view whose quoted name holds a renamed table's name is another view still.
+        let before = lines(&["table public.alpha", "view public.omega as SELECT 1 AS n;", "view public.\"public.alpha\" as SELECT omega.n FROM omega;", "view public.\"public.omega\" as SELECT alpha.id FROM alpha;"]);
+        let after = lines(&["table public.omega", "view public.\"public.omega\" as SELECT omega.id FROM omega;"]);
+        let steps = Steps { before: &before, moved: None, renamed: Some(&after), after: &after };
+        let tables = vec![("table public.alpha".to_string(), "table public.omega".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-alpha-]{+omega+}", "  - view omega as SELECT 1 AS n;", "  - view \"public.alpha\" as SELECT omega.n FROM omega;"]);
+        assert_eq!(renamed_in("view public.\"public.alpha\" as SELECT 1 FROM public.alpha", &[("public.alpha".to_string(), "public.omega".to_string())]), "view public.\"public.alpha\" as SELECT 1 FROM public.omega");
         // Two tables of one name in two schemas, each renamed its own way, with a column of one.
         let before = lines(&["table east.orders", "table west.orders", "column west.orders.title text", "constraint west.orders orders_pkey PRIMARY KEY (id)"]);
         let renamed = lines(&["table east.invoices", "table west.shipments", "column west.shipments.title text", "constraint west.shipments shipments_pkey PRIMARY KEY (id)"]);
