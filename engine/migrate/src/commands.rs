@@ -816,7 +816,6 @@ fn readable(line: &str) -> String {
     static MYSQL_INDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^index ([^.\s]+)\.(\S+) (unique )?(\w+)((?: invisible)?(?: comment "(?:[^"\\]|\\.)*")?) (\(.*\))$"#).expect("a valid pattern"));
     static SQLITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(index|view|trigger) \S+ create (unique )?(?:temp |temporary )?(?:index|view|trigger) (?:if not exists )?(\S+) (.*)$").expect("a valid pattern"));
     static CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) (\S+) (.*)$").expect("a valid pattern"));
-    static FUNCTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)^function CREATE OR REPLACE (FUNCTION|PROCEDURE) ([^\n]+)\n(?: RETURNS ([^\n]+)\n)?").expect("a valid pattern"));
     static POSTGRES_DEFINITION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:PRIMARY KEY|UNIQUE|CHECK|FOREIGN KEY|EXCLUDE|NOT NULL)\b").expect("a valid pattern"));
     static SQLITE_CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) ((?:primary key|unique|check|foreign key|constraint)\b.*)$").expect("a valid pattern"));
     static PUBLIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s(,]|::)(?:public|"public")\."#).expect("a valid pattern"));
@@ -834,9 +833,8 @@ fn readable(line: &str) -> String {
     }
     // A function by its signature and what it returns, not its body, which Postgres writes over
     // several lines; a trigger by its name and table, as a constraint is.
-    if let Some(c) = FUNCTION.captures(&line) {
-        let returns = c.get(3).map(|r| format!(" returns {}", lowercase_keywords(r.as_str()))).unwrap_or_default();
-        return format!("{} {}{returns}", c[1].to_lowercase(), lowercase_keywords(&c[2]));
+    if let Some(routine) = routine(&line) {
+        return routine;
     }
     if let Some(rest) = line.strip_prefix("trigger CREATE ") {
         let (constraint, rest) = rest.strip_prefix("CONSTRAINT ").map_or(("", rest), |rest| ("constraint ", rest));
@@ -858,6 +856,37 @@ fn readable(line: &str) -> String {
         return format!("constraint {} on {}: {}", &c[2], &c[1], lowercase_keywords(&c[3]));
     }
     line
+}
+
+/// A Postgres function or procedure as `pg_get_functiondef` writes it, by its name, its arguments
+/// whole (to the parenthesis that closes them, outside quotes, where a default's string may hold a
+/// line break, written `\n`) and what it returns. None for any other line, or one whose arguments
+/// don't close.
+fn routine(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("function CREATE OR REPLACE ")?;
+    let (kind, rest) = rest.strip_prefix("FUNCTION ").map(|r| ("function", r)).or_else(|| rest.strip_prefix("PROCEDURE ").map(|r| ("procedure", r)))?;
+    let (mut depth, mut quote) = (0, None::<char>);
+    let mut end = None;
+    for (k, c) in rest.char_indices() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(k + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+    let signature = lowercase_keywords(&rest[..end]).replace('\n', "\\n");
+    let returns = rest[end..].strip_prefix("\n RETURNS ").and_then(|r| r.lines().next()).map(|r| format!(" returns {}", lowercase_keywords(r))).unwrap_or_default();
+    Some(format!("{kind} {signature}{returns}"))
 }
 
 /// The name `text` starts with, a qualified one whole and a quoted part with its spaces, and what
@@ -1141,23 +1170,30 @@ fn listed(gone: &[String], came: &[String], before: &[String], after: &[String],
     out
 }
 
-/// What went and what came, without each pair of lines that read the same (as a function's does
-/// when its body alone changed), and each such pair as one line changed in place, `indent` in.
+/// What went and what came, without each function or procedure both sides have by the same
+/// signature (its body alone changed), and each of those as one line changed in place, `indent` in.
+/// Every other line is left where it is.
 fn in_place<'a>(gone: Vec<&'a String>, came: Vec<&'a String>, indent: &str) -> (Vec<&'a String>, Vec<&'a String>, Vec<String>) {
-    let mut came: Vec<Option<&String>> = came.into_iter().map(Some).collect();
+    let mut by_signature: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    for (k, c) in came.iter().enumerate() {
+        if let Some(signature) = routine(c) {
+            by_signature.entry(signature).or_default().push(k);
+        }
+    }
+    let mut taken = vec![false; came.len()];
     let mut kept = Vec::new();
     let mut changed = Vec::new();
     for g in gone {
-        let text = readable(g);
-        match came.iter_mut().find(|c| c.is_some_and(|c| readable(c) == text)) {
-            Some(c) => {
-                *c = None;
-                changed.push(format!("{indent}{} {text}", paint("yellow", "~")));
+        let found = routine(g).and_then(|signature| by_signature.get_mut(&signature).and_then(|ks| (!ks.is_empty()).then(|| ks.remove(0))));
+        match found {
+            Some(k) => {
+                taken[k] = true;
+                changed.push(format!("{indent}{} {}", paint("yellow", "~"), readable(g)));
             }
             None => kept.push(g),
         }
     }
-    (kept, came.into_iter().flatten().collect(), changed)
+    (kept, came.into_iter().zip(taken).filter(|(_, t)| !t).map(|(c, _)| c).collect(), changed)
 }
 
 /// The name of the table a readable `table …` line is, quotes and all: `"order items"` whole. On
@@ -7173,6 +7209,13 @@ mod tests {
         let one = lines(&["function CREATE OR REPLACE FUNCTION public.rate()\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
         let two = lines(&["function CREATE OR REPLACE FUNCTION public.rate()\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 2 $function$"]);
         assert_eq!(changed_lines(&one, &two, Dialect::Postgres), ["  ~ function rate() returns integer"]);
+        // Two overloads are two functions, even where an argument's default holds a line break.
+        let integer = lines(&["function CREATE OR REPLACE FUNCTION public.rate(a text DEFAULT 'hel\nlo'::text, b integer)\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        let boolean = lines(&["function CREATE OR REPLACE FUNCTION public.rate(a text DEFAULT 'hel\nlo'::text, b boolean)\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        assert_eq!(
+            changed_lines(&integer, &boolean, Dialect::Postgres),
+            ["  + function rate(a text default 'hel\\nlo'::text, b boolean) returns integer", "  - function rate(a text default 'hel\\nlo'::text, b integer) returns integer"]
+        );
         assert_eq!(describe_diff("this database", &one, "a fresh database", &two), ["", "    --- this database", "    +++ a fresh database", "    ~ function rate() returns integer", ""]);
     }
 
