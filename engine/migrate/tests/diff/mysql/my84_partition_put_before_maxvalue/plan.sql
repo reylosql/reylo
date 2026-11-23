@@ -1,0 +1,1 @@
+alter table measurements reorganize partition pmax into (partition p2028 values less than (2029) engine = innodb, partition p2029 values less than (2030) engine = innodb, partition pmax values less than maxvalue engine = innodb);

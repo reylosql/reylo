@@ -3,7 +3,10 @@
 //! each case builds both, plans from one to the other, runs the plan on the first, and requires its
 //! catalog to equal the second's, every table both have to keep its rows, and every column kept to
 //! keep its values, unless the plan says it loses or narrows them or the case's `changes.txt` names
-//! the table. A case's `sql_mode` file is the mode its sessions run in. Its v1 and v2 must differ to
+//! the table. A case's `sql_mode` file is the mode its sessions run in. A plan runs as Migrate runs a
+//! migration's statements (`Db::script`). A case's `fails.txt` is the error its plan must fail with,
+//! on a value a change can't hold: then every row must keep its values, and that is all it checks.
+//! Its v1 and v2 must differ to
 //! the comparator, unless `alike.txt` says why they read alike. `server.sql` makes
 //! what a case needs of the server itself (an account), and `check.sql`, where a case has one,
 //! runs after the plan, so a case can require what no catalog shows (an AUTO_INCREMENT counter
@@ -156,19 +159,49 @@ async fn mysql() {
         let text = plan.sql();
         let mut failed = None;
         for s in plan.runnable() {
-            if let Err(e) = from.exec(s).await {
+            if let Err(e) = from.script(s).await {
                 failed = Some(format!("{s}: {e}"));
                 break;
             }
         }
+        let fails = read(&case.join("fails.txt")).trim().to_string();
+        if !fails.is_empty() {
+            let expected = case.join("plan.sql");
+            if bless {
+                std::fs::write(&expected, &text).unwrap();
+            }
+            let mut problems = Vec::new();
+            match &failed {
+                Some(f) if f.contains(&fails) => {}
+                Some(f) => problems.push(format!("the plan failed otherwise than fails.txt says: {f}")),
+                None => problems.push(format!("the plan ran, where fails.txt says it fails with {fails}")),
+            }
+            if values(&mut from).await != rows_before {
+                problems.push("a failed plan changed the rows".to_string());
+            }
+            if !bless && read(&expected) != text {
+                problems.push(format!("the plan is not plan.sql's (REYLO_BLESS=1 writes it):\n{text}"));
+            }
+            if !problems.is_empty() {
+                failures.push(format!("{name}:\n{}\nplan:\n{text}", problems.join("\n")));
+            }
+            from.close().await;
+            to.close().await;
+            for db in [&a, &b] {
+                admin.exec(&format!("drop database if exists `{db}`")).await.unwrap();
+            }
+            continue;
+        }
         let (only_a, only_b) = differences(&mut from, &mut to).await;
         let again = diff::plan(&diff::mysql::read(&mut from).await.unwrap(), &diff::mysql::read(&mut to).await.unwrap(), alterer).sql();
         let after = counts(&mut from).await;
-        let lost: Vec<String> = before.iter().filter(|(t, n)| after.iter().any(|(u, m)| u == t && m != n)).map(|(t, n)| format!("{t}: {n} rows before")).collect();
+        // A table whose partition the plan drops, saying so, loses that partition's rows.
+        let partitioned: Vec<String> = plan.losses.iter().filter_map(|l| l.strip_prefix("partition ")?.rsplit_once('.').map(|(t, _)| t.to_lowercase())).collect();
+        let lost: Vec<String> = before.iter().filter(|(t, n)| !partitioned.contains(&t.to_lowercase()) && after.iter().any(|(u, m)| u == t && m != n)).map(|(t, n)| format!("{t}: {n} rows before")).collect();
         // Every column a table keeps keeps its values, where neither the plan (as a loss or a
         // narrowing) nor the case (`changes.txt`) says the change rewrites them.
         let declared = plan.losses.iter().chain(plan.narrowings.iter().map(|(c, _)| c)).filter_map(|id| id.strip_prefix("column ")?.rsplit_once('.').map(|(t, _)| t.trim_matches('`').to_lowercase()));
-        let skip: Vec<String> = read(&case.join("changes.txt")).lines().filter_map(|l| l.split_whitespace().next()).map(|t| t.to_lowercase()).chain(declared).collect();
+        let skip: Vec<String> = read(&case.join("changes.txt")).lines().filter_map(|l| l.split_whitespace().next()).map(|t| t.to_lowercase()).chain(declared).chain(partitioned.iter().cloned()).collect();
         let rewritten: Vec<String> = if failed.is_none() { changed(&rows_before, &values(&mut from).await).into_iter().filter(|t| !skip.contains(t)).collect() } else { vec![] };
         let check = read(&case.join("check.sql"));
         let checked = if failed.is_none() && !check.is_empty() { from.script(&check).await.err() } else { None };
@@ -212,7 +245,7 @@ async fn mysql() {
         let reverse = diff::plan(&diff::mysql::read(&mut to).await.unwrap(), &diff::mysql::read(&mut back).await.unwrap(), alterer);
         let mut failed = None;
         for s in reverse.runnable() {
-            if let Err(e) = to.exec(s).await {
+            if let Err(e) = to.script(s).await {
                 failed = Some(format!("{s}: {e}"));
                 break;
             }
@@ -284,7 +317,7 @@ async fn mysql_oracle_schemas() {
                 let plan = diff::plan(&diff::mysql::read(from).await.unwrap(), &diff::mysql::read(to).await.unwrap(), &alterer);
                 let mut failed = None;
                 for s in plan.runnable() {
-                    if let Err(err) = from.exec(s).await {
+                    if let Err(err) = from.script(s).await {
                         failed = Some(format!("{s}: {err}"));
                         break;
                     }

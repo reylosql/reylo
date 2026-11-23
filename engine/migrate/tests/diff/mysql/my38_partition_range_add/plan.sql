@@ -1,1 +1,1 @@
-alter table sales partition by range (y) (partition p2025 values less than (2026) engine = innodb, partition p2026 values less than (2027) engine = innodb, partition p2027 values less than (2028) engine = innodb);
+alter table sales add partition (partition p2027 values less than (2028) engine = innodb);

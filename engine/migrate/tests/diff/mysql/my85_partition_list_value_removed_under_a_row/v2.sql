@@ -1,0 +1,1 @@
+create table stores (id int not null, region varchar(2) not null, primary key (id, region)) partition by list columns (region) (partition pnorth values in ('n'), partition psouth values in ('s'));
