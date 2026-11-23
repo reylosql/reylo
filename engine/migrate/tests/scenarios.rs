@@ -1200,31 +1200,55 @@ async fn init_writes_and_records_the_baseline(mut p: P) {
     assert_eq!(q.history().await, ["init.sql", "20261028100000_nick.sql"]);
 }
 
-/// Another migration tool's history: a table of Prisma Migrate's and one of Knex's, whose key is a
-/// sequence the table owns, and on Postgres Drizzle Kit's, in a schema of its own.
+/// Another migration tool's history: a table of Prisma Migrate's with a check, one of Knex's whose
+/// key is a counter (a sequence the table owns on Postgres), Liquibase's lock in its capitals, and
+/// on Postgres Drizzle Kit's, in a schema of its own, and on MySQL a trigger on Prisma's.
 fn other_tools_history(p: &P) -> String {
-    let (id, text) = (p.t.id, p.t.text);
+    let text = p.t.text;
+    let knex_id = match p.d {
+        Dialect::Postgres => "serial primary key",
+        Dialect::Mysql => "bigint auto_increment primary key",
+        Dialect::Sqlite => "integer primary key autoincrement",
+    };
     let mut sql = format!(
-        "create table _prisma_migrations (id {text} primary key, migration_name {text} not null); insert into _prisma_migrations values ('a', '0_init');
-         create table knex_migrations (id {id}, name {text}); insert into knex_migrations (name) values ('one.js');"
+        "create table _prisma_migrations (id {text} primary key, migration_name {text} not null check (migration_name <> '')); insert into _prisma_migrations values ('a', '0_init');
+         create table knex_migrations (id {knex_id}, name {text}); insert into knex_migrations (id, name) values (100, 'one.js');
+         create table DATABASECHANGELOGLOCK (ID integer primary key, LOCKED boolean not null); insert into DATABASECHANGELOGLOCK values (1, false);"
     );
-    if p.d == Dialect::Postgres {
-        sql.push_str("create schema drizzle; create table drizzle.__drizzle_migrations (id serial primary key, hash text not null); insert into drizzle.__drizzle_migrations (hash) values ('h');");
+    match p.d {
+        Dialect::Postgres => sql.push_str("create schema drizzle; create table drizzle.__drizzle_migrations (id serial primary key, hash text not null); insert into drizzle.__drizzle_migrations (hash) values ('h'); select setval('knex_migrations_id_seq', 100);"),
+        Dialect::Mysql => sql.push_str("create trigger prisma_named before insert on _prisma_migrations for each row set new.migration_name = trim(new.migration_name);"),
+        Dialect::Sqlite => {}
     }
     sql
 }
 
-async fn init_leaves_out_another_tools_history(mut p: P) {
+async fn init_leaves_out_another_tools_history(p: P) {
     let (id, text) = (p.t.id, p.t.text);
-    let app = format!("create table users (id {id}, email {text} not null);");
+    leaves_out_another_tools_history(p, &format!("create table users (id {id}, email {text} not null);")).await;
+}
+
+/// Where Reylo's own SQL can't write the schema (here a comment on a table), `init` writes
+/// pg_dump's, which leaves the other tool's tables, and the sequences they own, out too.
+#[tokio::test(flavor = "current_thread")]
+async fn init_from_pg_dump_leaves_out_another_tools_history() {
+    let Some(p) = P::new(Dialect::Postgres).await else { return };
+    let url = p.url.clone();
+    let schema = leaves_out_another_tools_history(p, "create table users (id bigint primary key, email text not null); comment on table users is 'people';").await;
+    assert!(has(&schema, r"CREATE TABLE public\.users"), "pg_dump's: {schema}");
+    forget(&url).await;
+}
+
+/// What `init` wrote into schema.sql.
+async fn leaves_out_another_tools_history(mut p: P, app: &str) -> String {
     p.exec(&format!("{app}{}", other_tools_history(&p))).await;
     assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
     p.output();
     let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
     assert!(has(&schema, "(?i)create table .*users"), "{schema}");
-    assert!(!has(&schema, "(?i)prisma|knex|drizzle"), "{schema}");
+    assert!(!has(&schema, "(?i)prisma|knex|drizzle|databasechangelog"), "{schema}");
     assert_eq!(std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap(), schema);
-    assert!(!has(&introspect(&p.opts()).await, "(?i)prisma|knex|drizzle"));
+    assert!(!has(&introspect(&p.opts()).await, "(?i)prisma|knex|drizzle|databasechangelog"));
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     // Another database that still holds the old tool's history matches init.sql, and keeps it.
     let q = P::new(p.d).await.unwrap();
@@ -1233,11 +1257,22 @@ async fn init_leaves_out_another_tools_history(mut p: P) {
     assert_eq!(p.history_push().await, 0, "{}", p.peek());
     assert_eq!(q.history().await, ["init.sql"]);
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    // A wipe empties the application's tables alone, and leaves the other tool's counter where it was.
+    assert_eq!(p.run(async |o, log| reylo_migrate::db_wipe(o, false, log).await).await, 0, "{}", p.peek());
     assert_eq!(q.rows("select * from _prisma_migrations").await.len(), 1);
+    assert_eq!(q.rows("select * from DATABASECHANGELOGLOCK").await.len(), 1);
+    q.exec("insert into knex_migrations (name) values ('two.js')").await;
+    assert_eq!(q.rows("select id from knex_migrations where name = 'two.js'").await[0].text("id"), "101");
     // A migration that drops it later is no change to the schema.
     p.file("20261123100000_drop_prisma.sql", "drop table _prisma_migrations;");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_eq!(q.history().await, ["init.sql", "20261123100000_drop_prisma.sql"]);
+    // Nor is dropping a schema that held nothing but another tool's history.
+    if p.d == Dialect::Postgres {
+        q.exec("drop schema drizzle cascade").await;
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    }
+    schema
 }
 
 async fn a_migration_the_lock_lacks_is_a_draft(mut p: P) {

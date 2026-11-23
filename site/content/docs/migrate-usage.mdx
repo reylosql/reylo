@@ -120,8 +120,12 @@ $ reylo migrate history push --url $PROD_URL
 
 Reylo leaves the old tool's history table out of both files and every comparison. Drop it once nothing reads it:
 
-```sql
+```sql tab="Prisma Migrate"
 drop table _prisma_migrations;
+```
+
+```sql tab="Drizzle Kit"
+drop schema drizzle cascade;
 ```
 
 ## Schema <code className="dk-aside">schema.sql</code> [#schema-schemasql]

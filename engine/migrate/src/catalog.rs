@@ -16,8 +16,9 @@ pub const HISTORY_TABLE: &str = "__reylo_migrations";
 /// The history tables other migration tools keep, each left out as Reylo's own is: no catalog, diff,
 /// dump or wipe reads them. A project that moves to Reylo Migrate starts from its own schema, and a
 /// database that still holds its old tool's table, which that tool may go on reading until the move
-/// is done, matches the files. Each is known by a name no table of an application's takes; a
-/// generic one (TypeORM's `migrations`) is not listed.
+/// is done, matches the files. Each is known by a name no table of an application's takes, in any
+/// case, since a tool may write it in capitals (Liquibase's `DATABASECHANGELOG`) and MySQL keeps a
+/// name's case where its files do; a generic one (TypeORM's `migrations`) is not listed.
 pub const OTHER_HISTORY_TABLES: &[&str] = &[
     // Prisma Migrate.
     "_prisma_migrations",
@@ -59,27 +60,28 @@ pub const OTHER_HISTORY_TABLES: &[&str] = &[
     "atlas_schema_revisions",
 ];
 
-/// Every history table's name as a SQL list: Reylo's own and other tools'.
+/// Every history table's name in lowercase as a SQL list: Reylo's own and other tools'.
 fn history_names() -> String {
-    [HISTORY_TABLE].iter().chain(OTHER_HISTORY_TABLES).map(|t| format!("'{t}'")).collect::<Vec<_>>().join(", ")
+    [HISTORY_TABLE].iter().chain(OTHER_HISTORY_TABLES).map(|t| format!("'{}'", t.to_ascii_lowercase())).collect::<Vec<_>>().join(", ")
 }
 
 /// A condition on a column of table names that holds for every name but a history table's,
-/// [`HISTORY_TABLE`] or one of [`OTHER_HISTORY_TABLES`]. It reads alike in every dialect.
+/// [`HISTORY_TABLE`] or one of [`OTHER_HISTORY_TABLES`], in any case. It reads alike in every
+/// dialect.
 pub(crate) fn not_history(column: &str) -> String {
-    format!("{column} not in ({})", history_names())
+    format!("lower({column}) not in ({})", history_names())
 }
 
-/// Whether `name` is a history table's, Reylo's own or another tool's.
+/// Whether `name` is a history table's, Reylo's own or another tool's, in any case.
 pub(crate) fn is_history(name: &str) -> bool {
-    name == HISTORY_TABLE || OTHER_HISTORY_TABLES.contains(&name)
+    [HISTORY_TABLE].iter().chain(OTHER_HISTORY_TABLES).any(|t| t.eq_ignore_ascii_case(name))
 }
 
 /// Whether the `pg_class` row `c` is no history table and comes with none: a history table's
 /// indexes, its sequences (`serial` or identity) and its TOAST table go with it.
 pub(crate) fn pg_not_history(c: &str) -> String {
     format!(
-        "({} and not exists (select 1 from pg_depend hd join pg_class ht on ht.oid = hd.refobjid where hd.classid = 'pg_class'::regclass and hd.objid = {c}.oid and hd.refclassid = 'pg_class'::regclass and hd.deptype in ('a', 'i') and ht.relname in ({})))",
+        "({} and not exists (select 1 from pg_depend hd join pg_class ht on ht.oid = hd.refobjid where hd.classid = 'pg_class'::regclass and hd.objid = {c}.oid and hd.refclassid = 'pg_class'::regclass and hd.deptype in ('a', 'i') and lower(ht.relname) in ({})))",
         not_history(&format!("{c}.relname")),
         history_names()
     )
@@ -91,10 +93,10 @@ pub(crate) fn pg_not_history(c: &str) -> String {
 /// index or sequence) or an extension made is not the schema's own.
 pub(crate) fn pg_not_history_schema(n: &str) -> String {
     format!(
-        "not ({n}.nspname <> 'public' and exists (select 1 from pg_class hc where hc.relnamespace = {n}.oid and hc.relkind = 'r' and hc.relname in ({names}))
+        "not ({n}.nspname <> 'public' and exists (select 1 from pg_class hc where hc.relnamespace = {n}.oid and hc.relkind = 'r' and lower(hc.relname) in ({names}))
           and not exists (select 1 from pg_depend hd where hd.refclassid = 'pg_namespace'::regclass and hd.refobjid = {n}.oid and hd.deptype = 'n'
             and not exists (select 1 from pg_depend ho where ho.classid = hd.classid and ho.objid = hd.objid and ho.deptype in ('e', 'a', 'i'))
-            and not (hd.classid = 'pg_class'::regclass and hd.objid in (select hc.oid from pg_class hc where hc.relname in ({names}))))
+            and not (hd.classid = 'pg_class'::regclass and hd.objid in (select hc.oid from pg_class hc where lower(hc.relname) in ({names}))))
           and not exists (select 1 from pg_class hc where hc.relnamespace = {n}.oid and hc.relkind in ('r', 'p', 'v', 'm', 'f', 'S', 'c') and {}))",
         pg_not_history("hc"),
         names = history_names()
@@ -133,7 +135,7 @@ const TURSO_SEQUENCE: &str = "__turso_internal_seq___turso_internal_autoincremen
 /// that name is never dropped or emptied. The counter itself is `sqlite_sequence`'s, which SQLite keeps as the engine does: the
 /// engine reads it there, and copies it into each sequence when the file moves to its MVCC journal,
 /// which refuses an insert into a table with no sequence. With `restart`, every sequence is also put
-/// back to its first value, as a wipe empties `sqlite_sequence`. Only for a file the engine has
+/// back to its first value, as a wipe empties `sqlite_sequence`, but a history table's. Only for a file the engine has
 /// written (`turso`): any other gets none of its tables.
 pub async fn turso_sequences(db: &mut Db, turso: bool, restart: bool) -> Result<String, Error> {
     if db.dialect() != Dialect::Sqlite || !turso {
@@ -163,7 +165,7 @@ pub async fn turso_sequences(db: &mut Db, turso: bool, restart: bool) -> Result<
         }
         if !owner {
             sql.push_str(&format!("drop table {};", quoted(name)));
-        } else if restart {
+        } else if restart && !is_history(&name[TURSO_SEQUENCE.len()..]) {
             sql.push_str(&format!("delete from {};{}", quoted(name), first(name)));
         }
     }
@@ -1586,13 +1588,14 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
 
     let mut fks: BTreeMap<String, (Vec<String>, Vec<String>, String, String, String)> = BTreeMap::new();
     for r in db
-        .rows(
+        .rows(&format!(
             "select k.table_name as t, k.constraint_name as n, k.column_name as col, k.referenced_table_name as ref, k.referenced_column_name as refcol,
               rc.update_rule as upd, rc.delete_rule as del
             from information_schema.key_column_usage k join information_schema.referential_constraints rc
               on rc.constraint_schema = k.constraint_schema and rc.constraint_name = k.constraint_name and rc.table_name = k.table_name
-            where k.table_schema = database() and k.referenced_table_name is not null order by k.table_name, k.constraint_name, k.ordinal_position",
-        )
+            where k.table_schema = database() and k.referenced_table_name is not null and {} order by k.table_name, k.constraint_name, k.ordinal_position",
+            not_history("k.table_name")
+        ))
         .await?
     {
         let fk = fks.entry(format!("{} {}", r.text("t"), r.text("n"))).or_insert_with(|| (vec![], vec![], r.text("ref").into(), r.text("upd").into(), r.text("del").into()));
@@ -1604,12 +1607,13 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
     }
 
     for r in db
-        .rows(
+        .rows(&format!(
             "select tc.table_name as t, tc.constraint_name as n, cc.check_clause as clause, tc.enforced as enforced
             from information_schema.table_constraints tc join information_schema.check_constraints cc
               on cc.constraint_schema = tc.constraint_schema and cc.constraint_name = tc.constraint_name
-            where tc.table_schema = database() and tc.constraint_type = 'CHECK'",
-        )
+            where tc.table_schema = database() and tc.constraint_type = 'CHECK' and {}",
+            not_history("tc.table_name")
+        ))
         .await?
     {
         lines.push(format!("check {} {} {}{}", r.text("t"), r.text("n"), strip(r.text("clause")), if r.text("enforced") == "NO" { " not enforced" } else { "" }));
@@ -1670,10 +1674,11 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
     }
 
     for r in db
-        .rows(
+        .rows(&format!(
             "select trigger_name as n, event_manipulation as ev, event_object_table as t, action_statement as body, action_timing as timing, action_order as ord
-            from information_schema.triggers where trigger_schema = database()",
-        )
+            from information_schema.triggers where trigger_schema = database() and {}",
+            not_history("event_object_table")
+        ))
         .await?
     {
         lines.push(format!("trigger {} {} {} on {} order={} {}", r.text("n"), r.text("timing"), r.text("ev"), r.text("t"), r.text("ord"), strip(r.text("body"))));
