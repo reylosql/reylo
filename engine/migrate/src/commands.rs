@@ -2358,7 +2358,7 @@ async fn behind_problem(shadows: &mut Shadows<'_>, target: &mut Db, url: &str, r
     };
     let problem = match sql {
         Some(sql) => problem.sql(&sql),
-        None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&made, live)).chain([String::new()])),
+        None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&made, live, target.dialect())).chain([String::new()])),
     };
     let problem = if lost.is_empty() { problem } else { problem.note(format!("Undoing it loses what {} {}.", and_list(&lost), if lost.len() == 1 { "holds" } else { "hold" })) };
     // What `it` writes may have been written here too, with the change: the undo can't take it back,
