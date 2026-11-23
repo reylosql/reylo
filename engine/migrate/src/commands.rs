@@ -4503,7 +4503,7 @@ enum Remade {
 
 /// The tables in `lost` that `to` has too, which the plan drops to create again, each with why.
 #[cfg(feature = "cli")]
-fn remade_tables(lost: &[String], from: &crate::diff::Schema, to: &crate::diff::Schema) -> Vec<RemadeTable> {
+fn remade_tables(lost: &[String], from: &crate::diff::Schema, to: &crate::diff::Schema, renames: &[(String, String)]) -> Vec<RemadeTable> {
     let key = |o: &crate::diff::Object| o.extra.iter().find_map(|l| l.strip_prefix("shape ")).and_then(|s| s.split_once(" partition by ")).map(|(_, k)| k.to_string());
     let parent = |o: &crate::diff::Object| o.extra.iter().find_map(|l| l.strip_prefix("partition of ")).and_then(|p| p.split_once(' ')).map(|(p, _)| format!("table {p}"));
     let mut out = Vec::new();
@@ -4515,18 +4515,21 @@ fn remade_tables(lost: &[String], from: &crate::diff::Schema, to: &crate::diff::
             (Some(a), Some(b)) if a != b => Remade::Rekeyed,
             _ => Remade::Other,
         };
-        // Its partitions, and theirs, that the plan drops along with it.
-        let mut parts: Vec<String> = Vec::new();
+        // Its partitions, and theirs, that the plan drops along with it; one the schema keeps as a
+        // table of its own, no longer its partition, keeps its rows apart.
+        let (mut parts, mut apart): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
         let mut parents = vec![id.clone()];
         while let Some(p) = parents.pop() {
             for (part, _) in from.objects.iter().filter(|(part, o)| lost.contains(*part) && parent(o).as_deref() == Some(p.as_str())) {
-                if !parts.contains(part) {
+                if to.objects.get(part).is_some_and(|o| parent(o).as_deref() != Some(p.as_str())) {
+                    apart.push(part.clone());
+                } else if !parts.contains(part) {
                     parts.push(part.clone());
                     parents.push(part.clone());
                 }
             }
         }
-        let keep = keep_rows(id, from, to);
+        let keep = keep_rows(id, from, to, renames, &apart);
         out.push(RemadeTable { id: id.clone(), why, parts, keep });
     }
     // A partition made again with its table goes with it: the table's copy holds its rows.
@@ -4536,33 +4539,45 @@ fn remade_tables(lost: &[String], from: &crate::diff::Schema, to: &crate::diff::
 }
 
 /// The statements that keep a table's rows through a migration that creates it again: a copy at
-/// its top, and at its end, the rows put back in the columns both tables have, past an identity
-/// that only takes its own values, and each sequence of the new table moved past them.
+/// its top (without the rows of `apart`, partitions that become tables of their own), and at its
+/// end the rows put back: in each column the new table has from the one it was, `renames` (column
+/// ids, old and new) included, cast where its type changes, past an identity that only takes its own
+/// values, and each sequence of the new table moved past them, or to its start where that is further.
 #[cfg(feature = "cli")]
-fn keep_rows(id: &str, from: &crate::diff::Schema, to: &crate::diff::Schema) -> String {
+fn keep_rows(id: &str, from: &crate::diff::Schema, to: &crate::diff::Schema, renames: &[(String, String)], apart: &[String]) -> String {
     let full = id.trim_start_matches("table ");
-    let table = full.strip_prefix("public.").unwrap_or(full);
+    let shown = |full: &str| full.strip_prefix("public.").unwrap_or(full).to_string();
+    let table = shown(full);
     // The copy's name, the table's with `_rows` after it, inside its quotes where it has them.
     let copy = match table.strip_suffix('"') {
         Some(quoted) => format!("{quoted}_rows\""),
         None => format!("{table}_rows"),
     };
-    let columns = |s: &crate::diff::Schema| -> Vec<(String, String)> {
-        let prefix = format!("column {full}.");
-        s.objects.iter().filter(|(c, o)| o.kind == Some(crate::diff::Kind::Column) && c.starts_with(&prefix)).map(|(c, o)| (c[prefix.len()..].to_string(), o.def.clone())).collect()
-    };
+    let prefix = format!("column {full}.");
+    let columns = |s: &crate::diff::Schema| -> Vec<(String, String)> { s.objects.iter().filter(|(c, o)| o.kind == Some(crate::diff::Kind::Column) && c.starts_with(&prefix)).map(|(c, o)| (c[prefix.len()..].to_string(), o.def.clone())).collect() };
     let (was, is) = (columns(from), columns(to));
-    // A generated column takes no value of its own.
-    let kept: Vec<&(String, String)> = is.iter().filter(|(c, def)| was.iter().any(|(w, _)| w == c) && !def.contains(" generated always as (")).collect();
-    let names = kept.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>().join(", ");
-    let overriding = if kept.iter().any(|(_, def)| def.contains(" generated always as identity")) { " overriding system value" } else { "" };
+    // A column's type: its definition up to what follows the type.
+    let ty = |def: &str| [" collate ", " default ", " generated ", " not null", " constraint "].iter().filter_map(|m| def.find(m)).min().map_or(def.to_string(), |at| def[..at].to_string());
+    // Each column put back, with what it is read from; a generated one takes no value of its own.
+    let mut kept: Vec<(&str, String, &str)> = Vec::new();
+    for (c, def) in is.iter().filter(|(_, def)| !def.contains(" generated always as (")) {
+        let old = renames.iter().find(|(_, new)| new == &format!("{prefix}{c}")).and_then(|(old, _)| old.strip_prefix(&prefix)).unwrap_or(c);
+        let Some((_, was_def)) = was.iter().find(|(w, _)| w == old) else { continue };
+        let read = if ty(was_def) == ty(def) { old.to_string() } else { format!("{old}::{}", ty(def)) };
+        kept.push((c, read, def));
+    }
+    let names = kept.iter().map(|(c, _, _)| *c).collect::<Vec<_>>().join(", ");
+    let reads = kept.iter().map(|(_, r, _)| r.as_str()).collect::<Vec<_>>().join(", ");
+    let overriding = if kept.iter().any(|(_, _, def)| def.contains(" generated always as identity")) { " overriding system value" } else { "" };
     let literal = |t: &str| format!("'{}'", t.replace('\'', "''"));
-    let mut out = vec!["-- at the top".to_string(), format!("create table {copy} as select * from {table};"), "-- at the end".to_string(), format!("insert into {table} ({names}){overriding} select {names} from {copy};")];
-    for (c, def) in &kept {
+    let without = if apart.is_empty() { String::new() } else { format!(" where tableoid not in ({})", apart.iter().map(|a| format!("{}::regclass", literal(&shown(a.trim_start_matches("table "))))).collect::<Vec<_>>().join(", ")) };
+    let mut out = vec!["-- at the top".to_string(), format!("create table {copy} as select * from {table}{without};"), "-- at the end".to_string(), format!("insert into {table} ({names}){overriding} select {reads} from {copy};")];
+    for (c, _, def) in &kept {
         if def.contains(" as identity") || def.contains("nextval(") {
             let unquoted = c.strip_prefix('"').and_then(|c| c.strip_suffix('"')).map_or(c.to_string(), |c| c.replace("\"\"", "\""));
-            let edge = if def.contains("increment by -") { "min" } else { "max" };
-            out.push(format!("select setval(pg_get_serial_sequence({}, {}), {edge}({c})) from {table};", literal(table), literal(&unquoted)));
+            let sequence = format!("pg_get_serial_sequence({}, {})", literal(&table), literal(&unquoted));
+            let (pick, edge, past) = if def.contains("increment by -") { ("least", "min", "- 1") } else { ("greatest", "max", "+ 1") };
+            out.push(format!("select setval({sequence}, {pick}({edge}({c}) {past}, (select seqstart from pg_sequence where seqrelid = {sequence}::regclass)), false) from {table};"));
         }
     }
     out.push(format!("drop table {copy};"));
@@ -5147,7 +5162,7 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
         if let Some(asked) = asked {
             // What the plan adds, the names a person might mean by a rename of what it drops.
             let added: Vec<String> = target.schema.objects.iter().filter(|(id, o)| matches!(o.kind, Some(crate::diff::Kind::Column | crate::diff::Kind::Table)) && !current.objects.contains_key(*id) && !(o.kind == Some(crate::diff::Kind::Column) && o.owner.as_ref().is_some_and(|t| !current.objects.contains_key(t)))).map(|(id, o)| format!("{} {}", if o.kind == Some(crate::diff::Kind::Table) { "table" } else { "column" }, shown_name(id))).collect();
-            let remade = remade_tables(&lost, &current, &target.schema);
+            let remade = remade_tables(&lost, &current, &target.schema, &stated);
             let mut problems = drop_problems(&lost, &shown, &narrowed, &guesses, &guess_owner, &added, &remade, &Choices { drop: columns.drop.clone(), rename: choices.rename.clone(), ..Default::default() }, asked);
             if force {
                 problems.retain(|p| !DESTRUCTIVE.contains(&p.code));

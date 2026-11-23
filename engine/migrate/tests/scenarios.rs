@@ -3298,6 +3298,7 @@ on!(
     an_extension_left_in_a_schema_of_the_projects_own_stops_no_push,
     a_partition_dropped_at_run_time_is_data,
     a_table_made_partitioned_is_refused_for_what_postgres_cant_change,
+    the_lines_that_keep_a_remade_tables_rows_follow_the_change,
     init_creates_the_extensions_its_schema_uses,
     init_writes_the_event_triggers_it_compares,
     init_writes_the_publications_it_compares,
@@ -5546,6 +5547,58 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
     }
 
+    /// The refusal of a migration that creates a table again, read as a person would: its last
+    /// command run (with `--blocking` too where that run asks for it), and the lines it prints pasted
+    /// at the top and the end of the file it writes, which then runs. `renames` are stated each time.
+    async fn keep_the_rows(p: &mut P, name: &str, renames: &[(&str, &str)]) -> String {
+        let rename: Vec<(String, String)> = renames.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let choices = reylo_migrate::Choices { rename: rename.clone(), ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, name, &choices, log).await).await, 1);
+        let out = p.output();
+        assert!(!out.contains("renamed instead"), "{out}");
+        // The last command, its lines joined where it runs on.
+        let lines: Vec<&str> = out.lines().collect();
+        let at = lines.iter().rposition(|l| l.trim_start().starts_with(&format!("reylo migrate new {name}"))).unwrap_or_else(|| panic!("{out}"));
+        let mut command = String::new();
+        for l in &lines[at..] {
+            command.push_str(l.trim().trim_end_matches('\\').trim_end());
+            command.push(' ');
+            if !l.trim_end().ends_with('\\') {
+                break;
+            }
+        }
+        let drop: Vec<String> = command.split_once(" --drop ").map(|(_, d)| d.split(' ').next().unwrap_or_default().split(',').map(String::from).collect()).unwrap_or_default();
+        // Every refusal's lines, each under the heading it is printed under.
+        let (mut top, mut end, mut under) = (String::new(), String::new(), 0);
+        for l in out.lines().map(str::trim) {
+            match l {
+                "-- at the top" => under = 1,
+                "-- at the end" => under = 2,
+                "" => under = 0,
+                _ if under == 1 => top.push_str(&format!("{l}\n")),
+                _ if under == 2 => end.push_str(&format!("{l}\n")),
+                _ => {}
+            }
+        }
+        assert!(!top.is_empty() && !end.is_empty(), "{out}");
+        let mut choices = reylo_migrate::Choices { drop, rename, blocking: command.contains(" --blocking"), ..Default::default() };
+        // A change of key rebuilds the partitions' keys, which is refused until --blocking accepts it.
+        if p.run(async |o, log| reylo_migrate::create(o, name, &choices, log).await).await != 0 {
+            assert!(!choices.blocking && p.output().contains("--blocking"), "{}", p.peek());
+            choices.blocking = true;
+            assert_eq!(p.run(async |o, log| reylo_migrate::create(o, name, &choices, log).await).await, 0, "{}", p.peek());
+        }
+        p.output();
+        let file = p.dir.join("migrations").join(p.files().into_iter().find(|f| f.ends_with(&format!("_{name}.sql"))).unwrap());
+        let sql = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, format!("{top}{sql}\n{end}")).unwrap();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        p.output();
+        out
+    }
+
     /// A table made partitioned, made plain, or given another partition key is created again, which
     /// Postgres can't do in place: refused as that, with the statements that keep its rows, one
     /// command that writes the migration, and no rename offered.
@@ -5557,52 +5610,63 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         p.exec("insert into users (name) select 'u' || g from generate_series(1, 10) g").await;
         p.output();
-        // Refused, then written with the drop it names, then given the lines it prints: the rows
-        // stay, and the next id comes past them.
-        let keep = async |p: &mut P, name: &str| {
-            assert_eq!(p.run(async |o, log| reylo_migrate::create(o, name, &Default::default(), log).await).await, 1);
-            let out = p.output();
-            assert!(!out.contains("renamed instead"), "{out}");
-            let command = out.lines().filter(|l| l.trim_start().starts_with("reylo migrate new ")).last().unwrap_or_else(|| panic!("{out}")).trim().to_string();
-            let drop: Vec<String> = command.split_once(" --drop ").map(|(_, d)| d.split(' ').next().unwrap_or_default().split(',').map(String::from).collect()).unwrap_or_default();
-            let top: String = out.lines().skip_while(|l| l.trim() != "-- at the top").skip(1).take_while(|l| l.trim() != "-- at the end").map(|l| format!("{}\n", l.trim())).collect();
-            let end: String = out.lines().skip_while(|l| l.trim() != "-- at the end").skip(1).take_while(|l| !l.trim().is_empty()).map(|l| format!("{}\n", l.trim())).collect();
-            assert!(!top.is_empty() && !end.is_empty(), "{out}");
-            let mut choices = reylo_migrate::Choices { drop, blocking: command.ends_with("--blocking"), ..Default::default() };
-            // A change of key rebuilds the partitions' keys, which is refused until --blocking accepts it.
-            if p.run(async |o, log| reylo_migrate::create(o, name, &choices, log).await).await != 0 {
-                assert!(!choices.blocking && p.output().contains("--blocking"), "{}", p.peek());
-                choices.blocking = true;
-                assert_eq!(p.run(async |o, log| reylo_migrate::create(o, name, &choices, log).await).await, 0, "{}", p.peek());
-            }
-            p.output();
-            let file = p.dir.join("migrations").join(p.files().into_iter().find(|f| f.ends_with(&format!("_{name}.sql"))).unwrap());
-            let sql = std::fs::read_to_string(&file).unwrap();
-            std::fs::write(&file, format!("{top}{sql}\n{end}")).unwrap();
-            assert_eq!(p.dev().await, 0, "{}", p.peek());
-            p.output();
+        // Each time the rows stay, and the next id comes past them.
+        let kept = async |p: &mut P| {
             assert_eq!(p.rows("select count(*) as n from users").await[0].text("n"), "10");
             assert_eq!(p.rows("insert into users (name) values ('next') returning id").await[0].text("id"), "11");
             p.exec("delete from users where name = 'next'").await;
-            assert_eq!(p.status().await, 0, "{}", p.peek());
-            p.output();
-            out
         };
         p.schema(hashed);
-        let out = keep(&mut p, "partition_users").await;
-        assert_has!(&out, r"✗ Postgres can't make users a partitioned table in place\n  A table is partitioned only when it's created, so this migration drops users and its rows to create it again\.\n  To keep the rows, add these lines to the migration it writes:\n\n    -- at the top\n    create table users_rows as select \* from users;\n    -- at the end\n    insert into users \(id, name\) overriding system value select id, name from users_rows;\n    select setval\(pg_get_serial_sequence\('users', 'id'\), max\(id\)\) from users;\n    drop table users_rows;\n\n  To write it, dropping the rows:\n    reylo migrate new partition_users --drop users\n");
+        let out = keep_the_rows(&mut p, "partition_users", &[]).await;
+        kept(&mut p).await;
+        assert_has!(&out, r"✗ Postgres can't make users a partitioned table in place\n  A table is partitioned only when it's created, so this migration drops users and its rows to create it again\.\n  To keep the rows, add these lines to the migration it writes:\n\n    -- at the top\n    create table users_rows as select \* from users;\n    -- at the end\n    insert into users \(id, name\) overriding system value select id, name from users_rows;\n    select setval\(pg_get_serial_sequence\('users', 'id'\), greatest\(max\(id\) \+ 1, \(select seqstart from pg_sequence where seqrelid = pg_get_serial_sequence\('users', 'id'\)::regclass\)\), false\) from users;\n    drop table users_rows;\n\n  To write it, dropping the rows:\n    reylo migrate new partition_users --drop users\n");
         // Made plain again: its partitions go first, so the copy at the top is what keeps the rows.
         p.schema(plain);
-        let out = keep(&mut p, "unpartition").await;
+        let out = keep_the_rows(&mut p, "unpartition", &[]).await;
+        kept(&mut p).await;
         assert_has!(&out, r"✗ Postgres can't make users a plain table in place\n  A partitioned table is made plain only by creating it again, so this migration drops users, its partitions and their rows\.\n");
         assert_has!(&out, r"reylo migrate new unpartition --drop users_p0,users_p1,users\n");
-        // Given another partition key beside a column dropped: one command writes it all.
+        // Given another partition key beside a column dropped: one refusal for the table and its
+        // partitions, and one command writes it all.
         p.schema(hashed);
-        keep(&mut p, "partition_again").await;
+        keep_the_rows(&mut p, "partition_again", &[]).await;
+        kept(&mut p).await;
         p.schema("create table users (id int generated always as identity, name text not null, primary key (id, name)) partition by hash (name); create table users_p0 partition of users for values with (modulus 2, remainder 0); create table users_p1 partition of users for values with (modulus 2, remainder 1); create table logs (id int);");
-        let out = keep(&mut p, "rekey").await;
+        let out = keep_the_rows(&mut p, "rekey", &[]).await;
+        kept(&mut p).await;
         assert_has!(&out, r"✗ Postgres can't change the partition key of users in place\n  A partition key is set only when its table is created, so this migration drops users, its partitions and their rows to create them again\.\n");
+        assert_eq!(out.matches('✗').count(), 2, "{out}");
         assert_eq!(out.matches("reylo migrate new rekey").count(), 1, "{out}");
+    }
+
+    /// The lines that keep a remade table's rows put each value back where the schema now has it: in
+    /// a column renamed with it, cast to a type it changes to, with its identity at the start the
+    /// schema gives it, and a partition the schema keeps as a table of its own keeping its own rows.
+    pub async fn the_lines_that_keep_a_remade_tables_rows_follow_the_change(mut p: P) {
+        let before = "create table users (id int generated always as identity primary key, full_name text not null, score varchar(20), total numeric generated always as (id * 2) stored);";
+        p.schema(before);
+        p.file("20261027100000_users.sql", before);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("insert into users (full_name, score) select 'u' || g, g::text from generate_series(1, 10) g").await;
+        p.output();
+        let users = "create table users (id int generated always as identity (start with 1000), display_name text not null, score integer, total numeric generated always as (id * 3) stored, primary key (id)) partition by hash (id); create table users_p0 partition of users for values with (modulus 2, remainder 0); create table users_p1 partition of users for values with (modulus 2, remainder 1);";
+        p.schema(users);
+        let out = keep_the_rows(&mut p, "partition_users", &[("users.full_name", "display_name")]).await;
+        assert_has!(&out, r"insert into users \(display_name, id, score\) overriding system value select full_name, id, score::integer from users_rows;");
+        assert_eq!(p.rows("select count(*) as n from users where display_name = 'u' || id and score = id and total = id * 3").await[0].text("n"), "10");
+        assert_eq!(p.rows("insert into users (display_name) values ('next') returning id").await[0].text("id"), "1000");
+        // A list-partitioned table made plain, one of its partitions kept as a table of its own.
+        p.schema(&format!("{users} create table regions (id int generated always as identity, region text not null, name text, primary key (id, region)) partition by list (region); create table regions_eu partition of regions for values in ('eu'); create table regions_us partition of regions for values in ('us');"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "add_regions", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        p.exec("insert into regions (region, name) select case when g <= 5 then 'eu' else 'us' end, 'r' || g from generate_series(1, 10) g").await;
+        p.schema(&format!("{users} create table regions (id int generated always as identity, region text not null, name text, primary key (id, region)); create table regions_us (id int generated always as identity, region text not null, name text, primary key (id, region));"));
+        let out = keep_the_rows(&mut p, "unpartition_regions", &[]).await;
+        assert_has!(&out, r"create table regions_rows as select \* from regions where tableoid not in \('regions_us'::regclass\);");
+        assert_eq!(p.rows("select count(*) as n from regions where region = 'eu'").await[0].text("n"), "5");
+        assert_eq!(p.rows("select count(*) as n from regions where region = 'us'").await[0].text("n"), "0");
+        assert_eq!(p.rows("select count(*) as n from regions_us where region = 'us'").await[0].text("n"), "5");
     }
 
     pub async fn init_creates_the_extensions_its_schema_uses(mut p: P) {

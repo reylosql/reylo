@@ -3197,19 +3197,30 @@ fn ahead(was: &str, is: &str, descending: bool) -> bool {
 }
 
 /// A sequence moved forward to a `start` it hasn't reached, and past every value of each column it
-/// gives values to (an identity's, a serial's, a default's), but never back, which would give again
-/// a value it gave. A value past the rows that lies outside the sequence's bounds is passed over, as
-/// rows there can't be got past. Where it stands, its bounds and its columns are read from the
-/// database as the block runs, since a `setval` leaves it uncalled at a value past its start.
+/// gives values to, but never back, which would give again a value it gave. It moves only where each
+/// such column holds its values as they are: an identity, an integer column it is owned by, or one
+/// whose default is it alone. Where one makes something else of them (`'INV-' || nextval(…)`, a
+/// view's default, a domain's), where its rows are isn't known, and it stays where it is. A value
+/// past the rows that lies outside the sequence's bounds is passed over, as rows there can't be got
+/// past. Where it stands, its bounds and its columns are read from the database as the block runs,
+/// since a `setval` leaves it uncalled at a value past its start.
 fn moved_to_start(sequence: &str, start: &str, increment: &str) -> String {
     let (edge, past, beyond) = if increment.starts_with('-') { ("min", "- 1", "<") } else { ("max", "+ 1", ">") };
-    let columns = "select d.refobjid::regclass as rel, a.attname from pg_depend d join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid where d.classid = 'pg_class'::regclass and d.objid = s and d.refclassid = 'pg_class'::regclass and d.deptype in ('a', 'i') \
-        union select ad.adrelid::regclass, a.attname from pg_depend d join pg_attrdef ad on ad.oid = d.objid join pg_attribute a on a.attrelid = ad.adrelid and a.attnum = ad.adnum where d.classid = 'pg_attrdef'::regclass and d.refclassid = 'pg_class'::regclass and d.refobjid = s";
+    let integer = "a.atttypid in ('int2'::regtype, 'int4'::regtype, 'int8'::regtype)";
+    let columns = format!(
+        "select d.refobjid::regclass as rel, a.attname, {integer} as plain from pg_depend d join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid \
+        where d.classid = 'pg_class'::regclass and d.objid = s and d.refclassid = 'pg_class'::regclass and d.deptype in ('a', 'i') \
+        union all select ad.adrelid::regclass, a.attname, {integer} and r.relkind in ('r', 'p') and pg_get_expr(ad.adbin, ad.adrelid) = format('nextval(%L::regclass)', s::text) \
+        from pg_depend d join pg_attrdef ad on ad.oid = d.objid join pg_attribute a on a.attrelid = ad.adrelid and a.attnum = ad.adnum join pg_class r on r.oid = ad.adrelid \
+        where d.classid = 'pg_attrdef'::regclass and d.refclassid = 'pg_class'::regclass and d.refobjid = s \
+        union all select null, null, false from pg_depend d where d.classid = 'pg_type'::regclass and d.refclassid = 'pg_class'::regclass and d.refobjid = s"
+    );
     dollar_block(&format!(
         "declare s regclass := {sequence}; stands numeric; goal numeric := {start}; reach numeric; low numeric; high numeric; c record; \
         begin select seqmin, seqmax into low, high from pg_sequence where seqrelid = s; \
         execute format('select case when is_called then last_value::numeric + ({increment}) else last_value end from %s', s) into stands; \
-        for c in {columns} loop execute format('select {edge}(%I)::numeric {past} from %s', c.attname, c.rel) into reach; \
+        for c in {columns} loop if not c.plain then return; end if; \
+        execute format('select {edge}(%I)::numeric {past} from %s', c.attname, c.rel) into reach; \
         if reach {beyond} goal and reach between low and high then goal := reach; end if; end loop; \
         if goal {beyond} stands and goal between low and high then perform setval(s, goal::bigint, false); end if; end"
     ))
@@ -4773,12 +4784,17 @@ impl Alterer for PostgresAlterer {
                         literal(name)
                     ));
                 }
-                out.push(format!("alter sequence {name} {}{}", to.def, if disjoint { " restart" } else { "" }));
-                // A start moved ahead moves it where it hasn't got that far, past the rows of each
-                // column it gives values to.
+                // Where its bounds stay, before the alter, whose lock holds back every nextval while
+                // the block reads the columns it gives values to.
                 let start = ey.get("start with").cloned().unwrap_or_default();
-                if ahead(ex.get("start with").map_or("", |s| s.as_str()), &start, descending) && !disjoint {
-                    out.push(moved_to_start(&literal(name), &start, ey.get("increment by").map_or("1", |i| i.as_str())));
+                let moved = (ahead(ex.get("start with").map_or("", |s| s.as_str()), &start, descending) && !disjoint).then(|| moved_to_start(&literal(name), &start, ey.get("increment by").map_or("1", |i| i.as_str())));
+                let first = ex.get("minvalue") == ey.get("minvalue") && ex.get("maxvalue") == ey.get("maxvalue") && from.def.split_whitespace().nth(1) == to.def.split_whitespace().nth(1);
+                if first {
+                    out.extend(moved.clone());
+                }
+                out.push(format!("alter sequence {name} {}{}", to.def, if disjoint { " restart" } else { "" }));
+                if !first {
+                    out.extend(moved);
                 }
                 Some(out)
             }
