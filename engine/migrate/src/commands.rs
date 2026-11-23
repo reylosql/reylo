@@ -1278,6 +1278,22 @@ fn data_statements(sql: &str, d: Dialect) -> Vec<String> {
     statements.iter().enumerate().filter(|(k, s)| changes_data(s, d) && !copies_a_rebuild(&statements, *k)).map(|(_, s)| format!("{}…", s.text.split_whitespace().take(3).collect::<Vec<_>>().join(" ").to_lowercase())).collect()
 }
 
+/// Whether `reylo run` applies `sql` as deploy runs a migration: whole or not at all, and touching
+/// no rows deploy would keep. On Postgres a script runs as one transaction (a lone statement that
+/// can't run in one, as a migration's must be); elsewhere one statement does. And SQLite runs it with
+/// foreign keys on, where a migration runs with them off and checks them before it commits, so a
+/// table dropped there takes its children's rows with it: only what touches no rows through them,
+/// anything made, or an index, a view or a trigger dropped.
+fn runs_as_a_migration(sql: &str, d: Dialect) -> bool {
+    let statements = split_statements(sql, d);
+    let word = |s: &crate::sql::Statement, k: usize| s.tokens.get(k).map(crate::sql::Token::upper).unwrap_or_default();
+    match d {
+        Dialect::Postgres => !statements.iter().any(|s| word(s, 0) == "COMMIT"),
+        Dialect::Mysql => statements.len() == 1,
+        Dialect::Sqlite => statements.len() == 1 && statements.iter().all(|s| word(s, 0) == "CREATE" || (word(s, 0) == "DROP" && matches!(word(s, 1).as_str(), "INDEX" | "VIEW" | "TRIGGER"))),
+    }
+}
+
 /// The statements of a migration that write rows, as [`data_statements`] gives them, with the
 /// schema changes that fill what they make ([`fills`]). What they write turns on the rows and
 /// objects they read, so it can change with the order they run in, and no schema shows it was
@@ -1701,9 +1717,7 @@ fn lock_order_problem(opts: &Options, applied: &[&HistoryRow], order: &[Migratio
     let ran = and_list(&since.iter().map(|r| r.name.clone()).collect::<Vec<_>>());
     let problem = problem.note(format!("Every database runs the migrations in the lock's order, and this one ran {ran} without {}, which the lock runs first.", ahead.name)).fix("On a development database, apply them in the lock's order", &["reylo migrate dev"]);
     let record = "reylo migrate history push --url <url>";
-    // What `reylo run` applies whole: on Postgres a file runs as one transaction, or a lone statement
-    // that can't run in one, as a migration must be; elsewhere a lone statement.
-    if d == Dialect::Postgres || split_statements(&ahead.sql, d).len() == 1 {
+    if runs_as_a_migration(&ahead.sql, d) {
         let file = shell_word(&format!("{}/{}", shown(&opts.dir), ahead.name));
         Some(problem.fix("On any other, make its change there too, then record both, running nothing", &[&format!("reylo run --url <url> --file {file}"), record]))
     } else {
@@ -2119,8 +2133,8 @@ async fn behind_problem(shadows: &mut Shadows<'_>, target: &mut Db, url: &str, r
     let order = format!("{names} first, and then {}", it.name);
     let on = shown_url(url);
     let deploy = "reylo migrate deploy --url <url>";
-    let whole = |undo: &Vec<String>| if target.dialect() == Dialect::Postgres { !undo.iter().any(|s| s.starts_with("commit;")) } else { undo.len() == 1 };
-    match undo.filter(whole) {
+    let d = target.dialect();
+    match undo.filter(|undo| runs_as_a_migration(&undo.join("\n"), d)) {
         Some(undo) => problem.note("Give both commands the same URL as this one.").fix(format!("Undo it on {on}, so that deploy runs {order}"), &[format!("reylo run --url <url> {}", shell_word(&undo.join(" "))).as_str(), deploy]),
         None => problem.note(format!("Undo it on {on} by hand, then give deploy the same URL as this command.")).fix(format!("Then deploy, which runs {order}"), &[deploy]),
     }
@@ -7105,6 +7119,30 @@ fn table_lines(table: &crate::db::Table) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_printed_run_is_offered_only_where_it_runs_as_a_migration() {
+        for (sql, d) in [
+            ("create index a_id on a (id);", Dialect::Sqlite),
+            ("drop index a_id;", Dialect::Sqlite),
+            ("create table b (id integer);", Dialect::Sqlite),
+            ("drop index a_id on a;", Dialect::Mysql),
+            ("drop index a_id; drop table b;", Dialect::Postgres),
+            ("create index concurrently a_id on a (id);", Dialect::Postgres),
+        ] {
+            assert!(runs_as_a_migration(sql, d), "{sql}");
+        }
+        for (sql, d) in [
+            // With foreign keys on, as reylo run has them, a parent's rows take its children's.
+            ("drop table parent;", Dialect::Sqlite),
+            ("alter table a drop column b;", Dialect::Sqlite),
+            ("drop index a_id; drop index b_id;", Dialect::Sqlite),
+            ("drop index a_id on a; drop table b;", Dialect::Mysql),
+            ("alter type mood add value 'x'; commit; begin; update t set m = 'x';", Dialect::Postgres),
+        ] {
+            assert!(!runs_as_a_migration(sql, d), "{sql}");
+        }
+    }
 
     #[cfg(feature = "cli")]
     #[test]

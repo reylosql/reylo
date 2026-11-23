@@ -1479,7 +1479,14 @@ async fn a_hotfix_moves_past_no_table_made_from_a_query_and_is_none(mut p: P) {
     let out = p.output();
     assert_has!(&out, r"✗ Migration 20261027140000_copy\.sql makes this change, but runs after 20261027130000_b\.sql, which this database hasn't run\n  Its data statements can't be told to have run here, so it isn't recorded without running\.");
     assert_has!(&out, r"The undo reverses the schema alone: where create table copy… also ran here");
-    p.exec(&undo_on(&out)).await;
+    // SQLite's undo drops a table, which reylo run, with foreign keys on, would do otherwise than a
+    // migration: it is left to do by hand.
+    if p.d == Dialect::Sqlite {
+        assert_has!(&out, r"  Undo it on \S+ by hand, then give deploy the same URL as this command\.\n\n  Then deploy, which runs 20261027130000_b\.sql first, and then 20261027140000_copy\.sql:\n    reylo migrate deploy --url <url>");
+        p.exec("drop table copy").await;
+    } else {
+        p.exec(&undo_on(&out)).await;
+    }
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_eq!(p.rows("select * from copy").await.len(), 2);
     // A query's word in a string, or a column's name (SQLite's `with`), makes no table from a query:
@@ -1550,15 +1557,23 @@ async fn a_hotfix_that_cannot_move_ahead_is_undone_then_deployed(mut p: P) {
     assert_eq!(p.history_push().await, 1);
     let out = p.output();
     assert_has!(&out, title);
-    assert_has!(&out, r"  Undoing it loses what \S*t holds\.\n  Give both commands the same URL as this one\.\n\n  Undo it on \S+, so that deploy runs 20261027110000_t\.sql first, and then 20261027120000_wider\.sql:\n    reylo run --url <url> '[^\n]*'\n    reylo migrate deploy --url <url>\n\nNothing was changed\.");
+    if p.d == Dialect::Sqlite {
+        assert_has!(&out, r"  Undoing it loses what \S*t holds\.\n  Undo it on \S+ by hand, then give deploy the same URL as this command\.\n\n  Then deploy, which runs 20261027110000_t\.sql first, and then 20261027120000_wider\.sql:\n    reylo migrate deploy --url <url>\n\nNothing was changed\.");
+    } else {
+        assert_has!(&out, r"  Undoing it loses what \S*t holds\.\n  Give both commands the same URL as this one\.\n\n  Undo it on \S+, so that deploy runs 20261027110000_t\.sql first, and then 20261027120000_wider\.sql:\n    reylo run --url <url> '[^\n]*'\n    reylo migrate deploy --url <url>\n\nNothing was changed\.");
+    }
     // The lead names this database, which a command without --url may not reach, as every command
     // shows one: with no credential or option, which a log keeps.
-    assert!(out.contains(&format!("Undo it on {}, so", reylo_migrate::db::shown_url(&p.url))), "{out}");
+    assert!(out.contains(&format!("Undo it on {} ", reylo_migrate::db::shown_url(&p.url))) || out.contains(&format!("Undo it on {},", reylo_migrate::db::shown_url(&p.url))), "{out}");
     assert_eq!(p.locked(), [a, t, wider]);
     assert_eq!(p.history().await, [a]);
     assert_eq!(p.dry_run().await, 1);
     assert_has!(p.output(), title);
-    p.exec(&undo_on(&out)).await;
+    if p.d == Dialect::Sqlite {
+        p.exec("drop table t").await;
+    } else {
+        p.exec(&undo_on(&out)).await;
+    }
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_eq!(p.history().await, [a, t, wider]);
 }
