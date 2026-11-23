@@ -432,6 +432,7 @@ test("ClickHouse: a select is typed from the server's own description, nullabili
     assert.deepEqual([standard.dialect, standard.cardinality, standard.columns], ["clickhouse", "maybeOne", undefined]);
     assert.throws(() => standard.encode({ id: 1 }), /A Standard Query maps no values on ClickHouse, whose parameters are named in the statement/);
     assert.throws(() => standard.decode([[1n]]), /A Standard Query maps no values on ClickHouse/);
+    assert.throws(() => standard.output([{ id: "1" }]), /A Standard Query maps no values on ClickHouse/);
     assert.doesNotMatch(out["user.sql"]!, /~standard/);
     // A query's JSON Schema is of what its parameters take: a wide whole number is a number or a
     // BigInt and no digits, of no named format past 64 bits, and an array's element is null where
@@ -553,7 +554,7 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
   const db = await clickhouseDatabase("reylo_clickhouse_writes", `${SCHEMA};\nCREATE TABLE things (id UInt64, format String, d Dynamic, v Variant(UInt64, String), tags Array(UInt8), items Nested(sku String, quantity UInt32)) ENGINE = MergeTree ORDER BY id`);
   // What the type check says of a parameter written as it is to a column that keeps another type.
   const unkept = (written: string, column: string, type: string, fix: string) => `${written} is written as it is to the column ${column}, of the type ${type}. ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. ${fix}`;
-  const WIDE = unkept("{total:Decimal(18, 4)}", "total", "Decimal(18, 2)", "Declare the parameter as the column's type, {total:Decimal(18, 2)}, or write the conversion out, as CAST({total:Decimal(18, 4)}, 'Decimal(18, 2)') does.");
+  const WIDE = unkept("{total:Decimal(18, 4)}", "total", "Decimal(18, 2)", "Declare the parameter as the column's type, {total:Decimal(18, 2)}.");
   try {
     const root = project(db.url);
     const files = {
@@ -588,9 +589,18 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
       // label, and a column of a type no parameter declares takes a value the statement converts.
       "text_array.sql": "INSERT INTO things (id, tags) VALUES ({id:UInt64}, {tags:String})",
       "text_role.sql": "INSERT INTO users (id, name, role) VALUES ({id:UInt64}, 'x', {role:String})",
-      "dynamic.sql": "INSERT INTO things (id, d) VALUES ({id:UInt64}, {d:UInt64})",
+      "dynamic.sql": "INSERT INTO things (id, d) SELECT {id:UInt64}, {d:UInt64}",
+      // VALUES stores the text of a value for a Dynamic where it reads as data, a placeholder's own included.
+      "dynamic_values.sql": "INSERT INTO things (id, d) VALUES ({id:UInt64}, ({d:UInt64} + 1))",
+      // A text written to a Variant is read as whichever of its types the text reads as.
+      "variant_text.sql": "INSERT INTO things (id, v) SELECT {id:UInt64}, {v:String}",
       // A converted value, one in parentheses, a member's type in a Variant, a column named as a clause is, and a Nested column's parts.
-      "converted.sql": "INSERT INTO things (id, format, d, v, items.sku, items.quantity) VALUES ({id:UInt64}, {format:String}, {d:UInt64}::Dynamic, ({v:UInt64}), {skus:Array(String)}, {quantities:Array(UInt32)})",
+      "converted.sql": "INSERT INTO things (id, format, d, v, items.sku, items.quantity) SELECT {id:UInt64}, {format:String}, {d:UInt64}::Dynamic, ({v:UInt64}), {skus:Array(String)}, {quantities:Array(UInt32)}",
+      // VALUES reads a value for a Variant by the column's type: a 5 is its UInt64.
+      "variant_literal.sql": "INSERT INTO things (id, v) VALUES ({id:UInt64}, 5)",
+      // A SELECT in parentheses is not read, and a partition's id is the statement's to write.
+      "wrapped.sql": "INSERT INTO orders (id, user_id) (SELECT {id:UInt64}, {user:UInt64})",
+      "remove_part.sql": "DELETE FROM orders IN PARTITION ID {part:String} WHERE id = {id:UInt64}",
       // Where the text does not say which column a parameter goes to, nothing holds it.
       "starred.sql": "INSERT INTO orders SELECT * EXCEPT (note), {note:Nullable(String)} FROM orders",
       // A map as VALUES alone reads one is written, and a value an UPDATE's column does not take is refused.
@@ -600,11 +610,15 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
       "placed.sql": "INSERT INTO users (id, name, created) VALUES ({id:UInt64}, 'p', {created:String}::DateTime64(3, 'UTC'))",
     };
     const found = await transform(root, files);
-    for (const name of ["add.sql", "copy.sql", "remove.sql", "set.sql", "alter_set.sql", "copy_one.sql", "remove_in.sql", "converted.sql", "mapped.sql", "placed.sql"] as const) assert.deepEqual(found[name]!.diagnostics, [], name);
-    assert.deepEqual(marked(files["text_array.sql"], found["text_array.sql"]!.diagnostics), [[unkept("{tags:String}", "tags", "Array(UInt8)", "Declare the parameter as the column's type, {tags:Array(UInt8)}, or write the conversion out, as CAST({tags:String}, 'Array(UInt8)') does."), "{tags:String}"]]);
-    assert.deepEqual(marked(files["text_role.sql"], found["text_role.sql"]!.diagnostics), [[unkept("{role:String}", "role", "Enum8('admin' = 1, 'member' = 2)", "Declare the parameter as the column's type, {role:Enum8('admin' = 1, 'member' = 2)}, or write the conversion out, as CAST({role:String}, 'Enum8(\\'admin\\' = 1, \\'member\\' = 2)') does."), "{role:String}"]]);
-    assert.deepEqual(marked(files["dynamic.sql"], found["dynamic.sql"]!.diagnostics), [[unkept("{d:UInt64}", "d", "Dynamic", "Write the conversion out, as CAST({d:UInt64}, 'Dynamic') does."), "{d:UInt64}"]]);
-    assert.deepEqual(marked(files["starred.sql"], found["starred.sql"]!.diagnostics), [["{note:Nullable(String)} is written as it is to a column the statement's text does not name, so nothing holds it to that column's type. Write the table and each column by its name, with no * before the parameter, or write the conversion out, as CAST({note:Nullable(String)}, 'Nullable(String)') does.", "{note:Nullable(String)}"]]);
+    for (const name of ["add.sql", "copy.sql", "remove.sql", "set.sql", "alter_set.sql", "copy_one.sql", "remove_in.sql", "converted.sql", "mapped.sql", "placed.sql", "variant_literal.sql"] as const) assert.deepEqual(found[name]!.diagnostics, [], name);
+    assert.deepEqual(marked(files["text_array.sql"], found["text_array.sql"]!.diagnostics), [[unkept("{tags:String}", "tags", "Array(UInt8)", "Declare the parameter as the column's type, {tags:Array(UInt8)}."), "{tags:String}"]]);
+    assert.deepEqual(marked(files["text_role.sql"], found["text_role.sql"]!.diagnostics), [[unkept("{role:String}", "role", "Enum8('admin' = 1, 'member' = 2)", "Declare the parameter as the column's type, {role:Enum8('admin' = 1, 'member' = 2)}."), "{role:String}"]]);
+    assert.deepEqual(marked(files["dynamic.sql"], found["dynamic.sql"]!.diagnostics), [[unkept("{d:UInt64}", "d", "Dynamic", "No parameter declares that type: convert the value in the statement, as CAST({d:UInt64}, 'Dynamic') does."), "{d:UInt64}"]]);
+    assert.deepEqual(marked(files["dynamic_values.sql"], found["dynamic_values.sql"]!.diagnostics), [["{d:UInt64} is in a value that VALUES writes to the column d, of the type Dynamic. ClickHouse's VALUES reads a value for a Dynamic by its text where it can, and stores the placeholder's own text in place of the parameter's value. Write the row as an INSERT … SELECT, which computes each value.", "{d:UInt64}"]]);
+    assert.deepEqual(marked(files["variant_text.sql"], found["variant_text.sql"]!.diagnostics), [[`{v:String} is written as it is to the column v, of the type Variant(String, UInt64). ClickHouse reads a text written to a Variant as whichever of its types the text reads as, so the column would not hold the text as it was given: 123 is stored as a number where the Variant has one.`, "{v:String}"]]);
+    assert.deepEqual(marked(files["starred.sql"], found["starred.sql"]!.diagnostics), [["{note:Nullable(String)} is written as it is to a column the statement's text does not name, so nothing holds it to that column's type. Write the table and each column by its name, with no * before the parameter.", "{note:Nullable(String)}"]]);
+    assert.deepEqual(marked(files["remove_part.sql"], found["remove_part.sql"]!.diagnostics), [["Reylo types no parameter as a partition's id, which the server reads from the statement's text where a write is checked: write the id in the statement, in place of {part:String}.", "{part:String}"]]);
+    assert.match(found["wrapped.sql"]!.diagnostics[0]!.messageText, /^Reylo cannot read what this INSERT writes, so nothing would hold its parameters to their columns\. Write its rows as VALUES or as a SELECT, outside parentheses\.$/);
     assert.match(found["set_text.sql"]!.diagnostics[0]!.messageText, /^Cannot parse string 'abc' as UInt64/);
     for (const name of ["copy_wide.sql", "set_wide.sql", "alter_wide.sql"] as const) assert.deepEqual(marked(files[name], found[name]!.diagnostics), [[WIDE, "{total:Decimal(18, 4)}"]], name);
     assert.match(found["bad_value.sql"]!.diagnostics[0]!.messageText, /^Unknown expression or function identifier `nope`/);
@@ -644,6 +658,8 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
     // What the statement converts, and what the column's own type takes, is what the table holds.
     await (await built(root, "converted", files["converted.sql"])).run(db.client, { id: 20, format: "csv", d: 300, v: 300, skus: ["a"], quantities: [2] });
     assert.deepEqual(await byHand("SELECT format, toString(d) AS held, dynamicType(d) AS kind, v.UInt64 AS v, items.sku AS skus, items.quantity AS quantities FROM things").run(db.client, {}), [{ format: "csv", held: "300", kind: "UInt64", v: 300n, skus: ["a"], quantities: [2] }]);
+    await (await built(root, "variant_literal", files["variant_literal.sql"])).run(db.client, { id: 21 });
+    assert.deepEqual(await byHand("SELECT v.UInt64 AS v FROM things WHERE id = 21").run(db.client, {}), [{ v: 5n }]);
     await (await built(root, "mapped", files["mapped.sql"])).run(db.client, { id: 30 });
     assert.deepEqual(await byHand("SELECT meta FROM users WHERE id = 30").run(db.client, {}), [{ meta: [{ key: "logins", value: 2 }] }]);
     await (await built(root, "placed", files["placed.sql"])).run(db.client, { id: 40, created: "2026-01-02 03:04:05.678" });
@@ -678,6 +694,9 @@ test("ClickHouse: an error that ends a result is read whatever its length, and a
   const query = defineQuery<Record<string, never>, Record<string, unknown>, "many", "clickhouse">({ dialect: "clickhouse", sql: "SELECT throwIf(number = 2) AS p FROM numbers(3)", params: [] });
   await assert.rejects(query.run(answer({}) as never, {}), /^TypeError: The statement's result came without the X-ClickHouse-Exception-Tag header, which ClickHouse sends from 25\.11 on/);
   await assert.rejects(query.run(answer({ "x-clickhouse-exception-tag": "" }) as never, {}), /came without the X-ClickHouse-Exception-Tag header/);
+  // A query defined by hand that declares one name with two types has no one text to send for it.
+  const twice = defineQuery<Record<string, unknown>, Record<string, unknown>, "many", "clickhouse">({ dialect: "clickhouse", sql: "SELECT {x:UInt8} AS a, {x:String} AS b", params: ["x"], marks: [[7, 16], [23, 33]] });
+  await assert.rejects(twice.run(answer({ "x-clickhouse-exception-tag": "tag" }) as never, { x: 300 }), /^TypeError: Parameter "x" is declared as UInt8 and as String in the statement: a ClickHouse parameter has one type\.$/);
   // A name in the result's header that is no UTF-8 would read as another's.
   const named = { exec: async () => ({ stream: (async function* () { yield bytes("\x01\x01p\x17Enum8('\xff' = 1, '\xfe' = 2)\x01"); })(), response_headers: { "x-clickhouse-exception-tag": "tag" } }) };
   await assert.rejects(query.run({ ...answer({}), ...named } as never, {}), /^TypeError: The result's type for the column "p" holds bytes that are not UTF-8 text/);

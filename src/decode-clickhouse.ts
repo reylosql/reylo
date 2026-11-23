@@ -704,7 +704,12 @@ function typesOf(query: QueryModule, text: string, marks: Marks): ReadonlyMap<st
       const written = text.slice(start, end);
       const colon = written.indexOf(":");
       const type = written.startsWith("{") && written.endsWith("}") && colon !== -1 ? parseType(written.slice(colon + 1, -1)) : undefined;
-      if (type !== undefined) found.set(written.slice(1, colon).trim(), type);
+      if (type === undefined) continue;
+      const name = written.slice(1, colon).trim();
+      const other = found.get(name);
+      // One value goes for a name, as the text of one type: under two, the server would change it for the other and say nothing.
+      if (other !== undefined && typeName(other) !== typeName(type)) throw new ParameterError(`Parameter "${name}" is declared as ${typeName(other)} and as ${typeName(type)} in the statement: a ClickHouse parameter has one type.`);
+      found.set(name, type);
     }
     declared.set(query, (types = found));
   }
@@ -736,13 +741,15 @@ function tooLong(error: unknown, names: readonly string[], settings: Readonly<Re
   if (longest === undefined) return undefined;
   const code = /Code: (\d+)/.exec(message)?.[1];
   const own = message.replace(/^Poco::Exception\.\s*Code: \d+,\s*(?:e\.code\(\) = \d+,\s*)?/, "").replace(/\s*\(version [^()]*(?:\([^()]*\))?\)\s*$/, "").trim();
-  return Object.assign(new Error(`${own}: the parameter "${longest.name}" is ${longest.bytes} bytes as ClickHouse's text, and the server takes 131072 of one unless its http_max_field_value_size is raised. Send fewer values at a time.`, { cause: error }), code === undefined ? {} : { code });
+  // The parameters go in the request's address, which has a limit of its own for all of them together.
+  const why = /URI/i.test(message) && longest.bytes <= 131072 ? `the statement's parameters, of which "${longest.name}" is the longest, are more than the request's address takes, 1048576 bytes unless the server's http_max_uri_size is raised` : `the parameter "${longest.name}" is ${longest.bytes} bytes as ClickHouse's text, and the server takes 131072 of one unless its http_max_field_value_size is raised`;
+  return Object.assign(new Error(`${own}: ${why}. Send fewer values at a time.`, { cause: error }), code === undefined ? {} : { code });
 }
 
 /**
  * Each parameter of a bound statement as the text of its type, in binding order, which is how
- * `.run()` sends one and what a Standard Query's `encode` returns: refused where the type cannot
- * hold the value, since the server would change it and say nothing.
+ * `.run()` sends one: refused where the type cannot hold the value, since the server would change
+ * it and say nothing.
  */
 function texts(query: QueryModule<"clickhouse">, { text, values, names, marks }: Bound): string[] {
   if (marks === undefined && names.length > 0) throw new TypeError("Reylo cannot bind this ClickHouse statement's parameters: each goes as its declared type's text, which Reylo reads at its placeholder, and a query defined by hand needs `marks` there, the place of each placeholder in its text, which a build step writes.");

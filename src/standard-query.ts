@@ -12,7 +12,7 @@
 // digits as the driver read them, which are the column's own over the text protocol, while
 // mysql2's binary protocol drops trailing zeros (`.000`) that `.run()` writes back from the
 // column's metadata. A ClickHouse query alone maps no values: it binds none in a list and reads
-// none raw, so its `encode` and `decode` throw and it has no `columns` (`standardQuery`).
+// none raw, so its `encode`, `decode` and `output` throw and it has no `columns` (`standardQuery`).
 import { decodePlan } from "./codecs.ts";
 import { compile, rawStatement, sentText, type Dialect, type QueryModule } from "./execute.ts";
 import type { StandardTypedV1 } from "./standard.ts";
@@ -146,8 +146,8 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
   // ClickHouse names and types each parameter in the statement and takes its value as a setting of
   // the request, and returns a result as one body in its binary format, which `.run()` reads. A
   // list of values to bind and rows of raw values are neither, so its query says what it is, its
-  // text, its cardinality and its output, and maps no values: a driver's own reading of a value,
-  // a UInt64 as a number, say, would pass for the value the type names.
+  // text and its cardinality, and maps no values: a driver's own reading of a value, a UInt64 as
+  // a number, say, would pass for the value the type names.
   const unmapped = (): never => {
     throw new TypeError(`${module.source ? `${module.source}: ` : ""}A Standard Query maps no values on ClickHouse, whose parameters are named in the statement and whose result comes in its binary format: run the query with .run().`);
   };
@@ -173,7 +173,7 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
     ...(module.cardinality === undefined ? {} : { cardinality: module.cardinality }),
     ...(module.key === undefined ? {} : { key: module.key }),
     ...(columns === undefined ? {} : { columns: Object.freeze(columns) }),
-    output: (rows) => materialize(rows as Record<string, unknown>[]),
+    output: (rows) => (mapped ? materialize(rows as Record<string, unknown>[]) : unmapped()),
     ...(module.ordered ? { ordered: true as const } : {}),
     get text() {
       return statementText();

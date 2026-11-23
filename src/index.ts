@@ -130,7 +130,7 @@ export interface Query<Params, Row, C extends Cardinality, D extends Dialect, E 
   readonly inputSchema: Record<string, unknown>;
   /** The JSON Schema (2020-12) of the result as JSON: what `run` returns, written as JSON, a BigInt as the integer it is. */
   readonly outputSchema: Record<string, unknown>;
-  /** Standard JSON Schema's `jsonSchema` and Standard Query's `query`: a driver that supports Standard Query runs the import with the same input and output as `.run()`. */
+  /** Standard JSON Schema's `jsonSchema` and Standard Query's `query`: a driver that supports Standard Query runs the import with the same input and output as `.run()`. A ClickHouse query maps no values, and runs through `.run()` alone (src/standard-query.ts). */
   readonly "~standard": StandardJSONSchemaV1.Props<Params, Materialize<Row, C>> & StandardQueryV1.Props<Params, Materialize<Row, C>, D> & { readonly query: { readonly cardinality: C; output(rows: readonly Record<string, unknown>[]): Materialize<Row, C> } };
   readonly "~reylo": ReyloTypes<Params, Row, C>;
   /**
