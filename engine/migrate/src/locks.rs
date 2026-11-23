@@ -348,16 +348,24 @@ async fn mysql_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard>, Error>
     let statements = crate::sql::split_statements(&m.sql, Dialect::Mysql);
     let there = mysql_tables(db).await?;
     if statements.len() > 2 && crate::sql::locks_tables(&statements[0]) {
-        // A name no table of the database has.
-        let copy = (0..).map(|n| format!("__reylo_lock_probe_{n}")).find(|c| !there.contains(c)).expect("a free name");
+        // A name no table or view of the database has.
+        let taken: BTreeSet<String> = db.rows("select table_name as t from information_schema.tables where table_schema = database()").await?.iter().map(|r| r.text("t").to_lowercase()).collect();
+        let copy = (0..).map(|n| format!("__reylo_lock_probe_{n}")).find(|c| !taken.contains(c)).expect("a free name");
         let mut hazards = Vec::new();
         for s in statements.iter().filter(|s| crate::sql::alters_table(s)) {
             let Some((table, tried)) = with_option(&s.text, Some(&copy), "algorithm=instant") else { continue };
-            if !there.contains(&table.to_lowercase()) || db.exec(&format!("create table {copy} like `{}`", table.replace('`', "``"))).await.is_err() {
+            if !there.contains(&table.to_lowercase()) {
                 continue;
             }
-            let refused = matches!(db.script(&tried).await, Err(e) if e.0.contains("ALGORITHM=INSTANT is not supported"));
-            db.exec(&format!("drop table {copy}")).await?;
+            // Where no copy can be made to try it on, it is taken to block.
+            let refused = match db.exec(&format!("create table {copy} like `{}`", table.replace('`', "``"))).await {
+                Ok(()) => {
+                    let refused = matches!(db.script(&tried).await, Err(e) if e.0.contains("ALGORITHM=INSTANT is not supported"));
+                    db.exec(&format!("drop table {copy}")).await?;
+                    refused
+                }
+                Err(_) => true,
+            };
             if refused {
                 hazards.push(Hazard { what: mysql_hazard(&s.text, &table, true), table });
             }
@@ -415,6 +423,27 @@ fn named_lock(statement: &str) -> Option<(String, usize, usize)> {
         }
     }
     found
+}
+
+/// The tables MySQL statements make (`create table`), each name unquoted and in lowercase: a change
+/// to one of them after, in the same migration or in a pending one, reads no rows.
+pub(crate) fn mysql_tables_made<'a>(sqls: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
+    let mut made = BTreeSet::new();
+    for sql in sqls {
+        for statement in crate::sql::split_statements(sql, Dialect::Mysql) {
+            let t = &statement.tokens;
+            let words: Vec<String> = t.iter().take(5).map(crate::sql::Token::upper).collect();
+            let at = match words.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+                ["CREATE", "TABLE", "IF", "NOT", "EXISTS"] => 5,
+                ["CREATE", "TABLE", ..] => 2,
+                _ => continue,
+            };
+            if let Some(name) = t.get(at) {
+                made.insert(name.text.trim_matches('`').replace("``", "`").to_lowercase());
+            }
+        }
+    }
+    made
 }
 
 /// The base tables of a MySQL database, each name in lowercase.

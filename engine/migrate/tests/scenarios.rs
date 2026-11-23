@@ -3628,6 +3628,22 @@ async fn new_tables_with_keys_between_them_need_no_blocking() {
     assert_eq!(p.dev().await, 0, "{}", p.peek());
 }
 
+/// A table renamed in a pending migration keeps its rows: the dry run says what a later pending
+/// migration blocks on it, as on a table of the old name.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_says_what_blocks_a_table_renamed_before() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    p.file("20261027100000_users.sql", "create table users (id int primary key, n bigint);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into users values (1, 2)").await;
+    p.file("20261027110000_rename.sql", "rename table users to accounts;");
+    p.file("20261027120000_narrow.sql", "alter table accounts modify column n int;");
+    p.schema("create table accounts (id int primary key, n int);");
+    p.output();
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    assert_has!(p.output(), r"_narrow\.sql\n      ! It rewrites accounts, copying every row while it blocks writes to it");
+}
+
 /// A trigger swapped under a lock with a change to its table: the change runs first, so one that
 /// fails on a row leaves the old trigger as it was; and one MySQL can't make by changing the
 /// table's definition alone blocks reads and writes under the lock, so it needs `--blocking`, as
@@ -3635,7 +3651,7 @@ async fn new_tables_with_keys_between_them_need_no_blocking() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_trigger_swapped_with_a_change_to_its_table() {
     let Some(mut p) = P::new(Dialect::Mysql).await else { return };
-    let table = |columns: &str, by: &str| format!("create table __reylo_lock_probe_0 (id int primary key);\ncreate table users (id int primary key, {columns});\ncreate trigger users_touch before update on users for each row set new.{by} = old.{by} + 1;\n");
+    let table = |columns: &str, by: &str| format!("create table __reylo_lock_probe_0 (id int primary key);\ncreate view __reylo_lock_probe_1 as select 1 as x;\ncreate table users (id int primary key, {columns});\ncreate trigger users_touch before update on users for each row set new.{by} = old.{by} + 1;\n");
     p.schema(&table("n int, mood enum('a','b') not null default 'a', touches int not null default 0", "touches"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "users", &Default::default(), log).await).await, 0, "{}", p.peek());
     assert_eq!(p.dev().await, 0, "{}", p.peek());
@@ -3659,7 +3675,10 @@ async fn a_trigger_swapped_with_a_change_to_its_table() {
     // A change that fails on the row: the old trigger stays, and still runs.
     p.schema(&table("n int not null, mood enum('a') not null default 'a', hits int not null default 0", "hits").replace("old.hits + 1", "old.hits + 2"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "drop_b", &blocking, log).await).await, 0, "{}", p.peek());
-    assert!(read(&p).starts_with("lock tables users write;\nalter table users modify column mood enum('a')"), "{}", read(&p));
+    // The change keeps every column the trigger reads, so it runs before the swap, on its own.
+    let files = p.files();
+    assert!(std::fs::read_to_string(p.dir.join("migrations").join(&files[files.len() - 2])).unwrap().starts_with("alter table users modify column mood enum('a')"));
+    assert_eq!(read(&p), "lock tables users write;\ndrop trigger users_touch;\ncreate trigger users_touch before update on users for each row set new.hits = old.hits + 2;\nunlock tables;\n");
     p.output();
     assert_eq!(p.dev().await, 1);
     assert_has!(p.output(), r"Data truncated for column 'mood' at row 1");
