@@ -467,6 +467,8 @@ for_each_dialect!(
     a_hotfix_that_cannot_move_ahead_is_undone_then_deployed,
     a_server_that_ran_what_a_hotfix_moved_ahead_of_takes_its_change,
     history_push_takes_a_database_to_a_reordered_lock_keeping_its_rows,
+    a_database_that_skipped_a_migration_runs_it_after_the_rest,
+    a_skipped_migration_moves_past_no_data_change,
     a_hotfix_whose_migration_changes_data_is_undone_then_deployed,
     a_hotfix_moves_past_no_table_made_from_a_query_and_is_none,
     history_push_follows_a_renamed_migration,
@@ -1402,6 +1404,65 @@ async fn history_push_takes_a_database_to_a_reordered_lock_keeping_its_rows(mut 
     assert_eq!(p.history().await, [a, index, notes]);
     assert_eq!(p.rows("select * from notes").await.len(), 1);
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+}
+
+async fn a_database_that_skipped_a_migration_runs_it_after_the_rest(mut p: P) {
+    let int = p.t.int;
+    p.linear();
+    let (a, index, c, row) = ("20261027100000_a.sql", "20261027110000_a_index.sql", "20261027120000_c.sql", "20261027130000_c_row.sql");
+    p.schema(&format!("create table a (id {int}); create index a_id on a (id); create table c (id {int});"));
+    p.file(a, &format!("create table a (id {int});"));
+    p.file(index, "create index a_id on a (id);");
+    p.file(c, &format!("create table c (id {int});"));
+    p.file(row, "insert into c values (1);");
+    p.lock(&[a, index, c, row]);
+    // Another tool ran the migrations but the index, and maybe the row, and kept no history Reylo
+    // reads: the tables are recorded, and the index moves after them in the lock, for deploy to run
+    // with the row, which no schema shows ran.
+    p.exec(&format!("create table a (id {int}); create table c (id {int});")).await;
+    p.output();
+    assert_eq!(p.history_push().await, 0, "{}", p.peek());
+    let out = p.output();
+    assert_has!(&out, r"\+ 20261027100000_a\.sql +recorded: already in place\n *\+ 20261027120000_c\.sql +recorded: already in place\n✓ Recorded 2 migrations, running nothing\n✓ Wrote \S*reylo\.lock: 20261027110000_a_index\.sql now runs after 20261027120000_c\.sql, which this database ran without it\n» Development databases ran 20261027110000_a_index\.sql first\n  To record the lock's new order on one, running nothing:\n    reylo migrate history push\n» This database hasn't run 20261027110000_a_index\.sql, 20261027130000_c_row\.sql\n  To run them:\n    reylo migrate deploy");
+    assert_eq!(p.locked(), [a, c, index, row]);
+    assert_eq!(p.history().await, [a, c]);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.history().await, [a, c, index, row]);
+    assert_eq!(p.rows("select id from c").await.len(), 1);
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    // A database that ran them in the other order, as development did before the lock moved, is told
+    // to record the lock's, which it takes running nothing.
+    p.lock(&[a, index, c, row]);
+    p.output();
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), r"✗ This database applied 20261027120000_c\.sql where \S*reylo\.lock lists 20261027110000_a_index\.sql\n  Every database runs the migrations in the lock's order, and this one ran the same migrations in another\.\n\n  On a development database, record the lock's order, running nothing:\n    reylo migrate history push\n  On any other, do the same:\n    reylo migrate history push --url <url>");
+    assert_eq!(p.history_push().await, 0, "{}", p.peek());
+    assert_eq!(p.history().await, [a, index, c, row]);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.rows("select id from c").await.len(), 1);
+}
+
+async fn a_skipped_migration_moves_past_no_data_change(mut p: P) {
+    let int = p.t.int;
+    p.linear();
+    let (a, index, fill, c) = ("20261027100000_a.sql", "20261027110000_a_index.sql", "20261027120000_fill.sql", "20261027130000_c.sql");
+    p.file(a, &format!("create table a (id {int}, n {int});"));
+    p.file(index, "create index a_id on a (id);");
+    p.file(fill, "update a set n = 1 where n is null;");
+    p.file(c, &format!("create table c (id {int});"));
+    p.lock(&[a, index, fill, c]);
+    // The data migration that ran here without the index can run differently once it is there, so
+    // the index isn't moved after it: it is made here, and all four recorded in their order.
+    p.exec(&format!("create table a (id {int}, n {int}); create table c (id {int});")).await;
+    p.output();
+    assert_eq!(p.history_push().await, 1);
+    assert_has!(p.output(), r"✗ This database has what the migrations make without 20261027110000_a_index\.sql\n  It ran 20261027120000_fill\.sql and 20261027130000_c\.sql without it\. Migration 20261027120000_fill\.sql changes data, which can run differently without it, so it can't move after them\.\n  Give both commands the same URL as this one\.\n\n  Make its change here too, then record them all, running nothing:\n    reylo run --url <url> --file \S+20261027110000_a_index\.sql\n    reylo migrate history push --url <url>");
+    assert_eq!(p.locked(), [a, index, fill, c]);
+    assert!(p.history().await.is_empty());
+    p.exec("create index a_id on a (id)").await;
+    assert_eq!(p.history_push().await, 0, "{}", p.peek());
+    assert_eq!(p.history().await, [a, index, fill, c]);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
 }
 
 async fn a_hotfix_whose_migration_changes_data_is_undone_then_deployed(mut p: P) {
@@ -3255,6 +3316,8 @@ on!(
     a_platforms_extension_in_pg_catalog_is_not_the_projects,
     a_role_that_is_no_superuser_runs_every_command,
     a_platform_roles_default_privileges_are_the_platforms,
+    a_skipped_grant_runs_after_the_rest,
+    the_history_table_takes_no_default_privileges,
     a_role_that_cannot_create_databases_is_told_of_shadow_url,
     a_public_schema_its_role_owns_is_a_new_databases,
     a_servers_hint_is_in_its_error,
@@ -3564,6 +3627,54 @@ mod adversarial {
         let out = p.output();
         assert_has!(&out, r"alter table users add column hand text");
         assert!(!out.contains("cloud_admin"), "{out}");
+    }
+
+    /// A migration that changes only a privilege, which a database made by another tool never ran,
+    /// commutes with every table made after it: the rest are recorded, and it runs last.
+    pub async fn a_skipped_grant_runs_after_the_rest(mut p: P) {
+        p.linear();
+        let (a, usage, c) = ("20261027100000_a.sql", "20261027110000_public_schema_usage.sql", "20261027120000_c.sql");
+        p.file(a, "create table a (id int primary key);");
+        p.file(usage, "revoke usage on schema public from public;");
+        p.file(c, "create table c (id int primary key);");
+        p.lock(&[a, usage, c]);
+        p.exec("create table a (id int primary key); create table c (id int primary key);").await;
+        p.output();
+        assert_eq!(p.history_push().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"✓ Wrote \S*reylo\.lock: 20261027110000_public_schema_usage\.sql now runs after 20261027120000_c\.sql, which this database ran without it");
+        assert_eq!(p.locked(), [a, c, usage]);
+        assert_eq!(p.history().await, [a, c]);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.history().await, [a, c, usage]);
+        let acl = p.rows("select coalesce(nspacl::text, '') as acl from pg_namespace where nspname = 'public'").await;
+        assert!(!acl[0].text("acl").contains("\"=U"), "{}", acl[0].text("acl"));
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    }
+
+    /// Reylo's history table is made with no privilege but its owner's, whatever the database's
+    /// default privileges grant on a new table: an app's role may write the app's tables, never which
+    /// migrations ran. A grant made on it by hand stays.
+    pub async fn the_history_table_takes_no_default_privileges(mut p: P) {
+        p.exec("do $$ begin create role madv_readwrite; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec("alter default privileges in schema public grant select, insert, update, delete on tables to madv_readwrite; alter default privileges in schema public grant select on tables to public").await;
+        let may = async |p: &P, table: &str, role: &str, privilege: &str| p.rows(&format!("select has_table_privilege('{role}', '{table}', '{privilege}') as ok")).await[0].flag("ok");
+        // A database made before Reylo's history, recorded as it stands.
+        p.file("20261027100000_a.sql", "create table a (id int primary key);");
+        p.exec("create table a (id int primary key)").await;
+        assert_eq!(p.history_push().await, 0, "{}", p.peek());
+        assert!(may(&p, "a", "madv_readwrite", "insert").await, "the app's own table keeps its grants");
+        for privilege in ["insert", "update", "delete", "select"] {
+            assert!(!may(&p, "__reylo_migrations", "madv_readwrite", privilege).await, "madv_readwrite may {privilege} the history");
+        }
+        let others = p.rows("select count(*)::int as n from pg_class c cross join aclexplode(c.relacl) a where c.oid = '__reylo_migrations'::regclass and a.grantee <> c.relowner").await;
+        assert_eq!(others[0].text("n"), "0", "the history grants to a role but its owner");
+        // A grant made by hand on the history afterwards is kept by the runs after it.
+        p.exec("grant select on __reylo_migrations to madv_readwrite").await;
+        p.file("20261027110000_b.sql", "create table b (id int primary key);");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert!(may(&p, "__reylo_migrations", "madv_readwrite", "select").await);
+        assert!(!may(&p, "__reylo_migrations", "madv_readwrite", "insert").await);
+        assert!(may(&p, "b", "madv_readwrite", "insert").await);
     }
 
     /// A role that may not create a database (PlanetScale's, some managed ones') can make no shadow:

@@ -381,6 +381,24 @@ Recording on postgres://db.example.com/app
 ✓ Recorded 1 migration, running nothing
 ```
 
+A database that skipped a migration, as one another tool kept can, has the rest recorded. The skipped one moves after them in the lock, for deploy to run:
+
+```terminal
+$ reylo migrate history push --url $PROD_URL
+Recording on postgres://db.example.com/app
+  + 20261104160000_users_email.sql  recorded: already in place
+✓ Recorded 1 migration, running nothing
+✓ Wrote reylo/reylo.lock: 20261103090000_revoke_public.sql now runs after 20261104160000_users_email.sql, which this database ran without it
+» Development databases ran 20261103090000_revoke_public.sql first
+  To record the lock's new order on one, running nothing:
+    reylo migrate history push
+» This database hasn't run 20261103090000_revoke_public.sql
+  To run it:
+    reylo migrate deploy
+```
+
+It moves nothing past a migration that changes data. There, it says to make the skipped migration's change and record them all.
+
 ### `history pull`
 
 Writes your migration files from your database's history. A deleted migration comes back, and an edited one is written over:
