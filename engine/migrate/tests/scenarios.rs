@@ -937,7 +937,7 @@ async fn new_without_schema_sql_writes_what_the_database_has(mut p: P) {
     p.output();
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tags", &Default::default(), log).await).await, 0, "{}", p.peek());
     // It says what the migration changes.
-    assert_has!(p.output(), r"✓ Wrote \S*_tags\.sql\n(?:  \+ [^\n]+\n)*  \+ column tags\.id ");
+    assert_has!(p.output(), r"✓ Wrote \S*_tags\.sql\n(?:  \+ [^\n]+\n)*  \+ table tags[^\n]*\n      id ");
     let written = p.files().into_iter().find(|f| f.ends_with("_tags.sql")).unwrap();
     let sql = std::fs::read_to_string(p.dir.join("migrations").join(&written)).unwrap();
     assert_has!(&sql, r"(?i)create table [^\n]*tags");
@@ -2784,7 +2784,7 @@ async fn deploy_builds_no_shadow_database_and_trusts_the_fingerprint(mut p: P) {
     p.exec(&format!("create table stray (id {int})")).await;
     assert_eq!(p.migrate().await, 1);
     let out = p.output();
-    assert_has!(&out, r"✗ This database was changed outside its migrations\n\n  \+ column stray\.id [^\n]+\n  \+ table stray[^\n]*\n\n  If a migration makes this change, record it here, running nothing:\n    reylo migrate history push\n  If none does, write one and run it in development, then record it here:\n    reylo migrate new <name>\n    reylo migrate dev\n    reylo migrate history push\n  To see which migrations it matches:\n    reylo migrate deploy --dry-run\n\nNothing was changed\.");
+    assert_has!(&out, r"✗ This database was changed outside its migrations\n\n  \+ table stray[^\n]*\n      id [^\n]+\n\n  If a migration makes this change, record it here, running nothing:\n    reylo migrate history push\n  If none does, write one and run it in development, then record it here:\n    reylo migrate new <name>\n    reylo migrate dev\n    reylo migrate history push\n  To see which migrations it matches:\n    reylo migrate deploy --dry-run\n\nNothing was changed\.");
     p.schema(&format!("create table users (id {id}); create table tags (id {int});"));
     assert_eq!(p.dry_run().await, 1);
     assert_has!(p.output(), "This database was changed outside its migrations");
@@ -3411,7 +3411,7 @@ async fn a_lock_that_cant_be_read_is_refused() {
     assert_eq!(p.dev().await, 0, "{}", p.peek());
     p.file("20261027110000_draft.sql", "create table b (id integer);");
     let lock = p.dir.join(reylo_migrate::lock::LOCK);
-    std::fs::write(&lock, b"migrations:\n  - 20261027100000_a.sql \xff\n").unwrap();
+    std::fs::write(&lock, b"migrations:\n  - name: 20261027100000_a.sql\n    checksum: \xff\n").unwrap();
     p.output();
     assert_eq!(p.migrate().await, 1);
     assert_has!(p.output(), r"✗ Reylo can't read \S*reylo\.lock: [^\n]*UTF-8");
@@ -3421,6 +3421,35 @@ async fn a_lock_that_cant_be_read_is_refused() {
     assert_eq!(p.status().await, 1);
     assert_eq!(p.dev().await, 1);
     assert_eq!(p.output().matches("Reylo can't read").count(), 3);
+    assert_eq!(p.history().await, ["20261027100000_a.sql"]);
+}
+
+/// A lock a newer Reylo wrote is refused by every command, and none writes over it: history pull
+/// and lock would otherwise write it again from one database's history, by this version's rules,
+/// losing what that database hasn't run.
+#[tokio::test(flavor = "current_thread")]
+async fn a_lock_a_newer_reylo_wrote_is_refused_and_kept() {
+    let mut p = P::new(Dialect::Sqlite).await.unwrap();
+    p.linear();
+    p.schema("create table a (id integer);");
+    p.file("20261027100000_a.sql", "create table a (id integer);");
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    p.file("20261027110000_b.sql", "create table b (id integer);");
+    let lock = p.dir.join(reylo_migrate::lock::LOCK);
+    let newer = "version: 2\nmigrations:\n  - name: 20261027100000_a.sql\n    checksum: 0123abcd\n  - name: 20261027110000_b.sql\n    checksum: 4567cdef\n    after: 20261027100000_a.sql\n";
+    std::fs::write(&lock, newer).unwrap();
+    p.output();
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote \S*reylo\.lock[\s\S]*It is a lock of version 2, and Reylo \S+ reads version 1 and older\.[\s\S]*Upgrade Reylo to read it\.");
+    assert_eq!(p.status().await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote");
+    assert_eq!(p.dev().await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote");
+    assert_eq!(p.run(async |o, log| reylo_migrate::history_pull(o, log).await).await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote");
+    assert_eq!(p.run(async |o, log| reylo_migrate::lock_from_history(o, log).await).await, 1);
+    assert_has!(p.output(), r"✗ A newer Reylo wrote");
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), newer);
     assert_eq!(p.history().await, ["20261027100000_a.sql"]);
 }
 

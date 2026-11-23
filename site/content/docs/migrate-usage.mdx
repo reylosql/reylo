@@ -251,10 +251,13 @@ Your migrations run in one order: the lockfile's, or their names'.
 The lockfile lists your migrations in order, each with a checksum chained to the one before. A migration it doesn't list yet is a draft, free to edit:
 
 ```yaml title="reylo.lock"
+version: 1
 schema: c7bf681b
 migrations:
-  - 20261104120000_users.sql c86e9de4
-  - 20261104140347_add_bio.sql 78ad08c0
+  - name: 20261104120000_users.sql
+    checksum: c86e9de4
+  - name: 20261104140347_add_bio.sql
+    checksum: 78ad08c0
 ```
 
 Two branches that each add a migration conflict on the lock in git. Keep main's lines, then run `reylo migrate dev` to add yours after them.

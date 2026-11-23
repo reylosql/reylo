@@ -784,9 +784,10 @@ fn describe_diff(label_a: &str, a: &[String], label_b: &str, b: &[String]) -> Ve
     const MAX: usize = 20;
     let (only_a, only_b) = difference(a, b);
     let (only_a, only_b) = (without_default_grants(&only_a), without_default_grants(&only_b));
-    let mut changes: Vec<String> = only_a.iter().take(MAX).map(|l| paint("red", &format!("    - {}", readable(l)))).collect();
+    let (only_a, only_b, mut changes) = in_place(only_a.iter().collect(), only_b.iter().collect(), "    ");
+    changes.extend(only_a.iter().take(MAX).map(|l| paint("red", &format!("    - {}", readable(l)))));
     changes.extend(only_b.iter().take(MAX).map(|l| paint("green", &format!("    + {}", readable(l)))));
-    let more = only_a.len() + only_b.len() - changes.len();
+    let more = only_a.len().saturating_sub(MAX) + only_b.len().saturating_sub(MAX);
     if more > 0 {
         changes.push(format!("    … and {more} more"));
     }
@@ -815,6 +816,8 @@ fn readable(line: &str) -> String {
     static MYSQL_INDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^index ([^.\s]+)\.(\S+) (unique )?(\w+)((?: invisible)?(?: comment "(?:[^"\\]|\\.)*")?) (\(.*\))$"#).expect("a valid pattern"));
     static SQLITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(index|view|trigger) \S+ create (unique )?(?:temp |temporary )?(?:index|view|trigger) (?:if not exists )?(\S+) (.*)$").expect("a valid pattern"));
     static CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) (\S+) (.*)$").expect("a valid pattern"));
+    static POSTGRES_DEFINITION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:PRIMARY KEY|UNIQUE|CHECK|FOREIGN KEY|EXCLUDE|NOT NULL)\b").expect("a valid pattern"));
+    static SQLITE_CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) ((?:primary key|unique|check|foreign key|constraint)\b.*)$").expect("a valid pattern"));
     static PUBLIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s(,]|::)(?:public|"public")\."#).expect("a valid pattern"));
     let line = PUBLIC.replace_all(line, "$1").into_owned();
     if let Some(c) = INDEX.captures(&line) {
@@ -828,10 +831,94 @@ fn readable(line: &str) -> String {
     if let Some(c) = SQLITE.captures(&line) {
         return format!("{}{} {} {}", c.get(2).map_or("", |m| m.as_str()), &c[1], &c[3], &c[4]);
     }
+    // A function by its signature and what it returns, not its body, which Postgres writes over
+    // several lines; a trigger by its name and table, as a constraint is.
+    if let Some(routine) = routine(&line) {
+        return routine;
+    }
+    if let Some(rest) = line.strip_prefix("trigger CREATE ") {
+        let (constraint, rest) = rest.strip_prefix("CONSTRAINT ").map_or(("", rest), |rest| ("constraint ", rest));
+        // The table is the name after the first ON outside quotes, which a column's quoted name may hold.
+        if let Some((name, rest)) = rest.strip_prefix("TRIGGER ").map(first_name) {
+            if let Some((when, after)) = outside_quotes(rest.trim_start(), " ON ") {
+                let (table, rest) = first_name(after);
+                return format!("{constraint}trigger {name} on {table}: {} {}", lowercase_keywords(when), lowercase_keywords(rest.trim_start()));
+            }
+        }
+    }
+    // Postgres's, whose definition is in capitals, names its constraint, whatever the name; SQLite's,
+    // in lowercase, names none unless its definition does.
+    let named = CONSTRAINT.captures(&line).filter(|c| POSTGRES_DEFINITION.is_match(&c[3]));
+    if let Some(c) = SQLITE_CONSTRAINT.captures(&line).filter(|_| named.is_none()) {
+        return format!("constraint on {}: {}", &c[1], &c[2]);
+    }
     if let Some(c) = CONSTRAINT.captures(&line) {
         return format!("constraint {} on {}: {}", &c[2], &c[1], lowercase_keywords(&c[3]));
     }
     line
+}
+
+/// A Postgres function or procedure as `pg_get_functiondef` writes it, by its name, its arguments
+/// whole (to the parenthesis that closes them, outside quotes, where a name or a default's string
+/// may hold a line break, shown as `↵`) and what it returns. None for any other line, or one whose arguments don't close.
+fn routine(line: &str) -> Option<String> {
+    routine_parts(line).map(|(_, shown)| shown)
+}
+
+/// A routine's signature and what it returns as `pg_get_functiondef` writes them, which tells two
+/// routines apart, and as `routine` shows them.
+fn routine_parts(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("function CREATE OR REPLACE ")?;
+    let (kind, rest) = rest.strip_prefix("FUNCTION ").map(|r| ("function", r)).or_else(|| rest.strip_prefix("PROCEDURE ").map(|r| ("procedure", r)))?;
+    let (mut depth, mut quote) = (0, None::<char>);
+    let mut end = None;
+    for (k, c) in rest.char_indices() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(k + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+    let raw_returns = rest[end..].strip_prefix("\n RETURNS ").and_then(|r| r.lines().next());
+    let signature = lowercase_keywords(&rest[..end]).replace('\n', "↵");
+    let returns = raw_returns.map(|r| format!(" returns {}", lowercase_keywords(r))).unwrap_or_default();
+    Some((format!("{kind} {}\n{}", &rest[..end], raw_returns.unwrap_or_default()), format!("{kind} {signature}{returns}")))
+}
+
+/// The name `text` starts with, a qualified one whole and a quoted part with its spaces, and what
+/// follows it.
+fn first_name(text: &str) -> (&str, &str) {
+    let mut quoted = false;
+    let end = text.char_indices().find(|&(_, c)| {
+        if c == '"' {
+            quoted = !quoted;
+        }
+        c == ' ' && !quoted
+    });
+    end.map_or((text, ""), |(k, _)| (&text[..k], &text[k..]))
+}
+
+/// `text` split at the first `pattern` outside double quotes.
+fn outside_quotes<'a>(text: &'a str, pattern: &str) -> Option<(&'a str, &'a str)> {
+    let mut quoted = false;
+    for (k, c) in text.char_indices() {
+        if c == '"' {
+            quoted = !quoted;
+        } else if !quoted && text[k..].starts_with(pattern) {
+            return Some((&text[..k], &text[k + pattern.len()..]));
+        }
+    }
+    None
 }
 
 /// SQL's keywords in lowercase, outside its quotes: `PRIMARY KEY (id)` is `primary key (id)`.
@@ -874,17 +961,18 @@ fn lowercase_keywords(sql: &str) -> String {
 /// What changed from `before` to `after`, a line each, readable: `+` what `after` has, `-` what it
 /// lost. An index a constraint of the same name makes (a primary key's, a unique constraint's) goes
 /// with it.
-fn changed_lines(before: &[String], after: &[String]) -> Vec<String> {
+fn changed_lines(before: &[String], after: &[String], d: Dialect) -> Vec<String> {
     let (gone, came) = difference(before, after);
-    listed(&gone, &came)
+    listed(&gone, &came, before, after, d)
 }
 
 /// The schema at each step of drafting a migration, as `catalog` reads it: before it, after its
 /// tables moved to another schema and after its tables renamed (where it does either), and after it.
 #[cfg(feature = "cli")]
 struct Steps<'a> {
-    /// Whether the database is Postgres, whose lines may hold dollar-quoted bodies.
-    postgres: bool,
+    /// The database's dialect: Postgres's lines may hold dollar-quoted bodies, and MySQL's name a
+    /// table unquoted.
+    dialect: Dialect,
     before: &'a [String],
     moved: Option<&'a [String]>,
     renamed: Option<&'a [String]>,
@@ -923,7 +1011,7 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
         // table's new name where it starts with the old, as the renames name what they follow. A
         // column list never changes.
         let same_other = |g: &str, c: &str| {
-            let (g, c) = (renamed_in(g, &names, steps.postgres), c);
+            let (g, c) = (renamed_in(g, &names, steps.dialect == Dialect::Postgres), c);
             let (x, y) = (top_words(&g), top_words(c));
             x.len() == y.len() && x.iter().zip(&y).all(|(a, b)| a == b || (!a.contains('(') && bare.iter().any(|(old, new)| crate::diff::swap_name(a, old, new) == *b)))
         };
@@ -959,7 +1047,7 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
             out.push(changed_line(&readable(&a), &readable(&b)));
         }
     }
-    out.extend(listed(&gone, &came));
+    out.extend(listed(&gone, &came, steps.before, steps.after, steps.dialect));
     out
 }
 
@@ -1055,8 +1143,10 @@ fn top_words(line: &str) -> Vec<&str> {
     words
 }
 
-/// The lines of `changed_lines`, from what went and what came.
-fn listed(gone: &[String], came: &[String]) -> Vec<String> {
+/// The lines of `changed_lines`, from what went and what came, of the whole schemas `before` and
+/// `after` in dialect `d`.
+fn listed(gone: &[String], came: &[String], before: &[String], after: &[String], d: Dialect) -> Vec<String> {
+    let mysql = d == Dialect::Mysql;
     const MAX: usize = 20;
     let (gone, came) = (without_default_grants(gone), without_default_grants(came));
     let constraint_names = |lines: &[String]| -> Vec<String> { lines.iter().filter_map(|l| l.strip_prefix("constraint ")).filter_map(|rest| rest.split(' ').nth(1)).map(str::to_string).collect() };
@@ -1064,13 +1154,147 @@ fn listed(gone: &[String], came: &[String]) -> Vec<String> {
     let (gone_names, came_names) = (constraint_names(&gone), constraint_names(&came));
     let gone: Vec<&String> = gone.iter().filter(|l| !made_by_constraint(l, &gone_names)).collect();
     let came: Vec<&String> = came.iter().filter(|l| !made_by_constraint(l, &came_names)).collect();
-    let mut out: Vec<String> = came.iter().take(MAX).map(|l| paint("green", &format!("  + {}", readable(l)))).collect();
-    out.extend(gone.iter().take(MAX).map(|l| paint("red", &format!("  - {}", readable(l)))));
-    let more = gone.len() + came.len() - out.len();
+    // A table one side has and the other doesn't, by its name across each whole schema, came or
+    // went; one both have may have changed its own line, as row level security does.
+    // A name two of one side's tables read as is no one table's, and groups nothing.
+    let names = |lines: &[String]| -> Vec<String> { lines.iter().filter_map(|l| table_name(&readable(l), mysql)).collect() };
+    let (had, has) = (names(before), names(after));
+    let tables: Vec<String> = had.iter().chain(&has).cloned().collect();
+    let once = |name: &String, side: &[String]| side.iter().filter(|t| *t == name).count() == 1;
+    let added: Vec<String> = has.iter().filter(|t| !had.contains(t) && once(t, &has)).cloned().collect();
+    let dropped: Vec<String> = had.iter().filter(|t| !has.contains(t) && once(t, &had)).cloned().collect();
+    // A line both sides read the same, as a function whose body alone changed does, changed in place.
+    let (gone, came, mut out) = in_place(gone, came, "  ");
+    let (came_out, more_came) = marked(&came, "green", '+', MAX, &added, &tables, mysql);
+    out.extend(came_out);
+    let (gone, more_gone) = marked(&gone, "red", '-', MAX, &dropped, &tables, mysql);
+    out.extend(gone);
+    let more = more_came + more_gone;
     if more > 0 {
         out.push(format!("  … and {more} more"));
     }
     out
+}
+
+/// What went and what came, without each function or procedure both sides have by the same
+/// signature (its body alone changed), and each of those as one line changed in place, `indent` in.
+/// Every other line is left where it is.
+fn in_place<'a>(gone: Vec<&'a String>, came: Vec<&'a String>, indent: &str) -> (Vec<&'a String>, Vec<&'a String>, Vec<String>) {
+    let mut by_signature: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    for (k, c) in came.iter().enumerate() {
+        if let Some((signature, _)) = routine_parts(c) {
+            by_signature.entry(signature).or_default().push(k);
+        }
+    }
+    let mut taken = vec![false; came.len()];
+    let mut kept = Vec::new();
+    let mut changed = Vec::new();
+    for g in gone {
+        let found = routine_parts(g).and_then(|(signature, _)| by_signature.get_mut(&signature).and_then(|ks| (!ks.is_empty()).then(|| ks.remove(0))));
+        match found {
+            Some(k) => {
+                taken[k] = true;
+                changed.push(format!("{indent}{} {}", paint("yellow", "~"), readable(g)));
+            }
+            None => kept.push(g),
+        }
+    }
+    (kept, came.into_iter().zip(taken).filter(|(_, t)| !t).map(|(c, _)| c).collect(), changed)
+}
+
+/// The name of the table a readable `table …` line is, quotes and all: `"order items"` whole. On
+/// MySQL, which writes a name unquoted, all before the table's engine and collation; its
+/// `table options` line, a table's settings, is no table.
+fn table_name(line: &str, mysql: bool) -> Option<String> {
+    static MYSQL_TABLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^table (.+) engine=\S+ collate=\S+").expect("a valid pattern"));
+    if mysql {
+        return MYSQL_TABLE.captures(line).map(|c| c[1].to_string());
+    }
+    let rest = line.strip_prefix("table ")?;
+    let mut quote = None;
+    let end = rest
+        .char_indices()
+        .find(|&(_, c)| {
+            match (quote, c) {
+                (Some(q), _) if c == q => quote = None,
+                (None, '"' | '`') => quote = Some(c),
+                (None, ' ') => return true,
+                _ => {}
+            }
+            false
+        })
+        .map_or(rest.len(), |(k, _)| k);
+    Some(rest[..end].to_string())
+}
+
+/// The table a readable line belongs to, of `tables` (every table on either side), and the line as
+/// that table's own, without its name: a column, a constraint, an index, and MySQL's foreign keys
+/// and checks. None where no table, or more than one, could own it, as `t` and `t.archive` could
+/// both own SQLite's `column t.archive.label`.
+fn owner(line: &str, tables: &[String], mysql: bool) -> Option<(String, String)> {
+    // A table's own line is no other's part, as MySQL's `options orders` is no setting of `orders`.
+    if table_name(line, mysql).is_some() {
+        return None;
+    }
+    let of = |table: &String| -> Option<String> {
+        if let Some(rest) = line.strip_prefix("column ") {
+            return rest.strip_prefix(&format!("{table}.")).map(str::to_string);
+        }
+        if let Some(rest) = line.strip_prefix("trigger ") {
+            return rest.split_once(&format!(" on {table}: ")).filter(|(name, _)| !name.contains(' ')).map(|(name, def)| format!("trigger {name}: {def}"));
+        }
+        if let Some(rest) = line.strip_prefix("constraint ") {
+            return rest.split_once(&format!(" on {table}: ")).filter(|(name, _)| !name.contains(' ')).map(|(_, def)| def.to_string()).or_else(|| rest.strip_prefix(&format!("on {table}: ")).map(str::to_string));
+        }
+        // MySQL's foreign keys, checks and a table's settings, each a line of its own.
+        for kind in ["foreign key", "check", "table options"].into_iter().filter(|_| mysql) {
+            if let Some(rest) = line.strip_prefix(&format!("{kind} {table} ")) {
+                return Some(format!("{} {rest}", kind.trim_start_matches("table ")));
+            }
+        }
+        let (kind, rest) = line.strip_prefix("unique index ").map(|rest| ("unique index", rest)).or_else(|| line.strip_prefix("index ").map(|rest| ("index", rest)))?;
+        let (name, rest) = rest.split_once(' ')?;
+        rest.strip_prefix(&format!("on {table} ")).map(|def| format!("{kind} {name} {def}"))
+    };
+    let mut owners = tables.iter().filter_map(|t| of(t).map(|own| (t.clone(), own)));
+    let first = owners.next()?;
+    owners.all(|(t, _)| t == first.0).then_some(first)
+}
+
+/// What came or went, `mark` before each, readable: each table of `grouped` (those that came or
+/// went whole) one line, its columns, constraints and indexes indented under it rather than each
+/// on a line of its own. At most `max` of them, and how many more there are.
+fn marked(lines: &[&String], style: &str, mark: char, max: usize, grouped: &[String], tables: &[String], mysql: bool) -> (Vec<String>, usize) {
+    let lines: Vec<String> = lines.iter().map(|l| readable(l)).collect();
+    // A view's own line, its name alone, says nothing its definition's line doesn't.
+    // A materialized view's definition line reads `view <name> as …`: it takes its kind back from
+    // the view's own line, which then says nothing more, as a view's own line doesn't.
+    let materialized: Vec<String> = lines.iter().filter_map(|l| l.strip_prefix("materialized view ")).filter(|name| lines.iter().any(|d| d.starts_with(&format!("view {name} as ")))).map(str::to_string).collect();
+    let view = |l: &String| l.starts_with("view ") && lines.iter().any(|d| d.starts_with(&format!("{l} as ")));
+    let lines: Vec<String> = lines
+        .iter()
+        .filter(|l| !view(l) && !materialized.iter().any(|name| **l == format!("materialized view {name}")))
+        .map(|l| if materialized.iter().any(|name| l.starts_with(&format!("view {name} as "))) { format!("materialized {l}") } else { l.clone() })
+        .collect();
+    // Only a table whose own line is listed here has its parts under it: one a rename took out of the
+    // list keeps them as lines of their own.
+    let headed: Vec<String> = lines.iter().filter_map(|l| table_name(l, mysql)).filter(|t| grouped.contains(t)).collect();
+    let owned: Vec<Option<(String, String)>> = lines.iter().map(|l| owner(l, tables, mysql).filter(|(t, _)| headed.contains(t))).collect();
+    let mut out = Vec::new();
+    let mut shown = 0;
+    let mut total = 0;
+    for line in lines.iter().zip(&owned).filter(|(_, o)| o.is_none()).map(|(l, _)| l) {
+        total += 1;
+        if shown == max {
+            continue;
+        }
+        shown += 1;
+        out.push(paint(style, &format!("  {mark} {line}")));
+        if let Some(table) = table_name(line, mysql).filter(|t| headed.contains(t)) {
+            out.extend(owned.iter().flatten().filter(|(t, _)| *t == table).map(|(_, own)| paint(style, &format!("      {own}"))));
+        }
+    }
+    (out, total - shown)
 }
 
 /// Prints the refusals of a command that changes something, and says that it changed nothing.
@@ -1510,7 +1734,16 @@ fn read_lock(opts: &Options) -> Result<lock::Lock, Problem> {
             .fix("Then run this branch's migrations after main's, which locks them again", &["reylo migrate dev"])),
         lock::State::Invalid(e) => Err(Problem::new("lock-unreadable", format!("Reylo can't read {path} as a lock")).note(unreadable_why(&e)).fix("Write it again from what a database applied", &["reylo migrate history pull"])),
         lock::State::Unreadable(why) => Err(unreadable_lock_problem(opts, &why)),
+        lock::State::Newer(version) => Err(newer_lock_problem(opts, version)),
     }
+}
+
+/// The refusal of a lock a newer Reylo wrote: read by this one's rules, every checksum in it would
+/// look edited, and written again, it would lose what the newer version keeps.
+fn newer_lock_problem(opts: &Options, version: u64) -> Problem {
+    Problem::new("lock-newer", format!("A newer Reylo wrote {}", shown(&opts.lock)))
+        .note(format!("It is a lock of version {version}, and Reylo {} reads version {} and older.", env!("CARGO_PKG_VERSION"), lock::VERSION))
+        .note("Upgrade Reylo to read it.")
 }
 
 /// The refusal of a lock that is there and can't be read: read as none, it would turn its checksums
@@ -1590,10 +1823,12 @@ fn old_lock(opts: &Options) -> Option<Problem> {
 }
 
 /// The refusal of a project that still holds the lock under its old name ([`old_lock`]), or whose
-/// lock is there and can't be read: every command that reads or writes the lock makes it first.
+/// lock is there and can't be read, or was written by a newer Reylo: every command that reads or
+/// writes the lock makes it first, so that none writes over what it can't read.
 fn refuse_lock_file(opts: &Options, log: Log<'_>) -> Option<i32> {
     let unreadable = || match opts.lock_state() {
         lock::State::Unreadable(why) => Some(unreadable_lock_problem(opts, &why)),
+        lock::State::Newer(version) => Some(newer_lock_problem(opts, version)),
         _ => None,
     };
     old_lock(opts).or_else(unreadable).map(|p| refuse(&[p], log))
@@ -1838,7 +2073,7 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
                 Some(last) => stored_catalog(db, &last.name).await?,
                 None => None,
             } {
-                problem = problem.lines(std::iter::once(String::new()).chain(changed_lines(&stored, &fingerprinted(&live, db.dialect()))).chain([String::new()]));
+                problem = problem.lines(std::iter::once(String::new()).chain(changed_lines(&stored, &fingerprinted(&live, db.dialect()), db.dialect())).chain([String::new()]));
             }
             let problem = problem
                 .fix("If a migration makes this change, record it here, running nothing", &["reylo migrate history push"])
@@ -2010,7 +2245,7 @@ async fn drift(shadows: &mut Shadows<'_>, target: &mut Db, run: &Run<'_>, checkp
         sql = plan_text(shadows.db(prefix), target, None).await.unwrap_or_default();
     }
     let mut problem = Problem::new("database-drift", CHANGED_OUTSIDE);
-    problem = if sql.is_empty() { problem.lines(std::iter::once(String::new()).chain(changed_lines(&checkpoint, &live)).chain([String::new()])) } else { problem.sql(&sql) };
+    problem = if sql.is_empty() { problem.lines(std::iter::once(String::new()).chain(changed_lines(&checkpoint, &live, run.d)).chain([String::new()])) } else { problem.sql(&sql) };
     if !hint.is_empty() {
         problem = problem.fix(format!("{} {} exactly this change: record it here, running nothing", hint.join(" and "), if hint.len() == 1 { "makes" } else { "make" }), &["reylo migrate history push"]);
     } else if let Some((it, rest)) = ahead {
@@ -3072,7 +3307,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
         let problem = Problem::new("history-push-no-match", "No run of the migrations makes this database's schema").note(closest);
         let problem = match sql {
             Some(sql) => problem.sql(&sql),
-            None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&lines, &live)).chain([String::new()])),
+            None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&lines, &live, d)).chain([String::new()])),
         };
         if init {
             return Ok(refuse(&[problem], log));
@@ -3368,7 +3603,7 @@ async fn status_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
                     let mut problem = Problem::new("database-changed", CHANGED_OUTSIDE);
                     if let Some(last) = history.iter().rfind(|r| r.applied) {
                         if let Some(stored) = stored_catalog(db, &last.name).await? {
-                            let lines = changed_lines(&stored, &fingerprinted(&now_lines, db.dialect()));
+                            let lines = changed_lines(&stored, &fingerprinted(&now_lines, db.dialect()), db.dialect());
                             changes = lines.iter().map(|l| l.trim().to_string()).collect();
                             problem = problem.lines(std::iter::once(String::new()).chain(lines).chain([String::new()]));
                         }
@@ -3699,7 +3934,7 @@ async fn history_as_it_stands(db: &mut Db, server: &mut Server, opts: &Options) 
     let problem = Problem::new("database-drift", CHANGED_OUTSIDE);
     let problem = match sql {
         Some(sql) => problem.sql(&sql),
-        None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&made, &live)).chain([String::new()])),
+        None => problem.lines(std::iter::once(String::new()).chain(changed_lines(&made, &live, db.dialect())).chain([String::new()])),
     };
     let problem = problem.note("Files written from its history wouldn't make it either.");
     let schema = opts.schema_exists().then(|| shown(&opts.schema));
@@ -4995,7 +5230,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
             notes.push(format!("      {}", paint("cyan", &create_command(&asked, choices, &names, &[]))));
         }
         if failed.is_none() && reached == wanted {
-            let steps = Steps { postgres: d == Dialect::Postgres, before: &before, moved: moved.as_deref(), renamed: renamed.as_deref(), after: &reached };
+            let steps = Steps { dialect: d, before: &before, moved: moved.as_deref(), renamed: renamed.as_deref(), after: &reached };
             return Ok(Ok(Drafted { lock_safe: split_files.is_some(), commits, changes: summary_lines(&steps, &tables, &plan.renamed), ..drafted(texts, 0, notes, false) }));
         }
         let mut remaining = Vec::new();
@@ -5212,7 +5447,7 @@ async fn own_sql(db: &mut Db, opts: &Options) -> Result<Result<String, NotOwn>, 
             return Ok(Ok(format!("{}\n", sql.trim_end())));
         }
         let mut why = vec!["  Reylo's own SQL doesn't make all of it:".to_string()];
-        why.extend(changed_lines(&made, &live));
+        why.extend(changed_lines(&made, &live, db.dialect()));
         Ok::<_, Error>(Err(NotOwn::Short(why)))
     }
     .await;
@@ -7225,6 +7460,142 @@ mod tests {
     }
 
     #[test]
+    fn a_new_table_lists_what_it_holds_under_it() {
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let made = lines(&[
+            "column public.documents.embedding public.vector(1536)",
+            "column public.documents.id integer not null",
+            "column public.users.bio text",
+            "constraint public.documents documents_pkey PRIMARY KEY (id)",
+            "extension vector schema=public",
+            "index CREATE INDEX documents_embedding ON public.documents USING hnsw (embedding public.vector_cosine_ops)",
+            "index CREATE UNIQUE INDEX documents_pkey ON public.documents USING btree (id)",
+            "table public.documents",
+        ]);
+        let users = lines(&["table public.users", "column public.users.id integer"]);
+        let before: Vec<String> = users.clone();
+        let after: Vec<String> = users.iter().chain(&made).cloned().collect();
+        assert_eq!(
+            changed_lines(&before, &after, Dialect::Postgres),
+            [
+                "  + column users.bio text",
+                "  + extension vector schema=public",
+                "  + table documents",
+                "      embedding vector(1536)",
+                "      id integer not null",
+                "      primary key (id)",
+                "      index documents_embedding using hnsw (embedding vector_cosine_ops)",
+            ]
+        );
+        // A table dropped reads the same way, and SQLite's constraints, which name none, as theirs.
+        assert_eq!(changed_lines(&lines(&["table t strict", "column t.id integer", "constraint t primary key (id)"]), &[], Dialect::Sqlite), ["  - table t strict", "      id integer", "      primary key (id)"]);
+        // A table both sides have is no new table, whatever its own line became.
+        assert_eq!(
+            changed_lines(&lines(&["table public.t", "column public.t.id integer"]), &lines(&["table public.t row level security", "column public.t.id integer", "column public.t.label text"]), Dialect::Postgres),
+            ["  + table t row level security", "  + column t.label text", "  - table t"]
+        );
+        // A line two tables could own, `t` and `t.archive`, stays a line of its own.
+        assert_eq!(
+            changed_lines(&lines(&["table t.archive", "column t.archive.id integer"]), &lines(&["table t.archive", "column t.archive.id integer", "column t.archive.label text", "table t", "column t.id integer"]), Dialect::Sqlite),
+            ["  + column t.archive.label text", "  + table t", "      id integer"]
+        );
+        // A quoted name is one name.
+        assert_eq!(changed_lines(&[], &lines(&["table public.\"order items\"", "column public.\"order items\".id integer"]), Dialect::Postgres), ["  + table \"order items\"", "      id integer"]);
+        assert_eq!(changed_lines(&[], &lines(&["table public.\"orders engine=archive\"", "column public.\"orders engine=archive\".id integer"]), Dialect::Postgres), ["  + table \"orders engine=archive\"", "      id integer"]);
+        // On SQLite, `options` is a table like any other: made strict, it is no new table.
+        assert_eq!(
+            changed_lines(&lines(&["table options", "column options.id integer", "column options.note text"]), &lines(&["table options strict", "column options.id integer"]), Dialect::Sqlite),
+            ["  + table options strict", "  - table options", "  - column options.note text"]
+        );
+        // MySQL writes its names unquoted, a table's as all before its engine. Its foreign keys,
+        // checks and table options go under their table, but for one two tables could own, `orders`
+        // and `orders archive`.
+        assert_eq!(
+            changed_lines(
+                &[],
+                &lines(&[
+                    "table orders engine=InnoDB collate=utf8mb4_0900_ai_ci",
+                    "column orders.id int not null",
+                    "foreign key orders fk_user (user_id) references users (id) on update RESTRICT on delete CASCADE",
+                    "table orders archive engine=InnoDB collate=utf8mb4_0900_ai_ci",
+                    "column orders archive.id int not null",
+                    "check orders archive positive (`id` > 0)",
+                    "table options orders key_block_size=8",
+                ]),
+                Dialect::Mysql
+            ),
+            [
+                "  + table orders engine=InnoDB collate=utf8mb4_0900_ai_ci",
+                "      id int not null",
+                "      foreign key fk_user (user_id) references users (id) on update RESTRICT on delete CASCADE",
+                "      options key_block_size=8",
+                "  + table orders archive engine=InnoDB collate=utf8mb4_0900_ai_ci",
+                "      id int not null",
+                "  + check orders archive positive (`id` > 0)",
+            ]
+        );
+        // A table named `options orders` is a table beside `orders`, made or dropped with it.
+        let both = lines(&["table orders engine=InnoDB collate=c", "column orders.id int not null", "table options orders engine=InnoDB collate=c", "column options orders.id int not null"]);
+        let grouped = ["table orders engine=InnoDB collate=c", "      id int not null", "table options orders engine=InnoDB collate=c", "      id int not null"];
+        assert_eq!(changed_lines(&[], &both, Dialect::Mysql), grouped.map(|l| if l.starts_with("table") { format!("  + {l}") } else { l.to_string() }));
+        assert_eq!(changed_lines(&both, &[], Dialect::Mysql), grouped.map(|l| if l.starts_with("table") { format!("  - {l}") } else { l.to_string() }));
+        // A MySQL table named `options` is a table, by its engine.
+        assert_eq!(
+            changed_lines(&[], &lines(&["table options engine=InnoDB collate=utf8mb4_0900_ai_ci", "column options.id int not null"]), Dialect::Mysql),
+            ["  + table options engine=InnoDB collate=utf8mb4_0900_ai_ci", "      id int not null"]
+        );
+    }
+
+    #[test]
+    fn a_function_a_trigger_and_a_view_read_as_one_line_each() {
+        let function = "function CREATE OR REPLACE FUNCTION public.touch()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\nbegin new.updated_at := now(); return new; end $function$";
+        assert_eq!(readable(function), "function touch() returns trigger");
+        assert_eq!(readable("function CREATE OR REPLACE PROCEDURE public.tidy(IN days integer DEFAULT 30)\n LANGUAGE sql\nAS $procedure$ delete from logs $procedure$"), "procedure tidy(in days integer default 30)");
+        assert_eq!(readable("trigger CREATE TRIGGER users_touch BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.touch()"), "trigger users_touch on users: before update for each row execute function touch()");
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let made = lines(&[
+            "table public.users",
+            "column public.users.id integer",
+            "trigger CREATE TRIGGER users_touch BEFORE UPDATE ON public.users FOR EACH ROW EXECUTE FUNCTION public.touch()",
+            "view public.pro_users",
+            "view public.pro_users as SELECT id FROM users;",
+        ]);
+        assert_eq!(
+            changed_lines(&[], &made, Dialect::Postgres),
+            ["  + table users", "      id integer", "      trigger users_touch: before update for each row execute function touch()", "  + view pro_users as SELECT id FROM users;"]
+        );
+        // A trigger's table is the name after the ON outside quotes, whole.
+        assert_eq!(
+            readable("trigger CREATE TRIGGER t_upd BEFORE UPDATE OF \"stage ON decoy name\" ON public.\"order items\" FOR EACH ROW EXECUTE FUNCTION public.touch()"),
+            "trigger t_upd on \"order items\": before update of \"stage ON decoy name\" for each row execute function touch()"
+        );
+        // A materialized view's definition takes its kind back.
+        assert_eq!(changed_lines(&[], &lines(&["materialized view public.mat", "view public.mat as SELECT 1;"]), Dialect::Postgres), ["  + materialized view mat as SELECT 1;"]);
+        // A function whose body alone changed reads as changed in place, here and in a headed diff.
+        let one = lines(&["function CREATE OR REPLACE FUNCTION public.rate()\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        let two = lines(&["function CREATE OR REPLACE FUNCTION public.rate()\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 2 $function$"]);
+        assert_eq!(changed_lines(&one, &two, Dialect::Postgres), ["  ~ function rate() returns integer"]);
+        // Two overloads are two functions, even where an argument's default holds a line break.
+        let integer = lines(&["function CREATE OR REPLACE FUNCTION public.rate(a text DEFAULT 'hel\nlo'::text, b integer)\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        let boolean = lines(&["function CREATE OR REPLACE FUNCTION public.rate(a text DEFAULT 'hel\nlo'::text, b boolean)\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        assert_eq!(
+            changed_lines(&integer, &boolean, Dialect::Postgres),
+            ["  + function rate(a text default 'hel↵lo'::text, b boolean) returns integer", "  - function rate(a text default 'hel↵lo'::text, b integer) returns integer"]
+        );
+        // A name with a line break and one with a backslash and an n are two functions, and read so.
+        let broken = lines(&["function CREATE OR REPLACE FUNCTION public.\"line\nbreak\"()\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        let escaped = lines(&["function CREATE OR REPLACE FUNCTION public.\"line\\nbreak\"()\n RETURNS integer\n LANGUAGE sql\nAS $function$ select 1 $function$"]);
+        assert_eq!(changed_lines(&escaped, &broken, Dialect::Postgres), ["  + function \"line↵break\"() returns integer", "  - function \"line\\nbreak\"() returns integer"]);
+        assert_eq!(describe_diff("this database", &one, "a fresh database", &two), ["", "    --- this database", "    +++ a fresh database", "    ~ function rate() returns integer", ""]);
+    }
+
+    #[test]
+    fn a_postgres_constraint_named_like_a_keyword_keeps_its_name() {
+        assert_eq!(readable("constraint public.t check CHECK ((id > 0))"), "constraint check on t: check ((id > 0))");
+        assert_eq!(readable("constraint t check (id > 0)"), "constraint on t: check (id > 0)");
+    }
+
+    #[test]
     #[cfg(feature = "cli")]
     fn a_rename_reads_as_one_line_changed_in_place() {
         assert_eq!(inline_diff("column posts.title character varying(100)", "column posts.heading character varying(200)"), "column posts.[-title-]{+heading+} character varying([-100-]{+200+})");
@@ -7241,7 +7612,7 @@ mod tests {
         // A column renamed, beside one dropped and one added.
         let before = lines(&["table public.posts", "column public.posts.title character varying(100)", "column public.posts.body text"]);
         let after = lines(&["table public.posts", "column public.posts.heading character varying(200)", "column public.posts.summary text"]);
-        let steps = Steps { postgres: true, before: &before, moved: None, renamed: None, after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: None, after: &after };
         let columns = vec![("column public.posts.title".to_string(), "column public.posts.heading".to_string())];
         assert_eq!(summary_lines(&steps, &[], &columns), ["  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})", "  + column posts.summary text", "  - column posts.body text"]);
         // A table renamed: what only took its new name is left out, a default that changes besides is
@@ -7250,7 +7621,7 @@ mod tests {
         let before = lines(&["table public.orders", "column public.orders.id integer not null", "column public.orders.title text", "column public.orders.kind text default 'orders'::text", "constraint public.orders orders_pkey PRIMARY KEY (id)"]);
         let renamed = lines(&["table public.invoices", "column public.invoices.id integer not null", "column public.invoices.title text", "column public.invoices.kind text default 'orders'::text", "constraint public.invoices invoices_pkey PRIMARY KEY (id)"]);
         let after = lines(&["table public.invoices", "column public.invoices.id integer not null", "column public.invoices.heading text", "column public.invoices.kind text default 'invoices'::text", "constraint public.invoices invoices_pkey PRIMARY KEY (id)"]);
-        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string())];
         let columns = vec![("column public.invoices.title".to_string(), "column public.invoices.heading".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &columns), ["  ~ table [-orders-]{+invoices+}", "  ~ column invoices.[-title-]{+heading+} text", "  + column invoices.kind text default 'invoices'::text", "  - column orders.kind text default 'orders'::text"]);
@@ -7259,30 +7630,30 @@ mod tests {
         let before = lines(&["table public.alpha", "column public.alpha.alpha_code integer", "column public.alpha.beta_code integer"]);
         let renamed = lines(&["table public.beta", "column public.beta.alpha_code integer", "column public.beta.beta_code integer"]);
         let after = lines(&["table public.beta", "column public.beta.beta_code integer"]);
-        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), after: &after };
         let tables = vec![("table public.alpha".to_string(), "table public.beta".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-alpha-]{+beta+}", "  - column alpha.alpha_code integer"]);
         let before = lines(&["table public.orders", "table public.clients", "constraint public.orders fk_client FOREIGN KEY (client_id) REFERENCES public.clients(id)"]);
         let after = lines(&["table public.invoices", "table public.customers", "constraint public.invoices fk_client FOREIGN KEY (client_id) REFERENCES public.customers(id)"]);
-        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&after), after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string()), ("table public.clients".to_string(), "table public.customers".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}", "  ~ table [-clients-]{+customers+}"]);
         // A column whose name starts with another renamed table's is no reference to it.
         let before = lines(&["table public.orders", "table public.clients", "constraint public.orders fk_account FOREIGN KEY (clients_id) REFERENCES public.accounts(id)"]);
         let after = lines(&["table public.invoices", "table public.customers", "constraint public.invoices fk_account FOREIGN KEY (clients_id) REFERENCES public.accounts(id)"]);
-        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&after), after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string()), ("table public.clients".to_string(), "table public.customers".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}", "  ~ table [-clients-]{+customers+}"]);
         // A view that names a renamed table, as Postgres rewrites it, is the same view.
         let before = lines(&["table public.orders", "view public.order_count as SELECT count(orders.id) AS count FROM (orders JOIN details ON ((orders.id = details.id)));"]);
         let after = lines(&["table public.invoices", "view public.order_count as SELECT count(invoices.id) AS count FROM (invoices JOIN details ON ((invoices.id = details.id)));"]);
-        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&after), after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}"]);
         // A view whose quoted name holds a renamed table's name is another view still.
         let before = lines(&["table public.alpha", "view public.omega as SELECT 1 AS n;", "view public.\"public.alpha\" as SELECT omega.n FROM omega;", "view public.\"public.omega\" as SELECT alpha.id FROM alpha;"]);
         let after = lines(&["table public.omega", "view public.\"public.omega\" as SELECT omega.id FROM omega;"]);
-        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&after), after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), after: &after };
         let tables = vec![("table public.alpha".to_string(), "table public.omega".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-alpha-]{+omega+}", "  - view omega as SELECT 1 AS n;", "  - view \"public.alpha\" as SELECT omega.n FROM omega;"]);
         assert_eq!(renamed_in("view public.\"public.alpha\" as SELECT 1 FROM public.alpha", &[("public.alpha".to_string(), "public.omega".to_string())], true), "view public.\"public.alpha\" as SELECT 1 FROM public.omega");
@@ -7301,22 +7672,22 @@ mod tests {
         let before = lines(&["table east.orders", "table west.orders", "column west.orders.title text", "constraint west.orders orders_pkey PRIMARY KEY (id)"]);
         let renamed = lines(&["table east.invoices", "table west.shipments", "column west.shipments.title text", "constraint west.shipments shipments_pkey PRIMARY KEY (id)"]);
         let after = lines(&["table east.invoices", "table west.shipments", "column west.shipments.heading text", "constraint west.shipments shipments_pkey PRIMARY KEY (id)"]);
-        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), after: &after };
         let tables = vec![("table east.orders".to_string(), "table east.invoices".to_string()), ("table west.orders".to_string(), "table west.shipments".to_string())];
         let columns = vec![("column west.shipments.title".to_string(), "column west.shipments.heading".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &columns), ["  ~ table east.[-orders-]{+invoices+}", "  ~ table west.[-orders-]{+shipments+}", "  ~ column west.shipments.[-title-]{+heading+} text"]);
         // A view the table rename drops, where the table takes its name, stays listed.
         let before = lines(&["table public.t_data", "column public.t_data.id integer", "view public.data select id from public.t_data", "view public.q select id from public.data"]);
         let renamed = lines(&["table public.data", "column public.data.id integer"]);
-        let steps = Steps { postgres: true, before: &before, moved: None, renamed: Some(&renamed), after: &renamed };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), after: &renamed };
         let tables = vec![("table public.t_data".to_string(), "table public.data".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-t_data-]{+data+}", "  - view data select id from t_data", "  - view q select id from data"]);
         // A table moved to another schema shows as the move's endpoints, never a line in between.
         let before = lines(&["table public.orders", "column public.orders.status text default 'orders'::text"]);
         let moved = lines(&["table archive.orders", "column archive.orders.status text default 'orders'::text"]);
         let after = lines(&["table archive.orders", "column archive.orders.status text default 'archived'::text"]);
-        let steps = Steps { postgres: true, before: &before, moved: Some(&moved), renamed: None, after: &after };
-        assert_eq!(summary_lines(&steps, &[], &[]), ["  + table archive.orders", "  + column archive.orders.status text default 'archived'::text", "  - table orders", "  - column orders.status text default 'orders'::text"]);
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: Some(&moved), renamed: None, after: &after };
+        assert_eq!(summary_lines(&steps, &[], &[]), ["  + table archive.orders", "      status text default 'archived'::text", "  - table orders", "      status text default 'orders'::text"]);
     }
 
     #[test]
