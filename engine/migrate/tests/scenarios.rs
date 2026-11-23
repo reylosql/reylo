@@ -2994,7 +2994,8 @@ on!(
     the_dump_reads_a_schema_named_with_capitals,
     new_without_schema_sql_replays_beside_the_environments_extensions,
     new_without_schema_sql_makes_an_extension_added_by_hand,
-    new_without_schema_sql_replays_a_migration_that_uses_an_extension_added_by_hand,
+    new_without_schema_sql_keeps_only_the_extensions_the_history_needs,
+    new_without_schema_sql_makes_an_extension_no_migration_uses,
     a_pushed_extension_is_recorded_once_its_migration_makes_it,
     an_extension_in_a_projects_schema_is_the_projects_whoever_owns_it,
     an_extension_a_platform_role_owns_in_a_projects_schema_is_the_projects,
@@ -3419,21 +3420,47 @@ mod adversarial {
         assert_eq!(q.rows("select 1 from pg_extension where extname = 'citext'").await.len(), 1);
     }
 
-    /// With no schema.sql, an extension added by hand that a migration then uses without making it:
-    /// the history replays only with it, so `migrate new` makes its shadows with it, as before.
-    pub async fn new_without_schema_sql_replays_a_migration_that_uses_an_extension_added_by_hand(mut p: P) {
+    /// With no schema.sql, an extension added by hand that a migration then uses without making it,
+    /// and another added by hand after, with a column of its type: the history replays only with the
+    /// first, so `migrate new` keeps it in its shadows and makes the second, and a new database that
+    /// has the first runs the migrations.
+    pub async fn new_without_schema_sql_keeps_only_the_extensions_the_history_needs(mut p: P) {
         p.file("20261122100000_users.sql", "create table users (id int primary key);");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         p.exec("create extension citext").await;
         p.file("20261122100001_name.sql", "alter table users add column name citext;");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
-        p.exec("alter table users add column email text").await;
+        p.exec("create extension hstore; alter table users add column tags hstore").await;
         p.output();
-        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "email", &Default::default(), log).await).await, 0, "{}", p.peek());
-        let written = p.files().into_iter().find(|f| f.ends_with("_email.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tags", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_tags.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
         let text = std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap();
-        assert_has!(&text, r"(?i)add column email text");
-        assert!(!text.to_lowercase().contains("create extension"), "{text}");
+        assert_has!(&text, r"(?i)create extension (if not exists )?hstore");
+        assert_has!(&text, r"(?i)add column tags (public\.)?hstore");
+        assert!(!text.to_lowercase().contains("citext"), "{text}");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        q.exec("create extension citext").await;
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(q.rows("select 1 from pg_extension where extname = 'hstore'").await.len(), 1);
+    }
+
+    /// With no schema.sql, an extension the database had before its history began that no migration
+    /// uses, as after a dump restored it before the history table: `migrate new` makes it too, so a
+    /// new database runs the migrations.
+    pub async fn new_without_schema_sql_makes_an_extension_no_migration_uses(mut p: P) {
+        p.exec("create extension hstore").await;
+        p.file("20261122100000_users.sql", "create table users (id int primary key);");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("alter table users add column tags hstore").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tags", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let written = p.files().into_iter().find(|f| f.ends_with("_tags.sql")).unwrap_or_else(|| panic!("no migration written: {}", p.peek()));
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations").join(written)).unwrap(), r"(?i)create extension (if not exists )?hstore");
+        let q = P::new(p.d).await.unwrap();
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
     }
 
     /// An extension schema.sql makes in a schema of its own, pushed to the development database, then

@@ -3292,25 +3292,10 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
             Err(problems) => return Ok(refuse(&problems, log)),
         },
     };
-    // The extensions added since the history began are the new migration's to make, so its shadows
-    // start without them; where a migration uses one without making it, the history replays only
-    // with it, as it did on the database, and the draft is made again with the shadows keeping them.
-    let mut said = Vec::new();
-    let first = draft(opts, &files, &target_sql, &target_name, &added, name, choices, &mut |l: &str| said.push(l.to_string())).await?;
-    let drafted = match first {
-        Err(problems) if !added.is_empty() && problems.iter().any(|p| p.code == "replay-fails") => match draft(opts, &files, &target_sql, &target_name, &[], name, choices, log).await? {
-            Ok(drafted) => drafted,
-            Err(problems) => return Ok(refuse(&problems, log)),
-        },
-        first => {
-            for line in &said {
-                log(line);
-            }
-            match first {
-                Ok(drafted) => drafted,
-                Err(problems) => return Ok(refuse(&problems, log)),
-            }
-        }
+    let added = unneeded_by_history(opts, &files, added).await?;
+    let drafted = match draft(opts, &files, &target_sql, &target_name, &added, name, choices, log).await? {
+        Ok(drafted) => drafted,
+        Err(problems) => return Ok(refuse(&problems, log)),
     };
     std::fs::create_dir_all(&opts.dir)?;
     // After the newest migration, should one share this second; on MySQL a plan of several DDL
@@ -3363,7 +3348,8 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
 /// The development database as SQL that makes it, for `migrate new` in a project with no schema.sql:
 /// the migration is what it has that the migrations don't make. Refused unless it ran every migration,
 /// each as it now reads, since one it hasn't run would read as something to drop. With it, the
-/// extensions added since its history began ([`added_extensions`]).
+/// extensions of the project's it has that no file creates, for the migration to make where the
+/// history doesn't need them ([`unneeded_by_history`]).
 #[cfg(feature = "cli")]
 async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Result<Result<(String, Vec<String>), Vec<Problem>>, Error> {
     let mut db = Db::open(opts).await?;
@@ -3383,7 +3369,8 @@ async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Resu
         if !problems.is_empty() {
             return Ok(Err(problems));
         }
-        let added = added_extensions(&mut db).await?;
+        let created = created_extensions(opts);
+        let added: Vec<String> = if d == Dialect::Postgres { project_extensions(&mut db).await?.into_iter().filter(|x| !created.contains(x)).collect() } else { vec![] };
         Ok(schema_as_sql_on(&mut db, opts, &[], true).await?.map(|sql| (passing_over_existing(&sql, d), added)).map_err(|problem| vec![problem]))
     }
     .await;
@@ -3391,23 +3378,46 @@ async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Resu
     result
 }
 
-/// The extensions of the project's a Postgres database was given after its migration history began,
-/// by name, lowercase: each newer than the history table, as Postgres numbers what it makes (and with
-/// no history, each). They are what a developer added by hand, which the next migration makes for a
-/// new database; one the database had before (a platform's, or one a migration uses without making)
-/// is the environment's, which every shadow is made with.
+/// Of `extensions`, those the migrations replay without, which a new migration makes: one a migration
+/// uses without making it is the environment's (a platform's, or one the database had before the
+/// project began), which every shadow keeps, so that the history replays as it did on the database.
+/// Each is tried on its own; where the history needs several together, the shadows keep them all.
 #[cfg(feature = "cli")]
-async fn added_extensions(db: &mut Db) -> Result<Vec<String>, Error> {
-    if db.dialect() != Dialect::Postgres {
-        return Ok(vec![]);
+async fn unneeded_by_history(opts: &Options, files: &[Migration], extensions: Vec<String>) -> Result<Vec<String>, Error> {
+    if extensions.is_empty() {
+        return Ok(extensions);
     }
-    let rows = db
-        .rows(&format!(
-            "select lower(x.extname) as name from pg_extension x join pg_namespace n on n.oid = x.extnamespace where x.extname <> 'plpgsql' and {} and x.oid > coalesce(to_regclass('{HISTORY_TABLE}')::oid, 0) order by 1",
-            crate::catalog::project_extension("x", "n")
-        ))
-        .await?;
-    Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
+    let mut db = Db::open(opts).await?;
+    let server = Server::open(&mut db, &opts.url, opts.shadow_url.as_deref()).await;
+    db.close().await;
+    let mut server = server?;
+    server.copy_default_privileges(!sets_default_privileges(opts));
+    let texts: Vec<&str> = files.iter().map(|f| f.sql.as_str()).collect();
+    let mut replays_without = async |left: &[String]| -> Result<bool, Error> {
+        server.leave_extensions(created_extensions(opts).into_iter().chain(left.iter().cloned()).collect());
+        server.leave_schemas(created_schemas(opts));
+        let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &texts).await;
+        let lane = shadows.lane();
+        shadows.push(lane, files.iter().map(Step::of));
+        let lines = shadows.lines(lane).await;
+        shadows.finish().await;
+        Ok(lines?.is_ok())
+    };
+    let result = async {
+        if replays_without(&extensions).await? {
+            return Ok(extensions);
+        }
+        let mut unneeded = Vec::new();
+        for extension in &extensions {
+            if replays_without(std::slice::from_ref(extension)).await? {
+                unneeded.push(extension.clone());
+            }
+        }
+        Ok(if !unneeded.is_empty() && replays_without(&unneeded).await? { unneeded } else { vec![] })
+    }
+    .await;
+    server.close().await;
+    result
 }
 
 /// `sql` with each `create schema` and `create extension` passing over one that exists, as the dump
