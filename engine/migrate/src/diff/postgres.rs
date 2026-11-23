@@ -3196,18 +3196,22 @@ fn ahead(was: &str, is: &str, descending: bool) -> bool {
     }
 }
 
-/// A sequence moved forward to a `start` it hasn't reached, and past every value of `rows`' column
-/// (an identity's table and column), but never back, which would give again a value it gave.
-/// `sequence` is SQL that gives its name; where it stands is read from it as the block runs, since
-/// a `setval` leaves it uncalled at a value past its start.
-fn moved_to_start(sequence: &str, start: &str, increment: &str, rows: Option<(&str, &str)>) -> String {
-    let (pick, edge, past, beyond) = if increment.starts_with('-') { ("least", "min", "- 1", "<") } else { ("greatest", "max", "+ 1", ">") };
-    let goal = match rows {
-        Some((table, column)) => format!("select {pick}({start}, {edge}({column}) {past}) from {table}"),
-        None => format!("select {start}"),
-    };
+/// A sequence moved forward to a `start` it hasn't reached, and past every value of each column it
+/// gives values to (an identity's, a serial's, a default's), but never back, which would give again
+/// a value it gave. A value past the rows that lies outside the sequence's bounds is passed over, as
+/// rows there can't be got past. Where it stands, its bounds and its columns are read from the
+/// database as the block runs, since a `setval` leaves it uncalled at a value past its start.
+fn moved_to_start(sequence: &str, start: &str, increment: &str) -> String {
+    let (edge, past, beyond) = if increment.starts_with('-') { ("min", "- 1", "<") } else { ("max", "+ 1", ">") };
+    let columns = "select d.refobjid::regclass as rel, a.attname from pg_depend d join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid where d.classid = 'pg_class'::regclass and d.objid = s and d.refclassid = 'pg_class'::regclass and d.deptype in ('a', 'i') \
+        union select ad.adrelid::regclass, a.attname from pg_depend d join pg_attrdef ad on ad.oid = d.objid join pg_attribute a on a.attrelid = ad.adrelid and a.attnum = ad.adnum where d.classid = 'pg_attrdef'::regclass and d.refclassid = 'pg_class'::regclass and d.refobjid = s";
     dollar_block(&format!(
-        "declare s regclass := {sequence}; stands numeric; goal numeric; begin execute format('select case when is_called then last_value::numeric + {increment} else last_value end from %s', s) into stands; {goal} into goal; if goal {beyond} stands then perform setval(s, goal::bigint, false); end if; end"
+        "declare s regclass := {sequence}; stands numeric; goal numeric := {start}; reach numeric; low numeric; high numeric; c record; \
+        begin select seqmin, seqmax into low, high from pg_sequence where seqrelid = s; \
+        execute format('select case when is_called then last_value::numeric + ({increment}) else last_value end from %s', s) into stands; \
+        for c in {columns} loop execute format('select {edge}(%I)::numeric {past} from %s', c.attname, c.rel) into reach; \
+        if reach {beyond} goal and reach between low and high then goal := reach; end if; end loop; \
+        if goal {beyond} stands and goal between low and high then perform setval(s, goal::bigint, false); end if; end"
     ))
 }
 
@@ -4538,15 +4542,22 @@ impl Alterer for PostgresAlterer {
                         if ox.contains_key("cycle") != oy.contains_key("cycle") {
                             set.push(if oy.contains_key("cycle") { "set cycle".into() } else { "set no cycle".into() });
                         }
+                        // A start moved ahead moves the sequence where it hasn't got that far, as a
+                        // table made from the schema starts there. Where its bounds stay, that is
+                        // before the alter, whose lock blocks the table while the block reads it.
+                        let moved = (ahead(&ex["start with"], &ey["start with"], descending) && !disjoint).then(|| {
+                            let sequence = format!("pg_get_serial_sequence({}, {})", literal(&table), literal(&unquoted(&name)));
+                            moved_to_start(&sequence, &ey["start with"], &ey["increment by"])
+                        });
+                        let first = ex["minvalue"] == ey["minvalue"] && ex["maxvalue"] == ey["maxvalue"] && a.ty == b.ty;
+                        if first {
+                            out.extend(moved.clone());
+                        }
                         if !set.is_empty() {
                             out.push(format!("{at} {}", set.join(" ")));
                         }
-                        // A start moved ahead moves the sequence where it hasn't got that far, as a
-                        // table made from the schema starts there, unless the bound it follows
-                        // already moved it.
-                        if ahead(&ex["start with"], &ey["start with"], descending) && !disjoint && !(closes && ey["start with"] == ey[edge]) {
-                            let sequence = format!("pg_get_serial_sequence({}, {})", literal(&table), literal(&unquoted(&name)));
-                            out.push(moved_to_start(&sequence, &ey["start with"], &ey["increment by"], Some((&table, &name))));
+                        if !first {
+                            out.extend(moved);
                         }
                     }
                     _ => {}
@@ -4763,11 +4774,11 @@ impl Alterer for PostgresAlterer {
                     ));
                 }
                 out.push(format!("alter sequence {name} {}{}", to.def, if disjoint { " restart" } else { "" }));
-                // A start moved ahead moves it where it hasn't got that far, unless the bound it
-                // follows already moved it.
+                // A start moved ahead moves it where it hasn't got that far, past the rows of each
+                // column it gives values to.
                 let start = ey.get("start with").cloned().unwrap_or_default();
-                if ahead(ex.get("start with").map_or("", |s| s.as_str()), &start, descending) && !disjoint && !(closes && ey.get(edge) == Some(&start)) {
-                    out.push(moved_to_start(&literal(name), &start, ey.get("increment by").map_or("1", |i| i.as_str()), None));
+                if ahead(ex.get("start with").map_or("", |s| s.as_str()), &start, descending) && !disjoint {
+                    out.push(moved_to_start(&literal(name), &start, ey.get("increment by").map_or("1", |i| i.as_str())));
                 }
                 Some(out)
             }
