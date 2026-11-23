@@ -149,7 +149,7 @@ impl Type {
                         _ => Value::String(v.into()),
                     }
                 };
-                let values: Vec<Value> = e.values.iter().map(|v| as_json(v)).collect();
+                let values: Vec<Value> = e.texts().map(as_json).collect();
                 if let Value::Object(map) = &mut base {
                     map.insert("enum".into(), Value::Array(values));
                     base

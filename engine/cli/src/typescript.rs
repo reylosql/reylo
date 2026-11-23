@@ -360,7 +360,7 @@ fn column_kind(t: &Value, dialect: &str) -> String {
         "text" => "text".into(),
         "enum" => {
             let labels = items(&t["values"]);
-            if dialect == "mysql" && name == "enum" && kind(&t["type"]) == "text" && !labels.iter().any(|v| v.as_str() == Some("")) {
+            if dialect == "mysql" && name == "enum" && kind(&t["type"]) == "text" && !labels.iter().any(|v| v["value"].as_str() == Some("")) {
                 "enum".into()
             } else {
                 column_kind(&t["type"], dialect)
@@ -863,7 +863,7 @@ fn union(parts: Vec<String>) -> String {
 
 /// An enum's values as TypeScript's literal types, where its base renders as the primitive they are values of.
 fn enum_literal(t: &Value, base: &str) -> String {
-    let values: Vec<&str> = items(&t["values"]).iter().map(|v| v.as_str().unwrap_or_default()).collect();
+    let values: Vec<&str> = items(&t["values"]).iter().map(|v| v["value"].as_str().unwrap_or_default()).collect();
     match (kind(&t["type"]), base) {
         ("boolean", "boolean") | ("integer", "number") | ("float", "number") => values.join(" | "),
         ("integer", "bigint") => values.iter().map(|v| format!("{v}n")).collect::<Vec<_>>().join(" | "),

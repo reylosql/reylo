@@ -1,5 +1,5 @@
 [
-  { "check": "a type a value contradicts, on Postgres", "statement": "limits/scan_limit_param.sql", "pointer": "/columns/1/type", "value": { "kind": "enum", "type": { "kind": "text" }, "values": ["z"] }, "problem": "column name typed as one of [\"z\"] holds" },
+  { "check": "a type a value contradicts, on Postgres", "statement": "limits/scan_limit_param.sql", "pointer": "/columns/1/type", "value": { "kind": "enum", "type": { "kind": "text" }, "values": [{ "value": "z" }] }, "problem": "column name typed as one of [\"z\"] holds" },
   { "check": "a column typed non-null that is NULL, on Postgres", "statement": "limits/scan_limit_param.sql", "pointer": "/columns/1/nullable", "value": false, "problem": "column name typed non-null is NULL" },
   { "check": "a row count beyond one, on Postgres", "statement": "limits/scan_limit_param.sql", "pointer": "/cardinality", "value": "one", "problem": "proven one, returned" },
   { "check": "a row count beyond at_most_one, on Postgres", "statement": "limits/scan_limit_param.sql", "pointer": "/cardinality", "value": "at_most_one", "problem": "proven at_most_one, returned" },

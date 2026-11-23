@@ -143,8 +143,9 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
       return v;
     case "enum":
       if (type.type.kind === "text") {
-        if (typeof v === "string" && type.values.includes(v)) return v;
-        return fail(`is the enum ${type.label ?? written}, one of ${type.values.map((l) => JSON.stringify(l)).join(", ")}; got ${describe(v)}.`);
+        const labels = type.values.map((l) => l.value);
+        if (typeof v === "string" && labels.includes(v)) return v;
+        return fail(`is the enum ${type.label ?? written}, one of ${labels.map((l) => JSON.stringify(l)).join(", ")}; got ${describe(v)}.`);
       }
       return check(type.type, written, v, dialect, fail);
     case "array":

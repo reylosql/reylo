@@ -220,19 +220,19 @@ It holds any 128 bits, written in [RFC 9562](https://www.rfc-editor.org/rfc/rfc9
 
 One of a list of values.
 
-Its `type` is the type of every value, and its `values` the list, each in that type's canonical text. One value makes a literal, which a constant the statement writes is: `select 'user' as kind` gives the enum of `"user"`.
+Its `type` is the type of every value. Each of its `values` is an object, whose `value` is written in that type's canonical text. One value makes a literal, which a constant the statement writes is: `select 'user' as kind` gives the enum of `"user"`.
 
 <TypeDef holds={["\"happy\"", "1"]} types={{"postgres": ["an enum", "a column a CHECK keeps to a list", "a constant"], "mysql": ["enum", "a constant"], "sqlite": ["a constant"]}}>
 
 ```jsonc
 // One of two strings
-{ "kind": "enum", "type": { "kind": "text" }, "values": ["happy", "sad"] }
+{ "kind": "enum", "type": { "kind": "text" }, "values": [{ "value": "happy" }, { "value": "sad" }] }
 
 // The integer 1
-{ "kind": "enum", "type": { "kind": "integer", "bits": 32 }, "values": ["1"] }
+{ "kind": "enum", "type": { "kind": "integer", "bits": 32 }, "values": [{ "value": "1" }] }
 
 // The literal true
-{ "kind": "enum", "type": { "kind": "boolean" }, "values": ["true"] }
+{ "kind": "enum", "type": { "kind": "boolean" }, "values": [{ "value": "true" }] }
 ```
 
 </TypeDef>
@@ -355,7 +355,7 @@ Each element is a slot of its own, so it says whether it may be null. An array i
 { "kind": "array", "size": { "exact": 3 }, "element": { "type": { "kind": "float", "exponent_bits": 8, "mantissa_bits": 23 } } }
 
 // Members that never repeat
-{ "kind": "array", "distinct": true, "element": { "type": { "kind": "enum", "type": { "kind": "text" }, "values": ["a", "b", "c"] } } }
+{ "kind": "array", "distinct": true, "element": { "type": { "kind": "enum", "type": { "kind": "text" }, "values": [{ "value": "a" }, { "value": "b" }, { "value": "c" }] } } }
 ```
 
 </TypeDef>
@@ -401,7 +401,7 @@ Each field is a slot with a `name`. It may be `optional`, its key left out, with
   "kind": "struct",
   "fields": [
     { "name": "id", "type": { "kind": "integer", "bits": 64 } },
-    { "name": "role", "optional": true, "default": "member", "comment": "What the user may do", "type": { "kind": "enum", "type": { "kind": "text" }, "values": ["admin", "member"] } }
+    { "name": "role", "optional": true, "default": "member", "comment": "What the user may do", "type": { "kind": "enum", "type": { "kind": "text" }, "values": [{ "value": "admin" }, { "value": "member" }] } }
   ]
 }
 
@@ -516,8 +516,8 @@ A union is flat, of two members or more, and lists its members in the order of t
 {
   "kind": "union",
   "members": [
-    { "kind": "struct", "fields": [{ "name": "type", "type": { "kind": "enum", "type": { "kind": "text" }, "values": ["cat"] } }, { "name": "meows", "type": { "kind": "boolean" } }] },
-    { "kind": "struct", "fields": [{ "name": "type", "type": { "kind": "enum", "type": { "kind": "text" }, "values": ["dog"] } }, { "name": "barks", "type": { "kind": "boolean" } }] }
+    { "kind": "struct", "fields": [{ "name": "type", "type": { "kind": "enum", "type": { "kind": "text" }, "values": [{ "value": "cat" }] } }, { "name": "meows", "type": { "kind": "boolean" } }] },
+    { "kind": "struct", "fields": [{ "name": "type", "type": { "kind": "enum", "type": { "kind": "text" }, "values": [{ "value": "dog" }] } }, { "name": "barks", "type": { "kind": "boolean" } }] }
   ]
 }
 ```

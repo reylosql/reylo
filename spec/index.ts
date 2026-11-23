@@ -198,12 +198,20 @@ export interface UuidType extends Base {
   versions?: number[];
 }
 
-/** One of a fixed list of values of `type`, in that type's canonical text: an enum's labels, a `CHECK (x IN (…))`, or a constant a statement writes. An enum of one value is a literal: `select 'user' as kind` is `{ kind: "enum", type: { kind: "text" }, values: ["user"] }`. The list's order is the source's, and how its values sort is not part of the type. */
+/** One of a fixed list of values of `type`, in that type's canonical text: an enum's labels, a `CHECK (x IN (…))`, or a constant a statement writes. An enum of one value is a literal: `select 'user' as kind` is `{ kind: "enum", type: { kind: "text" }, values: [{ value: "user" }] }`. The list's order is the source's, and how its values sort is not part of the type. */
 export interface EnumType extends Base {
   kind: "enum";
   /** A kind whose values the format writes as text: a boolean (`"true"`), a number, text, bytes, a UUID, a date, a time or a duration. Never itself an enum. */
   type: Type;
-  values: string[];
+  values: EnumValue[];
+}
+
+/** One value of an enum. */
+export interface EnumValue {
+  /** The value, in its type's canonical text. */
+  value: string;
+  /** The name generated code gives the value, where the source names it, as OpenAPI's `x-enum-varnames` does: `Active` for `active`. */
+  name?: string;
 }
 
 /** A calendar date. */

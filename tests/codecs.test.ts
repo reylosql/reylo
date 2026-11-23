@@ -87,7 +87,7 @@ test("a codec position is declared its codec's type, through every part Reylo de
   assert.equal(renderType(array(pg("numeric"), false), false, "postgres", every), "number[]");
   // A SET's array is of its members' type.
   assert.equal(renderType(my("set"), false, "mysql", every), "string[]");
-  assert.equal(renderType({ ...my("set"), element: { type: { kind: "enum", type: { kind: "text" }, values: ["a", "b"] } } } as EngineType, false, "mysql", every), '("a" | "b")[]');
+  assert.equal(renderType({ ...my("set"), element: { type: { kind: "enum", type: { kind: "text" }, values: [{ value: "a" }, { value: "b" }] } } } as EngineType, false, "mysql", every), '("a" | "b")[]');
   // Inside JSON the database writes the value, which keeps JSON's type.
   assert.equal(renderType({ kind: "json", content: { type: pg("timestamptz") } }, false, "postgres", every), "string");
   assert.equal(renderParamType(my("set"), "mysql", false, undefined, every), "string[]");

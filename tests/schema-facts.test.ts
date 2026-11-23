@@ -68,10 +68,10 @@ test("a number's facts are written where its form here is a JSON number and they
   assert.deepEqual(output(int4({ min: "0", max: "150" })), { type: "integer", format: "int32", minimum: 0, maximum: 150 });
   assert.deepEqual(output(int4({ multiple_of: "5" })), { type: "integer", format: "int32", multipleOf: 5 });
   // An enum's values as its base's form writes them: numbers JSON writes exactly, a truth value, text, and a decimal's text as no value at all.
-  assert.deepEqual(output({ kind: "enum", type: int4({}), values: ["1", "2"] }), { type: "integer", format: "int32", enum: [1, 2] });
-  assert.deepEqual(output({ kind: "enum", type: { kind: "boolean", label: "bool" }, values: ["true"] }), { type: "boolean", enum: [true] });
-  assert.deepEqual(output({ kind: "enum", type: varchar({}), values: ["a", "b"] }), { type: "string", enum: ["a", "b"] });
-  assert.deepEqual(output({ kind: "enum", type: { kind: "decimal", label: "numeric" }, values: ["1.50"] }), { type: "string", format: "decimal" });
+  assert.deepEqual(output({ kind: "enum", type: int4({}), values: [{ value: "1" }, { value: "2" }] }), { type: "integer", format: "int32", enum: [1, 2] });
+  assert.deepEqual(output({ kind: "enum", type: { kind: "boolean", label: "bool" }, values: [{ value: "true" }] }), { type: "boolean", enum: [true] });
+  assert.deepEqual(output({ kind: "enum", type: varchar({}), values: [{ value: "a" }, { value: "b" }] }), { type: "string", enum: ["a", "b"] });
+  assert.deepEqual(output({ kind: "enum", type: { kind: "decimal", label: "numeric" }, values: [{ value: "1.50" }] }), { type: "string", format: "decimal" });
   const int8 = { kind: "integer", bits: 64, label: "int8" };
   assert.deepEqual(output({ ...int8, min: "1", max: "9223372036854775806" } as EngineType), { type: "integer", format: "int64", minimum: 1 });
   const float8 = { kind: "float", exponent_bits: 11, mantissa_bits: 52, label: "float8" };

@@ -324,7 +324,7 @@ function union(parts: string[]): string {
  * at the scale it stores (`1.50`), where the format writes the value (`1.5`).
  */
 function enumLiteral(t: Extract<EngineType, { kind: "enum" }>, base: string): string {
-  const values = t.values;
+  const values = t.values.map((v) => v.value);
   switch (t.type.kind) {
     case "boolean":
       if (base === "boolean") return values.join(" | ");

@@ -499,7 +499,7 @@
       "unevaluatedProperties": false
     },
     "EnumType": {
-      "description": "One of a fixed list of values of `type`, in that type's canonical text: an enum's labels, a `CHECK (x IN (…))`, or a constant a statement writes. An enum of one value is a literal: `select 'user' as kind` is `{ kind: \"enum\", type: { kind: \"text\" }, values: [\"user\"] }`. The list's order is the source's, and how its values sort is not part of the type.",
+      "description": "One of a fixed list of values of `type`, in that type's canonical text: an enum's labels, a `CHECK (x IN (…))`, or a constant a statement writes. An enum of one value is a literal: `select 'user' as kind` is `{ kind: \"enum\", type: { kind: \"text\" }, values: [{ value: \"user\" }] }`. The list's order is the source's, and how its values sort is not part of the type.",
       "type": "object",
       "allOf": [
         {
@@ -517,7 +517,7 @@
         "values": {
           "type": "array",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/EnumValue"
           },
           "minItems": 1,
           "uniqueItems": true
@@ -529,6 +529,24 @@
         "values"
       ],
       "unevaluatedProperties": false
+    },
+    "EnumValue": {
+      "description": "One value of an enum.",
+      "type": "object",
+      "properties": {
+        "value": {
+          "description": "The value, in its type's canonical text.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The name generated code gives the value, where the source names it, as OpenAPI's `x-enum-varnames` does: `Active` for `active`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "additionalProperties": false
     },
     "DateType": {
       "description": "A calendar date.",

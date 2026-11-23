@@ -296,7 +296,7 @@ function plainSchema(t: EngineType, dialect: Dialect, input: boolean, inJson: bo
     case "enum": {
       const base = typeSchema(t.type, dialect, input, inJson, inRow, undefined, codecs);
       if (typeof base !== "object" || base === null) return base;
-      const values = t.values.map((v): unknown => {
+      const values = t.values.map(({ value: v }): unknown => {
         if (base.type === "boolean") return v === "true";
         if (base.type === "integer" || base.type === "number") return exactNumber(v, base.type === "integer");
         if (base.type === "string" && t.type.kind === "text") return v;
