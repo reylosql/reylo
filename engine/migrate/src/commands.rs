@@ -4486,6 +4486,8 @@ struct RemadeTable {
     id: String,
     why: Remade,
     parts: Vec<String>,
+    /// The statements that keep its rows, added to the migration that creates it again.
+    keep: String,
 }
 
 /// What a table is made again for.
@@ -4524,9 +4526,44 @@ fn remade_tables(lost: &[String], from: &crate::diff::Schema, to: &crate::diff::
                 }
             }
         }
-        out.push(RemadeTable { id: id.clone(), why, parts });
+        let keep = keep_rows(id, from, to);
+        out.push(RemadeTable { id: id.clone(), why, parts, keep });
     }
     out
+}
+
+/// The statements that keep a table's rows through a migration that creates it again: a copy at
+/// its top, and at its end, the rows put back in the columns both tables have, past an identity
+/// that only takes its own values, and each sequence of the new table moved past them.
+#[cfg(feature = "cli")]
+fn keep_rows(id: &str, from: &crate::diff::Schema, to: &crate::diff::Schema) -> String {
+    let full = id.trim_start_matches("table ");
+    let table = full.strip_prefix("public.").unwrap_or(full);
+    // The copy's name, the table's with `_rows` after it, inside its quotes where it has them.
+    let copy = match table.strip_suffix('"') {
+        Some(quoted) => format!("{quoted}_rows\""),
+        None => format!("{table}_rows"),
+    };
+    let columns = |s: &crate::diff::Schema| -> Vec<(String, String)> {
+        let prefix = format!("column {full}.");
+        s.objects.iter().filter(|(c, o)| o.kind == Some(crate::diff::Kind::Column) && c.starts_with(&prefix)).map(|(c, o)| (c[prefix.len()..].to_string(), o.def.clone())).collect()
+    };
+    let (was, is) = (columns(from), columns(to));
+    // A generated column takes no value of its own.
+    let kept: Vec<&(String, String)> = is.iter().filter(|(c, def)| was.iter().any(|(w, _)| w == c) && !def.contains(" generated always as (")).collect();
+    let names = kept.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>().join(", ");
+    let overriding = if kept.iter().any(|(_, def)| def.contains(" generated always as identity")) { " overriding system value" } else { "" };
+    let literal = |t: &str| format!("'{}'", t.replace('\'', "''"));
+    let mut out = vec!["-- at the top".to_string(), format!("create table {copy} as select * from {table};"), "-- at the end".to_string(), format!("insert into {table} ({names}){overriding} select {names} from {copy};")];
+    for (c, def) in &kept {
+        if def.contains(" as identity") || def.contains("nextval(") {
+            let unquoted = c.strip_prefix('"').and_then(|c| c.strip_suffix('"')).map_or(c.to_string(), |c| c.replace("\"\"", "\""));
+            let edge = if def.contains("increment by -") { "min" } else { "max" };
+            out.push(format!("select setval(pg_get_serial_sequence({}, {}), {edge}({c})) from {table};", literal(table), literal(&unquoted)));
+        }
+    }
+    out.push(format!("drop table {copy};"));
+    out.join("\n")
 }
 
 /// The refusals `--force` accepts: what a change drops, a type change that loses values, and a rename
@@ -4867,6 +4904,7 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
     let mut unstated: Vec<&String> = lost.iter().filter(|l| !named.contains(l)).collect();
     // A table the plan drops to create it again under its name, with the partitions that go with
     // it, is refused for what the server can't change in place, and no rename is offered for it.
+    let mut remakes: Vec<Problem> = Vec::new();
     for r in remade {
         if !unstated.contains(&&r.id) {
             continue;
@@ -4874,7 +4912,6 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
         let gone: Vec<String> = r.parts.iter().filter(|p| unstated.contains(p)).chain(std::iter::once(&r.id)).cloned().collect();
         unstated.retain(|l| !gone.contains(l));
         let table = display(&r.id);
-        let list: Vec<String> = gone.iter().map(&display).collect();
         let (title, why) = match &r.why {
             Remade::Partitioned => (format!("Postgres can't make {table} a partitioned table in place"), Some(format!("A table is partitioned only when it's created, so this {subject} drops {table} and its rows to create it again."))),
             Remade::Plain => (format!("Postgres can't make {table} a plain table in place"), Some(format!("A partitioned table is made plain only by creating it again, so this {subject} drops {table}, its partitions and their rows."))),
@@ -4886,10 +4923,14 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
             problem = problem.note(why);
         }
         if subject == "migration" {
-            problem = problem.note(format!("To keep the rows, write it with --drop, then edit it: copy the rows of {table} aside before it's dropped, and back once it's created again."));
+            problem = problem.note("To keep the rows, add these lines to the migration it writes:").sql(&r.keep);
         }
-        problems.push(problem.fix(if subject == "migration" { "To write it, dropping the rows" } else { "To drop the rows" }, &[&create_command(asked, &stated, &list, &[])]));
+        remakes.push(problem);
+        // Each command from here on drops it too, so that any of them writes the migration.
+        stated.drop.extend(gone.iter().map(&display));
     }
+    let remade_from = problems.len();
+    problems.extend(remakes);
     let unnamed: Vec<(&String, String, String)> = narrowed.iter().filter(|(id, _, _)| !named.contains(id)).map(|(id, shown, why)| (id, shown_id(shown), why.clone())).collect();
     if !guesses.is_empty() {
         let drops: Vec<(String, String, Option<String>)> = unstated.iter().map(|l| (l.split(' ').next().unwrap_or_default().to_string(), display(l), owner(l))).collect();
@@ -4921,6 +4962,11 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
     }
     for (_, name, why) in &unnamed {
         problems.push(Problem::new("loses-data", format!("Column {name} {why}")).fix("To accept that", &[&create_command(asked, &stated, std::slice::from_ref(name), &[])]));
+    }
+    // Where nothing after them names a command, the last table made again does.
+    if problems.len() > remade_from && problems[remade_from..].iter().all(|p| p.fixes.is_empty()) {
+        let last = problems.pop().expect("a problem");
+        problems.push(last.fix(if subject == "migration" { "To write it, dropping the rows" } else { "To drop the rows" }, &[&create_command(asked, &stated, &[], &[])]));
     }
     problems
 }

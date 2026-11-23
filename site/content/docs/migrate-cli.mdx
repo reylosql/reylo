@@ -195,7 +195,13 @@ So the migration creates it again, and is refused:
 $ reylo migrate new partition_users
 ✗ Postgres can't make users a partitioned table in place
   A table is partitioned only when it's created, so this migration drops users and its rows to create it again.
-  To keep the rows, write it with --drop, then edit it: copy the rows of users aside before it's dropped, and back once it's created again.
+  To keep the rows, add these lines to the migration it writes:
+
+    -- at the top
+    create table users_rows as select * from users;
+    -- at the end
+    insert into users (id, name) select id, name from users_rows;
+    drop table users_rows;
 
   To write it, dropping the rows:
     reylo migrate new partition_users --drop users
@@ -203,7 +209,7 @@ $ reylo migrate new partition_users
 Nothing was changed.
 ```
 
-To keep the rows, add the copies to the migration it writes:
+Write it with `--drop users`, and add those lines:
 
 ```sql title="20261123120000_partition_users.sql"
 -- loses data: users
@@ -216,7 +222,7 @@ create table users (
 ) partition by hash (id);
 create table users_p0 partition of users for values with (modulus 2, remainder 0);
 create table users_p1 partition of users for values with (modulus 2, remainder 1);
-insert into users select * from users_rows; -- [!code ++]
+insert into users (id, name) select id, name from users_rows; -- [!code ++]
 drop table users_rows; -- [!code ++]
 ```
 
