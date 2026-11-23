@@ -904,23 +904,29 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
     let mut moved_with: Vec<(String, String)> = Vec::new();
     if let Some(renamed) = steps.renamed {
         let (r_gone, r_came) = difference(steps.moved.unwrap_or(steps.before), renamed);
-        let names: Vec<(String, String)> = tables.iter().map(|(old, new)| (crate::sql::last_written(&shown_name(old)), crate::sql::last_written(&shown_name(new)))).collect();
+        // Each renamed table's name as the catalog writes it, schema and all, and as a name starts.
+        let names: Vec<(String, String)> = tables.iter().map(|(old, new)| (shown_id(old), shown_id(new))).collect();
+        let bare: Vec<(String, String)> = names.iter().map(|(old, new)| (crate::sql::last_written(old), crate::sql::last_written(new))).collect();
         // A column's line names it under its table, whose name alone the rename changes: the same
         // column, whatever its definition became, as the rename of a sequence named after the
         // table changes a default.
         let retabled = |line: &str| -> Option<String> {
             let name = split_head(line).0.strip_prefix("column ")?;
             let column = crate::sql::last_written(name);
-            let qualified = name.strip_suffix(column.as_str())?.strip_suffix('.')?;
-            let table = crate::sql::last_written(qualified);
-            let schema = qualified.strip_suffix(table.as_str())?;
-            names.iter().find(|(old, _)| *old == table).map(|(_, new)| format!("column {schema}{new}.{column}"))
+            let table = name.strip_suffix(column.as_str())?.strip_suffix('.')?;
+            names.iter().find(|(old, _)| old == table).map(|(_, new)| format!("column {new}.{column}"))
         };
-        // Any other line, with every renamed table's name swapped at once, as a foreign key between
-        // two renamed tables names both.
-        let swapped = |line: &str| names.iter().fold(line.to_string(), |l, (old, new)| crate::diff::swap_name(&l, old, new));
+        // Any other line: every renamed table's name replaced where it stands whole, and a word
+        // outside parentheses, such as a constraint's or an index's name, may take a renamed
+        // table's new name where it starts with the old, as the renames name what they follow. A
+        // column list never changes.
+        let same_other = |g: &str, c: &str| {
+            let (g, c) = (renamed_in(g, &names), c);
+            let (x, y) = (top_words(&g), top_words(c));
+            x.len() == y.len() && x.iter().zip(&y).all(|(a, b)| a == b || (!a.contains('(') && bare.iter().any(|(old, new)| crate::diff::swap_name(a, old, new) == *b)))
+        };
         for g in &r_gone {
-            let same = |c: &String| if g.starts_with("column ") { retabled(g).is_some_and(|h| split_head(c).0 == h) } else { swapped(g) == *c };
+            let same = |c: &String| if g.starts_with("column ") { retabled(g).is_some_and(|h| split_head(c).0 == h) } else { same_other(g, c) };
             if let Some(c) = r_came.iter().find(|c| same(c) && !moved_with.iter().any(|(_, t)| t == *c)) {
                 moved_with.push((g.clone(), c.clone()));
             }
@@ -947,6 +953,56 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
     }
     out.extend(listed(&gone, &came));
     out
+}
+
+/// `line` with each of `names` (an old name and its new, as the catalog writes them) replaced where
+/// it stands as a whole name, all at once: `public.orders` in `public.orders(id)` and
+/// `public.orders.title`, but not in `public.orders_archive`.
+#[cfg(feature = "cli")]
+fn renamed_in(line: &str, names: &[(String, String)]) -> String {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let (mut out, mut at, mut prev) = (String::new(), 0, None::<char>);
+    while let Some(c) = line[at..].chars().next() {
+        let rest = &line[at..];
+        if prev.is_none_or(|p| !ident(p) && p != '.') {
+            if let Some((old, new)) = names.iter().find(|(old, _)| rest.starts_with(old.as_str()) && rest[old.len()..].chars().next().is_none_or(|n| !ident(n))) {
+                out.push_str(new);
+                at += old.len();
+                prev = old.chars().last();
+                continue;
+            }
+        }
+        out.push(c);
+        at += c.len_utf8();
+        prev = Some(c);
+    }
+    out
+}
+
+/// A line's words, split at spaces outside parentheses and quotes: `FOREIGN KEY (a, b)` is three.
+#[cfg(feature = "cli")]
+fn top_words(line: &str) -> Vec<&str> {
+    let (mut words, mut start, mut depth, mut quote) = (Vec::new(), 0, 0i32, None::<char>);
+    for (k, c) in line.char_indices() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"' | '`') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => depth -= 1,
+            (None, ' ') if depth == 0 => {
+                if k > start {
+                    words.push(&line[start..k]);
+                }
+                start = k + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < line.len() {
+        words.push(&line[start..]);
+    }
+    words
 }
 
 /// The lines of `changed_lines`, from what went and what came.
@@ -6744,6 +6800,20 @@ mod tests {
         let steps = Steps { before: &before, moved: None, renamed: Some(&after), after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string()), ("table public.clients".to_string(), "table public.customers".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}", "  ~ table [-clients-]{+customers+}"]);
+        // A column whose name starts with another renamed table's is no reference to it.
+        let before = lines(&["table public.orders", "table public.clients", "constraint public.orders fk_account FOREIGN KEY (clients_id) REFERENCES public.accounts(id)"]);
+        let after = lines(&["table public.invoices", "table public.customers", "constraint public.invoices fk_account FOREIGN KEY (clients_id) REFERENCES public.accounts(id)"]);
+        let steps = Steps { before: &before, moved: None, renamed: Some(&after), after: &after };
+        let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string()), ("table public.clients".to_string(), "table public.customers".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}", "  ~ table [-clients-]{+customers+}"]);
+        // Two tables of one name in two schemas, each renamed its own way, with a column of one.
+        let before = lines(&["table east.orders", "table west.orders", "column west.orders.title text", "constraint west.orders orders_pkey PRIMARY KEY (id)"]);
+        let renamed = lines(&["table east.invoices", "table west.shipments", "column west.shipments.title text", "constraint west.shipments shipments_pkey PRIMARY KEY (id)"]);
+        let after = lines(&["table east.invoices", "table west.shipments", "column west.shipments.heading text", "constraint west.shipments shipments_pkey PRIMARY KEY (id)"]);
+        let steps = Steps { before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let tables = vec![("table east.orders".to_string(), "table east.invoices".to_string()), ("table west.orders".to_string(), "table west.shipments".to_string())];
+        let columns = vec![("column west.shipments.title".to_string(), "column west.shipments.heading".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &columns), ["  ~ table east.[-orders-]{+invoices+}", "  ~ table west.[-orders-]{+shipments+}", "  ~ column west.shipments.[-title-]{+heading+} text"]);
         // A view the table rename drops, where the table takes its name, stays listed.
         let before = lines(&["table public.t_data", "column public.t_data.id integer", "view public.data select id from public.t_data", "view public.q select id from public.data"]);
         let renamed = lines(&["table public.data", "column public.data.id integer"]);
