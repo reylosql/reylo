@@ -893,8 +893,8 @@ struct Steps<'a> {
 /// to the schema after it. Each table and column it renames (`tables` and `columns`, each the old id
 /// and the new) shows as one line changed in place (`~`) rather than as a drop and an add, and what
 /// only took a renamed table's new name is left out: a line the table renames themselves replaced
-/// with the same object under the new name (its name swapped, or for a column, the column's name),
-/// where both lines are the endpoints'. Whatever else the renames did, such as a view they dropped,
+/// with the same object under the new names (a column, the same column of the renamed table), where
+/// both lines are the endpoints'. Whatever else the renames did, such as a view they dropped,
 /// stays listed.
 #[cfg(feature = "cli")]
 fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(String, String)]) -> Vec<String> {
@@ -905,14 +905,22 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
     if let Some(renamed) = steps.renamed {
         let (r_gone, r_came) = difference(steps.moved.unwrap_or(steps.before), renamed);
         let names: Vec<(String, String)> = tables.iter().map(|(old, new)| (crate::sql::last_written(&shown_name(old)), crate::sql::last_written(&shown_name(new)))).collect();
-        let column_head = |line: &str| if line.starts_with("column ") { Some(split_head(line).0.to_string()) } else { None };
+        // A column's line names it under its table, whose name alone the rename changes: the same
+        // column, whatever its definition became, as the rename of a sequence named after the
+        // table changes a default.
+        let retabled = |line: &str| -> Option<String> {
+            let name = split_head(line).0.strip_prefix("column ")?;
+            let column = crate::sql::last_written(name);
+            let qualified = name.strip_suffix(column.as_str())?.strip_suffix('.')?;
+            let table = crate::sql::last_written(qualified);
+            let schema = qualified.strip_suffix(table.as_str())?;
+            names.iter().find(|(old, _)| *old == table).map(|(_, new)| format!("column {schema}{new}.{column}"))
+        };
+        // Any other line, with every renamed table's name swapped at once, as a foreign key between
+        // two renamed tables names both.
+        let swapped = |line: &str| names.iter().fold(line.to_string(), |l, (old, new)| crate::diff::swap_name(&l, old, new));
         for g in &r_gone {
-            let same = |c: &String| {
-                names.iter().any(|(old, new)| {
-                    let swapped = crate::diff::swap_name(g, old, new);
-                    swapped == *c || column_head(&swapped).is_some_and(|h| column_head(c).as_deref() == Some(h.as_str()))
-                })
-            };
+            let same = |c: &String| if g.starts_with("column ") { retabled(g).is_some_and(|h| split_head(c).0 == h) } else { swapped(g) == *c };
             if let Some(c) = r_came.iter().find(|c| same(c) && !moved_with.iter().any(|(_, t)| t == *c)) {
                 moved_with.push((g.clone(), c.clone()));
             }
@@ -6723,6 +6731,19 @@ mod tests {
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string())];
         let columns = vec![("column public.invoices.title".to_string(), "column public.invoices.heading".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &columns), ["  ~ table [-orders-]{+invoices+}", "  ~ column invoices.[-title-]{+heading+} text", "  + column invoices.kind text default 'invoices'::text", "  - column orders.kind text default 'orders'::text"]);
+        // A column named after another table keeps its identity, and a foreign key between two
+        // renamed tables is left out.
+        let before = lines(&["table public.alpha", "column public.alpha.alpha_code integer", "column public.alpha.beta_code integer"]);
+        let renamed = lines(&["table public.beta", "column public.beta.alpha_code integer", "column public.beta.beta_code integer"]);
+        let after = lines(&["table public.beta", "column public.beta.beta_code integer"]);
+        let steps = Steps { before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let tables = vec![("table public.alpha".to_string(), "table public.beta".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-alpha-]{+beta+}", "  - column alpha.alpha_code integer"]);
+        let before = lines(&["table public.orders", "table public.clients", "constraint public.orders fk_client FOREIGN KEY (client_id) REFERENCES public.clients(id)"]);
+        let after = lines(&["table public.invoices", "table public.customers", "constraint public.invoices fk_client FOREIGN KEY (client_id) REFERENCES public.customers(id)"]);
+        let steps = Steps { before: &before, moved: None, renamed: Some(&after), after: &after };
+        let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string()), ("table public.clients".to_string(), "table public.customers".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}", "  ~ table [-clients-]{+customers+}"]);
         // A view the table rename drops, where the table takes its name, stays listed.
         let before = lines(&["table public.t_data", "column public.t_data.id integer", "view public.data select id from public.t_data", "view public.q select id from public.data"]);
         let renamed = lines(&["table public.data", "column public.data.id integer"]);
