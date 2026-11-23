@@ -1552,6 +1552,49 @@ fn writes_rows(sql: &str, d: Dialect) -> Vec<String> {
     out
 }
 
+/// The statements of a migration whose rows can turn out differently run before or after another
+/// migration: those that write rows ([`writes_rows`]), and the schema changes that compute a value
+/// for every row a table already has ([`fills_existing`]). Nothing moves past one of these.
+fn order_sensitive(sql: &str, d: Dialect) -> Vec<String> {
+    let mut out = writes_rows(sql, d);
+    out.extend(split_statements(sql, d).iter().filter(|s| fills_existing(s)).map(|s| format!("{}…", s.text.split_whitespace().take(3).collect::<Vec<_>>().join(" ").to_lowercase())));
+    out
+}
+
+/// Whether a schema change computes a value for each row a table already has from an expression
+/// that can call what other migrations define: a column added with a default that calls something
+/// or generated and stored, and a column retyped with `using`. What it writes turns on what those
+/// calls do when it runs, which no schema shows.
+fn fills_existing(statement: &crate::sql::Statement) -> bool {
+    use crate::sql::TokenKind;
+    let t = &statement.tokens;
+    let words: Vec<String> = t.iter().map(crate::sql::Token::upper).collect();
+    if words.first().map(String::as_str) != Some("ALTER") || words.get(1).map(String::as_str) != Some("TABLE") {
+        return false;
+    }
+    let has = |w: &str| words.iter().any(|x| x == w);
+    if !has("ADD") && !has("USING") {
+        return false;
+    }
+    if (has("ADD") && has("STORED")) || (has("TYPE") && has("USING")) {
+        return true;
+    }
+    // A call in a default, up to the end of its clause.
+    words.iter().enumerate().filter(|(_, w)| *w == "DEFAULT").any(|(k, _)| {
+        let mut depth = 0usize;
+        for i in k + 1..t.len() {
+            match t[i].text.as_str() {
+                "(" if t[i].kind == TokenKind::Symbol && t[i - 1].kind == TokenKind::Word && i > k + 1 => return true,
+                "(" if t[i].kind == TokenKind::Symbol => depth += 1,
+                ")" if t[i].kind == TokenKind::Symbol => depth = depth.saturating_sub(1),
+                "," if t[i].kind == TokenKind::Symbol && depth == 0 => return false,
+                _ => {}
+            }
+        }
+        false
+    })
+}
+
 /// Whether a statement makes what a query fills, read from its words, never a string's or a
 /// comment's: a table made from a query (`create table … as select`, and MySQL's `create table …
 /// select` and `create table … (select …)`, the query outside any parentheses but its own), and a
@@ -1966,22 +2009,28 @@ fn lock_order_problem(opts: &Options, applied: &[&HistoryRow], order: &[Migratio
     let problem = Problem::new("history-out-of-order", format!("This database applied {} where {} lists {}", applied[k].name, shown(&opts.lock), order[k].name));
     let (ahead, since) = (&order[k], &applied[k..]);
     let moved = !applied.iter().any(|r| r.name == ahead.name) && since.len() < order.len() - k && since.iter().zip(&order[k + 1..]).all(|(r, f)| r.name == f.name);
-    // One that ran the same migrations as the lock lists that far, in another order (the lock moved
-    // one after others, as `history push` moves one a database skipped), takes the lock's where the
-    // two end alike, which `history push` checks.
-    let same = applied.len() <= order.len() && {
-        let mut ran: Vec<&str> = applied.iter().map(|r| r.name.as_str()).collect();
-        let mut locked: Vec<&str> = order[..applied.len()].iter().map(|f| f.name.as_str()).collect();
-        ran.sort_unstable();
-        locked.sort_unstable();
-        ran == locked
-    };
-    if same {
+    // One that ran migrations the lock lists, in another order (the lock moved one after others, as
+    // `history push` moves one a database skipped): where it ran every one the lock lists up to the
+    // last it ran, it takes the lock's order, which `history push` records where the two end alike;
+    // where it lacks some of them that write no rows, it makes their change too, then records them.
+    let reach = applied.iter().map(|r| order.iter().position(|f| f.name == r.name)).collect::<Option<Vec<usize>>>().and_then(|at| at.into_iter().max());
+    let lacking: Option<Vec<&Migration>> = reach.map(|p| order[..=p].iter().filter(|f| !applied.iter().any(|r| r.name == f.name)).collect());
+    if lacking.as_ref().is_some_and(Vec::is_empty) {
         return Some(
             problem
                 .note("Every database runs the migrations in the lock's order, and this one ran the same migrations in another.")
                 .fix("On a development database, record the lock's order, running nothing", &["reylo migrate history push"])
                 .fix("On any other, do the same", &["reylo migrate history push --url <url>"]),
+        );
+    }
+    if let Some(lacking) = lacking.filter(|l| !moved && l.iter().all(|m| writes_rows(&m.sql, d).is_empty() && runs_as_a_migration(&m.sql, d))) {
+        let files: Vec<String> = lacking.iter().map(|m| format!("--file {}", shell_word(&format!("{}/{}", shown(&opts.dir), m.name)))).collect();
+        let names: Vec<String> = lacking.iter().map(|m| m.name.clone()).collect();
+        return Some(
+            problem
+                .note(format!("Every database runs the migrations in the lock's order, and this one ran them in another, without {}.", and_list(&names)))
+                .fix("On a development database, apply them in the lock's order", &["reylo migrate dev"])
+                .fix(format!("On any other, make {} change there too, then record them all, running nothing", if names.len() == 1 { "its" } else { "their" }), &[&format!("reylo run --url <url> {}", files.join(" ")), "reylo migrate history push --url <url>"]),
         );
     }
     if !moved || !writes_rows(&ahead.sql, d).is_empty() {
@@ -2327,29 +2376,41 @@ async fn unmovable(shadows: &mut Shadows<'_>, ran: &[Migration], pending: &[Migr
     if !writes_rows(&it.sql, d).is_empty() {
         return Ok(Some("Its data statements can't be told to have run here, so it isn't recorded without running.".into()));
     }
-    let changing: Vec<Migration> = ahead.iter().filter(|m| !writes_rows(&m.sql, d).is_empty()).cloned().collect();
+    if !order_sensitive(&it.sql, d).is_empty() {
+        return Ok(Some("It fills the rows a table has, which can turn out differently ahead of them, so it isn't recorded without running.".into()));
+    }
+    let changing: Vec<Migration> = ahead.iter().filter(|m| !order_sensitive(&m.sql, d).is_empty()).cloned().collect();
     if !changing.is_empty() {
         let one = changing.len() == 1;
         return Ok(Some(format!("{} {} {} data, which can run differently after this change, so it can't move ahead of {}.", if one { "Migration" } else { "Migrations" }, names_of(&changing), if one { "changes" } else { "change" }, if one { "it" } else { "them" })));
     }
     let reordered: Vec<Migration> = ran.iter().chain([it]).chain(ahead).chain(&pending[j + 1..]).cloned().collect();
     let original: Vec<Migration> = ran.iter().chain(pending).cloned().collect();
-    if !ends_alike(shadows, &original, &reordered).await? {
+    if !ends_alike(shadows, &original, &reordered, ran.len() + j + 1).await? {
         return Ok(Some(format!("Run ahead of {}, the migrations end differently, so it can't move there.", names_of(ahead))));
     }
     Ok(None)
 }
 
-/// Whether two orders of the migrations both replay, and end at the same schema.
+/// Whether two orders of the migrations both replay, and reach the same schema at the end of the
+/// first `block` of each, where they hold the same migrations, and at their ends: a migration after
+/// the block that fills rows sees the same schema either way, though a later one could make the
+/// two ends alike again.
 #[cfg(feature = "cli")]
-async fn ends_alike(shadows: &mut Shadows<'_>, a: &[Migration], b: &[Migration]) -> Result<bool, Error> {
+async fn ends_alike(shadows: &mut Shadows<'_>, a: &[Migration], b: &[Migration], block: usize) -> Result<bool, Error> {
     let (x, y) = (shadows.lane(), shadows.lane());
-    shadows.push(x, a.iter().map(Step::of));
-    shadows.push(y, b.iter().map(Step::of));
-    Ok(match (shadows.lines(x).await?, shadows.lines(y).await?) {
-        (Ok(p), Ok(q)) => crate::catalog::same_schema(&p, &q),
-        _ => false,
-    })
+    for (from, to) in [(0, block), (block, a.len())] {
+        shadows.push(x, a[from..to].iter().map(Step::of));
+        shadows.push(y, b[from..to].iter().map(Step::of));
+        let alike = match (shadows.lines(x).await?, shadows.lines(y).await?) {
+            (Ok(p), Ok(q)) => crate::catalog::same_schema(&p, &q),
+            _ => false,
+        };
+        if !alike {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// The migrations' names, as a sentence lists them.
@@ -2370,19 +2431,21 @@ fn run_of(migrations: &[Migration]) -> String {
 /// Where the database has what `order` makes without one migration, `order[k]`, and with those
 /// after it up to `order[m]`: a database that skipped one, as another tool or a hand can leave it.
 /// It is at or after `from`, where the history's run ends, and is looked for only among those whose
-/// change `stages` (the catalog after each prefix of `order`) shows to be part of what the database
-/// and the whole run differ by: a few replays, and never one per migration. The latest such, of the
-/// last three, with the longest run after it, but for the migrations at its end that change data and
-/// nothing a schema shows, which can't be told to have run.
+/// change is all that the database and some later prefix of `order` differ by, as `stages` (the
+/// catalog after each prefix) shows: a few replays, and never one per migration. The latest such, of
+/// the last three, with the longest run after it, but for the migrations at its end that change data
+/// and nothing a schema shows, which can't be told to have run.
 #[cfg(feature = "cli")]
 async fn skipped(shadows: &mut Shadows<'_>, order: &[Migration], stages: &[Vec<String>], from: usize, live: &[String], d: Dialect) -> Result<Option<(usize, usize)>, Error> {
-    let Some(whole) = stages.get(order.len()) else { return Ok(None) };
-    let (only_whole, only_live) = difference(whole, &crate::catalog::without_extra_children(live, whole));
+    if stages.len() <= order.len() {
+        return Ok(None);
+    }
+    let apart: Vec<(Vec<String>, Vec<String>)> = stages.iter().map(|stage| difference(stage, &crate::catalog::without_extra_children(live, stage))).collect();
     let candidates: Vec<usize> = (from..order.len().saturating_sub(1))
         .rev()
         .filter(|&k| {
             let (gone, came) = difference(&stages[k], &stages[k + 1]);
-            gone.iter().any(|l| only_live.contains(l)) || came.iter().any(|l| only_whole.contains(l))
+            !(gone.is_empty() && came.is_empty()) && apart[k + 2..].iter().any(|(only_stage, only_live)| !(only_stage.is_empty() && only_live.is_empty()) && only_stage.iter().all(|l| came.contains(l)) && only_live.iter().all(|l| gone.contains(l)))
         })
         .take(3)
         .collect();
@@ -2421,12 +2484,12 @@ fn moved_after(order: &[Migration], k: usize, m: usize) -> Vec<Migration> {
 #[cfg(feature = "cli")]
 async fn unskippable(shadows: &mut Shadows<'_>, order: &[Migration], k: usize, m: usize, d: Dialect) -> Result<Option<(String, bool)>, Error> {
     let (it, past) = (&order[k], &order[k + 1..m]);
-    let alike = ends_alike(shadows, order, &moved_after(order, k, m)).await?;
+    let alike = ends_alike(shadows, order, &moved_after(order, k, m), m).await?;
     let them = if past.len() == 1 { "it" } else { "them" };
-    if !writes_rows(&it.sql, d).is_empty() {
+    if !order_sensitive(&it.sql, d).is_empty() {
         return Ok(Some((format!("It changes data, which can run differently after {}, so it can't move after {them}.", run_of(past)), false)));
     }
-    let changing: Vec<Migration> = past.iter().filter(|m| !writes_rows(&m.sql, d).is_empty()).cloned().collect();
+    let changing: Vec<Migration> = past.iter().filter(|m| !order_sensitive(&m.sql, d).is_empty()).cloned().collect();
     if !changing.is_empty() {
         let one = changing.len() == 1;
         return Ok(Some((format!("{} {} {} data, which can run differently without it, so it can't move after {them}.", if one { "Migration" } else { "Migrations" }, names_of(&changing), if one { "changes" } else { "change" }), alike)));
@@ -3431,7 +3494,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     // one it skipped is moved after that run, as this database will run it, and stays pending, where
     // it can move there ([`unskippable`] says where it can't); the run is recorded. Where it can't,
     // its change is made here instead, and the migrations recorded in their order.
-    if moved.is_none() && matched.is_none() && !init {
+    if moved.is_none() && matched.is_none() && !init && (applied.is_empty() || history_run.is_some()) {
         let found = match skipped(&mut shadows, &order, &stages, history_run.unwrap_or(0), &live, d).await {
             Ok(Some((k, m))) => unskippable(&mut shadows, &order, k, m, d).await.map(|why| Some((k, m, why))),
             other => other.map(|_| None),
