@@ -812,6 +812,7 @@ fn readable(line: &str) -> String {
     static MYSQL_INDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^index ([^.\s]+)\.(\S+) (unique )?(\w+)((?: invisible)?(?: comment "(?:[^"\\]|\\.)*")?) (\(.*\))$"#).expect("a valid pattern"));
     static SQLITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(index|view|trigger) \S+ create (unique )?(?:temp |temporary )?(?:index|view|trigger) (?:if not exists )?(\S+) (.*)$").expect("a valid pattern"));
     static CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) (\S+) (.*)$").expect("a valid pattern"));
+    static SQLITE_CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) ((?:primary key|unique|check|foreign key|constraint)\b.*)$").expect("a valid pattern"));
     static PUBLIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s(,]|::)(?:public|"public")\."#).expect("a valid pattern"));
     let line = PUBLIC.replace_all(line, "$1").into_owned();
     if let Some(c) = INDEX.captures(&line) {
@@ -824,6 +825,10 @@ fn readable(line: &str) -> String {
     }
     if let Some(c) = SQLITE.captures(&line) {
         return format!("{}{} {} {}", c.get(2).map_or("", |m| m.as_str()), &c[1], &c[3], &c[4]);
+    }
+    // SQLite's, which names no constraint unless its definition does.
+    if let Some(c) = SQLITE_CONSTRAINT.captures(&line) {
+        return format!("constraint on {}: {}", &c[1], &c[2]);
     }
     if let Some(c) = CONSTRAINT.captures(&line) {
         return format!("constraint {} on {}: {}", &c[2], &c[1], lowercase_keywords(&c[3]));
@@ -880,13 +885,52 @@ fn changed_lines(before: &[String], after: &[String]) -> Vec<String> {
     let (gone_names, came_names) = (constraint_names(&gone), constraint_names(&came));
     let gone: Vec<&String> = gone.iter().filter(|l| !made_by_constraint(l, &gone_names)).collect();
     let came: Vec<&String> = came.iter().filter(|l| !made_by_constraint(l, &came_names)).collect();
-    let mut out: Vec<String> = came.iter().take(MAX).map(|l| paint("green", &format!("  + {}", readable(l)))).collect();
-    out.extend(gone.iter().take(MAX).map(|l| paint("red", &format!("  - {}", readable(l)))));
-    let more = gone.len() + came.len() - out.len();
+    let (mut out, more_came) = marked(&came, "green", '+', MAX);
+    let (gone, more_gone) = marked(&gone, "red", '-', MAX);
+    out.extend(gone);
+    let more = more_came + more_gone;
     if more > 0 {
         out.push(format!("  … and {more} more"));
     }
     out
+}
+
+/// What came or went, `mark` before each, readable: a table that came or went is one line, its
+/// columns, constraints and indexes indented under it rather than each on a line of its own. At
+/// most `max` of them, and how many more there are.
+fn marked(lines: &[&String], style: &str, mark: char, max: usize) -> (Vec<String>, usize) {
+    let lines: Vec<String> = lines.iter().map(|l| readable(l)).collect();
+    let tables: Vec<&str> = lines.iter().filter_map(|l| l.strip_prefix("table ")).map(|rest| rest.split(' ').next().unwrap_or(rest)).collect();
+    // A line of one of those tables, as its table's own: without the table's name.
+    let under = |line: &str| -> Option<(usize, String)> {
+        tables.iter().enumerate().find_map(|(k, table)| {
+            let own = if let Some(column) = line.strip_prefix(&format!("column {table}.")) {
+                Some(column.to_string())
+            } else if let Some(rest) = line.strip_prefix("constraint ") {
+                rest.split_once(&format!(" on {table}: ")).filter(|(name, _)| !name.contains(' ')).map(|(_, def)| def.to_string()).or_else(|| rest.strip_prefix(&format!("on {table}: ")).map(str::to_string))
+            } else {
+                let index = line.strip_prefix("unique index ").map(|rest| ("unique index", rest)).or_else(|| line.strip_prefix("index ").map(|rest| ("index", rest)));
+                index.and_then(|(kind, rest)| rest.split_once(&format!(" on {table} ")).filter(|(name, _)| !name.contains(' ')).map(|(name, def)| format!("{kind} {name} {def}")))
+            };
+            own.map(|own| (k, own))
+        })
+    };
+    let owned: Vec<Option<(usize, String)>> = lines.iter().map(|l| under(l)).collect();
+    let mut out = Vec::new();
+    let mut shown = 0;
+    let mut total = 0;
+    for line in lines.iter().zip(&owned).filter(|(_, o)| o.is_none()).map(|(l, _)| l) {
+        total += 1;
+        if shown == max {
+            continue;
+        }
+        shown += 1;
+        out.push(paint(style, &format!("  {mark} {line}")));
+        if let Some(k) = line.strip_prefix("table ").and_then(|rest| tables.iter().position(|t| rest.split(' ').next() == Some(*t))) {
+            out.extend(owned.iter().flatten().filter(|(t, _)| *t == k).map(|(_, own)| paint(style, &format!("      {own}"))));
+        }
+    }
+    (out, total - shown)
 }
 
 /// Prints the refusals of a command that changes something, and says that it changed nothing.
@@ -6531,6 +6575,38 @@ mod tests {
         more.push("column public.t.x integer".into());
         assert_eq!(sides(&more, &two), (true, false));
         assert_eq!(sides(&[two.clone(), vec!["column public.t.x integer".into()]].concat(), &three), (true, true));
+    }
+
+    #[test]
+    fn a_new_table_lists_what_it_holds_under_it() {
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let made = lines(&[
+            "column public.documents.embedding public.vector(1536)",
+            "column public.documents.id integer not null",
+            "column public.users.bio text",
+            "constraint public.documents documents_pkey PRIMARY KEY (id)",
+            "extension vector schema=public",
+            "index CREATE INDEX documents_embedding ON public.documents USING hnsw (embedding public.vector_cosine_ops)",
+            "index CREATE UNIQUE INDEX documents_pkey ON public.documents USING btree (id)",
+            "table public.documents",
+        ]);
+        let users = lines(&["table public.users", "column public.users.id integer"]);
+        let before: Vec<String> = users.clone();
+        let after: Vec<String> = users.iter().chain(&made).cloned().collect();
+        assert_eq!(
+            changed_lines(&before, &after),
+            [
+                "  + column users.bio text",
+                "  + extension vector schema=public",
+                "  + table documents",
+                "      embedding vector(1536)",
+                "      id integer not null",
+                "      primary key (id)",
+                "      index documents_embedding using hnsw (embedding vector_cosine_ops)",
+            ]
+        );
+        // A table dropped reads the same way, and SQLite's constraints, which name none, as theirs.
+        assert_eq!(changed_lines(&lines(&["table t strict", "column t.id integer", "constraint t primary key (id)"]), &[]), ["  - table t strict", "      id integer", "      primary key (id)"]);
     }
 
     #[test]

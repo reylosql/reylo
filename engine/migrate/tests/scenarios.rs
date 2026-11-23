@@ -931,7 +931,7 @@ async fn new_without_schema_sql_writes_what_the_database_has(mut p: P) {
     p.output();
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tags", &Default::default(), log).await).await, 0, "{}", p.peek());
     // It says what the migration changes.
-    assert_has!(p.output(), r"✓ Wrote \S*_tags\.sql\n(?:  \+ [^\n]+\n)*  \+ column tags\.id ");
+    assert_has!(p.output(), r"✓ Wrote \S*_tags\.sql\n(?:  \+ [^\n]+\n)*  \+ table tags[^\n]*\n      id ");
     let written = p.files().into_iter().find(|f| f.ends_with("_tags.sql")).unwrap();
     let sql = std::fs::read_to_string(p.dir.join("migrations").join(&written)).unwrap();
     assert_has!(&sql, r"(?i)create table [^\n]*tags");
@@ -2505,7 +2505,7 @@ async fn deploy_builds_no_shadow_database_and_trusts_the_fingerprint(mut p: P) {
     p.exec(&format!("create table stray (id {int})")).await;
     assert_eq!(p.migrate().await, 1);
     let out = p.output();
-    assert_has!(&out, r"✗ This database was changed outside its migrations\n\n  \+ column stray\.id [^\n]+\n  \+ table stray[^\n]*\n\n  If a migration makes this change, record it here, running nothing:\n    reylo migrate history push\n  If none does, write one and run it in development, then record it here:\n    reylo migrate new <name>\n    reylo migrate dev\n    reylo migrate history push\n  To see which migrations it matches:\n    reylo migrate deploy --dry-run\n\nNothing was changed\.");
+    assert_has!(&out, r"✗ This database was changed outside its migrations\n\n  \+ table stray[^\n]*\n      id [^\n]+\n\n  If a migration makes this change, record it here, running nothing:\n    reylo migrate history push\n  If none does, write one and run it in development, then record it here:\n    reylo migrate new <name>\n    reylo migrate dev\n    reylo migrate history push\n  To see which migrations it matches:\n    reylo migrate deploy --dry-run\n\nNothing was changed\.");
     p.schema(&format!("create table users (id {id}); create table tags (id {int});"));
     assert_eq!(p.dry_run().await, 1);
     assert_has!(p.output(), "This database was changed outside its migrations");
