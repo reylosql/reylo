@@ -889,22 +889,51 @@ struct Steps<'a> {
     after: &'a [String],
 }
 
-/// What a migration changes, as `changed_lines` writes it, but with each table and column it renames
-/// (`tables` and `columns`, each the old id and the new) shown as one line changed in place (`~`)
-/// rather than as a drop and an add. What only took a renamed table's new name, which is what the
-/// table renames changed, is left out.
+/// What a migration changes, as `changed_lines` writes it: the difference from the schema before it
+/// to the schema after it. Each table and column it renames (`tables` and `columns`, each the old id
+/// and the new) shows as one line changed in place (`~`) rather than as a drop and an add, and what
+/// only took a renamed table's new name is left out: a line the table renames themselves replaced
+/// with the same object under the new name (its name swapped, or for a column, the column's name),
+/// where both lines are the endpoints'. Whatever else the renames did, such as a view they dropped,
+/// stays listed.
 #[cfg(feature = "cli")]
 fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(String, String)]) -> Vec<String> {
-    let moved = steps.moved.unwrap_or(steps.before);
-    let mut out = if steps.moved.is_some() { changed_lines(steps.before, moved) } else { Vec::new() };
-    out.extend(tables.iter().map(|(old, new)| changed_line(&format!("table {}", shown_name(old)), &format!("table {}", shown_name(new)))));
-    let (mut gone, mut came) = difference(steps.renamed.unwrap_or(moved), steps.after);
+    let (mut gone, mut came) = difference(steps.before, steps.after);
+    let mut out: Vec<String> = tables.iter().map(|(old, new)| changed_line(&format!("table {}", shown_name(old)), &format!("table {}", shown_name(new)))).collect();
+    // What the table renames replaced, each line before them with the line they left in its place.
+    let mut moved_with: Vec<(String, String)> = Vec::new();
+    if let Some(renamed) = steps.renamed {
+        let (r_gone, r_came) = difference(steps.moved.unwrap_or(steps.before), renamed);
+        let names: Vec<(String, String)> = tables.iter().map(|(old, new)| (crate::sql::last_written(&shown_name(old)), crate::sql::last_written(&shown_name(new)))).collect();
+        let column_head = |line: &str| if line.starts_with("column ") { Some(split_head(line).0.to_string()) } else { None };
+        for g in &r_gone {
+            let same = |c: &String| {
+                names.iter().any(|(old, new)| {
+                    let swapped = crate::diff::swap_name(g, old, new);
+                    swapped == *c || column_head(&swapped).is_some_and(|h| column_head(c).as_deref() == Some(h.as_str()))
+                })
+            };
+            if let Some(c) = r_came.iter().find(|c| same(c) && !moved_with.iter().any(|(_, t)| t == *c)) {
+                moved_with.push((g.clone(), c.clone()));
+            }
+        }
+    }
+    for (g, c) in &moved_with {
+        if let (Some(i), Some(j)) = (gone.iter().position(|l| l == g), came.iter().position(|l| l == c)) {
+            gone.remove(i);
+            came.remove(j);
+        }
+    }
     let is = |line: &str, name: &str| readable(line).strip_prefix(&format!("column {name}")).is_some_and(|rest| rest.is_empty() || rest.starts_with(' '));
     for (old, new) in columns {
         let (old, new) = (shown_name(old), shown_name(new));
+        // The old column as the schema before the migration has it: under its table's old name where
+        // its table was renamed too.
+        let before = |line: &String| is(line, &old) || moved_with.iter().any(|(g, c)| g == line && is(c, &old));
         // Only both lines together make a rename.
-        if let (Some(g), Some(c)) = (gone.iter().position(|l| is(l, &old)), came.iter().position(|l| is(l, &new))) {
+        if let (Some(g), Some(c)) = (gone.iter().position(before), came.iter().position(|l| is(l, &new))) {
             let (a, b) = (gone.remove(g), came.remove(c));
+            let a = moved_with.iter().find(|(g, _)| *g == a).map_or(a.clone(), |(_, c)| c.clone());
             out.push(changed_line(&readable(&a), &readable(&b)));
         }
     }
@@ -6684,15 +6713,28 @@ mod tests {
         let steps = Steps { before: &before, moved: None, renamed: None, after: &after };
         let columns = vec![("column public.posts.title".to_string(), "column public.posts.heading".to_string())];
         assert_eq!(summary_lines(&steps, &[], &columns), ["  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})", "  + column posts.summary text", "  - column posts.body text"]);
-        // A table renamed: what its rename changed is left out, a default naming it that changes
-        // besides is not, and a column of it renamed is a rename under the table's new name.
+        // A table renamed: what only took its new name is left out, a default that changes besides is
+        // listed as it was before and is after, and a column of it renamed is a rename under the
+        // table's new name.
         let before = lines(&["table public.orders", "column public.orders.id integer not null", "column public.orders.title text", "column public.orders.kind text default 'orders'::text", "constraint public.orders orders_pkey PRIMARY KEY (id)"]);
         let renamed = lines(&["table public.invoices", "column public.invoices.id integer not null", "column public.invoices.title text", "column public.invoices.kind text default 'orders'::text", "constraint public.invoices invoices_pkey PRIMARY KEY (id)"]);
         let after = lines(&["table public.invoices", "column public.invoices.id integer not null", "column public.invoices.heading text", "column public.invoices.kind text default 'invoices'::text", "constraint public.invoices invoices_pkey PRIMARY KEY (id)"]);
         let steps = Steps { before: &before, moved: None, renamed: Some(&renamed), after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string())];
         let columns = vec![("column public.invoices.title".to_string(), "column public.invoices.heading".to_string())];
-        assert_eq!(summary_lines(&steps, &tables, &columns), ["  ~ table [-orders-]{+invoices+}", "  ~ column invoices.[-title-]{+heading+} text", "  + column invoices.kind text default 'invoices'::text", "  - column invoices.kind text default 'orders'::text"]);
+        assert_eq!(summary_lines(&steps, &tables, &columns), ["  ~ table [-orders-]{+invoices+}", "  ~ column invoices.[-title-]{+heading+} text", "  + column invoices.kind text default 'invoices'::text", "  - column orders.kind text default 'orders'::text"]);
+        // A view the table rename drops, where the table takes its name, stays listed.
+        let before = lines(&["table public.t_data", "column public.t_data.id integer", "view public.data select id from public.t_data", "view public.q select id from public.data"]);
+        let renamed = lines(&["table public.data", "column public.data.id integer"]);
+        let steps = Steps { before: &before, moved: None, renamed: Some(&renamed), after: &renamed };
+        let tables = vec![("table public.t_data".to_string(), "table public.data".to_string())];
+        assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-t_data-]{+data+}", "  - view data select id from t_data", "  - view q select id from data"]);
+        // A table moved to another schema shows as the move's endpoints, never a line in between.
+        let before = lines(&["table public.orders", "column public.orders.status text default 'orders'::text"]);
+        let moved = lines(&["table archive.orders", "column archive.orders.status text default 'orders'::text"]);
+        let after = lines(&["table archive.orders", "column archive.orders.status text default 'archived'::text"]);
+        let steps = Steps { before: &before, moved: Some(&moved), renamed: None, after: &after };
+        assert_eq!(summary_lines(&steps, &[], &[]), ["  + table archive.orders", "  + column archive.orders.status text default 'archived'::text", "  - table orders", "  - column orders.status text default 'orders'::text"]);
     }
 
     #[test]
