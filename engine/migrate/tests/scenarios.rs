@@ -3364,6 +3364,7 @@ on!(
     dev_rewinds_a_changed_index,
     a_primary_key_added_over_an_index_says_it_checks_for_nulls,
     new_keeps_a_key_while_a_column_under_it_is_renamed,
+    a_name_given_to_a_new_index_keeps_the_old_one_until_the_last_build,
 );
 
 #[tokio::test(flavor = "current_thread")]
@@ -4920,6 +4921,16 @@ mod adversarial {
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.output();
         assert_eq!(p.check_every_way().await.0, 0);
+        // An index and a constraint that trade names are no rename.
+        p.schema("create table t (id int primary key, n int, m int, constraint t_y unique (m)); create index t_b on t (n);");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "key", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        p.schema("create table t (id int primary key, n int, m int, constraint t_b unique (m)); create index t_y on t (n);");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "trade", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.check_every_way().await.0, 0);
     }
 
     pub async fn new_drops_a_foreign_key_on_a_replaced_key_with_it(mut p: P) {
@@ -4987,17 +4998,43 @@ mod adversarial {
         assert_eq!(p.rows("select count(*)::text as n from posts").await[0].text("n"), "1");
     }
 
+    pub async fn a_name_given_to_a_new_index_keeps_the_old_one_until_the_last_build(mut p: P) {
+        let v1 = "create table accounts (id int primary key, email text, handle text); create unique index accounts_a on accounts (email);";
+        p.schema(v1);
+        p.file("20261027100000_v1.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into accounts values (1, 'e1', 'h1')").await;
+        p.output();
+        // The name moves to a new definition, and the old one to another name.
+        p.schema("create table accounts (id int primary key, email text, handle text); create unique index accounts_a on accounts (handle); create unique index accounts_z on accounts (email);");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "move", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let made: Vec<String> = p.files().into_iter().filter(|f| f.contains("_move")).collect();
+        let last = (made.last().unwrap().clone(), std::fs::read_to_string(p.dir.join("migrations").join(made.last().unwrap())).unwrap());
+        assert!(last.1.contains("drop index accounts_a;"), "the old one goes last: {last:?}");
+        std::fs::remove_file(p.dir.join("migrations").join(&last.0)).unwrap();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert!(p.try_rows("insert into accounts values (2, 'e1', 'h2')").await.is_err(), "email stays unique until the swap");
+        p.file(&last.0, &last.1);
+        p.output();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.check_every_way().await.0, 0);
+    }
+
     pub async fn a_primary_key_added_over_an_index_says_it_checks_for_nulls(mut p: P) {
         p.file("20261027100000_t.sql", "create table t (id int, n int);");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.exec("insert into t values (1, 1)").await;
         // Written by hand: the key's column isn't yet not null, so adding the key reads every row.
-        p.file("20261027110000_index.sql", "create unique index concurrently t_new on t (id);");
+        // A column the index only includes stays nullable, and isn't read.
+        p.file("20261027110000_index.sql", "create unique index concurrently t_new on t (id) include (n);");
         p.file("20261027120000_key.sql", "alter table t add constraint t_pkey primary key using index t_new;");
-        p.schema("create table t (id int not null, n int, constraint t_pkey primary key (id));");
+        p.schema("create table t (id int not null, n int, constraint t_pkey primary key (id) include (n));");
         p.output();
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
-        assert_has!(p.output(), r"_key\.sql\n      ! It checks every row of t for a null in id while it blocks reads and writes to it");
+        let out = p.output();
+        assert_has!(&out, r"_key\.sql\n      ! It checks every row of t for a null in id while it blocks reads and writes to it");
+        assert!(!out.contains("a null in n "), "{out}");
     }
 
     pub async fn new_refuses_a_table_rewrite_until_blocking(mut p: P) {
