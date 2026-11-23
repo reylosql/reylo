@@ -1,0 +1,4 @@
+create table a (id integer primary key, body text not null);
+create view w as select 1 as k, 2 as j;
+create view s as select a.id, a.body from a join w on w.k = 1;
+create virtual table search using fts5(body, content='s', content_rowid='id');

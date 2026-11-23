@@ -4,3 +4,4 @@ drop table notes;
 alter table new_notes rename to notes;
 create trigger notes_ai after insert on notes begin insert into notes_fts (rowid, body) values (new.id, new.body); end;
 create trigger notes_ad after delete on notes begin insert into notes_fts (notes_fts, rowid, body) values ('delete', old.id, old.body); end;
+insert into notes_fts (notes_fts) values ('rebuild');

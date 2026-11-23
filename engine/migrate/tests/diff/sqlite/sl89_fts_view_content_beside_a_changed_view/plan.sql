@@ -1,0 +1,11 @@
+drop table search;
+drop view s;
+drop view w;
+create table new_a (id integer primary key, body text not null);
+insert into new_a (id, body) select id, body from a;
+drop table a;
+alter table new_a rename to a;
+create view w as select 1 as k, 2 as j;
+create view s as select a.id, a.body from a join w on w.k = 1;
+create virtual table search using fts5(body, content='s', content_rowid='id');
+insert into search (search) values ('rebuild');
