@@ -963,17 +963,17 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
 
 /// `line` with each of `names` (an old name and its new, as the catalog writes them) replaced where
 /// it stands as a whole name, all at once: `public.orders` in `public.orders(id)` and
-/// `public.orders.title`, but not in `public.orders_archive` or inside a quoted name,
-/// `"public.orders"`.
+/// `public.orders.title`, but not in `public.orders_archive`, inside a quoted name,
+/// `"public.orders"`, or inside a string, `'public.orders'`, whose text a rename never changes.
 #[cfg(feature = "cli")]
 fn renamed_in(line: &str, names: &[(String, String)]) -> String {
     let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
-    // The quote a quoted name or a string is open in: a name is never replaced inside a quoted name,
-    // and a `"` inside a string opens none.
+    // The quote a quoted name or a string is open in: a name is never replaced inside either, and a
+    // `"` inside a string opens none.
     let (mut out, mut at, mut prev, mut quote) = (String::new(), 0, None::<char>, None::<char>);
     while let Some(c) = line[at..].chars().next() {
         let rest = &line[at..];
-        if !matches!(quote, Some('"' | '`')) && prev.is_none_or(|p| !ident(p) && p != '.') {
+        if quote.is_none() && prev.is_none_or(|p| !ident(p) && p != '.') {
             if let Some((old, new)) = names.iter().find(|(old, _)| rest.starts_with(old.as_str()) && rest[old.len()..].chars().next().is_none_or(|n| !ident(n))) {
                 out.push_str(new);
                 at += old.len();
@@ -6833,7 +6833,8 @@ mod tests {
         let tables = vec![("table public.alpha".to_string(), "table public.omega".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-alpha-]{+omega+}", "  - view omega as SELECT 1 AS n;", "  - view \"public.alpha\" as SELECT omega.n FROM omega;"]);
         assert_eq!(renamed_in("view public.\"public.alpha\" as SELECT 1 FROM public.alpha", &[("public.alpha".to_string(), "public.omega".to_string())]), "view public.\"public.alpha\" as SELECT 1 FROM public.omega");
-        // A double quote inside a string quotes no name.
+        // A string is left as it is, and a double quote inside one quotes no name.
+        assert_eq!(renamed_in("policy public.alpha visible USING ((body = '\"public.alpha\"'::text))", &[("public.alpha".to_string(), "public.omega".to_string())]), "policy public.omega visible USING ((body = '\"public.alpha\"'::text))");
         assert_eq!(renamed_in("policy public.notes visible USING ((body = '\"'::text) OR (EXISTS (SELECT 1 FROM public.alpha)))", &[("public.alpha".to_string(), "public.omega".to_string())]), "policy public.notes visible USING ((body = '\"'::text) OR (EXISTS (SELECT 1 FROM public.omega)))");
         // Two tables of one name in two schemas, each renamed its own way, with a column of one.
         let before = lines(&["table east.orders", "table west.orders", "column west.orders.title text", "constraint west.orders orders_pkey PRIMARY KEY (id)"]);
