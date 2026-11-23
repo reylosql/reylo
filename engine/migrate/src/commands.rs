@@ -890,11 +890,13 @@ fn changed_lines(before: &[String], after: &[String]) -> Vec<String> {
     let came: Vec<&String> = came.iter().filter(|l| !made_by_constraint(l, &came_names)).collect();
     // A table one side has and the other doesn't, by its name across each whole schema, came or
     // went; one both have may have changed its own line, as row level security does.
+    // A name two of one side's tables read as is no one table's, and groups nothing.
     let names = |lines: &[String]| -> Vec<String> { lines.iter().filter_map(|l| table_name(&readable(l))).collect() };
     let (had, has) = (names(before), names(after));
     let tables: Vec<String> = had.iter().chain(&has).cloned().collect();
-    let added: Vec<String> = has.iter().filter(|t| !had.contains(t)).cloned().collect();
-    let dropped: Vec<String> = had.iter().filter(|t| !has.contains(t)).cloned().collect();
+    let once = |name: &String, side: &[String]| side.iter().filter(|t| *t == name).count() == 1;
+    let added: Vec<String> = has.iter().filter(|t| !had.contains(t) && once(t, &has)).cloned().collect();
+    let dropped: Vec<String> = had.iter().filter(|t| !has.contains(t) && once(t, &had)).cloned().collect();
     let (mut out, more_came) = marked(&came, "green", '+', MAX, &added, &tables);
     let (gone, more_gone) = marked(&gone, "red", '-', MAX, &dropped, &tables);
     out.extend(gone);
@@ -905,9 +907,14 @@ fn changed_lines(before: &[String], after: &[String]) -> Vec<String> {
     out
 }
 
-/// The name of the table a readable `table …` line is, quotes and all: `"order items"` whole.
+/// The name of the table a readable `table …` line is, quotes and all: `"order items"` whole, and
+/// MySQL's, which it writes unquoted, as all before its ` engine=`. None for MySQL's `table options`
+/// line, which is a table's settings, not a table.
 fn table_name(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("table ")?;
+    let rest = line.strip_prefix("table ").filter(|_| !line.starts_with("table options "))?;
+    if let Some((name, _)) = rest.split_once(" engine=") {
+        return Some(name.to_string());
+    }
     let mut quote = None;
     let end = rest
         .char_indices()
@@ -6657,10 +6664,33 @@ mod tests {
             changed_lines(&lines(&["table t.archive", "column t.archive.id integer"]), &lines(&["table t.archive", "column t.archive.id integer", "column t.archive.label text", "table t", "column t.id integer"])),
             ["  + column t.archive.label text", "  + table t", "      id integer"]
         );
-        // A quoted name is one name, and MySQL's foreign keys and checks go under their table.
+        // A quoted name is one name.
+        assert_eq!(changed_lines(&[], &lines(&["table public.\"order items\"", "column public.\"order items\".id integer"])), ["  + table \"order items\"", "      id integer"]);
+        // MySQL writes its names unquoted, a table's as all before its engine. Its foreign keys and
+        // checks go under their table, but for one two tables could own, `orders` and `orders
+        // archive`; its table options are no table.
         assert_eq!(
-            changed_lines(&[], &lines(&["table `order items` engine=InnoDB", "column `order items`.id int not null", "foreign key `order items` fk_user (user_id) references users (id) on update RESTRICT on delete CASCADE", "check `order items` positive (`id` > 0)"])),
-            ["  + table `order items` engine=InnoDB", "      id int not null", "      foreign key fk_user (user_id) references users (id) on update RESTRICT on delete CASCADE", "      check positive (`id` > 0)"]
+            changed_lines(
+                &[],
+                &lines(&[
+                    "table orders engine=InnoDB collate=utf8mb4_0900_ai_ci",
+                    "column orders.id int not null",
+                    "foreign key orders fk_user (user_id) references users (id) on update RESTRICT on delete CASCADE",
+                    "table orders archive engine=InnoDB collate=utf8mb4_0900_ai_ci",
+                    "column orders archive.id int not null",
+                    "check orders archive positive (`id` > 0)",
+                    "table options orders key_block_size=8",
+                ])
+            ),
+            [
+                "  + table orders engine=InnoDB collate=utf8mb4_0900_ai_ci",
+                "      id int not null",
+                "      foreign key fk_user (user_id) references users (id) on update RESTRICT on delete CASCADE",
+                "  + table orders archive engine=InnoDB collate=utf8mb4_0900_ai_ci",
+                "      id int not null",
+                "  + check orders archive positive (`id` > 0)",
+                "  + table options orders key_block_size=8",
+            ]
         );
     }
 
