@@ -1482,7 +1482,7 @@ async fn a_hotfix_moves_past_no_table_made_from_a_query_and_is_none(mut p: P) {
     // SQLite's undo drops a table, which reylo run, with foreign keys on, would do otherwise than a
     // migration: it is left to do by hand.
     if p.d == Dialect::Sqlite {
-        assert_has!(&out, r"  Undo it on \S+ by hand, with this SQL, then give deploy the same URL as this command:\n\n(?:    [^\n]*\n)*    (?i:drop table) \S*copy\S*;\n(?:    [^\n]*\n)*\n  Then deploy, which runs 20261027130000_b\.sql first, and then 20261027140000_copy\.sql:\n    reylo migrate deploy --url <url>");
+        assert_has!(&out, r"  Undo it on \S+ by hand, then give deploy the same URL as this command\.\n\n  Then deploy, which runs 20261027130000_b\.sql first, and then 20261027140000_copy\.sql:\n    reylo migrate deploy --url <url>");
         p.exec("drop table copy").await;
     } else {
         p.exec(&undo_on(&out)).await;
@@ -1558,7 +1558,7 @@ async fn a_hotfix_that_cannot_move_ahead_is_undone_then_deployed(mut p: P) {
     let out = p.output();
     assert_has!(&out, title);
     if p.d == Dialect::Sqlite {
-        assert_has!(&out, r"  Undoing it loses what \S*t holds\.\n  Undo it on \S+ by hand, with this SQL, then give deploy the same URL as this command:\n\n(?:    [^\n]*\n)*    (?i:drop table) \S*t\S*;\n(?:    [^\n]*\n)*\n  Then deploy, which runs 20261027110000_t\.sql first, and then 20261027120000_wider\.sql:\n    reylo migrate deploy --url <url>\n\nNothing was changed\.");
+        assert_has!(&out, r"  Undoing it loses what \S*t holds\.\n  Undo it on \S+ by hand, then give deploy the same URL as this command\.\n\n  Then deploy, which runs 20261027110000_t\.sql first, and then 20261027120000_wider\.sql:\n    reylo migrate deploy --url <url>\n\nNothing was changed\.");
     } else {
         assert_has!(&out, r"  Undoing it loses what \S*t holds\.\n  Give both commands the same URL as this one\.\n\n  Undo it on \S+, so that deploy runs 20261027110000_t\.sql first, and then 20261027120000_wider\.sql:\n    reylo run --url <url> '[^\n]*'\n    reylo migrate deploy --url <url>\n\nNothing was changed\.");
     }
