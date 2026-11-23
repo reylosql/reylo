@@ -3321,6 +3321,7 @@ on!(
     a_skipped_migration_moves_only_where_both_orders_agree_before_what_follows,
     a_skipped_function_moves_past_no_column_it_fills,
     a_skipped_migration_moves_past_no_partition_it_leaves,
+    a_skipped_function_moves_past_no_index_it_keys,
     a_skipped_migration_is_found_where_another_changes_the_same_column,
     a_history_out_of_the_locks_order_moves_nothing_more,
     the_history_table_takes_no_default_privileges,
@@ -3728,6 +3729,23 @@ mod adversarial {
         assert_eq!(p.history_push().await, 1);
         assert_has!(p.output(), r"It has what they make without 20261027110000_m_p\.sql\. Run after 20261027120000_c\.sql, the migrations end differently, so it can't move there\.");
         assert_eq!(p.locked(), [a, b, c, d, e]);
+    }
+
+    /// An expression index stores the keys its function returns when it is built: a skipped change to
+    /// the function never moves past it, or an index scan would miss rows a fresh database finds.
+    pub async fn a_skipped_function_moves_past_no_index_it_keys(mut p: P) {
+        p.linear();
+        let (a, b, c) = ("20261027100000_items.sql", "20261027110000_key.sql", "20261027120000_index.sql");
+        let made = "create table items (id int primary key, n int); insert into items values (1, 10); create function idx_key(int) returns int language plpgsql immutable as $$ begin return $1 + 1; end $$;";
+        p.file(a, made);
+        p.file(b, "create or replace function idx_key(int) returns int language plpgsql immutable as $$ begin return $1 + 2; end $$; alter table items alter column n set not null;");
+        p.file(c, "alter table items alter column n set default 0; create index items_expr on items (idx_key(id));");
+        p.lock(&[a, b, c]);
+        p.exec(&format!("{made} alter table items alter column n set default 0; create index items_expr on items (idx_key(id));")).await;
+        p.output();
+        assert_eq!(p.history_push().await, 1);
+        assert_has!(p.output(), r"✗ This database has what the migrations make without 20261027110000_key\.sql\n  It ran 20261027120000_index\.sql without it\. Migration 20261027120000_index\.sql changes data");
+        assert_eq!(p.locked(), [a, b, c]);
     }
 
     /// A column's default and its nullability share a line of the catalog: a skipped migration that

@@ -1562,13 +1562,38 @@ fn order_sensitive(sql: &str, d: Dialect) -> Vec<String> {
 }
 
 /// Whether a schema change computes a value for each row a table already has from an expression
-/// that can call what other migrations define: a column added with a default that calls something
-/// or generated and stored, and a column retyped with `using`. What it writes turns on what those
-/// calls do when it runs, which no schema shows.
+/// that can call what other migrations define, and stores it: a column added with a default that
+/// calls something or generated and stored, a column retyped with `using`, and an index whose keys
+/// or predicate call something. What it stores turns on what those calls do when it runs, which no
+/// schema shows, and an index scan reads its keys as they were stored.
 fn fills_existing(statement: &crate::sql::Statement) -> bool {
     use crate::sql::TokenKind;
     let t = &statement.tokens;
     let words: Vec<String> = t.iter().map(crate::sql::Token::upper).collect();
+    let call = |i: usize| i > 0 && t[i].text == "(" && t[i].kind == TokenKind::Symbol && matches!(t[i - 1].kind, TokenKind::Word | TokenKind::Quoted);
+    if words.first().map(String::as_str) == Some("CREATE") && words.iter().take(4).any(|w| w == "INDEX") {
+        // The key list, the first parenthesis after the table's name (and its access method), and
+        // the predicate after `where`.
+        let Some(on) = words.iter().position(|w| w == "ON") else { return false };
+        let Some(open) = (on + 1..t.len()).find(|&i| t[i].text == "(" && t[i].kind == TokenKind::Symbol) else { return false };
+        let mut depth = 0usize;
+        let mut close = t.len();
+        for (i, token) in t.iter().enumerate().skip(open) {
+            match token.text.as_str() {
+                "(" if token.kind == TokenKind::Symbol => depth += 1,
+                ")" if token.kind == TokenKind::Symbol => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let predicate = (close..t.len()).find(|&i| words[i] == "WHERE").unwrap_or(t.len());
+        return (open + 1..close).chain(predicate..t.len()).any(call);
+    }
     if words.first().map(String::as_str) != Some("ALTER") || words.get(1).map(String::as_str) != Some("TABLE") {
         return false;
     }
@@ -8015,6 +8040,11 @@ mod tests {
         assert!(!fills("alter table t add column v numeric(10, 2) default 0, add column w int default 2"));
         assert!(!fills("alter table t alter column n set default f()"));
         assert!(!fills("create table t (v int default f())"));
+        assert!(fills("create index t_k on t (idx_key(id))"));
+        assert!(fills("create index t_k on t using btree (lower(email))"));
+        assert!(fills("create unique index t_k on t (id) where active(id)"));
+        assert!(!fills("create index t_k on t using btree (id) include (email)"));
+        assert!(!fills("create index concurrently if not exists t_k on public.t (id, email desc)"));
     }
 
     #[test]
