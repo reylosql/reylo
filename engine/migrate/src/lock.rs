@@ -422,9 +422,11 @@ mod tests {
             let text = format!("version: {version}\nmigrations:\n");
             assert!(matches!(of_text(&text), State::Invalid(ref e) if e.contains(&format!("`version: {version}` isn't a lock's version"))), "{text}: {:?}", of_text(&text));
         }
-        for text in ["version: '1'\nmigrations:\n", "version:\nmigrations:\n", "migrations:\n"] {
+        for text in ["version: '1'\nmigrations:\n", "version:\nmigrations:\n", "version: NULL\nmigrations:\n", "version: ~ # none\nmigrations:\n", "migrations:\n"] {
             assert_eq!(of_text(text), State::Lock(Lock::default()), "{text}");
         }
+        assert!(matches!(of_text("version: 'null'\nmigrations:\n"), State::Invalid(e) if e.contains("`version: null` isn't a lock's version")));
+        assert_eq!(of_text("version: \"2\" # upgraded\nmigrations:\n"), State::Newer(2));
     }
 
     #[test]

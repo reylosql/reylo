@@ -57,13 +57,16 @@ type LockEntry = { name: string; sum: string };
  * `version` is above the one it reads, which a newer Reylo wrote, is `newer`, and read no further.
  */
 export function readLock(text: string): { schema?: string; entries: LockEntry[] } | { error: string } | { newer: number } {
-  // A plain value up to a comment, or a quoted one as written.
-  const scalar = (raw: string) => {
+  // A value and whether it was quoted: a quoted one as written, a plain one up to a comment.
+  const quoted = (raw: string): { text: string; quoted: boolean } => {
     const v = raw.trim();
-    if (/^'.*'$/.test(v)) return v.slice(1, -1).replace(/''/g, "'");
-    if (/^".*"$/.test(v)) return v.slice(1, -1);
-    return v.replace(/\s+#.*$/, "");
+    const single = /^'((?:[^']|'')*)'(?:\s+#.*)?$/.exec(v);
+    if (single) return { text: single[1]!.replace(/''/g, "'"), quoted: true };
+    const double = /^"([^"\\]*)"(?:\s+#.*)?$/.exec(v);
+    if (double) return { text: double[1]!, quoted: true };
+    return { text: v.replace(/(^|\s+)#.*$/, ""), quoted: false };
   };
+  const scalar = (raw: string) => quoted(raw).text;
   // `key: value` pairs, as a block mapping's line or a flow mapping's `{ a: b, c: d }`.
   const pair = (raw: string): [string, string] | undefined => {
     const m = /^([A-Za-z_]+):(?:\s+(.*))?$/.exec(raw.trim());
@@ -72,10 +75,11 @@ export function readLock(text: string): { schema?: string; entries: LockEntry[] 
   let schema: string | undefined;
   const items: { at: number; first: string; more: [number, string][] }[] = [];
   // The version first: a newer one may write the rest in a way this doesn't read. It is a version
-  // only as digits with no leading zero, as `of_text` reads it; none, as YAML's null, is version 1.
-  const versions = [...text.matchAll(/^version:(.*)$/gm)].map((m) => scalar(m[1]!));
-  if (versions.length === 1 && !["", "~", "null"].includes(versions[0]!)) {
-    const v = versions[0]!;
+  // only as digits with no leading zero, as `of_text` reads it; none, or YAML's null unquoted, is
+  // version 1.
+  const versions = [...text.matchAll(/^version:(.*)$/gm)].map((m) => quoted(m[1]!));
+  if (versions.length === 1 && (versions[0]!.quoted || !["", "~", "null", "Null", "NULL"].includes(versions[0]!.text))) {
+    const v = versions[0]!.text;
     if (!/^[1-9][0-9]{0,8}$/.test(v)) return { error: `\`version: ${v}\` isn't a lock's version` };
     if (Number(v) > LOCK_VERSION) return { newer: Number(v) };
   }
