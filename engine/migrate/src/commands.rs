@@ -812,6 +812,7 @@ fn readable(line: &str) -> String {
     static MYSQL_INDEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^index ([^.\s]+)\.(\S+) (unique )?(\w+)((?: invisible)?(?: comment "(?:[^"\\]|\\.)*")?) (\(.*\))$"#).expect("a valid pattern"));
     static SQLITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(index|view|trigger) \S+ create (unique )?(?:temp |temporary )?(?:index|view|trigger) (?:if not exists )?(\S+) (.*)$").expect("a valid pattern"));
     static CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) (\S+) (.*)$").expect("a valid pattern"));
+    static POSTGRES_DEFINITION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:PRIMARY KEY|UNIQUE|CHECK|FOREIGN KEY|EXCLUDE|NOT NULL)\b").expect("a valid pattern"));
     static SQLITE_CONSTRAINT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^constraint (\S+) ((?:primary key|unique|check|foreign key|constraint)\b.*)$").expect("a valid pattern"));
     static PUBLIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(^|[\s(,]|::)(?:public|"public")\."#).expect("a valid pattern"));
     let line = PUBLIC.replace_all(line, "$1").into_owned();
@@ -826,8 +827,10 @@ fn readable(line: &str) -> String {
     if let Some(c) = SQLITE.captures(&line) {
         return format!("{}{} {} {}", c.get(2).map_or("", |m| m.as_str()), &c[1], &c[3], &c[4]);
     }
-    // SQLite's, which names no constraint unless its definition does.
-    if let Some(c) = SQLITE_CONSTRAINT.captures(&line) {
+    // Postgres's, whose definition is in capitals, names its constraint, whatever the name; SQLite's,
+    // in lowercase, names none unless its definition does.
+    let named = CONSTRAINT.captures(&line).filter(|c| POSTGRES_DEFINITION.is_match(&c[3]));
+    if let Some(c) = SQLITE_CONSTRAINT.captures(&line).filter(|_| named.is_none()) {
         return format!("constraint on {}: {}", &c[1], &c[2]);
     }
     if let Some(c) = CONSTRAINT.captures(&line) {
@@ -885,8 +888,15 @@ fn changed_lines(before: &[String], after: &[String]) -> Vec<String> {
     let (gone_names, came_names) = (constraint_names(&gone), constraint_names(&came));
     let gone: Vec<&String> = gone.iter().filter(|l| !made_by_constraint(l, &gone_names)).collect();
     let came: Vec<&String> = came.iter().filter(|l| !made_by_constraint(l, &came_names)).collect();
-    let (mut out, more_came) = marked(&came, "green", '+', MAX);
-    let (gone, more_gone) = marked(&gone, "red", '-', MAX);
+    // A table one side has and the other doesn't, by its name across each whole schema, came or
+    // went; one both have may have changed its own line, as row level security does.
+    let names = |lines: &[String]| -> Vec<String> { lines.iter().filter_map(|l| table_name(&readable(l))).collect() };
+    let (had, has) = (names(before), names(after));
+    let tables: Vec<String> = had.iter().chain(&has).cloned().collect();
+    let added: Vec<String> = has.iter().filter(|t| !had.contains(t)).cloned().collect();
+    let dropped: Vec<String> = had.iter().filter(|t| !has.contains(t)).cloned().collect();
+    let (mut out, more_came) = marked(&came, "green", '+', MAX, &added, &tables);
+    let (gone, more_gone) = marked(&gone, "red", '-', MAX, &dropped, &tables);
     out.extend(gone);
     let more = more_came + more_gone;
     if more > 0 {
@@ -895,27 +905,57 @@ fn changed_lines(before: &[String], after: &[String]) -> Vec<String> {
     out
 }
 
-/// What came or went, `mark` before each, readable: a table that came or went is one line, its
-/// columns, constraints and indexes indented under it rather than each on a line of its own. At
-/// most `max` of them, and how many more there are.
-fn marked(lines: &[&String], style: &str, mark: char, max: usize) -> (Vec<String>, usize) {
-    let lines: Vec<String> = lines.iter().map(|l| readable(l)).collect();
-    let tables: Vec<&str> = lines.iter().filter_map(|l| l.strip_prefix("table ")).map(|rest| rest.split(' ').next().unwrap_or(rest)).collect();
-    // A line of one of those tables, as its table's own: without the table's name.
-    let under = |line: &str| -> Option<(usize, String)> {
-        tables.iter().enumerate().find_map(|(k, table)| {
-            let own = if let Some(column) = line.strip_prefix(&format!("column {table}.")) {
-                Some(column.to_string())
-            } else if let Some(rest) = line.strip_prefix("constraint ") {
-                rest.split_once(&format!(" on {table}: ")).filter(|(name, _)| !name.contains(' ')).map(|(_, def)| def.to_string()).or_else(|| rest.strip_prefix(&format!("on {table}: ")).map(str::to_string))
-            } else {
-                let index = line.strip_prefix("unique index ").map(|rest| ("unique index", rest)).or_else(|| line.strip_prefix("index ").map(|rest| ("index", rest)));
-                index.and_then(|(kind, rest)| rest.split_once(&format!(" on {table} ")).filter(|(name, _)| !name.contains(' ')).map(|(name, def)| format!("{kind} {name} {def}")))
-            };
-            own.map(|own| (k, own))
+/// The name of the table a readable `table …` line is, quotes and all: `"order items"` whole.
+fn table_name(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("table ")?;
+    let mut quote = None;
+    let end = rest
+        .char_indices()
+        .find(|&(_, c)| {
+            match (quote, c) {
+                (Some(q), _) if c == q => quote = None,
+                (None, '"' | '`') => quote = Some(c),
+                (None, ' ') => return true,
+                _ => {}
+            }
+            false
         })
+        .map_or(rest.len(), |(k, _)| k);
+    Some(rest[..end].to_string())
+}
+
+/// The table a readable line belongs to, of `tables` (every table on either side), and the line as
+/// that table's own, without its name: a column, a constraint, an index, and MySQL's foreign keys
+/// and checks. None where no table, or more than one, could own it, as `t` and `t.archive` could
+/// both own SQLite's `column t.archive.label`.
+fn owner(line: &str, tables: &[String]) -> Option<(String, String)> {
+    let of = |table: &String| -> Option<String> {
+        if let Some(rest) = line.strip_prefix("column ") {
+            return rest.strip_prefix(&format!("{table}.")).map(str::to_string);
+        }
+        if let Some(rest) = line.strip_prefix("constraint ") {
+            return rest.split_once(&format!(" on {table}: ")).filter(|(name, _)| !name.contains(' ')).map(|(_, def)| def.to_string()).or_else(|| rest.strip_prefix(&format!("on {table}: ")).map(str::to_string));
+        }
+        for kind in ["foreign key", "check"] {
+            if let Some(rest) = line.strip_prefix(&format!("{kind} {table} ")) {
+                return Some(format!("{kind} {rest}"));
+            }
+        }
+        let (kind, rest) = line.strip_prefix("unique index ").map(|rest| ("unique index", rest)).or_else(|| line.strip_prefix("index ").map(|rest| ("index", rest)))?;
+        let (name, rest) = rest.split_once(' ')?;
+        rest.strip_prefix(&format!("on {table} ")).map(|def| format!("{kind} {name} {def}"))
     };
-    let owned: Vec<Option<(usize, String)>> = lines.iter().map(|l| under(l)).collect();
+    let mut owners = tables.iter().filter_map(|t| of(t).map(|own| (t.clone(), own)));
+    let first = owners.next()?;
+    owners.all(|(t, _)| t == first.0).then_some(first)
+}
+
+/// What came or went, `mark` before each, readable: each table of `grouped` (those that came or
+/// went whole) one line, its columns, constraints and indexes indented under it rather than each
+/// on a line of its own. At most `max` of them, and how many more there are.
+fn marked(lines: &[&String], style: &str, mark: char, max: usize, grouped: &[String], tables: &[String]) -> (Vec<String>, usize) {
+    let lines: Vec<String> = lines.iter().map(|l| readable(l)).collect();
+    let owned: Vec<Option<(String, String)>> = lines.iter().map(|l| owner(l, tables).filter(|(t, _)| grouped.contains(t))).collect();
     let mut out = Vec::new();
     let mut shown = 0;
     let mut total = 0;
@@ -926,8 +966,8 @@ fn marked(lines: &[&String], style: &str, mark: char, max: usize) -> (Vec<String
         }
         shown += 1;
         out.push(paint(style, &format!("  {mark} {line}")));
-        if let Some(k) = line.strip_prefix("table ").and_then(|rest| tables.iter().position(|t| rest.split(' ').next() == Some(*t))) {
-            out.extend(owned.iter().flatten().filter(|(t, _)| *t == k).map(|(_, own)| paint(style, &format!("      {own}"))));
+        if let Some(table) = table_name(line).filter(|t| grouped.contains(t)) {
+            out.extend(owned.iter().flatten().filter(|(t, _)| *t == table).map(|(_, own)| paint(style, &format!("      {own}"))));
         }
     }
     (out, total - shown)
@@ -6607,6 +6647,27 @@ mod tests {
         );
         // A table dropped reads the same way, and SQLite's constraints, which name none, as theirs.
         assert_eq!(changed_lines(&lines(&["table t strict", "column t.id integer", "constraint t primary key (id)"]), &[]), ["  - table t strict", "      id integer", "      primary key (id)"]);
+        // A table both sides have is no new table, whatever its own line became.
+        assert_eq!(
+            changed_lines(&lines(&["table public.t", "column public.t.id integer"]), &lines(&["table public.t row level security", "column public.t.id integer", "column public.t.label text"])),
+            ["  + table t row level security", "  + column t.label text", "  - table t"]
+        );
+        // A line two tables could own, `t` and `t.archive`, stays a line of its own.
+        assert_eq!(
+            changed_lines(&lines(&["table t.archive", "column t.archive.id integer"]), &lines(&["table t.archive", "column t.archive.id integer", "column t.archive.label text", "table t", "column t.id integer"])),
+            ["  + column t.archive.label text", "  + table t", "      id integer"]
+        );
+        // A quoted name is one name, and MySQL's foreign keys and checks go under their table.
+        assert_eq!(
+            changed_lines(&[], &lines(&["table `order items` engine=InnoDB", "column `order items`.id int not null", "foreign key `order items` fk_user (user_id) references users (id) on update RESTRICT on delete CASCADE", "check `order items` positive (`id` > 0)"])),
+            ["  + table `order items` engine=InnoDB", "      id int not null", "      foreign key fk_user (user_id) references users (id) on update RESTRICT on delete CASCADE", "      check positive (`id` > 0)"]
+        );
+    }
+
+    #[test]
+    fn a_postgres_constraint_named_like_a_keyword_keeps_its_name() {
+        assert_eq!(readable("constraint public.t check CHECK ((id > 0))"), "constraint check on t: check ((id > 0))");
+        assert_eq!(readable("constraint t check (id > 0)"), "constraint on t: check (id > 0)");
     }
 
     #[test]
