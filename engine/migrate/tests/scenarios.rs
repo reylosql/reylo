@@ -1458,8 +1458,10 @@ async fn a_hotfix_moves_past_no_table_made_from_a_query_and_is_none(mut p: P) {
     let made = if p.d == Dialect::Sqlite { "INT" } else { int };
     p.exec(&format!("create table copy (id {made})")).await;
     p.file(b, &format!("create table b (id {int});"));
-    p.file(copy, "create table copy as select id from a;");
-    p.schema(&format!("create table a (id {int}); create table snap as select id from a; create index a_id on a (id); create table b (id {int}); create table copy as select id from a;"));
+    // MySQL's way to write one with no `as`, a query in the parentheses.
+    let fill = if p.d == Dialect::Mysql { "create table copy (select id from a);" } else { "create table copy as select id from a;" };
+    p.file(copy, fill);
+    p.schema(&format!("create table a (id {int}); create table snap as select id from a; create index a_id on a (id); create table b (id {int}); {fill}"));
     p.lock(&[a, snap, index, b, copy]);
     p.output();
     assert_eq!(p.history_push().await, 1);
@@ -1477,7 +1479,7 @@ async fn a_hotfix_moves_past_no_table_made_from_a_query_and_is_none(mut p: P) {
     p.exec("insert into notes (id) values (1)").await;
     p.file(c, &format!("create table c (id {int});"));
     p.file(notes, &format!("create table notes (id {int}, body {text} default 'select');"));
-    p.schema(&format!("create table a (id {int}); create table snap as select id from a; create index a_id on a (id); create table b (id {int}); create table copy as select id from a; create table c (id {int}); create table notes (id {int}, body {text} default 'select');"));
+    p.schema(&format!("create table a (id {int}); create table snap as select id from a; create index a_id on a (id); create table b (id {int}); {fill} create table c (id {int}); create table notes (id {int}, body {text} default 'select');"));
     p.lock(&[a, snap, index, b, copy, c, notes]);
     p.output();
     assert_eq!(p.history_push().await, 0, "{}", p.peek());

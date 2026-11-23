@@ -1085,8 +1085,8 @@ fn writes_rows(sql: &str, d: Dialect) -> Vec<String> {
 
 /// Whether a statement makes what a query fills, read from its words, never a string's or a
 /// comment's: a table made from a query (`create table … as select`, and MySQL's `create table …
-/// select`, the query outside any parentheses but its own), and a materialized view, made or
-/// refreshed.
+/// select` and `create table … (select …)`, the query outside any parentheses but its own), and a
+/// materialized view, made or refreshed.
 #[cfg(feature = "cli")]
 fn fills(statement: &crate::sql::Statement) -> bool {
     let words: Vec<String> = statement.tokens.iter().map(crate::sql::Token::upper).collect();
@@ -1103,19 +1103,18 @@ fn fills(statement: &crate::sql::Statement) -> bool {
     }
     let Some(table) = head.iter().position(|w| *w == "TABLE") else { return false };
     let query = |w: &str| matches!(w, "SELECT" | "WITH" | "VALUES" | "TABLE");
+    // The first word in a parenthesis at the top, past any more of them: a column's name, or a
+    // query's first word, as MySQL takes `create table t (select …)` with no `as`.
+    let opens = |k: usize| (k + 1..words.len()).find(|&n| statement.tokens[n].text != "(").is_some_and(|n| query(word(n)));
     let mut depth = 0usize;
     for (k, t) in statement.tokens.iter().enumerate().skip(table + 1) {
         match t.text.as_str() {
+            "(" if t.kind == crate::sql::TokenKind::Symbol && depth == 0 && opens(k) => return true,
             "(" if t.kind == crate::sql::TokenKind::Symbol => depth += 1,
             ")" if t.kind == crate::sql::TokenKind::Symbol => depth = depth.saturating_sub(1),
             _ if depth > 0 => {}
             _ if word(k) == "SELECT" => return true,
-            _ if word(k) == "AS" => {
-                let next = (k + 1..words.len()).find(|&n| statement.tokens[n].text != "(");
-                if next.is_some_and(|n| query(word(n))) {
-                    return true;
-                }
-            }
+            _ if word(k) == "AS" && opens(k) => return true,
             _ => {}
         }
     }
@@ -6280,6 +6279,8 @@ mod tests {
             ("CREATE TEMP TABLE IF NOT EXISTS snap AS (WITH x AS (SELECT 1) SELECT * FROM x)", Dialect::Postgres),
             ("create table snap as table a", Dialect::Postgres),
             ("create table snap (id bigint) engine=InnoDB select id from a", Dialect::Mysql),
+            ("create table snap (select id from a)", Dialect::Mysql),
+            ("create table snap (id bigint) ((select id from a))", Dialect::Mysql),
             ("create materialized view totals as select count(*) from a", Dialect::Postgres),
             ("refresh materialized view totals", Dialect::Postgres),
         ] {
