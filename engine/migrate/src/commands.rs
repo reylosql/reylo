@@ -2134,8 +2134,13 @@ async fn behind_problem(shadows: &mut Shadows<'_>, target: &mut Db, url: &str, r
     let on = shown_url(url);
     let deploy = "reylo migrate deploy --url <url>";
     let d = target.dialect();
-    match undo.filter(|undo| runs_as_a_migration(&undo.join("\n"), d)) {
-        Some(undo) => problem.note("Give both commands the same URL as this one.").fix(format!("Undo it on {on}, so that deploy runs {order}"), &[format!("reylo run --url <url> {}", shell_word(&undo.join(" "))).as_str(), deploy]),
+    match undo {
+        Some(undo) if runs_as_a_migration(&undo.join("\n"), d) => problem.note("Give both commands the same URL as this one.").fix(format!("Undo it on {on}, so that deploy runs {order}"), &[format!("reylo run --url <url> {}", shell_word(&undo.join(" "))).as_str(), deploy]),
+        // SQL that reylo run wouldn't run as a migration does is shown, to run by hand as one.
+        Some(undo) => problem
+            .note(format!("Undo it on {on} by hand, with this SQL, then give deploy the same URL as this command:"))
+            .lines(std::iter::once(String::new()).chain(undo.iter().flat_map(|s| s.lines().map(|l| format!("    {l}")).collect::<Vec<_>>())).chain([String::new()]))
+            .fix(format!("Then deploy, which runs {order}"), &[deploy]),
         None => problem.note(format!("Undo it on {on} by hand, then give deploy the same URL as this command.")).fix(format!("Then deploy, which runs {order}"), &[deploy]),
     }
 }
