@@ -2,7 +2,8 @@
 //! `v1.sql` with `seed.sql`'s rows in one database, `v2.sql` in another, the plan from the first to
 //! the second run on the first as `reylo migrate` runs a file (foreign keys off, one transaction,
 //! `pragma foreign_key_check` before the commit), the first's catalog then required to equal the
-//! second's and every table to keep its rows and their values, a second plan to be empty, the way
+//! second's and every table to keep its rows and their values, `check.sql`, where a case has one, to
+//! run after it without an error (a full-text index's integrity check), a second plan to be empty, the way
 //! back from v2 (without rows) to v1 to work too unless `one-way.txt` says why it can't, and the
 //! plan compared with `plan.sql`, which `REYLO_BLESS=1` writes. Every SQLite schema the oracle's cases set up is planned from an empty
 //! database and back to one. SQLite needs no server: every database is in memory.
@@ -145,6 +146,8 @@ async fn sqlite() {
         let plan = plan(&mut from, &mut to).await;
         let text = plan.sql();
         let failed = run(&mut from, &plan).await;
+        let check = read(&case.join("check.sql"));
+        let checked = if failed.is_none() && !check.is_empty() { from.exec(&check).await.err() } else { None };
         let rows_after = values(&mut from).await;
         let (only_a, only_b) = difference(&catalog(&mut from).await.unwrap(), &catalog(&mut to).await.unwrap());
         let after = counts(&mut from).await;
@@ -171,6 +174,9 @@ async fn sqlite() {
         }
         if !lost.is_empty() {
             problems.push(format!("rows lost: {}", lost.join(", ")));
+        }
+        if let Some(e) = checked {
+            problems.push(format!("check.sql failed after the plan: {e}"));
         }
         if !bless && read(&expected) != text {
             problems.push(format!("the plan is not plan.sql's (REYLO_BLESS=1 writes it):\n{text}"));

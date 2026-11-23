@@ -3308,7 +3308,7 @@ on!(Mysql, a_recurring_event_is_in_the_dump);
 on!(Mysql, init_makes_a_function_before_the_view_that_calls_it);
 on!(Postgres, init_writes_the_foreign_servers_its_tables_use);
 on!(Postgres, init_keeps_a_publications_generated_columns, init_makes_a_wrapper_after_the_functions_it_names, init_writes_a_wrappers_and_servers_grants_owner_and_comment);
-on!(Sqlite, a_virtual_tables_own_tables_are_not_in_the_dump);
+on!(Sqlite, a_virtual_tables_own_tables_are_not_in_the_dump, an_external_content_index_is_rebuilt_from_its_rows);
 mod on_mysql {
     use super::*;
     on!(Mysql, a_comment_made_by_hand_stops_nothing, a_comment_in_schema_sql_is_written, a_role_that_cannot_create_databases_is_told_of_shadow_url, a_grant_is_written_pushed_and_left_by_no_shadow, grants_an_account_cannot_read_back_are_refused);
@@ -3316,7 +3316,7 @@ mod on_mysql {
 on!(Sqlite, a_rebuild_keeps_every_row_where_foreign_keys_are_on, a_rebuild_keeps_tables_that_reference_each_other, libsqls_own_sql_migrates, a_libsql_history_replays_on_a_branch_without_it, a_table_renamed_keeps_its_rows_key_and_counter, a_turso_engines_own_tables_are_tursos);
 mod on_turso {
     use super::*;
-    on!(Turso, a_virtual_tables_own_tables_are_not_in_the_dump, a_rebuild_keeps_every_row_where_foreign_keys_are_on, a_rebuild_keeps_tables_that_reference_each_other, a_vector_indexs_own_tables_are_libsqls, libsqls_own_sql_migrates, a_libsql_history_replays_on_a_branch_without_it);
+    on!(Turso, a_virtual_tables_own_tables_are_not_in_the_dump, an_external_content_index_is_rebuilt_from_its_rows, a_rebuild_keeps_every_row_where_foreign_keys_are_on, a_rebuild_keeps_tables_that_reference_each_other, a_vector_indexs_own_tables_are_libsqls, libsqls_own_sql_migrates, a_libsql_history_replays_on_a_branch_without_it);
 }
 on!(Mysql, a_failure_that_leaves_part_of_itself_is_seen_by_the_next_deploy);
 on!(Mysql, a_table_comment_is_no_clause_of_its_table);
@@ -5849,6 +5849,31 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert!(!sql.contains("docs_fts_data"), "{sql}");
         p.exec("alter table docs add column extra int").await;
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "extra", &Default::default(), log).await).await, 0, "{}", p.peek());
+    }
+
+    /// An external-content full-text table holds an index of its content table's rows and none of
+    /// its own: made over a table that has rows, or made again with other options, the migration
+    /// rebuilds the index from them, needs no `--drop`, and a search finds the rows that were there.
+    pub async fn an_external_content_index_is_rebuilt_from_its_rows(mut p: P) {
+        let notes = "create table notes (id integer primary key, body text not null);";
+        p.schema(notes);
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "notes", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("insert into notes values (1, 'running quickly'), (5, 'walking slowly')").await;
+        let last = |p: &P| std::fs::read_to_string(p.dir.join("migrations").join(p.files().last().unwrap())).unwrap();
+        for (name, options) in [("search", ""), ("porter", ", tokenize='porter'")] {
+            p.schema(&format!("{notes}\ncreate virtual table notes_fts using fts5(body, content='notes', content_rowid='id'{options});"));
+            p.output();
+            assert_eq!(p.run(async |o, log| reylo_migrate::create(o, name, &Default::default(), log).await).await, 0, "{}", p.peek());
+            let sql = last(&p);
+            assert!(sql.contains("insert into notes_fts (notes_fts) values ('rebuild');") && !sql.contains("loses data"), "{sql}");
+            assert!(!p.output().contains("Drops the table"));
+            assert_eq!(p.dev().await, 0, "{}", p.peek());
+        }
+        // Porter's stemmer finds "running" for "run", which only the rebuilt index holds.
+        assert_eq!(p.rows("select rowid from notes_fts where notes_fts match 'run'").await.iter().map(|r| r.text("rowid").to_string()).collect::<Vec<_>>(), ["1"]);
+        p.exec("insert into notes_fts (notes_fts, rank) values ('integrity-check', 1)").await;
+        assert_eq!(p.status().await, 0, "{}", p.peek());
     }
 
     /// libSQL's own SQL, a vector index and `alter table … alter column`, which Reylo's SQLite
