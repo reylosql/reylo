@@ -1573,6 +1573,17 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   color: #fbc40e;
 }
 
+/* The words a line changes in place, as the CLI highlights them: the old on red, the new on green. */
+.ml-rm {
+  color: #ffafaf;
+  background: #5f0000;
+}
+
+.ml-ad {
+  color: #afffaf;
+  background: #005f00;
+}
+
 .ml-mu {
   color: hsl(0 0% 63%);
 }
@@ -2135,3 +2146,32 @@ html #nd-page .prose :where(code):not(:where(pre code, [class~='not-prose'], [cl
   height: 1.125rem;
 }
 
+
+/* A ```terminal line changed in place (lib/rehype-terminal-diff.ts), as the CLI draws it: its ~ yellow and the words it changes highlighted. Fumadocs' selector for every span of a code block, and the class. */
+.shiki:not(.not-fumadocs-codeblock *) code span.term-changed {
+  color: #9a6700;
+}
+
+.dark .shiki:not(.not-fumadocs-codeblock *) code span.term-changed {
+  color: #fbc40e;
+}
+
+.shiki:not(.not-fumadocs-codeblock *) code span.term-removed {
+  color: #82071e;
+  background: #ffebe9;
+}
+
+.shiki:not(.not-fumadocs-codeblock *) code span.term-added {
+  color: #116329;
+  background: #dafbe1;
+}
+
+.dark .shiki:not(.not-fumadocs-codeblock *) code span.term-removed {
+  color: #ffafaf;
+  background: #5f0000;
+}
+
+.dark .shiki:not(.not-fumadocs-codeblock *) code span.term-added {
+  color: #afffaf;
+  background: #005f00;
+}
