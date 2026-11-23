@@ -3188,6 +3188,29 @@ fn dollar_block(body: &str) -> String {
     format!("do {tag} {body} {tag}")
 }
 
+/// Whether a sequence's start moved from `was` to `is` in the direction it counts.
+fn ahead(was: &str, is: &str, descending: bool) -> bool {
+    match (was.parse::<i128>(), is.parse::<i128>()) {
+        (Ok(a), Ok(b)) => if descending { b < a } else { b > a },
+        _ => false,
+    }
+}
+
+/// A sequence moved forward to a `start` it hasn't reached, and past every value of `rows`' column
+/// (an identity's table and column), but never back, which would give again a value it gave.
+/// `sequence` is SQL that gives its name; where it stands is read from it as the block runs, since
+/// a `setval` leaves it uncalled at a value past its start.
+fn moved_to_start(sequence: &str, start: &str, increment: &str, rows: Option<(&str, &str)>) -> String {
+    let (pick, edge, past, beyond) = if increment.starts_with('-') { ("least", "min", "- 1", "<") } else { ("greatest", "max", "+ 1", ">") };
+    let goal = match rows {
+        Some((table, column)) => format!("select {pick}({start}, {edge}({column}) {past}) from {table}"),
+        None => format!("select {start}"),
+    };
+    dollar_block(&format!(
+        "declare s regclass := {sequence}; stands numeric; goal numeric; begin execute format('select case when is_called then last_value::numeric + {increment} else last_value end from %s', s) into stands; {goal} into goal; if goal {beyond} stands then perform setval(s, goal::bigint, false); end if; end"
+    ))
+}
+
 /// Whether `name` is one Postgres gives a not null it makes on `table`'s `column`: its name for it,
 /// or with a number after where another constraint of the schema held that name.
 fn generated_not_null(name: &str, table: &str, column: &str) -> bool {
@@ -4518,6 +4541,13 @@ impl Alterer for PostgresAlterer {
                         if !set.is_empty() {
                             out.push(format!("{at} {}", set.join(" ")));
                         }
+                        // A start moved ahead moves the sequence where it hasn't got that far, as a
+                        // table made from the schema starts there, unless the bound it follows
+                        // already moved it.
+                        if ahead(&ex["start with"], &ey["start with"], descending) && !disjoint && !(closes && ey["start with"] == ey[edge]) {
+                            let sequence = format!("pg_get_serial_sequence({}, {})", literal(&table), literal(&unquoted(&name)));
+                            out.push(moved_to_start(&sequence, &ey["start with"], &ey["increment by"], Some((&table, &name))));
+                        }
                     }
                     _ => {}
                 }
@@ -4733,6 +4763,12 @@ impl Alterer for PostgresAlterer {
                     ));
                 }
                 out.push(format!("alter sequence {name} {}{}", to.def, if disjoint { " restart" } else { "" }));
+                // A start moved ahead moves it where it hasn't got that far, unless the bound it
+                // follows already moved it.
+                let start = ey.get("start with").cloned().unwrap_or_default();
+                if ahead(ex.get("start with").map_or("", |s| s.as_str()), &start, descending) && !disjoint && !(closes && ey.get(edge) == Some(&start)) {
+                    out.push(moved_to_start(&literal(name), &start, ey.get("increment by").map_or("1", |i| i.as_str()), None));
+                }
                 Some(out)
             }
             Kind::Extension => {
