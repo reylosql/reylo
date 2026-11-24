@@ -11,7 +11,8 @@
 // which has none, does not do it: on MySQL it keeps a DATETIME's, TIMESTAMP's or TIME's fraction
 // digits as the driver read them, which are the column's own over the text protocol, while
 // mysql2's binary protocol drops trailing zeros (`.000`) that `.run()` writes back from the
-// column's metadata.
+// column's metadata. A ClickHouse query alone maps no values: it binds none in a list and reads
+// none raw, so its `encode`, `decode` and `output` throw and it has no `columns` (`standardQuery`).
 import { decodePlan } from "./codecs.ts";
 import { compile, rawStatement, sentText, type Dialect, type QueryModule } from "./execute.ts";
 import type { StandardTypedV1 } from "./standard.ts";
@@ -37,18 +38,20 @@ export declare namespace StandardQueryV1 {
   export interface Query<Output = unknown, D extends StandardQueryV1.Dialect = StandardQueryV1.Dialect> {
     /** The database the statement is written for. A driver refuses a query for another one. */
     readonly dialect: D;
-    /** The statement, with the database's positional placeholders: `$1`, `$2` on Postgres, `?` on MySQL and SQLite. */
+    /** The statement, with the database's positional placeholders: `$1`, `$2` on Postgres, `?` on MySQL and SQLite. ClickHouse has none: its statement names and types each parameter, `{id:UInt64}`. */
     readonly text: string;
     /**
      * Maps the input to the values to bind, one per placeholder, in order, each in its database's
      * raw form. The driver passes the input as the caller gave it, `undefined` when it was left
-     * out. Throws a `TypeError` for an input it cannot bind.
+     * out. Throws a `TypeError` for an input it cannot bind, and for any input on ClickHouse,
+     * which binds no list of values: a parameter goes by its name, as a setting of the request.
      */
     encode(input: unknown): readonly RawValue<D>[];
     /**
      * Maps the raw result to the output: every row the statement returned, each an array of raw
      * values in the order the statement selects them. Throws for a result that does not fit the
-     * output (a second row where at most one is expected, say).
+     * output (a second row where at most one is expected, say), and for any result on ClickHouse,
+     * whose rows come as one body in its binary format, which `.run()` reads.
      */
     decode(rows: readonly (readonly RawValue<D>[])[]): Output;
     /**
@@ -70,7 +73,8 @@ export declare namespace StandardQueryV1 {
      * maps one raw value of the column, never NULL, to the value `decode` puts in the row. With
      * `output`, it lets a driver that reads a result value by value decode each value once, as it
      * reads it, rather than hand `decode` the raw rows. NULL is null in the row, and a driver
-     * never calls a column's `decode` for it. Absent where the columns are not known.
+     * never calls a column's `decode` for it. Absent where the columns are not known, and on
+     * ClickHouse, which has no raw value for a decoder to take.
      */
     readonly columns?: readonly Column<D>[];
     /**
@@ -113,7 +117,7 @@ export declare namespace StandardQueryV1 {
   /**
    * A value in its raw form: what a driver of the database reads before converting anything, and
    * binds without converting anything. On Postgres, the value's text as the server sends it in
-   * the text format. NULL is `null`.
+   * the text format. NULL is `null`. ClickHouse has no such form, and a query on it maps no values.
    */
   export type RawValue<D extends Dialect = Dialect> =
     | null
@@ -139,19 +143,28 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
   let text: string | undefined;
   let build: RowBuilder | undefined;
   const dialect: Dialect = module.dialect;
+  // ClickHouse names and types each parameter in the statement and takes its value as a setting of
+  // the request, and returns a result as one body in its binary format, which `.run()` reads. A
+  // list of values to bind and rows of raw values are neither, so its query says what it is, its
+  // text and its cardinality, and maps no values: a driver's own reading of a value, a UInt64 as
+  // a number, say, would pass for the value the type names.
+  const unmapped = (): never => {
+    throw new TypeError(`${module.source ? `${module.source}: ` : ""}A Standard Query maps no values on ClickHouse, whose parameters are named in the statement and whose result comes in its binary format: run the query with .run().`);
+  };
+  const mapped = dialect !== "clickhouse";
   // Each column's decoder, which `decode` runs on every value and `columns` hands a driver, from
   // the dialect's half of the run time: Postgres's reads the value's text, MySQL's whatever form
   // the driver read. SQLite's is `.run()`'s own reading, its refusals of a storage class the
   // column's type does not allow included. Its default suits a driver whose integer mode is
   // unknown: a BigInt is read exact, and a number past 2^53 in an INTEGER column is refused as a
   // rounded one.
-  const decoders = module.columns?.map(([name, kind, delim], i): ((v: never) => unknown) => {
+  const decoders = (mapped ? module.columns : undefined)?.map(([name, kind, delim], i): ((v: never) => unknown) => {
     const decode = module.runtime.decoder(name, kind, delim, module.nonFinite?.[i] ?? undefined, module.nestedArrays);
     // A family the project file's `js.codecs` gives another type takes it here too, as in `.run()` (src/codecs.ts).
     const plan = module.codecs?.[name];
     return plan === undefined ? decode : (v) => decodePlan(plan, decode(v), name, module.libraries);
   });
-  const columns = module.columns?.map(([name], i) => Object.freeze({ name, decode: decoders![i]! }) as StandardQueryV1.Column<D>);
+  const columns = decoders && module.columns?.map(([name], i) => Object.freeze({ name, decode: decoders[i]! }) as StandardQueryV1.Column<D>);
   // A closure, not `this`: a driver may take `encode` off the object.
   // The statement as Reylo sends it, the comment naming its file included, as `.run()` sends it.
   const statementText = () => (text ??= sentText(module, compile(module).text));
@@ -160,12 +173,13 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
     ...(module.cardinality === undefined ? {} : { cardinality: module.cardinality }),
     ...(module.key === undefined ? {} : { key: module.key }),
     ...(columns === undefined ? {} : { columns: Object.freeze(columns) }),
-    output: (rows) => materialize(rows as Record<string, unknown>[]),
+    output: (rows) => (mapped ? materialize(rows as Record<string, unknown>[]) : unmapped()),
     ...(module.ordered ? { ordered: true as const } : {}),
     get text() {
       return statementText();
     },
     encode(input) {
+      if (!mapped) unmapped();
       const bound = rawStatement(module, input === undefined ? {} : input);
       // A structured parameter in a MySQL insert writes its column lists again for the keys a call
       // carries, so its text depends on the input: such a statement runs through `.run()`.
@@ -173,6 +187,7 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
       return bound.values as StandardQueryV1.RawValue<D>[];
     },
     decode(rows) {
+      if (!mapped) unmapped();
       const names = module.columns;
       if (names === undefined || decoders === undefined) throw new TypeError("A query defined by hand without its columns cannot map rows to its output: a module a build step writes carries them.");
       const n = names.length;

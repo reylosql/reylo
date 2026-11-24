@@ -37,13 +37,14 @@ To install Reylo, you'll need:
   - **Postgres** — 14 to 19, including Neon and PGlite
   - **MySQL** — 8.0.38 or later, including PlanetScale
   - **SQLite** — including Cloudflare D1 and Durable Objects, Turso and libSQL
+  - **ClickHouse** — 25.11 or later, in preview
 
 A coding agent can set it up for you:
 
 <AgentPrompt>
 
 ```text
-Set up Reylo in this project. Reylo lets TypeScript import .sql files, with types inferred from the live database. Its docs are https://reylo.dev/docs, with a reference page for each database (https://reylo.dev/postgres, https://reylo.dev/mysql, https://reylo.dev/sqlite), all served as Markdown at https://reylo.dev/llms.txt. Each step below links its section.
+Set up Reylo in this project. Reylo lets TypeScript import .sql files, with types inferred from the live database. Its docs are https://reylo.dev/docs, with a reference page for each database (https://reylo.dev/postgres, https://reylo.dev/mysql, https://reylo.dev/sqlite, https://reylo.dev/clickhouse), all served as Markdown at https://reylo.dev/llms.txt. Each step below links its section.
 
 Each setup has a complete, working example project to copy, whose README's "How Reylo is wired in" lists every line Reylo needs. Install from npm, since the examples link local builds: https://github.com/reylosql/reylo/tree/main/examples
 
@@ -329,6 +330,11 @@ DATABASE_URL=mysql://root@localhost:3306/app
 DATABASE_URL=sqlite:./app.db
 ```
 
+```sh title=".env" tab="ClickHouse" tab-group="dialect"
+# or clickhouse+https://, the URL of the HTTP interface
+DATABASE_URL=clickhouse+http://default@localhost:8123/app
+```
+
 Reylo reads `.env.local` and `.env`. To override this, list the files in `.reylo.yaml`:
 
 ```yaml title=".reylo.yaml"
@@ -372,7 +378,7 @@ echo "postgres://localhost:5432/$db"
 
 Hover over a query to see its types and the associated SQL statement.
 
-```sql tab="get_user.sql" dialect="all" errors
+```sql tab="get_user.sql" dialect="postgres,mysql,sqlite" errors
 select id, nmae, email
 from users
 where id = :id::int
@@ -389,7 +395,7 @@ const posts = await listPosts.run(db);
 for (const post of posts) console.log(post.body);
 ```
 
-```sql tab="list_posts.sql" dialect="all"
+```sql tab="list_posts.sql" dialect="postgres,mysql,sqlite"
 select id, title
 from posts
 order by id

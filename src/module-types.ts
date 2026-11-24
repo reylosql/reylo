@@ -38,7 +38,7 @@ export type ModuleTypes = {
  */
 export function queryErrorType(dialect: Dialect, errors: Analysis["errors"]): string {
   if (!errors) return `import("reylo").QueryError<${JSON.stringify(dialect)}>`;
-  const name = { postgres: "PostgresQueryError", mysql: "MysqlQueryError", sqlite: "SqliteQueryError" }[dialect];
+  const name = { postgres: "PostgresQueryError", mysql: "MysqlQueryError", sqlite: "SqliteQueryError", clickhouse: "ClickhouseQueryError" }[dialect];
   const names = (field: string, list: string[]) => list.map((n) => (field === "columns" ? `readonly [${n.split(", ").map((c) => JSON.stringify(c)).join(", ")}]` : JSON.stringify(n))).join(" | ");
   const codes = Object.entries(errors).map(([code, fields]) => `  ${JSON.stringify(code)}: { ${Object.entries(fields).map(([field, list]) => `${field}: ${names(field, list)}`).join("; ")} };`);
   return codes.length ? `import("reylo").${name}<{\n${codes.join("\n")}\n}>` : `import("reylo").${name}<{}>`;
@@ -163,6 +163,7 @@ export function moduleTypes(sql: string, written: Analysis, dialect: Dialect, le
   // caller may leave out, a typed JSON parameter whose schema has a `default`.
   const optional = new Set(analysis.params.filter((q) => q.nullable || q.optional).map((q) => q.name));
   const paramTypes = typed.map(([name, type, comment]) => [`${ident(name)}${optional.has(name) ? "?" : ""}: ${type}`, comment] as const);
+  const standard = standardColumnsType(analysis.columns, dialect, codecs);
   return {
     diagnostics,
     params: paramTypes.length ? objectType(paramTypes) : "Record<never, never>",
@@ -171,15 +172,18 @@ export function moduleTypes(sql: string, written: Analysis, dialect: Dialect, le
     cardinality,
     names,
     queryError: queryErrorType(dialect, analysis.errors),
-    columns: standardColumnsType(analysis.columns, dialect, codecs),
+    ...(standard === undefined ? {} : { columns: standard }),
   };
 }
 
 /**
  * The type of a module's Standard Query `columns`: one entry per output column, in order, whose
  * decoder takes the column's raw value, never NULL, and gives the column's type without null.
+ * None on ClickHouse, whose query has no `columns`: a result's value has no raw form there
+ * (src/standard-query.ts).
  */
-export function standardColumnsType(columns: Analysis["columns"], dialect: Dialect, codecs: Codecs = {}): string {
+export function standardColumnsType(columns: Analysis["columns"], dialect: Dialect, codecs: Codecs = {}): string | undefined {
+  if (dialect === "clickhouse") return undefined;
   const raw = dialect === "postgres" ? "string" : "string | number | bigint | Uint8Array";
   return `readonly [${columns.map((c) => `{ readonly name: ${JSON.stringify(c.name)}; decode(value: ${raw}): ${renderType(c.type, false, dialect, codecs)} }`).join(", ")}]`;
 }
