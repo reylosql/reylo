@@ -1660,7 +1660,8 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         .rows(&format!(
             "select s.oid, format('%I.%I', n.nspname, s.stxname) as name, pg_get_statisticsobjdef(s.oid) as def, s.stxrelid as rel,
               nullif(coalesce(s.stxstattarget::int, -1), -1) as target
-            from pg_statistic_ext s join pg_namespace n on n.oid = s.stxnamespace where {ns} and {}",
+            from pg_statistic_ext s join pg_namespace n on n.oid = s.stxnamespace where {ns} and {} and {}",
+            crate::catalog::on_no_temporary_table("s"),
             format!("({} or {})", not_platform("s.stxowner"), not_platform_schema("n"))
         ))
         .await?

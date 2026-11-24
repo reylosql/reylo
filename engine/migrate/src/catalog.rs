@@ -398,6 +398,13 @@ pub(crate) fn pg_user_ns(nspname: &str) -> String {
     PG_USER_NS.replace("n.nspname", nspname)
 }
 
+/// Whether the statistics object `x` (a `pg_statistic_ext` row) is on no temporary table: one is made
+/// in the schema its name gives, the first of the search path unless it names one, and goes with its
+/// table when the session ends.
+pub(crate) fn on_no_temporary_table(x: &str) -> String {
+    format!("not exists (select 1 from pg_class xt where xt.oid = {x}.stxrelid and xt.relpersistence = 't')")
+}
+
 /// The roles a hosting platform creates its own objects as: what they own is the platform's, never
 /// compared (the comparison would report every platform upgrade as drift). Supabase's are the 21 its
 /// own diff engine leaves out (pg-delta's `SUPABASE_SYSTEM_ROLES`); Neon's system role is
@@ -871,6 +878,7 @@ fn flattened_at(text: &str, t: &[Token], close: &[Option<usize>], k: usize) -> O
 async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
     let mut lines = Vec::new();
     let ns = PG_USER_NS;
+    let (kept_s, kept_sx, kept_x) = (on_no_temporary_table("s"), on_no_temporary_table("sx"), on_no_temporary_table("x"));
     let version: i64 = db.rows("select current_setting('server_version_num') as v").await?.first().and_then(|r| r.first()?.parse().ok()).unwrap_or(0);
 
     for r in db
@@ -1268,7 +1276,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             where {ns} and {} and {}
             union all select 'rule ' || pg_get_ruledef(r.oid, false) || case r.ev_enabled when 'O' then '' else ' enabled=' || r.ev_enabled::text end from pg_rewrite r join pg_class c on c.oid = r.ev_class join pg_namespace n on n.oid = c.relnamespace
             where r.rulename <> '_RETURN' and {ns} and {} and {} and {} and {}
-            union all select 'statistics ' || pg_get_statisticsobjdef(s.oid) from pg_statistic_ext s join pg_namespace n on n.oid = s.stxnamespace where {ns} and {}",
+            union all select 'statistics ' || pg_get_statisticsobjdef(s.oid) from pg_statistic_ext s join pg_namespace n on n.oid = s.stxnamespace where {ns} and {kept_s} and {}",
             aggregate_options("p"),
             not_extension("pg_proc", "p"),
             not_platform("p.proowner"),
@@ -1302,7 +1310,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
               left join pg_type ct on ct.oid = co.contypid left join pg_namespace tn on tn.oid = ct.typnamespace
             where {} and (cc.oid is null or {})
             union all select 'statistics ' || format('%I.%I', n.nspname, sx.stxname), null, obj_description(sx.oid, 'pg_statistic_ext'), null
-            from pg_statistic_ext sx join pg_namespace n on n.oid = sx.stxnamespace where {ns}
+            from pg_statistic_ext sx join pg_namespace n on n.oid = sx.stxnamespace where {ns} and {kept_sx}
             union all select 'trigger ' || format('%I', tg.tgname) || ' on ' || format('%I.%I', n.nspname, c.relname), null, obj_description(tg.oid, 'pg_trigger'), null
             from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace where not tg.tgisinternal and {ns} and {}
             union all select 'policy ' || format('%I', po.polname) || ' on ' || format('%I.%I', n.nspname, c.relname), null, obj_description(po.oid, 'pg_policy'), null
@@ -1500,7 +1508,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
     // what a migration made depend on an extension, which goes with it.
     for r in db
         .rows(&format!(
-            "select 'statistics target ' || format('%I.%I', n.nspname, x.stxname) || ' ' || x.stxstattarget as line from pg_statistic_ext x join pg_namespace n on n.oid = x.stxnamespace where coalesce(x.stxstattarget::int, -1) <> -1 and {ns}
+            "select 'statistics target ' || format('%I.%I', n.nspname, x.stxname) || ' ' || x.stxstattarget as line from pg_statistic_ext x join pg_namespace n on n.oid = x.stxnamespace where coalesce(x.stxstattarget::int, -1) <> -1 and {ns} and {kept_x}
             union all select 'wrapper options ' || format('%I.%I.%I', n.nspname, c.relname, a.attname) || ' ' || array_to_string(a.attfdwoptions, ',') from pg_attribute a join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace
               where c.relkind = 'f' and a.attnum > 0 and a.attfdwoptions is not null and {ns}
             union all select 'depends ' || o.type || ' ' || o.identity || ' on extension ' || format('%I', x.extname) from pg_depend d join pg_extension x on x.oid = d.refobjid, lateral pg_identify_object(d.classid, d.objid, 0) o
@@ -1675,6 +1683,7 @@ pub(crate) fn runner() -> String {
 /// extension or a platform owns, and no history table's.
 pub(crate) fn owned_objects() -> String {
     let ns = PG_USER_NS;
+    let kept_x = on_no_temporary_table("x");
     [
         // A sequence a column owns (`serial`) has its table's owner, and moves with it; a partition
         // has an owner of its own.
@@ -1687,7 +1696,7 @@ pub(crate) fn owned_objects() -> String {
         format!("select 'pg_foreign_server'::regclass, s.oid, s.srvowner from pg_foreign_server s where {}", not_platform("s.srvowner")),
         format!("select 'pg_foreign_data_wrapper'::regclass, w.oid, w.fdwowner from pg_foreign_data_wrapper w where {} and {}", not_extension("pg_foreign_data_wrapper", "w"), not_platform("w.fdwowner")),
         format!("select 'pg_event_trigger'::regclass, et.oid, et.evtowner from pg_event_trigger et where {} and {}", not_extension("pg_event_trigger", "et"), not_platform("et.evtowner")),
-        format!("select 'pg_statistic_ext'::regclass, x.oid, x.stxowner from pg_statistic_ext x join pg_namespace n on n.oid = x.stxnamespace where {ns} and {}", not_platform("x.stxowner")),
+        format!("select 'pg_statistic_ext'::regclass, x.oid, x.stxowner from pg_statistic_ext x join pg_namespace n on n.oid = x.stxnamespace where {ns} and {kept_x} and {}", not_platform("x.stxowner")),
     ]
     .join(" union all ")
 }

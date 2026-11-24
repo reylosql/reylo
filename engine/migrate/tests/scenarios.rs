@@ -6105,8 +6105,9 @@ mod adversarial {
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
     }
 
-    /// A temporary table is its session's: its key, its checks, its policies and their comments are
-    /// gone when the run that made them ends, and are in no fingerprint and no comparison.
+    /// A temporary table is its session's: its key, its checks, its policies, its statistics (made in
+    /// `public`, the first schema of the search path) and their comments are gone when the run that
+    /// made them ends, and are in no fingerprint and no comparison.
     pub async fn a_temporary_tables_constraints_and_policies_are_no_drift(mut p: P) {
         p.schema("create table t (id int primary key);");
         p.file(
@@ -6115,7 +6116,10 @@ mod adversarial {
             create temp table scratch (key int primary key, n int check (n > 0));
             comment on constraint scratch_pkey on scratch is 'for this session';
             create policy everyone on scratch using (true);
-            comment on policy everyone on scratch is 'for this session';",
+            comment on policy everyone on scratch is 'for this session';
+            create statistics scratch_stats on key, n from scratch;
+            alter statistics scratch_stats set statistics 500;
+            comment on statistics scratch_stats is 'for this session';",
         );
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.output();
