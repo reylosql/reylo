@@ -791,17 +791,21 @@ fn cast_elements(items: &[&str], ty: &str) -> Option<Vec<String>> {
         [] => false,
     };
     if read.iter().any(|(t, _)| value(t)) {
-        // A cast goes beneath a collation: `(x COLLATE "C")` reads back as `((x)::ty COLLATE "C")`.
+        // A cast goes beneath a collation: `(x COLLATE "C")` reads back as `((x)::ty COLLATE "C")`
+        // where `ty` takes a collation, and as `(x)::ty`, without it, where it doesn't. Which types
+        // take one the text says for the character types alone.
+        let collatable = ["text", "name", "bpchar", "character", "character varying"].iter().any(|c| ty == *c || ty.strip_prefix(c).is_some_and(|m| m.starts_with('(')));
         let cast = |(e, (t, close)): (&&str, &(Vec<Token>, Vec<Option<usize>>))| {
             let last = t.len().saturating_sub(1);
             let collate = (symbol(t, 0, "(") && close[0] == Some(last)).then(|| top_level(close, 1, last).into_iter().find(|&k| word(t, k, "COLLATE"))).flatten();
             match collate {
-                Some(c) if c > 1 && c + 1 < last && t[c + 1..last].iter().all(|n| matches!(n.kind, TokenKind::Word | TokenKind::Quoted) || n.text == ".") => format!("(({})::{ty} COLLATE {})", &e[t[1].start..t[c - 1].end], &e[t[c + 1].start..t[last - 1].end]),
-                _ if e.ends_with(&format!("::{ty}")) => e.to_string(),
-                _ => format!("({e})::{ty}"),
+                Some(c) if collatable && c > 1 && c + 1 < last && t[c + 1..last].iter().all(|n| matches!(n.kind, TokenKind::Word | TokenKind::Quoted) || n.text == ".") => Some(format!("(({})::{ty} COLLATE {})", &e[t[1].start..t[c - 1].end], &e[t[c + 1].start..t[last - 1].end])),
+                Some(_) => None,
+                None if e.ends_with(&format!("::{ty}")) => Some(e.to_string()),
+                None => Some(format!("({e})::{ty}")),
             }
         };
-        return Some(items.iter().zip(&read).map(cast).collect());
+        return items.iter().zip(&read).map(cast).collect();
     }
     items
         .iter()
@@ -2273,6 +2277,8 @@ mod tests {
             // A column or a call may be an array itself, which the parser casts to an array.
             "COALESCE(NULL::text[], (ARRAY[arr])::text[])",
             "(ARRAY[f(x), arr])::text[]",
+            // A collation where the type may take none, which the parser then drops.
+            "(ARRAY['1'::character varying, (vf() COLLATE \"C\")])::integer[]",
             "(ARRAY['{a}'::character varying[]])::text[]",
             "(f(x) OVER (ORDER BY y ROWS BETWEEN 1 PRECEDING AND CURRENT ROW))",
         ] {
