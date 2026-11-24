@@ -10,7 +10,7 @@
    - one border colour, controls transparent on whatever they sit on, a 6% tint
      on hover, 120ms transitions.
    On a narrow screen the panes stack and the page scrolls. */
-#nd-page.play {
+:is(#nd-page, .play-embed).play {
   --play-pad: 20px;
   --play-head: 48px;
   --play-control: 32px;
@@ -35,19 +35,19 @@
   font-family: var(--font-text);
 }
 
-html:not(.dark) #nd-page.play {
+html:not(.dark) :is(#nd-page, .play-embed).play {
   --play-surface-pop: var(--color-fd-popover);
   --play-shadow-pop: 0 0 0 1px rgb(0 0 0 / 0.06), 0 12px 32px rgb(0 0 0 / 0.12);
 }
 
-#nd-page.play :is(a, button):focus-visible {
+:is(#nd-page, .play-embed).play :is(a, button):focus-visible {
   outline: 2px solid color-mix(in srgb, var(--color-fd-ring) 70%, transparent);
   outline-offset: 2px;
   border-radius: var(--play-radius);
 }
 
 /* The bar. */
-#nd-page.play .play-bar {
+:is(#nd-page, .play-embed).play .play-bar {
   display: flex;
   align-items: center;
   gap: 21px;
@@ -56,18 +56,18 @@ html:not(.dark) #nd-page.play {
   border-bottom: 1px solid var(--color-fd-border);
 }
 
-#nd-page.play .play-wordmark {
+:is(#nd-page, .play-embed).play .play-wordmark {
   display: block;
   height: 18px;
   width: auto;
 }
 
-#nd-page.play .play-brand {
+:is(#nd-page, .play-embed).play .play-brand {
   display: inline-flex;
   color: var(--color-fd-headings);
 }
 
-#nd-page.play .play-status {
+:is(#nd-page, .play-embed).play .play-status {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -79,12 +79,12 @@ html:not(.dark) #nd-page.play {
   text-overflow: ellipsis;
 }
 
-#nd-page.play .play-status[data-kind='failed'] {
+:is(#nd-page, .play-embed).play .play-status[data-kind='failed'] {
   color: var(--color-fd-error);
 }
 
 /* The dot and its halo; the 3px margin keeps the halo inside the status line, which clips. */
-#nd-page.play .play-dot {
+:is(#nd-page, .play-embed).play .play-dot {
   flex-shrink: 0;
   width: 7px;
   height: 7px;
@@ -94,13 +94,13 @@ html:not(.dark) #nd-page.play {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-fd-success) 22%, transparent);
 }
 
-#nd-page.play .play-status[data-kind='loading'] .play-dot {
+:is(#nd-page, .play-embed).play .play-status[data-kind='loading'] .play-dot {
   background: var(--dk-accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--dk-accent) 25%, transparent);
   animation: play-pulse 1.2s ease-in-out infinite;
 }
 
-#nd-page.play :is(.play-status[data-kind='failed'], .play-types-error) .play-dot {
+:is(#nd-page, .play-embed).play :is(.play-status[data-kind='failed'], .play-types-error) .play-dot {
   background: var(--color-fd-error);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-fd-error) 22%, transparent);
 }
@@ -111,12 +111,12 @@ html:not(.dark) #nd-page.play {
   }
 }
 
-#nd-page.play .play-grow {
+:is(#nd-page, .play-embed).play .play-grow {
   flex: 1;
 }
 
 /* Docs, GitHub and the theme: every box 32px, the last glyph on the gutter. */
-#nd-page.play .play-nav {
+:is(#nd-page, .play-embed).play .play-nav {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -124,7 +124,7 @@ html:not(.dark) #nd-page.play {
   font-size: var(--play-ui);
 }
 
-#nd-page.play .play-nav-link {
+:is(#nd-page, .play-embed).play .play-nav-link {
   display: inline-flex;
   align-items: center;
   height: var(--play-control);
@@ -137,7 +137,7 @@ html:not(.dark) #nd-page.play {
     color 120ms;
 }
 
-#nd-page.play .play-icon-button {
+:is(#nd-page, .play-embed).play .play-icon-button {
   display: inline-grid;
   place-items: center;
   width: var(--play-control);
@@ -150,35 +150,35 @@ html:not(.dark) #nd-page.play {
     color 120ms;
 }
 
-#nd-page.play :is(.play-nav-link, .play-icon-button):hover {
+:is(#nd-page, .play-embed).play :is(.play-nav-link, .play-icon-button):hover {
   background: var(--play-hover);
   color: var(--color-fd-headings);
 }
 
-#nd-page.play .play-theme span {
+:is(#nd-page, .play-embed).play .play-theme span {
   display: contents;
 }
 
-.dark #nd-page.play .play-theme-light,
-html:not(.dark) #nd-page.play .play-theme-dark {
+.dark :is(#nd-page, .play-embed).play .play-theme-light,
+html:not(.dark) :is(#nd-page, .play-embed).play .play-theme-dark {
   display: none;
 }
 
 /* The panes. */
-#nd-page.play .play-main {
+:is(#nd-page, .play-embed).play .play-main {
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) clamp(22rem, 40%, 36rem);
   min-height: 0;
 }
 
-#nd-page.play .play-pane {
+:is(#nd-page, .play-embed).play .play-pane {
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
 
-#nd-page.play .play-pane-head {
+:is(#nd-page, .play-embed).play .play-pane-head {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -187,7 +187,7 @@ html:not(.dark) #nd-page.play .play-theme-dark {
   flex-shrink: 0;
 }
 
-#nd-page.play .play-label {
+:is(#nd-page, .play-embed).play .play-label {
   font-size: var(--play-label);
   font-weight: 600;
   line-height: 20px;
@@ -197,7 +197,7 @@ html:not(.dark) #nd-page.play .play-theme-dark {
 }
 
 /* A button: transparent on any surface, a hairline, a 6% tint on hover. */
-#nd-page.play .play-button {
+:is(#nd-page, .play-embed).play .play-button {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -216,39 +216,39 @@ html:not(.dark) #nd-page.play .play-theme-dark {
     color 120ms;
 }
 
-#nd-page.play .play-button:hover,
-#nd-page.play .play-button[data-open] {
+:is(#nd-page, .play-embed).play .play-button:hover,
+:is(#nd-page, .play-embed).play .play-button[data-open] {
   background: var(--play-hover);
   border-color: var(--play-hover-border);
   color: var(--color-fd-headings);
 }
 
-#nd-page.play .play-button svg {
+:is(#nd-page, .play-embed).play .play-button svg {
   color: var(--color-fd-muted-foreground);
 }
 
 /* The examples: the trigger and its menu one width; the current example a check, not a fill. */
-#nd-page.play .play-picker {
+:is(#nd-page, .play-embed).play .play-picker {
   position: relative;
 }
 
-#nd-page.play .play-picker .play-button {
+:is(#nd-page, .play-embed).play .play-picker .play-button {
   justify-content: space-between;
   width: 13.5rem;
   padding: 0 8px 0 12px;
 }
 
-#nd-page.play .play-picker-label {
+:is(#nd-page, .play-embed).play .play-picker-label {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-#nd-page.play .play-picker-label[data-custom] {
+:is(#nd-page, .play-embed).play .play-picker-label[data-custom] {
   color: var(--color-fd-muted-foreground);
 }
 
-#nd-page.play .play-menu {
+:is(#nd-page, .play-embed).play .play-menu {
   position: absolute;
   top: calc(100% + 4px);
   right: 0;
@@ -264,7 +264,7 @@ html:not(.dark) #nd-page.play .play-theme-dark {
   outline: none;
 }
 
-#nd-page.play .play-menu-group {
+:is(#nd-page, .play-embed).play .play-menu-group {
   padding: 8px 12px 4px;
   font-size: var(--play-label);
   font-weight: 600;
@@ -274,11 +274,11 @@ html:not(.dark) #nd-page.play .play-theme-dark {
 }
 
 /* Each section of examples set apart from the one above it. */
-#nd-page.play .play-menu [role='group'] + [role='group'] {
+:is(#nd-page, .play-embed).play .play-menu [role='group'] + [role='group'] {
   margin-top: 12px;
 }
 
-#nd-page.play .play-menu-item {
+:is(#nd-page, .play-embed).play .play-menu-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -290,21 +290,21 @@ html:not(.dark) #nd-page.play .play-theme-dark {
   cursor: pointer;
 }
 
-#nd-page.play .play-menu-item[data-active] {
+:is(#nd-page, .play-embed).play .play-menu-item[data-active] {
   background: var(--play-hover);
 }
 
-#nd-page.play .play-menu-item[aria-selected='true'] {
+:is(#nd-page, .play-embed).play .play-menu-item[aria-selected='true'] {
   font-weight: 500;
   color: var(--color-fd-headings);
 }
 
-#nd-page.play .play-menu-item svg {
+:is(#nd-page, .play-embed).play .play-menu-item svg {
   color: var(--dk-accent);
 }
 
 /* The code, as the docs draw a block: Shiki's two themes, the hanging indent, whole-pixel lines. */
-#nd-page.play .play-scroll {
+:is(#nd-page, .play-embed).play .play-scroll {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
@@ -312,7 +312,7 @@ html:not(.dark) #nd-page.play .play-theme-dark {
   scrollbar-color: var(--play-hover-border) transparent;
 }
 
-#nd-page.play figure.shiki {
+:is(#nd-page, .play-embed).play figure.shiki {
   --padding-left: var(--play-pad);
   --padding-right: var(--play-pad);
   margin: 0;
@@ -322,70 +322,70 @@ html:not(.dark) #nd-page.play .play-theme-dark {
   background: transparent;
 }
 
-#nd-page.play figure.shiki pre,
-#nd-page.play figure.shiki pre code {
+:is(#nd-page, .play-embed).play figure.shiki pre,
+:is(#nd-page, .play-embed).play figure.shiki pre code {
   line-height: var(--play-code-lh);
 }
 
-#nd-page.play figure.shiki pre {
+:is(#nd-page, .play-embed).play figure.shiki pre {
   padding-block: 4px 24px;
 }
 
 /* Each line a block, as Fumadocs lays a code block out (its `*:flex *:flex-col`). */
-#nd-page.play figure.shiki pre > code {
+:is(#nd-page, .play-embed).play figure.shiki pre > code {
   display: flex;
   flex-direction: column;
 }
 
 /* The types: Params' label on the line of Query's, the first type line on the first query line,
    and one gap under every label. */
-#nd-page.play .play-side {
+:is(#nd-page, .play-embed).play .play-side {
   position: relative;
   overflow: hidden;
   border-left: 1px solid var(--color-fd-border);
   background: var(--color-fd-secondary);
 }
 
-#nd-page.play .play-types {
+:is(#nd-page, .play-embed).play .play-types {
   padding: 0 var(--play-pad) 24px;
 }
 
 /* One gap under every label, 10px from the label's line to the first code line, in both panes;
    20px between one type and the next label. */
-#nd-page.play .play-row .play-label {
+:is(#nd-page, .play-embed).play .play-row .play-label {
   display: block;
   padding-top: 20px;
 }
 
-#nd-page.play .play-row:first-child .play-label {
+:is(#nd-page, .play-embed).play .play-row:first-child .play-label {
   padding-top: 14px;
 }
 
-#nd-page.play .play-row figure.shiki {
+:is(#nd-page, .play-embed).play .play-row figure.shiki {
   --padding-left: 0px;
   --padding-right: 0px;
 }
 
-#nd-page.play .play-row figure.shiki pre {
+:is(#nd-page, .play-embed).play .play-row figure.shiki pre {
   padding-block: 10px 0;
 }
 
-#nd-page.play .play-none {
+:is(#nd-page, .play-embed).play .play-none {
   margin: 0;
   padding-top: 10px;
   font: var(--dk-code-size) / var(--play-code-lh) var(--font-code);
   color: var(--color-fd-muted-foreground);
 }
 
-#nd-page.play .play-types figure.shiki {
+:is(#nd-page, .play-embed).play .play-types figure.shiki {
   transition: opacity 120ms;
 }
 
-#nd-page.play .play-types[data-stale] figure.shiki {
+:is(#nd-page, .play-embed).play .play-types[data-stale] figure.shiki {
   opacity: 0.4;
 }
 
-#nd-page.play .play-types-error {
+:is(#nd-page, .play-embed).play .play-types-error {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -394,7 +394,7 @@ html:not(.dark) #nd-page.play .play-theme-dark {
   color: var(--color-fd-error);
 }
 
-#nd-page.play .play-side-actions {
+:is(#nd-page, .play-embed).play .play-side-actions {
   position: absolute;
   top: 0;
   right: 0;
@@ -406,7 +406,7 @@ html:not(.dark) #nd-page.play .play-theme-dark {
 }
 
 /* The schema: a card that slides in from the right over the whole pane, and back out, with no fade. */
-#nd-page.play .play-schema {
+:is(#nd-page, .play-embed).play .play-schema {
   position: absolute;
   inset: 0;
   z-index: 5;
@@ -421,13 +421,13 @@ html:not(.dark) #nd-page.play .play-theme-dark {
     visibility 0s linear 240ms;
 }
 
-#nd-page.play .play-schema[data-open] {
+:is(#nd-page, .play-embed).play .play-schema[data-open] {
   transform: none;
   visibility: visible;
   transition: transform 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-#nd-page.play .play-schema-head {
+:is(#nd-page, .play-embed).play .play-schema-head {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -436,7 +436,7 @@ html:not(.dark) #nd-page.play .play-theme-dark {
   flex-shrink: 0;
 }
 
-#nd-page.play .play-x {
+:is(#nd-page, .play-embed).play .play-x {
   display: grid;
   place-items: center;
   width: var(--play-control);
@@ -449,70 +449,70 @@ html:not(.dark) #nd-page.play .play-theme-dark {
     color 120ms;
 }
 
-#nd-page.play .play-x:hover {
+:is(#nd-page, .play-embed).play .play-x:hover {
   background: var(--play-hover);
   color: var(--color-fd-headings);
 }
 
-#nd-page.play .play-schema figure.shiki {
+:is(#nd-page, .play-embed).play .play-schema figure.shiki {
   --dk-code-size: 12px;
 }
 
-#nd-page.play .play-schema figure.shiki pre,
-#nd-page.play .play-schema figure.shiki pre code {
+:is(#nd-page, .play-embed).play .play-schema figure.shiki pre,
+:is(#nd-page, .play-embed).play .play-schema figure.shiki pre code {
   line-height: 20px;
 }
 
 /* The schema starts 10px under its label, as the query and the types do. */
-#nd-page.play .play-schema .play-scroll {
+:is(#nd-page, .play-embed).play .play-schema .play-scroll {
   margin-top: -4px;
 }
 
-#nd-page.play .play-schema figure.shiki pre {
+:is(#nd-page, .play-embed).play .play-schema figure.shiki pre {
   padding-top: 0;
 }
 
 /* The schema's controls: Edit with its hairline, then Cancel and Apply while editing, Reset to sample
    once the schema is the reader's own; the quiet ones show their hairline on hover only. */
-#nd-page.play .play-schema-head .play-button {
+:is(#nd-page, .play-embed).play .play-schema-head .play-button {
   white-space: nowrap;
 }
 
-#nd-page.play .play-button-plain {
+:is(#nd-page, .play-embed).play .play-button-plain {
   padding: 0 10px;
   border-color: transparent;
   color: var(--color-fd-muted-foreground);
 }
 
-#nd-page.play .play-button-primary {
+:is(#nd-page, .play-embed).play .play-button-primary {
   padding: 0 12px;
   border-color: var(--play-hover-border);
   color: var(--color-fd-headings);
 }
 
-#nd-page.play .play-button:disabled {
+:is(#nd-page, .play-embed).play .play-button:disabled {
   opacity: 0.5;
   cursor: default;
   background: transparent;
 }
 
-#nd-page.play .play-button-plain:disabled {
+:is(#nd-page, .play-embed).play .play-button-plain:disabled {
   border-color: transparent;
 }
 
-#nd-page.play .play-schema-tag {
+:is(#nd-page, .play-embed).play .play-schema-tag {
   font-size: var(--play-ui);
   line-height: 20px;
   color: var(--color-fd-muted-foreground);
 }
 
-#nd-page.play .play-schema-tag::before {
+:is(#nd-page, .play-embed).play .play-schema-tag::before {
   content: '·';
   margin-right: 8px;
 }
 
 /* What Postgres said of the DDL, over it, the previous schema still loaded. */
-#nd-page.play .play-schema-error {
+:is(#nd-page, .play-embed).play .play-schema-error {
   display: flex;
   align-items: baseline;
   gap: 8px;
@@ -524,7 +524,7 @@ html:not(.dark) #nd-page.play .play-theme-dark {
   flex-shrink: 0;
 }
 
-#nd-page.play .play-schema-error .play-dot {
+:is(#nd-page, .play-embed).play .play-schema-error .play-dot {
   flex-shrink: 0;
   position: relative;
   top: -1px;
@@ -534,28 +534,28 @@ html:not(.dark) #nd-page.play .play-theme-dark {
 
 /* On a phone, Reset to sample says the schema is the reader's own. */
 @media (width < 30rem) {
-  #nd-page.play .play-schema-tag {
+  :is(#nd-page, .play-embed).play .play-schema-tag {
     display: none;
   }
 }
 
-#nd-page.play .play-schema-kept {
+:is(#nd-page, .play-embed).play .play-schema-kept {
   display: block;
   color: var(--color-fd-muted-foreground);
 }
 
 /* The schema's editor at the schema's size: 12px on 20px lines. */
-#nd-page.play .play-schema-editor {
+:is(#nd-page, .play-embed).play .play-schema-editor {
   --play-code-lh: 20px;
 }
 
 /* A link with a schema of its own, before the page hydrates: the build's types are the sample's, so
    none show, only the `…` of a statement waiting for its types. */
-html[data-play-schema] #nd-page.play .play-types[data-built] .play-row > figure {
+html[data-play-schema] :is(#nd-page, .play-embed).play .play-types[data-built] .play-row > figure {
   display: none;
 }
 
-html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
+html[data-play-schema] :is(#nd-page, .play-embed).play .play-types[data-built] .play-row::after {
   content: '…';
   display: block;
   padding-top: 10px;
@@ -564,32 +564,32 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
 }
 
 /* The editor: CodeMirror in the place of the block's <pre>, the same font, size, padding and hanging indent. */
-#nd-page.play .play-editor-host,
-#nd-page.play .play-editor figure.shiki,
-#nd-page.play .play-editor .cm-editor {
+:is(#nd-page, .play-embed).play .play-editor-host,
+:is(#nd-page, .play-embed).play .play-editor figure.shiki,
+:is(#nd-page, .play-embed).play .play-editor .cm-editor {
   min-height: 100%;
 }
 
 /* The code starts 10px under the query's label, as the types do under theirs: the label's line
    ends 14px above the head's foot. */
-#nd-page.play .play-editor {
+:is(#nd-page, .play-embed).play .play-editor {
   margin-top: -4px;
   cursor: text;
 }
 
-#nd-page.play .play-editor figure.shiki pre {
+:is(#nd-page, .play-embed).play .play-editor figure.shiki pre {
   padding-top: 0;
 }
 
-#nd-page.play .play-editor .cm-editor {
+:is(#nd-page, .play-embed).play .play-editor .cm-editor {
   background: transparent;
 }
 
-#nd-page.play .play-editor .cm-editor.cm-focused {
+:is(#nd-page, .play-embed).play .play-editor .cm-editor.cm-focused {
   outline: none;
 }
 
-#nd-page.play .play-editor .cm-scroller {
+:is(#nd-page, .play-embed).play .play-editor .cm-scroller {
   overflow: visible;
   font-family: var(--font-code);
   font-size: var(--dk-code-size);
@@ -597,48 +597,48 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
   font-variant-ligatures: none;
 }
 
-#nd-page.play .play-editor .cm-content {
+:is(#nd-page, .play-embed).play .play-editor .cm-content {
   padding: 0 0 24px;
   caret-color: var(--color-fd-foreground);
 }
 
 /* A wrapped line hangs two characters past its own indent, as a code block's does. */
-#nd-page.play .play-editor .cm-line {
+:is(#nd-page, .play-embed).play .play-editor .cm-line {
   padding: 0 var(--play-pad) 0 calc(var(--play-pad) + var(--indent, 0ch) + 2ch);
   text-indent: calc(-1 * (var(--indent, 0ch) + 2ch));
   color: var(--shiki-light);
 }
 
-#nd-page.play .play-editor .cm-line * {
+:is(#nd-page, .play-embed).play .play-editor .cm-line * {
   text-indent: 0;
 }
 
-#nd-page.play .play-editor .cm-content span[style] {
+:is(#nd-page, .play-embed).play .play-editor .cm-content span[style] {
   color: var(--shiki-light);
 }
 
-.dark #nd-page.play .play-editor .cm-line,
-.dark #nd-page.play .play-editor .cm-content span[style] {
+.dark :is(#nd-page, .play-embed).play .play-editor .cm-line,
+.dark :is(#nd-page, .play-embed).play .play-editor .cm-content span[style] {
   color: var(--shiki-dark);
 }
 
-#nd-page.play .play-editor .cm-cursor {
+:is(#nd-page, .play-embed).play .play-editor .cm-cursor {
   border-left: 1.5px solid var(--color-fd-foreground);
 }
 
-#nd-page.play .play-editor .cm-selectionBackground,
-#nd-page.play .play-editor .cm-focused .cm-selectionBackground {
+:is(#nd-page, .play-embed).play .play-editor .cm-selectionBackground,
+:is(#nd-page, .play-embed).play .play-editor .cm-focused .cm-selectionBackground {
   background: color-mix(in srgb, var(--dk-accent) 28%, transparent);
 }
 
-#nd-page.play .play-editor .cm-matchingBracket {
+:is(#nd-page, .play-embed).play .play-editor .cm-matchingBracket {
   background: var(--play-hover);
   outline: 1px solid var(--color-fd-border);
 }
 
 /* The error card: under the code from the pane's gutter, edged and pointed in the squiggle's red,
    opening rather than appearing. */
-#nd-page.play .play-editor .dk-error-line {
+:is(#nd-page, .play-embed).play .play-editor .dk-error-line {
   padding-inline-start: var(--play-pad);
   /* 11px from the card to the next line's text, as from its own line's text to the card. */
   padding-bottom: 9px;
@@ -646,18 +646,18 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
   animation: play-open 120ms ease-out;
 }
 
-#nd-page.play .play-editor .dk-error-popup {
+:is(#nd-page, .play-embed).play .play-editor .dk-error-popup {
   border-color: color-mix(in srgb, var(--color-fd-error) 35%, var(--color-fd-border));
   border-radius: var(--play-radius);
   background: var(--play-surface-pop);
 }
 
-#nd-page.play .play-editor .dk-error-popup .twoslash-popup-arrow {
+:is(#nd-page, .play-embed).play .play-editor .dk-error-popup .twoslash-popup-arrow {
   border-color: color-mix(in srgb, var(--color-fd-error) 35%, var(--color-fd-border));
   background: var(--play-surface-pop);
 }
 
-#nd-page.play .play-editor .dk-error-text {
+:is(#nd-page, .play-embed).play .play-editor .dk-error-text {
   font-size: var(--dk-code-size);
 }
 
@@ -669,7 +669,7 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
 }
 
 /* Completions: the page's popover, inset rows, the candidates on the column being typed. */
-#nd-page.play .cm-tooltip {
+:is(#nd-page, .play-embed).play .cm-tooltip {
   border: 0;
   border-radius: var(--play-radius-pop);
   background: var(--play-surface-pop);
@@ -678,30 +678,30 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
   overflow: hidden;
 }
 
-#nd-page.play .cm-tooltip.cm-tooltip-autocomplete {
+:is(#nd-page, .play-embed).play .cm-tooltip.cm-tooltip-autocomplete {
   /* Its left margin is set where it is placed (lib/live/editor.ts): names start under the letters typed. */
   margin-top: 4px;
 }
 
-#nd-page.play .cm-tooltip-autocomplete > ul {
+:is(#nd-page, .play-embed).play .cm-tooltip-autocomplete > ul {
   max-height: 16em;
   padding: 4px;
   font-family: var(--font-code);
   font-size: var(--dk-code-size);
 }
 
-#nd-page.play .cm-tooltip-autocomplete > ul > li {
+:is(#nd-page, .play-embed).play .cm-tooltip-autocomplete > ul > li {
   padding: 0 8px;
   line-height: 26px;
   border-radius: 4px;
 }
 
-#nd-page.play .cm-tooltip-autocomplete > ul > li[aria-selected] {
+:is(#nd-page, .play-embed).play .cm-tooltip-autocomplete > ul > li[aria-selected] {
   background: var(--play-hover);
   color: var(--color-fd-headings);
 }
 
-#nd-page.play .cm-completionMatchedText {
+:is(#nd-page, .play-embed).play .cm-completionMatchedText {
   text-decoration: none;
   font-weight: 600;
   color: var(--color-fd-primary);
@@ -711,13 +711,13 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
 /* Each item's kind as a grey icon before it, and its type after it, muted: a column's SQL type, a
    function's return type (lib/live/complete.ts). The icon hangs left of the item, so its name
    still starts under the letters typed. */
-#nd-page.play .cm-tooltip-autocomplete > ul > li {
+:is(#nd-page, .play-embed).play .cm-tooltip-autocomplete > ul > li {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-#nd-page.play .cm-completionIcon {
+:is(#nd-page, .play-embed).play .cm-completionIcon {
   flex: none;
   width: 14px;
   height: 14px;
@@ -728,35 +728,35 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
   mask: var(--play-icon) center / 14px 14px no-repeat;
 }
 
-#nd-page.play .cm-completionIcon::after {
+:is(#nd-page, .play-embed).play .cm-completionIcon::after {
   content: none;
 }
 
-#nd-page.play .cm-completionIcon-column {
+:is(#nd-page, .play-embed).play .cm-completionIcon-column {
   --play-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='2.5' y='2.5' width='11' height='11' rx='1.5'/%3E%3Cpath d='M6.5 2.5v11'/%3E%3Crect x='2.5' y='2.5' width='4' height='11' rx='1.5' fill='black' stroke='none' opacity='.45'/%3E%3C/svg%3E");
 }
 
-#nd-page.play .cm-completionIcon-table {
+:is(#nd-page, .play-embed).play .cm-completionIcon-table {
   --play-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='2.5' y='2.5' width='11' height='11' rx='1.5'/%3E%3Cpath d='M2.5 6.5h11M6.5 6.5v7'/%3E%3C/svg%3E");
 }
 
-#nd-page.play .cm-completionIcon-function {
+:is(#nd-page, .play-embed).play .cm-completionIcon-function {
   --play-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10.5 2.75c-1.6-.4-2.7.3-3 1.8l-1.7 7.4c-.35 1.5-1.4 2.2-3 1.8M4.5 6.5h6'/%3E%3C/svg%3E");
 }
 
-#nd-page.play .cm-completionIcon-aggregate {
+:is(#nd-page, .play-embed).play .cm-completionIcon-aggregate {
   --play-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3H4l4.5 5L4 13h8'/%3E%3C/svg%3E");
 }
 
-#nd-page.play .cm-completionIcon-keyword {
+:is(#nd-page, .play-embed).play .cm-completionIcon-keyword {
   --play-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5.5 4.5 2.5 8l3 3.5M10.5 4.5l3 3.5-3 3.5'/%3E%3C/svg%3E");
 }
 
-#nd-page.play .cm-completionIcon-type {
+:is(#nd-page, .play-embed).play .cm-completionIcon-type {
   --play-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 3.5h10M8 3.5v9'/%3E%3C/svg%3E");
 }
 
-#nd-page.play .cm-completionDetail {
+:is(#nd-page, .play-embed).play .cm-completionDetail {
   margin-left: auto;
   padding-left: 16px;
   font-style: normal;
@@ -765,45 +765,45 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
 }
 
 @media (max-width: 899px) {
-  #nd-page.play {
+  :is(#nd-page, .play-embed).play {
     height: auto;
     min-height: 100dvh;
     overflow: visible;
   }
 
   /* The query keeps a fixed least height and the types take the rest, so the line between them stays put as a short query grows. */
-  #nd-page.play .play-main {
+  :is(#nd-page, .play-embed).play .play-main {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(18rem, auto) 1fr;
   }
 
-  #nd-page.play .play-side {
+  :is(#nd-page, .play-embed).play .play-side {
     border-left: 0;
     border-top: 1px solid var(--color-fd-border);
   }
 
-  #nd-page.play .play-pane-head {
+  :is(#nd-page, .play-embed).play .play-pane-head {
     height: auto;
     min-height: var(--play-head);
   }
 
-  #nd-page.play .play-picker {
+  :is(#nd-page, .play-embed).play .play-picker {
     flex: 1;
     max-width: 16rem;
   }
 
-  #nd-page.play .play-picker .play-button {
+  :is(#nd-page, .play-embed).play .play-picker .play-button {
     width: 100%;
   }
 }
 
 /* On a phone the error card spans the code's column, its edges on the pane's margins. */
 @media (width < 48rem) {
-  #nd-page.play .play-editor .dk-error-line {
+  :is(#nd-page, .play-embed).play .play-editor .dk-error-line {
     padding-inline: var(--play-pad);
   }
 
-  #nd-page.play .play-editor .dk-error-line .twoslash-popup-container {
+  :is(#nd-page, .play-embed).play .play-editor .dk-error-line .twoslash-popup-container {
     width: 100%;
     margin-inline: 0;
   }
@@ -811,7 +811,7 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
 
 /* The status shares the brand's line until the bar is too narrow for both, about 455px. */
 @media (width < 30rem) {
-  #nd-page.play .play-bar {
+  :is(#nd-page, .play-embed).play .play-bar {
     flex-wrap: wrap;
     height: auto;
     min-height: var(--play-head);
@@ -819,19 +819,19 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
     row-gap: 0;
   }
 
-  #nd-page.play .play-status {
+  :is(#nd-page, .play-embed).play .play-status {
     order: 1;
     flex-basis: 100%;
     padding-bottom: 4px;
   }
 
-  #nd-page.play .play-nav {
+  :is(#nd-page, .play-embed).play .play-nav {
     margin-left: auto;
   }
 }
 
 /* The API link, a button drawn as the bar's links are. */
-#nd-page.play button.play-nav-link {
+:is(#nd-page, .play-embed).play button.play-nav-link {
   border: 0;
   background: none;
   font: inherit;
@@ -840,7 +840,7 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
 
 /* The API dialog (lib/live/api-dialog.tsx): the page's popover, centred over a dimmed page, its
    body scrolling under a fixed head. */
-#nd-page.play .play-api {
+:is(#nd-page, .play-embed).play .play-api {
   /* Centred in the window: the site's reset takes the browser's own margins away. */
   position: fixed;
   inset: 0;
@@ -857,16 +857,16 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
   overflow: hidden;
 }
 
-#nd-page.play .play-api[open] {
+:is(#nd-page, .play-embed).play .play-api[open] {
   display: flex;
   flex-direction: column;
 }
 
-#nd-page.play .play-api::backdrop {
+:is(#nd-page, .play-embed).play .play-api::backdrop {
   background: rgb(0 0 0 / 0.55);
 }
 
-#nd-page.play .play-api-head {
+:is(#nd-page, .play-embed).play .play-api-head {
   display: flex;
   flex: none;
   align-items: center;
@@ -875,29 +875,29 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
   border-bottom: 1px solid var(--color-fd-border);
 }
 
-#nd-page.play .play-api-head h2 {
+:is(#nd-page, .play-embed).play .play-api-head h2 {
   margin: 0;
   font-size: 14px;
   font-weight: 600;
   color: var(--color-fd-headings);
 }
 
-#nd-page.play .play-api-body {
+:is(#nd-page, .play-embed).play .play-api-body {
   overflow: auto;
   padding: 16px var(--play-pad) 24px;
   font-size: var(--play-ui);
   line-height: 1.6;
 }
 
-#nd-page.play .play-api-body p {
+:is(#nd-page, .play-embed).play .play-api-body p {
   margin: 0 0 8px;
 }
 
-#nd-page.play .play-api-body section + section {
+:is(#nd-page, .play-embed).play .play-api-body section + section {
   margin-top: 28px;
 }
 
-#nd-page.play .play-api-body h3 {
+:is(#nd-page, .play-embed).play .play-api-body h3 {
   margin: 0 0 6px;
   font-family: var(--font-code);
   font-size: 13.5px;
@@ -905,19 +905,19 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
   color: var(--color-fd-headings);
 }
 
-#nd-page.play .play-api-body code {
+:is(#nd-page, .play-embed).play .play-api-body code {
   font-family: var(--font-code);
   font-size: 12.5px;
   color: var(--color-fd-headings);
   overflow-wrap: anywhere;
 }
 
-#nd-page.play .play-api-code {
+:is(#nd-page, .play-embed).play .play-api-code {
   position: relative;
   margin: 8px 0 12px;
 }
 
-#nd-page.play .play-api-code pre {
+:is(#nd-page, .play-embed).play .play-api-code pre {
   margin: 0;
   padding: 10px 40px 10px 12px;
   border: 1px solid var(--color-fd-border);
@@ -932,13 +932,13 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
 }
 
 /* JSON keeps its lines and scrolls sideways where they are wider than the dialog. */
-#nd-page.play .play-api-code pre[data-nowrap] {
+:is(#nd-page, .play-embed).play .play-api-code pre[data-nowrap] {
   padding-right: 12px;
   white-space: pre;
   overflow-x: auto;
 }
 
-#nd-page.play .play-api-code > .dk-code-copy {
+:is(#nd-page, .play-embed).play .play-api-code > .dk-code-copy {
   position: absolute;
   top: 6px;
   right: 6px;
@@ -946,7 +946,7 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
   cursor: pointer;
 }
 
-#nd-page.play .play-api-copy-all {
+:is(#nd-page, .play-embed).play .play-api-copy-all {
   height: 28px;
   margin-right: 8px;
   padding: 0 10px;
@@ -959,18 +959,18 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
   cursor: pointer;
 }
 
-#nd-page.play :is(.play-api-code > .dk-code-copy, .play-api-copy-all):hover {
+:is(#nd-page, .play-embed).play :is(.play-api-code > .dk-code-copy, .play-api-copy-all):hover {
   color: var(--color-fd-headings);
 }
 
 /* The About dialog (lib/live/about-dialog.tsx): the API dialog's box, its headings words rather than addresses. */
-#nd-page.play .play-about .play-api-body h3 {
+:is(#nd-page, .play-embed).play .play-about .play-api-body h3 {
   font-family: var(--font-text);
   font-size: 14px;
   font-weight: 600;
 }
 
-#nd-page.play .play-about .play-api-body a {
+:is(#nd-page, .play-embed).play .play-about .play-api-body a {
   color: var(--color-fd-headings);
   text-decoration: underline;
   text-decoration-color: var(--dk-accent);
@@ -979,11 +979,11 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
 
 /* The pitch (the docs' playground): centred on the bar, over the space between the status and the
    links, and dropped where the bar is too narrow to keep it clear of both. */
-#nd-page.play .play-bar {
+:is(#nd-page, .play-embed).play .play-bar {
   position: relative;
 }
 
-#nd-page.play .play-pitch {
+:is(#nd-page, .play-embed).play .play-pitch {
   position: absolute;
   left: 50%;
   top: 0;
@@ -999,7 +999,7 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
   white-space: nowrap;
 }
 
-#nd-page.play .play-pitch a {
+:is(#nd-page, .play-embed).play .play-pitch a {
   color: var(--color-fd-foreground);
   text-decoration: underline;
   text-decoration-color: var(--dk-accent);
@@ -1007,25 +1007,25 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
   text-underline-offset: 3px;
 }
 
-#nd-page.play .play-pitch a:hover {
+:is(#nd-page, .play-embed).play .play-pitch a:hover {
   color: var(--color-fd-headings);
 }
 
 @media (width < 75rem) {
-  #nd-page.play .play-pitch {
+  :is(#nd-page, .play-embed).play .play-pitch {
     display: none;
   }
 }
 
 /* "Wrong type? Report it", small and dim at the types pane's bottom left, until hovered. */
-#nd-page.play .play-report {
+:is(#nd-page, .play-embed).play .play-report {
   flex: none;
   margin: 0;
   padding: 12px var(--play-pad) 16px;
   font-size: 12px;
 }
 
-#nd-page.play .play-report a {
+:is(#nd-page, .play-embed).play .play-report a {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1033,10 +1033,97 @@ html[data-play-schema] #nd-page.play .play-types[data-built] .play-row::after {
   transition: color 120ms;
 }
 
-#nd-page.play .play-report a:hover {
+:is(#nd-page, .play-embed).play .play-report a:hover {
   color: var(--color-fd-headings);
 }
 
-#nd-page.play .play-report svg {
+:is(#nd-page, .play-embed).play .play-report svg {
   opacity: 0.8;
+}
+
+/* ── The playground in a post (components/play-embed.tsx) ─────────────────────
+   The query over the types, in a card of the post's own width: no bar, the
+   database's state in the query's head, and "Open in the playground" under the
+   types. The query keeps a least height, so the types below it stay put while a
+   short query grows. */
+.play.play-embed:is(#nd-page, .play-embed) {
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+  container-type: inline-size;
+  grid-template-rows: minmax(0, 1fr);
+  margin-block: 1.5rem;
+  border: 1px solid var(--color-fd-border);
+  border-radius: 12px;
+  background: var(--color-fd-card);
+  --play-pad: 16px;
+}
+
+.play.play-embed:is(#nd-page, .play-embed) .play-main {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(13rem, auto) auto;
+}
+
+.play.play-embed:is(#nd-page, .play-embed) .play-side {
+  border-left: 0;
+  border-top: 1px solid var(--color-fd-border);
+  min-height: 11rem;
+}
+
+.play.play-embed:is(#nd-page, .play-embed) .play-editor[tabindex] {
+  cursor: text;
+  outline: none;
+}
+
+.play.play-embed:is(#nd-page, .play-embed) .play-open {
+  padding-top: 0;
+}
+
+/* Before it starts: a hollow dot, the muted colour, so nothing reads as running. */
+.play.play-embed:is(#nd-page, .play-embed) .play-status[data-kind='idle'] .play-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--color-fd-muted-foreground);
+}
+
+/* In a narrow post the state goes under the label and the examples, on a line of its own. */
+@container (width < 36rem) {
+  .play.play-embed:is(#nd-page, .play-embed) .play-query .play-pane-head {
+    flex-wrap: wrap;
+    height: auto;
+    padding-block: 8px;
+    row-gap: 4px;
+  }
+
+  .play.play-embed:is(#nd-page, .play-embed) .play-query .play-status {
+    order: 1;
+    flex-basis: 100%;
+  }
+}
+
+/* View schema's icon sat 0.63px below its label's cap band (ink-align, dark and light); half a pixel up levels it. */
+:is(#nd-page, .play-embed).play .play-side-actions .play-button svg {
+  transform: translateY(-0.5px);
+}
+
+/* In an embed's query head, the status dot sat 1.13px and, everywhere, the examples' chevron 0.63px below their labels' cap band (ink-align, dark and light). */
+.play.play-embed:is(#nd-page, .play-embed) .play-status .play-dot {
+  transform: translateY(-1px);
+}
+
+:is(#nd-page, .play-embed).play .play-picker .play-button svg {
+  transform: translateY(-0.5px);
+}
+
+/* Wide, as a post lays it out past its column: the query and the types side by side, as on /play. */
+@container (width >= 52rem) {
+  .play.play-embed:is(#nd-page, .play-embed) .play-main {
+    grid-template-columns: minmax(0, 1fr) clamp(22rem, 40%, 32rem);
+    grid-template-rows: minmax(26rem, auto);
+  }
+
+  .play.play-embed:is(#nd-page, .play-embed) .play-side {
+    border-top: 0;
+    border-left: 1px solid var(--color-fd-border);
+    border-radius: 0 12px 12px 0;
+  }
 }

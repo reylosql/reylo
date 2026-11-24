@@ -1,0 +1,323 @@
+---
+title: "Introducing Reylo"
+description: "Reylo lets you import SQL files directly into TypeScript with full type safety, with every type inferred from your database."
+date: 2026-11-24
+author: Colin McDonnell
+---
+
+<PageSchema>
+
+```sql file="schema.sql" tab="Postgres" tab-group="dialect"
+create extension if not exists pg_jsonschema;
+
+create type user_role as enum ('admin', 'member');
+
+create table users (
+  id serial primary key,                     -- at most one row per id
+  name text not null,                        -- name: string
+  email text unique,                         -- email: string | null
+  role user_role not null default 'member',  -- role: "admin" | "member"
+  tags text[] not null default '{}',         -- tags: (string | null)[]
+  created_at timestamptz                     -- created_at: string
+    not null default now()
+);
+
+create table posts (
+  id serial primary key,
+  user_id integer not null references users (id),
+  title text not null,
+  body text,
+  published_at timestamptz
+);
+
+create table events (
+  id serial primary key,
+  kind text not null
+    check (kind in ('click', 'key')),        -- kind: "click" | "key"
+  payload jsonb not null                     -- payload: what the schema admits
+    check (jsonb_matches_schema('{
+      "type": "object",
+      "properties": {
+        "x": { "type": "integer" },
+        "y": { "type": "integer" },
+        "code": { "type": "string" }
+      }
+    }', payload))
+);
+```
+
+```sql file="schema.sql" tab="MySQL" tab-group="dialect"
+create table users (
+  id int auto_increment primary key,          -- at most one row per id
+  name text not null,                         -- name: string
+  email varchar(255) unique,                  -- email: string | null
+  role enum('admin', 'member')                -- role: "admin" | "member"
+    not null default 'member',
+  tags json not null default (json_array()),  -- tags: Json
+  created_at datetime                         -- created_at: string, UTC
+    not null default (utc_timestamp())
+);
+
+create table posts (
+  id int auto_increment primary key,
+  user_id int not null,
+  title text not null,
+  body text,
+  published_at datetime,
+  foreign key (user_id) references users (id)
+);
+
+create table events (
+  id int auto_increment primary key,
+  kind text not null,
+  payload json not null                       -- payload: what the schema admits
+    check (json_schema_valid('{
+      "type": "object",
+      "properties": {
+        "x": { "type": "integer" },
+        "y": { "type": "integer" },
+        "code": { "type": "string" }
+      }
+    }', payload))
+);
+```
+
+```sql file="schema.sql" tab="SQLite" tab-group="dialect"
+create table users (
+  id integer primary key,               -- at most one row per id
+  name text not null,                   -- name: string
+  email text unique,                    -- email: string | null
+  role text not null default 'member'   -- role: string
+    check (role in ('admin', 'member')),
+  tags text not null default '[]',      -- tags: string, JSON text
+  created_at text                       -- created_at: string, UTC
+    not null default (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+) strict;
+
+create table posts (
+  id integer primary key,
+  user_id integer not null references users (id),
+  title text not null,
+  body text,
+  published_at text
+) strict;
+
+create table events (
+  id integer primary key,
+  kind text not null,
+  payload text not null
+) strict;
+```
+
+</PageSchema>
+
+Reylo lets you import SQL files directly into TypeScript with full type safety. If you have a query like this:
+
+```sql title="get_author.sql"
+-- hover a table to see its declaration
+select u.id, u.name, count(p.id)::int as post_count
+from users u
+left join posts p on p.user_id = u.id
+where u.id = :id::int
+group by u.id
+```
+
+You can import it straight into TypeScript. Hover over `author` to see the type Reylo infers for it:
+
+```ts twoslash title="main.ts" dialect="postgres"
+// @noErrors
+import postgres from "postgres";
+import getAuthor from "./get_author.sql";
+
+const db = postgres(process.env.DATABASE_URL);
+const author = await getAuthor.run(db, { id: 1 });
+```
+
+There's no codegen step and no generated file: the types come straight from your database. The query runs on whatever driver you already use, on Postgres, MySQL or SQLite.
+
+## How it works
+
+TypeScript 7.1 adds the content mapper API, adding support for external file types. It lets you dynamically generate a static type signature for an import of a file with a given extension. Reylo is a content mapper for `.sql`:
+
+```jsonc title="tsconfig.json"
+{
+  "compilerOptions": { /* ... */ },
+  "contentMappers": [{ "package": "reylo" }]
+}
+```
+
+When TypeScript meets a `.sql` import, Reylo sends the query to your live development database. The database compiles it without running it, and hands back the types of its parameters and columns. Reylo reads your schema information too: the catalog on Postgres, and the information tables on MySQL and SQLite.
+
+<HowItWorksDiagram />
+
+From all of that, Reylo infers your types, including some remarkably complex ones. A few examples:
+
+<Tabs items={["Left joins", "Aggregates", "JSON aggregation", "JSON Schema"]}>
+<Tab value="Left joins" id="how-left-joins">
+
+<InferenceCard>
+
+```sql file="inferred_user_titles.sql" dialect="all"
+select u.name, p.title
+from users u
+left join posts p on p.user_id = u.id
+where u.id = :user_id::int
+```
+
+</InferenceCard>
+
+</Tab>
+<Tab value="Aggregates" id="how-aggregates">
+
+<InferenceCard>
+
+```sql file="inferred_post_count.sql" dialect="postgres"
+select count(*)::int as posts
+from posts
+where user_id = :user_id::int
+```
+
+```sql file="inferred_post_count.sql" dialect="mysql"
+select count(*) as posts
+from posts
+where user_id = :user_id::int
+```
+
+```sql file="inferred_post_count.sql" dialect="sqlite"
+select count(*) as posts
+from posts
+where user_id = :user_id::int
+```
+
+</InferenceCard>
+
+</Tab>
+<Tab value="JSON aggregation" id="how-json-aggregation">
+
+<InferenceCard>
+
+```sql file="inferred_user_posts.sql" dialect="postgres"
+select u.name,
+  jsonb_agg(jsonb_build_object('id', p.id, 'title', p.title)) as posts
+from users u
+join posts p on p.user_id = u.id
+where p.published_at > :since
+group by u.id
+```
+
+```sql file="inferred_user_posts.sql" dialect="mysql"
+select u.name,
+  json_arrayagg(json_object('id', p.id, 'title', p.title)) as posts
+from users u
+join posts p on p.user_id = u.id
+where p.published_at > :since
+group by u.id
+```
+
+```sql file="inferred_user_posts.sql" dialect="sqlite"
+select u.name,
+  json_group_array(json_object('id', p.id, 'title', p.title)) as posts
+from users u
+join posts p on p.user_id = u.id
+where p.published_at > :since
+group by u.id
+```
+
+</InferenceCard>
+
+</Tab>
+<Tab value="JSON Schema" id="how-json-schema">
+
+<InferenceCard>
+
+```sql schema dialect="postgres"
+create extension if not exists pg_jsonschema;
+
+create table events (
+  id serial primary key,
+  payload jsonb not null check (jsonb_matches_schema('{
+    "type": "object",
+    "properties": {
+      "x": { "type": "integer" },
+      "y": { "type": "integer" }
+    },
+    "required": ["x", "y"],
+    "additionalProperties": false
+  }', payload))
+);
+```
+
+```sql schema dialect="mysql"
+create table events (
+  id int auto_increment primary key,
+  payload json not null check (json_schema_valid('{
+    "type": "object",
+    "properties": {
+      "x": { "type": "integer" },
+      "y": { "type": "integer" }
+    },
+    "required": ["x", "y"],
+    "additionalProperties": false
+  }', payload))
+);
+```
+
+```sql file="inferred_event_payloads.sql" dialect="postgres"
+-- hover events: payload's type comes from its JSON Schema
+select id, payload
+from events
+where id = :id::int
+```
+
+```sql file="inferred_event_payloads.sql" dialect="mysql"
+-- hover events: payload's type comes from its JSON Schema
+select id, payload
+from events
+where id = :id::int
+```
+
+</InferenceCard>
+
+</Tab>
+</Tabs>
+
+And yes, a typo in your SQL is a type error too, with the database's own message:
+
+```sql tab="get_user.sql" dialect="all" errors
+select id, nmae, email
+from users
+where id = :id::int
+```
+
+## Try it
+
+You can try it right here. Click into the query and start editing, and the types update as you type. Postgres runs in this tab through PGlite, with Reylo's engine beside it as WebAssembly:
+
+<PlayEmbed />
+
+## Get started
+
+To use it in your own project, install Reylo along with TypeScript 7.1:
+
+```sh
+npm install reylo
+npm install -D typescript@next
+```
+
+Then you add the `tsconfig.json` entry from above, plus Reylo's plugin for your runtime or bundler. [The setup guide](/typescript#setup) walks through each one.
+
+Reylo is the perfect option for the agent era:
+
+<div className="dk-features">
+
+- 💪 **The full power of SQL** — any syntax, function or operator your database supports
+- 🌵 **DRY** — no redundant hand-written types
+- 🎯 **Checked against your database** — a misspelled column is a type error
+- 🤖 **Agent-friendly** — DRY code is more maintainable for agents
+- 🧩 **Postgres, MySQL and SQLite** — Neon, PlanetScale, Cloudflare D1, Turso and more
+- 🔌 **Bring your own driver** — `pg`, postgres.js, `mysql2`, `better-sqlite3` and [more](/typescript#run)
+- ⚡ **No codegen** — no generated files, no watcher
+
+</div>
+
+Reylo can also write your migrations, in plain SQL, with [Reylo Migrate](/blog/reylo-migrate). It's all MIT licensed and on [GitHub](https://github.com/reylosql/reylo).

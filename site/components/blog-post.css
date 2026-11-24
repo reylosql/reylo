@@ -1,0 +1,85 @@
+/* A blog post (app/routes/blog-post.tsx): one column under the homepage's bar, as wide as a docs
+   page's, with nothing beside it. A playground in it (components/play-embed.tsx) leaves the column
+   for most of the window's width, centred on it. */
+.bp-main {
+  --bp-column: 46rem;
+  max-width: calc(var(--bp-column) + 6rem);
+  margin: 0 auto;
+  padding: 3.5rem 3rem 6rem;
+}
+
+.bp-article {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.bp-article .play.play-embed:is(#nd-page, .play-embed) {
+  width: min(calc(100vw - 3rem), 76rem);
+  margin-inline: calc((100% - min(calc(100vw - 3rem), 76rem)) / 2);
+}
+
+@media (max-width: 640px) {
+  .bp-main {
+    padding: 2rem 1.25rem 4rem;
+  }
+
+  .bp-article .play.play-embed:is(#nd-page, .play-embed) {
+    width: calc(100vw - 2rem);
+    margin-inline: calc((100% - (100vw - 2rem)) / 2);
+  }
+}
+
+/* The byline under the title: the author's avatar beside their name over the date, with a
+   section's room under it before the post opens. A release's post, which names no author, has
+   the date alone. */
+.bp-byline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0.25rem 0 2.25rem;
+}
+
+.bp-author {
+  flex: none;
+  display: block;
+  border-radius: 50%;
+}
+
+.bp-author img {
+  display: block;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--color-fd-border);
+}
+
+.bp-byline-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+.bp-author-name {
+  font-weight: 500;
+  color: var(--color-fd-foreground);
+  text-decoration: none;
+}
+
+.bp-author-name:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.bp-byline-meta {
+  color: var(--color-fd-muted-foreground);
+}
+
+.bp-byline-meta a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}

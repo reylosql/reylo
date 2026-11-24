@@ -10,6 +10,7 @@ import { HowItWorksDiagram } from './how-it-works-diagram';
 import { MigrationsDiagram } from './migrations-diagram';
 import { InferenceCard, InferenceCardPlay, InferenceCardRow, InferenceCardTypes, InferenceLanguage, InferenceLanguages, LanguagePanel, LanguagePanels, LanguageSwitch } from './inference-card';
 import { Pairs, Rules } from './value-pairs';
+import { PlayEmbed } from './play-embed';
 
 /**
  * docs-kit's components (headings with the link icon and the copy-as-Markdown button, accordions,
@@ -78,6 +79,8 @@ export function getMDXComponents(components?: MDXComponents) {
     // pages' (components/value-pairs.tsx).
     Rules,
     Pairs,
+    // The playground inside a post (components/play-embed.tsx).
+    PlayEmbed,
     ...components,
   });
 }
