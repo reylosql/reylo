@@ -201,10 +201,10 @@ test("Postgres: where the role or the database sets another DateStyle than ISO, 
 test("Postgres: an analysis waits on another session's lock for at most 10 s, or the session's own shorter lock_timeout, once per statement, and nothing is kept as the statement's error", { skip: pgLive }, async () => {
   const { url, sql, drop } = await postgresDatabase("reylo_lock_wait", "create table users (id bigint primary key, name text not null); create table orders (id bigint primary key)");
   const e = await engine("postgres");
-  const setting = async (at: string) => {
+  const setting = async (at: string, name = "lock_timeout") => {
     const c = await e.open(at);
     try {
-      return ((await c.query("select pg_catalog.current_setting('lock_timeout')", [])) as [[string]])[0][0];
+      return ((await c.query(`select pg_catalog.current_setting('${name}')`, [])) as [[string]])[0][0];
     } finally {
       await c.close();
     }
@@ -214,6 +214,8 @@ test("Postgres: an analysis waits on another session's lock for at most 10 s, or
     assert.equal(await setting(url), "10s");
     assert.equal(await setting(`${url}?options=-c%20lock_timeout%3D1min`), "10s");
     assert.equal(await setting(`${url}?options=-c%20lock_timeout%3D1s`), "1s");
+    // A backend waiting on a lock notices its client gone by this check alone.
+    assert.equal(await setting(url, "client_connection_check_interval"), "100ms");
     const locked = (err: Error) => !(err instanceof Unreachable) && err.message === "A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_timeout. Run it again once the lock is released: pg_locks lists the session that holds it";
     // An alter table left open in another session holds the table's lock until its transaction ends.
     await sql.begin(async (tx: any) => {
@@ -243,7 +245,8 @@ test("Postgres: a session a lock timeout gives up on is closed, so a role allowe
   await sql.unsafe(`create role ${role} login connection limit 1`);
   const at = new URL(url);
   at.username = role;
-  const c = await (await engine("postgres")).open(`${at.href}?options=-c%20lock_timeout%3D200ms`);
+  // Longer than the replacement is asked again for, so that only the server's check for a client gone ends the old session's queued wait in time.
+  const c = await (await engine("postgres")).open(`${at.href}?options=-c%20lock_timeout%3D3s`);
   try {
     await sql.begin(async (tx: any) => {
       await tx.unsafe("alter table users add column email text");

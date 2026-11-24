@@ -25,8 +25,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// left open in another client, a `vacuum full`) ends the analysis with a message rather than
 /// stalling the type check until its transaction ends. Postgres's own default waits forever. A
 /// shorter `lock_timeout` the session already has, from the URL's `options`, the role or the
-/// database, is kept.
-const LOCK_WAIT: &str = "select pg_catalog.set_config('lock_timeout', '10s', false) from pg_catalog.pg_settings where name OPERATOR(pg_catalog.=) 'lock_timeout' and (setting::pg_catalog.int8 OPERATOR(pg_catalog.=) 0 or setting::pg_catalog.int8 OPERATOR(pg_catalog.>) 10000)";
+/// database, is kept. With it, a `client_connection_check_interval` (Postgres 14 and later), unless
+/// the session has one: a session retired at a lock timeout ([`Driven::retire`]) may still have a
+/// describe waiting on the server behind the same lock, and a backend that waits on a lock notices
+/// its client gone only by that check, so without it the session would keep its server slot until
+/// that wait ran out too.
+const LOCK_WAIT: &str = "select pg_catalog.set_config('lock_timeout', '10s', false) from pg_catalog.pg_settings where name OPERATOR(pg_catalog.=) 'lock_timeout' and (setting::pg_catalog.int8 OPERATOR(pg_catalog.=) 0 or setting::pg_catalog.int8 OPERATOR(pg_catalog.>) 10000); select pg_catalog.set_config('client_connection_check_interval', '100ms', false) from pg_catalog.pg_settings where name OPERATOR(pg_catalog.=) 'client_connection_check_interval' and setting::pg_catalog.int8 OPERATOR(pg_catalog.=) 0";
 
 /// The URL parameters tokio-postgres reads itself. libpq's TLS settings are read here (`sslmode`,
 /// `sslrootcert`, `sslcert`, `sslkey`, `sslpassword`), and `ssl`, which node-postgres and
