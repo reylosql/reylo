@@ -475,6 +475,22 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
         }
         }
     });
+    // A sequence moved to a new start reads each column it gives values to, its table locked
+    // against writes until the file commits: every row of it, where no index leads with the column.
+    let (opens, closes) = crate::diff::postgres::SEQUENCE_READ;
+    for line in m.sql.lines().filter(|l| l.contains("set_config('reylo.sequence_goal', goal::text")) {
+        let Some(sequence) = line.strip_prefix(opens).and_then(|rest| rest.split_once(closes)).map(|(s, _)| s) else { continue };
+        let read = db
+            .rows(&format!(
+                "select format('%s', c.rel) as t from (select ({sequence})::regclass as s) q, lateral ({}) c \
+                where c.plain and not exists (select from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0] where i.indrelid = c.rel and a.attname = c.attname)",
+                crate::diff::postgres::sequence_columns("q.s")
+            ))
+            .await;
+        for r in read.iter().flatten() {
+            add(r.text("t"), format!("reads every row of {} while it blocks writes to it, to move a sequence past them", r.text("t")));
+        }
+    }
     run(db, m, false).await?;
     // A table renamed keeps its storage; one given new storage was copied, but for a truncate,
     // which empties it at once. An index given new storage on a table that wasn't copied was

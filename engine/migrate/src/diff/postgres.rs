@@ -3231,6 +3231,26 @@ fn dollar_block(body: &str) -> String {
     format!("do {tag} {body} {tag}")
 }
 
+/// The columns the sequence `s` (SQL that gives it as a `regclass`) gives values to, each as its
+/// table (`rel`) and name (`attname`), and whether it holds them as they are (`plain`): an identity,
+/// an integer column the sequence is owned by, or one whose default is it alone. A domain whose
+/// default calls it is a row that isn't.
+pub(crate) fn sequence_columns(s: &str) -> String {
+    let integer = "a.atttypid in ('int2'::regtype, 'int4'::regtype, 'int8'::regtype)";
+    format!(
+        "select d.refobjid::regclass as rel, a.attname, {integer} as plain from pg_depend d join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid \
+        where d.classid = 'pg_class'::regclass and d.objid = {s} and d.refclassid = 'pg_class'::regclass and d.deptype in ('a', 'i') \
+        union all select ad.adrelid::regclass, a.attname, {integer} and r.relkind in ('r', 'p') and pg_get_expr(ad.adbin, ad.adrelid) = format('nextval(%L::regclass)', {s}::text) \
+        from pg_depend d join pg_attrdef ad on ad.oid = d.objid join pg_attribute a on a.attrelid = ad.adrelid and a.attnum = ad.adnum join pg_class r on r.oid = ad.adrelid \
+        where d.classid = 'pg_attrdef'::regclass and d.refclassid = 'pg_class'::regclass and d.refobjid = {s} \
+        union all select null, null, false from pg_depend d where d.classid = 'pg_type'::regclass and d.refclassid = 'pg_class'::regclass and d.refobjid = {s}"
+    )
+}
+
+/// What precedes the expression that gives the sequence in the first block of `moved_to_start`, and
+/// what follows it, by which a file's hazards find the block and the sequence it reads for.
+pub(crate) const SEQUENCE_READ: (&str, &str) = ("do $reylo$ declare s regclass := ", "; goal numeric := ");
+
 /// Whether a sequence's start moved from `was` to `is` in the direction it counts.
 fn ahead(was: &str, is: &str, descending: bool) -> bool {
     match (was.parse::<i128>(), is.parse::<i128>()) {
@@ -3243,7 +3263,8 @@ fn ahead(was: &str, is: &str, descending: bool) -> bool {
 /// gives values to, but never back, which would give again a value it gave: two blocks, the first
 /// before the alter of the sequence and the second after it. The first reads the columns, each
 /// table locked against writes (not reads) until the migration commits, so that no row written
-/// after it is passed over, and keeps where the sequence is to go for the second (a setting of the
+/// after it is passed over (a table the role may not lock leaves the sequence where it is), and
+/// keeps where the sequence is to go for the second (a setting of the
 /// transaction); the second, under the alter's lock, which holds back every `nextval`, reads where
 /// the sequence stands and restarts it there, which a failed migration undoes. It moves only where
 /// each column holds the sequence's values as they are: an identity, an integer column it is owned
@@ -3253,19 +3274,11 @@ fn ahead(was: &str, is: &str, descending: bool) -> bool {
 /// can't be got past.
 fn moved_to_start(sequence: &str, start: &str, increment: &str, low: &str, high: &str) -> [String; 2] {
     let (edge, past, beyond) = if increment.starts_with('-') { ("min", "- 1", "<") } else { ("max", "+ 1", ">") };
-    let integer = "a.atttypid in ('int2'::regtype, 'int4'::regtype, 'int8'::regtype)";
-    let columns = format!(
-        "select d.refobjid::regclass as rel, a.attname, {integer} as plain from pg_depend d join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid \
-        where d.classid = 'pg_class'::regclass and d.objid = s and d.refclassid = 'pg_class'::regclass and d.deptype in ('a', 'i') \
-        union all select ad.adrelid::regclass, a.attname, {integer} and r.relkind in ('r', 'p') and pg_get_expr(ad.adbin, ad.adrelid) = format('nextval(%L::regclass)', s::text) \
-        from pg_depend d join pg_attrdef ad on ad.oid = d.objid join pg_attribute a on a.attrelid = ad.adrelid and a.attnum = ad.adnum join pg_class r on r.oid = ad.adrelid \
-        where d.classid = 'pg_attrdef'::regclass and d.refclassid = 'pg_class'::regclass and d.refobjid = s \
-        union all select null, null, false from pg_depend d where d.classid = 'pg_type'::regclass and d.refclassid = 'pg_class'::regclass and d.refobjid = s"
-    );
+    let columns = sequence_columns("s");
     let first = dollar_block(&format!(
         "declare s regclass := {sequence}; goal numeric := {start}; reach numeric; c record; \
         begin for c in {columns} loop if not c.plain then return; end if; \
-        execute format('lock table %s in share mode', c.rel); execute format('select {edge}(%I)::numeric {past} from %s', c.attname, c.rel) into reach; \
+        begin execute format('lock table %s in share mode', c.rel); exception when insufficient_privilege then return; end; execute format('select {edge}(%I)::numeric {past} from %s', c.attname, c.rel) into reach; \
         if reach {beyond} goal and reach between {low} and {high} then goal := reach; end if; end loop; \
         perform set_config('reylo.sequence_goal', goal::text, true); end"
     ));

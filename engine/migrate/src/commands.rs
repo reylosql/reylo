@@ -4650,16 +4650,16 @@ fn keep_rows(id: &str, from: &crate::diff::Schema, to: &crate::diff::Schema, ren
     // A column's type: its definition up to what follows the type.
     let ty = |def: &str| [" collate ", " default ", " generated ", " not null", " constraint "].iter().filter_map(|m| def.find(m)).min().map_or(def.to_string(), |at| def[..at].to_string());
     // Each column put back, with what it is read from; a generated one takes no value of its own.
-    let mut kept: Vec<(&str, String, &str)> = Vec::new();
+    let mut kept: Vec<(&str, &str, String, &str)> = Vec::new();
     for (c, def) in is.iter().filter(|(_, def)| !def.contains(" generated always as (")) {
         let old = renames.iter().find(|(_, new)| new == &format!("{prefix}{c}")).and_then(|(old, _)| old.strip_prefix(&prefix)).unwrap_or(c);
         let Some((_, was_def)) = was.iter().find(|(w, _)| w == old) else { continue };
         let read = if ty(was_def) == ty(def) { old.to_string() } else { format!("{old}::{}", ty(def)) };
-        kept.push((c, read, def));
+        kept.push((c, old, read, def));
     }
-    let names = kept.iter().map(|(c, _, _)| *c).collect::<Vec<_>>().join(", ");
-    let reads = kept.iter().map(|(_, r, _)| r.as_str()).collect::<Vec<_>>().join(", ");
-    let overriding = if kept.iter().any(|(_, _, def)| def.contains(" generated always as identity")) { " overriding system value" } else { "" };
+    let names = kept.iter().map(|(c, _, _, _)| *c).collect::<Vec<_>>().join(", ");
+    let reads = kept.iter().map(|(_, _, r, _)| r.as_str()).collect::<Vec<_>>().join(", ");
+    let overriding = if kept.iter().any(|(_, _, _, def)| def.contains(" generated always as identity")) { " overriding system value" } else { "" };
     let literal = |t: &str| format!("'{}'", t.replace('\'', "''"));
     let without = if apart.is_empty() { String::new() } else { format!(" where tableoid not in ({})", apart.iter().map(|a| format!("select relid from pg_partition_tree({}::regclass)", literal(&shown(a.trim_start_matches("table "))))).collect::<Vec<_>>().join(" union all ")) };
     let partitioned = to.objects.get(id).is_some_and(|o| o.extra.iter().any(|l| l.starts_with("shape ") && l.contains(" partition by ")));
@@ -4671,16 +4671,25 @@ fn keep_rows(id: &str, from: &crate::diff::Schema, to: &crate::diff::Schema, ren
         after,
         format!("insert into {table} ({names}){overriding} select {reads} from {copy};"),
     ];
-    for (c, _, def) in &kept {
-        // An identity's sequence, found through its column; and one the column owns, made again with
-        // the table, named, since the migration makes it the column's only after the rows are back.
-        // A sequence of its own that the column only calls keeps its place.
-        let owned = to.objects.iter().find(|(_, o)| o.kind == Some(crate::diff::Kind::Sequence) && o.goes_with.as_deref() == Some(format!("{prefix}{c}").as_str()));
+    for (c, old, _, def) in &kept {
+        // An identity's sequence, found through its column, and a sequence the column owned, which
+        // goes with the table and is made again, named, since the migration makes it the column's
+        // only after the rows are back. Either moves past the rows where the column holds its values
+        // as they are; one the column only calls, which stays, keeps its place.
+        let owned = |schema: &crate::diff::Schema, column: &str| schema.objects.iter().find(|(_, o)| o.kind == Some(crate::diff::Kind::Sequence) && o.goes_with.as_deref() == Some(format!("{prefix}{column}").as_str())).map(|(id, o)| (id.clone(), o.def.clone()));
         let (sequence, options) = if def.contains(" as identity") {
             let unquoted = c.strip_prefix('"').and_then(|c| c.strip_suffix('"')).map_or(c.to_string(), |c| c.replace("\"\"", "\""));
-            (format!("pg_get_serial_sequence({}, {})", literal(&table), literal(&unquoted)), *def)
-        } else if let Some((id, o)) = owned {
-            (literal(&shown(id.trim_start_matches("sequence "))), o.def.as_str())
+            (format!("pg_get_serial_sequence({}, {})", literal(&table), literal(&unquoted)), def.to_string())
+        } else if let (Some((id, options)), Some((was, _))) = (owned(to, c), owned(from, old)) {
+            let name = shown(id.trim_start_matches("sequence "));
+            let integer = ["smallint", "integer", "bigint"].contains(&ty(def).as_str());
+            let full = id.trim_start_matches("sequence ");
+            let alone = [&name, full].iter().any(|n| def.contains(&format!("default nextval({}::regclass)", literal(n))));
+            if id != was || !integer || !alone {
+                out.push(format!("-- and move the sequence {name} past the values put back in {c}"));
+                continue;
+            }
+            (literal(&name), options)
         } else {
             continue;
         };

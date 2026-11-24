@@ -1850,13 +1850,17 @@ async fn a_shadow_left_by_a_killed_run_is_swept(mut p: P) {
     target.close().await;
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     let list = if p.d == Dialect::Postgres { "select datname as n from pg_database where datname like 'reylo_shadow_%'" } else { r"select schema_name as n from information_schema.schemata where schema_name like 'reylo\_shadow\_%'" };
-    // Another test's run may be sweeping it at the same moment, which this run's sweep leaves to
-    // it: it is gone once that drop ends.
+    // Another test's run may be sweeping at the same moment, which this run's sweep leaves to it:
+    // the dead one is gone once that drop ends, or, where that sweep listed the shadows before it
+    // was made, once a later run sweeps, as each run does.
     let mut names: Vec<String> = Vec::new();
-    for _ in 0..100 {
+    for k in 0..100 {
         names = p.rows(list).await.iter().map(|r| r.text("n").to_string()).collect();
         if !names.contains(&dead) {
             break;
+        }
+        if k % 10 == 9 {
+            assert_eq!(p.migrate().await, 0, "{}", p.peek());
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -3463,6 +3467,7 @@ on!(
     a_partition_dropped_at_run_time_is_data,
     a_table_made_partitioned_is_refused_for_what_postgres_cant_change,
     the_lines_that_keep_a_remade_tables_rows_follow_the_change,
+    a_sequence_moved_past_unindexed_rows_asks_for_blocking,
     init_creates_the_extensions_its_schema_uses,
     init_writes_the_default_privileges_and_grants_a_migration_made,
     init_writes_a_database_of_grants_alone,
@@ -6030,6 +6035,25 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "drop_counters", &reylo_migrate::Choices { drop: vec!["counters".into(), "counters_0".into()], ..Default::default() }, log).await).await, 0, "{}", p.peek());
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         p.output();
+        // A sequence the table only called, which it comes to own, keeps its place: other tables may
+        // have taken its values. And a text column its own sequence feeds through an expression is
+        // left for the sequence to be moved by hand.
+        let shared = "create sequence ticket_no; create table tickets (id bigint primary key default nextval('ticket_no'), n text); create sequence invoices_no; create table invoices (code text primary key default 'INV-' || nextval('invoices_no'), n text); alter sequence invoices_no owned by invoices.code;";
+        p.schema(&format!("{users} {shared}"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "add_tickets", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        p.exec("insert into tickets (n) select 't' || g from generate_series(1, 10) g; select setval('ticket_no', 100); insert into invoices (n) select 'i' || g from generate_series(1, 3) g").await;
+        p.schema(&format!("{users} create sequence ticket_no; create table tickets (id bigint primary key default nextval('ticket_no'), n text) partition by hash (id); create table tickets_0 partition of tickets for values with (modulus 1, remainder 0); alter sequence ticket_no owned by tickets.id; create sequence invoices_no; create table invoices (code text primary key default 'INV-' || nextval('invoices_no'), n text) partition by hash (code); create table invoices_0 partition of invoices for values with (modulus 1, remainder 0); alter sequence invoices_no owned by invoices.code;"));
+        let out = keep_the_rows(&mut p, "partition_tickets", &[]).await;
+        assert!(!out.contains("setval('ticket_no'"), "{out}");
+        assert_has!(&out, r"-- and move the sequence invoices_no past the values put back in code");
+        assert_eq!(p.rows("select nextval('ticket_no') as n").await[0].text("n"), "101");
+        assert_eq!(p.rows("select count(*) as n from invoices").await[0].text("n"), "3");
+        p.schema(users);
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "drop_tickets", &reylo_migrate::Choices { drop: vec!["tickets".into(), "tickets_0".into(), "invoices".into(), "invoices_0".into()], ..Default::default() }, log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
         // A list-partitioned table made plain, one of its partitions kept as a table of its own, whose
         // rows are in a partition of its own.
         p.schema(&format!("{users} create table regions (id int generated always as identity, region text not null, name text, primary key (id, region)) partition by list (region); create table regions_eu partition of regions for values in ('eu'); create table regions_us partition of regions for values in ('us') partition by hash (id); create table regions_us_0 partition of regions_us for values with (modulus 1, remainder 0);"));
@@ -6043,6 +6067,26 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.rows("select count(*) as n from regions where region = 'eu'").await[0].text("n"), "5");
         assert_eq!(p.rows("select count(*) as n from regions where region = 'us'").await[0].text("n"), "0");
         assert_eq!(p.rows("select count(*) as n from only regions_us_0 where region = 'us'").await[0].text("n"), "5");
+    }
+
+    /// A start moved on an identity no index leads with reads every row of its table, which is
+    /// locked against writes while it does, so the migration asks for --blocking.
+    pub async fn a_sequence_moved_past_unindexed_rows_asks_for_blocking(mut p: P) {
+        let before = "create table log (id bigint generated always as identity, msg text); create table events (id bigint generated always as identity primary key, msg text);";
+        p.schema(before);
+        p.file("20261027100000_log.sql", before);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("insert into log (msg) select 'm' || g from generate_series(1, 10) g; insert into events (msg) select 'e' || g from generate_series(1, 10) g").await;
+        p.output();
+        p.schema("create table log (id bigint generated always as identity (start with 1000), msg text); create table events (id bigint generated always as identity (start with 1000) primary key, msg text);");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "move_ids", &Default::default(), log).await).await, 1);
+        let out = p.output();
+        assert_has!(&out, r"reads every row of log while it blocks writes to it, to move a sequence past them");
+        assert!(!out.contains("of events while"), "an indexed column is read through its index: {out}");
+        let choices = reylo_migrate::Choices { blocking: true, ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "move_ids", &choices, log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("insert into log (msg) values ('next') returning id").await[0].text("id"), "1000");
     }
 
     pub async fn init_creates_the_extensions_its_schema_uses(mut p: P) {
