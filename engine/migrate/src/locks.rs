@@ -550,8 +550,11 @@ struct Ahead {
     /// Of those, the ones set to `nextval` of a sequence: table, column and the sequence's name.
     fed: BTreeSet<(String, String, String)>,
     indexes: BTreeSet<String>,
-    /// The constraints dropped, table and name: a key's index, named as the key is, goes with it.
-    keys: BTreeSet<(String, String)>,
+    /// The constraints dropped, by name: a key's index, named as the key is, goes with it, and a
+    /// partitioned table's key takes its partitions' with it, whatever their tables. A constraint
+    /// of that name elsewhere counts too, which asks --blocking where none is needed rather than
+    /// pass over a read with no index.
+    keys: BTreeSet<String>,
     owned: BTreeSet<String>,
 }
 
@@ -602,7 +605,7 @@ fn ahead_of_reads(sql: &str) -> Vec<Ahead> {
                                     now.fed.insert((table.clone(), cmd.name.clone(), sequence));
                                 }
                             } else if is(cmd.subtype, At::AtDropConstraint) {
-                                now.keys.insert((table.clone(), cmd.name.clone()));
+                                now.keys.insert(cmd.name.clone());
                             }
                         }
                     }
@@ -780,17 +783,17 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
         let owner = db.rows(&format!("select relname from pg_class where oid = ({sequence})::regclass")).await.ok().and_then(|r| r.first().map(|r| r.text("relname").to_string())).unwrap_or_default();
         // Served where the read runs: by an index there before that the file doesn't drop ahead of
         // it, or one there after that the file makes ahead of it.
-        let dropped = |rel: &str, i: &String| ahead.indexes.contains(i) || ahead.keys.contains(&(rel.to_string(), i.clone()));
-        let served = |rel: &str, then: &[String], after: &[String]| then.iter().any(|i| after.contains(i) || !dropped(rel, i)) || after.iter().any(|i| !then.contains(i) && ahead.indexes.contains(i));
+        let dropped = |i: &String| ahead.indexes.contains(i) || ahead.keys.contains(i);
+        let served = |then: &[String], after: &[String]| then.iter().any(|i| after.contains(i) || !dropped(i)) || after.iter().any(|i| !then.contains(i) && ahead.indexes.contains(i));
         let mut read: Vec<(String, String)> = Vec::new();
         match was {
             None => read.extend(now.iter().filter(|(_, _, _, _, _, after)| after.is_empty()).map(|(t, oid, _, _, _, _)| (t.clone(), oid.clone()))),
             Some(was) => {
                 for (t, oid, rel, num, col, after) in &now {
                     let unserved = match was.iter().find(|(_, o, _, n, _, _)| o == oid && n == num) {
-                        Some((_, _, _, _, _, then)) => !served(rel, then, after),
+                        Some((_, _, _, _, _, then)) => !served(then, after),
                         // Given to the column ahead of the read: by a default set there, or ownership.
-                        None => (ahead.fed.contains(&(rel.clone(), col.clone(), owner.clone())) || ahead.owned.contains(&owner)) && !served(rel, &[], after),
+                        None => (ahead.fed.contains(&(rel.clone(), col.clone(), owner.clone())) || ahead.owned.contains(&owner)) && !served(&[], after),
                     };
                     if unserved {
                         read.push((t.clone(), oid.clone()));
@@ -798,7 +801,7 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                 }
                 // Taken from the column after the read, where no default change ahead of it took it.
                 for (t, oid, rel, _, col, then) in was.iter().filter(|(_, o, _, n, _, _)| !now.iter().any(|(_, o2, _, n2, _, _)| o2 == o && n2 == n)) {
-                    if !served(rel, then, &[]) && !ahead.defaults.contains(&(rel.clone(), col.clone())) {
+                    if !served(then, &[]) && !ahead.defaults.contains(&(rel.clone(), col.clone())) {
                         read.push((t.clone(), oid.clone()));
                     }
                 }
@@ -856,7 +859,7 @@ mod tests {
         assert_eq!(first.defaults.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "code".to_string()), ("orders".to_string(), "dotted".to_string()), ("orders".to_string(), "total".to_string())], "a comment's words change nothing");
         assert_eq!(first.fed.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "code".to_string(), "other_no".to_string()), ("orders".to_string(), "dotted".to_string(), "order.no".to_string()), ("orders".to_string(), "total".to_string(), "order_no".to_string())]);
         assert_eq!(first.indexes.iter().cloned().collect::<Vec<_>>(), ["orders$Idx", "orders_id"]);
-        assert_eq!(first.keys.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "orders_pk".to_string())]);
+        assert_eq!(first.keys.iter().cloned().collect::<Vec<_>>(), ["orders_pk"]);
         assert_eq!(first.owned.iter().cloned().collect::<Vec<_>>(), ["tag_no"]);
         assert!(aheads[1].defaults.contains(&("orders".to_string(), "id".to_string())) && aheads[1].indexes.contains("later_idx"));
     }
