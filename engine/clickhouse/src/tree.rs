@@ -23,6 +23,34 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// What a column's values depend on, of the statement's parameters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Flow {
+    /// The type of each parameter the values are computed from, as its stand-in has it.
+    pub of: Vec<String>,
+    /// Whether they may be computed from one whose type the tree does not say: a source the
+    /// engine does not know, a table function's rows, a row a WITH FILL adds.
+    pub unknown: bool,
+}
+
+impl Flow {
+    /// Whether the values depend on a parameter at all.
+    pub fn depends(&self) -> bool {
+        self.unknown || !self.of.is_empty()
+    }
+}
+
+/// One of the values a choice between values may be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pick {
+    /// A text the statement writes, with no escape in it.
+    Text(String),
+    /// A NULL the statement writes.
+    Null,
+    /// Any value of a type, by the type's name: a column's, or what a function computes.
+    Typed(String),
+}
+
 /// What a query tree proves of the statement's row count.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Rows {
@@ -244,62 +272,122 @@ impl<'a> Tree<'a> {
         Some(self.children(list))
     }
 
-    /// Whether the node at `i` is what a parameter is written as: the function that makes a
-    /// column of a constant, or a constant's conversion to a type a parameter written as one has.
-    fn stands_in(&self, i: usize) -> bool {
-        let Some(rest) = self.nodes[i].1.strip_prefix("FUNCTION id: ") else { return false };
-        let Some((_, name)) = rest.split_once("function_name: ") else { return true };
+    /// The results of the choice between values the node at `i` is, where it is one: an `if`'s
+    /// two, a `multiIf`'s after each condition and its last, and a `CASE`'s after each value it
+    /// compares with and its last.
+    fn results(&self, i: usize) -> Option<Vec<usize>> {
+        let name = self.nodes[i].1.strip_prefix("FUNCTION id: ")?.split_once("function_name: ")?.1.split(',').next()?;
+        let arguments = self.listed(i, "ARGUMENTS")?;
+        let count = arguments.len();
+        let places: Vec<usize> = match name {
+            "if" if count == 3 => vec![1, 2],
+            "multiIf" if count >= 3 && count % 2 == 1 => (1..count).step_by(2).chain([count - 1]).collect(),
+            "caseWithExpression" if count >= 4 && count % 2 == 0 => (2..count - 1).step_by(2).chain([count - 1]).collect(),
+            _ => return None,
+        };
+        Some(places.into_iter().map(|place| arguments[place]).collect())
+    }
+
+    /// The values the node at `i` may be, added to `picks`: each result of a choice, a text or a
+    /// NULL the statement writes, or any value of the type its line says. `None` where its line
+    /// says no type.
+    fn picks(&self, i: usize, picks: &mut Vec<Pick>) -> Option<()> {
+        if let Some(results) = self.results(i) {
+            return results.into_iter().try_for_each(|result| self.picks(result, picks));
+        }
+        let text = self.nodes[i].1;
+        // A constant with nothing under it is one the statement writes, and no computed one.
+        let written = self.end(i) == i + 1;
+        picks.push(if let Some(constant) = text.strip_prefix("CONSTANT id: ") {
+            let (value, ty) = constant.split_once("constant_value: ")?.1.rsplit_once(", constant_value_type: ")?;
+            match value.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')) {
+                Some(value) if written && ty == "String" && !value.contains(['\\', '\'']) => Pick::Text(value.to_string()),
+                _ if written && value == "NULL" && ty == "Nullable(Nothing)" => Pick::Null,
+                _ => Pick::Typed(ty.to_string()),
+            }
+        } else if let Some((_, ty, _)) = column(text) {
+            Pick::Typed(ty.to_string())
+        } else {
+            Pick::Typed(text.strip_prefix("FUNCTION id: ")?.rsplit_once("result_type: ")?.1.to_string())
+        });
+        Some(())
+    }
+
+    /// What the node at `i` is, where it is what a parameter is written as: the function that
+    /// makes a column of a constant, or a constant's conversion to a type a parameter written as
+    /// one has. With it, the type it has, where its line says one.
+    fn stand_in(&self, i: usize) -> Option<Option<&'a str>> {
+        let rest = self.nodes[i].1.strip_prefix("FUNCTION id: ")?;
+        let Some((_, name)) = rest.split_once("function_name: ") else { return Some(None) };
+        let ty = rest.rsplit_once("result_type: ").map(|(_, ty)| ty);
         match name.split(',').next().unwrap_or_default() {
-            "materialize" => true,
-            "CAST" | "_CAST" | "defaultValueOfTypeName" => rest.rsplit_once("result_type: ").is_none_or(|(_, ty)| (self.constant)(ty)),
-            _ => false,
+            "materialize" => Some(ty),
+            "CAST" | "_CAST" | "defaultValueOfTypeName" if ty.is_none_or(|ty| (self.constant)(ty)) => Some(ty),
+            _ => None,
         }
     }
 
-    /// Whether what the lines from `from` to `to` compute depends on a parameter: one of them is
-    /// a parameter, or a column whose values do.
-    fn depends(&self, from: usize, to: usize, seen: &mut HashSet<(usize, usize)>) -> bool {
+    /// What the lines from `from` to `to` compute depends on, added to `flow`: each parameter
+    /// among them, and those the values of each column among them depend on.
+    fn collect(&self, from: usize, to: usize, seen: &mut HashSet<(usize, usize)>, flow: &mut Flow) {
         for i in (from..to).filter(|&i| !self.names[i]) {
-            if self.stands_in(i) {
-                return true;
+            match self.stand_in(i) {
+                Some(Some(ty)) => flow.of.push(ty.to_string()),
+                Some(None) => flow.unknown = true,
+                None => {}
             }
-            if self.kind(i) == "COLUMN" && column(self.nodes[i].1).is_none_or(|(name, ty, source)| self.sourced(source, name, ty, seen)) {
-                return true;
+            if self.kind(i) == "COLUMN" {
+                match column(self.nodes[i].1) {
+                    Some((name, ty, source)) => self.sourced(source, name, ty, seen, flow),
+                    None => flow.unknown = true,
+                }
             }
         }
-        false
     }
 
-    /// Whether the column `name` of the node with the id `source` holds values that depend on a
-    /// parameter. A source the engine does not know may be anything, so its columns do.
-    fn sourced(&self, source: &str, name: &str, ty: &str, seen: &mut HashSet<(usize, usize)>) -> bool {
-        let Some(&at) = self.ids.get(source) else { return true };
+    /// What the column `name` of the node with the id `source` depends on, added to `flow`. A
+    /// source the engine does not know may be anything, so its columns may depend on a parameter.
+    fn sourced(&self, source: &str, name: &str, ty: &str, seen: &mut HashSet<(usize, usize)>, flow: &mut Flow) {
+        let Some(&at) = self.ids.get(source) else {
+            flow.unknown = true;
+            return;
+        };
         match self.kind(at) {
-            // A join's column holds the columns it joins under it, a lambda's argument is of what
-            // its function is given, and an INTERPOLATE's column is the query's own: each is read
-            // where it stands.
-            "JOIN" | "LAMBDA" | "INTERPOLATE" => false,
-            // A table's rows are its own, and a table function's are of its arguments.
-            "TABLE" | "TABLE_FUNCTION" => self.depends(at + 1, self.end(at), seen),
+            // A join's column holds the columns it joins under it, a lambda's argument, whose source
+            // is the lambda or its list of arguments, is of what its function is given, and an
+            // INTERPOLATE's column is the query's own: each is read where it stands.
+            "JOIN" | "LAMBDA" | "ARGUMENTS" | "INTERPOLATE" => {}
+            // A table's rows are its own, and a table function's are of its arguments, in a way
+            // no type of theirs says.
+            "TABLE" | "TABLE_FUNCTION" => {
+                let mut given = Flow::default();
+                self.collect(at + 1, self.end(at), seen, &mut given);
+                flow.unknown |= given.depends();
+            }
             // The expression the ARRAY JOIN unfolds into the column.
-            "ARRAY_JOIN" => match self.listed(at, "JOIN EXPRESSIONS") {
-                None => true,
-                Some(joined) => {
-                    let named: Vec<usize> = joined.into_iter().filter(|&c| column(self.nodes[c].1).is_some_and(|(joined, ..)| joined == name)).collect();
-                    named.is_empty() || named.into_iter().any(|c| seen.insert((at, c)) && self.depends(c + 1, self.end(c), seen))
+            "ARRAY_JOIN" => {
+                let named: Vec<usize> = self.listed(at, "JOIN EXPRESSIONS").unwrap_or_default().into_iter().filter(|&c| column(self.nodes[c].1).is_some_and(|(joined, ..)| joined == name)).collect();
+                flow.unknown |= named.is_empty();
+                for c in named {
+                    if seen.insert((at, c)) {
+                        self.collect(c + 1, self.end(c), seen, flow);
+                    }
                 }
-            },
+            }
             "QUERY" | "UNION" => {
-                let Some(columns) = self.columns(at) else { return true };
+                let columns = self.columns(at).unwrap_or_default();
                 // The column by its name and its type, or by its name where a union's type is another.
                 let own = format!("{name} {ty}");
                 let mut places: Vec<usize> = (0..columns.len()).filter(|&c| columns[c] == own).collect();
                 if places.is_empty() {
                     places = (0..columns.len()).filter(|&c| columns[c].strip_prefix(name).is_some_and(|rest| rest.starts_with(' '))).collect();
                 }
-                places.is_empty() || places.into_iter().any(|c| self.produced(at, c, seen))
+                flow.unknown |= places.is_empty();
+                for c in places {
+                    self.produced(at, c, seen, flow);
+                }
             }
-            _ => true,
+            _ => flow.unknown = true,
         }
     }
 
@@ -345,18 +433,21 @@ impl<'a> Tree<'a> {
         }
     }
 
-    /// Whether the column numbered `c` of the query at `i` depends on a parameter: in a set
-    /// operation, the column of any of its queries.
-    fn produced(&self, i: usize, c: usize, seen: &mut HashSet<(usize, usize)>) -> bool {
+    /// What the column numbered `c` of the query at `i` depends on, added to `flow`: in a set
+    /// operation, the column of each of its queries.
+    fn produced(&self, i: usize, c: usize, seen: &mut HashSet<(usize, usize)>, flow: &mut Flow) {
         match self.kind(i) {
-            // A column read a second time has been answered.
-            "QUERY" if !seen.insert((i, c)) => false,
+            // A column read a second time has been added.
+            "QUERY" if !seen.insert((i, c)) => {}
             "QUERY" => match self.listed(i, "PROJECTION").and_then(|items| items.get(c).copied()) {
-                Some(item) => self.depends(item, self.end(item), seen),
-                None => true,
+                Some(item) => self.collect(item, self.end(item), seen, flow),
+                None => flow.unknown = true,
             },
-            "UNION" => self.listed(i, "QUERIES").is_none_or(|queries| queries.into_iter().any(|query| self.produced(query, c, seen))),
-            _ => true,
+            "UNION" => match self.listed(i, "QUERIES") {
+                Some(queries) => queries.into_iter().for_each(|query| self.produced(query, c, seen, flow)),
+                None => flow.unknown = true,
+            },
+            _ => flow.unknown = true,
         }
     }
 }
@@ -371,17 +462,42 @@ impl<'a> Tree<'a> {
 /// A parameter that only keeps rows, in a `WHERE` or a join's condition, is in no column.
 /// `None` where the lines are no query's tree, and where an `INTERPOLATE` computes with a
 /// parameter: it converts what it computes to its column's type, inside the SELECT.
-pub fn flows(lines: &[&str], constant: &dyn Fn(&str) -> bool) -> Option<Vec<bool>> {
+pub fn flows(lines: &[&str], constant: &dyn Fn(&str) -> bool) -> Option<Vec<Flow>> {
     let tree = Tree::read(lines, constant)?;
     let count = tree.columns(0)?.len();
-    if (0..tree.nodes.len()).any(|i| !tree.names[i] && tree.nodes[i].1 == "INTERPOLATE" && tree.depends(i + 1, tree.end(i), &mut HashSet::new())) {
+    let within = |from: usize, to: usize| {
+        let mut flow = Flow::default();
+        tree.collect(from, to, &mut HashSet::new(), &mut flow);
+        flow
+    };
+    if (0..tree.nodes.len()).any(|i| !tree.names[i] && tree.nodes[i].1 == "INTERPOLATE" && within(i + 1, tree.end(i)).depends()) {
         return None;
     }
-    let mut flows: Vec<bool> = (0..count).map(|c| tree.produced(0, c, &mut HashSet::new())).collect();
-    if lines.iter().any(|line| line.contains("with_fill: 1")) && (0..tree.nodes.len()).any(|i| !tree.names[i] && tree.stands_in(i)) {
-        flows = vec![true; count];
+    let mut flows: Vec<Flow> = (0..count)
+        .map(|c| {
+            let mut flow = Flow::default();
+            tree.produced(0, c, &mut HashSet::new(), &mut flow);
+            flow
+        })
+        .collect();
+    // A row a WITH FILL adds is of the parameters that bound it, whatever its columns compute.
+    if lines.iter().any(|line| line.contains("with_fill: 1")) && (0..tree.nodes.len()).any(|i| !tree.names[i] && tree.stand_in(i).is_some()) {
+        flows.iter_mut().for_each(|flow| flow.unknown = true);
     }
     Some(flows)
+}
+
+/// The values each of a SELECT's columns is one of, where the column is a choice between values:
+/// an `if`, a `multiIf` or a `CASE`, whose results may be such choices themselves. `None` of any
+/// other column, and of every column where the lines are no one query's tree.
+pub fn choices(lines: &[&str]) -> Vec<Option<Vec<Pick>>> {
+    let Some(tree) = Tree::read(lines, &|_| false).filter(|tree| tree.kind(0) == "QUERY") else { return Vec::new() };
+    let chosen = |item: usize| {
+        tree.results(item)?;
+        let mut picks = Vec::new();
+        tree.picks(item, &mut picks).map(|_| picks)
+    };
+    tree.listed(0, "PROJECTION").unwrap_or_default().into_iter().map(chosen).collect()
 }
 
 /// Which of a SELECT's columns are each a conversion to a type the statement names, a `CAST` at
@@ -795,33 +911,80 @@ mod tests {
         assert_eq!(read("Expression"), None);
     }
 
+    /// Whether each column depends on a parameter.
+    fn depends(lines: &[&str], constant: &dyn Fn(&str) -> bool) -> Option<Vec<bool>> {
+        flows(lines, constant).map(|flows| flows.iter().map(Flow::depends).collect())
+    }
+
+    #[test]
+    fn a_column_s_parameters_are_told_by_the_types_of_what_stands_for_them() {
+        let read = |tree: &str, constants: &[&str]| flows(&tree.lines().collect::<Vec<_>>(), &|ty| constants.contains(&ty)).unwrap();
+        let flow = |of: &[&str], unknown: bool| Flow { of: of.iter().map(|ty| ty.to_string()).collect(), unknown };
+        // Each stand-in a column's values come from, by its type, through a subquery and a name.
+        let (_, starred, ..) = FLOWS[0];
+        assert_eq!(read(starred, &[]), [flow(&[], false), flow(&["UInt64"], false)]);
+        let (_, named, ..) = FLOWS[1];
+        assert_eq!(read(named, &[])[2], flow(&["UInt64"], false));
+        // A table function's rows are of its arguments in a way no type says, and so is a row a WITH FILL adds.
+        let (_, numbers, ..) = FLOWS[8];
+        assert_eq!(read(numbers, &["UInt64"]), [flow(&[], true), flow(&[], false)]);
+        let (_, filled, ..) = FLOWS[9];
+        assert!(read(filled, &["UInt8"]).iter().all(|flow| flow.unknown));
+    }
+
+    #[test]
+    fn a_column_is_a_choice_of_values_where_an_if_or_a_case_gives_it() {
+        let query = |item: &str| format!("QUERY id: 0\n  PROJECTION COLUMNS\n    c0 String\n  PROJECTION\n    LIST id: 1, nodes: 1\n{item}\n  JOIN TREE\n    TABLE id: 3, table_name: app.t");
+        let read = |item: &str| choices(&query(item).lines().collect::<Vec<_>>());
+        // A node of a function's arguments, as far in as `depth` functions are.
+        let node = |depth: usize, text: &str| format!("{:1$}{text}", "", 6 + 6 * depth);
+        let text = |id: usize, value: &str| node(1, &format!("CONSTANT id: {id}, constant_value: '{value}', constant_value_type: String"));
+        let condition = |id: usize| node(1, &format!("FUNCTION id: {id}, function_name: materialize, function_type: ordinary, result_type: Bool"));
+        let chosen = |name: &str, arguments: &[String]| format!("      FUNCTION id: 2, function_name: {name}, function_type: ordinary, result_type: String\n        ARGUMENTS\n          LIST id: 4, nodes: {}\n{}", arguments.len(), arguments.join("\n"));
+        let texts = |values: &[&str]| Some(values.iter().map(|value| Pick::Text(value.to_string())).collect::<Vec<_>>());
+        assert_eq!(read(&chosen("if", &[condition(5), text(6, "paid"), text(7, "new")])), [texts(&["paid", "new"])]);
+        assert_eq!(read(&chosen("multiIf", &[condition(5), text(6, "a"), condition(8), text(7, "b"), text(9, "c")])), [texts(&["a", "b", "c"])]);
+        // A CASE that compares a value gives the result after each value it compares with, and its last.
+        let compared = node(1, "CONSTANT id: 10, constant_value: UInt64_1, constant_value_type: UInt8");
+        assert_eq!(read(&chosen("caseWithExpression", &[condition(5), compared.clone(), text(6, "a"), compared.replace("id: 10", "id: 11"), text(7, "b"), text(9, "c")])), [texts(&["a", "b", "c"])]);
+        // A result may be a choice itself, a NULL, or any value of a type: a column's, a function's, a constant's that is computed or holds an escape.
+        let inner = format!("{}\n{}\n{}\n{}\n{}\n{}", node(1, "FUNCTION id: 20, function_name: if, function_type: ordinary, result_type: Nullable(String)"), node(1, "  ARGUMENTS"), node(1, "    LIST id: 21, nodes: 3"), condition(22).replacen("", "      ", 1), text(23, "late").replacen("", "      ", 1), node(2, "CONSTANT id: 24, constant_value: NULL, constant_value_type: Nullable(Nothing)"));
+        let column = node(1, "COLUMN id: 30, column_name: status, result_type: Enum8('new' = 1), source_id: 3");
+        assert_eq!(read(&chosen("multiIf", &[condition(5), inner, condition(8), column, text(9, "it\\\\'s")])), [Some(vec![Pick::Text("late".into()), Pick::Null, Pick::Typed("Enum8('new' = 1)".into()), Pick::Typed("String".into())])]);
+        let lowered = node(1, "FUNCTION id: 40, function_name: lower, function_type: ordinary, result_type: String");
+        assert_eq!(read(&chosen("if", &[condition(5), text(6, "paid"), lowered])), [Some(vec![Pick::Text("paid".into()), Pick::Typed("String".into())])]);
+        // Another function is no choice, and neither is what is no query's tree.
+        assert_eq!(read(&chosen("concat", &[text(6, "paid"), text(7, "new")])), [None]);
+        assert!(choices(&["Expression"]).is_empty());
+    }
+
     #[test]
     fn a_column_depends_on_a_parameter_where_the_tree_says_its_values_come_from_one() {
         for (what, tree, constants, expected) in FLOWS {
             let lines: Vec<&str> = tree.lines().collect();
-            assert_eq!(flows(&lines, &|ty| constants.contains(&ty)).as_deref(), Some(*expected), "{what}");
+            assert_eq!(depends(&lines, &|ty| constants.contains(&ty)).as_deref(), Some(*expected), "{what}");
         }
         // What is no query's tree says nothing, and neither does one a line of which stands where no node can.
-        assert_eq!(flows(&[], &|_| false), None);
-        assert_eq!(flows(&["Expression"], &|_| false), None);
+        assert_eq!(depends(&[], &|_| false), None);
+        assert_eq!(depends(&["Expression"], &|_| false), None);
         let (_, tree, ..) = FLOWS[0];
         let parted = tree.replacen("alias: __table1", "alias: a\nb", 1);
-        assert_eq!(flows(&parted.lines().collect::<Vec<_>>(), &|_| false), None);
+        assert_eq!(depends(&parted.lines().collect::<Vec<_>>(), &|_| false), None);
         // A list with a node more than it counts is one a name forged, and so is a query's second list of columns.
         let forged = tree.replacen("      COLUMN id: 2, column_name: id, result_type: UInt8, source_id: 3", "      COLUMN id: 2, column_name: id, result_type: UInt8, source_id: 3\n      CONSTANT id: 98, constant_value: UInt64_1, constant_value_type: UInt8", 1);
         assert_ne!(forged, tree);
-        assert_eq!(flows(&forged.lines().collect::<Vec<_>>(), &|_| false), None);
+        assert_eq!(depends(&forged.lines().collect::<Vec<_>>(), &|_| false), None);
         let twice = tree.replacen("  PROJECTION\n", "  PROJECTION COLUMNS\n    id UInt8\n  PROJECTION\n", 1);
-        assert_eq!(flows(&twice.lines().collect::<Vec<_>>(), &|_| false), None);
+        assert_eq!(depends(&twice.lines().collect::<Vec<_>>(), &|_| false), None);
         // An INTERPOLATE that computes with a parameter converts it inside the SELECT, which no column's type shows.
         let filled = "QUERY id: 0\n  PROJECTION COLUMNS\n    a UInt8\n  PROJECTION\n    LIST id: 1, nodes: 1\n      COLUMN id: 2, column_name: a, result_type: UInt8, source_id: 3\n  JOIN TREE\n    TABLE id: 3, table_name: app.t\n  INTERPOLATE\n    LIST id: 4, nodes: 1\n      INTERPOLATE id: 5\n        EXPRESSION\n          COLUMN id: 2, column_name: a, result_type: UInt8, source_id: 3\n        INTERPOLATE_EXPRESSION\n          FUNCTION id: 6, function_name: materialize, function_type: ordinary, result_type: UInt64";
-        assert_eq!(flows(&filled.lines().collect::<Vec<_>>(), &|_| false), None);
-        assert_eq!(flows(&filled.replace("function_name: materialize", "function_name: plus").lines().collect::<Vec<_>>(), &|_| false), Some(vec![false]));
+        assert_eq!(depends(&filled.lines().collect::<Vec<_>>(), &|_| false), None);
+        assert_eq!(depends(&filled.replace("function_name: materialize", "function_name: plus").lines().collect::<Vec<_>>(), &|_| false), Some(vec![false]));
         // A source the tree does not show, or one of a kind the engine does not know, may be a parameter's.
         let unknown = "QUERY id: 0\n  PROJECTION COLUMNS\n    a UInt8\n    b UInt8\n  PROJECTION\n    LIST id: 1, nodes: 2\n      COLUMN id: 2, column_name: a, result_type: UInt8, source_id: 9\n      COLUMN id: 4, column_name: b, result_type: UInt8, source_id: 3\n  JOIN TREE\n    TABLE id: 3, table_name: app.t";
-        assert_eq!(flows(&unknown.lines().collect::<Vec<_>>(), &|_| false), Some(vec![true, false]));
+        assert_eq!(depends(&unknown.lines().collect::<Vec<_>>(), &|_| false), Some(vec![true, false]));
         let other = unknown.replace("TABLE id: 3, table_name: app.t", "SOMETHING id: 3");
-        assert_eq!(flows(&other.lines().collect::<Vec<_>>(), &|_| false), Some(vec![true, true]));
+        assert_eq!(depends(&other.lines().collect::<Vec<_>>(), &|_| false), Some(vec![true, true]));
     }
 
 

@@ -332,7 +332,7 @@ test("ClickHouse: an error is the server's, whether the statement fails at once 
     assert.deepEqual([long.error?.code, long.error?.number], ["POCO_EXCEPTION", 1000]);
     assert.match(long.error!.message, /Field value too long: the parameter "p" is 140000 bytes as ClickHouse's text, and the server takes 131072 of one unless its http_max_field_value_size is raised\./);
     // A format the statement names itself outranks the one Reylo asks for, on a server that takes one there: 26.8 and later.
-    await assert.rejects(byHand("SELECT 1 AS x SETTINGS default_format = 'JSONEachRow'").run(client, {}), /^TypeError: The statement returned its result in the format JSONEachRow, and Reylo reads RowBinaryWithNamesAndTypes: take the format out|^Error: Setting default_format is neither a builtin setting/);
+    await assert.rejects(byHand("SELECT 1 AS x SETTINGS default_format = 'JSONEachRow'").run(client, {}), /^TypeError: The statement returned its result in the format JSONEachRow, and Reylo reads RowBinaryWithNamesAndTypes: take the format out|^Error: Setting default_format is neither a builtin setting|^Error: Unknown setting 'default_format'/);
     // A session that writes each type as bytes gives no name to read.
     const bytes = driver("@clickhouse/client").createClient({ url: CLICKHOUSE!, clickhouse_settings: { output_format_binary_encode_types_in_binary_format: 1 } });
     try {
@@ -581,7 +581,7 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
   const unkept = (written: string, column: string, type: string, fix: string) => `${written} is written as it is to the column ${column}, of the type ${type}. ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. ${fix}`;
   // And of a value the statement computes with a parameter, which has the type the server describes it with: at the
   // parameter, where the statement's text shows which one, and of the whole statement where it does not.
-  const computed = (written: string | null, value: string, column: string, type: string, why = `ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Give the value the column's type: declare its parameters so, or convert it in the statement, as CAST(… AS ${type}) does.`) =>
+  const computed = (written: string | null, value: string, column: string, type: string, why = `ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Give each parameter the value is computed from a type the column keeps, or convert the value in the statement, as CAST(… AS ${type}) does.`) =>
     written === null ? `The statement writes a value of the type ${value} that depends on a parameter to the column ${column}, of the type ${type}. ${why}` : `${written} is in a value of the type ${value} that is written to the column ${column}, of the type ${type}. ${why}`;
   const WIDE = unkept("{total:Decimal(18, 4)}", "total", "Decimal(18, 2)", "Declare the parameter as the column's type, {total:Decimal(18, 2)}.");
   try {
@@ -659,9 +659,41 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
       "set_text.sql": "UPDATE orders SET user_id = 'abc' WHERE id = {id:UInt64}",
       // A text the statement converts to its column's type, as the docs' own example does.
       "placed.sql": "INSERT INTO users (id, name, created) VALUES ({id:UInt64}, 'p', {created:String}::DateTime64(3, 'UTC'))",
+      // A sum is wider than what it adds: it stands where it is a number of the column's kind and each parameter it adds has a type the column keeps.
+      "sum.sql": "UPDATE users SET age = age + {by:UInt8} WHERE id = {id:UInt64}",
+      "sum_values.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 's', {a:UInt8} + {b:UInt8})",
+      "sum_wide.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 's', {a:UInt8} + {b:UInt16})",
+      // A quotient is a float, and a text is read: neither is a number of the column's kind.
+      "quotient.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 's', {a:UInt8} / {b:UInt8})",
+      "joined.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 's', concat(toString({a:UInt8}), toString({b:UInt8})))",
+      "variant_sum.sql": "INSERT INTO things (id, v) VALUES ({id:UInt64}, {a:UInt64} - {b:UInt64})",
+      // A text that is one of an enum's labels whichever its parameters choose is the label.
+      "label.sql": "INSERT INTO users (id, name, role) VALUES ({id:UInt64}, 'l', if({admin:Bool}, 'admin', 'member'))",
+      "label_set.sql": "UPDATE users SET role = multiIf({level:UInt8} > 8, 'admin', 'member') WHERE id = {id:UInt64}",
+      "label_text.sql": "INSERT INTO users (id, name, role) VALUES ({id:UInt64}, 'l', if({admin:Bool}, 'admin', '2'))",
+      // A CASE chooses as an if does, and a result may be the column's own value.
+      "label_case.sql": "INSERT INTO users (id, name, role) SELECT {id:UInt64}, 'l', CASE {level:UInt8} WHEN 9 THEN 'admin' ELSE 'member' END",
+      "label_same.sql": "ALTER TABLE users UPDATE role = if({admin:Bool}, 'admin', role) WHERE id = {id:UInt64}",
+      // A column that holds no NULL: an INSERT writes its default value in place of one, and an UPDATE fails.
+      "null_add.sql": "INSERT INTO users (id, name) VALUES ({id:UInt64}, {name:Nullable(String)})",
+      "null_set.sql": "UPDATE users SET name = {name:Nullable(String)} WHERE id = {id:UInt64}",
+      "null_named.sql": "UPDATE users SET name = ifNull({name:Nullable(String)}, '') WHERE id = {id:UInt64}",
+      // A value that may be NULL is held as one, whatever it is computed from.
+      "null_computed.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 'n', nullIf({age:UInt8}, 0))",
     };
     const found = await transform(root, files);
-    for (const name of ["add.sql", "copy.sql", "remove.sql", "set.sql", "alter_set.sql", "copy_one.sql", "remove_in.sql", "converted.sql", "mapped.sql", "placed.sql", "variant_literal.sql", "cast_dynamic.sql", "wrapped.sql", "starred.sql", "computed_cast.sql", "kept_rows.sql", "kept_wider.sql", "dynamic.sql", "settings_first.sql", "zoned_cast.sql"] as const) assert.deepEqual(found[name]!.diagnostics, [], name);
+    for (const name of ["add.sql", "copy.sql", "remove.sql", "set.sql", "alter_set.sql", "copy_one.sql", "remove_in.sql", "converted.sql", "mapped.sql", "placed.sql", "variant_literal.sql", "cast_dynamic.sql", "wrapped.sql", "starred.sql", "computed_cast.sql", "kept_rows.sql", "kept_wider.sql", "dynamic.sql", "settings_first.sql", "zoned_cast.sql", "sum.sql", "sum_values.sql", "label.sql", "label_set.sql", "label_case.sql", "label_same.sql", "null_named.sql"] as const) assert.deepEqual(found[name]!.diagnostics, [], name);
+    assert.deepEqual(marked(files["sum_wide.sql"], found["sum_wide.sql"]!.diagnostics), [["This value of the type UInt32 depends on a parameter and is written to the column age, of the type UInt8. ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Give each parameter the value is computed from a type the column keeps, or convert the value in the statement, as CAST(… AS UInt8) does.", "{a:UInt8} + {b:UInt16}"]]);
+    const converted = (value: string, to: string) => `This value of the type ${value} depends on a parameter and is written to the column age, of the type UInt8. ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Convert the value in the statement, as CAST(… AS ${to}) does.`;
+    assert.deepEqual(marked(files["quotient.sql"], found["quotient.sql"]!.diagnostics), [[converted("Float64", "UInt8"), "{a:UInt8} / {b:UInt8}"]]);
+    assert.deepEqual(marked(files["joined.sql"], found["joined.sql"]!.diagnostics), [[converted("String", "UInt8"), "concat(toString({a:UInt8}), toString({b:UInt8}))"]]);
+    assert.deepEqual(marked(files["variant_sum.sql"], found["variant_sum.sql"]!.diagnostics), [["This value of the type Int64 depends on a parameter and is written to the column v, of the type Variant(String, UInt64). ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Give the value one of the types the column holds, other than a text: declare its parameters so, or convert it in the statement.", "{a:UInt64} - {b:UInt64}"]]);
+    // A parameter that could not be of the column's kind is none a declaration changes.
+    assert.deepEqual(marked(files["label_text.sql"], found["label_text.sql"]!.diagnostics), [[computed("{admin:Bool}", "String", "role", "Enum8('admin' = 1, 'member' = 2)", "ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Convert the value in the statement, as CAST(… AS Enum8('admin' = 1, 'member' = 2)) does."), "{admin:Bool}"]]);
+    assert.deepEqual(marked(files["null_computed.sql"], found["null_computed.sql"]!.diagnostics), [[computed("{age:UInt8}", "Nullable(UInt8)", "age", "UInt8", "The column holds no NULL, and an INSERT writes the column's default value in place of one, with no error unless a setting asks for one. Write what a NULL becomes in the statement, as ifNull(…, …) does."), "{age:UInt8}"]]);
+    const never = "Declare the parameter as a type that is never NULL, {name:String}, or write what a NULL becomes in the statement, as ifNull({name:Nullable(String)}, …) does.";
+    assert.deepEqual(marked(files["null_add.sql"], found["null_add.sql"]!.diagnostics), [[`{name:Nullable(String)} is written as it is to the column name, of the type String. The column holds no NULL, and an INSERT writes the column's default value in place of one, with no error unless a setting asks for one. ${never}`, "{name:Nullable(String)}"]]);
+    assert.deepEqual(marked(files["null_set.sql"], found["null_set.sql"]!.diagnostics), [[`{name:Nullable(String)} is written as it is to the column name, of the type String. The column holds no NULL, and an UPDATE that writes one fails. ${never}`, "{name:Nullable(String)}"]]);
     assert.deepEqual(marked(files["text_array.sql"], found["text_array.sql"]!.diagnostics), [[unkept("{tags:String}", "tags", "Array(UInt8)", "Declare the parameter as the column's type, {tags:Array(UInt8)}."), "{tags:String}"]]);
     assert.deepEqual(marked(files["text_role.sql"], found["text_role.sql"]!.diagnostics), [[unkept("{role:String}", "role", "Enum8('admin' = 1, 'member' = 2)", "Declare the parameter as the column's type, {role:Enum8('admin' = 1, 'member' = 2)}."), "{role:String}"]]);
     assert.deepEqual(marked(files["set_alias.sql"], found["set_alias.sql"]!.diagnostics), [[unkept("{user:Int64}", "user_id", "UInt64", "Declare the parameter as the column's type, {user:UInt64}."), "{user:Int64}"]]);
@@ -724,6 +756,12 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
     assert.deepEqual(await byHand("SELECT meta FROM users WHERE id = 30").run(db.client, {}), [{ meta: [{ key: "logins", value: 2 }] }]);
     await (await built(root, "placed", files["placed.sql"])).run(db.client, { id: 40, created: "2026-01-02 03:04:05.678" });
     assert.deepEqual(await byHand("SELECT created FROM users WHERE id = 40").run(db.client, {}), [{ created: "2026-01-02T03:04:05.678Z" }]);
+    // A label the statement chooses is the label the table holds, and a sum of what the column keeps is the sum.
+    const label = await built(root, "label", files["label.sql"]);
+    await label.run(db.client, { id: 50, admin: true });
+    await label.run(db.client, { id: 51, admin: false });
+    await (await built(root, "sum_values", files["sum_values.sql"])).run(db.client, { id: 52, a: 3, b: 4 });
+    assert.deepEqual(await byHand("SELECT id, role, age FROM users WHERE id >= 50 ORDER BY id").run(db.client, {}), [{ id: 50n, role: "admin", age: 0 }, { id: 51n, role: "member", age: 0 }, { id: 52n, role: "admin", age: 7 }]);
     // An UPDATE runs where its table keeps the two block columns a lightweight update needs, as this one does.
     const set = await built(root, "set", files["set.sql"]);
     assert.equal(await set.run(db.client, { id: 11, note: "paid", more: "1.5" }), undefined);

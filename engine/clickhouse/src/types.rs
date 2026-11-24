@@ -381,6 +381,48 @@ pub fn kept(from: &Named, column: &Named) -> bool {
     keeps(&plain(column), &plain(from))
 }
 
+/// Whether a column of the type `column` holds NULL.
+pub fn takes_null(column: &Named) -> bool {
+    matches!(plain(column).name.as_str(), "Nullable" | "Variant" | "Dynamic")
+}
+
+/// The type of `t`'s values that are no NULL, where it has NULL.
+pub fn never_null(t: &Named) -> Option<Named> {
+    let t = plain(t);
+    match (t.name.as_str(), t.args.as_slice()) {
+        ("Nullable", [Arg::Type(inner)]) => Some(inner.clone()),
+        _ => None,
+    }
+}
+
+/// Whether a value of the type `value` is a number of the kind a column of the type `column`
+/// holds: both whole numbers, both floats, or both decimals, a NULL either may be aside. What
+/// ClickHouse's arithmetic computes from numbers of a column's kind is such a number, of a wider
+/// type: a sum, a product, a difference.
+pub fn of_one_arithmetic(value: &Named, column: &Named) -> bool {
+    let kind = |t: &Named| {
+        let t = plain(t);
+        let bare = t.bare();
+        if integer(&bare.name).is_some() {
+            Some("whole")
+        } else if float_bits(&bare.name).is_some() {
+            Some("float")
+        } else {
+            decimal_digits(bare).map(|_| "decimal")
+        }
+    };
+    kind(value).is_some() && kind(value) == kind(column)
+}
+
+/// Whether a column of the type `column` keeps each of `texts` as it is: an enum that has each
+/// as a label. ClickHouse reads a text written to an enum as the label it is, and only a text
+/// that is no label as a label's number.
+pub fn labelled(texts: &[String], column: &Named) -> bool {
+    let column = plain(column);
+    let to = column.bare();
+    matches!(to.name.as_str(), "Enum8" | "Enum16") && texts.iter().all(|text| to.args.iter().any(|a| matches!(a, Arg::Label(label, _) if label == text)))
+}
+
 fn keeps(to: &Named, from: &Named) -> bool {
     // A Dynamic holds a value of any type as that type, a NULL included, and nothing has the
     // type Nothing but the NULL of a `Nullable(Nothing)` and the elements of an empty array.
@@ -754,6 +796,23 @@ mod tests {
                 assert!(!kept(from, to), "{from} into {to}");
             }
         }
+    }
+
+    #[test]
+    fn a_type_is_told_by_its_null_its_kind_of_number_and_its_labels() {
+        assert!(super::takes_null(&parse("LowCardinality(Nullable(String))").unwrap()) && super::takes_null(&parse("Variant(UInt8, String)").unwrap()) && !super::takes_null(&parse("LowCardinality(String)").unwrap()));
+        let never_null = |t: &str| super::never_null(&parse(t).unwrap()).map(|t| t.to_string());
+        assert_eq!((never_null("LowCardinality(Nullable(UInt8))").as_deref(), never_null("Nullable(Nothing)").as_deref(), never_null("String")), (Some("UInt8"), Some("Nothing"), None));
+        let arithmetic = |value: &str, column: &str| super::of_one_arithmetic(&parse(value).unwrap(), &parse(column).unwrap());
+        assert!(arithmetic("UInt64", "UInt32") && arithmetic("Int64", "LowCardinality(UInt8)") && arithmetic("Nullable(UInt16)", "Nullable(UInt8)") && arithmetic("Float64", "Float32") && arithmetic("Decimal(18, 4)", "Decimal(12, 2)"));
+        // A float is no whole number and no decimal, and a text, a day and an array are no numbers.
+        for (value, column) in [("Float64", "UInt8"), ("Float64", "Decimal(12, 2)"), ("UInt64", "Float64"), ("String", "UInt8"), ("Int32", "Date"), ("Int64", "Variant(UInt64, String)"), ("Array(UInt16)", "Array(UInt8)"), ("Bool", "UInt8")] {
+            assert!(!arithmetic(value, column), "{value} into {column}");
+        }
+        let labelled = |texts: &[&str], to: &str| super::labelled(&texts.iter().map(|text| text.to_string()).collect::<Vec<_>>(), &parse(to).unwrap());
+        assert!(labelled(&["new", "paid"], "Enum8('new' = 1, 'paid' = 2)") && labelled(&["paid"], "LowCardinality(Nullable(Enum16('new' = 1, 'paid' = 2)))"));
+        // A text that is no label is read as a label's number where it is one, and no other type has labels.
+        assert!(!labelled(&["paid", "2"], "Enum8('new' = 1, 'paid' = 2)") && !labelled(&["new"], "String") && !labelled(&["New"], "Enum8('new' = 1)"));
     }
 
     #[test]
