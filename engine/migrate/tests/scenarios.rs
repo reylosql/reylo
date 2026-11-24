@@ -4750,6 +4750,23 @@ mod adversarial {
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.exec("insert into held default values").await;
         assert_eq!(p.rows("select id from held order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+        p.output();
+        // A sequence the column that owned it keeps using, unowned, while the new name goes to a
+        // sequence another column owns: the column keeps its count.
+        let rest = format!("{rest} create sequence owned_id_seq as integer; create table held (id serial primary key, seq_ref regclass default 'owned_id_seq'::regclass);");
+        p.file("20991231000012_t.sql", "create table donor (id serial primary key, ticket integer default nextval('donor_id_seq'));");
+        p.schema(&format!("{rest} create table donor (id serial primary key, ticket integer default nextval('donor_id_seq'));"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into donor (ticket) values (100)").await;
+        p.output();
+        p.schema(&format!("{rest} create sequence donor_id_seq as integer; create sequence taker_id_seq as integer; create table taker (id integer primary key default nextval('donor_id_seq'), ticket integer default nextval('taker_id_seq')); alter sequence taker_id_seq owned by taker.ticket;"));
+        let choices = reylo_migrate::Choices { rename: vec![("donor".into(), "taker".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "taker", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into taker default values").await;
+        assert_eq!(p.rows("select id, ticket from taker where id <> 1").await.iter().map(|r| format!("{} {}", r.text("id"), r.text("ticket"))).collect::<Vec<_>>(), ["2 1"]);
     }
 
     /// A refusal's suggested command carries --blocking where the migration it writes rewrites a
