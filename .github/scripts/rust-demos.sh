@@ -42,7 +42,7 @@ echo '::group::demo-sqlite, on SQLite'
 DATABASE_URL=sqlite:demo.db cargo run -q -p demo-sqlite --features live
 echo '::endgroup::'
 echo '::group::demo-codegen, reylo generate and reylo-build'
-(cd rust/demo-codegen && DATABASE_URL="$server/rust_demo" ../../target/debug/reylo generate rust-sqlx src/queries)
+(cd rust/demo-codegen && DATABASE_URL="$server/rust_demo" ../../target/debug/reylo generate rust-sqlx src/queries --out src/queries.rs)
 DATABASE_URL="$server/rust_demo" cargo run -q -p demo-codegen --features live
 query=rust/demo-codegen/src/queries/get_user.sql
 cp "$query" "${RUNNER_TEMP:-/tmp}/get_user.sql"
