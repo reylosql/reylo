@@ -9,16 +9,15 @@ on:
       matrix:
         description: The platforms of npm/platforms.json, as a matrix
         value: ${{ jobs.platforms.outputs.matrix }}
-  # Each push to main that changes the binary's program, how it is built, packaged or found, or this workflow, so that a platform's break shows on main at the latest.
+  # Each push to main that changes the engine the binary is built from, how it is built, packaged or found, or this workflow, so that a platform's break shows on main at the latest.
   push:
     branches:
       - main
     paths:
-      - engine/cli/**
-      - engine/native/**
-      - engine/migrate/**
-      - engine/syntax/**
+      - engine/**
       - rust/reylo-build/**
+      - package.json
+      - tsconfig.build.json
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
@@ -41,7 +40,7 @@ on:
       - .github/workflows/binaries.yml
       - .github/workflows/channels.yml
       - .github/workflows/release.yml
-  # A pull request that changes how the binary is built, packaged, found or started is checked the same way on every platform, before a release meets it: the build (the toolchain, Cargo's manifests and lockfile, each crate's build script and the C it compiles, which differ by target), the stack the analysis runs on, which differs by platform and which the install check reads statements nested to the bound of, how a Rust project's command finds the binary of its version, the packages, and how the loader and the reylo command find and run it. Every other change to the engine is built and tested on Linux by test.yml, and on every platform on its push to main.
+  # A pull request that changes how the binary is built, packaged, found or started is checked the same way on every platform, before a release meets it: the build (the toolchain, Cargo's manifests and lockfile, each crate's build script and the C it compiles, which differ by target), the stacks the analysis and the parser run on, which differ by platform and which the install check reads statements nested to the bound of, how a Rust project's command finds the binary of its version, the packages, and how the loader and the reylo command find and run it. Every other change to the engine is built and tested on Linux by test.yml, and built, installed and run on every platform on its push to main.
   pull_request:
     branches:
       - main
@@ -54,10 +53,16 @@ on:
       - engine/*/Cargo.toml
       - engine/*/build.rs
       - engine/*/csrc/**
+      - engine/build-support/**
       - engine/core/src/stack.rs
+      - engine/postgres/src/stack.rs
+      - engine/syntax/src/postgres/mod.rs
+      - engine/syntax/NOTICE.md
       - engine/cli/src/matched.rs
       - rust/reylo-build/Cargo.toml
       - npm/**
+      - package.json
+      - tsconfig.build.json
       - scripts/build.ts
       - src/cli.ts
       - src/native.ts
@@ -113,7 +118,8 @@ jobs:
     container: ${{ matrix.container || '' }} # zizmor: ignore[unpinned-images]
     timeout-minutes: 60
     strategy:
-      fail-fast: ${{ github.event_name != 'pull_request' }}
+      # A release stops at its first platform that fails; a pull request's run and a push to main's show every one.
+      fail-fast: ${{ github.event_name != 'pull_request' && github.event_name != 'push' }}
       matrix: ${{ fromJSON(needs.platforms.outputs.matrix) }}
     defaults:
       run:
