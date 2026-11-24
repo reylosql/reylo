@@ -32,6 +32,11 @@ test("comments are read as the dialect reads them", () => {
   assert.deepEqual(read("--1\nselect 1", "mysql"), ["", "--1\nselect 1"]);
   assert.deepEqual(read("/*!40101 set names utf8 */", "mysql"), ["", "/*!40101 set names utf8 */"]);
   assert.deepEqual(read("# One.\nselect 1", "postgres"), ["", "# One.\nselect 1"]);
+  // On ClickHouse `#` starts a comment before a space or a `!`, and a block comment nests.
+  assert.deepEqual(read("# One.\n# Two.\nSELECT 1", "clickhouse"), ["One.\nTwo.", "SELECT 1"]);
+  assert.deepEqual(read("#! One.\nSELECT 1", "clickhouse"), ["! One.", "SELECT 1"]);
+  assert.deepEqual(read("#One.\nSELECT 1", "clickhouse"), ["", "#One.\nSELECT 1"]);
+  assert.deepEqual(read("/* One /* inside */ still. */ SELECT 1", "clickhouse"), ["One /* inside */ still.", "SELECT 1"]);
 });
 
 test("the doc comment holds the prose, the statement in a sql block and the note, and nothing ends it early", () => {

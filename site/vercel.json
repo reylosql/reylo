@@ -211,11 +211,6 @@
       "source": "/details",
       "destination": "/configuration",
       "permanent": true
-    },
-    {
-      "source": "/clickhouse",
-      "destination": "/",
-      "permanent": false
     }
   ],
   "headers": [

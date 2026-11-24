@@ -26,7 +26,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 use reylo_engine::Failure;
 #[cfg(feature = "postgres")]
-use tokio_postgres::Client;
+use reylo_engine::postgres::Driven;
 
 const ENTRY_VERSION: u64 = 1;
 #[cfg(any(feature = "postgres", feature = "mysql"))]
@@ -49,6 +49,9 @@ struct Session<C, D> {
     /// The schema's fingerprint, or why the database could not be reached, and when.
     schema: Option<(Result<String, String>, Instant)>,
     answers: AnswerCache<D>,
+    /// Whether the last connection was retired at a lock timeout, so that the next stands in for it.
+    #[cfg(feature = "postgres")]
+    retired: bool,
 }
 
 #[cfg(any(feature = "postgres", feature = "mysql"))]
@@ -73,7 +76,7 @@ impl<C, D> Session<C, D> {
 }
 
 #[cfg(feature = "postgres")]
-static POSTGRES: Mutex<Option<Session<Client, reylo_engine::clients::tokio_postgres::Describe>>> = Mutex::new(None);
+static POSTGRES: Mutex<Option<Session<Driven, reylo_engine::clients::tokio_postgres::Describe>>> = Mutex::new(None);
 #[cfg(feature = "mysql")]
 static MYSQL: Mutex<Option<Session<mysql_async::Conn, reylo_engine::clients::mysql_async::Describe>>> = Mutex::new(None);
 #[cfg(any(feature = "postgres", feature = "mysql"))]
@@ -95,7 +98,7 @@ fn runtime() -> Result<&'static tokio::runtime::Runtime, String> {
 fn session<C, D>(cell: &'static Mutex<Option<Session<C, D>>>, url: &str) -> MutexGuard<'static, Option<Session<C, D>>> {
     let mut guard = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if guard.as_ref().map_or(true, |s| s.url != url) {
-        *guard = Some(Session { url: url.to_string(), conn: None, schema: None, answers: AnswerCache::default() });
+        *guard = Some(Session { url: url.to_string(), conn: None, schema: None, answers: AnswerCache::default(), #[cfg(feature = "postgres")] retired: false });
     }
     guard
 }
@@ -153,6 +156,7 @@ impl Dialect {
             "postgres" | "postgresql" => Ok(Dialect::Postgres),
             "sqlite" | "file" => Ok(Dialect::Sqlite),
             "mysql" => Ok(Dialect::Mysql),
+            "clickhouse+http" | "clickhouse+https" => Err("the Rust crate runs its queries on sqlx, which has no ClickHouse driver: type ClickHouse's statements with the npm package `reylo`".into()),
             other => Err(format!("cannot tell the database from the URL's scheme {other:?}: reylo reads postgres://, postgresql://, mysql://, file: and sqlite: URLs")),
         }
     }
@@ -272,13 +276,13 @@ pub fn watched(dir: &Path) -> Vec<PathBuf> {
 }
 
 #[cfg(feature = "postgres")]
-async fn postgres(located: &Located, queries: &Path, sql: &str, session: &mut Session<Client, reylo_engine::clients::tokio_postgres::Describe>) -> Result<Value, String> {
+async fn postgres(located: &Located, queries: &Path, sql: &str, session: &mut Session<Driven, reylo_engine::clients::tokio_postgres::Describe>) -> Result<Value, String> {
     let statement = statement_key(Dialect::Postgres, sql).expect("the feature builds the engine");
     let server = server(&session.url);
     let schema = match session.fresh() {
         Some(schema) => schema,
         None => {
-            let schema = match postgres_client(&mut session.conn, &session.url).await {
+            let schema = match postgres_client(&mut session.conn, &mut session.retired, &session.url).await {
                 Ok(client) => {
                     let rows = client.query(POSTGRES_FINGERPRINT, &[]).await.map_err(|e| format!("the schema fingerprint failed: {}", e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().to_string())))?;
                     Ok(fingerprint(&rows.iter().map(|row| vec![row.get::<_, Option<String>>(0).map_or(Value::Null, Value::from)]).collect::<Vec<_>>()))
@@ -300,23 +304,34 @@ async fn postgres(located: &Located, queries: &Path, sql: &str, session: &mut Se
     if let Some(entry) = current(&own, &schema) {
         return Ok(entry);
     }
-    let client = match postgres_client(&mut session.conn, &session.url).await {
+    let client = match postgres_client(&mut session.conn, &mut session.retired, &session.url).await {
         Ok(client) => client,
         Err(Failure::Unreachable(why)) => return offline(located, queries, &statement, &server, false, &located.cannot_connect(&session.url, &why)),
         Err(other) => return Err(other.to_string()),
     };
-    let analysis = reylo_engine::clients::tokio_postgres::analyze(client, sql, &mut session.answers).await.map_err(|e| e.to_string())?;
-    remember(&located.cache, &own, Dialect::Postgres, &schema, &analysis)
+    let analysis = reylo_engine::clients::tokio_postgres::analyze(client, sql, &mut session.answers).await;
+    // A lock timeout leaves the statement's other describes queued on the connection behind the same
+    // lock: the next statement opens a new one rather than wait behind them.
+    if matches!(&analysis, Err(reylo_engine::ReplayError::Host(e)) if e.0.starts_with(reylo_engine::clients::tokio_postgres::LOCKED)) {
+        client.retire();
+        session.conn = None;
+        session.retired = true;
+    }
+    remember(&located.cache, &own, Dialect::Postgres, &schema, &analysis.map_err(|e| e.to_string())?)
 }
 
-/// The session's client, connected again where the server closed it.
+/// The session's client, connected again where the server closed it, or where a lock timeout retired it.
 #[cfg(feature = "postgres")]
-async fn postgres_client<'c>(conn: &'c mut Option<Client>, url: &str) -> Result<&'c Client, Failure> {
-    if conn.as_ref().map_or(true, Client::is_closed) {
+async fn postgres_client<'c>(conn: &'c mut Option<Driven>, retired: &mut bool, url: &str) -> Result<&'c Driven, Failure> {
+    if conn.as_ref().map_or(true, |client| client.is_closed()) {
         if let Some(refusal) = reylo_engine::postgres::transaction_pooler(url) {
             return Err(Failure::Error(refusal));
         }
-        *conn = Some(reylo_engine::postgres::open(url).await?.0);
+        let client = if *retired { reylo_engine::postgres::open_replacement(url).await?.0 } else { reylo_engine::postgres::open_driven(url).await?.0 };
+        *retired = false;
+        // Waiting on a table's lock at most as long as the type check does.
+        reylo_engine::postgres::bound_lock_wait(&client).await;
+        *conn = Some(client);
     }
     Ok(conn.as_ref().expect("connected above"))
 }
@@ -388,7 +403,10 @@ async fn mysql_fingerprint(conn: &mut Option<mysql_async::Conn>, url: &str) -> R
 #[cfg(feature = "mysql")]
 async fn mysql_conn<'c>(conn: &'c mut Option<mysql_async::Conn>, url: &str) -> Result<&'c mut mysql_async::Conn, Failure> {
     if conn.is_none() {
-        *conn = Some(reylo_engine::mysql::open(url).await?.0);
+        let mut opened = reylo_engine::mysql::open(url).await?.0;
+        // Waiting on a table's lock at most as long as the type check does.
+        reylo_engine::mysql::bound_lock_wait(&mut opened).await;
+        *conn = Some(opened);
     }
     Ok(conn.as_mut().expect("connected above"))
 }

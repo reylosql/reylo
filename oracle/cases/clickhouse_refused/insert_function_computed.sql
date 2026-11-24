@@ -1,0 +1,1 @@
+INSERT INTO FUNCTION null('id UInt8') SELECT {id:UInt64} + 0

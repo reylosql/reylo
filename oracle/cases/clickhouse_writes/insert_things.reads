@@ -1,0 +1,1 @@
+SELECT count() > 0 FROM things WHERE id = {id:UInt64} AND format = {format:String} AND v.UInt64 = {v:UInt64} AND tags = {tags:Array(UInt8)} AND meta['k2'] = 10 AND items.sku = {skus:Array(String)}

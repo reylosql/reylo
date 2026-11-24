@@ -916,8 +916,16 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         let Some(mut statements) = alterer.rename(&from.objects[old_id], &to.objects[new_id]) else { continue };
         let _ = was_stated;
         if from.objects[old_id].def != to.objects[new_id].def {
+            // What the rename already did, such as a Postgres not null renamed with its column, the
+            // change would do again, on a name no longer there.
             match alterer.alter(&from.objects[old_id], &to.objects[new_id]) {
-                Some(more) => statements.extend(more),
+                Some(more) => {
+                    for s in more {
+                        if !statements.contains(&s) {
+                            statements.push(s);
+                        }
+                    }
+                }
                 None => continue,
             }
         }

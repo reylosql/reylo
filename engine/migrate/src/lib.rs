@@ -78,6 +78,9 @@ impl Dialect {
             "sqlite" | "file" => Ok(Dialect::Sqlite),
             // A libSQL server's database, Turso Cloud's among them, named as `@libsql/client` names it.
             "libsql" | "https" | "http" | "wss" | "ws" => Ok(Dialect::Sqlite),
+            // ClickHouse, whose statements Reylo types and whose schema it does not migrate.
+            // Its URL carries secrets in its query too, a token or a header's value, so the message names the server alone.
+            "clickhouse+http" | "clickhouse+https" => Err(Error(format!("Reylo's migrations and reylo run don't support ClickHouse yet, which this URL names: {}", redact(url).split(['?', '#']).next().unwrap_or_default()))),
             // A bare path, or one on a Windows drive (`C:\app.db`): any other scheme names a database Reylo doesn't read.
             _ if scheme.len() <= 1 && (lower == ":memory:" || [".db", ".sqlite", ".sqlite3"].iter().any(|e| lower.ends_with(e))) => Ok(Dialect::Sqlite),
             _ => Err(Error(format!("no database for the URL's scheme: {}", redact(url)))),
@@ -98,11 +101,17 @@ impl Dialect {
     }
 }
 
-/// The URL with its user and password left out, for a message.
+/// The URL with its user and password left out, for a message: what stands before the last `@`
+/// ahead of its query, since a password may hold an `@` or a `/` unescaped. Where no `@` stands
+/// there, the first one after it is taken for the login's, as a password that holds a `?` or a `#`
+/// would leave it: hiding too much shows no secret.
 pub fn redact(url: &str) -> String {
-    match (url.find("://"), url.find('@')) {
-        (Some(s), Some(at)) if at > s => format!("{}//…{}", &url[..s + 1], &url[at..]),
-        _ => url.to_string(),
+    let Some(s) = url.find("://") else { return url.to_string() };
+    let host = s + 3;
+    let end = url[host..].find(['?', '#']).map_or(url.len(), |i| host + i);
+    match url[host..end].rfind('@').or_else(|| url[host..].find('@')) {
+        Some(at) => format!("{}//…{}", &url[..s + 1], &url[host + at..]),
+        None => url.to_string(),
     }
 }
 
@@ -142,5 +151,16 @@ mod tests {
         assert!(Dialect::of_url("duckdb:./app.db").is_err());
         assert_eq!(percent_decode("a%20b%2"), "a b%2");
         assert_eq!(redact("postgres://u:p@h/db"), "postgres://…@h/db");
+        // A password with an `@` or a `/` of its own, unescaped, and one with a `?`, which reads as a query's.
+        assert_eq!(redact("mysql://u:p@ss@h:3306/db"), "mysql://…@h:3306/db");
+        assert_eq!(redact("mysql://u:pa/ss@h:3306/db?charset=utf8mb4"), "mysql://…@h:3306/db?charset=utf8mb4");
+        assert_eq!(redact("mysql://u:pa?ss@h:3306/db"), "mysql://…@h:3306/db");
+        assert_eq!(redact("sqlite://app.db"), "sqlite://app.db");
+        // ClickHouse's URL keeps secrets in its query, which the refusal leaves out.
+        let refusal = Dialect::of_url("clickhouse+https://app:p@ss@db.example:8443/shop?access_token=SECRET&http_header_X-Key=SECRET").unwrap_err().0;
+        assert!(refusal.ends_with("clickhouse+https://…@db.example:8443/shop") && !refusal.contains("SECRET") && !refusal.contains("ss@"), "{refusal}");
+        // A password that holds a `?` is hidden before the query is left out.
+        let cut = Dialect::of_url("clickhouse+https://app:pa?ss@db.example:8443/shop?access_token=SECRET").unwrap_err().0;
+        assert!(cut.ends_with("clickhouse+https://…@db.example:8443/shop") && !cut.contains("app:pa"), "{cut}");
     }
 }

@@ -9,9 +9,10 @@ export type Leading = { prose: string; end: number };
 /**
  * The `--` lines and `/* … *\/` blocks before the statement's first token, markers stripped and
  * lines kept: a blank line between two comments, or a change from one form to the other, starts a
- * paragraph. Read as the dialect reads comments: Postgres nests block comments, MySQL's `--` is one
- * only before a space or a control character and `#` starts one too, and MySQL's `/*!` and `/*+`
- * are code to the server, so they end the prose. With no dialect (no project), `--` and `/* *\/`.
+ * paragraph. Read as the dialect reads comments: Postgres and ClickHouse nest block comments,
+ * MySQL's `--` is one only before a space or a control character and `#` starts one too, as it
+ * does on ClickHouse before a space or a `!`, and MySQL's `/*!` and `/*+` are code to the server,
+ * so they end the prose. With no dialect (no project), `--` and `/* *\/`.
  */
 export function leadingComment(sql: string, dialect?: Dialect): Leading {
   const paragraphs: string[][] = [];
@@ -25,7 +26,7 @@ export function leadingComment(sql: string, dialect?: Dialect): Leading {
     const ch = sql[at];
     const next = sql[at + 1];
     const blankBefore = (ws.match(/\n/g)?.length ?? 0) > 1;
-    const lineComment = (ch === "-" && next === "-" && !(dialect === "mysql" && at + 2 < sql.length && sql.charCodeAt(at + 2) > 32 && sql.charCodeAt(at + 2) !== 127)) || (ch === "#" && dialect === "mysql");
+    const lineComment = (ch === "-" && next === "-" && !(dialect === "mysql" && at + 2 < sql.length && sql.charCodeAt(at + 2) > 32 && sql.charCodeAt(at + 2) !== 127)) || (ch === "#" && (dialect === "mysql" || (dialect === "clickhouse" && (next === " " || next === "!"))));
     if (lineComment) {
       const stop = sql.indexOf("\n", at);
       const text = sql.slice(at + (ch === "#" ? 1 : 2), stop === -1 ? sql.length : stop);
@@ -40,7 +41,7 @@ export function leadingComment(sql: string, dialect?: Dialect): Leading {
       let j = at + 2;
       while (j < sql.length && depth > 0) {
         if (sql.startsWith("*/", j)) { depth--; j += 2; }
-        else if (dialect === "postgres" && sql.startsWith("/*", j)) { depth++; j += 2; }
+        else if ((dialect === "postgres" || dialect === "clickhouse") && sql.startsWith("/*", j)) { depth++; j += 2; }
         else j++;
       }
       const text = sql.slice(at + 2, depth === 0 ? j - 2 : sql.length);

@@ -1,0 +1,1 @@
+SELECT countIf(id = {id:UInt64} AND user_id = 1) > 0 AND countIf(id = 2 AND user_id = {user:UInt64}) > 0 FROM orders

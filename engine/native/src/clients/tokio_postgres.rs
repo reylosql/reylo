@@ -73,8 +73,10 @@ impl ConcurrentAnswerer<Describe> for Answers<'_> {
     }
 
     // A prepare dropped after its Parse is sent has no statement to close, so on a session that goes on it is left to finish.
+    // A lock timeout ends the round too: the describes queued behind it would each wait out the
+    // same lock, so the caller leaves the connection to them and opens another.
     fn ends_session(&self, error: &HostError) -> bool {
-        self.0.is_closed() || error.0.starts_with(ENDED)
+        self.0.is_closed() || error.0.starts_with(ENDED) || error.0.starts_with(LOCKED)
     }
 }
 
@@ -102,7 +104,7 @@ impl ConcurrentAnswerer<Describe> for PreparedAnswers<'_> {
     }
 
     fn ends_session(&self, error: &HostError) -> bool {
-        self.0.is_closed() || error.0.starts_with(ENDED)
+        self.0.is_closed() || error.0.starts_with(ENDED) || error.0.starts_with(LOCKED)
     }
 }
 
@@ -122,6 +124,11 @@ async fn describe(client: &Client, sql: &str) -> Result<Result<Describe, DbError
             // The session's end rather than the statement's answer: the replay ends as on a
             // lost connection, and nothing is kept as the statement's error.
             Some(_) if ended(&e) => Err(HostError(format!("{ENDED}: {}", pg_message(&e)))),
+            // Another session's lock on a table the statement names, waited for until `lock_timeout`:
+            // not the statement's answer either, so nothing is kept as its error, and the next
+            // analysis asks again. The server cannot say which session it waited for once the wait
+            // has ended, so none is named.
+            Some(d) if *d.code() == ::tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE => Err(HostError(format!("{LOCKED}. Run it again once the lock is released: pg_locks lists the session that holds it"))),
             Some(d) => {
                 let position = match d.position() {
                     Some(::tokio_postgres::error::ErrorPosition::Original(p)) => Some(*p as usize),
@@ -200,6 +207,11 @@ fn cell(row: &::tokio_postgres::Row, i: usize) -> Value {
 /// of the connection-exception class 08, and closes the connection (a restart, an administrator's
 /// `pg_terminate_backend`, a database dropped).
 pub const ENDED: &str = "the server ended the session";
+
+/// How a host error that is a lock timeout opens: a describe waited until `lock_timeout` for another
+/// session's lock on a table the statement names. The connection still has the round's other
+/// describes queued behind the same lock, so its caller opens another for the next statement.
+pub const LOCKED: &str = "A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_timeout";
 
 /// Whether `e` is the server ending the session, rather than its answer to what it was asked.
 pub fn ended(e: &::tokio_postgres::Error) -> bool {

@@ -1,22 +1,24 @@
-//! The modules `#[reylo::query]` expands to, written to files: `reylo generate rust-sqlx` writes a
-//! `.rs` file beside each `.sql` file, or every module to one file with `--out`, and a build script
-//! (`reylo_build::rust_sqlx()`) writes one file into Cargo's `OUT_DIR`. A file's module is named
-//! after it, so `get_user.sql` is `get_user`, holding `Query`, `Row` and `run`.
+//! The modules `#[reylo::query]` expands to, written to one file: `reylo generate rust-sqlx` writes
+//! every module to the file `--out` names, and a build script (`reylo_build::rust_sqlx()`) to one
+//! file in Cargo's `OUT_DIR`. Each `.sql` file's module sits at the top of the file, named after the
+//! file in snake_case, whatever directory it is in, so `get_user.sql` and `getUser.sql` are each
+//! `get_user`, holding `Query`, `Row` and `run`; two files with one name fail the run, naming both.
 //!
-//! A module written beside its crate's sources checks, as the crate compiles, that its `.sql` file
-//! still reads as the text it was written from: an edited query fails the build until it is
+//! A file written beside the crate's sources checks, as the crate compiles, that each `.sql` file
+//! still reads as the text its module was written from: an edited query fails the build until it is
 //! generated again, with no database.
 //!
-//! In one file, each Postgres enum type is declared once, in a module named after its schema at the
-//! top of the file (`public::Mood`), the `public` schema's also at the top itself (`Mood`), and each
-//! query's module names it as its own (`get_user::Mood`), so every query's value of it is one type.
+//! Each Postgres enum type is declared once, in a module named after its schema in the file's
+//! `enums` module (`enums::public::Mood`), the `public` schema's also at the top itself (`Mood`), and
+//! each query's module names it as its own (`get_user::Mood`), so every query's value of it is one
+//! type.
 
 use crate::{analysis, files, Dates, Decimals, Options, Overrides, SharedEnum};
 use proc_macro2::{Span, TokenStream, TokenTree};
 use quote::quote;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// The first line of every file the generator writes, which it looks for before it writes over one.
 const MARK: &str = "// Written by `reylo generate rust-sqlx`";
@@ -69,8 +71,8 @@ impl Generator {
         self
     }
 
-    /// One file for every module, each directory under the inputs a module of its own. In a build
-    /// script it is a name in `OUT_DIR`, `queries.rs` where none is given.
+    /// The one file every module is written to, which the command line must name. In a build script
+    /// it is a name in `OUT_DIR`, `queries.rs` where none is given.
     pub fn out(mut self, file: impl Into<PathBuf>) -> Self {
         self.out = Some(file.into());
         self
@@ -91,6 +93,11 @@ impl Generator {
         } else {
             std::env::current_dir().map_err(|e| Error(format!("cannot read the working directory: {e}")))?
         };
+        let out = match (&self.out, self.build_script) {
+            (Some(out), _) => out.clone(),
+            (None, true) => "queries.rs".into(),
+            (None, false) => return Err(Error("name the file to write every module to, as --out src/queries.rs".into())),
+        };
         let inputs = if !self.inputs.is_empty() {
             self.inputs.clone()
         } else if self.build_script {
@@ -98,23 +105,11 @@ impl Generator {
         } else {
             default_inputs(&base)?
         };
-        // Each file with the directory its module's path starts from: the directory the input names,
-        // a glob's directory up to its first wildcard, or a named file's own directory.
-        let mut found: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut found: Vec<PathBuf> = Vec::new();
         let mut errors = Vec::new();
         for input in &inputs {
-            let root = if files::is_glob(input) {
-                base.join(files::glob_root(input))
-            } else {
-                let full = base.join(input);
-                if full.is_dir() {
-                    full
-                } else {
-                    full.parent().map_or(base.clone(), Path::to_path_buf)
-                }
-            };
             match files::sql_files(input, &base) {
-                Ok(files) => found.extend(files.into_iter().filter(|f| !found.iter().any(|(seen, _)| seen == f)).map(|f| (f, root.clone())).collect::<Vec<_>>()),
+                Ok(files) => found.extend(files),
                 Err(message) => errors.push(message),
             }
         }
@@ -122,17 +117,35 @@ impl Generator {
             return Err(Error(errors.join("\n")));
         }
         found.sort();
+        found.dedup();
         if found.is_empty() {
             return Err(Error(format!("no .sql file under {}", inputs.join(", "))));
         }
 
+        // Every file's module is named first, so that two files of one name fail before any is analyzed.
+        let mut named: BTreeMap<String, &PathBuf> = BTreeMap::new();
+        for file in &found {
+            let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            match module_name(&stem) {
+                None => errors.push(format!("{}: {stem:?} is no Rust module's name: name the file with letters, digits and underscores, starting with a letter, as get_user.sql", shown(&base, file))),
+                Some(name) if name == ENUMS => errors.push(format!("{}: the module {ENUMS} holds the enum types: rename the file", shown(&base, file))),
+                Some(name) => match named.get(&name) {
+                    Some(other) => errors.push(format!("{} and {} are both the module {name}: rename one", shown(&base, other), shown(&base, file))),
+                    None => {
+                        named.insert(name, file);
+                    }
+                },
+            }
+        }
+        if !errors.is_empty() {
+            return Err(Error(errors.join("\n")));
+        }
+
         let mut modules = Vec::new();
         let mut options = BTreeMap::new();
-        let one = self.build_script || self.out.is_some();
-        for (file, root) in &found {
-            let shown = shown(&base, file);
-            match module(file, &shown, &mut options, one) {
-                Ok((name, generated)) => modules.push(Module { file: file.clone(), root: root.clone(), name, tokens: generated.tokens, shared: generated.shared }),
+        for (name, file) in &named {
+            match module(file, &shown(&base, file), &mut options) {
+                Ok(generated) => modules.push(Module { file: (*file).clone(), name: name.clone(), tokens: generated.tokens, shared: generated.shared }),
                 Err(message) => errors.push(message),
             }
         }
@@ -142,7 +155,7 @@ impl Generator {
 
         if self.build_script {
             let out_dir = PathBuf::from(std::env::var("OUT_DIR").map_err(|_| Error("OUT_DIR is not set: reylo_build runs in a build script".into()))?);
-            let out = out_dir.join(self.out.clone().unwrap_or_else(|| "queries.rs".into()));
+            let out = out_dir.join(out);
             let written = write(&out, &one_file(&modules, &inputs, &base, &out, true)?)?;
             for input in &inputs {
                 let dir = if files::is_glob(input) { files::glob_root(input) } else { input.as_str() };
@@ -160,21 +173,18 @@ impl Generator {
             println!("cargo:rerun-if-env-changed=DATABASE_URL");
             return Ok(vec![written]);
         }
-        match &self.out {
-            Some(out) => {
-                let out = base.join(out);
-                Ok(vec![write(&out, &one_file(&modules, &inputs, &base, &out, false)?)?])
-            }
-            None => modules.iter().map(|m| write(&m.file.with_extension("rs"), &beside(m)?)).collect(),
-        }
+        let out = base.join(out);
+        Ok(vec![write(&out, &one_file(&modules, &inputs, &base, &out, false)?)?])
     }
 }
 
-/// A statement's module: its name and its items, the directory its path in one file starts from, and
-/// the Postgres enum types it reads from the file's schema modules.
+/// The module that holds each schema's module of Postgres enum types, a name no query's module may take.
+const ENUMS: &str = "enums";
+
+/// A statement's module: its file, its name and its items, and the Postgres enum types it reads from
+/// the file's schema modules.
 struct Module {
     file: PathBuf,
-    root: PathBuf,
     name: String,
     tokens: TokenStream,
     shared: Vec<SharedEnum>,
@@ -208,11 +218,9 @@ fn default_inputs(cwd: &Path) -> Result<Vec<String>, Error> {
 }
 
 /// One statement's module, or the messages that say why it cannot be written, each naming the
-/// file, and the line and column where the engine places it; `one`, for a module of one file, whose
-/// Postgres enum types are its schema modules'.
-fn module(file: &Path, shown: &str, options: &mut BTreeMap<PathBuf, Options>, one: bool) -> Result<(String, crate::Generated), String> {
-    let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let name = module_name(&stem).ok_or_else(|| format!("{shown}: {stem:?} is no Rust module's name: rename the file in snake_case, as get_user.sql"))?;
+/// file, and the line and column where the engine places it. Its Postgres enum types are the file's
+/// schema modules'.
+fn module(file: &Path, shown: &str, options: &mut BTreeMap<PathBuf, Options>) -> Result<crate::Generated, String> {
     let sql = std::fs::read_to_string(file).map_err(|e| format!("{shown}: cannot read it: {e}"))?;
     let package = package_dir(file);
     let (dialect, analysis) = analysis::analyze(&package, &sql).map_err(|message| format!("{shown}: {message}"))?;
@@ -220,14 +228,49 @@ fn module(file: &Path, shown: &str, options: &mut BTreeMap<PathBuf, Options>, on
         return Err(diagnostics.iter().map(|d| diagnostic(shown, &sql, d)).collect::<Vec<_>>().join("\n"));
     }
     let options = *options.entry(package.clone()).or_insert_with(|| crate_options(&package));
-    let generated = crate::module(dialect, options, &analysis, Span::call_site(), &Overrides::default(), one).map_err(|e| format!("{shown}: {e}"))?;
-    Ok((name, generated))
+    crate::module(dialect, options, &analysis, Span::call_site(), &Overrides::default(), true).map_err(|e| format!("{shown}: {e}"))
 }
 
-/// A file's stem as a module's name: a Rust identifier, written raw where it is a keyword.
-fn module_name(stem: &str) -> Option<String> {
-    let valid = !stem.is_empty() && stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !stem.starts_with(|c: char| c.is_ascii_digit());
-    valid.then(|| if syn::parse_str::<syn::Ident>(stem).is_ok() { stem.to_string() } else { format!("r#{stem}") })
+/// A file's stem as a module's name: its words in snake_case, written raw where that is a keyword
+/// of any edition, `gen` included, which syn reads as a name and Rust 2024 reserves. Words are ASCII
+/// letters and digits, which `_`, `-`, `.` and spaces separate and a capital starts (`getUser` and
+/// `get-user` are each `get_user`; `HTTPStatus` is `http_status`). A stem with any other character,
+/// or whose name would start with a digit, has none.
+pub fn module_name(stem: &str) -> Option<String> {
+    let name = file_words(stem)?.join("_");
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    if name != "gen" && syn::parse_str::<syn::Ident>(&name).is_ok() {
+        return Some(name);
+    }
+    let raw = format!("r#{name}");
+    syn::parse_str::<syn::Ident>(&raw).is_ok().then_some(raw)
+}
+
+/// The words of a file's stem, lowercase: ASCII letters and digits, split at `_`, `-`, `.` and
+/// spaces, and before a capital that follows a lowercase letter or a digit, or that starts a word
+/// after a run of capitals; none where the stem holds any other character or no word.
+fn file_words(stem: &str) -> Option<Vec<String>> {
+    if !stem.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ' ')) {
+        return None;
+    }
+    let mut words = Vec::new();
+    for part in stem.split(['_', '-', '.', ' ']).filter(|p| !p.is_empty()) {
+        let chars: Vec<char> = part.chars().collect();
+        let mut word = String::new();
+        for (i, &c) in chars.iter().enumerate() {
+            let prev = i.checked_sub(1).map(|j| chars[j]);
+            let next = chars.get(i + 1).copied();
+            let starts = c.is_ascii_uppercase() && prev.is_some_and(|p| p.is_ascii_lowercase() || p.is_ascii_digit() || (p.is_ascii_uppercase() && next.is_some_and(|n| n.is_ascii_lowercase())));
+            if starts && !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            word.push(c.to_ascii_lowercase());
+        }
+        words.push(word);
+    }
+    (!words.is_empty()).then_some(words)
 }
 
 /// `file:line:column: message`, the place the engine gives as a byte offset into the statement.
@@ -319,84 +362,41 @@ pub fn module_text(dialect: crate::Dialect, options: Options, analysis: &Value) 
     Ok(prettyplease::unparse(&file))
 }
 
-/// A module beside its `.sql` file: its items, after the check that the file still reads as the
-/// text they were written from.
-fn beside(module: &Module) -> Result<String, Error> {
-    let file_name = module.file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let check = check(&module.file, &file_name)?;
-    let tokens = &module.tokens;
-    let header = format!("{MARK} from {file_name}: edit the query and run it again, never this file.\n\n");
-    format_file(header, quote!(#check #tokens))
-}
-
-/// Every module in one file, a module per directory under the input that found it, so that a
-/// module's path stays as it is when other `.sql` files come and go. A build script's names each
-/// `.sql` file by its full path and needs no check, since Cargo runs it again when one changes.
+/// Every module in one file, at its top, then the `enums` module of each schema's enum types. A
+/// build script's file needs no check that each `.sql` file reads as it did, since Cargo runs the
+/// script again when one changes.
 fn one_file(modules: &[Module], inputs: &[String], base: &Path, out: &Path, build_script: bool) -> Result<String, Error> {
-    #[derive(Default)]
-    struct Node {
-        dirs: BTreeMap<String, Node>,
-        queries: BTreeMap<String, TokenStream>,
-    }
-    let mut root = Node::default();
     // Each Postgres enum type once, in its schema's module.
     let mut schemas: BTreeMap<String, BTreeMap<String, &SharedEnum>> = BTreeMap::new();
     for shared in modules.iter().flat_map(|m| &m.shared) {
         let schema = schemas.entry(shared.schema.clone()).or_default();
         match schema.get(&shared.name) {
-            Some(other) if other.qualified != shared.qualified => return Err(Error(format!("the enum types {} and {} would both be {}::{}: rename one in the database, or generate their queries into separate files", other.qualified, shared.qualified, shared.schema, shared.name))),
+            Some(other) if other.qualified != shared.qualified => return Err(Error(format!("the enum types {} and {} would both be {ENUMS}::{}::{}: rename one in the database, or generate their queries into separate files", other.qualified, shared.qualified, shared.schema, shared.name))),
             _ => {
                 schema.insert(shared.name.clone(), shared);
             }
         }
     }
+    let mut items = Vec::new();
     for module in modules {
-        let rel = module.file.parent().and_then(|p| p.strip_prefix(&module.root).ok()).unwrap_or(Path::new(""));
-        let mut node = &mut root;
-        for part in rel.components() {
-            let Component::Normal(part) = part else { continue };
-            let part = part.to_string_lossy().into_owned();
-            let name = module_name(&part).ok_or_else(|| Error(format!("{}: the directory {part:?} is no Rust module's name: rename it in snake_case", module.file.display())))?;
-            node = node.dirs.entry(name).or_default();
-        }
-        // The schema modules, from the query's module: a `super` for each module it is inside of.
-        let depth = rel.components().filter(|c| matches!(c, Component::Normal(_))).count() + 1;
-        let tokens = &shared_root(module.tokens.clone(), depth);
-        let body = if build_script {
-            quote!(#tokens)
-        } else {
-            let check = check(&module.file, &relative(out.parent().unwrap_or(Path::new("")), &module.file))?;
-            quote!(#check #tokens)
-        };
-        if node.queries.insert(module.name.clone(), body).is_some() {
-            return Err(Error(format!("{}: another .sql file of the inputs is the module {} too: rename one", module.file.display(), module.name)));
-        }
+        let ident = syn::parse_str::<syn::Ident>(&module.name).map_err(|e| Error(e.to_string()))?;
+        let tokens = enums_from_query(module.tokens.clone());
+        let check = if build_script { None } else { Some(check(&module.file, &relative(out.parent().unwrap_or(Path::new("")), &module.file))?) };
+        items.push(quote!(pub mod #ident { #check #tokens }));
     }
-    fn render(node: &Node, at: &Path) -> Result<TokenStream, Error> {
-        let mut items = Vec::new();
-        for (name, child) in &node.dirs {
-            if node.queries.contains_key(name) {
-                return Err(Error(format!("{}: both a directory and a .sql file are the module {name}: rename one", at.display())));
-            }
-            let ident = syn::parse_str::<syn::Ident>(name).map_err(|e| Error(e.to_string()))?;
-            let inner = render(child, &at.join(name))?;
-            items.push(quote!(pub mod #ident { #inner }));
-        }
-        for (name, body) in &node.queries {
-            let ident = syn::parse_str::<syn::Ident>(name).map_err(|e| Error(e.to_string()))?;
-            items.push(quote!(pub mod #ident { #body }));
-        }
-        Ok(quote!(#(#items)*))
-    }
-    let mut tokens = render(&root, out)?;
-    for (schema, enums) in &schemas {
-        if root.dirs.contains_key(schema) || root.queries.contains_key(schema) {
-            return Err(Error(format!("{}: the module {schema} would hold both the schema {schema}'s enum types and queries: rename the directory or the .sql file", out.display())));
-        }
-        let ident = syn::parse_str::<syn::Ident>(schema).map_err(|e| Error(e.to_string()))?;
-        let definitions = enums.values().map(|e| &e.tokens);
-        let spread = (schema == "public").then(|| quote!(#[allow(unused_imports)] pub use self::public::*;));
-        tokens = quote!(#tokens #[doc = " The enum types of one database schema, which the queries' modules name."] pub mod #ident { #(#definitions)* } #spread);
+    let mut tokens = quote!(#(#items)*);
+    if !schemas.is_empty() {
+        let enums = syn::parse_str::<syn::Ident>(ENUMS).map_err(|e| Error(e.to_string()))?;
+        let schema_modules = schemas
+            .iter()
+            .map(|(schema, enums)| {
+                let ident = syn::parse_str::<syn::Ident>(schema).map_err(|e| Error(e.to_string()))?;
+                let definitions = enums.values().map(|e| &e.tokens);
+                Ok(quote!(#[doc = " The enum types of one database schema, which the queries' modules name."] pub mod #ident { #(#definitions)* }))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let spread = schemas.contains_key("public").then(|| quote!(#[allow(unused_imports)] pub use self::#enums::public::*;));
+        tokens = quote!(#tokens #[doc = " Each database schema's enum types, a module per schema."] pub mod #enums { #(#schema_modules)* } #spread);
     }
     // The inputs from the file's own directory, so that every checkout writes the same header; a
     // build script's file is in OUT_DIR, which no checkout shares, so its inputs read as given.
@@ -405,19 +405,17 @@ fn one_file(modules: &[Module], inputs: &[String], base: &Path, out: &Path, buil
     format_file(header, tokens)
 }
 
-/// `tokens` with the stand-in for the file's top, `__reylo_shared_root`, written as the `super`s
-/// that reach it from a module `depth` modules down.
-fn shared_root(tokens: TokenStream, depth: usize) -> TokenStream {
+/// `tokens`, a query's module, with the stand-in for the file's top, `__reylo_shared_root`, written
+/// as the path to the file's `enums` module from it.
+fn enums_from_query(tokens: TokenStream) -> TokenStream {
+    let enums = syn::Ident::new(ENUMS, Span::call_site());
     tokens
         .into_iter()
         .flat_map(|tree| -> Vec<TokenTree> {
             match tree {
-                TokenTree::Ident(ident) if ident == "__reylo_shared_root" => {
-                    let supers: Vec<TokenStream> = (0..depth).map(|_| quote!(super)).collect();
-                    quote!(#(#supers)::*).into_iter().collect()
-                }
+                TokenTree::Ident(ident) if ident == "__reylo_shared_root" => quote!(super::#enums).into_iter().collect(),
                 TokenTree::Group(group) => {
-                    let mut inner = proc_macro2::Group::new(group.delimiter(), shared_root(group.stream(), depth));
+                    let mut inner = proc_macro2::Group::new(group.delimiter(), enums_from_query(group.stream()));
                     inner.set_span(group.span());
                     vec![TokenTree::Group(inner)]
                 }
@@ -502,17 +500,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_module_reads_the_schema_modules_from_where_it_is() {
+    fn a_module_reads_the_enum_types_from_the_files_enums_module() {
         let tokens = quote!(pub use __reylo_shared_root::public::Mood as Mood;);
-        assert_eq!(shared_root(tokens, 2).to_string(), quote!(pub use super::super::public::Mood as Mood;).to_string());
+        assert_eq!(enums_from_query(tokens).to_string(), quote!(pub use super::enums::public::Mood as Mood;).to_string());
     }
 
     #[test]
-    fn a_module_is_named_after_its_file() {
+    fn a_module_is_named_after_its_file_in_snake_case() {
         assert_eq!(module_name("get_user").as_deref(), Some("get_user"));
+        assert_eq!(module_name("get-user").as_deref(), Some("get_user"));
+        assert_eq!(module_name("getUser").as_deref(), Some("get_user"));
+        assert_eq!(module_name("GetUser").as_deref(), Some("get_user"));
+        assert_eq!(module_name("HTTPStatus").as_deref(), Some("http_status"));
+        assert_eq!(module_name("user2Posts").as_deref(), Some("user2_posts"));
+        assert_eq!(module_name("list users.v2").as_deref(), Some("list_users_v2"));
         assert_eq!(module_name("type").as_deref(), Some("r#type"));
-        assert_eq!(module_name("get-user"), None);
+        assert_eq!(module_name("Gen").as_deref(), Some("r#gen"));
         assert_eq!(module_name("1st"), None);
+        assert_eq!(module_name("self"), None);
+        assert_eq!(module_name("é"), None);
+        assert_eq!(module_name("__"), None);
     }
 
     #[test]
