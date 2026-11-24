@@ -7150,7 +7150,8 @@ create trigger kids_note after insert on kids begin update parents set name = na
             create sequence dropdef_no; create table dropdef (id bigint default nextval('dropdef_no')); \
             create sequence rn_no; create table rn (id bigint default nextval('rn_no')); \
             create sequence pk_no; create table pk (id bigint constraint pk_key primary key default nextval('pk_no')); \
-            create sequence part_no; create table part (id bigint, constraint part_key primary key (id)) partition by range (id); create table part_1 partition of part (id default nextval('part_no')) for values from (0) to (100000);";
+            create sequence part_no; create table part (id bigint, constraint part_key primary key (id)) partition by range (id); create table part_1 partition of part (id default nextval('part_no')) for values from (0) to (100000); \
+            create sequence kept_no; create table kept (id bigint constraint kept_key primary key default nextval('kept_no')); create table kept_items (kept_id bigint constraint kept_items_fk references kept (id));";
         p.schema(before);
         p.file("20261027100000_log.sql", before);
         assert_eq!(p.dev().await, 0, "{}", p.peek());
@@ -7165,6 +7166,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
             create sequence rn_no start with 1000; create table rn (new_id bigint default nextval('rn_no')); \
             create sequence pk_no start with 1000; create table pk (id bigint not null default nextval('pk_no')); \
             create sequence part_no start with 1000; create table part (id bigint not null) partition by range (id); create table part_1 partition of part (id default nextval('part_no')) for values from (0) to (100000); \
+            create sequence kept_no start with 1000; create table kept (id bigint constraint kept_key primary key default nextval('kept_no')); create table kept_items (kept_id bigint); \
             create sequence stage_no start with 1000; create table stage (id bigint, n text); alter sequence stage_no owned by stage.id; create table log (id bigint generated always as identity (start with 1000), msg text); create table events (id bigint generated always as identity (start with 1000) primary key, msg text); create table active (id bigint generated always as identity (start with 1000), live boolean); create index active_live on active (id) where live; create table renamed (new_id bigint generated always as identity (start with 1000), msg text);");
         let rename = vec![("renamed.id".to_string(), "new_id".to_string()), ("rn.id".to_string(), "new_id".to_string())];
         let choices = reylo_migrate::Choices { rename: rename.clone(), ..Default::default() };
@@ -7199,6 +7201,8 @@ create trigger kids_note after insert on kids begin update parents set name = na
         // A partitioned table's key takes its partitions' indexes with it, whatever they are named.
         let parent_first = file.lines().position(|l| l.contains("drop constraint part_key")).is_some_and(|d| d < at("'public.part_no'"));
         assert_eq!(out.contains("of part_1 while"), parent_first, "{file}");
+        // A foreign key dropped takes no index: the key it references still serves the read.
+        assert!(!out.contains("of kept while"), "{out}");
     }
 
     /// The check of a sequence's read reads the catalog and runs nothing of the file but the file:

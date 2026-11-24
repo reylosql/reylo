@@ -773,19 +773,20 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
         was.push(if known { db.rows(&fed(sequence)).await.ok().map(|rows| columns(&rows)) } else { None });
     }
     // The indexes each key dropped ahead of a read takes with it: its own and, under a partitioned
-    // table, those attached beneath it; a key the catalog doesn't hold yet (made in the file) by
-    // its name, as Postgres names a key's index.
+    // table, those attached beneath it; a constraint the catalog doesn't hold yet (made in the
+    // file) by its name, as Postgres names a key's index.
     let mut aheads = ahead_of_reads(&m.sql);
     for ahead in aheads.iter_mut().filter(|a| !a.keys.is_empty()) {
         let names = ahead.keys.iter().map(|k| format!("'{}'", k.replace('\'', "''"))).collect::<Vec<_>>().join(", ");
+        // A key owns its index; a foreign key only names the one it references, which stays.
         let rows = db
             .rows(&format!(
-                "with recursive k as (select conindid as i, conname from pg_constraint where conname in ({names}) and conindid <> 0 \
-                union select h.inhrelid, k.conname from pg_inherits h join k on h.inhparent = k.i) select relname, conname from k join pg_class c on c.oid = k.i"
+                "with recursive k as (select conindid as i from pg_constraint where conname in ({names}) and contype in ('p', 'u', 'x') and conindid <> 0 \
+                union select h.inhrelid from pg_inherits h join k on h.inhparent = k.i) select relname from k join pg_class c on c.oid = k.i"
             ))
             .await
             .unwrap_or_default();
-        let known: BTreeSet<String> = rows.iter().map(|r| r.text("conname").to_string()).collect();
+        let known: BTreeSet<String> = db.rows(&format!("select conname from pg_constraint where conname in ({names})")).await.unwrap_or_default().iter().map(|r| r.text("conname").to_string()).collect();
         ahead.indexes.extend(rows.iter().map(|r| r.text("relname").to_string()));
         let unknown: Vec<String> = ahead.keys.iter().filter(|k| !known.contains(*k)).cloned().collect();
         ahead.indexes.extend(unknown);
