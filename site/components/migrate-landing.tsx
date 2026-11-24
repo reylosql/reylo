@@ -13,7 +13,7 @@ import { githubUrl, migrateCompareUrl, migrateDocsUrl } from '@/lib/layout.share
  * (content/docs/migrate.mdx), and the docs are a page of their own, at /migrate/docs. The players
  * run on timers from the moment the page loads; nothing here reads the scroll position.
  */
-export function MigrateLanding({ stars }: { stars?: number }) {
+export function MigrateLanding({ stars, agentPrompt }: { stars?: number; agentPrompt?: string }) {
   return (
     <div className="ml rh">
       <Nav
@@ -33,56 +33,14 @@ export function MigrateLanding({ stars }: { stars?: number }) {
             <span>SQL-first</span> <em>schema and migrations.</em>
           </h1>
           <p className="ml-lede">Model your schema in <code>schema.sql</code>. Generate migrations, or write your own. Works on Postgres, MySQL and SQLite.</p>
-          <Install docs={migrateDocsUrl} />
+          <Install docs={migrateDocsUrl} agentPrompt={agentPrompt} />
         </div>
         <div className="ml-hero-visual">
           <SchemaToMigration />
         </div>
       </header>
 
-      <Row n={1} title="Use the full power of your database" visual={<SchemaKinds />}>
-        <p>No lossy or limited DSLs. Declare views, functions, triggers, policies, checks, computed columns, and more.</p>
-      </Row>
-
-      <Row n={2} title="Fast iteration loops" visual={<Term lines={PUSH} />} flip>
-        <p>Push <code>schema.sql</code> to your development database on every save. Then generate a migration once you're done iterating on schema.</p>
-      </Row>
-
-      <Row n={3} title="The most advanced cross-dialect diff engine" visual={<DialectMigrations />}>
-        <p>Edit <code>schema.sql</code>, then generate a migration with one command. Editable as needed.</p>
-      </Row>
-
-      <Row n={4} title="Explicit disambiguation" visual={<Term lines={RENAMES} />} flip>
-        <p>When schema changes are ambiguous, Reylo asks you for clarification. Use <code>--drop</code> or <code>--rename</code> to disambiguate.</p>
-      </Row>
-
-      <Row n={5} title={<>Linear history via <code>reylo.lock</code></>} visual={<LockFile />}>
-        <p>Enforce linear migration history in Git with the <code>reylo.lock</code> lockfile.</p>
-      </Row>
-
-      <Row n={6} title="Soundness guaranteed" visual={<Term lines={HAND_CHANGE} />} flip>
-        <p>Checksums in the lockfile prevent edited or reordered migrations. Untracked schema changes are detected and flagged.</p>
-      </Row>
-
-      <Row n={7} title="Introspect anytime" visual={<Term lines={INTROSPECT} sql />}>
-        <p>Introspect the current database schema anytime in readable SQL.</p>
-      </Row>
-
-      <Row n={8} title="Schemaless mode" visual={<Schemaless />} flip>
-        <p>For a DDL-first experience, just delete <code>schema.sql</code>. You (or your agents) can write raw DDL migrations.</p>
-      </Row>
-
-      <Row n={9} title="Lock-free mode" visual={<Term lines={LOCK_FREE} />}>
-        <p>For faster iteration, delete the lockfile. Unapplied migrations are run in lexicographic order. Reylo automatically prevents any ordering-dependent schema drift.</p>
-      </Row>
-
-      <Row n={10} title="Works with your database" visual={<Hosts />} flip>
-        <p>Works with Postgres, MySQL, SQLite—and all major database hosts and backends.</p>
-      </Row>
-
-      <Row n={11} title="Switch easily" visual={<Term lines={INIT} />}>
-        <p>One command introspects your current schema, generates <code>schema.sql</code>, and creates your initial <code>migrations/init.sql</code>.</p>
-      </Row>
+      <MigrateRows />
 
       <section className="ml-table">
         <h2>Compared with other migration tools</h2>
@@ -113,6 +71,107 @@ export function MigrateLanding({ stars }: { stars?: number }) {
   );
 }
 
+/**
+ * One row per feature, numbered in order, the sides alternating. `hosts: false` leaves out the row of
+ * databases and hosts, for a page that shows them once already (components/home-landing.tsx).
+ */
+export function MigrateRows({ hosts = true }: { hosts?: boolean }) {
+  const rows: { title: ReactNode; visual: ReactNode; body: ReactNode }[] = [
+    {
+      title: 'Use the full power of your database',
+      visual: <SchemaKinds />,
+      body: <p>No lossy or limited DSLs. Declare views, functions, triggers, policies, checks, computed columns, and more.</p>,
+    },
+    {
+      title: 'Fast iteration loops',
+      visual: <Term lines={PUSH} />,
+      body: (
+        <p>
+          Push <code>schema.sql</code> to your development database on every save. Then generate a migration once you're done iterating on schema.
+        </p>
+      ),
+    },
+    {
+      title: 'The most advanced cross-dialect diff engine',
+      visual: <DialectMigrations />,
+      body: (
+        <p>
+          Edit <code>schema.sql</code>, then generate a migration with one command. Editable as needed.
+        </p>
+      ),
+    },
+    {
+      title: 'Explicit disambiguation',
+      visual: <Term lines={RENAMES} />,
+      body: (
+        <p>
+          When schema changes are ambiguous, Reylo asks you for clarification. Use <code>--drop</code> or <code>--rename</code> to disambiguate.
+        </p>
+      ),
+    },
+    {
+      title: (
+        <>
+          Linear history <span className="ml-keep">via <code>reylo.lock</code></span>
+        </>
+      ),
+      visual: <LockFile />,
+      body: (
+        <p>
+          Enforce linear migration history in Git with the <code>reylo.lock</code> lockfile.
+        </p>
+      ),
+    },
+    {
+      title: 'Soundness guaranteed',
+      visual: <Term lines={HAND_CHANGE} />,
+      body: <p>Checksums in the lockfile prevent edited or reordered migrations. Untracked schema changes are detected and flagged.</p>,
+    },
+    {
+      title: 'Introspect anytime',
+      visual: <Term lines={INTROSPECT} sql />,
+      body: <p>Introspect the current database schema anytime in readable SQL.</p>,
+    },
+    {
+      title: 'Schemaless mode',
+      visual: <Schemaless />,
+      body: (
+        <p>
+          For a DDL-first experience, just delete <code>schema.sql</code>. You (or your agents) can write raw DDL migrations.
+        </p>
+      ),
+    },
+    {
+      title: 'Lock-free mode',
+      visual: <Term lines={LOCK_FREE} />,
+      body: <p>For faster iteration, delete the lockfile. Unapplied migrations are run in lexicographic order. Reylo automatically prevents any ordering-dependent schema drift.</p>,
+    },
+    ...(hosts
+      ? [
+          {
+            title: 'Works with your database',
+            visual: <Hosts />,
+            body: <p>Works with Postgres, MySQL, SQLite—and all major database hosts and backends.</p>,
+          },
+        ]
+      : []),
+    {
+      title: 'Switch easily',
+      visual: <Term lines={INIT} />,
+      body: (
+        <p>
+          One command introspects your current schema, generates <code>schema.sql</code>, and creates your initial <code>migrations/init.sql</code>.
+        </p>
+      ),
+    },
+  ];
+  return rows.map((r, i) => (
+    <Row key={i} n={i + 1} title={r.title} visual={r.visual} flip={i % 2 === 1}>
+      {r.body}
+    </Row>
+  ));
+}
+
 /** Variadic's mark: its squares, in their own colours. */
 export function VariadicMark() {
   return (
@@ -138,7 +197,7 @@ export function GitHubIcon() {
 }
 
 /** A feature: its number, in the accent, its name and a sentence or two, beside what it does. `flip` puts the words on the right. */
-function Row({ n, title, visual, flip, children }: { n: number; title: ReactNode; visual: ReactNode; flip?: boolean; children: ReactNode }) {
+export function Row({ n, title, visual, flip, children }: { n: number; title: ReactNode; visual: ReactNode; flip?: boolean; children: ReactNode }) {
   return (
     <section className={flip ? 'ml-row ml-flip' : 'ml-row'}>
       <div className="ml-row-text">
@@ -329,30 +388,23 @@ function Term({ lines, sql }: { lines: Script; sql?: boolean }) {
   return <TermWindow lines={usePlayer(lines)} script={lines} sql={sql} />;
 }
 
-/** The migration asked for with no flags, then again with a flag picked for each line. */
+/** A column replaced by one of another type, asked about with no flag, then again with `--rename`, as the docs show it (content/docs/migrate-usage.mdx). */
 const RENAMES: Script = [
-  '$ reylo migrate new tidy_columns',
-  "✗ This migration can't tell renames from new columns",
+  '$ reylo migrate new rename_title',
+  "✗ This migration can't tell a rename from a new column",
   '',
   '    - column posts.title character varying(100)',
   '    + column posts.heading character varying(200)',
-  '    - column users.bio character varying(200)',
-  '    + column users.about text',
   '',
-  '  For each, rename it to keep its rows, or drop it and add the new one:',
-  '    --rename posts.title=heading   or   --drop posts.title',
-  '    --rename users.bio=about       or   --drop users.bio',
-  '  Add the flags you picked to:',
-  '    reylo migrate new tidy_columns',
+  '  To rename the column, keeping its rows:',
+  '    reylo migrate new rename_title --rename posts.title=heading',
+  '  To drop the column and its data, and add a new one:',
+  '    reylo migrate new rename_title --drop posts.title',
   '',
   'Nothing was changed.',
-  '$ reylo migrate new tidy_columns --rename posts.title=heading --drop users.bio',
-  '✓ Wrote reylo/migrations/20261104150000_tidy_columns.sql',
+  '$ reylo migrate new rename_title --rename posts.title=heading',
+  '✓ Wrote reylo/migrations/20261104150000_rename_title.sql',
   '  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})',
-  '  + column users.about text',
-  '  - column users.bio character varying(200)',
-  '',
-  '  ! Drops the column users.bio and its data',
 ];
 
 /** With no schema.sql: DDL run on the database, the migration written from what it changed (`#edit` fills the editor above), and the migration recorded as run. */

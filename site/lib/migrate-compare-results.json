@@ -38,6 +38,9 @@
         "extensions": {
           "state": "y"
         },
+        "grants": {
+          "state": "y"
+        },
         "three-dialects": {
           "state": "y"
         },
@@ -57,6 +60,9 @@
           "state": "y"
         },
         "drift": {
+          "state": "y"
+        },
+        "edited": {
           "state": "y"
         },
         "out-of-order": {
@@ -121,6 +127,10 @@
           "state": "p",
           "note": "Only behind the `postgresqlExtensions` preview feature, and `prisma db pull` leaves the extension out."
         },
+        "grants": {
+          "state": "n",
+          "note": "Prisma's schema has no grant: `prisma db pull` leaves it out, and `prisma migrate dev` writes an empty migration."
+        },
         "three-dialects": {
           "state": "y"
         },
@@ -145,6 +155,10 @@
         "drift": {
           "state": "n",
           "note": "On a database with a hand-added column, `prisma migrate deploy` ran the pending migration without a word, and `prisma migrate status` listed only the pending migration."
+        },
+        "edited": {
+          "state": "n",
+          "note": "A migration edited after `prisma migrate deploy` ran it went unnoticed: the next deploy found nothing pending, and `prisma migrate status` said the database was up to date."
         },
         "out-of-order": {
           "state": "n",
@@ -205,6 +219,10 @@
           "state": "n",
           "note": "Drizzle's schema has no extension: `drizzle-kit pull` leaves it out, and `drizzle-kit generate` finds no changes."
         },
+        "grants": {
+          "state": "n",
+          "note": "Drizzle's schema has no grant: `drizzle-kit pull` leaves it out, and `drizzle-kit generate` finds no changes."
+        },
         "three-dialects": {
           "state": "y"
         },
@@ -231,6 +249,10 @@
           "state": "n",
           "note": "On a database with a hand-added column, `drizzle-kit migrate` ran the pending migration without a word."
         },
+        "edited": {
+          "state": "n",
+          "note": "A migration edited after `drizzle-kit migrate` ran it went unnoticed by the next `drizzle-kit migrate` and by `drizzle-kit check`."
+        },
         "out-of-order": {
           "state": "n",
           "note": "A merged migration that sorts before one already run was run by `drizzle-kit migrate` without a word, even when the two migrations end in different schemas in each order."
@@ -249,8 +271,8 @@
       }
     },
     "atlas": {
-      "name": "Atlas",
-      "version": "1.4.2 standard, 1.3.1 community",
+      "name": "Atlas Pro",
+      "version": "Pro, from its documentation on 2026-11-24",
       "cells": {
         "sql-schema": {
           "state": "y"
@@ -268,67 +290,82 @@
           "state": "y"
         },
         "domains": {
-          "state": "p",
-          "note": "The free standard build refuses domains until `atlas login`, and the community build adds the column without creating its domain."
+          "state": "y",
+          "pro": true,
+          "note": "Only in Atlas Pro, which is paid: the Apache-2.0 community build leaves out domains."
         },
         "views": {
-          "state": "p",
-          "note": "The free standard build refuses views until `atlas login`, and the community build ignores them."
+          "state": "y",
+          "pro": true,
+          "note": "Only in Atlas Pro, which is paid: the Apache-2.0 community build leaves out views."
         },
         "functions": {
-          "state": "p",
-          "note": "The free standard build refuses functions until `atlas login`, and the community build ignores them."
+          "state": "y",
+          "pro": true,
+          "note": "Only in Atlas Pro, which is paid: the Apache-2.0 community build leaves out functions."
         },
         "triggers": {
-          "state": "p",
-          "note": "The free standard build refuses a trigger's function until `atlas login`, and the community build ignores both."
+          "state": "y",
+          "pro": true,
+          "note": "Only in Atlas Pro, which is paid: the Apache-2.0 community build leaves out triggers."
         },
         "rls": {
-          "state": "p",
-          "note": "The free standard build refuses policies until `atlas login`, and the community build ignores them."
+          "state": "y",
+          "pro": true,
+          "note": "Only in Atlas Pro, which is paid: the Apache-2.0 community build leaves out policies."
         },
         "extensions": {
+          "state": "y",
+          "pro": true,
+          "note": "Only in Atlas Pro, which is paid: the Apache-2.0 community build leaves out extensions."
+        },
+        "grants": {
           "state": "p",
-          "note": "The free standard build refuses extensions until `atlas login`, and the community build ignores them."
+          "note": "Only with `permissions = true` in a `mode` block of `atlas.hcl`, since Atlas leaves grants out by default."
         },
         "three-dialects": {
           "state": "y"
         },
         "renames": {
-          "state": "y"
+          "state": "p",
+          "note": "A rename keeps its rows only when answered at a prompt in a terminal or marked with `-- atlas:renamed_from`. Otherwise, as in CI or an agent's shell, `atlas migrate diff` writes a drop and an add without a word."
         },
         "data-loss": {
           "state": "p",
-          "note": "With `atlas migrate diff`, the drop is written and `atlas migrate apply` runs it without asking, while `atlas schema apply` asks to approve every plan alike."
+          "note": "A drop fails `atlas migrate lint` until the file says `-- atlas:nolint destructive`, but `atlas migrate diff` writes it and `atlas migrate apply` runs it without asking."
         },
         "view-dependencies": {
           "state": "p",
-          "note": "The free standard build refuses the view until `atlas login`, and the community build's `alter column type` fails on it."
+          "note": "Atlas's documentation never says that a view reading the column is taken down and put back around the change."
         },
         "non-blocking": {
           "state": "p",
-          "note": "Only with `concurrent_index` turned on in `atlas.hcl`; by default `atlas schema apply` writes a plain `create index`."
+          "note": "Only with `concurrent_index` turned on in `atlas.hcl`; by default a new index is a plain `create index`."
         },
         "shadow": {
           "state": "y"
         },
         "drift": {
           "state": "p",
-          "note": "On a database with a hand-added column, the free builds' `atlas migrate apply` ran the pending migration without a word."
+          "note": "Only with a `check \"migrate_apply\"` block in `atlas.hcl` whose drift check is set to `on_error = FAIL`."
+        },
+        "edited": {
+          "state": "p",
+          "note": "Its `atlas.sum` refuses the edit until `atlas migrate hash`, which its error says to run. After that, `atlas migrate apply` and `atlas migrate status` say nothing, unless a drift check in `atlas.hcl` catches the schema the edit changed."
         },
         "out-of-order": {
           "state": "y"
         },
         "branch-switch": {
-          "state": "n",
-          "note": "After a switch, `atlas migrate apply` refused this branch's migration as out of order, or ran it beside the other branch's table, and the community build has no `atlas migrate down`."
+          "state": "p",
+          "note": "A migration is reverted by hand with `atlas migrate down`, before the switch, while the other branch's files are still there. After the switch, `atlas migrate apply` fails on this branch's migration as out of order."
         },
         "lockfile": {
           "state": "y"
         },
         "open-source": {
-          "state": "p",
-          "note": "The Apache-2.0 community build leaves `atlas migrate down` to the standard build, under Ariga's EULA, and drift alerts to Atlas Pro."
+          "state": "n",
+          "note": "Atlas Pro is proprietary, at $9 per seat a month, and runs only on a machine signed in with `atlas login`. The Apache-2.0 community build leaves out views, functions, triggers, policies, extensions, domains, linting and drift checks."
         }
       }
     },
@@ -369,6 +406,9 @@
         "extensions": {
           "state": "y"
         },
+        "grants": {
+          "state": "y"
+        },
         "three-dialects": {
           "state": "n",
           "note": "Postgres only."
@@ -392,6 +432,10 @@
         "drift": {
           "state": "p",
           "note": "Its `apply` refuses a plan whose database changed by hand since it was planned, but it keeps no migration history to deploy."
+        },
+        "edited": {
+          "state": "n",
+          "note": "It plans changes only, and keeps no migration history."
         },
         "out-of-order": {
           "state": "n",
@@ -457,6 +501,10 @@
           "state": "n",
           "note": "For a new extension, `liquibase diff-changelog` writes nothing."
         },
+        "grants": {
+          "state": "n",
+          "note": "For a new grant, `liquibase diff-changelog` writes nothing."
+        },
         "three-dialects": {
           "state": "y"
         },
@@ -483,6 +531,9 @@
         "drift": {
           "state": "n",
           "note": "On a database with a hand-added column, `liquibase update` ran the pending changeset without a word."
+        },
+        "edited": {
+          "state": "y"
         },
         "out-of-order": {
           "state": "n",
@@ -549,6 +600,10 @@
           "state": "n",
           "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
         },
+        "grants": {
+          "state": "n",
+          "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
+        },
         "three-dialects": {
           "state": "n",
           "note": "Flyway writes no migrations for you: each is a file you write by hand, and `flyway diff` and `flyway generate` ask for a Flyway Enterprise license."
@@ -576,6 +631,9 @@
         "drift": {
           "state": "p",
           "note": "Flyway Enterprise only: Community refuses `flyway check -drift`, and `flyway migrate` ran the pending migration on a database with a hand-added column without a word."
+        },
+        "edited": {
+          "state": "y"
         },
         "out-of-order": {
           "state": "y"

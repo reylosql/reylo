@@ -339,6 +339,140 @@
   padding: 0.5rem 0.875rem;
 }
 
+/* The headline for both tools: two lines, "Type-safe SQL tooling" and "for the modern era", each
+   kept whole, at the size that fits the longer, the first (9.22 times the font size), in the words'
+   column. */
+.rh .rh-h1-both span,
+.rh .rh-h1-both em {
+  display: block;
+  white-space: nowrap;
+}
+
+.rh .ml-hero-words .rh-h1-both {
+  --rh-h1: min(4.375rem, 10.7cqi);
+}
+
+/* The lede in even lines, so no word is left alone on the last. */
+.rh .ml-hero-words .ml-lede {
+  text-wrap: balance;
+}
+
+/* ── A tool's part of the page ──
+   Centred, with wide room above and below, so the page reads as entering a new part: a chip naming
+   what the tool is, its headline and a sentence. */
+.rh-part-head {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 12rem 3rem 5rem;
+}
+
+.rh-chip {
+  display: inline-block;
+  margin-bottom: 1.5rem;
+  /* The capitals sat 0.7–1.1px high in the box (ink-align.mjs, 2026-11-24), so a pixel more over them than under. */
+  padding: 0.4375rem 0.875rem 0.3125rem;
+  border: 1px solid color-mix(in oklab, var(--dk-accent) 45%, transparent);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--dk-accent) 10%, transparent);
+  font: 500 0.8125rem/1.25rem var(--font-code);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-fd-primary);
+}
+
+.dark .rh-chip {
+  color: #ffd43b;
+}
+
+/* Reylo Migrate's comparison and the call to action are centred sections too, with the same room. */
+.rh .ml-table {
+  padding-top: 10rem;
+  border-top: 0;
+}
+
+.rh .ml-end {
+  padding-block: 12rem 10rem;
+  border-top: 0;
+}
+
+/* The examples follow their part's head, and the rows follow the examples. */
+.rh-part .rh-examples {
+  padding-top: 0;
+  padding-bottom: 2.5rem;
+}
+
+.rh-part .ml-row:first-of-type {
+  padding-top: 3rem;
+}
+
+/* ── Reylo's rows' windows ── */
+
+/* The misspelled statement: the misspelling under a red wave, and under its line the error, as an
+   editor's hover shows it. */
+.rh-error {
+  position: relative;
+}
+
+.rh-error > .rh-code {
+  padding-bottom: 5.5rem;
+}
+
+.rh-squiggle {
+  text-decoration: underline wavy hsl(2 80% 62%);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.3em;
+}
+
+/* Under the error's line, a character in from where the misspelling starts. */
+.rh-diag {
+  position: absolute;
+  top: calc(2.375rem + 1.25rem + (var(--rh-at) + 1) * var(--rh-lh) + 6px);
+  left: calc(1.5rem + var(--rh-col) * 1ch - 0.875rem);
+  max-width: calc(100% - 2rem);
+  padding: 0.5rem 0.875rem;
+  border: 1px solid hsl(0 0% 22%);
+  border-radius: 0.5rem;
+  background: hsl(0 0% 11%);
+  box-shadow: 0 12px 30px -8px rgb(0 0 0 / 0.6);
+  font: 400 var(--rh-code) / var(--rh-lh) var(--font-code);
+  color: #e1e4e8;
+}
+
+.rh-diag-src {
+  color: var(--ml-win-dim);
+}
+
+/* The agent's edit: get_author.sql as a diff, wide enough for its longest line, over main.ts and the
+   type of `author`, a line longer than the hero's, the added line on green. */
+.rh-agent .ml-editor {
+  width: 88%;
+}
+
+.rh-agent .ml-code {
+  padding-bottom: 2.25rem;
+  font: 400 var(--rh-code) / var(--rh-lh) var(--font-code);
+}
+
+.rh-agent .rh-import-ts > .rh-code {
+  padding-bottom: calc(9.5rem + var(--rh-lh));
+}
+
+.rh-tline {
+  display: block;
+}
+
+.rh-added {
+  margin-inline: -0.875rem;
+  padding-inline: 0.875rem;
+  background: rgb(46 160 67 / 0.2);
+}
+
+/* The drivers' main.ts: each driver's file in one cell, so the window holds the tallest. */
+.rh-drivers .ml-stack > pre {
+  padding: 1.125rem 1.5rem 1.25rem;
+  font: 400 var(--rh-code) / var(--rh-lh) var(--font-code);
+}
+
 /* ── The examples ── */
 .rh-examples {
   max-width: 1280px;
@@ -368,14 +502,13 @@
   text-wrap: balance;
 }
 
-/* The blade under each heading, 72 by 3px, about a lightsaber's proportions, in the yellow, lit by
-   night with the strongest of the saber glows (app/global.css). Its margins put it halfway, by eye,
-   between the heading's baseline and the sentence's lowercase under it. */
+/* Before the call to action, a short blade, about a lightsaber's proportions, in the yellow, lit by
+   night with the strongest of the saber glows (app/global.css): the one place a rule parts the page. */
 .rh-blade {
   display: block;
   width: 4.5rem;
   height: 3px;
-  margin: 1rem auto 0;
+  margin: 10rem auto 0;
   border-radius: 999px;
   background: var(--dk-accent);
 }
@@ -384,16 +517,18 @@
   filter: var(--saber-glow-strongest);
 }
 
-.rh-section-head .rh-blade + p {
-  margin-top: 0.78125rem;
+/* The call to action's room above it is the blade's. */
+.rh .rh-blade + .ml-end {
+  padding-top: 8rem;
 }
 
-.rh-end h2 {
-  margin-bottom: 0;
+/* The lateral join, and under it the type it returns, the editor wide enough for its longest line. */
+.rh-sqlfirst .ml-editor {
+  width: 80%;
 }
 
-.rh-end .rh-blade {
-  margin-bottom: 2.5rem;
+.rh-sqlfirst .ml-editor > .rh-code {
+  padding-bottom: 2.25rem;
 }
 
 /* One card, centred, as wide as the docs' column: the examples' names as tabs across its top, in
@@ -444,69 +579,6 @@
 
 .rh-ex-caption code {
   font-size: 0.9em;
-}
-
-/* ── Features ── */
-.rh-features {
-  max-width: 1280px;
-  margin: 0 auto;
-  /* No rule above it: the hero's "Works with" row parts the two. */
-  padding: 4rem 3rem 7rem;
-}
-
-.rh-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1rem;
-  max-width: var(--rh-max);
-  margin: 0 auto;
-}
-
-.rh-feature {
-  padding: 1.75rem 1.75rem 1.875rem;
-  border: 1px solid var(--color-fd-border);
-  border-radius: 1rem;
-  background: var(--color-fd-card);
-}
-
-.rh-feature svg {
-  width: 1.625rem;
-  height: 1.625rem;
-  fill: none;
-  stroke: var(--color-fd-primary);
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.dark .rh-feature svg {
-  filter: drop-shadow(0 0 4px rgb(255 200 31 / 0.45));
-}
-
-.rh-feature h3 {
-  margin: 1.125rem 0 0.5rem;
-  font-size: 1.1875rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.rh-feature p {
-  margin: 0;
-  font-size: 1rem;
-  color: var(--color-fd-muted-foreground);
-  text-wrap: pretty;
-}
-
-.dark .rh-feature p {
-  color: hsl(0 0% 72%);
-}
-
-.rh-feature p code {
-  padding: 0.15em 0.35em;
-  border-radius: 0.3rem;
-  background: color-mix(in oklab, var(--color-fd-foreground) 11%, transparent);
-  font-size: 0.86em;
-  color: var(--color-fd-foreground);
 }
 
 /* Under the hero, the databases and hosts in two rows, each centred, under a small title in petite caps. */
@@ -589,14 +661,6 @@
   line-height: 1.875rem;
 }
 
-.rh .rh-feature h3 {
-  line-height: 1.75rem;
-}
-
-.rh .rh-feature p {
-  line-height: 1.5rem;
-}
-
 /* ── Optical nudges, each measured with ink-align.mjs on 2026-11-19 ──
    main.ts's icon in hero B sat 1.06px low (a 0.5px lift lands it, the svg snapping on its own). */
 .rh-import-ts .ml-bar svg {
@@ -604,15 +668,57 @@
 }
 
 
+/* Words a heading keeps on one line, as "via reylo.lock", so the file's name never sits alone. */
+.ml-keep {
+  white-space: nowrap;
+}
+
 /* ── Narrower windows ── */
+
+/* Below 1280px a row's words column is too narrow for its heading on one line, and a two-line
+   heading of three words leaves one alone, so each row stacks its words over what it does. */
+@media (max-width: 1279px) {
+  .rh-home .ml-row,
+  .rh-home .ml-flip {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2.5rem;
+    padding-block: 3.5rem;
+  }
+
+  .rh-home .ml-flip .ml-row-text {
+    order: 0;
+  }
+
+  .rh-home .ml-row-text {
+    max-width: 40rem;
+  }
+}
+
 @media (max-width: 1023px) {
   .rh-examples,
-  .rh-features {
+  .rh-part-head {
     padding-inline: 1.25rem;
   }
 
-  .rh-grid {
-    grid-template-columns: minmax(0, 1fr);
+  .rh-part-head {
+    padding-top: 8rem;
+    padding-bottom: 3.5rem;
+  }
+
+  .rh .ml-table {
+    padding-top: 6rem;
+  }
+
+  .rh .ml-end {
+    padding-block: 8rem 7rem;
+  }
+
+  .rh-blade {
+    margin-top: 6rem;
+  }
+
+  .rh .rh-blade + .ml-end {
+    padding-top: 5rem;
   }
 
   .rh-star-note {
@@ -631,4 +737,54 @@
     height: 1.125rem;
   }
 
+}
+
+/* "Copy agent prompt" under the hero's install row (components/home-chrome.tsx): a quiet link with a
+   dotted underline, the sparkles in the accent. Both labels share one grid cell, so "Copied" moves nothing. */
+.ml-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 1rem;
+  color: var(--color-fd-muted-foreground);
+  cursor: pointer;
+}
+.ml-agent svg {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  color: var(--dk-accent);
+  /* centred on the label's capitals, which sit low in IBM Plex Sans's line box */
+  translate: 0 0.375px;
+}
+.ml-agent-label {
+  display: grid;
+  justify-items: start;
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in oklab, currentColor 55%, transparent);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 0.3em;
+}
+.ml-agent-label > span {
+  grid-area: 1 / 1;
+  visibility: hidden;
+}
+.ml-agent-label > [data-shown] {
+  visibility: visible;
+}
+.ml-agent:hover {
+  color: var(--color-fd-foreground);
+}
+.ml-agent:hover .ml-agent-label {
+  text-decoration-color: currentColor;
+}
+.ml-agent:focus-visible {
+  outline: 2px solid var(--dk-accent);
+  outline-offset: 3px;
+  border-radius: 2px;
 }

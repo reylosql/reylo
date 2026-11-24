@@ -641,9 +641,16 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             "select co.oid, co.conindid, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, format('%I', co.conname) as name,
               pg_get_constraintdef(co.oid, false) as def, co.condeferrable as deferrable, co.condeferred as deferred, co.convalidated as validated, co.contype as type,
               case when co.contype = 'f' then
-                (select string_agg(format_type(a.atttypid, null), ', ' order by k.n) from unnest(co.conkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.conrelid and a.attnum = k.num)
-                || ' to ' || (select string_agg(format_type(a.atttypid, null), ', ' order by k.n) from unnest(co.confkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.confrelid and a.attnum = k.num)
+                (select string_agg(format_type(a.atttypid, null)
+                  || case when a.attcollation <> t.typcollation then ' collate ' || (select format('%I.%I', cn.nspname, cl.collname) from pg_collation cl join pg_namespace cn on cn.oid = cl.collnamespace where cl.oid = a.attcollation) else '' end, ', ' order by k.n) from unnest(co.conkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.conrelid and a.attnum = k.num join pg_type t on t.oid = a.atttypid)
+                || ' to ' || (select string_agg(format_type(a.atttypid, null)
+                  || case when a.attcollation <> t.typcollation then ' collate ' || (select format('%I.%I', cn.nspname, cl.collname) from pg_collation cl join pg_namespace cn on cn.oid = cl.collnamespace where cl.oid = a.attcollation) else '' end, ', ' order by k.n) from unnest(co.confkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.confrelid and a.attnum = k.num join pg_type t on t.oid = a.atttypid)
               end as linked,
+              case when co.contype = 'f' then
+                (select string_agg(format(E'\n-- computes %s %s as %s', side, k.n, encode(textsend(pg_get_expr(ad.adbin, ad.adrelid)), 'hex')), '' order by side, k.n)
+                  from (select 'own' as side, co.conrelid as rel, co.conkey as keys union all select 'referenced', co.confrelid, co.confkey) s cross join lateral unnest(s.keys) with ordinality k(num, n)
+                  join pg_attribute a on a.attrelid = s.rel and a.attnum = k.num join pg_attrdef ad on ad.adrelid = a.attrelid and ad.adnum = a.attnum where a.attgenerated = 's')
+              end as computed,
               case when co.contype in ('p', 'u') then (select string_agg(o, ', ' order by o) from pg_class ic, unnest(ic.reloptions) o where ic.oid = co.conindid) end as index_options,
               case when co.contype in ('p', 'u', 'x') then (select format('%I.%I', inn.nspname, ic.relname) from pg_class ic join pg_namespace inn on inn.oid = ic.relnamespace where ic.oid = co.conindid) end as index_name,
               c.relkind = 'p' and co.contype in ('p', 'u', 'x') and not coalesce((select i.indisvalid from pg_index i where i.indexrelid = co.conindid), true) as alone
@@ -685,9 +692,11 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         if inline {
             inline_constraints.entry(oid(&r, "reloid")).or_default().push(format!("constraint {name} {def}"));
         }
-        // A foreign key holds while the types of the columns it links compare; a change of either
-        // side's type makes it again around the change, so that both columns can change between.
-        let linked = r.get("linked").map(|l| format!("\n-- links {l}")).unwrap_or_default();
+        // A foreign key holds while the values of the columns it links compare; a change of either
+        // side's type, collation or stored expression makes it again around the change, so that
+        // both columns can change between. A stored expression that goes keeps the values; each is
+        // written as its text in hex, on one line that no line of it can stand in for.
+        let linked = r.get("linked").map(|l| format!("\n-- links {l}{}", r.get("computed").unwrap_or_default())).unwrap_or_default();
         // A key's index storage parameters change in place on its index; anything else about it
         // makes it again.
         // A partitioned table's key index takes no options in place: it is made again.
@@ -3270,6 +3279,66 @@ fn dollar_block(body: &str) -> String {
     format!("do {tag} {body} {tag}")
 }
 
+/// The columns the sequence `s` (SQL that gives it as a `regclass`) gives values to, each as its
+/// table (`rel`) and name (`attname`), whether it holds them as they are (`plain`): an identity, an
+/// integer column the sequence is owned by, or one whose default is it alone. A domain whose
+/// default calls it is a row that isn't.
+pub(crate) fn sequence_columns(s: &str) -> String {
+    let integer = "a.atttypid in ('int2'::regtype, 'int4'::regtype, 'int8'::regtype)";
+    format!(
+        "select d.refobjid::regclass as rel, a.attname, {integer} as plain from pg_depend d join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid \
+        where d.classid = 'pg_class'::regclass and d.objid = {s} and d.refclassid = 'pg_class'::regclass and d.deptype in ('a', 'i') \
+        union all select ad.adrelid::regclass, a.attname, {integer} and r.relkind in ('r', 'p') and pg_get_expr(ad.adbin, ad.adrelid) = format('nextval(%L::regclass)', {s}::text) \
+        from pg_depend d join pg_attrdef ad on ad.oid = d.objid join pg_attribute a on a.attrelid = ad.adrelid and a.attnum = ad.adnum join pg_class r on r.oid = ad.adrelid \
+        where d.classid = 'pg_attrdef'::regclass and d.refclassid = 'pg_class'::regclass and d.refobjid = {s} \
+        union all select null, null, false from pg_depend d where d.classid = 'pg_type'::regclass and d.refclassid = 'pg_class'::regclass and d.refobjid = {s}"
+    )
+}
+
+/// What precedes the expression that gives the sequence in the first block of `moved_to_start`, and
+/// what follows it, by which a file's hazards find the block and the sequence it reads for.
+pub(crate) const SEQUENCE_READ: (&str, &str) = ("do $reylo$ declare s regclass := ", "; goal numeric := ");
+
+/// Whether a sequence's start moved from `was` to `is` in the direction it counts.
+fn ahead(was: &str, is: &str, descending: bool) -> bool {
+    match (was.parse::<i128>(), is.parse::<i128>()) {
+        (Ok(a), Ok(b)) => if descending { b < a } else { b > a },
+        _ => false,
+    }
+}
+
+/// A sequence moved forward to a `start` it hasn't reached, and past every value of each column it
+/// gives values to, but never back, which would give again a value it gave: two blocks, the first
+/// before the alter of the sequence and the second after it. The first reads the columns, each
+/// table locked against writes (not reads) until the migration commits, so that no row written
+/// after it is passed over (a table the role may not lock leaves the sequence where it is), and
+/// keeps where the sequence is to go for the second (a setting of the
+/// transaction); the second, under the alter's lock, which holds back every `nextval`, reads where
+/// the sequence stands and restarts it there, which a failed migration undoes. It moves only where
+/// each column holds the sequence's values as they are: an identity, an integer column it is owned
+/// by, or one whose default is it alone. Where one makes something else of them (`'INV-' ||
+/// nextval(…)`, a view's default, a domain's), where its rows are isn't known, and it stays where it
+/// is. A value past the rows outside the new bounds, `low` to `high`, is passed over, as rows there
+/// can't be got past.
+fn moved_to_start(sequence: &str, start: &str, increment: &str, low: &str, high: &str) -> [String; 2] {
+    let (edge, past, beyond) = if increment.starts_with('-') { ("min", "- 1", "<") } else { ("max", "+ 1", ">") };
+    let columns = sequence_columns("s");
+    let first = dollar_block(&format!(
+        "declare s regclass := {sequence}; goal numeric := {start}; reach numeric; c record; \
+        begin for c in {columns} loop if not c.plain then return; end if; \
+        begin execute format('lock table %s in share mode', c.rel); exception when insufficient_privilege then return; end; execute format('select {edge}(%I)::numeric {past} from %s', c.attname, c.rel) into reach; \
+        if reach {beyond} goal and reach between {low} and {high} then goal := reach; end if; end loop; \
+        perform set_config('reylo.sequence_goal', goal::text, true); end"
+    ));
+    let second = dollar_block(&format!(
+        "declare s regclass := {sequence}; goal numeric := nullif(current_setting('reylo.sequence_goal', true), '')::numeric; stands numeric; \
+        begin perform set_config('reylo.sequence_goal', '', true); if goal is null then return; end if; \
+        execute format('select case when is_called then last_value::numeric + ({increment}) else last_value end from %s', s) into stands; \
+        if goal {beyond} stands then execute format('alter sequence %s restart with %s', s, goal); end if; end"
+    ));
+    [first, second]
+}
+
 /// Whether `name` is one Postgres gives a not null it makes on `table`'s `column`, the column's name
 /// as Postgres holds it: its name for it, or the one it gives where another constraint of the schema
 /// held that name, with a number after its label.
@@ -4349,6 +4418,37 @@ impl Alterer for PostgresAlterer {
         Some(out)
     }
 
+    fn renamed_under(&self, from: &Object, renamed: &BTreeMap<String, String>) -> Option<String> {
+        if !matches!(from.kind, Some(Kind::Constraint | Kind::Index)) {
+            return None;
+        }
+        let own = from.owner.as_deref()?.strip_prefix("table ")?;
+        // A foreign key's referenced columns are another table's, which it depends on, or its own
+        // table's where it names that; else a table the plan doesn't read, whose names it can't tell.
+        let referenced = from.deps.iter().filter_map(|d| column_of(d)).map(|(t, _)| t).find(|t| t != own).or_else(|| references(&from.def).is_none_or(|r| r == own || own.ends_with(&format!(".{r}"))).then(|| own.to_string()));
+        let names = |table: &str| -> BTreeMap<String, String> { renamed.iter().filter_map(|(old, new)| Some((column_of(old)?, column_of(new)?))).filter(|((t, _), _)| t == table).map(|((_, old), (_, new))| (catalog_name(&old), new)).collect() };
+        renamed_key(&from.def, &names(own), referenced.map(|r| names(&r)).as_ref())
+    }
+
+    fn keeps_values(&self, from: &Object, to: &Object) -> bool {
+        // A default, a not null and an identity change no value the column holds.
+        let values = |def: &str| {
+            let c = parse_column(def);
+            (c.ty, c.collation, c.generated)
+        };
+        from.kind == Some(Kind::Column) && values(&from.def) == values(&to.def)
+    }
+
+    fn keeps(&self, from: &Object, to: &Object) -> bool {
+        // A foreign key, alike but for stored expressions its columns lose, which keep their values.
+        let parts = |def: &str| -> (String, Vec<String>) {
+            let mut parts = def.split("\n-- computes ").map(String::from);
+            (parts.next().unwrap_or_default(), parts.collect())
+        };
+        let ((a, was), (b, is)) = (parts(&from.def), parts(&to.def));
+        from.kind == Some(Kind::Constraint) && a.starts_with("FOREIGN KEY") && a == b && is.len() < was.len() && is.iter().all(|e| was.contains(e))
+    }
+
     fn alter(&self, from: &Object, to: &Object) -> Option<Vec<String>> {
         let (table, name) = match to.kind? {
             Kind::Column => {
@@ -4630,8 +4730,21 @@ impl Alterer for PostgresAlterer {
                         if ox.contains_key("cycle") != oy.contains_key("cycle") {
                             set.push(if oy.contains_key("cycle") { "set cycle".into() } else { "set no cycle".into() });
                         }
+                        // A start moved ahead moves the sequence where it hasn't got that far, as a
+                        // table made from the schema starts there: the table read before the alter,
+                        // the sequence moved after it, under its lock.
+                        let moved = (ahead(&ex["start with"], &ey["start with"], descending) && !disjoint).then(|| {
+                            let sequence = format!("pg_get_serial_sequence({}, {})", literal(&table), literal(&unquoted(&name)));
+                            moved_to_start(&sequence, &ey["start with"], &ey["increment by"], &ey["minvalue"], &ey["maxvalue"])
+                        });
+                        if let Some([read, _]) = &moved {
+                            out.push(read.clone());
+                        }
                         if !set.is_empty() {
                             out.push(format!("{at} {}", set.join(" ")));
+                        }
+                        if let Some([_, restart]) = moved {
+                            out.push(restart);
                         }
                     }
                     _ => {}
@@ -4847,7 +4960,20 @@ impl Alterer for PostgresAlterer {
                         literal(name)
                     ));
                 }
+                // A start moved ahead moves it where it hasn't got that far: the columns it gives
+                // values to read before the alter, it moved after, under the alter's lock.
+                let start = ey.get("start with").cloned().unwrap_or_default();
+                let moved = (ahead(ex.get("start with").map_or("", |s| s.as_str()), &start, descending) && !disjoint).then(|| {
+                    let bound = |key: &str| ey.get(key).cloned().unwrap_or_default();
+                    moved_to_start(&literal(name), &start, ey.get("increment by").map_or("1", |i| i.as_str()), &bound("minvalue"), &bound("maxvalue"))
+                });
+                if let Some([read, _]) = &moved {
+                    out.push(read.clone());
+                }
                 out.push(format!("alter sequence {name} {}{}", to.def, if disjoint { " restart" } else { "" }));
+                if let Some([_, restart]) = moved {
+                    out.push(restart);
+                }
                 Some(out)
             }
             Kind::Extension => {
@@ -5076,6 +5202,151 @@ impl Alterer for PostgresAlterer {
     }
 }
 
+/// A column's id split into its table (`public.t`) and its name as written.
+fn column_of(id: &str) -> Option<(String, String)> {
+    let rest = id.strip_prefix("column ")?;
+    let name = super::last_written(rest);
+    Some((rest.strip_suffix(name.as_str())?.strip_suffix('.')?.to_string(), name))
+}
+
+/// The table a foreign key's definition references, as it writes it (`parents`, `public.parents`).
+fn references(def: &str) -> Option<String> {
+    let tokens = crate::sql::tokenize(def, Dialect::Postgres);
+    let at = tokens.iter().position(|t| is_keyword(t) && t.text == "REFERENCES")?;
+    let end = tokens[at + 1..].iter().position(|t| t.text == "(").map(|k| at + 1 + k)?;
+    Some(def[tokens.get(at + 1)?.start..tokens[end - 1].end].to_string())
+}
+
+/// Whether a word of a definition the server wrote is a keyword, which it writes in capitals, and
+/// not a name, which it writes in lowercase or quotes.
+fn is_keyword(t: &crate::sql::Token) -> bool {
+    t.kind == crate::sql::TokenKind::Word && t.text.bytes().any(|b| b.is_ascii_uppercase())
+}
+
+/// A name as the catalog holds it: a word folded to lowercase, a quoted name unquoted.
+fn catalog_name(written: &str) -> String {
+    match crate::sql::tokenize(written, Dialect::Postgres).first() {
+        Some(t) => token_name(t).unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
+fn token_name(t: &crate::sql::Token) -> Option<String> {
+    use crate::sql::TokenKind::{Quoted, Word};
+    match t.kind {
+        Word => Some(t.text.to_ascii_lowercase()),
+        Quoted => Some(t.text.get(1..t.text.len().saturating_sub(1)).unwrap_or_default().replace("\"\"", "\"")),
+        _ => None,
+    }
+}
+
+/// A key's or an index's definition (`PRIMARY KEY (id)`, `FOREIGN KEY (a) REFERENCES t(id)`,
+/// `CREATE INDEX i ON public.t USING btree (a)`) once the server renames the columns of its own table
+/// that `own` names, and of the table its foreign key references that `referenced` names (each by
+/// its name as the catalog holds it, to the new one as written): the names in its column lists
+/// follow. None where a renamed column's name is anywhere else in it (an expression, a predicate),
+/// which this can't tell is that column.
+fn renamed_key(def: &str, own: &BTreeMap<String, String>, referenced: Option<&BTreeMap<String, String>>) -> Option<String> {
+    let unread = BTreeMap::new();
+    use crate::sql::TokenKind::{Quoted, Symbol, Word};
+    let tokens = crate::sql::tokenize(def, Dialect::Postgres);
+    let symbol = |k: usize, s: &str| tokens.get(k).is_some_and(|t| t.kind == Symbol && t.text == s);
+    // A keyword as the server writes it, in capitals: a name it writes is lowercase or quoted.
+    let upper = |k: usize| tokens.get(k).filter(|t| is_keyword(t)).map(|t| t.text.clone()).unwrap_or_default();
+    // Each column name of a list: its token, and the names it is renamed by.
+    let mut columns: BTreeMap<usize, &BTreeMap<String, String>> = BTreeMap::new();
+    let mut k = 0;
+    let mut depth = 0;
+    while k < tokens.len() {
+        // Lists open only at the top, before a predicate: what is in parentheses or after WHERE is
+        // an expression.
+        if symbol(k, "(") || symbol(k, ")") {
+            depth += if symbol(k, "(") { 1 } else { -1 };
+            k += 1;
+            continue;
+        }
+        if depth != 0 || upper(k) == "WHERE" {
+            if depth == 0 {
+                break;
+            }
+            k += 1;
+            continue;
+        }
+        // Where a list of columns opens, and whose they are.
+        let list = match upper(k).as_str() {
+            "KEY" if matches!(upper(k.wrapping_sub(1)).as_str(), "PRIMARY" | "FOREIGN") && symbol(k + 1, "(") => Some((k + 1, own)),
+            "INCLUDE" if symbol(k + 1, "(") => Some((k + 1, own)),
+            "UNIQUE" => {
+                let mut at = k + 1;
+                if upper(at) == "NULLS" {
+                    at += if upper(at + 1) == "NOT" { 3 } else { 2 };
+                }
+                symbol(at, "(").then_some((at, own))
+            }
+            // An index's (or an exclusion constraint's) elements, after its access method.
+            "USING" if tokens.get(k + 1).is_some_and(|t| t.kind == Word) && symbol(k + 2, "(") => Some((k + 2, own)),
+            "REFERENCES" => {
+                let mut at = k + 1;
+                while tokens.get(at).is_some_and(|t| matches!(t.kind, Word | Quoted)) && symbol(at + 1, ".") {
+                    at += 2;
+                }
+                if symbol(at + 1, "(") && referenced.is_none() {
+                    return None;
+                }
+                symbol(at + 1, "(").then_some((at + 1, referenced.unwrap_or(&unread)))
+            }
+            _ => None,
+        };
+        let Some((open, names)) = list else {
+            k += 1;
+            continue;
+        };
+        // Each element's column is its first name, or the one after PERIOD, unless it is a call.
+        let mut depth = 0;
+        let mut start = open + 1;
+        let mut at = open;
+        while at < tokens.len() {
+            if symbol(at, "(") {
+                depth += 1;
+            } else if symbol(at, ")") || symbol(at, ",") {
+                if depth == 1 {
+                    let first = if upper(start) == "PERIOD" && at > start + 1 { start + 1 } else { start };
+                    if first < at && matches!(tokens[first].kind, Word | Quoted) && !is_keyword(&tokens[first]) && !symbol(first + 1, "(") && !symbol(first + 1, ".") {
+                        columns.insert(first, names);
+                    }
+                    start = at + 1;
+                }
+                if symbol(at, ")") {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+            at += 1;
+        }
+        k = at + 1;
+    }
+    let mut out = String::with_capacity(def.len());
+    let mut from = 0;
+    for (k, t) in tokens.iter().enumerate() {
+        let Some(name) = token_name(t).filter(|_| !is_keyword(t)) else { continue };
+        match columns.get(&k) {
+            Some(names) => {
+                if let Some(new) = names.get(&name) {
+                    out.push_str(&def[from..t.start]);
+                    out.push_str(new);
+                    from = t.end;
+                }
+            }
+            None if own.contains_key(&name) || referenced.is_some_and(|r| r.contains_key(&name)) => return None,
+            None => {}
+        }
+    }
+    out.push_str(&def[from..]);
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5084,6 +5355,33 @@ mod tests {
     fn a_do_block_is_quoted_by_a_tag_its_body_lacks() {
         assert_eq!(dollar_block("begin end"), "do $reylo$ begin end $reylo$");
         assert_eq!(dollar_block("select 'uses $reylo$ and $reylo1$'"), "do $reylo2$ select 'uses $reylo$ and $reylo1$' $reylo2$");
+    }
+
+    #[test]
+    fn a_key_follows_its_renamed_columns() {
+        let names = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> { pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() };
+        let none = names(&[]);
+        assert_eq!(renamed_key("PRIMARY KEY (id)", &names(&[("id", "parent_id")]), Some(&none)).as_deref(), Some("PRIMARY KEY (parent_id)"));
+        let fk = "FOREIGN KEY (parent_id) REFERENCES parents(id) ON DELETE CASCADE\n-- links uuid to uuid";
+        assert_eq!(renamed_key(fk, &none, Some(&names(&[("id", "parent_id")]))).as_deref(), Some("FOREIGN KEY (parent_id) REFERENCES parents(parent_id) ON DELETE CASCADE\n-- links uuid to uuid"));
+        // Each list is its own table's: the referencing column of the same name stays.
+        assert_eq!(renamed_key("FOREIGN KEY (id) REFERENCES public.parents(id)", &none, Some(&names(&[("id", "x")]))).as_deref(), Some("FOREIGN KEY (id) REFERENCES public.parents(x)"));
+        assert_eq!(renamed_key("UNIQUE NULLS NOT DISTINCT (\"Code\") INCLUDE (id)", &names(&[("Code", "\"Slug\"")]), Some(&none)).as_deref(), Some("UNIQUE NULLS NOT DISTINCT (\"Slug\") INCLUDE (id)"));
+        assert_eq!(renamed_key("FOREIGN KEY (id, PERIOD valid_at) REFERENCES t(id, PERIOD valid_at)", &none, Some(&names(&[("valid_at", "during")]))).as_deref(), Some("FOREIGN KEY (id, PERIOD valid_at) REFERENCES t(id, PERIOD during)"));
+        assert_eq!(renamed_key("CREATE INDEX i ON public.t USING btree (a DESC NULLS LAST) INCLUDE (b)", &names(&[("a", "c"), ("b", "d")]), Some(&none)).as_deref(), Some("CREATE INDEX i ON public.t USING btree (c DESC NULLS LAST) INCLUDE (d)"));
+        // A renamed column anywhere else is left for the plan to make again.
+        assert_eq!(renamed_key("CREATE INDEX i ON public.t USING btree (a) WHERE (a > 0)", &names(&[("a", "b")]), Some(&none)), None);
+        assert_eq!(renamed_key("CREATE INDEX i ON public.t USING btree (lower(a))", &names(&[("a", "b")]), Some(&none)), None);
+        assert_eq!(renamed_key("FOREIGN KEY (a, c) REFERENCES p(x) ON DELETE SET NULL (a)", &names(&[("a", "b")]), Some(&none)), None);
+        // A foreign key to a table the plan doesn't read keeps its own.
+        assert_eq!(renamed_key("FOREIGN KEY (id) REFERENCES ext.codes(id)", &names(&[("id", "code")]), None), None);
+        assert_eq!(references("FOREIGN KEY (id) REFERENCES public.parents(id) ON DELETE CASCADE").as_deref(), Some("public.parents"));
+        // A column named as a keyword is a name, and a keyword in an expression opens no list.
+        assert_eq!(renamed_key("PRIMARY KEY (key)", &names(&[("key", "api_key")]), Some(&none)).as_deref(), Some("PRIMARY KEY (api_key)"));
+        assert_eq!(renamed_key("CREATE INDEX i ON public.t USING btree (period DESC)", &names(&[("period", "p")]), Some(&none)).as_deref(), Some("CREATE INDEX i ON public.t USING btree (p DESC)"));
+        assert_eq!(renamed_key("CREATE INDEX i ON public.t USING btree (c) WHERE include(a, a => 1)", &names(&[("a", "b")]), Some(&none)), None);
+        assert_eq!(renamed_key("CREATE INDEX i ON public.t USING btree (c) WHERE (a > 0) INCLUDE (a)", &names(&[("a", "b")]), Some(&none)), None);
+        assert_eq!(renamed_key("CHECK ((a > 0))", &names(&[("a", "b")]), Some(&none)), None);
     }
 
     #[test]

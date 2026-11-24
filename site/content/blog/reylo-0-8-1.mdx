@@ -5,13 +5,13 @@ date: 2026-11-21
 release: v0.8.1
 ---
 
-Reylo v0.8.1 types Turso Cloud's sqlean functions, runs on Drizzle's Postgres driver, plans MySQL grants in migrations and halves the median Postgres analysis on a remote server.
+Reylo v0.8.1 adds Turso Cloud sqlean functions, Drizzle's Postgres driver, MySQL migration grants, and faster remote Postgres analysis.
 
 Three changes can surface in an existing project, listed in [Upgrading from v0.8.0](#upgrading-from-v080).
 
 ## Turso Cloud's sqlean functions
 
-The type check now types the functions of the sqlean extensions Turso Cloud loads, which it refused with `no such function` ([#327](https://github.com/reylosql/reylo/pull/327)).
+The type check now recognizes the sqlean extension functions Turso Cloud loads, instead of refusing them with `no such function` ([#327](https://github.com/reylosql/reylo/pull/327)).
 
 ```sql
 select id, name, levenshtein(name, :name) as distance
@@ -47,13 +47,13 @@ const user = await getUser.run(db, { id: 1 });
 
 What it runs on:
 
-- **Clients:** its `Pool`, a connection, a transaction or savepoint, and a `drizzle()` database over any of them
+- **Clients:** its `Pool`, a connection, a transaction or savepoint, and a `drizzle()` connection over any of them
 - **Neon:** `drizzle-orm/postgres/client/neon-ws`, over a WebSocket
 - **Refused:** the `neon-http`, `http` and `aurora` clients, whose results don't name each column's type
 
 ## MySQL grants in migrations
 
-Migrations now read, compare and plan MySQL grants, which they refused ([#328](https://github.com/reylosql/reylo/pull/328)).
+Migrations now read, compare and plan MySQL grants ([#328](https://github.com/reylosql/reylo/pull/328)).
 
 ```diff
 -grant select on users to 'reader'@'%';
@@ -70,19 +70,21 @@ grant insert on users to `reader`@`%` with grant option;
 
 What it covers:
 
-- **Objects:** grants on the database's tables, views, columns and routines, each with or without `with grant option`
-- **Drops and renames:** a grant is revoked before what it's on is dropped or renamed, since MySQL keeps it, and granted again after
-- **Introspection:** `reylo db introspect` and `reylo migrate init` write the database's grants into `schema.sql`
-- **Refused:** a grant on every database, the server, another database, a role or a proxy, and `set password` or `set default role` in a migration
-- **Permissions:** an account that can't read MySQL's privilege tables is refused grants, with the statements that let it read them
+- **Objects:** grants on tables, views, columns and routines, with or without `with grant option`
+- **Drops and renames:** grants are revoked before an object is dropped or renamed, then re-granted afterward, since MySQL keeps stale grants
+- **Introspection:** `reylo db introspect` and `reylo migrate init` write grants into `schema.sql`
+- **Refused:** server-wide, cross-database, role and proxy grants, plus `set password` and `set default role`
+- **Permissions:** accounts without read access to MySQL's privilege tables get an error listing the grant statements needed
 
 ## Faster Postgres analysis
 
-Each round of a Postgres analysis now sends its queries together, where each waited for the one before ([#335](https://github.com/reylosql/reylo/pull/335)). Over 2,320 statements on a server about 100 ms away:
+Each round of Postgres analysis now pipelines its queries instead of waiting for each one in sequence ([#335](https://github.com/reylosql/reylo/pull/335)). Measured across 2,320 statements against a server ~100 ms away:
 
-- **Median:** 514 ms → 242 ms
-- **90th percentile:** 2.7 s → 0.9 s
-- **Slowest:** 18.5 s → 2.7 s
+| Metric | Before | After | Speedup |
+| --- | --- | --- | --- |
+| Median | 514 ms | 242 ms | **2.1×** |
+| p90 | 2.7 s | 0.9 s | **3.0×** |
+| Slowest | 18.5 s | 2.7 s | **6.9×** |
 
 ## Upgrading from v0.8.0
 
@@ -90,12 +92,12 @@ Each change below can surface in a project that upgrades from v0.8.0.
 
 ### Postgres
 
-- **The type check refuses Supabase's transaction pooler on port 6543.** Point the type check at the session pooler, which the error names ([#334](https://github.com/reylosql/reylo/pull/334)).
+- **The type check refuses Supabase's transaction pooler on port 6543.** Point the type check at the session pooler named in the error ([#334](https://github.com/reylosql/reylo/pull/334)).
 
 ### MySQL
 
-- **A `BIT` that a view, derived table or `WITH` query computes with `coalesce`, `ifnull`, `greatest`, `least` or `any_value` is `unknown`, where it was bytes.** MySQL sends its decimal digits there, not its bytes, so handle the `unknown` where the type check now asks ([#329](https://github.com/reylosql/reylo/pull/329)).
+- **A `BIT` computed with `coalesce`, `ifnull`, `greatest`, `least` or `any_value` inside a view, derived table or `WITH` query is now `unknown` (previously bytes).** MySQL returns decimal digits rather than bytes there; narrow the `unknown` value where the type check asks ([#329](https://github.com/reylosql/reylo/pull/329)).
 
 ### SQLite
 
-- **The type of `soundex(x)` of a nullable `x` is `string | null`, where it was `string`.** Handle `null`, which Turso Cloud's `soundex` returns for `NULL` ([#327](https://github.com/reylosql/reylo/pull/327)).
+- **Calling `soundex(x)` on a nullable `x` now returns `string | null` (previously `string`).** Handle `null`, which Turso Cloud's `soundex` returns for `NULL` ([#327](https://github.com/reylosql/reylo/pull/327)).
