@@ -1183,8 +1183,10 @@ pub enum Server {
         /// is on the target, and left out where the shadows' role may not become it.
         owned: Owned,
         /// The target's privileges on the schemas a shadow has without the project making them
-        /// (`public`, and those its extensions are in), as `grant` statements.
+        /// (`public`, and those its extensions are in), as `grant` statements; made again in each
+        /// shadow but where SQL is written to make the database whole.
         schema_grants: Vec<String>,
+        copy_schema_grants: bool,
     },
     Mysql {
         admin: mysql_async::Conn,
@@ -1317,7 +1319,7 @@ impl Server {
                 let schemas: Vec<String> = std::iter::once("public".to_string()).chain(extensions.iter().map(|(_, s)| s.clone())).filter(|s| !platform.contains(s)).collect();
                 let schema_grants = schema_grants(target, &schemas).await?;
                 let owned = owned_by_platform(target, &admin, url, version).await?;
-                Ok(Server::Postgres { admin, url: server_url.to_string(), create, locale: unknown_locale, settings, privileges, copy_privileges: true, extensions, leave: vec![], environment, environment_role, owned, schema_grants })
+                Ok(Server::Postgres { admin, url: server_url.to_string(), create, locale: unknown_locale, settings, privileges, copy_privileges: true, extensions, leave: vec![], environment, environment_role, owned, schema_grants, copy_schema_grants: true })
             }
             Dialect::Mysql => {
                 let admin = crate::db::open_mysql(&with_database(server_url, "")).await?;
@@ -1374,7 +1376,7 @@ impl Server {
     /// privileges) but not its database settings, which a copy does not take. The lock named after
     /// it is held until it is dropped; a copy that fails releases it.
     pub(crate) async fn pg_shadow(&mut self, template: Option<&str>) -> Result<Shadow, Error> {
-        let Server::Postgres { admin, url, create, locale, settings, privileges, copy_privileges, extensions, leave, environment, environment_role, owned, schema_grants, .. } = self else { return Err(Error("not a Postgres server".into())) };
+        let Server::Postgres { admin, url, create, locale, settings, privileges, copy_privileges, extensions, leave, environment, environment_role, owned, schema_grants, copy_schema_grants, .. } = self else { return Err(Error("not a Postgres server".into())) };
         let name = random_name();
         admin.batch_execute(&format!("select pg_advisory_lock(hashtextextended('{name}', 0))")).await.map_err(pg_error)?;
         let made = async {
@@ -1446,7 +1448,7 @@ impl Server {
             for (_, schema) in owned.extensions.iter().filter(|(e, s)| owned.role.is_some() && !leave.contains(&e.to_lowercase()) && !platform_schema(s) && s != "pg_catalog") {
                 let _ = db.exec(&format!("create schema if not exists {}", ident(schema))).await;
             }
-            for statement in schema_grants.iter() {
+            for statement in schema_grants.iter().filter(|_| *copy_schema_grants) {
                 let _ = db.exec(statement).await;
             }
             if let (Some(role), false) = (environment_role.as_deref(), environment.is_empty()) {
@@ -1527,6 +1529,16 @@ impl Server {
     pub fn copy_default_privileges(&mut self, on: bool) {
         if let Server::Postgres { copy_privileges, .. } = self {
             *copy_privileges = on;
+        }
+    }
+
+    /// Shadows take none of the target's default privileges or grants on its schemas: for SQL written
+    /// to make the database whole (init's, introspect's), which makes them itself. Which of them a new
+    /// database on the server has already, no name tells, so they are all the SQL's.
+    pub fn copy_no_privileges(&mut self) {
+        if let Server::Postgres { copy_privileges, copy_schema_grants, .. } = self {
+            *copy_privileges = false;
+            *copy_schema_grants = false;
         }
     }
 

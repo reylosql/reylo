@@ -73,6 +73,28 @@ $ reylo migrate init
 
 It reads every schema. Where its own SQL can't make your schema exactly, it writes the database's own dump, which on Postgres needs `pg_dump` of your server's version or newer.
 
+It leaves out the history tables of other migration tools, as it leaves out its own:
+
+| Tool | Table |
+| --- | --- |
+| Prisma Migrate | `_prisma_migrations` |
+| Drizzle Kit | `__drizzle_migrations`, in its `drizzle` schema on Postgres |
+| Knex | `knex_migrations`, `knex_migrations_lock` |
+| Kysely | `kysely_migration`, `kysely_migration_lock` |
+| node-pg-migrate | `pgmigrations` |
+| Sequelize | `SequelizeMeta` |
+| MikroORM | `mikro_orm_migrations` |
+| Rails, Ecto, golang-migrate, dbmate | `schema_migrations`, and Rails' `ar_internal_metadata` |
+| Flyway | `flyway_schema_history` |
+| Liquibase | `DATABASECHANGELOG`, `DATABASECHANGELOGLOCK` |
+| goose | `goose_db_version` |
+| SQLx | `_sqlx_migrations` |
+| Diesel | `__diesel_schema_migrations` |
+| Alembic | `alembic_version` |
+| Django | `django_migrations` |
+| Entity Framework Core | `__EFMigrationsHistory` |
+| Atlas | `atlas_schema_revisions`, in its schema of that name on Postgres |
+
 ### `new`
 
 Writes the next migration, from your change to `schema.sql`.
@@ -512,7 +534,12 @@ Each database makes them its own way:
 - **MySQL:** on your database's server, with `create database`, so your user needs the `CREATE` privilege on every database. PlanetScale refuses `create database`, so point `shadow_url` at a plain MySQL 8.4 server.
 - **SQLite:** in memory. There's nothing to grant. A [Turso](/turso#migrations) database's shadows run on libSQL's own engine.
 
-A migration that would reach past its shadow is refused. That's one that changes a role, a database, a tablespace or a server setting. On MySQL, it's also one that names a database, as in `app.users`. Code inside a `do` block or a function isn't checked.
+A migration that would reach past its shadow is refused by every command, `deploy` and `status` included. That's one that:
+
+- changes a role, a database, a tablespace or a server setting
+- on MySQL, names a database, as in `app.users`
+
+Make roles with your server's setup, outside the migrations. Reylo doesn't check inside a `do` block, but every shadow runs one on its server, your database's own unless `shadow_url` names another.
 
 Where your role can't create a database, point `shadow_url` at a server that can, running the same version:
 

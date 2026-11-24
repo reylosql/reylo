@@ -457,6 +457,7 @@ for_each_dialect!(
     ddl_run_by_hand_then_written_is_recorded,
     a_change_by_hand_with_schema_sql_is_told_to_write_the_migration,
     init_writes_and_records_the_baseline,
+    init_leaves_out_another_tools_history,
     a_migration_the_lock_lacks_is_a_draft,
     status_reports_a_history_out_of_the_locks_order,
     a_rebased_migration_is_rewound_by_dev,
@@ -1205,6 +1206,83 @@ async fn init_writes_and_records_the_baseline(mut p: P) {
     p.url = q.url.clone();
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     assert_eq!(q.history().await, ["init.sql", "20261028100000_nick.sql"]);
+}
+
+/// Another migration tool's history: a table of Prisma Migrate's with a check, one of Knex's whose
+/// key is a counter (a sequence the table owns on Postgres), Liquibase's lock in its capitals, and
+/// on Postgres Drizzle Kit's, in a schema of its own, and on MySQL a trigger on Prisma's.
+fn other_tools_history(p: &P) -> String {
+    let text = p.t.text;
+    let knex_id = match p.d {
+        Dialect::Postgres => "serial primary key",
+        Dialect::Mysql => "bigint auto_increment primary key",
+        Dialect::Sqlite => "integer primary key autoincrement",
+    };
+    let mut sql = format!(
+        "create table _prisma_migrations (id {text} primary key, migration_name {text} not null check (migration_name <> '')); insert into _prisma_migrations values ('a', '0_init');
+         create table knex_migrations (id {knex_id}, name {text}); insert into knex_migrations (id, name) values (100, 'one.js');
+         create table DATABASECHANGELOGLOCK (ID integer primary key, LOCKED boolean not null); insert into DATABASECHANGELOGLOCK values (1, false);"
+    );
+    match p.d {
+        Dialect::Postgres => sql.push_str("create schema drizzle; create table drizzle.__drizzle_migrations (id serial primary key, hash text not null); insert into drizzle.__drizzle_migrations (hash) values ('h'); select setval('knex_migrations_id_seq', 100);"),
+        Dialect::Mysql => sql.push_str("create trigger prisma_named before insert on _prisma_migrations for each row set new.migration_name = trim(new.migration_name);"),
+        Dialect::Sqlite => {}
+    }
+    sql
+}
+
+async fn init_leaves_out_another_tools_history(p: P) {
+    let (id, text) = (p.t.id, p.t.text);
+    leaves_out_another_tools_history(p, &format!("create table users (id {id}, email {text} not null);")).await;
+}
+
+/// pg_dump's schema, where Reylo's own SQL can't be checked, leaves the other tool's tables out
+/// too, and the sequences they own.
+#[tokio::test(flavor = "current_thread")]
+async fn the_dump_leaves_out_another_tools_history() {
+    let Some(p) = P::new(Dialect::Postgres).await else { return };
+    p.exec(&format!("create table users (id bigint primary key, email text not null);{}", other_tools_history(&p))).await;
+    // A shadows' server that answers nothing leaves the dump.
+    let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
+    let text = introspect(&opts).await;
+    assert!(text.contains("CREATE TABLE public.users"), "{text}");
+    assert!(!has(&text, "(?i)prisma|knex|drizzle|databasechangelog"), "{text}");
+}
+
+async fn leaves_out_another_tools_history(mut p: P, app: &str) {
+    p.exec(&format!("{app}{}", other_tools_history(&p))).await;
+    assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+    p.output();
+    let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
+    assert!(has(&schema, "(?i)create table .*users"), "{schema}");
+    assert!(!has(&schema, "(?i)prisma|knex|drizzle|databasechangelog"), "{schema}");
+    assert_eq!(std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap(), schema);
+    assert!(!has(&introspect(&p.opts()).await, "(?i)prisma|knex|drizzle|databasechangelog"));
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    // Another database that still holds the old tool's history matches init.sql, and keeps it.
+    let q = P::new(p.d).await.unwrap();
+    q.exec(&format!("{app}{}", other_tools_history(&q))).await;
+    p.url = q.url.clone();
+    assert_eq!(p.history_push().await, 0, "{}", p.peek());
+    assert_eq!(q.history().await, ["init.sql"]);
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    // A wipe empties the application's tables alone, and leaves the other tool's counter where it was.
+    assert_eq!(p.run(async |o, log| reylo_migrate::db_wipe(o, false, log).await).await, 0, "{}", p.peek());
+    assert_eq!(q.rows("select * from _prisma_migrations").await.len(), 1);
+    assert_eq!(q.rows("select * from DATABASECHANGELOGLOCK").await.len(), 1);
+    q.exec("insert into knex_migrations (name) values ('two.js')").await;
+    assert_eq!(q.rows("select id from knex_migrations where name = 'two.js'").await[0].text("id"), "101");
+    // A migration that drops it later is no change to the schema, and replays on a database that
+    // never had it.
+    p.file("20261123100000_drop_prisma.sql", "drop table if exists _prisma_migrations;");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    assert_eq!(q.history().await, ["init.sql", "20261123100000_drop_prisma.sql"]);
+    // Nor is dropping a schema that held nothing but another tool's history.
+    if p.d == Dialect::Postgres {
+        q.exec("drop table if exists drizzle.__drizzle_migrations; drop schema if exists drizzle;").await;
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    }
 }
 
 async fn a_migration_the_lock_lacks_is_a_draft(mut p: P) {
@@ -3605,6 +3683,7 @@ on!(
     a_database_time_zone_does_not_change_defaults,
     grants_compare_without_their_grantor,
     a_migration_that_creates_a_role_is_refused,
+    a_role_grant_is_refused_by_deploy_too,
     an_object_the_comparison_does_not_read_is_not_a_match,
     a_failed_concurrent_index_leaves_nothing,
     a_failed_lone_statement_may_leave_its_change,
@@ -3665,6 +3744,8 @@ on!(
     an_extension_left_in_a_schema_of_the_projects_own_stops_no_push,
     a_partition_dropped_at_run_time_is_data,
     init_creates_the_extensions_its_schema_uses,
+    init_writes_the_default_privileges_and_grants_a_migration_made,
+    init_writes_a_database_of_grants_alone,
     init_writes_the_event_triggers_it_compares,
     init_writes_the_publications_it_compares,
     a_dump_keeps_a_function_body_as_written,
@@ -4743,8 +4824,32 @@ mod adversarial {
         p.file("20261027100000_t.sql", "create table t (id int);");
         p.file("20261027110000_role.sql", &format!("create role {role};"));
         assert_eq!(p.dry_run().await, 1);
-        assert_has!(p.output(), r"can't be replayed in a shadow database\n  [^\n]*create role");
+        assert_has!(p.output(), &format!(r"can't be replayed in a shadow database\n\n    create role {role}\n\n  It changes a role, which belongs to the server\.\n  Run it outside the migrations"));
         assert!(p.rows(&format!("select 1 from pg_roles where rolname = '{role}'")).await.is_empty(), "no shadow created the role on the server");
+    }
+
+    pub async fn a_role_grant_is_refused_by_deploy_too(mut p: P) {
+        let (reader, writer) = (format!("madv_reader_{}", std::process::id()), format!("madv_writer_{}", std::process::id()));
+        p.exec(&format!("drop role if exists {writer}; drop role if exists {reader}; create role {reader} nologin; create role {writer} nologin")).await;
+        let member = format!("select 1 from pg_auth_members m join pg_roles r on r.oid = m.roleid join pg_roles w on w.oid = m.member where r.rolname = '{reader}' and w.rolname = '{writer}'");
+        p.file("20261027100000_t.sql", "create table t (id int);");
+        p.file("20261027110000_roles.sql", &format!("grant {reader}\n  to {writer};"));
+        // The whole statement, why, and what to do instead.
+        let refused = format!(r"✗ Migration 20261027110000_roles\.sql can't be replayed in a shadow database\n\n    grant {reader} to {writer}\n\n  It grants or revokes a role, which belongs to the server\.\n  Run it outside the migrations, with the server's setup\. Reylo doesn't check inside a do block, but every shadow runs one on its server");
+        assert_eq!(p.dry_run().await, 1);
+        assert_has!(p.output(), &refused);
+        // A deploy refuses what its dry run does: once it ran, every command that replays would.
+        assert_eq!(p.migrate().await, 1);
+        assert_has!(p.output(), &refused);
+        assert!(p.rows(&member).await.is_empty(), "nothing was granted");
+        assert!(p.rows("select 1 from pg_class where relname = 't'").await.is_empty(), "nothing ran");
+        // In a do block, it runs, and every command takes it.
+        p.file("20261027110000_roles.sql", &format!("do $$ begin grant {reader} to {writer}; end $$;"));
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert!(!p.rows(&member).await.is_empty(), "the grant ran");
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        p.exec(&format!("drop role {writer}; drop role {reader}")).await;
     }
 
     pub async fn an_object_the_comparison_does_not_read_is_not_a_match(mut p: P) {
@@ -5884,7 +5989,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
         p.exec("create table t (id int)").await;
         p.file("20261027110000_row.sql", &format!("insert {}.t values (1);", p.name));
         assert_eq!(p.dry_run().await, 1);
-        assert_has!(p.output(), r"Migration 20261027110000_row\.sql can't be replayed in a shadow database\n  [^\n]*names the database");
+        assert_has!(p.output(), &format!(r"Migration 20261027110000_row\.sql can't be replayed in a shadow database\n\n    insert {}\.t values \(1\)\n\n  It names the database {}: in a shadow", p.name, p.name));
         assert!(p.rows("select id from t").await.is_empty(), "no shadow wrote into the database it named");
     }
 
@@ -5920,6 +6025,43 @@ create trigger kids_note after insert on kids begin update parents set name = na
         p.url = q.url.clone();
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         assert_eq!(q.history().await, ["init.sql"]);
+    }
+
+    /// Default privileges and grants a migration made, as Prisma's migrations make them for a role a
+    /// `do` block makes: init.sql makes them, which a new database lacks, and names the role, which a
+    /// new server may lack. A new database deployed from it has the grants this one has.
+    pub async fn init_writes_the_default_privileges_and_grants_a_migration_made(mut p: P) {
+        p.exec("do $$ begin create role madv_ops_read nologin; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec("create table mints (id int primary key); create table users (id int primary key)").await;
+        p.exec("grant usage on schema public to madv_ops_read; grant select, insert on all tables in schema public to madv_ops_read; alter default privileges in schema public grant select, insert on tables to madv_ops_read; revoke insert on mints from madv_ops_read").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"» init\.sql names the role madv_ops_read: make it on each new server before it runs there, since a migration may not");
+        let init = std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap();
+        assert_has!(&init, r"(?m)^alter default privileges in schema public grant insert on tables to madv_ops_read;$");
+        assert_has!(&init, r"(?m)^alter default privileges in schema public grant select on tables to madv_ops_read;$");
+        assert_has!(&init, r"(?m)^grant usage on schema public to madv_ops_read;$");
+        p.strict = true;
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        let grants = "select string_agg(table_name || ':' || privilege_type, ',' order by table_name, privilege_type) as g from information_schema.role_table_grants where grantee = 'madv_ops_read'";
+        assert_eq!(q.rows(grants).await[0].text("g"), "mints:SELECT,users:INSERT,users:SELECT");
+        assert_eq!(q.rows("select has_schema_privilege('madv_ops_read', 'public', 'usage')::text as u").await[0].text("u"), "true");
+        q.exec("create table later (id int)").await;
+        assert_eq!(q.rows("select has_table_privilege('madv_ops_read', 'later', 'insert')::text as i").await[0].text("i"), "true", "the default privileges made");
+    }
+
+    /// A database whose only change from a new one is a grant on `public`: init writes it, and
+    /// introspect prints it, rather than starting an empty project.
+    pub async fn init_writes_a_database_of_grants_alone(mut p: P) {
+        p.exec("do $$ begin create role madv_ops_read nologin; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec("grant create on schema public to madv_ops_read").await;
+        assert_has!(introspect(&p.opts()).await, r"(?m)^grant create on schema public to madv_ops_read;$");
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        assert_has!(std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap(), r"(?m)^grant create on schema public to madv_ops_read;$");
     }
 
     pub async fn an_extension_in_a_schema_of_its_own_is_dumped_after_it(mut p: P) {

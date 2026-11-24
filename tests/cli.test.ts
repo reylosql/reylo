@@ -212,15 +212,22 @@ test("reylo migrate init starts no project in the home directory, and passes ove
   assert.equal(existsSync(join(home, "reylo")), false);
 });
 
-test("reylo generate names its generators, and TypeScript needs none", () => {
+test("reylo generate names its generators, and needs the file to write", () => {
   const bare = reylo(project(), ["generate"]);
   assert.equal(bare.status, 2);
-  assert.match(bare.out, /^Usage: reylo generate <generator>/);
-  assert.match(bare.out, /rust-sqlx/);
-  assert.match(bare.out, /TypeScript needs no generator/);
-  const unknown = reylo(project(), ["generate", "typescript"]);
+  assert.match(bare.out, /^Usage: reylo generate <generator> .* --out <file>\n/);
+  assert.match(bare.out, /\n  typescript {2,}/);
+  assert.match(bare.out, /\n  rust-sqlx {2,}/);
+  const unknown = reylo(project(), ["generate", "kotlin"]);
   assert.equal(unknown.status, 2);
-  assert.equal(unknown.err, "reylo generate: no generator typescript: the one there is is rust-sqlx (reylo generate --help)\n");
+  assert.equal(unknown.err, "reylo generate: no generator kotlin: there are typescript and rust-sqlx (reylo generate --help)\n");
+  const out = reylo(project(), ["generate", "rust-sqlx", "."]);
+  assert.equal(out.status, 2);
+  assert.equal(out.err, "reylo generate: name the file to write with --out, as --out src/queries.rs (reylo generate --help)\n");
+  // The TypeScript generator renders TypeScript, and so runs in JavaScript (src/generate.ts).
+  const typescript = reylo(project(), ["generate", "typescript", "--help"]);
+  assert.equal(typescript.status, 0, typescript.err);
+  assert.match(typescript.out, /^Usage: reylo generate typescript /);
 });
 
 test("reylo play is the playground's server, in JavaScript", () => {

@@ -7,7 +7,7 @@ use crate::db::{shown_url, Breach, Breaks, Db, Ran, Server};
 use crate::lock;
 #[cfg(feature = "cli")]
 use crate::replay::{Shadows, Step};
-use crate::sql::{atomicity_problem, changes_data, runs_alone, shadow_problem, split_statements};
+use crate::sql::{atomicity_problem, changes_data, runs_alone, split_statements, unreplayable};
 use crate::{time, Dialect, Error};
 use regex::Regex;
 use std::path::{Path, PathBuf};
@@ -2055,11 +2055,15 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
     if server.is_some() {
         let schema_name = opts.schema.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "schema.sql".into());
         for (name, sql) in files.iter().map(|f| (f.name.as_str(), f.sql.as_str())).chain(schema_sql.as_deref().map(|s| (schema_name.as_str(), s))) {
-            if let Some(why) = shadow_problem(sql, d) {
-                problems.push(Problem::new("not-replayable", format!("Migration {name} can't be replayed in a shadow database")).note(why));
-            }
+            problems.extend(replay_problem(name, sql, d));
         }
         problems.extend(unreadable_grants(db, opts, &files, schema_sql.as_deref()).await?);
+    } else {
+        // A deploy replays nothing, but runs no migration a shadow can't replay: once it ran, every
+        // command that replays the migrations, status and the dry run among them, would refuse it.
+        for p in &pending {
+            problems.extend(replay_problem(&p.name, &p.sql, d).map(|problem| problem.note("A deploy needs no shadow, but once it ran this, every command that replays the migrations would refuse it.")));
+        }
     }
     if !problems.is_empty() {
         return Ok(Plan { problems: with_stamp(problems), ..Plan::default() });
@@ -2693,6 +2697,49 @@ fn holds_a_schema(lines: &[String]) -> bool {
     const EMPTY: [&str; 6] = ["schema ", "grant schema ", "comment schema ", "comment language ", "extension ", crate::catalog::DEFAULT_PRIVILEGES];
     // A schema's owner too: a new database's `public` is `pg_database_owner`'s.
     lines.iter().any(|l| !EMPTY.iter().any(|kind| l.starts_with(kind)) && !(l.starts_with("owner ") && l.ends_with(" (schema)")))
+}
+
+/// Whether a database holds anything init and introspect write: a schema, or a grant on a schema or a
+/// default privilege that a new database on its server lacks. A new database's `public` grants
+/// PUBLIC `USAGE`, and `CREATE` too before Postgres 15. On a platform's server, a new database may
+/// grant the platform's roles more (Supabase grants its API's roles every new table), so a database
+/// with only those still starts empty there.
+#[cfg(feature = "cli")]
+fn holds_sql(lines: &[String], new: &NewDatabase) -> bool {
+    let platform = |grantee: &str| new.platform && crate::catalog::PLATFORM_ROLES.contains(&grantee);
+    holds_a_schema(lines)
+        || lines.iter().any(|l| {
+            if let Some(rest) = l.strip_prefix("grant schema ") {
+                let name = crate::catalog::name_at(rest);
+                let given = |grantee: &str, privilege: &str| name == "public" && grantee == "PUBLIC" && (privilege == "USAGE" || (privilege == "CREATE" && new.public_create));
+                rest[name.len()..].trim().split(',').filter_map(|g| g.rsplit_once(':')).any(|(grantee, privilege)| !given(grantee, privilege) && !platform(grantee))
+            } else if l.starts_with(crate::catalog::DEFAULT_PRIVILEGES) {
+                let tail = l.trim_end_matches(" with grant option");
+                tail.rsplit_once(" to ").or_else(|| tail.rsplit_once(" from ")).is_none_or(|(_, grantee)| !platform(grantee))
+            } else {
+                false
+            }
+        })
+}
+
+/// What a new database on a server has that [`holds_sql`] needs to know.
+#[cfg(feature = "cli")]
+#[derive(Default)]
+struct NewDatabase {
+    /// Whether the server is a platform's, as Supabase's is.
+    platform: bool,
+    /// Whether a new database's `public` grants PUBLIC `CREATE`, as before Postgres 15.
+    public_create: bool,
+}
+
+#[cfg(feature = "cli")]
+async fn new_database(db: &mut Db) -> Result<NewDatabase, Error> {
+    if db.dialect() != Dialect::Postgres {
+        return Ok(NewDatabase::default());
+    }
+    let rows = db.rows(&format!("select ({})::text as platform, (current_setting('server_version_num')::int < 150000)::text as public_create", crate::catalog::platform_names())).await?;
+    let r = rows.first().ok_or_else(|| Error("no answer".into()))?;
+    Ok(NewDatabase { platform: r.text("platform") == "true", public_create: r.text("public_create") == "true" })
 }
 
 /// Whether a migration that fails can leave part of what it did: on MySQL, whose statements commit as
@@ -3536,7 +3583,7 @@ async fn wipe_rows_on(db: &mut Db) -> Result<usize, Error> {
             schema.objects.values().filter(|o| o.kind == Some(crate::diff::Kind::Table) && !o.extra.iter().any(|l| l.starts_with("shape foreign"))).filter_map(|o| o.id.strip_prefix("table ").map(String::from)).collect()
         }
         Dialect::Mysql => db
-            .rows(&format!("select table_name as n from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE' and table_name <> '{HISTORY_TABLE}'"))
+            .rows(&format!("select table_name as n from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE' and {}", crate::catalog::not_history("table_name")))
             .await?
             .iter()
             .map(|r| format!("`{}`", r.text("n").replace('`', "``")))
@@ -3545,7 +3592,8 @@ async fn wipe_rows_on(db: &mut Db) -> Result<usize, Error> {
         // vector index's are libSQL's: deleting from them directly breaks it.
         Dialect::Sqlite => db
             .rows(&format!(
-                "select name as n from pragma_table_list where schema = 'main' and type in ('table', 'virtual') and name not like 'sqlite_%' and name <> '{HISTORY_TABLE}' and name {} and {}",
+                "select name as n from pragma_table_list where schema = 'main' and type in ('table', 'virtual') and name not like 'sqlite_%' and {} and name {} and {}",
+                crate::catalog::not_history("name"),
                 crate::catalog::NOT_TURSO_OWN,
                 crate::catalog::NOT_LIBSQL_VECTOR_OWN
             ))
@@ -3610,7 +3658,8 @@ async fn wipe_rows_on(db: &mut Db) -> Result<usize, Error> {
             }
             sql.push_str(&after);
             let has_sequence = db.rows("select count(*) > 0 as ok from sqlite_schema where name = 'sqlite_sequence'").await?.first().is_some_and(|r| r.flag("ok"));
-            let reset = if has_sequence { "delete from sqlite_sequence;" } else { "" };
+            // The counters of the tables it empties: a history table keeps its own.
+            let reset = if has_sequence { format!("delete from sqlite_sequence where {};", crate::catalog::not_history("name")) } else { String::new() };
             let turso = crate::catalog::holds_turso_tables(db).await?;
             let restart = crate::catalog::turso_sequences(db, turso, true).await?;
             let result = db.script(&format!("begin; {sql} {reset} {restart} commit;")).await;
@@ -5839,7 +5888,7 @@ async fn with_referenced(db: &mut Db, schemas: &[String], log: Log<'_>) -> Resul
 
 /// The schemas of the project's that --schema has to name for SQL of them to hold them: each that
 /// holds an object of its own (not one an extension made, nor what comes with another object, as a
-/// table's index or sequence does, nor Reylo's history), and each that holds nothing at all, but
+/// table's index or sequence does, nor a history table), and each that holds nothing at all, but
 /// `public`, which every new database has. One that holds an extension alone is made with it.
 #[cfg(feature = "cli")]
 async fn schemas_to_name(db: &mut Db) -> Result<Vec<String>, Error> {
@@ -5848,11 +5897,12 @@ async fn schemas_to_name(db: &mut Db) -> Result<Vec<String>, Error> {
             "select n.nspname as name from pg_namespace n where {} and {} and (exists (
                select 1 from pg_depend d where d.refclassid = 'pg_namespace'::regclass and d.refobjid = n.oid and d.deptype = 'n'
                  and not exists (select 1 from pg_depend o where o.classid = d.classid and o.objid = d.objid and o.deptype in ('e', 'a', 'i'))
-                 and not (d.classid = 'pg_class'::regclass and d.objid in (select oid from pg_class where relname = '{HISTORY_TABLE}')))
+                 and not (d.classid = 'pg_class'::regclass and d.objid in (select oid from pg_class where not {})))
                or (n.nspname <> 'public' and not exists (select 1 from pg_depend d where d.refclassid = 'pg_namespace'::regclass and d.refobjid = n.oid)))
              order by 1",
             crate::catalog::PG_USER_NS,
-            crate::catalog::not_platform_schema("n")
+            crate::catalog::not_platform_schema("n"),
+            crate::catalog::not_history("relname")
         ))
         .await?;
     Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
@@ -5885,12 +5935,12 @@ async fn referenced_schemas(db: &mut Db, named: &[String]) -> Result<Vec<String>
 
 /// `live` as a shadow that ran SQL written from it reads, where the SQL makes all of it: without the
 /// lines the environment gives a shadow as it is made and `made` lacks, which the SQL leaves to it
-/// (a default privilege, the privileges on what an extension made). Partitions, comments and the
+/// (the privileges on what an extension made). Default privileges, partitions, comments and the
 /// rest stay, for the SQL to make.
 #[cfg(feature = "cli")]
 fn as_made(live: &[String], made: &[String]) -> Vec<String> {
-    use crate::catalog::{DEFAULT_PRIVILEGES, EXTENSION_GRANT};
-    live.iter().filter(|l| !(l.starts_with(DEFAULT_PRIVILEGES) || l.starts_with(EXTENSION_GRANT)) || made.contains(l)).cloned().collect()
+    use crate::catalog::EXTENSION_GRANT;
+    live.iter().filter(|l| !l.starts_with(EXTENSION_GRANT) || made.contains(l)).cloned().collect()
 }
 
 /// The refusal of an init whose --schema (`schemas`) leaves out schemas of the project's (`left`):
@@ -5928,8 +5978,10 @@ async fn own_sql(db: &mut Db, opts: &Options) -> Result<Result<String, NotOwn>, 
         Err(e) => return Ok(Err(NotOwn::NoShadow(e))),
     };
     // The project's extensions are the text's to make, as a fresh database needs them: a shadow that
-    // already had them would hide a plan that leaves them out.
+    // already had them would hide a plan that leaves them out. So are its default privileges and
+    // its grants on `public`.
     server.leave_extensions(project_extensions(db).await?);
+    server.copy_no_privileges();
     let result = async {
         let live = catalog(db).await?;
         let mut empty = match server.shadow().await {
@@ -6093,7 +6145,19 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             let mut args: Vec<String> = ["--schema-only", "--no-publications", "--no-subscriptions", "--no-security-labels", "--no-tablespaces"].map(String::from).to_vec();
             // Owners are kept where they aren't the role the file will run as, which owns what it makes.
             let runner = db.rows("select quote_ident(current_user) as u").await?.first().map(|r| r.text("u").to_string()).unwrap_or_default();
-            args.push(format!("--exclude-table=*.{HISTORY_TABLE}"));
+            // The history tables, and the sequences they own, each named as it is written: pg_dump
+            // folds what isn't quoted.
+            let history = db
+                .rows(&format!(
+                    "select format('\"%s\".\"%s\"', replace(n.nspname, '\"', '\"\"'), replace(c.relname, '\"', '\"\"')) as p
+                    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind in ('r', 'p', 'S') and {} and not {}",
+                    crate::catalog::PG_USER_NS,
+                    crate::catalog::pg_not_history("c")
+                ))
+                .await?;
+            for r in &history {
+                args.push(format!("--exclude-table={}", r.text("p")));
+            }
             // Every schema of the project's, unless --schema names some.
             let mut named_schemas: Vec<String> = if schemas.is_empty() { crate::catalog::user_schemas(db).await? } else { schemas.to_vec() };
             if named_schemas.is_empty() {
@@ -6308,9 +6372,10 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
         Dialect::Sqlite => {
             let rows = db
                 .rows(&format!(
-                    "select sql from sqlite_schema where sql is not null and name not like 'sqlite_%' and tbl_name <> '{HISTORY_TABLE}'
+                    "select sql from sqlite_schema where sql is not null and name not like 'sqlite_%' and {}
                       and name not in (select name from pragma_table_list where type = 'shadow') and name {turso} and tbl_name {turso} and {}
                     order by case type when 'table' then 0 when 'index' then 1 when 'view' then 2 else 3 end, rowid",
+                    crate::catalog::not_history("tbl_name"),
                     crate::catalog::NOT_LIBSQL_VECTOR_OWN,
                     turso = crate::catalog::NOT_TURSO_OWN
                 ))
@@ -6321,7 +6386,7 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             static AUTO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" AUTO_INCREMENT=\d+").expect("a valid pattern"));
             static DEFINER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" DEFINER=\S+").expect("a valid pattern"));
             let mut out = vec!["set foreign_key_checks = 0;".to_string()];
-            let tables = db.rows(&format!("select table_name as n, table_type as t from information_schema.tables where table_schema = database() and table_name <> '{HISTORY_TABLE}' order by table_type, table_name")).await?;
+            let tables = db.rows(&format!("select table_name as n, table_type as t from information_schema.tables where table_schema = database() and {} order by table_type, table_name", crate::catalog::not_history("table_name"))).await?;
             for t in tables.iter().filter(|t| t.text("t") == "BASE TABLE") {
                 let row = db.rows(&format!("show create table `{}`", t.text("n"))).await?;
                 out.push(format!("{};", AUTO.replace(row.first().map(|r| r.text("Create Table")).unwrap_or_default(), "")));
@@ -6350,7 +6415,7 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
                 let row = db.rows(&format!("show create view `{name}`")).await?;
                 out.push(format!("{};", DEFINER.replace(row.first().map(|r| r.text("Create View")).unwrap_or_default(), "")));
             }
-            for r in db.rows("select trigger_name as n from information_schema.triggers where trigger_schema = database()").await? {
+            for r in db.rows(&format!("select trigger_name as n from information_schema.triggers where trigger_schema = database() and {}", crate::catalog::not_history("event_object_table"))).await? {
                 let row = db.rows(&format!("show create trigger `{}`", r.text("n"))).await?;
                 out.push(format!("{};", DEFINER.replace(row.first().map(|x| x.text("SQL Original Statement")).unwrap_or_default(), "")));
             }
@@ -6417,8 +6482,12 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     let problems = out_of_reach(&mut db, &opts.url).await;
     let lines = catalog(&mut db).await;
     let left = left_out(&mut db, schemas).await;
+    let roles = named_roles(&mut db).await;
+    let new = new_database(&mut db).await;
     db.close().await;
     let problems = problems?;
+    let mut roles = roles?;
+    let new = new?;
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
     }
@@ -6426,7 +6495,7 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     if !left.is_empty() {
         return Ok(refuse(&[schemas_left_out(schemas, &left)], log));
     }
-    if !holds_a_schema(&lines?) {
+    if !holds_sql(&lines?, &new) {
         drop(spinning);
         std::fs::create_dir_all(&opts.dir)?;
         std::fs::write(&opts.schema, "")?;
@@ -6451,6 +6520,7 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     let init = opts.dir.join(INIT);
     std::fs::write(&init, &sql)?;
     // The history is the lock's: init.sql is its first line, and reaches schema.sql.
+    roles.retain(|role| names(&sql, role));
     let entries = lock::chain([(INIT, sql.as_str())]);
     let schema = Some(lock::schema_sum(&entries[0].sum, &sql));
     lock::write(&opts.lock, &lock::Lock { schema, entries })?;
@@ -6486,7 +6556,32 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     log(&entry(branch(false), &dir_name, ""));
     log(&entry(&format!("│   {}", branch(true)), INIT, "the same, recorded as run here"));
     log(&entry(branch(true), &file_name(&opts.lock), "the order the migrations run in"));
+    if !roles.is_empty() {
+        let named = if roles.len() == 1 { format!("the role {}", roles[0]) } else { format!("the roles {}", and_list(&roles)) };
+        log(&note(format!("{INIT} names {named}: make {} on each new server before it runs there, since a migration may not", if roles.len() == 1 { "it" } else { "them" })));
+    }
     Ok(code)
+}
+
+/// The roles the database names, as an owner, a grantee or a policy's role, that a new server
+/// lacks: none of the role that runs the migrations, a platform's, or Postgres's own. A migration
+/// may make no role, so they are the server's to have first, where the SQL written names them.
+#[cfg(feature = "cli")]
+async fn named_roles(db: &mut Db) -> Result<Vec<String>, Error> {
+    if db.dialect() != Dialect::Postgres {
+        return Ok(vec![]);
+    }
+    let rows = db
+        .rows(&format!(
+            "select distinct quote_ident(r.rolname) as r from pg_shdepend d join pg_roles r on r.oid = d.refobjid
+            where d.dbid = (select oid from pg_database where datname = current_database()) and d.refclassid = 'pg_authid'::regclass
+              and d.deptype in ('o', 'a', 'r') and r.oid <> {} and r.rolname !~ '^pg_' and {}
+            order by 1",
+            crate::catalog::runner(),
+            crate::catalog::not_platform("r.oid")
+        ))
+        .await?;
+    Ok(rows.iter().map(|r| r.text("r").to_string()).collect())
 }
 
 /// `reylo db introspect`: the database's schema as SQL that makes it, as `init` writes schema.sql;
@@ -6499,7 +6594,8 @@ pub async fn db_introspect(opts: &Options, schemas: &[String], log: Log<'_>) -> 
     let spinning = crate::terminal::spinner(format!("Introspecting {}", shown_url(&opts.url)));
     let mut db = Db::open(opts).await?;
     let result = async {
-        if !holds_a_schema(&catalog(&mut db).await?) {
+        let new = new_database(&mut db).await?;
+        if !holds_sql(&catalog(&mut db).await?, &new) {
             return Ok(Ok(String::new()));
         }
         let schemas = with_referenced(&mut db, schemas, &mut *log).await?;
@@ -6808,11 +6904,24 @@ fn file_problems(opts: &Options, files: &[Migration], strays: &[String], schema_
     }
     let schema_name = opts.schema.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "schema.sql".into());
     for (name, sql) in files.iter().map(|f| (f.name.as_str(), f.sql.as_str())).chain(schema_sql.map(|s| (schema_name.as_str(), s))) {
-        if let Some(why) = shadow_problem(sql, d) {
-            problems.push(Problem::new("not-replayable", format!("Migration {name} can't be replayed in a shadow database")).note(why));
-        }
+        problems.extend(replay_problem(name, sql, d));
     }
     problems
+}
+
+/// The refusal of a file with a statement a shadow can't replay: the statement, why, and what to
+/// do instead.
+fn replay_problem(name: &str, sql: &str, d: Dialect) -> Option<Problem> {
+    let u = unreplayable(sql, d)?;
+    let mut why = u.why;
+    if let Some(first) = why.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    let problem = Problem::new("not-replayable", format!("Migration {name} can't be replayed in a shadow database")).sql(&u.statement).note(format!("{why}."));
+    Some(match u.instead {
+        Some(instead) => problem.note(instead),
+        None => problem,
+    })
 }
 
 #[cfg(feature = "cli")]
@@ -7833,6 +7942,13 @@ fn drop_phrase(items: &[(String, String)]) -> String {
         .join(", and ")
 }
 
+/// Whether `sql` names `role`, written as `quote_ident` writes it, as a word of its own.
+#[cfg(feature = "cli")]
+fn names(sql: &str, role: &str) -> bool {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
+    sql.match_indices(role).any(|(k, _)| !word(sql[..k].chars().next_back()) && !word(sql[k + role.len()..].chars().next()))
+}
+
 /// `a`, `a and b`, `a, b and c`.
 fn and_list(items: &[String]) -> String {
     match items {
@@ -7930,6 +8046,28 @@ fn table_lines(table: &crate::db::Table) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "cli")]
+    #[test]
+    fn a_grant_to_a_role_of_its_own_is_sql_to_write() {
+        use super::{NewDatabase, holds_sql};
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let stock = NewDatabase::default();
+        let supabase = NewDatabase { platform: true, ..NewDatabase::default() };
+        let platform = lines(&["schema public", "grant schema public PUBLIC:USAGE,anon:USAGE,service_role:USAGE*", "default privileges in schema public grant select on tables to anon"]);
+        assert!(!holds_sql(&platform, &supabase));
+        assert!(holds_sql(&platform, &stock), "anon is a role of the project's on a server of no platform");
+        assert!(!holds_sql(&lines(&["schema public", "grant schema public PUBLIC:USAGE"]), &stock));
+        assert!(holds_sql(&lines(&["schema public", "grant schema public PUBLIC:CREATE,PUBLIC:USAGE"]), &stock));
+        assert!(!holds_sql(&lines(&["schema public", "grant schema public PUBLIC:CREATE,PUBLIC:USAGE"]), &NewDatabase { public_create: true, ..NewDatabase::default() }));
+        assert!(holds_sql(&lines(&["schema public", "schema reports", "grant schema reports PUBLIC:USAGE"]), &stock));
+        assert!(holds_sql(&lines(&["schema public", "grant schema public PUBLIC:USAGE,reporting:CREATE"]), &supabase));
+        assert!(holds_sql(&lines(&["schema public", "default privileges in schema public grant select on tables to reporting with grant option"]), &supabase));
+        assert!(holds_sql(&lines(&["schema public", "default privileges revoke execute on functions from public"]), &supabase));
+        assert!(super::names("grant select on table t to ops_read;", "ops_read"));
+        assert!(!super::names("grant select on table t to ops_readwrite;", "ops_read"));
+        assert!(!super::names("create table ops_read_log (id int);", "ops_read"));
+    }
+
     use super::*;
 
     #[test]

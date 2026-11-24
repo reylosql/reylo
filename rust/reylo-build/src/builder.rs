@@ -1,6 +1,6 @@
 //! The modules `reylo generate rust-sqlx` writes, written by a build script instead. Each input is
 //! read from the crate's directory, `src/` where none is given, and every module goes into the one
-//! file in Cargo's `OUT_DIR`, a module per directory under its input. Cargo runs the script again
+//! file in Cargo's `OUT_DIR`, each named after its `.sql` file. Cargo runs the script again
 //! when a `.sql` file, the project file, a `.env` file or the project's migrations change.
 //!
 //! A statement that cannot be typed fails the build with one of Cargo's own errors, at its file,
