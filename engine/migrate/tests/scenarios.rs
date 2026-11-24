@@ -7091,12 +7091,12 @@ create trigger kids_note after insert on kids begin update parents set name = na
     /// makes it again (a serial's, made with the table or new), and keeps its place where it outlives
     /// the table; one whose column makes something else of its values is left to be moved by hand.
     pub async fn a_remade_tables_sequences_move_past_the_rows_put_back(mut p: P) {
-        let before = "create table counters (id serial primary key, n text); create table serials (id bigint primary key, n text); create sequence ticket_no; create table tickets (id bigint primary key default nextval('ticket_no'), n text); create sequence invoices_no; create table invoices (code text primary key default 'INV-' || nextval('invoices_no'), n text); alter sequence invoices_no owned by invoices.code;";
+        let before = "create table counters (id serial primary key, n text); create table serials (id bigint primary key, n text); create sequence ticket_no; create table tickets (id bigint primary key default nextval('ticket_no'), n text); create sequence invoices_no; create table invoices (code text primary key default 'INV-' || nextval('invoices_no'), n text); alter sequence invoices_no owned by invoices.code; create table smalls (id smallint primary key, n text);";
         p.schema(before);
         p.file("20261027100000_tables.sql", before);
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         p.output();
-        p.exec("insert into counters (n) select 'c' || g from generate_series(1, 10) g; insert into serials select g, 's' || g from generate_series(1, 10) g; insert into tickets (n) select 't' || g from generate_series(1, 10) g; select setval('ticket_no', 100); insert into invoices (n) select 'i' || g from generate_series(1, 3) g").await;
+        p.exec("insert into counters (n) select 'c' || g from generate_series(1, 10) g; insert into serials select g, 's' || g from generate_series(1, 10) g; insert into tickets (n) select 't' || g from generate_series(1, 10) g; select setval('ticket_no', 100); insert into invoices (n) select 'i' || g from generate_series(1, 3) g; insert into smalls values (32767, 'top')").await;
         // Each made again: a serial key, whose sequence the migration makes the column's only after
         // the rows are back; a key given a serial; a sequence the table only called, which it comes
         // to own, and which keeps its place, as other tables may have taken its values; and a text
@@ -7104,7 +7104,8 @@ create trigger kids_note after insert on kids begin update parents set name = na
         p.schema("create table counters (id serial primary key, n text) partition by hash (id); create table counters_0 partition of counters for values with (modulus 1, remainder 0); \
             create table serials (id bigserial primary key, n text) partition by hash (id); create table serials_0 partition of serials for values with (modulus 1, remainder 0); \
             create sequence ticket_no; create table tickets (id bigint primary key default nextval('ticket_no'), n text) partition by hash (id); create table tickets_0 partition of tickets for values with (modulus 1, remainder 0); alter sequence ticket_no owned by tickets.id; \
-            create sequence invoices_no; create table invoices (code text primary key default 'INV-' || nextval('invoices_no'), n text) partition by hash (code); create table invoices_0 partition of invoices for values with (modulus 1, remainder 0); alter sequence invoices_no owned by invoices.code;");
+            create sequence invoices_no; create table invoices (code text primary key default 'INV-' || nextval('invoices_no'), n text) partition by hash (code); create table invoices_0 partition of invoices for values with (modulus 1, remainder 0); alter sequence invoices_no owned by invoices.code; \
+            create sequence smalls_no as bigint; create table smalls (id smallint primary key default nextval('smalls_no'), n text) partition by hash (id); create table smalls_0 partition of smalls for values with (modulus 1, remainder 0); alter sequence smalls_no owned by smalls.id;");
         let out = Box::pin(keep_the_rows(&mut p, "partition_all", &[])).await;
         assert!(!out.contains("setval('ticket_no'"), "{out}");
         assert_has!(&out, r"-- and move the sequence invoices_no past the values put back in code");
@@ -7112,6 +7113,8 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.rows("insert into serials (n) values ('next') returning id").await[0].text("id"), "11");
         assert_eq!(p.rows("select nextval('ticket_no') as n").await[0].text("n"), "101");
         assert_eq!(p.rows("select count(*) as n from invoices").await[0].text("n"), "3");
+        // A sequence that counts wider than its key moves no further than the key can hold.
+        assert_eq!(p.rows("insert into smalls (n) values ('next') returning id").await[0].text("id"), "1");
     }
 
     /// A list-partitioned table made plain, one of its partitions kept as a table of its own, keeps
@@ -7138,13 +7141,13 @@ create trigger kids_note after insert on kids begin update parents set name = na
     pub async fn a_sequence_moved_past_unindexed_rows_asks_for_blocking(mut p: P) {
         // A partial index serves no max over every row; a column renamed in the same change is
         // found where the block reads it.
-        let before = "create table log (id bigint generated always as identity, msg text); create table events (id bigint generated always as identity primary key, msg text); create table active (id bigint generated always as identity, live boolean); create index active_live on active (id) where live; create table renamed (id bigint generated always as identity, msg text);";
+        let before = "create table log (id bigint generated always as identity, msg text); create table events (id bigint generated always as identity primary key, msg text); create table active (id bigint generated always as identity, live boolean); create index active_live on active (id) where live; create table renamed (id bigint generated always as identity, msg text); create sequence stage_no; create table stage (id bigint, n text);";
         p.schema(before);
         p.file("20261027100000_log.sql", before);
         assert_eq!(p.dev().await, 0, "{}", p.peek());
-        p.exec("insert into log (msg) select 'm' || g from generate_series(1, 10) g; insert into events (msg) select 'e' || g from generate_series(1, 10) g").await;
+        p.exec("insert into log (msg) select 'm' || g from generate_series(1, 10) g; insert into events (msg) select 'e' || g from generate_series(1, 10) g; insert into stage values (2000, 's')").await;
         p.output();
-        p.schema("create table log (id bigint generated always as identity (start with 1000), msg text); create table events (id bigint generated always as identity (start with 1000) primary key, msg text); create table active (id bigint generated always as identity (start with 1000), live boolean); create index active_live on active (id) where live; create table renamed (new_id bigint generated always as identity (start with 1000), msg text);");
+        p.schema("create sequence stage_no start with 1000; create table stage (id bigint, n text); alter sequence stage_no owned by stage.id; create table log (id bigint generated always as identity (start with 1000), msg text); create table events (id bigint generated always as identity (start with 1000) primary key, msg text); create table active (id bigint generated always as identity (start with 1000), live boolean); create index active_live on active (id) where live; create table renamed (new_id bigint generated always as identity (start with 1000), msg text);");
         let rename = vec![("renamed.id".to_string(), "new_id".to_string())];
         let choices = reylo_migrate::Choices { rename: rename.clone(), ..Default::default() };
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "move_ids", &choices, log).await).await, 1);
@@ -7153,10 +7156,12 @@ create trigger kids_note after insert on kids begin update parents set name = na
             assert_has!(&out, &format!(r"reads every row of {table} while it blocks writes to it, to move a sequence past them"));
         }
         assert!(!out.contains("of events while"), "an indexed column is read through its index: {out}");
+        assert!(!out.contains("of stage while"), "a table the sequence comes to own after the read isn't read: {out}");
         let choices = reylo_migrate::Choices { rename, blocking: true, ..Default::default() };
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "move_ids", &choices, log).await).await, 0, "{}", p.peek());
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_eq!(p.rows("insert into log (msg) values ('next') returning id").await[0].text("id"), "1000");
+        assert_eq!(p.rows("select nextval('stage_no') as n").await[0].text("n"), "1000");
     }
 
     pub async fn init_creates_the_extensions_its_schema_uses(mut p: P) {

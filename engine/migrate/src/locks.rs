@@ -642,14 +642,24 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
         }
         }
     });
+    // The tables each sequence a block reads for gives values to before the file runs, where the
+    // sequence is found then: one the file comes to own later gives it none to read.
+    let (opens, closes) = crate::diff::postgres::SEQUENCE_READ;
+    let reads: Vec<&str> = m.sql.lines().filter(|l| l.contains("set_config('reylo.sequence_goal', goal::text")).filter_map(|line| line.strip_prefix(opens).and_then(|rest| rest.split_once(closes)).map(|(s, _)| s)).collect();
+    let mut fed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for sequence in &reads {
+        let known = db.rows(&format!("select ({sequence})::regclass is not null as known")).await.ok().and_then(|r| r.first().map(|r| r.flag("known"))).unwrap_or(false);
+        if known {
+            let rows = db.rows(&format!("select c.rel::oid::text as oid from (select ({sequence})::regclass as s) q, lateral ({}) c where c.plain", crate::diff::postgres::sequence_columns("q.s"))).await.unwrap_or_default();
+            fed.insert(sequence.to_string(), rows.iter().map(|r| r.text("oid").to_string()).collect());
+        }
+    }
     run(db, m).await?;
     // A sequence moved to a new start reads each column it gives values to, its table locked
     // against writes until the file commits: every row of a table that was there before, where no
     // index serves the column's max and min (a valid btree index that leads with it, over every
     // row). Read once the file has run, as the block finds them where it runs, after a rename.
-    let (opens, closes) = crate::diff::postgres::SEQUENCE_READ;
-    for line in m.sql.lines().filter(|l| l.contains("set_config('reylo.sequence_goal', goal::text")) {
-        let Some(sequence) = line.strip_prefix(opens).and_then(|rest| rest.split_once(closes)).map(|(s, _)| s) else { continue };
+    for sequence in &reads {
         let read = db
             .rows(&format!(
                 "select format('%s', c.rel) as t, c.rel::oid::text as oid from (select ({sequence})::regclass as s) q, lateral ({}) c \
@@ -658,7 +668,8 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                 crate::diff::postgres::sequence_columns("q.s")
             ))
             .await;
-        for r in read.iter().flatten().filter(|r| before.values().any(|s| s.oid == r.text("oid"))) {
+        let then = fed.get(*sequence);
+        for r in read.iter().flatten().filter(|r| before.values().any(|s| s.oid == r.text("oid")) && then.is_none_or(|t| t.contains(r.text("oid")))) {
             add(r.text("t"), format!("reads every row of {} while it blocks writes to it, to move a sequence past them", r.text("t")));
         }
     }

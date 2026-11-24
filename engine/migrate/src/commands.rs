@@ -5734,7 +5734,15 @@ fn keep_rows(id: &str, from: &crate::diff::Schema, to: &crate::diff::Schema, ren
         };
         let (edge, past, beyond) = if options.contains("increment by -") { ("min", "- 1", "<") } else { ("max", "+ 1", ">") };
         let next = format!("{edge}({c})::numeric {past}");
-        out.push(format!("select setval({sequence}, coalesce((select {next} from {table} having {next} between seqmin and seqmax and {next} {beyond} seqstart), seqstart)::bigint, false) from pg_sequence where seqrelid = {sequence}::regclass;"));
+        // Past the rows only where the column can hold that value too: a sequence it owns may count
+        // wider than it, where an identity's counts as its column does.
+        let range = match ty(def).as_str() {
+            _ if def.contains(" as identity") => "seqmin and seqmax".to_string(),
+            "smallint" => "greatest(seqmin, -32768) and least(seqmax, 32767)".to_string(),
+            "integer" => "greatest(seqmin, -2147483648) and least(seqmax, 2147483647)".to_string(),
+            _ => "seqmin and seqmax".to_string(),
+        };
+        out.push(format!("select setval({sequence}, coalesce((select {next} from {table} having {next} between {range} and {next} {beyond} seqstart), seqstart)::bigint, false) from pg_sequence where seqrelid = {sequence}::regclass;"));
     }
     out.push(format!("drop table {copy};"));
     out.join("\n")
