@@ -386,6 +386,16 @@ fn undo_in(out: &str) -> String {
     quoted.replace("'\\''", "'")
 }
 
+/// Makes `p` connect to its Postgres database as a role that owns it and can't create a database, with
+/// no shadow_url: no shadow database can be made, so its schema as SQL is the dump. The role is the
+/// one `a_role_that_cannot_create_databases_is_told_of_shadow_url` makes, so no other role changes
+/// every replay cache's key on the server under the scenarios beside it.
+async fn with_no_shadows(p: &mut P) {
+    p.exec("do $$ begin create role madv_nocreate login nocreatedb; exception when duplicate_object or unique_violation then null; end $$").await;
+    p.exec(&format!("alter database {} owner to madv_nocreate", p.name)).await;
+    p.url = as_role(&p.url, "madv_nocreate");
+}
+
 /// `url` connecting as `role`, with no password: the test servers trust their local connections.
 fn as_role(url: &str, role: &str) -> String {
     regex::Regex::new(r"^([a-z]+://)(?:[^@/]*@)?").unwrap().replace(url, format!("${{1}}{role}@").as_str()).into_owned()
@@ -519,6 +529,7 @@ for_each_dialect!(
     create_renames_a_table_keeping_its_rows,
     create_renames_a_not_null_column_with_its_table,
     create_offers_renames_only_to_what_the_dropped_ones_table_adds,
+    create_offers_no_rename_to_a_column_another_table_renames_onto,
     create_lists_every_rename_it_assumes,
     commands_create_prints_for_names_with_spaces_run_as_printed,
     deploy_compares_with_what_dev_replayed,
@@ -1248,11 +1259,10 @@ async fn init_leaves_out_another_tools_history(p: P) {
 /// too, and the sequences they own.
 #[tokio::test(flavor = "current_thread")]
 async fn the_dump_leaves_out_another_tools_history() {
-    let Some(p) = P::new(Dialect::Postgres).await else { return };
+    let Some(mut p) = P::new(Dialect::Postgres).await else { return };
+    with_no_shadows(&mut p).await;
     p.exec(&format!("create table users (id bigint primary key, email text not null);{}", other_tools_history(&p))).await;
-    // A shadows' server that answers nothing leaves the dump.
-    let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
-    let text = introspect(&opts).await;
+    let text = introspect(&p.opts()).await;
     assert!(text.contains("CREATE TABLE public.users"), "{text}");
     assert!(!has(&text, "(?i)prisma|knex|drizzle|databasechangelog"), "{text}");
 }
@@ -2370,14 +2380,20 @@ async fn a_shadow_left_by_a_killed_run_is_swept(mut p: P) {
     target.exec(&format!("create database {dead}")).await.unwrap();
     target.close().await;
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    // A run that makes shadows sweeps first, as a dry run does.
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     let list = if p.d == Dialect::Postgres { "select datname as n from pg_database where datname like 'reylo_shadow_%'" } else { r"select schema_name as n from information_schema.schemata where schema_name like 'reylo\_shadow\_%'" };
-    // Another test's run may be sweeping it at the same moment, which this run's sweep leaves to
-    // it: it is gone once that drop ends.
+    // Another test's run may be sweeping at the same moment, which this run's sweep leaves to it:
+    // the dead one is gone once that drop ends, or, where that sweep listed the shadows before it
+    // was made, once a later run sweeps, as each run does.
     let mut names: Vec<String> = Vec::new();
-    for _ in 0..100 {
+    for k in 0..100 {
         names = p.rows(list).await.iter().map(|r| r.text("n").to_string()).collect();
         if !names.contains(&dead) {
             break;
+        }
+        if k % 10 == 9 {
+            assert_eq!(p.dry_run().await, 0, "{}", p.peek());
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -3272,6 +3288,31 @@ async fn create_offers_renames_only_to_what_the_dropped_ones_table_adds(mut p: P
     assert!(!out.contains("renamed instead"), "{out}");
 }
 
+async fn create_offers_no_rename_to_a_column_another_table_renames_onto(mut p: P) {
+    let (id, int, text) = (p.t.id, p.t.int, p.t.text);
+    let statements = |title: &str, profile: &str| [format!("create table users (id {id}, email {text} not null, name {text}{profile});"), format!("create table posts (id {id}, author_id {int} not null references users (id), {title} {text} not null, body {text});"), format!("create index posts_author_idx on posts (author_id, {title});"), format!("create view published_posts as select id, author_id, {title} from posts where body is not null;")];
+    // One file per statement, which MySQL commits each on its own.
+    for (k, statement) in statements("title", &format!(", profile {text}")).iter().enumerate() {
+        p.file(&format!("2026102710000{k}_t{k}.sql"), statement);
+    }
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into users (email) values ('a'); insert into posts (author_id, title, body) values (1, 'Hello', 'x')").await;
+    p.output();
+    // One table drops a column while another renames one, its index and view following: the rename
+    // is assumed, and its new name, another table's column, is no name for the drop's rename.
+    p.schema(&statements("heading", "").join(" "));
+    assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "step3", &Default::default(), log).await).await, 1);
+    let out = p.output();
+    assert_has!(&out, r"This migration drops the column users\.profile and its data\n");
+    assert_has!(&out, r"reylo migrate new step3 [^\n]*--drop users\.profile");
+    assert!(!out.contains("renamed instead") && !out.contains("posts.heading") && !out.contains("posts.title"), "{out}");
+    let choices = reylo_migrate::Choices { drop: vec!["users.profile".into()], ..Default::default() };
+    assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "step3", &choices, log).await).await, 0, "{}", p.peek());
+    assert_has!(p.output(), r"\n  ~ column posts\.\[-title-\]\{\+heading\+\} ");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.rows("select heading from published_posts").await[0].text("heading"), "Hello");
+}
+
 async fn db_push_renames_a_table_keeping_its_rows(mut p: P) {
     let (id, text) = (p.t.id, p.t.text);
     p.file("20261027100000_users.sql", &format!("create table users (id {id}, email {text});"));
@@ -4042,6 +4083,7 @@ on!(
     a_change_by_hand_is_shown_alone_beside_a_function_of_many_lines,
     an_enum_value_added_is_ahead_on_the_side_that_added_it,
     a_comment_a_migration_adds_is_the_migrations,
+    a_temporary_tables_constraints_and_policies_are_no_drift,
 );
 on!(Mysql, a_migration_that_names_a_database_is_refused);
 on!(
@@ -4050,6 +4092,12 @@ on!(
     an_extension_in_a_schema_of_its_own_is_dumped_after_it,
     an_extension_left_in_a_schema_of_the_projects_own_stops_no_push,
     a_partition_dropped_at_run_time_is_data,
+    a_table_made_partitioned_is_refused_for_what_postgres_cant_change,
+    the_lines_that_keep_a_remade_tables_rows_follow_the_change,
+    a_remade_tables_sequences_move_past_the_rows_put_back,
+    a_partition_kept_as_a_table_of_its_own_keeps_its_rows,
+    a_sequence_moved_past_unindexed_rows_asks_for_blocking,
+    a_sequence_read_is_checked_without_moving_the_files_sequences,
     init_creates_the_extensions_its_schema_uses,
     init_writes_the_default_privileges_and_grants_a_migration_made,
     init_writes_a_database_of_grants_alone,
@@ -4976,7 +5024,9 @@ mod adversarial {
     }
 
     /// A role that may not create a database (PlanetScale's, some managed ones') can make no shadow:
-    /// the refusal names shadow_url, and `init` leaves no project behind.
+    /// the refusal names shadow_url, and `init` leaves no project behind. introspect prints the
+    /// database's own dump instead, and says why on stderr; with a shadow_url that makes no shadow
+    /// either, it is refused.
     pub async fn a_role_that_cannot_create_databases_is_told_of_shadow_url(mut p: P) {
         let role = "madv_nocreate";
         match p.d {
@@ -4994,6 +5044,21 @@ mod adversarial {
         assert!(!p.dir.join("schema.sql").exists(), "init left schema.sql");
         assert!(!p.dir.join(reylo_migrate::lock::LOCK).exists(), "init left the lock");
         assert!(p.files().is_empty(), "init left {:?}", p.files());
+        let mut said = Vec::new();
+        let text = match reylo_migrate::db_introspect(&opts, &[], &mut |l: &str| said.push(l.to_string())).await {
+            Ok(Ok(text)) => text,
+            other => panic!("introspect: {:?}\n{}", other.map_err(|e| e.0), said.join("\n")),
+        };
+        assert_has!(text, "(?i)create table");
+        assert_has!(said.join("\n"), r"^» Printing (pg_dump's output|the database's own dump), not Reylo's own SQL\n  No shadow database can be made to check Reylo's own SQL for it: [\s\S]+shadow_url[\s\S]*$");
+        // A shadow_url that answers nothing, and one whose role can't create a database either.
+        let nowhere = if p.d == Dialect::Postgres { "postgres://postgres@127.0.0.1:1/none" } else { "mysql://root@127.0.0.1:1/none" };
+        for shadow_url in [nowhere.to_string(), p.url.clone()] {
+            let mut said = Vec::new();
+            let result = reylo_migrate::db_introspect(&Options { shadow_url: Some(shadow_url.clone()), ..p.opts() }, &[], &mut |l: &str| said.push(l.to_string())).await;
+            assert!(matches!(result, Ok(Err(1))), "{shadow_url}: {}", said.join("\n"));
+            assert_has!(said.join("\n"), r"^✗ No shadow database can be made on the server shadow_url names\n  [\s\S]+\n  Reylo's own SQL is checked on a shadow database before it's printed\.\n  Make sure that server is running and its role can create a database, or set shadow_url in \.reylo\.yaml to one that can\.\n\nNothing was changed\.$");
+        }
         p.schema("create table users (id int primary key);");
         p.file("20261027100000_users.sql", "create table users (id int primary key);");
         let e = reylo_migrate::dry_run(&opts, &mut |_: &str| {}).await.expect_err("no shadow database can be made");
@@ -5002,12 +5067,10 @@ mod adversarial {
 
     /// Where no shadow can be made, the schema is the dump, which makes each extension's schema before
     /// it: once, however many extensions share it (Supabase keeps three in `extensions`).
-    pub async fn a_dump_makes_a_schema_its_extensions_share_once(p: P) {
+    pub async fn a_dump_makes_a_schema_its_extensions_share_once(mut p: P) {
+        with_no_shadows(&mut p).await;
         p.exec("create schema extensions; create extension citext with schema extensions; create extension pgcrypto with schema extensions; create table users (id int primary key)").await;
-        // A shadows' server that answers nothing leaves the dump, with no role made for it: a new
-        // role would change every replay cache's key on the server under the scenarios beside it.
-        let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
-        let text = introspect(&opts).await;
+        let text = introspect(&p.opts()).await;
         assert_eq!(text.matches("CREATE SCHEMA IF NOT EXISTS extensions").count(), 1, "{text}");
         assert!(text.contains("CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA extensions") && text.contains("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions"), "{text}");
     }
@@ -5034,9 +5097,10 @@ mod adversarial {
 
     /// Where Reylo's own SQL can't be checked (no shadow database can be made here) and no pg_dump can
     /// dump the database instead, introspect says why, what it found and how to get one.
-    pub async fn introspect_with_no_check_and_no_pg_dump_says_how_to_get_one(p: P) {
+    pub async fn introspect_with_no_check_and_no_pg_dump_says_how_to_get_one(mut p: P) {
+        with_no_shadows(&mut p).await;
         p.exec("create table users (id int primary key)").await;
-        let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
+        let opts = p.opts();
         let mut dirs = vec![];
         // A pg_dump too old to read the server, which is named.
         #[cfg(unix)]
@@ -5099,11 +5163,10 @@ mod adversarial {
 
     /// The dump reads a schema whose name has capitals as it is named: pg_dump folds what --schema
     /// gives it unless it is quoted.
-    pub async fn the_dump_reads_a_schema_named_with_capitals(p: P) {
+    pub async fn the_dump_reads_a_schema_named_with_capitals(mut p: P) {
+        with_no_shadows(&mut p).await;
         p.exec(r#"create schema "CaseSensitive"; create table "CaseSensitive".items (id int); create table users (id int primary key)"#).await;
-        // A shadows' server that answers nothing leaves the dump.
-        let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
-        let text = introspect(&opts).await;
+        let text = introspect(&p.opts()).await;
         assert!(text.contains(r#"CREATE TABLE "CaseSensitive".items"#) && text.contains("CREATE TABLE public.users"), "{text}");
     }
 
@@ -6050,6 +6113,34 @@ mod adversarial {
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_has!(p.output(), "Up to date");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    }
+
+    /// A temporary table is its session's: its key, its checks, its policies, its statistics (made in
+    /// `public`, the first schema of the search path) and their comments are gone when the run that
+    /// made them ends, and are in no fingerprint and no comparison.
+    pub async fn a_temporary_tables_constraints_and_policies_are_no_drift(mut p: P) {
+        p.schema("create table t (id int primary key);");
+        p.file(
+            "20261027100000_t.sql",
+            "create table t (id int primary key);
+            create temp table scratch (key int primary key, n int check (n > 0));
+            comment on constraint scratch_pkey on scratch is 'for this session';
+            create policy everyone on scratch using (true);
+            comment on policy everyone on scratch is 'for this session';
+            create statistics scratch_stats on key, n from scratch;
+            alter statistics scratch_stats set statistics 500;
+            comment on statistics scratch_stats is 'for this session';",
+        );
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_has!(p.output(), "Up to date");
+        let (code, out) = p.check_every_way().await;
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(p.history_push().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), "Up to date");
     }
 
     /// An enum is one line of the catalog, so a value added changes that line on both sides: schema.sql's
@@ -6999,6 +7090,262 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    }
+
+    /// The refusal of a migration that creates a table again, read as a person would: its last
+    /// command run (with `--blocking` too where that run asks for it), and the lines it prints pasted
+    /// at the top and the end of the file it writes, which then runs. `renames` are stated each time.
+    async fn keep_the_rows(p: &mut P, name: &str, renames: &[(&str, &str)]) -> String {
+        let rename: Vec<(String, String)> = renames.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let choices = reylo_migrate::Choices { rename: rename.clone(), ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, name, &choices, log).await).await, 1);
+        let out = p.output();
+        assert!(!out.contains("renamed instead"), "{out}");
+        // The last command, its lines joined where it runs on.
+        let lines: Vec<&str> = out.lines().collect();
+        let at = lines.iter().rposition(|l| l.trim_start().starts_with(&format!("reylo migrate new {name}"))).unwrap_or_else(|| panic!("{out}"));
+        let mut command = String::new();
+        for l in &lines[at..] {
+            command.push_str(l.trim().trim_end_matches('\\').trim_end());
+            command.push(' ');
+            if !l.trim_end().ends_with('\\') {
+                break;
+            }
+        }
+        let drop: Vec<String> = command.split_once(" --drop ").map(|(_, d)| d.split(' ').next().unwrap_or_default().split(',').map(String::from).collect()).unwrap_or_default();
+        // Every refusal's lines, each under the heading it is printed under.
+        let (mut top, mut end, mut under) = (String::new(), String::new(), 0);
+        for l in out.lines().map(str::trim) {
+            match l {
+                "-- at the top" => under = 1,
+                _ if l.starts_with("-- right after it creates ") => under = 2,
+                "" => under = 0,
+                _ if under == 1 => top.push_str(&format!("{l}\n")),
+                _ if under == 2 => end.push_str(&format!("{l}\n")),
+                _ => {}
+            }
+        }
+        assert!(!top.is_empty() && !end.is_empty(), "{out}");
+        let mut choices = reylo_migrate::Choices { drop, rename, blocking: command.contains(" --blocking"), ..Default::default() };
+        // A change of key rebuilds the partitions' keys, which is refused until --blocking accepts it.
+        if p.run(async |o, log| reylo_migrate::create(o, name, &choices, log).await).await != 0 {
+            assert!(!choices.blocking && p.output().contains("--blocking"), "{}", p.peek());
+            choices.blocking = true;
+            assert_eq!(p.run(async |o, log| reylo_migrate::create(o, name, &choices, log).await).await, 0, "{}", p.peek());
+        }
+        p.output();
+        let file = p.dir.join("migrations").join(p.files().into_iter().find(|f| f.ends_with(&format!("_{name}.sql"))).unwrap());
+        let sql = std::fs::read_to_string(&file).unwrap();
+        // Right after the statements that create the tables again.
+        let made = sql.rfind("\ncreate table ").map(|at| at + sql[at..].find(";\n").unwrap() + 2).unwrap_or_else(|| panic!("{sql}"));
+        std::fs::write(&file, format!("{top}{}{end}{}", &sql[..made], &sql[made..])).unwrap();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        p.output();
+        out
+    }
+
+    /// A table made partitioned, made plain, or given another partition key is created again, which
+    /// Postgres can't do in place: refused as that, with the statements that keep its rows, one
+    /// command that writes the migration, and no rename offered.
+    pub async fn a_table_made_partitioned_is_refused_for_what_postgres_cant_change(mut p: P) {
+        let plain = "create table users (id int generated always as identity primary key, name text); create table logs (id int, msg text);";
+        let hashed = "create table users (id int generated always as identity primary key, name text) partition by hash (id); create table users_p0 partition of users for values with (modulus 2, remainder 0); create table users_p1 partition of users for values with (modulus 2, remainder 1); create table logs (id int, msg text);";
+        p.schema(plain);
+        p.file("20261027100000_users.sql", plain);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("insert into users (name) select 'u' || g from generate_series(1, 10) g").await;
+        p.output();
+        // Each time the rows stay, and the next id comes past them.
+        let kept = async |p: &mut P| {
+            assert_eq!(p.rows("select count(*) as n from users").await[0].text("n"), "10");
+            assert_eq!(p.rows("insert into users (name) values ('next') returning id").await[0].text("id"), "11");
+            p.exec("delete from users where name = 'next'").await;
+        };
+        p.schema(hashed);
+        let out = keep_the_rows(&mut p, "partition_users", &[]).await;
+        kept(&mut p).await;
+        assert_has!(&out, r"✗ Postgres can't make users a partitioned table in place\n  A table is partitioned only when it's created, so this migration drops users and its rows to create it again\.\n  To keep the rows, add these lines to the migration it writes:\n\n    -- at the top\n    lock table users in exclusive mode;\n    create table users_rows as select \* from users;\n    -- right after it creates users and its partitions\n    insert into users \(id, name\) overriding system value select id, name from users_rows;\n    select setval\(pg_get_serial_sequence\('users', 'id'\), coalesce\(\(select max\(id\)::numeric \+ 1 from users having max\(id\)::numeric \+ 1 between seqmin and seqmax and max\(id\)::numeric \+ 1 > seqstart\), seqstart\)::bigint, false\) from pg_sequence where seqrelid = pg_get_serial_sequence\('users', 'id'\)::regclass;\n    drop table users_rows;\n\n  To write it, dropping the rows:\n    reylo migrate new partition_users --drop users\n");
+        // Made plain again: its partitions go first, so the copy at the top is what keeps the rows.
+        p.schema(plain);
+        let out = keep_the_rows(&mut p, "unpartition", &[]).await;
+        kept(&mut p).await;
+        assert_has!(&out, r"✗ Postgres can't make users a plain table in place\n  A partitioned table is made plain only by creating it again, so this migration drops users, its partitions and their rows\.\n");
+        assert_has!(&out, r"reylo migrate new unpartition --drop users_p0,users_p1,users\n");
+        // Given another partition key beside a column dropped: one refusal for the table and its
+        // partitions, and one command writes it all.
+        p.schema(hashed);
+        keep_the_rows(&mut p, "partition_again", &[]).await;
+        kept(&mut p).await;
+        p.schema("create table users (id int generated always as identity, name text not null, primary key (id, name)) partition by hash (name); create table users_p0 partition of users for values with (modulus 2, remainder 0); create table users_p1 partition of users for values with (modulus 2, remainder 1); create table logs (id int);");
+        let out = keep_the_rows(&mut p, "rekey", &[]).await;
+        kept(&mut p).await;
+        assert_has!(&out, r"✗ Postgres can't change the partition key of users in place\n  A partition key is set only when its table is created, so this migration drops users, its partitions and their rows to create them again\.\n");
+        assert_eq!(out.matches('✗').count(), 2, "{out}");
+        assert_eq!(out.matches("reylo migrate new rekey").count(), 1, "{out}");
+    }
+
+    /// The lines that keep a remade table's rows put each value back where the schema now has it: in
+    /// a column renamed with it, cast to a type it changes to, with its identity at the start the
+    /// schema gives it, and a partition the schema keeps as a table of its own keeping its own rows.
+    pub async fn the_lines_that_keep_a_remade_tables_rows_follow_the_change(mut p: P) {
+        let before = "create table users (id int generated always as identity primary key, full_name text not null, score varchar(20), total numeric generated always as (id * 2) stored);";
+        p.schema(before);
+        p.file("20261027100000_users.sql", before);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("insert into users (full_name, score) select 'u' || g, g::text from generate_series(1, 10) g").await;
+        p.output();
+        let users = "create table users (id int generated always as identity (start with 1000), display_name text not null, score integer, total numeric generated always as (id * 3) stored, primary key (id)) partition by hash (id); create table users_p0 partition of users for values with (modulus 2, remainder 0); create table users_p1 partition of users for values with (modulus 2, remainder 1);";
+        p.schema(users);
+        let out = Box::pin(keep_the_rows(&mut p, "partition_users", &[("users.full_name", "display_name")])).await;
+        assert_has!(&out, r"insert into users \(display_name, id, score\) overriding system value select full_name, id, score::integer from users_rows;");
+        assert_eq!(p.rows("select count(*) as n from users where display_name = 'u' || id and score = id and total = id * 3").await[0].text("n"), "10");
+        assert_eq!(p.rows("insert into users (display_name) values ('next') returning id").await[0].text("id"), "1000");
+    }
+
+    /// Each sequence a remade table's rows are put back under moves past them where the migration
+    /// makes it again (a serial's, made with the table or new), and keeps its place where it outlives
+    /// the table; one whose column makes something else of its values is left to be moved by hand.
+    pub async fn a_remade_tables_sequences_move_past_the_rows_put_back(mut p: P) {
+        let before = "create table counters (id serial primary key, n text); create table serials (id bigint primary key, n text); create sequence ticket_no; create table tickets (id bigint primary key default nextval('ticket_no'), n text); create sequence invoices_no; create table invoices (code text primary key default 'INV-' || nextval('invoices_no'), n text); alter sequence invoices_no owned by invoices.code; create table smalls (id smallint primary key, n text);";
+        p.schema(before);
+        p.file("20261027100000_tables.sql", before);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        p.exec("insert into counters (n) select 'c' || g from generate_series(1, 10) g; insert into serials select g, 's' || g from generate_series(1, 10) g; insert into tickets (n) select 't' || g from generate_series(1, 10) g; select setval('ticket_no', 100); insert into invoices (n) select 'i' || g from generate_series(1, 3) g; insert into smalls values (32767, 'top')").await;
+        // Each made again: a serial key, whose sequence the migration makes the column's only after
+        // the rows are back; a key given a serial; a sequence the table only called, which it comes
+        // to own, and which keeps its place, as other tables may have taken its values; and a text
+        // column its own sequence feeds through an expression, which is left to be moved by hand.
+        p.schema("create table counters (id serial primary key, n text) partition by hash (id); create table counters_0 partition of counters for values with (modulus 1, remainder 0); \
+            create table serials (id bigserial primary key, n text) partition by hash (id); create table serials_0 partition of serials for values with (modulus 1, remainder 0); \
+            create sequence ticket_no; create table tickets (id bigint primary key default nextval('ticket_no'), n text) partition by hash (id); create table tickets_0 partition of tickets for values with (modulus 1, remainder 0); alter sequence ticket_no owned by tickets.id; \
+            create sequence invoices_no; create table invoices (code text primary key default 'INV-' || nextval('invoices_no'), n text) partition by hash (code); create table invoices_0 partition of invoices for values with (modulus 1, remainder 0); alter sequence invoices_no owned by invoices.code; \
+            create sequence smalls_no as bigint; create table smalls (id smallint primary key default nextval('smalls_no'), n text) partition by hash (id); create table smalls_0 partition of smalls for values with (modulus 1, remainder 0); alter sequence smalls_no owned by smalls.id;");
+        let out = Box::pin(keep_the_rows(&mut p, "partition_all", &[])).await;
+        assert!(!out.contains("setval('ticket_no'"), "{out}");
+        assert_has!(&out, r"-- and move the sequence invoices_no past the values put back in code");
+        assert_eq!(p.rows("insert into counters (n) values ('next') returning id").await[0].text("id"), "11");
+        assert_eq!(p.rows("insert into serials (n) values ('next') returning id").await[0].text("id"), "11");
+        assert_eq!(p.rows("select nextval('ticket_no') as n").await[0].text("n"), "101");
+        assert_eq!(p.rows("select count(*) as n from invoices").await[0].text("n"), "3");
+        // A sequence that counts wider than its key may find no value past the rows the key holds:
+        // it is left to be moved by hand.
+        assert_has!(&out, r"-- and move the sequence smalls_no past the values put back in id");
+        assert_eq!(p.rows("insert into smalls (n) values ('next') returning id").await[0].text("id"), "1");
+    }
+
+    /// A list-partitioned table made plain, one of its partitions kept as a table of its own, keeps
+    /// that partition's rows apart, those of its own partitions included.
+    pub async fn a_partition_kept_as_a_table_of_its_own_keeps_its_rows(mut p: P) {
+        // A list-partitioned table made plain, one of its partitions kept as a table of its own, whose
+        // rows are in a partition of its own.
+        let regions = "create table regions (id int generated always as identity, region text not null, name text, primary key (id, region)) partition by list (region); create table regions_eu partition of regions for values in ('eu'); create table regions_us partition of regions for values in ('us') partition by hash (id); create table regions_us_0 partition of regions_us for values with (modulus 1, remainder 0);";
+        p.schema(regions);
+        p.file("20261027100000_regions.sql", regions);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        p.exec("insert into regions (region, name) select case when g <= 5 then 'eu' else 'us' end, 'r' || g from generate_series(1, 10) g").await;
+        p.schema("create table regions (id int generated always as identity, region text not null, name text, primary key (id, region)); create table regions_us (id int generated always as identity, region text not null, name text, primary key (id, region)) partition by hash (id); create table regions_us_0 partition of regions_us for values with (modulus 1, remainder 0);");
+        let out = Box::pin(keep_the_rows(&mut p, "unpartition_regions", &[])).await;
+        assert_has!(&out, r"create table regions_rows as select \* from regions where tableoid not in \(select relid from pg_partition_tree\('regions_us'::regclass\)\);");
+        assert_eq!(p.rows("select count(*) as n from regions where region = 'eu'").await[0].text("n"), "5");
+        assert_eq!(p.rows("select count(*) as n from regions where region = 'us'").await[0].text("n"), "0");
+        assert_eq!(p.rows("select count(*) as n from only regions_us_0 where region = 'us'").await[0].text("n"), "5");
+    }
+
+    /// A start moved on an identity no index leads with reads every row of its table, which is
+    /// locked against writes while it does, so the migration asks for --blocking.
+    pub async fn a_sequence_moved_past_unindexed_rows_asks_for_blocking(mut p: P) {
+        // A partial index serves no max over every row; a column renamed in the same change is
+        // found where the block reads it.
+        let before = "create table log (id bigint generated always as identity, msg text); create table events (id bigint generated always as identity primary key, msg text); create table active (id bigint generated always as identity, live boolean); create index active_live on active (id) where live; create table renamed (id bigint generated always as identity, msg text); create sequence stage_no; create table stage (id bigint, n text); create sequence later_no; create table later (id bigint, n text); create sequence fed_no; create table fed (id bigint default nextval('fed_no'), n text); \
+            create sequence order_no; create table orders (id bigint primary key, secondary_id bigint default nextval('order_no')); alter sequence order_no owned by orders.id; \
+            create sequence idx_no; create table idx (id bigint default nextval('idx_no')); create index \"idx$id\" on idx (id); \
+            create sequence dropdef_no; create table dropdef (id bigint default nextval('dropdef_no')); \
+            create sequence rn_no; create table rn (id bigint default nextval('rn_no')); \
+            create sequence pk_no; create table pk (id bigint constraint pk_key primary key default nextval('pk_no')); \
+            create sequence part_no; create table part (id bigint, constraint part_key primary key (id)) partition by range (id); create table part_1 partition of part (id default nextval('part_no')) for values from (0) to (100000); \
+            create sequence kept_no; create table kept (id bigint constraint kept_key primary key default nextval('kept_no')); create table kept_items (kept_id bigint constraint kept_items_fk references kept (id));";
+        p.schema(before);
+        p.file("20261027100000_log.sql", before);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("insert into log (msg) select 'm' || g from generate_series(1, 10) g; insert into events (msg) select 'e' || g from generate_series(1, 10) g; insert into stage values (2000, 's'); insert into later values (2000, 'l'); insert into fed values (2000, 'f')").await;
+        p.output();
+        // A default the change gives a column is set after the read, which so doesn't reach it; one
+        // already there is read.
+        p.schema("create sequence later_no start with 1000; create table later (id bigint default nextval('later_no'), n text); create sequence fed_no start with 1000; create table fed (id bigint default nextval('fed_no'), n text); \
+            create sequence order_no start with 1000; create table orders (id bigint primary key, secondary_id bigint default nextval('order_no')); alter sequence order_no owned by orders.id; \
+            create sequence idx_no start with 1000; create table idx (id bigint default nextval('idx_no')); \
+            create sequence dropdef_no start with 1000; create table dropdef (id bigint); \
+            create sequence rn_no start with 1000; create table rn (new_id bigint default nextval('rn_no')); \
+            create sequence pk_no start with 1000; create table pk (id bigint not null default nextval('pk_no')); \
+            create sequence part_no start with 1000; create table part (id bigint not null) partition by range (id); create table part_1 partition of part (id default nextval('part_no')) for values from (0) to (100000); \
+            create sequence kept_no start with 1000; create table kept (id bigint constraint kept_key primary key default nextval('kept_no')); create table kept_items (kept_id bigint); \
+            create sequence stage_no start with 1000; create table stage (id bigint, n text); alter sequence stage_no owned by stage.id; create table log (id bigint generated always as identity (start with 1000), msg text); create table events (id bigint generated always as identity (start with 1000) primary key, msg text); create table active (id bigint generated always as identity (start with 1000), live boolean); create index active_live on active (id) where live; create table renamed (new_id bigint generated always as identity (start with 1000), msg text);");
+        let rename = vec![("renamed.id".to_string(), "new_id".to_string()), ("rn.id".to_string(), "new_id".to_string())];
+        let choices = reylo_migrate::Choices { rename: rename.clone(), ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "move_ids", &choices, log).await).await, 1);
+        let out = p.output();
+        assert!(!out.contains("of later while"), "{out}");
+        // An indexed column the sequence owns hides no other column it feeds; a column renamed
+        // ahead of the read is still read.
+        for table in ["log", "active", "renamed", "fed", "orders", "rn"] {
+            assert_has!(&out, &format!(r"reads every row of {table} while it blocks writes to it, to move a sequence past them"));
+        }
+        assert!(!out.contains("of events while"), "an indexed column is read through its index: {out}");
+        assert!(!out.contains("of stage while"), "a table the sequence comes to own after the read isn't read: {out}");
+        let choices = reylo_migrate::Choices { rename, blocking: true, ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "move_ids", &choices, log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("insert into log (msg) values ('next') returning id").await[0].text("id"), "1000");
+        assert_eq!(p.rows("select nextval('stage_no') as n").await[0].text("n"), "1000");
+        assert_eq!(p.rows("select nextval('fed_no') as n").await[0].text("n"), "2001");
+        // A default the change drops is read only where it is dropped after the read.
+        let file = std::fs::read_to_string(p.dir.join("migrations").join(p.files().into_iter().find(|f| f.ends_with("_move_ids.sql")).unwrap())).unwrap();
+        let at = |text: &str| file.lines().position(|l| l.contains(text)).unwrap_or_else(|| panic!("{file}"));
+        let read_first = at("'public.dropdef_no'") < at("alter column id drop default");
+        assert_eq!(out.contains("of dropdef while"), read_first, "{file}");
+        // An index the change drops serves the read only where it is dropped after it, whatever its
+        // name holds.
+        let dropped_first = file.lines().position(|l| l.contains("drop index") && l.contains("idx$id")).is_some_and(|d| d < at("'public.idx_no'"));
+        assert_eq!(out.contains("of idx while"), dropped_first, "{file}");
+        // So does a key the change drops, whose index goes with it.
+        let key_first = file.lines().position(|l| l.contains("drop constraint pk_key")).is_some_and(|d| d < at("'public.pk_no'"));
+        assert_eq!(out.contains("of pk while"), key_first, "{file}");
+        // A partitioned table's key takes its partitions' indexes with it, whatever they are named.
+        let parent_first = file.lines().position(|l| l.contains("drop constraint part_key")).is_some_and(|d| d < at("'public.part_no'"));
+        assert_eq!(out.contains("of part_1 while"), parent_first, "{file}");
+        // A foreign key dropped takes no index: the key it references still serves the read.
+        assert!(!out.contains("of kept while"), "{out}");
+    }
+
+    /// The check of a sequence's read reads the catalog and runs nothing of the file but the file:
+    /// a dry run that deploys to another database files that take a serial's values around the read
+    /// runs them as the deploy would, and still finds the read.
+    pub async fn a_sequence_read_is_checked_without_moving_the_files_sequences(mut p: P) {
+        let tables = |start: &str| format!("create table parent (id serial primary key); create table child (parent_id integer references parent (id)); create table log (id bigint generated always as identity{start}, msg text);");
+        p.schema(&tables(""));
+        p.file("20261027100000_tables.sql", &tables(""));
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "seed", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let named = |p: &P, name: &str| p.dir.join("migrations").join(p.files().into_iter().find(|f| f.ends_with(&format!("_{name}.sql"))).unwrap());
+        std::fs::write(named(&p, "seed"), "insert into parent default values;\n").unwrap();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        p.schema(&tables(" (start with 1000)"));
+        let choices = reylo_migrate::Choices { blocking: true, ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "move_log", &choices, log).await).await, 0, "{}", p.peek());
+        let file = named(&p, "move_log");
+        let sql = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, format!("{sql}\ninsert into parent default values;\ninsert into child values (2);\n")).unwrap();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        let q = P::new(p.d).await.unwrap();
+        p.url = q.url.clone();
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"reads every row of log while it blocks writes to it, to move a sequence past them");
     }
 
     pub async fn init_creates_the_extensions_its_schema_uses(mut p: P) {

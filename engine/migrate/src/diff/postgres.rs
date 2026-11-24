@@ -641,9 +641,16 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             "select co.oid, co.conindid, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, format('%I', co.conname) as name,
               pg_get_constraintdef(co.oid, false) as def, co.condeferrable as deferrable, co.condeferred as deferred, co.convalidated as validated, co.contype as type,
               case when co.contype = 'f' then
-                (select string_agg(format_type(a.atttypid, null), ', ' order by k.n) from unnest(co.conkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.conrelid and a.attnum = k.num)
-                || ' to ' || (select string_agg(format_type(a.atttypid, null), ', ' order by k.n) from unnest(co.confkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.confrelid and a.attnum = k.num)
+                (select string_agg(format_type(a.atttypid, null)
+                  || case when a.attcollation <> t.typcollation then ' collate ' || (select format('%I.%I', cn.nspname, cl.collname) from pg_collation cl join pg_namespace cn on cn.oid = cl.collnamespace where cl.oid = a.attcollation) else '' end, ', ' order by k.n) from unnest(co.conkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.conrelid and a.attnum = k.num join pg_type t on t.oid = a.atttypid)
+                || ' to ' || (select string_agg(format_type(a.atttypid, null)
+                  || case when a.attcollation <> t.typcollation then ' collate ' || (select format('%I.%I', cn.nspname, cl.collname) from pg_collation cl join pg_namespace cn on cn.oid = cl.collnamespace where cl.oid = a.attcollation) else '' end, ', ' order by k.n) from unnest(co.confkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.confrelid and a.attnum = k.num join pg_type t on t.oid = a.atttypid)
               end as linked,
+              case when co.contype = 'f' then
+                (select string_agg(format(E'\n-- computes %s %s as %s', side, k.n, encode(textsend(pg_get_expr(ad.adbin, ad.adrelid)), 'hex')), '' order by side, k.n)
+                  from (select 'own' as side, co.conrelid as rel, co.conkey as keys union all select 'referenced', co.confrelid, co.confkey) s cross join lateral unnest(s.keys) with ordinality k(num, n)
+                  join pg_attribute a on a.attrelid = s.rel and a.attnum = k.num join pg_attrdef ad on ad.adrelid = a.attrelid and ad.adnum = a.attnum where a.attgenerated = 's')
+              end as computed,
               case when co.contype in ('p', 'u') then (select string_agg(o, ', ' order by o) from pg_class ic, unnest(ic.reloptions) o where ic.oid = co.conindid) end as index_options,
               case when co.contype in ('p', 'u', 'x') then (select format('%I.%I', inn.nspname, ic.relname) from pg_class ic join pg_namespace inn on inn.oid = ic.relnamespace where ic.oid = co.conindid) end as index_name,
               c.relkind = 'p' and co.contype in ('p', 'u', 'x') and not coalesce((select i.indisvalid from pg_index i where i.indexrelid = co.conindid), true) as alone
@@ -685,9 +692,11 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         if inline {
             inline_constraints.entry(oid(&r, "reloid")).or_default().push(format!("constraint {name} {def}"));
         }
-        // A foreign key holds while the types of the columns it links compare; a change of either
-        // side's type makes it again around the change, so that both columns can change between.
-        let linked = r.get("linked").map(|l| format!("\n-- links {l}")).unwrap_or_default();
+        // A foreign key holds while the values of the columns it links compare; a change of either
+        // side's type, collation or stored expression makes it again around the change, so that
+        // both columns can change between. A stored expression that goes keeps the values; each is
+        // written as its text in hex, on one line that no line of it can stand in for.
+        let linked = r.get("linked").map(|l| format!("\n-- links {l}{}", r.get("computed").unwrap_or_default())).unwrap_or_default();
         // A key's index storage parameters change in place on its index; anything else about it
         // makes it again.
         // A partitioned table's key index takes no options in place: it is made again.
@@ -1580,7 +1589,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             "select p.oid, format('%I', p.polname) as name, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, p.polcmd as cmd, p.polpermissive as permissive,
               (select string_agg(case when r = 0 then 'public' else quote_ident(pg_get_userbyid(r)) end, ', ' order by 1) from unnest(p.polroles) r) as roles,
               pg_get_expr(p.polqual, p.polrelid) as qual, pg_get_expr(p.polwithcheck, p.polrelid) as check
-            from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace where {kept_rel}",
+            from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace where {ns} and {kept_rel}",
         ))
         .await?
     {
@@ -1651,7 +1660,8 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         .rows(&format!(
             "select s.oid, format('%I.%I', n.nspname, s.stxname) as name, pg_get_statisticsobjdef(s.oid) as def, s.stxrelid as rel,
               nullif(coalesce(s.stxstattarget::int, -1), -1) as target
-            from pg_statistic_ext s join pg_namespace n on n.oid = s.stxnamespace where {ns} and {}",
+            from pg_statistic_ext s join pg_namespace n on n.oid = s.stxnamespace where {ns} and {} and {}",
+            crate::catalog::on_no_temporary_table("s"),
             format!("({} or {})", not_platform("s.stxowner"), not_platform_schema("n"))
         ))
         .await?
@@ -2254,6 +2264,24 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                 if let Some(o) = s.objects.get_mut(&from) {
                     o.deps.insert(to);
                 }
+            }
+        }
+    }
+    // A table's copy of another's check is no object of its own, but holds what it calls: the
+    // table carries that, read off the copy itself, whichever ancestor the check came down from.
+    for r in db
+        .rows(
+            "select co.conrelid, format('%s', d.refclassid::regclass) as rcls, d.refobjid, d.refobjsubid
+            from pg_constraint co join pg_depend d on d.classid = 'pg_constraint'::regclass and d.objid = co.oid and d.deptype = 'n'
+            where co.contype = 'c' and co.coninhcount > 0 and not (d.refclassid = 'pg_class'::regclass and d.refobjid = co.conrelid) and d.refobjid >= 16384",
+        )
+        .await?
+    {
+        let (Some(table), Some(read)) = (ids.of("pg_class", oid(&r, "conrelid"), 0), ids.of(r.text("rcls"), oid(&r, "refobjid"), r.text("refobjsubid").parse().unwrap_or(0))) else { continue };
+        if let Some(o) = s.objects.get_mut(&table) {
+            let line = format!("{COPY_READS}{read}");
+            if !o.extra.contains(&line) {
+                o.extra.push(line);
             }
         }
     }
@@ -3242,6 +3270,66 @@ fn dollar_block(body: &str) -> String {
     format!("do {tag} {body} {tag}")
 }
 
+/// The columns the sequence `s` (SQL that gives it as a `regclass`) gives values to, each as its
+/// table (`rel`) and name (`attname`), whether it holds them as they are (`plain`): an identity, an
+/// integer column the sequence is owned by, or one whose default is it alone. A domain whose
+/// default calls it is a row that isn't.
+pub(crate) fn sequence_columns(s: &str) -> String {
+    let integer = "a.atttypid in ('int2'::regtype, 'int4'::regtype, 'int8'::regtype)";
+    format!(
+        "select d.refobjid::regclass as rel, a.attname, {integer} as plain from pg_depend d join pg_attribute a on a.attrelid = d.refobjid and a.attnum = d.refobjsubid \
+        where d.classid = 'pg_class'::regclass and d.objid = {s} and d.refclassid = 'pg_class'::regclass and d.deptype in ('a', 'i') \
+        union all select ad.adrelid::regclass, a.attname, {integer} and r.relkind in ('r', 'p') and pg_get_expr(ad.adbin, ad.adrelid) = format('nextval(%L::regclass)', {s}::text) \
+        from pg_depend d join pg_attrdef ad on ad.oid = d.objid join pg_attribute a on a.attrelid = ad.adrelid and a.attnum = ad.adnum join pg_class r on r.oid = ad.adrelid \
+        where d.classid = 'pg_attrdef'::regclass and d.refclassid = 'pg_class'::regclass and d.refobjid = {s} \
+        union all select null, null, false from pg_depend d where d.classid = 'pg_type'::regclass and d.refclassid = 'pg_class'::regclass and d.refobjid = {s}"
+    )
+}
+
+/// What precedes the expression that gives the sequence in the first block of `moved_to_start`, and
+/// what follows it, by which a file's hazards find the block and the sequence it reads for.
+pub(crate) const SEQUENCE_READ: (&str, &str) = ("do $reylo$ declare s regclass := ", "; goal numeric := ");
+
+/// Whether a sequence's start moved from `was` to `is` in the direction it counts.
+fn ahead(was: &str, is: &str, descending: bool) -> bool {
+    match (was.parse::<i128>(), is.parse::<i128>()) {
+        (Ok(a), Ok(b)) => if descending { b < a } else { b > a },
+        _ => false,
+    }
+}
+
+/// A sequence moved forward to a `start` it hasn't reached, and past every value of each column it
+/// gives values to, but never back, which would give again a value it gave: two blocks, the first
+/// before the alter of the sequence and the second after it. The first reads the columns, each
+/// table locked against writes (not reads) until the migration commits, so that no row written
+/// after it is passed over (a table the role may not lock leaves the sequence where it is), and
+/// keeps where the sequence is to go for the second (a setting of the
+/// transaction); the second, under the alter's lock, which holds back every `nextval`, reads where
+/// the sequence stands and restarts it there, which a failed migration undoes. It moves only where
+/// each column holds the sequence's values as they are: an identity, an integer column it is owned
+/// by, or one whose default is it alone. Where one makes something else of them (`'INV-' ||
+/// nextval(…)`, a view's default, a domain's), where its rows are isn't known, and it stays where it
+/// is. A value past the rows outside the new bounds, `low` to `high`, is passed over, as rows there
+/// can't be got past.
+fn moved_to_start(sequence: &str, start: &str, increment: &str, low: &str, high: &str) -> [String; 2] {
+    let (edge, past, beyond) = if increment.starts_with('-') { ("min", "- 1", "<") } else { ("max", "+ 1", ">") };
+    let columns = sequence_columns("s");
+    let first = dollar_block(&format!(
+        "declare s regclass := {sequence}; goal numeric := {start}; reach numeric; c record; \
+        begin for c in {columns} loop if not c.plain then return; end if; \
+        begin execute format('lock table %s in share mode', c.rel); exception when insufficient_privilege then return; end; execute format('select {edge}(%I)::numeric {past} from %s', c.attname, c.rel) into reach; \
+        if reach {beyond} goal and reach between {low} and {high} then goal := reach; end if; end loop; \
+        perform set_config('reylo.sequence_goal', goal::text, true); end"
+    ));
+    let second = dollar_block(&format!(
+        "declare s regclass := {sequence}; goal numeric := nullif(current_setting('reylo.sequence_goal', true), '')::numeric; stands numeric; \
+        begin perform set_config('reylo.sequence_goal', '', true); if goal is null then return; end if; \
+        execute format('select case when is_called then last_value::numeric + ({increment}) else last_value end from %s', s) into stands; \
+        if goal {beyond} stands then execute format('alter sequence %s restart with %s', s, goal); end if; end"
+    ));
+    [first, second]
+}
+
 /// Whether `name` is one Postgres gives a not null it makes on `table`'s `column`, the column's name
 /// as Postgres holds it: its name for it, or the one it gives where another constraint of the schema
 /// held that name, with a number after its label.
@@ -3414,6 +3502,8 @@ fn columns_left(from: &Object, to: &Object) -> Vec<(String, String)> {
 /// name and definition).
 const OWN_CONSTRAINT: &str = "constraint of table ";
 const COPIED_CONSTRAINT: &str = "constraint copied to table ";
+/// What a table's copy of another's check calls, by id.
+const COPY_READS: &str = "copied check reads ";
 
 /// The constraints a table's joining or leaving another carries across, by the server's rules: one
 /// it leaves keeps its copies of the other's as its own, and one it joins takes its own that match
@@ -4205,7 +4295,20 @@ impl Alterer for PostgresAlterer {
         let columns: Vec<String> = to.extra.iter().filter_map(|l| l.strip_prefix(TABLE_COLUMN)?.split(SEP).nth(2)).map(String::from).collect();
         let mut out: Vec<String> = parents.iter().flat_map(|p| copies.iter().map(move |c| format!("constraint {p}.{c}"))).collect();
         out.extend(parents.iter().flat_map(|p| columns.iter().map(move |c| format!("column {p}.{c}"))));
+        // A parent's check may be a copy itself, of an ancestor's: what the copies call, as the
+        // target records them, is made first too.
+        out.extend(to.extra.iter().filter_map(|l| l.strip_prefix(COPY_READS)).map(String::from));
         out
+    }
+
+    fn copies_read(&self, from: &Object, to: &Object) -> Vec<String> {
+        // A table that leaves a parent drops its copies of the parent's checks after it leaves. One
+        // it added itself before it joined is its own as well, which the parent's drop leaves: what
+        // the check calls, as the copy's own records say, goes after the table's change.
+        if from.kind != Some(Kind::Table) || !joins_or_leaves(from, to).1 {
+            return Vec::new();
+        }
+        from.extra.iter().filter_map(|l| l.strip_prefix(COPY_READS)).map(String::from).collect()
     }
 
     fn releases(&self, from: &Object, to: &Object) -> bool {
@@ -4327,6 +4430,16 @@ impl Alterer for PostgresAlterer {
             (c.ty, c.collation, c.generated)
         };
         from.kind == Some(Kind::Column) && values(&from.def) == values(&to.def)
+    }
+
+    fn keeps(&self, from: &Object, to: &Object) -> bool {
+        // A foreign key, alike but for stored expressions its columns lose, which keep their values.
+        let parts = |def: &str| -> (String, Vec<String>) {
+            let mut parts = def.split("\n-- computes ").map(String::from);
+            (parts.next().unwrap_or_default(), parts.collect())
+        };
+        let ((a, was), (b, is)) = (parts(&from.def), parts(&to.def));
+        from.kind == Some(Kind::Constraint) && a.starts_with("FOREIGN KEY") && a == b && is.len() < was.len() && is.iter().all(|e| was.contains(e))
     }
 
     fn alter(&self, from: &Object, to: &Object) -> Option<Vec<String>> {
@@ -4610,8 +4723,21 @@ impl Alterer for PostgresAlterer {
                         if ox.contains_key("cycle") != oy.contains_key("cycle") {
                             set.push(if oy.contains_key("cycle") { "set cycle".into() } else { "set no cycle".into() });
                         }
+                        // A start moved ahead moves the sequence where it hasn't got that far, as a
+                        // table made from the schema starts there: the table read before the alter,
+                        // the sequence moved after it, under its lock.
+                        let moved = (ahead(&ex["start with"], &ey["start with"], descending) && !disjoint).then(|| {
+                            let sequence = format!("pg_get_serial_sequence({}, {})", literal(&table), literal(&unquoted(&name)));
+                            moved_to_start(&sequence, &ey["start with"], &ey["increment by"], &ey["minvalue"], &ey["maxvalue"])
+                        });
+                        if let Some([read, _]) = &moved {
+                            out.push(read.clone());
+                        }
                         if !set.is_empty() {
                             out.push(format!("{at} {}", set.join(" ")));
+                        }
+                        if let Some([_, restart]) = moved {
+                            out.push(restart);
                         }
                     }
                     _ => {}
@@ -4827,7 +4953,20 @@ impl Alterer for PostgresAlterer {
                         literal(name)
                     ));
                 }
+                // A start moved ahead moves it where it hasn't got that far: the columns it gives
+                // values to read before the alter, it moved after, under the alter's lock.
+                let start = ey.get("start with").cloned().unwrap_or_default();
+                let moved = (ahead(ex.get("start with").map_or("", |s| s.as_str()), &start, descending) && !disjoint).then(|| {
+                    let bound = |key: &str| ey.get(key).cloned().unwrap_or_default();
+                    moved_to_start(&literal(name), &start, ey.get("increment by").map_or("1", |i| i.as_str()), &bound("minvalue"), &bound("maxvalue"))
+                });
+                if let Some([read, _]) = &moved {
+                    out.push(read.clone());
+                }
                 out.push(format!("alter sequence {name} {}{}", to.def, if disjoint { " restart" } else { "" }));
+                if let Some([_, restart]) = moved {
+                    out.push(restart);
+                }
                 Some(out)
             }
             Kind::Extension => {

@@ -9,6 +9,9 @@ import { builtPage } from '../lib/rust-content.ts';
 const markdown = readdirSync('content/docs')
   .filter(builtPage)
   .map((name) => `${name.slice(0, -'.mdx'.length)}.md`);
+const blogMarkdown = readdirSync('content/blog')
+  .filter((name) => name.endsWith('.mdx'))
+  .map((name) => `blog/${name.slice(0, -'.mdx'.length)}.md`);
 
 export default [
   // Reylo's homepage (components/home-landing.tsx), and the docs' intro (content/docs/index.mdx) under it.
@@ -23,9 +26,11 @@ export default [
   route('migrate/usage', 'routes/page.tsx', { id: 'migrate-usage' }),
   route('migrate/cli', 'routes/page.tsx', { id: 'migrate-cli' }),
   route('migrate/compare', 'routes/page.tsx', { id: 'migrate-compare' }),
-  // The blog: its list of posts, and each post (content/blog, lib/blog.ts).
+  // The blog: its list of posts, and each post (content/blog, lib/blog.ts), plus Markdown mirrors.
   route('blog', 'routes/blog.tsx'),
   route('blog/:slug', 'routes/blog-post.tsx'),
+  route('blog.md', 'routes/blog-markdown.ts', { id: 'markdown/blog.md' }),
+  ...blogMarkdown.map((file) => route(file, 'routes/blog-markdown.ts', { id: `markdown/${file}` })),
   ...markdown.map((file) => route(file, 'routes/markdown.ts', { id: `markdown/${file}` })),
   route('404', 'routes/not-found.tsx'),
   // The playground, full screen (components/play.tsx).
