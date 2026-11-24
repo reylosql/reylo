@@ -135,16 +135,6 @@ const author = await getAuthor.run(db, { id: 1 });
 
 There's no codegen step and no generated file: the types come straight from your database. The query runs on whatever driver you already use, on Postgres, MySQL or SQLite.
 
-## Why Reylo
-
-Until now, there have been three ways to query a database from TypeScript, and each of them falls short:
-
-- **ORMs and query builders** — Prisma, Drizzle and Kysely build your SQL from TypeScript. But they're a second language over SQL. Whatever they can't express falls back to a raw query you type by hand.
-- **Raw SQL** — You write the SQL yourself, and declare each query's row type by hand. Nothing checks that type against the database, so it drifts as the schema changes.
-- **Code generators** — sqlc and PgTyped read your queries and generate typed functions. But that's a build step to run after every change, and generated code to commit and keep in sync.
-
-Reylo keeps the SQL and drops the rest. You write plain SQL, and TypeScript gets its types from the database itself.
-
 ## How it works
 
 TypeScript 7.1 adds the content mapper API, adding support for external file types. It lets you dynamically generate a static type signature for an import of a file with a given extension. Reylo is a content mapper for `.sql`:
@@ -315,5 +305,19 @@ npm install -D typescript@next
 ```
 
 Then you add the `tsconfig.json` entry from above, plus Reylo's plugin for your runtime or bundler. [The setup guide](/typescript#setup) walks through each one.
+
+Reylo is the perfect option for the agent era:
+
+<div className="dk-features">
+
+- 💪 **The full power of SQL** — any syntax, function or operator your database supports
+- 🌵 **DRY** — no redundant hand-written types
+- 🎯 **Checked against your database** — a misspelled column is a type error
+- 🤖 **Agent-friendly** — DRY code is more maintainable for agents
+- 🧩 **Postgres, MySQL and SQLite** — Neon, PlanetScale, Cloudflare D1, Turso and more
+- 🔌 **Bring your own driver** — `pg`, postgres.js, `mysql2`, `better-sqlite3` and [more](/typescript#run)
+- ⚡ **No codegen** — no generated files, no watcher
+
+</div>
 
 Reylo can also write your migrations, in plain SQL, with [Reylo Migrate](/blog/reylo-migrate). It's all MIT licensed and on [GitHub](https://github.com/reylosql/reylo).
