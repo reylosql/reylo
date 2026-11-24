@@ -4013,6 +4013,7 @@ on!(
     a_migration_that_creates_a_role_is_refused,
     a_role_grant_is_refused_by_deploy_too,
     a_role_in_schema_sql_is_refused_before_any_shadow,
+    a_role_a_database_ran_is_refused_before_its_replay,
     an_object_the_comparison_does_not_read_is_not_a_match,
     a_failed_concurrent_index_leaves_nothing,
     a_failed_lone_statement_may_leave_its_change,
@@ -5870,6 +5871,22 @@ mod adversarial {
         p.file("20261027110000_role.sql", &format!("create role {role};"));
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "more", &Default::default(), log).await).await, 1);
         assert_has!(p.output(), &format!(r"✗ Migration 20261027110000_role\.sql can't be replayed in a shadow database\n\n    create role {role}\n"));
+        assert!(p.rows(&format!("select 1 from pg_roles where rolname = '{role}'")).await.is_empty(), "no shadow created the role on the server");
+    }
+
+    /// `history pull`, and `dev` rewinding a migration edited since, replay what the database ran
+    /// rather than the files, so a role an older run or another tool recorded is refused there.
+    pub async fn a_role_a_database_ran_is_refused_before_its_replay(mut p: P) {
+        let role = format!("madv_ran_role_{}", std::process::id());
+        p.exec(&format!("drop role if exists {role}")).await;
+        p.schema("create table t (id int);");
+        p.file("20261027100000_t.sql", "create table t (id int);");
+        p.exec(&format!("create table t (id int); create table __reylo_migrations (name text primary key, sql text not null, applied_at timestamptz); insert into __reylo_migrations values ('20261027100000_t.sql', 'create table t (id int); create role {role};', now())")).await;
+        let refused = format!(r"✗ Migration 20261027100000_t\.sql, as this database ran it, can't be replayed in a shadow database\n\n    create role {role}\n\n  It changes a role, which belongs to the server\.");
+        assert_eq!(p.run(async |o, log| reylo_migrate::history_pull(o, log).await).await, 1);
+        assert_has!(p.output(), &refused);
+        assert_eq!(p.dev().await, 1);
+        assert_has!(p.output(), &refused);
         assert!(p.rows(&format!("select 1 from pg_roles where rolname = '{role}'")).await.is_empty(), "no shadow created the role on the server");
     }
 
