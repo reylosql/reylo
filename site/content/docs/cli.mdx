@@ -32,10 +32,10 @@ To pin a version, name it in mise's `mise.toml`. Every developer and CI job then
 
 ```toml title="mise.toml"
 [tools]
-"github:reylosql/reylo" = "0.8.0"
+reylo = "0.8.3"
 ```
 
-The scripts take `REYLO_VERSION=0.8.0`. The image takes a tag, as `ghcr.io/reylosql/reylo:0.8.0`.
+The scripts take `REYLO_VERSION=0.8.3`. The image takes a tag, as `ghcr.io/reylosql/reylo:0.8.3`.
 
 Each command reads the database your project names, as the type check does:
 

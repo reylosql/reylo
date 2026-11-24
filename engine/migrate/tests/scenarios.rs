@@ -3993,6 +3993,7 @@ on!(
     a_server_setting_change_misses_the_cache,
     a_migrations_session_setting_is_never_carried_by_the_cache,
     init_reads_a_function_dumped_before_the_table_it_reads,
+    init_locks_a_schema_that_uses_a_hash_operator,
     a_platforms_schemas_and_extensions_are_in_every_shadow,
     a_platforms_extension_in_pg_catalog_is_not_the_projects,
     a_role_that_is_no_superuser_runs_every_command,
@@ -5916,6 +5917,17 @@ mod adversarial {
         let text = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
         assert!(text.contains("function user_count()") && text.contains("create table quotas"), "{text}");
         assert_eq!(introspect(&p.opts()).await, text);
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    }
+
+    /// Postgres reads `#` as an operator, which the lock keeps everything after as written: init.sql
+    /// is locked as the checks read it back.
+    pub async fn init_locks_a_schema_that_uses_a_hash_operator(mut p: P) {
+        p.exec("create table t (id int primary key, j jsonb, a int, b int, check ((a # b) >= 0)); create index t_j on t ((j #>> '{k}'))").await;
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.history().await, ["init.sql"]);
+        p.strict = true;
+        assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     }
 
