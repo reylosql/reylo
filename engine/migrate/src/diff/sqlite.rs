@@ -655,11 +655,12 @@ impl Alterer for SqliteAlterer {
             None => true,
         });
         // The indexes each one's content reads, by the target's schema: its content where that
-        // is another index, the index an `fts5vocab` table reads, and the relations a view on the
-        // way reads.
+        // is another index, the index an `fts5vocab` table reads, and what a view on the way
+        // reads, which `view_reads` gives: every name its text holds (`loose`, which never misses
+        // a read), or the sources of its FROM clauses (which no alias or literal fakes).
         let schemas = self.schemas.borrow();
         let names: Vec<String> = rebuilds.iter().map(|(n, _)| n.clone()).collect();
-        let reads = |name: &str| -> BTreeSet<String> {
+        let reads = |name: &str, loose: bool| -> BTreeSet<String> {
             let mut out = BTreeSet::new();
             let Some((_, to)) = schemas.as_ref() else { return out };
             let Some(content) = to.objects.get(&format!("table {name}")).and_then(|o| Info::of(o).content).map(|(c, ..)| c) else { return out };
@@ -677,29 +678,24 @@ impl Alterer for SqliteAlterer {
                     queue.extend(o.create.first().and_then(|sql| vocabulary_of(sql)));
                 }
                 if let Some(view) = to.objects.get(&format!("view {relation}")) {
-                    queue.extend(relations_read(view.create.first().map_or("", String::as_str)));
+                    queue.extend(view_reads(view.create.first().map_or("", String::as_str), loose));
                 }
             }
             out.remove(name);
             out
         };
-        let needs: Vec<BTreeSet<String>> = names.iter().map(|n| reads(n)).collect();
-        // Each after what it reads, in the plan's order otherwise. Indexes that read each other,
-        // which no rebuild can settle, run in the plan's order.
+        let loose: Vec<BTreeSet<String>> = names.iter().map(|n| reads(n, true)).collect();
+        let tight: Vec<BTreeSet<String>> = names.iter().map(|n| reads(n, false)).collect();
+        // Each after every index it may read, in the plan's order otherwise; where those make a
+        // circle, the next is one whose FROM clauses read none still to come.
         let mut done: Vec<String> = Vec::new();
         let mut left: Vec<usize> = (0..names.len()).collect();
         while !left.is_empty() {
-            match left.iter().position(|&k| needs[k].iter().all(|n| done.contains(n))) {
-                Some(at) => {
-                    let k = left.remove(at);
-                    statements.push(rebuilds[k].1.clone());
-                    done.push(names[k].clone());
-                }
-                None => {
-                    statements.extend(left.iter().map(|&k| rebuilds[k].1.clone()));
-                    break;
-                }
-            }
+            let ready = |needs: &[BTreeSet<String>]| left.iter().position(|&k| needs[k].iter().all(|n| done.contains(n)));
+            let at = ready(&loose).or_else(|| ready(&tight)).unwrap_or(0);
+            let k = left.remove(at);
+            statements.push(rebuilds[k].1.clone());
+            done.push(names[k].clone());
         }
     }
 
@@ -1143,18 +1139,41 @@ fn reindexed(a: &Info, b: &Info, renamed: &BTreeMap<String, String>, old_parts: 
         .collect()
 }
 
-/// The relations a view's text reads, folded: each its FROM clauses name, a table-valued call
-/// (`join 'notes_fts'('word')`) among them and the name after a schema (`main.notes_fts`), and
-/// never an alias, a column or a string the rest of the text holds.
-fn relations_read(sql: &str) -> Vec<String> {
+/// What a view's text reads, folded. Loosely, every name it holds, which takes in an alias, a
+/// literal or a CTE named like a relation but misses no read. Otherwise each source its FROM
+/// clauses name: a table-valued call (`join 'notes_fts'('word')`) among them, the name after a
+/// schema (`main.notes_fts`), the first of a parenthesized join, and never a CTE's name.
+fn view_reads(sql: &str, loose: bool) -> Vec<String> {
     let tokens = tokenize(sql, Dialect::Sqlite);
     let named = |k: usize| tokens.get(k).is_some_and(|t| matches!(t.kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Str));
+    if loose {
+        return (0..tokens.len()).filter(|&k| named(k)).map(|k| fold(&unquote(&tokens[k]))).collect();
+    }
+    // The names its WITH clauses give: one before `as (`, or before its column list and that.
+    let ctes: BTreeSet<String> = (0..tokens.len())
+        .filter(|&k| named(k) && k > 0 && (matches!(tokens[k - 1].upper().as_str(), "WITH" | "RECURSIVE") || tokens[k - 1].text == ","))
+        .filter(|&k| {
+            let mut j = k + 1;
+            if tokens.get(j).is_some_and(|t| t.text == "(") {
+                j = (j..tokens.len()).find(|&i| tokens[i].text == ")").map_or(tokens.len(), |i| i + 1);
+            }
+            tokens.get(j).is_some_and(|t| t.upper() == "AS") && tokens.get(j + 1).is_some_and(|t| t.text == "(" || t.upper() == "MATERIALIZED" || t.upper() == "NOT")
+        })
+        .map(|k| fold(&unquote(&tokens[k])))
+        .collect();
     // Whether each depth of parentheses is in a FROM clause.
     let mut from: Vec<bool> = vec![false];
     let mut out = Vec::new();
     for (k, t) in tokens.iter().enumerate() {
+        let prev = k.checked_sub(1).map(|j| &tokens[j]);
+        // A source: what follows FROM, JOIN, a comma in a FROM clause, or the parenthesis that
+        // opens a grouped join there.
+        let source = |p: &Token, from: &[bool]| matches!(p.upper().as_str(), "FROM" | "JOIN") || ((p.text == "," || p.text == "(") && from.last() == Some(&true));
         match t.text.as_str() {
-            "(" => from.push(false),
+            "(" => {
+                let grouped = prev.is_some_and(|p| source(p, &from));
+                from.push(grouped);
+            }
             ")" => {
                 from.pop();
                 if from.is_empty() {
@@ -1166,13 +1185,15 @@ fn relations_read(sql: &str) -> Vec<String> {
         let here = from.len() - 1;
         match t.upper().as_str() {
             "FROM" => from[here] = true,
-            "WHERE" | "GROUP" | "HAVING" | "ORDER" | "LIMIT" | "WINDOW" | "UNION" | "INTERSECT" | "EXCEPT" | "SELECT" | "VALUES" => from[here] = false,
+            "WHERE" | "GROUP" | "HAVING" | "ORDER" | "LIMIT" | "WINDOW" | "UNION" | "INTERSECT" | "EXCEPT" | "SELECT" | "VALUES" | "WITH" => from[here] = false,
             _ => {}
         }
-        let Some(prev) = k.checked_sub(1).map(|j| &tokens[j]) else { continue };
-        if named(k) && (matches!(prev.upper().as_str(), "FROM" | "JOIN") || (prev.text == "," && from[here])) {
+        if named(k) && prev.is_some_and(|p| source(p, &from)) {
             let at = if tokens.get(k + 1).is_some_and(|n| n.text == ".") && named(k + 2) { k + 2 } else { k };
-            out.push(fold(&unquote(&tokens[at])));
+            let name = fold(&unquote(&tokens[at]));
+            if at != k || !ctes.contains(&name) {
+                out.push(name);
+            }
         }
     }
     out
@@ -1374,9 +1395,10 @@ mod tests {
 
     #[test]
     fn reads_the_relations_a_view_reads() {
-        let read = |sql: &str| relations_read(sql);
+        let read = |sql: &str| view_reads(sql, false);
         assert_eq!(read("create view v as select f.id, 'filtered' as kind from notes as f join main.\"Z_Root\"('word') as hit on hit.rowid = f.id, other o where f.category <> 'filtered'"), ["notes", "z_root", "other"]);
         assert_eq!(read("create view v as select a, filtered from (select x as a, y as filtered from t1, t2) join 'docs'('x')"), ["t1", "t2", "docs"]);
+        assert_eq!(read("create view v as with filtered as (select id from notes), c (x) as materialized (select 1) select * from (z_root join filtered on 1) join c"), ["notes", "z_root"]);
         assert_eq!(vocabulary_of("CREATE VIRTUAL TABLE v USING fts5vocab(z_root, 'instance')"), Some("z_root".to_string()));
         assert_eq!(vocabulary_of("create virtual table v using fts5vocab(main, \"Docs\", row)"), Some("docs".to_string()));
         assert_eq!(vocabulary_of("create virtual table v using fts5(body)"), None);
