@@ -4584,13 +4584,21 @@ fn keep_rows(id: &str, from: &crate::diff::Schema, to: &crate::diff::Schema, ren
         format!("insert into {table} ({names}){overriding} select {reads} from {copy};"),
     ];
     for (c, _, def) in &kept {
-        if def.contains(" as identity") || def.contains("nextval(") {
+        // An identity's sequence, found through its column; and one the column owns, made again with
+        // the table, named, since the migration makes it the column's only after the rows are back.
+        // A sequence of its own that the column only calls keeps its place.
+        let owned = to.objects.iter().find(|(_, o)| o.kind == Some(crate::diff::Kind::Sequence) && o.goes_with.as_deref() == Some(format!("{prefix}{c}").as_str()));
+        let (sequence, options) = if def.contains(" as identity") {
             let unquoted = c.strip_prefix('"').and_then(|c| c.strip_suffix('"')).map_or(c.to_string(), |c| c.replace("\"\"", "\""));
-            let sequence = format!("pg_get_serial_sequence({}, {})", literal(&table), literal(&unquoted));
-            let (edge, past, beyond) = if def.contains("increment by -") { ("min", "- 1", "<") } else { ("max", "+ 1", ">") };
-            let next = format!("{edge}({c})::numeric {past}");
-            out.push(format!("select setval({sequence}, coalesce((select {next} from {table} having {next} between seqmin and seqmax and {next} {beyond} seqstart), seqstart)::bigint, false) from pg_sequence where seqrelid = {sequence}::regclass;"));
-        }
+            (format!("pg_get_serial_sequence({}, {})", literal(&table), literal(&unquoted)), *def)
+        } else if let Some((id, o)) = owned {
+            (literal(&shown(id.trim_start_matches("sequence "))), o.def.as_str())
+        } else {
+            continue;
+        };
+        let (edge, past, beyond) = if options.contains("increment by -") { ("min", "- 1", "<") } else { ("max", "+ 1", ">") };
+        let next = format!("{edge}({c})::numeric {past}");
+        out.push(format!("select setval({sequence}, coalesce((select {next} from {table} having {next} between seqmin and seqmax and {next} {beyond} seqstart), seqstart)::bigint, false) from pg_sequence where seqrelid = {sequence}::regclass;"));
     }
     out.push(format!("drop table {copy};"));
     out.join("\n")

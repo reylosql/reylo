@@ -3198,8 +3198,9 @@ fn ahead(was: &str, is: &str, descending: bool) -> bool {
 
 /// A sequence moved forward to a `start` it hasn't reached, and past every value of each column it
 /// gives values to, but never back, which would give again a value it gave: two blocks, the first
-/// before the alter of the sequence and the second after it. The first reads the columns while
-/// nothing is locked and keeps where the sequence is to go for the second (a setting of the
+/// before the alter of the sequence and the second after it. The first reads the columns, each
+/// table locked against writes (not reads) until the migration commits, so that no row written
+/// after it is passed over, and keeps where the sequence is to go for the second (a setting of the
 /// transaction); the second, under the alter's lock, which holds back every `nextval`, reads where
 /// the sequence stands and restarts it there, which a failed migration undoes. It moves only where
 /// each column holds the sequence's values as they are: an identity, an integer column it is owned
@@ -3221,7 +3222,7 @@ fn moved_to_start(sequence: &str, start: &str, increment: &str, low: &str, high:
     let first = dollar_block(&format!(
         "declare s regclass := {sequence}; goal numeric := {start}; reach numeric; c record; \
         begin for c in {columns} loop if not c.plain then return; end if; \
-        execute format('select {edge}(%I)::numeric {past} from %s', c.attname, c.rel) into reach; \
+        execute format('lock table %s in share mode', c.rel); execute format('select {edge}(%I)::numeric {past} from %s', c.attname, c.rel) into reach; \
         if reach {beyond} goal and reach between {low} and {high} then goal := reach; end if; end loop; \
         perform set_config('reylo.sequence_goal', goal::text, true); end"
     ));

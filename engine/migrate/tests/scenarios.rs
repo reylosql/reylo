@@ -5657,6 +5657,19 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_has!(&out, r"insert into users \(display_name, id, score\) overriding system value select full_name, id, score::integer from users_rows;");
         assert_eq!(p.rows("select count(*) as n from users where display_name = 'u' || id and score = id and total = id * 3").await[0].text("n"), "10");
         assert_eq!(p.rows("insert into users (display_name) values ('next') returning id").await[0].text("id"), "1000");
+        // A serial key, whose sequence the migration makes the column's only after the rows are back.
+        p.schema(&format!("{users} create table counters (id serial primary key, n text);"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "add_counters", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
+        p.exec("insert into counters (n) select 'c' || g from generate_series(1, 10) g").await;
+        p.schema(&format!("{users} create table counters (id serial primary key, n text) partition by hash (id); create table counters_0 partition of counters for values with (modulus 1, remainder 0);"));
+        keep_the_rows(&mut p, "partition_counters", &[]).await;
+        assert_eq!(p.rows("insert into counters (n) values ('next') returning id").await[0].text("id"), "11");
+        p.schema(users);
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "drop_counters", &reylo_migrate::Choices { drop: vec!["counters".into(), "counters_0".into()], ..Default::default() }, log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.output();
         // A list-partitioned table made plain, one of its partitions kept as a table of its own, whose
         // rows are in a partition of its own.
         p.schema(&format!("{users} create table regions (id int generated always as identity, region text not null, name text, primary key (id, region)) partition by list (region); create table regions_eu partition of regions for values in ('eu'); create table regions_us partition of regions for values in ('us') partition by hash (id); create table regions_us_0 partition of regions_us for values with (modulus 1, remainder 0);"));
