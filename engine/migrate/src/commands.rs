@@ -6161,6 +6161,9 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
         stated.drop.extend(gone.iter().map(&display));
     }
     let remade_from = problems.len();
+    let remaking = !remakes.is_empty();
+    // Whether two of the names --drop would need are one, which --drop can't tell apart.
+    let mut ambiguous = false;
     problems.extend(remakes);
     let unnamed: Vec<(&String, String, String)> = narrowed.iter().filter(|(id, _, _)| !named.contains(id)).map(|(id, shown, why)| (id, shown_id(shown), why.clone())).collect();
     if !guesses.is_empty() {
@@ -6183,7 +6186,10 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
         let problem = asked.hazards(&r).iter().fold(Problem::new("drops-data", title), |p, w| p.note(format!("It also {w}.")));
         let mut problem = match shared.as_slice() {
             [] => problem.offer(if list.len() == 1 { "To drop it" } else { "To drop them" }, asked, r),
-            [(a, name), (b, _), ..] => problem.note(format!("A {a} and a {b} share the name {name}: make one of the changes in schema.sql and write its migration, then the other.")),
+            [(a, name), (b, _), ..] => {
+                ambiguous = true;
+                problem.note(format!("A {a} and a {b} share the name {name}: make one of the changes in schema.sql and write its migration, then the other."))
+            }
             [_] => unreachable!("a name shared by one"),
         };
         // Where something comes as these go, any of them may be renamed: which became which is
@@ -6226,8 +6232,9 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
             problems.push(problem);
         }
     }
-    // Where nothing after them names a command, the last table made again does.
-    if problems.len() > remade_from && problems[remade_from..].iter().all(|p| p.fixes.is_empty()) {
+    // Where nothing after them names a command, the last table made again does, where its command
+    // can name all it needs.
+    if remaking && !ambiguous && problems.len() > remade_from && problems[remade_from..].iter().all(|p| p.fixes.is_empty()) {
         let last = problems.pop().expect("a problem");
         problems.push(last.offer(if subject == "migration" { "To write it, dropping the rows" } else { "To drop the rows" }, asked, reading(&stated, &[], &[])));
     }
@@ -8960,7 +8967,7 @@ mod tests {
         // Beside two drops --drop can't tell apart, no command is offered that would name them.
         let (lost, shown) = (["column public.t.p1".to_string(), "table public.t.p1".to_string()], ["column t.p1".to_string(), "table t.p1".to_string()]);
         let problems = drop_problems(&lost, &shown, &narrowed, &[], &none, &nothing, &[], &Choices::default(), &Asked::migration("narrow", &[]));
-        assert!(problems.iter().all(|p| p.fixes.iter().all(|(what, _)| what != "To accept every change")), "{problems:?}");
+        assert!(problems.iter().all(|p| p.json().get("fixes").is_none()), "no command to repeat the refusal: {problems:?}");
     }
 
     #[test]
