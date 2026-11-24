@@ -540,48 +540,60 @@ async fn storage(db: &mut Db) -> Result<BTreeMap<String, Stored>, Error> {
     Ok(rows.iter().map(|r| (r.text("t").to_string(), Stored { oid: r.text("oid").to_string(), file: r.text("file").to_string(), kind: r.text("kind").to_string(), table: r.text("owner").to_string() })).collect())
 }
 
-/// The names a line of SQL writes, as Postgres reads them: a quoted one as written (a doubled quote
-/// one quote), an unquoted word (`$` part of it) with its ASCII letters folded to lower case. A
-/// string literal's names are those it holds, as `nextval('public.order_no')` reads its own.
-fn identifiers(line: &str) -> Vec<String> {
+/// What the statements of a file ahead of each block that reads for a sequence's move change, as
+/// Postgres's parse names them: the columns whose default they set or drop (table and column), the
+/// indexes they drop and make, and the sequences they give an owner. One for each such block, in
+/// the file's order; none where the file doesn't parse.
+#[derive(Clone, Default)]
+struct Ahead {
+    defaults: BTreeSet<(String, String)>,
+    indexes: BTreeSet<String>,
+    owned: BTreeSet<String>,
+}
+
+fn ahead_of_reads(sql: &str) -> Vec<Ahead> {
     let mut out = Vec::new();
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '"' {
-            let mut name = String::new();
-            while let Some(c) = chars.next() {
-                if c == '"' {
-                    if chars.peek() == Some(&'"') {
-                        chars.next();
-                        name.push('"');
-                    } else {
-                        break;
-                    }
-                } else {
-                    name.push(c);
-                }
-            }
-            out.push(name);
-        } else if c == '\'' {
-            let mut text = String::new();
-            while let Some(c) = chars.next() {
-                if c == '\'' {
-                    if chars.next_if_eq(&'\'').is_none() {
-                        break;
+    syntax::postgres::on_deep_stack(|| {
+        let Ok(result) = syntax::postgres::parse(sql, 0) else { return };
+        let mut now = Ahead::default();
+        for raw in &result.protobuf.stmts {
+            match raw.stmt.as_ref().and_then(|s| s.node.as_ref()) {
+                Some(N::AlterTableStmt(a)) => {
+                    let Some(table) = a.relation.as_ref().map(|r| r.relname.clone()) else { continue };
+                    for cmd in &a.cmds {
+                        if let Some(N::AlterTableCmd(cmd)) = &cmd.node {
+                            if is(cmd.subtype, At::AtColumnDefault) || is(cmd.subtype, At::AtDropColumn) {
+                                now.defaults.insert((table.clone(), cmd.name.clone()));
+                            }
+                        }
                     }
                 }
-                text.push(c);
+                Some(N::DropStmt(d)) if is(d.remove_type, syntax::postgres::protobuf::ObjectType::ObjectIndex) => {
+                    for object in &d.objects {
+                        if let Some(N::List(l)) = &object.node {
+                            if let Some(N::String(name)) = l.items.last().and_then(|n| n.node.as_ref()) {
+                                now.indexes.insert(name.sval.clone());
+                            }
+                        }
+                    }
+                }
+                Some(N::IndexStmt(i)) => {
+                    now.indexes.insert(i.idxname.clone());
+                }
+                Some(N::AlterSeqStmt(q)) if q.options.iter().any(|o| matches!(&o.node, Some(N::DefElem(d)) if d.defname == "owned_by")) => {
+                    now.owned.extend(q.sequence.as_ref().map(|r| r.relname.clone()));
+                }
+                Some(N::DoStmt(_)) => {
+                    let (at, len) = (raw.stmt_location.max(0) as usize, raw.stmt_len.max(0) as usize);
+                    let text = sql.get(at..if len == 0 { sql.len() } else { at + len }).unwrap_or_default();
+                    if text.contains("set_config('reylo.sequence_goal', goal::text") {
+                        out.push(now.clone());
+                    }
+                }
+                _ => {}
             }
-            out.extend(identifiers(&text));
-        } else if c.is_alphabetic() || c == '_' {
-            let mut word = c.to_ascii_lowercase().to_string();
-            while let Some(&c) = chars.peek().filter(|c| c.is_alphanumeric() || **c == '_' || **c == '$') {
-                word.push(c.to_ascii_lowercase());
-                chars.next();
-            }
-            out.push(word);
         }
-    }
+    });
     out
 }
 
@@ -692,60 +704,61 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
     // index serves the column's max and min (a valid btree index that leads with it, over every
     // row). Which columns those are, and their indexes, is read from the catalog before the file
     // runs and after, running nothing more, a column at a time and by its number, which a rename
-    // keeps. One the sequence gives values to in both counts; one only after counts where the file
-    // names the sequence ahead of the read (a default set there), and one only before where the file
-    // doesn't name the column ahead of it (a default dropped there). Likewise an index there before
-    // serves the read unless the file drops it ahead of it, and one there only after where the file
-    // makes it ahead of it. Where the sequence isn't found before the file runs (an identity's
-    // column renamed in it), what it gives values to after counts.
+    // keeps; what the file changes ahead of the read, from its parse. One the sequence gives values
+    // to in both counts; one only after counts where the file sets its default, or gives the
+    // sequence an owner, ahead of the read; and one only before unless the file changes its default
+    // ahead of the read. Likewise an index there before serves the read unless the file drops it
+    // ahead of it, and one there only after where the file makes it ahead of it. Where the sequence
+    // isn't found before the file runs (an identity's column renamed in it), what it gives values to
+    // after counts.
     let (opens, closes) = crate::diff::postgres::SEQUENCE_READ;
     let lines: Vec<&str> = m.sql.lines().collect();
     let reads: Vec<(usize, &str)> = lines.iter().enumerate().filter(|(_, l)| l.contains("set_config('reylo.sequence_goal', goal::text")).filter_map(|(k, l)| l.strip_prefix(opens).and_then(|rest| rest.split_once(closes)).map(|(s, _)| (k, s))).collect();
-    // Each column the sequence gives values to: its table, the table's oid, its number and name, and
-    // the indexes that serve it.
-    type Fed = Vec<(String, String, String, String, Vec<String>)>;
+    // Each column the sequence gives values to: its table, the table's oid and name, its number and
+    // name, and the indexes that serve it.
+    type Fed = Vec<(String, String, String, String, String, Vec<String>)>;
     let fed = |sequence: &str| {
         format!(
-            "select format('%s', c.rel) as t, c.rel::oid::text as oid, a.attnum::text as num, c.attname::text as col, \
+            "select format('%s', c.rel) as t, c.rel::oid::text as oid, (select relname from pg_class where oid = c.rel) as rel, a.attnum::text as num, c.attname::text as col, \
             coalesce((select string_agg(x.relname, ' ') from pg_index i join pg_class x on x.oid = i.indexrelid join pg_am am on am.oid = x.relam \
               where i.indrelid = c.rel and i.indkey[0] = a.attnum and i.indisvalid and i.indpred is null and am.amname = 'btree'), '') as served \
             from (select ({sequence})::regclass as s) q, lateral ({}) c left join pg_attribute a on a.attrelid = c.rel and a.attname = c.attname where c.plain",
             crate::diff::postgres::sequence_columns("q.s")
         )
     };
-    let columns = |rows: &[crate::db::Row]| -> Fed { rows.iter().map(|r| (r.text("t").to_string(), r.text("oid").to_string(), r.text("num").to_string(), r.text("col").to_string(), r.text("served").split_whitespace().map(String::from).collect())).collect() };
+    let columns = |rows: &[crate::db::Row]| -> Fed { rows.iter().map(|r| (r.text("t").to_string(), r.text("oid").to_string(), r.text("rel").to_string(), r.text("num").to_string(), r.text("col").to_string(), r.text("served").split_whitespace().map(String::from).collect())).collect() };
     let mut was: Vec<Option<Fed>> = Vec::new();
     for (_, sequence) in &reads {
         let known = db.rows(&format!("select ({sequence})::regclass is not null as known")).await.ok().and_then(|r| r.first().map(|r| r.flag("known"))).unwrap_or(false);
         was.push(if known { db.rows(&fed(sequence)).await.ok().map(|rows| columns(&rows)) } else { None });
     }
+    let aheads = ahead_of_reads(&m.sql);
     run(db, m).await?;
     let mut found: Vec<String> = Vec::new();
-    for ((k, sequence), was) in reads.iter().zip(&was) {
+    for (k, ((_, sequence), was)) in reads.iter().zip(&was).enumerate() {
         let now = db.rows(&fed(sequence)).await.map(|rows| columns(&rows)).unwrap_or_default();
-        let ahead = &lines[..*k];
-        // A name as the file writes it, read as Postgres reads one: quoted, as written; unquoted, `$`
-        // part of it, folded to lower case.
-        let named = |name: &str| ahead.iter().any(|l| identifiers(l).iter().any(|w| w == name));
-        let bare = |name: &str| name.trim_matches(|c: char| c == '\'' || c == '"').rsplit('.').next().unwrap_or_default().trim_matches('"').to_string();
+        let ahead = aheads.get(k).cloned().unwrap_or_default();
+        let owner = db.rows(&format!("select relname from pg_class where oid = ({sequence})::regclass")).await.ok().and_then(|r| r.first().map(|r| r.text("relname").to_string())).unwrap_or_default();
         // Served where the read runs: by an index there before that the file doesn't drop ahead of
         // it, or one there after that the file makes ahead of it.
-        let served = |then: &[String], after: &[String]| then.iter().any(|i| after.contains(i) || !named(i)) || after.iter().any(|i| !then.contains(i) && named(i));
+        let served = |then: &[String], after: &[String]| then.iter().any(|i| after.contains(i) || !ahead.indexes.contains(i)) || after.iter().any(|i| !then.contains(i) && ahead.indexes.contains(i));
         let mut read: Vec<(String, String)> = Vec::new();
         match was {
-            None => read.extend(now.iter().filter(|(_, _, _, _, after)| after.is_empty()).map(|(t, oid, _, _, _)| (t.clone(), oid.clone()))),
+            None => read.extend(now.iter().filter(|(_, _, _, _, _, after)| after.is_empty()).map(|(t, oid, _, _, _, _)| (t.clone(), oid.clone()))),
             Some(was) => {
-                for (t, oid, num, _, after) in &now {
-                    let unserved = match was.iter().find(|(_, o, n, _, _)| o == oid && n == num) {
-                        Some((_, _, _, _, then)) => !served(then, after),
-                        None => named(&bare(sequence)) && !served(&[], after),
+                for (t, oid, rel, num, col, after) in &now {
+                    let unserved = match was.iter().find(|(_, o, _, n, _, _)| o == oid && n == num) {
+                        Some((_, _, _, _, _, then)) => !served(then, after),
+                        // Given to the column ahead of the read: by a default set there, or ownership.
+                        None => (ahead.defaults.contains(&(rel.clone(), col.clone())) || ahead.owned.contains(&owner)) && !served(&[], after),
                     };
                     if unserved {
                         read.push((t.clone(), oid.clone()));
                     }
                 }
-                for (t, oid, _, col, then) in was.iter().filter(|(_, o, n, _, _)| !now.iter().any(|(_, o2, n2, _, _)| o2 == o && n2 == n)) {
-                    if !served(then, &[]) && !(named(&bare(t)) && named(col)) {
+                // Taken from the column after the read, where no default change ahead of it took it.
+                for (t, oid, rel, _, col, then) in was.iter().filter(|(_, o, _, n, _, _)| !now.iter().any(|(_, o2, _, n2, _, _)| o2 == o && n2 == n)) {
+                    if !served(then, &[]) && !ahead.defaults.contains(&(rel.clone(), col.clone())) {
                         read.push((t.clone(), oid.clone()));
                     }
                 }
@@ -792,10 +805,20 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
 mod tests {
 
     #[test]
-    fn identifiers_are_read_as_postgres_reads_them() {
-        assert_eq!(super::identifiers(r#"drop index "orders$Idx", ORDERS_ID; alter table "T""x" alter column "ID" set default nextval('public.Order_No'::regclass)"#), ["drop", "index", "orders$Idx", "orders_id", "alter", "table", "T\"x", "alter", "column", "ID", "set", "default", "nextval", "public", "order_no", "regclass"]);
-        assert_eq!(super::identifiers("drop index ÉvéNEMENTS_IDX"), ["drop", "index", "Événements_idx"]);
+    fn what_a_file_changes_ahead_of_each_read_is_read_from_its_parse() {
+        let read = "do $reylo$ declare s regclass := 'public.order_no'; goal numeric := 1000; begin perform set_config('reylo.sequence_goal', goal::text, true); end $reylo$;";
+        let sql = format!(
+            "comment on sequence order_no is 'Generates orders id values';\nalter table orders alter column total set default nextval('public.order_no'::regclass);\ndrop index \"orders$Idx\", ORDERS_ID;\nalter sequence tag_no owned by tags.id;\n{read}\nalter table orders alter column id drop default;\ndrop index later_idx;\n{read}\n"
+        );
+        let aheads = super::ahead_of_reads(&sql);
+        assert_eq!(aheads.len(), 2);
+        let first = &aheads[0];
+        assert_eq!(first.defaults.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "total".to_string())], "a comment's words change nothing");
+        assert_eq!(first.indexes.iter().cloned().collect::<Vec<_>>(), ["orders$Idx", "orders_id"]);
+        assert_eq!(first.owned.iter().cloned().collect::<Vec<_>>(), ["tag_no"]);
+        assert!(aheads[1].defaults.contains(&("orders".to_string(), "id".to_string())) && aheads[1].indexes.contains("later_idx"));
     }
+
 
     use super::*;
 
