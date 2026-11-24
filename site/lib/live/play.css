@@ -1113,3 +1113,17 @@ html[data-play-schema] :is(#nd-page, .play-embed).play .play-types[data-built] .
 :is(#nd-page, .play-embed).play .play-picker .play-button svg {
   transform: translateY(-0.5px);
 }
+
+/* Wide, as a post lays it out past its column: the query and the types side by side, as on /play. */
+@container (width >= 52rem) {
+  .play.play-embed:is(#nd-page, .play-embed) .play-main {
+    grid-template-columns: minmax(0, 1fr) clamp(22rem, 40%, 32rem);
+    grid-template-rows: minmax(26rem, auto);
+  }
+
+  .play.play-embed:is(#nd-page, .play-embed) .play-side {
+    border-top: 0;
+    border-left: 1px solid var(--color-fd-border);
+    border-radius: 0 12px 12px 0;
+  }
+}

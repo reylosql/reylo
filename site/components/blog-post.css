@@ -1,0 +1,32 @@
+/* A blog post (app/routes/blog-post.tsx): one column under the homepage's bar, as wide as a docs
+   page's, with nothing beside it. A playground in it (components/play-embed.tsx) leaves the column
+   for most of the window's width, centred on it. */
+.bp-main {
+  --bp-column: 46rem;
+  max-width: calc(var(--bp-column) + 6rem);
+  margin: 0 auto;
+  padding: 3.5rem 3rem 6rem;
+}
+
+.bp-article {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.bp-article .play.play-embed:is(#nd-page, .play-embed) {
+  width: min(calc(100vw - 3rem), 76rem);
+  margin-inline: calc((100% - min(calc(100vw - 3rem), 76rem)) / 2);
+}
+
+@media (max-width: 640px) {
+  .bp-main {
+    padding: 2rem 1.25rem 4rem;
+  }
+
+  .bp-article .play.play-embed:is(#nd-page, .play-embed) {
+    width: calc(100vw - 2rem);
+    margin-inline: calc((100% - (100vw - 2rem)) / 2);
+  }
+}

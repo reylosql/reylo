@@ -134,21 +134,21 @@ const db = postgres(process.env.DATABASE_URL);
 const author = await getAuthor.run(db, { id: 1 });
 ```
 
-The types come from your database. Reylo works with Postgres, MySQL and SQLite, and runs each query on the driver you already use.
+There's no codegen step and no generated file. The types come straight from your database. The query runs on the driver you already use, on Postgres, MySQL or SQLite.
 
-## Why
+## Why Reylo
 
-TypeScript has had three ways to talk to SQL, each with a cost:
+There have been three ways to query a database from TypeScript, and each falls short:
 
-- **ORMs and query builders** like Prisma, Drizzle and Kysely are a second language over SQL. What they can't express becomes a raw query, typed by hand.
-- **Raw SQL** needs a row type written by hand, which drifts as the schema changes.
-- **Code generators** like sqlc and PgTyped write the types into files. A separate step keeps them current.
+- **ORMs and query builders** — Prisma, Drizzle and Kysely build your SQL from TypeScript. But they're a second language over SQL. Whatever they can't express falls back to a raw query you type by hand.
+- **Raw SQL** — You write the SQL yourself, and declare each query's row type by hand. Nothing checks that type against the database, so it drifts as the schema changes.
+- **Code generators** — sqlc and PgTyped read your queries and generate typed functions. But that's a build step to run after every change, and generated code to commit and keep in sync.
 
-Reylo has no generated files. The type check asks the database, and the import is typed.
+Reylo keeps the SQL and drops the rest. You write plain SQL, and TypeScript gets its types from the database itself.
 
 ## How it works
 
-TypeScript 7.1 adds content mappers. A package named in `tsconfig.json` gives the types of a file TypeScript can't read itself:
+TypeScript 7.1 adds the content mapper API, adding support for external file types. It lets you dynamically generate a static type signature for an import of a file with a given extension. Reylo is a content mapper for `.sql`:
 
 ```jsonc title="tsconfig.json"
 {
@@ -157,20 +157,53 @@ TypeScript 7.1 adds content mappers. A package named in `tsconfig.json` gives th
 }
 ```
 
-For each `.sql` import, Reylo prepares the statement on your development database, without running it:
+When TypeScript meets a `.sql` import, Reylo sends the query to your live development database. The database compiles it without running it, and hands back the types of its parameters and columns. Reylo reads your schema information too: the catalog on Postgres, and the information tables on MySQL and SQLite.
 
 <HowItWorksDiagram />
 
-Postgres reports the type of each parameter and each column. For a column read from a table, it also names the table. Reylo then reads the column's `not null` from the catalog.
+From those, Reylo infers the types, including some remarkably complex ones:
 
-The database says nothing else about nulls, and nothing about how many rows come back. So Reylo reads the statement with a parser generated from Postgres's own grammar, and works out the rest:
+<Tabs items={["Left joins", "Aggregates", "JSON aggregation", "JSON Schema"]}>
+<Tab value="Left joins" id="how-left-joins">
 
-- **Left joins** make the joined table's columns nullable, unless the `where` rules out a null.
-- **Expressions** such as `count(…)` are never null, and `coalesce(…)` is non-null when any argument is.
-- **Cardinality** comes from the statement's shape. A lookup on a unique key or a `limit 1` returns one row or null.
-- **JSON** built with `jsonb_build_object` and `jsonb_agg` is typed field by field.
+<InferenceCard>
 
-For JSON, Reylo describes the constructor's arguments as a statement of their own. Each field then carries its column's type and nullability:
+```sql file="inferred_user_titles.sql" dialect="all"
+select u.name, p.title
+from users u
+left join posts p on p.user_id = u.id
+where u.id = :user_id::int
+```
+
+</InferenceCard>
+
+</Tab>
+<Tab value="Aggregates" id="how-aggregates">
+
+<InferenceCard>
+
+```sql file="inferred_post_count.sql" dialect="postgres"
+select count(*)::int as posts
+from posts
+where user_id = :user_id::int
+```
+
+```sql file="inferred_post_count.sql" dialect="mysql"
+select count(*) as posts
+from posts
+where user_id = :user_id::int
+```
+
+```sql file="inferred_post_count.sql" dialect="sqlite"
+select count(*) as posts
+from posts
+where user_id = :user_id::int
+```
+
+</InferenceCard>
+
+</Tab>
+<Tab value="JSON aggregation" id="how-json-aggregation">
 
 <InferenceCard>
 
@@ -203,9 +236,63 @@ group by u.id
 
 </InferenceCard>
 
-MySQL and SQLite have engines of their own. MySQL's reads the server's prepare metadata, and SQLite's reads the statement as SQLite itself resolves it.
+</Tab>
+<Tab value="JSON Schema" id="how-json-schema">
 
-A mistake is a type error, with the database's own message at its line in the `.sql` file:
+<InferenceCard>
+
+```sql schema dialect="postgres"
+create extension if not exists pg_jsonschema;
+
+create table events (
+  id serial primary key,
+  payload jsonb not null check (jsonb_matches_schema('{
+    "type": "object",
+    "properties": {
+      "x": { "type": "integer" },
+      "y": { "type": "integer" }
+    },
+    "required": ["x", "y"],
+    "additionalProperties": false
+  }', payload))
+);
+```
+
+```sql schema dialect="mysql"
+create table events (
+  id int auto_increment primary key,
+  payload json not null check (json_schema_valid('{
+    "type": "object",
+    "properties": {
+      "x": { "type": "integer" },
+      "y": { "type": "integer" }
+    },
+    "required": ["x", "y"],
+    "additionalProperties": false
+  }', payload))
+);
+```
+
+```sql file="inferred_event_payloads.sql" dialect="postgres"
+-- hover events: payload's type comes from its JSON Schema
+select id, payload
+from events
+where id = :id::int
+```
+
+```sql file="inferred_event_payloads.sql" dialect="mysql"
+-- hover events: payload's type comes from its JSON Schema
+select id, payload
+from events
+where id = :id::int
+```
+
+</InferenceCard>
+
+</Tab>
+</Tabs>
+
+And a typo in your SQL is a type error, with the database's own message:
 
 ```sql tab="get_user.sql" dialect="all" errors
 select id, nmae, email
@@ -213,43 +300,11 @@ from users
 where id = :id::int
 ```
 
-The type check prints it like any other error:
-
-```ansi title="Terminal"
-$ tsc --noEmit --runExternalCode
-[96mget_user.sql[0m:[93m1[0m:[93m12[0m - [91merror[0m[90m reylo6: [0mcolumn "nmae" does not exist (42703)
-
-[7m1[0m select id, nmae, email
-[7m [0m [91m           ~~~~[0m
-
-Found 1 error in get_user.sql[90m:1[0m
-```
-
 ## Try it
 
-Edit the query, and its types follow. Postgres and Reylo run in this tab:
+Edit the query, and its types follow. Postgres runs in this tab through PGlite, and Reylo's engine runs beside it as WebAssembly:
 
 <PlayEmbed />
-
-## Limits
-
-- **TypeScript 7.1** is in beta, installed as `typescript@next`.
-- **The type check reads your development database.** Each analysis is kept in `reylo/.cache/`, so a check without the database reads the types it last saw.
-- **Queries are fixed text.** Reylo doesn't type a query built at run time.
-
-An optional filter is a parameter cast to `nullable(…)`:
-
-<InferenceCard>
-
-```sql file="inferred_posts_by_user.sql" dialect="all"
-select id, title
-from posts
-where user_id = coalesce(:user_id::nullable(int), user_id)
-```
-
-</InferenceCard>
-
-A form's filters fit in one [JSON parameter](/inference#dynamic-filtering), checked against its JSON Schema before the query runs.
 
 ## Get started
 
@@ -260,6 +315,6 @@ npm install reylo
 npm install -D typescript@next
 ```
 
-Then add it to `tsconfig.json` and to your runtime, as [the setup](/typescript#setup) shows.
+Then add the `tsconfig.json` entry above, and Reylo's plugin for your runtime or bundler, as [the setup](/typescript#setup) shows.
 
 Reylo also writes your migrations, in plain SQL, with [Reylo Migrate](/blog/reylo-migrate). It's MIT licensed, on [GitHub](https://github.com/reylosql/reylo).
