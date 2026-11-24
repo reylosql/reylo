@@ -2376,12 +2376,12 @@ async fn create_asks_about_a_column_replaced_by_one_of_another_type(mut p: P) {
     p.schema(&format!("create table users (id {id}, label {text});"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "label", &Default::default(), log).await).await, 1);
     let out = p.output();
-    // On Postgres the rename rewrites the table, so the command that takes it says --blocking too,
-    // and the refusal says what that accepts.
-    let (why, rename) = if p.d == Dialect::Postgres {
-        (r"  As a rename, it rewrites users, copying every row while it blocks reads and writes to it\.\n\n", r"reylo migrate new label \\\n      --rename users\.score=label \\\n      --blocking")
-    } else {
-        ("", r"reylo migrate new label --rename users\.score=label")
+    // On Postgres and MySQL the rename rewrites the table, so the command that takes it says
+    // --blocking too, and the refusal says what that accepts.
+    let (why, rename) = match p.d {
+        Dialect::Postgres => (r"  As a rename, it rewrites users, copying every row while it blocks reads and writes to it\.\n\n", r"reylo migrate new label \\\n      --rename users\.score=label \\\n      --blocking"),
+        Dialect::Mysql => (r"  As a rename, it rewrites users, copying every row while it blocks writes to it\.\n\n", r"reylo migrate new label \\\n      --rename users\.score=label \\\n      --blocking"),
+        Dialect::Sqlite => ("", r"reylo migrate new label --rename users\.score=label"),
     };
     assert_has!(&out, &format!(r"✗ This migration can't tell a rename from a new column\n\n    - column users\.score [^\n]+\n    \+ column users\.label [^\n]+\n\n{why}  To rename the column, keeping its rows:\n    {rename}\n  To drop the column and its data, and add a new one:\n    reylo migrate new label --drop users\.score\n"));
     assert!(p.files().iter().all(|f| !f.contains("_label")), "nothing is written");
@@ -2614,7 +2614,10 @@ async fn create_renames_a_table_keeping_its_rows(mut p: P) {
     // A table renamed with its columns changed is a drop, unless --rename states it.
     p.schema(&format!("create table members (id {id}, address {text}, joined {int}); create table posts (id {int}, user_id {int}, foreign key (user_id) references members (id));"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "members", &Default::default(), log).await).await, 1);
-    assert_has!(p.output(), r"drops the table accounts and its rows\n\n  To drop it:\n    reylo migrate new members --drop accounts\n  If it was renamed instead, as members:\n    reylo migrate new members --rename accounts=<new name>");
+    // On MySQL, the key on posts made again to reference members copies posts, which the drop's
+    // command takes --blocking for.
+    let drop = if p.d == Dialect::Mysql { r"\n  It also blocks writes to posts while it reads every row\.\n\n  To drop it:\n    reylo migrate new members \\\n      --drop accounts \\\n      --blocking\n" } else { r"\n\n  To drop it:\n    reylo migrate new members --drop accounts\n" };
+    assert_has!(p.output(), &format!(r"drops the table accounts and its rows{drop}  If it was renamed instead, as members:\n    reylo migrate new members --rename accounts=<new name>"));
     let choices = reylo_migrate::Choices { drop: vec![], rename: vec![("accounts".into(), "members".into()), ("accounts.email".into(), "address".into())], ..Default::default() };
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "members", &choices, log).await).await, 0, "{}", p.peek());
     // Both renames read as renames, the column's under the table's new name, named as --rename names
@@ -3863,7 +3866,7 @@ async fn a_trigger_swapped_with_a_key_added_to_its_table() {
     let blocking = reylo_migrate::Choices { blocking: true, ..Default::default() };
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "key", &blocking, log).await).await, 0, "{}", p.peek());
     let sql = std::fs::read_to_string(p.dir.join("migrations").join(p.files().last().unwrap())).unwrap();
-    assert!(sql.starts_with("lock tables users write, accounts write;\nalter table users add constraint ") && sql.ends_with("drop trigger users_touch;\ncreate trigger users_touch before update on users for each row set new.touches = old.touches + 2;\nunlock tables;\n"), "{sql}");
+    assert!(sql.starts_with("lock tables users write, accounts write;\n") && sql.contains("\nalter table users add constraint users_ibfk_1 foreign key (account_id) references accounts (id);\n") && sql.ends_with("drop trigger users_touch;\ncreate trigger users_touch before update on users for each row set new.touches = old.touches + 2;\nunlock tables;\n"), "{sql}");
     p.output();
     assert_eq!(p.dev().await, 1);
     assert_has!(p.output(), r"foreign key constraint fails");
