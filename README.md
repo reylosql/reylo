@@ -15,7 +15,7 @@
 </p>
 
 <div align="center">
-  <a href="https://reylo.dev/docs">Read the docs →</a>
+  <a href="https://reylo.dev/docs">Read the docs →</a> · <a href="https://reylo.dev/play">Try it in your browser →</a>
 </div>
 
 <br/>
