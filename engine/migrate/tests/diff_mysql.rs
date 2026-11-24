@@ -13,8 +13,11 @@
 //! past the rows). The plan is kept beside the case as `plan.sql`: `REYLO_BLESS=1` writes it.
 //! Then every MySQL schema the oracle's cases set up is built from an empty database by its plan
 //! and dropped back to an empty one. The comparator leaves events out, so these tests compare
-//! them themselves. Each case is planned back from v2 to v1 too, which must reach v1 as well
-//! (that plan is not kept). After a plan has run, planning again must find nothing to do. Run against the server `REYLO_TEST_MYSQL` names, and skipped where it is not set.
+//! them themselves. After a plan has run, planning again must find nothing to do. Then the same
+//! database goes back to v1, with its rows, as a rewind takes it, and up to v2 again, unless the
+//! case's `one-way.txt` says why it can't: each leg must reach the other side's catalog and keep its
+//! rows and values as the first plan must (those plans are not kept). Where the way back can't hold
+//! those rows, `back-fails.txt` names the error it must fail with, and the round trip runs without them. Run against the server `REYLO_TEST_MYSQL` names, and skipped where it is not set.
 
 use reylo_migrate::catalog::{catalog, difference};
 use reylo_migrate::db::{with_database, Db};
@@ -89,6 +92,58 @@ fn changed(before: &[(String, Vec<String>, Vec<Vec<String>>)], after: &[(String,
     out
 }
 
+type Values = Vec<(String, Vec<String>, Vec<Vec<String>>)>;
+
+/// What a plan did to the rows it was given: each table whose row count changed, but one whose
+/// partition the plan drops, saying so; and where the plan ran (`rows_after` read), each whose values
+/// changed in the columns it kept, but where the plan (as a loss or a narrowing) or the case
+/// (`changes`, its tables) says it rewrites them.
+fn row_problems(plan: &diff::Plan, before: &[(String, String)], after: &[(String, String)], rows_before: &Values, rows_after: Option<&Values>, changes: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let partitioned: Vec<String> = plan.losses.iter().filter_map(|l| l.strip_prefix("partition ")?.rsplit_once('.').map(|(t, _)| t.to_lowercase())).collect();
+    let lost: Vec<String> = before.iter().filter(|(t, n)| !partitioned.contains(&t.to_lowercase()) && after.iter().any(|(u, m)| u == t && m != n)).map(|(t, n)| format!("{t}: {n} rows before")).collect();
+    if !lost.is_empty() {
+        out.push(format!("rows lost: {}", lost.join(", ")));
+    }
+    let declared = plan.losses.iter().chain(plan.narrowings.iter().map(|(c, _)| c)).filter_map(|id| id.strip_prefix("column ")?.rsplit_once('.').map(|(t, _)| t.trim_matches('`').to_lowercase()));
+    let skip: Vec<String> = changes.iter().cloned().chain(declared).chain(partitioned.iter().cloned()).collect();
+    let rewritten: Vec<String> = rows_after.map(|after| changed(rows_before, after).into_iter().filter(|t| !skip.contains(t)).collect()).unwrap_or_default();
+    if !rewritten.is_empty() {
+        out.push(format!("values changed in: {}", rewritten.join(", ")));
+    }
+    out
+}
+
+/// Takes `db`, with its rows, to the schema `like` has, running the plan as Migrate runs a
+/// migration's statements, and says how it fell short: the statement that failed, each line the two
+/// differ in, the rows and values it changed, and what a second plan would still run. Empty where it
+/// reached it.
+async fn leg(db: &mut Db, like: &mut Db, alterer: &dyn diff::Alterer, changes: &[String]) -> Vec<String> {
+    let before = counts(db).await;
+    let rows_before = values(db).await;
+    let plan = diff::plan(&diff::mysql::read(db).await.unwrap(), &diff::mysql::read(like).await.unwrap(), alterer);
+    let mut failed = None;
+    for s in plan.runnable() {
+        if let Err(e) = db.script(s).await {
+            failed = Some(format!("{s}: {e}"));
+            break;
+        }
+    }
+    let mut lines: Vec<String> = failed.iter().map(|f| format!("the plan failed at {f}")).collect();
+    let (only_a, only_b) = differences(db, like).await;
+    lines.extend(only_a.iter().map(|l| format!("- {l}")).chain(only_b.iter().map(|l| format!("+ {l}"))));
+    let rows_after = if failed.is_none() { Some(values(db).await) } else { None };
+    lines.extend(row_problems(&plan, &before, &counts(db).await, &rows_before, rows_after.as_ref(), changes));
+    if failed.is_none() && only_a.is_empty() && only_b.is_empty() {
+        let again = diff::plan(&diff::mysql::read(db).await.unwrap(), &diff::mysql::read(like).await.unwrap(), alterer).sql();
+        lines.extend(again.lines().map(|l| format!("again: {l}")));
+    }
+    if !lines.is_empty() {
+        lines.push(format!("plan:\n{}", plan.sql().lines().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n")));
+    }
+    lines
+}
+
 /// The database's events, which the comparator does not read, with the database's own name taken
 /// out and when each starts left out (the server fixes it as the event is made).
 async fn events(db: &mut Db) -> Vec<String> {
@@ -111,6 +166,16 @@ async fn differences(a: &mut Db, b: &mut Db) -> (Vec<String>, Vec<String>) {
     only_a.extend(ea.into_iter().map(|l| format!("event {l}")));
     only_b.extend(eb.into_iter().map(|l| format!("event {l}")));
     (only_a, only_b)
+}
+
+/// Deletes every table's rows, keeping each AUTO_INCREMENT counter where it is.
+async fn empty(db: &mut Db) {
+    let tables = db.rows("select table_name as t from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE'").await.unwrap();
+    db.exec("set foreign_key_checks = 0").await.unwrap();
+    for t in tables {
+        db.exec(&format!("delete from `{}`", t.text("t").replace('`', "``"))).await.unwrap();
+    }
+    db.exec("set foreign_key_checks = 1").await.unwrap();
 }
 
 async fn recreate(admin: &mut Db, name: &str) {
@@ -194,15 +259,13 @@ async fn mysql() {
         }
         let (only_a, only_b) = differences(&mut from, &mut to).await;
         let again = diff::plan(&diff::mysql::read(&mut from).await.unwrap(), &diff::mysql::read(&mut to).await.unwrap(), alterer).sql();
-        let after = counts(&mut from).await;
-        // A table whose partition the plan drops, saying so, loses that partition's rows.
-        let partitioned: Vec<String> = plan.losses.iter().filter_map(|l| l.strip_prefix("partition ")?.rsplit_once('.').map(|(t, _)| t.to_lowercase())).collect();
-        let lost: Vec<String> = before.iter().filter(|(t, n)| !partitioned.contains(&t.to_lowercase()) && after.iter().any(|(u, m)| u == t && m != n)).map(|(t, n)| format!("{t}: {n} rows before")).collect();
-        // Every column a table keeps keeps its values, where neither the plan (as a loss or a
-        // narrowing) nor the case (`changes.txt`) says the change rewrites them.
-        let declared = plan.losses.iter().chain(plan.narrowings.iter().map(|(c, _)| c)).filter_map(|id| id.strip_prefix("column ")?.rsplit_once('.').map(|(t, _)| t.trim_matches('`').to_lowercase()));
-        let skip: Vec<String> = read(&case.join("changes.txt")).lines().filter_map(|l| l.split_whitespace().next()).map(|t| t.to_lowercase()).chain(declared).chain(partitioned.iter().cloned()).collect();
-        let rewritten: Vec<String> = if failed.is_none() { changed(&rows_before, &values(&mut from).await).into_iter().filter(|t| !skip.contains(t)).collect() } else { vec![] };
+        // Every table keeps its rows, and every column a table keeps its values, where neither the
+        // plan (a partition or a column it says it loses, a narrowing) nor the case (`changes.txt`)
+        // says the change rewrites them.
+        let changes: Vec<String> = read(&case.join("changes.txt")).lines().filter_map(|l| l.split_whitespace().next()).map(|t| t.to_lowercase()).collect();
+        let rows_after = if failed.is_none() { Some(values(&mut from).await) } else { None };
+        let rows = row_problems(&plan, &before, &counts(&mut from).await, &rows_before, rows_after.as_ref(), &changes);
+        let reached = failed.is_none() && only_a.is_empty() && only_b.is_empty();
         let check = read(&case.join("check.sql"));
         let checked = if failed.is_none() && !check.is_empty() { from.script(&check).await.err() } else { None };
         let expected = case.join("plan.sql");
@@ -219,12 +282,7 @@ async fn mysql() {
         if !only_a.is_empty() || !only_b.is_empty() {
             problems.push(format!("after the plan the database differs from v2:\n{}", only_a.iter().map(|l| format!("  - {l}")).chain(only_b.iter().map(|l| format!("  + {l}"))).collect::<Vec<_>>().join("\n")));
         }
-        if !lost.is_empty() {
-            problems.push(format!("rows lost: {}", lost.join(", ")));
-        }
-        if !rewritten.is_empty() {
-            problems.push(format!("values changed in: {}", rewritten.join(", ")));
-        }
+        problems.extend(rows);
         if !again.is_empty() {
             problems.push(format!("after the plan, the plan again is not empty:\n{again}"));
         }
@@ -234,32 +292,55 @@ async fn mysql() {
         if !bless && read(&expected) != text {
             problems.push(format!("the plan is not plan.sql's (REYLO_BLESS=1 writes it):\n{text}"));
         }
-        // And back: v2 (without rows) to v1, which takes the opposite path through each change.
-        let c = format!("diff_{}_{n}_c", std::process::id());
-        recreate(&mut admin, &c).await;
-        let mut back = Db::connect(&with_database(&base, &c), &here).await.unwrap();
-        if !mode.is_empty() {
-            back.exec(&format!("set session sql_mode = '{mode}'")).await.unwrap();
-        }
-        back.script(&read(&case.join("v1.sql"))).await.unwrap();
-        let reverse = diff::plan(&diff::mysql::read(&mut to).await.unwrap(), &diff::mysql::read(&mut back).await.unwrap(), alterer);
-        let mut failed = None;
-        for s in reverse.runnable() {
-            if let Err(e) = to.script(s).await {
-                failed = Some(format!("{s}: {e}"));
-                break;
+        // Then back to v1 with the rows the plan kept, as a rewind takes a database back, which
+        // takes the opposite path through each change, and up to v2 again, unless the case says
+        // why it goes one way only.
+        if reached && read(&case.join("one-way.txt")).trim().is_empty() {
+            let c = format!("diff_{}_{n}_c", std::process::id());
+            recreate(&mut admin, &c).await;
+            let mut first = Db::connect(&with_database(&base, &c), &here).await.unwrap();
+            if !mode.is_empty() {
+                first.exec(&format!("set session sql_mode = '{mode}'")).await.unwrap();
             }
+            first.script(&read(&case.join("v1.sql"))).await.unwrap();
+            // A case whose way back can't hold the rows the plan left (values it padded past a
+            // narrower type) names the error in `back-fails.txt`: the way back must fail with it and
+            // change nothing, and the round trip then runs without the rows.
+            let back_fails = read(&case.join("back-fails.txt")).trim().to_string();
+            let mut ready = true;
+            if !back_fails.is_empty() {
+                let reverse = diff::plan(&diff::mysql::read(&mut from).await.unwrap(), &diff::mysql::read(&mut first).await.unwrap(), alterer);
+                let mut failed = None;
+                for s in reverse.runnable() {
+                    if let Err(e) = from.script(s).await {
+                        failed = Some(format!("{s}: {e}"));
+                        break;
+                    }
+                }
+                let (only_a, only_b) = differences(&mut from, &mut to).await;
+                let refused = match failed {
+                    Some(f) if f.contains(&back_fails) => None,
+                    Some(f) => Some(format!("the way back failed otherwise than back-fails.txt says: {f}")),
+                    None => Some(format!("the way back ran, where back-fails.txt says it fails with {back_fails}")),
+                };
+                let changed = (!only_a.is_empty() || !only_b.is_empty()).then(|| "the way back that failed changed the database".to_string());
+                ready = refused.is_none() && changed.is_none();
+                problems.extend(refused.into_iter().chain(changed));
+                empty(&mut from).await;
+            }
+            let indent = |lines: Vec<String>| lines.iter().map(|l| format!("  {}", l.replace('\n', "\n  "))).collect::<Vec<_>>().join("\n");
+            let back = if ready { leg(&mut from, &mut first, alterer, &changes).await } else { vec![] };
+            if !back.is_empty() {
+                problems.push(format!("back from v2 to v1:\n{}", indent(back)));
+            } else if ready {
+                let up = leg(&mut from, &mut to, alterer, &changes).await;
+                if !up.is_empty() {
+                    problems.push(format!("up from v1 to v2 again:\n{}", indent(up)));
+                }
+            }
+            first.close().await;
+            admin.exec(&format!("drop database if exists `{c}`")).await.unwrap();
         }
-        let (only_a, only_b) = differences(&mut to, &mut back).await;
-        let again = diff::plan(&diff::mysql::read(&mut to).await.unwrap(), &diff::mysql::read(&mut back).await.unwrap(), alterer).sql();
-        if failed.is_some() || !only_a.is_empty() || !only_b.is_empty() || !again.is_empty() {
-            let mut lines: Vec<String> = failed.into_iter().map(|f| format!("  failed at {f}")).collect();
-            lines.extend(only_a.iter().map(|l| format!("  - {l}")).chain(only_b.iter().map(|l| format!("  + {l}"))));
-            lines.extend(again.lines().map(|l| format!("  again: {l}")));
-            problems.push(format!("back from v2 to v1:\n{}\nplan back:\n{}", lines.join("\n"), reverse.sql()));
-        }
-        back.close().await;
-        admin.exec(&format!("drop database if exists `{c}`")).await.unwrap();
         if !problems.is_empty() {
             failures.push(format!("{name}:\n{}\nplan:\n{text}", problems.join("\n")));
         }
