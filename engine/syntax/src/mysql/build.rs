@@ -33,6 +33,11 @@ fn no<T>(what: &str) -> R<T> {
     Err(what.to_string())
 }
 
+/// Why a statement that parses has no AST: it nests deeper than [`super::Bounds::depth`].
+pub(crate) const TOO_DEEP: &str = "the statement nests too deeply";
+/// Why a statement that parses has no AST: it has more operators than [`super::Bounds::operators`].
+pub(crate) const TOO_MANY_OPERATORS: &str = "the statement has too many operators";
+
 impl<'a> B<'a> {
     pub(crate) fn new(t: &'a Tree<'a>, backslash: bool, bounds: super::Bounds) -> Self {
         let mut lines = vec![0];
@@ -69,7 +74,7 @@ impl<'a> B<'a> {
     fn deeper<T>(&self, f: impl FnOnce() -> R<T>) -> R<T> {
         let depth = self.depth.get() + 1;
         if depth > self.bounds.depth {
-            return no("the statement nests too deeply");
+            return no(TOO_DEEP);
         }
         self.depth.set(depth);
         let out = f();
@@ -139,7 +144,7 @@ impl<'a> B<'a> {
             return no(&e.message);
         }
         if self.operators() > self.bounds.operators {
-            return no("the statement has too many operators");
+            return no(TOO_MANY_OPERATORS);
         }
         let mut out = Vec::new();
         let mut stack = vec![self.t.root];

@@ -893,6 +893,25 @@ a.reylo-compare-name:hover {
   height: 17px;
 }
 
+/* A yes only in a tool's paid build: the check in the half circle's yellow, a small lock at its lower right. */
+.reylo-compare-pro {
+  position: relative;
+  display: block;
+  color: hsl(40, 72%, 45%);
+}
+
+.dark .reylo-compare-pro {
+  color: #d9ad55;
+}
+
+.reylo-compare-mark .reylo-compare-pro .reylo-compare-lock {
+  position: absolute;
+  right: -3px;
+  bottom: -2px;
+  width: 9px;
+  height: 9px;
+}
+
 /* A label that has a popup keeps a dotted rule, as a Twoslash name does, so a reader sees it can be hovered. */
 /* A row's label shows what the row asks on hover. It carries no rule at rest; on hover a dotted underline follows each line of the text. */
 .reylo-compare-label {

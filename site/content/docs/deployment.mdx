@@ -1,6 +1,6 @@
 ---
 title: CI
-description: How to run Reylo's type check and build in CI and on your host. A GitHub Actions workflow for Postgres, what changes for MySQL, SQLite and Cloudflare D1, and a host that builds before it migrates.
+description: Run Reylo's type check and build in CI and on your host. GitHub Actions workflows for Postgres, MySQL, SQLite and D1, plus build-before-migrate hosts.
 ---
 
 <p className="dk-subheader">Type-check and build your queries in CI and on your host</p>
@@ -13,7 +13,7 @@ Reylo's type check runs in CI as it does on your machine, against a database the
 | Schema | Your migrations or a schema file, applied before the type check |
 | Connection | `DATABASE_URL` in the job's environment, or [`direct_url`](/configuration#direct_url) |
 | Commands | The type check, then your build and your tests |
-| Builds on a host | A shadow of the schema the deploy leaves, where the host builds before it migrates ([below](#build-before-migrate)) |
+| Build-before-migrate hosts | A shadow of the schema the deploy leaves ([below](#build-before-migrate)) |
 
 ## GitHub Actions
 
@@ -180,9 +180,9 @@ steps:
   - run: npm run build
 ```
 
-The type check reads the local file that [`direct_url`](/d1#local-database) names, so the job needs no Cloudflare account. [Cloudflare D1](/d1) and [Durable Objects](/durable-objects) cover the rest.
+The type check reads the local SQLite file named by [`direct_url`](/d1#local-database), so CI needs no Cloudflare account (the same workflow applies to [Durable Objects](/durable-objects)).
 
-## A host that builds before it migrates [#build-before-migrate]
+## Build-before-migrate hosts [#build-before-migrate]
 
 A host that builds before it migrates, such as Vercel, would type your build against production's old schema. With Reylo Migrate, run the build on a dry run of the deploy, then deploy:
 

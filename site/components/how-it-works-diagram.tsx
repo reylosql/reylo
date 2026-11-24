@@ -180,9 +180,17 @@ function Narrow() {
  * and the types that come back. A container query picks the form: the wide one from a 588px column
  * (drawn for the page's 672px, where its text is the size it was drawn at, and no smaller than
  * 10.5px at 588px), and the stacked one below that, kept to 400px so that it does not grow larger
- * than the page's text on a small tablet.
+ * than the page's text on a small tablet. `stacked` draws the stacked one at any width, centred, for
+ * a column beside other content (components/home-landing.tsx).
  */
-export function HowItWorksDiagram() {
+export function HowItWorksDiagram({ stacked }: { stacked?: boolean }) {
+  if (stacked) {
+    return (
+      <figure className="mx-auto my-0 max-w-[400px]">
+        <Narrow />
+      </figure>
+    );
+  }
   return (
     <figure className="@container my-8">
       <div className="hidden @min-[588px]:block">
