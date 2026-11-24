@@ -241,7 +241,7 @@ enum Built {
     /// `create index`, as the plan writes it, and the schema its table is named in (`billing.`).
     Index { statement: String, schema: String },
     /// A unique constraint or a primary key: its index, then the constraint added over it.
-    Key { rel: String, primary: bool, columns: Vec<String>, including: Vec<String>, nulls_not_distinct: bool, deferral: &'static str },
+    Key { rel: String, primary: bool, columns: Vec<String>, including: Vec<String>, nulls_not_distinct: bool },
 }
 
 /// `create [unique] index [if not exists] <name> on`, its name apart.
@@ -296,8 +296,8 @@ impl Build {
         match &self.what {
             Built::Index { schema, .. } if under != self.name => vec![format!("alter index {schema}{} rename to {}", quote_ident(under), quote_ident(&self.name))],
             Built::Index { .. } => vec![],
-            Built::Key { rel, primary, deferral, .. } => {
-                vec![format!("alter table {rel} add constraint {} {} using index {}{deferral}", quote_ident(&self.name), if *primary { "primary key" } else { "unique" }, quote_ident(under))]
+            Built::Key { rel, primary, .. } => {
+                vec![format!("alter table {rel} add constraint {} {} using index {}", quote_ident(&self.name), if *primary { "primary key" } else { "unique" }, quote_ident(under))]
             }
         }
     }
@@ -323,18 +323,15 @@ fn shape(statement: &str, tree: Option<&N>, tables: &BTreeMap<String, String>, n
                 if is(c.contype, ConstrType::ConstrCheck) || is(c.contype, ConstrType::ConstrForeign) {
                     return Shape::Later(format!("{} not valid", statement.trim_end()), format!("alter table {rel} validate constraint {}", quote_ident(&c.conname)), vec![]);
                 }
-                // Its index built concurrently, then taken as the constraint's, which carries its
-                // deferral: an index takes no other storage parameters or tablespace in that place.
-                let plain = c.options.is_empty() && c.indexname.is_empty() && c.indexspace.is_empty() && c.access_method.is_empty() && !c.without_overlaps && c.where_clause.is_none();
+                // Its index built concurrently, then taken as the constraint's: an index takes no
+                // other storage parameters or tablespace in that place. Not a deferrable key's, whose
+                // index would check each row at once until the key takes it, refusing writes its
+                // deferral lets through.
+                let plain = c.options.is_empty() && c.indexname.is_empty() && c.indexspace.is_empty() && c.access_method.is_empty() && !c.without_overlaps && c.where_clause.is_none() && !c.deferrable && !c.initdeferred;
                 let primary = is(c.contype, ConstrType::ConstrPrimary);
                 if (is(c.contype, ConstrType::ConstrUnique) || primary) && plain {
                     let (Some(columns), Some(including)) = (key_columns(&c.keys), key_columns(&c.including)) else { return kept() };
-                    let deferral = match (c.deferrable, c.initdeferred) {
-                        (_, true) => " deferrable initially deferred",
-                        (true, false) => " deferrable",
-                        _ => "",
-                    };
-                    return Shape::Built(Build { table: table.clone(), name: c.conname.clone(), what: Built::Key { rel, primary, columns, including, nulls_not_distinct: c.nulls_not_distinct, deferral } });
+                    return Shape::Built(Build { table: table.clone(), name: c.conname.clone(), what: Built::Key { rel, primary, columns, including, nulls_not_distinct: c.nulls_not_distinct } });
                 }
                 return kept();
             }
@@ -1341,27 +1338,25 @@ mod tests {
     }
 
     #[test]
-    fn builds_a_deferrable_key_concurrently_alone() {
+    fn builds_a_key_concurrently_alone() {
         let files = lock_safe(
-            &plan(&[
-                "alter table teams add constraint teams_name_key unique (name) deferrable",
-                "alter table teams add constraint teams_code_key unique nulls not distinct (code) include (name) deferrable initially deferred",
-                "alter table teams add constraint teams_pkey primary key (id) initially deferred",
-            ]),
+            &plan(&["alter table teams add constraint teams_code_key unique nulls not distinct (code) include (name)", "alter table teams add constraint teams_pkey primary key (id)"]),
             &existing(&["teams"]),
         )
         .unwrap();
         assert_eq!(
             files,
             vec![
-                strings(&["create unique index concurrently teams_name_key on teams (name)"]),
-                strings(&["alter table teams add constraint teams_name_key unique using index teams_name_key deferrable"]),
                 strings(&["create unique index concurrently teams_code_key on teams (code) include (name) nulls not distinct"]),
-                strings(&["alter table teams add constraint teams_code_key unique using index teams_code_key deferrable initially deferred"]),
+                strings(&["alter table teams add constraint teams_code_key unique using index teams_code_key"]),
                 strings(&["create unique index concurrently teams_pkey on teams (id)"]),
-                strings(&["alter table teams add constraint teams_pkey primary key using index teams_pkey deferrable initially deferred"]),
+                strings(&["alter table teams add constraint teams_pkey primary key using index teams_pkey"]),
             ]
         );
+        // A deferrable key is added as it is: an index built first would check each row at once.
+        for deferrable in ["alter table teams add constraint teams_name_key unique (name) deferrable", "alter table teams add constraint teams_pkey primary key (id) initially deferred"] {
+            assert_eq!(lock_safe(&plan(&[deferrable]), &existing(&["teams"])), None, "{deferrable}");
+        }
     }
 
     #[test]
