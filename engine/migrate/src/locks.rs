@@ -550,8 +550,8 @@ struct Ahead {
     /// Of those, the ones set to `nextval` of a sequence: table, column and the sequence's name.
     fed: BTreeSet<(String, String, String)>,
     indexes: BTreeSet<String>,
-    /// The constraints dropped, table (as the catalog named it before the file ran, through any
-    /// rename ahead) and name: a key takes its index with it, and a partitioned table's key its
+    /// The constraints dropped, table (as written, and as the catalog named it before the file ran,
+    /// through any rename ahead) and name: a key takes its index with it, and a partitioned table's key its
     /// partitions' too, which the catalog names before the file runs.
     keys: BTreeSet<(String, String)>,
     owned: BTreeSet<String>,
@@ -612,7 +612,9 @@ fn ahead_of_reads(sql: &str) -> Vec<Ahead> {
                                     now.fed.insert((table.clone(), cmd.name.clone(), sequence));
                                 }
                             } else if is(cmd.subtype, At::AtDropConstraint) {
-                                now.keys.insert((was.get(&table).cloned().unwrap_or_else(|| table.clone()), cmd.name.clone()));
+                                // Under its name as written too: a rename of a table of that name
+                                // in another schema mustn't hide the key it drops.
+                                now.keys.extend(was.get(&table).cloned().into_iter().chain([table.clone()]).map(|t| (t, cmd.name.clone())));
                             }
                         }
                     }
@@ -885,7 +887,7 @@ mod tests {
         assert_eq!(first.defaults.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "code".to_string()), ("orders".to_string(), "dotted".to_string()), ("orders".to_string(), "total".to_string())], "a comment's words change nothing");
         assert_eq!(first.fed.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "code".to_string(), "other_no".to_string()), ("orders".to_string(), "dotted".to_string(), "order.no".to_string()), ("orders".to_string(), "total".to_string(), "order_no".to_string())]);
         assert_eq!(first.indexes.iter().cloned().collect::<Vec<_>>(), ["orders$Idx", "orders_id"]);
-        assert_eq!(first.keys.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "orders_pk".to_string())]);
+        assert_eq!(first.keys.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "orders_pk".to_string()), ("purchases".to_string(), "orders_pk".to_string())]);
         assert_eq!(first.owned.iter().cloned().collect::<Vec<_>>(), ["tag_no"]);
         assert!(aheads[1].defaults.contains(&("orders".to_string(), "id".to_string())) && aheads[1].indexes.contains("later_idx"));
     }
