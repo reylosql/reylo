@@ -1149,8 +1149,22 @@ fn view_reads(sql: &str, loose: bool) -> Vec<String> {
     if loose {
         return (0..tokens.len()).filter(|&k| named(k)).map(|k| fold(&unquote(&tokens[k]))).collect();
     }
-    // The names its WITH clauses give: one before `as (`, or before its column list and that.
-    let ctes: BTreeSet<String> = (0..tokens.len())
+    // How deep in parentheses each token is.
+    let depths: Vec<usize> = tokens
+        .iter()
+        .scan(0usize, |depth, t| {
+            let at = *depth;
+            match t.text.as_str() {
+                "(" => *depth += 1,
+                ")" => *depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            Some(if t.text == ")" { *depth } else { at })
+        })
+        .collect();
+    // The names its WITH clauses give (one before `as (`, or before its column list and that),
+    // each with the tokens it is bound over: to the end of the parentheses that hold it.
+    let ctes: Vec<(String, usize, usize)> = (0..tokens.len())
         .filter(|&k| named(k) && k > 0 && (matches!(tokens[k - 1].upper().as_str(), "WITH" | "RECURSIVE") || tokens[k - 1].text == ","))
         .filter(|&k| {
             let mut j = k + 1;
@@ -1159,8 +1173,9 @@ fn view_reads(sql: &str, loose: bool) -> Vec<String> {
             }
             tokens.get(j).is_some_and(|t| t.upper() == "AS") && tokens.get(j + 1).is_some_and(|t| t.text == "(" || t.upper() == "MATERIALIZED" || t.upper() == "NOT")
         })
-        .map(|k| fold(&unquote(&tokens[k])))
+        .map(|k| (fold(&unquote(&tokens[k])), k, (k..tokens.len()).find(|&j| depths[j] < depths[k]).unwrap_or(tokens.len())))
         .collect();
+    let bound = |name: &str, at: usize| ctes.iter().any(|(n, start, end)| n == name && (*start..*end).contains(&at));
     // Whether each depth of parentheses is in a FROM clause.
     let mut from: Vec<bool> = vec![false];
     let mut out = Vec::new();
@@ -1191,7 +1206,7 @@ fn view_reads(sql: &str, loose: bool) -> Vec<String> {
         if named(k) && prev.is_some_and(|p| source(p, &from)) {
             let at = if tokens.get(k + 1).is_some_and(|n| n.text == ".") && named(k + 2) { k + 2 } else { k };
             let name = fold(&unquote(&tokens[at]));
-            if at != k || !ctes.contains(&name) {
+            if at != k || !bound(&name, k) {
                 out.push(name);
             }
         }
@@ -1399,6 +1414,7 @@ mod tests {
         assert_eq!(read("create view v as select f.id, 'filtered' as kind from notes as f join main.\"Z_Root\"('word') as hit on hit.rowid = f.id, other o where f.category <> 'filtered'"), ["notes", "z_root", "other"]);
         assert_eq!(read("create view v as select a, filtered from (select x as a, y as filtered from t1, t2) join 'docs'('x')"), ["t1", "t2", "docs"]);
         assert_eq!(read("create view v as with filtered as (select id from notes), c (x) as materialized (select 1) select * from (z_root join filtered on 1) join c"), ["notes", "z_root"]);
+        assert_eq!(read("create view v as select * from a join z_root on 1 where exists (with z_root as (select 1) select * from z_root)"), ["a", "z_root"]);
         assert_eq!(vocabulary_of("CREATE VIRTUAL TABLE v USING fts5vocab(z_root, 'instance')"), Some("z_root".to_string()));
         assert_eq!(vocabulary_of("create virtual table v using fts5vocab(main, \"Docs\", row)"), Some("docs".to_string()));
         assert_eq!(vocabulary_of("create virtual table v using fts5(body)"), None);
