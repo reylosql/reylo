@@ -1,0 +1,1 @@
+SELECT countIf(name = 'filled' AND CAST(role, 'String') = if({admin:Bool}, 'admin', 'member')) >= 3 FROM users

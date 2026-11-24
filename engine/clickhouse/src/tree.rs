@@ -296,7 +296,20 @@ impl<'a> Tree<'a> {
             return Some(());
         }
         if text.starts_with("CONSTANT id: ") {
-            operands.others.push(text.rsplit_once(", constant_value_type: ")?.1.to_string());
+            // A constant the server computed keeps what computed it under it: where that is
+            // arithmetic, its operands are the value's, and the constant is one by its own type
+            // otherwise.
+            let folded = self.section(i, "EXPRESSION").and_then(|expression| self.children(expression).first().copied()).and_then(|computed| {
+                let mut inner = Operands::default();
+                self.operands(computed, &mut inner).map(|_| inner)
+            });
+            match folded {
+                Some(inner) => {
+                    operands.parameters.extend(inner.parameters);
+                    operands.others.extend(inner.others);
+                }
+                None => operands.others.push(text.rsplit_once(", constant_value_type: ")?.1.to_string()),
+            }
             return Some(());
         }
         let name = text.strip_prefix("FUNCTION id: ")?.split_once("function_name: ")?.1.split(',').next()?;
@@ -537,11 +550,12 @@ pub fn operands(lines: &[&str], constant: &dyn Fn(&str) -> bool) -> Vec<Option<O
 /// The values each of a SELECT's columns is one of, where the column is a choice between values:
 /// an `if`, a `multiIf` or a `CASE`, whose results may be such choices themselves. `None` of any
 /// other column, of every column where the lines are no one query's tree, and of every column of
-/// a query that adds rows of its own, whose values are no result of the choice: the rows a WITH
-/// FILL adds, and those of totals, a rollup, a cube or grouping sets.
+/// a query that adds rows of its own after it computes its columns, whose values are no result of
+/// the choice: the rows its own WITH FILL adds, and those of its totals, rollup, cube or grouping
+/// sets. A query it reads from may add rows, each of which the choice is computed for.
 pub fn choices(lines: &[&str]) -> Vec<Option<Vec<Pick>>> {
     let Some(tree) = Tree::read(lines, &|_| false).filter(|tree| tree.kind(0) == "QUERY") else { return Vec::new() };
-    let adds_rows = ["is_group_by_with_totals: 1", "group_by_type: "].iter().any(|flag| tree.nodes[0].1.contains(flag)) || (0..tree.nodes.len()).any(|i| !tree.names[i] && tree.kind(i) == "SORT" && tree.nodes[i].1.contains("with_fill: 1"));
+    let adds_rows = ["is_group_by_with_totals: 1", "group_by_type: "].iter().any(|flag| tree.nodes[0].1.contains(flag)) || tree.listed(0, "ORDER BY").unwrap_or_default().into_iter().any(|sort| tree.nodes[sort].1.contains("with_fill: 1"));
     if adds_rows {
         return vec![None; tree.columns(0).map_or(0, |columns| columns.len())];
     }
@@ -1014,6 +1028,9 @@ mod tests {
         for (from, to) in [("QUERY id: 0\n", "QUERY id: 0, is_group_by_with_totals: 1\n"), ("QUERY id: 0\n", "QUERY id: 0, group_by_type: rollup\n"), ("  JOIN TREE", "  ORDER BY\n    LIST id: 50, nodes: 1\n      SORT id: 51, sort_direction: ASCENDING, with_fill: 1\n        EXPRESSION\n          COLUMN id: 52, column_name: number, result_type: UInt64, source_id: 3\n  JOIN TREE")] {
             assert_eq!(choices(&query(&labels).replacen(from, to, 1).lines().collect::<Vec<_>>()), [None], "{to}");
         }
+        // A query it reads from may add rows: the choice is computed for each of them.
+        let source = "  JOIN TREE\n    QUERY id: 3, alias: __table1, is_subquery: 1\n      PROJECTION COLUMNS\n        number UInt64\n      PROJECTION\n        LIST id: 60, nodes: 1\n          COLUMN id: 61, column_name: number, result_type: UInt64, source_id: 62\n      JOIN TREE\n        TABLE id: 62, table_name: app.t\n      ORDER BY\n        LIST id: 63, nodes: 1\n          SORT id: 64, sort_direction: ASCENDING, with_fill: 1\n            EXPRESSION\n              COLUMN id: 61, column_name: number, result_type: UInt64, source_id: 62";
+        assert_eq!(choices(&query(&labels).replacen("  JOIN TREE\n    TABLE id: 3, table_name: app.t", source, 1).lines().collect::<Vec<_>>()), [texts(&["paid", "new"])]);
     }
 
     #[test]
@@ -1039,6 +1056,10 @@ mod tests {
             assert_eq!(read("UInt64", &operator(name, &[format!("            {column}"), inner.clone()])), [None], "{name}");
         }
         assert_eq!(read("UInt64", &operator("plus", &[format!("            {column}"), converted.replace("CAST", "toUInt64")])), [None]);
+        // A constant the server computed with arithmetic stands for what it was computed from, and any other is an operand by its own type.
+        let folded = |name: &str| format!("            CONSTANT id: 40, constant_value: UInt64_3, constant_value_type: UInt16\n              EXPRESSION\n                FUNCTION id: 41, function_name: {name}, function_type: ordinary, result_type: UInt16\n                  ARGUMENTS\n                    LIST id: 42, nodes: 2\n                      CONSTANT id: 43, constant_value: UInt64_1, constant_value_type: UInt8\n                      CONSTANT id: 44, constant_value: UInt64_2, constant_value_type: UInt8");
+        assert_eq!(read("UInt64", &operator("plus", &[format!("            {stand_in}"), folded("plus")])), [of(&["UInt8"], &["UInt8", "UInt8"])]);
+        assert_eq!(read("UInt64", &operator("plus", &[format!("            {stand_in}"), folded("bitOr")])), [of(&["UInt8"], &["UInt16"])]);
         assert!(operands(&["Expression"], &|_| false).is_empty());
     }
 

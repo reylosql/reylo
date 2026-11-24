@@ -663,6 +663,8 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
       "sum.sql": "UPDATE users SET age = age + {by:UInt8} WHERE id = {id:UInt64}",
       "sum_values.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 's', {a:UInt8} + {b:UInt8})",
       "sum_wide.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 's', {a:UInt8} + {b:UInt16})",
+      // A part of a sum the server computes ahead stands for what it adds.
+      "sum_folded.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 's', {a:UInt8} + (1 + 2))",
       // A quotient is a float, and a text is read: neither is a number of the column's kind.
       "quotient.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 's', {a:UInt8} / {b:UInt8})",
       "joined.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 's', concat(toString({a:UInt8}), toString({b:UInt8})))",
@@ -672,6 +674,8 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
       "sum_column.sql": "UPDATE users SET age = id + {by:UInt8} WHERE id = {id:UInt64}",
       // A query that adds rows of its own gives a label's column values that are no result of the choice.
       "label_filled.sql": "INSERT INTO users (id, role) SELECT number, if({admin:Bool}, 'admin', 'member') FROM numbers(3) WHERE number != 1 ORDER BY number WITH FILL",
+      // A query it reads from may add rows: the choice is computed for each.
+      "label_filled_source.sql": "INSERT INTO users (id, role) SELECT number, if({admin:Bool}, 'admin', 'member') FROM (SELECT number FROM numbers(3) WHERE number != 1 ORDER BY number WITH FILL)",
       // A text that is one of an enum's labels whichever its parameters choose is the label.
       "label.sql": "INSERT INTO users (id, name, role) VALUES ({id:UInt64}, 'l', if({admin:Bool}, 'admin', 'member'))",
       "label_set.sql": "UPDATE users SET role = multiIf({level:UInt8} > 8, 'admin', 'member') WHERE id = {id:UInt64}",
@@ -687,7 +691,7 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
       "null_computed.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 'n', nullIf({age:UInt8}, 0))",
     };
     const found = await transform(root, files);
-    for (const name of ["add.sql", "copy.sql", "remove.sql", "set.sql", "alter_set.sql", "copy_one.sql", "remove_in.sql", "converted.sql", "mapped.sql", "placed.sql", "variant_literal.sql", "cast_dynamic.sql", "wrapped.sql", "starred.sql", "computed_cast.sql", "kept_rows.sql", "kept_wider.sql", "dynamic.sql", "settings_first.sql", "zoned_cast.sql", "sum.sql", "sum_values.sql", "label.sql", "label_set.sql", "label_case.sql", "label_same.sql", "null_named.sql"] as const) assert.deepEqual(found[name]!.diagnostics, [], name);
+    for (const name of ["add.sql", "copy.sql", "remove.sql", "set.sql", "alter_set.sql", "copy_one.sql", "remove_in.sql", "converted.sql", "mapped.sql", "placed.sql", "variant_literal.sql", "cast_dynamic.sql", "wrapped.sql", "starred.sql", "computed_cast.sql", "kept_rows.sql", "kept_wider.sql", "dynamic.sql", "settings_first.sql", "zoned_cast.sql", "sum.sql", "sum_values.sql", "label.sql", "label_set.sql", "label_case.sql", "label_same.sql", "null_named.sql", "sum_folded.sql", "label_filled_source.sql"] as const) assert.deepEqual(found[name]!.diagnostics, [], name);
     assert.deepEqual(marked(files["sum_wide.sql"], found["sum_wide.sql"]!.diagnostics), [["This value of the type UInt32 depends on a parameter and is written to the column age, of the type UInt8. ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Give each parameter the value is computed from a type the column keeps, or convert the value in the statement, as CAST(… AS UInt8) does.", "{a:UInt8} + {b:UInt16}"]]);
     const converted = (value: string, to: string) => `This value of the type ${value} depends on a parameter and is written to the column age, of the type UInt8. ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Convert the value in the statement, as CAST(… AS ${to}) does.`;
     assert.deepEqual(marked(files["quotient.sql"], found["quotient.sql"]!.diagnostics), [[converted("Float64", "UInt8"), "{a:UInt8} / {b:UInt8}"]]);

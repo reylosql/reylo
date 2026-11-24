@@ -19,6 +19,7 @@ insert_from_array.sql: none (rows: (UInt64, UInt64, Decimal(18,2))[]) -> {  }
 insert_kept.sql: none (id: UInt32, name: String(UTF-8, ill-formed), age: UInt8, balance: Decimal(9,2), created: DateTime64, role: Enum8('admin'), tags: String(UTF-8, ill-formed)[], plan: String(UTF-8, ill-formed)) -> {  }
 insert_label.sql: none (id: UInt64, admin: Bool) -> {  }
 insert_label_case.sql: none (id: UInt64, level: UInt8) -> {  }
+insert_label_filled_source.sql: none (admin: Bool) -> {  }
 insert_label_select.sql: none (id: UInt64, level: UInt8) -> {  }
 insert_null_named.sql: none (id: UInt64, name: String(UTF-8, ill-formed)?) -> {  }
 insert_select.sql: none (offset: UInt64, least: Decimal(18,2)) -> {  }
@@ -27,6 +28,7 @@ insert_select_parenthesized.sql: none (id: UInt64, user: UInt64) -> {  }
 insert_settings_first.sql: none (id: UInt64, user: UInt64, placed: Date) -> {  }
 insert_several.sql: none (a: UInt64, b: UInt64) -> {  }
 insert_sum.sql: none (id: UInt64, a: UInt8, b: UInt8) -> {  }
+insert_sum_folded.sql: none (id: UInt64, a: UInt8) -> {  }
 insert_things.sql: none (id: UInt64, format: String(UTF-8, ill-formed), v: UInt64, tags: UInt8[], skus: String(UTF-8, ill-formed)[]) -> {  }
 insert_union_branch.sql: none (id: UInt64, user: UInt64) -> {  }
 insert_values.sql: none (id: UInt64, user: UInt64, total: Decimal(18,2), note: String(UTF-8, ill-formed)?, placed: Date) -> {  }

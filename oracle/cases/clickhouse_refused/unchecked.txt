@@ -60,6 +60,7 @@ insert_star_list.sql: the engine refuses it
 insert_star_replace.sql: the engine refuses it
 insert_subquery_name.sql: the engine refuses it
 insert_subquery_star.sql: the engine refuses it
+insert_sum_folded_wide.sql: the engine refuses it
 insert_sum_wide.sql: the engine refuses it
 insert_text_array.sql: the engine refuses it
 insert_text_enum.sql: the engine refuses it
