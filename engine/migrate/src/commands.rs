@@ -3952,16 +3952,28 @@ fn uncompared_line() -> String {
 /// and writes nothing to the database.
 #[cfg(feature = "cli")]
 pub async fn dry_run(opts: &Options, log: Log<'_>) -> Result<i32, Error> {
+    dry_run_then(opts, None, log).await
+}
+
+/// `reylo migrate deploy --dry-run -- <command>`: the dry run, then, where the deploy after it would
+/// run, `command` run with a shadow database of the schema that deploy leaves (this database's
+/// history replayed, then the pending migrations) as the database its type check and build steps
+/// read, through `REYLO_ANALYSIS_URL`, which the migrations' own commands never read. The shadow is
+/// dropped when the command exits, and the exit code is the command's. A host that builds before it
+/// migrates builds against the schema the deploy makes, never production's, and changes nothing.
+#[cfg(feature = "cli")]
+pub async fn dry_run_then(opts: &Options, command: Option<&[String]>, log: Log<'_>) -> Result<i32, Error> {
     if let Some(code) = refuse_lock_file(opts, log) {
         return Ok(code);
     }
     // A SQLite file that isn't there yet is a database a first deploy makes: checked as the
-    // empty one opening it makes, which is removed after, with what its engine wrote beside it.
-    let made: Vec<PathBuf> = match missing_file(opts)? {
+    // empty one opening it makes, which is removed after, with what its engine wrote beside it;
+    // before a command runs, since what it writes there (a deploy inside it) is its own.
+    let mut made: Vec<PathBuf> = match missing_file(opts)? {
         Some((path, _)) => ["", "-wal", "-shm", "-journal"].iter().map(|x| PathBuf::from(format!("{}{x}", path.display()))).filter(|p| !p.exists()).collect(),
         None => vec![],
     };
-    let result = dry_run_on(opts, log).await;
+    let result = dry_run_on(opts, command, &mut made, log).await;
     for path in &made {
         let _ = std::fs::remove_file(path);
     }
@@ -3969,7 +3981,7 @@ pub async fn dry_run(opts: &Options, log: Log<'_>) -> Result<i32, Error> {
 }
 
 #[cfg(feature = "cli")]
-async fn dry_run_on(opts: &Options, log: Log<'_>) -> Result<i32, Error> {
+async fn dry_run_on(opts: &Options, command: Option<&[String]>, made: &mut Vec<PathBuf>, log: Log<'_>) -> Result<i32, Error> {
     let (mut db, mut server, swept) = match open(opts, log).await? {
         Ok(opened) => opened,
         Err(code) => return Ok(code),
@@ -4004,11 +4016,31 @@ async fn dry_run_on(opts: &Options, log: Log<'_>) -> Result<i32, Error> {
         }
         _ => vec![],
     };
+    // The build's types are those of the server it is analyzed on, which `shadow_url` may make
+    // another: its version is held to this database's.
+    let version = match command {
+        Some(_) if opts.shadow_url.is_some() => server_version(&mut db).await.ok(),
+        _ => None,
+    };
     db.close().await;
-    server.close().await;
-    let plan = result?;
-    unmodeled_note("This database has what Reylo doesn't fully compare, so these checks can't see every change to it", &unmodeled?, log);
+    let plan = match (result, unmodeled) {
+        (Ok(plan), Ok(unmodeled)) => {
+            unmodeled_note("This database has what Reylo doesn't fully compare, so these checks can't see every change to it", &unmodeled, log);
+            plan
+        }
+        (Err(e), _) | (_, Err(e)) => {
+            server.close().await;
+            return Err(e);
+        }
+    };
+    let mut plan = plan;
+    // A deploy refuses a schema.sql that changed since the lock was written, which a dry run holds
+    // to the migrations instead: the command after it would build for a deploy that never runs.
+    if command.is_some() && stamp(opts, opts.schema_text().as_deref()) == Stamp::Changed {
+        plan.problems.push(stamp_problem(opts));
+    }
     if !plan.ok() {
+        server.close().await;
         print_problems(&plan.problems, log);
         return Ok(1);
     }
@@ -4037,7 +4069,231 @@ async fn dry_run_on(opts: &Options, log: Log<'_>) -> Result<i32, Error> {
             }
         }
     }
-    Ok(0)
+    let code = match command {
+        None => Ok(0),
+        // The deploy after the build would refuse this database: nothing is built for it.
+        Some(_) if plan.unchanged == Some(false) => {
+            log(&note("The command didn't run, since the deploy after it would refuse this database"));
+            Ok(1)
+        }
+        Some(command) => {
+            for path in made.drain(..) {
+                let _ = std::fs::remove_file(path);
+            }
+            build_on_shadow(&mut server, opts, &plan, version.as_deref(), command, log).await
+        }
+    };
+    server.close().await;
+    code
+}
+
+/// `command` run with a shadow of what the deploy leaves as the database its analysis reads, and the
+/// shadow dropped after, whatever the command's exit. The shadow starts from the replay cache where
+/// it holds a prefix, and its end is kept there for the next build, before the command can touch it.
+/// `version` is the target's server version, where the shadows are on another server.
+#[cfg(feature = "cli")]
+async fn build_on_shadow(server: &mut Server, opts: &Options, plan: &Plan, version: Option<&str>, command: &[String], log: Log<'_>) -> Result<i32, Error> {
+    let steps: Vec<&Migration> = plan.ran.iter().chain(&plan.records).chain(&plan.pending).collect();
+    let texts: Vec<&str> = steps.iter().map(|m| m.sql.as_str()).collect();
+    let mut shadows = Shadows::new(server, &opts.url, &opts.root, &opts.cache, &texts).await;
+    let lane = shadows.lane();
+    shadows.push(lane, steps.into_iter().map(Step::of));
+    shadows.mark(lane);
+    // A SQLite shadow is in memory, and the command reads a copy: a file this run makes, by a name no other run takes.
+    let file = std::env::temp_dir().join(format!("{}.db", crate::db::random_name()));
+    let mut made_file = false;
+    let opened: Result<Result<String, String>, Error> = async {
+        if let Err((name, e)) = shadows.open(lane).await? {
+            return Ok(Err(format!("{name} failed on the shadow database: {e}")));
+        }
+        if let Some(target) = version {
+            let shadow = server_version(shadows.db(lane)).await?;
+            if shadow != target {
+                return Ok(Err(format!("The shadow server is {shadow}, and this database's is {target}: set shadow_url in .reylo.yaml to a server of {target}, so the build is typed as this database types it")));
+            }
+        }
+        if shadows.server.dialect() == Dialect::Sqlite {
+            std::fs::OpenOptions::new().write(true).create_new(true).open(&file).map_err(|e| Error(format!("cannot make {}: {e}", file.display())))?;
+            made_file = true;
+        }
+        shadows.url(lane, &file).await.map(Ok)
+    }
+    .await;
+    shadows.taint(lane);
+    let code = match opened {
+        Ok(Ok(url)) => {
+            log(&format!("{} Running {} on a shadow database of the schema this deploy leaves", paint("green", "✓"), paint("cyan", &command.join(" "))));
+            crate::terminal::set_spinner(false);
+            let signals = Signals::new();
+            let child = tokio::process::Command::new(program(&command[0]))
+                .args(&command[1..])
+                .env(ANALYSIS_URL, &url)
+                // The npm package's own handshake with this binary, which a reylo inside the command must not inherit.
+                .env_remove("REYLO_VERSION_MATCHED")
+                .spawn();
+            match child {
+                Ok(child) => Ok(wait_holding(shadows.server, child, signals).await),
+                Err(e) => Err(Error(format!("cannot run {}: {e}", command[0]))),
+            }
+        }
+        Ok(Err(why)) => {
+            log(&format!("{} {why}", paint("red", "✗")));
+            Ok(1)
+        }
+        Err(e) => Err(e),
+    };
+    shadows.finish().await;
+    if made_file {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", file.display()));
+        }
+    }
+    code
+}
+
+/// The signals this run passes on to the command it runs, listened for from before the command
+/// starts, so that none ends this run before it has dropped the shadow.
+#[cfg(feature = "cli")]
+struct Signals {
+    #[cfg(unix)]
+    interrupt: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    terminate: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    hangup: Option<tokio::signal::unix::Signal>,
+}
+
+#[cfg(feature = "cli")]
+impl Signals {
+    fn new() -> Signals {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            Signals { interrupt: signal(SignalKind::interrupt()).ok(), terminate: signal(SignalKind::terminate()).ok(), hangup: signal(SignalKind::hangup()).ok() }
+        }
+        #[cfg(not(unix))]
+        Signals {}
+    }
+
+    /// The next signal received.
+    async fn next(&mut self) -> i32 {
+        #[cfg(unix)]
+        {
+            async fn on(stream: &mut Option<tokio::signal::unix::Signal>, n: i32) -> Option<i32> {
+                stream.as_mut()?.recv().await.map(|()| n)
+            }
+            tokio::select! {
+                Some(n) = on(&mut self.interrupt, libc::SIGINT) => n,
+                Some(n) = on(&mut self.terminate, libc::SIGTERM) => n,
+                Some(n) = on(&mut self.hangup, libc::SIGHUP) => n,
+                else => std::future::pending().await,
+            }
+        }
+        #[cfg(not(unix))]
+        std::future::pending().await
+    }
+}
+
+/// The command's exit code, waited for while the shadows' server session is kept alive (its lock is
+/// what keeps another run's sweep off the shadow), and while a signal meant for this run is passed
+/// to the command, which this run waits out before it drops the shadow. A command a signal ended
+/// exits as a shell reports it, 128 and the signal's number.
+#[cfg(feature = "cli")]
+async fn wait_holding(server: &mut Server, mut child: tokio::process::Child, mut signals: Signals) -> i32 {
+    let mut ping = tokio::time::interval(std::time::Duration::from_secs(60));
+    ping.tick().await;
+    let mut pinging = false;
+    loop {
+        // A ping runs beside the wait, and gives up rather than hold it on a connection gone silent.
+        let (now, every, on) = (pinging, &mut ping, &mut *server);
+        let keepalive = async move {
+            if now {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(10), on.ping()).await;
+            } else {
+                every.tick().await;
+            }
+        };
+        tokio::select! {
+            status = child.wait() => return match status {
+                Ok(status) => exit_code(status),
+                Err(_) => 1,
+            },
+            () = keepalive => pinging = !pinging,
+            signal = signals.next() => forward(&child, signal),
+        }
+    }
+}
+
+/// Passes a signal this run received on to the command, but an interrupt from the terminal, which
+/// reached the command too, as one of the terminal's foreground group.
+#[cfg(feature = "cli")]
+fn forward(child: &tokio::process::Child, signal: i32) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // SAFETY: tcgetpgrp and getpgrp only read; kill(2) is of the child this run started and has not reaped yet.
+        unsafe {
+            if signal == libc::SIGINT && libc::tcgetpgrp(0) == libc::getpgrp() {
+                return;
+            }
+            libc::kill(pid as libc::pid_t, signal);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (child, signal);
+}
+
+#[cfg(feature = "cli")]
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+        return 128 + signal;
+    }
+    status.code().unwrap_or(1)
+}
+
+/// The server's version as its types depend on it: Postgres's major, MySQL's major and minor.
+#[cfg(feature = "cli")]
+async fn server_version(db: &mut Db) -> Result<String, Error> {
+    match db.dialect() {
+        Dialect::Postgres => Ok(db.rows("select current_setting('server_version_num')::int / 10000 as v").await?.first().map(|r| format!("Postgres {}", r.text("v"))).unwrap_or_default()),
+        Dialect::Mysql => {
+            let rows = db.rows("select version() as v").await?;
+            let full = rows.first().map(|r| r.text("v").to_string()).unwrap_or_default();
+            Ok(format!("MySQL {}", full.split('.').take(2).collect::<Vec<_>>().join(".")))
+        }
+        Dialect::Sqlite => Ok(String::new()),
+    }
+}
+
+/// The variable a command run on a shadow (`deploy --dry-run -- <command>`) is given the shadow's URL
+/// in: the type check, the build steps and `reylo analyze` read it in place of `direct_url`, and the
+/// migrations' commands never do, so a deploy inside the command still reaches the project's
+/// database.
+pub const ANALYSIS_URL: &str = "REYLO_ANALYSIS_URL";
+
+/// The program to start for a command's first word. On Windows a name with no extension is looked
+/// for with each of PATHEXT's, as a shell does, since `next` is `next.cmd` there: a path as it is
+/// written, and a bare name in the working directory, then on the PATH.
+#[cfg(feature = "cli")]
+fn program(name: &str) -> PathBuf {
+    if !cfg!(windows) || Path::new(name).extension().is_some() {
+        return PathBuf::from(name);
+    }
+    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    let dirs: Vec<PathBuf> = if name.contains(['/', '\\']) {
+        vec![PathBuf::new()]
+    } else {
+        std::iter::once(PathBuf::from(".")).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())).collect()
+    };
+    for dir in dirs {
+        for ext in exts.split(';').filter(|e| !e.is_empty()) {
+            let candidate = dir.join(format!("{name}{ext}"));
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from(name)
 }
 
 /// Each pending migration's locks that block writes to a table with rows while it reads them all,

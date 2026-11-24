@@ -151,6 +151,12 @@ impl<'s> Shadows<'s> {
         &mut self.lanes[l].shadow.as_mut().expect("an open lane").db
     }
 
+    /// A URL another process opens the lane's database at, once `open`; on SQLite a copy at `file`.
+    pub(crate) async fn url(&mut self, l: usize, file: &Path) -> Result<String, Error> {
+        let shadow = self.lanes[l].shadow.as_mut().expect("an open lane");
+        self.server.url_of(shadow, file).await
+    }
+
     /// The command writes to the lane's database itself: it is no longer the replay of its steps.
     pub(crate) fn taint(&mut self, l: usize) {
         self.lanes[l].caching = false;

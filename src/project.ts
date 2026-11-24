@@ -5,7 +5,8 @@
 // project file names under `env` (by default `.env.local`, then `.env`, beside it), and a `${VAR}`
 // in a URL is replaced from that. A `$(command)` in `direct_url` is replaced by what the command
 // prints, so that a secret can come from a password manager or a cloud's token command instead of
-// a file. The URL's scheme names the dialect. The connection is
+// a file. The URL's scheme names the dialect. The connection is the shadow database of
+// `reylo migrate deploy --dry-run -- <command>` inside that command, else
 // `direct_url`, else `${DATABASE_URL}`, and never `url`, which the file keeps for another use
 // (wiki/project-config.md section 4). A file that sets `url` without `direct_url` is told so by
 // `reylo analyze` and `reylo play`, once, and by the error a project with no connection gets; never by an error of
@@ -51,7 +52,7 @@ export type ResolvedProject = {
   sqlcommenter: boolean;
   /** The type `.run()` gives each family of values where the file's `js.codecs` names one (src/codecs.ts). */
   codecs: Codecs;
-  /** The connection the type check uses: `direct_url` when the file names one, else `DATABASE_URL`; never `url`. */
+  /** The connection the type check uses: a dry run's shadow inside its command, else `direct_url` when the file names one, else `DATABASE_URL`; never `url`. */
   url: string | undefined;
   /** Where the URL came from, for a diagnostic: never the URL itself. */
   urlSource: string;
@@ -367,6 +368,9 @@ function commandOutput(command: string, cwd: string, env: Record<string, string>
   return outcome;
 }
 
+/** The variable `reylo migrate deploy --dry-run -- <command>` names its shadow database in, for the command's analyses alone. */
+export const ANALYSIS_URL = "REYLO_ANALYSIS_URL";
+
 /**
  * The project `projectDir` belongs to. `engine` reads the project file: any database's engine does
  * (src/engine.ts, `anyEngine`), and where reylo has none to run a project file is the project's error.
@@ -420,7 +424,11 @@ export function resolveProject(engine: Engine | MissingEngine, projectDir: strin
   const missingUrl = urlAlone
     ? `No database URL: ${shown(file!)} sets url, which Reylo does not read; set direct_url there, or DATABASE_URL in the environment, .env.local or .env.`
     : `No database URL: set DATABASE_URL in the environment, .env.local or .env, or "direct_url" in ${file ? shown(file) : PROJECT_FILE}.`;
-  const written = options.urlGiven ? undefined : config.direct_url;
+  // Inside `reylo migrate deploy --dry-run -- <command>`, every analysis the command runs reads the
+  // shadow database it runs on, which it names in REYLO_ANALYSIS_URL. The migrations' own commands
+  // never read it, so a deploy inside that command still reaches the project's database.
+  const shadow = options.urlGiven ? undefined : env[ANALYSIS_URL] || undefined;
+  const written = options.urlGiven || shadow ? undefined : config.direct_url;
   let refreshUrl: (() => string | undefined) | undefined;
   if (written !== undefined) {
     const missing: string[] = [];
@@ -480,6 +488,9 @@ export function resolveProject(engine: Engine | MissingEngine, projectDir: strin
         }
       } else url = texts.join("");
     }
+  } else if (shadow) {
+    url = shadow;
+    urlSource = "the shadow database of reylo migrate deploy --dry-run";
   } else if (!options.urlGiven) {
     const hit = lookup("DATABASE_URL");
     url = hit?.value;

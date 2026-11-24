@@ -7489,3 +7489,93 @@ async fn a_turso_connection_left_idle_opens_again_outside_a_transaction() {
     assert!(e.0.contains("idle too long"), "{e}");
     assert_eq!(idle.rows("select count(*) as n from t").await.unwrap()[0].text("n"), "0", "the transaction was rolled back");
 }
+
+/// `deploy --dry-run -- <command>`, the command a shell runs, with its exit code, and what it saw.
+async fn dry_run_then(p: &mut P, script: &str) -> i32 {
+    let command = vec!["sh".to_string(), "-c".to_string(), script.to_string()];
+    p.run(async |o, log| reylo_migrate::dry_run_then(o, Some(&command), log).await).await
+}
+
+async fn a_dry_run_builds_on_a_shadow_of_what_deploy_leaves(mut p: P) {
+    let (id, text) = (p.t.id, p.t.text);
+    p.file("20990101000000_users.sql", &format!("create table users (id {id}, email {text});"));
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20990101010000_nick.sql", &format!("alter table users add column nick {text};"));
+    p.output();
+    let dir = p.dir.display().to_string();
+    // The command sees the shadow's URL, a SQLite shadow as a file it can copy, and its exit code is the run's.
+    let script = format!(r#"printf %s "$REYLO_ANALYSIS_URL" > '{dir}/url.txt'; case "$REYLO_ANALYSIS_URL" in sqlite:*) cp "${{REYLO_ANALYSIS_URL#sqlite:}}" '{dir}/seen.db';; esac; exit 7"#);
+    assert_eq!(dry_run_then(&mut p, &script).await, 7, "{}", p.peek());
+    let url = std::fs::read_to_string(p.dir.join("url.txt")).unwrap();
+    assert_ne!(url, p.url, "the command must read a shadow, never the database itself");
+    match p.d {
+        // The shadow had both migrations, and is gone with the command.
+        Dialect::Sqlite => {
+            assert!(!std::path::Path::new(url.trim_start_matches("sqlite:")).exists(), "{url}");
+            let mut seen = Db::connect(&format!("sqlite:{dir}/seen.db"), &p.dir).await.unwrap();
+            let columns: Vec<String> = seen.rows("select name from pragma_table_info('users')").await.unwrap().iter().map(|r| r.text("name").to_string()).collect();
+            seen.close().await;
+            assert_eq!(columns, ["id", "email", "nick"]);
+        }
+        _ => {
+            let name = url.rsplit('/').next().unwrap().split('?').next().unwrap().to_string();
+            assert!(name.starts_with("reylo_shadow_"), "{url}");
+            let left = if p.d == Dialect::Postgres { format!("select count(*) as n from pg_database where datname = '{name}'") } else { format!("select count(*) as n from information_schema.schemata where schema_name = '{name}'") };
+            assert_eq!(p.rows(&left).await[0].text("n"), "0", "{url}");
+        }
+    }
+    // Nothing ran here: the deploy after the build runs the pending migration.
+    assert_eq!(p.history().await, ["20990101000000_users.sql"]);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.history().await, ["20990101000000_users.sql", "20990101010000_nick.sql"]);
+}
+
+async fn a_dry_run_that_refuses_runs_no_command(mut p: P) {
+    let (id, text) = (p.t.id, p.t.text);
+    p.file("20990101000000_users.sql", &format!("create table users (id {id}, email {text});"));
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    // An applied migration edited since, which the deploy after the build would refuse.
+    p.file("20990101000000_users.sql", &format!("create table users (id {id}, email {text}, nick {text});"));
+    p.output();
+    let ran = p.dir.join("ran");
+    assert_eq!(dry_run_then(&mut p, &format!("touch '{}'", ran.display())).await, 1, "{}", p.peek());
+    assert!(!ran.exists(), "{}", p.peek());
+}
+
+async fn a_dry_run_runs_no_command_for_a_schema_sql_the_deploy_refuses(mut p: P) {
+    let int = p.t.int;
+    p.linear();
+    p.schema(&format!("create table a (id {int});"));
+    p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    // The same schema, written otherwise: the migrations still reach it, and the lock's checksum no longer holds.
+    p.schema(&format!("CREATE TABLE a (id {int});"));
+    p.output();
+    let ran = p.dir.join("ran");
+    assert_eq!(dry_run_then(&mut p, &format!("touch '{}'", ran.display())).await, 1, "{}", p.peek());
+    assert!(!ran.exists(), "{}", p.peek());
+    assert_has!(p.output(), r"The schema changed since the lock was written");
+}
+
+/// A first deploy's SQLite file, which the dry run opens and removes, is the command's once it runs.
+async fn a_first_deploys_sqlite_file_is_left_to_the_command(mut p: P) {
+    if p.d != Dialect::Sqlite || p.server.is_some() {
+        return;
+    }
+    let file = p.url.trim_start_matches("sqlite:").to_string();
+    let _ = std::fs::remove_file(&file);
+    p.file("20990101000000_users.sql", &format!("create table users (id {});", p.t.id));
+    assert_eq!(dry_run_then(&mut p, &format!("printf kept > '{file}'")).await, 0, "{}", p.peek());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "kept");
+    // With nothing to run, the file the dry run made is gone after it.
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    assert!(!std::path::Path::new(&file).exists());
+}
+
+for_each_dialect!(
+    a_dry_run_builds_on_a_shadow_of_what_deploy_leaves,
+    a_dry_run_that_refuses_runs_no_command,
+    a_dry_run_runs_no_command_for_a_schema_sql_the_deploy_refuses,
+    a_first_deploys_sqlite_file_is_left_to_the_command,
+);

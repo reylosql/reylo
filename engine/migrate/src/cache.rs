@@ -567,7 +567,7 @@ pub(crate) async fn snapshot(db: &mut Db) -> Result<String, Error> {
 
 /// Copies the main database of `from` over that of `to`, page by page, as SQLite's backup API does.
 #[cfg(feature = "cli")]
-fn sqlite_backup(from: &rusqlite::Connection, to: &rusqlite::Connection) -> Result<(), Error> {
+pub(crate) fn sqlite_backup(from: &rusqlite::Connection, to: &rusqlite::Connection) -> Result<(), Error> {
     use rusqlite::ffi;
     // SAFETY: both handles are open connections that outlive the backup, which is finished before
     // this returns; neither is used by another thread meanwhile.

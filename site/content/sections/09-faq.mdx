@@ -43,7 +43,7 @@ reylo: cannot connect to the database at localhost:5432/app (DATABASE_URL in .en
 
 The types are then as old as that analysis, so a migration since doesn't show. With a server's URL set, a build reads only what was analyzed on that database. With none, or on SQLite, it reads the newest analysis of any. A query that `reylo/.cache/` doesn't hold is an error.
 
-A host that builds before it migrates, such as Vercel, has no cache. [Build against a database of its own](/deployment#build-before-migrate) there.
+A host that builds before it migrates, such as Vercel, has no cache. [Run the build on a dry run of the deploy](/deployment#build-before-migrate) there.
 
 </Accordion>
 <Accordion title="Why are dates strings, and 64-bit integers bigints?" id="faq-value-types">

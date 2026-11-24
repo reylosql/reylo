@@ -13,7 +13,7 @@ Reylo's type check runs in CI as it does on your machine, against a database the
 | Schema | Your migrations or a schema file, applied before the type check |
 | Connection | `DATABASE_URL` in the job's environment, or [`direct_url`](/configuration#direct_url) |
 | Commands | The type check, then your build and your tests |
-| Builds on a host | A database of its own, where the host builds before it migrates ([below](#build-before-migrate)) |
+| Builds on a host | A shadow of the schema the deploy leaves, where the host builds before it migrates ([below](#build-before-migrate)) |
 
 ## GitHub Actions
 
@@ -184,7 +184,21 @@ The type check reads the local file that [`direct_url`](/d1#local-database) name
 
 ## A host that builds before it migrates [#build-before-migrate]
 
-A host that builds before it migrates, such as Vercel, starts with no database that has your schema. Build against a database of its own:
+A host that builds before it migrates, such as Vercel, would type your build against production's old schema. With Reylo Migrate, run the build on a dry run of the deploy, then deploy:
+
+```sh
+reylo migrate deploy --dry-run -- next build
+reylo migrate deploy
+```
+
+The dry run replays your database's migrations and the pending ones into a shadow database. The build's type check and Reylo's plugins read that shadow, and it's dropped when the build exits. A deploy the dry run refuses fails the build before it starts.
+
+Where your database's role can't create databases, set [`shadow_url`](/configuration#shadow_url).
+
+> [!WARNING]
+> Your build's own queries still run on `DATABASE_URL`. A page it prerenders with a column the deploy adds fails until that deploy has run.
+
+With another migration tool, build against a database of your own:
 
 1. Create an empty database.
 2. Run your migrations into it, which also tries each one before it reaches production.

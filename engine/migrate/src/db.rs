@@ -832,7 +832,12 @@ pub fn with_database(url: &str, name: &str) -> String {
         Some(at) => &tail[at..],
         None => "",
     };
-    format!("{}://{authority}/{name}{query}", &url[..scheme_end])
+    // A `dbname` setting names the database over the path, as libpq and tokio-postgres read it: it
+    // would send a shadow's session to the target's own database.
+    let (query, fragment) = query.split_at(query.find('#').unwrap_or(query.len()));
+    let kept: Vec<&str> = query.strip_prefix('?').unwrap_or(query).split('&').filter(|pair| !pair.is_empty() && crate::percent_decode(pair.split('=').next().unwrap_or_default()) != "dbname").collect();
+    let query = if kept.is_empty() { String::new() } else { format!("?{}", kept.join("&")) };
+    format!("{}://{authority}/{name}{query}{fragment}", &url[..scheme_end])
 }
 
 /// A URL as a heading says it: no credentials and no settings. Whatever is before the last `@` is
@@ -1565,6 +1570,37 @@ impl Server {
         }
     }
 
+    /// A URL another process opens the shadow at: on Postgres and MySQL its database on the shadows'
+    /// server, and on SQLite, whose shadows are in memory, a copy written to `file`.
+    pub(crate) async fn url_of(&self, shadow: &mut Shadow, file: &Path) -> Result<String, Error> {
+        match self {
+            Server::Postgres { url, .. } | Server::Mysql { url, .. } => Ok(with_database(url, &shadow.name)),
+            // Copied as the replay cache copies a SQLite shadow, page by page.
+            Server::Sqlite { .. } => {
+                match &mut shadow.db {
+                    Db::Sqlite(conn) => crate::cache::sqlite_backup(conn, &rusqlite::Connection::open(file).map_err(sqlite_error)?)?,
+                    Db::LibsqlLocal(local) => local.backup_to(&mut crate::libsql_local::Local::open(&file.to_string_lossy())?)?,
+                    _ => return Err(Error("a SQLite shadow that is not in this process".into())),
+                }
+                Ok(format!("sqlite:{}", file.display()))
+            }
+        }
+    }
+
+    /// A statement on the session that makes shadows, so that a connection kept idle through a long
+    /// command (whose lock keeps other runs' sweeps off its shadow) isn't closed as idle.
+    pub(crate) async fn ping(&mut self) {
+        match self {
+            Server::Postgres { admin, .. } => {
+                let _ = admin.simple_query("select 1").await;
+            }
+            Server::Mysql { admin, .. } => {
+                let _ = admin.query_drop("select 1").await;
+            }
+            Server::Sqlite { .. } => {}
+        }
+    }
+
     pub async fn drop_shadow(&mut self, shadow: Shadow) {
         let Shadow { db, name } = shadow;
         match self {
@@ -1837,5 +1873,20 @@ mod url_tests {
         ] {
             assert_eq!(transaction_pooler(url, "direct_url"), None, "{url}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_database;
+
+    #[test]
+    fn a_database_swapped_into_a_url_is_the_one_its_session_opens() {
+        assert_eq!(with_database("postgres://u:p@h:5432/app?sslmode=require#x", "reylo_shadow_1"), "postgres://u:p@h:5432/reylo_shadow_1?sslmode=require#x");
+        // A dbname setting would name the target over the path.
+        assert_eq!(with_database("postgres://u:p@h/app?dbname=app&sslmode=require", "reylo_shadow_1"), "postgres://u:p@h/reylo_shadow_1?sslmode=require");
+        assert_eq!(with_database("postgres://u:p@h/app?dbname=app", "postgres"), "postgres://u:p@h/postgres");
+        assert_eq!(with_database("postgres://u:p@h/app?%64bname=app", "postgres"), "postgres://u:p@h/postgres");
+        assert_eq!(with_database("mysql://root@h:3306", "reylo_shadow_1"), "mysql://root@h:3306/reylo_shadow_1");
     }
 }

@@ -32,6 +32,7 @@ Commands:
   dev                      Apply pending migrations, rewinding if needed (may drop data), and write the lockfile
   deploy                   Run what the lock lists, with no shadow database
     --dry-run              Try it on a shadow database, running nothing here
+      -- <command>         Then run the command, such as your build, typed against that shadow
   status                   Check that this database and the files are in step
   lock                     Write the lock from this database's history
   history push             Record the migrations this database's schema has
@@ -227,6 +228,12 @@ $ reylo migrate deploy --dry-run
 ✓ The migrations match reylo/schema.sql
 ✓ Tried the pending migration on a shadow database:
     · 20261104140347_add_bio.sql
+```
+
+To type your build against the schema the deploy leaves, put it after `--`. It runs on the dry run's shadow database, which is dropped when it exits:
+
+```sh
+reylo migrate deploy --dry-run -- next build
 ```
 
 A failed migration rolls back and records nothing. Fix the file, run `reylo migrate dev`, and deploy again. Where a database already ran the old version, write a new migration instead.

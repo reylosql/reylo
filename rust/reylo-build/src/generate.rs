@@ -171,6 +171,7 @@ impl Generator {
                 println!("cargo:rerun-if-changed={}", file.display());
             }
             println!("cargo:rerun-if-env-changed=DATABASE_URL");
+            println!("cargo:rerun-if-env-changed=REYLO_ANALYSIS_URL");
             return Ok(vec![written]);
         }
         let out = base.join(out);
