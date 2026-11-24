@@ -647,7 +647,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                   || case when a.attcollation <> t.typcollation then ' collate ' || (select format('%I.%I', cn.nspname, cl.collname) from pg_collation cl join pg_namespace cn on cn.oid = cl.collnamespace where cl.oid = a.attcollation) else '' end, ', ' order by k.n) from unnest(co.confkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.confrelid and a.attnum = k.num join pg_type t on t.oid = a.atttypid)
               end as linked,
               case when co.contype = 'f' then
-                (select string_agg(format(E'\n-- computes %s %s as %s', side, k.n, pg_get_expr(ad.adbin, ad.adrelid)), '' order by side, k.n)
+                (select string_agg(format(E'\n-- computes %s %s as %s', side, k.n, md5(pg_get_expr(ad.adbin, ad.adrelid))), '' order by side, k.n)
                   from (select 'own' as side, co.conrelid as rel, co.conkey as keys union all select 'referenced', co.confrelid, co.confkey) s cross join lateral unnest(s.keys) with ordinality k(num, n)
                   join pg_attribute a on a.attrelid = s.rel and a.attnum = k.num join pg_attrdef ad on ad.adrelid = a.attrelid and ad.adnum = a.attnum where a.attgenerated = 's')
               end as computed,
@@ -694,7 +694,8 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         }
         // A foreign key holds while the values of the columns it links compare; a change of either
         // side's type, collation or stored expression makes it again around the change, so that
-        // both columns can change between. A stored expression that goes keeps the values.
+        // both columns can change between. A stored expression that goes keeps the values; each is
+        // written as its text's digest, which no line of it can stand in for.
         let linked = r.get("linked").map(|l| format!("\n-- links {l}{}", r.get("computed").unwrap_or_default())).unwrap_or_default();
         // A key's index storage parameters change in place on its index; anything else about it
         // makes it again.

@@ -1,0 +1,2 @@
+create table parents (raw text not null, code text generated always as (raw || E'head\n-- computes tail') stored, constraint parents_code_key unique (code));
+create table children (raw text not null, parent_code text generated always as (raw || E'head\n-- computes tail') stored, constraint children_parent_code_fkey foreign key (parent_code) references parents(code));
