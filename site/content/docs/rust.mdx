@@ -401,7 +401,7 @@ reylo generate rust-sqlx src/queries src/reports --out src/queries.rs
 reylo generate rust-sqlx 'src/**/*.sql' --out src/queries.rs
 ```
 
-Without arguments, it reads every `.sql` file under `src/` from the nearest `Cargo.toml`. At a workspace root, it reads every member's.
+If you omit input paths, it reads every `.sql` file under `src/` from the nearest `Cargo.toml`. At a workspace root, it reads every member's.
 
 ### Names
 

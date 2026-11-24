@@ -52,7 +52,7 @@ Why not the transaction pooler:
 - The type check prepares each query on its session. The transaction pooler shares sessions between clients, so their prepared queries collide. The type check refuses its port, 6543.
 - Copy each connection string from the Connect panel of your project's dashboard.
 - The direct connection is IPv6 only, unless your project has Supabase's IPv4 add-on. From a network without IPv6, use the session pooler.
-- Connections use TLS automatically. To verify Supabase's certificate too, download it from your project's database settings and [pass it in the URL](/configuration#direct_url).
+- With no TLS setting in the URL, Reylo tries TLS by default (`sslmode=prefer`); add `sslmode=require` to require encryption. To verify Supabase's certificate too, download it from your project's database settings and [pass it in the URL](/configuration#direct_url).
 
 ## Drivers
 
