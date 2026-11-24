@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { structuredData } from 'docs-kit/site';
 import type { Route } from './+types/home';
+import site from '@/docs.config';
 import { HomeLanding } from '@/components/home-landing';
 import { agentPromptFiles, readAgentPrompt } from '@/lib/agent-prompt';
 import { siteTitle, siteUrl } from '@/lib/layout.shared';
@@ -8,7 +10,6 @@ import { movedAnchorsScript } from '@/lib/moved-anchors';
 import { ogAlt, ogSize } from '@/lib/og';
 import { source } from '@/lib/source';
 import { fetchStars } from '@/lib/stars';
-import { structuredData } from '@/lib/structured-data';
 
 /**
  * Reylo's homepage, at / (components/home-landing.tsx); the docs open at /docs. Run at build time,
@@ -69,7 +70,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   return (
     <>
       <script dangerouslySetInnerHTML={{ __html: movedAnchorsScript }} />
-      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: structuredData(loaderData.description) }} />
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: structuredData(site, loaderData.description)! }} />
       <HomeLanding stars={loaderData.stars} agentPrompt={loaderData.agentPrompt} />
     </>
   );

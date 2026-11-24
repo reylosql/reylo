@@ -1,15 +1,15 @@
 import './global.css';
+import { DocsErrorBoundary } from 'docs-kit/components';
 import { DocsDocument } from 'docs-kit/document';
 import type { ReactNode } from 'react';
 import { Analytics } from '@vercel/analytics/react';
-import { isRouteErrorResponse, Outlet } from 'react-router';
+import { Outlet } from 'react-router';
 import type { Route } from './+types/root';
 import caveatLatin from '../assets/fonts/caveat-latin.woff2?url';
 import plexLatin from '../assets/fonts/ibm-plex-sans-latin.woff2?url';
 import geistMonoLatin from '../assets/fonts/geist-mono-latin.woff2?url';
 import orbitron from '../assets/fonts/orbitron.woff2?url';
 import fontsCss from './fonts.css?url';
-import { NotFound } from '@/components/not-found';
 import { DIALECTS } from '@/lib/dialects';
 import { LANGUAGES } from '@/lib/languages';
 
@@ -104,6 +104,5 @@ export default function App() {
 // What a failed navigation shows: the missing-address page for a 404 (a link to a page the site
 // does not have), and the status for anything else, with the error itself in `vite dev`.
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
-  if (isRouteErrorResponse(error)) return <NotFound status={error.status} text={error.status === 404 ? undefined : error.statusText || 'This page could not be shown.'} />;
-  return <NotFound status={500} text={import.meta.env.DEV ? String(error) : 'This page could not be shown.'} />;
+  return <DocsErrorBoundary error={error} />;
 }

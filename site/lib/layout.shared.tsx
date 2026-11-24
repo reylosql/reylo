@@ -1,6 +1,7 @@
+import site from '../docs.config.ts';
 import { SHOW_RUST } from './languages.ts';
 
-export const githubUrl = 'https://github.com/reylosql/reylo';
+export const githubUrl = site.repo;
 
 /** Reylo Migrate's docs: content/docs/migrate.mdx, at an address of its own under its landing page, /migrate (components/migrate-landing.tsx). */
 export const migrateDocsUrl = '/migrate/docs';
@@ -15,7 +16,7 @@ export const migrateCompareUrl = '/migrate/compare';
 export const docsUrl = (url: string) => (url === '/' ? introUrl : url === '/migrate' ? migrateDocsUrl : url.startsWith('/migrate-') ? `/migrate/${url.slice('/migrate-'.length)}` : url);
 
 /** The docs site's address: reylo.dev, which every other Reylo domain redirects to (wiki/docs-site.md). */
-export const siteUrl = 'https://reylo.dev';
+export const siteUrl = site.url;
 
 /**
  * The address of a page's Markdown, by its slug: /index.md for the main page, /<slug>.md for
@@ -24,11 +25,8 @@ export const siteUrl = 'https://reylo.dev';
  */
 export const markdownPath = (slug: string) => `/${slug || 'index'}.md`;
 
-/**
- * The title search results and link previews show: the name and what it does, in under 60
- * characters so that Google does not cut it. The page's h1 stays the name alone.
- */
-export const siteTitle = 'Reylo — Import .sql files into TypeScript, fully typed';
+/** The title search results and link previews show (docs.config.ts). */
+export const siteTitle = site.title;
 
 /**
  * A dialect's reference page (content/docs/<dialect>.mdx) in search results and link previews:

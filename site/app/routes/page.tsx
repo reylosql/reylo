@@ -5,6 +5,7 @@ import { DocsShell } from 'docs-kit/shell';
 import type { Root } from 'fumadocs-core/page-tree';
 import type { Route } from './+types/page';
 import { Brand } from '@/components/brand';
+import site from '@/docs.config';
 import { HeroTitle } from '@/components/hero';
 import { getMDXComponents } from '@/components/mdx';
 import { HeroActions } from '@/components/hero';
@@ -176,7 +177,7 @@ function PageContent({ loaderData }: Pick<Route.ComponentProps, 'loaderData'>) {
       }
       // The intro asks for a star beside "Copy agent prompt" (components/hero.tsx), so its table of contents doesn't.
       star={!main}
-      footer={<>Released under the MIT License. Copyright © 2026 Colin McDonnell.</>}
+      footer={site.footer}
     >
       {files.map((file, i) => (
         <file.default key={i} components={components} />
