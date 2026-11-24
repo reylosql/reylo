@@ -37,6 +37,16 @@ function warnUnverified(line: string): void {
 }
 
 export async function sqlModule(path: string, sql: string): Promise<SqlModule> {
+  const { input, entry, session } = await moduleInputOf(path, sql);
+  return { code: moduleCode(input), entry, watched: session.project.watched.filter((f) => existsSync(f)) };
+}
+
+/**
+ * What the module of the statement `sql`, read from the file at `path`, is written from, with the
+ * session that analyzed it and the `reylo/.cache/` entry the analysis came from; or the error that
+ * fails the build, which starts with `path`.
+ */
+export async function moduleInputOf(path: string, sql: string): Promise<{ input: ModuleInput; session: Session; entry: string }> {
   const session = await Session.for(dirname(path));
   let outcome = await session.analyze(sql);
   // A statement the database refuses may have been analyzed against a schema read a few seconds
@@ -84,7 +94,7 @@ export async function sqlModule(path: string, sql: string): Promise<SqlModule> {
     const missing = libraryProblem(library, dirname(path));
     if (missing) throw new Error(`${path}: ${missing}`);
   }
-  return { code: moduleCode(input), entry: outcome.entry, watched: session.project.watched.filter((f) => existsSync(f)) };
+  return { input, session, entry: outcome.entry };
 }
 
 /**
@@ -140,6 +150,54 @@ export function moduleLibraries(m: ModuleInput): Set<Library> {
 
 /** The text of a statement's module: its imports, its exports, and the definition of its query, field by field. */
 export function moduleCode(m: ModuleInput): string {
+  const { checked, imports } = moduleImports(m);
+  const define = DEFINE[m.dialect];
+  return [
+    `import { ${define}${checked ? ", checks" : ""} } from "reylo";`,
+    ...imports,
+    // `sql` is the compiled statement and `raw` the file as written. The comment naming the file
+    // (src/sqlcommenter.ts) is added where the statement is sent, so `sql` leaves it out.
+    `export const sql = ${JSON.stringify(compiledText(m))};`,
+    `export const raw = ${JSON.stringify(m.raw)};`,
+    `export const params = ${JSON.stringify(m.params)};`,
+    `export default ${define}(${moduleDefinition(m, { raw: "raw", sql: "sql", params: "params", checks: "checks" })});`,
+    ``,
+  ].join("\n");
+}
+
+/** The compiled statement without the file's trailing blank lines: the module's `sql`. The comment naming the file is added where the statement is sent (src/execute.ts, `sentText`). */
+export function compiledText(m: ModuleInput): string {
+  return m.analysis.rewritten.sql.trimEnd();
+}
+
+/**
+ * What a statement's module imports besides its dialect's define function: whether it needs
+ * reylo's `checks`, and each library a codec builds its values with, by the names the module's
+ * definition calls them (`ReyloDecimal`, `ReyloIpAddress`).
+ */
+export function moduleImports(m: ModuleInput): { checked: boolean; imports: string[] } {
+  const { analysis } = m;
+  // A decimal library's class by a default import, which every version gives as its class, and
+  // ip-address whole.
+  const libraries = moduleLibraries(m);
+  const library = [...libraries].find((l) => l !== "ip-address");
+  const imports = [...(library === undefined ? [] : [`import ReyloDecimal from ${JSON.stringify(library)};`]), ...(libraries.has("ip-address") ? [`import * as ReyloIpAddress from "ip-address";`] : [])];
+  // A typed JSON, structured or cast parameter is checked with reylo's `checks`, imported only where
+  // the statement has one, so that an app none of whose statements has one bundles none of them
+  // (src/checks.ts). A non-null JSON parameter whose type alone carries a schema needs them too,
+  // to learn whether that schema allows null.
+  const checked = analysis.params.some((p) => p.schema !== undefined || p.cast !== undefined || p.members !== undefined || (p.type.kind === "json" && p.type.schema !== undefined && !p.nullable));
+  return { checked, imports };
+}
+
+/**
+ * The object a statement's module passes its dialect's define function, field by field, as source
+ * text. `names` are the sources of the values a module holds apart from the definition: the
+ * statement as written (`raw`), the compiled one (`sql`), the parameters' names and reylo's
+ * `checks`. A field whose source is its own name is written as a shorthand. `multiline` puts each
+ * field on a line of its own, for a file that is read and diffed.
+ */
+export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: string; params: string; checks: string }, multiline = false): string {
   const { analysis, dialect } = m;
   const inputs = moduleInputs(m);
   // Each output column's name and kind, from the table the declared types come from: what the run
@@ -154,36 +212,24 @@ export function moduleCode(m: ModuleInput): string {
   // type. Under `allow_nested_arrays: true` a Postgres array nests there too, held to no depth.
   const nonFinite = dialect === "postgres" ? (m.allowNestedArrays ? analysisWithNestedArrays(analysis) : analysis).columns.map((c) => jsonNumbers(c.type) ?? null) : [];
   const codecs = moduleCodecs(m);
-  // A decimal library's class by a default import, which every version gives as its class, and
-  // ip-address whole.
   const libraries = moduleLibraries(m);
   const library = [...libraries].find((l) => l !== "ip-address");
-  const imports = [...(library === undefined ? [] : [`import ReyloDecimal from ${JSON.stringify(library)};`]), ...(libraries.has("ip-address") ? [`import * as ReyloIpAddress from "ip-address";`] : [])];
   const handed = [...(library === undefined ? [] : ["decimal: ReyloDecimal"]), ...(libraries.has("ip-address") ? ["inet: ReyloIpAddress"] : [])];
-  // The compiled statement without the file's trailing blank lines; the comment naming the file
-  // is added where the statement is sent (src/execute.ts, `sentText`).
-  const text = analysis.rewritten.sql.trimEnd();
+  const { checked } = moduleImports(m);
+  const text = compiledText(m);
   // A structured parameter's lists, at JavaScript's offsets into the statement (the engine's are
   // UTF-8 bytes).
   const structured = (analysis.structured ?? []).map((s) => ({ name: s.name, lists: s.lists.map((l) => ({ start: utf16(text, l.start), end: utf16(text, l.end), entries: l.entries })) }));
-  // A typed JSON, structured or cast parameter is checked with reylo's `checks`, imported only where
-  // the statement has one, so that an app none of whose statements has one bundles none of them
-  // (src/checks.ts). A non-null JSON parameter whose type alone carries a schema needs them too,
-  // to learn whether that schema allows null.
-  const checked = analysis.params.some((p) => p.schema !== undefined || p.cast !== undefined || p.members !== undefined || (p.type.kind === "json" && p.type.schema !== undefined && !p.nullable));
-  // Each dialect's own define function names that dialect's half of the run time alone (src/execute.ts,
-  // `Runtime`), so an app bundles no other dialect's drivers and error codes.
-  const define = DEFINE[dialect];
   // The definition's fields in order, each its name and the source of its value: one whose value
   // is undefined is left out, and one whose value is its own name is written as a shorthand.
   // `sql` is the statement as written and `text` the compiled one, the module's `raw` and `sql`.
   const fields: (readonly [name: string, value: string | undefined])[] = [
-    ["sql", "raw"],
-    ["params", "params"],
+    ["sql", names.raw],
+    ["params", names.params],
     ["cardinality", JSON.stringify(analysis.cardinality === "at_most_one" ? "maybeOne" : analysis.cardinality)],
     ["readOnly", analysis.readOnly ? "true" : undefined],
     ["value", analysis.value ? "true" : undefined],
-    ["text", "sql"],
+    ["text", names.sql],
     ["order", JSON.stringify(analysis.rewritten.order)],
     ["marks", m.marks && JSON.stringify(m.marks)],
     ["sqlMode", analysis.sqlMode && JSON.stringify(analysis.sqlMode)],
@@ -200,20 +246,10 @@ export function moduleCode(m: ModuleInput): string {
     ["sqlcommenter", m.sqlcommenter ? "true" : undefined],
     ["nestedArrays", m.allowNestedArrays && dialect === "postgres" ? "true" : undefined],
     ["jsonSchema", JSON.stringify(querySchemas(m.allowNestedArrays ? analysisWithNestedArrays(analysis) : analysis, dialect, m.codecs))],
-    ["checks", checked ? "checks" : undefined],
+    ["checks", checked ? names.checks : undefined],
   ];
-  const definition = fields.flatMap(([name, value]) => (value === undefined ? [] : [value === name ? name : `${name}: ${value}`])).join(", ");
-  return [
-    `import { ${define}${checked ? ", checks" : ""} } from "reylo";`,
-    ...imports,
-    // `sql` is the compiled statement and `raw` the file as written. The comment naming the file
-    // (src/sqlcommenter.ts) is added where the statement is sent, so `sql` leaves it out.
-    `export const sql = ${JSON.stringify(text)};`,
-    `export const raw = ${JSON.stringify(m.raw)};`,
-    `export const params = ${JSON.stringify(m.params)};`,
-    `export default ${define}({ ${definition} });`,
-    ``,
-  ].join("\n");
+  const written = fields.flatMap(([name, value]) => (value === undefined ? [] : [value === name ? name : `${name}: ${value}`]));
+  return multiline ? `{\n${written.map((f) => `  ${f},\n`).join("")}}` : `{ ${written.join(", ")} }`;
 }
 
 /** The define function from "reylo" a module of each dialect calls (src/index.ts). */

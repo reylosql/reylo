@@ -5,7 +5,7 @@
 //! with its database), and the version comments the server wraps around newer clauses opened.
 //! The dependencies are the server's records where it keeps them (foreign keys,
 //! `view_table_usage`, `view_routine_usage`) and a generated column's own expression; the objects
-//! are those the comparator reads, with Reylo's history table left out.
+//! are those the comparator reads, with the history tables left out, Reylo's own and other tools'.
 //!
 //! MySQL commits every DDL statement on its own, so a plan changes each table in one `alter table`
 //! with a clause per change. A table is therefore one object whose definition is its whole body
@@ -17,7 +17,7 @@
 //! its table's triggers is part of it, is replaced with every trigger after it.
 
 use super::{Alterer, Change, Kind, Object, Schema};
-use crate::catalog::HISTORY_TABLE;
+use crate::catalog::not_history;
 use crate::db::{Db, Row};
 use crate::sql::{tokenize, Token, TokenKind};
 use crate::{Dialect, Error};
@@ -339,7 +339,8 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
 }
 
 async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
-    let history = HISTORY_TABLE;
+    let kept = not_history("table_name");
+    let kept_trigger = not_history("event_object_table");
     let first = |rows: Vec<Row>, name: &str| rows.first().map(|r| r.text(name).to_string()).unwrap_or_default();
     let ctx = Ctx {
         db: first(db.rows("select database() as n").await?, "n"),
@@ -355,7 +356,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         .rows(&format!(
             "select table_name as t, column_name as c, column_type as type, collation_name as collation, generation_expression as gen,
               case when extra like '%DEFAULT_GENERATED%' then column_default end as expression
-            from information_schema.columns where table_schema = database() and table_name <> '{history}'"
+            from information_schema.columns where table_schema = database() and {kept}"
         ))
         .await?
     {
@@ -381,7 +382,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
     for r in db
         .rows(&format!(
             "select table_name as t, index_name as i, non_unique as nonunique, column_name as col, sub_part as sub, expression as expr
-            from information_schema.statistics where table_schema = database() and table_name <> '{history}' order by table_name, index_name, seq_in_index"
+            from information_schema.statistics where table_schema = database() and {kept} order by table_name, index_name, seq_in_index"
         ))
         .await?
     {
@@ -404,7 +405,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
     for r in db
         .rows(&format!(
             "select table_name as t, constraint_name as n, column_name as col, referenced_table_schema as rs, referenced_table_name as rt, referenced_column_name as rc
-            from information_schema.key_column_usage where table_schema = database() and referenced_table_name is not null and table_name <> '{history}'
+            from information_schema.key_column_usage where table_schema = database() and referenced_table_name is not null and {kept}
             order by table_name, constraint_name, ordinal_position"
         ))
         .await?
@@ -437,7 +438,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
     };
     let in_cycle: BTreeSet<(String, String)> = fks.iter().filter(|((t, _), fk)| fk.ref_schema == ctx.db && fk.ref_table != *t && reaches(&fk.ref_table, t)).map(|(k, _)| k.clone()).collect();
 
-    let tables = db.rows(&format!("select table_name as name, table_type as type, table_collation as collation from information_schema.tables where table_schema = database() and table_name <> '{history}' order by table_name")).await?;
+    let tables = db.rows(&format!("select table_name as name, table_type as type, table_collation as collation from information_schema.tables where table_schema = database() and {kept} order by table_name")).await?;
     let views: BTreeSet<String> = tables.iter().filter(|r| r.text("type") == "VIEW").map(|r| r.text("name").to_string()).collect();
     for r in tables.iter().filter(|r| r.text("type") != "VIEW") {
         let name = r.text("name").to_string();
@@ -591,7 +592,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
     let triggers = db
         .rows(&format!(
             "select trigger_name as n, event_manipulation as ev, event_object_table as t, action_statement as body, action_timing as timing, action_order as ord, definer as definer
-            from information_schema.triggers where trigger_schema = database() and event_object_table <> '{history}' order by event_object_table, action_timing, event_manipulation, action_order"
+            from information_schema.triggers where trigger_schema = database() and {kept_trigger} order by event_object_table, action_timing, event_manipulation, action_order"
         ))
         .await?;
     for (k, r) in triggers.iter().enumerate() {

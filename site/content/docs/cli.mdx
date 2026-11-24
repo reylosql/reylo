@@ -49,9 +49,9 @@ Commands:
     --format <format>      json, the default, yaml or typescript
 <Rust>
     --format rust          Print each statement's Rust module for sqlx
-  generate <generator>     Write each .sql file's module for a language
-    --out <file>           Write every module into one file
 </Rust>
+  generate <generator>     Write every .sql file's module into one file
+    --out <file>           The file to write
   migrate <command>        Write, check and run your migrations
   db <command>             Push, reset, wipe or print a development database
   run <sql>                Run SQL as written, recording nothing
@@ -347,10 +347,21 @@ reylo db introspect
 reylo db introspect --schema app
 ```
 
-<Rust>
 ## `reylo generate`
 
-Writes each `.sql` file's module for a language, as [`#[reylo::query]`](/rust#codegen) does for Rust.
+Writes every query into one TypeScript file ([Codegen](/typescript#codegen)):
+
+```terminal
+$ npx reylo generate typescript 'src/queries/**/*.sql' --out src/queries.ts
+✓ Wrote src/queries.ts
+```
+
+<Rust>
+For Rust, name the `rust-sqlx` generator ([Codegen](/rust#codegen)):
+
+```sh
+reylo generate rust-sqlx --out src/queries.rs
+```
 
 </Rust>
 

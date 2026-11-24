@@ -7,7 +7,7 @@ use crate::db::{shown_url, Db, Ran, Server};
 use crate::lock;
 #[cfg(feature = "cli")]
 use crate::replay::{Shadows, Step};
-use crate::sql::{atomicity_problem, changes_data, runs_alone, shadow_problem, split_statements};
+use crate::sql::{atomicity_problem, changes_data, runs_alone, split_statements, unreplayable};
 use crate::{time, Dialect, Error};
 use regex::Regex;
 use std::path::{Path, PathBuf};
@@ -1324,11 +1324,17 @@ pub struct Problem {
     fixed: bool,
     /// Whether it is the lock's drafts, which some commands pass over.
     drafts: bool,
+    /// What each command it suggests states, without `--blocking`: for `migrate new` to try, and to
+    /// add `--blocking` to where the migration it writes would need it.
+    readings: Vec<Choices>,
+    /// What a `blocks-writes` refusal's migration does that `--blocking` accepts, each as a
+    /// sentence's predicate: `rewrites users, …`.
+    hazards: Vec<String>,
 }
 
 impl Problem {
     fn new(code: &'static str, title: impl Into<String>) -> Problem {
-        Problem { code, title: title.into(), lines: vec![], detail: vec![], sql: None, notes: vec![], fixes: vec![], fixed: false, drafts: false }
+        Problem { code, title: title.into(), lines: vec![], detail: vec![], sql: None, notes: vec![], fixes: vec![], fixed: false, drafts: false, readings: vec![], hazards: vec![] }
     }
 
     /// The refusal as `--json` gives it.
@@ -1379,6 +1385,14 @@ impl Problem {
         self.lines.push(paint("dim", &format!("  {}:", what.as_ref())));
         self.lines.extend(commands.iter().map(|c| format!("    {}", paint("cyan", c))));
         self
+    }
+
+    /// `fix`, with the command that states `reading`, which it records; with `--blocking` where
+    /// `asked` knows the migration that reading writes holds a lock that needs it.
+    fn offer(mut self, what: impl AsRef<str>, asked: &Asked, reading: Choices) -> Problem {
+        let command = command_line(asked, &asked.blocking(&reading), &[], &[], false);
+        self.readings.push(reading);
+        self.fix(what, &[&command])
     }
 
     fn lines(mut self, lines: impl IntoIterator<Item = String>) -> Problem {
@@ -1981,7 +1995,7 @@ fn run_order(opts: &Options, files: &[Migration]) -> Vec<Migration> {
 pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> Result<Plan, Error> {
     let d = db.dialect();
     let (files, strays) = opts.migrations()?;
-    let mut problems: Vec<Problem> = stray_problem(opts, &strays).into_iter().collect();
+    let mut problems: Vec<Problem> = stray_problem(opts, &files, &strays).into_iter().collect();
     // What schema.sql declares is held against the migrations in development and CI, not at deploy;
     // a project without one keeps its schema in its migrations alone.
     let schema_sql = if server.is_some() { opts.schema_text() } else { None };
@@ -2031,11 +2045,15 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
     if server.is_some() {
         let schema_name = opts.schema.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "schema.sql".into());
         for (name, sql) in files.iter().map(|f| (f.name.as_str(), f.sql.as_str())).chain(schema_sql.as_deref().map(|s| (schema_name.as_str(), s))) {
-            if let Some(why) = shadow_problem(sql, d) {
-                problems.push(Problem::new("not-replayable", format!("Migration {name} can't be replayed in a shadow database")).note(why));
-            }
+            problems.extend(replay_problem(name, sql, d));
         }
         problems.extend(unreadable_grants(db, opts, &files, schema_sql.as_deref()).await?);
+    } else {
+        // A deploy replays nothing, but runs no migration a shadow can't replay: once it ran, every
+        // command that replays the migrations, status and the dry run among them, would refuse it.
+        for p in &pending {
+            problems.extend(replay_problem(&p.name, &p.sql, d).map(|problem| problem.note("A deploy needs no shadow, but once it ran this, every command that replays the migrations would refuse it.")));
+        }
     }
     if !problems.is_empty() {
         return Ok(Plan { problems: with_stamp(problems), ..Plan::default() });
@@ -2671,6 +2689,49 @@ fn holds_a_schema(lines: &[String]) -> bool {
     lines.iter().any(|l| !EMPTY.iter().any(|kind| l.starts_with(kind)) && !(l.starts_with("owner ") && l.ends_with(" (schema)")))
 }
 
+/// Whether a database holds anything init and introspect write: a schema, or a grant on a schema or a
+/// default privilege that a new database on its server lacks. A new database's `public` grants
+/// PUBLIC `USAGE`, and `CREATE` too before Postgres 15. On a platform's server, a new database may
+/// grant the platform's roles more (Supabase grants its API's roles every new table), so a database
+/// with only those still starts empty there.
+#[cfg(feature = "cli")]
+fn holds_sql(lines: &[String], new: &NewDatabase) -> bool {
+    let platform = |grantee: &str| new.platform && crate::catalog::PLATFORM_ROLES.contains(&grantee);
+    holds_a_schema(lines)
+        || lines.iter().any(|l| {
+            if let Some(rest) = l.strip_prefix("grant schema ") {
+                let name = crate::catalog::name_at(rest);
+                let given = |grantee: &str, privilege: &str| name == "public" && grantee == "PUBLIC" && (privilege == "USAGE" || (privilege == "CREATE" && new.public_create));
+                rest[name.len()..].trim().split(',').filter_map(|g| g.rsplit_once(':')).any(|(grantee, privilege)| !given(grantee, privilege) && !platform(grantee))
+            } else if l.starts_with(crate::catalog::DEFAULT_PRIVILEGES) {
+                let tail = l.trim_end_matches(" with grant option");
+                tail.rsplit_once(" to ").or_else(|| tail.rsplit_once(" from ")).is_none_or(|(_, grantee)| !platform(grantee))
+            } else {
+                false
+            }
+        })
+}
+
+/// What a new database on a server has that [`holds_sql`] needs to know.
+#[cfg(feature = "cli")]
+#[derive(Default)]
+struct NewDatabase {
+    /// Whether the server is a platform's, as Supabase's is.
+    platform: bool,
+    /// Whether a new database's `public` grants PUBLIC `CREATE`, as before Postgres 15.
+    public_create: bool,
+}
+
+#[cfg(feature = "cli")]
+async fn new_database(db: &mut Db) -> Result<NewDatabase, Error> {
+    if db.dialect() != Dialect::Postgres {
+        return Ok(NewDatabase::default());
+    }
+    let rows = db.rows(&format!("select ({})::text as platform, (current_setting('server_version_num')::int < 150000)::text as public_create", crate::catalog::platform_names())).await?;
+    let r = rows.first().ok_or_else(|| Error("no answer".into()))?;
+    Ok(NewDatabase { platform: r.text("platform") == "true", public_create: r.text("public_create") == "true" })
+}
+
 /// Whether a migration that fails can leave part of what it did: on MySQL, whose statements commit as
 /// they go, and a statement that runs outside a transaction.
 fn may_leave_part(sql: &str, d: Dialect) -> bool {
@@ -3031,7 +3092,7 @@ async fn wipe_rows_on(db: &mut Db) -> Result<usize, Error> {
             schema.objects.values().filter(|o| o.kind == Some(crate::diff::Kind::Table) && !o.extra.iter().any(|l| l.starts_with("shape foreign"))).filter_map(|o| o.id.strip_prefix("table ").map(String::from)).collect()
         }
         Dialect::Mysql => db
-            .rows(&format!("select table_name as n from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE' and table_name <> '{HISTORY_TABLE}'"))
+            .rows(&format!("select table_name as n from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE' and {}", crate::catalog::not_history("table_name")))
             .await?
             .iter()
             .map(|r| format!("`{}`", r.text("n").replace('`', "``")))
@@ -3040,7 +3101,8 @@ async fn wipe_rows_on(db: &mut Db) -> Result<usize, Error> {
         // vector index's are libSQL's: deleting from them directly breaks it.
         Dialect::Sqlite => db
             .rows(&format!(
-                "select name as n from pragma_table_list where schema = 'main' and type in ('table', 'virtual') and name not like 'sqlite_%' and name <> '{HISTORY_TABLE}' and name {} and {}",
+                "select name as n from pragma_table_list where schema = 'main' and type in ('table', 'virtual') and name not like 'sqlite_%' and {} and name {} and {}",
+                crate::catalog::not_history("name"),
                 crate::catalog::NOT_TURSO_OWN,
                 crate::catalog::NOT_LIBSQL_VECTOR_OWN
             ))
@@ -3105,7 +3167,8 @@ async fn wipe_rows_on(db: &mut Db) -> Result<usize, Error> {
             }
             sql.push_str(&after);
             let has_sequence = db.rows("select count(*) > 0 as ok from sqlite_schema where name = 'sqlite_sequence'").await?.first().is_some_and(|r| r.flag("ok"));
-            let reset = if has_sequence { "delete from sqlite_sequence;" } else { "" };
+            // The counters of the tables it empties: a history table keeps its own.
+            let reset = if has_sequence { format!("delete from sqlite_sequence where {};", crate::catalog::not_history("name")) } else { String::new() };
             let turso = crate::catalog::holds_turso_tables(db).await?;
             let restart = crate::catalog::turso_sequences(db, turso, true).await?;
             let result = db.script(&format!("begin; {sql} {reset} {restart} commit;")).await;
@@ -3947,7 +4010,7 @@ async fn history_as_it_stands(db: &mut Db, server: &mut Server, opts: &Options) 
 /// migration is unapplied, so that its time comes after theirs.
 /// What the person writing a migration states about it: the tables and columns it may drop, with
 /// their rows, and the columns it renames.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Choices {
     /// Names as written: `users.nickname`, `audit_log`, `billing.invoices`, a schema's name.
     pub drop: Vec<String>,
@@ -4474,16 +4537,41 @@ struct Asked {
     subject: &'static str,
     head: String,
     offers_force: bool,
+    /// What suggested commands state, without `--blocking`, where the migration each writes holds a
+    /// lock that `--blocking` accepts, with what holds it: each such command takes the flag, and
+    /// its refusal says what the flag accepts.
+    rewrites: Vec<(Choices, Vec<String>)>,
 }
 
 impl Asked {
-    fn migration(name: &str) -> Asked {
-        Asked { subject: "migration", head: format!("reylo migrate new {name}"), offers_force: false }
+    fn migration(name: &str, rewrites: &[(Choices, Vec<String>)]) -> Asked {
+        Asked { subject: "migration", head: format!("reylo migrate new {name}"), offers_force: false, rewrites: rewrites.to_vec() }
     }
 
     fn push(watch: bool) -> Asked {
-        Asked { subject: "push", head: if watch { "reylo db push --watch".to_string() } else { "reylo db push".to_string() }, offers_force: true }
+        Asked { subject: "push", head: if watch { "reylo db push --watch".to_string() } else { "reylo db push".to_string() }, offers_force: true, rewrites: vec![] }
     }
+
+    /// `reading`, with `--blocking` where the migration it writes needs it.
+    fn blocking(&self, reading: &Choices) -> Choices {
+        Choices { blocking: reading.blocking || !self.hazards(reading).is_empty(), ..reading.clone() }
+    }
+
+    /// What the migration `reading` writes does that `--blocking` accepts.
+    fn hazards(&self, reading: &Choices) -> &[String] {
+        self.rewrites.iter().find(|(r, _)| r == reading).map_or(&[], |(_, what)| what.as_slice())
+    }
+}
+
+/// What `choices` states, with `more_drops` and `renames` added: what a suggested command states.
+fn reading(choices: &Choices, more_drops: &[String], renames: &[(String, String)]) -> Choices {
+    let mut drop: Vec<String> = Vec::new();
+    for name in choices.drop.iter().chain(more_drops) {
+        if !drop.contains(name) {
+            drop.push(name.clone());
+        }
+    }
+    Choices { drop, rename: choices.rename.iter().chain(renames).cloned().collect(), blocking: choices.blocking }
 }
 
 /// The refusals `--force` accepts: what a change drops, a type change that loses values, and a rename
@@ -4711,12 +4799,26 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], 
     // Each name --drop may need, with the id of the guessed table it belongs to, if any.
     let owned: Vec<(String, Option<String>)> = drops.iter().map(|(_, n, o)| (n.clone(), o.clone())).chain(narrowed.iter().map(|(n, _, o)| (n.clone(), o.clone()))).collect();
     let more: Vec<String> = owned.iter().map(|(n, _)| n.clone()).collect();
+    // What each reading holds that its command's --blocking accepts, said before the command.
+    let mut noted = !others.is_empty() || !narrowed.is_empty();
+    let mut hazard = |problem: Problem, lead: &str, r: &Choices| -> Problem {
+        let what = asked.hazards(r);
+        let mut problem = if !what.is_empty() && !noted { problem.lines([String::new()]) } else { problem };
+        noted |= !what.is_empty();
+        for w in what {
+            problem = problem.note(format!("{lead}, it {w}."));
+        }
+        problem
+    };
     if one {
         let renames: Vec<(String, String)> = guesses.iter().map(|g| (g.old.clone(), g.new.clone())).collect();
         let dropped: Vec<String> = guesses.iter().map(|g| g.old.clone()).chain(outside.iter().cloned()).collect();
+        let (keep, drop) = (reading(stated, &more, &renames), reading(stated, &dropped, &[]));
+        let problem = hazard(problem, "As a rename", &keep);
+        let problem = hazard(problem, "As a drop", &drop);
         return problem
-            .fix(format!("To rename the {kind}, keeping its rows"), &[&create_command(asked, stated, &more, &renames)])
-            .fix(format!("To drop the {kind} and its data, and {} a new one", if guesses[0].table { "create" } else { "add" }), &[&create_command(asked, stated, &dropped, &[])]);
+            .offer(format!("To rename the {kind}, keeping its rows"), asked, keep)
+            .offer(format!("To drop the {kind} and its data, and {} a new one", if guesses[0].table { "create" } else { "add" }), asked, drop);
     }
     // Each line's flags: a rename takes along what its own reading also asks of --drop, the columns
     // a renamed table drops, and what the rename's change of type loses; a guess within a guessed
@@ -4725,11 +4827,13 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], 
     // carries, as under a search_path.
     let mut taken: Vec<String> = Vec::new();
     let mut rows: Vec<(String, String)> = Vec::new();
+    // What each line's rename states, its renames and its drops, and what its drop does.
+    let mut keeps: Vec<(Vec<(String, String)>, Vec<String>)> = Vec::new();
     for g in guesses.iter().filter(|g| g.owner.is_none()) {
         let within: Vec<&Guess> = guesses.iter().filter(|c| g.table && c.owner.as_deref() == Some(g.id.as_str())).collect();
         let mine: Vec<String> = owned.iter().filter(|(n, o)| *n == g.old || (g.table && o.as_deref() == Some(g.id.as_str())) || within.iter().any(|c| *n == c.old)).map(|(n, _)| n.clone()).collect();
-        let mut keep = vec![format!("--rename {}={}", shell_word(&g.old), shell_word(&g.new))];
-        keep.extend(within.iter().map(|c| format!("--rename {}={}", shell_word(&c.old), shell_word(&c.new))));
+        let renames: Vec<(String, String)> = std::iter::once(g).chain(within.iter().copied()).map(|c| (c.old.clone(), c.new.clone())).collect();
+        let mut keep: Vec<String> = renames.iter().map(|(old, new)| format!("--rename {}={}", shell_word(old), shell_word(new))).collect();
         let mut lost: Vec<String> = Vec::new();
         for n in &mine {
             if !lost.contains(n) {
@@ -4741,8 +4845,22 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], 
         }
         taken.extend(mine);
         rows.push((keep.join(" "), format!("--drop {}", shell_word(&g.old))));
+        keeps.push((renames, lost));
     }
     let rest: Vec<String> = more.iter().filter(|n| !taken.contains(n)).cloned().collect();
+    // A line's rename takes `--blocking` where its migration needs it, the other lines dropped.
+    let olds: Vec<String> = guesses.iter().filter(|g| g.owner.is_none()).map(|g| g.old.clone()).collect();
+    let mut readings = Vec::new();
+    for (k, (renames, lost)) in keeps.iter().enumerate() {
+        let drops: Vec<String> = rest.iter().chain(lost).cloned().chain(olds.iter().enumerate().filter(|(j, _)| *j != k).map(|(_, o)| o.clone())).collect();
+        let r = reading(stated, &drops, renames);
+        if asked.blocking(&r).blocking && !stated.blocking {
+            rows[k].0.push_str(" --blocking");
+        }
+        let (old, new) = &renames[0];
+        problem = hazard(problem, &format!("With --rename {}={}", shell_word(old), shell_word(new)), &r);
+        readings.push(r);
+    }
     let width = rows.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
     let lead = "For each, rename it to keep its rows, or drop it and add the new one";
     problem.lines.extend([String::new(), paint("dim", &format!("  {lead}:"))]);
@@ -4751,6 +4869,7 @@ fn guess_problem(guesses: &[Guess], drops: &[(String, String, Option<String>)], 
         problem.detail.push(format!("{keep} or {drop}"));
     }
     problem.fixed = true;
+    problem.readings.extend(readings);
     problem.fix("Add the flags you picked to", &[&create_command(asked, stated, &rest, &[])])
 }
 
@@ -4763,6 +4882,7 @@ fn lock_problem(hazards: &[crate::locks::Hazard], asked: &Asked, choices: &Choic
         _ => "This migration blocks writes to tables while it reads every row".to_string(),
     };
     let mut problem = Problem::new("blocks-writes", title);
+    problem.hazards = hazards.iter().map(|h| h.what.clone()).collect();
     if hazards.len() > 1 {
         problem = problem.lines([String::new()]).lines(hazards.iter().map(|h| format!("    It {}", h.what))).lines([String::new()]);
     }
@@ -4778,11 +4898,11 @@ fn lock_problem(hazards: &[crate::locks::Hazard], asked: &Asked, choices: &Choic
 /// the plan's ids, and `shown`, as the file names them, one for one): each must be named in
 /// `--drop`, and each name in `--drop` must name only what it drops. `guesses`, renames it won't
 /// assume, are settled with them; `owner` gives the new id of the guessed table an id belongs to,
-/// whose own columns a drop of the table takes along; `added` are the columns and tables the plan adds, the
-/// names a person could mean by a rename.
+/// whose own columns a drop of the table takes along; `candidates` gives, for a table or column it
+/// drops, the names a person could mean by its rename.
 #[allow(clippy::too_many_arguments)]
-fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, added: &[String], choices: &Choices, asked: &Asked) -> Vec<Problem> {
-    let mut problems = drop_problems_of(lost, shown, narrowed, guesses, owner, added, choices, asked);
+fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, candidates: &dyn Fn(&str) -> Vec<String>, choices: &Choices, asked: &Asked) -> Vec<Problem> {
+    let mut problems = drop_problems_of(lost, shown, narrowed, guesses, owner, candidates, choices, asked);
     // Where --force can accept them all, the last says so, once nothing but what it accepts is left.
     if asked.offers_force && !problems.is_empty() && problems.iter().all(|p| DESTRUCTIVE.contains(&p.code)) {
         let stated = Choices { drop: vec![], rename: choices.rename.clone(), ..Default::default() };
@@ -4793,7 +4913,7 @@ fn drop_problems(lost: &[String], shown: &[String], narrowed: &[(String, String,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, added: &[String], choices: &Choices, asked: &Asked) -> Vec<Problem> {
+fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, String, String)], guesses: &[Guess], owner: &dyn Fn(&str) -> Option<String>, candidates: &dyn Fn(&str) -> Vec<String>, choices: &Choices, asked: &Asked) -> Vec<Problem> {
     let subject = asked.subject;
     let display = |id: &String| lost.iter().position(|l| l == id).map(|k| shown_id(&shown[k])).or_else(|| narrowed.iter().find(|(n, _, _)| n == id).map(|(_, s, _)| shown_id(s))).unwrap_or_else(|| shown_id(id));
     let mut problems = Vec::new();
@@ -4842,25 +4962,38 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
         };
         // A column and a MySQL partition of one table may share a name, which --drop can't tell apart.
         let shared: Vec<&(String, String)> = what.iter().filter(|(_, n)| what.iter().filter(|(_, m)| m == n).count() > 1).collect();
+        let r = reading(&stated, &list, &[]);
+        let problem = asked.hazards(&r).iter().fold(Problem::new("drops-data", title), |p, w| p.note(format!("It also {w}.")));
         let mut problem = match shared.as_slice() {
-            [] => Problem::new("drops-data", title).fix(if list.len() == 1 { "To drop it" } else { "To drop them" }, &[&create_command(asked, &stated, &list, &[])]),
-            [(a, name), (b, _), ..] => Problem::new("drops-data", title).note(format!("A {a} and a {b} share the name {name}: make one of the changes in schema.sql and write its migration, then the other.")),
+            [] => problem.offer(if list.len() == 1 { "To drop it" } else { "To drop them" }, asked, r),
+            [(a, name), (b, _), ..] => problem.note(format!("A {a} and a {b} share the name {name}: make one of the changes in schema.sql and write its migration, then the other.")),
             [_] => unreachable!("a name shared by one"),
         };
         // Where something comes as these go, any of them may be renamed: which became which is
-        // for the person to say, so the command names no new name for them.
-        // What the plan adds of the same kind: a table renamed is a table, a column a column.
-        let kinds: Vec<&str> = unstated.iter().filter_map(|l| l.split(' ').next()).collect();
-        let like: Vec<String> = added.iter().filter(|a| kinds.contains(&a.split(' ').next().unwrap_or_default())).map(|a| a.split_once(' ').map_or(a.clone(), |(_, n)| n.to_string())).collect();
+        // for the person to say, so the command names no new name for them. Each is offered only
+        // where something it could be renamed to comes.
+        let mut like: Vec<String> = Vec::new();
+        let mut renames: Vec<(String, String)> = Vec::new();
+        for l in &unstated {
+            let could = candidates(l);
+            if !could.is_empty() {
+                renames.push((display(l), "<new name>".to_string()));
+            }
+            for c in could {
+                if !like.contains(&c) {
+                    like.push(c);
+                }
+            }
+        }
         if !like.is_empty() {
-            let renames: Vec<(String, String)> = list.iter().map(|old| (old.clone(), "<new name>".to_string())).collect();
-            let what = format!("If {} renamed instead, as {}", if list.len() == 1 { "it was" } else { "any were" }, like.join(", "));
+            let what = format!("If {} renamed instead, as {}", if renames.len() == 1 { "it was" } else { "any were" }, like.join(", "));
             problem = problem.fix(what, &[&create_command(asked, &stated, &[], &renames)]);
         }
         problems.push(problem);
     }
     for (_, name, why) in &unnamed {
-        problems.push(Problem::new("loses-data", format!("Column {name} {why}")).fix("To accept that", &[&create_command(asked, &stated, std::slice::from_ref(name), &[])]));
+        let r = reading(&stated, std::slice::from_ref(name), &[]);
+        problems.push(asked.hazards(&r).iter().fold(Problem::new("loses-data", format!("Column {name} {why}")), |p, w| p.note(format!("It also {w}."))).offer("To accept that", asked, r));
     }
     problems
 }
@@ -4999,6 +5132,7 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
         let narrowing: Vec<(String, String)> = plan.narrowings.clone();
         let guessed: Vec<String> = plan.renames.iter().map(|r| r.0.clone()).collect();
         let paired: Vec<String> = plan.pairs.iter().map(|p| p.0.clone()).collect();
+        let claimed: std::collections::BTreeSet<String> = plan.renamed.iter().map(|(_, new)| new.clone()).collect();
         style(db, &mut plan, &target.schema).await?;
         let mut narrowed: Vec<(String, String, String)> = narrowing.iter().zip(&plan.narrowings).map(|((id, why), (shown, _))| (id.clone(), shown.clone(), why.clone())).collect();
         let guess_owner = |id: &str| current.objects.get(id).and_then(|o| o.owner.clone()).filter(|t| guessed_tables.contains(t));
@@ -5032,9 +5166,14 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
         // Tables first, then columns, each by name.
         guesses.sort_by(|a, b| (!a.table, &a.old).cmp(&(!b.table, &b.old)));
         if let Some(asked) = asked {
-            // What the plan adds, the names a person might mean by a rename of what it drops.
-            let added: Vec<String> = target.schema.objects.iter().filter(|(id, o)| matches!(o.kind, Some(crate::diff::Kind::Column | crate::diff::Kind::Table)) && !current.objects.contains_key(*id) && !(o.kind == Some(crate::diff::Kind::Column) && o.owner.as_ref().is_some_and(|t| !current.objects.contains_key(t)))).map(|(id, o)| format!("{} {}", if o.kind == Some(crate::diff::Kind::Table) { "table" } else { "column" }, shown_name(id))).collect();
-            let mut problems = drop_problems(&lost, &shown, &narrowed, &guesses, &guess_owner, &added, &Choices { drop: columns.drop.clone(), rename: choices.rename.clone(), ..Default::default() }, asked);
+            // The names a person might mean by a rename of what the plan drops: a table it creates,
+            // and a column it adds to the table the dropped one was in, that nothing renames onto.
+            let candidates = |id: &str| -> Vec<String> {
+                let Some(gone) = current.objects.get(id).filter(|o| matches!(o.kind, Some(crate::diff::Kind::Column | crate::diff::Kind::Table))) else { return vec![] };
+                let table = gone.kind == Some(crate::diff::Kind::Table);
+                target.schema.objects.iter().filter(|(new, o)| o.kind == gone.kind && !current.objects.contains_key(*new) && !claimed.contains(*new) && (table || (o.owner.is_some() && o.owner == gone.owner))).map(|(new, _)| shown_name(new)).collect()
+            };
+            let mut problems = drop_problems(&lost, &shown, &narrowed, &guesses, &guess_owner, &candidates, &Choices { drop: columns.drop.clone(), rename: choices.rename.clone(), ..Default::default() }, asked);
             if force {
                 problems.retain(|p| !DESTRUCTIVE.contains(&p.code));
             }
@@ -5063,6 +5202,40 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 #[cfg(feature = "cli")]
 async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, added: &[String], migration: &str, choices: &Choices, log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
+    let first = draft_with(opts, files, schema_sql, target_name, added, migration, choices, &[], log).await?;
+    // On Postgres and MySQL, each command a refusal suggests is tried, and takes `--blocking` where
+    // the migration it writes would be refused for nothing else: one more run would only add it.
+    let readings: Vec<Choices> = match &first {
+        Err(problems) if !choices.blocking && matches!(Dialect::of_url(&opts.url).ok(), Some(Dialect::Postgres | Dialect::Mysql)) => {
+            let mut out: Vec<Choices> = Vec::new();
+            for r in problems.iter().flat_map(|p| &p.readings) {
+                if !out.contains(r) {
+                    out.push(r.clone());
+                }
+            }
+            out
+        }
+        _ => return Ok(first),
+    };
+    let mut rewrites = Vec::new();
+    for r in readings {
+        if let Ok(Err(problems)) = draft_with(opts, files, schema_sql, target_name, added, migration, &r, &[], &mut |_: &str| {}).await {
+            if !problems.is_empty() && problems.iter().all(|p| p.code == "blocks-writes") {
+                rewrites.push((r, problems.iter().flat_map(|p| p.hazards.iter().cloned()).collect()));
+            }
+        }
+    }
+    if rewrites.is_empty() {
+        return Ok(first);
+    }
+    draft_with(opts, files, schema_sql, target_name, added, migration, choices, &rewrites, &mut |_: &str| {}).await
+}
+
+/// `draft`, with the suggested commands `rewrites` names (each as it states its flags, without
+/// `--blocking`, with what holds the lock) taking `--blocking`, and the refusal saying why.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[cfg(feature = "cli")]
+async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, added: &[String], migration: &str, choices: &Choices, rewrites: &[(Choices, Vec<String>)], log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
     let drafted = |texts: Vec<String>, code: i32, notes: Vec<String>, empty: bool| Drafted { texts, code, notes, empty, target: target_name.to_string(), lock_safe: false, commits: 0, changes: vec![] };
     let mut db = Db::open(opts).await?;
     let mut problems = out_of_reach(&mut db, &opts.url).await?;
@@ -5128,7 +5301,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
         let d = shadows.db(c).dialect();
         let indexes = if d == Dialect::Postgres { crate::diff::postgres::index_names(shadows.db(a)).await? } else { Default::default() };
         let target = Target { schema: target, indexes };
-        let asked = Asked::migration(migration);
+        let asked = Asked::migration(migration, rewrites);
         let Settled { renames, mut plan, assumed, tables } = match settle(shadows.db(c), current, &target, false, choices, Some(&asked), false).await? {
             Ok(settled) => settled,
             Err(problems) => return Ok(Err(problems)),
@@ -5345,7 +5518,7 @@ async fn with_referenced(db: &mut Db, schemas: &[String], log: Log<'_>) -> Resul
 
 /// The schemas of the project's that --schema has to name for SQL of them to hold them: each that
 /// holds an object of its own (not one an extension made, nor what comes with another object, as a
-/// table's index or sequence does, nor Reylo's history), and each that holds nothing at all, but
+/// table's index or sequence does, nor a history table), and each that holds nothing at all, but
 /// `public`, which every new database has. One that holds an extension alone is made with it.
 #[cfg(feature = "cli")]
 async fn schemas_to_name(db: &mut Db) -> Result<Vec<String>, Error> {
@@ -5354,11 +5527,12 @@ async fn schemas_to_name(db: &mut Db) -> Result<Vec<String>, Error> {
             "select n.nspname as name from pg_namespace n where {} and {} and (exists (
                select 1 from pg_depend d where d.refclassid = 'pg_namespace'::regclass and d.refobjid = n.oid and d.deptype = 'n'
                  and not exists (select 1 from pg_depend o where o.classid = d.classid and o.objid = d.objid and o.deptype in ('e', 'a', 'i'))
-                 and not (d.classid = 'pg_class'::regclass and d.objid in (select oid from pg_class where relname = '{HISTORY_TABLE}')))
+                 and not (d.classid = 'pg_class'::regclass and d.objid in (select oid from pg_class where not {})))
                or (n.nspname <> 'public' and not exists (select 1 from pg_depend d where d.refclassid = 'pg_namespace'::regclass and d.refobjid = n.oid)))
              order by 1",
             crate::catalog::PG_USER_NS,
-            crate::catalog::not_platform_schema("n")
+            crate::catalog::not_platform_schema("n"),
+            crate::catalog::not_history("relname")
         ))
         .await?;
     Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
@@ -5391,12 +5565,12 @@ async fn referenced_schemas(db: &mut Db, named: &[String]) -> Result<Vec<String>
 
 /// `live` as a shadow that ran SQL written from it reads, where the SQL makes all of it: without the
 /// lines the environment gives a shadow as it is made and `made` lacks, which the SQL leaves to it
-/// (a default privilege, the privileges on what an extension made). Partitions, comments and the
+/// (the privileges on what an extension made). Default privileges, partitions, comments and the
 /// rest stay, for the SQL to make.
 #[cfg(feature = "cli")]
 fn as_made(live: &[String], made: &[String]) -> Vec<String> {
-    use crate::catalog::{DEFAULT_PRIVILEGES, EXTENSION_GRANT};
-    live.iter().filter(|l| !(l.starts_with(DEFAULT_PRIVILEGES) || l.starts_with(EXTENSION_GRANT)) || made.contains(l)).cloned().collect()
+    use crate::catalog::EXTENSION_GRANT;
+    live.iter().filter(|l| !l.starts_with(EXTENSION_GRANT) || made.contains(l)).cloned().collect()
 }
 
 /// The refusal of an init whose --schema (`schemas`) leaves out schemas of the project's (`left`):
@@ -5434,8 +5608,10 @@ async fn own_sql(db: &mut Db, opts: &Options) -> Result<Result<String, NotOwn>, 
         Err(e) => return Ok(Err(NotOwn::NoShadow(e))),
     };
     // The project's extensions are the text's to make, as a fresh database needs them: a shadow that
-    // already had them would hide a plan that leaves them out.
+    // already had them would hide a plan that leaves them out. So are its default privileges and
+    // its grants on `public`.
     server.leave_extensions(project_extensions(db).await?);
+    server.copy_no_privileges();
     let result = async {
         let live = catalog(db).await?;
         let mut empty = match server.shadow().await {
@@ -5599,7 +5775,19 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             let mut args: Vec<String> = ["--schema-only", "--no-publications", "--no-subscriptions", "--no-security-labels", "--no-tablespaces"].map(String::from).to_vec();
             // Owners are kept where they aren't the role the file will run as, which owns what it makes.
             let runner = db.rows("select quote_ident(current_user) as u").await?.first().map(|r| r.text("u").to_string()).unwrap_or_default();
-            args.push(format!("--exclude-table=*.{HISTORY_TABLE}"));
+            // The history tables, and the sequences they own, each named as it is written: pg_dump
+            // folds what isn't quoted.
+            let history = db
+                .rows(&format!(
+                    "select format('\"%s\".\"%s\"', replace(n.nspname, '\"', '\"\"'), replace(c.relname, '\"', '\"\"')) as p
+                    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind in ('r', 'p', 'S') and {} and not {}",
+                    crate::catalog::PG_USER_NS,
+                    crate::catalog::pg_not_history("c")
+                ))
+                .await?;
+            for r in &history {
+                args.push(format!("--exclude-table={}", r.text("p")));
+            }
             // Every schema of the project's, unless --schema names some.
             let mut named_schemas: Vec<String> = if schemas.is_empty() { crate::catalog::user_schemas(db).await? } else { schemas.to_vec() };
             if named_schemas.is_empty() {
@@ -5814,9 +6002,10 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
         Dialect::Sqlite => {
             let rows = db
                 .rows(&format!(
-                    "select sql from sqlite_schema where sql is not null and name not like 'sqlite_%' and tbl_name <> '{HISTORY_TABLE}'
+                    "select sql from sqlite_schema where sql is not null and name not like 'sqlite_%' and {}
                       and name not in (select name from pragma_table_list where type = 'shadow') and name {turso} and tbl_name {turso} and {}
                     order by case type when 'table' then 0 when 'index' then 1 when 'view' then 2 else 3 end, rowid",
+                    crate::catalog::not_history("tbl_name"),
                     crate::catalog::NOT_LIBSQL_VECTOR_OWN,
                     turso = crate::catalog::NOT_TURSO_OWN
                 ))
@@ -5827,7 +6016,7 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             static AUTO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" AUTO_INCREMENT=\d+").expect("a valid pattern"));
             static DEFINER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" DEFINER=\S+").expect("a valid pattern"));
             let mut out = vec!["set foreign_key_checks = 0;".to_string()];
-            let tables = db.rows(&format!("select table_name as n, table_type as t from information_schema.tables where table_schema = database() and table_name <> '{HISTORY_TABLE}' order by table_type, table_name")).await?;
+            let tables = db.rows(&format!("select table_name as n, table_type as t from information_schema.tables where table_schema = database() and {} order by table_type, table_name", crate::catalog::not_history("table_name"))).await?;
             for t in tables.iter().filter(|t| t.text("t") == "BASE TABLE") {
                 let row = db.rows(&format!("show create table `{}`", t.text("n"))).await?;
                 out.push(format!("{};", AUTO.replace(row.first().map(|r| r.text("Create Table")).unwrap_or_default(), "")));
@@ -5856,7 +6045,7 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
                 let row = db.rows(&format!("show create view `{name}`")).await?;
                 out.push(format!("{};", DEFINER.replace(row.first().map(|r| r.text("Create View")).unwrap_or_default(), "")));
             }
-            for r in db.rows("select trigger_name as n from information_schema.triggers where trigger_schema = database()").await? {
+            for r in db.rows(&format!("select trigger_name as n from information_schema.triggers where trigger_schema = database() and {}", crate::catalog::not_history("event_object_table"))).await? {
                 let row = db.rows(&format!("show create trigger `{}`", r.text("n"))).await?;
                 out.push(format!("{};", DEFINER.replace(row.first().map(|x| x.text("SQL Original Statement")).unwrap_or_default(), "")));
             }
@@ -5923,8 +6112,12 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     let problems = out_of_reach(&mut db, &opts.url).await;
     let lines = catalog(&mut db).await;
     let left = left_out(&mut db, schemas).await;
+    let roles = named_roles(&mut db).await;
+    let new = new_database(&mut db).await;
     db.close().await;
     let problems = problems?;
+    let mut roles = roles?;
+    let new = new?;
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
     }
@@ -5932,7 +6125,7 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     if !left.is_empty() {
         return Ok(refuse(&[schemas_left_out(schemas, &left)], log));
     }
-    if !holds_a_schema(&lines?) {
+    if !holds_sql(&lines?, &new) {
         drop(spinning);
         std::fs::create_dir_all(&opts.dir)?;
         std::fs::write(&opts.schema, "")?;
@@ -5957,6 +6150,7 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     let init = opts.dir.join(INIT);
     std::fs::write(&init, &sql)?;
     // The history is the lock's: init.sql is its first line, and reaches schema.sql.
+    roles.retain(|role| names(&sql, role));
     let entries = lock::chain([(INIT, sql.as_str())]);
     let schema = Some(lock::schema_sum(&entries[0].sum, &sql));
     lock::write(&opts.lock, &lock::Lock { schema, entries })?;
@@ -5992,7 +6186,32 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     log(&entry(branch(false), &dir_name, ""));
     log(&entry(&format!("│   {}", branch(true)), INIT, "the same, recorded as run here"));
     log(&entry(branch(true), &file_name(&opts.lock), "the order the migrations run in"));
+    if !roles.is_empty() {
+        let named = if roles.len() == 1 { format!("the role {}", roles[0]) } else { format!("the roles {}", and_list(&roles)) };
+        log(&note(format!("{INIT} names {named}: make {} on each new server before it runs there, since a migration may not", if roles.len() == 1 { "it" } else { "them" })));
+    }
     Ok(code)
+}
+
+/// The roles the database names, as an owner, a grantee or a policy's role, that a new server
+/// lacks: none of the role that runs the migrations, a platform's, or Postgres's own. A migration
+/// may make no role, so they are the server's to have first, where the SQL written names them.
+#[cfg(feature = "cli")]
+async fn named_roles(db: &mut Db) -> Result<Vec<String>, Error> {
+    if db.dialect() != Dialect::Postgres {
+        return Ok(vec![]);
+    }
+    let rows = db
+        .rows(&format!(
+            "select distinct quote_ident(r.rolname) as r from pg_shdepend d join pg_roles r on r.oid = d.refobjid
+            where d.dbid = (select oid from pg_database where datname = current_database()) and d.refclassid = 'pg_authid'::regclass
+              and d.deptype in ('o', 'a', 'r') and r.oid <> {} and r.rolname !~ '^pg_' and {}
+            order by 1",
+            crate::catalog::runner(),
+            crate::catalog::not_platform("r.oid")
+        ))
+        .await?;
+    Ok(rows.iter().map(|r| r.text("r").to_string()).collect())
 }
 
 /// `reylo db introspect`: the database's schema as SQL that makes it, as `init` writes schema.sql;
@@ -6005,7 +6224,8 @@ pub async fn db_introspect(opts: &Options, schemas: &[String], log: Log<'_>) -> 
     let spinning = crate::terminal::spinner(format!("Introspecting {}", shown_url(&opts.url)));
     let mut db = Db::open(opts).await?;
     let result = async {
-        if !holds_a_schema(&catalog(&mut db).await?) {
+        let new = new_database(&mut db).await?;
+        if !holds_sql(&catalog(&mut db).await?, &new) {
             return Ok(Ok(String::new()));
         }
         let schemas = with_referenced(&mut db, schemas, &mut *log).await?;
@@ -6220,8 +6440,7 @@ pub async fn dev(opts: &Options, in_ci: bool, log: Log<'_>) -> Result<i32, Error
 
 /// The files in the migrations directory that aren't migrations, as one refusal: a `.sql` file that
 /// lacks only the time is told the name it needs.
-fn stray_problem(opts: &Options, strays: &[String]) -> Option<Problem> {
-    static BARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z0-9_]+\.sql$").expect("a valid pattern"));
+fn stray_problem(opts: &Options, files: &[Migration], strays: &[String]) -> Option<Problem> {
     let dir = shown(&opts.dir);
     let title = match strays {
         [] => return None,
@@ -6229,10 +6448,72 @@ fn stray_problem(opts: &Options, strays: &[String]) -> Option<Problem> {
         many => format!("Files in {dir} that aren't migrations: {}", many.join(", ")),
     };
     let mut problem = Problem::new("not-a-migration", title).note(format!("A file in {dir} is init.sql or <YYYYMMDDHHMMSS>_<name>.sql, the name in a-z, 0-9 and _."));
-    for s in strays.iter().filter(|s| BARE.is_match(s)) {
-        problem = problem.note(format!("Rename {s} to {}_{s}.", time::stamp(time::now_seconds())));
+    for note in stray_renames(files, strays, time::now_seconds()) {
+        problem = problem.note(note);
     }
     Some(problem)
+}
+
+/// The rename each stray `.sql` file named in a-z, 0-9 and _ needs, as a note. One whose name starts
+/// with a shorter stamp (`20260320_b.sql`, as Prisma accepts) is padded to the full time in place, so
+/// that it runs where its name sorts among the migrations: from the start of its period, else its
+/// end, whichever keeps it between the same neighbours. Any other takes the first second from `now`
+/// that no file has, which puts it last.
+fn stray_renames(files: &[Migration], strays: &[String], now: i64) -> Vec<String> {
+    static BARE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z0-9_]+\.sql$").expect("a valid pattern"));
+    static SHORT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{8,13})_([a-z0-9_]+)\.sql$").expect("a valid pattern"));
+    let real = |t: &str| time::seconds(t).map(time::stamp).as_deref() == Some(t);
+    // Each migration, and each stray already given a time, as (its time, its name, the name it is
+    // ordered by now): init.sql runs first whatever its name.
+    let mut placed: Vec<(String, String, String)> = files.iter().map(|f| (f.time.clone(), f.name.clone(), if f.name == INIT { String::new() } else { f.name.clone() })).collect();
+    // Every name a file in the directory has or is told to take, in lowercase, as a filesystem that
+    // ignores case reads it, so that no rename meets another file.
+    let mut taken: std::collections::HashSet<String> = files.iter().map(|f| &f.name).chain(strays).map(|n| n.to_lowercase()).collect();
+    let mut notes = Vec::new();
+    // A name with no stamp, or digits that aren't a date, can take any time from now, so it waits
+    // for those that can only take a time of their own period.
+    let mut unstamped = Vec::new();
+    for s in strays.iter().filter(|s| BARE.is_match(s)) {
+        let Some((short, rest)) = SHORT.captures(s).filter(|m| real(format!("{:0<14}", &m[1]).as_str())).map(|m| (m[1].to_string(), m[2].to_string())) else {
+            unstamped.push(s);
+            continue;
+        };
+        // The start of the stamp's period, and its end: each digit after the prefix the largest that
+        // still makes a time.
+        let start = format!("{short:0<14}");
+        let end = (short.len()..14).fold(short.clone(), |t, _| (0..=9).rev().map(|d| format!("{t}{d}")).find(|t| real(format!("{t:0<14}").as_str())).expect("0 makes a time"));
+        let candidates = [start, end];
+        let before = placed.iter().filter(|p| p.2.as_str() < s.as_str()).count();
+        let keeps = |t: &String| {
+            let name = format!("{t}_{rest}.sql");
+            !taken.contains(&name) && placed.iter().filter(|p| (p.0.as_str(), p.1.as_str()) < (t.as_str(), name.as_str())).count() == before
+        };
+        match candidates.iter().find(|t| keeps(t)) {
+            Some(t) => {
+                let name = format!("{t}_{rest}.sql");
+                notes.push(format!("Rename {s} to {name}."));
+                taken.insert(name.clone());
+                placed.push((t.clone(), name, s.clone()));
+            }
+            None => {
+                let mut by_order: Vec<&(String, String, String)> = placed.iter().collect();
+                by_order.sort_by(|a, b| a.2.cmp(&b.2));
+                let (prev, next) = (before.checked_sub(1).map(|i| &by_order[i].1), by_order.get(before).map(|p| &p.1));
+                notes.push(match (prev, next) {
+                    (Some(p), Some(n)) => format!("Rename {s} with a time that runs it where its name sorts, after {p} and before {n}."),
+                    (Some(p), None) => format!("Rename {s} with a time that runs it where its name sorts, after {p}."),
+                    (None, Some(n)) => format!("Rename {s} with a time that runs it where its name sorts, before {n}."),
+                    (None, None) => format!("Rename {s} with a time no other file has."),
+                });
+            }
+        }
+    }
+    for s in unstamped {
+        let name = (now..).map(|t| format!("{}_{s}", time::stamp(t))).find(|n| !taken.contains(n)).expect("a free second");
+        notes.push(format!("Rename {s} to {name}."));
+        taken.insert(name);
+    }
+    notes
 }
 
 /// The problems no database is needed to see: files that aren't migrations, a migration that can't
@@ -6245,7 +6526,7 @@ fn file_problems(opts: &Options, files: &[Migration], strays: &[String], schema_
             problems.push(Problem::new("merge-conflict-markers", format!("Git's conflict markers are still in {path}")).note("Resolve git's conflict markers (<<<<<<<, =======, >>>>>>>) first."));
         }
     }
-    problems.extend(stray_problem(opts, strays));
+    problems.extend(stray_problem(opts, files, strays));
     for f in files.iter().filter(|f| f.name != INIT) {
         if let Some(why) = atomicity_problem(&f.sql, d) {
             problems.push(Problem::new("not-atomic", format!("Migration {} can't run atomically", f.name)).note(why));
@@ -6253,11 +6534,24 @@ fn file_problems(opts: &Options, files: &[Migration], strays: &[String], schema_
     }
     let schema_name = opts.schema.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "schema.sql".into());
     for (name, sql) in files.iter().map(|f| (f.name.as_str(), f.sql.as_str())).chain(schema_sql.map(|s| (schema_name.as_str(), s))) {
-        if let Some(why) = shadow_problem(sql, d) {
-            problems.push(Problem::new("not-replayable", format!("Migration {name} can't be replayed in a shadow database")).note(why));
-        }
+        problems.extend(replay_problem(name, sql, d));
     }
     problems
+}
+
+/// The refusal of a file with a statement a shadow can't replay: the statement, why, and what to
+/// do instead.
+fn replay_problem(name: &str, sql: &str, d: Dialect) -> Option<Problem> {
+    let u = unreplayable(sql, d)?;
+    let mut why = u.why;
+    if let Some(first) = why.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    let problem = Problem::new("not-replayable", format!("Migration {name} can't be replayed in a shadow database")).sql(&u.statement).note(format!("{why}."));
+    Some(match u.instead {
+        Some(instead) => problem.note(instead),
+        None => problem,
+    })
 }
 
 #[cfg(feature = "cli")]
@@ -7278,6 +7572,13 @@ fn drop_phrase(items: &[(String, String)]) -> String {
         .join(", and ")
 }
 
+/// Whether `sql` names `role`, written as `quote_ident` writes it, as a word of its own.
+#[cfg(feature = "cli")]
+fn names(sql: &str, role: &str) -> bool {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
+    sql.match_indices(role).any(|(k, _)| !word(sql[..k].chars().next_back()) && !word(sql[k + role.len()..].chars().next()))
+}
+
 /// `a`, `a and b`, `a, b and c`.
 fn and_list(items: &[String]) -> String {
     match items {
@@ -7375,7 +7676,54 @@ fn table_lines(table: &crate::db::Table) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "cli")]
+    #[test]
+    fn a_grant_to_a_role_of_its_own_is_sql_to_write() {
+        use super::{NewDatabase, holds_sql};
+        let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let stock = NewDatabase::default();
+        let supabase = NewDatabase { platform: true, ..NewDatabase::default() };
+        let platform = lines(&["schema public", "grant schema public PUBLIC:USAGE,anon:USAGE,service_role:USAGE*", "default privileges in schema public grant select on tables to anon"]);
+        assert!(!holds_sql(&platform, &supabase));
+        assert!(holds_sql(&platform, &stock), "anon is a role of the project's on a server of no platform");
+        assert!(!holds_sql(&lines(&["schema public", "grant schema public PUBLIC:USAGE"]), &stock));
+        assert!(holds_sql(&lines(&["schema public", "grant schema public PUBLIC:CREATE,PUBLIC:USAGE"]), &stock));
+        assert!(!holds_sql(&lines(&["schema public", "grant schema public PUBLIC:CREATE,PUBLIC:USAGE"]), &NewDatabase { public_create: true, ..NewDatabase::default() }));
+        assert!(holds_sql(&lines(&["schema public", "schema reports", "grant schema reports PUBLIC:USAGE"]), &stock));
+        assert!(holds_sql(&lines(&["schema public", "grant schema public PUBLIC:USAGE,reporting:CREATE"]), &supabase));
+        assert!(holds_sql(&lines(&["schema public", "default privileges in schema public grant select on tables to reporting with grant option"]), &supabase));
+        assert!(holds_sql(&lines(&["schema public", "default privileges revoke execute on functions from public"]), &supabase));
+        assert!(super::names("grant select on table t to ops_read;", "ops_read"));
+        assert!(!super::names("grant select on table t to ops_readwrite;", "ops_read"));
+        assert!(!super::names("create table ops_read_log (id int);", "ops_read"));
+    }
+
     use super::*;
+
+    #[test]
+    fn a_stray_with_a_shorter_stamp_is_padded_where_its_name_sorts() {
+        let files = |names: &[&str]| -> Vec<Migration> { names.iter().map(|n| Migration { sql: String::new(), name: n.to_string(), time: if *n == INIT { "00000000000000".into() } else { n[..14].to_string() }, path: PathBuf::from(n) }).collect() };
+        let renames_at = |now: &str, names: &[&str], strays: &[&str]| stray_renames(&files(names), &strays.iter().map(|s| s.to_string()).collect::<Vec<_>>(), time::seconds(now).unwrap());
+        let renames = |names: &[&str], strays: &[&str]| renames_at("20261123191900", names, strays);
+        // Between its neighbours, from the start of its day.
+        assert_eq!(renames(&[INIT, "20260101000000_a.sql", "20260401000000_c.sql"], &["20260320_b.sql"]), ["Rename 20260320_b.sql to 20260320000000_b.sql."]);
+        assert_eq!(renames(&[], &["20260320_a.sql", "20260320_b.sql"]), ["Rename 20260320_a.sql to 20260320000000_a.sql.", "Rename 20260320_b.sql to 20260320000000_b.sql."]);
+        // Strays come in name order, and each keeps its place after those before it.
+        assert_eq!(renames(&[], &["202603201230_c.sql", "20260320_a.sql"]), ["Rename 202603201230_c.sql to 20260320123000_c.sql.", "Rename 20260320_a.sql to 20260320235959_a.sql."]);
+        // After a migration of the same day, which its name sorts after, from the end of the day.
+        assert_eq!(renames(&["20260320100000_x.sql", "20260401000000_c.sql"], &["20260320_b.sql"]), ["Rename 20260320_b.sql to 20260320235959_b.sql."]);
+        // A name with no date in front takes the time now, as does one whose digits are no date.
+        assert_eq!(renames(&["20260101000000_a.sql"], &["notes.sql", "20261399_x.sql", "README.md"]), ["Rename notes.sql to 20261123191900_notes.sql.", "Rename 20261399_x.sql to 20261123191900_20261399_x.sql."]);
+        // The end of a period read from the prefix's own digits: 1 of a 9-digit stamp is the hours 10 to 19.
+        assert_eq!(renames(&["20260320180000_a.sql"], &["202603201_b.sql"]), ["Rename 202603201_b.sql to 20260320195959_b.sql."]);
+        // No two renames, nor a rename and a migration, take one name.
+        assert_eq!(renames(&["20261123191900_bar.sql"], &["2026112319190_foo.sql", "bar.sql", "foo.sql"]), ["Rename 2026112319190_foo.sql to 20261123191900_foo.sql.", "Rename bar.sql to 20261123191901_bar.sql.", "Rename foo.sql to 20261123191901_foo.sql."]);
+        // A name that differs only in case is taken, and an unstamped file takes its time after the stamped ones.
+        assert_eq!(renames(&["20260320180000_a.sql"], &["20260320195959_B.sql", "202603201_b.sql"]), ["Rename 202603201_b.sql with a time that runs it where its name sorts, after 20260320180000_a.sql."]);
+        assert_eq!(renames_at("20261123191929", &["20261123191925_a.sql"], &["1_notes.sql", "2026112319192_1_notes.sql"]), ["Rename 2026112319192_1_notes.sql to 20261123191929_1_notes.sql.", "Rename 1_notes.sql to 20261123191930_1_notes.sql."]);
+        // No time of the day keeps it between its neighbours.
+        assert_eq!(renames(&["20260320000000_z.sql", "20260320235959_z.sql", "20260401000000_c.sql"], &["20260320_b.sql"]), ["Rename 20260320_b.sql with a time that runs it where its name sorts, after 20260320235959_z.sql and before 20260401000000_c.sql."]);
+    }
 
     #[test]
     fn a_printed_run_is_offered_only_where_it_runs_as_a_migration() {

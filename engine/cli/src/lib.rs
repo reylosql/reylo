@@ -47,8 +47,8 @@ Commands:
     --url <url>            The database, in place of the project's
     --format <format>      json, the default, yaml or typescript
     --format rust          Print each statement's Rust module for sqlx
-  generate <generator>     Write each .sql file's module for a language
-    --out <file>           Write every module into one file
+  generate <generator>     Write every .sql file's module into one file
+    --out <file>           The file to write
   migrate <command>        Write, check and run your migrations
   db <command>             Push, reset, wipe or print a development database
   run <sql>                Run SQL as written, recording nothing
@@ -62,21 +62,24 @@ Flags:
   -h, --help               Print this help
   --version                Print the version";
 
-const GENERATE_USAGE: &str = "Usage: reylo generate <generator> [<file.sql | directory | 'glob'> ...] [--out <file>]
+const GENERATE_USAGE: &str = "Usage: reylo generate <generator> [<file.sql | directory | 'glob'> ...] --out <file>
 
-Writes each .sql file's module, typed by the project's database, as reylo analyze reads it.
+Writes every .sql file's module into one file, typed by the project's database, as reylo analyze
+reads it.
 
 Generators:
+  typescript                Each query as an export, with .run() and its types, for the
+                            project's reylo dependency; run by the reylo package's command
   rust-sqlx                 Query, Row and .run() on sqlx, as #[reylo::query] writes them, for
                             the crate's reylo dependency
 
-Each .sql file's module is written beside it, get_user.sql as get_user.rs; with --out, every
-module goes into one file, each directory under the inputs a module of its own. A directory is
-searched for .sql files, and a glob in quotes is expanded by Reylo; with none, every .sql file
-under the crate's src/, from the nearest Cargo.toml, or at a workspace's root under each member's.
-A module checks as the crate compiles that its .sql file reads as it did, so a query edited since
-fails to compile until it is written again. Exits with 1 when any statement fails, writing none.
-TypeScript needs no generator: the type check reads each query itself.";
+Each module is named after its file, whatever directory it is in: get_user.sql is getUser in
+TypeScript and get_user in Rust, and two files with one name fail. A directory is searched for
+.sql files, and a glob in quotes is expanded by Reylo. typescript reads the paths it is given;
+rust-sqlx with none reads every .sql file under the crate's src/, from the nearest Cargo.toml, or
+at a workspace's root under each member's. A Rust module checks as the crate compiles that its .sql
+file reads as it did, so a query edited since fails to compile until it is written again. Exits
+with 1 when any statement fails, writing nothing.";
 
 const RUN_USAGE: &str = "Usage: reylo run \"<sql>\"… [--file <path>]…
 
@@ -463,8 +466,16 @@ fn generate_command(args: &[String]) -> i32 {
         return if args.is_empty() { 2 } else { 0 };
     }
     let generator = args[0].as_str();
+    if generator == "typescript" {
+        eprintln!("reylo generate: the typescript generator runs in the project's reylo package: npx reylo generate typescript");
+        return 2;
+    }
     if generator != "rust-sqlx" {
-        eprintln!("reylo generate: no generator {generator}: the one there is is rust-sqlx (reylo generate --help)");
+        eprintln!("reylo generate: no generator {generator}: there are typescript and rust-sqlx (reylo generate --help)");
+        return 2;
+    }
+    if !args[1..].iter().any(|a| a == "--out" || a == "-o" || a.starts_with("--out=")) {
+        eprintln!("reylo generate: name the file to write with --out, as --out src/queries.rs (reylo generate --help)");
         return 2;
     }
     let mut builder = reylo_build::generate::rust_sqlx();
@@ -491,12 +502,13 @@ fn generate_command(args: &[String]) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_default();
     match builder.run() {
         Ok(written) => {
-            let changed = written.iter().filter(|w| w.changed).count();
-            for file in written.iter().filter(|w| w.changed) {
-                println!("{} Wrote {}", paint("green", "✓"), file.path.strip_prefix(&cwd).unwrap_or(&file.path).display());
-            }
-            if changed < written.len() {
-                println!("{}", paint("dim", &format!("{} unchanged", written.len() - changed)));
+            for file in &written {
+                let path = file.path.strip_prefix(&cwd).unwrap_or(&file.path).display();
+                if file.changed {
+                    println!("{} Wrote {path}", paint("green", "✓"));
+                } else {
+                    println!("{}", paint("dim", &format!("» No change to {path}")));
+                }
             }
             0
         }
