@@ -2506,11 +2506,10 @@ async fn a_cached_prefix_replays_only_what_follows_it(mut p: P) {
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     let stats = reylo_migrate::cache::take_stats();
     if keeps_databases {
-        // A copy for the check, and one for the locks the pending migration holds, run on Postgres.
-        let copies = if p.d == Dialect::Postgres { 2 } else { 1 };
-        assert_eq!((stats.replayed, stats.copies), (2, copies), "{stats:?}");
+        // A copy for the check, and one the pending migration runs on to say what it locks and drops.
+        assert_eq!((stats.replayed, stats.copies), (2, 2), "{stats:?}");
     } else {
-        // The check's replay, and the history again for the locks the pending migration holds.
+        // The check's replay, and the history again for what the pending migration locks and drops.
         assert_eq!(stats.replayed, 8, "{stats:?}");
     }
     reylo_migrate::cache::set_enabled(None);
@@ -4392,6 +4391,66 @@ async fn a_dry_run_says_what_blocks_a_table_renamed_before() {
     p.output();
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     assert_has!(p.output(), r"_narrow\.sql\n      ! It rewrites accounts, copying every row while it blocks writes to it");
+}
+
+/// A dry run says what each pending migration drops, one written by hand too, with what this
+/// database holds of it; a column renamed keeps its rows, and isn't said to be dropped.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_says_what_pending_migrations_drop() {
+    for d in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
+        let Some(mut p) = P::new(d).await else { continue };
+        p.file("20261027100000_users.sql", "create table users (id int primary key, bio varchar(20), nick varchar(20), n bigint);");
+        p.file("20261027100001_tags.sql", "create table tags (id int primary key);");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into users values (1, 'a', null, 1); insert into users values (2, null, null, 2); insert into users values (3, 'c', null, 3); insert into tags values (1)").await;
+        p.file("20261027110000_drop_bio.sql", "alter table users drop column bio;");
+        p.file("20261027110001_drop_nick.sql", "alter table users drop column nick;");
+        p.file("20261027110002_drop_tags.sql", "drop table tags;");
+        p.file("20261027110003_rename_n.sql", "alter table users rename column n to amount;");
+        p.schema("create table users (id int primary key, amount bigint);\n");
+        p.output();
+        assert_eq!(p.dry_run().await, 0, "{d:?}: {}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"_drop_bio\.sql\n      ! It drops users\.bio, which holds a value in 2 rows on this database\n");
+        assert_has!(&out, r"_drop_nick\.sql\n      ! It drops users\.nick, which holds no value on this database\n");
+        assert_has!(&out, r"_drop_tags\.sql\n      ! It drops the table tags and its 1 row on this database\n");
+        assert!(out.trim_end().ends_with("_rename_n.sql"), "{d:?}: a rename keeps its rows: {out}");
+    }
+}
+
+/// A dry run checks each constraint a pending migration adds against the rows this database holds,
+/// and fails where some break it, listing them. One whose table a pending migration changes the
+/// rows of first is left to the deploy: the rows it meets are those the change leaves.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_checks_new_constraints_against_this_databases_rows() {
+    for d in [Dialect::Postgres, Dialect::Mysql] {
+        let Some(mut p) = P::new(d).await else { continue };
+        p.file("20261027100000_teams.sql", "create table teams (id int primary key);");
+        p.file("20261027100001_users.sql", "create table users (id int primary key, email varchar(100), plan varchar(10), team_id int);");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into teams values (1); insert into users values (1, 'a@x', 'free', 1); insert into users values (2, 'a@x', 'gold', null); insert into users values (3, null, 'pro', 9)").await;
+        p.file("20261027110000_plan.sql", "alter table users add constraint users_plan check (plan in ('free', 'pro'));");
+        p.file("20261027110001_email.sql", "create unique index users_email on users (email);");
+        p.file("20261027110002_team.sql", "alter table users add constraint users_team foreign key (team_id) references teams (id);");
+        let not_null = if d == Dialect::Mysql { "alter table users modify email varchar(100) not null;" } else { "alter table users alter column email set not null;" };
+        p.file("20261027110003_email_not_null.sql", not_null);
+        p.schema("create table teams (id int primary key);\ncreate table users (id int primary key, email varchar(100) not null, plan varchar(10), team_id int, constraint users_plan check (plan in ('free', 'pro')), constraint users_team foreign key (team_id) references teams (id));\ncreate unique index users_email on users (email);\n");
+        p.output();
+        assert_eq!(p.dry_run().await, 1, "{d:?}: {}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"_plan\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks users_plan\n        List them:\n          select \* from [^\n]+\n");
+        assert_has!(&out, r"_email\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 value repeats in users_email\n");
+        assert_has!(&out, r"_team\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks users_team\n");
+        assert_has!(&out, r"_email_not_null\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row has nulls in users\.email\n");
+        assert_has!(&out, r"✗ The deploy would fail on rows this database holds\n");
+
+        // A backfill before them: the constraints meet the rows it leaves, which no read of this
+        // database can say, so the deploy is left to find out.
+        p.file("20261027105959_backfill.sql", "update users set plan = 'free', email = concat('u', id, '@x'), team_id = 1;");
+        p.output();
+        assert_eq!(p.dry_run().await, 0, "{d:?}: {}", p.peek());
+        assert!(!p.output().contains("✗"), "{d:?}: the backfill changes the rows first");
+    }
 }
 
 /// A trigger swapped under a lock with a change to its table: the change runs first, so one that
