@@ -5039,12 +5039,15 @@ mod adversarial {
             other => panic!("introspect: {:?}\n{}", other.map_err(|e| e.0), said.join("\n")),
         };
         assert_has!(text, "(?i)create table");
-        assert_has!(said.join("\n"), r"^» Printing (pg_dump's output|the database's own dump), not Reylo's own SQL\n  No shadow database can be made to check Reylo's own SQL for it: [\s\S]+\n  Set shadow_url in \.reylo\.yaml to a server that can make one, to get Reylo's own SQL$");
+        assert_has!(said.join("\n"), r"^» Printing (pg_dump's output|the database's own dump), not Reylo's own SQL\n  No shadow database can be made to check Reylo's own SQL for it: [\s\S]+shadow_url[\s\S]*$");
+        // A shadow_url that answers nothing, and one whose role can't create a database either.
         let nowhere = if p.d == Dialect::Postgres { "postgres://postgres@127.0.0.1:1/none" } else { "mysql://root@127.0.0.1:1/none" };
-        let mut said = Vec::new();
-        let result = reylo_migrate::db_introspect(&Options { shadow_url: Some(nowhere.into()), ..p.opts() }, &[], &mut |l: &str| said.push(l.to_string())).await;
-        assert!(matches!(result, Ok(Err(1))), "{}", said.join("\n"));
-        assert_has!(said.join("\n"), r"^✗ No shadow database can be made on the server shadow_url names\n  [\s\S]+\n  Reylo's own SQL is checked on a shadow database before it's printed\.\n  Start that server, or set shadow_url in \.reylo\.yaml to one that can make shadow databases\.\n\nNothing was changed\.$");
+        for shadow_url in [nowhere.to_string(), p.url.clone()] {
+            let mut said = Vec::new();
+            let result = reylo_migrate::db_introspect(&Options { shadow_url: Some(shadow_url.clone()), ..p.opts() }, &[], &mut |l: &str| said.push(l.to_string())).await;
+            assert!(matches!(result, Ok(Err(1))), "{shadow_url}: {}", said.join("\n"));
+            assert_has!(said.join("\n"), r"^✗ No shadow database can be made on the server shadow_url names\n  [\s\S]+\n  Reylo's own SQL is checked on a shadow database before it's printed\.\n  Make sure that server is running and its role can create a database, or set shadow_url in \.reylo\.yaml to one that can\.\n\nNothing was changed\.$");
+        }
         p.schema("create table users (id int primary key);");
         p.file("20261027100000_users.sql", "create table users (id int primary key);");
         let e = reylo_migrate::dry_run(&opts, &mut |_: &str| {}).await.expect_err("no shadow database can be made");

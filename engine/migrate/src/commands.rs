@@ -6728,7 +6728,7 @@ async fn schema_as_sql_on(db: &mut Db, opts: &Options, schemas: &[String], shado
 /// `shadow_url` unset.
 #[cfg(feature = "cli")]
 fn no_shadow(e: &Error) -> Vec<String> {
-    vec![format!("  No shadow database can be made to check Reylo's own SQL for it: {e}"), "  Set shadow_url in .reylo.yaml to a server that can make one, to get Reylo's own SQL".to_string()]
+    vec![format!("  No shadow database can be made to check Reylo's own SQL for it: {e}")]
 }
 
 /// The refusal where no shadow database can be made on the server `shadow_url` names.
@@ -6737,7 +6737,7 @@ fn shadow_url_problem(e: &Error) -> Problem {
     Problem::new("shadow-url-unusable", "No shadow database can be made on the server shadow_url names")
         .lines([format!("  {e}")])
         .note("Reylo's own SQL is checked on a shadow database before it's printed.")
-        .note("Start that server, or set shadow_url in .reylo.yaml to one that can make shadow databases.")
+        .note("Make sure that server is running and its role can create a database, or set shadow_url in .reylo.yaml to one that can.")
 }
 
 /// What --schema (`schemas`, where it names any) leaves out: each schema of the project's it doesn't
@@ -6982,6 +6982,7 @@ async fn checked_against_dump(db: &mut Db, opts: &Options, schemas: &[String], s
         shadows.push(from_plan, [Step::script("schema.sql", &sql)]);
         Ok::<_, Error>(match (shadows.lines(from_dump).await?, shadows.lines(from_plan).await?) {
             (Ok(a), Ok(b)) if a == b => Ok(sql),
+            (Err((_, e)), _) => Err(NotOwn::Short(vec![format!("  The dump fails on a shadow database: {e}")])),
             (_, Err((_, e))) => Err(NotOwn::Short(vec![format!("  Reylo's own SQL for it fails on a shadow database: {e}")])),
             _ => Err(NotOwn::Short(vec!["  Reylo's own SQL doesn't make what the dump does".to_string()])),
         })
@@ -6990,13 +6991,13 @@ async fn checked_against_dump(db: &mut Db, opts: &Options, schemas: &[String], s
     shadows.finish().await;
     server.close().await;
     // Whatever keeps the plan from being shown to make the dump's schema leaves the dump, but a
-    // shadow_url that can make no shadow.
+    // shadow that can't be made or fails on its server.
     *why = match styled {
         Ok(Ok(sql)) => return Ok(Ok(format!("{}\n", sql.trim_end()))),
-        Ok(Err(NotOwn::NoShadow(e))) if opts.shadow_url.is_some() => return Ok(Err(shadow_url_problem(&e))),
-        Ok(Err(NotOwn::NoShadow(e))) => no_shadow(&e),
+        Ok(Err(NotOwn::NoShadow(e))) | Err(e) if shadowed => return Err(e),
+        Ok(Err(NotOwn::NoShadow(e))) | Err(e) if opts.shadow_url.is_some() => return Ok(Err(shadow_url_problem(&e))),
+        Ok(Err(NotOwn::NoShadow(e))) | Err(e) => no_shadow(&e),
         Ok(Err(NotOwn::Short(lines))) => lines,
-        Err(e) => vec![format!("  Reylo's own SQL can't be checked on a shadow database: {e}")],
     };
     Ok(Ok(dumped))
 }
