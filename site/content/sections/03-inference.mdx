@@ -2,11 +2,9 @@
 title: "Inference"
 ---
 
-Reylo sends each statement against your live dev database without running it. It gets back a prepared version of the query plus your database's type descriptors, and it infers type information based on those.
+Reylo prepares each statement on your live dev database without running it. It reads back the database's type descriptors and infers TypeScript types from them.
 
-Reylo returns the types in a structured format that is then consumed by the TypeScript content mapper. To read the data in its raw form, you can use the [CLI](/cli#reylo-analyze).
-
-ClickHouse states most of this itself: a parameter declares its type, and a column's type says whether it can be null. So the rules below are mostly those of Postgres, MySQL and SQLite, and [ClickHouse](/clickhouse) has its own page.
+To inspect the raw analysis, run [`reylo analyze`](/cli#reylo-analyze). On [ClickHouse](/clickhouse), parameters and nullability come from the types you declare, so the rules below focus on Postgres, MySQL and SQLite.
 
 <Rust>
 Each card shows the types in TypeScript or in Rust: pick one at the top of any card.
@@ -266,7 +264,7 @@ A function your application registers fails the type check. Reylo prepares the s
 </Dialect>
 <Dialect value="ClickHouse">
 
-ClickHouse infers no parameter's type: each one declares its own, as `{x:String}` or `:x::String`, and a bare `:x` is an error.
+ClickHouse infers no parameter types. Declare each one as `{x:String}` or `:x::String`; a bare `:x` is an error.
 
 </Dialect>
 </DialectTabs>
@@ -274,6 +272,8 @@ ClickHouse infers no parameter's type: each one declares its own, as `{x:String}
 </Details>
 
 ## Column types
+
+Each selected column takes its type and nullability from the schema:
 
 <InferenceCard>
 
@@ -480,7 +480,7 @@ Each filter read with `->>` is a value the database can plan with. On Postgres a
 
 <Callout type="warning" title="Indexes">
 
-A given filter can use an index on Postgres only when each run is planned with its values. Every Postgres driver plans each run, except postgres.js and Bun.sql, and Drizzle over them. Create those clients with `connection: { plan_cache_mode: "force_custom_plan" }` ([postgres.js](/postgres#postgresjs)), or after five runs Postgres can switch to a plan that reads the whole table. MySQL plans each run. SQLite reads every row for this query.
+A given filter can use an index on Postgres only when each run is planned with its values. Every Postgres driver plans each run, except postgres.js and Bun.sql, and Drizzle over them. Create those clients with `connection: { plan_cache_mode: "force_custom_plan" }` ([postgres.js](/postgres#postgresjs)). Without it, Postgres can switch to a full-table scan after five runs. MySQL plans each run. SQLite reads every row for this query.
 
 </Callout>
 

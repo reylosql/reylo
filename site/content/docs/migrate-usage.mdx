@@ -9,6 +9,8 @@ Each workflow below is a few commands of the [CLI](/migrate/cli).
 
 ## Workflows
 
+Every workflow keeps your schema file, migration history and development database in step.
+
 ### Trying a change
 
 Push changes to your development database, then write the migration:
@@ -44,7 +46,7 @@ A change that blocks writes to a table while it reads every row is refused until
 $ reylo migrate new widen_amount --blocking
 ```
 
-On a large table, the app's writes wait for as long as that takes. To change a column without copying its table, add a column, fill it in batches, then swap the two, each step a migration of its own.
+On a large table, the app's writes wait for as long as that takes. To avoid copying the table, add a column, fill it in batches, and swap the two across separate migrations.
 
 ### Switching branches
 
@@ -565,7 +567,7 @@ $ reylo migrate new dates_only --drop events.starts_at,events.price --blocking
   ! Column events.starts_at changes from timestamp with time zone to date, which keeps only the date
 ```
 
-A change that fails on a value it can't hold, such as a shorter `varchar`, isn't asked about: the migration fails on that row instead. On SQLite, only a change from text to a number loses values.
+A change that fails on an existing value, such as a shorter `varchar`, isn't asked about. The migration fails on that row instead. On SQLite, only a change from text to a number loses values.
 
 ### Pushes
 
@@ -583,7 +585,7 @@ $ reylo db push
 Nothing was changed.
 ```
 
-With `--force`, a column that could be a rename is renamed where both types are of one kind, such as two numbers, and dropped otherwise. A push never asks for `--blocking`.
+With `--force`, an ambiguous column change becomes a rename when both types share a kind, such as two numbers. Otherwise it's dropped. A push never asks for `--blocking`.
 
 ## Schemaless mode
 

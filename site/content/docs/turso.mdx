@@ -187,7 +187,7 @@ About vectors:
 - A vector function fails on a `NULL` vector, where most SQLite functions return `NULL`. Leave rows without one out with `where emb is not null`.
 - A vector column is typed as a `BLOB`. It can't be in a `STRICT` table, since libSQL refuses vector types there. Calling `.run()` returns a vector as a `Uint8Array`, and `vector_extract(emb)` returns its text.
 - A driver whose SQLite has no vectors, such as `better-sqlite3`, refuses these queries in the type check. Turso's own engine can't open a schema with a vector index, so the type check skips it then.
-- `alter table … alter column` type-checks as a statement that returns nothing.
+- Statements with `alter table … alter column` type-check and return nothing.
 
 ## Extensions
 
