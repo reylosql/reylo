@@ -247,10 +247,10 @@ pub trait Alterer: Send {
         let _ = (from, to);
         Vec::new()
     }
-    /// The objects whose copies a change of `from` to `to` drops itself (a table that leaves a parent
-    /// drops its copies of the parent's checks): what those depend on is dropped after the change,
-    /// since a copy the table also had of its own outlives the other's object.
-    fn copies_dropped(&self, from: &Object, to: &Object) -> Vec<String> {
+    /// What the copies of another object's that a change of `from` to `to` drops itself depend on (a
+    /// table that leaves a parent drops its copies of the parent's checks, and what those call): each
+    /// dropped after the change, since a copy the table also had of its own outlives the other's.
+    fn copies_read(&self, from: &Object, to: &Object) -> Vec<String> {
         let _ = (from, to);
         Vec::new()
     }
@@ -1319,14 +1319,12 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         None
     };
     // The changes that drop copies of another object themselves, by what those copies depend on.
-    let mut copies_need: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    let mut copies_need: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (k, op) in ops.iter().enumerate() {
         let Op::Alter(id) = op else { continue };
         let (Some(f), Some(t)) = (from.objects.get(id), to.objects.get(id)) else { continue };
-        for copied in alterer.copies_dropped(f, t) {
-            for d in from.objects.get(&copied).into_iter().flat_map(|c| c.deps.iter()) {
-                copies_need.entry(d.as_str()).or_default().push(k);
-            }
+        for d in alterer.copies_read(f, t) {
+            copies_need.entry(d).or_default().push(k);
         }
     }
     for (k, op) in ops.iter().enumerate() {

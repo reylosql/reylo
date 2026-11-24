@@ -31,6 +31,7 @@ fn cases(dialect: &str) -> Vec<PathBuf> {
 
 /// A table's rows, column by column, as text, sorted: `columns` are `(name before the plan, type
 /// before it)`.
+#[derive(PartialEq)]
 struct Rows {
     table: String,
     columns: Vec<(String, String)>,
@@ -406,6 +407,7 @@ async fn postgres() {
             let back_fails = read(&case.join("back-fails.txt")).trim().to_string();
             let mut ready = true;
             if !back_fails.is_empty() {
+                let (held, valued) = (counts(&mut from).await, values(&mut from, None, &Default::default(), &skip).await);
                 let (_, _, failed) = apply(&mut from, &origin, &alterer).await;
                 let (only_a, only_b) = differences(&mut from, &mut to).await;
                 let refused = match failed {
@@ -413,7 +415,8 @@ async fn postgres() {
                     Some(f) => Some(format!("the way back failed otherwise than back-fails.txt says: {f}")),
                     None => Some(format!("the way back ran, where back-fails.txt says it fails with {back_fails}")),
                 };
-                let changed = (!only_a.is_empty() || !only_b.is_empty()).then(|| "the way back that failed changed the database".to_string());
+                let same = only_a.is_empty() && only_b.is_empty() && counts(&mut from).await == held && values(&mut from, None, &Default::default(), &skip).await == valued;
+                let changed = (!same).then(|| "the way back that failed changed the database or its rows".to_string());
                 ready = refused.is_none() && changed.is_none();
                 problems.extend(refused.into_iter().chain(changed));
                 empty(&mut from).await;
