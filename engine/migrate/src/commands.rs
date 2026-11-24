@@ -6095,6 +6095,8 @@ struct Settled {
     assumed: Vec<(String, String, bool)>,
     /// The tables renamed, each its old id and its new.
     tables: Vec<(String, String)>,
+    /// The catalog as the table renames left it, read before any column was renamed, where one was.
+    after_tables: Option<Vec<String>>,
 }
 
 /// The plan from `db`, which reads as `current`, to `target`, as `choices` settles it: tables renamed
@@ -6236,7 +6238,7 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
                 return Ok(Err(problems));
             }
         }
-        Ok(Ok((plan, assumed)))
+        Ok(Ok((plan, assumed, dropped)))
     }
     .await;
     // MySQL commits each rename on its own, so a refusal renames the tables back.
@@ -6247,7 +6249,70 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
         }
     }
     let tables = renamed_tables.iter().map(|(old, new, _)| (old.clone(), new.clone())).collect();
-    settled.map(|r| r.map(|(plan, assumed)| Settled { renames, plan, assumed, tables }))
+    // On Postgres the columns the plan renames are renamed first, on `db` itself, and the rest
+    // planned from there: the server renames a column in every index, constraint, view and policy
+    // that names it, which a plan from before the rename would drop and make again.
+    let mut after_tables = None;
+    let settled = match settled {
+        Ok(Ok((plan, assumed, dropped))) if d == Dialect::Postgres && !plan.renamed.is_empty() => {
+            if !renamed_tables.is_empty() {
+                after_tables = Some(catalog(db).await?);
+            }
+            match columns_renamed_first(db, &plan, &current, target, &dropped, live).await? {
+                Some((ran, rest)) => {
+                    renames.extend(ran);
+                    Ok(Ok((rest, assumed)))
+                }
+                None => Ok(Ok((plan, assumed))),
+            }
+        }
+        other => other.map(|r| r.map(|(plan, assumed, _)| (plan, assumed))),
+    };
+    settled.map(|r| r.map(|(plan, assumed)| Settled { renames, plan, assumed, tables, after_tables }))
+}
+
+/// The statements of a Postgres plan that rename its columns, in order, each with the comments above
+/// it and the not null renamed after it.
+#[cfg(feature = "cli")]
+fn column_rename_statements(plan: &crate::diff::Plan) -> Vec<String> {
+    let renames = |s: &str, what: &str| s.trim_start().to_ascii_lowercase().starts_with("alter table ") && s.contains(what);
+    let (mut out, mut comments) = (Vec::new(), Vec::new());
+    let mut statements = plan.statements.iter().peekable();
+    while let Some(s) = statements.next() {
+        if s.starts_with("--") {
+            comments.push(s.clone());
+            continue;
+        }
+        if renames(s, " rename column ") {
+            out.append(&mut comments);
+            out.push(s.clone());
+            if let Some(next) = statements.next_if(|n| renames(n, " rename constraint ")) {
+                out.push(next.clone());
+            }
+        }
+        comments.clear();
+    }
+    out
+}
+
+/// `plan`'s column renames run on `db`, and the plan from there to `target`, which carries `plan`'s
+/// renames for what is shown of them; None, running nothing, where a rename can't run first (its new
+/// name a column `db` has, which the plan drops before it).
+#[cfg(feature = "cli")]
+async fn columns_renamed_first(db: &mut Db, plan: &crate::diff::Plan, current: &crate::diff::Schema, target: &Target, dropped: &std::collections::BTreeSet<String>, live: bool) -> Result<Option<(Vec<String>, crate::diff::Plan)>, Error> {
+    let ran = column_rename_statements(plan);
+    let runnable: Vec<String> = ran.iter().filter(|s| !s.starts_with("--")).map(|s| format!("{};", s.trim_end())).collect();
+    if runnable.iter().filter(|s| s.contains(" rename column ")).count() != plan.renamed.len() || plan.renamed.iter().any(|(_, new)| current.objects.contains_key(new)) {
+        return Ok(None);
+    }
+    db.script(&runnable.join("\n")).await?;
+    let mut now = crate::diff::read(db).await?;
+    now.live = live;
+    let alterer = crate::diff::alterer(db).await?;
+    let mut rest = crate::diff::plan_with(&now, &target.schema, alterer.as_ref(), &[], dropped);
+    style(db, &mut rest, &target.schema).await?;
+    (rest.renames, rest.renamed, rest.pairs) = (plan.renames.clone(), plan.renamed.clone(), plan.pairs.clone());
+    Ok(Some((ran, rest)))
 }
 
 /// The new migration's text: the diff engine's plan from the migrations replayed in order to
@@ -6357,13 +6422,17 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
         let indexes = if d == Dialect::Postgres { crate::diff::postgres::index_names(shadows.db(a)).await? } else { Default::default() };
         let target = Target { schema: target, indexes };
         let asked = Asked::migration(migration, rewrites);
-        let Settled { renames, mut plan, assumed, tables } = match settle(shadows.db(c), current, &target, false, choices, Some(&asked), false).await? {
+        let Settled { renames, mut plan, assumed, tables, after_tables } = match settle(shadows.db(c), current, &target, false, choices, Some(&asked), false).await? {
             Ok(settled) => settled,
             Err(problems) => return Ok(Err(problems)),
         };
         // The schema the table renames left, for the summary, which shows each as a rename and leaves
         // out what only took its new name.
-        let renamed = if tables.is_empty() { None } else { Some(catalog(shadows.db(c)).await?) };
+        let renamed = match (tables.is_empty(), after_tables) {
+            (true, _) => None,
+            (false, Some(lines)) => Some(lines),
+            (false, None) => Some(catalog(shadows.db(c)).await?),
+        };
         moves.extend(renames);
         if plan.statements.is_empty() && moves.is_empty() {
             return Ok(Ok(drafted(vec![String::new()], 0, vec![], true)));

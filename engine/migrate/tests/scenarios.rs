@@ -4118,7 +4118,7 @@ on!(
     new_drops_a_foreign_key_on_a_replaced_key_with_it,
     dev_rewinds_a_changed_index,
     a_primary_key_added_over_an_index_says_it_checks_for_nulls,
-    new_keeps_a_key_while_a_column_under_it_is_renamed,
+    new_renames_a_column_under_its_indexes_keys_and_views,
     a_name_given_to_a_new_index_keeps_the_old_one_until_the_last_build,
 );
 
@@ -6396,27 +6396,34 @@ mod adversarial {
         assert_eq!(p.rows("select count(*)::text as n from users").await[0].text("n"), "1", "a rewind keeps the rows");
     }
 
-    pub async fn new_keeps_a_key_while_a_column_under_it_is_renamed(mut p: P) {
-        let v1 = "create table posts (pid int primary key, title text); create index posts_title on posts (title, pid);";
+    pub async fn new_renames_a_column_under_its_indexes_keys_and_views(mut p: P) {
+        let v1 = "create table posts (pid int primary key, title text, constraint pid_pos check (pid > 0));
+            create index posts_title on posts (title, pid);
+            create table comments (id int primary key, post int references posts (pid));
+            create view titles as select pid, title from posts;";
         p.schema(v1);
         p.file("20261027100000_v1.sql", v1);
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
-        p.exec("insert into posts values (1, 'a')").await;
+        p.exec("insert into posts values (1, 'a'); insert into comments values (1, 1)").await;
         p.output();
-        p.schema("create table posts (post_id int primary key, title text); create index posts_title on posts (title, post_id);");
+        p.schema(
+            "create table posts (post_id int primary key, title text, constraint pid_pos check (post_id > 0));
+            create index posts_title on posts (title, post_id);
+            create table comments (id int primary key, post int references posts (post_id));
+            create view titles as select post_id as pid, title from posts;",
+        );
         let choices = reylo_migrate::Choices { rename: vec![("posts.pid".into(), "post_id".into())], ..Default::default() };
-        // The key and the index are built again under the new column's name, beside the old ones.
+        // The rename alone: the server renames the column in each index, key, check and view.
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "rename_pid", &choices, log).await).await, 0, "{}", p.peek());
-        let made = written(&p, "rename_pid");
-        let all = made.join("-- next\n");
-        for (build, swap) in [("create unique index concurrently posts_pkey_new on posts (post_id);", "alter table posts drop constraint posts_pkey;"), ("create index concurrently posts_title_new on posts (title, post_id);", "drop index posts_title;")] {
-            let at = made.iter().position(|f| f.contains(build)).unwrap_or_else(|| panic!("no file builds {build}:\n{all}"));
-            assert!(made[..=at].iter().all(|f| !f.contains(swap)), "{swap} waits for {build}:\n{all}");
+        let all = written(&p, "rename_pid").join("-- next\n");
+        assert!(all.contains("alter table posts rename column pid to post_id;"), "{all}");
+        for rebuilt in ["drop ", "create ", "add constraint", "concurrently"] {
+            assert!(!all.contains(rebuilt), "nothing is built again ({rebuilt}):\n{all}");
         }
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.output();
         assert_eq!(p.check_every_way().await.0, 0);
-        assert_eq!(p.rows("select count(*)::text as n from posts").await[0].text("n"), "1");
+        assert_eq!(p.rows("select count(*)::text as n from comments").await[0].text("n"), "1");
     }
 
     pub async fn a_name_given_to_a_new_index_keeps_the_old_one_until_the_last_build(mut p: P) {
