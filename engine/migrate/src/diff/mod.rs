@@ -860,7 +860,7 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
             let follows = under.iter().any(|old| followers.contains(&renamed_columns[old]));
             // Nor where a column it holds changes otherwise (its type, its collation), which the
             // server may refuse under it.
-            let changes = a.deps.iter().filter(|d| from.objects.get(*d).is_some_and(|c| c.kind == Some(Kind::Column))).any(|d| to.objects.get(renamed_columns.get(d).unwrap_or(d)).is_none_or(|c| c.def != from.objects[d].def));
+            let changes = a.deps.iter().filter(|d| from.objects.get(*d).is_some_and(|c| c.kind == Some(Kind::Column))).any(|d| to.objects.get(renamed_columns.get(d).unwrap_or(d)).is_none_or(|c| alterer.remakes(&from.objects[d], c)));
             if !under.is_empty() && !parented && !follows && !changes && alterer.renamed_under(a, &renamed_columns).is_some_and(|d| d == b.def) {
                 kept_through.insert(id.clone(), under);
                 continue;
