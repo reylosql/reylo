@@ -515,7 +515,7 @@ Where it can't check the schema, it prints the database's own dump instead, and 
 - your role can't create a database, and `shadow_url` is unset
 - `--schema` names only some of your schemas
 
-On Postgres, the dump needs `pg_dump` of your server's version or newer. A `shadow_url` whose server can't make a shadow database fails the run.
+On Postgres, the dump needs `pg_dump` of your server's version or newer. Where it checks the schema, a `shadow_url` whose server can't make a shadow database fails the run.
 
 To save it over `schema.sql`, write another file first, so a failed run can't empty it:
 

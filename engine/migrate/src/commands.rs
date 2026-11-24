@@ -6996,7 +6996,8 @@ async fn checked_against_dump(db: &mut Db, opts: &Options, schemas: &[String], s
         Ok(Ok(sql)) => return Ok(Ok(format!("{}\n", sql.trim_end()))),
         Ok(Err(NotOwn::NoShadow(e))) | Err(e) if shadowed => return Err(e),
         Ok(Err(NotOwn::NoShadow(e))) | Err(e) if opts.shadow_url.is_some() => return Ok(Err(shadow_url_problem(&e))),
-        Ok(Err(NotOwn::NoShadow(e))) | Err(e) => no_shadow(&e),
+        Ok(Err(NotOwn::NoShadow(e))) => no_shadow(&e),
+        Err(e) => vec![format!("  Reylo's own SQL can't be checked on a shadow database: {e}")],
         Ok(Err(NotOwn::Short(lines))) => lines,
     };
     Ok(Ok(dumped))
