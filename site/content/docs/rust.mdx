@@ -63,7 +63,7 @@ reylo = { version = "0.8", default-features = false, features = ["sqlx_0_8", "po
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono"] }
 ```
 
-On 0.8, sqlx's own `json`, `chrono`, `time` and `uuid` features are yours to turn on, as your types need them; `json` is one of sqlx's defaults.
+On sqlx 0.8, enable sqlx's own `json`, `chrono`, `time` and `uuid` features as your types need them (`json` is enabled by default).
 
 ### Database
 
@@ -90,7 +90,7 @@ The `reylo` command runs your migrations and writes modules to files. Install it
 cargo binstall reylo-cli
 ```
 
-[CLI](/cli) has the other ways: Homebrew, Scoop, mise and a script. In a Rust project, it runs the version your `Cargo.lock` holds for the `reylo` crate, the same as the attribute's: a version it doesn't have yet, it fetches once, checked against the release's checksums.
+Other install methods (Homebrew, Scoop, mise and shell scripts) are on the [CLI](/cli) page. In a Rust project, `reylo` automatically runs the version pinned for the `reylo` crate in `Cargo.lock`. Missing versions download once and are verified against release checksums.
 
 <Details summary="Run it through cargo, with nothing installed">
 
@@ -124,7 +124,7 @@ Then `cargo reylo db push` runs it. It compiles the CLI in your project the firs
 
 ### Editor
 
-The attribute expands in rust-analyzer, so `Query` and `Row` complete and show their types on hover, with no setup of their own.
+The attribute expands inside rust-analyzer with no extra setup, giving autocomplete and hover types for `Query` and `Row`.
 
 A statement the database refuses is underlined at its string, with the database's own error:
 
@@ -326,11 +326,11 @@ let author = row.author.0;
 
 A JSON column a JSON Schema `CHECK` holds is typed by what the schema admits, in sqlx's `Json` too:
 
-- An object is a struct of its properties, with an `Option` for each one the schema doesn't require, and any keys the schema doesn't name in `additional_properties`.
-- An integer is an `i64`. A value it can't hold, such as one written as `1.0` or one beyond its range, fails `.run()`.
+- An object becomes a struct of its properties. Optional properties use `Option`, and unnamed keys collect into `additional_properties`.
+- An integer is an `i64`. Values it can't represent, such as `1.0` or out-of-range integers, fail `.run()`.
 - A `number` is an `f64`, so `9007199254740993` reads as the nearest `f64`, and `1e400` fails.
 
-Any other JSON is a `serde_json::Value`, and so is JSON no one Rust type holds, such as a union of a string and a number. A decimal inside JSON the statement builds fails to compile, since no Rust number reads it exactly: cast it to text inside the JSON.
+Any other JSON becomes `serde_json::Value`, including unions like string-or-number. A decimal inside built JSON fails to compile because no Rust float represents it exactly. Cast it to text inside the JSON instead.
 
 ### Errors
 
@@ -401,7 +401,7 @@ reylo generate rust-sqlx src/queries src/reports --out src/queries.rs
 reylo generate rust-sqlx 'src/**/*.sql' --out src/queries.rs
 ```
 
-With none, it reads every `.sql` file under the crate's `src/`, found from the nearest `Cargo.toml`, and at a workspace's root, every member's.
+Without arguments, it reads every `.sql` file under `src/` from the nearest `Cargo.toml`. At a workspace root, it reads every member's.
 
 ### Names
 
@@ -450,7 +450,7 @@ mod queries {
 }
 ```
 
-A build script writes only into Cargo's `OUT_DIR`, so this writes one file, and every build that changes a `.sql` file needs the database.
+A build script writes one file into Cargo's `OUT_DIR`. Any build where a `.sql` file changed needs a live database.
 
 A statement the database refuses fails the build with Cargo's own error, at its file, line and column:
 

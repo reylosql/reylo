@@ -1,6 +1,6 @@
 ---
 title: Neon
-description: How to use Reylo with Neon. The connection string the type check reads, Neon's serverless driver over HTTP and WebSockets, pg and postgres.js, and branches for development and pull requests.
+description: Use Reylo with Neon. Covers direct vs pooled connection strings, Neon's serverless HTTP and WebSocket drivers, pg and postgres.js, and database branches.
 ---
 
 <p className="dk-subheader">Reylo on Neon's serverless Postgres</p>
@@ -239,6 +239,6 @@ export default {
 
 In a Worker:
 
-- In a Worker, it needs no `nodejs_compat` flag, only the [Vite plugin](/d1#setup) that loads `.sql` files there.
+- No `nodejs_compat` flag is needed, only the [Vite plugin](/d1#setup) to load `.sql` files.
 - Use it the same way on [Next.js](/nextjs)'s edge runtime.
 - In an edge runtime, connect, use and close a `Pool` or `Client` within one request.

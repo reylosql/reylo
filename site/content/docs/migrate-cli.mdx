@@ -254,9 +254,9 @@ Applying to postgres://db.example.com/app
     reylo migrate dev
 ```
 
-A deploy cut off between migrations resumes once it confirms the schema hasn't changed. Where that check fails or can't run (as on MySQL), run `reylo migrate history push` to store the fingerprint again; that needs a shadow database.
+A deploy cut off between migrations resumes once it confirms the schema hasn't changed. If that check fails or can't run (as on MySQL), run `reylo migrate history push` to store the fingerprint again. That command needs a shadow database.
 
-A migration and the app build that needs it go live at different times, so the old build fails on a renamed or dropped column. Rename in two steps. To rename `users.email` to `contact`, add `contact`, copy its values, and deploy code that reads `contact` and writes both:
+Migrations and app builds go live at different times, so old builds fail on renamed or dropped columns. Rename in two steps. To rename `users.email` to `contact`, add `contact`, copy values, and deploy code that reads `contact` and writes both:
 
 ```sql title="20261110120000_add_contact.sql"
 alter table users add column contact text;
@@ -507,7 +507,7 @@ create table users (
 );
 ```
 
-In a terminal, a spinner shows while it reads and the SQL is coloured; a pipe or redirect gets plain SQL. Where it can't verify the schema, or `--schema` names a subset, it prints the database's dump instead (requiring `pg_dump` of your server's version or newer on Postgres).
+In a terminal, a spinner shows while it reads and SQL output is coloured. Piped or redirected output is plain SQL. If verification can't run, or `--schema` selects a subset, it prints the database's dump instead. On Postgres, that requires `pg_dump` matching your server's version or newer.
 
 To save it over `schema.sql`, write a temporary file first so a failed run can't empty it:
 

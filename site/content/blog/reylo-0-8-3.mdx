@@ -32,12 +32,12 @@ What else changed:
 
 - **Existing databases:** `reylo migrate init` and `reylo db introspect` now emit Reylo's own SQL across every schema in Postgres. They no longer require a matching `pg_dump` binary ([#390](https://github.com/reylosql/reylo/pull/390)).
 - **Concurrent deploys:** parallel deploys no longer deadlock on a pending `create index concurrently` ([#386](https://github.com/reylosql/reylo/pull/386)).
-- **Summaries:** `reylo migrate new` summarizes each change cleanly (new tables as one line with their columns below), and schema diffs label both sides ([#383](https://github.com/reylosql/reylo/pull/383), [#424](https://github.com/reylosql/reylo/pull/424)).
+- **Summaries:** `reylo migrate new` summarizes each change cleanly (new tables as one line with columns below). Schema diffs label both sides ([#383](https://github.com/reylosql/reylo/pull/383), [#424](https://github.com/reylosql/reylo/pull/424)).
 - **After a push:** `reylo migrate dev` now reports that the schema is ahead of migrations after `reylo db push`, instead of reporting a mismatch ([#388](https://github.com/reylosql/reylo/pull/388)).
 - **CI detection:** `CI=false`, `CI=0` and an empty `CI` no longer count as CI ([#388](https://github.com/reylosql/reylo/pull/388)).
 - **Enum values:** adding a Postgres enum value emits `alter type … add value` alone instead of rebuilding dependent views, policies and triggers. Adding and using a value in one edit splits into two migrations ([#400](https://github.com/reylosql/reylo/pull/400)).
 - **Column defaults:** changing a column's default, `not null` constraint or identity no longer rebuilds dependent views, policies and triggers ([#400](https://github.com/reylosql/reylo/pull/400)).
-- **Renames:** ambiguous column renames render as a diff with a command for each option, and generated renames print as a single `~` line ([#419](https://github.com/reylosql/reylo/pull/419)).
+- **Renames:** ambiguous column renames render as a diff with a command for each option. Generated renames print as a single `~` line ([#419](https://github.com/reylosql/reylo/pull/419)).
 - **Extensions:** `reylo migrate new` captures extensions added directly on the dev database and excludes extension-owned types and rules from `schema.sql` ([#421](https://github.com/reylosql/reylo/pull/421), [#422](https://github.com/reylosql/reylo/pull/422)).
 - **Manual changes:** `reylo migrate history push` records manual changes even when their migration sorts behind an unapplied one, reordering it in the lockfile ([#387](https://github.com/reylosql/reylo/pull/387)).
 - **Lockfile format:** `reylo.lock` now carries `version: 1` with structured `{ name, checksum }` entries. Locks written by a newer Reylo fail with an upgrade prompt ([#425](https://github.com/reylosql/reylo/pull/425)).
@@ -80,8 +80,8 @@ group by t.id
 
 What it infers:
 
-- **Never-null built-ins:** elements of `objects` and `times` above are now non-null, along with `array_agg` over `concat`, `gen_random_uuid()` and other never-null built-ins
-- **Aggregates with custom casts:** expressions like `round(coalesce(sum(x), 0), 2)` stay non-null even when an extension such as pgvector adds an implicit cast (regression from v0.8.0)
+- **Never-null built-ins:** elements of `objects` and `times` above are now non-null. The same applies to `array_agg` over `concat`, `gen_random_uuid()` and other never-null built-ins.
+- **Aggregates with custom casts:** expressions like `round(coalesce(sum(x), 0), 2)` stay non-null even with custom implicit casts such as pgvector's (fixes a v0.8.0 regression).
 
 ## MySQL statements
 
@@ -93,7 +93,7 @@ table tags limit 1
 
 What it reads:
 
-- **`TABLE` statements:** typed from the table itself, so `table tags limit 1` returns at most one row of non-null columns (previously many rows of nullable ones)
+- **`TABLE` statements:** typed from the table itself. Above, `table tags limit 1` returns at most one row of non-null columns (previously many rows of nullable ones).
 - **More syntax:** derived-table column aliases, multiple locking clauses, `CAST … AT TIME ZONE`, `GROUP BY ROLLUP(…)`, `JSON_VALUE … RETURNING` and `NATURAL INNER JOIN`
 - **Accurate parsing:** `UPDATE IGNORE`, `DELETE LOW_PRIORITY`, `BINARY a = b`, bit literals like `0b1011`, and the precedence of `^` and shift operators
 
