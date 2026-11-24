@@ -254,6 +254,13 @@ pub trait Alterer: Send {
         let _ = (from, to);
         Vec::new()
     }
+    /// What the copies of another object's that a change of `from` to `to` drops itself depend on (a
+    /// table that leaves a parent drops its copies of the parent's checks, and what those call): each
+    /// dropped after the change, since a copy the table also had of its own outlives the other's.
+    fn copies_read(&self, from: &Object, to: &Object) -> Vec<String> {
+        let _ = (from, to);
+        Vec::new()
+    }
     /// Whether a change of `from` to `to` lets go of the objects of it that something else holds (a
     /// partition detached from its table, whose indexes are then its own to drop), so that their
     /// drops wait for the change rather than go before it.
@@ -1310,6 +1317,15 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         }
         None
     };
+    // The changes that drop copies of another object themselves, by what those copies depend on.
+    let mut copies_need: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (k, op) in ops.iter().enumerate() {
+        let Op::Alter(id) = op else { continue };
+        let (Some(f), Some(t)) = (from.objects.get(id), to.objects.get(id)) else { continue };
+        for d in alterer.copies_read(f, t) {
+            copies_need.entry(d).or_default().push(k);
+        }
+    }
     for (k, op) in ops.iter().enumerate() {
         match op {
             Op::Create(id) | Op::Alter(id) => {
@@ -1633,6 +1649,11 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                     if let Some(j) = find(Op::Alter(owner.clone())) {
                         after[k].insert(j);
                     }
+                }
+                // After a change that drops copies depending on it (a table leaving a parent whose
+                // check calls it, the table's copy of which is its own too).
+                for j in copies_need.get(id.as_str()).into_iter().flatten().filter(|j| **j != k) {
+                    after[k].insert(*j);
                 }
                 // After the drops of what it owns that go on their own, before it.
                 for owned in with_owned(from, id).into_iter().filter(|o| *o != id.as_str()) {

@@ -392,7 +392,7 @@ fn expand_enum(at: &LitStr, mut item: ItemEnum) -> syn::Result<TokenStream2> {
         }
     };
     let ty = &analysis["columns"][0]["type"];
-    let values: Vec<String> = ty["values"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect();
+    let values: Vec<String> = ty["values"].as_array().into_iter().flatten().filter_map(|v| v["value"].as_str().map(String::from)).collect();
     let label = ty["label"].as_str().unwrap_or_default();
     let domains = analysis.get("domains").and_then(|d| d.as_object());
     let is_type = dialect == Dialect::Postgres && label.contains('.') && !domains.is_some_and(|d| d.contains_key(label));

@@ -3,9 +3,12 @@
 //! the second run on the first as `reylo migrate` runs a file (foreign keys off, one transaction,
 //! `pragma foreign_key_check` before the commit), the first's catalog then required to equal the
 //! second's and every table to keep its rows and their values, `check.sql`, where a case has one, to
-//! run after it without an error (a full-text index's integrity check), a second plan to be empty, the way
-//! back from v2 (without rows) to v1 to work too unless `one-way.txt` says why it can't, and the
-//! plan compared with `plan.sql`, which `REYLO_BLESS=1` writes. Every SQLite schema the oracle's cases set up is planned from an empty
+//! run after it without an error (a full-text index's integrity check), a second plan to be empty, and the
+//! plan compared with `plan.sql`, which `REYLO_BLESS=1` writes. Then the same database goes back to v1,
+//! with its rows, as a rewind takes it, and up to v2 again, unless `one-way.txt` says why it can't: each
+//! leg must reach the other side's catalog and keep its rows, counters and values as the first plan must;
+//! where the way back can't hold those rows, `back-fails.txt` names the error it must fail with, and the
+//! round trip runs without them. Every SQLite schema the oracle's cases set up is planned from an empty
 //! database and back to one. SQLite needs no server: every database is in memory.
 
 use reylo_migrate::catalog::{catalog, difference};
@@ -128,8 +131,73 @@ async fn counters(db: &mut Db) -> Vec<(String, i64)> {
     db.rows("select lower(name) as name, seq from sqlite_sequence order by 1").await.unwrap().iter().map(|r| (r.text("name").to_string(), r.text("seq").parse().unwrap())).collect()
 }
 
+/// Deletes every table's rows.
+async fn empty(db: &mut Db) {
+    let tables = db.rows("select name from pragma_table_list where schema = 'main' and type = 'table' and name not like 'sqlite_%'").await.unwrap();
+    db.exec("pragma foreign_keys = off").await.unwrap();
+    for t in tables {
+        db.exec(&format!("delete from \"{}\"", t.text("name").replace('"', "\"\""))).await.unwrap();
+    }
+    db.exec("pragma foreign_keys = on").await.unwrap();
+}
+
 fn differs(only_a: &[String], only_b: &[String]) -> Option<String> {
     (!only_a.is_empty() || !only_b.is_empty()).then(|| only_a.iter().map(|l| format!("  - {l}")).chain(only_b.iter().map(|l| format!("  + {l}"))).collect::<Vec<_>>().join("\n"))
+}
+
+/// What `plan` did to the rows `db` held before it, which `before`, `rows_before` and `sequences` read:
+/// each table whose row count changed, but one the plan says it loses (a contentless full-text index
+/// made again), each AUTOINCREMENT counter that went back or away from a table that keeps
+/// AUTOINCREMENT, and where the plan ran (`ran`), each table whose values changed in the columns it
+/// kept, but one the case (`changes`) says the change rewrites.
+async fn row_problems(db: &mut Db, plan: &Plan, before: &[(String, String)], rows_before: &[(String, Vec<String>, Vec<Vec<String>>)], sequences: &[(String, i64)], ran: bool, changes: &[String]) -> Vec<String> {
+    let after = counts(db).await;
+    let lossy: Vec<String> = plan.losses.iter().filter_map(|l| l.strip_prefix("table ")).map(|t| t.to_lowercase()).collect();
+    let mut lost: Vec<String> = before.iter().filter(|(t, n)| !lossy.contains(t) && after.iter().any(|(u, m)| u == t && m != n)).map(|(t, n)| format!("{t}: {n} rows before")).collect();
+    // A table that keeps AUTOINCREMENT keeps its counter: no key it handed out is handed out again.
+    let kept = counters(db).await;
+    let autoincrement = db.rows("select lower(name) as name from sqlite_schema where type = 'table' and sql like '%autoincrement%'").await.unwrap();
+    for (t, seq) in sequences {
+        let now = kept.iter().find(|(u, _)| u == t).map(|(_, s)| *s);
+        if now.is_some_and(|n| n < *seq) || (now.is_none() && autoincrement.iter().any(|r| r.text("name") == t)) {
+            lost.push(format!("{t}'s counter: {seq} before, {now:?} after"));
+        }
+    }
+    let mut out = Vec::new();
+    if !lost.is_empty() {
+        out.push(format!("rows lost: {}", lost.join(", ")));
+    }
+    // Every column a table keeps keeps its values, where the case doesn't say the change rewrites them.
+    let changed: Vec<String> = if ran { changed(rows_before, &values(db).await).into_iter().filter(|t| !changes.contains(t)).collect() } else { vec![] };
+    if !changed.is_empty() {
+        out.push(format!("values changed in: {}", changed.join(", ")));
+    }
+    out
+}
+
+/// Takes `db`, with its rows, to the schema `like` has, running the plan as `reylo migrate` runs a
+/// file, and says how it fell short: the statement that failed, each line the two differ in, the rows,
+/// counters and values it changed, and what a second plan would still run. Empty where it reached it.
+async fn leg(db: &mut Db, like: &mut Db, changes: &[String]) -> Vec<String> {
+    let before = counts(db).await;
+    let rows_before = values(db).await;
+    let sequences = counters(db).await;
+    let plan = plan(db, like).await;
+    let failed = run(db, &plan).await;
+    let mut lines: Vec<String> = failed.iter().map(|f| format!("the plan failed at {f}")).collect();
+    let (only_a, only_b) = difference(&catalog(db).await.unwrap(), &catalog(like).await.unwrap());
+    lines.extend(only_a.iter().map(|l| format!("- {l}")).chain(only_b.iter().map(|l| format!("+ {l}"))));
+    lines.extend(row_problems(db, &plan, &before, &rows_before, &sequences, failed.is_none(), changes).await);
+    if failed.is_none() && only_a.is_empty() && only_b.is_empty() {
+        let more = crate::plan(db, like).await;
+        if more.runnable().next().is_some() {
+            lines.push(format!("again:\n{}", more.sql()));
+        }
+    }
+    if !lines.is_empty() {
+        lines.push(format!("plan:\n{}", plan.sql()));
+    }
+    lines
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -152,19 +220,9 @@ async fn sqlite() {
         let failed = run(&mut from, &plan).await;
         let check = read(&case.join("check.sql"));
         let checked = if failed.is_none() && !check.is_empty() { from.exec(&check).await.err() } else { None };
-        let rows_after = values(&mut from).await;
         let (only_a, only_b) = difference(&catalog(&mut from).await.unwrap(), &catalog(&mut to).await.unwrap());
-        let after = counts(&mut from).await;
-        let mut lost: Vec<String> = before.iter().filter(|(t, n)| after.iter().any(|(u, m)| u == t && m != n)).map(|(t, n)| format!("{t}: {n} rows before")).collect();
-        // A table that keeps AUTOINCREMENT keeps its counter: no key it handed out is handed out again.
-        let kept = counters(&mut from).await;
-        let autoincrement = from.rows("select lower(name) as name from sqlite_schema where type = 'table' and sql like '%autoincrement%'").await.unwrap();
-        for (t, seq) in &sequences {
-            let now = kept.iter().find(|(u, _)| u == t).map(|(_, s)| *s);
-            if now.is_some_and(|n| n < *seq) || (now.is_none() && autoincrement.iter().any(|r| r.text("name") == t)) {
-                lost.push(format!("{t}'s counter: {seq} before, {now:?} after"));
-            }
-        }
+        let changes: Vec<String> = read(&case.join("changes.txt")).lines().filter_map(|l| l.split_whitespace().next()).map(|t| t.to_lowercase()).collect();
+        let rows = row_problems(&mut from, &plan, &before, &rows_before, &sequences, failed.is_none(), &changes).await;
         let expected = case.join("plan.sql");
         if bless {
             std::fs::write(&expected, &text).unwrap();
@@ -176,46 +234,55 @@ async fn sqlite() {
         if let Some(d) = differs(&only_a, &only_b) {
             problems.push(format!("after the plan the database differs from v2:\n{d}"));
         }
-        if !lost.is_empty() {
-            problems.push(format!("rows lost: {}", lost.join(", ")));
-        }
+        problems.extend(rows);
         if let Some(e) = checked {
             problems.push(format!("check.sql failed after the plan: {e}"));
         }
         if !bless && read(&expected) != text {
             problems.push(format!("the plan is not plan.sql's (REYLO_BLESS=1 writes it):\n{text}"));
         }
-        // Every column a table keeps keeps its values, where the case doesn't say the change rewrites them.
-        let skip: Vec<String> = read(&case.join("changes.txt")).lines().filter_map(|l| l.split_whitespace().next()).map(|t| t.to_lowercase()).collect();
-        let changed: Vec<String> = changed(&rows_before, &rows_after).into_iter().filter(|t| !skip.contains(t)).collect();
-        if failed.is_none() && !changed.is_empty() {
-            problems.push(format!("values changed in: {}", changed.join(", ")));
-        }
         // Planned again, a database the plan took to the target needs nothing more.
-        if failed.is_none() && differs(&only_a, &only_b).is_none() {
+        let reached = failed.is_none() && differs(&only_a, &only_b).is_none();
+        if reached {
             let more = crate::plan(&mut from, &mut to).await;
             if more.runnable().next().is_some() {
                 problems.push(format!("after the plan, the plan again is not empty:\n{}", more.sql()));
             }
         }
-        // And back: v2 (without rows) to v1, unless the case says why it goes one way only.
-        if read(&case.join("one-way.txt")).trim().is_empty() {
-            let (mut back, mut first) = (memory().await, memory().await);
-            back.exec(&read(&case.join("v2.sql"))).await.unwrap_or_else(|e| panic!("{name}: v2.sql: {e}"));
+        // Then back to v1 with the rows the plan kept, as a rewind takes a database back, and up to
+        // v2 again, unless the case says why it goes one way only.
+        if reached && read(&case.join("one-way.txt")).trim().is_empty() {
+            let mut first = memory().await;
             first.exec(&read(&case.join("v1.sql"))).await.unwrap_or_else(|e| panic!("{name}: v1.sql: {e}"));
-            let reverse = crate::plan(&mut back, &mut first).await;
-            let failed = run(&mut back, &reverse).await;
-            let (only_c, only_d) = difference(&catalog(&mut back).await.unwrap(), &catalog(&mut first).await.unwrap());
-            let mut lines: Vec<String> = failed.iter().map(|f| format!("  the plan failed at {f}")).collect();
-            lines.extend(differs(&only_c, &only_d));
-            if lines.is_empty() {
-                let more = crate::plan(&mut back, &mut first).await;
-                if more.runnable().next().is_some() {
-                    lines.push(format!("  again:\n{}", more.sql()));
-                }
+            // A case whose way back can't hold the rows the plan left (a not-null column made again
+            // with no value for them) names the error in `back-fails.txt`: the way back must fail
+            // with it, which rolls it back, and the round trip then runs without the rows.
+            let back_fails = read(&case.join("back-fails.txt")).trim().to_string();
+            let mut ready = true;
+            if !back_fails.is_empty() {
+                let (held, valued, counted) = (counts(&mut from).await, values(&mut from).await, counters(&mut from).await);
+                let reverse = crate::plan(&mut from, &mut first).await;
+                let refused = match run(&mut from, &reverse).await {
+                    Some(f) if f.contains(&back_fails) => None,
+                    Some(f) => Some(format!("the way back failed otherwise than back-fails.txt says: {f}")),
+                    None => Some(format!("the way back ran, where back-fails.txt says it fails with {back_fails}")),
+                };
+                let (only_a, only_b) = difference(&catalog(&mut from).await.unwrap(), &catalog(&mut to).await.unwrap());
+                let same = only_a.is_empty() && only_b.is_empty() && counts(&mut from).await == held && values(&mut from).await == valued && counters(&mut from).await == counted;
+                let changed = (!same).then(|| "the way back that failed changed the database or its rows".to_string());
+                ready = refused.is_none() && changed.is_none();
+                problems.extend(refused.into_iter().chain(changed));
+                empty(&mut from).await;
             }
-            if !lines.is_empty() {
-                problems.push(format!("back from v2 to v1:\n{}\nplan:\n{}", lines.join("\n"), reverse.sql()));
+            let indent = |lines: Vec<String>| lines.iter().map(|l| format!("  {}", l.replace('\n', "\n  "))).collect::<Vec<_>>().join("\n");
+            let back = if ready { leg(&mut from, &mut first, &changes).await } else { vec![] };
+            if !back.is_empty() {
+                problems.push(format!("back from v2 to v1:\n{}", indent(back)));
+            } else if ready {
+                let up = leg(&mut from, &mut to, &changes).await;
+                if !up.is_empty() {
+                    problems.push(format!("up from v1 to v2 again:\n{}", indent(up)));
+                }
             }
         }
         if !problems.is_empty() {

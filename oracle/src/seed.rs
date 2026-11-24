@@ -1008,7 +1008,7 @@ pub(crate) fn contradiction(ty: &Value, text: &str, nullable: bool, delimiter: c
 /// and any other value of a kind written as text by its text.
 pub(crate) fn literal_contradiction(ty: &Type, text: &str) -> Option<String> {
     let Kind::Enum(e) = &ty.kind else { return None };
-    let values = &e.values;
+    let values: Vec<&str> = e.texts().collect();
     let none_of = || format!("typed as one of {values:?} holds {text:?}");
     match &e.ty.kind {
         Kind::Integer(_) | Kind::Decimal(_) => (!values.iter().any(|v| decimal_cmp(text, v) == Some(std::cmp::Ordering::Equal))).then(none_of),
@@ -1022,9 +1022,9 @@ pub(crate) fn literal_contradiction(ty: &Type, text: &str) -> Option<String> {
                 "f" | "false" | "0" => "false",
                 _ => return Some(format!("typed as a boolean holds {text}")),
             };
-            (!values.iter().any(|v| v == value)).then(none_of)
+            (!values.iter().any(|v| *v == value)).then(none_of)
         }
-        _ => (!values.iter().any(|v| v == text)).then(none_of),
+        _ => (!values.iter().any(|v| *v == text)).then(none_of),
     }
 }
 
@@ -1749,7 +1749,7 @@ pub fn check_sqlite<D: SqliteDb + ?Sized>(db: &D, statements: &[(String, String,
                                         _ => unreachable!(),
                                     };
                                     let why = serde_json::from_value::<Type>(col["type"].clone()).ok().and_then(|ty| match &ty.kind {
-                                        Kind::Enum(e) if matches!(e.ty.kind, Kind::Text(_)) => Some(format!("typed as one of {:?} holds the number {number}", e.values)),
+                                        Kind::Enum(e) if matches!(e.ty.kind, Kind::Text(_)) => Some(format!("typed as one of {:?} holds the number {number}", e.texts().collect::<Vec<_>>())),
                                         _ => literal_contradiction(&ty, &number).or_else(|| fact_contradiction(&ty, &number)),
                                     });
                                     if let Some(why) = why {

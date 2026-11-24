@@ -2,10 +2,11 @@
 //! `REYLO_FUZZ_OUT`) with the server `REYLO_TEST_PG` names. Each step makes a random schema, changes it
 //! by a few random mutations, fills the first with rows both accept, plans from one to the other and
 //! runs the plan as a migration runs it. The plan must run, the result must read as a fresh build of
-//! the target, every column kept must keep its values unless the plan says it loses them, a second
-//! plan must be empty, and the way back (from the target without rows) must work too. A step that
-//! fails is shrunk to the fewest objects that still fail the same way and written to `REYLO_FUZZ_OUT`
-//! as a case for `tests/diff/postgres/`. Without `REYLO_FUZZ` it does nothing.
+//! the target, every column kept must keep its values unless the plan says it loses them, and a
+//! second plan must be empty; then the same database must go back to the first schema, with its
+//! rows, and up to the target again, each leg held to the same checks. A step that fails is shrunk
+//! to the fewest objects that still fail the same way and written to `REYLO_FUZZ_OUT` as a case for
+//! `tests/diff/postgres/`. Without `REYLO_FUZZ` it does nothing.
 //!
 //! The schemas lean on what objects do to each other: functions whose signatures use the enum, a
 //! domain or a composite type, called from defaults, checks, views and policies, or reading a table's
@@ -2436,102 +2437,110 @@ async fn check(admin: &mut Db, base: &str, tag: &str, v1: &str, seed: &str, v2: 
 
 async fn checked(admin: &mut Db, base: &str, tag: &str, v1: &str, seed: &str, v2: &str, alterer: &diff::postgres::PostgresAlterer) -> Option<String> {
     let here = std::env::temp_dir();
-    let names: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| format!("fuzz_{tag}_{s}")).collect();
+    let names: Vec<String> = ["a", "b", "c"].iter().map(|s| format!("fuzz_{tag}_{s}")).collect();
     for n in &names {
         admin.exec(&format!("drop database if exists {n} with (force)")).await.unwrap();
         admin.exec(&format!("create database {n}")).await.unwrap();
     }
-    let mut problems = Vec::new();
-    {
-        let mut a = Db::connect(&with_database(base, &names[0]), &here).await.unwrap();
-        let mut b = Db::connect(&with_database(base, &names[1]), &here).await.unwrap();
-        if let Err(e) = a.exec(v1).await {
-            return finish(admin, &names, Some(format!("setup v1: {e}")), true).await;
-        }
-        if let Err(e) = a.exec(seed).await {
-            return finish(admin, &names, Some(format!("setup seed: {e}")), true).await;
-        }
-        if let Err(e) = b.exec(v2).await {
-            return finish(admin, &names, Some(format!("setup v2: {e}")), true).await;
-        }
-        let mut target = diff::postgres::read(&mut b).await.unwrap();
-        diff::postgres::declare(&mut b, &mut target, v2).await.unwrap();
-        let before = snapshot(&mut a).await;
-        // Rows a column's new type can't hold (a 1.5 made a boolean, through two changes) are the
-        // generator's: no plan takes them there. They are cast where both types exist: the first
-        // database, or the target's where the new type is the target's own.
-        let target_types = snapshot(&mut b).await;
-        for (col, (ty, vals)) in &before {
-            if let Some((to_ty, _)) = target_types.get(col).filter(|(t, _)| t != ty) {
-                if converted(&mut a, vals, ty, to_ty).await.is_none() && converted(&mut b, vals, ty, to_ty).await.is_none() {
-                    a.close().await;
-                    b.close().await;
-                    return finish(admin, &names, Some("setup rows: a column's values don't convert".into()), true).await;
-                }
-            }
-        }
-        // A composite type whose attributes change, or a domain whose base does, keeps its name
-        // while its values read otherwise: those columns are held to their rows and their nulls.
-        let (defs_a, defs_b) = (type_defs(&mut a).await, type_defs(&mut b).await);
-        let mut plan = diff::plan(&diff::postgres::read(&mut a).await.unwrap(), &target, alterer);
-        diff::postgres::style(&mut a, &mut plan, &target.verbatim).await.unwrap();
-        let failed = run(&mut a, &plan).await;
-        if let Some(f) = failed {
-            problems.push(format!("forward: the plan failed: {f}\n{}", plan.sql()));
-        } else {
-            let (x, y) = difference(&catalog(&mut a).await.unwrap(), &catalog(&mut b).await.unwrap());
-            if !x.is_empty() || !y.is_empty() {
-                problems.push(format!("forward: differs from v2\n{}\n{}", x.iter().chain(&y).cloned().collect::<Vec<_>>().join("\n"), plan.sql()));
-            } else {
-                let lossy: Vec<String> = plan.losses.iter().chain(plan.narrowings.iter().map(|(c, _)| c)).cloned().collect();
-                let after = snapshot(&mut a).await;
-                for (col, (ty, vals)) in &before {
-                    if lossy.iter().any(|l| loses(l, col)) {
-                        continue;
-                    }
-                    let Some((now_ty, now)) = after.get(col) else { continue };
-                    let reshaped = ty == now_ty && defs_a.get(ty) != defs_b.get(ty);
-                    let want = if reshaped { None } else if ty == now_ty { Some(vals.clone()) } else { converted(&mut a, vals, ty, now_ty).await };
-                    let nulls = |v: &Vec<String>| v.iter().filter(|x| *x == "NULL").count();
-                    let changed = match &want {
-                        Some(w) => w != now,
-                        None => nulls(vals) != nulls(now) || vals.len() != now.len(),
-                    };
-                    if changed {
-                        problems.push(format!("forward: values changed in {col} ({ty} to {now_ty}): {vals:?} -> {now:?}\n{}", plan.sql()));
-                    }
-                }
-                let mut again = diff::plan(&diff::postgres::read(&mut a).await.unwrap(), &target, alterer);
-                diff::postgres::style(&mut a, &mut again, &target.verbatim).await.unwrap();
-                if again.runnable().next().is_some() {
-                    problems.push(format!("forward: a second plan is not empty\n{}", again.sql()));
-                }
-            }
-        }
-        a.close().await;
-        b.close().await;
+    let mut a = Db::connect(&with_database(base, &names[0]), &here).await.unwrap();
+    let mut b = Db::connect(&with_database(base, &names[1]), &here).await.unwrap();
+    if let Err(e) = a.exec(v1).await {
+        return finish(admin, &names, Some(format!("setup v1: {e}")), true).await;
     }
+    if let Err(e) = a.exec(seed).await {
+        return finish(admin, &names, Some(format!("setup seed: {e}")), true).await;
+    }
+    if let Err(e) = b.exec(v2).await {
+        return finish(admin, &names, Some(format!("setup v2: {e}")), true).await;
+    }
+    let mut target = diff::postgres::read(&mut b).await.unwrap();
+    diff::postgres::declare(&mut b, &mut target, v2).await.unwrap();
+    // Rows a column's new type can't hold (a 1.5 made a boolean, through two changes) are the
+    // generator's: no plan takes them there. They are cast where both types exist: the first
+    // database, or the target's where the new type is the target's own.
+    let before = snapshot(&mut a).await;
+    let target_types = snapshot(&mut b).await;
+    for (col, (ty, vals)) in &before {
+        if let Some((to_ty, _)) = target_types.get(col).filter(|(t, _)| t != ty) {
+            if converted(&mut a, vals, ty, to_ty).await.is_none() && converted(&mut b, vals, ty, to_ty).await.is_none() {
+                a.close().await;
+                b.close().await;
+                return finish(admin, &names, Some("setup rows: a column's values don't convert".into()), true).await;
+            }
+        }
+    }
+    let mut problems = leg("forward", "v2", &mut a, &mut b, &target, alterer).await;
+    // Then back to v1 with the rows the plan kept, as a rewind takes a database back, and up to v2
+    // again.
     if problems.is_empty() {
         let mut c = Db::connect(&with_database(base, &names[2]), &here).await.unwrap();
-        let mut d = Db::connect(&with_database(base, &names[3]), &here).await.unwrap();
-        c.exec(v2).await.unwrap();
-        d.exec(v1).await.unwrap();
-        let mut origin = diff::postgres::read(&mut d).await.unwrap();
-        diff::postgres::declare(&mut d, &mut origin, v1).await.unwrap();
-        let mut plan = diff::plan(&diff::postgres::read(&mut c).await.unwrap(), &origin, alterer);
-        diff::postgres::style(&mut c, &mut plan, &origin.verbatim).await.unwrap();
-        if let Some(f) = run(&mut c, &plan).await {
-            problems.push(format!("back: the plan failed: {f}\n{}", plan.sql()));
-        } else {
-            let (x, y) = difference(&catalog(&mut c).await.unwrap(), &catalog(&mut d).await.unwrap());
-            if !x.is_empty() || !y.is_empty() {
-                problems.push(format!("back: differs from v1\n{}\n{}", x.iter().chain(&y).cloned().collect::<Vec<_>>().join("\n"), plan.sql()));
+        c.exec(v1).await.unwrap();
+        let mut origin = diff::postgres::read(&mut c).await.unwrap();
+        diff::postgres::declare(&mut c, &mut origin, v1).await.unwrap();
+        problems = leg("back", "v1", &mut a, &mut c, &origin, alterer).await;
+        // A not-null column the target dropped can't be made again over the rows it left, with no
+        // value for them: the way back rolls back, and the round trip runs without the rows.
+        if problems.first().is_some_and(|p| p.starts_with("back: the plan failed") && p.contains("contains null values")) {
+            if let Some(list) = a.rows("select string_agg(format('%I', tablename), ', ') as list from pg_tables where schemaname = 'public'").await.unwrap()[0].get("list") {
+                a.exec(&format!("truncate table {list}")).await.unwrap();
             }
+            problems = leg("back", "v1", &mut a, &mut c, &origin, alterer).await;
+        }
+        if problems.is_empty() {
+            problems = leg("up", "v2", &mut a, &mut b, &target, alterer).await;
         }
         c.close().await;
-        d.close().await;
     }
+    a.close().await;
+    b.close().await;
     finish(admin, &names, problems.first().cloned(), false).await
+}
+
+/// Takes `db`, with its rows, to `target`, which `like` (`version`) was built as, in one transaction,
+/// and says what went wrong, each problem under the leg's `name`: a plan that failed, a catalog that
+/// differs from `like`'s, a column whose values changed where the plan doesn't say it loses or
+/// narrows them, or a second plan that isn't empty.
+async fn leg(name: &str, version: &str, db: &mut Db, like: &mut Db, target: &diff::Schema, alterer: &diff::postgres::PostgresAlterer) -> Vec<String> {
+    let mut problems = Vec::new();
+    let before = snapshot(db).await;
+    // A composite type whose attributes change, or a domain whose base does, keeps its name while
+    // its values read otherwise: those columns are held to their rows and their nulls.
+    let (defs_a, defs_b) = (type_defs(db).await, type_defs(like).await);
+    let mut plan = diff::plan(&diff::postgres::read(db).await.unwrap(), target, alterer);
+    diff::postgres::style(db, &mut plan, &target.verbatim).await.unwrap();
+    if let Some(f) = run(db, &plan).await {
+        problems.push(format!("{name}: the plan failed: {f}\n{}", plan.sql()));
+        return problems;
+    }
+    let (x, y) = difference(&catalog(db).await.unwrap(), &catalog(like).await.unwrap());
+    if !x.is_empty() || !y.is_empty() {
+        problems.push(format!("{name}: differs from {version}\n{}\n{}", x.iter().chain(&y).cloned().collect::<Vec<_>>().join("\n"), plan.sql()));
+        return problems;
+    }
+    let lossy: Vec<String> = plan.losses.iter().chain(plan.narrowings.iter().map(|(c, _)| c)).cloned().collect();
+    let after = snapshot(db).await;
+    for (col, (ty, vals)) in &before {
+        if lossy.iter().any(|l| loses(l, col)) {
+            continue;
+        }
+        let Some((now_ty, now)) = after.get(col) else { continue };
+        let reshaped = ty == now_ty && defs_a.get(ty) != defs_b.get(ty);
+        let want = if reshaped { None } else if ty == now_ty { Some(vals.clone()) } else { converted(db, vals, ty, now_ty).await };
+        let nulls = |v: &Vec<String>| v.iter().filter(|x| *x == "NULL").count();
+        let changed = match &want {
+            Some(w) => w != now,
+            None => nulls(vals) != nulls(now) || vals.len() != now.len(),
+        };
+        if changed {
+            problems.push(format!("{name}: values changed in {col} ({ty} to {now_ty}): {vals:?} -> {now:?}\n{}", plan.sql()));
+        }
+    }
+    let mut again = diff::plan(&diff::postgres::read(db).await.unwrap(), target, alterer);
+    diff::postgres::style(db, &mut again, &target.verbatim).await.unwrap();
+    if again.runnable().next().is_some() {
+        problems.push(format!("{name}: a second plan is not empty\n{}", again.sql()));
+    }
+    problems
 }
 
 /// Whether a loss the plan reports, a table's or a column's id, covers a column of the snapshot.

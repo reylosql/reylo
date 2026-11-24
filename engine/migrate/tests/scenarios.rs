@@ -2522,11 +2522,10 @@ async fn a_cached_prefix_replays_only_what_follows_it(mut p: P) {
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     let stats = reylo_migrate::cache::take_stats();
     if keeps_databases {
-        // A copy for the check, and one for the locks the pending migration holds, run on Postgres.
-        let copies = if p.d == Dialect::Postgres { 2 } else { 1 };
-        assert_eq!((stats.replayed, stats.copies), (2, copies), "{stats:?}");
+        // A copy for the check, and one the pending migration runs on to say what it locks and drops.
+        assert_eq!((stats.replayed, stats.copies), (2, 2), "{stats:?}");
     } else {
-        // The check's replay, and the history again for the locks the pending migration holds.
+        // The check's replay, and the history again for what the pending migration locks and drops.
         assert_eq!(stats.replayed, 8, "{stats:?}");
     }
     reylo_migrate::cache::set_enabled(None);
@@ -4083,6 +4082,7 @@ on!(
     a_change_by_hand_is_shown_alone_beside_a_function_of_many_lines,
     an_enum_value_added_is_ahead_on_the_side_that_added_it,
     a_comment_a_migration_adds_is_the_migrations,
+    a_temporary_tables_constraints_and_policies_are_no_drift,
 );
 on!(Mysql, a_migration_that_names_a_database_is_refused);
 on!(
@@ -4439,6 +4439,224 @@ async fn a_dry_run_says_what_blocks_a_table_renamed_before() {
     p.output();
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     assert_has!(p.output(), r"_narrow\.sql\n      ! It rewrites accounts, copying every row while it blocks writes to it");
+}
+
+/// A dry run says what each pending migration drops, one written by hand too, with what this
+/// database holds of it; a column renamed keeps its rows, and isn't said to be dropped.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_says_what_pending_migrations_drop() {
+    for d in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
+        let Some(mut p) = P::new(d).await else { continue };
+        p.file("20261027100000_users.sql", "create table users (id int primary key, bio varchar(20), nick varchar(20), n bigint);");
+        p.file("20261027100001_tags.sql", "create table tags (id int primary key);");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into users values (1, 'a', null, 1); insert into users values (2, null, null, 2); insert into users values (3, 'c', null, 3); insert into tags values (1)").await;
+        p.file("20261027110000_drop_bio.sql", "alter table users drop column bio;");
+        p.file("20261027110001_drop_nick.sql", "alter table users drop column nick;");
+        p.file("20261027110002_drop_tags.sql", "drop table tags;");
+        p.file("20261027110003_rename_n.sql", "alter table users rename column n to amount;");
+        p.schema("create table users (id int primary key, amount bigint);\n");
+        p.output();
+        assert_eq!(p.dry_run().await, 0, "{d:?}: {}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"_drop_bio\.sql\n      ! It drops users\.bio, which holds a value in 2 rows on this database\n");
+        assert_has!(&out, r"_drop_nick\.sql\n      ! It drops users\.nick, which holds no value on this database\n");
+        assert_has!(&out, r"_drop_tags\.sql\n      ! It drops the table tags and its 1 row on this database\n");
+        assert!(out.trim_end().ends_with("_rename_n.sql"), "{d:?}: a rename keeps its rows: {out}");
+    }
+}
+
+/// A dry run checks each constraint a pending migration adds against the rows this database holds,
+/// and fails where some break it, listing them. One whose table a pending migration changes the
+/// rows of first is left to the deploy: the rows it meets are those the change leaves.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_checks_new_constraints_against_this_databases_rows() {
+    for d in [Dialect::Postgres, Dialect::Mysql] {
+        let Some(mut p) = P::new(d).await else { continue };
+        p.file("20261027100000_teams.sql", "create table teams (id int primary key);");
+        p.file("20261027100001_users.sql", "create table users (id int primary key, email varchar(100), plan varchar(10), team_id int);");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into teams values (1); insert into users values (1, 'a@x', 'free', 1); insert into users values (2, 'a@x', 'gold', null); insert into users values (3, null, 'pro', 9)").await;
+        p.file("20261027110000_plan.sql", "alter table users add constraint users_plan check (plan in ('free', 'pro'));");
+        p.file("20261027110001_email.sql", "create unique index users_email on users (email);");
+        p.file("20261027110002_team.sql", "alter table users add constraint users_team foreign key (team_id) references teams (id);");
+        let not_null = if d == Dialect::Mysql { "alter table users modify email varchar(100) not null;" } else { "alter table users alter column email set not null;" };
+        p.file("20261027110003_email_not_null.sql", not_null);
+        p.schema("create table teams (id int primary key);\ncreate table users (id int primary key, email varchar(100) not null, plan varchar(10), team_id int, constraint users_plan check (plan in ('free', 'pro')), constraint users_team foreign key (team_id) references teams (id));\ncreate unique index users_email on users (email);\n");
+        p.output();
+        assert_eq!(p.dry_run().await, 1, "{d:?}: {}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"_plan\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks users_plan\n        List them:\n          select \* from [^\n]+\n");
+        assert_has!(&out, r"_email\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 value repeats in users_email\n");
+        assert_has!(&out, r"_team\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks users_team\n");
+        assert_has!(&out, r"_email_not_null\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row has nulls in users\.email\n");
+        assert_has!(&out, r"✗ The deploy would fail on rows this database holds\n");
+
+        // A backfill before them: the constraints meet the rows it leaves, which no read of this
+        // database can say, so the deploy is left to find out.
+        p.file("20261027105959_backfill.sql", "update users set plan = 'free', email = concat('u', id, '@x'), team_id = 1;");
+        p.output();
+        assert_eq!(p.dry_run().await, 0, "{d:?}: {}", p.peek());
+        assert!(!p.output().contains("✗"), "{d:?}: the backfill changes the rows first");
+    }
+}
+
+/// A table dropped and made again as it was reads as unchanged in the catalog, while its rows are
+/// gone: the dry run says so, from the migration's statements.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_says_a_table_made_again_loses_its_rows() {
+    for d in [Dialect::Postgres, Dialect::Sqlite] {
+        let Some(mut p) = P::new(d).await else { continue };
+        let logs = "create table logs (id int primary key, note varchar(20));";
+        p.file("20261027100000_logs.sql", logs);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into logs values (1, 'a'); insert into logs values (2, 'b')").await;
+        p.file("20261027110000_reset_logs.sql", &format!("drop table logs;\n{logs}"));
+        p.schema(logs);
+        p.output();
+        assert_eq!(p.dry_run().await, 0, "{d:?}: {}", p.peek());
+        assert_has!(p.output(), r"_reset_logs\.sql\n(      ! [^\n]*\n)*      ! It drops the table logs and its 2 rows on this database");
+    }
+}
+
+/// A composite unique key is checked on every column of it; a foreign key whose parent rows a
+/// pending migration adds first is left to the deploy, which meets them; and so is a NOT NULL on a
+/// column dropped and added again, which holds none of the target's values.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_checks_composite_keys_and_waits_on_a_parent_filled_first() {
+    for d in [Dialect::Postgres, Dialect::Mysql] {
+        let Some(mut p) = P::new(d).await else { continue };
+        p.file("20261027100000_pairs.sql", "create table pairs (id int primary key, a int, b int);");
+        p.file("20261027100001_teams.sql", "create table teams (id int primary key);");
+        p.file("20261027100002_members.sql", "create table members (id int primary key, team_id int);");
+        p.file("20261027100003_tags.sql", "create table tags (id int primary key, status varchar(20));");
+        p.file("20261027100004_codes.sql", "create table codes (id int primary key, code varchar(10));");
+        p.file("20261027100005_holders.sql", "create table holders (id int primary key, code varchar(10));");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into codes values (1, 'a'); insert into holders values (1, 'x')").await;
+        // A key whose referenced column is dropped and added again meets the values that leaves.
+        p.file("20261027105800_drop_code.sql", "alter table codes drop column code;");
+        p.file("20261027105801_add_code.sql", "alter table codes add column code varchar(10) not null default 'x';");
+        p.file("20261027105802_code_key.sql", "alter table codes add constraint codes_code unique (code);");
+        p.file("20261027105803_holders_code.sql", "alter table holders add constraint holders_code foreign key (code) references codes (code);");
+        p.exec("insert into pairs values (1, 1, 1); insert into pairs values (2, 1, 1); insert into pairs values (3, 1, null); insert into pairs values (4, 1, 2); insert into teams values (1); insert into members values (1, 9); insert into tags values (1, null)").await;
+        // A column dropped and added again under its name holds none of the target's values.
+        p.file("20261027105900_drop_status.sql", "alter table tags drop column status;");
+        p.file("20261027105901_add_status.sql", "alter table tags add column status varchar(20) not null default 'active';");
+        p.file("20261027110000_pairs_ab.sql", "create unique index pairs_ab on pairs (a, b);");
+        p.file("20261027110001_team_9.sql", "insert into teams values (9);");
+        p.file("20261027110002_members_team.sql", "alter table members add constraint members_team foreign key (team_id) references teams (id);");
+        p.schema("create table pairs (id int primary key, a int, b int);\ncreate unique index pairs_ab on pairs (a, b);\ncreate table teams (id int primary key);\ncreate table members (id int primary key, team_id int, constraint members_team foreign key (team_id) references teams (id));\ncreate table tags (id int primary key, status varchar(20) not null default 'active');\ncreate table codes (id int primary key, code varchar(10) not null default 'x', constraint codes_code unique (code));\ncreate table holders (id int primary key, code varchar(10), constraint holders_code foreign key (code) references codes (code));\n");
+        p.output();
+        assert_eq!(p.dry_run().await, 1, "{d:?}: {}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"_pairs_ab\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 value repeats in pairs_ab\n");
+        assert!(!out.contains("nulls in tags.status"), "{d:?}: the column added again holds none of the old values: {out}");
+        assert!(!out.contains("breaks holders_code"), "{d:?}: the referenced column added again holds none of the old values: {out}");
+        assert!(!out.contains("breaks members_team"), "{d:?}: the parent row comes first: {out}");
+    }
+}
+
+/// On Postgres: a check whose function writes is read in a read-only transaction, which refuses the
+/// write, so the target is left as it was and the check unsaid; a type change that rewrites values
+/// before a check of the same file meets them is left to the deploy; and a NOT NULL added `not valid`
+/// holds no row to it until a later migration validates it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_reads_postgres_rows_only_as_the_deploy_meets_them() {
+    let Some(mut p) = P::new(Dialect::Postgres).await else { return };
+    let version: u32 = p.rows("show server_version_num").await[0].text("server_version_num").parse().unwrap();
+    let base = "create table audit (n int);\ncreate function plan_ok(p text) returns boolean language plpgsql as $$ begin insert into audit values (1); return p in ('free', 'pro'); end $$;\ncreate table users (id int primary key, plan text, email text);";
+    p.file("20261027100000_base.sql", base);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into users values (1, 'Free', null), (2, 'gold', 'a@x')").await;
+    p.file("20261027110002_plan_ok.sql", "alter table users add constraint users_plan_ok check (plan_ok(plan));");
+    p.file("20261027110003_lower_plan.sql", "alter table users alter column plan type varchar(10) using lower(plan);\nalter table users add constraint users_plan_lower check (plan = lower(plan));");
+    let mut schema = format!("{base}\nalter table users alter column plan type varchar(10);\nalter table users add constraint users_plan_ok check (plan_ok(plan));\nalter table users add constraint users_plan_lower check (plan = lower(plan));\n");
+    if version >= 180000 {
+        p.file("20261027110000_email_not_valid.sql", "alter table users add constraint users_email_nn not null email not valid;");
+        p.file("20261027110001_email_validate.sql", "alter table users validate constraint users_email_nn;");
+        schema.push_str("alter table users add constraint users_email_nn not null email;\n");
+    }
+    p.schema(&schema);
+    p.output();
+    let code = p.dry_run().await;
+    let out = p.output();
+    assert_eq!(p.rows("select count(*) as n from audit").await[0].text("n"), "0", "the target is left as it was: {out}");
+    assert!(!out.contains("users_plan_ok") && !out.contains("users_plan_lower"), "{out}");
+    if version >= 180000 {
+        assert_eq!(code, 1, "{out}");
+        assert_has!(&out, r"_email_not_valid\.sql\n    · \d+_email_validate\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row has nulls in users\.email\n");
+    } else {
+        assert_eq!(code, 0, "{out}");
+    }
+}
+
+/// A check beside a drop of another column of its table, in one migration on Postgres and in two
+/// on MySQL, is checked against the target's rows: the column it reads is as the target has it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_checks_a_constraint_beside_a_drop() {
+    for d in [Dialect::Postgres, Dialect::Mysql] {
+        let Some(mut p) = P::new(d).await else { continue };
+        p.file("20261027100000_users.sql", "create table users (id int primary key, bio varchar(20), plan varchar(10));");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into users values (1, 'a', 'free'); insert into users values (2, null, 'team')").await;
+        // A backtick inside a string names no column.
+        let check = "alter table users add constraint users_plan_check check (plan in ('free', 'pro', '`code`'));";
+        if d == Dialect::Mysql {
+            p.file("20261027110000_drop_bio.sql", "alter table users drop column bio;");
+            p.file("20261027110001_plan_check.sql", check);
+        } else {
+            p.file("20261027110001_plan_check.sql", &format!("alter table users drop column bio;\n{check}"));
+        }
+        p.schema("create table users (id int primary key, plan varchar(10), constraint users_plan_check check (plan in ('free', 'pro', '`code`')));\n");
+        p.output();
+        assert_eq!(p.dry_run().await, 1, "{d:?}: {}", p.peek());
+        assert_has!(p.output(), r"_plan_check\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks users_plan_check\n");
+    }
+}
+
+/// On Postgres: a check that reads the whole row as well as a column reads every column, so one
+/// added before it leaves it to the deploy; and `"Plan"` and `plan` are two columns, so a type change
+/// of the one isn't hidden by the other.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_reads_postgres_columns_as_postgres_names_them() {
+    let Some(mut p) = P::new(Dialect::Postgres).await else { return };
+    let base = "create table accounts (id int primary key);\ncreate table plans (id int primary key, \"Plan\" text, plan text);";
+    p.file("20261027100000_base.sql", base);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into accounts values (1); insert into plans values (1, 'Free', 'x')").await;
+    p.file("20261027110000_flag.sql", "alter table accounts add column flag boolean;");
+    p.file("20261027110001_flag_check.sql", "alter table accounts add constraint accounts_flag check (id > 0 and to_jsonb(accounts.*) ? 'flag');");
+    p.file("20261027110002_plan_lower.sql", "alter table plans alter column \"Plan\" type varchar(10) using lower(\"Plan\");\nalter table plans add constraint plans_plan_lower check (\"Plan\" = lower(\"Plan\"));");
+    p.schema("create table accounts (id int primary key, flag boolean, constraint accounts_flag check (id > 0 and to_jsonb(accounts.*) ? 'flag'));\ncreate table plans (id int primary key, \"Plan\" varchar(10), plan text, constraint plans_plan_lower check (\"Plan\" = lower(\"Plan\")));\n");
+    p.output();
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    let out = p.output();
+    assert!(!out.contains("✗"), "{out}");
+}
+
+/// On Postgres: a drop names its table by schema, so one of two tables of a name is said to be
+/// dropped alone; a `check … no inherit` holds its own table's rows; and a NOT NULL on a partitioned
+/// table after a pending migration detaches a partition meets the rows the partitions left keep.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_reads_postgres_tables_by_schema_and_partition() {
+    let Some(mut p) = P::new(Dialect::Postgres).await else { return };
+    let base = "create schema billing;\ncreate schema analytics;\ncreate table billing.logs (id int primary key);\ncreate table analytics.logs (id int primary key);\ncreate table users (id int primary key, plan text);\ncreate table m (id int, k int, v int) partition by list (k);\ncreate table m1 partition of m for values in (1);\ncreate table m2 partition of m for values in (2);";
+    p.file("20261027100000_base.sql", base);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into billing.logs values (1), (2); insert into analytics.logs values (1); insert into users values (1, 'gold'); insert into m values (1, 1, null), (2, 2, 5)").await;
+    p.file("20261027110000_reset_billing_logs.sql", "drop table billing.logs;\ncreate table billing.logs (id int primary key);");
+    p.file("20261027110001_plan_free.sql", "alter table users add constraint users_plan_free check (plan = 'free') no inherit;");
+    p.file("20261027110002_detach_m1.sql", "alter table m detach partition m1;");
+    p.file("20261027110003_v_not_null.sql", "alter table m alter column v set not null;");
+    p.schema("create schema billing;\ncreate schema analytics;\ncreate table billing.logs (id int primary key);\ncreate table analytics.logs (id int primary key);\ncreate table users (id int primary key, plan text, constraint users_plan_free check (plan = 'free') no inherit);\ncreate table m (id int, k int, v int not null) partition by list (k);\ncreate table m1 (id int, k int, v int);\ncreate table m2 partition of m for values in (2);\n");
+    p.output();
+    assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+    let out = p.output();
+    assert_has!(&out, r"_reset_billing_logs\.sql\n(      ! [^\n]*\n)*      ! It drops the table billing\.logs and its 2 rows on this database\n");
+    assert!(!out.contains("analytics.logs"), "{out}");
+    assert_has!(&out, r"_plan_free\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks users_plan_free\n        List them:\n          select \* from only users ");
+    assert!(!out.contains("nulls in m.v"), "the detached partition's rows aren't m's: {out}");
 }
 
 /// A trigger swapped under a lock with a change to its table: the change runs first, so one that
@@ -6102,6 +6320,34 @@ mod adversarial {
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_has!(p.output(), "Up to date");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    }
+
+    /// A temporary table is its session's: its key, its checks, its policies, its statistics (made in
+    /// `public`, the first schema of the search path) and their comments are gone when the run that
+    /// made them ends, and are in no fingerprint and no comparison.
+    pub async fn a_temporary_tables_constraints_and_policies_are_no_drift(mut p: P) {
+        p.schema("create table t (id int primary key);");
+        p.file(
+            "20261027100000_t.sql",
+            "create table t (id int primary key);
+            create temp table scratch (key int primary key, n int check (n > 0));
+            comment on constraint scratch_pkey on scratch is 'for this session';
+            create policy everyone on scratch using (true);
+            comment on policy everyone on scratch is 'for this session';
+            create statistics scratch_stats on key, n from scratch;
+            alter statistics scratch_stats set statistics 500;
+            comment on statistics scratch_stats is 'for this session';",
+        );
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_has!(p.output(), "Up to date");
+        let (code, out) = p.check_every_way().await;
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(p.history_push().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), "Up to date");
     }
 
     /// An enum is one line of the catalog, so a value added changes that line on both sides: schema.sql's
