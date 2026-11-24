@@ -73,7 +73,9 @@ function edited() {
   const { files: recorded } = JSON.parse(readFileSync(manifestFile, 'utf8'));
   const now = hashes(target);
   const names = new Set([...Object.keys(recorded), ...Object.keys(now)]);
-  return [...names].filter((name) => recorded[name] !== now[name]).sort();
+  // A site may keep the README out of its repository (Reylo's clone excludes it), so a copy without
+  // one was left out, not edited.
+  return [...names].filter((name) => recorded[name] !== now[name] && !(name === 'README.md' && !(name in now))).sort();
 }
 
 const changed = edited();
