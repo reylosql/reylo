@@ -43,8 +43,30 @@ pub struct Postgres {
     next: u64,
 }
 
-struct Connection {
+/// A client with the task that drives its connection. Dropped, it closes as a client does, once what
+/// is queued on it has its answers; retired, it closes at once, so that a session given up on with
+/// requests still queued (a lock timeout's) holds no slot on the server while they drain.
+pub struct Driven {
     client: Client,
+    driver: tokio::task::AbortHandle,
+}
+
+impl Driven {
+    /// Closes the connection now. Every request still on it fails, and the client is closed.
+    pub fn retire(&self) {
+        self.driver.abort();
+    }
+}
+
+impl std::ops::Deref for Driven {
+    type Target = Client;
+    fn deref(&self) -> &Client {
+        &self.client
+    }
+}
+
+struct Connection {
+    client: Driven,
     /// The URL it was opened from, and the token of the host's bridge to a Unix socket, to open it again.
     url: String,
     bridge: Option<String>,
@@ -67,11 +89,11 @@ impl Connection {
     /// connection only from the request that finds it so, since its connection's task runs only
     /// while a request does: that request is answered over the new one.
     async fn reopen(&mut self) -> Result<(), Value> {
-        let Started { client, date_style, .. } = connect(&self.url, self.bridge.as_deref()).await?;
+        let Started { client, driver, date_style, .. } = connect(&self.url, self.bridge.as_deref()).await?;
         if let Some(setup) = &self.setup {
             client.batch_execute(setup).await.map_err(|e| json!({ "status": "unreachable", "message": e.to_string() }))?;
         }
-        (self.client, self.date_style, self.prepared) = (client, date_style, Prepared::default());
+        (self.client, self.date_style, self.prepared) = (Driven { client, driver }, date_style, Prepared::default());
         Ok(())
     }
 
@@ -98,6 +120,7 @@ impl Connection {
         // same lock: it is reported now, and the next request opens a session of its own rather
         // than wait behind them.
         if matches!(&result, Err(ReplayError::Host(e)) if e.0.starts_with(answers::LOCKED)) {
+            self.client.retire();
             self.retired = true;
         }
         match result {
@@ -138,6 +161,12 @@ pub fn transaction_pooler(url: &str) -> Option<String> {
 pub async fn open(url: &str) -> Result<(Client, String), Failure> {
     let Started { client, version, .. } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
     Ok((client, server_version(&version)))
+}
+
+/// As [`open`], for a caller that may give up on a session with requests still on it ([`Driven::retire`]).
+pub async fn open_driven(url: &str) -> Result<(Driven, String), Failure> {
+    let Started { client, driver, version, .. } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
+    Ok((Driven { client, driver }, server_version(&version)))
 }
 
 /// The diagnostic code of a statement whose dates the session writes in another style than ISO's.
@@ -199,9 +228,9 @@ impl Session {
         if let Some(refusal) = transaction_pooler(url) {
             return Err(Failure::Error(refusal));
         }
-        let Started { client, version, date_style } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
+        let Started { client, driver, version, date_style } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
         let setup = lock_wait(&client).await;
-        Ok(Session { connection: Connection { client, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup, retired: false }, version: server_version(&version) })
+        Ok(Session { connection: Connection { client: Driven { client, driver }, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup, retired: false }, version: server_version(&version) })
     }
 
     /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
@@ -239,10 +268,10 @@ impl Program for Postgres {
                     return Some(json!({ "status": "error", "message": refusal }));
                 }
                 match connect(url, bridge.as_deref()).await {
-                    Ok(Started { client, version, date_style }) => {
+                    Ok(Started { client, driver, version, date_style }) => {
                         let setup = lock_wait(&client).await;
                         self.next += 1;
-                        self.connections.insert(self.next, Connection { client, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup, retired: false });
+                        self.connections.insert(self.next, Connection { client: Driven { client, driver }, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup, retired: false });
                         json!({ "status": "opened", "conn": self.next, "version": server_version(&version) })
                     }
                     Err(failure) => failure,
@@ -502,6 +531,8 @@ fn network(e: &tokio_postgres::Error) -> bool {
 /// A connection just opened, and what the server reported as it started, which costs no round trip.
 struct Started {
     client: Client,
+    /// The task that drives the connection: detached unless a [`Driven`] holds it.
+    driver: tokio::task::AbortHandle,
     /// `server_version`, as the server writes it.
     version: String,
     /// The session's `DateStyle`: `ISO, MDY`.
@@ -517,10 +548,11 @@ where
 {
     let version = connection.parameter("server_version").unwrap_or_default().to_string();
     let date_style = connection.parameter("DateStyle").unwrap_or_default().to_string();
-    tokio::spawn(async move {
+    let driver = tokio::spawn(async move {
         let _ = connection.await;
-    });
-    Started { client, version, date_style }
+    })
+    .abort_handle();
+    Started { client, driver, version, date_style }
 }
 
 /// A libpq URL read: tokio-postgres's configuration, how much of the server's certificate to check,

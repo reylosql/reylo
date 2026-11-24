@@ -26,7 +26,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 use reylo_engine::Failure;
 #[cfg(feature = "postgres")]
-use tokio_postgres::Client;
+use reylo_engine::postgres::Driven;
 
 const ENTRY_VERSION: u64 = 1;
 #[cfg(any(feature = "postgres", feature = "mysql"))]
@@ -73,7 +73,7 @@ impl<C, D> Session<C, D> {
 }
 
 #[cfg(feature = "postgres")]
-static POSTGRES: Mutex<Option<Session<Client, reylo_engine::clients::tokio_postgres::Describe>>> = Mutex::new(None);
+static POSTGRES: Mutex<Option<Session<Driven, reylo_engine::clients::tokio_postgres::Describe>>> = Mutex::new(None);
 #[cfg(feature = "mysql")]
 static MYSQL: Mutex<Option<Session<mysql_async::Conn, reylo_engine::clients::mysql_async::Describe>>> = Mutex::new(None);
 #[cfg(any(feature = "postgres", feature = "mysql"))]
@@ -272,7 +272,7 @@ pub fn watched(dir: &Path) -> Vec<PathBuf> {
 }
 
 #[cfg(feature = "postgres")]
-async fn postgres(located: &Located, queries: &Path, sql: &str, session: &mut Session<Client, reylo_engine::clients::tokio_postgres::Describe>) -> Result<Value, String> {
+async fn postgres(located: &Located, queries: &Path, sql: &str, session: &mut Session<Driven, reylo_engine::clients::tokio_postgres::Describe>) -> Result<Value, String> {
     let statement = statement_key(Dialect::Postgres, sql).expect("the feature builds the engine");
     let server = server(&session.url);
     let schema = match session.fresh() {
@@ -309,6 +309,7 @@ async fn postgres(located: &Located, queries: &Path, sql: &str, session: &mut Se
     // A lock timeout leaves the statement's other describes queued on the connection behind the same
     // lock: the next statement opens a new one rather than wait behind them.
     if matches!(&analysis, Err(reylo_engine::ReplayError::Host(e)) if e.0.starts_with(reylo_engine::clients::tokio_postgres::LOCKED)) {
+        client.retire();
         session.conn = None;
     }
     remember(&located.cache, &own, Dialect::Postgres, &schema, &analysis.map_err(|e| e.to_string())?)
@@ -316,12 +317,12 @@ async fn postgres(located: &Located, queries: &Path, sql: &str, session: &mut Se
 
 /// The session's client, connected again where the server closed it.
 #[cfg(feature = "postgres")]
-async fn postgres_client<'c>(conn: &'c mut Option<Client>, url: &str) -> Result<&'c Client, Failure> {
-    if conn.as_ref().map_or(true, Client::is_closed) {
+async fn postgres_client<'c>(conn: &'c mut Option<Driven>, url: &str) -> Result<&'c Driven, Failure> {
+    if conn.as_ref().map_or(true, |client| client.is_closed()) {
         if let Some(refusal) = reylo_engine::postgres::transaction_pooler(url) {
             return Err(Failure::Error(refusal));
         }
-        let client = reylo_engine::postgres::open(url).await?.0;
+        let client = reylo_engine::postgres::open_driven(url).await?.0;
         // Waiting on a table's lock at most as long as the type check does.
         reylo_engine::postgres::bound_lock_wait(&client).await;
         *conn = Some(client);

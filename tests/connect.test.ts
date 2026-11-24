@@ -235,6 +235,34 @@ test("Postgres: an analysis waits on another session's lock for at most 10 s, or
   }
 });
 
+test("Postgres: a session a lock timeout gives up on is closed, so a role allowed one connection analyzes again once the lock is released", { skip: pgLive }, async () => {
+  const { url, sql, drop } = await postgresDatabase("reylo_lock_one", "create table users (id bigint primary key, name text not null); create table orders (id bigint primary key)");
+  const role = `reylo_lock_one_${process.pid}`;
+  const sessions = async () => ((await sql.unsafe(`select pid from pg_catalog.pg_stat_activity where usename = '${role}'`)) as unknown[]).length;
+  await sql.unsafe(`drop role if exists ${role}`);
+  await sql.unsafe(`create role ${role} login connection limit 1`);
+  const at = new URL(url);
+  at.username = role;
+  const c = await (await engine("postgres")).open(`${at.href}?options=-c%20lock_timeout%3D1s`);
+  try {
+    await sql.begin(async (tx: any) => {
+      await tx.unsafe("alter table users add column email text");
+      await assert.rejects(c.analyze("select id, name from users where id = :id"), (err: Error) => err.message.startsWith("A table this statement names is locked by another session"));
+    });
+    // The session given up on leaves the server once what was queued on it is done, which the lock's release lets it be.
+    for (let tries = 0; (await sessions()) > 0; tries++) {
+      assert.ok(tries < 100, "the session given up on never left the server");
+      await new Promise((done) => setTimeout(done, 50));
+    }
+    assert.deepEqual((await c.analyze("select id from orders")).columns.map((col) => col.name), ["id"]);
+  } finally {
+    await c.close();
+    await sql.unsafe(`select pg_catalog.pg_terminate_backend(pid) from pg_catalog.pg_stat_activity where usename = '${role}'`);
+    await sql.unsafe(`drop role if exists ${role}`);
+    await drop();
+  }
+});
+
 test("reylo analyze and reylo generate stop waiting on another session's lock at 10 s, as the type check does", { skip: pgLive }, async () => {
   const { url, sql, drop } = await postgresDatabase("reylo_lock_wait_cli", "create table users (id bigint primary key, name text not null)");
   const project = mkdtempSync(join(tmpdir(), "reylo-lock-project-"));
@@ -247,7 +275,7 @@ test("reylo analyze and reylo generate stop waiting on another session's lock at
       // The generator runs under no lock_timeout of its own, so only the engine's bound ends its wait; it reads the schema's fingerprint first, whose catalog functions wait on the same lock. The analysis takes a shorter one from its URL.
       for (const [args, said] of [
         [["analyze", "q.sql", "--url", `${url}?options=-c%20lock_timeout%3D1s`], /A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_timeout/],
-        [["generate", "rust-sqlx", "q.sql"], /the schema fingerprint failed: canceling statement due to lock timeout/],
+        [["generate", "rust-sqlx", "q.sql", "--out", "queries.rs"], /the schema fingerprint failed: canceling statement due to lock timeout/],
       ] as const) {
         const run = spawnSync(nativeBinary(), args, { cwd: project, encoding: "utf8", timeout: 20_000 });
         assert.equal(run.signal, null, `reylo ${args.join(" ")} was still waiting after 20 s`);
