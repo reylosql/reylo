@@ -7172,29 +7172,31 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.rows("select nextval('fed_no') as n").await[0].text("n"), "2001");
     }
 
-    /// The check of a sequence's read runs the file up to it and rolls that back, setting each
-    /// sequence back too: a file that takes a serial's value before the read runs after it as it
-    /// would have, and the read is still found, as a dry run deploys the file to another database.
+    /// The check of a sequence's read reads the catalog and runs nothing of the file but the file:
+    /// a dry run that deploys to another database files that take a serial's values around the read
+    /// runs them as the deploy would, and still finds the read.
     pub async fn a_sequence_read_is_checked_without_moving_the_files_sequences(mut p: P) {
-        let before = "create table parent (id serial primary key); create table child (parent_id integer references parent (id)); create table log (id bigint generated always as identity, msg text);";
-        p.schema(before);
-        p.file("20261027100000_tables.sql", before);
+        let tables = |start: &str| format!("create table parent (id serial primary key); create table child (parent_id integer references parent (id)); create table log (id bigint generated always as identity{start}, msg text);");
+        p.schema(&tables(""));
+        p.file("20261027100000_tables.sql", &tables(""));
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "seed", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let named = |p: &P, name: &str| p.dir.join("migrations").join(p.files().into_iter().find(|f| f.ends_with(&format!("_{name}.sql"))).unwrap());
+        std::fs::write(named(&p, "seed"), "insert into parent default values;\n").unwrap();
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         p.output();
-        p.schema("create table parent (id serial primary key); create table child (parent_id integer references parent (id)); create table log (id bigint generated always as identity (start with 1000), msg text);");
+        p.schema(&tables(" (start with 1000)"));
         let choices = reylo_migrate::Choices { blocking: true, ..Default::default() };
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "move_log", &choices, log).await).await, 0, "{}", p.peek());
-        p.output();
-        let file = p.dir.join("migrations").join(p.files().into_iter().find(|f| f.ends_with("_move_log.sql")).unwrap());
+        let file = named(&p, "move_log");
         let sql = std::fs::read_to_string(&file).unwrap();
-        std::fs::write(&file, format!("insert into parent default values;\ninsert into child values (1);\n{sql}")).unwrap();
+        std::fs::write(&file, format!("{sql}\ninsert into parent default values;\ninsert into child values (2);\n")).unwrap();
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         p.output();
         let q = P::new(p.d).await.unwrap();
         p.url = q.url.clone();
-        p.dry_run().await;
-        let out = p.output();
-        assert_has!(&out, r"reads every row of log while it blocks writes to it, to move a sequence past them");
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"reads every row of log while it blocks writes to it, to move a sequence past them");
     }
 
     pub async fn init_creates_the_extensions_its_schema_uses(mut p: P) {

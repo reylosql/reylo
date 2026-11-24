@@ -645,53 +645,49 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
     // A sequence moved to a new start reads each column it gives values to, its table locked
     // against writes until the file commits: every row of a table that was there before, where no
     // index serves the column's max and min (a valid btree index that leads with it, over every
-    // row). Which columns those are, and their indexes, is read where the block runs: the file up to
-    // it run in a transaction that is then rolled back, or, where that part can't run in one (an
-    // index built concurrently), once the whole file has run.
+    // row). Which tables those are is read from the catalog before the file runs and after, running
+    // nothing more: one the sequence gave values to before counts; one it gives values to only after
+    // counts where the file names the sequence ahead of the read, as a default set there does, and
+    // not where that comes after it. Where the sequence isn't found before the file runs (a column
+    // renamed in it), what it gives values to after counts.
     let (opens, closes) = crate::diff::postgres::SEQUENCE_READ;
     let lines: Vec<&str> = m.sql.lines().collect();
     let reads: Vec<(usize, &str)> = lines.iter().enumerate().filter(|(_, l)| l.contains("set_config('reylo.sequence_goal', goal::text")).filter_map(|(k, l)| l.strip_prefix(opens).and_then(|rest| rest.split_once(closes)).map(|(s, _)| (k, s))).collect();
-    let unserved = |sequence: &str| {
+    // Each table the sequence gives values to, with whether an index serves the column; None where
+    // the sequence isn't found.
+    let fed = |sequence: &str| {
         format!(
-            "select format('%s', c.rel) as t, c.rel::oid::text as oid from (select ({sequence})::regclass as s) q, lateral ({}) c \
-            where c.plain and not exists (select from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0] join pg_class x on x.oid = i.indexrelid join pg_am am on am.oid = x.relam \
-            where i.indrelid = c.rel and a.attname = c.attname and i.indisvalid and i.indpred is null and am.amname = 'btree')",
+            "select format('%s', c.rel) as t, c.rel::oid::text as oid, exists (select from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0] join pg_class x on x.oid = i.indexrelid join pg_am am on am.oid = x.relam \
+            where i.indrelid = c.rel and a.attname = c.attname and i.indisvalid and i.indpred is null and am.amname = 'btree') as served from (select ({sequence})::regclass as s) q, lateral ({}) c where c.plain",
             crate::diff::postgres::sequence_columns("q.s")
         )
     };
-    let mut found: Vec<(String, String)> = Vec::new();
-    let mut after: Vec<&str> = Vec::new();
-    // A rollback leaves each sequence where the part of the file it ran moved it: each is set back
-    // after, so that the file then runs as it would have.
-    let mut sequences: Vec<(String, String, bool)> = Vec::new();
-    if !reads.is_empty() {
-        let names = db.rows(r"select format('%s', c.oid::regclass) as s from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind = 'S' and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\_%'").await?;
-        for name in names.iter().map(|r| r.text("s").to_string()) {
-            if let Some(r) = db.rows(&format!("select last_value::text as v, is_called as called from {name}")).await?.first() {
-                sequences.push((name, r.text("v").to_string(), r.flag("called")));
+    let known = async |db: &mut Db, sequence: &str| db.rows(&format!("select ({sequence})::regclass is not null as known")).await.ok().and_then(|r| r.first().map(|r| r.flag("known"))).unwrap_or(false);
+    let mut was: Vec<Option<Vec<(String, String, bool)>>> = Vec::new();
+    for (_, sequence) in &reads {
+        let rows = if known(db, sequence).await { db.rows(&fed(sequence)).await.ok().map(|rows| rows.iter().map(|r| (r.text("t").to_string(), r.text("oid").to_string(), r.flag("served"))).collect()) } else { None };
+        was.push(rows);
+    }
+    run(db, m).await?;
+    let mut found: Vec<String> = Vec::new();
+    for ((k, sequence), was) in reads.iter().zip(&was) {
+        let now: Vec<(String, String, bool)> = db.rows(&fed(sequence)).await.unwrap_or_default().iter().map(|r| (r.text("t").to_string(), r.text("oid").to_string(), r.flag("served"))).collect();
+        let name = sequence.trim_matches(|c: char| c == '\'' || c == '"');
+        let named_ahead = lines[..*k].iter().any(|l| l.contains(name.rsplit_once('.').map_or(name, |(_, n)| n)));
+        for (table, oid, served) in &now {
+            let read = match was {
+                None => !served,
+                Some(was) => match was.iter().find(|(_, o, _)| o == oid) {
+                    Some((_, _, served_then)) => !served_then,
+                    None => named_ahead && !served,
+                },
+            };
+            if read && before.values().any(|s| &s.oid == oid) {
+                found.push(table.clone());
             }
         }
     }
-    for (k, sequence) in &reads {
-        db.exec("begin").await?;
-        let at = match db.script(&lines[..*k].join("\n")).await {
-            Ok(()) => db.rows(&unserved(sequence)).await.ok(),
-            Err(_) => None,
-        };
-        db.exec("rollback").await?;
-        for (name, value, called) in &sequences {
-            db.exec(&format!("select setval('{}'::regclass, {value}, {called})", name.replace('\'', "''"))).await?;
-        }
-        match at {
-            Some(rows) => found.extend(rows.iter().map(|r| (r.text("t").to_string(), r.text("oid").to_string()))),
-            None => after.push(sequence),
-        }
-    }
-    run(db, m).await?;
-    for sequence in after {
-        found.extend(db.rows(&unserved(sequence)).await.unwrap_or_default().iter().map(|r| (r.text("t").to_string(), r.text("oid").to_string())));
-    }
-    for (table, _) in found.iter().filter(|(_, oid)| before.values().any(|s| &s.oid == oid)) {
+    for table in &found {
         add(table, format!("reads every row of {table} while it blocks writes to it, to move a sequence past them"));
     }
     // A table renamed keeps its storage; one given new storage was copied, but for a truncate,
