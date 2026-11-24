@@ -872,6 +872,7 @@ impl<'a> Engine<'a> {
 
     fn run(&self, sql: &str, lexed: &Lexed, marked: &[String]) -> Lazy<Analysis> {
         let mut diagnostics = Vec::new();
+        let mut notes = Vec::new();
         let rewritten = lex::rewrite(sql, lexed, Target::Dollar);
         // The parameters cast to `nullable(…)`, by the number the rewrite gave each.
         let marked: HashSet<i32> = rewritten.order.iter().enumerate().filter(|(_, name)| marked.contains(name)).map(|(k, _)| k as i32 + 1).collect();
@@ -888,6 +889,12 @@ impl<'a> Engine<'a> {
             Err(analyze::AnalyzeError::NotOneStatement(n)) if n > 1 => {
                 diagnostics.push(diag(lex::several_statements(), 0, sql.trim_end().len(), 10));
                 return Some(bare(sql, lexed, Dialect::Postgres, diagnostics));
+            }
+            // A statement that nests deeper than the analysis reads is the server's to describe
+            // alone, which fails nothing, since its types are still sound, but is said on the hover.
+            Err(analyze::AnalyzeError::TooDeep) => {
+                notes.push(analyze::too_deep_note());
+                None
             }
             Err(_) => None,
         };
@@ -1115,7 +1122,7 @@ impl<'a> Engine<'a> {
             errors: None,
             capabilities: None,
             read_only: false,
-            notes: Vec::new(),
+            notes,
             tables: None,
             domains: Default::default(),
         };
@@ -5821,6 +5828,8 @@ mod tests {
             assert_eq!(past.cardinality_reason.as_deref(), Some("the statement did not parse locally"));
             assert!(past.columns.iter().all(|c| c.nullable), "{shape} at {}", n + 1);
             assert!(past.diagnostics.is_empty(), "{:?}", past.diagnostics);
+            assert_eq!(past.notes, vec![crate::analyze::too_deep_note()], "{shape} at {}", n + 1);
+            assert!(at.notes.is_empty(), "{shape} at {n}: {:?}", at.notes);
         }
     }
 

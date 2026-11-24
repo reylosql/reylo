@@ -112,17 +112,27 @@ impl std::fmt::Display for AnalyzeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AnalyzeError::Parse(m) => write!(f, "SQL does not parse: {m}"),
-            AnalyzeError::TooDeep => write!(
-                f,
-                "the statement nests deeper than the analysis reads: at most {} levels of its parse tree, which is about {} levels of an expression such as `a + b + …`, a nested CASE or json_build_object, or {} nested subqueries",
-                crate::stack::MAX_DEPTH,
-                crate::stack::MAX_DEPTH / 2,
-                crate::stack::MAX_DEPTH / 6
-            ),
+            AnalyzeError::TooDeep => write!(f, "the statement nests deeper than the analysis reads: {}", reach()),
             AnalyzeError::NotOneStatement(n) => write!(f, "expected exactly one statement, found {n}"),
             AnalyzeError::UnsupportedStatement => f.write_str("only SELECT, INSERT, UPDATE, DELETE and MERGE statements are typed"),
         }
     }
+}
+
+/// How deeply the analysis reads a statement ([`crate::stack::MAX_DEPTH`]), in the shapes deep SQL takes.
+fn reach() -> String {
+    format!(
+        "at most {} levels of its parse tree, which is about {} levels of an expression such as `a + b + …`, a nested CASE or json_build_object, or {} nested subqueries",
+        crate::stack::MAX_DEPTH,
+        crate::stack::MAX_DEPTH / 2,
+        crate::stack::MAX_DEPTH / 6
+    )
+}
+
+/// The note on a statement [`AnalyzeError::TooDeep`] refuses, which is typed from the server's
+/// describe alone.
+pub fn too_deep_note() -> String {
+    format!("This statement nests deeper than the analysis reads, so it is typed from the server's describe alone: each column it returns may be null, in any number of rows. The analysis reads {}.", reach())
 }
 
 /// Analyze one rewritten statement (placeholders already `$n`).

@@ -264,6 +264,8 @@ An aggregate returns at most one row where something can drop its row:
 
 ## Parameters
 
+ClickHouse requires every parameter to declare its own type in the query, and Reylo validates values against those types before sending them.
+
 ### Placeholders
 
 Write parameters as `{name:Type}`, as ClickHouse does, and pass `.run()` an object with those names:

@@ -12,6 +12,7 @@ export function blogMeta({ title, description, path, og, type }: { title: string
     { name: 'author', content: 'Colin McDonnell' },
     { name: 'robots', content: 'index, follow' },
     { tagName: 'link', rel: 'canonical', href: url },
+    { tagName: 'link', rel: 'alternate', type: 'text/markdown', href: `${url}.md` },
     { property: 'og:title', content: title },
     { property: 'og:description', content: description },
     { property: 'og:url', content: url },

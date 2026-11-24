@@ -199,11 +199,18 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     // read otherwise still says what kind of statement it is, and nothing more.
     // A tree only IGNORE_SPACE reads still names the statement and its tables, where [`misread`]
     // keeps its types and rows from being inferred.
+    // Beside the tree, whether one that does not read nests deeper than the parse reads.
     let read_as = |dialect: &SessionDialect| {
-        let one = |d: &SessionDialect| parse(d, &rewritten.sql).ok().and_then(|mut v| if v.len() == 1 { v.pop() } else { None });
-        one(dialect).or_else(|| one(&SessionDialect(dialect.0, dialect.1, true)))
+        let one = |d: &SessionDialect| parse(d, &rewritten.sql).map(|mut v| if v.len() == 1 { v.pop() } else { None });
+        match one(dialect) {
+            Ok(Some(statement)) => (Some(statement), false),
+            first => match one(&SessionDialect(dialect.0, dialect.1, true)) {
+                Ok(Some(statement)) => (Some(statement), false),
+                _ => (None, first.is_err_and(|e| e.past_bounds())),
+            },
+        }
     };
-    let read = read_as(&dialect);
+    let (read, past_bounds) = read_as(&dialect);
     let names = crate::mysql_params::names(&rewritten);
     if let Some(statement) = &read {
         crate::mysql_params::prefetch(statement, &names, host);
@@ -213,12 +220,15 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     let misread = misread.or_else(|| pipes.clone().err());
     // The tree again where the session reads `||` or a spaced built-in otherwise than the default.
     let session = SessionDialect(dialect.0, !matches!(pipes, Ok(false)), ignore_space);
-    let (dialect, read) = if (session.1, session.2) != (dialect.1, dialect.2) {
-        let read = read_as(&session);
-        (session, read)
+    let (dialect, read, past_bounds) = if (session.1, session.2) != (dialect.1, dialect.2) {
+        let (read, past_bounds) = read_as(&session);
+        (session, read, past_bounds)
     } else {
-        (dialect, read)
+        (dialect, read, past_bounds)
     };
+    // A statement that nests deeper than the engine reads is the server's to describe alone, which
+    // fails nothing, since its types are still sound, but is said on the hover.
+    let notes = if past_bounds { vec![too_deep_note()] } else { Vec::new() };
     let raw = match raw {
         Ok(r) => r,
         Err(e) => {
@@ -546,7 +556,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
         // A table named by its schema is one the walk of the catalog does not reach.
         capabilities: read.as_ref().filter(|r| crate::mysql_params::reads_by_schema(r)).map(|_| crate::capabilities::by_schema()),
         read_only: false,
-        notes: Vec::new(),
+        notes,
         // From the tree as the session reads the statement, also where it reads some part of it
         // otherwise than the parser (a spaced `count (`): which tables a FROM names does not
         // turn on that.
@@ -2463,6 +2473,14 @@ fn kind(read: Option<&Statement>) -> Option<StatementKind> {
 /// describe, never an overflow of the stack.
 const BOUNDS: syntax::mysql::Bounds = syntax::mysql::Bounds { depth: crate::stack::MAX_DEPTH / 5, operators: crate::stack::MAX_DEPTH / 2 };
 
+/// The note on a statement past [`BOUNDS`], which is typed from the server's prepare alone.
+pub(crate) fn too_deep_note() -> String {
+    format!(
+        "This statement nests deeper than the analysis reads, so it is typed from the server's prepare alone: each column it returns may be null, in any number of rows. The analysis reads {} levels of nesting, which a call's arguments, a parenthesized operand and a CASE each spend one of and a subquery two, and {} operators in all.",
+        BOUNDS.depth, BOUNDS.operators
+    )
+}
+
 /// The statements of `sql` as the session reads them, within [`BOUNDS`].
 fn parse(dialect: &SessionDialect, sql: &str) -> Result<Vec<Statement>, syntax::mysql::ParseError> {
     syntax::mysql::parse(sql, dialect.options(), BOUNDS)
@@ -3964,11 +3982,18 @@ mod tests {
             let (analysis, _) = crate::stack::run(|| analyzed(&crate::stack::nested("sum", n), described.clone(), "STRICT_TRANS_TABLES"));
             assert_eq!(analysis.columns.len(), 1, "{n}");
         }
-        // Every shape at its deepest is analyzed whole on the engine's stack.
+        // Every shape at its deepest is analyzed whole on the engine's stack, and one level past
+        // it is typed from the prepare alone, which a note says.
         for (shape, n) in found {
             let (analysis, _) = crate::stack::run(|| analyzed(&crate::stack::nested(shape, n), described.clone(), "STRICT_TRANS_TABLES"));
             assert_eq!(analysis.columns.len(), 1, "{shape}");
+            assert!(analysis.notes.is_empty(), "{shape} at {n}: {:?}", analysis.notes);
+            let (past, _) = crate::stack::run(|| analyzed(&crate::stack::nested(shape, n + 1), described.clone(), "STRICT_TRANS_TABLES"));
+            assert_eq!((past.cardinality, past.notes), (Cardinality::Many, vec![too_deep_note()]), "{shape} at {}", n + 1);
         }
+        // A statement the parser does not read for any other reason carries no such note.
+        let (unread, _) = analyzed("select x from t where", described.clone(), "STRICT_TRANS_TABLES");
+        assert!(unread.notes.is_empty(), "{:?}", unread.notes);
     }
 
     #[test]
