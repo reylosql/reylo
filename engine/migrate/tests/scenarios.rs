@@ -519,6 +519,7 @@ for_each_dialect!(
     create_renames_a_table_keeping_its_rows,
     create_renames_a_not_null_column_with_its_table,
     create_offers_renames_only_to_what_the_dropped_ones_table_adds,
+    create_offers_no_rename_to_a_column_another_table_renames_onto,
     create_lists_every_rename_it_assumes,
     commands_create_prints_for_names_with_spaces_run_as_printed,
     deploy_compares_with_what_dev_replayed,
@@ -3270,6 +3271,31 @@ async fn create_offers_renames_only_to_what_the_dropped_ones_table_adds(mut p: P
     let out = p.output();
     assert_has!(&out, r"This migration drops the column users\.middle_name and its data\n\n  To drop it:\n");
     assert!(!out.contains("renamed instead"), "{out}");
+}
+
+async fn create_offers_no_rename_to_a_column_another_table_renames_onto(mut p: P) {
+    let (id, int, text) = (p.t.id, p.t.int, p.t.text);
+    let statements = |title: &str, profile: &str| [format!("create table users (id {id}, email {text} not null, name {text}{profile});"), format!("create table posts (id {id}, author_id {int} not null references users (id), {title} {text} not null, body {text});"), format!("create index posts_author_idx on posts (author_id, {title});"), format!("create view published_posts as select id, author_id, {title} from posts where body is not null;")];
+    // One file per statement, which MySQL commits each on its own.
+    for (k, statement) in statements("title", &format!(", profile {text}")).iter().enumerate() {
+        p.file(&format!("2026102710000{k}_t{k}.sql"), statement);
+    }
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into users (email) values ('a'); insert into posts (author_id, title, body) values (1, 'Hello', 'x')").await;
+    p.output();
+    // One table drops a column while another renames one, its index and view following: the rename
+    // is assumed, and its new name, another table's column, is no name for the drop's rename.
+    p.schema(&statements("heading", "").join(" "));
+    assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "step3", &Default::default(), log).await).await, 1);
+    let out = p.output();
+    assert_has!(&out, r"This migration drops the column users\.profile and its data\n");
+    assert_has!(&out, r"reylo migrate new step3 [^\n]*--drop users\.profile");
+    assert!(!out.contains("renamed instead") && !out.contains("posts.heading") && !out.contains("posts.title"), "{out}");
+    let choices = reylo_migrate::Choices { drop: vec!["users.profile".into()], ..Default::default() };
+    assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "step3", &choices, log).await).await, 0, "{}", p.peek());
+    assert_has!(p.output(), r"\n  ~ column posts\.\[-title-\]\{\+heading\+\} ");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.rows("select heading from published_posts").await[0].text("heading"), "Hello");
 }
 
 async fn db_push_renames_a_table_keeping_its_rows(mut p: P) {
