@@ -1577,6 +1577,14 @@ impl Problem {
         self
     }
 
+    /// A lead and the flag it names, for the command another lead gives: printed as `fix` prints a
+    /// command, and no fix of its own, since a flag alone runs nothing.
+    fn hint(mut self, what: impl AsRef<str>, flag: &str) -> Problem {
+        self.lines.push(paint("dim", &format!("  {}:", what.as_ref())));
+        self.lines.push(format!("    {}", paint("cyan", flag)));
+        self
+    }
+
     /// `fix`, with the command that states `reading`, which it records; with `--blocking` where
     /// `asked` knows the migration that reading writes holds a lock that needs it.
     fn offer(mut self, what: impl AsRef<str>, asked: &Asked, reading: Choices) -> Problem {
@@ -6208,9 +6216,11 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
     } else if !unnamed.is_empty() {
         let names: Vec<String> = unstated.iter().map(|l| display(l)).chain(unnamed.iter().map(|(_, name, _)| name.clone())).collect();
         let all = reading(&stated, &names, &[]);
+        // Where two of the names are one, --drop can't tell them apart, as the drop's refusal says.
+        let apart = names.iter().enumerate().all(|(k, n)| !names[..k].contains(n));
         for (k, (_, name, why)) in unnamed.iter().enumerate() {
-            let mut problem = Problem::new("loses-data", format!("Column {name} {why}")).fix("To accept that", &[&format!("--drop {}", shell_word(name))]);
-            if k + 1 == unnamed.len() {
+            let mut problem = Problem::new("loses-data", format!("Column {name} {why}")).hint("To accept that", &format!("--drop {}", shell_word(name)));
+            if k + 1 == unnamed.len() && apart {
                 problem = asked.hazards(&all).iter().fold(problem, |p, w| p.note(format!("It also {w}."))).offer("To accept every change", asked, all.clone());
             }
             problems.push(problem);
@@ -8933,6 +8943,25 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn several_lossy_columns_name_their_flags_and_one_command() {
+        let narrowed: Vec<(String, String, String)> = ["price", "starts"].iter().map(|c| (format!("column public.events.{c}"), format!("column events.{c}"), "loses what it holds".to_string())).collect();
+        let none = |_: &str| None;
+        let nothing = |_: &str| Vec::new();
+        let problems = drop_problems(&[], &[], &narrowed, &[], &none, &nothing, &[], &Choices::default(), &Asked::migration("narrow", &[]));
+        // Each prints its flag, which no structured fix lists as a command; the last gives the one
+        // command that accepts both.
+        assert_eq!(problems.len(), 2);
+        assert!(problems[0].lines.iter().any(|l| l == "    --drop events.price"), "{:?}", problems[0].lines);
+        assert!(problems[0].json().get("fixes").is_none(), "{}", problems[0].json());
+        assert_eq!(problems[1].json()["fixes"], serde_json::json!([{ "what": "To accept every change", "commands": ["reylo migrate new narrow --drop events.price,events.starts"] }]));
+        assert!(!problems.iter().flat_map(|p| &p.lines).any(String::is_empty), "no empty line in a refusal");
+        // Beside two drops --drop can't tell apart, no command is offered that would name them.
+        let (lost, shown) = (["column public.t.p1".to_string(), "table public.t.p1".to_string()], ["column t.p1".to_string(), "table t.p1".to_string()]);
+        let problems = drop_problems(&lost, &shown, &narrowed, &[], &none, &nothing, &[], &Choices::default(), &Asked::migration("narrow", &[]));
+        assert!(problems.iter().all(|p| p.fixes.iter().all(|(what, _)| what != "To accept every change")), "{problems:?}");
+    }
 
     #[test]
     fn a_virtual_tables_own_tables_are_left_out_of_its_summary() {
