@@ -3227,6 +3227,8 @@ struct Dropped {
     name: String,
     written: String,
     table: Option<String>,
+    /// Whether it is an index (`drop index`, MySQL's `drop key`), else a constraint.
+    index: bool,
 }
 
 /// The constraints and indexes a migration drops and doesn't make again: a changed `check` is
@@ -3285,7 +3287,7 @@ fn dropped_and_made(sql: &str, d: Dialect) -> (Vec<Dropped>, Vec<String>) {
                 if let (Some(name), Some(written)) = (kept(at), written(at)) {
                     // Postgres's `drop index` names the index alone, schema-qualified where it is.
                     let name = if table.is_none() { kept(at + if t.get(at + 1).is_some_and(|x| x.text == ".") { 2 } else { 0 }).unwrap_or(name) } else { name };
-                    dropped.push(Dropped { name, written, table: table.clone() });
+                    dropped.push(Dropped { name, written, table: table.clone(), index: matches!(what, Some("INDEX" | "KEY")) });
                 }
             } else if (up[k] == "ADD" && matches!(what, Some("CONSTRAINT"))) || (up[k] == "INDEX" && k >= 1 && matches!(up[k - 1].as_str(), "CREATE" | "UNIQUE")) {
                 made.extend(kept(skip(if up[k] == "ADD" { k + 2 } else { k + 1 })));
@@ -3489,9 +3491,15 @@ async fn absent(db: &mut Db, dropped: Vec<Dropped>) -> Vec<String> {
         let sql = match (db.dialect(), &x.table) {
             (Dialect::Postgres, Some(table)) => format!("select not exists (select 1 from pg_constraint where conrelid = to_regclass({}) and conname = (parse_ident({written}))[1]) as gone", crate::db::literal(table)),
             (Dialect::Postgres, None) => format!("select to_regclass({written}) is null as gone"),
+            // An index in the table's indexes, a constraint in its constraints: a `check` that shares an
+            // index's name doesn't stand in for it.
             (Dialect::Mysql, Some(table)) => {
                 let table = crate::db::literal(table.rsplit('.').next().unwrap_or(table).trim_matches('`'));
-                format!("select not exists (select 1 from information_schema.statistics where table_schema = database() and table_name = {table} and index_name = {name}) and not exists (select 1 from information_schema.table_constraints where constraint_schema = database() and table_name = {table} and constraint_name = {name}) as gone")
+                if x.index {
+                    format!("select not exists (select 1 from information_schema.statistics where table_schema = database() and table_name = {table} and index_name = {name}) as gone")
+                } else {
+                    format!("select not exists (select 1 from information_schema.table_constraints where constraint_schema = database() and table_name = {table} and constraint_name = {name}) as gone")
+                }
             }
             (Dialect::Sqlite, _) => format!("select not exists (select 1 from sqlite_schema where name = {name}) as gone"),
             // A drop read with no table to look in isn't said.
@@ -8447,6 +8455,7 @@ mod tests {
     #[test]
     fn what_a_migration_drops_is_read_by_name() {
         let names = |sql: &str, d: Dialect| dropped_by(sql, d).into_iter().map(|x| (x.name, x.written, x.table)).collect::<Vec<_>>();
+        assert_eq!(dropped_by("alter table people drop check people_x, drop index people_y", Dialect::Mysql).iter().map(|x| x.index).collect::<Vec<_>>(), [false, true]);
         assert!(names("alter domain positive drop constraint positive_check;", Dialect::Postgres).is_empty());
         assert_eq!(names("drop index people_x on people", Dialect::Mysql), [("people_x".into(), "people_x".into(), Some("people".to_string()))]);
         let some = |s: &str| Some(s.to_string());

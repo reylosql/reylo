@@ -2179,6 +2179,19 @@ async fn a_unique_index_the_rows_break_lists_the_duplicates(mut p: P) {
         assert!(p.rows("select 1 from pg_class where relname = 'users_email'").await.is_empty());
     } else {
         assert_has!(&out, r"✗ The migration 20261027110000_email\.sql failed on rows that break users_email\n  Duplicate entry [^\n]+\n  Nothing was recorded, so the next deploy runs it again\.\n\n  List the rows that break it:\n    select email, count\(\*\) from users where email is not null group by email having count\(\*\) > 1;\n");
+        // An index dropped by one file and built again by the next, beside a `check` of its name:
+        // the check doesn't stand in for the index.
+        std::fs::remove_file(p.dir.join("migrations").join("20261027110000_email.sql")).unwrap();
+        p.file("20261027110000_named.sql", "alter table users add constraint users_email check (id > 0);\n");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.file("20261027120000_rebuild.sql", "drop index users_email on users;\n");
+        p.file("20261027120001_rebuild_2.sql", "alter table users add unique key users_email (email);\n");
+        p.output();
+        assert_eq!(p.migrate().await, 1, "{}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"of the same change is applied, so users_email is dropped and not yet replaced\.\n");
+        assert_eq!(p.status().await, 1);
+        assert_has!(p.output(), r"» Until it runs, users_email is dropped and not yet replaced\n");
     }
     let dupes: Vec<String> = p.rows(&listed_query(&out)).await.iter().map(|r| r.text("email").to_string()).collect();
     assert_eq!(dupes, ["a"]);
