@@ -4638,6 +4638,23 @@ mod adversarial {
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.exec("insert into target (note) values ('b')").await;
         assert_eq!(p.rows("select id from target order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+        p.output();
+        // A serial's sequence the renamed table's column still takes its default from, though it no
+        // longer owns it: renamed, keeping its count.
+        let rest = format!("{rest} create table target (id serial primary key, note text); create sequence source_id_seq;");
+        p.file("20991231000004_t.sql", "create table origin (id serial primary key, note text);");
+        p.schema(&format!("{rest} create table origin (id serial primary key, note text);"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into origin (note) values ('a')").await;
+        p.output();
+        p.schema(&format!("{rest} create sequence moved_id_seq as integer; create table moved (id integer default nextval('moved_id_seq') primary key, note text);"));
+        let choices = reylo_migrate::Choices { rename: vec![("origin".into(), "moved".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "unowned", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into moved (note) values ('b')").await;
+        assert_eq!(p.rows("select id from moved order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
     }
 
     /// A refusal's suggested command carries --blocking where the migration it writes rewrites a
