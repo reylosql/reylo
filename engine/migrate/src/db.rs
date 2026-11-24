@@ -108,6 +108,92 @@ pub(crate) enum Ran {
     Waited(Error),
     Failed(Error),
     Partly(Error),
+    /// Failed as `Failed` does, on a row the table already held that breaks a constraint or a
+    /// unique index the statement checked the rows against.
+    Broke(Error, Breach),
+}
+
+/// What a statement found a row breaking: a constraint or a unique index, by the name the server
+/// gave, and the table it is on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Breach {
+    pub kind: Breaks,
+    /// The constraint's name, or the unique index's, or for a NOT NULL with no name the column's.
+    pub name: String,
+    /// The table, schema-qualified where the server said (Postgres), else as the error named it.
+    pub table: String,
+    /// The column a NOT NULL is on, where the server said, unquoted.
+    pub column: Option<String>,
+    /// A query that lists the rows that break it, where the database could say.
+    pub rows: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Breaks {
+    #[default]
+    Check,
+    ForeignKey,
+    Unique,
+    NotNull,
+}
+
+/// A Postgres name in double quotes, which reads as the name whatever it is: a reserved word too.
+pub(crate) fn pg_quoted(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+/// What a Postgres error says of a row that breaks a constraint, by its SQLSTATE: a `check`, a
+/// foreign key, a unique index or a NOT NULL. None for any other error.
+#[cfg(feature = "cli")]
+pub(crate) fn pg_breach(e: &tokio_postgres::Error) -> Option<Breach> {
+    use tokio_postgres::error::SqlState;
+    let d = e.as_db_error()?;
+    let kind = match d.code() {
+        c if *c == SqlState::CHECK_VIOLATION => Breaks::Check,
+        c if *c == SqlState::FOREIGN_KEY_VIOLATION => Breaks::ForeignKey,
+        c if *c == SqlState::UNIQUE_VIOLATION => Breaks::Unique,
+        c if *c == SqlState::NOT_NULL_VIOLATION => Breaks::NotNull,
+        _ => return None,
+    };
+    // A check, a foreign key and a unique index are named by their constraint; a NOT NULL may be
+    // named by its column alone. A domain's check is named by neither as it is in the table.
+    let name = match kind {
+        Breaks::NotNull => d.constraint().or(d.column())?,
+        _ => d.constraint()?,
+    }
+    .to_string();
+    let table = match (d.schema(), d.table()) {
+        (Some(schema), Some(table)) => format!("{}.{}", pg_quoted(schema), pg_quoted(table)),
+        (None, Some(table)) => pg_quoted(table),
+        _ => return None,
+    };
+    Some(Breach { kind, name, table, column: d.column().map(String::from), rows: None })
+}
+
+/// What a MySQL error says of a row that breaks a constraint: a `check` (3819), a foreign key
+/// (1452) or a unique key (1062), its name read off the server's message. None for any other
+/// error, and where the message doesn't read as MySQL's English one does.
+#[cfg(feature = "cli")]
+pub(crate) fn mysql_breach(code: u16, message: &str) -> Option<Breach> {
+    let between = |from: &str, to: &str| -> Option<String> {
+        let at = message.find(from)? + from.len();
+        let end = message[at..].find(to)? + at;
+        Some(message[at..end].to_string())
+    };
+    match code {
+        // Check constraint 'people_mood' is violated.
+        3819 => Some(Breach { kind: Breaks::Check, name: between("Check constraint '", "' is violated")?, ..Breach::default() }),
+        // Cannot add or update a child row: a foreign key constraint fails (`db`.`#sql-…`, CONSTRAINT `people_team` FOREIGN KEY (`team_id`) REFERENCES `teams` (`id`))
+        1452 => Some(Breach { kind: Breaks::ForeignKey, name: between("CONSTRAINT `", "` FOREIGN KEY")?, ..Breach::default() }),
+        // Duplicate entry 'a' for key 'users.email'
+        1062 => {
+            // The last ` for key '…'`, since the duplicated value comes first and may hold the words.
+            let key = message.rsplit_once(" for key '").map(|(_, k)| k.trim_end_matches(['\'', '.']).to_string())?;
+            let (table, name) = key.rsplit_once('.').map(|(t, n)| (t.to_string(), n.to_string())).unwrap_or((String::new(), key));
+            Some(Breach { kind: Breaks::Unique, name, table, ..Breach::default() })
+        }
+        _ => None,
+    }
 }
 
 impl From<Error> for Ran {
@@ -527,11 +613,12 @@ impl Db {
             #[cfg(feature = "cli")]
             Db::Postgres(client) => client.batch_execute(sql).await.map_err(|e| {
                 let waited = e.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE);
+                let breach = pg_breach(&e);
                 let e = pg_error(e);
-                if waited {
-                    Ran::Waited(e)
-                } else {
-                    Ran::Failed(e)
+                match breach {
+                    _ if waited => Ran::Waited(e),
+                    Some(b) => Ran::Broke(e, b),
+                    None => Ran::Failed(e),
                 }
             }),
             #[cfg(feature = "cli")]
@@ -540,8 +627,16 @@ impl Db {
                     if let Err(e) = conn.query_drop(&statement.text).await {
                         // ER_LOCK_WAIT_TIMEOUT: a metadata lock, or a row's, waited past its limit.
                         let waited = matches!(&e, mysql_async::Error::Server(s) if s.code == 1205);
+                        let breach = match &e {
+                            mysql_async::Error::Server(s) => mysql_breach(s.code, &s.message),
+                            _ => None,
+                        };
                         let e = mysql_error(e);
-                        return Err(if waited { Ran::Waited(e) } else { Ran::Failed(e) });
+                        return Err(match breach {
+                            _ if waited => Ran::Waited(e),
+                            Some(b) => Ran::Broke(e, b),
+                            None => Ran::Failed(e),
+                        });
                     }
                 }
                 Ok(())
@@ -1088,8 +1183,10 @@ pub enum Server {
         /// is on the target, and left out where the shadows' role may not become it.
         owned: Owned,
         /// The target's privileges on the schemas a shadow has without the project making them
-        /// (`public`, and those its extensions are in), as `grant` statements.
+        /// (`public`, and those its extensions are in), as `grant` statements; made again in each
+        /// shadow but where SQL is written to make the database whole.
         schema_grants: Vec<String>,
+        copy_schema_grants: bool,
     },
     Mysql {
         admin: mysql_async::Conn,
@@ -1222,7 +1319,7 @@ impl Server {
                 let schemas: Vec<String> = std::iter::once("public".to_string()).chain(extensions.iter().map(|(_, s)| s.clone())).filter(|s| !platform.contains(s)).collect();
                 let schema_grants = schema_grants(target, &schemas).await?;
                 let owned = owned_by_platform(target, &admin, url, version).await?;
-                Ok(Server::Postgres { admin, url: server_url.to_string(), create, locale: unknown_locale, settings, privileges, copy_privileges: true, extensions, leave: vec![], environment, environment_role, owned, schema_grants })
+                Ok(Server::Postgres { admin, url: server_url.to_string(), create, locale: unknown_locale, settings, privileges, copy_privileges: true, extensions, leave: vec![], environment, environment_role, owned, schema_grants, copy_schema_grants: true })
             }
             Dialect::Mysql => {
                 let admin = crate::db::open_mysql(&with_database(server_url, "")).await?;
@@ -1279,7 +1376,7 @@ impl Server {
     /// privileges) but not its database settings, which a copy does not take. The lock named after
     /// it is held until it is dropped; a copy that fails releases it.
     pub(crate) async fn pg_shadow(&mut self, template: Option<&str>) -> Result<Shadow, Error> {
-        let Server::Postgres { admin, url, create, locale, settings, privileges, copy_privileges, extensions, leave, environment, environment_role, owned, schema_grants, .. } = self else { return Err(Error("not a Postgres server".into())) };
+        let Server::Postgres { admin, url, create, locale, settings, privileges, copy_privileges, extensions, leave, environment, environment_role, owned, schema_grants, copy_schema_grants, .. } = self else { return Err(Error("not a Postgres server".into())) };
         let name = random_name();
         admin.batch_execute(&format!("select pg_advisory_lock(hashtextextended('{name}', 0))")).await.map_err(pg_error)?;
         let made = async {
@@ -1351,7 +1448,7 @@ impl Server {
             for (_, schema) in owned.extensions.iter().filter(|(e, s)| owned.role.is_some() && !leave.contains(&e.to_lowercase()) && !platform_schema(s) && s != "pg_catalog") {
                 let _ = db.exec(&format!("create schema if not exists {}", ident(schema))).await;
             }
-            for statement in schema_grants.iter() {
+            for statement in schema_grants.iter().filter(|_| *copy_schema_grants) {
                 let _ = db.exec(statement).await;
             }
             if let (Some(role), false) = (environment_role.as_deref(), environment.is_empty()) {
@@ -1432,6 +1529,16 @@ impl Server {
     pub fn copy_default_privileges(&mut self, on: bool) {
         if let Server::Postgres { copy_privileges, .. } = self {
             *copy_privileges = on;
+        }
+    }
+
+    /// Shadows take none of the target's default privileges or grants on its schemas: for SQL written
+    /// to make the database whole (init's, introspect's), which makes them itself. Which of them a new
+    /// database on the server has already, no name tells, so they are all the SQL's.
+    pub fn copy_no_privileges(&mut self) {
+        if let Server::Postgres { copy_privileges, copy_schema_grants, .. } = self {
+            *copy_privileges = false;
+            *copy_schema_grants = false;
         }
     }
 

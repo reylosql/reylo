@@ -1,0 +1,1 @@
+SELECT count() > 0 FROM readings WHERE id = {id:UInt64} AND pair.2 = {x:UInt8} AND score = {n:UInt32} / 2

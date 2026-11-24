@@ -416,6 +416,7 @@ impl Analyzer {
                     let dialect = match name {
                         "postgres" => reylo_engine_core::dialect::Dialect::Postgres,
                         "mysql" => reylo_engine_core::dialect::Dialect::Mysql,
+                        "clickhouse" => reylo_engine_core::dialect::Dialect::Clickhouse,
                         _ => reylo_engine_core::dialect::Dialect::Sqlite,
                     };
                     diagnostics.extend(untyped_params(&text, &analysis, dialect, project));
@@ -471,18 +472,23 @@ impl Reader {
             return;
         };
         let (base, mut db) = (place.base.clone(), place.db.take());
-        let read = runtime.block_on(async {
-            let read = async {
-                if db.is_none() {
-                    db = Some(match &place.file {
-                        Some(file) => Db::Sqlite(file.open().map_err(|e| reylo_migrate::Error(e.to_string()))?),
-                        None => Db::connect_read_only(&url, &base).await?,
-                    });
-                }
-                list_columns(db.as_mut().expect("connected above"), name).await
-            };
-            tokio::time::timeout(TIMEOUT, read).await
-        });
+        // ClickHouse answers over HTTP, which keeps no connection to hold between reads.
+        let read = if name == "clickhouse" {
+            Ok(clickhouse_columns(&url).map(|rows| (rows, Vec::new())).map_err(reylo_migrate::Error))
+        } else {
+            runtime.block_on(async {
+                let read = async {
+                    if db.is_none() {
+                        db = Some(match &place.file {
+                            Some(file) => Db::Sqlite(file.open().map_err(|e| reylo_migrate::Error(e.to_string()))?),
+                            None => Db::connect_read_only(&url, &base).await?,
+                        });
+                    }
+                    list_columns(db.as_mut().expect("connected above"), name).await
+                };
+                tokio::time::timeout(TIMEOUT, read).await
+            })
+        };
         let (rows, reserved) = match read {
             Ok(Ok(found)) => found,
             failed => {
@@ -516,6 +522,18 @@ async fn list_columns(connection: &mut Db, name: &str) -> Result<(Vec<reylo_migr
     let rows = connection.rows(columns_query(name)).await?;
     let reserved = if name == "mysql" { connection.rows("select cast(word as char) as w from information_schema.keywords where reserved = 1").await? } else { Vec::new() };
     Ok((rows, reserved))
+}
+
+/// ClickHouse's columns, as [`columns_query`] lists another database's: those of the URL's database, whose tables a statement names alone. A column holds no NULL unless its type is `Nullable`.
+fn clickhouse_columns(url: &str) -> Result<Vec<reylo_migrate::db::Row>, String> {
+    use reylo_engine::clients::clickhouse::{Outcome, Server};
+    const NAMES: [&str; 6] = ["s", "t", "c", "ty", "nn", "sp"];
+    let sql = "SELECT database AS s, table AS t, name AS c, type AS ty, if(startsWith(type, 'Nullable(') OR startsWith(type, 'LowCardinality(Nullable('), '0', '1') AS nn, '0' AS sp FROM system.columns WHERE database = currentDatabase() ORDER BY table, position";
+    match Server::of(url)?.ask(sql)? {
+        Outcome::Rows(rows) | Outcome::Typed(_, rows) => Ok(rows.into_iter().map(|row| reylo_migrate::db::Row::new(NAMES.iter().map(|n| n.to_string()).collect(), row.iter().map(|v| v.as_str().map(str::to_string)).collect())).collect()),
+        Outcome::Refused { message, .. } => Err(message),
+        Outcome::Foreign(what) => Err(what),
+    }
 }
 
 /// The tables the SQL files under a project's directory create: its migrations in order, then `schema.sql`, its statement of what it holds, which is found first.

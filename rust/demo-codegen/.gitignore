@@ -1,2 +1,1 @@
-src/queries/get_user.rs
-src/queries/users/count_users.rs
+src/queries.rs

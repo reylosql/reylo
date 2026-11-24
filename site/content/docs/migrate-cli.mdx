@@ -73,6 +73,28 @@ $ reylo migrate init
 
 It reads every schema. Where its own SQL can't make your schema exactly, it writes the database's own dump, which on Postgres needs `pg_dump` of your server's version or newer.
 
+It leaves out the history tables of other migration tools, as it leaves out its own:
+
+| Tool | Table |
+| --- | --- |
+| Prisma Migrate | `_prisma_migrations` |
+| Drizzle Kit | `__drizzle_migrations`, in its `drizzle` schema on Postgres |
+| Knex | `knex_migrations`, `knex_migrations_lock` |
+| Kysely | `kysely_migration`, `kysely_migration_lock` |
+| node-pg-migrate | `pgmigrations` |
+| Sequelize | `SequelizeMeta` |
+| MikroORM | `mikro_orm_migrations` |
+| Rails, Ecto, golang-migrate, dbmate | `schema_migrations`, and Rails' `ar_internal_metadata` |
+| Flyway | `flyway_schema_history` |
+| Liquibase | `DATABASECHANGELOG`, `DATABASECHANGELOGLOCK` |
+| goose | `goose_db_version` |
+| SQLx | `_sqlx_migrations` |
+| Diesel | `__diesel_schema_migrations` |
+| Alembic | `alembic_version` |
+| Django | `django_migrations` |
+| Entity Framework Core | `__EFMigrationsHistory` |
+| Atlas | `atlas_schema_revisions`, in its schema of that name on Postgres |
+
 ### `new`
 
 Writes the next migration, from your change to `schema.sql`.
@@ -84,108 +106,12 @@ Writes the next migration, from your change to `schema.sql`.
 - On Postgres, new constraints and indexes never block writes, and a table rewrite needs `--blocking`. Each statement gives up a busy lock after half a second and retries.
 - On Postgres, a new enum value the change also uses gets a migration of its own, before its first use. Postgres can't use a value in the transaction that adds it.
 
-To accept a table rewrite:
+A change it could read two ways is refused until you answer with a flag ([Disambiguation](/migrate/usage#disambiguation)):
 
 ```terminal
+$ reylo migrate new drop_bio --drop users.bio
+$ reylo migrate new rename_title --rename posts.title=heading
 $ reylo migrate new widen_amount --blocking
-```
-
-A drop, or a type change that loses values, is refused until you name it:
-
-```sql title="schema.sql"
-create table users (
-  id integer primary key,
-  email text not null, -- [!code --]
-  email text not null -- [!code ++]
-  bio text -- [!code --]
-);
-```
-
-Writing its migration is refused:
-
-```terminal
-$ reylo migrate new drop_bio
-✗ This migration drops the column users.bio and its data
-
-  To drop it:
-    reylo migrate new drop_bio --drop users.bio
-
-Nothing was changed.
-```
-
-A column replaced by one just like it is a rename, which keeps its rows:
-
-```sql title="schema.sql"
-create table users (
-  id integer primary key,
-  email text not null,
-  bio text -- [!code --]
-  about text -- [!code ++]
-);
-```
-
-Writing its migration keeps the rows:
-
-```terminal
-$ reylo migrate new rename_bio
-✓ Wrote reylo/migrations/20261104150000_rename_bio.sql
-  ~ column users.[-bio-]{+about+} text
-
-  ! Written as a rename, keeping its rows
-    If they're different columns, delete the file, then:
-      reylo migrate new rename_bio --drop users.bio
-```
-
-A column replaced by one that differs in more than its name could be either, so you say which:
-
-```sql title="schema.sql"
-create table posts (
-  id integer primary key,
-  title varchar(100) -- [!code --]
-  heading varchar(200) -- [!code ++]
-);
-
-create table users (
-  id integer primary key,
-  bio varchar(200) -- [!code --]
-  about text -- [!code ++]
-);
-```
-
-```terminal
-$ reylo migrate new tidy_columns
-✗ This migration can't tell renames from new columns
-
-    - column posts.title character varying(100)
-    + column posts.heading character varying(200)
-    - column users.bio character varying(200)
-    + column users.about text
-
-  For each, rename it to keep its rows, or drop it and add the new one:
-    --rename posts.title=heading   or   --drop posts.title
-    --rename users.bio=about       or   --drop users.bio
-  Add the flags you picked to:
-    reylo migrate new tidy_columns
-
-Nothing was changed.
-
-$ reylo migrate new tidy_columns --rename posts.title=heading --drop users.bio
-✓ Wrote reylo/migrations/20261104150000_tidy_columns.sql
-  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})
-  + column users.about text
-  - column users.bio character varying(200)
-
-  ! Drops the column users.bio and its data
-```
-
-It asks wherever a table loses one column and gains one, whatever their types. A rename casts each value to the new type, and a value the database can't cast fails the migration. With one such column, it prints both commands whole.
-
-With no schema change, the migration is empty, for a data change:
-
-```terminal
-$ reylo migrate new backfill
-✓ Wrote reylo/migrations/20261104160000_backfill.sql
-» Empty: reylo/schema.sql has nothing new, so it's for a change to data
 ```
 
 ### `dev`
@@ -265,7 +191,7 @@ Applying to postgres://db.example.com/app
 It needs no shadow database. It refuses to run:
 
 - **On an edited schema file.** A `schema.sql` that doesn't match the lock's checksum.
-- **On a database changed by hand.** Each migration stores a fingerprint of the schema. A database that no longer matches it is refused, even for a hand-added index.
+- **On a database changed by hand.** Each deploy stores a fingerprint of the schema it leaves. A database that no longer matches it is refused, even for a hand-added index.
 
 The refusal shows the change:
 
@@ -298,6 +224,31 @@ $ reylo migrate deploy --dry-run
 ```
 
 A failed migration rolls back and records nothing. Fix the file, run `reylo migrate dev`, and deploy again. Where a database already ran the old version, write a new migration instead.
+
+A migration can also fail on rows the database already holds. The refusal gives a query that lists them, to fix before you deploy again:
+
+```terminal
+$ reylo migrate deploy
+Applying to postgres://db.example.com/app
+  ✓ 20261123211603_drop_team_plan.sql    applied · 44 ms
+  ✗ 20261123211604_drop_team_plan_2.sql  failed
+
+✗ The migration 20261123211604_drop_team_plan_2.sql failed on rows that break users_plan_check
+  check constraint "users_plan_check" of relation "users" is violated by some row
+  The migration before it, 20261123211603_drop_team_plan.sql, added users_plan_check without checking the rows already in users: rows written from now on are held to it, and those aren't.
+  Nothing was recorded, so the next deploy runs it again.
+
+  List the rows that break it:
+    select * from users where not (plan = ANY (ARRAY['free'::text, 'pro'::text]));
+  Fix them here, then deploy again:
+    reylo migrate deploy
+  If the rows are right and only development ran 20261123211604_drop_team_plan_2.sql, change users_plan_check in reylo/schema.sql and delete it, then take it off development and write the replacement:
+    reylo migrate dev
+    reylo migrate new <name>
+    reylo migrate dev
+```
+
+A deploy cut off between migrations picks up where it stopped, once it has checked that the schema hasn't changed since. Where the check fails or can't run, as on MySQL, it's refused until `reylo migrate history push` stores the fingerprint again, which needs a shadow database.
 
 A migration and the build that needs it go live at different moments. The old build's queries fail on a renamed or dropped column. So rename in steps. To rename `users.email` to `contact`, add the new column and copy its values, then deploy code that reads `contact` and writes both:
 
@@ -601,7 +552,12 @@ Each database makes them its own way:
 - **MySQL:** on your database's server, with `create database`, so your user needs the `CREATE` privilege on every database. PlanetScale refuses `create database`, so point `shadow_url` at a plain MySQL 8.4 server.
 - **SQLite:** in memory. There's nothing to grant. A [Turso](/turso#migrations) database's shadows run on libSQL's own engine.
 
-A migration that would reach past its shadow is refused. That's one that changes a role, a database, a tablespace or a server setting. On MySQL, it's also one that names a database, as in `app.users`. Code inside a `do` block or a function isn't checked.
+A migration that would reach past its shadow is refused by every command, `deploy` and `status` included. That's one that:
+
+- changes a role, a database, a tablespace or a server setting
+- on MySQL, names a database, as in `app.users`
+
+Make roles with your server's setup, outside the migrations. Reylo doesn't check inside a `do` block, but every shadow runs one on its server, your database's own unless `shadow_url` names another.
 
 Where your role can't create a database, point `shadow_url` at a server that can, running the same version:
 

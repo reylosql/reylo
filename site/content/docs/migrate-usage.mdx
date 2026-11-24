@@ -25,7 +25,7 @@ $ reylo migrate dev
 
 ### Dropping and renaming
 
-A drop, or a rename that also changes a type, is refused until you name it:
+A drop, or a rename Reylo Migrate can't be sure of, is refused until you [name it](#disambiguation):
 
 ```terminal
 # drop a column, and its data
@@ -106,6 +106,31 @@ $ reylo migrate deploy --url $PROD_URL
 
 It moves yours past no migration that changes data. Past one, it refuses and says to undo your change on production, then deploy. It prints the undo where it can run it safely. A server that ran them before yours, such as staging, takes your change too. Its deploy refusal gives the commands.
 
+### Moving from another tool
+
+Start from a database your old tool migrated, then record the baseline on every other database:
+
+```terminal
+# write schema.sql and init.sql from your development database
+$ reylo migrate init
+
+# record init.sql as run on production, running nothing
+$ reylo migrate history push --url $PROD_URL
+```
+
+Reylo leaves the old tool's history table out of both files and every comparison. Drop it once nothing reads it:
+
+```sql tab="Prisma Migrate"
+drop table if exists _prisma_migrations;
+```
+
+```sql tab="Drizzle Kit"
+drop table if exists drizzle.__drizzle_migrations;
+
+-- where nothing else is in the drizzle schema
+drop schema if exists drizzle;
+```
+
 ## Schema <code className="dk-aside">schema.sql</code> [#schema-schemasql]
 
 Declare your schema in plain SQL, as you would on the database. Reylo Migrate compares and migrates:
@@ -117,7 +142,7 @@ Declare your schema in plain SQL, as you would on the database. Reylo Migrate co
 - Triggers, functions (Postgres and MySQL), and procedures and events (MySQL)
 - Partitions (Postgres and MySQL)
 - Row level security policies, sequences, extensions and schemas (Postgres)
-- Grants and comments (Postgres and MySQL)
+- Grants and comments (Postgres and MySQL), and default privileges (Postgres)
 - `STRICT` and `WITHOUT ROWID` tables (SQLite)
 
 #### Enums and domains
@@ -185,7 +210,14 @@ create policy documents_own on documents
 
 ```sql
 grant select on room_totals to reporting;
+alter default privileges in schema public grant select on tables to reporting;
 comment on column users.verified_at is 'When they confirmed their email';
+```
+
+Roles belong to the server, so a migration can't create one. Create each role your grants name on a new server before you deploy to it:
+
+```sql
+create role reporting nologin;
 ```
 
 On MySQL, an account sees only its own grants unless it may read the privilege tables. An account that isn't an administrator needs them granted:
@@ -211,6 +243,336 @@ create policy docs_read on docs for select to reader, writer using (owner_name =
 ```
 
 Text search configurations, security labels and a few other kinds are compared by name only, or not at all. Write their changes by hand. On MySQL, so is a routine, trigger or event made under another `sql_mode` than the server's.
+
+## Disambiguation
+
+Some changes to `schema.sql` read two ways, such as a drop or a rename. Reylo Migrate asks which you mean, and you answer with a flag.
+
+### Drops
+
+A table or column that goes is refused until you name it:
+
+```sql title="schema.sql"
+create table users (
+  id integer primary key,
+  email text not null, -- [!code --]
+  email text not null -- [!code ++]
+  bio text -- [!code --]
+);
+```
+
+Name it with `--drop`:
+
+```terminal
+$ reylo migrate new drop_bio
+✗ This migration drops the column users.bio and its data
+
+  To drop it:
+    reylo migrate new drop_bio --drop users.bio
+
+Nothing was changed.
+
+$ reylo migrate new drop_bio --drop users.bio
+✓ Wrote reylo/migrations/20261104150000_drop_bio.sql
+  - column users.bio text
+
+  ! Drops the column users.bio and its data
+```
+
+A table is named alone:
+
+```terminal
+$ reylo migrate new drop_tags --drop tags
+✓ Wrote reylo/migrations/20261104150000_drop_tags.sql
+  - table tags
+      id integer not null
+      name text not null
+      primary key (id)
+
+  ! Drops the table tags and its rows
+```
+
+### Column renames
+
+A column replaced by one just like it is a rename, which keeps its rows:
+
+```sql title="schema.sql"
+create table users (
+  id integer primary key,
+  email text not null,
+  bio text -- [!code --]
+  about text -- [!code ++]
+);
+```
+
+It's written as a rename, and says so:
+
+```terminal
+$ reylo migrate new rename_bio
+✓ Wrote reylo/migrations/20261104150000_rename_bio.sql
+  ~ column users.[-bio-]{+about+} text
+
+  ! Written as a rename, keeping its rows
+    If they're different columns, delete the file, then:
+      reylo migrate new rename_bio --drop users.bio
+```
+
+The migration carries the other reading:
+
+```sql title="20261104150000_rename_bio.sql"
+-- users.bio is renamed about, keeping its rows. If they are two columns, write instead:
+--   alter table users drop column bio;
+--   alter table users add column about text;
+alter table users rename column bio to about;
+```
+
+"Just like it" means the same type, nullability, default and collation. A column that differs in any of them could be either, so you say which:
+
+```sql title="schema.sql"
+create table posts (
+  id integer primary key,
+  title varchar(100) -- [!code --]
+  heading varchar(200) -- [!code ++]
+);
+```
+
+Rename it with `--rename`, or drop it with `--drop`:
+
+```terminal
+$ reylo migrate new rename_title
+✗ This migration can't tell a rename from a new column
+
+    - column posts.title character varying(100)
+    + column posts.heading character varying(200)
+
+  To rename the column, keeping its rows:
+    reylo migrate new rename_title --rename posts.title=heading
+  To drop the column and its data, and add a new one:
+    reylo migrate new rename_title --drop posts.title
+
+Nothing was changed.
+
+$ reylo migrate new rename_title --rename posts.title=heading
+✓ Wrote reylo/migrations/20261104150000_rename_title.sql
+  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})
+```
+
+Several at once are asked together:
+
+```sql title="schema.sql"
+create table posts (
+  id integer primary key,
+  title varchar(100) -- [!code --]
+  heading varchar(200) -- [!code ++]
+);
+
+create table users (
+  id integer primary key,
+  bio varchar(200) -- [!code --]
+  about text -- [!code ++]
+);
+```
+
+Pick a flag for each:
+
+```terminal
+$ reylo migrate new tidy_columns
+✗ This migration can't tell renames from new columns
+
+    - column posts.title character varying(100)
+    + column posts.heading character varying(200)
+    - column users.bio character varying(200)
+    + column users.about text
+
+  For each, rename it to keep its rows, or drop it and add the new one:
+    --rename posts.title=heading   or   --drop posts.title
+    --rename users.bio=about       or   --drop users.bio
+  Add the flags you picked to:
+    reylo migrate new tidy_columns
+
+Nothing was changed.
+
+$ reylo migrate new tidy_columns --rename posts.title=heading --drop users.bio
+✓ Wrote reylo/migrations/20261104150000_tidy_columns.sql
+  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})
+  + column users.about text
+  - column users.bio character varying(200)
+
+  ! Drops the column users.bio and its data
+```
+
+### Table renames
+
+A table replaced by one with the same columns is a rename:
+
+```sql title="schema.sql"
+create table users ( -- [!code --]
+create table accounts ( -- [!code ++]
+  id integer primary key,
+  email text not null
+);
+
+create table posts (
+  id integer primary key,
+  user_id integer references users (id) -- [!code --]
+  user_id integer references accounts (id) -- [!code ++]
+);
+```
+
+It's written as a rename, with what's named after the table:
+
+```terminal
+$ reylo migrate new rename_users
+✓ Wrote reylo/migrations/20261104150000_rename_users.sql
+  ~ table [-users-]{+accounts+}
+
+  ! Written as a rename, keeping its rows
+    If they're different tables, delete the file, then:
+      reylo migrate new rename_users --drop users
+```
+
+A table that shares most of its columns could be either:
+
+```sql title="schema.sql"
+create table orders ( -- [!code --]
+create table invoices ( -- [!code ++]
+  id integer primary key,
+  customer text not null,
+  total numeric(10, 2) not null,
+  note text -- [!code --]
+  paid_at timestamptz -- [!code ++]
+);
+```
+
+Each answer is a command:
+
+```terminal
+$ reylo migrate new invoices
+✗ This migration can't tell a rename from a new table
+
+    - table orders
+    + table invoices
+    - column orders.note text
+    + column invoices.paid_at timestamp with time zone
+
+  To rename the table, keeping its rows:
+    reylo migrate new invoices \
+      --drop invoices.note \
+      --rename orders=invoices
+  To drop the table and its data, and create a new one:
+    reylo migrate new invoices --drop orders
+
+Nothing was changed.
+
+$ reylo migrate new invoices --drop invoices.note --rename orders=invoices
+✓ Wrote reylo/migrations/20261104150000_invoices.sql
+  ~ table [-orders-]{+invoices+}
+  + column invoices.paid_at timestamp with time zone
+  - column orders.note text
+
+  ! Drops the column invoices.note and its data
+```
+
+### Table rewrites
+
+On Postgres, a change that copies a table while it blocks writes is refused until you accept it with `--blocking`:
+
+```sql title="schema.sql"
+create table payments (
+  id integer primary key,
+  amount integer not null -- [!code --]
+  amount bigint not null -- [!code ++]
+);
+```
+
+Accept it where the table is small:
+
+```terminal
+$ reylo migrate new widen_amount
+✗ This migration rewrites payments, copying every row while it blocks reads and writes to it
+  On a table with many rows, the app's writes wait for as long as that takes.
+  To change a column without copying its table, add a column, fill it in batches, then swap the two, each step a migration of its own.
+
+  Where the table is small enough to wait for:
+    reylo migrate new widen_amount --blocking
+
+Nothing was changed.
+
+$ reylo migrate new widen_amount --blocking
+✓ Wrote reylo/migrations/20261104150000_widen_amount.sql
+  + column payments.amount bigint not null
+  - column payments.amount integer not null
+
+  ! It rewrites payments, copying every row while it blocks reads and writes to it
+```
+
+New constraints and indexes are never asked about. They're written as several migrations, so that none blocks writes.
+
+### Type changes
+
+A type change that loses values is refused until you name the column with `--drop`:
+
+```sql title="schema.sql"
+create table events (
+  id integer primary key,
+  starts_at timestamptz not null, -- [!code --]
+  price numeric(10, 2) -- [!code --]
+  starts_at date not null, -- [!code ++]
+  price numeric(10, 0) -- [!code ++]
+);
+```
+
+Each loss is named:
+
+```terminal
+$ reylo migrate new dates_only
+✗ Column events.price changes from numeric(10,2) to numeric(10,0), which rounds to whole numbers
+
+  To accept that:
+    reylo migrate new dates_only --drop events.price
+
+✗ Column events.starts_at changes from timestamp with time zone to date, which keeps only the date
+
+  To accept that:
+    reylo migrate new dates_only --drop events.starts_at
+
+Nothing was changed.
+```
+
+Name both, with `--blocking` for the rewrite:
+
+```terminal
+$ reylo migrate new dates_only --drop events.starts_at,events.price --blocking
+✓ Wrote reylo/migrations/20261104150000_dates_only.sql
+  + column events.price numeric(10,0)
+  + column events.starts_at date not null
+  - column events.price numeric(10,2)
+  - column events.starts_at timestamp with time zone not null
+
+  ! It rewrites events, copying every row while it blocks reads and writes to it
+  ! Column events.price changes from numeric(10,2) to numeric(10,0), which rounds to whole numbers
+  ! Column events.starts_at changes from timestamp with time zone to date, which keeps only the date
+```
+
+A change that fails on a value it can't hold, such as a shorter `varchar`, isn't asked about: the migration fails on that row instead. On SQLite, only a change from text to a number loses values.
+
+### Pushes
+
+A push asks the same questions, and takes `--force` for every one at once:
+
+```terminal
+$ reylo db push
+✗ This push drops the column users.nick and its data
+
+  To drop it:
+    reylo db push --drop users.nick
+  To accept every destructive change:
+    reylo db push --force
+
+Nothing was changed.
+```
+
+With `--force`, a column that could be a rename is renamed where both types are of one kind, such as two numbers, and dropped otherwise. A push never asks for `--blocking`.
 
 ## Schemaless mode
 

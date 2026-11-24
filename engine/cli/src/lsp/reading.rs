@@ -55,15 +55,16 @@ impl Tok<'_> {
     }
 }
 
-/// A name in `dialect`'s case folding: Postgres and SQLite fold ASCII alone.
+/// A name in `dialect`'s case folding: Postgres and SQLite fold ASCII alone, and ClickHouse folds nothing.
 fn folded(dialect: Dialect, name: &str) -> String {
     match dialect {
         Dialect::Postgres | Dialect::Sqlite => name.to_ascii_lowercase(),
+        Dialect::ClickHouse => name.to_string(),
         _ => name.to_lowercase(),
     }
 }
 
-/// How `dialect` compares a name as written: Postgres folds what isn't quoted to lower case and keeps what is; the others compare without case.
+/// How `dialect` compares a name as written: Postgres folds what isn't quoted to lower case and keeps what is; ClickHouse compares every name as it is written; the others compare without case.
 pub fn key(dialect: Dialect, t: &Tok<'_>) -> String {
     if dialect == Dialect::Postgres && t.class == Class::Quoted {
         t.name()
@@ -818,6 +819,14 @@ mod tests {
 
     fn sources(s: &Scopes, query: usize) -> Vec<(&str, Option<&str>)> {
         s.queries[query].sources.iter().map(|x| (x.name.as_str(), x.alias.as_deref())).collect()
+    }
+
+    #[test]
+    fn a_name_is_compared_as_its_database_compares_it() {
+        // ClickHouse's names are as written, MySQL's without case, and Postgres's catalog holds each already folded.
+        assert_eq!(catalog_key(Dialect::ClickHouse, "Users"), "Users");
+        assert_eq!(catalog_key(Dialect::Mysql, "Users"), "users");
+        assert_eq!(catalog_key(Dialect::Postgres, "Users"), "Users");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! `reylo lsp` over its real protocol, on a SQLite project: what an editor sends, and what it gets back.
+//! `reylo lsp` over its real protocol, on a SQLite project and once on ClickHouse: what an editor sends, and what it gets back.
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -357,4 +357,57 @@ fn a_request_for_nothing_it_knows_is_refused_and_a_notification_ignored() {
         }
     }
     client.finish();
+}
+
+/// The editor's ClickHouse path, on the server `REYLO_TEST_CLICKHOUSE` names and skipped without one: a statement analyzed over the server's HTTP interface, and its columns listed for completion.
+#[test]
+fn an_editor_gets_types_completion_and_errors_on_clickhouse() {
+    use reylo_engine::clients::clickhouse::{Outcome, Server};
+    let Ok(address) = std::env::var("REYLO_TEST_CLICKHOUSE") else { return };
+    let run = |server: &Server, sql: &str| match server.ask(sql).unwrap() {
+        Outcome::Refused { message, .. } => panic!("{sql}: {message}"),
+        Outcome::Foreign(what) => panic!("{sql}: {what}"),
+        _ => {}
+    };
+    let name = format!("reylo_lsp_{}", std::process::id());
+    let admin = Server::of(&address).unwrap();
+    run(&admin, &format!("DROP DATABASE IF EXISTS {name}"));
+    run(&admin, &format!("CREATE DATABASE {name}"));
+    let url = format!("{}/{name}", address.trim_end_matches('/'));
+    run(&Server::of(&url).unwrap(), "CREATE TABLE users (id UInt64, name String, nick Nullable(String)) ENGINE = MergeTree ORDER BY id");
+
+    let dir = std::env::temp_dir().join(format!("reylo-lsp-clickhouse-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), "{}").unwrap();
+    std::fs::write(dir.join(".env"), format!("DATABASE_URL=clickhouse+{url}\n")).unwrap();
+    let uri = format!("file://{}", dir.join("q.sql").display());
+    let mut client = Client::start(&dir);
+
+    let query = "SELECT id, nick FROM users WHERE id = {id:UInt64} LIMIT 1\n";
+    client.open(&uri, query);
+    let until = Instant::now() + Duration::from_secs(30);
+    let summary = loop {
+        let answer = client.at("textDocument/hover", &uri, query, "SELECT", false);
+        let value = answer["contents"]["value"].as_str().unwrap_or("").to_string();
+        if value.contains("at most one") || Instant::now() > until {
+            break value;
+        }
+        let _ = client.receive(Instant::now() + Duration::from_millis(100));
+    };
+    assert!(summary.contains("SELECT (at most one)") && summary.contains("id: UInt64"), "{summary}");
+
+    client.change(&uri, 2, "SELECT nope FROM users");
+    client.wait_for(&uri, "nope");
+
+    let typing = "SELECT u. FROM users u";
+    client.change(&uri, 3, typing);
+    assert_eq!(labels(&client.complete(&uri, typing, "u.")), ["id", "name", "nick"]);
+    let from = "SELECT id FROM ";
+    client.change(&uri, 4, from);
+    assert_eq!(labels(&client.at("textDocument/completion", &uri, from, "FROM ", true)), ["users"]);
+    client.finish();
+
+    run(&admin, &format!("DROP DATABASE IF EXISTS {name}"));
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -9,7 +9,7 @@ type Deploy = {
   ok: boolean;
   error?: string;
   result?: { migrations?: { name: string; state: string; error?: string }[] };
-  problems?: { title: string; notes?: string[]; fixes?: { what: string; commands: string[] }[] }[];
+  problems?: { title: string; detail?: string[]; sql?: string; notes?: string[]; fixes?: { what: string; commands: string[] }[] }[];
   log?: string[];
 };
 
@@ -33,9 +33,17 @@ export async function migrate(options: MigrateOptions): Promise<string[]> {
   }
   if (!deploy.ok) {
     // A migration that failed is said so, its refusal (what of it is in place, and what to run) or its error leading.
+    // Each refusal says what it is about as the command line does under its title: the change it
+    // found (a column added by hand), or the SQL that makes it, so that an app's log names it.
     const failed = deploy.result?.migrations?.find((m) => m.state === "failed");
     if (deploy.problems?.length) {
-      const lines = deploy.problems.flatMap((p) => [p.title, ...(p.notes ?? []).map((n) => `  ${n}`), ...(p.fixes ?? []).map((f) => `  ${f.what}: ${f.commands.join(", then ")}`)]);
+      const lines = deploy.problems.flatMap((p) => [
+        p.title,
+        ...(p.detail ?? []).map((d) => `  ${d}`),
+        ...(p.sql ?? "").split("\n").filter((l) => l.trim()).map((l) => `    ${l}`),
+        ...(p.notes ?? []).map((n) => `  ${n}`),
+        ...(p.fixes ?? []).map((f) => `  ${f.what}: ${f.commands.join(", then ")}`),
+      ]);
       throw new Error(`reylo migrate deploy ${failed ? "failed" : "refused"}: ${lines.join("\n")}`);
     }
     // With no refusal, the log follows, which says what ran before it.

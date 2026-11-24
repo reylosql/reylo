@@ -37,8 +37,14 @@ test("await migrate() runs reylo migrate deploy, resolves to what it ran, and re
     // A draft refuses the deploy, with what to do about it.
     writeFileSync(join(root, "reylo", "migrations", "20991231000000_draft.sql"), "alter table users add column bio text;\n");
     await assert.rejects(migrate({ url: "file:./prod.sqlite" }), /^Error: reylo migrate deploy refused: The lock doesn't list 20991231000000_draft\.sql yet\n  Run it in development, which locks it: reylo migrate dev/);
-    // A migration that fails on this database rolls back, and rejects with what to run next.
     rmSync(join(root, "reylo", "migrations", "20991231000000_draft.sql"));
+    // A database changed by hand refuses it, naming the change as the command line does.
+    const changed = new DatabaseSync(join(root, "prod.sqlite"));
+    changed.exec("alter table users add column hotfix integer");
+    await assert.rejects(migrate({ url: "file:./prod.sqlite" }), /^Error: reylo migrate deploy refused: This database was changed outside its migrations\n  \+ column users\.hotfix integer\n  If a migration makes this change/);
+    changed.exec("alter table users drop column hotfix");
+    changed.close();
+    // A migration that fails on this database rolls back, and rejects with what to run next.
     writeFileSync(join(root, "reylo", "schema.sql"), "create table users (id integer primary key, name text not null);\ncreate unique index users_name on users (name);\n");
     for (const args of [["new", "unique_name"], ["dev"]]) {
       const r = spawnSync(nativeBinary(), ["migrate", ...args], { cwd: root, encoding: "utf8", env });

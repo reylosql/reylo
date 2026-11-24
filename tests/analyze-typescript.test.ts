@@ -15,7 +15,7 @@ import { Session } from "../src/analyze.ts";
 import type { Codecs } from "../src/codecs.ts";
 import type { Analysis, Dialect } from "../src/engine-core.ts";
 import { nativeBinary } from "../src/native.ts";
-import { closeSessions, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, ROOT } from "./helpers.ts";
+import { clickhouseDatabase, clickhouseLive, closeSessions, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, ROOT } from "./helpers.ts";
 import { typescriptOf } from "./typescript-format.ts";
 
 /** Every codec of `js.codecs` set to a type other than its default. */
@@ -63,7 +63,7 @@ function oracleCases(): Case[] {
     const at = join(dir, name);
     if (!existsSync(join(at, "setup.sql"))) return [];
     const dialect = (existsSync(join(at, "dialect")) ? readFileSync(join(at, "dialect"), "utf8").trim() : "postgres") as Dialect;
-    if (!["postgres", "mysql", "sqlite"].includes(dialect)) return [];
+    if (!["postgres", "mysql", "sqlite", "clickhouse"].includes(dialect)) return [];
     const files = readdirSync(at).filter((f) => f.endsWith(".sql") && f !== "setup.sql").sort().map((f) => join(at, f));
     return files.length ? [{ name, dialect, setup: readFileSync(join(at, "setup.sql"), "utf8"), files }] : [];
   });
@@ -75,7 +75,7 @@ function specExamples(): Case[] {
   const dir = mkdtempSync(join(tmpdir(), "reylo-ts-spec-"));
   return Object.entries(examples).flatMap(([name, e]): Case[] => {
     const dialect = e.database as Dialect;
-    if (!["postgres", "mysql", "sqlite"].includes(dialect)) return [];
+    if (!["postgres", "mysql", "sqlite", "clickhouse"].includes(dialect)) return [];
     const file = join(dir, `${name}.sql`);
     writeFileSync(file, e.statement);
     return [{ name: `spec ${name}`, dialect, setup: e.setup ?? "", files: [file] }];
@@ -87,6 +87,7 @@ async function databaseOf(c: Case, n: number): Promise<{ url: string; drop(): Pr
   try {
     if (c.dialect === "postgres") return await postgresDatabase(`reylo_ts_${n}`, c.setup);
     if (c.dialect === "mysql") return await mysqlDatabase(`reylo_ts_${n}`, c.setup);
+    if (c.dialect === "clickhouse") return await clickhouseDatabase(`reylo_ts_${n}`, c.setup);
     const file = join(mkdtempSync(join(tmpdir(), "reylo-ts-sqlite-")), "app.db");
     const db = new DatabaseSync(file);
     try {
@@ -139,9 +140,9 @@ async function check(cases: Case[]): Promise<{ statements: number; skipped: stri
   return { statements, skipped, differences };
 }
 
-const live = { postgres: pgLive, mysql: mysqlLive, sqlite: false } as const;
+const live = { postgres: pgLive, mysql: mysqlLive, sqlite: false, clickhouse: clickhouseLive } as const;
 
-for (const dialect of ["postgres", "mysql", "sqlite"] as const) {
+for (const dialect of ["postgres", "mysql", "sqlite", "clickhouse"] as const) {
   test(`analyze --format typescript prints each ${dialect} statement of the oracle and the spec as the content mapper declares it`, { skip: live[dialect], timeout: 600_000 }, async (t) => {
     const cases = [...oracleCases(), ...specExamples()].filter((c) => c.dialect === dialect);
     const { statements, skipped, differences } = await check(cases);

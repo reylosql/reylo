@@ -1,0 +1,27 @@
+alter_delete.sql: none (before: Date) -> {  }
+alter_update.sql: none (note: String(UTF-8, ill-formed)?, id: UInt64) -> {  }
+alter_update_computed.sql: none (more: Decimal(18,2), id: UInt64) -> {  }
+delete_partition.sql: none (id: UInt64) -> {  }
+delete_where.sql: none (id: UInt64) -> {  }
+insert_after_star.sql: none (placed: Date) -> {  }
+insert_cast.sql: none (id: UInt64, x: UInt64) -> {  }
+insert_computed.sql: none (id: UInt64, x: UInt8, n: UInt32) -> {  }
+insert_converted.sql: none (id: UInt64, d: UInt64) -> {  }
+insert_decimal_sum.sql: none (id: UInt64, a: Decimal(12,2), b: Decimal(12,2)) -> {  }
+insert_dynamic_cast.sql: none (id: UInt64, d: UInt64) -> {  }
+insert_dynamic_select.sql: none (id: UInt64, d: UInt64) -> {  }
+insert_dynamic_value.sql: none (id: UInt64, s: String(UTF-8, ill-formed)) -> {  }
+insert_from_array.sql: none (rows: (UInt64, UInt64, Decimal(18,2))[]) -> {  }
+insert_kept.sql: none (id: UInt32, name: String(UTF-8, ill-formed), age: UInt8, balance: Decimal(9,2), created: DateTime64, role: Enum8('admin'), tags: String(UTF-8, ill-formed)[], plan: String(UTF-8, ill-formed)) -> {  }
+insert_select.sql: none (offset: UInt64, least: Decimal(18,2)) -> {  }
+insert_select_alone.sql: none (id: UInt64, user: UInt64, total: Decimal(18,2), note: String(UTF-8, ill-formed)?, placed: Date) -> {  }
+insert_select_parenthesized.sql: none (id: UInt64, user: UInt64) -> {  }
+insert_settings_first.sql: none (id: UInt64, user: UInt64, placed: Date) -> {  }
+insert_several.sql: none (a: UInt64, b: UInt64) -> {  }
+insert_things.sql: none (id: UInt64, format: String(UTF-8, ill-formed), v: UInt64, tags: UInt8[], skus: String(UTF-8, ill-formed)[]) -> {  }
+insert_union_branch.sql: none (id: UInt64, user: UInt64) -> {  }
+insert_values.sql: none (id: UInt64, user: UInt64, total: Decimal(18,2), note: String(UTF-8, ill-formed)?, placed: Date) -> {  }
+insert_variant_literal.sql: none (id: UInt64) -> {  }
+insert_widened.sql: none (id: UInt64, seen: DateTime, day: Date, flag: Bool, n: UInt32, m: Int16) -> {  }
+insert_widened_more.sql: none (id: UInt64, n: UInt32, at: DateTime64) -> {  }
+read_back.sql: many () -> { id: UInt64, user_id: UInt64, total: Decimal(19,2), note: String(UTF-8, ill-formed)? }
