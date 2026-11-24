@@ -1162,10 +1162,12 @@ async fn owned_by_platform(target: &mut Db, admin: &tokio_postgres::Client, url:
     Ok(Owned { statements: vec![], extensions, role: None, note: Some(note) })
 }
 
-/// What a new Supabase database has for its Data API, as the statements that make it: `postgres`'s
-/// default privileges in `public`, which grant the API's roles every privilege on each table,
-/// sequence and function `postgres` makes there, and the grants of `USAGE` on `public` to them and to
-/// `postgres`. One statement each, so that a server without one of the roles leaves out only it.
+/// What a new Supabase database had for its Data API before Supabase stopped exposing new tables
+/// through it, as the statements that make it: `postgres`'s default privileges in `public`, which
+/// grant the API's roles every privilege on each table, sequence and function `postgres` makes there,
+/// and the grants of `USAGE` on `public` to them and to `postgres`. SQL written to make a database
+/// whole writes its changes to them from there, which any new Supabase database takes the same way.
+/// One statement each, so that a server without one of the roles leaves out only it.
 #[cfg(feature = "cli")]
 fn platform_defaults() -> (Vec<String>, Vec<String>) {
     use crate::catalog::{PLATFORM_API_ROLES, PLATFORM_CREATOR};
@@ -1175,6 +1177,18 @@ fn platform_defaults() -> (Vec<String>, Vec<String>) {
         .collect();
     let grants = std::iter::once(&PLATFORM_CREATOR).chain(PLATFORM_API_ROLES).map(|role| format!("grant usage on schema public to {role}")).collect();
     (privileges, grants)
+}
+
+/// Whether `statement`, one of [`default_privileges`], grants one of Supabase's Data API roles a
+/// privilege on what `postgres` makes in `public`: the role that runs the migrations is `postgres` on
+/// Supabase, whose own name none of its statements, or another role named for `postgres`.
+#[cfg(feature = "cli")]
+fn platform_privilege(statement: &str) -> bool {
+    use crate::catalog::{PLATFORM_API_ROLES, PLATFORM_CREATOR};
+    let Some(rest) = statement.strip_prefix("alter default privileges in schema public ").or_else(|| statement.strip_prefix(&format!("alter default privileges for role {PLATFORM_CREATOR} in schema public "))) else { return false };
+    let rest = rest.trim_end_matches(" with grant option");
+    let Some((what, role)) = rest.rsplit_once(" to ").or_else(|| rest.rsplit_once(" from ")) else { return false };
+    PLATFORM_API_ROLES.contains(&role) && ["tables", "sequences", "functions"].iter().any(|o| what.ends_with(&format!(" on {o}")))
 }
 
 /// Gives a shadow's session the target's word on whether it is a platform's (`settings`, the target
@@ -1277,11 +1291,16 @@ pub enum Server {
         /// shadow but where SQL is written to make the database whole.
         schema_grants: Vec<String>,
         copy_schema_grants: bool,
-        /// On a Supabase target, what a new Supabase database has where a shadow takes none of the
-        /// target's: `postgres`'s default privileges in `public` for the Data API's roles, and their
-        /// grants on `public`, which SQL that changes them changes from there.
+        /// On a Supabase target, what a shadow is given where it takes none of the target's default
+        /// privileges or grants on its schemas: the default privileges `postgres` gives the Data
+        /// API's roles in `public`, the target's own, which Supabase sets as it chooses (and which
+        /// a project's SQL changes from there); or, for SQL written to make the database whole,
+        /// those and their grants on `public` as a new database had them before Supabase stopped
+        /// exposing new tables, which that SQL changes from there.
         platform_privileges: Vec<String>,
         platform_schema_grants: Vec<String>,
+        /// Whether the target is Supabase's.
+        platform: bool,
         /// Whether each shadow is given the platform's publication, empty, as the target was:
         /// Supabase's `supabase_realtime`, which a project's SQL adds its tables to.
         publication: bool,
@@ -1417,9 +1436,9 @@ impl Server {
                 let schemas: Vec<String> = std::iter::once("public".to_string()).chain(extensions.iter().map(|(_, s)| s.clone())).filter(|s| !platform.contains(s)).collect();
                 let schema_grants = schema_grants(target, &schemas).await?;
                 let owned = owned_by_platform(target, &admin, url, version).await?;
-                // On Supabase, what a new database there has: its default privileges and grants for
-                // the Data API, and its publication.
-                let (platform_privileges, platform_schema_grants) = if names { platform_defaults() } else { (vec![], vec![]) };
+                // On Supabase, the default privileges its Data API's roles have, the target's own,
+                // which Supabase sets for every project as it chooses; and its publication.
+                let platform_privileges = if names { privileges.iter().filter(|s| platform_privilege(s)).cloned().collect() } else { vec![] };
                 let publication = names && !target.rows(&format!("select 1 from pg_publication where pubname = {}", literal(crate::catalog::PLATFORM_PUBLICATION))).await?.is_empty();
                 Ok(Server::Postgres {
                     admin,
@@ -1437,7 +1456,8 @@ impl Server {
                     schema_grants,
                     copy_schema_grants: true,
                     platform_privileges,
-                    platform_schema_grants,
+                    platform_schema_grants: vec![],
+                    platform: names,
                     publication,
                 })
             }
@@ -1663,8 +1683,9 @@ impl Server {
     /// make it, as a project begun before Reylo took it for the platform's did: its publication, and
     /// its default privileges and grants for the Data API.
     pub fn leave_platform(&mut self) {
-        if let Server::Postgres { publication, platform_privileges, platform_schema_grants, .. } = self {
+        if let Server::Postgres { publication, platform_privileges, platform_schema_grants, platform, .. } = self {
             *publication = false;
+            *platform = false;
             platform_privileges.clear();
             platform_schema_grants.clear();
         }
@@ -1675,9 +1696,12 @@ impl Server {
     /// database on the server has already, no name tells, so they are all the SQL's, but on Supabase,
     /// whose new databases have their own, which shadows take.
     pub fn copy_no_privileges(&mut self) {
-        if let Server::Postgres { copy_privileges, copy_schema_grants, .. } = self {
+        if let Server::Postgres { copy_privileges, copy_schema_grants, platform_privileges, platform_schema_grants, platform, .. } = self {
             *copy_privileges = false;
             *copy_schema_grants = false;
+            if *platform {
+                (*platform_privileges, *platform_schema_grants) = platform_defaults();
+            }
         }
     }
 

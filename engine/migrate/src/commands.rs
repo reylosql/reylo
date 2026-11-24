@@ -3216,6 +3216,7 @@ fn holds_a_schema(lines: &[String]) -> bool {
 fn holds_sql(lines: &[String], new: &NewDatabase) -> bool {
     let platform = |grantee: &str| new.platform && crate::catalog::PLATFORM_ROLES.contains(&grantee);
     holds_a_schema(lines)
+        || new.api_changed
         || lines.iter().any(|l| {
             if let Some(rest) = l.strip_prefix("grant schema ") {
                 let name = crate::catalog::name_at(rest);
@@ -3241,6 +3242,9 @@ struct NewDatabase {
     platform: bool,
     /// Whether a new database's `public` grants PUBLIC `CREATE`, as before Postgres 15.
     public_create: bool,
+    /// On Supabase, whether the database changed what its Data API's roles are granted by default
+    /// or on `public` ([`Api::changes`]), which holds no line of its own.
+    api_changed: bool,
 }
 
 #[cfg(feature = "cli")]
@@ -3250,7 +3254,10 @@ async fn new_database(db: &mut Db) -> Result<NewDatabase, Error> {
     }
     let rows = db.rows(&format!("select ({})::text as platform, (current_setting('server_version_num')::int < 150000)::text as public_create", crate::catalog::platform_names())).await?;
     let r = rows.first().ok_or_else(|| Error("no answer".into()))?;
-    Ok(NewDatabase { platform: r.text("platform") == "true", public_create: r.text("public_create") == "true" })
+    let platform = r.text("platform") == "true";
+    let public_create = r.text("public_create") == "true";
+    let api_changed = !Api::read(db, platform).await?.changes.is_empty();
+    Ok(NewDatabase { platform, public_create, api_changed })
 }
 
 /// Whether a migration that fails can leave part of what it did: on MySQL, whose statements commit as
@@ -5314,6 +5321,9 @@ async fn unneeded_by_history(opts: &Options, files: &[Migration], extensions: Ve
     db.close().await;
     let mut server = server?;
     server.copy_default_privileges(!sets_default_privileges(opts));
+    if creates_platform_publication(opts) {
+        server.leave_platform();
+    }
     let texts: Vec<&str> = files.iter().map(|f| f.sql.as_str()).collect();
     // The catalog's lines of a shadow that leaves out `left`, after the migrations or with none run;
     // nothing where they fail.
@@ -6383,6 +6393,9 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
     }
     let mut server = Server::open(&mut db, &opts.url, opts.shadow_url.as_deref()).await?;
     server.copy_default_privileges(!sets_default_privileges(opts));
+    if creates_platform_publication(opts) {
+        server.leave_platform();
+    }
     server.leave_extensions(created_extensions(opts).into_iter().chain(added.iter().cloned()).collect());
     server.leave_schemas(created_schemas(opts));
     left_out_note(&server, log);
@@ -6772,6 +6785,10 @@ async fn own_sql(db: &mut Db, opts: &Options) -> Result<Result<String, NotOwn>, 
         } else {
             crate::sql::split_statements(&planned, db.dialect()).iter().map(|st| format!("{};", st.text.trim())).collect::<Vec<_>>().join("\n\n")
         };
+        // On Supabase, each object's grants to the Data API's roles, explicitly.
+        let platform = db.rows(&format!("select ({})::text as on", crate::catalog::platform_names())).await?.first().is_some_and(|r| r.text("on") == "true");
+        let granted = Api::read(db, platform).await?.objects(db, true).await?;
+        let sql = if granted.is_empty() { sql } else { format!("{}\n\n{}", sql.trim_end(), granted.iter().map(|g| format!("{g};")).collect::<Vec<_>>().join("\n\n")) };
         let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &[sql.as_str()]).await;
         let lane = shadows.lane();
         shadows.push(lane, [Step::script("schema.sql", &sql)]);
@@ -6912,22 +6929,22 @@ fn without_entries_of(text: &str, owners: &[String], project: &[String]) -> Stri
     out
 }
 
-/// What Supabase's Data API roles are granted in `public`, read for a dump that leaves out what a new
-/// Supabase database has ([`crate::catalog::PLATFORM_API_ROLES`]): its grants of `USAGE` on `public`,
-/// and `postgres`'s default privileges there, which give every table, sequence and function made
-/// there what they grant. Empty off Supabase.
+/// What Supabase's Data API roles are granted in `public` ([`crate::catalog::PLATFORM_API_ROLES`]),
+/// read for SQL that makes the whole database: the grants of `USAGE` on `public`, `postgres`'s default
+/// privileges there, and each table's, sequence's and function's own. Empty off Supabase.
+///
+/// A new Supabase database granted them every privilege on what `postgres` makes in `public`, through
+/// those default privileges, until Supabase stopped exposing new tables to its Data API; a project
+/// may have either, by when it was made or how its local stack is set. So the SQL writes its changes
+/// to the default privileges from the former, before anything it makes, and each object's grants
+/// explicitly: the objects it makes are granted the same on any Supabase database.
 #[derive(Default)]
 struct Api {
     /// Whether the database is Supabase's.
     on: bool,
-    /// What the project changed of them, as the statements that change them from what a new
-    /// database has.
+    /// What the project changed of the default privileges and the grants on `public`, as the
+    /// statements that change them from what a new database had.
     changes: Vec<String>,
-    /// What each role is granted on each kind of object as it is made, now: `(kind, role, privileges)`,
-    /// the kind as `pg_default_acl` names it (`r`, `S`, `f`).
-    made_with: Vec<(String, String, Vec<String>)>,
-    /// Every privilege on each kind of object, as `ALL` grants them.
-    all: Vec<(String, Vec<String>)>,
 }
 
 impl Api {
@@ -6943,7 +6960,7 @@ impl Api {
         // grant option.
         let cells = db
             .rows(&format!(
-                "select o.k, o.objects, r.rolname as role, quote_ident(r.rolname) as quoted,
+                "select o.objects, quote_ident(r.rolname) as role,
                    (select string_agg(b.privilege_type, ',' order by b.privilege_type) from aclexplode(acldefault(o.k::\"char\", c.oid)) b where b.grantee = c.oid) as everything,
                    (select string_agg(x.privilege_type, ',' order by x.privilege_type) from pg_default_acl d, aclexplode(d.defaclacl) x
                      where d.defaclrole = c.oid and d.defaclnamespace = 'public'::regnamespace and d.defaclobjtype = o.d::\"char\" and x.grantee = r.oid) as has,
@@ -6956,20 +6973,16 @@ impl Api {
             .await?;
         let list = |r: &crate::db::Row, column: &str| r.get(column).map(|l| l.split(',').map(String::from).collect::<Vec<_>>()).unwrap_or_default();
         for r in &cells {
-            let (kind, all, has) = (if r.text("k") == "s" { "S" } else { r.text("k") }, list(r, "everything"), list(r, "has"));
+            let (all, has) = (list(r, "everything"), list(r, "has"));
             let lacks: Vec<&String> = all.iter().filter(|p| !has.contains(p)).collect();
             let head = format!("ALTER DEFAULT PRIVILEGES FOR ROLE {PLATFORM_CREATOR} IN SCHEMA public");
             if !lacks.is_empty() {
                 let what = if lacks.len() == all.len() { "ALL".to_string() } else { lacks.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ") };
-                api.changes.push(format!("{head} REVOKE {what} ON {} FROM {}", r.text("objects"), r.text("quoted")));
+                api.changes.push(format!("{head} REVOKE {what} ON {} FROM {}", r.text("objects"), r.text("role")));
             }
             let grantable = list(r, "grantable");
             if !grantable.is_empty() {
-                api.changes.push(format!("{head} GRANT {} ON {} TO {} WITH GRANT OPTION", grantable.join(", "), r.text("objects"), r.text("quoted")));
-            }
-            api.made_with.push((kind.to_string(), r.text("role").to_string(), has));
-            if !api.all.iter().any(|(k, _)| k == kind) {
-                api.all.push((kind.to_string(), all));
+                api.changes.push(format!("{head} GRANT {} ON {} TO {} WITH GRANT OPTION", grantable.join(", "), r.text("objects"), r.text("role")));
             }
         }
         // The grants of `USAGE` on `public` it has taken back.
@@ -6986,7 +6999,7 @@ impl Api {
         Ok(api)
     }
 
-    /// Whether pg_dump's statement `s` makes what a new Supabase database has: a grant of `USAGE` on
+    /// Whether pg_dump's statement `s` makes what a new Supabase database had: a grant of `USAGE` on
     /// `public` to the Data API's roles or `postgres`, or `postgres`'s default privileges in `public`
     /// for them, which [`Api::changes`] writes the project's changes to.
     fn as_made(&self, s: &str) -> bool {
@@ -7001,66 +7014,67 @@ impl Api {
         self.on && GRANTS.is_match(s)
     }
 
-    /// pg_dump's statement `s` without what an object in `public` is granted as it is made, where it
-    /// grants a Data API role privileges on it: `postgres` makes every object a file makes, so it is
-    /// made with them. Empty where it grants nothing more.
-    fn beyond(&self, s: &str) -> String {
-        static GRANT: LazyLock<Regex> = LazyLock::new(|| {
-            let roles = crate::catalog::PLATFORM_API_ROLES.join("|");
-            Regex::new(&format!(r"^GRANT ([A-Z, ]+) ON (TABLE|SEQUENCE|FUNCTION|PROCEDURE) (public\..+) TO ({roles})$")).expect("a valid pattern")
-        });
-        let Some(c) = GRANT.captures(s).filter(|_| self.on) else { return s.to_string() };
-        let kind = match &c[2] {
-            "TABLE" => "r",
-            "SEQUENCE" => "S",
-            _ => "f",
-        };
-        let all = self.all.iter().find(|(k, _)| k == kind).map(|(_, a)| a.clone()).unwrap_or_default();
-        let made: Vec<String> = self.made_with.iter().find(|(k, r, _)| k == kind && r == &c[4]).map(|(_, _, m)| m.clone()).unwrap_or_default();
-        let named: Vec<String> = if c[1].trim() == "ALL" { all.clone() } else { c[1].split(',').map(|p| p.trim().to_string()).collect() };
-        let left: Vec<&String> = named.iter().filter(|p| !made.contains(p)).collect();
-        match left.len() {
-            0 => String::new(),
-            n if n == named.len() => s.to_string(),
-            _ => format!("GRANT {} ON {} {} TO {}", left.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(","), &c[2], &c[3], &c[4]),
-        }
-    }
-
-    /// What each object in `public` lacks of what it is made with ([`Api::made_with`]): revoked after
-    /// it is made, where a new Supabase database would grant it.
-    async fn revokes(&self, db: &mut Db) -> Result<Vec<String>, Error> {
+    /// The statements that give each table, sequence and function in `public` its own grants to the
+    /// Data API's roles on any Supabase database, where [`Api::changes`] runs first: after pg_dump's
+    /// grants of what it has (`own` false), what the default privileges give it and it lacks,
+    /// revoked, and a grant option they give and it lacks, taken back; or, beside Reylo's own SQL
+    /// (`own` true), which grants only what they don't give, the grants of what they give it. A new
+    /// Supabase database gives it no more than they do, once the changes have run.
+    async fn objects(&self, db: &mut Db, own: bool) -> Result<Vec<String>, Error> {
         use crate::catalog::{not_extension, not_platform, pg_not_history, PLATFORM_API_ROLES, PLATFORM_CREATOR};
         if !self.on {
             return Ok(vec![]);
         }
         let roles = PLATFORM_API_ROLES.iter().map(|r| crate::db::literal(r)).collect::<Vec<_>>().join(", ");
+        // Reylo's own SQL names what is in `public` unqualified, as it does the rest.
+        let name = |schema: &str, object: &str| if own { format!("format('%I', {object})") } else { format!("format('%I.%I', {schema}, {object})") };
         let rows = db
             .rows(&format!(
                 "with made as (
-                   select d.defaclobjtype as k, x.grantee, x.privilege_type as p from pg_default_acl d, aclexplode(d.defaclacl) x
-                   where d.defaclrole = (select oid from pg_roles where rolname = {}) and d.defaclnamespace = 'public'::regnamespace
-                     and x.grantee in (select oid from pg_roles where rolname in ({roles}))
+                   select d.defaclobjtype as k, x.grantee, x.privilege_type as p, x.is_grantable as g from pg_default_acl d, aclexplode(d.defaclacl) x
+                   where d.defaclrole = (select oid from pg_roles where rolname = {creator}) and d.defaclnamespace = 'public'::regnamespace
                  ), object as (
-                   select case c.relkind when 'S' then 'S' else 'r' end::\"char\" as k, case c.relkind when 'S' then 'SEQUENCE' else 'TABLE' end as word, format('%I.%I', n.nspname, c.relname) as name,
-                     coalesce(c.relacl, acldefault(case c.relkind when 'S' then 's' else 'r' end::\"char\", c.relowner)) as acl
+                   select case c.relkind when 'S' then 'S' else 'r' end::\"char\" as k, case c.relkind when 'S' then 's' else 'r' end::\"char\" as a,
+                     case c.relkind when 'S' then 'SEQUENCE' else 'TABLE' end as word, {} as name, coalesce(c.relacl, acldefault(case c.relkind when 'S' then 's' else 'r' end::\"char\", c.relowner)) as acl, c.relowner as owner
                    from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S') and {} and {}
                    union all
-                   select 'f', case p.prokind when 'p' then 'PROCEDURE' else 'FUNCTION' end, format('%I.%I(%s)', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)), coalesce(p.proacl, acldefault('f', p.proowner))
-                   from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and {} and {}
+                   select 'f', 'f', case p.prokind when 'p' then 'PROCEDURE' else 'FUNCTION' end, {} || format('(%s)', pg_get_function_identity_arguments(p.oid)), coalesce(p.proacl, acldefault('f', p.proowner)), p.proowner
+                   from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.prokind in ('f', 'p') and {} and {}
+                 ), cell as (
+                   select o.word, o.name, r.rolname, b.privilege_type as p,
+                     (select count(*) from aclexplode(acldefault(o.a, o.owner)) t where t.grantee = o.owner) as total,
+                     exists (select 1 from aclexplode(o.acl) x where x.grantee = r.oid and x.privilege_type = b.privilege_type) as has,
+                     exists (select 1 from aclexplode(o.acl) x where x.grantee = r.oid and x.privilege_type = b.privilege_type and x.is_grantable) as has_option,
+                     exists (select 1 from made m where m.k = o.k and m.grantee = r.oid and m.p = b.privilege_type) as made,
+                     exists (select 1 from made m where m.k = o.k and m.grantee = r.oid and m.p = b.privilege_type and m.g) as made_option
+                   from object o cross join pg_roles r cross join lateral aclexplode(acldefault(o.a, o.owner)) b
+                   where r.rolname in ({roles}) and b.grantee = o.owner
+                 ), statement as (
+                   select 0 as n, 'GRANT' as verb, word, name, rolname, p, total from cell where {own} and has and made
+                   union all select 1, 'REVOKE', word, name, rolname, p, total from cell where not {own} and made and not has
+                   union all select 2, 'REVOKE GRANT OPTION FOR', word, name, rolname, p, total from cell where not {own} and made_option and has and not has_option
+                 ), by_role as (
+                   select n, verb, word, name, rolname, case when count(*) = max(total) then 'ALL' else string_agg(p, ', ' order by p) end as ps from statement group by n, verb, word, name, rolname
                  )
-                 select format('REVOKE %s ON %s %s FROM %I', string_agg(m.p, ', ' order by m.p), o.word, o.name, pg_get_userbyid(m.grantee)) as s
-                 from object o join made m on m.k = o.k
-                 where not exists (select 1 from aclexplode(o.acl) a where a.grantee = m.grantee and a.privilege_type = m.p)
-                 group by o.word, o.name, m.grantee
-                 order by o.name, o.word, 1",
-                crate::db::literal(PLATFORM_CREATOR),
+                 select format('%s %s ON %s %s %s %s', verb, ps, word, name, case when verb = 'GRANT' then 'TO' else 'FROM' end, string_agg(quote_ident(rolname), ', ' order by rolname)) as s
+                 from by_role group by n, verb, word, name, ps order by name, word, n, 1",
+                name("n.nspname", "c.relname"),
                 not_extension("pg_class", "c"),
                 pg_not_history("c"),
+                name("n.nspname", "p.proname"),
                 not_extension("pg_proc", "p"),
-                not_platform("p.proowner")
+                not_platform("p.proowner"),
+                creator = crate::db::literal(PLATFORM_CREATOR),
             ))
             .await?;
-        Ok(rows.iter().map(|r| r.text("s").to_string()).collect())
+        // Reylo's own SQL is lowercase but for names.
+        let lower = |s: &str| {
+            let (verb, rest) = s.split_once(" ON ").unwrap_or((s, ""));
+            let (word, rest) = rest.split_once(' ').unwrap_or((rest, ""));
+            let (object, roles) = rest.rsplit_once(if verb.starts_with("GRANT") { " TO " } else { " FROM " }).unwrap_or((rest, ""));
+            format!("{} on {} {object} {} {roles}", verb.to_lowercase(), word.to_lowercase(), if verb.starts_with("GRANT") { "to" } else { "from" })
+        };
+        Ok(rows.iter().map(|r| if own { lower(r.text("s")) } else { r.text("s").to_string() }).collect())
     }
 }
 
@@ -7213,11 +7227,6 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
                 if s.starts_with("SET ") || s.starts_with("SELECT pg_catalog.set_config") || (s.starts_with("ALTER ") && s.ends_with(&own)) || platform_default(s) || s.starts_with("CREATE EXTENSION ") || AS_MADE.contains(&s) || api.as_made(s) {
                     continue;
                 }
-                let s = api.beyond(s);
-                if s.is_empty() {
-                    continue;
-                }
-                let s = s.as_str();
                 if s.starts_with("CREATE FOREIGN TABLE ") {
                     kept.append(&mut foreign);
                 }
@@ -7231,7 +7240,7 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
                 }
             }
             kept.append(&mut foreign);
-            kept.extend(api.revokes(db).await?);
+            kept.extend(api.objects(db, false).await?);
             // Event triggers and publications, which are in no schema, so pg_dump writes neither for a
             // schema (and publications not at all here): the project's, which are compared, after the
             // functions and tables they name, an extension's and the platform's own aside.
