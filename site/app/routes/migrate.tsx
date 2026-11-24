@@ -17,6 +17,7 @@ export const meta: Route.MetaFunction = ({ loaderData }) => {
     { title },
     { name: 'description', content: description },
     { tagName: 'link', rel: 'canonical', href: url },
+    { tagName: 'link', rel: 'alternate', type: 'text/markdown', href: `${siteUrl}/migrate.md` },
     { property: 'og:title', content: title },
     { property: 'og:description', content: description },
     { property: 'og:url', content: url },

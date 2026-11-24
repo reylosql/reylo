@@ -37,6 +37,7 @@ export function meta({ loaderData }: Route.MetaArgs): Route.MetaDescriptors {
     { name: 'robots', content: 'index, follow' },
     { name: 'googlebot', content: 'index, follow, max-image-preview:large, max-snippet:-1' },
     { tagName: 'link', rel: 'canonical', href: siteUrl },
+    { tagName: 'link', rel: 'alternate', type: 'text/markdown', href: `${siteUrl}/index.md` },
     { property: 'og:title', content: siteTitle },
     { property: 'og:description', content: description },
     { property: 'og:url', content: siteUrl },

@@ -49,7 +49,7 @@ export default defineConfig({
 
 ## Replaced columns in migrations
 
-A migration that can't tell renames from new columns now lists each column with its own flags ([#324](https://github.com/reylosql/reylo/pull/324)). Any mix of renames and drops can be picked, where it offered all renames or all drops.
+When a migration can't tell renames from new columns, it now lists each column with its own flags ([#324](https://github.com/reylosql/reylo/pull/324)). You can mix renames and drops instead of picking all of one or the other.
 
 ```terminal
 $ reylo migrate new tidy_columns
@@ -65,7 +65,7 @@ $ reylo migrate new tidy_columns
     reylo migrate new tidy_columns
 ```
 
-A column replaced by one of another kind of type, such as text to a date, is now asked about the same way. It was a refusal to drop it, with a placeholder for the new name.
+Replacing a column with a different type kind (such as text to date) now prompts the same way, instead of refusing with a placeholder drop.
 
 ## MySQL types through WITH queries
 
@@ -80,15 +80,17 @@ select n from nums
 
 What it infers:
 
-- **Recursive WITH queries:** a column that no query of the WITH makes NULL is never null, as `n` above, where every column was nullable
-- **ENUM labels:** an ENUM column read through a WITH query, a derived table or a UNION is typed as its labels, such as `"admin" | "member"`, where it was `string`
+- **Recursive WITH queries:** columns that no branch makes `NULL` stay non-null, like `n` above (previously every column was nullable)
+- **ENUM labels:** `ENUM` columns read through a `WITH` query, derived table or `UNION` keep their literal union, such as `"admin" | "member"` (previously `string`)
 
 ## Faster Postgres analysis
 
-Each connection now prepares a catalog query once, where each analysis prepared it again ([#297](https://github.com/reylosql/reylo/pull/297)). Over 200 statements on a server 20 ms away:
+Each connection now prepares catalog queries once instead of on every analysis ([#297](https://github.com/reylosql/reylo/pull/297)). Measured across 200 statements against a server 20 ms away:
 
-- **40 tables:** 13.4 s → 9.3 s
-- **200 tables:** 25.1 s → 17.3 s
+| Schema size | Before | After | Speedup |
+| --- | --- | --- | --- |
+| 40 tables | 13.4 s | 9.3 s | **1.4×** |
+| 200 tables | 25.1 s | 17.3 s | **1.5×** |
 
 ## Upgrading from v0.8.1
 
@@ -96,9 +98,9 @@ Each change below can surface in a project that upgrades from v0.8.1.
 
 ### Every dialect
 
-- **The `reylo analyze` command prints JSON, where it printed YAML.** Pass `--format yaml` where a script reads the old output ([#365](https://github.com/reylosql/reylo/pull/365)).
-- **A one-file run of `reylo analyze` has no `file` key.** Read the file's name from the command line, which names it ([#350](https://github.com/reylosql/reylo/pull/350)).
+- **The `reylo analyze` command prints JSON by default (previously YAML).** Pass `--format yaml` for scripts reading the old output ([#365](https://github.com/reylosql/reylo/pull/365)).
+- **A single-file run of `reylo analyze` omits the `file` key.** Use the path passed on the command line instead ([#350](https://github.com/reylosql/reylo/pull/350)).
 
 ### MySQL
 
-- **An ENUM column read through a WITH query, a derived table or a UNION is typed as its labels, where it was `string`.** Handle the labels where the type check now asks. A row holding MySQL's `''` error value there now throws in `.run()`, as it does for a plain ENUM column ([#339](https://github.com/reylosql/reylo/pull/339)).
+- **An `ENUM` column read through a `WITH` query, derived table or `UNION` is now typed as its labels (previously `string`).** Update code that expects a plain `string`. Rows holding MySQL's empty `''` error value also throw in `.run()`, matching plain `ENUM` columns ([#339](https://github.com/reylosql/reylo/pull/339)).

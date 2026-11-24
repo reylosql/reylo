@@ -50,7 +50,7 @@ Change any of it, and `reylo migrate new` writes the migration. It compares ever
 - **MySQL:** tables, columns, constraints, indexes, generated columns, views, triggers, functions, procedures, events, enums, partitions, grants and comments
 - **SQLite:** tables (`STRICT` and `WITHOUT ROWID` ones included), columns, constraints, indexes, generated columns, views and triggers
 
-Operators, casts, text search configurations and a few rarer kinds are compared by name only, so you write their changes by hand. Each kind is declared in `schema.sql` as you would on the database:
+Operators, casts, text search configurations and a few rarer kinds are compared by name only. Write their changes by hand. Each supported kind is declared in `schema.sql` as you would on the database:
 
 ```sql tab="Tables"
 create table users (
@@ -247,23 +247,25 @@ create table users (
 create table tags (name text primary key, color text) without rowid;
 ```
 
+How that compares with other schema-first tools:
+
 <Callout title="Compared with Prisma">
 
-Prisma's schema language is lossy: it describes part of the database, and the rest never reaches the schema file. It has no CHECK constraints, triggers, functions, row level security, grants or comments, and Prisma Migrate ignores a change to a view. Each of those goes into SQL you [add to a migration by hand](https://www.prisma.io/docs/orm/v7/prisma-migrate/workflows/unsupported-database-features).
+Prisma's schema language is lossy. It covers tables and indexes, while CHECK constraints, triggers, functions, row level security, grants and comments never reach the schema file. Prisma Migrate also ignores changes to views, so each of those goes into SQL you [add to a migration by hand](https://www.prisma.io/docs/orm/v7/prisma-migrate/workflows/unsupported-database-features).
 
 </Callout>
 
 <Callout title="Compared with Supabase">
 
-Supabase introduced [declarative schemas](https://supabase.com/docs/guides/local-development/declarative-database-schemas) in 2025: plain SQL files in `supabase/schemas/`, diffed into migrations. They work on Postgres, for projects on Supabase. Reylo Migrate takes the same approach to MySQL and SQLite, on any host.
+Supabase introduced [declarative schemas](https://supabase.com/docs/guides/local-development/declarative-database-schemas) in 2025: plain SQL files in `supabase/schemas/`, diffed into migrations. They work on Postgres, for projects on Supabase. Reylo Migrate brings the same approach to MySQL and SQLite, on any host.
 
 </Callout>
 
 ## The most advanced multi-dialect diff engine
 
-Reylo Migrate never guesses what your SQL means from its text. It builds `schema.sql` in one shadow database and your migrations in another, and reads both back from the database's own catalog. The migration it writes is the difference between the two, ordered by the database's own dependency records. Before it writes the file, it runs that migration on a shadow and checks that the result matches `schema.sql`.
+Reylo Migrate never parses SQL text to guess what changed. It runs `schema.sql` in one shadow database, runs your migrations in another, and diffs both catalogs directly.
 
-So it knows what depends on what you change. Retype a column that a view and a materialized view both read:
+Each generated migration is ordered by the database's dependency records and verified on a shadow database before it is written. Retype a column that both a view and a materialized view read:
 
 ```sql title="schema.sql"
 create table bookings (
@@ -320,12 +322,12 @@ Nothing was changed.
 
 The same care goes into every migration it writes:
 
-- **Lossy type changes** are refused the same way, as when a `numeric` becomes a `bigint` and its values would be rounded.
-- **Renames** are kept as renames, with their rows, where a column is replaced by one just like it.
-- **Constraints and indexes** never block writes on Postgres: a constraint is validated in a migration of its own, and an index is built concurrently.
-- **Locks** on a busy table are given up after half a second and tried again, so the migration doesn't hold up your app's queries.
+- **Lossy type changes** are refused the same way, such as narrowing a `numeric` column to `bigint`.
+- **Renames** keep their rows when a column is replaced by one of a compatible type.
+- **Constraints and indexes** never block writes on Postgres. Constraints validate in a separate migration, and indexes build concurrently.
+- **Locks** on a busy table time out after 500 ms and retry, so migrations don't stall app queries.
 
-It works the same way on Postgres, MySQL and SQLite: one schema file, the same commands, the same checks. The migrations differ, because each database changes a schema its own way. Give posts a slug, and require every title to have text:
+The workflow is identical across Postgres, MySQL and SQLite: one schema file, the same commands, the same checks. The generated SQL differs because each database alters schemas differently. Give `posts` a slug and require non-empty titles:
 
 ```sql title="schema.sql"
 create table posts (
@@ -371,31 +373,35 @@ drop table posts;
 alter table new_posts rename to posts;
 ```
 
-On Postgres, the check is added `not valid` and validated in a second migration, which reads every row without blocking writes. MySQL commits each schema change on its own, outside any transaction, so each migration is one statement. Here, one `alter table` makes both changes. SQLite can't add a check to a table, so the table is rebuilt with its rows, and so is any table that references it.
+What each dialect does differently:
 
-The same holds on hosted databases: Supabase, Neon, PlanetScale and Turso among them. A platform's own objects, such as Supabase's `auth.users`, are left alone.
+- **Postgres:** adds the check `not valid`, then validates it in a second migration without blocking writes.
+- **MySQL:** runs DDL outside transactions, so both changes combine into one `alter table` statement.
+- **SQLite:** can't add a check constraint in place, so it rebuilds the table and any referencing tables with their rows.
+
+The same holds on hosted databases, including Supabase, Neon, PlanetScale and Turso. Platform-owned objects, such as Supabase's `auth.users`, are left alone.
 
 <Callout title="Compared with pg-delta">
 
-Supabase's [pg-delta](https://supabase.com/blog/declarative-schemas-2-0-pg-delta) works the same way: it "never parses SQL to understand it", and resolves every state in a real Postgres. It became the default diff engine of Supabase's CLI this month, and it supports Postgres alone. Reylo Migrate's engine reimplements that design in Rust. It's at parity with pg-delta on Postgres, and carries the same approach to MySQL and SQLite.
+Supabase's [pg-delta](https://supabase.com/blog/declarative-schemas-2-0-pg-delta) works the same way: it "never parses SQL to understand it", resolving every state in a real Postgres. It became the default diff engine in Supabase's CLI this month, for Postgres alone. Reylo Migrate reimplements that design in Rust at parity on Postgres, and brings it to MySQL and SQLite.
 
 </Callout>
 
 <Callout title="Compared with Atlas">
 
-[Atlas](https://atlasgo.io) works out each change on a dev database too, from a schema in SQL or in its own HCL, on several databases. Its free builds leave out views, triggers, functions, policies and more. The [community build](https://atlasgo.io/community-edition) ignores a change to one, and the standard build asks you to log in to [Atlas Pro](https://atlasgo.io/pricing), at $9 per user a month. Drift detection is in Pro too. Reylo Migrate is MIT licensed, with nothing held back for a paid tier.
+[Atlas](https://atlasgo.io) also diffs schemas against a dev database using SQL or HCL across several dialects. Its free builds leave out views, triggers, functions, policies and drift detection. The [community build](https://atlasgo.io/community-edition) ignores changes to them, and the standard build requires [Atlas Pro](https://atlasgo.io/pricing) at $9 per user a month. Reylo Migrate is MIT licensed, with nothing held back for a paid tier.
 
 </Callout>
 
 <Callout title="Compared with Liquibase">
 
-[Liquibase](https://www.liquibase.com) keeps each change as a changeset you write in XML, YAML or SQL, and its `diff-changelog` command writes changesets from the difference between two databases. That diff has no functions, triggers or policies. It writes a renamed column as a drop and an add, which loses the column's rows, and it drops a column without asking. Since 5.0, Liquibase's license is the FSL, which isn't an open source license.
+[Liquibase](https://www.liquibase.com) tracks changesets in XML, YAML or SQL, and `diff-changelog` generates them by comparing two databases. That diff omits functions, triggers and policies. It turns renamed columns into drop-and-add pairs (losing rows) and drops columns without asking. Since 5.0, Liquibase uses the FSL rather than an open source license.
 
 </Callout>
 
 <Callout title="Compared with Prisma and Drizzle">
 
-Prisma and Drizzle Kit write each migration from their own model of the schema, which leaves out what in the database depends on what. Retype a column that a view reads, and both write a bare type change that fails when it runs. Both write a plain `create index`, which blocks writes on a busy table. Prisma writes a renamed column as a drop and an add, which empties it, and Drizzle's `generate` writes a dropped column without asking.
+Prisma and Drizzle Kit diff against their own schema models, which miss database dependencies. Retype a column that a view reads, and both generate a bare `alter table` that fails when it runs. Both emit a plain `create index` that blocks writes on busy tables. Prisma also turns renamed columns into drop-and-add pairs, and Drizzle's `generate` drops columns without asking.
 
 Their most-upvoted open requests are for what `schema.sql` already holds:
 
@@ -411,7 +417,7 @@ Their most-upvoted open requests are for what `schema.sql` already holds:
 
 Delete `schema.sql`, and your migrations are your schema.
 
-A schema file reads best in review, but when an agent writes the DDL, migrations alone work too. With no schema to compare against, `reylo migrate new` drafts a migration from changes to your development database, or writes an empty one for you or your agent to fill:
+A schema file reads best in review, but migrations alone work well when an agent writes DDL. Without `schema.sql`, `reylo migrate new` drafts a migration from changes on your development database, or creates an empty file to fill in:
 
 ```terminal
 $ reylo run 'alter table users add column bio text'
@@ -434,21 +440,23 @@ create table users (
 );
 ```
 
+How those two modes map to frameworks teams already know:
+
 <Callout title="Compared with Rails">
 
-Schemaless mode is how Rails works: migrations are the source of truth, and `schema.rb` is dumped from the database after they run, as `reylo db introspect` prints it. Rails leaves the migration for you to write, where Reylo Migrate can draft it from the change you made to your development database.
+Schemaless mode matches Rails: migrations are the source of truth, and `schema.rb` is dumped from the database after they run (like `reylo db introspect`). Rails leaves every migration for you to write by hand. Reylo Migrate can draft it from the changes you made to your development database.
 
 </Callout>
 
 <Callout title="Compared with Django">
 
-With a `schema.sql`, Reylo Migrate works the way Django does, where `makemigrations` writes each migration from a change to your models. Django's models stop at what its ORM can declare, so a trigger or a function goes into a hand-written `RunSQL` step. In `schema.sql`, it's one more statement.
+With `schema.sql`, Reylo Migrate works like Django's `makemigrations`, generating migrations from changes to your schema. Django's models stop at what the ORM can declare, pushing triggers and functions into hand-written `RunSQL` steps. In `schema.sql`, they are just SQL statements.
 
 </Callout>
 
 ## Migration ordering
 
-An optional lockfile, `reylo.lock`, lists your migrations in the order they run, each with a checksum chained to the one before:
+An optional lockfile, `reylo.lock`, lists migrations in run order, each with a chained checksum:
 
 ```yaml title="reylo.lock"
 schema: c7bf681b
@@ -457,17 +465,17 @@ migrations:
   - 20261104140347_add_bio.sql 78ad08c0
 ```
 
-Two branches that each add a migration conflict on the lock in git, before either reaches a database. The second branch to merge keeps main's lines, then runs `reylo migrate dev`, which runs its migrations after main's and adds them back. Every database then runs every migration in one order, and an edit to a locked migration fails its checksum. On a busy team, though, every two branches that add migrations conflict, even when they touch different tables.
+Two branches that each add a migration conflict on `reylo.lock` in git before reaching a database. The second branch keeps `main`'s lines and runs `reylo migrate dev`, which replays its migrations after `main`'s and appends them back. Every database then runs migrations in one order, and editing a locked migration fails its checksum. The trade-off on a busy team is that parallel migration branches always conflict, even across unrelated tables.
 
 <Callout title="Compared with Drizzle">
 
-Drizzle Kit kept a journal, `meta/_journal.json`, through its 0.x releases, and two branches that each added a migration conflicted on it. Its maintainers called that folder structure "completely unusable due to git incompatibility" in [a 2024 discussion](https://github.com/drizzle-team/drizzle-orm/discussions/2832). Drizzle 1.0, now a release candidate, removes the journal and runs migrations in any order. Some teams want that, and some want the conflict. Reylo Migrate gives each team the choice: keep `reylo.lock` for strict ordering, or delete it.
+Drizzle Kit kept a journal, `meta/_journal.json`, through 0.x, so parallel migration branches conflicted on it. Its maintainers called that structure "completely unusable due to git incompatibility" in [a 2024 discussion](https://github.com/drizzle-team/drizzle-orm/discussions/2832). Drizzle 1.0 removes the journal and runs migrations in any order. Some teams want that, and others want the conflict. Reylo Migrate lets each team choose: keep `reylo.lock` for strict ordering, or delete it.
 
 </Callout>
 
 <Callout title="Compared with other tools">
 
-A file built to make parallel branches conflict is an old idea, and most tools that keep a strict order have one:
+Using a lockfile to force git conflicts between parallel migration branches is an established pattern:
 
 | Tool | What holds the order | Two branches that each add a migration |
 | --- | --- | --- |
@@ -481,7 +489,7 @@ A file built to make parallel branches conflict is an old idea, and most tools t
 | [Prisma](https://www.prisma.io/docs/guides/v7/database/schema-changes) | Folder names, with `migration_lock.toml` holding only the database provider | No conflict in git |
 | [Drizzle 1.0](https://github.com/drizzle-team/drizzle-orm/releases/tag/v1.0.0-beta.16), [dbmate](https://github.com/amacneil/dbmate/issues/159#issuecomment-698449138) | Nothing | Run in any order |
 
-[Zenefits wrote the pattern up in 2015](https://web.archive.org/web/20180520172740/https://engineering.zenefits.com/2015/11/using-old-ideas-to-solve-new-problems/), after migrations from parallel branches kept merging cleanly in git and then breaking the main branch. It went "from having four merge errors every week to having none". The tools without such a file take the other side of the trade: their branches never conflict, so a collision shows up when the migrations run, or not at all. Even Rails, when it added a full list of versions to `schema.rb` in 2026, sorted the list so that parallel branches wouldn't conflict on it ([rails/rails#58166](https://github.com/rails/rails/pull/58166)).
+[Zenefits documented the pattern in 2015](https://web.archive.org/web/20180520172740/https://engineering.zenefits.com/2015/11/using-old-ideas-to-solve-new-problems/) after parallel migration branches kept merging cleanly and breaking `main`. It went "from having four merge errors every week to having none". Tools without a lockfile take the opposite trade-off: branches never conflict, so collisions surface only when migrations run. Even Rails sorted its full version list in `schema.rb` in 2026 to avoid merge conflicts ([rails/rails#58166](https://github.com/rails/rails/pull/58166)).
 
 </Callout>
 
@@ -528,15 +536,17 @@ $ reylo migrate lock
 ✓ The migrations match reylo/schema.sql
 ```
 
+How other migrators handle out-of-order migrations:
+
 <Callout title="Compared with Kysely">
 
-[Kysely's migrator](https://github.com/kysely-org/kysely/blob/master/src/migration/migrator.ts) refuses any migration that sorts before one already run. With `allowUnorderedMigrations` on, it runs every one of them without a check. Reylo Migrate checks whether the order changes the result, and refuses only where it does.
+[Kysely's migrator](https://github.com/kysely-org/kysely/blob/master/src/migration/migrator.ts) refuses any migration that sorts before one already run. With `allowUnorderedMigrations` on, it runs every one without checking. Reylo Migrate checks whether order changes the resulting schema, and refuses only when it does.
 
 </Callout>
 
 <Callout title="Compared with Flyway">
 
-[Flyway's `outOfOrder` setting](https://documentation.red-gate.com/fd/flyway-out-of-order-setting-277579015.html) is the same switch. Off, the default, a migration that sorts before one already run fails validation, and nothing runs. On, it runs, and Flyway warns that the migration "may not be reproducible".
+[Flyway's `outOfOrder` setting](https://documentation.red-gate.com/fd/flyway-out-of-order-setting-277579015.html) is a similar binary switch. When off (the default), any migration sorting before an applied one fails validation and nothing runs. When on, it runs with a warning that the migration "may not be reproducible".
 
 </Callout>
 
@@ -611,7 +621,7 @@ Applying to postgres://localhost:5432/app
 
 ## Get started
 
-Reylo Migrate completes the Reylo toolkit. Reylo infers types from SQL queries, so you run them type-safe from [TypeScript](/docs) or [Rust](/rust), with no codegen, ORM or query builder.
+Reylo Migrate completes the Reylo toolkit. Reylo infers types directly from SQL queries for [TypeScript](/docs) and [Rust](/rust), with no codegen, ORM or query builder.
 
 Start from your existing database:
 
