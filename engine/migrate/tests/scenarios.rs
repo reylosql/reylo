@@ -4655,6 +4655,24 @@ mod adversarial {
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.exec("insert into moved (note) values ('b')").await;
         assert_eq!(p.rows("select id from moved order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+        p.output();
+        // A new name that holds the sequence's old one, beside a sequence of its own under the old
+        // name; and a sequence the target gives the name a rename would, which the renamed column
+        // no longer uses.
+        let rest = format!("{rest} create sequence moved_id_seq as integer; create table moved (id integer default nextval('moved_id_seq') primary key, note text);");
+        p.file("20991231000006_t.sql", "create table first (id serial primary key, note text); create table second (id serial primary key, note text); create sequence later_id_seq;");
+        p.schema(&format!("{rest} create table first (id serial primary key, note text); create table second (id serial primary key, note text); create sequence later_id_seq;"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into first (note) values ('a'); insert into second (note) values ('a')").await;
+        p.output();
+        p.schema(&format!("{rest} create table first_id_seq_more (id serial primary key, note text); create sequence first_id_seq; create table later (id integer primary key, note text); create sequence later_id_seq;"));
+        let choices = reylo_migrate::Choices { rename: vec![("first".into(), "first_id_seq_more".into()), ("second".into(), "later".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "names", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into first_id_seq_more (note) values ('b')").await;
+        assert_eq!(p.rows("select id from first_id_seq_more order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
     }
 
     /// A refusal's suggested command carries --blocking where the migration it writes rewrites a

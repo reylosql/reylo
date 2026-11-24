@@ -2747,19 +2747,20 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
             let made = renamed_name(&name, old, new);
             let wanted = declared::quote_ident(&made);
             let at = if o.kind == Some(Kind::Constraint) { new_rel.to_string() } else { prefix.clone() };
-            // Renamed only onto what the target has under that name on the renamed table (an index
-            // on it), and only where the target doesn't keep it under the name it has: the same index,
-            // or a sequence the same column owns or takes its default from. A name the target gives
+            // Renamed only onto what the target has under that name for the renamed table, and only
+            // where the target doesn't keep it under the name it has: an index on the table, or a
+            // sequence the same column owns or takes its default from. A name the target gives
             // something else is let go.
-            let ours = |t: &Object| t.kind == o.kind && (o.kind != Some(Kind::Index) || t.owner.as_deref() == Some(new_table.as_str()));
             let column = o.goes_with.as_ref().map(|c| c.replacen(&format!("column {old_rel}."), &format!("column {new_rel}."), 1));
-            let same = |t: &Object| {
-                ours(t)
-                    && (o.kind != Some(Kind::Sequence)
-                        || t.goes_with == column
-                        || column.as_ref().and_then(|c| target.objects.get(c)).is_some_and(|c| c.def.contains("nextval(") && c.def.contains(&unquoted(&name))))
+            let ours = |t: &Object| {
+                t.kind == o.kind
+                    && match o.kind {
+                        Some(Kind::Index) => t.owner.as_deref() == Some(new_table.as_str()),
+                        Some(Kind::Sequence) => t.goes_with.is_some() && t.goes_with == column || column.as_ref().and_then(|c| target.objects.get(c)).is_some_and(|c| c.deps.contains(&t.id)),
+                        _ => true,
+                    }
             };
-            if made == unquoted(&name) || target.objects.get(&o.id).is_some_and(same) || !target.objects.get(&format!("{word} {at}.{wanted}")).is_some_and(ours) {
+            if made == unquoted(&name) || target.objects.get(&o.id).is_some_and(ours) || !target.objects.get(&format!("{word} {at}.{wanted}")).is_some_and(ours) {
                 continue;
             }
             if o.kind == Some(Kind::Constraint) {
