@@ -197,7 +197,7 @@ On MySQL, a table's change runs in strict mode, whatever the server's `sql_mode`
 It needs no shadow database. It refuses to run:
 
 - **On an edited schema file.** A `schema.sql` that doesn't match the lock's checksum.
-- **On a database changed by hand.** Each migration stores a fingerprint of the schema. A database that no longer matches it is refused, even for a hand-added index.
+- **On a database changed by hand.** Each deploy stores a fingerprint of the schema it leaves. A database that no longer matches it is refused, even for a hand-added index.
 
 The refusal shows the change:
 
@@ -230,6 +230,8 @@ $ reylo migrate deploy --dry-run
 ```
 
 A failed migration rolls back and records nothing. Fix the file, run `reylo migrate dev`, and deploy again. Where a database already ran the old version, write a new migration instead.
+
+A deploy cut off between migrations picks up where it stopped, once it has checked that the schema hasn't changed since. Where the check fails or can't run, as on MySQL, it's refused until `reylo migrate history push` stores the fingerprint again, which needs a shadow database.
 
 A migration and the build that needs it go live at different moments. The old build's queries fail on a renamed or dropped column. So rename in steps. To rename `users.email` to `contact`, add the new column and copy its values, then deploy code that reads `contact` and writes both:
 

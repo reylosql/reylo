@@ -195,7 +195,7 @@ impl<'s> Shadows<'s> {
             let step = lane.steps[i].clone();
             spinning.say(format!("Replaying {} on a shadow database", step.label));
             let db = &mut lane.shadow.as_mut().expect("a shadow").db;
-            let result = if step.schema { db.script(&step.sql).await } else { run(db, &Migration { name: step.label.clone(), time: String::new(), path: PathBuf::new(), sql: step.sql.clone() }, false).await };
+            let result = if step.schema { db.script(&step.sql).await } else { run(db, &Migration { name: step.label.clone(), time: String::new(), path: PathBuf::new(), sql: step.sql.clone() }).await };
             count(|s| s.replayed += 1);
             lane.at = i + 1;
             if let Err(e) = result {

@@ -517,7 +517,8 @@ for_each_dialect!(
     init_on_an_empty_database_writes_an_empty_schema_and_lock,
     a_broken_draft_keeps_what_sync_made,
     a_migrations_directory_that_isnt_there_is_refused,
-    a_run_cut_off_between_migrations_is_still_compared,
+    a_run_cut_off_goes_on_where_its_schema_is_unchanged,
+    a_rewind_that_fails_leaves_the_row_before_it_unverified,
     create_settles_every_guess_with_one_command,
     create_asks_about_a_column_replaced_by_one_of_another_type,
     db_push_renames_a_table_keeping_its_rows,
@@ -529,7 +530,8 @@ for_each_dialect!(
     db_push_force_accepts_every_destructive_change,
     db_push_takes_a_rename_it_is_told_of,
     create_guesses_no_rename_a_table_that_stays_could_explain,
-    every_applied_row_holds_the_fingerprint_it_left,
+    each_run_leaves_its_fingerprint_on_its_newest_row,
+    a_failed_migration_leaves_the_fingerprint_of_those_before_it,
     a_run_cut_off_before_its_fingerprint_is_refused,
 );
 
@@ -1691,17 +1693,49 @@ async fn history_push_follows_a_renamed_migration(mut p: P) {
     assert_eq!(p.history().await, ["20261027100000_a.sql", "20261027130000_mine.sql"]);
 }
 
-async fn every_applied_row_holds_the_fingerprint_it_left(mut p: P) {
+async fn each_run_leaves_its_fingerprint_on_its_newest_row(mut p: P) {
     let (int, text) = (p.t.int, p.t.text);
     p.schema(&format!("create table a (id {int}, note {text});"));
     p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
     p.file("20261027110000_note.sql", &format!("alter table a add column note {text};"));
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
-    // Written with its row, so that no run cut off between the two leaves a row with nothing to compare.
-    let rows = p.rows("select name, fingerprint from __reylo_migrations order by name").await;
-    assert_eq!(rows.len(), 2);
-    assert!(rows.iter().all(|r| r.get("fingerprint").is_some()), "{rows:?}");
-    assert_ne!(rows[0].get("fingerprint"), rows[1].get("fingerprint"), "each holds the schema it left");
+    // Read once, after the run's last migration: only the newest row's is compared, and the one before
+    // keeps its pending mark, which says nothing of the schema now. MySQL commits each statement, so a
+    // migration there may leave part of itself, and the schema is read before each.
+    let fingerprints = async |p: &P| p.rows("select name, fingerprint from __reylo_migrations order by name").await.iter().map(|r| r.get("fingerprint").unwrap_or_default().to_string()).collect::<Vec<_>>();
+    let first = fingerprints(&p).await;
+    assert!(first[0].starts_with("pending") == (p.d != Dialect::Mysql) && !first[1].starts_with("pending"), "{first:?}");
+    p.schema(&format!("create table a (id {int}, note {text}); create table b (id {int});"));
+    p.file("20261027120000_b.sql", &format!("create table b (id {int});"));
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    let second = fingerprints(&p).await;
+    assert!(!second[2].starts_with("pending") && second[2] != second[1], "{second:?}");
+}
+
+async fn a_failed_migration_leaves_the_fingerprint_of_those_before_it(mut p: P) {
+    let int = p.t.int;
+    p.schema(&format!("create table a (id {int});"));
+    p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    if p.d == Dialect::Mysql {
+        return;
+    }
+    // Fine in the shadows, where `a` is empty; fails on the live database, which has a row.
+    p.exec("insert into a values (null)").await;
+    let (change, column) = if p.d == Dialect::Postgres { ("alter column id set not null", " not null") } else { ("add column x integer not null", ", x integer not null") };
+    p.file("20261027110000_b.sql", &format!("create table b (id {int});"));
+    p.file("20261027120000_c.sql", &format!("alter table a {change};"));
+    p.schema(&format!("create table a (id {int}{column}); create table b (id {int});"));
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    assert_eq!(p.history().await, ["20261027100000_a.sql", "20261027110000_b.sql"]);
+    // c rolled back, so the schema is the one b left, and b's row holds its fingerprint: the next run
+    // compares with it, and goes on.
+    let rows = p.rows("select name from __reylo_migrations where fingerprint not like 'pending%'").await;
+    assert_eq!(rows.iter().map(|r| r.text("name")).collect::<Vec<_>>(), ["20261027100000_a.sql", "20261027110000_b.sql"]);
+    p.exec("delete from a").await;
+    p.output();
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_has!(p.output(), "Applied 1 migration");
 }
 
 async fn a_run_cut_off_before_its_fingerprint_is_refused(mut p: P) {
@@ -2554,18 +2588,69 @@ async fn a_migrations_directory_that_isnt_there_is_refused(mut p: P) {
     assert_eq!(p.history().await, ["20261027100000_a.sql"]);
 }
 
-async fn a_run_cut_off_between_migrations_is_still_compared(mut p: P) {
+async fn a_run_cut_off_goes_on_where_its_schema_is_unchanged(mut p: P) {
     let int = p.t.int;
+    if p.d == Dialect::Mysql {
+        return;
+    }
+    // Cut off after `last` committed, before the run read its fingerprint: on Postgres its connection
+    // ends in `next`, so the read fails; on SQLite, the row reads as such a run leaves it.
+    let migrations = p.dir.join("migrations");
+    let cut_off = async |p: &mut P, last: &str, next: &str| {
+        if p.d == Dialect::Postgres {
+            p.file(next, "select pg_terminate_backend(pg_backend_pid());");
+            assert_eq!(p.migrate().await, 1, "{}", p.peek());
+            std::fs::remove_file(migrations.join(next)).unwrap();
+        } else {
+            assert_eq!(p.migrate().await, 0, "{}", p.peek());
+            let mut db = Db::open(&p.opts()).await.unwrap();
+            let mark = reylo_migrate::commands::pending_mark(&mut db).await.unwrap();
+            db.close().await;
+            p.exec(&format!("update __reylo_migrations set fingerprint = '{mark}' where name = '{last}'")).await;
+        }
+        p.output();
+    };
     p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
     p.file("20261027110000_b.sql", &format!("create table b (id {int});"));
+    cut_off(&mut p, "20261027110000_b.sql", "20261027120000_c.sql").await;
+    assert_eq!(p.history().await, ["20261027100000_a.sql", "20261027110000_b.sql"]);
+    // Nothing changed the schema since: the next run goes on, and stores the fingerprint.
+    p.status().await;
+    assert_has!(p.output(), "Unchanged since a run was cut off after its last migration");
+    p.file("20261027120000_c.sql", &format!("create table c (id {int});"));
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
-    p.output();
-    // Each row holds the fingerprint its migration left; a change after the last is seen.
-    let rows = p.rows("select name from __reylo_migrations where fingerprint is not null").await;
-    assert_eq!(rows.len(), 2);
+    assert_has!(p.output(), "Applied 1 migration");
+    let rows = p.rows("select name from __reylo_migrations where fingerprint not like 'pending%'").await;
+    assert_eq!(rows.iter().map(|r| r.text("name")).collect::<Vec<_>>(), ["20261027120000_c.sql"]);
+    // Something did: refused.
+    p.file("20261027130000_d.sql", &format!("create table d (id {int});"));
+    cut_off(&mut p, "20261027130000_d.sql", "20261027140000_e.sql").await;
     p.exec(&format!("create table stray (id {int})")).await;
     assert_eq!(p.migrate().await, 1);
-    assert_has!(p.output(), "was changed outside its migrations");
+    assert_has!(p.output(), r"A run was cut off after 20261027130000_d\.sql applied");
+}
+
+async fn a_rewind_that_fails_leaves_the_row_before_it_unverified(mut p: P) {
+    let int = p.t.int;
+    // MySQL reads the schema before each migration, so each row holds its own fingerprint.
+    if p.d == Dialect::Mysql {
+        return;
+    }
+    p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
+    p.file("20261027110000_b.sql", &format!("create table b (id {int});"));
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    // b changes into one that fails on this database, not in the empty shadows: dev rewinds b, and a
+    // is the newest row when its replacement fails.
+    p.exec("insert into a values (1), (1)").await;
+    p.file("20261027110000_b.sql", &format!("create table b (id {int}); create unique index a_id on a (id);"));
+    p.output();
+    assert_eq!(p.dev().await, 1, "{}", p.peek());
+    assert_eq!(p.history().await, ["20261027100000_a.sql"]);
+    // A change since is not taken for what a left.
+    p.exec(&format!("create table stray (id {int})")).await;
+    p.output();
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    assert_has!(p.output(), "cut off|changed outside");
 }
 
 async fn init_on_an_empty_database_writes_an_empty_schema_and_lock(mut p: P) {
