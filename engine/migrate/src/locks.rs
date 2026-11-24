@@ -441,11 +441,20 @@ pub(crate) fn mysql_tables_made<'a>(sqls: impl IntoIterator<Item = &'a str>) -> 
                 _ => continue,
             };
             if let Some(name) = t.get(at) {
-                made.insert(name.text.trim_matches('`').replace("``", "`").to_lowercase());
+                made.insert(unquoted(name).to_lowercase());
             }
         }
     }
     made
+}
+
+/// A MySQL name token as MySQL reads it: a backquoted one without its quotes, a doubled backtick
+/// in it read as one.
+fn unquoted(name: &crate::sql::Token) -> String {
+    match name.text.strip_prefix('`').and_then(|t| t.strip_suffix('`')) {
+        Some(inner) => inner.replace("``", "`"),
+        None => name.text.clone(),
+    }
 }
 
 /// The base tables of a MySQL database, each name in lowercase.
@@ -484,10 +493,10 @@ fn with_option(statement: &str, on: Option<&str>, option: &str) -> Option<(Strin
     if next.text == "." {
         return None;
     }
-    let unquoted = name.text.trim_matches('`').replace("``", "`");
+    let table = unquoted(name);
     let options = matches!(next.upper().as_str(), "PARTITION" | "REMOVE");
     let head = format!("{}{}{}", &statement[..name.start], on.unwrap_or(&name.text), &statement[name.end..next.start]);
-    Some((unquoted, format!("{head}{option}{} {}", if options { "" } else { "," }, &statement[next.start..])))
+    Some((table, format!("{head}{option}{} {}", if options { "" } else { "," }, &statement[next.start..])))
 }
 
 /// The check constraints that prove a column holds no null: (table, column) to (name, validated).
@@ -682,6 +691,8 @@ mod tests {
         // A partitioning clause takes the option before it with no comma.
         assert_eq!(tried("alter table m partition by hash (id) partitions 4").as_deref(), Some("m: alter table m lock=none partition by hash (id) partitions 4"));
         assert_eq!(tried("alter table `order` remove partitioning").as_deref(), Some("order: alter table `order` lock=none remove partitioning"));
+        assert_eq!(tried("alter table `a``` modify column n bigint").as_deref(), Some("a`: alter table `a``` lock=none, modify column n bigint"));
+        assert_eq!(mysql_tables_made(["create table `a``` (id int); create table if not exists b (id int); create table C (id int)"]), ["a`".to_string(), "c".to_string()].into_iter().collect());
         assert_eq!(tried("alter table m add partition (partition p2 values less than (3))").as_deref(), Some("m: alter table m lock=none, add partition (partition p2 values less than (3))"));
         assert_eq!(tried("create table t (id int)"), None);
         assert_eq!(tried("alter table app.users add column bio text"), None);

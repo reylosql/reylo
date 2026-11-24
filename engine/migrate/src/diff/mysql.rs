@@ -1492,7 +1492,7 @@ fn lock_swaps(swaps: &[Swap], statements: &mut Vec<String>) {
     // references is read, to check the key, and stays readable. The names are the server's own, so
     // two that differ in case are two tables.
     let mut tables: Vec<(String, bool)> = Vec::new();
-    let mut lock = |table: String, write: bool| match tables.iter_mut().find(|(t, _)| t.trim_matches('`') == table.trim_matches('`')) {
+    let mut lock = |table: String, write: bool| match tables.iter_mut().find(|(t, _)| unquoted(t) == unquoted(&table)) {
         Some((_, w)) => *w |= write,
         None => tables.push((table, write)),
     };
@@ -1524,7 +1524,7 @@ fn lock_swaps(swaps: &[Swap], statements: &mut Vec<String>) {
 fn crossable(statement: &str, swapped: &[&Swap]) -> bool {
     let tokens = tokenize(statement, Dialect::Mysql);
     let words: Vec<String> = tokens.iter().take(5).map(Token::upper).collect();
-    let named = |object: &str| swapped.iter().any(|w| w.tables.iter().any(|t| t.trim_matches('`').eq_ignore_ascii_case(object)) || tokenize(&w.old, Dialect::Mysql).iter().filter_map(name_of).any(|n| n.eq_ignore_ascii_case(object)));
+    let named = |object: &str| swapped.iter().any(|w| w.tables.iter().any(|t| unquoted(t).eq_ignore_ascii_case(object)) || tokenize(&w.old, Dialect::Mysql).iter().filter_map(name_of).any(|n| n.eq_ignore_ascii_case(object)));
     let replaces = words.iter().take(3).any(|w| w == "REPLACE");
     // What the statement acts on: a table's change, an object dropped or renamed, or one made.
     let object = match words.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
@@ -1536,6 +1536,11 @@ fn crossable(statement: &str, swapped: &[&Swap]) -> bool {
         _ => None,
     };
     object.and_then(name_of).is_some_and(|o| !named(&o))
+}
+
+/// A name as a statement writes it, read back: its quotes taken off, as MySQL reads it.
+fn unquoted(name: &str) -> String {
+    tokenize(name, Dialect::Mysql).first().and_then(name_of).unwrap_or_else(|| name.to_string())
 }
 
 /// The tables a statement's foreign keys reference, as it names them.
@@ -1901,6 +1906,7 @@ mod tests {
             ["lock tables a write, `order` read;\nalter table a add constraint a_x foreign key (x) references `order` (id);\ndrop trigger a_touch;\ncreate trigger a_touch before update on a for each row set new.m = 2;\nunlock tables"]
         );
         assert!(swapped(&["drop trigger a_touch", "alter table a add constraint a_x foreign key (x) references A (id)", "create trigger a_touch before update on a for each row set new.m = 2"])[0].starts_with("lock tables a write, A read;\n"));
+        assert!(swapped(&["drop trigger a_touch", "alter table a add constraint a_x foreign key (x) references `a``` (id)", "create trigger a_touch before update on a for each row set new.m = 2"])[0].starts_with("lock tables a write, `a``` read;\n"));
         // So would a function it calls, which isn't a table's change: written apart, saying so.
         let plan = swapped(&["drop trigger a_touch", "drop function f", "create function f () returns int return 2", "create trigger a_touch before update on a for each row set new.m = 2"]);
         assert_eq!(plan[0], "-- Until a_touch is made again, writes to a run without it");
