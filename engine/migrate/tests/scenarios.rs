@@ -4520,7 +4520,15 @@ async fn a_dry_run_checks_composite_keys_and_waits_on_a_parent_filled_first() {
         p.file("20261027100001_teams.sql", "create table teams (id int primary key);");
         p.file("20261027100002_members.sql", "create table members (id int primary key, team_id int);");
         p.file("20261027100003_tags.sql", "create table tags (id int primary key, status varchar(20));");
+        p.file("20261027100004_codes.sql", "create table codes (id int primary key, code varchar(10));");
+        p.file("20261027100005_holders.sql", "create table holders (id int primary key, code varchar(10));");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into codes values (1, 'a'); insert into holders values (1, 'x')").await;
+        // A key whose referenced column is dropped and added again meets the values that leaves.
+        p.file("20261027105800_drop_code.sql", "alter table codes drop column code;");
+        p.file("20261027105801_add_code.sql", "alter table codes add column code varchar(10) not null default 'x';");
+        p.file("20261027105802_code_key.sql", "alter table codes add constraint codes_code unique (code);");
+        p.file("20261027105803_holders_code.sql", "alter table holders add constraint holders_code foreign key (code) references codes (code);");
         p.exec("insert into pairs values (1, 1, 1); insert into pairs values (2, 1, 1); insert into pairs values (3, 1, null); insert into pairs values (4, 1, 2); insert into teams values (1); insert into members values (1, 9); insert into tags values (1, null)").await;
         // A column dropped and added again under its name holds none of the target's values.
         p.file("20261027105900_drop_status.sql", "alter table tags drop column status;");
@@ -4528,12 +4536,13 @@ async fn a_dry_run_checks_composite_keys_and_waits_on_a_parent_filled_first() {
         p.file("20261027110000_pairs_ab.sql", "create unique index pairs_ab on pairs (a, b);");
         p.file("20261027110001_team_9.sql", "insert into teams values (9);");
         p.file("20261027110002_members_team.sql", "alter table members add constraint members_team foreign key (team_id) references teams (id);");
-        p.schema("create table pairs (id int primary key, a int, b int);\ncreate unique index pairs_ab on pairs (a, b);\ncreate table teams (id int primary key);\ncreate table members (id int primary key, team_id int, constraint members_team foreign key (team_id) references teams (id));\ncreate table tags (id int primary key, status varchar(20) not null default 'active');\n");
+        p.schema("create table pairs (id int primary key, a int, b int);\ncreate unique index pairs_ab on pairs (a, b);\ncreate table teams (id int primary key);\ncreate table members (id int primary key, team_id int, constraint members_team foreign key (team_id) references teams (id));\ncreate table tags (id int primary key, status varchar(20) not null default 'active');\ncreate table codes (id int primary key, code varchar(10) not null default 'x', constraint codes_code unique (code));\ncreate table holders (id int primary key, code varchar(10), constraint holders_code foreign key (code) references codes (code));\n");
         p.output();
         assert_eq!(p.dry_run().await, 1, "{d:?}: {}", p.peek());
         let out = p.output();
         assert_has!(&out, r"_pairs_ab\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 value repeats in pairs_ab\n");
         assert!(!out.contains("nulls in tags.status"), "{d:?}: the column added again holds none of the old values: {out}");
+        assert!(!out.contains("breaks holders_code"), "{d:?}: the referenced column added again holds none of the old values: {out}");
         assert!(!out.contains("breaks members_team"), "{d:?}: the parent row comes first: {out}");
     }
 }
@@ -4570,6 +4579,53 @@ async fn a_dry_run_reads_postgres_rows_only_as_the_deploy_meets_them() {
     } else {
         assert_eq!(code, 0, "{out}");
     }
+}
+
+/// A check beside a drop of another column of its table, in one migration on Postgres and in two
+/// on MySQL, is checked against the target's rows: the column it reads is as the target has it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_checks_a_constraint_beside_a_drop() {
+    for d in [Dialect::Postgres, Dialect::Mysql] {
+        let Some(mut p) = P::new(d).await else { continue };
+        p.file("20261027100000_users.sql", "create table users (id int primary key, bio varchar(20), plan varchar(10));");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into users values (1, 'a', 'free'); insert into users values (2, null, 'team')").await;
+        let check = "alter table users add constraint users_plan_check check (plan in ('free', 'pro'));";
+        if d == Dialect::Mysql {
+            p.file("20261027110000_drop_bio.sql", "alter table users drop column bio;");
+            p.file("20261027110001_plan_check.sql", check);
+        } else {
+            p.file("20261027110001_plan_check.sql", &format!("alter table users drop column bio;\n{check}"));
+        }
+        p.schema("create table users (id int primary key, plan varchar(10), constraint users_plan_check check (plan in ('free', 'pro')));\n");
+        p.output();
+        assert_eq!(p.dry_run().await, 1, "{d:?}: {}", p.peek());
+        assert_has!(p.output(), r"_plan_check\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks users_plan_check\n");
+    }
+}
+
+/// On Postgres: a drop names its table by schema, so one of two tables of a name is said to be
+/// dropped alone; a `check … no inherit` holds its own table's rows; and a NOT NULL on a partitioned
+/// table after a pending migration detaches a partition meets the rows the partitions left keep.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_reads_postgres_tables_by_schema_and_partition() {
+    let Some(mut p) = P::new(Dialect::Postgres).await else { return };
+    let base = "create schema billing;\ncreate schema analytics;\ncreate table billing.logs (id int primary key);\ncreate table analytics.logs (id int primary key);\ncreate table users (id int primary key, plan text);\ncreate table m (id int, k int, v int) partition by list (k);\ncreate table m1 partition of m for values in (1);\ncreate table m2 partition of m for values in (2);";
+    p.file("20261027100000_base.sql", base);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into billing.logs values (1), (2); insert into analytics.logs values (1); insert into users values (1, 'gold'); insert into m values (1, 1, null), (2, 2, 5)").await;
+    p.file("20261027110000_reset_billing_logs.sql", "drop table billing.logs;\ncreate table billing.logs (id int primary key);");
+    p.file("20261027110001_plan_free.sql", "alter table users add constraint users_plan_free check (plan = 'free') no inherit;");
+    p.file("20261027110002_detach_m1.sql", "alter table m detach partition m1;");
+    p.file("20261027110003_v_not_null.sql", "alter table m alter column v set not null;");
+    p.schema("create schema billing;\ncreate schema analytics;\ncreate table billing.logs (id int primary key);\ncreate table analytics.logs (id int primary key);\ncreate table users (id int primary key, plan text, constraint users_plan_free check (plan = 'free') no inherit);\ncreate table m (id int, k int, v int not null) partition by list (k);\ncreate table m1 (id int, k int, v int);\ncreate table m2 partition of m for values in (2);\n");
+    p.output();
+    assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+    let out = p.output();
+    assert_has!(&out, r"_reset_billing_logs\.sql\n(      ! [^\n]*\n)*      ! It drops the table billing\.logs and its 2 rows on this database\n");
+    assert!(!out.contains("analytics.logs"), "{out}");
+    assert_has!(&out, r"_plan_free\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks users_plan_free\n        List them:\n          select \* from only users ");
+    assert!(!out.contains("nulls in m.v"), "the detached partition's rows aren't m's: {out}");
 }
 
 /// A trigger swapped under a lock with a change to its table: the change runs first, so one that
