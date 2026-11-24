@@ -456,7 +456,25 @@
       ]
     },
     {
+      "source": "/:page(docs|migrate|blog)/",
+      "headers": [
+        {
+          "key": "Vary",
+          "value": "Accept"
+        }
+      ]
+    },
+    {
       "source": "/docs/:page(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs|migrate)",
+      "headers": [
+        {
+          "key": "Vary",
+          "value": "Accept"
+        }
+      ]
+    },
+    {
+      "source": "/docs/:page(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs|migrate)/",
       "headers": [
         {
           "key": "Vary",
@@ -474,7 +492,25 @@
       ]
     },
     {
+      "source": "/docs/migrate/:sub(usage|cli|compare)/",
+      "headers": [
+        {
+          "key": "Vary",
+          "value": "Accept"
+        }
+      ]
+    },
+    {
       "source": "/blog/:slug",
+      "headers": [
+        {
+          "key": "Vary",
+          "value": "Accept"
+        }
+      ]
+    },
+    {
+      "source": "/blog/:slug/",
       "headers": [
         {
           "key": "Vary",
