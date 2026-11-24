@@ -168,8 +168,9 @@ function Wide() {
 /** The same figure for a phone's column (328px on a 360px screen): the nodes stacked. */
 function Narrow() {
   const w = 328;
+  // Two pixels past the last box's edge: scaled up from 328px, one pixel cut its bottom border off.
   return (
-    <Figure w={w} h={stackHeight + 1}>
+    <Figure w={w} h={stackHeight + 2}>
       <Stack w={w} />
     </Figure>
   );
@@ -180,9 +181,20 @@ function Narrow() {
  * and the types that come back. A container query picks the form: the wide one from a 588px column
  * (drawn for the page's 672px, where its text is the size it was drawn at, and no smaller than
  * 10.5px at 588px), and the stacked one below that, kept to 400px so that it does not grow larger
- * than the page's text on a small tablet.
+ * than the page's text on a small tablet. `stacked` draws the stacked one at every width, centred,
+ * with room around it and an optional caption under it, for a blog post.
  */
-export function HowItWorksDiagram() {
+export function HowItWorksDiagram({ stacked = false, caption }: { /** The stacked form at every width, centred, as a post shows it. */ stacked?: boolean; /** A line under the figure. */ caption?: ReactNode }) {
+  if (stacked) {
+    return (
+      <figure className="my-12 flex flex-col items-center gap-5">
+        <div className="w-full max-w-[360px]">
+          <Narrow />
+        </div>
+        {caption ? <figcaption className="m-0 text-center text-sm text-fd-muted-foreground">{caption}</figcaption> : null}
+      </figure>
+    );
+  }
   return (
     <figure className="@container my-8">
       <div className="hidden @min-[588px]:block">

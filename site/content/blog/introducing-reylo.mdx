@@ -148,7 +148,7 @@ TypeScript 7.1 adds the content mapper API, adding support for external file typ
 
 When TypeScript meets a `.sql` import, Reylo sends the query to your live development database. The database compiles it without running it, and hands back the types of its parameters and columns. Reylo reads your schema information too: the catalog on Postgres, and the information tables on MySQL and SQLite.
 
-<HowItWorksDiagram />
+<HowItWorksDiagram stacked caption="TypeScript asks Reylo for a .sql file's types, and Reylo asks your database." />
 
 From all of that, Reylo infers your types, including some remarkably complex ones. A few examples:
 
