@@ -1,0 +1,1 @@
+create table measurements (id bigint not null, taken_on date not null, value decimal(10,2), primary key (id, taken_on)) partition by range (year(taken_on)) (partition p2026 values less than (2027), partition p2027 values less than (2028), partition p2028 values less than (2029), partition p2029 values less than (2030), partition pmax values less than maxvalue);

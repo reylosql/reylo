@@ -298,6 +298,12 @@ async fn sqlite() {
     p2.migrator().run(&app).await.unwrap();
     let on: i64 = sqlx::query_scalar(text("pragma foreign_keys")).fetch_one(&app).await.unwrap();
     assert_eq!(on, 1);
+    // A database changed by hand is refused, and the error names the change, as the command line does.
+    sqlx::raw_sql(text("alter table users add column hotfix integer")).execute(&app).await.unwrap();
+    let refused = p2.migrator().run(&app).await.unwrap_err();
+    let changed = refused.problems().iter().find(|problem| problem.code == "database-changed").unwrap_or_else(|| panic!("{refused}"));
+    assert!(changed.detail.iter().any(|line| line == "+ column users.hotfix integer"), "{changed:?}");
+    assert!(refused.to_string().contains("\n  + column users.hotfix integer\n"), "{refused}");
 }
 
 /// The two calls' futures are `Send`, so a run can be spawned onto the runtime or awaited in a

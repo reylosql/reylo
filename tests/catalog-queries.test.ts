@@ -307,6 +307,31 @@ test("no catalog query converts a value implicitly, so each operator and functio
   });
 });
 
+// The unique-key query runs for the relations of every statement analyzed, so its cost must not
+// grow with the database's catalog: each `pg_attribute` row it reads is found through the index on
+// `(attrelid, attnum)`, never by a scan of every column of every relation.
+test("the unique-key query reads pg_attribute through its index, never by a scan of every column", { skip: live }, async () => {
+  await withAsked(async (url, asked, postgres) => {
+    const db = postgres(url, { max: 1 });
+    try {
+      const scans = (node: unknown): string[] =>
+        Array.isArray(node) ? node.flatMap(scans)
+        : node && typeof node === "object" ? [...(((node as any)["Node Type"] === "Seq Scan" && (node as any)["Relation Name"] === "pg_attribute") ? [(node as any).Alias as string] : []), ...Object.values(node).flatMap(scans)]
+        : [];
+      let checked = 0;
+      for (const { sql, params } of asked.values()) {
+        if (kindOf(sql) !== "UNIQUE_KEYS_QUERY") continue;
+        const [row] = await db.unsafe(`explain (format json) ${sql}`, params);
+        assert.deepEqual(scans(row["QUERY PLAN"]), [], `the unique-key query scans pg_attribute for ${JSON.stringify(params)}`);
+        checked++;
+      }
+      assert.ok(checked > 0);
+    } finally {
+      await db.end();
+    }
+  });
+});
+
 test("the engine binds and reads the catalog queries' arrays itself, each value as its type", { skip: live }, async () => {
   const d = await (await engine("postgres")).open(PG!);
   try {

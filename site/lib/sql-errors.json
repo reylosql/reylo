@@ -53,5 +53,55 @@
         }
       ]
     }
+  },
+  "clickhouse": {
+    "ch_add_taxed.sql": {
+      "3bd33f490a98e77f": [
+        {
+          "start": {
+            "line": 2,
+            "column": 37
+          },
+          "end": {
+            "line": 2,
+            "column": 59
+          },
+          "source": "reylo(10)",
+          "message": "{total:Decimal(12, 2)} is in a value of the type Float64 that is written to the column total, of the type Decimal(12, 2). ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Convert the value in the statement, as CAST(… AS Decimal(12, 2)) does."
+        }
+      ]
+    },
+    "ch_add_wide.sql": {
+      "eaae186fd3b928a2": [
+        {
+          "start": {
+            "line": 2,
+            "column": 37
+          },
+          "end": {
+            "line": 2,
+            "column": 59
+          },
+          "source": "reylo(10)",
+          "message": "{total:Decimal(18, 4)} is written as it is to the column total, of the type Decimal(12, 2). ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Declare the parameter as the column's type, {total:Decimal(12, 2)}."
+        }
+      ]
+    },
+    "ch_rounded.sql": {
+      "3189d1c7723c3c19": [
+        {
+          "start": {
+            "line": 1,
+            "column": 32
+          },
+          "end": {
+            "line": 1,
+            "column": 45
+          },
+          "source": "reylo(10)",
+          "message": "ClickHouse reads {scale:UInt8} as a constant here, and the result's types change with its value: column 1 (placed) has the type DateTime64(1, 'UTC') with 1 and DateTime64(2, 'UTC') with 2. Write the value in the statement."
+        }
+      ]
+    }
   }
 }

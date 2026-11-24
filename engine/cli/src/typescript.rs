@@ -672,7 +672,7 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
                     _ => render_fields(items(&t["fields"]), dialect, t.get("extra")),
                 };
             }
-            if dialect == "postgres" {
+            if dialect == "postgres" || dialect == "clickhouse" {
                 let fields = items(&t["fields"]);
                 if fields.is_empty() {
                     return "Record<never, never>".into();
@@ -952,6 +952,34 @@ fn render_param_type(t: &Value, dialect: &str, in_row: bool, members: Option<&Va
         return codec_type(&codec, t, &|e| render_param_type(e, dialect, true, None, NO_CODECS), true);
     }
     let kind = column_kind(t, dialect);
+    // A ClickHouse parameter's type says all of it: whether an array's elements or a tuple's may be
+    // NULL, and a tuple's names. A wide integer takes a BigInt, or a number that is whole.
+    if dialect == "clickhouse" {
+        let slot = |s: &Value| {
+            let ty = render_param_type(&s["type"], dialect, false, None, codecs);
+            if is_true(&s["nullable"]) {
+                or_null(&ty)
+            } else {
+                ty
+            }
+        };
+        match self::kind(t) {
+            "array" => return format!("{}[]", grouped(&slot(&t["element"]))),
+            "struct" => {
+                let fields = items(&t["fields"]);
+                if fields.is_empty() {
+                    return "Record<never, never>".into();
+                }
+                let each: Vec<String> = fields.iter().map(|f| format!("{}: {}", ident(f["name"].as_str().unwrap_or_default()), slot(f))).collect();
+                return format!("{{ {} }}", each.join("; "));
+            }
+            "tuple" => return format!("[{}]", items(&t["elements"]).iter().map(slot).collect::<Vec<_>>().join(", ")),
+            _ => {}
+        }
+        if kind == "int8" {
+            return "number | bigint".into();
+        }
+    }
     if self::kind(t) == "json" {
         return match t.get("schema") {
             None => JSON_INPUT_TYPE.into(),

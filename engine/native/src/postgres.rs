@@ -20,6 +20,23 @@ use tokio_postgres::{Client, Config};
 /// waits on it, in the editor and in CI.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// What every analysis connection runs once it opens: a `lock_timeout` as long as a connection may
+/// take to open, so that a session holding a lock on a table a statement names (an `alter table`
+/// left open in another client, a `vacuum full`) ends the analysis with a message rather than
+/// stalling the type check until its transaction ends. Postgres's own default waits forever. A
+/// shorter `lock_timeout` the session already has, from the URL's `options`, the role or the
+/// database, is kept.
+const LOCK_WAIT: &str = "select pg_catalog.set_config('lock_timeout', '10s', false) from pg_catalog.pg_settings where name OPERATOR(pg_catalog.=) 'lock_timeout' and (setting::pg_catalog.int8 OPERATOR(pg_catalog.=) 0 or setting::pg_catalog.int8 OPERATOR(pg_catalog.>) 10000)";
+
+/// What every analysis connection runs after [`LOCK_WAIT`], on its own, since a server may refuse it
+/// and a refusal would undo a statement sent with it: a `client_connection_check_interval` (Postgres
+/// 14 and later), unless the session has one. A session retired at a lock timeout
+/// ([`Driven::retire`]) may still have a describe waiting on the server behind the same lock, and a
+/// backend that waits on a lock notices its client gone only by that check, so without it the
+/// session keeps its server slot until that wait runs out too. A server on a platform it cannot
+/// check on (Windows) refuses any value but 0, and is analyzed without it.
+const DISCONNECT_CHECK: &str = "select pg_catalog.set_config('client_connection_check_interval', '100ms', false) from pg_catalog.pg_settings where name OPERATOR(pg_catalog.=) 'client_connection_check_interval' and setting::pg_catalog.int8 OPERATOR(pg_catalog.=) 0";
+
 /// The URL parameters tokio-postgres reads itself. libpq's TLS settings are read here (`sslmode`,
 /// `sslrootcert`, `sslcert`, `sslkey`, `sslpassword`), and `ssl`, which node-postgres and
 /// postgres.js read; any other parameter is left out, since tokio-postgres refuses a parameter it
@@ -35,8 +52,30 @@ pub struct Postgres {
     next: u64,
 }
 
-struct Connection {
+/// A client with the task that drives its connection. Dropped, it closes as a client does, once what
+/// is queued on it has its answers; retired, it closes at once, so that a session given up on with
+/// requests still queued (a lock timeout's) holds no slot on the server while they drain.
+pub struct Driven {
     client: Client,
+    driver: tokio::task::AbortHandle,
+}
+
+impl Driven {
+    /// Closes the connection now. Every request still on it fails, and the client is closed.
+    pub fn retire(&self) {
+        self.driver.abort();
+    }
+}
+
+impl std::ops::Deref for Driven {
+    type Target = Client;
+    fn deref(&self) -> &Client {
+        &self.client
+    }
+}
+
+struct Connection {
+    client: Driven,
     /// The URL it was opened from, and the token of the host's bridge to a Unix socket, to open it again.
     url: String,
     bridge: Option<String>,
@@ -49,6 +88,9 @@ struct Connection {
     date_style: String,
     /// What a session of this connection runs under, set again on a connection that replaces it.
     setup: Option<String>,
+    /// Whether the session is given up on, after a lock timeout left describes queued on it behind
+    /// the same lock: nothing more is sent through it, and the next request opens another.
+    retired: bool,
 }
 
 impl Connection {
@@ -56,21 +98,48 @@ impl Connection {
     /// connection only from the request that finds it so, since its connection's task runs only
     /// while a request does: that request is answered over the new one.
     async fn reopen(&mut self) -> Result<(), Value> {
-        let Started { client, date_style, .. } = connect(&self.url, self.bridge.as_deref()).await?;
+        let Started { client, driver, date_style, .. } = connect(&self.url, self.bridge.as_deref()).await?;
         if let Some(setup) = &self.setup {
             client.batch_execute(setup).await.map_err(|e| json!({ "status": "unreachable", "message": e.to_string() }))?;
         }
-        (self.client, self.date_style, self.prepared) = (client, date_style, Prepared::default());
+        let _ = client.batch_execute(DISCONNECT_CHECK).await;
+        (self.client, self.date_style, self.prepared) = (Driven { client, driver }, date_style, Prepared::default());
+        Ok(())
+    }
+
+    /// The connection opened again where a lock timeout retired its session, before a request is
+    /// sent; until one opens, every request fails as the opening does, and none reaches the old one.
+    /// A refusal for too many connections is asked again, as [`open_replacement`] asks it.
+    async fn ready(&mut self) -> Result<(), Value> {
+        if self.retired {
+            let mut tries = 0;
+            while let Err(failure) = self.reopen().await {
+                if failure["code"] != TOO_MANY_CONNECTIONS || tries == REPLACEMENT_TRIES {
+                    return Err(failure);
+                }
+                tries += 1;
+                tokio::time::sleep(REPLACEMENT_WAIT).await;
+            }
+            self.retired = false;
+        }
         Ok(())
     }
 
     /// The analysis of one statement over the connection, opened again once where the server
     /// closed it; a failure is the answer the program gives for it.
     async fn analyze(&mut self, sql: &str) -> Result<Analysis, Value> {
+        self.ready().await?;
         let mut result = answers::analyze_prepared(&self.client, &self.prepared, sql, &mut self.answers).await;
         if matches!(&result, Err(ReplayError::Host(e)) if self.client.is_closed() || e.0.starts_with(answers::ENDED)) {
             self.reopen().await?;
             result = answers::analyze_prepared(&self.client, &self.prepared, sql, &mut self.answers).await;
+        }
+        // A lock timeout leaves the statement's other describes queued on the session behind the
+        // same lock: it is reported now, and the next request opens a session of its own rather
+        // than wait behind them.
+        if matches!(&result, Err(ReplayError::Host(e)) if e.0.starts_with(answers::LOCKED)) {
+            self.client.retire();
+            self.retired = true;
         }
         match result {
             Ok(mut analysis) => {
@@ -110,6 +179,37 @@ pub fn transaction_pooler(url: &str) -> Option<String> {
 pub async fn open(url: &str) -> Result<(Client, String), Failure> {
     let Started { client, version, .. } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
     Ok((client, server_version(&version)))
+}
+
+/// As [`open`], for a caller that may give up on a session with requests still on it ([`Driven::retire`]).
+pub async fn open_driven(url: &str) -> Result<(Driven, String), Failure> {
+    let Started { client, driver, version, .. } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
+    Ok((Driven { client, driver }, server_version(&version)))
+}
+
+/// The error a server refuses a connection with when the role, the database or the server is at its
+/// limit of connections.
+const TOO_MANY_CONNECTIONS: &str = "53300";
+
+/// How many times, and how far apart, a connection that stands in for a retired one is asked again.
+const REPLACEMENT_TRIES: u32 = 20;
+const REPLACEMENT_WAIT: Duration = Duration::from_millis(50);
+
+/// As [`open_driven`], to stand in for a session just retired ([`Driven::retire`]). That session
+/// leaves the server a moment after it is closed, and until it has, a server at a limit of
+/// connections counts it: that refusal is asked again, for up to a second.
+pub async fn open_replacement(url: &str) -> Result<(Driven, String), Failure> {
+    let mut tries = 0;
+    loop {
+        match connect(url, None).await {
+            Ok(Started { client, driver, version, .. }) => return Ok((Driven { client, driver }, server_version(&version))),
+            Err(answer) if answer["code"] == TOO_MANY_CONNECTIONS && tries < REPLACEMENT_TRIES => {
+                tries += 1;
+                tokio::time::sleep(REPLACEMENT_WAIT).await;
+            }
+            Err(answer) => return Err(Failure::of(&answer)),
+        }
+    }
 }
 
 /// The diagnostic code of a statement whose dates the session writes in another style than ISO's.
@@ -171,8 +271,9 @@ impl Session {
         if let Some(refusal) = transaction_pooler(url) {
             return Err(Failure::Error(refusal));
         }
-        let Started { client, version, date_style } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
-        Ok(Session { connection: Connection { client, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup: None }, version: server_version(&version) })
+        let Started { client, driver, version, date_style } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
+        let setup = lock_wait(&client).await;
+        Ok(Session { connection: Connection { client: Driven { client, driver }, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup, retired: false }, version: server_version(&version) })
     }
 
     /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
@@ -210,9 +311,10 @@ impl Program for Postgres {
                     return Some(json!({ "status": "error", "message": refusal }));
                 }
                 match connect(url, bridge.as_deref()).await {
-                    Ok(Started { client, version, date_style }) => {
+                    Ok(Started { client, driver, version, date_style }) => {
+                        let setup = lock_wait(&client).await;
                         self.next += 1;
-                        self.connections.insert(self.next, Connection { client, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup: None });
+                        self.connections.insert(self.next, Connection { client: Driven { client, driver }, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup, retired: false });
                         json!({ "status": "opened", "conn": self.next, "version": server_version(&version) })
                     }
                     Err(failure) => failure,
@@ -230,6 +332,9 @@ impl Program for Postgres {
             "describe" => match self.connections.get_mut(&conn) {
                 None => closed(conn),
                 Some(c) => {
+                    if let Err(failure) = c.ready().await {
+                        return Some(failure);
+                    }
                     let mut result = c.client.prepare(sql).await;
                     if matches!(&result, Err(e) if c.client.is_closed() || answers::ended(e)) {
                         if let Err(failure) = c.reopen().await {
@@ -252,6 +357,9 @@ impl Program for Postgres {
             "query" => match self.connections.get_mut(&conn) {
                 None => closed(conn),
                 Some(c) => {
+                    if let Err(failure) = c.ready().await {
+                        return Some(failure);
+                    }
                     let params = request["params"].as_array().cloned().unwrap_or_default();
                     let mut result = answers::PreparedAnswers(&c.client, &c.prepared).query(sql, &params).await;
                     if matches!(&result, Err(e) if c.client.is_closed() || e.0.starts_with(answers::ENDED)) {
@@ -284,6 +392,21 @@ impl Program for Postgres {
             _ => return None,
         })
     }
+}
+
+/// Runs [`LOCK_WAIT`] on a connection that analyzes, and says whether the server took it. A server
+/// that refuses it, one that speaks Postgres's protocol without its catalog, is analyzed as before,
+/// under its own `lock_timeout`.
+pub async fn bound_lock_wait(client: &Client) -> bool {
+    let bounded = client.batch_execute(LOCK_WAIT).await.is_ok();
+    let _ = client.batch_execute(DISCONNECT_CHECK).await;
+    bounded
+}
+
+/// [`LOCK_WAIT`] run on a new connection, and kept as what a connection that replaces it runs, where
+/// the server took it.
+async fn lock_wait(client: &Client) -> Option<String> {
+    bound_lock_wait(client).await.then(|| LOCK_WAIT.to_string())
 }
 
 fn closed(conn: u64) -> Value {
@@ -453,6 +576,8 @@ fn network(e: &tokio_postgres::Error) -> bool {
 /// A connection just opened, and what the server reported as it started, which costs no round trip.
 struct Started {
     client: Client,
+    /// The task that drives the connection: detached unless a [`Driven`] holds it.
+    driver: tokio::task::AbortHandle,
     /// `server_version`, as the server writes it.
     version: String,
     /// The session's `DateStyle`: `ISO, MDY`.
@@ -468,10 +593,11 @@ where
 {
     let version = connection.parameter("server_version").unwrap_or_default().to_string();
     let date_style = connection.parameter("DateStyle").unwrap_or_default().to_string();
-    tokio::spawn(async move {
+    let driver = tokio::spawn(async move {
         let _ = connection.await;
-    });
-    Started { client, version, date_style }
+    })
+    .abort_handle();
+    Started { client, driver, version, date_style }
 }
 
 /// A libpq URL read: tokio-postgres's configuration, how much of the server's certificate to check,

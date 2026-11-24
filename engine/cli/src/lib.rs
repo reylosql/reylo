@@ -93,7 +93,7 @@ Commands:
   init                     Start from this database
     --schema <name>        A schema to read; repeat for more (Postgres; all by default)
   new <name>               Write the next migration, from schema.sql or this database
-    --drop <names>         Accept what it drops: tables and columns
+    --drop <names>         Accept what it drops: tables, columns and partitions
     --rename <old>=<new>   Say a table or column was renamed
     --blocking             Accept a statement that blocks writes while it reads every row
   dev                      Apply pending migrations, rewinding if needed (may drop data), and write the lockfile
@@ -113,7 +113,7 @@ const DB_USAGE: &str = "Usage: reylo db <command> [flags]
 
 Commands:
   push                     Synchronize this database with schema.sql (may be destructive)
-    --drop <names>         Accept what it drops: tables and columns
+    --drop <names>         Accept what it drops: tables, columns and partitions
     --rename <old>=<new>   Say a table or column was renamed
     --force                Accept everything it drops
     --watch                Push again on each save
@@ -554,8 +554,9 @@ fn engine_command(args: &[String]) -> i32 {
         Some("postgres") => reylo_engine::serve(reylo_engine::postgres::Postgres::default(), call),
         Some("mysql") => reylo_engine::serve(reylo_engine::mysql::Mysql::default(), call),
         Some("sqlite") => reylo_engine::serve(reylo_engine::sqlite::Sqlite::default(), call),
+        Some("clickhouse") => reylo_engine::serve(reylo_engine::clickhouse::Clickhouse::default(), call),
         other => {
-            eprintln!("reylo engine: name a database: postgres, mysql or sqlite{}", other.map(|o| format!(" (not {o})")).unwrap_or_default());
+            eprintln!("reylo engine: name a database: postgres, mysql, sqlite or clickhouse{}", other.map(|o| format!(" (not {o})")).unwrap_or_default());
             return 2;
         }
     }

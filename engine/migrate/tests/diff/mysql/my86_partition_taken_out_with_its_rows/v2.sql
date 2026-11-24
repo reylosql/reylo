@@ -1,0 +1,2 @@
+create table measurements (id bigint not null, taken_on date not null, value decimal(10,2), primary key (id, taken_on)) partition by range (year(taken_on)) (partition p2027 values less than (2028), partition pmax values less than maxvalue);
+create table stores (id int not null, region varchar(2) not null, primary key (id, region)) partition by list columns (region) (partition pnorth values in ('n', 'ne'), partition pwest values in ('w'), partition peast values in ('e'));

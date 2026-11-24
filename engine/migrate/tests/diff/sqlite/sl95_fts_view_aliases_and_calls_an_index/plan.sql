@@ -1,0 +1,14 @@
+drop table all_notes_fts;
+drop view notes_content;
+drop table filtered;
+drop view searchable;
+create table new_notes (id integer primary key, draft text, body text generated always as ('published ' || draft) virtual);
+insert into new_notes (id, draft) select id, draft from notes;
+drop table notes;
+alter table new_notes rename to notes;
+create view searchable as select notes.id as rowid, notes.body from notes join 'all_notes_fts'('published') as hit on hit.rowid = notes.id;
+create virtual table filtered using fts4(body, content='searchable');
+create view notes_content as select filtered.id, filtered.body from notes as filtered;
+create virtual table all_notes_fts using fts5(body, content='notes_content', content_rowid='id');
+insert into all_notes_fts (all_notes_fts) values ('rebuild');
+insert into filtered (filtered) values ('rebuild');

@@ -31,10 +31,7 @@ pub async fn alterer(db: &mut Db) -> Result<Box<dyn Alterer>, Error> {
             let version = db.rows("select current_setting('server_version_num') as v").await?.first().and_then(|r| r.first()?.parse().ok()).unwrap_or(0);
             Box::new(postgres::PostgresAlterer::read(db, version).await?)
         }
-        Dialect::Mysql => {
-            let mode = db.rows("select @@session.sql_mode as m").await?.first().map(|r| r.text("m").to_string()).unwrap_or_default();
-            Box::new(mysql::MysqlAlterer::for_mode(&mode))
-        }
+        Dialect::Mysql => Box::new(mysql::MysqlAlterer::default()),
         Dialect::Sqlite => Box::new(sqlite::SqliteAlterer::default()),
     })
 }
@@ -178,6 +175,12 @@ pub trait Alterer: Send {
         let _ = (from, to);
         None
     }
+    /// What a change of `from` to `to` in place drops with its rows, beside the objects the plan
+    /// drops: a MySQL partition taken out of its table, `partition measurements.p2026`.
+    fn loses(&self, from: &Object, to: &Object) -> Vec<String> {
+        let _ = (from, to);
+        Vec::new()
+    }
     /// Whether a change of `from` to `to` changes the object under what depends on it (an enum
     /// made again, a column's type), which the server refuses while a view, rule, policy or trigger
     /// is on it: those go before the change and come back after, and so do the functions that
@@ -271,6 +274,10 @@ pub enum TypeClass {
 
 /// What a generated column's object carries, whose values are its expression's.
 pub const GENERATED: &str = "generated";
+
+/// What a table's object carries whose rows are another table's: SQLite's external-content
+/// full-text index, which holds only an index of its content table's rows, made again from them.
+pub const ROWS_ELSEWHERE: &str = "its rows are another table's";
 
 /// What a change of a column's values from one type to another loses without failing, written
 /// after "which": None where every value is kept or the change fails on one it can't hold.
@@ -376,7 +383,7 @@ impl Plan {
     pub fn sql(&self) -> String {
         let mut out = String::new();
         for loss in &self.losses {
-            out.push_str(&format!("-- loses data: {}\n", loss.trim_start_matches("column ").trim_start_matches("table ")));
+            out.push_str(&format!("-- loses data: {}\n", loss.split_once(' ').map_or(loss.as_str(), |(_, name)| name)));
         }
         for (column, why) in &self.narrowings {
             out.push_str(&format!("-- loses data: {} {why}\n", column.trim_start_matches("column ")));
@@ -1764,6 +1771,12 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
             plan.pairs.push((old_id.clone(), last_written(new_id), (a.def.clone(), b.def.clone()), alterer.narrows(a, b)));
         }
     }
+    // What a change in place drops with its rows.
+    for id in alters.keys() {
+        if let (Some(a), Some(b)) = (from.objects.get(id), to.objects.get(id)) {
+            plan.losses.extend(alterer.loses(a, b));
+        }
+    }
     // A column kept, or renamed, whose type changes so that values are lost without failing.
     for (id, a) in from.objects.iter().filter(|(_, o)| o.kind == Some(Kind::Column)) {
         let to_id = renames.iter().find(|(_, (old, _))| old == id).map(|(new, _)| new).unwrap_or(id);
@@ -1784,9 +1797,11 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                 // A table or column dropped loses its rows, made again or not; a column whose table
                 // goes is the table's loss.
                 let in_lost_table = o.kind == Some(Kind::Column) && o.owner.as_ref().is_some_and(|t| drops.contains(t));
-                // A foreign table's rows are its server's.
+                // A foreign table's rows are its server's, and an external-content index's its
+                // content table's, unless it is made again as a table that holds its own.
                 let table = if o.kind == Some(Kind::Column) { o.owner.as_ref().and_then(|t| from.objects.get(t)) } else { Some(o) };
-                let foreign = table.is_some_and(|t| t.extra.iter().any(|l| l.starts_with("shape foreign")));
+                let elsewhere = |t: &Object| t.extra.iter().any(|l| l == ROWS_ELSEWHERE);
+                let foreign = table.is_some_and(|t| t.extra.iter().any(|l| l.starts_with("shape foreign")) || (elsewhere(t) && to.objects.get(&t.id).is_none_or(elsewhere)));
                 // A generated column's values are its expression's, which loses nothing, and so
                 // are those of a column held from one (a partition's).
                 let marked = |c: &Object| c.extra.iter().any(|l| l == GENERATED);

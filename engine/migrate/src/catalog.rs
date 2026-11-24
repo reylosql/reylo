@@ -671,7 +671,195 @@ async fn postgres(db: &mut Db) -> Result<Vec<String>, Error> {
     for (name, before) in was {
         db.exec(&format!("select set_config({}, {}, false)", literal(name), literal(&before))).await?;
     }
-    result
+    // A comment's line holds its text as JSON, which is no SQL.
+    result.map(|lines| lines.iter().map(|l| if l.starts_with("comment ") { l.clone() } else { pg_reread(l) }).collect())
+}
+
+/// Postgres's rendering of an expression as Postgres renders it once it reads that rendering back.
+/// The two can differ, so a database made from another's rendering (init.sql, a replay of what the
+/// diff wrote) would never read as the same schema. Two shapes change, each written here as it is
+/// read back, and a rendering that has been read back is left as it is:
+/// - a cast of `ARRAY[…]` of values to an array type, `(ARRAY['a'::character varying])::text[]`
+///   (how `varchar_column in ('a', …)` renders), which the parser applies to each element instead:
+///   `ARRAY[('a'::character varying)::text]`;
+/// - an AND or OR whose first operand is the same operator, `((a AND b) AND c)`, which the parser
+///   reads as one: `(a AND b AND c)`. The server stores a row `IS DISTINCT FROM` of three or more
+///   columns that way, and a row `<>` once it is ORed with another term, as can a database from an
+///   older server.
+pub(crate) fn pg_reread(text: &str) -> String {
+    if !text.contains("(ARRAY[") && !text.contains("((") {
+        return text.to_string();
+    }
+    let mut text = text.to_string();
+    while let Some(next) = reread_once(&text) {
+        text = next;
+    }
+    text
+}
+
+/// `text` with the first shape `pg_reread` rewrites written as it is read back, if it has one.
+fn reread_once(text: &str) -> Option<String> {
+    let t = tokenize(text, Dialect::Postgres);
+    let close = matching(&t);
+    (0..t.len()).find_map(|k| array_cast_at(text, &t, &close, k).or_else(|| flattened_at(text, &t, &close, k)))
+}
+
+fn symbol(t: &[Token], k: usize, s: &str) -> bool {
+    t.get(k).is_some_and(|t| t.kind == TokenKind::Symbol && t.text == s)
+}
+
+fn word(t: &[Token], k: usize, w: &str) -> bool {
+    t.get(k).is_some_and(|t| t.kind == TokenKind::Word && t.text.eq_ignore_ascii_case(w))
+}
+
+/// For each `(` and `[`, the index of the token that closes it.
+fn matching(t: &[Token]) -> Vec<Option<usize>> {
+    let mut close = vec![None; t.len()];
+    let mut open: Vec<usize> = Vec::new();
+    for (k, token) in t.iter().enumerate() {
+        if token.kind != TokenKind::Symbol {
+            continue;
+        }
+        match token.text.as_str() {
+            "(" | "[" => open.push(k),
+            ")" | "]" => {
+                if let Some(o) = open.pop() {
+                    if (t[o].text == "(") == (token.text == ")") {
+                        close[o] = Some(k);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    close
+}
+
+/// The tokens from `from` to `to` that are not inside a bracket of their own, by index.
+fn top_level(close: &[Option<usize>], from: usize, to: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut k = from;
+    while k < to {
+        out.push(k);
+        k = close[k].map_or(k, |c| c) + 1;
+    }
+    out
+}
+
+/// The text of each element of the `ARRAY[…]` whose `[` is at `open`.
+fn elements<'a>(text: &'a str, t: &[Token], close: &[Option<usize>], open: usize) -> Option<Vec<&'a str>> {
+    let end = close[open]?;
+    let commas: Vec<usize> = top_level(close, open + 1, end).into_iter().filter(|&k| symbol(t, k, ",")).collect();
+    let mut bounds = vec![open];
+    bounds.extend(commas);
+    bounds.push(end);
+    bounds.windows(2).map(|w| (w[0] + 1 < w[1]).then(|| text[t[w[0] + 1].start..t[w[1] - 1].end].trim())).collect()
+}
+
+/// The index past the type that starts at `first`, as the server writes one: words and quoted
+/// names, dotted, with a modifier in parentheses. It stops at a `[` or the end.
+fn type_end(t: &[Token], first: usize) -> Option<usize> {
+    let mut j = first;
+    let mut depth = 0;
+    while let Some(token) = t.get(j) {
+        match (token.kind, token.text.as_str()) {
+            (TokenKind::Symbol, "[") if depth == 0 => break,
+            (TokenKind::Symbol, "(") => depth += 1,
+            (TokenKind::Symbol, ")") if depth > 0 => depth -= 1,
+            (TokenKind::Symbol, ",") if depth > 0 => {}
+            (TokenKind::Symbol, ".") | (TokenKind::Word | TokenKind::Quoted, _) => {}
+            (TokenKind::Number, _) if depth > 0 => {}
+            _ => return None,
+        }
+        j += 1;
+    }
+    (j > first && depth == 0).then_some(j)
+}
+
+/// The elements of an `ARRAY[…]` cast to `ty[]`, each cast as the parser casts it, where the text
+/// says how. Every element of one array has one type, so a literal of a type that is no array says
+/// they are all values, each then cast to `ty` (or left, where it has that type already). Elements
+/// that are all `ARRAY[…]` have their own elements cast. Otherwise (`ARRAY[arr]`) they may be
+/// arrays themselves, which the parser casts to `ty[]`, and it is `None`.
+fn cast_elements(items: &[&str], ty: &str) -> Option<Vec<String>> {
+    let read: Vec<(Vec<Token>, Vec<Option<usize>>)> = items.iter().map(|e| {
+        let t = tokenize(e, Dialect::Postgres);
+        let close = matching(&t);
+        (t, close)
+    }).collect();
+    let value = |t: &[Token]| match t {
+        [one] => one.kind == TokenKind::Number || word(t, 0, "TRUE") || word(t, 0, "FALSE"),
+        [first, ..] => (first.kind == TokenKind::Str || word(t, 0, "NULL")) && symbol(t, 1, "::") && type_end(t, 2) == Some(t.len()),
+        [] => false,
+    };
+    if read.iter().any(|(t, _)| value(t)) {
+        // A cast goes beneath a collation: `(x COLLATE "C")` reads back as `((x)::ty COLLATE "C")`
+        // where `ty` takes a collation, and as `(x)::ty`, without it, where it doesn't. Which types
+        // take one the text says for the character types alone.
+        let collatable = ["text", "name", "bpchar", "character", "character varying"].iter().any(|c| ty == *c || ty.strip_prefix(c).is_some_and(|m| m.starts_with('(')));
+        let cast = |(e, (t, close)): (&&str, &(Vec<Token>, Vec<Option<usize>>))| {
+            let last = t.len().saturating_sub(1);
+            let collate = (symbol(t, 0, "(") && close[0] == Some(last)).then(|| top_level(close, 1, last).into_iter().find(|&k| word(t, k, "COLLATE"))).flatten();
+            match collate {
+                Some(c) if collatable && c > 1 && c + 1 < last && t[c + 1..last].iter().all(|n| matches!(n.kind, TokenKind::Word | TokenKind::Quoted) || n.text == ".") => Some(format!("(({})::{ty} COLLATE {})", &e[t[1].start..t[c - 1].end], &e[t[c + 1].start..t[last - 1].end])),
+                Some(_) => None,
+                None if e.ends_with(&format!("::{ty}")) => Some(e.to_string()),
+                None => Some(format!("({e})::{ty}")),
+            }
+        };
+        return items.iter().zip(&read).map(cast).collect();
+    }
+    items
+        .iter()
+        .zip(&read)
+        .map(|(e, (t, close))| {
+            if !(word(t, 0, "ARRAY") && symbol(t, 1, "[") && close[1] == Some(t.len() - 1)) {
+                return None;
+            }
+            Some(format!("ARRAY[{}]", cast_elements(&elements(e, t, close, 1)?, ty)?.join(", ")))
+        })
+        .collect()
+}
+
+/// `(ARRAY[e, …])::ty[]` at `k`, written as `ARRAY[(e)::ty, …]`.
+fn array_cast_at(text: &str, t: &[Token], close: &[Option<usize>], k: usize) -> Option<String> {
+    if !(symbol(t, k, "(") && word(t, k + 1, "ARRAY") && symbol(t, k + 2, "[")) {
+        return None;
+    }
+    let end = close[k + 2]?;
+    if close[k]? != end + 1 || !symbol(t, end + 2, "::") {
+        return None;
+    }
+    let first = end + 3;
+    let j = type_end(t, first)?;
+    if !(symbol(t, j, "[") && symbol(t, j + 1, "]")) {
+        return None;
+    }
+    let ty = &text[t[first].start..t[j - 1].end];
+    let items = elements(text, t, close, k + 2)?;
+    if items.is_empty() {
+        return None;
+    }
+    Some(format!("{}ARRAY[{}]{}", &text[..t[k].start], cast_elements(&items, ty)?.join(", "), &text[t[j + 1].end..]))
+}
+
+/// `((a AND b) AND c)` at `k`, written as `(a AND b AND c)`, and the same for OR.
+fn flattened_at(text: &str, t: &[Token], close: &[Option<usize>], k: usize) -> Option<String> {
+    if !(symbol(t, k, "(") && symbol(t, k + 1, "(")) {
+        return None;
+    }
+    let (end, inner) = (close[k]?, close[k + 1]?);
+    let op = ["AND", "OR"].into_iter().find(|op| word(t, inner + 1, op))?;
+    // Both are that operator's own: each joins its operands with it alone. BETWEEN, whose AND is
+    // its own, is never rendered as such in an expression, but a window's frame is.
+    let joins_with_op = |from: usize, to: usize| {
+        let top = top_level(close, from, to);
+        top.iter().any(|&i| word(t, i, op)) && !top.iter().any(|&i| ["AND", "OR", "BETWEEN"].iter().any(|w| *w != op && word(t, i, w)))
+    };
+    if inner < k + 3 || !joins_with_op(k + 2, inner) || !joins_with_op(k + 1, end) {
+        return None;
+    }
+    Some(format!("{}{}{}", &text[..t[k + 1].start], &text[t[k + 2].start..t[inner - 1].end], &text[t[inner].end..]))
 }
 
 async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
@@ -2052,6 +2240,66 @@ mod tests {
         assert_eq!(one_line(" SELECT 'a  b' AS x,\n    \"y  z\"::text\n   FROM t;"), "SELECT 'a  b' AS x, \"y  z\"::text FROM t;");
         assert_ne!(one_line("SELECT 'a  b'"), one_line("SELECT 'a b'"));
         assert_ne!(one_line("SELECT $$a  b$$"), one_line("SELECT $$a b$$"));
+    }
+
+    #[test]
+    fn a_postgres_rendering_reads_as_it_reads_back() {
+        // `status in ('open', 'closed')` on a varchar column, as a database holds it and as one
+        // made from that rendering does.
+        let source = "constraint public.items items_status_check CHECK (((status)::text = ANY ((ARRAY['open'::character varying, 'closed'::character varying])::text[])))";
+        let replayed = "constraint public.items items_status_check CHECK (((status)::text = ANY (ARRAY[('open'::character varying)::text, ('closed'::character varying)::text])))";
+        assert_eq!(pg_reread(source), replayed);
+        assert_eq!(pg_reread(replayed), replayed);
+        // NOT IN, a partial index's predicate, a modifier, a qualified quoted type, an array within
+        // the array, and an element already of the type.
+        assert_eq!(
+            pg_reread("CREATE INDEX i ON public.t USING btree (id) WHERE ((s)::text <> ALL ((ARRAY['a'::character varying, NULL::character varying])::text[]))"),
+            "CREATE INDEX i ON public.t USING btree (id) WHERE ((s)::text <> ALL (ARRAY[('a'::character varying)::text, (NULL::character varying)::text]))"
+        );
+        assert_eq!(pg_reread("(ARRAY['a'::character varying, public.vf(), (x)::text])::text[]"), "ARRAY[('a'::character varying)::text, (public.vf())::text, (x)::text]");
+        assert_eq!(pg_reread("(ARRAY['a'::character varying, (public.vf() COLLATE \"C\")])::text[]"), "ARRAY[('a'::character varying)::text, ((public.vf())::text COLLATE \"C\")]");
+        assert_eq!(pg_reread("(ARRAY[1, '2.5'::numeric(4,1)])::numeric(10,2)[]"), "ARRAY[(1)::numeric(10,2), ('2.5'::numeric(4,1))::numeric(10,2)]");
+        assert_eq!(pg_reread("(ARRAY['a'::text, true])::public.\"My Type\"[] = c"), "ARRAY[('a'::text)::public.\"My Type\", (true)::public.\"My Type\"] = c");
+        assert_eq!(pg_reread("(ARRAY[ARRAY[1, 2], ARRAY[3, '4'::text]])::text[]"), "ARRAY[ARRAY[(1)::text, (2)::text], ARRAY[(3)::text, '4'::text]]");
+        // A left-nested AND or OR is one, to any depth; a right-nested one is read as it is.
+        assert_eq!(pg_reread("CHECK ((((a > 0) AND (b > 0)) AND (c > 0)))"), "CHECK (((a > 0) AND (b > 0) AND (c > 0)))");
+        assert_eq!(pg_reread("((((a) OR (b)) OR (c)) OR d)"), "((a) OR (b) OR (c) OR d)");
+        assert_eq!(pg_reread("((a > 0) AND ((b > 0) AND (c > 0)))"), "((a > 0) AND ((b > 0) AND (c > 0)))");
+        // A row comparison of three or more columns, as the server stores it.
+        for (source, replayed) in [
+            ("CHECK ((((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e)) OR (c IS DISTINCT FROM f)))", "CHECK (((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e) OR (c IS DISTINCT FROM f)))"),
+            ("CHECK ((NOT (((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e)) OR (c IS DISTINCT FROM f))))", "CHECK ((NOT ((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e) OR (c IS DISTINCT FROM f))))"),
+            ("CHECK (((((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e)) OR (c IS DISTINCT FROM f)) AND (a > 0) AND (b > 0)))", "CHECK ((((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e) OR (c IS DISTINCT FROM f)) AND (a > 0) AND (b > 0)))"),
+            ("CHECK ((((a <> d) OR (b <> e) OR (c <> f)) OR (a IS NULL)))", "CHECK (((a <> d) OR (b <> e) OR (c <> f) OR (a IS NULL)))"),
+            (
+                "CREATE TRIGGER t_changed AFTER UPDATE OF a, b, c ON public.t FOR EACH ROW WHEN ((((old.a IS DISTINCT FROM new.a) OR (old.b IS DISTINCT FROM new.b)) OR (old.c IS DISTINCT FROM new.c))) EXECUTE FUNCTION f()",
+                "CREATE TRIGGER t_changed AFTER UPDATE OF a, b, c ON public.t FOR EACH ROW WHEN (((old.a IS DISTINCT FROM new.a) OR (old.b IS DISTINCT FROM new.b) OR (old.c IS DISTINCT FROM new.c))) EXECUTE FUNCTION f()",
+            ),
+            (
+                "CREATE INDEX t_pi ON public.t USING btree (id) WHERE (((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e)) OR (c IS DISTINCT FROM f))",
+                "CREATE INDEX t_pi ON public.t USING btree (id) WHERE ((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e) OR (c IS DISTINCT FROM f))",
+            ),
+        ] {
+            assert_eq!(pg_reread(source), replayed);
+            assert_eq!(pg_reread(replayed), replayed);
+        }
+        // Other operators, and what only looks alike, are left.
+        for same in [
+            "(((a) OR (b)) AND (c))",
+            "((a = ANY (ARRAY[1, 2])) AND (b))",
+            "(ARRAY['a'::text])",
+            "('(ARRAY[a])::text[]'::text = b)",
+            "((a) = (b))",
+            // A column or a call may be an array itself, which the parser casts to an array.
+            "COALESCE(NULL::text[], (ARRAY[arr])::text[])",
+            "(ARRAY[f(x), arr])::text[]",
+            // A collation where the type may take none, which the parser then drops.
+            "(ARRAY['1'::character varying, (vf() COLLATE \"C\")])::integer[]",
+            "(ARRAY['{a}'::character varying[]])::text[]",
+            "(f(x) OVER (ORDER BY y ROWS BETWEEN 1 PRECEDING AND CURRENT ROW))",
+        ] {
+            assert_eq!(pg_reread(same), same);
+        }
     }
 
     #[test]

@@ -74,6 +74,7 @@ pub(crate) enum Session {
     Postgres(reylo_engine::postgres::Session),
     Mysql(reylo_engine::mysql::Session),
     Sqlite(reylo_engine::sqlite::Session),
+    Clickhouse(reylo_engine::clickhouse::Session),
 }
 
 impl Session {
@@ -82,6 +83,7 @@ impl Session {
         Ok(match dialect {
             "postgres" => Session::Postgres(reylo_engine::postgres::Session::open(url).await?),
             "mysql" => Session::Mysql(reylo_engine::mysql::Session::open(url).await?),
+            "clickhouse" => Session::Clickhouse(reylo_engine::clickhouse::Session::open(url)?),
             _ => Session::Sqlite(reylo_engine::sqlite::Session::open(&project::sqlite_path(url, base).map_err(|why| Failure::Error(format!("Cannot read the SQLite URL {url}: {why}.")))?)?),
         })
     }
@@ -91,6 +93,7 @@ impl Session {
             Session::Postgres(s) => &s.version,
             Session::Mysql(s) => &s.version,
             Session::Sqlite(s) => &s.version,
+            Session::Clickhouse(s) => &s.version,
         }
     }
 
@@ -100,16 +103,17 @@ impl Session {
             Session::Postgres(s) => s.forget(),
             Session::Mysql(s) => s.forget(),
             Session::Sqlite(s) => s.forget(),
+            Session::Clickhouse(s) => s.forget(),
         }
     }
 
     /// Has the server give up on a lock after `seconds`. SQLite's analysis takes none.
-    /// Sets the session up for text an editor sends on its own: giving up on a lock after `seconds`, and read-only where parsing a statement can run code, as on Postgres. A SQLite file is opened read-only already.
+    /// Sets the session up for text an editor sends on its own: giving up on a lock after `seconds`, and read-only where parsing a statement can run code, as on Postgres. A SQLite file is opened read-only already, and ClickHouse's HTTP interface keeps no session: its description of a statement takes no lock and writes nothing.
     pub(crate) async fn for_an_editor(&mut self, seconds: u32) -> Result<(), String> {
         match self {
             Session::Postgres(s) => s.for_an_editor(seconds).await,
             Session::Mysql(s) => s.for_an_editor(seconds).await,
-            Session::Sqlite(_) => Ok(()),
+            Session::Sqlite(_) | Session::Clickhouse(_) => Ok(()),
         }
     }
 
@@ -118,6 +122,7 @@ impl Session {
             Session::Postgres(s) => s.analyze(sql).await,
             Session::Mysql(s) => s.analyze(sql).await,
             Session::Sqlite(s) => s.analyze(sql),
+            Session::Clickhouse(s) => s.analyze(sql),
         }
     }
 }
@@ -184,7 +189,7 @@ pub fn run(args: &[String]) -> i32 {
         Err(message) => return fail(&message),
     };
     let Some(dialect) = project::dialect_of(&url) else {
-        return fail(&format!("Cannot tell the database from the URL ({source}): reylo reads postgres://, postgresql://, mysql://, file: and sqlite: URLs."));
+        return fail(&format!("Cannot tell the database from the URL ({source}): reylo reads postgres://, postgresql://, mysql://, file: and sqlite: URLs, and for ClickHouse clickhouse+http:// or clickhouse+https://, the URL of its HTTP interface."));
     };
     // A relative SQLite path in a URL typed on the command line is the shell's, from the working
     // directory; one in the project's URL is from the project's root, as the type check reads it.
@@ -193,6 +198,10 @@ pub fn run(args: &[String]) -> i32 {
         if let Err(why) = project::sqlite_path(&url, &base) {
             return fail(&format!("Cannot read the SQLite URL {url} ({source}): {why}."));
         }
+    }
+    // The Rust crate runs its queries on sqlx, which has no ClickHouse driver.
+    if dialect == "clickhouse" && format == Format::Rust {
+        return fail("Cannot print a Rust module for ClickHouse: the Rust crate runs its queries on sqlx, which has no ClickHouse driver. Its types print with --format typescript.");
     }
     let settings = Settings {
         codecs: serde_json::to_value(&project.config.js.codecs).unwrap_or(Value::Null),
@@ -234,6 +243,7 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
     let engine_dialect = match dialect {
         "postgres" => Dialect::Postgres,
         "mysql" => Dialect::Mysql,
+        "clickhouse" => Dialect::Clickhouse,
         _ => Dialect::Sqlite,
     };
     let mut flagged = false;

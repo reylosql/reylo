@@ -1,0 +1,14 @@
+drop view hits;
+create table new_a_input (id integer primary key, extra blob);
+insert into new_a_input (id, extra) select id, extra from a_input;
+drop table a_input;
+alter table new_a_input rename to a_input;
+create view hits as select z_root.rowid as rowid, z_root.body from a_input join z_root on z_root.rowid % 10 = a_input.id where z_root match 'published';
+drop view z_source;
+create table new_z_notes (id integer primary key, body text, category text, search_id integer generated always as (id + 20) virtual);
+insert into new_z_notes (id, body, category) select id, body, category from z_notes;
+drop table z_notes;
+alter table new_z_notes rename to z_notes;
+create view z_source as select search_id as id, body from z_notes where category <> 'filtered';
+insert into z_root (z_root) values ('rebuild');
+insert into filtered (filtered) values ('rebuild');

@@ -40,6 +40,11 @@ DATABASE_URL=mysql://root@localhost:3306/app
 DATABASE_URL=sqlite:./app.db
 ```
 
+```sh title=".env" tab="ClickHouse" tab-group="dialect"
+# or clickhouse+https://, the URL of the HTTP interface
+DATABASE_URL=clickhouse+http://default@localhost:8123/app
+```
+
 Point it at a direct connection, not a pooler. A pooler in transaction mode, such as PgBouncer, can fail to describe a query. You can interpolate other variables from your environment to construct a connection string.
 
 ```yaml title=".reylo.yaml"

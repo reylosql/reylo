@@ -1,0 +1,1 @@
+notes body not null on conflict replace fills null with its default

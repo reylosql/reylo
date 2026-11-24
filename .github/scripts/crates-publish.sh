@@ -28,7 +28,7 @@ version=${1:?the version to publish, as the tag names it without its v}
 : "${CARGO_REGISTRY_TOKEN:?CARGO_REGISTRY_TOKEN names the crates.io token}"
 agent="reylo-release (github.com/reylosql/reylo)"
 # Each crate after those it depends on.
-crates=(reylo-engine-build reylo-sql reylo-engine-core reylo-engine-postgres reylo-engine-sqlite reylo-engine-mysql reylo-engine reylo-migrate reylo-build reylo-macros reylo reylo-cli)
+crates=(reylo-engine-build reylo-sql reylo-engine-core reylo-engine-postgres reylo-engine-sqlite reylo-engine-mysql reylo-engine-clickhouse reylo-engine reylo-migrate reylo-build reylo-macros reylo reylo-cli)
 
 metadata=$(cargo metadata --no-deps --format-version 1 --locked)
 versions=$(python3 -c '
