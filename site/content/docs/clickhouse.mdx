@@ -420,7 +420,7 @@ That holds in `VALUES`, in an `INSERT … SELECT` and in an `UPDATE`'s assignmen
 - a whole number in a float or a decimal that holds it exactly, as a `UInt32` in a `Float64` column
 - a `Float32` in a `Float64` column, and a decimal with no more digits on either side of the point
 - a `Bool` in a whole number, and a `Date` in a `Date32`
-- a `DateTime`, or a `DateTime64` of a coarser tick, in a `DateTime64`
+- a `DateTime` in a `DateTime64`, and a `DateTime64` in one of a finer tick, short of nanoseconds
 - an enum whose labels the column's enum has, at the same numbers
 - a type that takes no null, in a `Nullable` column
 - any type, in a `Dynamic` column

@@ -33,6 +33,7 @@ insert_dynamic_computed.sql: the engine refuses it
 insert_dynamic_inferred.sql: the engine refuses it
 insert_dynamic_inferred_quoted.sql: the engine refuses it
 insert_enum_number.sql: the engine refuses it
+insert_finer_nanos.sql: the engine refuses it
 insert_format.sql: the engine refuses it
 insert_function.sql: the engine refuses it
 insert_function_computed.sql: the engine refuses it

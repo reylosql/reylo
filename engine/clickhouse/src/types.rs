@@ -372,7 +372,8 @@ fn decimal_digits(t: &Named) -> Option<(u32, u32)> {
 ///   in one that has each of its labels at the same number;
 /// - a whole number in a decimal with as many digits before the point as its furthest value has;
 /// - a `Bool` in a column of whole numbers, a `DateTime` in a `DateTime64`, a `DateTime64` in
-///   one of a finer tick and a `Date` in a `Date32`, each of which the wider type holds as it is;
+///   one of a finer tick short of nanoseconds, whose range is narrower, and a `Date` in a
+///   `Date32`, each of which the wider type holds as it is;
 /// - any value in a `Dynamic`, which holds each as the type it has;
 /// - an array, a tuple or a map whose elements are each kept, a tuple's names the column's own
 ///   where both name them.
@@ -453,8 +454,12 @@ fn keeps(to: &Named, from: &Named) -> bool {
             labels(from).iter().all(|label| into.contains(label))
         }
         ("DateTime", "DateTime") => true,
-        // A tick of a coarser clock is a whole number of a finer one's.
-        ("DateTime64", "DateTime64") => from.number(0).unwrap_or(3) <= to.number(0).unwrap_or(3),
+        // A tick of a coarser clock is a whole number of a finer one's. A clock of nanoseconds
+        // ends in 2262, before the others' 2299, and an instant past its end wraps with no error.
+        ("DateTime64", "DateTime64") => {
+            let (ticks, into) = (from.number(0).unwrap_or(3), to.number(0).unwrap_or(3));
+            ticks == into || (ticks < into && into < 9)
+        }
         // A second is a tick of any finer clock, and a day of the narrower calendar one of the
         // wider: both of the wider types reach further back and further on.
         ("DateTime", "DateTime64") | ("Date", "Date32") => true,
@@ -653,7 +658,8 @@ mod tests {
             ("String", &["String", "LowCardinality(String)", "Nullable(String)"]),
             ("Nullable(String)", &["Nullable(String)", "LowCardinality(Nullable(String))"]),
             ("DateTime", &["DateTime('UTC')"]),
-            ("DateTime64(3, 'UTC')", &["DateTime64(3)", "DateTime64(3, 'Europe/Berlin')", "DateTime64(6)", "DateTime64(9, 'UTC')"]),
+            ("DateTime64(3, 'UTC')", &["DateTime64(3)", "DateTime64(3, 'Europe/Berlin')", "DateTime64(6)", "DateTime64(8, 'UTC')"]),
+            ("DateTime64(9)", &["DateTime64(9, 'UTC')"]),
             ("Decimal(9, 2)", &["Decimal32(2)"]),
             ("Tuple(Float64, Float64)", &["Point"]),
             ("Array(Tuple(a UInt8, b String))", &["Nested(a UInt8, b String)"]),
@@ -732,7 +738,7 @@ mod tests {
             ("Date", &["BFloat16", "UInt16", "DateTime", "DateTime64(3)"]),
             ("Date32", &["Date", "DateTime64(9)"]),
             ("DateTime", &["Date", "Date32"]),
-            ("DateTime64(6)", &["DateTime64(3)", "DateTime"]),
+            ("DateTime64(6)", &["DateTime64(3)", "DateTime64(9)", "DateTime"]),
             ("Enum8('a' = 1)", &["Enum8('a' = 2)", "Enum8('b' = 1)", "UInt8"]),
             ("Enum16('a' = 1000)", &["UInt8"]),
             ("IPv6", &["IPv4"]),
