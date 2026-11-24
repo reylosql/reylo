@@ -40,6 +40,16 @@ impl Flow {
     }
 }
 
+/// What a value is computed from, where it is one of them or is computed from them with
+/// arithmetic alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Operands {
+    /// The type of each parameter among them, as its stand-in has it.
+    pub parameters: Vec<String>,
+    /// The type of each other one: a column's, a constant's.
+    pub others: Vec<String>,
+}
+
 /// One of the values a choice between values may be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pick {
@@ -272,6 +282,30 @@ impl<'a> Tree<'a> {
         Some(self.children(list))
     }
 
+    /// What the node at `i` is computed from, added to `operands`, where it is an operand or an
+    /// arithmetic operator's result: a parameter's stand-in, a column or a constant, each by its
+    /// type, and the operands of each of an operator's arguments.
+    fn operands(&self, i: usize, operands: &mut Operands) -> Option<()> {
+        let text = self.nodes[i].1;
+        if let Some(parameter) = self.stand_in(i) {
+            operands.parameters.push(parameter?.to_string());
+            return Some(());
+        }
+        if let Some((_, ty, _)) = column(text) {
+            operands.others.push(ty.to_string());
+            return Some(());
+        }
+        if text.starts_with("CONSTANT id: ") {
+            operands.others.push(text.rsplit_once(", constant_value_type: ")?.1.to_string());
+            return Some(());
+        }
+        let name = text.strip_prefix("FUNCTION id: ")?.split_once("function_name: ")?.1.split(',').next()?;
+        if !matches!(name, "plus" | "minus" | "multiply" | "divide" | "modulo" | "negate" | "intDiv" | "abs") {
+            return None;
+        }
+        self.listed(i, "ARGUMENTS")?.into_iter().try_for_each(|argument| self.operands(argument, operands))
+    }
+
     /// The results of the choice between values the node at `i` is, where it is one: an `if`'s
     /// two, a `multiIf`'s after each condition and its last, and a `CASE`'s after each value it
     /// compares with and its last.
@@ -487,11 +521,30 @@ pub fn flows(lines: &[&str], constant: &dyn Fn(&str) -> bool) -> Option<Vec<Flow
     Some(flows)
 }
 
+/// What each of a SELECT's columns is computed from, where it is one operand or is computed from
+/// several with arithmetic operators alone: a sum, a difference, a product, a quotient, a
+/// remainder, a negation, an absolute value. `None` of a column anything else computes, and of
+/// every column where the lines are no one query's tree.
+pub fn operands(lines: &[&str], constant: &dyn Fn(&str) -> bool) -> Vec<Option<Operands>> {
+    let Some(tree) = Tree::read(lines, constant).filter(|tree| tree.kind(0) == "QUERY") else { return Vec::new() };
+    let computed = |item: usize| {
+        let mut operands = Operands::default();
+        tree.operands(item, &mut operands).map(|_| operands)
+    };
+    tree.listed(0, "PROJECTION").unwrap_or_default().into_iter().map(computed).collect()
+}
+
 /// The values each of a SELECT's columns is one of, where the column is a choice between values:
 /// an `if`, a `multiIf` or a `CASE`, whose results may be such choices themselves. `None` of any
-/// other column, and of every column where the lines are no one query's tree.
+/// other column, of every column where the lines are no one query's tree, and of every column of
+/// a query that adds rows of its own, whose values are no result of the choice: the rows a WITH
+/// FILL adds, and those of totals, a rollup, a cube or grouping sets.
 pub fn choices(lines: &[&str]) -> Vec<Option<Vec<Pick>>> {
     let Some(tree) = Tree::read(lines, &|_| false).filter(|tree| tree.kind(0) == "QUERY") else { return Vec::new() };
+    let adds_rows = ["is_group_by_with_totals: 1", "group_by_type: "].iter().any(|flag| tree.nodes[0].1.contains(flag)) || (0..tree.nodes.len()).any(|i| !tree.names[i] && tree.kind(i) == "SORT" && tree.nodes[i].1.contains("with_fill: 1"));
+    if adds_rows {
+        return vec![None; tree.columns(0).map_or(0, |columns| columns.len())];
+    }
     let chosen = |item: usize| {
         tree.results(item)?;
         let mut picks = Vec::new();
@@ -956,6 +1009,37 @@ mod tests {
         // Another function is no choice, and neither is what is no query's tree.
         assert_eq!(read(&chosen("concat", &[text(6, "paid"), text(7, "new")])), [None]);
         assert!(choices(&["Expression"]).is_empty());
+        // A query that adds rows of its own gives values that are no result of the choice: a filled row's is the empty text.
+        let labels = chosen("if", &[condition(5), text(6, "paid"), text(7, "new")]);
+        for (from, to) in [("QUERY id: 0\n", "QUERY id: 0, is_group_by_with_totals: 1\n"), ("QUERY id: 0\n", "QUERY id: 0, group_by_type: rollup\n"), ("  JOIN TREE", "  ORDER BY\n    LIST id: 50, nodes: 1\n      SORT id: 51, sort_direction: ASCENDING, with_fill: 1\n        EXPRESSION\n          COLUMN id: 52, column_name: number, result_type: UInt64, source_id: 3\n  JOIN TREE")] {
+            assert_eq!(choices(&query(&labels).replacen(from, to, 1).lines().collect::<Vec<_>>()), [None], "{to}");
+        }
+    }
+
+    #[test]
+    fn a_column_s_operands_are_what_arithmetic_alone_computes_it_from() {
+        let query = |ty: &str, item: &str| format!("QUERY id: 0\n  PROJECTION COLUMNS\n    c0 {ty}\n  PROJECTION\n    LIST id: 1, nodes: 1\n{item}\n  JOIN TREE\n    TABLE id: 3, table_name: app.t");
+        let read = |ty: &str, item: &str| operands(&query(ty, item).lines().collect::<Vec<_>>(), &|ty| ty == "UInt64");
+        let of = |parameters: &[&str], others: &[&str]| Some(Operands { parameters: parameters.iter().map(|ty| ty.to_string()).collect(), others: others.iter().map(|ty| ty.to_string()).collect() });
+        // A parameter, a column and a constant are each an operand, by its type.
+        let stand_in = "FUNCTION id: 10, function_name: materialize, function_type: ordinary, result_type: UInt8";
+        let column = "COLUMN id: 11, column_name: n, result_type: UInt32, source_id: 3";
+        let constant = "CONSTANT id: 12, constant_value: UInt64_3, constant_value_type: UInt8";
+        assert_eq!(read("UInt8", &format!("      {stand_in}")), [of(&["UInt8"], &[])]);
+        assert_eq!(read("UInt32", &format!("      {column}")), [of(&[], &["UInt32"])]);
+        // An operator's operands are those of its arguments, an operator's among them included.
+        let operator = |name: &str, arguments: &[String]| format!("      FUNCTION id: 2, function_name: {name}, function_type: ordinary, result_type: UInt64\n        ARGUMENTS\n          LIST id: 4, nodes: {}\n{}", arguments.len(), arguments.join("\n"));
+        let inner = format!("            FUNCTION id: 20, function_name: multiply, function_type: ordinary, result_type: UInt16\n              ARGUMENTS\n                LIST id: 21, nodes: 2\n                  {stand_in}\n                  {constant}");
+        assert_eq!(read("UInt64", &operator("plus", &[format!("            {column}"), inner.clone()])), [of(&["UInt8"], &["UInt32", "UInt8"])]);
+        // A parameter written as a constant is its conversion to its type.
+        let converted = "            FUNCTION id: 30, function_name: CAST, function_type: ordinary, result_type: UInt64";
+        assert_eq!(read("UInt64", &operator("minus", &[format!("            {column}"), converted.to_string()])), [of(&["UInt64"], &["UInt32"])]);
+        // Any other function computes what is no arithmetic on its arguments: a choice, a hash, a conversion.
+        for name in ["if", "cityHash64", "toUInt64", "length"] {
+            assert_eq!(read("UInt64", &operator(name, &[format!("            {column}"), inner.clone()])), [None], "{name}");
+        }
+        assert_eq!(read("UInt64", &operator("plus", &[format!("            {column}"), converted.replace("CAST", "toUInt64")])), [None]);
+        assert!(operands(&["Expression"], &|_| false).is_empty());
     }
 
     #[test]

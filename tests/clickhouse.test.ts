@@ -659,7 +659,7 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
       "set_text.sql": "UPDATE orders SET user_id = 'abc' WHERE id = {id:UInt64}",
       // A text the statement converts to its column's type, as the docs' own example does.
       "placed.sql": "INSERT INTO users (id, name, created) VALUES ({id:UInt64}, 'p', {created:String}::DateTime64(3, 'UTC'))",
-      // A sum is wider than what it adds: it stands where it is a number of the column's kind and each parameter it adds has a type the column keeps.
+      // A sum is wider than what it adds: it stands where the column keeps the type of each thing it adds, and it is a number of the column's kind.
       "sum.sql": "UPDATE users SET age = age + {by:UInt8} WHERE id = {id:UInt64}",
       "sum_values.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 's', {a:UInt8} + {b:UInt8})",
       "sum_wide.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 's', {a:UInt8} + {b:UInt16})",
@@ -667,6 +667,11 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
       "quotient.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 's', {a:UInt8} / {b:UInt8})",
       "joined.sql": "INSERT INTO users (id, name, age) VALUES ({id:UInt64}, 's', concat(toString({a:UInt8}), toString({b:UInt8})))",
       "variant_sum.sql": "INSERT INTO things (id, v) VALUES ({id:UInt64}, {a:UInt64} - {b:UInt64})",
+      // A value a parameter only chooses is no sum, and neither is one that adds a column the target does not keep.
+      "chosen.sql": "INSERT INTO users (id, name, age) SELECT {id:UInt64}, 's', if({take:Bool}, id, 0) FROM users",
+      "sum_column.sql": "UPDATE users SET age = id + {by:UInt8} WHERE id = {id:UInt64}",
+      // A query that adds rows of its own gives a label's column values that are no result of the choice.
+      "label_filled.sql": "INSERT INTO users (id, role) SELECT number, if({admin:Bool}, 'admin', 'member') FROM numbers(3) WHERE number != 1 ORDER BY number WITH FILL",
       // A text that is one of an enum's labels whichever its parameters choose is the label.
       "label.sql": "INSERT INTO users (id, name, role) VALUES ({id:UInt64}, 'l', if({admin:Bool}, 'admin', 'member'))",
       "label_set.sql": "UPDATE users SET role = multiIf({level:UInt8} > 8, 'admin', 'member') WHERE id = {id:UInt64}",
@@ -688,6 +693,9 @@ test("ClickHouse: a write returns no rows, and is checked against its table", { 
     assert.deepEqual(marked(files["quotient.sql"], found["quotient.sql"]!.diagnostics), [[converted("Float64", "UInt8"), "{a:UInt8} / {b:UInt8}"]]);
     assert.deepEqual(marked(files["joined.sql"], found["joined.sql"]!.diagnostics), [[converted("String", "UInt8"), "concat(toString({a:UInt8}), toString({b:UInt8}))"]]);
     assert.deepEqual(marked(files["variant_sum.sql"], found["variant_sum.sql"]!.diagnostics), [["This value of the type Int64 depends on a parameter and is written to the column v, of the type Variant(String, UInt64). ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Give the value one of the types the column holds, other than a text: declare its parameters so, or convert it in the statement.", "{a:UInt64} - {b:UInt64}"]]);
+    assert.deepEqual(marked(files["chosen.sql"], found["chosen.sql"]!.diagnostics), [["The statement writes a value of the type UInt64 that depends on a parameter to the column age, of the type UInt8. ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Convert the value in the statement, as CAST(… AS UInt8) does.", files["chosen.sql"]]]);
+    assert.deepEqual(marked(files["sum_column.sql"], found["sum_column.sql"]!.diagnostics), [[computed("{by:UInt8}", "UInt64", "age", "UInt8", "ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Convert the value in the statement, as CAST(… AS UInt8) does."), "{by:UInt8}"]]);
+    assert.deepEqual(marked(files["label_filled.sql"], found["label_filled.sql"]!.diagnostics), [[computed("{admin:Bool}", "String", "role", "Enum8('admin' = 1, 'member' = 2)", "ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Convert the value in the statement, as CAST(… AS Enum8('admin' = 1, 'member' = 2)) does."), "{admin:Bool}"]]);
     // A parameter that could not be of the column's kind is none a declaration changes.
     assert.deepEqual(marked(files["label_text.sql"], found["label_text.sql"]!.diagnostics), [[computed("{admin:Bool}", "String", "role", "Enum8('admin' = 1, 'member' = 2)", "ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Convert the value in the statement, as CAST(… AS Enum8('admin' = 1, 'member' = 2)) does."), "{admin:Bool}"]]);
     assert.deepEqual(marked(files["null_computed.sql"], found["null_computed.sql"]!.diagnostics), [[computed("{age:UInt8}", "Nullable(UInt8)", "age", "UInt8", "The column holds no NULL, and an INSERT writes the column's default value in place of one, with no error unless a setting asks for one. Write what a NULL becomes in the statement, as ifNull(…, …) does."), "{age:UInt8}"]]);

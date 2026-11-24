@@ -53,7 +53,7 @@
 
 use crate::api::{Analysis, Column, Diagnostic, Param, Scope};
 use crate::host::{as_str, Host, Lazy};
-use crate::tree::{Flow, Pick};
+use crate::tree::{Flow, Operands, Pick};
 use crate::types::{self, Arg, Named};
 use reylo_engine_core::analysis::{self, ResultTarget};
 use reylo_engine_core::api::DbError;
@@ -1149,6 +1149,8 @@ struct Held {
     /// The type of each parameter the value is computed from, where the server's tree says each
     /// and the server read none of them as a constant.
     on: Option<Vec<Named>>,
+    /// What the value is computed from, where arithmetic alone computes it.
+    operands: Option<Operands>,
     /// The values the value is one of, where it is a choice between values.
     choices: Option<Vec<Pick>>,
 }
@@ -1159,6 +1161,8 @@ struct Told {
     ty: String,
     /// The parameters the value depends on.
     flow: Flow,
+    /// What it is computed from, where arithmetic alone computes it.
+    operands: Option<Operands>,
     /// The values it is one of, where it is a choice between values.
     choices: Option<Vec<Pick>>,
 }
@@ -1186,13 +1190,14 @@ struct Told {
 /// converts itself, whose type is the one it names.
 ///
 /// A number of a type the column does not keep still stands where no declaration would change
-/// that: it is a number of the column's kind ([`types::of_one_arithmetic`]), and each parameter
-/// it is computed from has a type the column keeps. What the column is given is then ClickHouse's
-/// arithmetic on values the column holds, as it is with constants in their place: a sum is of a
-/// wider type than what it adds. A value of another kind is not such a number, a text that the
-/// column would read or a float in a column of whole numbers, and neither is one that may be
-/// NULL where the column holds none. And a text that is one of an enum's labels whichever its
-/// parameters choose, an `if` between two of them, is the label ([`crate::tree::choices`]).
+/// that: arithmetic operators alone compute it, from parameters, columns and constants whose
+/// types the column each keeps ([`crate::tree::operands`]), and it is a number of the column's
+/// kind ([`types::of_one_arithmetic`]). What the column is given is then ClickHouse's arithmetic
+/// on values the column holds: a sum is of a wider type than what it adds. A value anything else
+/// computes is not such a number, one a parameter only chooses or a hash, and neither is one of
+/// another kind, a float in a column of whole numbers, nor one that may be NULL where the column
+/// holds none. And a text that is one of an enum's labels whichever its parameters choose, an
+/// `if` between two of them, is the label ([`crate::tree::choices`]).
 ///
 /// Where the server takes the statement only with a parameter a constant, it has read that
 /// parameter's value, and a type may be another with another value, one no value tried here
@@ -1423,7 +1428,8 @@ fn write(sql: &str, lexed: &Lexed, parameters: &Parameters, body: &str, asked: &
         };
         // A parameter written as a constant is a conversion to its type, as the tree names it.
         let constants: Vec<String> = (0..choice.len()).filter(|&k| choice[k].is_some()).map(|k| parameters.types[k].to_string()).collect();
-        let told = lines.as_ref().and_then(|lines| crate::tree::flows(lines, &|ty| types::parse(ty).is_none_or(|ty| constants.contains(&ty.to_string()))));
+        let constant = |ty: &str| types::parse(ty).is_none_or(|ty| constants.contains(&ty.to_string()));
+        let told = lines.as_ref().and_then(|lines| crate::tree::flows(lines, &constant));
         let flows: Vec<Flow> = if computed.is_empty() {
             told?
         } else {
@@ -1440,7 +1446,8 @@ fn write(sql: &str, lexed: &Lexed, parameters: &Parameters, body: &str, asked: &
             (false, _) => None,
         };
         let chosen = lines.as_ref().map(|lines| crate::tree::choices(lines)).filter(|chosen| chosen.len() == rows.len()).unwrap_or_else(|| vec![None; rows.len()]);
-        (flows.len() == rows.len()).then(|| (rows.iter().zip(flows).zip(chosen).map(|((row, flow), choices)| Told { ty: text(row, 1), flow, choices }).collect(), converted))
+        let computed_from = lines.as_ref().map(|lines| crate::tree::operands(lines, &constant)).filter(|operands| operands.len() == rows.len()).unwrap_or_else(|| vec![None; rows.len()]);
+        (flows.len() == rows.len()).then(|| (rows.iter().zip(flows).zip(chosen).zip(computed_from).map(|(((row, flow), choices), operands)| Told { ty: text(row, 1), flow, operands, choices }).collect(), converted))
     };
     // Why the server's answer says nothing, where it does not.
     let mut untyped: Option<Option<DbError>> = None;
@@ -1484,7 +1491,7 @@ fn write(sql: &str, lexed: &Lexed, parameters: &Parameters, body: &str, asked: &
     };
     // A parameter alone in a row of VALUES has the type it declares.
     for &(place, k) in written.iter().flat_map(|w| &w.written) {
-        held.extend(column_at(place).map(|column| Held { column, ty: Some(parameters.types[k].clone()), alone: Some(k), at: Spot::Parameter(k), fixed: true, converted: false, on: None, choices: None }));
+        held.extend(column_at(place).map(|column| Held { column, ty: Some(parameters.types[k].clone()), alone: Some(k), at: Spot::Parameter(k), fixed: true, converted: false, on: None, operands: None, choices: None }));
     }
     // The parameters a stretch of the statement's text holds.
     let inside = |start: usize, end: usize| -> Vec<usize> { (0..lexed.placeholders.len()).filter(|&k| start <= lexed.placeholders[k].start && lexed.placeholders[k].end <= end).collect() };
@@ -1514,6 +1521,7 @@ fn write(sql: &str, lexed: &Lexed, parameters: &Parameters, body: &str, asked: &
                 let of: Option<Vec<Named>> = told.flow.of.iter().map(|ty| types::parse(ty)).collect();
                 of.map(|of| of.into_iter().chain(written.iter().flat_map(|&(start, end)| inside(start, end)).map(|k| parameters.types[k].clone())).collect())
             },
+            operands: told.operands.clone(),
             choices: told.choices.clone(),
         };
         if let Some(start) = select_from {
@@ -1566,15 +1574,17 @@ fn write(sql: &str, lexed: &Lexed, parameters: &Parameters, body: &str, asked: &
     };
     let (inferred, keeps_nullable) = (infers && on(INFERS), converts && on(KEEPS_NULLABLE));
     // A value of a type the column does not keep that stands all the same, where it is of the
-    // type `ty`: a number of the column's kind computed from parameters whose types the column
-    // each keeps; and a text that is one of an enum's labels whichever its parameters choose,
-    // each a label the statement writes or a value of an enum the column keeps. Neither where
-    // the value may be NULL and the column holds none.
+    // type `ty`: a number of the column's kind that arithmetic alone computes, from operands and
+    // parameters whose types the column each keeps; and a text that is one of an enum's labels
+    // whichever its parameters choose, each a label the statement writes or a value of an enum
+    // the column keeps. Neither where the value may be NULL and the column holds none.
     let stands = |value: &Held, ty: &Named, column: &Named| {
         if types::never_null(ty).is_some() && !types::takes_null(column) {
             return false;
         }
-        let by_parameters = types::of_one_arithmetic(ty, column) && value.on.as_ref().is_some_and(|on| !on.is_empty() && on.iter().all(|of| types::kept(of, column)));
+        let kept = |of: &String| types::parse(of).is_some_and(|of| types::kept(&of, column));
+        let by_arithmetic = value.operands.as_ref().is_some_and(|operands| operands.parameters.iter().chain(&operands.others).all(kept));
+        let by_parameters = types::of_one_arithmetic(ty, column) && by_arithmetic && value.on.as_ref().is_some_and(|on| !on.is_empty() && on.iter().all(|of| types::kept(of, column)));
         let labels = |pick: &Pick| match pick {
             Pick::Text(text) => types::labelled(std::slice::from_ref(text), column),
             // A NULL is one the column holds, or no part of a type that has none.
@@ -1600,7 +1610,7 @@ fn write(sql: &str, lexed: &Lexed, parameters: &Parameters, body: &str, asked: &
                 let null_alone = !types::takes_null(&column) && types::never_null(ty).is_some_and(|rest| types::kept(&rest, &column) || stands(value, &rest, &column));
                 unkept.push(match value.alone {
                     Some(k) => not_kept(sql, lexed, parameters, k, &name, &column, insert),
-                    None => not_kept_value(sql, lexed, value.at, ty, value.on.as_deref(), null_alone, &name, &column, insert),
+                    None => not_kept_value(sql, lexed, value.at, ty, value.on.as_deref(), value.operands.as_ref(), null_alone, &name, &column, insert),
                 });
             }
         }
@@ -1746,24 +1756,30 @@ fn refused_value(sql: &str, lexed: &Lexed, spot: Spot, value: Option<&Named>, to
 /// The refusal of a value the statement computes with a parameter, written to a column that does
 /// not keep its type's every value.
 ///
-/// `on` is the type of each parameter the value is computed from, where the server says each.
-/// Declaring them as types the column keeps is a way out where the value's type follows theirs,
-/// and a conversion in the statement the one way otherwise. `null_alone` says that all the column does not keep of
-/// the value is its NULL.
-fn not_kept_value(sql: &str, lexed: &Lexed, spot: Spot, value: &Named, on: Option<&[Named]>, null_alone: bool, name: &str, column: &Named, insert: bool) -> Diagnostic {
+/// `on` is the type of each parameter the value is computed from, where the server says each,
+/// and `operands` what it is computed from, where arithmetic alone computes it. Declaring the
+/// parameters as types the column keeps is a way out where the value's type follows theirs, and
+/// a conversion in the statement the one way otherwise. `null_alone` says that all the column
+/// does not keep of the value is its NULL.
+fn not_kept_value(sql: &str, lexed: &Lexed, spot: Spot, value: &Named, on: Option<&[Named]>, operands: Option<&Operands>, null_alone: bool, name: &str, column: &Named, insert: bool) -> Diagnostic {
     let into = types::plain(column);
     let text = matches!(types::plain(value).bare().name.as_str(), "String" | "FixedString");
+    let others = |holds: &dyn Fn(&Named) -> bool| operands.is_some_and(|operands| operands.others.iter().all(|of| types::parse(of).is_some_and(|of| holds(&of))));
     // A parameter whose type the value follows: one of the value's own type, which the value is
-    // or passes on, and a number where the value is a number of the column's kind.
-    let follows = |of: &Named| types::plain(of) == types::plain(value) || (types::of_one_arithmetic(value, column) && matches!(types::plain(of).bare(), of if of.name == "Bool" || of.is_number()));
+    // or passes on, and a number in a number of the column's kind that arithmetic computes from
+    // it and from what the column keeps.
+    let summed = types::of_one_arithmetic(value, column) && others(&|of| types::kept(of, column));
+    let follows = |of: &Named| types::plain(of) == types::plain(value) || (summed && matches!(types::plain(of).bare(), of if of.name == "Bool" || of.is_number()));
     // Each parameter of a type the column does not keep is one a declaration changes the value with.
     let declared = on.is_some_and(|on| {
         let other: Vec<&Named> = on.iter().filter(|of| !types::kept(of, column)).collect();
         !other.is_empty() && other.into_iter().all(follows)
     });
     let why = if null_alone {
-        // A parameter that may be NULL is what a declaration changes.
-        let declare = if on.is_some_and(|on| on.iter().any(|of| types::never_null(of).is_some())) { "Declare each parameter it is computed from as a type that is never NULL, or write" } else { "Write" };
+        // A NULL is a parameter's own where arithmetic alone computes the value, from nothing
+        // else that may be NULL: declaring each parameter as a type that has none leaves none.
+        let own = on.is_some_and(|on| on.iter().any(|of| types::never_null(of).is_some())) && others(&|of| types::never_null(of).is_none());
+        let declare = if own { "Declare each parameter it is computed from as a type that is never NULL, or write" } else { "Write" };
         format!("{} {declare} what a NULL becomes in the statement, as ifNull(…, …) does.", nulls(insert))
     } else if into.name == "Variant" && text {
         READS_TEXT.to_string()
@@ -2742,6 +2758,11 @@ mod tests {
     /// stand-in of each of `on`'s types, a parameter's own stand-in where it is of the value's
     /// type alone, or a table's column where it has none.
     fn computed_from(i: usize, ty: &str, on: &[&str]) -> String {
+        computed_with(i, "plus", ty, on)
+    }
+
+    /// The same, the function that computes the value from its stand-ins by its name.
+    fn computed_with(i: usize, name: &str, ty: &str, on: &[&str]) -> String {
         let id = (i + 1) * 10;
         let stand_in = |id: usize, ty: &str, indent: usize| format!("{:indent$}FUNCTION id: {id}, function_name: materialize, function_type: ordinary, result_type: {ty}", "");
         match on {
@@ -2749,7 +2770,7 @@ mod tests {
             [own] if *own == ty => stand_in(id, ty, 6),
             _ => {
                 let stand_ins: Vec<String> = on.iter().enumerate().map(|(k, of)| stand_in(id + 2 + k, of, 12)).collect();
-                format!("      FUNCTION id: {id}, function_name: plus, function_type: ordinary, result_type: {ty}\n        ARGUMENTS\n          LIST id: {}, nodes: {}\n{}", id + 1, on.len(), stand_ins.join("\n"))
+                format!("      FUNCTION id: {id}, function_name: {name}, function_type: ordinary, result_type: {ty}\n        ARGUMENTS\n          LIST id: {}, nodes: {}\n{}", id + 1, on.len(), stand_ins.join("\n"))
             }
         }
     }
@@ -3034,9 +3055,8 @@ mod tests {
         };
         let refused = |sql: &str, values: Vec<(&'static str, String)>| run(sql, &server(values)).diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>();
         let converts = "ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error.";
-        // A sum is wider than what it adds. Where it is a number of the column's kind and each parameter
-        // it is computed from has a type the column keeps, the sum is ClickHouse's arithmetic, as with
-        // constants in their place.
+        // A sum is wider than what it adds. Where arithmetic alone computes it, from what the column
+        // keeps the type of, and it is a number of the column's kind, the sum is ClickHouse's arithmetic.
         assert!(refused("UPDATE t SET n = n + {by:UInt8} WHERE id = 1", vec![("UInt16", computed_from(0, "UInt16", &["UInt8"]))]).is_empty());
         assert!(refused("INSERT INTO t (id, n) VALUES ({i:UInt8}, {a:UInt8} * {b:UInt8})", vec![("UInt16", computed_from(0, "UInt16", &["UInt8", "UInt8"]))]).is_empty());
         assert!(refused("INSERT INTO t (id, n) SELECT 1, {a:UInt8} + 1", vec![("UInt8", computed_from(0, "UInt8", &[])), ("UInt16", computed_from(1, "UInt16", &["UInt8"]))]).is_empty());
@@ -3046,7 +3066,17 @@ mod tests {
         let passed = refused("INSERT INTO t (id, name) SELECT 1, {at:DateTime} FROM t WHERE id = {i:UInt8}", vec![("UInt8", computed_from(0, "UInt8", &[])), ("DateTime", computed_from(1, "DateTime", &["DateTime"]))]);
         assert_eq!(passed, [format!("The statement writes a value of the type DateTime that depends on a parameter to the column name, of the type String. {converts} Give each parameter the value is computed from a type the column keeps, or convert the value in the statement, as CAST(… AS String) does.")]);
         // A parameter that could not be of the column's kind is none a declaration changes: the statement converts the value.
-        assert_eq!(refused("UPDATE t SET n = length({s:String}) WHERE id = 1", vec![("UInt64", computed_from(0, "UInt64", &["String"]))]), [format!("{{s:String}} is in a value of the type UInt64 that is written to the column n, of the type UInt8. {converts} Convert the value in the statement, as CAST(… AS UInt8) does.")]);
+        assert_eq!(refused("UPDATE t SET n = length({s:String}) WHERE id = 1", vec![("UInt64", computed_with(0, "length", "UInt64", &["String"]))]), [format!("{{s:String}} is in a value of the type UInt64 that is written to the column n, of the type UInt8. {converts} Convert the value in the statement, as CAST(… AS UInt8) does.")]);
+        // What anything but arithmetic computes is no sum, whatever its parameters are: a hash, and a value a parameter only chooses.
+        for (sql, name) in [("UPDATE t SET n = cityHash64({a:UInt8}) WHERE id = 1", "cityHash64"), ("UPDATE t SET n = if({a:UInt8} = 1, 1000, 0) WHERE id = 1", "if")] {
+            assert_eq!(refused(sql, vec![("UInt64", computed_with(0, name, "UInt64", &["UInt8"]))]), [format!("{{a:UInt8}} is in a value of the type UInt64 that is written to the column n, of the type UInt8. {converts} Convert the value in the statement, as CAST(… AS UInt8) does.")], "{sql}");
+        }
+        // And neither is a sum with a column or a constant of a type the column does not keep.
+        let sum = |operand: &str| format!("      FUNCTION id: 10, function_name: plus, function_type: ordinary, result_type: UInt64\n        ARGUMENTS\n          LIST id: 11, nodes: 2\n            {operand}\n            FUNCTION id: 13, function_name: materialize, function_type: ordinary, result_type: UInt8");
+        assert!(refused("UPDATE t SET n = id + {by:UInt8} WHERE id = 1", vec![("UInt64", sum("COLUMN id: 12, column_name: id, result_type: UInt8, source_id: 3"))]).is_empty());
+        for operand in ["COLUMN id: 12, column_name: big, result_type: UInt64, source_id: 3", "CONSTANT id: 12, constant_value: UInt64_1000, constant_value_type: UInt16"] {
+            assert_eq!(refused("UPDATE t SET n = big + {by:UInt8} WHERE id = 1", vec![("UInt64", sum(operand))]), [format!("{{by:UInt8}} is in a value of the type UInt64 that is written to the column n, of the type UInt8. {converts} Convert the value in the statement, as CAST(… AS UInt8) does.")], "{operand}");
+        }
         // A parameter the value's own text holds is one it is computed from, whatever the tree says of it.
         assert_eq!(refused("INSERT INTO t (id, n) VALUES ({i:UInt8}, {a:UInt8} * {b:UInt16})", vec![("UInt32", computed_from(0, "UInt32", &["UInt8"]))]).len(), 1);
         assert_eq!(refused("UPDATE t SET n = n + {a:UInt8} + {b:UInt16} WHERE id = 1", vec![("UInt32", computed_from(0, "UInt32", &["UInt8"]))]).len(), 1);
@@ -3060,8 +3090,8 @@ mod tests {
         let signed = refused("INSERT INTO t (id, v) VALUES ({i:UInt8}, {a:UInt64} - {b:UInt64})", vec![("Int64", computed_from(0, "Int64", &["UInt64", "UInt64"]))]);
         assert!(signed.len() == 1 && signed[0].ends_with("Give the value one of the types the column holds, other than a text: declare its parameters so, or convert it in the statement."), "{signed:?}");
         // A value of another kind is no number the column's arithmetic gives: a text the column would read, a float in a column of whole numbers.
-        for (sql, ty) in [("INSERT INTO t (id, n) VALUES ({i:UInt8}, concat(toString({a:UInt8}), toString({b:UInt8})))", "String"), ("INSERT INTO t (id, n) VALUES ({i:UInt8}, {a:UInt8} / {b:UInt8})", "Float64")] {
-            assert_eq!(refused(sql, vec![(ty, computed_from(0, ty, &["UInt8", "UInt8"]))]), [format!("This value of the type {ty} depends on a parameter and is written to the column n, of the type UInt8. {converts} Convert the value in the statement, as CAST(… AS UInt8) does.")], "{sql}");
+        for (sql, name, ty) in [("INSERT INTO t (id, n) VALUES ({i:UInt8}, concat(toString({a:UInt8}), toString({b:UInt8})))", "concat", "String"), ("INSERT INTO t (id, n) VALUES ({i:UInt8}, {a:UInt8} / {b:UInt8})", "divide", "Float64")] {
+            assert_eq!(refused(sql, vec![(ty, computed_with(0, name, ty, &["UInt8", "UInt8"]))]), [format!("This value of the type {ty} depends on a parameter and is written to the column n, of the type UInt8. {converts} Convert the value in the statement, as CAST(… AS UInt8) does.")], "{sql}");
         }
         // A text that is one of the enum's labels whichever its parameters choose is the label.
         for sql in ["INSERT INTO t (id, role) VALUES ({i:UInt8}, if({paid:Bool}, 'paid', 'new'))", "UPDATE t SET role = if({paid:Bool}, 'paid', 'new') WHERE id = 1"] {
@@ -3085,7 +3115,9 @@ mod tests {
         let declare = "Declare the parameter as a type that is never NULL, {s:String}, or write what a NULL becomes in the statement, as ifNull({s:Nullable(String)}, …) does.";
         assert_eq!(refused("INSERT INTO t (id, name) VALUES ({i:UInt8}, {s:Nullable(String)})", Vec::new()), [format!("{null} an INSERT writes the column's default value in place of one, with no error unless a setting asks for one. {declare}")]);
         assert_eq!(refused("UPDATE t SET name = {s:Nullable(String)} WHERE id = 1", vec![("Nullable(String)", computed_from(0, "Nullable(String)", &["Nullable(String)"]))]), [format!("{null} an UPDATE that writes one fails. {declare}")]);
-        // A value computed from a parameter that may be NULL is one a declaration changes, and one of parameters that are never NULL the statement's own.
+        // A value computed from a parameter that may be NULL is one a declaration changes where arithmetic
+        // alone computes it, and a NULL the statement makes is its own, whatever its parameters are.
+        assert_eq!(refused("UPDATE t SET name = nullIf({s:Nullable(String)}, {none:String}) WHERE id = 1", vec![("Nullable(String)", computed_with(0, "nullIf", "Nullable(String)", &["Nullable(String)", "String"]))]), ["This value of the type Nullable(String) depends on a parameter and is written to the column name, of the type String. The column holds no NULL, and an UPDATE that writes one fails. Write what a NULL becomes in the statement, as ifNull(…, …) does."]);
         assert_eq!(refused("UPDATE t SET n = abs({x:Nullable(Int8)}) WHERE id = 1", vec![("Nullable(UInt8)", computed_from(0, "Nullable(UInt8)", &["Nullable(Int8)"]))]), ["{x:Nullable(Int8)} is in a value of the type Nullable(UInt8) that is written to the column n, of the type UInt8. The column holds no NULL, and an UPDATE that writes one fails. Declare each parameter it is computed from as a type that is never NULL, or write what a NULL becomes in the statement, as ifNull(…, …) does."]);
         // A value that may be NULL is held as one whatever its parameters are: a sum that may be NULL too, whose NULL is all the column does not keep.
         let written = "The column holds no NULL, and an INSERT writes the column's default value in place of one, with no error unless a setting asks for one. Write what a NULL becomes in the statement, as ifNull(…, …) does.";

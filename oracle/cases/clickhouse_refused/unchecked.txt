@@ -5,6 +5,7 @@ alter_update_array_null.sql: the engine refuses it
 alter_update_computed.sql: the engine refuses it
 alter_update_unknown_column.sql: the engine refuses it
 alter_update_wide.sql: the engine refuses it
+alter_update_wide_operand.sql: the engine refuses it
 cast_target.sql: the engine refuses it
 command.sql: the engine refuses it
 date_trunc_unit.sql: the engine refuses it
@@ -24,6 +25,7 @@ insert_array_of.sql: the engine refuses it
 insert_branch_wide.sql: the engine refuses it
 insert_cast_computed.sql: the engine refuses it
 insert_cast_nullable.sql: the engine refuses it
+insert_chosen_wide.sql: the engine refuses it
 insert_commented.sql: the engine refuses it
 insert_computed.sql: the engine refuses it
 insert_constant_element.sql: the engine refuses it
@@ -38,9 +40,12 @@ insert_finer_nanos.sql: the engine refuses it
 insert_format.sql: the engine refuses it
 insert_function.sql: the engine refuses it
 insert_function_computed.sql: the engine refuses it
+insert_hash.sql: the engine refuses it
 insert_interpolate.sql: the engine refuses it
 insert_label_computed.sql: the engine refuses it
+insert_label_fill.sql: the engine refuses it
 insert_label_text.sql: the engine refuses it
+insert_label_totals.sql: the engine refuses it
 insert_map_of.sql: the engine refuses it
 insert_name_break.sql: the engine refuses it
 insert_name_escape.sql: the engine refuses it

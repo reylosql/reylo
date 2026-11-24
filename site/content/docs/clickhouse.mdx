@@ -414,7 +414,7 @@ INSERT INTO orders (id, user_id, total, placed_at)
 VALUES ({id:UInt64}, {user:UInt64}, {total:Decimal(12, 2)} * 1.2, now64(3))
 ```
 
-A sum or a product has a wider type than its operands. It passes where the column keeps each parameter's type:
+A sum or a product has a wider type than its operands. It passes where the column keeps each operand's type:
 
 ```sql tab="ch_add_scaled.sql" dialect="clickhouse"
 INSERT INTO orders (id, user_id, total, placed_at)
