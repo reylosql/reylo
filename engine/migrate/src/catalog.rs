@@ -796,7 +796,7 @@ fn cast_elements(items: &[&str], ty: &str) -> Option<Vec<String>> {
             let last = t.len().saturating_sub(1);
             let collate = (symbol(t, 0, "(") && close[0] == Some(last)).then(|| top_level(close, 1, last).into_iter().find(|&k| word(t, k, "COLLATE"))).flatten();
             match collate {
-                Some(c) if c > 1 && type_end(t, c + 1) == Some(last) => format!("(({})::{ty} COLLATE {})", &e[t[1].start..t[c - 1].end], &e[t[c + 1].start..t[last - 1].end]),
+                Some(c) if c > 1 && c + 1 < last && t[c + 1..last].iter().all(|n| matches!(n.kind, TokenKind::Word | TokenKind::Quoted) || n.text == ".") => format!("(({})::{ty} COLLATE {})", &e[t[1].start..t[c - 1].end], &e[t[c + 1].start..t[last - 1].end]),
                 _ if e.ends_with(&format!("::{ty}")) => e.to_string(),
                 _ => format!("({e})::{ty}"),
             }
