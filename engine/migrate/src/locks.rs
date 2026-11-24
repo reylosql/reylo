@@ -550,8 +550,9 @@ struct Ahead {
     /// Of those, the ones set to `nextval` of a sequence: table, column and the sequence's name.
     fed: BTreeSet<(String, String, String)>,
     indexes: BTreeSet<String>,
-    /// The constraints dropped, table and name: a key takes its index with it, and a partitioned
-    /// table's key its partitions' too, which the catalog names before the file runs.
+    /// The constraints dropped, table (as the catalog named it before the file ran, through any
+    /// rename ahead) and name: a key takes its index with it, and a partitioned table's key its
+    /// partitions' too, which the catalog names before the file runs.
     keys: BTreeSet<(String, String)>,
     owned: BTreeSet<String>,
 }
@@ -591,8 +592,16 @@ fn ahead_of_reads(sql: &str) -> Vec<Ahead> {
     syntax::postgres::on_deep_stack(|| {
         let Ok(result) = syntax::postgres::parse(sql, 0) else { return };
         let mut now = Ahead::default();
+        // Each table the file renames, by its name now, and the name the catalog had before it ran.
+        let mut was: BTreeMap<String, String> = BTreeMap::new();
         for raw in &result.protobuf.stmts {
             match raw.stmt.as_ref().and_then(|s| s.node.as_ref()) {
+                Some(N::RenameStmt(r)) if is(r.rename_type, syntax::postgres::protobuf::ObjectType::ObjectTable) => {
+                    if let Some(old) = r.relation.as_ref().map(|t| t.relname.clone()) {
+                        let first = was.remove(&old).unwrap_or(old);
+                        was.insert(r.newname.clone(), first);
+                    }
+                }
                 Some(N::AlterTableStmt(a)) => {
                     let Some(table) = a.relation.as_ref().map(|r| r.relname.clone()) else { continue };
                     for cmd in &a.cmds {
@@ -603,7 +612,7 @@ fn ahead_of_reads(sql: &str) -> Vec<Ahead> {
                                     now.fed.insert((table.clone(), cmd.name.clone(), sequence));
                                 }
                             } else if is(cmd.subtype, At::AtDropConstraint) {
-                                now.keys.insert((table.clone(), cmd.name.clone()));
+                                now.keys.insert((was.get(&table).cloned().unwrap_or_else(|| table.clone()), cmd.name.clone()));
                             }
                         }
                     }
@@ -868,7 +877,7 @@ mod tests {
     fn what_a_file_changes_ahead_of_each_read_is_read_from_its_parse() {
         let read = "do $reylo$ declare s regclass := 'public.order_no'; goal numeric := 1000; begin perform set_config('reylo.sequence_goal', goal::text, true); end $reylo$;";
         let sql = format!(
-            "comment on sequence order_no is 'Generates orders id values';\nalter table orders alter column total set default nextval('public.order_no'::regclass);\nalter table orders alter column code set default nextval('other_no');\nalter table orders alter column dotted set default nextval('public.\"order.no\"');\nalter table orders drop constraint orders_pk;\ndrop index \"orders$Idx\", ORDERS_ID;\nalter sequence tag_no owned by tags.id;\n{read}\nalter table orders alter column id drop default;\ndrop index later_idx;\n{read}\n"
+            "comment on sequence order_no is 'Generates orders id values';\nalter table orders alter column total set default nextval('public.order_no'::regclass);\nalter table orders alter column code set default nextval('other_no');\nalter table orders alter column dotted set default nextval('public.\"order.no\"');\nalter table orders rename to purchases;\nalter table purchases drop constraint orders_pk;\ndrop index \"orders$Idx\", ORDERS_ID;\nalter sequence tag_no owned by tags.id;\n{read}\nalter table orders alter column id drop default;\ndrop index later_idx;\n{read}\n"
         );
         let aheads = super::ahead_of_reads(&sql);
         assert_eq!(aheads.len(), 2);
