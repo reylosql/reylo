@@ -1570,10 +1570,11 @@ fn fills_existing(statement: &crate::sql::Statement) -> bool {
     use crate::sql::TokenKind;
     let t = &statement.tokens;
     let words: Vec<String> = t.iter().map(crate::sql::Token::upper).collect();
-    // A name and a parenthesis, but for a reserved word's, which names no function (`where (…)`,
-    // `check (…)`), and the table a reference names. A name after a schema's is a function's,
-    // whatever it is spelled.
-    const NO_CALL: &[&str] = &["WHERE", "AND", "OR", "NOT", "IN", "IS", "EXISTS", "ANY", "ALL", "SOME", "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "CHECK", "LIKE", "ILIKE", "ROW", "FROM", "DISTINCT", "SIMILAR", "TO", "AS", "ON", "USING", "SELECT", "ARRAY"];
+    // A name and a parenthesis, but for a keyword's that Postgres lets name no function, reserved
+    // or a column's alone (`where (…)`, `check (…)`), and the table a reference names. A name after
+    // a schema's is a function's, whatever it is spelled, and so is one `like`, `similar` or `is`
+    // could be.
+    const NO_CALL: &[&str] = &["WHERE", "AND", "OR", "NOT", "IN", "EXISTS", "ANY", "ALL", "SOME", "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "CHECK", "ROW", "FROM", "DISTINCT", "TO", "AS", "ON", "USING", "SELECT", "ARRAY"];
     let call = |i: usize| {
         i > 0
             && t[i].text == "("
@@ -8062,6 +8063,9 @@ mod tests {
         assert!(fills("create index t_k on t (include(id))"));
         assert!(!fills("create index t_k on t (id) where id is distinct from (1)"));
         assert!(fills("create index t_k on t (id) where id is distinct from (f(1))"));
+        assert!(fills("create index t_k on t (similar(id))"));
+        assert!(fills("alter table t add column v int default similar(1)"));
+        assert!(!fills("create index t_k on t (id) where email similar to ('a%')"));
     }
 
     #[test]
