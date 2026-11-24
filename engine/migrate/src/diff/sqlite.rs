@@ -1182,7 +1182,10 @@ fn view_reads(sql: &str, loose: bool) -> Vec<String> {
             let word = |i: usize, w: &str| tokens.get(i).is_some_and(|t| t.upper() == w);
             let body = if word(j + 1, "NOT") { j + 3 } else if word(j + 1, "MATERIALIZED") { j + 2 } else { j + 1 };
             let declared = word(j, "AS") && (!word(j + 1, "NOT") || word(j + 2, "MATERIALIZED")) && tokens.get(body).is_some_and(|t| t.text == "(");
-            let with = list_of(k).filter(|_| declared)?;
+            if !declared {
+                return None;
+            }
+            let with = list_of(k)?;
             Some((fold(&unquote(&tokens[k])), with, (k..tokens.len()).find(|&j| depths[j] < depths[k]).unwrap_or(tokens.len())))
         })
         .collect();
