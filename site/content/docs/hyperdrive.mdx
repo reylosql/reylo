@@ -58,7 +58,14 @@ import getUser from "./get_user.sql";
 export default {
   async fetch(request: Request, env: { HYPERDRIVE: Hyperdrive }, ctx: ExecutionContext) {
     const { host, port, user, password, database } = env.HYPERDRIVE;
-    const conn = await mysql.createConnection({ host, port, user, password, database });
+    const conn = await mysql.createConnection({
+      host,
+      port,
+      user,
+      password,
+      database,
+      disableEval: true, // required in Workers
+    });
     const row = await getUser.run(conn, { id: 1 });
     ctx.waitUntil(conn.end());
     return Response.json(row);

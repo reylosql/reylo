@@ -57,7 +57,7 @@
         {
           "type": "header",
           "key": "accept",
-          "value": "^(?!.*text/html.*text/(?:x-)?markdown).*text/(?:x-)?markdown.*$"
+          "value": "^(?:(?!(?:^|,)\\s*text/html(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$))).)*(?:^|,)\\s*text/(?:x-)?markdown(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$)).*$"
         }
       ],
       "dest": "/play/api.md",
@@ -116,7 +116,7 @@
         {
           "type": "header",
           "key": "accept",
-          "value": "^(?!.*text/html.*text/(?:x-)?markdown).*text/(?:x-)?markdown.*$"
+          "value": "^(?:(?!(?:^|,)\\s*text/html(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$))).)*(?:^|,)\\s*text/(?:x-)?markdown(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$)).*$"
         }
       ],
       "dest": "/index.md",
@@ -131,7 +131,7 @@
         {
           "type": "header",
           "key": "accept",
-          "value": "^(?!.*text/html.*text/(?:x-)?markdown).*text/(?:x-)?markdown.*$"
+          "value": "^(?:(?!(?:^|,)\\s*text/html(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$))).)*(?:^|,)\\s*text/(?:x-)?markdown(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$)).*$"
         }
       ],
       "dest": "/$1.md",
@@ -146,7 +146,7 @@
         {
           "type": "header",
           "key": "accept",
-          "value": "^(?!.*text/html.*text/(?:x-)?markdown).*text/(?:x-)?markdown.*$"
+          "value": "^(?:(?!(?:^|,)\\s*text/html(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$))).)*(?:^|,)\\s*text/(?:x-)?markdown(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$)).*$"
         }
       ],
       "dest": "/migrate.md",
@@ -161,7 +161,7 @@
         {
           "type": "header",
           "key": "accept",
-          "value": "^(?!.*text/html.*text/(?:x-)?markdown).*text/(?:x-)?markdown.*$"
+          "value": "^(?:(?!(?:^|,)\\s*text/html(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$))).)*(?:^|,)\\s*text/(?:x-)?markdown(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$)).*$"
         }
       ],
       "dest": "/migrate-$1.md",
