@@ -7146,7 +7146,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
         // found where the block reads it.
         let before = "create table log (id bigint generated always as identity, msg text); create table events (id bigint generated always as identity primary key, msg text); create table active (id bigint generated always as identity, live boolean); create index active_live on active (id) where live; create table renamed (id bigint generated always as identity, msg text); create sequence stage_no; create table stage (id bigint, n text); create sequence later_no; create table later (id bigint, n text); create sequence fed_no; create table fed (id bigint default nextval('fed_no'), n text); \
             create sequence order_no; create table orders (id bigint primary key, secondary_id bigint default nextval('order_no')); alter sequence order_no owned by orders.id; \
-            create sequence idx_no; create table idx (id bigint default nextval('idx_no')); create index idx_id on idx (id); \
+            create sequence idx_no; create table idx (id bigint default nextval('idx_no')); create index \"idx$id\" on idx (id); \
             create sequence dropdef_no; create table dropdef (id bigint default nextval('dropdef_no')); \
             create sequence rn_no; create table rn (id bigint default nextval('rn_no'));";
         p.schema(before);
@@ -7185,8 +7185,9 @@ create trigger kids_note after insert on kids begin update parents set name = na
         let at = |text: &str| file.lines().position(|l| l.contains(text)).unwrap_or_else(|| panic!("{file}"));
         let read_first = at("'public.dropdef_no'") < at("alter column id drop default");
         assert_eq!(out.contains("of dropdef while"), read_first, "{file}");
-        // An index the change drops serves the read only where it is dropped after it.
-        let dropped_first = file.lines().position(|l| l.contains("drop index") && l.contains("idx_id")).is_some_and(|d| d < at("'public.idx_no'"));
+        // An index the change drops serves the read only where it is dropped after it, whatever its
+        // name holds.
+        let dropped_first = file.lines().position(|l| l.contains("drop index") && l.contains("idx$id")).is_some_and(|d| d < at("'public.idx_no'"));
         assert_eq!(out.contains("of idx while"), dropped_first, "{file}");
     }
 

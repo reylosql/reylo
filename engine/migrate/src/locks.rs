@@ -679,7 +679,8 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
     for ((k, sequence), was) in reads.iter().zip(&was) {
         let now = db.rows(&fed(sequence)).await.map(|rows| columns(&rows)).unwrap_or_default();
         let ahead = &lines[..*k];
-        let named = |name: &str| ahead.iter().any(|l| l.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| w == name));
+        // A name as a word of the file, `$` part of it, and its case as an unquoted name folds.
+        let named = |name: &str| ahead.iter().any(|l| l.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).any(|w| w.eq_ignore_ascii_case(name)));
         let bare = |name: &str| name.trim_matches(|c: char| c == '\'' || c == '"').rsplit('.').next().unwrap_or_default().trim_matches('"').to_string();
         // Served where the read runs: by an index there before that the file doesn't drop ahead of
         // it, or one there after that the file makes ahead of it.
