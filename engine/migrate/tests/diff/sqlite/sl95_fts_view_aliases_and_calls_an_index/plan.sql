@@ -12,5 +12,3 @@ create view notes_content as select filtered.id, filtered.body from notes as fil
 create virtual table all_notes_fts using fts5(body, content='notes_content', content_rowid='id');
 insert into all_notes_fts (all_notes_fts) values ('rebuild');
 insert into filtered (filtered) values ('rebuild');
-insert into all_notes_fts (all_notes_fts) values ('rebuild');
-insert into filtered (filtered) values ('rebuild');
