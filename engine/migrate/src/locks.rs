@@ -661,6 +661,17 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
     };
     let mut found: Vec<(String, String)> = Vec::new();
     let mut after: Vec<&str> = Vec::new();
+    // A rollback leaves each sequence where the part of the file it ran moved it: each is set back
+    // after, so that the file then runs as it would have.
+    let mut sequences: Vec<(String, String, bool)> = Vec::new();
+    if !reads.is_empty() {
+        let names = db.rows(r"select format('%s', c.oid::regclass) as s from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relkind = 'S' and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\_%'").await?;
+        for name in names.iter().map(|r| r.text("s").to_string()) {
+            if let Some(r) = db.rows(&format!("select last_value::text as v, is_called as called from {name}")).await?.first() {
+                sequences.push((name, r.text("v").to_string(), r.flag("called")));
+            }
+        }
+    }
     for (k, sequence) in &reads {
         db.exec("begin").await?;
         let at = match db.script(&lines[..*k].join("\n")).await {
@@ -668,6 +679,9 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
             Err(_) => None,
         };
         db.exec("rollback").await?;
+        for (name, value, called) in &sequences {
+            db.exec(&format!("select setval('{}'::regclass, {value}, {called})", name.replace('\'', "''"))).await?;
+        }
         match at {
             Some(rows) => found.extend(rows.iter().map(|r| (r.text("t").to_string(), r.text("oid").to_string()))),
             None => after.push(sequence),
