@@ -1578,7 +1578,8 @@ fn fills_existing(statement: &crate::sql::Statement) -> bool {
     const INFIX: &[&str] = &["LIKE", "ILIKE", "SIMILAR", "IS"];
     let ends_operand = |j: usize| match t[j].kind {
         TokenKind::Quoted | TokenKind::Str | TokenKind::Number => true,
-        TokenKind::Word => !NO_CALL.contains(&words[j].as_str()) && !INFIX.contains(&words[j].as_str()) && words[j] != "DEFAULT",
+        // A name after a table's is a column's, whatever it is spelled.
+        TokenKind::Word => (j > 0 && t[j - 1].text == ".") || (!NO_CALL.contains(&words[j].as_str()) && !INFIX.contains(&words[j].as_str()) && words[j] != "DEFAULT"),
         TokenKind::Symbol => t[j].text == ")",
     };
     let infix = |i: usize| {
@@ -8084,6 +8085,7 @@ mod tests {
         assert!(fills("create index t_k on t (id) where email like (f('a%'))"));
         assert!(fills("create index t_k on t (id) where like(id)"));
         assert!(fills("create index t_k on t (id) where id > 0 and ilike(email)"));
+        assert!(!fills("create index t_k on t (id) where t.default like ('a%')"));
     }
 
     #[test]
