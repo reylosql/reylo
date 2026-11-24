@@ -497,6 +497,25 @@ test("ClickHouse: a result whose types are not the ones the type check read is r
   }
 });
 
+test("ClickHouse: a table of another database is typed again once it changes", { skip: clickhouseLive, timeout: 120_000 }, async () => {
+  const db = await clickhouseDatabase("reylo_clickhouse_other");
+  const other = `reylo_clickhouse_other_side_${process.pid}`;
+  try {
+    await db.client.command({ query: `DROP DATABASE IF EXISTS ${other}` });
+    await db.client.command({ query: `CREATE DATABASE ${other}` });
+    await db.client.command({ query: `CREATE TABLE ${other}.readings (id UInt64, level UInt8) ENGINE = MergeTree ORDER BY id` });
+    const root = project(db.url);
+    const files = { "levels.sql": `SELECT id, level FROM ${other}.readings` };
+    assert.equal(types((await declarations(root, files))["levels.sql"]!).row, "{ id: bigint; level: number }");
+    // The cache's fingerprint covers the other database too: a new session reads the column's new type.
+    await db.client.command({ query: `ALTER TABLE ${other}.readings MODIFY COLUMN level String` });
+    assert.equal(types((await declarations(root, files))["levels.sql"]!).row, "{ id: bigint; level: string }");
+  } finally {
+    await db.client.command({ query: `DROP DATABASE IF EXISTS ${other}` });
+    await db.drop();
+  }
+});
+
 test("ClickHouse: what cannot be typed is an error at its place", { skip: clickhouseLive, timeout: 120_000 }, async () => {
   const db = await clickhouseDatabase("reylo_clickhouse_refused", SCHEMA);
   try {

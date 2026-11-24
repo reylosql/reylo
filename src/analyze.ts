@@ -664,13 +664,18 @@ const POSTGRES_FINGERPRINT = `select pg_catalog.md5(coalesce(pg_catalog.string_a
     union all select ${line("d", relation("d.objoid"), out("int4", "d.objsubid"), md5("d.description"))} from pg_catalog.pg_description d ${rel("d", "objoid")} where ${eq("d.classoid", PG_CLASS)} and d.objsubid operator(pg_catalog.>) 0 and ${NS}
   ) t`;
 /**
- * ClickHouse: every column, table (a view's query with it) and function the database's user made,
- * each a line, hashed with the server's version and the settings the session changed, since one of
- * those can change a statement's types (`join_use_nulls`).
+ * ClickHouse: every column, table (a view's query with it) and function a user made, each a line,
+ * hashed with the server's version and the settings the session changed, since one of those can
+ * change a statement's types (`join_use_nulls`). A statement may read a table of any database, so
+ * each database's are in it but the server's own: the connection's by their names alone, so that a
+ * database built the same way under another name has the same fingerprint, and any other's with
+ * its database's name.
  */
+const CLICKHOUSE_OWN = "database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')";
+const CLICKHOUSE_IN = "if(database = currentDatabase(), '', concat(database, '.'))";
 const CLICKHOUSE_FINGERPRINT = `SELECT concat(version(), ' ', toString(count()), ' ', toString(sum(cityHash64(x))), ' ', toString(groupBitXor(cityHash64(x)))) FROM (
-    SELECT concat('c ', table, ' ', name, ' ', toString(position), ' ', type, ' ', default_kind, ' ', toString(cityHash64(default_expression)), ' ', toString(cityHash64(comment))) AS x FROM system.columns WHERE database = currentDatabase()
-    UNION ALL SELECT concat('t ', name, ' ', engine, ' ', sorting_key, ' ', toString(cityHash64(as_select))) FROM system.tables WHERE database = currentDatabase()
+    SELECT concat('c ', ${CLICKHOUSE_IN}, table, ' ', name, ' ', toString(position), ' ', type, ' ', default_kind, ' ', toString(cityHash64(default_expression)), ' ', toString(cityHash64(comment))) AS x FROM system.columns WHERE ${CLICKHOUSE_OWN}
+    UNION ALL SELECT concat('t ', ${CLICKHOUSE_IN}, name, ' ', engine, ' ', sorting_key, ' ', toString(cityHash64(as_select))) FROM system.tables WHERE ${CLICKHOUSE_OWN}
     UNION ALL SELECT concat('f ', name, ' ', toString(cityHash64(create_query))) FROM system.functions WHERE origin = 'SQLUserDefined'
     UNION ALL SELECT concat('s ', name, ' ', value) FROM system.settings WHERE changed
   )`;
