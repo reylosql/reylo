@@ -9,7 +9,13 @@ import { PgClient } from "@effect/sql-pg";
 import { defineQuery } from "../src/index.ts";
 import { effect } from "../src/effect.ts";
 import type { Columns } from "../src/values.ts";
-import { handWritten, MYSQL, PG } from "./helpers.ts";
+import type { Inputs } from "../src/execute.ts";
+import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { handWritten, mysqlDatabase, mysqlLive, pgLive, postgresDatabase } from "./helpers.ts";
+import { array, pg } from "./descriptors.ts";
 
 // Reylo's queries inside Effect SQL: on the SqlClient the Effect's context provides, on the open
 // transaction's connection inside withTransaction, every value decoded by Reylo as `.run()`
@@ -18,8 +24,8 @@ import { handWritten, MYSQL, PG } from "./helpers.ts";
 const sqlite = <Params, Row, C extends "many" | "one" | "maybeOne" | "none" = "many">(sql: string, columns?: Columns, cardinality?: C, value?: boolean) =>
   defineQuery<Params, Row, C, "sqlite">({ dialect: "sqlite", ...handWritten(sql, "sqlite"), ...(columns && { columns }), ...(cardinality && { cardinality }), ...(value && { value }) });
 
-const postgres = <Params, Row, C extends "many" | "one" | "maybeOne" | "none" = "many">(sql: string, columns?: Columns, cardinality?: C) =>
-  defineQuery<Params, Row, C, "postgres">({ dialect: "postgres", ...handWritten(sql, "postgres"), ...(columns && { columns }), ...(cardinality && { cardinality }) });
+const postgres = <Params, Row, C extends "many" | "one" | "maybeOne" | "none" = "many">(sql: string, columns?: Columns, cardinality?: C, inputs?: Inputs) =>
+  defineQuery<Params, Row, C, "postgres">({ dialect: "postgres", ...handWritten(sql, "postgres"), ...(columns && { columns }), ...(cardinality && { cardinality }), ...(inputs && { inputs }) });
 
 const mysql = <Params, Row, C extends "many" | "one" | "maybeOne" | "none" = "many">(sql: string, columns?: Columns, cardinality?: C, value?: boolean) =>
   defineQuery<Params, Row, C, "mysql">({ dialect: "mysql", ...handWritten(sql, "mysql"), ...(columns && { columns }), ...(cardinality && { cardinality }), ...(value && { value }) });
@@ -134,114 +140,131 @@ test(".run() refuses an Effect SQL client, whose unsafe() hands back an Effect r
   assert.match(String((rejected as Error).message), /with \.run\(\), which takes a driver's own client: inside an Effect, run the query with effect\(query, params\) from reylo\/effect/);
 });
 
-const mysqlSkip = !MYSQL ? "REYLO_TEST_MYSQL names no server" : false;
 
-/** A database of the test's own on the test MySQL, made and dropped through Effect's client. */
-function mysqlLayer(name: string) {
-  const at = (database: string) => {
-    const url = new URL(MYSQL!);
-    url.pathname = `/${database}`;
-    return MysqlClient.layer({ url: Redacted.make(url.href) });
-  };
-  const admin = (statement: string) =>
-    Effect.runPromise(
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        yield* sql.unsafe(statement);
-      }).pipe(Effect.provide(at(""))),
-    );
-  return { at: () => at(name), make: () => admin(`drop database if exists ${name}`).then(() => admin(`create database ${name}`)), drop: () => admin(`drop database if exists ${name}`) };
-}
+// The `typed` fixture of lab/driver-matrix (seed/*.sql, with the columns its TYPED_COLUMNS give
+// each dialect): one value of each SQL type, read through Effect and through `.run()` on the driver
+// underneath, which must agree value for value, compared with their types (mysql2's and postgres.js's
+// bytes are a Buffer, node:sqlite's a Uint8Array, on either path); then the row goes back in
+// as the parameters of a statement comparing each column with one, which must hold for every column.
 
-test("a MySQL query on Effect's mysql2 client runs on mysql2's connection with Reylo's options", { skip: mysqlSkip }, async () => {
-  const database = mysqlLayer(`reylo_effect_${process.pid}`);
-  await database.make();
+test("Effect's node:sqlite client gives the driver matrix's typed row as .run() gives it on node:sqlite, and takes it back", async () => {
+  const file = join(mkdtempSync(join(tmpdir(), "reylo-effect-")), "app.db");
+  const db = new DatabaseSync(file);
+  db.exec("create table typed (id integer primary key, n integer, r real, s text, b blob, doc text, flag integer, x, big integer)");
+  db.exec("insert into typed values (1, 5, 1.5, 'hi', x'0102ff', '{\"a\":[1,2]}', 1, 7, 9007199254740993)");
+  const get = sqlite<{ id: number }, Record<string, unknown>, "one">("select id, n, r, s, b, doc, flag, x, big from typed where id = :id", [["id", "int"], ["n", "int"], ["r", "float"], ["s", "text"], ["b", "bytes"], ["doc", "json"], ["flag", "bool"], ["x", "unknown"], ["big", "int8"]], "one");
+  const back = sqlite<Record<string, unknown>, unknown, "one">("select n = :n and r = :r and s = :s and b = :b and flag = :flag and x = :x and big = :big as same from typed where id = 1", [["same", "bool"]], "one");
   try {
-    const get = mysql<{ id: number }, unknown, "one">("select id, big, d, ts, `dec`, j, ok from t where id = :id", [["id", "int"], ["big", "int8"], ["d", "date"], ["ts", "timestamp"], ["dec", "decimal"], ["j", "json"], ["ok", "bool"]], "one");
-    const insert = mysql<{ id: number }, never, "none">("insert into t (id) values (:id)", undefined, "none");
-    const count = mysql<{}, bigint, "one">("select count(*) from t", [["count(*)", "int8"]], "one", true);
+    const direct = await get.run(db, { id: 1 });
+    const program = Effect.gen(function* () {
+      const row = yield* effect(get, { id: 1 });
+      const { id: _, doc: __, ...rest } = row;
+      return [row, yield* effect(back, rest)] as const;
+    });
+    const [row, same] = await Effect.runPromise(program.pipe(Effect.provide(SqliteClient.layer({ filename: file }))));
+    assert.deepStrictEqual(row, direct);
+    assert.deepStrictEqual({ ...row }, { id: 1, n: 5, r: 1.5, s: "hi", b: Uint8Array.of(1, 2, 255), doc: { a: [1, 2] }, flag: true, x: 7, big: 9007199254740993n });
+    assert.deepStrictEqual({ ...(same as object) }, { same: true });
+  } finally {
+    db.close();
+  }
+});
+
+test("Effect's mysql2 client gives the driver matrix's typed row as .run() gives it on mysql2, takes it back, and runs on the transaction's connection", { skip: mysqlLive }, async () => {
+  const database = await mysqlDatabase(
+    "reylo_effect",
+    `create table typed (id int primary key, big bigint, ubig bigint unsigned, amount decimal(30,18), day date, at datetime(3), doc json, bit1 bit(1), raw varbinary(4), tags set('x','y','z'), kind enum('a','b'), flag tinyint(1), yr year, f8 double, tm time, s text);
+     insert into typed values (1, -9007199254740993, 18446744073709551615, 1.100000000000000001, '2026-10-20', '2026-10-20 10:00:00.123', '{"a": [1, 2]}', b'1', x'0102ff', 'x,z', 'b', 1, 2026, 2.5, '10:00:00', 'hi');
+     create table uniq (k int primary key);`,
+  );
+  try {
+    const columns: Columns = [["id", "int"], ["big", "int8"], ["ubig", "int8"], ["amount", "decimal"], ["day", "date"], ["at", "timestamp"], ["doc", "json"], ["bit1", "bool"], ["raw", "bytes"], ["tags", "set"], ["kind", "enum"], ["flag", "bool"], ["yr", "int"], ["f8", "float"], ["tm", "text"], ["s", "text"]];
+    const get = mysql<{}, Record<string, unknown>, "one">(`select ${columns.map(([name]) => name).join(", ")} from typed where id = 1`, columns, "one");
+    const back = mysql<Record<string, unknown>, unknown, "one">("select big = :big and ubig = :ubig and amount = :amount and day = :day and at = :at and raw = :raw and kind = :kind and yr = :yr and f8 = :f8 and tm = :tm and s = :s as same from typed where id = 1", [["same", "bool"]], "one");
+    const insert = mysql<{ k: number }, never, "none">("insert into uniq (k) values (:k)", undefined, "none");
+    const count = mysql<{}, bigint, "one">("select count(*) from uniq", [["count(*)", "int8"]], "one", true);
+    const direct = await get.run(database.db);
     const program = Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* sql.unsafe("create table t (id int primary key, big bigint, d date, ts datetime(6), `dec` decimal(30,10), j json, ok tinyint(1))");
-      yield* sql.unsafe("insert into t values (1, 9007199254740993, '2026-11-24', '2026-11-24 10:11:12.345678', 12345678901234567890.0123456789, '{\"a\":1.10}', 1)");
-      const row = yield* effect(get, { id: 1 });
+      const row = yield* effect(get);
+      const same = yield* effect(back, { big: row.big, ubig: row.ubig, amount: row.amount, day: row.day, at: row.at, raw: row.raw, kind: row.kind, yr: row.yr, f8: row.f8, tm: row.tm, s: row.s });
+      yield* effect(insert, { k: 1 });
       const inside = yield* sql
         .withTransaction(
           Effect.gen(function* () {
-            yield* effect(insert, { id: 2 });
+            yield* effect(insert, { k: 2 });
             return yield* Effect.fail(yield* effect(count));
           }),
         )
         .pipe(Effect.flip);
-      const duplicate = yield* Effect.flip(effect(insert, { id: 1 }));
-      return { row, inside, after: yield* effect(count), duplicate };
+      const duplicate = yield* Effect.flip(effect(insert, { k: 1 }));
+      return { row, same, inside, after: yield* effect(count), duplicate };
     });
-    const { row, inside, after, duplicate } = await Effect.runPromise(program.pipe(Effect.provide(database.at())));
-    assert.deepEqual(row, { id: 1, big: 9007199254740993n, d: "2026-11-24", ts: "2026-11-24T10:11:12.345678", dec: "12345678901234567890.0123456789", j: { a: 1.1 }, ok: true });
+    const { row, same, inside, after, duplicate } = await Effect.runPromise(program.pipe(Effect.provide(MysqlClient.layer({ url: Redacted.make(database.url) }))));
+    assert.deepStrictEqual(row, direct);
+    assert.deepStrictEqual({ ...row }, { id: 1, big: -9007199254740993n, ubig: 18446744073709551615n, amount: "1.100000000000000001", day: "2026-10-20", at: "2026-10-20T10:00:00.123", doc: { a: [1, 2] }, bit1: true, raw: Buffer.from([1, 2, 255]), tags: new Set(["x", "z"]), kind: "b", flag: true, yr: 2026, f8: 2.5, tm: "10:00:00", s: "hi" });
+    assert.deepStrictEqual({ ...(same as object) }, { same: true });
     assert.deepEqual([inside, after], [2n, 1n]);
     assert.ok(SqlError.isSqlError(duplicate));
     assert.equal(duplicate.reason._tag, "UniqueViolation");
-    assert.equal((duplicate.reason as SqlError.UniqueViolation).constraint, "t.PRIMARY");
+    assert.equal((duplicate.reason as SqlError.UniqueViolation).constraint, "uniq.PRIMARY");
   } finally {
     await database.drop();
   }
 });
 
-const pgSkip = !PG ? "REYLO_TEST_PG names no server" : false;
-
-test("a Postgres query on Effect's pg client reads each value from the server's text, through queryText()", { skip: pgSkip }, async () => {
-  const name = `reylo_effect_${process.pid}`;
-  const at = (database: string) => {
-    const url = new URL(PG!);
-    url.pathname = `/${database}`;
-    return PgClient.layer({ url: Redacted.make(url.href) });
-  };
-  const admin = (statement: string) =>
-    Effect.runPromise(
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        yield* sql.unsafe(statement);
-      }).pipe(Effect.provide(at(new URL(PG!).pathname.slice(1) || "postgres"))),
-    );
-  await admin(`drop database if exists ${name}`);
-  await admin(`create database ${name}`);
+test("Effect's pg client gives the driver matrix's typed row as .run() gives it on postgres.js, through queryText(), and takes it back", { skip: pgLive }, async () => {
+  const database = await postgresDatabase(
+    "reylo_effect",
+    `create type mood as enum ('ok', 'sad');
+     create type pair as (a int, b text);
+     create table typed (id int primary key, big int8, amount numeric, day date, at timestamp(3), stamp timestamptz, doc json, docb jsonb, raw bytea, flag bool, f8 float8, tags text[], ints int4[], moods mood[], span interval, uid uuid, pr pair, pt point, bxs box[], seats int4range, many int8multirange);
+     insert into typed values (1, 9007199254740993, 12345678901234567890.123456789, '2026-10-20', '2026-10-20 10:00:00.123', '2026-10-20 10:00:00.123+02', '{"a": [1, 2]}', '{"b": true}', '\\x0102ff', true, 2.5, '{a,NULL,"NULL","b,c"}', '{1,2,3}', '{ok,sad}', '1 day 2 hours', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', row(1, 'x,y'), '(1.5,-2)', '{(3,4),(1,2);(1,1),(0,0)}', '[1,5)', '{[1,3),[5,7)}'), (2, null, 'NaN', null, null, 'infinity', null, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+     create table uniq (k int primary key);`,
+  );
   try {
-    const get = postgres<{ id: number }, unknown, "one">("select id, at, big, n, iv, j, moods from t where id = :id", undefined, "one");
-    const insert = postgres<{ id: number }, never, "none">("insert into t (id) values (:id)", undefined, "none");
-    const count = postgres<{}, unknown, "one">("select count(*)::int as n from t", [["n", "int"]], "one");
+    const columns: Columns = [["id", "int"], ["big", "int8"], ["amount", "decimal"], ["day", "date"], ["at", "timestamp"], ["stamp", "timestamptz"], ["doc", "json"], ["docb", "json"], ["raw", "bytes"], ["flag", "bool"], ["f8", "float"], ["tags", "text[]"], ["ints", "int[]"], ["moods", "text[]"], ["span", "interval"], ["uid", "text"], ["pr", '(["a","int"],["b","text"])'], ["pt", "point"], ["bxs", "box[]", ";"], ["seats", "range:int"], ["many", "multirange:int8"]];
+    const get = postgres<{ id: number }, Record<string, unknown>, "one">(`select ${columns.map(([name]) => name).join(", ")} from typed where id = :id`, columns, "one");
+    const inputs: Inputs = { big: { type: pg("int8") }, amount: { type: pg("numeric") }, day: { type: pg("date") }, at: { type: pg("timestamp") }, stamp: { type: pg("timestamptz") }, docb: { type: { kind: "json" } }, raw: { type: pg("bytea") }, flag: { type: pg("bool") }, f8: { type: pg("float8") }, ints: { type: array(pg("int4")) }, span: { type: pg("interval") }, uid: { type: pg("uuid") } };
+    const back = postgres<Record<string, unknown>, unknown, "one">("select big = :big and amount = :amount and day = :day and at = :at and stamp = :stamp and docb = :docb and raw = :raw and flag = :flag and f8 = :f8 and ints = :ints and span = :span and uid = :uid as same from typed where id = 1", [["same", "bool"]], "one", inputs);
+    const insert = postgres<{ k: number }, never, "none">("insert into uniq (k) values (:k)", undefined, "none");
+    const count = postgres<{}, unknown, "one">("select count(*)::int as n from uniq", [["n", "int"]], "one");
+    const direct = [await get.run(database.sql, { id: 1 }), await get.run(database.sql, { id: 2 })];
     const program = Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* sql.unsafe("create type mood as enum ('ok', 'meh')");
-      yield* sql.unsafe("create table t (id int primary key, at timestamptz, big int8, n numeric, iv interval, j jsonb, moods mood[])");
-      yield* sql.unsafe("insert into t values (1, '2026-11-24 10:11:12.345678+00', 9007199254740993, 'NaN', '1 year 2 mons', '{\"a\":2.50}', '{ok,meh}'), (2, 'infinity', null, null, null, null, null)");
       const rows = [yield* effect(get, { id: 1 }), yield* effect(get, { id: 2 })];
+      const r = rows[0]!;
+      const same = yield* effect(back, { big: r.big, amount: r.amount, day: r.day, at: r.at, stamp: r.stamp, docb: r.docb, raw: r.raw, flag: r.flag, f8: r.f8, ints: r.ints, span: r.span, uid: r.uid });
+      yield* effect(insert, { k: 1 });
       const inside = yield* sql
         .withTransaction(
           Effect.gen(function* () {
-            yield* effect(insert, { id: 3 });
+            yield* effect(insert, { k: 2 });
             return yield* Effect.fail(yield* effect(count));
           }),
         )
         .pipe(Effect.flip);
-      const duplicate = yield* Effect.flip(effect(insert, { id: 1 }));
-      return { rows, inside, after: yield* effect(count), duplicate };
+      const duplicate = yield* Effect.flip(effect(insert, { k: 1 }));
+      return { rows, same, inside, after: yield* effect(count), duplicate, queryText: "queryText" in sql };
     });
-    const exit = await Effect.runPromise(Effect.exit(program).pipe(Effect.provide(at(name))));
-    if (!("queryText" in (await Effect.runPromise(SqlClient.SqlClient.pipe(Effect.provide(at(name))))))) {
+    const exit = await Effect.runPromise(Effect.exit(program).pipe(Effect.provide(PgClient.layer({ url: Redacted.make(database.url) }))));
+    const client = await Effect.runPromise(SqlClient.SqlClient.pipe(Effect.provide(PgClient.layer({ url: Redacted.make(database.url) }))));
+    if (!("queryText" in client)) {
       // A release of @effect/sql-pg before queryText(): its own codecs decode every value, which Reylo cannot read back.
       assert.match(String((defect(exit) as Error).message), /this version of @effect\/sql-pg has none\. Update @effect\/sql-pg/);
       return;
     }
     assert.ok(Exit.isSuccess(exit), String(Exit.isFailure(exit) && exit.cause));
-    const { rows, inside, after, duplicate } = exit.value;
-    assert.deepEqual(rows, [
-      { id: 1, at: "2026-11-24T10:11:12.345678Z", big: 9007199254740993n, n: "NaN", iv: "P1Y2M", j: { a: 2.5 }, moods: ["ok", "meh"] },
-      { id: 2, at: "infinity", big: null, n: null, iv: null, j: null, moods: null },
-    ]);
-    assert.deepEqual([inside, after], [{ n: 3 }, { n: 2 }]);
+    const { rows, same, inside, after, duplicate } = exit.value;
+    assert.deepStrictEqual(rows, direct);
+    assert.deepStrictEqual({ ...rows[0] }, { id: 1, big: 9007199254740993n, amount: "12345678901234567890.123456789", day: "2026-10-20", at: "2026-10-20T10:00:00.123000", stamp: "2026-10-20T08:00:00.123000Z", doc: { a: [1, 2] }, docb: { b: true }, raw: Buffer.from([1, 2, 255]), flag: true, f8: 2.5, tags: ["a", null, "NULL", "b,c"], ints: [1, 2, 3], moods: ["ok", "sad"], span: "P1DT2H", uid: "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", pr: { a: 1, b: "x,y" }, pt: { x: 1.5, y: -2 }, bxs: [{ high: { x: 3, y: 4 }, low: { x: 1, y: 2 } }, { high: { x: 1, y: 1 }, low: { x: 0, y: 0 } }], seats: { lower: 1, upper: 5, bounds: "[)" }, many: [{ lower: 1n, upper: 3n, bounds: "[)" }, { lower: 5n, upper: 7n, bounds: "[)" }] });
+    assert.equal((rows[1] as Record<string, unknown>).stamp, "infinity");
+    assert.equal((rows[1] as Record<string, unknown>).amount, "NaN");
+    assert.deepStrictEqual({ ...(same as object) }, { same: true });
+    assert.deepEqual([inside, after], [{ n: 2 }, { n: 1 }]);
     assert.ok(SqlError.isSqlError(duplicate));
     assert.equal(duplicate.reason._tag, "UniqueViolation");
   } finally {
-    await admin(`drop database if exists ${name}`);
+    await database.drop();
   }
 });
