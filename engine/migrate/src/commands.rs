@@ -1572,14 +1572,27 @@ fn fills_existing(statement: &crate::sql::Statement) -> bool {
     let words: Vec<String> = t.iter().map(crate::sql::Token::upper).collect();
     // A name and a parenthesis, but for a keyword's that Postgres lets name no function, reserved
     // or a column's alone (`where (…)`, `check (…)`), and the table a reference names. A name after
-    // a schema's is a function's, whatever it is spelled, and so is one `like`, `similar` or `is`
-    // could be.
+    // a schema's is a function's, whatever it is spelled. `like`, `ilike`, `similar` and `is` can
+    // name one too: after an operand (`email like (…)`, `email not like (…)`) each is an operator.
     const NO_CALL: &[&str] = &["WHERE", "AND", "OR", "NOT", "IN", "EXISTS", "ANY", "ALL", "SOME", "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "CHECK", "ROW", "FROM", "DISTINCT", "TO", "AS", "ON", "USING", "SELECT", "ARRAY"];
+    const INFIX: &[&str] = &["LIKE", "ILIKE", "SIMILAR", "IS"];
+    let ends_operand = |j: usize| match t[j].kind {
+        TokenKind::Quoted | TokenKind::Str | TokenKind::Number => true,
+        TokenKind::Word => !NO_CALL.contains(&words[j].as_str()) && !INFIX.contains(&words[j].as_str()),
+        TokenKind::Symbol => t[j].text == ")",
+    };
+    let infix = |i: usize| {
+        if !INFIX.contains(&words[i].as_str()) || i == 0 {
+            return false;
+        }
+        let j = if words[i - 1] == "NOT" && i > 1 { i - 2 } else { i - 1 };
+        ends_operand(j)
+    };
     let call = |i: usize| {
         i > 0
             && t[i].text == "("
             && t[i].kind == TokenKind::Symbol
-            && (t[i - 1].kind == TokenKind::Quoted || (t[i - 1].kind == TokenKind::Word && (!NO_CALL.contains(&words[i - 1].as_str()) || (i > 1 && t[i - 2].text == "."))))
+            && (t[i - 1].kind == TokenKind::Quoted || (t[i - 1].kind == TokenKind::Word && ((!NO_CALL.contains(&words[i - 1].as_str()) && !infix(i - 1)) || (i > 1 && t[i - 2].text == "."))))
             && !(i > 1 && words[i - 2] == "REFERENCES")
     };
     if words.first().map(String::as_str) == Some("CREATE") && words.iter().take(4).any(|w| w == "INDEX") {
@@ -8066,6 +8079,11 @@ mod tests {
         assert!(fills("create index t_k on t (similar(id))"));
         assert!(fills("alter table t add column v int default similar(1)"));
         assert!(!fills("create index t_k on t (id) where email similar to ('a%')"));
+        assert!(!fills("create index t_k on t (id) where email like ('a%')"));
+        assert!(!fills("create index t_k on t (id) where email not ilike ('a%')"));
+        assert!(fills("create index t_k on t (id) where email like (f('a%'))"));
+        assert!(fills("create index t_k on t (id) where like(id)"));
+        assert!(fills("create index t_k on t (id) where id > 0 and ilike(email)"));
     }
 
     #[test]
