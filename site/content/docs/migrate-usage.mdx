@@ -81,6 +81,8 @@ $ reylo migrate status
 
 Run the deploy before your new code goes live. Two deploys at once take turns, so each instance of your app can instead run [`migrate()`](#api) as it starts.
 
+Your old code serves while the deploy runs, and on if it fails. So drop a column only once no running code reads it.
+
 ### Starting over
 
 Rebuild your development database from your migrations, or empty it:

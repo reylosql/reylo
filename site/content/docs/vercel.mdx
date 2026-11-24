@@ -36,3 +36,5 @@ direct_url: ${BUILD_DATABASE_URL:-${DATABASE_URL_UNPOOLED}}
 ```
 
 Set `BUILD_DATABASE_URL` in the Production environment only, to that database's direct connection string. A preview build reads its own database, which the script migrates first.
+
+Pages the build prerenders still query production, before it's migrated. Render a page that reads a new column on each request.

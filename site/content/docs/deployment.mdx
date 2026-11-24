@@ -192,6 +192,8 @@ A host that builds before it migrates starts with no database that has your sche
 4. Drop it.
 5. Migrate your deployment's own database.
 
+Pages the build prerenders still query production, before it's migrated. Render a page that reads a new column on each request.
+
 ## Errors
 
 A query that doesn't match the schema fails the job, at its line and column:

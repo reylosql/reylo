@@ -63,6 +63,7 @@ spec:
           env:
             - name: DATABASE_URL
               valueFrom:
+                # a Secret made before the first sync
                 secretKeyRef: { name: app-database, key: url }
 ```
 
