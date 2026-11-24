@@ -254,6 +254,13 @@ pub trait Alterer: Send {
         let _ = (from, to);
         Vec::new()
     }
+    /// Whether a change of `from` to `to` binds the object's columns to another that then holds them
+    /// (a table made a table of a type), after which the server converts none of them: the changes
+    /// that convert them go first.
+    fn binds(&self, from: &Object, to: &Object) -> bool {
+        let _ = (from, to);
+        false
+    }
     /// Whether a change of `from` to `to` lets go of the objects of it that something else holds (a
     /// partition detached from its table, whose indexes are then its own to drop), so that their
     /// drops wait for the change rather than go before it.
@@ -1187,6 +1194,10 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         }
     }
 
+    // What the plan drops, itself or with its owner (an index's statistics, the index made again),
+    // is taken off and put back around no change: it is made as the target has it after.
+    hooks.retain(|id, _| !drops.contains(id) && !owners(from, id).iter().any(|w| drops.contains(*w)));
+
     // A revoke of what an object is given as it is made is made only with its owner, or with the
     // change of the column that makes it (an identity's sequence), and dropped only with its owner:
     // an object already there was never given it. One made is kept even where what gives it is new,
@@ -1470,6 +1481,19 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                     for c in converted.get(id.as_str()).into_iter().flatten() {
                         if let Some(j) = from.objects.get(c).and_then(|c| c.owner.clone()).filter(|w| releases(w)).and_then(|w| find(Op::Alter(w))) {
                             after[k].insert(j);
+                        }
+                    }
+                }
+                // And a table that comes to be held so (made a table of a type) after the changes
+                // that convert its columns.
+                if let (Op::Alter(_), Some(f)) = (op, from.objects.get(id.as_str())) {
+                    if alterer.binds(f, o) {
+                        for (x, columns) in &converted {
+                            if x != id && columns.iter().any(|c| from.objects.get(c).is_some_and(|c| c.owner.as_deref() == Some(id.as_str()))) {
+                                if let Some(j) = find(Op::Alter(x.clone())) {
+                                    after[k].insert(j);
+                                }
+                            }
                         }
                     }
                 }
