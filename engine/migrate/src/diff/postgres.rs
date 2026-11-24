@@ -881,7 +881,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             let named = c.get("identity_name").map(|n| named_identity(&full, n)).unwrap_or_else(|| full.clone());
             // A not null of its own named otherwise than Postgres would name it (`constraint
             // a_required not null`) is made under that name.
-            let declared = c.get("nn_name").filter(|n| matches!(kind, "r" | "p") && !c.flag("inherited") && !generated_not_null(n, &name, c.text("name"))).map(String::from);
+            let declared = c.get("nn_name").filter(|n| matches!(kind, "r" | "p") && !c.flag("inherited") && !generated_not_null(n, &name, &unquoted(c.text("name")))).map(String::from);
             // One left unvalidated is added after, by its name, as below.
             let named = match declared.as_deref().filter(|_| !unvalidated) {
                 Some(n) if named.ends_with(" not null") => format!("{} constraint {n} not null", named.trim_end_matches(" not null")),
@@ -2723,6 +2723,8 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
     for (old, new, old_table, new_table) in renamed {
         let related = |o: &Object| o.owner.as_deref() == Some(old_table.as_str()) || o.goes_with.as_ref().is_some_and(|c| current.objects.get(c).is_some_and(|c| c.owner.as_deref() == Some(old_table.as_str())));
         let new_rel = new_table.strip_prefix("table ").unwrap_or(new_table);
+        // The names the renames below give the table's constraints, which no other may be given.
+        let mut given: Vec<String> = Vec::new();
         for o in current.objects.values().filter(|o| matches!(o.kind, Some(Kind::Constraint | Kind::Index | Kind::Sequence)) && related(o)) {
             let Some((word, rest)) = o.id.split_once(' ') else { continue };
             let (prefix, name) = last(rest);
@@ -2730,6 +2732,9 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
             let at = if o.kind == Some(Kind::Constraint) { new_rel.to_string() } else { prefix.clone() };
             if wanted == name || !target.objects.get(&format!("{word} {at}.{wanted}")).is_some_and(|t| t.kind == o.kind) {
                 continue;
+            }
+            if o.kind == Some(Kind::Constraint) {
+                given.push(unquoted(&wanted));
             }
             out.push(match o.kind {
                 Some(Kind::Constraint) => format!("alter table {at} rename constraint {name} to {wanted}"),
@@ -2758,15 +2763,49 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
                 out.push(format!("alter sequence {was} rename to {}", last(&now).1));
             }
         }
-        // Each column's not null, which Postgres 18 names after the table too.
-        for o in current.objects.values().filter(|o| o.kind == Some(Kind::Column) && o.owner.as_deref() == Some(old_table.as_str())) {
+        // Each column's not null, which Postgres 18 names after the table too. One the target has no
+        // column for, which the plan renames or drops, takes the name Postgres would give it under
+        // the new table where Postgres named it, so that the column reads as one made there, unless
+        // a constraint of the table holds that name.
+        let columns: Vec<&Object> = current.objects.values().filter(|o| o.kind == Some(Kind::Column) && o.owner.as_deref() == Some(old_table.as_str())).collect();
+        // Its own constraints, and those it holds as copies of another table's, an inherited check's.
+        let copied: Vec<String> = current.objects.get(old_table.as_str()).map_or(vec![], |t| t.extra.iter().filter_map(|l| l.strip_prefix(COPIED_CONSTRAINT)?.split(SEP).next()).map(unquoted).collect());
+        let held = |wanted: &str| {
+            columns.iter().any(|c| not_null_name(c).is_some_and(|n| unquoted(&n) == unquoted(wanted)))
+                || copied.contains(&unquoted(wanted))
+                || current.objects.values().any(|c| c.kind == Some(Kind::Constraint) && related(c) && c.id.split_once(' ').is_some_and(|(_, rest)| unquoted(&last(rest).1) == unquoted(wanted)))
+        };
+        // A kept column's not null takes the target's name; those renames go last, after the others
+        // have let go of the names they hold, and what they give no other is given.
+        let mut kept_renames = Vec::new();
+        for o in &columns {
             let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
-            let Some(name) = not_null_name(o) else { continue };
+            let (Some(name), Some(kept)) = (not_null_name(o), target.objects.get(&format!("column {new_rel}.{column}"))) else { continue };
             let wanted = crate::diff::swap_name(&name, old, new);
-            if wanted != name && target.objects.get(&format!("column {new_rel}.{column}")).and_then(not_null_name).as_deref() == Some(wanted.as_str()) {
-                out.push(format!("alter table {new_rel} rename constraint {name} to {wanted}"));
+            if wanted != name && not_null_name(kept).as_deref() == Some(wanted.as_str()) {
+                given.push(unquoted(&wanted));
+                kept_renames.push(format!("alter table {new_rel} rename constraint {name} to {wanted}"));
             }
         }
+        // One the target has no column for: the name Postgres would make, as it holds it, with a
+        // number after its label where that is held or given, as Postgres numbers it.
+        for o in &columns {
+            let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
+            let Some(name) = not_null_name(o) else { continue };
+            if target.objects.contains_key(&format!("column {new_rel}.{column}")) {
+                continue;
+            }
+            let column = unquoted(column);
+            if !generated_not_null(&name, old_rel, &column) {
+                continue;
+            }
+            let made = (0..100).map(|n| not_null_named(new_rel, &column, &if n == 0 { "not_null".to_string() } else { format!("not_null{n}") })).find(|m| *m == unquoted(&name) || (!held(m) && !given.contains(m)));
+            if let Some(made) = made.filter(|m| *m != unquoted(&name)) {
+                out.push(format!("alter table {new_rel} rename constraint {name} to {}", declared::quote_ident(&made)));
+                given.push(made);
+            }
+        }
+        out.extend(kept_renames);
     }
     out
 }
@@ -3192,22 +3231,42 @@ fn dollar_block(body: &str) -> String {
     format!("do {tag} {body} {tag}")
 }
 
-/// Whether `name` is one Postgres gives a not null it makes on `table`'s `column`: its name for it,
-/// or with a number after where another constraint of the schema held that name.
+/// Whether `name` is one Postgres gives a not null it makes on `table`'s `column`, the column's name
+/// as Postgres holds it: its name for it, or the one it gives where another constraint of the schema
+/// held that name, with a number after its label.
 fn generated_not_null(name: &str, table: &str, column: &str) -> bool {
     let name = unquoted(name);
-    let made = default_not_null(table, column);
-    name.strip_prefix(made.as_str()).is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_digit()))
+    let number = name.len() - name.bytes().rev().take_while(u8::is_ascii_digit).count();
+    name[..number].ends_with("_not_null") && not_null_named(table, column, &name[number - "not_null".len()..]) == name
 }
 
-/// The name Postgres gives a not null it makes on a table's column, as it holds it.
+/// The name Postgres gives a not null it makes on a table's column, the column's name and its own as
+/// Postgres holds them.
 fn default_not_null(table: &str, column: &str) -> String {
-    let name = format!("{}_{}_not_null", unquoted(split_last(table).1), unquoted(column));
-    let mut end = name.len().min(63);
-    while !name.is_char_boundary(end) {
-        end -= 1;
+    not_null_named(table, column, "not_null")
+}
+
+/// The name Postgres makes of a table's name, a column's and `label` (`not_null`, or `not_null1` where
+/// that was taken): past 63 bytes, the longer of the table's and the column's names is shortened a
+/// byte at a time until it fits, each then cut at a character's edge (`makeObjectName`).
+fn not_null_named(table: &str, column: &str, label: &str) -> String {
+    let table = unquoted(split_last(table).1);
+    let room = 63usize.saturating_sub(label.len() + 2);
+    let (mut a, mut b) = (table.len(), column.len());
+    while a + b > room {
+        if a > b {
+            a -= 1;
+        } else {
+            b -= 1;
+        }
     }
-    name[..end].to_string()
+    let clip = |s: &str, mut n: usize| -> String {
+        while !s.is_char_boundary(n) {
+            n -= 1;
+        }
+        s[..n].to_string()
+    };
+    format!("{}_{}_{label}", clip(&table, a), clip(column, b))
 }
 
 /// A name as Postgres holds it, from how it is written: a quoted one without its quotes.
@@ -4536,7 +4595,7 @@ impl Alterer for PostgresAlterer {
                 } else if b.not_null && (!a.not_null || a.no_inherit != b.no_inherit || (a.not_valid && !b.not_valid)) && !not_null_done {
                     // A not null the target names otherwise than Postgres would is added under its name.
                     let named = declared(to)
-                        .or_else(|| to.extra.iter().find_map(|l| l.strip_prefix("not null name ")).filter(|n| !generated_not_null(n, &table, &name)).map(String::from))
+                        .or_else(|| to.extra.iter().find_map(|l| l.strip_prefix("not null name ")).filter(|n| !generated_not_null(n, &table, &unquoted(&name))).map(String::from))
                         .filter(|_| !a.not_null || a.no_inherit != b.no_inherit);
                     out.push(match named {
                         Some(n) if b.no_inherit => format!("alter table {table} add constraint {n} not null {name} no inherit"),
@@ -4550,7 +4609,7 @@ impl Alterer for PostgresAlterer {
                 // column's rename and a table's joining rename theirs.
                 let dropped = out.iter().any(|s| s.ends_with(" drop not null"));
                 if a.not_null && b.not_null && !dropped && (declared(from).is_some() || declared(to).is_some()) {
-                    let made = default_not_null(&table, &name);
+                    let made = default_not_null(&table, &unquoted(&name));
                     let made = if made.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') { made } else { crate::db::ident(&made) };
                     let want = declared(to).unwrap_or(made);
                     if let Some(now) = not_null_name(from).filter(|now| unquoted(now) != unquoted(&want)) {
