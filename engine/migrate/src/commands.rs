@@ -4825,12 +4825,14 @@ fn keep_rows(id: &str, from: &crate::diff::Schema, to: &crate::diff::Schema, ren
         let (sequence, options) = if def.contains(" as identity") {
             let unquoted = c.strip_prefix('"').and_then(|c| c.strip_suffix('"')).map_or(c.to_string(), |c| c.replace("\"\"", "\""));
             (format!("pg_get_serial_sequence({}, {})", literal(&table), literal(&unquoted)), def.to_string())
-        } else if let (Some((id, options)), Some((was, _))) = (owned(to, c), owned(from, old)) {
+        } else if let Some((id, options)) = owned(to, c).filter(|(id, _)| !from.objects.contains_key(id) || owned(from, old).is_some_and(|(was, _)| &was == id)) {
+            // Made again with the table, or new: one that outlives it, which the column only comes
+            // to own, keeps its place.
             let name = shown(id.trim_start_matches("sequence "));
             let integer = ["smallint", "integer", "bigint"].contains(&ty(def).as_str());
             let full = id.trim_start_matches("sequence ");
             let alone = [&name, full].iter().any(|n| def.contains(&format!("default nextval({}::regclass)", literal(n))));
-            if id != was || !integer || !alone {
+            if !integer || !alone {
                 out.push(format!("-- and move the sequence {name} past the values put back in {c}"));
                 continue;
             }

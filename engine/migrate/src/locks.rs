@@ -475,23 +475,26 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
         }
         }
     });
+    run(db, m).await?;
     // A sequence moved to a new start reads each column it gives values to, its table locked
-    // against writes until the file commits: every row of it, where no index leads with the column.
+    // against writes until the file commits: every row of a table that was there before, where no
+    // index serves the column's max and min (a valid btree index that leads with it, over every
+    // row). Read once the file has run, as the block finds them where it runs, after a rename.
     let (opens, closes) = crate::diff::postgres::SEQUENCE_READ;
     for line in m.sql.lines().filter(|l| l.contains("set_config('reylo.sequence_goal', goal::text")) {
         let Some(sequence) = line.strip_prefix(opens).and_then(|rest| rest.split_once(closes)).map(|(s, _)| s) else { continue };
         let read = db
             .rows(&format!(
-                "select format('%s', c.rel) as t from (select ({sequence})::regclass as s) q, lateral ({}) c \
-                where c.plain and not exists (select from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0] where i.indrelid = c.rel and a.attname = c.attname)",
+                "select format('%s', c.rel) as t, c.rel::oid::text as oid from (select ({sequence})::regclass as s) q, lateral ({}) c \
+                where c.plain and not exists (select from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0] join pg_class x on x.oid = i.indexrelid join pg_am am on am.oid = x.relam \
+                where i.indrelid = c.rel and a.attname = c.attname and i.indisvalid and i.indpred is null and am.amname = 'btree')",
                 crate::diff::postgres::sequence_columns("q.s")
             ))
             .await;
-        for r in read.iter().flatten() {
+        for r in read.iter().flatten().filter(|r| before.values().any(|s| s.oid == r.text("oid"))) {
             add(r.text("t"), format!("reads every row of {} while it blocks writes to it, to move a sequence past them", r.text("t")));
         }
     }
-    run(db, m).await?;
     // A table renamed keeps its storage; one given new storage was copied, but for a truncate,
     // which empties it at once. An index given new storage on a table that wasn't copied was
     // built again, reading every row while its table's lock blocks reads and writes.
