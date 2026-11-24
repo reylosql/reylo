@@ -1573,7 +1573,7 @@ fn fills_existing(statement: &crate::sql::Statement) -> bool {
     // A name and a parenthesis, but for a reserved word's, which names no function (`where (…)`,
     // `check (…)`), and the table a reference names. A name after a schema's is a function's,
     // whatever it is spelled.
-    const NO_CALL: &[&str] = &["WHERE", "AND", "OR", "NOT", "IN", "IS", "EXISTS", "ANY", "ALL", "SOME", "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "CHECK", "LIKE", "ILIKE", "ROW"];
+    const NO_CALL: &[&str] = &["WHERE", "AND", "OR", "NOT", "IN", "IS", "EXISTS", "ANY", "ALL", "SOME", "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "CHECK", "LIKE", "ILIKE", "ROW", "FROM", "DISTINCT", "SIMILAR", "TO", "AS", "ON", "USING", "SELECT", "ARRAY"];
     let call = |i: usize| {
         i > 0
             && t[i].text == "("
@@ -8060,6 +8060,8 @@ mod tests {
         assert!(fills("create index t_k on t (public.include(id))"));
         assert!(fills("create index t_k on t (id) where public.any(id)"));
         assert!(fills("create index t_k on t (include(id))"));
+        assert!(!fills("create index t_k on t (id) where id is distinct from (1)"));
+        assert!(fills("create index t_k on t (id) where id is distinct from (f(1))"));
     }
 
     #[test]
