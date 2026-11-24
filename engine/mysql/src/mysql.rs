@@ -2467,17 +2467,23 @@ fn kind(read: Option<&Statement>) -> Option<StatementKind> {
 }
 
 /// How far a statement's tree may go: 200 levels of nesting, which a call's arguments, a
-/// parenthesized operand and a CASE each spend one of and a subquery two, and 500 operators in all,
-/// each a level of the tree a chain of them makes, which every walk of the engine and the tree's
-/// drop then recurse through. A statement past either is an error to parse, left to the server's
-/// describe, never an overflow of the stack.
-const BOUNDS: syntax::mysql::Bounds = syntax::mysql::Bounds { depth: crate::stack::MAX_DEPTH / 5, operators: crate::stack::MAX_DEPTH / 2 };
+/// parenthesized operand and a CASE each spend one of and a subquery two, and chains of 2,000
+/// operators (`a or b or …`, `a + b + …`, `… union all …`), each a level of the tree the chain
+/// makes, which every walk of the engine and the tree's drop then recurse through. A statement past
+/// either is an error to parse, left to the server's describe, never an overflow of the stack.
+///
+/// The engine runs natively alone, on [`reylo_engine_core::stack::STACK_BYTES`], and in a Rust project's
+/// macro unoptimized: there a chain of 4,000 operators, or 500 nested calls, is read, and twice
+/// either overflows the stack, so each bound is half of what that build reads or less. MySQL
+/// itself refuses most statements deeper than these: 500 nested CASEs, 64 nested subqueries and a
+/// sum of 4,000 terms each overrun its thread's stack or its nesting limit (8.4, 2026-11-24).
+const BOUNDS: syntax::mysql::Bounds = syntax::mysql::Bounds { depth: 200, chain: 2_000 };
 
 /// The note on a statement past [`BOUNDS`], which is typed from the server's prepare alone.
 pub(crate) fn too_deep_note() -> String {
     format!(
-        "This statement nests deeper than the analysis reads, so it is typed from the server's prepare alone: each column it returns may be null, in any number of rows. The analysis reads {} levels of nesting, which a call's arguments, a parenthesized operand and a CASE each spend one of and a subquery two, and {} operators in all.",
-        BOUNDS.depth, BOUNDS.operators
+        "This statement nests deeper than the analysis reads, so it is typed from the server's prepare alone: each column it returns may be null, in any number of rows. The analysis reads {} levels of nesting, which a call's arguments, a parenthesized operand and a CASE each spend one of and a subquery two, and chains of up to {} operators, as `a or b or …`, `a + b + …` or a UNION's queries.",
+        BOUNDS.depth, BOUNDS.chain
     )
 }
 
@@ -3968,17 +3974,23 @@ mod tests {
     #[test]
     fn statements_nest_to_the_engines_bound() {
         // 200 levels of nesting, which a parenthesized operand (`id = 0 or (…)`) and a subquery
-        // each spend two of, and 500 operators in all ([`BOUNDS`]). A statement past either is an
-        // error to parse, left to the server's describe, never an overflow of the stack.
+        // each spend two of, and chains of 2,000 operators ([`BOUNDS`]). A statement past either is
+        // an error to parse, left to the server's describe, never an overflow of the stack.
         let deepest = |shape: &str| crate::stack::run(|| (1..1_000).take_while(|&n| parse(&SessionDialect::default(), &crate::stack::nested(shape, n)).is_ok()).last().unwrap_or(0));
-        let found: Vec<(&str, usize)> = ["sum", "and_or", "case", "coalesce", "subquery"].into_iter().map(|shape| (shape, deepest(shape))).collect();
-        assert_eq!(found, vec![("sum", 501), ("and_or", 99), ("case", 198), ("coalesce", 198), ("subquery", 98)]);
+        let mut found: Vec<(&str, usize)> = ["and_or", "case", "coalesce", "subquery"].into_iter().map(|shape| (shape, deepest(shape))).collect();
+        assert_eq!(found, vec![("and_or", 99), ("case", 198), ("coalesce", 198), ("subquery", 98)]);
+        // The chains, at the bound and one past it.
+        let reads = |shape: &str, n: usize| crate::stack::run(|| parse(&SessionDialect::default(), &crate::stack::nested(shape, n)).is_ok());
+        for (shape, n) in [("sum", 2_001), ("or", 2_000)] {
+            assert!(reads(shape, n) && !reads(shape, n + 1), "{shape} at {n}");
+            found.push((shape, n));
+        }
         for shape in ["sum", "case", "or", "and_or"] {
             assert!(crate::stack::run(|| parse(&SessionDialect::default(), &crate::stack::nested(shape, 100_000)).is_err()), "{shape}");
         }
         // A whole analysis at the bound and far past it, which used to overflow the stack.
         let described = json!({ "columns": [{ "name": "x", "type": 8, "flags": 1 }], "params": [] });
-        for n in [501, 100_000] {
+        for n in [2_001, 100_000] {
             let (analysis, _) = crate::stack::run(|| analyzed(&crate::stack::nested("sum", n), described.clone(), "STRICT_TRANS_TABLES"));
             assert_eq!(analysis.columns.len(), 1, "{n}");
         }

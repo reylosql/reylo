@@ -21,7 +21,9 @@ pub mod mysql_params;
 pub mod mysql_shape;
 pub mod mysql_types;
 
-use reylo_engine_core::{analysis, dialect, fresh, lex, schema_type, shape, stack, structured, types};
+use reylo_engine_core::{analysis, dialect, fresh, lex, schema_type, shape, structured, types};
+#[cfg(test)]
+use reylo_engine_core::stack;
 
 pub use api::Mysql;
 
