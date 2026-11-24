@@ -2738,6 +2738,7 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
     for (old, new, old_table, new_table) in renamed {
         let related = |o: &Object| o.owner.as_deref() == Some(old_table.as_str()) || o.goes_with.as_ref().is_some_and(|c| current.objects.get(c).is_some_and(|c| c.owner.as_deref() == Some(old_table.as_str())));
         let new_rel = new_table.strip_prefix("table ").unwrap_or(new_table);
+        let old_rel = old_table.strip_prefix("table ").unwrap_or(old_table);
         // The names the renames below give the table's constraints, which no other may be given.
         let mut given: Vec<String> = Vec::new();
         for o in current.objects.values().filter(|o| matches!(o.kind, Some(Kind::Constraint | Kind::Index | Kind::Sequence)) && related(o)) {
@@ -2747,9 +2748,14 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
             let wanted = declared::quote_ident(&made);
             let at = if o.kind == Some(Kind::Constraint) { new_rel.to_string() } else { prefix.clone() };
             // Renamed only onto what the target has under that name on the renamed table, and only
-            // where the target doesn't keep it under the name it has.
-            let ours = |t: &Object| t.kind == o.kind && (o.kind != Some(Kind::Index) || t.owner.as_deref() == Some(new_table.as_str()));
-            if made == unquoted(&name) || target.objects.contains_key(&o.id) || !target.objects.get(&format!("{word} {at}.{wanted}")).is_some_and(ours) {
+            // where the target doesn't keep it under the name it has: an index on the renamed table,
+            // a sequence its same column owns. A name the target gives something else is let go.
+            let ours = |t: &Object| {
+                t.kind == o.kind
+                    && (o.kind != Some(Kind::Index) || t.owner.as_deref() == Some(new_table.as_str()))
+                    && (o.kind != Some(Kind::Sequence) || t.goes_with == o.goes_with.as_ref().map(|c| c.replacen(&format!("column {old_rel}."), &format!("column {new_rel}."), 1)))
+            };
+            if made == unquoted(&name) || target.objects.get(&o.id).is_some_and(ours) || !target.objects.get(&format!("{word} {at}.{wanted}")).is_some_and(ours) {
                 continue;
             }
             if o.kind == Some(Kind::Constraint) {
@@ -2764,7 +2770,6 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
         // Each identity's sequence, which Postgres names after the table and keeps through its
         // rename, where the target's is named after the new one. A partition's identity is its
         // parent's, with no sequence of its own.
-        let old_rel = old_table.strip_prefix("table ").unwrap_or(old_table);
         let (schema, _) = last(old_rel);
         for o in current.objects.values().filter(|o| o.kind == Some(Kind::Column) && o.owner.as_deref() == Some(old_table.as_str()) && parse_column(&o.def).identity.is_some() && !o.extra.iter().any(|l| l == "partition")) {
             let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };

@@ -4621,6 +4621,23 @@ mod adversarial {
         assert_eq!(p.rows("select id from plain order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
         p.output();
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        p.output();
+        // A serial's sequence, whose old name the target gives a sequence of its own: the serial's is
+        // renamed with its table, keeping its count, and the other made.
+        let rest = format!("{rest} create table dest (x integer); create index {kept} on dest (x); create table holder (x integer); create index dest_x_idx on holder (x); create table plain (id integer generated always as identity, note text);");
+        p.file("20991231000002_t.sql", "create table source (id serial primary key, note text);");
+        p.schema(&format!("{rest} create table source (id serial primary key, note text);"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into source (note) values ('a')").await;
+        p.output();
+        p.schema(&format!("{rest} create table target (id serial primary key, note text); create sequence source_id_seq;"));
+        let choices = reylo_migrate::Choices { rename: vec![("source".into(), "target".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "serial", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into target (note) values ('b')").await;
+        assert_eq!(p.rows("select id from target order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
     }
 
     /// A refusal's suggested command carries --blocking where the migration it writes rewrites a
