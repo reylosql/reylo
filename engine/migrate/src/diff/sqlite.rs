@@ -642,7 +642,7 @@ impl Alterer for SqliteAlterer {
     /// renames have given its key the name the target reads it by, and every view it reads
     /// through is back. Each comes after those of the indexes its content reads (a view that
     /// searches another index), and an index a table's rebuild refreshes that the plan makes again
-    /// is rebuilt once, as it is made.
+    /// is rebuilt with the rest, as it is made.
     fn finish(&self, statements: &mut Vec<String>) {
         let mut rebuilds: Vec<(String, String)> = Vec::new();
         statements.retain(|s| match rebuilt(s) {
@@ -666,7 +666,10 @@ impl Alterer for SqliteAlterer {
             while let Some(view) = queue.pop() {
                 let Some(o) = to.objects.get(&format!("view {view}")).filter(|_| seen.insert(view.clone())) else { continue };
                 let tokens = tokenize(o.create.first().map_or("", String::as_str), Dialect::Sqlite);
-                let read = (1..tokens.len()).filter(|&k| matches!(tokens[k].kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Str) && (matches!(tokens[k - 1].upper().as_str(), "FROM" | "JOIN") || tokens[k - 1].text == ","));
+                let named = |k: usize| matches!(tokens[k].kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Str);
+                let read = (1..tokens.len()).filter(|&k| named(k) && (matches!(tokens[k - 1].upper().as_str(), "FROM" | "JOIN") || tokens[k - 1].text == ","));
+                // A name its schema qualifies (`main.notes_fts`) is the one after the dot.
+                let read = read.map(|k| if tokens.get(k + 1).is_some_and(|t| t.text == ".") && tokens.get(k + 2).is_some() && named(k + 2) { k + 2 } else { k });
                 for n in read.map(|k| fold(&unquote(&tokens[k]))) {
                     if to.objects.get(&format!("table {n}")).is_some_and(|t| Info::of(t).content.is_some()) {
                         out.insert(n.clone());
@@ -677,10 +680,21 @@ impl Alterer for SqliteAlterer {
             out.remove(name);
             out
         };
+        // Those over a table first, which read no other index; then those over a view, each after
+        // the indexes it reads. Where several read through views, which a view can name in more
+        // ways than this reads, they run again until a chain of any length has settled.
+        let through_view = |name: &str| schemas.as_ref().is_some_and(|(_, to)| to.objects.get(&format!("table {name}")).and_then(|o| Info::of(o).content).is_some_and(|(c, ..)| to.objects.contains_key(&format!("view {c}"))));
+        rebuilds.sort_by_key(|(n, _)| through_view(n));
+        let mut ordered: Vec<(String, String)> = Vec::new();
         while !rebuilds.is_empty() {
             let waiting: Vec<String> = rebuilds.iter().map(|(n, _)| n.clone()).collect();
             let next = rebuilds.iter().position(|(n, _)| reads(n).iter().all(|r| !waiting.contains(r))).unwrap_or(0);
-            statements.push(rebuilds.remove(next).1);
+            ordered.push(rebuilds.remove(next));
+        }
+        let viewed: Vec<String> = ordered.iter().filter(|(n, _)| through_view(n)).map(|(_, s)| s.clone()).collect();
+        statements.extend(ordered.into_iter().map(|(_, s)| s));
+        for _ in 1..viewed.len() {
+            statements.extend(viewed.iter().cloned());
         }
     }
 
