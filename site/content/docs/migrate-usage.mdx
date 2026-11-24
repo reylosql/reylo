@@ -569,6 +569,58 @@ $ reylo migrate new dates_only --drop events.starts_at,events.price --blocking
 
 A change that fails on an existing value, such as a shorter `varchar`, isn't asked about. The migration fails on that row instead. On SQLite, only a change from text to a number loses values.
 
+### Partitioned tables
+
+Postgres can't partition a table in place:
+
+```sql title="schema.sql"
+create table users (id integer primary key, name text); -- [!code --]
+create table users (id integer primary key, name text) partition by hash (id); -- [!code ++]
+create table users_p0 partition of users for values with (modulus 2, remainder 0); -- [!code ++]
+create table users_p1 partition of users for values with (modulus 2, remainder 1); -- [!code ++]
+```
+
+So the migration creates it again, and is refused:
+
+```terminal
+$ reylo migrate new partition_users
+✗ Postgres can't make users a partitioned table in place
+  A table is partitioned only when it's created, so this migration drops users and its rows to create it again.
+  To keep the rows, add these lines to the migration it writes:
+
+    -- at the top
+    lock table users in exclusive mode;
+    create table users_rows as select * from users;
+    -- right after it creates users and its partitions
+    insert into users (id, name) select id, name from users_rows;
+    drop table users_rows;
+
+  To write it, dropping the rows:
+    reylo migrate new partition_users --drop users
+
+Nothing was changed.
+```
+
+Write it with `--drop users`, and add those lines:
+
+```sql title="20261104150000_partition_users.sql"
+lock table users in exclusive mode; -- [!code ++]
+create table users_rows as select * from users; -- [!code ++]
+-- loses data: users
+drop table users;
+create table users (
+  id integer not null,
+  name text,
+  constraint users_pkey primary key (id)
+) partition by hash (id);
+create table users_p0 partition of users for values with (modulus 2, remainder 0);
+create table users_p1 partition of users for values with (modulus 2, remainder 1);
+insert into users (id, name) select id, name from users_rows; -- [!code ++]
+drop table users_rows; -- [!code ++]
+```
+
+The same goes for a partitioned table made plain, and a changed partition key.
+
 ### Pushes
 
 A push asks the same questions, and takes `--force` for every one at once:

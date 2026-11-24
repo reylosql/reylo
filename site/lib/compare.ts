@@ -5,7 +5,8 @@ import migrateResultsJson from '@/lib/migrate-compare-results.json';
  * The docs' comparison, /compare: which tools and rows it shows. Every mark comes from
  * lib/compare-results.json, which lab/compare writes from real runs of each tool.
  */
-export type CompareCell = { state: 'y' | 'p' | 'n'; note?: string };
+/** A tool's mark in a row; `pro` is a yes only in the tool's paid build, which `note` says. */
+export type CompareCell = { state: 'y' | 'p' | 'n'; note?: string; pro?: boolean };
 
 export const compareResults = results as unknown as { at: string; tools: Record<string, { name: string; version: string; cells: Record<string, CompareCell> }> };
 
@@ -68,11 +69,12 @@ export const compareOrmRows: { id: string; label: string; asks?: string }[] = [
  * The migration tools beside Reylo Migrate, on /migrate/compare and in its launch post, in an order
  * that keeps the longer subtitles from sitting side by side. Every mark
  * comes from lib/migrate-compare-results.json, written from real runs of each tool on Postgres 18,
- * MySQL 8.4 and SQLite.
+ * MySQL 8.4 and SQLite, but Atlas's, which are Atlas Pro's documented behavior, since its free
+ * builds leave out views, functions, triggers and policies.
  */
 export const migrateTools = [
   { id: 'prisma', name: 'Prisma', sub: 'TypeScript', href: 'https://www.prisma.io/orm' },
-  { id: 'atlas', name: 'Atlas', sub: 'Go', href: 'https://atlasgo.io' },
+  { id: 'atlas', name: 'Atlas Pro', sub: 'Go', href: 'https://atlasgo.io' },
   { id: 'drizzle', name: 'Drizzle Kit', sub: 'TypeScript', href: 'https://orm.drizzle.team/docs/kit-overview' },
   { id: 'flyway', name: 'Flyway', sub: 'Java', href: 'https://github.com/flyway/flyway' },
   { id: 'pgdelta', name: 'pg-delta', sub: 'Supabase', href: 'https://github.com/supabase/pg-toolbelt/tree/main/packages/pg-delta' },
@@ -92,6 +94,7 @@ export const migrateRows: { id: string; label: string; asks?: string }[] = [
   { id: 'triggers', label: 'Triggers', asks: 'A new trigger, or a change to when it fires, becomes a migration.' },
   { id: 'rls', label: 'Row level security', asks: "A new policy, or a change to its expression, becomes a migration." },
   { id: 'extensions', label: 'Extensions', asks: 'An extension your schema creates becomes a migration.' },
+  { id: 'grants', label: 'Grants', asks: 'A new grant becomes a migration.' },
   { id: 'three-dialects', label: 'Postgres, MySQL, SQLite', asks: 'It writes migrations from your schema on all three.' },
   { id: 'renames', label: 'Renames', asks: 'A renamed column keeps its rows, rather than being dropped and added again.' },
   { id: 'data-loss', label: 'Data-loss guard', asks: 'Dropping a column that holds rows waits for you to confirm it.' },
@@ -99,6 +102,7 @@ export const migrateRows: { id: string; label: string; asks?: string }[] = [
   { id: 'non-blocking', label: 'Non-blocking indexes', asks: 'A new index on a Postgres table is built without blocking writes.' },
   { id: 'shadow', label: 'Shadow database', asks: 'Each migration is tried on a throwaway database before it runs.' },
   { id: 'drift', label: 'Drift detection', asks: 'A deploy onto a database someone changed by hand is refused.' },
+  { id: 'edited', label: 'Edited migrations', asks: 'A deploy onto a database that ran a migration since edited is refused.' },
   { id: 'out-of-order', label: 'Out-of-order migrations', asks: 'A migration that sorts before one a database already ran is caught.' },
   { id: 'branch-switch', label: 'Branch switching', asks: "After a branch switch, the development database rewinds the other branch's migrations, keeping the rest." },
   { id: 'lockfile', label: 'Strict order in git', asks: 'Two branches that each add a migration conflict in git.' },
