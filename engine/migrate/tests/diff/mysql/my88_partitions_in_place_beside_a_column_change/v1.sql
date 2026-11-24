@@ -1,0 +1,1 @@
+create table m (id int not null, y int not null, primary key (id, y)) partition by range (y) (partition p1 values less than (2026), partition p2 values less than (2027), partition p3 values less than (2028));

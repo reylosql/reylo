@@ -362,6 +362,12 @@ pub fn head(statement: &Statement, count: usize) -> String {
     head_of(&statement.tokens, count)
 }
 
+/// Whether a MySQL statement is an `alter table`, which copies the values a table keeps into its
+/// columns as they are after it.
+pub fn alters_table(statement: &Statement) -> bool {
+    head(statement, 2) == "ALTER TABLE"
+}
+
 fn head_of(tokens: &[Token], count: usize) -> String {
     tokens.iter().take(count).map(|t| if t.kind == TokenKind::Word { t.text.to_ascii_uppercase() } else { t.text.clone() }).collect::<Vec<_>>().join(" ")
 }
@@ -390,6 +396,8 @@ re!(SQLITE_ALONE, r"^(VACUUM|ATTACH|DETACH)\b");
 re!(PG_DETACH, r"^ALTER TABLE\b.*\bDETACH PARTITION\b.*\bCONCURRENTLY\b");
 re!(PG_BUILDS_INDEX, r"^CREATE (UNIQUE )?INDEX CONCURRENTLY\b");
 re!(MYSQL_DATA, r"^(INSERT|UPDATE|DELETE|REPLACE|SELECT|WITH|DO|TABLE|VALUES|CALL|SET)\b");
+re!(MYSQL_LOCK, r"^LOCK TABLES?$");
+re!(MYSQL_UNLOCK, r"^UNLOCK TABLES?$");
 re!(MYSQL_SET_COMMITS, r"^SET (PASSWORD|DEFAULT ROLE)\b|^SET\b.*\bAUTOCOMMIT\b");
 
 /// The scopes of a MySQL `SET` that write the server's own settings: `GLOBAL` the running server's,
@@ -478,14 +486,14 @@ pub fn atomicity_problem(sql: &str, dialect: Dialect) -> Option<String> {
     if let Some(problem) = readings.iter().find_map(|statements| atomicity_of(statements, dialect)) {
         return Some(problem);
     }
-    if readings.iter().any(|statements| alone(statements, dialect)) && readings.iter().any(|statements| statements.len() > 1) {
+    if readings.iter().any(|statements| alone(statements, dialect)) && readings.iter().any(|statements| statements.len() > 1 && !locked(statements, dialect)) {
         return Some("Its executable comments leave a statement that runs alone on some versions of MySQL and several statements on others, so give each statement a file of its own.".into());
     }
     None
 }
 
 fn atomicity_of(statements: &[Statement], dialect: Dialect) -> Option<String> {
-    if statements.is_empty() {
+    if statements.is_empty() || locked(statements, dialect) {
         return None;
     }
     let kinds: Vec<Kind> = statements.iter().map(|s| kind_of(s, dialect)).collect();
@@ -521,7 +529,27 @@ pub fn runs_alone(sql: &str, dialect: Dialect) -> bool {
 }
 
 fn alone(statements: &[Statement], dialect: Dialect) -> bool {
-    statements.len() == 1 && matches!(kind_of(&statements[0], dialect), Kind::Alone | Kind::Commits)
+    (statements.len() == 1 && matches!(kind_of(&statements[0], dialect), Kind::Alone | Kind::Commits)) || locked(statements, dialect)
+}
+
+/// Whether MySQL statements are one change under `lock tables`: the lock first, `unlock tables`
+/// last, and DDL alone between them, which commits as each statement runs while the session keeps
+/// the lock. No write to the tables locked runs between its statements, so Migrate writes a trigger
+/// dropped and made again so, MySQL having no `create or replace trigger`. It runs outside a
+/// transaction, as MySQL's DDL does, and a failure may leave its first statements in place.
+fn locked(statements: &[Statement], dialect: Dialect) -> bool {
+    let [first, between @ .., last] = statements else { return false };
+    dialect == Dialect::Mysql && !between.is_empty() && locks_tables(first) && unlocks_tables(last) && between.iter().all(|s| kind_of(s, dialect) == Kind::Commits && !locks_tables(s) && !unlocks_tables(s))
+}
+
+/// Whether a MySQL statement is a `lock tables`.
+pub fn locks_tables(statement: &Statement) -> bool {
+    MYSQL_LOCK.is_match(&head(statement, 2))
+}
+
+/// Whether a MySQL statement is an `unlock tables`.
+pub fn unlocks_tables(statement: &Statement) -> bool {
+    MYSQL_UNLOCK.is_match(&head(statement, 2))
 }
 
 /// The words a table's (or routine's) name follows, so that `<word> a.b` names the database `a`:
@@ -919,6 +947,15 @@ mod tests {
         assert_eq!(atomicity_problem("call refresh_totals(); insert into a values (1)", Dialect::Mysql), None);
         assert!(atomicity_problem("set autocommit = 1; insert into a values (1)", Dialect::Mysql).unwrap().contains("a file of its own"));
         assert!(atomicity_problem("set password = 'x'; insert into a values (1)", Dialect::Mysql).unwrap().contains("a file of its own"));
+        // DDL under `lock tables` is one change, run outside a transaction; anything else beside the
+        // lock is not.
+        let swap = "lock tables users write;\ndrop trigger t;\ncreate trigger t before update on users for each row begin set new.n = 1; set new.m = 2; end;\nunlock tables;";
+        assert_eq!(atomicity_problem(swap, Dialect::Mysql), None);
+        assert!(runs_alone(swap, Dialect::Mysql));
+        assert!(atomicity_problem("lock tables users write;\ndrop trigger t;\ncreate trigger t before update on users for each row set new.n = 1;", Dialect::Mysql).is_some());
+        assert!(atomicity_problem("lock tables users write;\nupdate users set n = 1;\nunlock tables;", Dialect::Mysql).is_some());
+        assert!(atomicity_problem("lock tables users write;\ndrop trigger t;\nunlock tables;\ncreate table b (x int);", Dialect::Mysql).is_some());
+        assert!(atomicity_problem("lock tables users write;\nunlock tables;", Dialect::Mysql).is_some());
     }
 
     #[test]

@@ -335,6 +335,170 @@ pub struct Hazard {
     pub what: String,
 }
 
+/// Runs a MySQL file as `deploy` runs it, saying where its `alter table`, on a table that was there
+/// before it ran, blocks writes to it while it reads every row. That is MySQL's own answer: the
+/// statement runs first with `lock=none`, which MySQL refuses where the change can't let writes
+/// through (a column's type changed, which copies the table, a table partitioned anew, partitions
+/// reorganized), and otherwise makes as it is. A file that holds its changes under `lock tables`
+/// blocks reads and writes for as long as each runs, however MySQL makes it: each is tried with
+/// `algorithm=instant` on an empty copy of its table, which MySQL answers as it would the table,
+/// and one it can't make by changing the definition alone (it rebuilds or reads the table) blocks.
+/// The file then runs as written.
+async fn mysql_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard>, Error> {
+    let statements = crate::sql::split_statements(&m.sql, Dialect::Mysql);
+    let there = mysql_tables(db).await?;
+    if statements.len() > 2 && crate::sql::locks_tables(&statements[0]) {
+        // A name no table or view of the database has.
+        let taken: BTreeSet<String> = db.rows("select table_name as t from information_schema.tables where table_schema = database()").await?.iter().map(|r| r.text("t").to_lowercase()).collect();
+        let copy = (0..).map(|n| format!("__reylo_lock_probe_{n}")).find(|c| !taken.contains(c)).expect("a free name");
+        let mut hazards = Vec::new();
+        for s in statements.iter().filter(|s| crate::sql::alters_table(s)) {
+            let Some((table, tried)) = with_option(&s.text, Some(&copy), "algorithm=instant") else { continue };
+            if !there.contains(&table.to_lowercase()) {
+                continue;
+            }
+            // Where no copy can be made to try it on, it is taken to block.
+            let refused = match db.exec(&format!("create table {copy} like `{}`", table.replace('`', "``"))).await {
+                Ok(()) => {
+                    let refused = matches!(db.script(&tried).await, Err(e) if e.0.contains("ALGORITHM=INSTANT is not supported"));
+                    db.exec(&format!("drop table {copy}")).await?;
+                    refused
+                }
+                Err(_) => true,
+            };
+            if refused {
+                hazards.push(Hazard { what: mysql_hazard(&s.text, &table, true), table });
+            }
+        }
+        run(db, m).await?;
+        return Ok(hazards);
+    }
+    let tried = match statements.as_slice() {
+        [one] if crate::sql::alters_table(one) => with_option(&one.text, None, "lock=none"),
+        _ => None,
+    };
+    let Some((table, tried)) = tried.filter(|(table, _)| there.contains(&table.to_lowercase())) else {
+        run(db, m).await?;
+        return Ok(vec![]);
+    };
+    let written = &statements[0].text;
+    // A statement that names its own lock takes the last it names: a lock that blocks writes is
+    // the author's, said as it is; `lock=default` is tried as `lock=none` in its place.
+    let tried = match named_lock(written) {
+        Some((lock, ..)) if lock == "SHARED" || lock == "EXCLUSIVE" => {
+            run(db, m).await?;
+            return Ok(vec![Hazard { what: mysql_hazard(written, &table, lock == "EXCLUSIVE"), table }]);
+        }
+        Some((lock, start, end)) if lock == "DEFAULT" => format!("{}none{}", &written[..start], &written[end..]),
+        Some(_) => written.clone(),
+        None => tried,
+    };
+    match db.script(&tried).await {
+        Ok(()) => Ok(vec![]),
+        Err(e) if e.0.contains("LOCK=NONE is not supported") => {
+            run(db, m).await?;
+            Ok(vec![Hazard { what: mysql_hazard(written, &table, false), table }])
+        }
+        // A statement that fails for its own reasons fails the same way as written.
+        Err(_) => run(db, m).await.map(|()| vec![]),
+    }
+}
+
+/// The last `lock` clause an `alter table` names itself, uppercase, and where its value is written.
+fn named_lock(statement: &str) -> Option<(String, usize, usize)> {
+    let tokens = crate::sql::tokenize(statement, Dialect::Mysql);
+    let mut depth = 0;
+    let mut found = None;
+    for (k, t) in tokens.iter().enumerate() {
+        match t.text.as_str() {
+            "(" => depth += 1,
+            ")" => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && k > 2 && t.upper() == "LOCK" && (k == 3 || tokens[k - 1].text == ",") {
+            let at = if tokens.get(k + 1).is_some_and(|n| n.text == "=") { k + 2 } else { k + 1 };
+            if let Some(value) = tokens.get(at) {
+                found = Some((value.upper(), value.start, value.end));
+            }
+        }
+    }
+    found
+}
+
+/// The tables MySQL statements make (`create table`, not `if not exists`), each name unquoted and in
+/// lowercase: a change to one of them after, in the same migration or in a pending one, reads no
+/// rows.
+pub(crate) fn mysql_tables_made<'a>(sqls: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
+    let mut made = BTreeSet::new();
+    for sql in sqls {
+        for statement in crate::sql::split_statements(sql, Dialect::Mysql) {
+            let t = &statement.tokens;
+            let words: Vec<String> = t.iter().take(5).map(crate::sql::Token::upper).collect();
+            // One `if not exists` may find a table with rows, and make nothing.
+            let at = match words.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+                ["CREATE", "TABLE", "IF", ..] => continue,
+                ["CREATE", "TABLE", ..] => 2,
+                _ => continue,
+            };
+            if let Some(name) = t.get(at) {
+                made.insert(unquoted(name).to_lowercase());
+            }
+        }
+    }
+    made
+}
+
+/// A MySQL name token as MySQL reads it: a backquoted one without its quotes, a doubled backtick
+/// in it read as one.
+fn unquoted(name: &crate::sql::Token) -> String {
+    match name.text.strip_prefix('`').and_then(|t| t.strip_suffix('`')) {
+        Some(inner) => inner.replace("``", "`"),
+        None => name.text.clone(),
+    }
+}
+
+/// The base tables of a MySQL database, each name in lowercase.
+pub(crate) async fn mysql_tables(db: &mut Db) -> Result<BTreeSet<String>, Error> {
+    Ok(db.rows("select table_name as t from information_schema.tables where table_schema = database() and table_type = 'BASE TABLE'").await?.iter().map(|r| r.text("t").to_lowercase()).collect())
+}
+
+/// What a MySQL `alter table` that blocks writes does to `table`, as a sentence's predicate; under
+/// `lock tables` (`reads`), it blocks reads as well.
+fn mysql_hazard(statement: &str, table: &str, reads: bool) -> String {
+    let blocks = if reads { "reads and writes" } else { "writes" };
+    let lower = statement.to_ascii_lowercase();
+    if let Some(at) = lower.find("reorganize partition ") {
+        let names = statement[at + "reorganize partition ".len()..].split(" into ").next().unwrap_or_default().trim();
+        return format!("reorganizes {table}'s partitions {names}, copying their rows while it blocks {blocks} to it");
+    }
+    if lower.contains(" partition by ") || lower.contains(" remove partitioning") {
+        return format!("partitions {table} anew, copying every row while it blocks {blocks} to it");
+    }
+    if lower.contains(" modify column ") || lower.contains(" change column ") || lower.contains(" convert to ") {
+        return format!("rewrites {table}, copying every row while it blocks {blocks} to it");
+    }
+    format!("blocks {blocks} to {table} while it reads every row")
+}
+
+/// A MySQL `alter table` with `option` (`lock=none`) among its clauses, on the table `on` names
+/// where it names one, and the table it alters, unquoted: the option goes first, and before a
+/// partitioning clause with no comma, as MySQL's grammar has it.
+fn with_option(statement: &str, on: Option<&str>, option: &str) -> Option<(String, String)> {
+    let tokens = crate::sql::tokenize(statement, Dialect::Mysql);
+    let (name, next) = match tokens.as_slice() {
+        [alter, table, name, next, ..] if alter.upper() == "ALTER" && table.upper() == "TABLE" => (name, next),
+        _ => return None,
+    };
+    // A qualified name (`app.users`) is refused by the shadow check before it runs.
+    if next.text == "." {
+        return None;
+    }
+    let table = unquoted(name);
+    let options = matches!(next.upper().as_str(), "PARTITION" | "REMOVE");
+    let head = format!("{}{}{}", &statement[..name.start], on.unwrap_or(&name.text), &statement[name.end..next.start]);
+    Some((table, format!("{head}{option}{} {}", if options { "" } else { "," }, &statement[next.start..])))
+}
+
 /// The check constraints that prove a column holds no null: (table, column) to (name, validated).
 async fn not_null_proofs(db: &mut Db) -> Result<BTreeMap<(String, String), (String, bool)>, Error> {
     static PROOF: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#"^CHECK \(\(?("(?:[^"]|"")+"|[a-z_][a-z0-9_$]*) IS NOT NULL\)?\)(?: NOT VALID)?$"#).expect("a valid pattern"));
@@ -380,9 +544,12 @@ async fn storage(db: &mut Db) -> Result<BTreeMap<String, Stored>, Error> {
 /// while it reads every row: the parse tree for a scan (a validated constraint, an index built
 /// without `concurrently`, a `set not null` no validated check proves, a validation after an
 /// earlier statement of the file took a lock that blocks writes, which it holds until the file
-/// commits), and the storage of tables and their indexes for a copy or a rebuild. Postgres only;
-/// elsewhere it runs the file and says nothing.
+/// commits), and the storage of tables and their indexes for a copy or a rebuild. On MySQL, as the
+/// server answers ([`mysql_watched`]); on SQLite it runs the file and says nothing.
 pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard>, Error> {
+    if db.dialect() == Dialect::Mysql {
+        return mysql_watched(db, m).await;
+    }
     if db.dialect() != Dialect::Postgres {
         run(db, m).await?;
         return Ok(vec![]);
@@ -533,6 +700,30 @@ mod tests {
 
     fn existing(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn asks_mysql_to_change_a_table_letting_writes_through() {
+        let tried = |s: &str| with_option(s, None, "lock=none").map(|(t, s)| format!("{t}: {s}"));
+        assert_eq!(tried("alter table people modify column mood enum('ok') not null").as_deref(), Some("people: alter table people lock=none, modify column mood enum('ok') not null"));
+        assert_eq!(tried("alter table readings\n  modify column level tinyint,\n  modify column code varchar(3)").as_deref(), Some("readings: alter table readings\n  lock=none, modify column level tinyint,\n  modify column code varchar(3)"));
+        // A partitioning clause takes the option before it with no comma.
+        assert_eq!(tried("alter table m partition by hash (id) partitions 4").as_deref(), Some("m: alter table m lock=none partition by hash (id) partitions 4"));
+        assert_eq!(tried("alter table `order` remove partitioning").as_deref(), Some("order: alter table `order` lock=none remove partitioning"));
+        assert_eq!(tried("alter table `a``` modify column n bigint").as_deref(), Some("a`: alter table `a``` lock=none, modify column n bigint"));
+        assert_eq!(mysql_tables_made(["create table `a``` (id int); create table if not exists b (id int); create table C (id int)"]), ["a`".to_string(), "c".to_string()].into_iter().collect());
+        assert_eq!(tried("alter table m add partition (partition p2 values less than (3))").as_deref(), Some("m: alter table m lock=none, add partition (partition p2 values less than (3))"));
+        assert_eq!(tried("create table t (id int)"), None);
+        assert_eq!(tried("alter table app.users add column bio text"), None);
+        // On a copy of the table.
+        assert_eq!(with_option("alter table `order` rename column n to m", Some("probe"), "algorithm=instant").map(|(t, s)| format!("{t}: {s}")).as_deref(), Some("order: alter table probe algorithm=instant, rename column n to m"));
+        assert_eq!(mysql_hazard("alter table m reorganize partition p1, pmax into (partition p2 values less than (3), partition pmax values less than maxvalue)", "m", false), "reorganizes m's partitions p1, pmax, copying their rows while it blocks writes to it");
+        assert_eq!(mysql_hazard("alter table m partition by hash (id) partitions 4", "m", false), "partitions m anew, copying every row while it blocks writes to it");
+        assert_eq!(mysql_hazard("alter table p modify column n bigint", "p", true), "rewrites p, copying every row while it blocks reads and writes to it");
+        assert_eq!(mysql_hazard("alter table p add fulltext index f (body)", "p", false), "blocks writes to p while it reads every row");
+        assert_eq!(named_lock("alter table p modify column n bigint, lock = shared").map(|(l, ..)| l).as_deref(), Some("SHARED"));
+        assert_eq!(named_lock("alter table p lock=exclusive, modify column n bigint, lock=default").map(|(l, s, e)| format!("{l} {s} {e}")).as_deref(), Some("DEFAULT 59 66"));
+        assert_eq!(named_lock("alter table p add column lock int"), None);
     }
 
     #[test]

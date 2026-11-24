@@ -31,10 +31,7 @@ pub async fn alterer(db: &mut Db) -> Result<Box<dyn Alterer>, Error> {
             let version = db.rows("select current_setting('server_version_num') as v").await?.first().and_then(|r| r.first()?.parse().ok()).unwrap_or(0);
             Box::new(postgres::PostgresAlterer::read(db, version).await?)
         }
-        Dialect::Mysql => {
-            let mode = db.rows("select @@session.sql_mode as m").await?.first().map(|r| r.text("m").to_string()).unwrap_or_default();
-            Box::new(mysql::MysqlAlterer::for_mode(&mode))
-        }
+        Dialect::Mysql => Box::new(mysql::MysqlAlterer::default()),
         Dialect::Sqlite => Box::new(sqlite::SqliteAlterer::default()),
     })
 }
@@ -177,6 +174,12 @@ pub trait Alterer: Send {
     fn narrows(&self, from: &Object, to: &Object) -> Option<String> {
         let _ = (from, to);
         None
+    }
+    /// What a change of `from` to `to` in place drops with its rows, beside the objects the plan
+    /// drops: a MySQL partition taken out of its table, `partition measurements.p2026`.
+    fn loses(&self, from: &Object, to: &Object) -> Vec<String> {
+        let _ = (from, to);
+        Vec::new()
     }
     /// Whether a change of `from` to `to` changes the object under what depends on it (an enum
     /// made again, a column's type), which the server refuses while a view, rule, policy or trigger
@@ -376,7 +379,7 @@ impl Plan {
     pub fn sql(&self) -> String {
         let mut out = String::new();
         for loss in &self.losses {
-            out.push_str(&format!("-- loses data: {}\n", loss.trim_start_matches("column ").trim_start_matches("table ")));
+            out.push_str(&format!("-- loses data: {}\n", loss.split_once(' ').map_or(loss.as_str(), |(_, name)| name)));
         }
         for (column, why) in &self.narrowings {
             out.push_str(&format!("-- loses data: {} {why}\n", column.trim_start_matches("column ")));
@@ -1738,6 +1741,12 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         let (a, b) = (&from.objects[old_id], &to.objects[new_id]);
         if alterer.alter(a, b).is_some() {
             plan.pairs.push((old_id.clone(), last_written(new_id), (a.def.clone(), b.def.clone()), alterer.narrows(a, b)));
+        }
+    }
+    // What a change in place drops with its rows.
+    for id in alters.keys() {
+        if let (Some(a), Some(b)) = (from.objects.get(id), to.objects.get(id)) {
+            plan.losses.extend(alterer.loses(a, b));
         }
     }
     // A column kept, or renamed, whose type changes so that values are lost without failing.

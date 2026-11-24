@@ -35,6 +35,17 @@ $ reylo migrate new drop_bio --drop users.bio
 $ reylo migrate new rename_bio --rename users.bio=about
 ```
 
+### Changing a large table
+
+A change that blocks writes to a table while it reads every row is refused until you accept it:
+
+```terminal
+# a column's new type copies its table, on Postgres and MySQL
+$ reylo migrate new widen_amount --blocking
+```
+
+On a large table, the app's writes wait for as long as that takes. To change a column without copying its table, add a column, fill it in batches, then swap the two, each step a migration of its own.
+
 ### Switching branches
 
 After a switch, pull or merge, run `reylo migrate dev`:

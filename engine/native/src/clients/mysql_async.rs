@@ -10,6 +10,9 @@ use reylo_engine_mysql::Mysql;
 use serde_json::{json, Value};
 use std::future::Future;
 
+/// The error a server answers a lock waited for until `lock_wait_timeout` with.
+const LOCK_WAIT_TIMEOUT: u16 = 1205;
+
 /// What a MySQL describe is answered with.
 pub type Describe = <Mysql as Database>::Describe;
 
@@ -34,6 +37,10 @@ impl AsyncAnswerer<Describe> for Answers<'_> {
                     conn.close(statement).await.map_err(|e| HostError(e.to_string()))?;
                     serde_json::from_value(json!({ "columns": columns, "params": params })).map(Ok).map_err(|e| HostError(e.to_string()))
                 }
+                // Another session's metadata lock on a table the statement names, waited for until
+                // `lock_wait_timeout` (ER_LOCK_WAIT_TIMEOUT): not the statement's answer, so nothing is
+                // kept as its error, and the next analysis asks again.
+                Err(::mysql_async::Error::Server(e)) if e.code == LOCK_WAIT_TIMEOUT => Err(HostError("A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_wait_timeout. Run it again once the lock is released: SHOW PROCESSLIST lists the session that holds it".to_string())),
                 // The server's error number, which the engine names in its message.
                 Err(::mysql_async::Error::Server(e)) => Ok(Err(DbError { message: e.message, code: Some(e.code.to_string()), position: None })),
                 Err(e) => Err(HostError(format!("the prepare did not reach the server: {e}"))),

@@ -108,12 +108,119 @@ pub(crate) enum Ran {
     Waited(Error),
     Failed(Error),
     Partly(Error),
+    /// Failed as `Failed` does, on a row the table already held that breaks a constraint or a
+    /// unique index the statement checked the rows against.
+    Broke(Error, Breach),
+}
+
+/// What a statement found a row breaking: a constraint or a unique index, by the name the server
+/// gave, and the table it is on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Breach {
+    pub kind: Breaks,
+    /// The constraint's name, or the unique index's, or for a NOT NULL with no name the column's.
+    pub name: String,
+    /// The table, schema-qualified where the server said (Postgres), else as the error named it.
+    pub table: String,
+    /// The column a NOT NULL is on, where the server said, unquoted.
+    pub column: Option<String>,
+    /// A query that lists the rows that break it, where the database could say.
+    pub rows: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Breaks {
+    #[default]
+    Check,
+    ForeignKey,
+    Unique,
+    NotNull,
+}
+
+/// A Postgres name in double quotes, which reads as the name whatever it is: a reserved word too.
+pub(crate) fn pg_quoted(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+/// What a Postgres error says of a row that breaks a constraint, by its SQLSTATE: a `check`, a
+/// foreign key, a unique index or a NOT NULL. None for any other error.
+#[cfg(feature = "cli")]
+pub(crate) fn pg_breach(e: &tokio_postgres::Error) -> Option<Breach> {
+    use tokio_postgres::error::SqlState;
+    let d = e.as_db_error()?;
+    let kind = match d.code() {
+        c if *c == SqlState::CHECK_VIOLATION => Breaks::Check,
+        c if *c == SqlState::FOREIGN_KEY_VIOLATION => Breaks::ForeignKey,
+        c if *c == SqlState::UNIQUE_VIOLATION => Breaks::Unique,
+        c if *c == SqlState::NOT_NULL_VIOLATION => Breaks::NotNull,
+        _ => return None,
+    };
+    // A check, a foreign key and a unique index are named by their constraint; a NOT NULL may be
+    // named by its column alone. A domain's check is named by neither as it is in the table.
+    let name = match kind {
+        Breaks::NotNull => d.constraint().or(d.column())?,
+        _ => d.constraint()?,
+    }
+    .to_string();
+    let table = match (d.schema(), d.table()) {
+        (Some(schema), Some(table)) => format!("{}.{}", pg_quoted(schema), pg_quoted(table)),
+        (None, Some(table)) => pg_quoted(table),
+        _ => return None,
+    };
+    Some(Breach { kind, name, table, column: d.column().map(String::from), rows: None })
+}
+
+/// What a MySQL error says of a row that breaks a constraint: a `check` (3819), a foreign key
+/// (1452) or a unique key (1062), its name read off the server's message. None for any other
+/// error, and where the message doesn't read as MySQL's English one does.
+#[cfg(feature = "cli")]
+pub(crate) fn mysql_breach(code: u16, message: &str) -> Option<Breach> {
+    let between = |from: &str, to: &str| -> Option<String> {
+        let at = message.find(from)? + from.len();
+        let end = message[at..].find(to)? + at;
+        Some(message[at..end].to_string())
+    };
+    match code {
+        // Check constraint 'people_mood' is violated.
+        3819 => Some(Breach { kind: Breaks::Check, name: between("Check constraint '", "' is violated")?, ..Breach::default() }),
+        // Cannot add or update a child row: a foreign key constraint fails (`db`.`#sql-…`, CONSTRAINT `people_team` FOREIGN KEY (`team_id`) REFERENCES `teams` (`id`))
+        1452 => Some(Breach { kind: Breaks::ForeignKey, name: between("CONSTRAINT `", "` FOREIGN KEY")?, ..Breach::default() }),
+        // Duplicate entry 'a' for key 'users.email'
+        1062 => {
+            // The last ` for key '…'`, since the duplicated value comes first and may hold the words.
+            let key = message.rsplit_once(" for key '").map(|(_, k)| k.trim_end_matches(['\'', '.']).to_string())?;
+            let (table, name) = key.rsplit_once('.').map(|(t, n)| (t.to_string(), n.to_string())).unwrap_or((String::new(), key));
+            Some(Breach { kind: Breaks::Unique, name, table, ..Breach::default() })
+        }
+        _ => None,
+    }
 }
 
 impl From<Error> for Ran {
     fn from(e: Error) -> Ran {
         Ran::Failed(e)
     }
+}
+
+/// The sql_mode a MySQL session whose `mode` isn't strict runs a table's change under: its own,
+/// with strict mode on, so that the change fails on a value its new type can't hold (an enum's
+/// label it no longer lists, a string too long, a number out of range) rather than storing another
+/// in its place, as a change fails on a value it can't keep on Postgres. Strict mode also refuses
+/// dates a session that isn't strict takes (a zero date, `2026-02-31`) and a division by zero,
+/// where the table may hold such values the change copies: so the modes that refuse them are left
+/// out, and invalid dates allowed, which keeps them as they are. None where `mode` is strict already.
+pub fn strict_mode(mode: &str) -> Option<String> {
+    let modes: Vec<&str> = mode.split(',').map(str::trim).filter(|m| !m.is_empty()).collect();
+    if modes.iter().any(|m| matches!(*m, "STRICT_TRANS_TABLES" | "STRICT_ALL_TABLES" | "TRADITIONAL")) {
+        return None;
+    }
+    let mut strict: Vec<&str> = modes.into_iter().filter(|m| !matches!(*m, "NO_ZERO_DATE" | "NO_ZERO_IN_DATE" | "ERROR_FOR_DIVISION_BY_ZERO" | "ALLOW_INVALID_DATES")).collect();
+    strict.extend(["ALLOW_INVALID_DATES", "STRICT_ALL_TABLES"]);
+    Some(strict.join(","))
+}
+
+fn set_sql_mode(mode: &str) -> String {
+    format!("set session sql_mode = '{}'", mode.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 #[cfg(feature = "cli")]
@@ -424,10 +531,39 @@ impl Db {
         if self.dialect() != Dialect::Mysql {
             return self.exec(sql).await;
         }
+        let mut locked = false;
         for statement in crate::sql::split_statements(sql, Dialect::Mysql) {
-            self.exec(&statement.text).await?;
+            let restore = if crate::sql::alters_table(&statement) { self.make_strict().await? } else { None };
+            let ran = self.exec(&statement.text).await;
+            // The session's own mode is set back whether the change ran or failed.
+            let back = match restore {
+                Some(mode) => self.exec(&set_sql_mode(&mode)).await,
+                None => Ok(()),
+            };
+            if let Err(e) = ran.and(back) {
+                self.unlock(locked).await;
+                return Err(e);
+            }
+            locked = (locked || crate::sql::locks_tables(&statement)) && !crate::sql::unlocks_tables(&statement);
         }
         Ok(())
+    }
+
+    /// Releases the tables a MySQL script locked (`lock tables`) and failed before it unlocked them,
+    /// so that the session can go on: it reaches no other table while it holds them.
+    async fn unlock(&mut self, locked: bool) {
+        if locked {
+            let _ = self.exec("unlock tables").await;
+        }
+    }
+
+    /// Sets a MySQL session whose sql_mode isn't strict to [`strict_mode`] for a table's change, and
+    /// gives its own mode, to set back after; None where it is strict already.
+    async fn make_strict(&mut self) -> Result<Option<String>, Error> {
+        let mode = self.rows("select @@session.sql_mode as m").await?.first().map(|r| r.text("m").to_string()).unwrap_or_default();
+        let Some(strict) = strict_mode(&mode) else { return Ok(None) };
+        self.exec(&set_sql_mode(&strict)).await?;
+        Ok(Some(mode))
     }
 
     /// Runs a script as [`Db::script`] does, and gives what each statement that returns rows returned,
@@ -527,22 +663,56 @@ impl Db {
             #[cfg(feature = "cli")]
             Db::Postgres(client) => client.batch_execute(sql).await.map_err(|e| {
                 let waited = e.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE);
+                let breach = pg_breach(&e);
                 let e = pg_error(e);
-                if waited {
-                    Ran::Waited(e)
-                } else {
-                    Ran::Failed(e)
+                match breach {
+                    _ if waited => Ran::Waited(e),
+                    Some(b) => Ran::Broke(e, b),
+                    None => Ran::Failed(e),
                 }
             }),
             #[cfg(feature = "cli")]
-            Db::Mysql(conn) => {
+            Db::Mysql(_) => {
+                let mut locked = false;
                 for statement in crate::sql::split_statements(sql, Dialect::Mysql) {
-                    if let Err(e) = conn.query_drop(&statement.text).await {
+                    let restore = match crate::sql::alters_table(&statement) {
+                        true => match self.make_strict().await {
+                            Ok(restore) => restore,
+                            Err(e) => {
+                                self.unlock(locked).await;
+                                return Err(Ran::Failed(e));
+                            }
+                        },
+                        false => None,
+                    };
+                    let Db::Mysql(conn) = &mut *self else { unreachable!("a MySQL session") };
+                    let ran = conn.query_drop(&statement.text).await;
+                    // The session's own mode is set back whether the change ran or failed; failing to
+                    // after it ran leaves the change in place.
+                    let back = match restore {
+                        Some(mode) => self.exec(&set_sql_mode(&mode)).await,
+                        None => Ok(()),
+                    };
+                    if let Err(e) = ran {
+                        self.unlock(locked).await;
                         // ER_LOCK_WAIT_TIMEOUT: a metadata lock, or a row's, waited past its limit.
                         let waited = matches!(&e, mysql_async::Error::Server(s) if s.code == 1205);
+                        let breach = match &e {
+                            mysql_async::Error::Server(s) => mysql_breach(s.code, &s.message),
+                            _ => None,
+                        };
                         let e = mysql_error(e);
-                        return Err(if waited { Ran::Waited(e) } else { Ran::Failed(e) });
+                        return Err(match breach {
+                            _ if waited => Ran::Waited(e),
+                            Some(b) => Ran::Broke(e, b),
+                            None => Ran::Failed(e),
+                        });
                     }
+                    if let Err(e) = back {
+                        self.unlock(locked).await;
+                        return Err(Ran::Partly(e));
+                    }
+                    locked = (locked || crate::sql::locks_tables(&statement)) && !crate::sql::unlocks_tables(&statement);
                 }
                 Ok(())
             }
@@ -1569,6 +1739,15 @@ pub(crate) async fn default_privileges(target: &mut Db) -> Result<Vec<String>, E
 #[cfg(test)]
 mod url_tests {
     use super::*;
+
+    #[test]
+    fn a_table_change_runs_strict_where_the_session_isnt() {
+        assert_eq!(strict_mode("ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_DATE"), None);
+        assert_eq!(strict_mode("TRADITIONAL"), None);
+        assert_eq!(strict_mode("").as_deref(), Some("ALLOW_INVALID_DATES,STRICT_ALL_TABLES"));
+        assert_eq!(strict_mode("NO_ENGINE_SUBSTITUTION").as_deref(), Some("NO_ENGINE_SUBSTITUTION,ALLOW_INVALID_DATES,STRICT_ALL_TABLES"));
+        assert_eq!(strict_mode("ANSI_QUOTES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,ALLOW_INVALID_DATES").as_deref(), Some("ANSI_QUOTES,ALLOW_INVALID_DATES,STRICT_ALL_TABLES"));
+    }
 
     #[test]
     fn a_locale_is_spelled_as_the_shadow_server_spells_it() {
