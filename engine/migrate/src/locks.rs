@@ -547,8 +547,30 @@ async fn storage(db: &mut Db) -> Result<BTreeMap<String, Stored>, Error> {
 #[derive(Clone, Default)]
 struct Ahead {
     defaults: BTreeSet<(String, String)>,
+    /// Of those, the ones set to `nextval` of a sequence: table, column and the sequence's name.
+    fed: BTreeSet<(String, String, String)>,
     indexes: BTreeSet<String>,
     owned: BTreeSet<String>,
+}
+
+/// The sequence a default expression calls `nextval` of, by its name as Postgres reads the text.
+fn nextval_of(node: &syntax::postgres::protobuf::Node) -> Option<String> {
+    let N::FuncCall(f) = node.node.as_ref()? else { return None };
+    let Some(N::String(name)) = f.funcname.last().and_then(|n| n.node.as_ref()) else { return None };
+    if name.sval != "nextval" {
+        return None;
+    }
+    let mut arg = f.args.first()?;
+    while let Some(N::TypeCast(t)) = &arg.node {
+        arg = t.arg.as_deref()?;
+    }
+    let Some(N::AConst(c)) = &arg.node else { return None };
+    let Some(syntax::postgres::protobuf::a_const::Val::Sval(text)) = &c.val else { return None };
+    let last = text.sval.rsplit('.').next().unwrap_or_default();
+    Some(match last.strip_prefix('"').and_then(|l| l.strip_suffix('"')) {
+        Some(quoted) => quoted.replace("\"\"", "\""),
+        None => last.to_ascii_lowercase(),
+    })
 }
 
 fn ahead_of_reads(sql: &str) -> Vec<Ahead> {
@@ -564,6 +586,12 @@ fn ahead_of_reads(sql: &str) -> Vec<Ahead> {
                         if let Some(N::AlterTableCmd(cmd)) = &cmd.node {
                             if is(cmd.subtype, At::AtColumnDefault) || is(cmd.subtype, At::AtDropColumn) {
                                 now.defaults.insert((table.clone(), cmd.name.clone()));
+                                if let Some(sequence) = cmd.def.as_deref().and_then(nextval_of) {
+                                    now.fed.insert((table.clone(), cmd.name.clone(), sequence));
+                                }
+                            } else if is(cmd.subtype, At::AtDropConstraint) {
+                                // A key's index, named as its constraint is, goes with it.
+                                now.indexes.insert(cmd.name.clone());
                             }
                         }
                     }
@@ -705,10 +733,10 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
     // row). Which columns those are, and their indexes, is read from the catalog before the file
     // runs and after, running nothing more, a column at a time and by its number, which a rename
     // keeps; what the file changes ahead of the read, from its parse. One the sequence gives values
-    // to in both counts; one only after counts where the file sets its default, or gives the
-    // sequence an owner, ahead of the read; and one only before unless the file changes its default
+    // to in both counts; one only after counts where the file sets its default to the sequence, or
+    // gives the sequence an owner, ahead of the read; and one only before unless the file changes its default
     // ahead of the read. Likewise an index there before serves the read unless the file drops it
-    // ahead of it, and one there only after where the file makes it ahead of it. Where the sequence
+    // ahead of it (or the key it backs), and one there only after where the file makes it ahead of it. Where the sequence
     // isn't found before the file runs (an identity's column renamed in it), what it gives values to
     // after counts.
     let (opens, closes) = crate::diff::postgres::SEQUENCE_READ;
@@ -750,7 +778,7 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                     let unserved = match was.iter().find(|(_, o, _, n, _, _)| o == oid && n == num) {
                         Some((_, _, _, _, _, then)) => !served(then, after),
                         // Given to the column ahead of the read: by a default set there, or ownership.
-                        None => (ahead.defaults.contains(&(rel.clone(), col.clone())) || ahead.owned.contains(&owner)) && !served(&[], after),
+                        None => (ahead.fed.contains(&(rel.clone(), col.clone(), owner.clone())) || ahead.owned.contains(&owner)) && !served(&[], after),
                     };
                     if unserved {
                         read.push((t.clone(), oid.clone()));
@@ -808,13 +836,14 @@ mod tests {
     fn what_a_file_changes_ahead_of_each_read_is_read_from_its_parse() {
         let read = "do $reylo$ declare s regclass := 'public.order_no'; goal numeric := 1000; begin perform set_config('reylo.sequence_goal', goal::text, true); end $reylo$;";
         let sql = format!(
-            "comment on sequence order_no is 'Generates orders id values';\nalter table orders alter column total set default nextval('public.order_no'::regclass);\ndrop index \"orders$Idx\", ORDERS_ID;\nalter sequence tag_no owned by tags.id;\n{read}\nalter table orders alter column id drop default;\ndrop index later_idx;\n{read}\n"
+            "comment on sequence order_no is 'Generates orders id values';\nalter table orders alter column total set default nextval('public.order_no'::regclass);\nalter table orders alter column code set default nextval('other_no');\nalter table orders drop constraint orders_pk;\ndrop index \"orders$Idx\", ORDERS_ID;\nalter sequence tag_no owned by tags.id;\n{read}\nalter table orders alter column id drop default;\ndrop index later_idx;\n{read}\n"
         );
         let aheads = super::ahead_of_reads(&sql);
         assert_eq!(aheads.len(), 2);
         let first = &aheads[0];
-        assert_eq!(first.defaults.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "total".to_string())], "a comment's words change nothing");
-        assert_eq!(first.indexes.iter().cloned().collect::<Vec<_>>(), ["orders$Idx", "orders_id"]);
+        assert_eq!(first.defaults.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "code".to_string()), ("orders".to_string(), "total".to_string())], "a comment's words change nothing");
+        assert_eq!(first.fed.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "code".to_string(), "other_no".to_string()), ("orders".to_string(), "total".to_string(), "order_no".to_string())]);
+        assert_eq!(first.indexes.iter().cloned().collect::<Vec<_>>(), ["orders$Idx", "orders_id", "orders_pk"]);
         assert_eq!(first.owned.iter().cloned().collect::<Vec<_>>(), ["tag_no"]);
         assert!(aheads[1].defaults.contains(&("orders".to_string(), "id".to_string())) && aheads[1].indexes.contains("later_idx"));
     }

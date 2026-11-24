@@ -7148,7 +7148,8 @@ create trigger kids_note after insert on kids begin update parents set name = na
             create sequence order_no; create table orders (id bigint primary key, secondary_id bigint default nextval('order_no')); alter sequence order_no owned by orders.id; \
             create sequence idx_no; create table idx (id bigint default nextval('idx_no')); create index \"idx$id\" on idx (id); \
             create sequence dropdef_no; create table dropdef (id bigint default nextval('dropdef_no')); \
-            create sequence rn_no; create table rn (id bigint default nextval('rn_no'));";
+            create sequence rn_no; create table rn (id bigint default nextval('rn_no')); \
+            create sequence pk_no; create table pk (id bigint constraint pk_key primary key default nextval('pk_no'));";
         p.schema(before);
         p.file("20261027100000_log.sql", before);
         assert_eq!(p.dev().await, 0, "{}", p.peek());
@@ -7161,6 +7162,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
             create sequence idx_no start with 1000; create table idx (id bigint default nextval('idx_no')); \
             create sequence dropdef_no start with 1000; create table dropdef (id bigint); \
             create sequence rn_no start with 1000; create table rn (new_id bigint default nextval('rn_no')); \
+            create sequence pk_no start with 1000; create table pk (id bigint not null default nextval('pk_no')); \
             create sequence stage_no start with 1000; create table stage (id bigint, n text); alter sequence stage_no owned by stage.id; create table log (id bigint generated always as identity (start with 1000), msg text); create table events (id bigint generated always as identity (start with 1000) primary key, msg text); create table active (id bigint generated always as identity (start with 1000), live boolean); create index active_live on active (id) where live; create table renamed (new_id bigint generated always as identity (start with 1000), msg text);");
         let rename = vec![("renamed.id".to_string(), "new_id".to_string()), ("rn.id".to_string(), "new_id".to_string())];
         let choices = reylo_migrate::Choices { rename: rename.clone(), ..Default::default() };
@@ -7189,6 +7191,9 @@ create trigger kids_note after insert on kids begin update parents set name = na
         // name holds.
         let dropped_first = file.lines().position(|l| l.contains("drop index") && l.contains("idx$id")).is_some_and(|d| d < at("'public.idx_no'"));
         assert_eq!(out.contains("of idx while"), dropped_first, "{file}");
+        // So does a key the change drops, whose index goes with it.
+        let key_first = file.lines().position(|l| l.contains("drop constraint pk_key")).is_some_and(|d| d < at("'public.pk_no'"));
+        assert_eq!(out.contains("of pk while"), key_first, "{file}");
     }
 
     /// The check of a sequence's read reads the catalog and runs nothing of the file but the file:
