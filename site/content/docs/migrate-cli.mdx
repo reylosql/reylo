@@ -166,9 +166,7 @@ It refuses a change made outside `schema.sql` and your migrations:
 ```terminal
 $ reylo migrate dev
 ✗ This database was changed outside reylo/schema.sql and its migrations
-
     alter table users add column hotfix bigint;
-
   To keep it, add it to reylo/schema.sql, then write its migration:
     reylo migrate new <name>
   To undo it:
@@ -204,9 +202,7 @@ The refusal shows the change:
 ```terminal
 $ reylo migrate deploy
 ✗ This database was changed outside its migrations
-
   + column users.hotfix bigint
-
   If a migration makes this change, record it here, running nothing:
     reylo migrate history push
   If none does, write one and run it in development, then record it here:
@@ -243,7 +239,6 @@ Applying to postgres://db.example.com/app
   check constraint "users_plan_check" of relation "users" is violated by some row
   The migration before it, 20261123211603_drop_team_plan.sql, added users_plan_check without checking the rows already in users: rows written from now on are held to it, and those aren't.
   Nothing was recorded, so the next deploy runs it again.
-
   List the rows that break it:
     select * from users where not (plan = ANY (ARRAY['free'::text, 'pro'::text]));
   Fix them here, then deploy again:
@@ -307,7 +302,6 @@ Migrations on postgres://localhost:5432/app
 
 ✗ The schema changed since the lock was written
   The lock holds a checksum of reylo/schema.sql from when the migrations last matched it.
-
   If the schema changed, write its migration and run it:
     reylo migrate new <name>
     reylo migrate dev
@@ -433,7 +427,6 @@ The push is refused:
 ```terminal
 $ reylo db push
 ✗ This push drops the column users.nick and its data
-
   To drop it:
     reylo db push --drop users.nick
   To accept every destructive change:

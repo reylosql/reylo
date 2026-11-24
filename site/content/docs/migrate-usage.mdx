@@ -279,7 +279,6 @@ Name it with `--drop`:
 ```terminal
 $ reylo migrate new drop_bio
 ✗ This migration drops the column users.bio and its data
-
   To drop it:
     reylo migrate new drop_bio --drop users.bio
 
@@ -354,10 +353,8 @@ Rename it with `--rename`, or drop it with `--drop`:
 ```terminal
 $ reylo migrate new rename_title
 ✗ This migration can't tell a rename from a new column
-
     - column posts.title character varying(100)
     + column posts.heading character varying(200)
-
   To rename the column, keeping its rows:
     reylo migrate new rename_title --rename posts.title=heading
   To drop the column and its data, and add a new one:
@@ -391,12 +388,10 @@ Pick a flag for each:
 ```terminal
 $ reylo migrate new tidy_columns
 ✗ This migration can't tell renames from new columns
-
     - column posts.title character varying(100)
     + column posts.heading character varying(200)
     - column users.bio character varying(200)
     + column users.about text
-
   For each, rename it to keep its rows, or drop it and add the new one:
     --rename posts.title=heading   or   --drop posts.title
     --rename users.bio=about       or   --drop users.bio
@@ -462,12 +457,10 @@ Each answer is a command:
 ```terminal
 $ reylo migrate new invoices
 ✗ This migration can't tell a rename from a new table
-
     - table orders
     + table invoices
     - column orders.note text
     + column invoices.paid_at timestamp with time zone
-
   To rename the table, keeping its rows:
     reylo migrate new invoices \
       --drop invoices.note \
@@ -505,7 +498,6 @@ $ reylo migrate new widen_amount
 ✗ This migration rewrites payments, copying every row while it blocks reads and writes to it
   On a table with many rows, the app's writes wait for as long as that takes.
   To change a column without copying its table, add a column, fill it in batches, then swap the two, each step a migration of its own.
-
   Where the table is small enough to wait for:
     reylo migrate new widen_amount --blocking
 
@@ -535,27 +527,30 @@ create table events (
 );
 ```
 
-Each loss is named:
+Each loss names its flag, and the last gives one command for all of them:
 
 ```terminal
 $ reylo migrate new dates_only
 ✗ Column events.price changes from numeric(10,2) to numeric(10,0), which rounds to whole numbers
-
   To accept that:
-    reylo migrate new dates_only --drop events.price
+    --drop events.price
 
 ✗ Column events.starts_at changes from timestamp with time zone to date, which keeps only the date
-
   To accept that:
-    reylo migrate new dates_only --drop events.starts_at
+    --drop events.starts_at
+  It also rewrites events, copying every row while it blocks reads and writes to it.
+  To accept every change:
+    reylo migrate new dates_only \
+      --drop events.price,events.starts_at \
+      --blocking
 
 Nothing was changed.
 ```
 
-Name both, with `--blocking` for the rewrite:
+Run it:
 
 ```terminal
-$ reylo migrate new dates_only --drop events.starts_at,events.price --blocking
+$ reylo migrate new dates_only --drop events.price,events.starts_at --blocking
 ✓ Wrote reylo/migrations/20261104150000_dates_only.sql
   + column events.price numeric(10,0)
   + column events.starts_at date not null
@@ -587,14 +582,12 @@ $ reylo migrate new partition_users
 ✗ Postgres can't make users a partitioned table in place
   A table is partitioned only when it's created, so this migration drops users and its rows to create it again.
   To keep the rows, add these lines to the migration it writes:
-
     -- at the top
     lock table users in exclusive mode;
     create table users_rows as select * from users;
     -- right after it creates users and its partitions
     insert into users (id, name) select id, name from users_rows;
     drop table users_rows;
-
   To write it, dropping the rows:
     reylo migrate new partition_users --drop users
 
@@ -628,7 +621,6 @@ A push asks the same questions, and takes `--force` for every one at once:
 ```terminal
 $ reylo db push
 ✗ This push drops the column users.nick and its data
-
   To drop it:
     reylo db push --drop users.nick
   To accept every destructive change:
@@ -717,11 +709,9 @@ Without a lock, a merged migration can sort before one a database already ran. T
 $ reylo migrate deploy
 ✗ Migration 20261105080000_no_nick.sql sorts before 20261105090000_nick.sql, which this database already ran
   Run in name order, as on a fresh database, the migrations end differently:
-
     --- this database
     +++ a fresh database
     + column users.nick text
-
   Give it a later name, so that every database runs it after 20261105090000_nick.sql:
     mv reylo/migrations/20261105080000_no_nick.sql reylo/migrations/20261105090001_no_nick.sql
 
