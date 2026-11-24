@@ -11,7 +11,7 @@ Reylo's type check runs in CI as it does on your machine, against a database the
 | --- | --- |
 | Database | A throwaway one the job starts: a service container, or a file for SQLite |
 | Schema | Your migrations or a schema file, applied before the type check |
-| Connection | `DATABASE_URL` in the job's environment, or [`direct_url`](/configuration#direct_url) |
+| Connection | `DATABASE_URL` in the job's environment, or [`direct_url`](/docs/configuration#direct_url) |
 | Commands | The type check, then your build and your tests |
 | Build-before-migrate hosts | Build against a throwaway database ([below](#build-before-migrate)) |
 
@@ -180,7 +180,7 @@ steps:
   - run: npm run build
 ```
 
-The type check reads the local SQLite file named by [`direct_url`](/d1#local-database), so CI needs no Cloudflare account (the same workflow applies to [Durable Objects](/durable-objects)).
+The type check reads the local SQLite file named by [`direct_url`](/docs/d1#local-database), so CI needs no Cloudflare account (the same workflow applies to [Durable Objects](/docs/durable-objects)).
 
 ## Build-before-migrate hosts [#build-before-migrate]
 
@@ -188,7 +188,7 @@ A host that builds before it migrates, such as Vercel, starts with no database t
 
 1. Create an empty database.
 2. Run your migrations into it, which also tries each one before it reaches production.
-3. Run the build with [`direct_url`](/configuration#direct_url) pointed at that database.
+3. Run the build with [`direct_url`](/docs/configuration#direct_url) pointed at that database.
 4. Drop it.
 5. Migrate your deployment's own database.
 

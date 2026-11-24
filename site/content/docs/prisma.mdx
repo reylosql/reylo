@@ -83,7 +83,7 @@ One production app migrated about 750 Prisma Client calls. A billing report went
 | Concern | In practice |
 | --- | --- |
 | Relations become N+1 queries | A relation is a subquery in the same statement, as above |
-| Queries can't be built at run time | Optional filters are one JSON parameter ([Dynamic filtering](/inference#dynamic-filtering)), a sort order is a `case` ([Dynamic sorting](/inference#dynamic-sorting)), and a patch object is one update ([Partial updates](#partial-updates)) |
+| Queries can't be built at run time | Optional filters are one JSON parameter ([Dynamic filtering](/docs/inference#dynamic-filtering)), a sort order is a `case` ([Dynamic sorting](/docs/inference#dynamic-sorting)), and a patch object is one update ([Partial updates](#partial-updates)) |
 | Dates come back as strings | As ISO text in UTC, exact to the microsecond, where a `Date` keeps milliseconds and Prisma's `timestamp(3)` keeps no zone |
 | The build needs a database | Yes: a fresh one, migrated by the build itself ([Build and deploy](#build-and-deploy)) |
 | A migration can break a running deploy | A query keeps the types of the schema it was built against: a column retyped or made nullable under it can return values those types rule out, and one the database can no longer run fails with the database's error ([Build and deploy](#build-and-deploy)) |
@@ -95,7 +95,7 @@ One production app migrated about 750 Prisma Client calls. A billing report went
   ```sh
   npx skills add reylosql/reylo --skill reylo
   ```
-- **[Set Reylo up](/typescript#setup).**
+- **[Set Reylo up](/docs/typescript#setup).**
 - **Count what moves:** every Prisma Client call, raw query and transaction, and every folder that holds them. A folder that `tsconfig.json` leaves out is never type-checked. Give it a `tsconfig` of its own.
 - **Keep the branch short.** A long-lived branch pays at each sync with `main`, in new Prisma calls to convert and in conflicts. Re-apply what `main` changed onto the `.sql`, rather than taking either side.
 - **Give your pool an error listener**, on the pool and on each connection a transaction takes. Prisma's adapter had both, and without them Node exits when the database drops an idle connection.
@@ -206,8 +206,8 @@ Prisma Client reads a `String[]` as never null, and throws on a `NULL` element. 
 
 Reylo types each query against a database with your migrations applied, so every place that type-checks or builds needs one:
 
-- **[In CI](/faq#in-ci)**, start Postgres, run `prisma migrate deploy`, then the type check.
-- **On a host that migrates during the build**, such as Vercel, build against a fresh database. Create it, run `prisma migrate deploy` into it, and point [`direct_url`](/configuration#direct_url) at it for the build. Drop it after, then migrate the deployment's own database. The build types against exactly the commit's schema, and no migration reaches production untested.
+- **[In CI](/docs/faq#in-ci)**, start Postgres, run `prisma migrate deploy`, then the type check.
+- **On a host that migrates during the build**, such as Vercel, build against a fresh database. Create it, run `prisma migrate deploy` into it, and point [`direct_url`](/docs/configuration#direct_url) at it for the build. Drop it after, then migrate the deployment's own database. The build types against exactly the commit's schema, and no migration reaches production untested.
 - **Each query keeps the types of the schema it was built against.** A retyped or newly nullable column can return values those types rule out. A dropped or renamed column fails with the database's error. A new column, default or `NOT NULL` changes nothing it reads. So add before you remove: the new column, then the code that uses it, then the drop.
 
 For the type check itself:
@@ -225,28 +225,28 @@ Each Prisma Client call, as SQL:
 | --- | --- |
 | `findUnique`, `findFirst` | `select … where id = :id` |
 | `findUniqueOrThrow`, `findFirstOrThrow` | the same `select`, and a check for `null` |
-| `findMany` with `include` | a `jsonb_agg` subquery per relation, as in [Why move](#why-move) and [Nested fetching](/inference#nested-fetching) |
+| `findMany` with `include` | a `jsonb_agg` subquery per relation, as in [Why move](#why-move) and [Nested fetching](/docs/inference#nested-fetching) |
 | `count`, `aggregate`, `groupBy` | one `select` of scalar subqueries ([Counts](#counts)); a `Decimal` sum for display is `coalesce(sum(x), 0)::float8` |
 | A follow-up `findFirst` per row | a `left join lateral (… order by … limit 1)`, in the same statement |
 | `contains`, `startsWith` | `strpos(name, :q) > 0` and `starts_with(name, :q)`, since a `like` pattern reads `%` and `_` in the value |
 | `mode: "insensitive"` | `lower(email) = lower(:email)` |
-| `in: ids` | `id = any(:ids::text[])` ([Filtering by a list](/inference#filtering-by-a-list)) |
-| Optional filters | one JSON parameter ([Dynamic filtering](/inference#dynamic-filtering)) |
+| `in: ids` | `id = any(:ids::text[])` ([Filtering by a list](/docs/inference#filtering-by-a-list)) |
+| Optional filters | one JSON parameter ([Dynamic filtering](/docs/inference#dynamic-filtering)) |
 | `create` | `insert … returning …` |
-| `createMany`, or `upsert` in a loop | one `insert … select` from a JSON parameter, with `on conflict` for an upsert ([Bulk inserts](/inference#bulk-inserts)) |
+| `createMany`, or `upsert` in a loop | one `insert … select` from a JSON parameter, with `on conflict` for an upsert ([Bulk inserts](/docs/inference#bulk-inserts)) |
 | `upsert` | `insert … on conflict (id) do update … returning …` |
-| `update` with optional fields | `set name = coalesce(:name::nullable(text), name)` ([Nullable parameters](/inference#nullable-parameters)) |
+| `update` with optional fields | `set name = coalesce(:name::nullable(text), name)` ([Nullable parameters](/docs/inference#nullable-parameters)) |
 | `update` with a patch object | `jsonb_populate_record` ([Partial updates](#partial-updates)) |
 | An `update` or a `delete` that throws P2025 | `returning`, and a check for `null`, since a missing row is no longer an error |
-| `updateMany` that fills columns still empty | `set c = coalesce(c, :new) where c is null` ([Recipes](/postgres#recipes)) |
+| `updateMany` that fills columns still empty | `set c = coalesce(c, :new) where c is null` ([Recipes](/docs/postgres#recipes)) |
 | `deleteMany` with a relation filter | `delete … using` the related table |
 | A filter object kept in a constant, like `{ not: "draft" }` | the same condition in each query, or a view |
-| A catch of P2002 or P2034 | [`.try()`](/typescript#try) and the error's `condition` |
-| `$transaction` | a transaction of your driver ([`.run()`](/typescript#run)) |
+| A catch of P2002 or P2034 | [`.try()`](/docs/typescript#try) and the error's `condition` |
+| `$transaction` | a transaction of your driver ([`.run()`](/docs/typescript#run)) |
 | `$transaction` with `timeout` or `maxWait` | no equivalent: `statement_timeout` bounds a statement, not a transaction waiting on your code, so move slow calls outside it |
-| `$Enums.X` and model types | each query's `Row` and `Params`; an enum alone is a query imported for its `Row` ([Recipes](/postgres#recipes)) |
+| `$Enums.X` and model types | each query's `Row` and `Params`; an enum alone is a query imported for its `Row` ([Recipes](/docs/postgres#recipes)) |
 | `omit` on the client | no equivalent: name a shared read's columns, since `*` picks up a large column as soon as it is added |
-| `${json}::jsonb` with text you serialized | `:json::text::jsonb` ([JSON text](/postgres#what-a-parameter-takes)) |
+| `${json}::jsonb` with text you serialized | `:json::text::jsonb` ([JSON text](/docs/postgres#what-a-parameter-takes)) |
 | `$queryRaw` with `Prisma.sql` fragments | a `with` query in one file, or a view or a function across files |
 | A table or column named at run time | your driver's own `query()`, which Reylo doesn't type. It brings `Date` back, and `pg` reads a `timestamp` in the machine's time zone |
 

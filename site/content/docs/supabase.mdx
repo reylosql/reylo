@@ -5,14 +5,14 @@ description: Use Reylo with Supabase. Covers direct and session-pooler connectio
 
 <p className="dk-subheader">Reylo on Supabase's Postgres</p>
 
-A Supabase project is a Postgres database, so everything on the [Postgres](/postgres) page holds for it.
+A Supabase project is a Postgres database, so everything on the [Postgres](/docs/postgres) page holds for it.
 
 | | |
 | --- | --- |
 | Dialect | Postgres |
 | The type check reads | The direct connection or the session pooler, and in development the database `supabase start` runs |
 | Drivers | postgres.js or `pg`, through any of Supabase's connections |
-| Migrations | The Supabase CLI's, in `supabase/migrations`, applied to the local database, or [`reylo migrate`](/migrate/docs) through the session pooler or the direct connection, never port 6543 |
+| Migrations | The Supabase CLI's, in `supabase/migrations`, applied to the local database, or [`reylo migrate`](/docs/migrate) through the session pooler or the direct connection, never port 6543 |
 | JavaScript client | Calls Supabase's REST API, so `.run()` doesn't take it ([Drivers](#drivers)) |
 
 <PageSchema>
@@ -52,7 +52,7 @@ Why not the transaction pooler:
 - The type check prepares each query on its session. The transaction pooler shares sessions between clients, so their prepared queries collide. The type check refuses its port, 6543.
 - Copy each connection string from the Connect panel of your project's dashboard.
 - The direct connection is IPv6 only, unless your project has Supabase's IPv4 add-on. From a network without IPv6, use the session pooler.
-- With no TLS setting in the URL, Reylo tries TLS by default (`sslmode=prefer`); add `sslmode=require` to require encryption. To verify Supabase's certificate too, download it from your project's database settings and [pass it in the URL](/configuration#direct_url).
+- With no TLS setting in the URL, Reylo tries TLS by default (`sslmode=prefer`); add `sslmode=require` to require encryption. To verify Supabase's certificate too, download it from your project's database settings and [pass it in the URL](/docs/configuration#direct_url).
 
 ## Drivers
 

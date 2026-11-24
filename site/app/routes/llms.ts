@@ -11,9 +11,8 @@ import { markdownOf } from '@/lib/markdown';
 /** Map a sidebar href back to its content/docs slug ('' for index.mdx). */
 function slugOf(href: string): string {
   if (href === '/docs') return '';
-  if (href === '/migrate/docs') return 'migrate';
-  if (href.startsWith('/migrate/')) return `migrate-${href.slice('/migrate/'.length)}`;
-  return href.replace(/^\//, '');
+  if (href.startsWith('/docs/migrate/')) return `migrate-${href.slice('/docs/migrate/'.length)}`;
+  return href.replace(/^\/docs\//, '');
 }
 
 const EXTRA_GUIDES: readonly { title: string; slug: string }[] = [

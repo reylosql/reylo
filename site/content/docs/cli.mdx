@@ -72,7 +72,7 @@ Flags:
 
 ## `reylo analyze`
 
-Prints what Reylo [infers](/inference) for each statement. Given this query:
+Prints what Reylo [infers](/docs/inference) for each statement. Given this query:
 
 ```sql title="queries/get_user.sql"
 -- One user, by id.
@@ -136,12 +136,12 @@ Each field of the result:
 | `sql` | The statement as the database runs it, with the database's own placeholders |
 | `kind` | What the statement does: `select`, `insert`, `update`, `delete`, `merge` or `other` |
 | `comment` | The comment before the statement |
-| `params` | Each parameter's name and [type](/typedefs) |
+| `params` | Each parameter's name and [type](/docs/typedefs) |
 | `result` | Each column's name and type, and the cardinality: how many rows the statement returns |
 | `capabilities` | The tables the statement reads or writes |
 | `diagnostics` | What the database reports where it refuses the statement |
 
-All type information is presented using the [Reylo Type Defs](/typedefs) specification.
+All type information is presented using the [Reylo Type Defs](/docs/typedefs) specification.
 
 <Callout type="warning" title="A developing API">
 
@@ -195,7 +195,7 @@ queries/broken.sql:4:7: column u.emial does not exist (42703)
 
 ## `reylo migrate`
 
-Write, check and run your [migrations](/migrate/cli):
+Write, check and run your [migrations](/docs/migrate/cli):
 
 ```terminal
 Usage: reylo migrate <command> [flags]
@@ -223,7 +223,7 @@ Flags:
 
 ### `init`
 
-Starts your migrations from an existing database ([details](/migrate/cli#init)):
+Starts your migrations from an existing database ([details](/docs/migrate/cli#init)):
 
 ```sh
 reylo migrate init
@@ -232,7 +232,7 @@ reylo migrate init --schema public --schema billing
 
 ### `new`
 
-Writes the next migration from your change to `schema.sql` ([details](/migrate/cli#new)):
+Writes the next migration from your change to `schema.sql` ([details](/docs/migrate/cli#new)):
 
 ```sh
 reylo migrate new add_bio
@@ -243,7 +243,7 @@ reylo migrate new add_bio --blocking
 
 ### `dev`
 
-Applies pending migrations to your development database, rewinding if needed, and writes the lockfile ([details](/migrate/cli#dev)). A rewind may drop data:
+Applies pending migrations to your development database, rewinding if needed, and writes the lockfile ([details](/docs/migrate/cli#dev)). A rewind may drop data:
 
 ```sh
 reylo migrate dev
@@ -251,7 +251,7 @@ reylo migrate dev
 
 ### `deploy`
 
-Runs the lock's pending migrations with no shadow database ([details](/migrate/cli#deploy)):
+Runs the lock's pending migrations with no shadow database ([details](/docs/migrate/cli#deploy)):
 
 ```sh
 reylo migrate deploy
@@ -260,7 +260,7 @@ reylo migrate deploy --dry-run
 
 ### `status`
 
-Checks that a database and your files are in step without changing anything ([details](/migrate/cli#status)):
+Checks that a database and your files are in step without changing anything ([details](/docs/migrate/cli#status)):
 
 ```sh
 reylo migrate status
@@ -269,7 +269,7 @@ reylo migrate status --url $PROD_URL
 
 ### `lock`
 
-Writes the lock from your database's history ([details](/migrate/cli#lock)):
+Writes the lock from your database's history ([details](/docs/migrate/cli#lock)):
 
 ```sh
 reylo migrate lock
@@ -277,7 +277,7 @@ reylo migrate lock
 
 ### `history push`
 
-Records your migrations as run on a database that already has their schema ([details](/migrate/cli#history-push)):
+Records your migrations as run on a database that already has their schema ([details](/docs/migrate/cli#history-push)):
 
 ```sh
 reylo migrate history push --url $PROD_URL
@@ -285,7 +285,7 @@ reylo migrate history push --url $PROD_URL
 
 ### `history pull`
 
-Writes your migration files from a database's history ([details](/migrate/cli#history-pull)):
+Writes your migration files from a database's history ([details](/docs/migrate/cli#history-pull)):
 
 ```sh
 reylo migrate history pull --url $PROD_URL
@@ -293,7 +293,7 @@ reylo migrate history pull --url $PROD_URL
 
 ## `reylo db`
 
-Push `schema.sql` to a [development database](/migrate/cli#push), reset it, wipe it or read its schema:
+Push `schema.sql` to a [development database](/docs/migrate/cli#push), reset it, wipe it or read its schema:
 
 ```terminal
 Usage: reylo db <command> [flags]
@@ -317,7 +317,7 @@ Flags:
 
 ### `push`
 
-Synchronizes your development database with `schema.sql` without writing a migration ([details](/migrate/cli#push)):
+Synchronizes your development database with `schema.sql` without writing a migration ([details](/docs/migrate/cli#push)):
 
 ```sh
 reylo db push
@@ -328,7 +328,7 @@ reylo db push --force
 
 ### `reset`
 
-Rebuilds your development database from your migrations ([details](/migrate/cli#reset)):
+Rebuilds your development database from your migrations ([details](/docs/migrate/cli#reset)):
 
 ```sh
 reylo db reset
@@ -336,7 +336,7 @@ reylo db reset
 
 ### `wipe`
 
-Deletes every row while keeping the schema and migration history ([details](/migrate/cli#wipe)):
+Deletes every row while keeping the schema and migration history ([details](/docs/migrate/cli#wipe)):
 
 ```sh
 reylo db wipe
@@ -344,7 +344,7 @@ reylo db wipe
 
 ### `introspect`
 
-Prints your database's schema as SQL ([details](/migrate/cli#introspect)):
+Prints your database's schema as SQL ([details](/docs/migrate/cli#introspect)):
 
 ```sh
 reylo db introspect
@@ -353,7 +353,7 @@ reylo db introspect --schema app
 
 ## `reylo generate`
 
-Writes every query into one TypeScript file ([Codegen](/typescript#codegen)):
+Writes every query into one TypeScript file ([Codegen](/docs/typescript#codegen)):
 
 ```terminal
 $ npx reylo generate typescript 'src/queries/**/*.sql' --out src/queries.ts
@@ -361,7 +361,7 @@ $ npx reylo generate typescript 'src/queries/**/*.sql' --out src/queries.ts
 ```
 
 <Rust>
-For Rust, name the `rust-sqlx` generator ([Codegen](/rust#codegen)):
+For Rust, name the `rust-sqlx` generator ([Codegen](/docs/rust#codegen)):
 
 ```sh
 reylo generate rust-sqlx --out src/queries.rs
