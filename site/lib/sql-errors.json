@@ -67,7 +67,7 @@
             "column": 59
           },
           "source": "reylo(10)",
-          "message": "{total:Decimal(12, 2)} is in a value of the type Float64 that is written to the column total, of the type Decimal(12, 2). ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Give the value the column's type: declare its parameters so, or convert it in the statement, as CAST(… AS Decimal(12, 2)) does."
+          "message": "{total:Decimal(12, 2)} is in a value of the type Float64 that is written to the column total, of the type Decimal(12, 2). ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Convert the value in the statement, as CAST(… AS Decimal(12, 2)) does."
         }
       ]
     },

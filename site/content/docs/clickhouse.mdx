@@ -414,6 +414,13 @@ INSERT INTO orders (id, user_id, total, placed_at)
 VALUES ({id:UInt64}, {user:UInt64}, {total:Decimal(12, 2)} * 1.2, now64(3))
 ```
 
+A sum or a product has a wider type than its operands. It passes where the column keeps each parameter's type:
+
+```sql tab="ch_add_scaled.sql" dialect="clickhouse"
+INSERT INTO orders (id, user_id, total, placed_at)
+VALUES ({id:UInt64}, {user:UInt64}, {total:Decimal(12, 2)} * {rate:Decimal(12, 2)}, now64(3))
+```
+
 That holds in `VALUES`, in an `INSERT … SELECT` and in an `UPDATE`'s assignment. A column keeps its own type, and each type it holds every value of:
 
 - a whole number of fewer bits, as a `UInt8` in a `UInt64` column
@@ -430,6 +437,13 @@ To write a value of another type, convert it in the query:
 ```sql tab="ch_add_placed.sql" dialect="clickhouse"
 INSERT INTO orders (id, user_id, total, placed_at)
 VALUES ({id:UInt64}, {user:UInt64}, {total:Decimal(12, 2)}, {placed:String}::DateTime64(3, 'UTC'))
+```
+
+An enum column takes a choice between its labels:
+
+```sql tab="ch_set_role.sql" dialect="clickhouse"
+UPDATE users SET role = if({admin:Bool}, 'admin', 'member')
+WHERE id = {id:UInt64}
 ```
 
 To insert many rows in one query, pass them as one array of tuples:
