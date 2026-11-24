@@ -1163,7 +1163,8 @@ fn view_reads(sql: &str, loose: bool) -> Vec<String> {
         })
         .collect();
     // The names its WITH clauses give (one before `as (`, or before its column list and that),
-    // each with the tokens it is bound over: to the end of the parentheses that hold it.
+    // each with the tokens it is bound over: from its WITH, which binds its siblings' bodies too,
+    // to the end of the parentheses that hold it.
     let ctes: Vec<(String, usize, usize)> = (0..tokens.len())
         .filter(|&k| named(k) && k > 0 && (matches!(tokens[k - 1].upper().as_str(), "WITH" | "RECURSIVE") || tokens[k - 1].text == ","))
         .filter(|&k| {
@@ -1173,7 +1174,10 @@ fn view_reads(sql: &str, loose: bool) -> Vec<String> {
             }
             tokens.get(j).is_some_and(|t| t.upper() == "AS") && tokens.get(j + 1).is_some_and(|t| t.text == "(" || t.upper() == "MATERIALIZED" || t.upper() == "NOT")
         })
-        .map(|k| (fold(&unquote(&tokens[k])), k, (k..tokens.len()).find(|&j| depths[j] < depths[k]).unwrap_or(tokens.len())))
+        .map(|k| {
+            let with = (0..k).rev().find(|&j| depths[j] == depths[k] && tokens[j].upper() == "WITH").unwrap_or(k);
+            (fold(&unquote(&tokens[k])), with, (k..tokens.len()).find(|&j| depths[j] < depths[k]).unwrap_or(tokens.len()))
+        })
         .collect();
     let bound = |name: &str, at: usize| ctes.iter().any(|(n, start, end)| n == name && (*start..*end).contains(&at));
     // Whether each depth of parentheses is in a FROM clause.
@@ -1415,6 +1419,7 @@ mod tests {
         assert_eq!(read("create view v as select a, filtered from (select x as a, y as filtered from t1, t2) join 'docs'('x')"), ["t1", "t2", "docs"]);
         assert_eq!(read("create view v as with filtered as (select id from notes), c (x) as materialized (select 1) select * from (z_root join filtered on 1) join c"), ["notes", "z_root"]);
         assert_eq!(read("create view v as select * from a join z_root on 1 where exists (with z_root as (select 1) select * from z_root)"), ["a", "z_root"]);
+        assert_eq!(read("create view v as with src as (select id from filtered), filtered as (select id from z_notes) select * from src"), ["z_notes"]);
         assert_eq!(vocabulary_of("CREATE VIRTUAL TABLE v USING fts5vocab(z_root, 'instance')"), Some("z_root".to_string()));
         assert_eq!(vocabulary_of("create virtual table v using fts5vocab(main, \"Docs\", row)"), Some("docs".to_string()));
         assert_eq!(vocabulary_of("create virtual table v using fts5(body)"), None);
