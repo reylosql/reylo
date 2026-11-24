@@ -96,15 +96,15 @@ A coding agent can set it up for you:
 <AgentPrompt title="Set up Reylo Migrate with an agent">
 
 ```text
-Set up Reylo Migrate in this project. Reylo Migrate keeps the schema in a schema.sql file and writes, checks and runs each migration, on Postgres, MySQL and SQLite. Its docs are https://reylo.dev/migrate/docs, https://reylo.dev/migrate/usage and https://reylo.dev/migrate/cli, all served as Markdown at https://reylo.dev/llms.txt. Each step below links its section.
+Set up Reylo Migrate in this project. Reylo Migrate keeps the schema in a schema.sql file and writes, checks and runs each migration on Postgres, MySQL and SQLite. Its docs are https://reylo.dev/migrate/docs, https://reylo.dev/migrate/usage and https://reylo.dev/migrate/cli — fetch any page as Markdown with Accept: text/markdown, or read the index at https://reylo.dev/llms.txt. Each step below links its section.
 
 1. Install the reylo command: https://reylo.dev/migrate/docs#basic-usage
-2. Point it at the development database with DATABASE_URL, or with direct_url in .reylo.yaml. Where the database's role can't create databases, set shadow_url too: https://reylo.dev/migrate/cli#configuration
+2. Point it at the development database with DATABASE_URL, or with direct_url in .reylo.yaml. If the database role can't create databases, set shadow_url too: https://reylo.dev/migrate/cli#configuration
 3. Start the migrations from the development database with reylo migrate init, and commit the reylo directory it writes: https://reylo.dev/migrate/cli#init
-4. Make a first change: edit reylo/schema.sql, write its migration with reylo migrate new <name>, and run it with reylo migrate dev: https://reylo.dev/migrate/usage#trying-a-change
-   A drop, or a rename that could be read two ways, is refused until a flag names it. Ask before dropping anything: https://reylo.dev/migrate/usage#disambiguation
-5. Check the migrations in CI with reylo migrate deploy --dry-run, run reylo migrate deploy where the project deploys, and reylo migrate status after it: https://reylo.dev/migrate/usage#deploying
-   On Cloudflare Durable Objects, run the migrations from code instead: https://reylo.dev/durable-objects#migrations
+4. Make a first change: edit reylo/schema.sql, generate its migration with reylo migrate new <name>, and run it with reylo migrate dev: https://reylo.dev/migrate/usage#trying-a-change
+   Drops and ambiguous renames are refused until you pass a flag. Ask before dropping anything: https://reylo.dev/migrate/usage#disambiguation
+5. Check migrations in CI with reylo migrate deploy --dry-run, run reylo migrate deploy during deployment, and check reylo migrate status afterward: https://reylo.dev/migrate/usage#deploying
+   On Cloudflare Durable Objects, run migrations from code instead: https://reylo.dev/durable-objects#migrations
 6. Install Reylo's agent skill, which gives later sessions its rules for schema changes and migrations: npx skills add reylosql/reylo --skill reylo
 ```
 

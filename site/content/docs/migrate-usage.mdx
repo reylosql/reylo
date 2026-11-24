@@ -263,7 +263,7 @@ Some changes to `schema.sql` read two ways, such as a drop or a rename. Reylo Mi
 
 ### Drops
 
-A table or column that goes is refused until you name it:
+Dropping a table or column is refused until you name it:
 
 ```sql title="schema.sql"
 create table users (
@@ -432,7 +432,7 @@ create table posts (
 );
 ```
 
-It's written as a rename, with what's named after the table:
+It's written as a rename, including objects named after the table:
 
 ```terminal
 $ reylo migrate new rename_users
@@ -519,7 +519,7 @@ $ reylo migrate new widen_amount --blocking
   ! It rewrites payments, copying every row while it blocks reads and writes to it
 ```
 
-New constraints and indexes are never asked about. They're written as several migrations, so that none blocks writes.
+New constraints and indexes never prompt for `--blocking`. Reylo splits them across migrations so none blocks writes.
 
 ### Type changes
 

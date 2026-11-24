@@ -81,7 +81,9 @@ export async function markdownOf(slug: string): Promise<string> {
 export async function blogMarkdownOf(slug: string, meta?: { date: string; release?: { tag: string; url: string } }): Promise<string> {
   const raw = await readFile(path.resolve('content/blog', `${slug}.mdx`), 'utf8');
   const expanded = expandAnchors(expandAsides(expandSteps(expandCompare(rustContent(raw)))));
-  const rendered = await pageMarkdown([expanded], { site: siteUrl, page: `/blog/${slug}` });
+  const rendered = (await pageMarkdown([expanded], { site: siteUrl, page: `/blog/${slug}` }))
+    .replace(/^# "([^"\n]+)"$/m, '# $1')
+    .replace(/^> "([^"\n]+)"$/m, '> $1');
   if (!meta) return rendered;
   const byline = `Published ${meta.date}${meta.release ? ` · [${meta.release.tag} on GitHub](${meta.release.url})` : ''}`;
   return rendered.replace(/^(# [^\n]+\n\n> [^\n]+\n)/, `$1\n${byline}\n`);
