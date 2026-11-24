@@ -4061,6 +4061,7 @@ on!(
     a_new_supabase_database_starts_an_empty_project_either_way,
     a_project_begun_where_new_tables_are_hidden_runs_where_they_are_exposed,
     a_later_change_to_supabases_default_grants_leaves_earlier_tables_alone,
+    a_pending_change_to_supabases_default_grants_changes_nothing_yet,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
     init_reads_an_in_list_on_a_varchar_column_as_it_reads_back,
@@ -7249,6 +7250,33 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(holds(&p, "posts", "anon", "SELECT").await, "1");
         assert_eq!(holds(&p, "notes", "anon", "SELECT").await, "0");
+    }
+
+    /// A pending migration that changes what Supabase grants the Data API's roles by default changes
+    /// nothing on the database until it runs; once it has run, changing everything the project's
+    /// setting decides, the history still says how the database began, and a table made before it
+    /// keeps what it was granted.
+    pub async fn a_pending_change_to_supabases_default_grants_changes_nothing_yet(mut p: P) {
+        as_supabase_makes_it(&p, false).await;
+        let posts = "create table posts (id int primary key);\n";
+        p.schema(posts);
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "posts", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        let exposed = format!("{posts}\nalter default privileges in schema public grant select, insert, update, delete on tables to anon, authenticated, service_role;\n\nalter default privileges in schema public grant usage, select on sequences to anon, authenticated, service_role;\n");
+        p.schema(&exposed);
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "expose_new_tables", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        p.schema(&format!("{exposed}\ncreate table notes (id int primary key);\n"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "notes", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(holds(&p, "posts", "anon", "SELECT").await, "0");
+        assert_eq!(holds(&p, "notes", "anon", "SELECT").await, "1");
     }
 
     /// A Supabase database whose one change is to what its Data API's roles are granted by default

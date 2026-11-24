@@ -1199,6 +1199,27 @@ pub(crate) fn api_settings(current: &[ApiPrivilege], changed: &[ApiPrivilege]) -
     })
 }
 
+/// The note on the history table that records the settings ([`API_SETTINGS`]) a Supabase database
+/// began under, which nothing else shows once a migration changes all a setting decides.
+pub(crate) fn api_settings_note(on: [bool; 2]) -> String {
+    let said = |on: bool| if on { "exposed" } else { "not exposed" };
+    format!("Reylo Migrate's history. This database began with Supabase's Data API settings: new tables {}, new functions {}.", said(on[0]), said(on[1]))
+}
+
+/// The settings a history table's `note` records ([`api_settings_note`]).
+pub(crate) fn api_settings_in_note(note: &str) -> Option<[bool; 2]> {
+    let read = |what: &str| {
+        if note.contains(&format!("new {what} not exposed")) {
+            Some(false)
+        } else if note.contains(&format!("new {what} exposed")) {
+            Some(true)
+        } else {
+            None
+        }
+    };
+    Some([read("tables")?, read("functions")?])
+}
+
 /// What a new Supabase database starts with for its Data API, under the settings `on`
 /// ([`api_settings`]), as the statements that make it: `postgres`'s default privileges in `public`
 /// for the API's roles, and the grants of `USAGE` on `public` to them and to `postgres`. One
@@ -1339,13 +1360,12 @@ pub enum Server {
         copy_schema_grants: bool,
         /// On a Supabase target, what a shadow is given where it takes none of the target's default
         /// privileges or grants on its schemas: the default privileges `postgres` gives the Data
-        /// API's roles in `public` as the target started with them, under its project's settings
-        /// ([`api_settings`]), which the project's SQL changes from there; and, for SQL written to
-        /// make the database whole, their grants on `public` as a new database has them.
+        /// API's roles in `public` as the target began with them, under its project's settings
+        /// ([`API_SETTINGS`], [`Server::began_with`]), which the project's SQL changes from there;
+        /// and, for SQL written to make the database whole, their grants on `public` as a new
+        /// database has them.
         platform_privileges: Vec<String>,
         platform_schema_grants: Vec<String>,
-        /// What those default privileges grant on the target now ([`api_privileges`]).
-        api: Vec<ApiPrivilege>,
         /// Whether the target is Supabase's.
         platform: bool,
         /// Whether each shadow is given the platform's publication, empty, as the target was:
@@ -1485,8 +1505,7 @@ impl Server {
                 let owned = owned_by_platform(target, &admin, url, version).await?;
                 // On Supabase, the default privileges its Data API's roles have, the target's own,
                 // which Supabase sets for every project as it chooses; and its publication.
-                let api = if names { api_privileges(&privileges) } else { vec![] };
-                let platform_privileges = if names { platform_defaults(api_settings(&api, &[])).0 } else { vec![] };
+                let platform_privileges = if names { platform_defaults(api_settings(&api_privileges(&privileges), &[])).0 } else { vec![] };
                 let publication = names && !target.rows(&format!("select 1 from pg_publication where pubname = {}", literal(crate::catalog::PLATFORM_PUBLICATION))).await?.is_empty();
                 Ok(Server::Postgres {
                     admin,
@@ -1505,7 +1524,6 @@ impl Server {
                     copy_schema_grants: true,
                     platform_privileges,
                     platform_schema_grants: vec![],
-                    api,
                     platform: names,
                     publication,
                 })
@@ -1740,11 +1758,10 @@ impl Server {
         }
     }
 
-    /// Which of the default privileges Supabase gives the Data API's roles the project's own SQL
-    /// changes (`changed`): the rest say how the target started, which its shadows start as.
-    pub fn changed_api_privileges(&mut self, changed: &[ApiPrivilege]) {
-        if let Server::Postgres { platform_privileges, api, platform: true, .. } = self {
-            *platform_privileges = platform_defaults(api_settings(api, changed)).0;
+    /// The settings the target began under ([`API_SETTINGS`]), which its shadows begin under.
+    pub fn began_with(&mut self, on: [bool; 2]) {
+        if let Server::Postgres { platform_privileges, platform: true, .. } = self {
+            *platform_privileges = platform_defaults(on).0;
         }
     }
 
@@ -1899,6 +1916,9 @@ mod url_tests {
         assert_eq!(api_settings(&all("tables", &["SELECT"], &["authenticated"]), &all("tables", &["SELECT"], &["authenticated"])), [false, false]);
         // Every one changed says nothing either: it started as Supabase's projects once all did.
         assert_eq!(api_settings(&[], &exposed), [true, true]);
+        assert_eq!(api_settings_in_note(&api_settings_note([false, true])), Some([false, true]));
+        assert_eq!(api_settings_in_note(&api_settings_note([true, false])), Some([true, false]));
+        assert_eq!(api_settings_in_note("the history"), None);
         let (privileges, _) = platform_defaults([false, true]);
         assert!(privileges.contains(&"alter default privileges for role postgres in schema public revoke delete, insert, select, update on tables from anon".to_string()), "{privileges:?}");
     }

@@ -414,6 +414,10 @@ async fn ensure_history(db: &mut Db) -> Result<(), Error> {
             for r in granted {
                 db.exec(&format!("revoke all on table {HISTORY_TABLE} from {}", r.text("grantee"))).await?;
             }
+            // On Supabase, the settings the database began under, which its shadows begin under.
+            if let Some(on) = api_began(db).await? {
+                db.exec(&format!("comment on table {HISTORY_TABLE} is {}", crate::db::literal(&crate::db::api_settings_note(on)))).await?;
+            }
             db.exec("commit").await
         }
         .await;
@@ -3004,12 +3008,22 @@ fn creates_platform_publication(opts: &Options) -> bool {
     texts.iter().any(|t| PUBLICATION.is_match(&crate::sql::tokenize(t, Dialect::Postgres).iter().map(|token| token.text.clone()).collect::<Vec<_>>().join(" ")))
 }
 
-/// Which of the default privileges Supabase gives its Data API's roles in `public`
-/// ([`crate::db::API_SETTINGS`]) the project's own files grant or revoke.
-fn changed_api_privileges(opts: &Options) -> Vec<crate::db::ApiPrivilege> {
-    let mut texts = vec![opts.schema_text().unwrap_or_default()];
-    texts.extend(opts.migrations().map(|(files, _)| files.into_iter().map(|f| f.sql).collect::<Vec<_>>()).unwrap_or_default());
-    texts.iter().flat_map(|t| api_privileges_in(t)).collect()
+/// The settings a Supabase database began under ([`crate::db::API_SETTINGS`]): as its history table
+/// records them, else as the privileges they decide that its applied migrations leave alone show;
+/// none off Supabase.
+async fn api_began(db: &mut Db) -> Result<Option<[bool; 2]>, Error> {
+    if db.dialect() != Dialect::Postgres || !db.rows(&format!("select ({})::text as on", crate::catalog::platform_names())).await?.first().is_some_and(|r| r.text("on") == "true") {
+        return Ok(None);
+    }
+    if has_history(db).await? {
+        let note = db.rows(&format!("select obj_description(to_regclass('{HISTORY_TABLE}'), 'pg_class') as note")).await?;
+        if let Some(on) = note.first().and_then(|r| r.get("note")).and_then(crate::db::api_settings_in_note) {
+            return Ok(Some(on));
+        }
+    }
+    let changed: Vec<crate::db::ApiPrivilege> = read_history(db).await?.iter().filter(|r| r.applied).flat_map(|r| api_privileges_in(&r.sql)).collect();
+    let current = crate::db::api_privileges(&crate::db::default_privileges(db).await?);
+    Ok(Some(crate::db::api_settings(&current, &changed)))
 }
 
 /// The default privileges in `public` a text grants or revokes Supabase's Data API roles, of those
@@ -3127,7 +3141,9 @@ async fn with_shadows(mut db: Db, opts: &Options) -> Result<(Db, Server, usize),
 async fn shadow_server(db: &mut Db, opts: &Options) -> Result<Server, Error> {
     let mut server = Server::open(db, &opts.url, opts.shadow_url.as_deref()).await?;
     server.copy_default_privileges(!sets_default_privileges(opts));
-    server.changed_api_privileges(&changed_api_privileges(opts));
+    if let Some(on) = api_began(db).await? {
+        server.began_with(on);
+    }
     server.leave_extensions(created_extensions(opts));
     server.leave_schemas(created_schemas(opts));
     if creates_platform_publication(opts) {
@@ -5356,10 +5372,13 @@ async fn unneeded_by_history(opts: &Options, files: &[Migration], extensions: Ve
     }
     let mut db = Db::open(opts).await?;
     let server = Server::open(&mut db, &opts.url, opts.shadow_url.as_deref()).await;
+    let began = api_began(&mut db).await;
     db.close().await;
     let mut server = server?;
     server.copy_default_privileges(!sets_default_privileges(opts));
-    server.changed_api_privileges(&changed_api_privileges(opts));
+    if let Some(on) = began? {
+        server.began_with(on);
+    }
     if creates_platform_publication(opts) {
         server.leave_platform();
     }
@@ -6432,7 +6451,9 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
     }
     let mut server = Server::open(&mut db, &opts.url, opts.shadow_url.as_deref()).await?;
     server.copy_default_privileges(!sets_default_privileges(opts));
-    server.changed_api_privileges(&changed_api_privileges(opts));
+    if let Some(on) = api_began(&mut db).await? {
+        server.began_with(on);
+    }
     if creates_platform_publication(opts) {
         server.leave_platform();
     }
