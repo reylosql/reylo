@@ -3232,8 +3232,8 @@ fn dollar_block(body: &str) -> String {
 }
 
 /// The columns the sequence `s` (SQL that gives it as a `regclass`) gives values to, each as its
-/// table (`rel`) and name (`attname`), and whether it holds them as they are (`plain`): an identity,
-/// an integer column the sequence is owned by, or one whose default is it alone. A domain whose
+/// table (`rel`) and name (`attname`), whether it holds them as they are (`plain`): an identity, an
+/// integer column the sequence is owned by, or one whose default is it alone. A domain whose
 /// default calls it is a row that isn't.
 pub(crate) fn sequence_columns(s: &str) -> String {
     let integer = "a.atttypid in ('int2'::regtype, 'int4'::regtype, 'int8'::regtype)";

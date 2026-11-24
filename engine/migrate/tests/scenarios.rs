@@ -7113,7 +7113,9 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.rows("insert into serials (n) values ('next') returning id").await[0].text("id"), "11");
         assert_eq!(p.rows("select nextval('ticket_no') as n").await[0].text("n"), "101");
         assert_eq!(p.rows("select count(*) as n from invoices").await[0].text("n"), "3");
-        // A sequence that counts wider than its key moves no further than the key can hold.
+        // A sequence that counts wider than its key may find no value past the rows the key holds:
+        // it is left to be moved by hand.
+        assert_has!(&out, r"-- and move the sequence smalls_no past the values put back in id");
         assert_eq!(p.rows("insert into smalls (n) values ('next') returning id").await[0].text("id"), "1");
     }
 
@@ -7141,18 +7143,22 @@ create trigger kids_note after insert on kids begin update parents set name = na
     pub async fn a_sequence_moved_past_unindexed_rows_asks_for_blocking(mut p: P) {
         // A partial index serves no max over every row; a column renamed in the same change is
         // found where the block reads it.
-        let before = "create table log (id bigint generated always as identity, msg text); create table events (id bigint generated always as identity primary key, msg text); create table active (id bigint generated always as identity, live boolean); create index active_live on active (id) where live; create table renamed (id bigint generated always as identity, msg text); create sequence stage_no; create table stage (id bigint, n text);";
+        let before = "create table log (id bigint generated always as identity, msg text); create table events (id bigint generated always as identity primary key, msg text); create table active (id bigint generated always as identity, live boolean); create index active_live on active (id) where live; create table renamed (id bigint generated always as identity, msg text); create sequence stage_no; create table stage (id bigint, n text); create sequence later_no; create table later (id bigint, n text); create sequence fed_no; create table fed (id bigint default nextval('fed_no'), n text);";
         p.schema(before);
         p.file("20261027100000_log.sql", before);
         assert_eq!(p.dev().await, 0, "{}", p.peek());
-        p.exec("insert into log (msg) select 'm' || g from generate_series(1, 10) g; insert into events (msg) select 'e' || g from generate_series(1, 10) g; insert into stage values (2000, 's')").await;
+        p.exec("insert into log (msg) select 'm' || g from generate_series(1, 10) g; insert into events (msg) select 'e' || g from generate_series(1, 10) g; insert into stage values (2000, 's'); insert into later values (2000, 'l'); insert into fed values (2000, 'f')").await;
         p.output();
-        p.schema("create sequence stage_no start with 1000; create table stage (id bigint, n text); alter sequence stage_no owned by stage.id; create table log (id bigint generated always as identity (start with 1000), msg text); create table events (id bigint generated always as identity (start with 1000) primary key, msg text); create table active (id bigint generated always as identity (start with 1000), live boolean); create index active_live on active (id) where live; create table renamed (new_id bigint generated always as identity (start with 1000), msg text);");
+        // A default the change gives a column is set after the read, which so doesn't reach it; one
+        // already there is read.
+        p.schema("create sequence later_no start with 1000; create table later (id bigint default nextval('later_no'), n text); create sequence fed_no start with 1000; create table fed (id bigint default nextval('fed_no'), n text); \
+            create sequence stage_no start with 1000; create table stage (id bigint, n text); alter sequence stage_no owned by stage.id; create table log (id bigint generated always as identity (start with 1000), msg text); create table events (id bigint generated always as identity (start with 1000) primary key, msg text); create table active (id bigint generated always as identity (start with 1000), live boolean); create index active_live on active (id) where live; create table renamed (new_id bigint generated always as identity (start with 1000), msg text);");
         let rename = vec![("renamed.id".to_string(), "new_id".to_string())];
         let choices = reylo_migrate::Choices { rename: rename.clone(), ..Default::default() };
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "move_ids", &choices, log).await).await, 1);
         let out = p.output();
-        for table in ["log", "active", "renamed"] {
+        assert!(!out.contains("of later while"), "{out}");
+        for table in ["log", "active", "renamed", "fed"] {
             assert_has!(&out, &format!(r"reads every row of {table} while it blocks writes to it, to move a sequence past them"));
         }
         assert!(!out.contains("of events while"), "an indexed column is read through its index: {out}");
@@ -7162,6 +7168,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_eq!(p.rows("insert into log (msg) values ('next') returning id").await[0].text("id"), "1000");
         assert_eq!(p.rows("select nextval('stage_no') as n").await[0].text("n"), "1000");
+        assert_eq!(p.rows("select nextval('fed_no') as n").await[0].text("n"), "2001");
     }
 
     pub async fn init_creates_the_extensions_its_schema_uses(mut p: P) {
