@@ -2369,7 +2369,8 @@ async fn a_shadow_left_by_a_killed_run_is_swept(mut p: P) {
     let dead = format!("reylo_shadow_dead{}", COUNTER.fetch_add(1, Ordering::Relaxed));
     target.exec(&format!("create database {dead}")).await.unwrap();
     target.close().await;
-    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    // A command that makes shadows sweeps first (deploy makes none).
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
     let list = if p.d == Dialect::Postgres { "select datname as n from pg_database where datname like 'reylo_shadow_%'" } else { r"select schema_name as n from information_schema.schemata where schema_name like 'reylo\_shadow\_%'" };
     // Another test's run may be sweeping it at the same moment, which this run's sweep leaves to
     // it: it is gone once that drop ends.
