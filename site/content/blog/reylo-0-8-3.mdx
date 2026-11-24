@@ -5,13 +5,13 @@ date: 2026-11-23
 release: v0.8.3
 ---
 
-Reylo v0.8.3 sets Reylo Migrate up on an existing Postgres database without pg_dump, names the next step when a deploy fails, prints rows from `reylo run`, and refuses SQLite inserts that leave out a required column.
+Reylo v0.8.3 initializes Reylo Migrate on Postgres without `pg_dump`, adds recovery steps to failed deploys, prints query rows from `reylo run`, and flags missing required columns on SQLite.
 
 A few changes can surface in an existing project, listed in [Upgrading from v0.8.2](#upgrading-from-v082).
 
 ## Reylo Migrate
 
-A migration that fails on deploy is now a refusal that names the next step ([#389](https://github.com/reylosql/reylo/pull/389)).
+A migration that fails on deploy now prints the exact recovery steps ([#389](https://github.com/reylosql/reylo/pull/389)).
 
 ```terminal
 Applying to postgres://localhost:57432/pinboard_prod
@@ -30,21 +30,21 @@ Applying to postgres://localhost:57432/pinboard_prod
 
 What else changed:
 
-- **Existing databases:** `reylo migrate init` and `reylo db introspect` write Reylo's own SQL for a Postgres database, where they ran `pg_dump` and failed wherever none of the server's version was installed, and they read every schema the database uses ([#390](https://github.com/reylosql/reylo/pull/390))
-- **Concurrent deploys:** several deploys at once no longer deadlock on a pending `create index concurrently`, which failed every deploy but one with `deadlock detected` ([#386](https://github.com/reylosql/reylo/pull/386))
-- **Summaries:** `reylo migrate new` lists what the migration changes, a new table as one line with its parts under it, and each schema diff names its two sides ([#383](https://github.com/reylosql/reylo/pull/383), [#424](https://github.com/reylosql/reylo/pull/424))
-- **After a push:** `reylo migrate dev` says the schema is ahead of the migrations after `reylo db push`, where it said the two disagree ([#388](https://github.com/reylosql/reylo/pull/388))
-- **CI:** `CI=false`, `CI=0` and an empty `CI` no longer count as CI ([#388](https://github.com/reylosql/reylo/pull/388))
-- **Enum values:** a value added to a Postgres enum is `alter type … add value` alone, where `reylo migrate new` dropped and rebuilt every view, policy and trigger on the type; a value added and used in one change is written as two migrations ([#400](https://github.com/reylosql/reylo/pull/400))
-- **Column defaults:** a column's default, `not null` or identity changes without rebuilding the views, policies and triggers on it ([#400](https://github.com/reylosql/reylo/pull/400))
-- **Renames:** a column that may be renamed is shown as a diff with a command for each answer, and a rename it wrote is one `~` line ([#419](https://github.com/reylosql/reylo/pull/419))
-- **Extensions:** `reylo migrate new` writes an extension added by hand on the development database into the migration, and leaves an extension's own types and rules out of the schema ([#421](https://github.com/reylosql/reylo/pull/421), [#422](https://github.com/reylosql/reylo/pull/422))
-- **Changes made by hand:** `reylo migrate history push` records a change made by hand whose migration sits behind one the database hasn't run, and moves it ahead in the lock, where it found no run that makes the schema ([#387](https://github.com/reylosql/reylo/pull/387))
-- **The lock:** each migration in `reylo.lock` is an object with a `name` and a `checksum`, under a `version: 1` line, and a lock a newer Reylo wrote is refused with the upgrade to make ([#425](https://github.com/reylosql/reylo/pull/425))
+- **Existing databases:** `reylo migrate init` and `reylo db introspect` now emit Reylo's own SQL across every schema in Postgres. They no longer require a matching `pg_dump` binary ([#390](https://github.com/reylosql/reylo/pull/390)).
+- **Concurrent deploys:** parallel deploys no longer deadlock on a pending `create index concurrently` ([#386](https://github.com/reylosql/reylo/pull/386)).
+- **Summaries:** `reylo migrate new` summarizes each change cleanly (new tables as one line with columns below). Schema diffs label both sides ([#383](https://github.com/reylosql/reylo/pull/383), [#424](https://github.com/reylosql/reylo/pull/424)).
+- **After a push:** `reylo migrate dev` now reports that the schema is ahead of migrations after `reylo db push`, instead of reporting a mismatch ([#388](https://github.com/reylosql/reylo/pull/388)).
+- **CI detection:** `CI=false`, `CI=0` and an empty `CI` no longer count as CI ([#388](https://github.com/reylosql/reylo/pull/388)).
+- **Enum values:** adding a Postgres enum value emits `alter type … add value` alone instead of rebuilding dependent views, policies and triggers. Adding and using a value in one edit splits into two migrations ([#400](https://github.com/reylosql/reylo/pull/400)).
+- **Column defaults:** changing a column's default, `not null` constraint or identity no longer rebuilds dependent views, policies and triggers ([#400](https://github.com/reylosql/reylo/pull/400)).
+- **Renames:** ambiguous column renames render as a diff with a command for each option. Generated renames print as a single `~` line ([#419](https://github.com/reylosql/reylo/pull/419)).
+- **Extensions:** `reylo migrate new` captures extensions added directly on the dev database and excludes extension-owned types and rules from `schema.sql` ([#421](https://github.com/reylosql/reylo/pull/421), [#422](https://github.com/reylosql/reylo/pull/422)).
+- **Manual changes:** `reylo migrate history push` records manual changes even when their migration sorts behind an unapplied one, reordering it in the lockfile ([#387](https://github.com/reylosql/reylo/pull/387)).
+- **Lockfile format:** `reylo.lock` now carries `version: 1` with structured `{ name, checksum }` entries. Locks written by a newer Reylo fail with an upgrade prompt ([#425](https://github.com/reylosql/reylo/pull/425)).
 
 ## Rows from `reylo run`
 
-The `reylo run` command now prints the rows a statement returns, up to 50 ([#389](https://github.com/reylosql/reylo/pull/389)).
+The `reylo run` command now prints up to 50 returned rows in a formatted table ([#389](https://github.com/reylosql/reylo/pull/389)).
 
 ```terminal
 $ reylo run 'select id, email, bio from users'
@@ -58,7 +58,7 @@ $ reylo run 'select id, email, bio from users'
 
 ## Required columns on SQLite
 
-The type check now refuses a SQLite insert that leaves out a `NOT NULL` column with no default, which SQLite refuses on every row it inserts ([#381](https://github.com/reylosql/reylo/pull/381)).
+The type check now refuses SQLite inserts that omit a `NOT NULL` column with no default ([#381](https://github.com/reylosql/reylo/pull/381)).
 
 ```sql
 insert into req (id, name) values (:id, :name)
@@ -66,11 +66,11 @@ insert into req (id, name) values (:id, :name)
 --              so SQLite refuses every row it inserts.
 ```
 
-It stands down where SQLite may skip the row rather than refuse it: `OR IGNORE`, a constraint declared `ON CONFLICT IGNORE`, and a `BEFORE` or `INSTEAD OF` trigger on insert.
+The check stands down when SQLite can skip or fill the row: `OR IGNORE`, an `ON CONFLICT IGNORE` constraint, or a `BEFORE` / `INSTEAD OF` insert trigger.
 
 ## Postgres types
 
-Postgres now types more of what its built-in functions return ([#382](https://github.com/reylosql/reylo/pull/382), [#384](https://github.com/reylosql/reylo/pull/384)).
+Postgres now infers non-null types for more built-in functions ([#382](https://github.com/reylosql/reylo/pull/382), [#384](https://github.com/reylosql/reylo/pull/384)).
 
 ```sql
 select t.id, array_agg(jsonb_build_object('email', m.email)) as objects, array_agg(now()) as times
@@ -80,12 +80,12 @@ group by t.id
 
 What it infers:
 
-- **Never-null built-ins:** the elements of `objects` and `times` above are non-null, where they were nullable, and so are those of `array_agg` over `concat`, `gen_random_uuid()` and the other built-ins that never return NULL
-- **Aggregates under a user's cast:** `round(coalesce(sum(x), 0), 2)` is non-null in a database with an implicit cast of its own, such as pgvector's, where it was nullable from v0.8.0 on
+- **Never-null built-ins:** elements of `objects` and `times` above are now non-null. The same applies to `array_agg` over `concat`, `gen_random_uuid()` and other never-null built-ins.
+- **Aggregates with custom casts:** expressions like `round(coalesce(sum(x), 0), 2)` stay non-null even with custom implicit casts such as pgvector's (fixes a v0.8.0 regression).
 
 ## MySQL statements
 
-The MySQL engine now reads statements with a grammar of Reylo's own, which reads more of MySQL 8.4 ([#380](https://github.com/reylosql/reylo/pull/380)).
+The MySQL engine now parses queries with Reylo's own grammar, covering more of MySQL 8.4 ([#380](https://github.com/reylosql/reylo/pull/380)).
 
 ```sql
 table tags limit 1
@@ -93,9 +93,9 @@ table tags limit 1
 
 What it reads:
 
-- **TABLE statements:** typed as their table, so `tags` above returns at most one row of non-null columns, where it returned many rows of nullable ones
-- **More syntax:** derived-table column aliases, several locking clauses, `CAST … AT TIME ZONE`, `GROUP BY ROLLUP(…)`, `JSON_VALUE … RETURNING` and `NATURAL INNER JOIN`
-- **As MySQL reads it:** `UPDATE IGNORE`, `DELETE LOW_PRIORITY`, `BINARY a = b`, the bit literal `0b1011`, and the precedence of `^` and the shifts, each of which the old reader misread
+- **`TABLE` statements:** typed from the table itself. Above, `table tags limit 1` returns at most one row of non-null columns (previously many rows of nullable ones).
+- **More syntax:** derived-table column aliases, multiple locking clauses, `CAST … AT TIME ZONE`, `GROUP BY ROLLUP(…)`, `JSON_VALUE … RETURNING` and `NATURAL INNER JOIN`
+- **Accurate parsing:** `UPDATE IGNORE`, `DELETE LOW_PRIORITY`, `BINARY a = b`, bit literals like `0b1011`, and the precedence of `^` and shift operators
 
 ## Upgrading from v0.8.2
 
@@ -103,14 +103,14 @@ Each change below can surface in a project that upgrades from v0.8.2.
 
 ### Every dialect
 
-- **Each migration in `reylo.lock` is an object with a `name` and a `checksum`, under a `version: 1` line, where it was one line.** A lock from v0.8.2 still reads, and the next `reylo migrate dev` or `reylo migrate lock` rewrites it. Reylo v0.8.2 refuses the new form, so upgrade every copy of Reylo that reads the lock at once ([#425](https://github.com/reylosql/reylo/pull/425)).
+- **The `reylo.lock` format now uses `version: 1` and `{ name, checksum }` entries.** Existing v0.8.2 lockfiles still read, and the next `reylo migrate dev` or `reylo migrate lock` rewrites them. Older v0.8.2 binaries refuse the new format, so upgrade every copy of Reylo together ([#425](https://github.com/reylosql/reylo/pull/425)).
 
 ### Postgres
 
-- **An insert inside a data-modifying `WITH` that leaves out a required column is refused**, as a plain insert already was. Write the column, or give it a default ([#381](https://github.com/reylosql/reylo/pull/381)).
-- **An array of a `ROLLUP` grouping key, or of a subquery's own grouping sets, has nullable elements, where they were non-null.** Handle the NULL elements where the type check now asks ([#382](https://github.com/reylosql/reylo/pull/382)).
+- **Data-modifying `WITH` inserts that omit a required column are now refused**, matching plain inserts. Provide the column or add a default ([#381](https://github.com/reylosql/reylo/pull/381)).
+- **Arrays of `ROLLUP` keys or subquery grouping sets now have nullable elements (previously non-null).** Handle `null` elements where the type check asks ([#382](https://github.com/reylosql/reylo/pull/382)).
 
 ### SQLite
 
-- **An insert that leaves out a `NOT NULL` column with no default is refused, as `reylo16`.** Write the column, or give it a default ([#381](https://github.com/reylosql/reylo/pull/381)).
-- **A virtual table's columns are no longer read as non-null**, since SQLite checks no `NOT NULL` a module declares. Handle `null` where the type check now asks ([#381](https://github.com/reylosql/reylo/pull/381)).
+- **Inserts omitting a `NOT NULL` column with no default now fail with `reylo16`.** Provide the column or add a default ([#381](https://github.com/reylosql/reylo/pull/381)).
+- **Virtual table columns are now nullable**, since SQLite does not enforce `NOT NULL` constraints declared by virtual table modules. Handle `null` where the type check asks ([#381](https://github.com/reylosql/reylo/pull/381)).

@@ -63,7 +63,7 @@ create table events (
 
 Reylo types each query from Postgres's own analysis of it.
 
-Reylo sends the query to the live database [prepared](https://www.postgresql.org/docs/current/sql-prepare.html) and reads back the database's own type information on its parameters and return type, then reads the rest from the catalog.
+Reylo sends each query to your live database [prepared](https://www.postgresql.org/docs/current/sql-prepare.html) to read Postgres's parameter and column types. It then reads constraints, keys and nullability from the catalog.
 
 ## Data types
 
@@ -458,7 +458,7 @@ from events
 
 **Through a `with` query or a subquery**
 
-JSON built in a `with` query or a subquery keeps its type when you select it, nest it, or default it with `coalesce(…, '[]')`. Through a `union` or a `*`, it's `Json`.
+JSON built in a `with` query or subquery keeps its type when selected, nested, or defaulted with `coalesce(…, '[]')`. Through a `union` or a `*`, it becomes `Json`.
 
 <InferenceCard>
 
@@ -544,7 +544,7 @@ An array column is typed with one dimension. Postgres doesn't track an array's d
 
 **pgvector's vectors**
 
-A `vector` or `halfvec` comes back as a `number[]`, and a parameter of either takes one. `NaN`, infinities and an empty array are rejected before the query runs. A `sparsevec` comes back as its text.
+A `vector` or `halfvec` comes back as a `number[]`, and a parameter of either takes one. Values that are `NaN`, infinite or empty are rejected before the query runs. A `sparsevec` comes back as its text.
 
 <Pairs>
 
@@ -609,7 +609,7 @@ How a nested array comes back:
 <Rules>
 
 - **Arrays of rows.** An `array(…)` is `[]` over no rows, where an `array_agg` of the same rows is `null`. An element is `null` only where an outer join nulls its whole row. Each level of nesting escapes the quotes inside it again, so build deeply nested rows as JSON instead.
-- **The row's alias.** Give the subquery an alias that no table in the query has as a column, as `o` above. Where a column has that name, Postgres reads the column in place of the row, and Reylo types the result as a `string`.
+- **The row's alias.** Give the subquery an alias that no table in the query has as a column, as `o` above. If a column shares that name, Postgres reads the column instead and Reylo types it as `string`.
 
 **Geometric types**
 
@@ -688,13 +688,15 @@ Reylo infers [how many rows](/inference#unique-keys) a query returns. On Postgre
 - **Unique indexes on an expression** count when the query compares the same expression, cast included.
 - **Partial unique indexes** count only when the `where` includes the index's condition.
 - **Writes that join** still return a row or `null` when their key is matched. That includes `from`, `using` and a one-row `with` query.
-- **`BEFORE` row triggers** can skip a row by returning `NULL`, so a write they fire on returns a row or `null`. A PL/pgSQL trigger that always returns `new` skips nothing.
+- **`BEFORE` row triggers** can return `NULL` to skip a row, making the write return a row or `null`. A PL/pgSQL trigger that always returns `new` skips nothing.
 - **Nondeterministic collations** bound nothing. Under one, `'a'` can equal `'A'`, so a unique key can match several rows.
 - **A `varchar` key** compared with a `char` value bounds nothing, since trailing blanks don't count.
 - **SQL functions** bound a key only where their body calls nothing volatile, whatever their label. A `stable` function that calls `random()` runs again for each row. A function in another language, such as PL/pgSQL, is taken at its label.
 - **A comparison with a bare `null`** by `=` bounds no key. With `transform_null_equals` on, Postgres reads `x = null` as `x is null`.
 
 ## Parameters
+
+Postgres infers parameter types when preparing a statement, and Reylo checks each value against those types before binding it.
 
 ### Placeholders
 
@@ -704,7 +706,7 @@ A colon right after a subscript's `[` starts a slice, so `tags[:n]` holds the fi
 
 ### What a parameter takes
 
-A parameter accepts the same values `.run()` returns for its type, so you can pass a row straight into the next query:
+A parameter accepts the same values `.run()` returns for its type. You can pass a row straight into the next query:
 
 | SQL type | A parameter takes |
 | --- | --- |
@@ -872,7 +874,7 @@ await client.query("commit");
 client.release();
 ```
 
-A client created with `binary: true` isn't supported, and neither is `pg.native`. A wrapper around a `Pool`, such as one that retries, needs to stay a `Pool`, as a subclass or a proxy. On any other object, `.run()` throws before it runs the query.
+A client created with `binary: true` isn't supported, and neither is `pg.native`. A retry wrapper around a `Pool` must stay a `Pool`, as a subclass or a proxy. On any other object, `.run()` throws before it runs the query.
 
 ### postgres.js
 
@@ -1075,6 +1077,8 @@ await db.transaction(async (trx) => {
 ```
 
 ### Standard Query
+
+Each imported query exposes its column decoders, cardinality and ordering under `query["~standard"].query`.
 
 <Rules>
 

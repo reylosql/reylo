@@ -65,9 +65,7 @@ To keep a password out of every file, use `$(…)`. It runs a command, such as a
 direct_url: postgres://app:$(op read op://dev/db/password)@db:5432/app
 ```
 
-A type check or a build reads this database. In CI and on your host, apply your migrations first. The database a query runs on is the client you pass to `.run()`, so the two can differ.
-
-A script that runs against production is typed on your dev database. Its types hold only where the two schemas agree. To type it on the database it runs on:
+A type check or build reads this database, while `.run()` uses the client you pass in. Apply your migrations first in CI and on your host. To type-check a script against production directly:
 
 ```sh
 DATABASE_URL="$PRODUCTION_URL" node --import reylo/register report.ts
@@ -133,14 +131,14 @@ allow_nested_arrays: true
 
 ## `sqlcommenter`
 
-Each query Reylo sends ends with a comment that names its file, in [sqlcommenter](https://google.github.io/sqlcommenter/)'s format. Monitoring tools such as Datadog and PlanetScale group your queries by it. On SQLite the comment opens the query instead. The query's [`.sql`](/typescript#sql) leaves it out. Set `sqlcommenter: false` to leave it off what Reylo sends too.
+Reylo appends a [sqlcommenter](https://google.github.io/sqlcommenter/) comment naming each query's file, so tools like Datadog and PlanetScale can group queries by source. Set `sqlcommenter: false` to omit it:
 
 ```yaml title=".reylo.yaml"
 # the default is true
 sqlcommenter: false
 ```
 
-Each query then carries its file:
+On SQLite, the comment opens the query instead. The query's [`.sql`](/typescript#sql) property leaves the comment out. By default, Postgres receives:
 
 ```sql title="What Postgres receives for queries/get_user.sql, by default"
 select id, name, email from users where id = $1::int /*file='queries%2Fget_user.sql'*/

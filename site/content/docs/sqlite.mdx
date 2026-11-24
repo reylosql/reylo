@@ -425,7 +425,7 @@ SQLite doesn't report what a function returns, so Reylo keeps its own table of S
 
 **Functions that answer `NULL`**
 
-A function that can return `NULL` for non-null arguments is typed `| null`. That includes the date functions, given text they can't read, and math functions such as `sqrt` and `ln` outside their domain. So `date(placed_at)` is `string | null`, while `date('now')` is a `string`. A date function is also `| null` with a format or modifier that SQLite before 3.46 doesn't know, such as `%V` or `floor`.
+A function that can return `NULL` for non-null arguments is typed `| null`. That includes date functions on unreadable text, and math functions like `sqrt` and `ln` outside their domain. So `date(placed_at)` is `string | null`, while `date('now')` is `string`. Date functions are also `| null` with modifiers SQLite before 3.46 doesn't know, such as `%V` or `floor`.
 
 <Pairs>
 
@@ -488,13 +488,15 @@ Reylo infers [how many rows](/inference#unique-keys) a query returns. On SQLite:
 
 ## Parameters
 
+SQLite binds parameters dynamically, so Reylo infers each parameter's type from the columns and operators around it.
+
 ### Placeholders
 
 Write parameters as `:name`, `@name` or `$name`, one style per query. Pass `.run()` an object with those names, without the prefix. You can use SQLite's `?` or `?1` instead, but not beside names. Then `.run()` takes an object keyed by number, `{ 1: 42 }`.
 
 ### What a parameter takes
 
-A parameter accepts the same values `.run()` returns for its type, so you can pass a row straight into the next query:
+A parameter accepts the same values `.run()` returns for its type. You can pass a row straight into the next query:
 
 | Affinity | A parameter takes |
 | --- | --- |
