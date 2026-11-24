@@ -20,15 +20,18 @@ It runs after the build, on an instance of its own. A migration that fails stops
 
 <Callout title="Previews">
 
-A pull request preview copies its service's variables, production's `DATABASE_URL` included, and deploys at once. So its first deploy migrates production. Use [preview environments](https://render.com/docs/preview-environments) instead, which give each preview a database of its own.
+A pull request preview copies production's `DATABASE_URL`, so its first deploy migrates production. Use [preview environments](https://render.com/docs/preview-environments) instead: each gets a new instance of every database your Blueprint declares.
 
 </Callout>
 
 ## Database
 
-Set `DATABASE_URL` from your Render database:
+Declare your database in the Blueprint, and set `DATABASE_URL` from it:
 
 ```yaml title="render.yaml"
+databases:
+  - name: db
+
 services:
   - type: web
     name: app
