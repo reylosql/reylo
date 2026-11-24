@@ -111,7 +111,7 @@
       }
     },
     {
-      "src": "^/(?:docs)?$",
+      "src": "^/(?:docs/?)?$",
       "has": [
         {
           "type": "header",
@@ -126,7 +126,7 @@
       }
     },
     {
-      "src": "^/docs/(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs|migrate)$",
+      "src": "^/docs/(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs|migrate)/?$",
       "has": [
         {
           "type": "header",
@@ -141,7 +141,7 @@
       }
     },
     {
-      "src": "^/docs/migrate/(usage|cli|compare)$",
+      "src": "^/docs/migrate/(usage|cli|compare)/?$",
       "has": [
         {
           "type": "header",
@@ -156,7 +156,7 @@
       }
     },
     {
-      "src": "^/migrate$",
+      "src": "^/migrate/?$",
       "has": [
         {
           "type": "header",
@@ -171,7 +171,7 @@
       }
     },
     {
-      "src": "^/blog$",
+      "src": "^/blog/?$",
       "has": [
         {
           "type": "header",
@@ -186,7 +186,7 @@
       }
     },
     {
-      "src": "^/blog/([a-z0-9-]+)$",
+      "src": "^/blog/([a-z0-9-]+)/?$",
       "has": [
         {
           "type": "header",
@@ -198,6 +198,48 @@
       "headers": {
         "Content-Type": "text/markdown; charset=utf-8",
         "Vary": "Accept"
+      }
+    },
+    {
+      "src": "^/(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs)(?:/|/index\\.html)$",
+      "status": 308,
+      "headers": {
+        "Location": "/docs/$1"
+      }
+    },
+    {
+      "src": "^/migrate/docs(?:/|/index\\.html)$",
+      "status": 308,
+      "headers": {
+        "Location": "/docs/migrate"
+      }
+    },
+    {
+      "src": "^/migrate/(usage|cli|compare)(?:/|/index\\.html)$",
+      "status": 308,
+      "headers": {
+        "Location": "/docs/migrate/$1"
+      }
+    },
+    {
+      "src": "^/index\\.md/$",
+      "status": 308,
+      "headers": {
+        "Location": "/docs.md"
+      }
+    },
+    {
+      "src": "^/migrate-(usage|cli|compare)\\.md/$",
+      "status": 308,
+      "headers": {
+        "Location": "/docs/migrate/$1.md"
+      }
+    },
+    {
+      "src": "^/(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs|migrate)\\.md/$",
+      "status": 308,
+      "headers": {
+        "Location": "/docs/$1.md"
       }
     }
   ],
