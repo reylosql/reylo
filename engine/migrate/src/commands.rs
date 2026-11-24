@@ -608,7 +608,11 @@ impl SchemaStamp {
                 );
                 let union = db.rows(&sql).await?.first().map(|r| r.text("q").to_string()).unwrap_or_default();
                 let roles = "select 'role:' || r.oid || ':' || r.rolname as s from pg_roles r where r.oid in (select d.refobjid from pg_shdepend d join pg_database b on b.oid = d.dbid where b.datname = current_database() union select datdba from pg_database where datname = current_database())";
-                Ok(SchemaStamp(Some(if union.is_empty() { roles.to_string() } else { format!("{union} union all {roles}") })))
+                let stamp = SchemaStamp(Some(if union.is_empty() { roles.to_string() } else { format!("{union} union all {roles}") }));
+                // Read once here, outside any migration's transaction: a catalog the session can't
+                // read (a server may revoke `pg_shdepend` from everyone) leaves a bare mark rather than
+                // failing the migration it is read in.
+                Ok(if stamp.mark(db).await.is_ok() { stamp } else { SchemaStamp(None) })
             }
             Dialect::Sqlite => Ok(SchemaStamp(Some("select type || char(1) || name || char(1) || tbl_name || char(1) || coalesce(sql, '') as s from sqlite_schema".into()))),
             Dialect::Mysql => Ok(SchemaStamp(None)),
@@ -643,11 +647,15 @@ fn is_pending(fingerprint: &str) -> bool {
 /// Whether the schema is the one the migration of the pending mark `stored` left: its stamp is the
 /// schema's now, so nothing has changed it since that migration committed, and a fingerprint read now
 /// is the one its run would have stored.
-async fn unchanged_since_cut_off(db: &mut Db, stored: &str) -> Result<bool, Error> {
+async fn unchanged_since_cut_off(db: &mut Db, stored: &str) -> bool {
     if !stored.contains(':') {
-        return Ok(false);
+        return false;
     }
-    Ok(SchemaStamp::of(db).await?.mark(db).await? == stored)
+    // A stamp that can't be read shows nothing.
+    match SchemaStamp::of(db).await {
+        Ok(stamp) => stamp.mark(db).await.is_ok_and(|now| now == stored),
+        Err(_) => false,
+    }
 }
 
 /// The migration's row: applied now, or marked started; with the pending mark of the schema it left,
@@ -2170,7 +2178,7 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
     // that left the schema as it is goes on.
     let unread = stored.as_deref().is_some_and(is_pending);
     let resumed = match stored.as_deref() {
-        Some(stored) if unread => unchanged_since_cut_off(db, stored).await?,
+        Some(stored) if unread => unchanged_since_cut_off(db, stored).await,
         _ => false,
     };
     if unread && !resumed && server.is_none() {
@@ -3709,7 +3717,7 @@ async fn status_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
     let mut changes: Vec<String> = Vec::new();
     if !history.is_empty() {
         let resumed = match stored.as_deref() {
-            Some(stored) if is_pending(stored) => unchanged_since_cut_off(db, stored).await?,
+            Some(stored) if is_pending(stored) => unchanged_since_cut_off(db, stored).await,
             _ => false,
         };
         match stored.as_deref() {
