@@ -233,3 +233,4 @@ function executableFormat(b: Buffer): Format | undefined {
   }
   return undefined;
 }
+
