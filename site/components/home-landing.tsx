@@ -58,12 +58,12 @@ const EXAMPLES = SHOWN.map((id) => data.examples.find((e) => e.id === id))
 
 const DIALECT_NAMES: Record<Dialect, string> = { postgres: 'Postgres', mysql: 'MySQL', sqlite: 'SQLite' };
 
-export function HomeLanding({ stars }: { stars?: number }) {
+export function HomeLanding({ stars, agentPrompt }: { stars?: number; agentPrompt?: string }) {
   return (
     <TableHover>
       <div className="ml rh">
         <Nav stars={stars} />
-        <Hero />
+        <Hero agentPrompt={agentPrompt} />
         <Logos />
         <Examples />
         <Features />
@@ -271,7 +271,7 @@ function NewsPill() {
  * imports it, with the type of `author` in a hover, as the Migrate landing lays its editor over its
  * terminal.
  */
-function Hero() {
+function Hero({ agentPrompt }: { agentPrompt?: string }) {
   return (
     <header className="ml-hero rh-hero-split">
       <div className="ml-hero-words">
@@ -280,7 +280,7 @@ function Hero() {
           <span>Import SQL</span> <span>into TypeScript,</span> <em>fully typed</em>
         </h1>
         <p className="ml-lede">Reylo infers type information from SQL queries, against a live database.</p>
-        <Install />
+        <Install agentPrompt={agentPrompt} />
       </div>
       <div className="ml-hero-visual rh-import">
         <div className="ml-pair">

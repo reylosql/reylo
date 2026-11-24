@@ -9,6 +9,7 @@ import { HeroTitle } from '@/components/hero';
 import { getMDXComponents } from '@/components/mdx';
 import { HeroActions } from '@/components/hero';
 import { loadPage } from '@/lib/content';
+import { agentPromptFiles, readAgentPrompt } from '@/lib/agent-prompt';
 import { migrateMovedAnchorsScript } from '@/lib/moved-anchors';
 import { compareTitle, docsTitle, docsUrl, githubUrl, introUrl, migrateDocsUrl, markdownPath, pageGroups, pageLinks, pageTitle, siteUrl } from '@/lib/layout.shared';
 import { ogAlt, ogSize } from '@/lib/og';
@@ -46,8 +47,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   if (!page) throw new Response('Not found', { status: 404 });
   const card = await readFile('app/routes/opengraph-image.tsx');
   // Setup's agent card holds the prompt; the main page's button copies the same text, from another page.
-  const setup = slug ? '' : await readFile('content/sections/01-setup.mdx', 'utf8');
-  const agentPrompt = setup.match(/<AgentPrompt>\s*```text\n([\s\S]*?)\n```\s*<\/AgentPrompt>/)?.[1];
+  const agentPrompt = slug ? undefined : await readAgentPrompt(agentPromptFiles.reylo);
   return {
     slug,
     path: page.path,
@@ -56,7 +56,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     description: page.data.description ?? '',
     tree: source.getPageTree(),
     og: createHash('sha256').update(card).digest('hex').slice(0, 16),
-    agentPrompt: agentPrompt === undefined ? undefined : `${agentPrompt}\n`,
+    agentPrompt,
     // The intro's star pill shows the count.
     stars: slug ? undefined : await fetchStars(),
     // The type format's page shows its version, or that it is a preview, at the right of its title.

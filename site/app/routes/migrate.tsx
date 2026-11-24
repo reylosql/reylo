@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { Route } from './+types/migrate';
 import { MigrateLanding } from '@/components/migrate-landing';
+import { agentPromptFiles, readAgentPrompt } from '@/lib/agent-prompt';
 import { siteUrl } from '@/lib/layout.shared';
 import { migrateOgAlt, ogSize } from '@/lib/og';
 
@@ -43,20 +44,21 @@ export const meta: Route.MetaFunction = ({ loaderData }) => {
 /**
  * Run at build time, when the page is rendered to a file (react-router.config.ts): the hash of the link
  * preview's route, which its URL carries, so that a change to the card changes the URL and the caches
- * of X and Slack fetch the new card; and Reylo's star count, for the nav's GitHub link, or none when
- * GitHub can't be reached.
+ * of X and Slack fetch the new card; Reylo's star count, for the nav's GitHub link, or none when
+ * GitHub can't be reached; and the setup prompt the hero's "Copy agent prompt" copies.
  */
 export async function loader() {
+  const agentPrompt = await readAgentPrompt(agentPromptFiles.migrate);
   const og = createHash('sha256').update(await readFile('app/routes/migrate-opengraph-image.tsx')).digest('hex').slice(0, 16);
   try {
     const res = await fetch('https://api.github.com/repos/reylosql/reylo', { headers: { Accept: 'application/vnd.github+json' } });
     const repo = (await res.json()) as { stargazers_count?: number };
-    return { og, stars: res.ok ? repo.stargazers_count : undefined };
+    return { og, agentPrompt, stars: res.ok ? repo.stargazers_count : undefined };
   } catch {
-    return { og, stars: undefined };
+    return { og, agentPrompt, stars: undefined };
   }
 }
 
 export default function Migrate({ loaderData }: Route.ComponentProps) {
-  return <MigrateLanding stars={loaderData.stars} />;
+  return <MigrateLanding stars={loaderData.stars} agentPrompt={loaderData.agentPrompt} />;
 }
