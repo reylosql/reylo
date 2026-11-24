@@ -540,6 +540,45 @@ async fn storage(db: &mut Db) -> Result<BTreeMap<String, Stored>, Error> {
     Ok(rows.iter().map(|r| (r.text("t").to_string(), Stored { oid: r.text("oid").to_string(), file: r.text("file").to_string(), kind: r.text("kind").to_string(), table: r.text("owner").to_string() })).collect())
 }
 
+/// The names a line of SQL writes, as Postgres reads them: a quoted one as written (a doubled quote
+/// one quote), an unquoted word (`$` part of it) folded to lower case. String literals hold none.
+fn identifiers(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            let mut name = String::new();
+            while let Some(c) = chars.next() {
+                if c == '"' {
+                    if chars.peek() == Some(&'"') {
+                        chars.next();
+                        name.push('"');
+                    } else {
+                        break;
+                    }
+                } else {
+                    name.push(c);
+                }
+            }
+            out.push(name);
+        } else if c == '\'' {
+            while let Some(c) = chars.next() {
+                if c == '\'' && chars.next_if_eq(&'\'').is_none() {
+                    break;
+                }
+            }
+        } else if c.is_alphabetic() || c == '_' {
+            let mut word = c.to_lowercase().to_string();
+            while let Some(&c) = chars.peek().filter(|c| c.is_alphanumeric() || **c == '_' || **c == '$') {
+                word.extend(c.to_lowercase());
+                chars.next();
+            }
+            out.push(word);
+        }
+    }
+    out
+}
+
 /// Runs `m` as `deploy` runs it, saying each lock it holds on a table that was there before it ran
 /// while it reads every row: the parse tree for a scan (a validated constraint, an index built
 /// without `concurrently`, a `set not null` no validated check proves, a validation after an
@@ -679,8 +718,9 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
     for ((k, sequence), was) in reads.iter().zip(&was) {
         let now = db.rows(&fed(sequence)).await.map(|rows| columns(&rows)).unwrap_or_default();
         let ahead = &lines[..*k];
-        // A name as a word of the file, `$` part of it, and its case as an unquoted name folds.
-        let named = |name: &str| ahead.iter().any(|l| l.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).any(|w| w.eq_ignore_ascii_case(name)));
+        // A name as the file writes it, read as Postgres reads one: quoted, as written; unquoted, `$`
+        // part of it, folded to lower case.
+        let named = |name: &str| ahead.iter().any(|l| identifiers(l).iter().any(|w| w == name));
         let bare = |name: &str| name.trim_matches(|c: char| c == '\'' || c == '"').rsplit('.').next().unwrap_or_default().trim_matches('"').to_string();
         // Served where the read runs: by an index there before that the file doesn't drop ahead of
         // it, or one there after that the file makes ahead of it.
@@ -744,6 +784,12 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn identifiers_are_read_as_postgres_reads_them() {
+        assert_eq!(super::identifiers(r#"drop index "orders$Idx", ORDERS_ID; alter table "T""x" alter column "ID" set default nextval('order_no')"#), ["drop", "index", "orders$Idx", "orders_id", "alter", "table", "T\"x", "alter", "column", "ID", "set", "default", "nextval"]);
+    }
+
     use super::*;
 
     fn plan(statements: &[&str]) -> Plan {
