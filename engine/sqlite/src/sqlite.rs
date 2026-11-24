@@ -3963,7 +3963,9 @@ mod tests {
             let at = small(crate::stack::nested(shape, n));
             assert!(at.diagnostics.is_empty() && at.kind == Some(StatementKind::Select), "{shape} at {n}: {:?}", at.diagnostics);
             let past = small(crate::stack::nested(shape, n + 1));
-            assert_eq!(past.diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>(), ["Expression tree is too large (maximum depth 1000)"], "{shape} at {}", n + 1);
+            // SQLite's bound on an expression's height, or its parser's stack, whichever the shape reaches first.
+            let refused: Vec<&str> = past.diagnostics.iter().map(|d| d.message.as_str()).collect();
+            assert!(matches!(refused[..], ["Expression tree is too large (maximum depth 1000)" | "Recursion limit"]), "{shape} at {}: {refused:?}", n + 1);
         }
         // A list does not nest: SQLite's OR is a tree, which its bound counts; an IN list is not.
         let list = (0..5_000).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");

@@ -84,7 +84,9 @@ test("a SQLite statement nested to the engine's bound is typed, and one level pa
       assert.ok(at.ok && at.analysis.kind === "select" && at.analysis.diagnostics.length === 0, `${shape} at ${n}: ${JSON.stringify(at).slice(0, 300)}`);
       const past = await session.analyze(nested(shape, n + 1), { force: true });
       assert.ok(past.ok, `${shape} at ${n + 1}`);
-      assert.deepEqual(past.ok && past.analysis.diagnostics.map((d) => d.message), ["Expression tree is too large (maximum depth 1000)"], `${shape} at ${n + 1}`);
+      // SQLite's bound on an expression's height, or its parser's stack, whichever the shape reaches first.
+      const refused = past.ok ? past.analysis.diagnostics.map((d) => d.message) : [];
+      assert.ok(refused.length === 1 && /^(Expression tree is too large \(maximum depth 1000\)|Recursion limit)$/.test(refused[0]!), `${shape} at ${n + 1}: ${JSON.stringify(refused)}`);
     }
     const plain = await session.analyze("select id, name from users where id = :id", { force: true });
     assert.ok(plain.ok && plain.analysis.cardinality === "at_most_one");
