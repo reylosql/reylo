@@ -664,20 +664,21 @@ const POSTGRES_FINGERPRINT = `select pg_catalog.md5(coalesce(pg_catalog.string_a
     union all select ${line("d", relation("d.objoid"), out("int4", "d.objsubid"), md5("d.description"))} from pg_catalog.pg_description d ${rel("d", "objoid")} where ${eq("d.classoid", PG_CLASS)} and d.objsubid operator(pg_catalog.>) 0 and ${NS}
   ) t`;
 /**
- * ClickHouse: every column, table (a view's query with it) and function a user made, each a line,
- * hashed with the server's version and the settings the session changed, since one of those can
- * change a statement's types (`join_use_nulls`). A statement may read a table of any database, so
- * each database's are in it but the server's own: the connection's by their names alone, so that a
+ * ClickHouse: every column, table (a view's query with it) and function a user made, each hashed
+ * field by field, since a name may hold any character, a dot or a space included, and the server's
+ * version and the settings the session changed with them, since one of those can change a
+ * statement's types (`join_use_nulls`). A statement may read a table of any database, so each
+ * database's are in it but the server's own: the connection's with no database's name, so that a
  * database built the same way under another name has the same fingerprint, and any other's with
- * its database's name.
+ * its own.
  */
 const CLICKHOUSE_OWN = "database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')";
-const CLICKHOUSE_IN = "if(database = currentDatabase(), '', concat(database, '.'))";
-const CLICKHOUSE_FINGERPRINT = `SELECT concat(version(), ' ', toString(count()), ' ', toString(sum(cityHash64(x))), ' ', toString(groupBitXor(cityHash64(x)))) FROM (
-    SELECT concat('c ', ${CLICKHOUSE_IN}, table, ' ', name, ' ', toString(position), ' ', type, ' ', default_kind, ' ', toString(cityHash64(default_expression)), ' ', toString(cityHash64(comment))) AS x FROM system.columns WHERE ${CLICKHOUSE_OWN}
-    UNION ALL SELECT concat('t ', ${CLICKHOUSE_IN}, name, ' ', engine, ' ', sorting_key, ' ', toString(cityHash64(as_select))) FROM system.tables WHERE ${CLICKHOUSE_OWN}
-    UNION ALL SELECT concat('f ', name, ' ', toString(cityHash64(create_query))) FROM system.functions WHERE origin = 'SQLUserDefined'
-    UNION ALL SELECT concat('s ', name, ' ', value) FROM system.settings WHERE changed
+const CLICKHOUSE_IN = "database = currentDatabase(), if(database = currentDatabase(), '', database)";
+const CLICKHOUSE_FINGERPRINT = `SELECT concat(version(), ' ', toString(count()), ' ', toString(sum(x)), ' ', toString(groupBitXor(x))) FROM (
+    SELECT cityHash64('c', ${CLICKHOUSE_IN}, table, name, position, type, default_kind, default_expression, comment) AS x FROM system.columns WHERE ${CLICKHOUSE_OWN}
+    UNION ALL SELECT cityHash64('t', ${CLICKHOUSE_IN}, name, engine, sorting_key, as_select) FROM system.tables WHERE ${CLICKHOUSE_OWN}
+    UNION ALL SELECT cityHash64('f', name, create_query) FROM system.functions WHERE origin = 'SQLUserDefined'
+    UNION ALL SELECT cityHash64('s', name, value) FROM system.settings WHERE changed
   )`;
 /** Each dialect's schema fingerprint query. The Rust crate keeps copies (rust/reylo-build/src/fingerprint-*.sql), which tests/rust-fingerprints.test.ts holds to these. */
 export const FINGERPRINT: Record<ResolvedProject["dialect"], string> = {

@@ -504,12 +504,18 @@ test("ClickHouse: a table of another database is typed again once it changes", {
     await db.client.command({ query: `DROP DATABASE IF EXISTS ${other}` });
     await db.client.command({ query: `CREATE DATABASE ${other}` });
     await db.client.command({ query: `CREATE TABLE ${other}.readings (id UInt64, level UInt8) ENGINE = MergeTree ORDER BY id` });
+    // And a table of this database whose one name reads as the other's with its database's: the two are told apart.
+    await db.client.command({ query: `CREATE TABLE \`${other}.readings\` (id UInt64, level String) ENGINE = MergeTree ORDER BY id` });
     const root = project(db.url);
-    const files = { "levels.sql": `SELECT id, level FROM ${other}.readings` };
-    assert.equal(types((await declarations(root, files))["levels.sql"]!).row, "{ id: bigint; level: number }");
-    // The cache's fingerprint covers the other database too: a new session reads the column's new type.
+    const files = { "levels.sql": `SELECT id, level FROM ${other}.readings`, "named.sql": `SELECT id, level FROM \`${other}.readings\`` };
+    const first = await declarations(root, files);
+    assert.deepEqual([types(first["levels.sql"]!).row, types(first["named.sql"]!).row], ["{ id: bigint; level: number }", "{ id: bigint; level: string }"]);
+    // The cache's fingerprint covers the other database too, each table by its database and its name:
+    // once the two change types with each other, a new session reads each one's new type.
     await db.client.command({ query: `ALTER TABLE ${other}.readings MODIFY COLUMN level String` });
-    assert.equal(types((await declarations(root, files))["levels.sql"]!).row, "{ id: bigint; level: string }");
+    await db.client.command({ query: `ALTER TABLE \`${other}.readings\` MODIFY COLUMN level UInt8` });
+    const second = await declarations(root, files);
+    assert.deepEqual([types(second["levels.sql"]!).row, types(second["named.sql"]!).row], ["{ id: bigint; level: string }", "{ id: bigint; level: number }"]);
   } finally {
     await db.client.command({ query: `DROP DATABASE IF EXISTS ${other}` });
     await db.drop();
