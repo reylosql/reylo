@@ -1263,10 +1263,7 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
             ))
             .await?;
         for column in open.iter().map(|r| r.text("name").to_string()).filter(|c| !set.contains(c)) {
-            let hazard = Hazard { table: table.clone(), what: format!("checks every row of {table} for a null in {} while it blocks reads and writes to it", quote_ident(&column)) };
-            if !hazards.contains(&hazard) {
-                hazards.push(hazard);
-            }
+            add(&table, format!("checks every row of {table} for a null in {} while it blocks reads and writes to it", quote_ident(&column)));
         }
     }
     // A sequence moved to a new start reads each column it gives values to, its table locked
