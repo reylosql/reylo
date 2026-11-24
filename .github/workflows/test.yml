@@ -6,7 +6,7 @@ on:
   push:
     branches:
       - main
-  # A pull request that changes only Markdown, the docs site or the examples runs none of this: Vercel's build of the site checks the site (its type check, links, headings and routes, and that the captured types are current), play.yml builds reylo play's page from it, and no job here reads an example. The site's files that the loader's tests or the package build read otherwise still run it: its install, the published type descriptor schema and the CLI pages the CLI's help is held to, and the Markdown the packages carry.
+  # A pull request that changes only Markdown, the docs site or the examples runs none of this: Vercel's build of the site checks the site (its type check, links, headings and routes, and that the captured types are current), play.yml builds reylo play's page from it, and no job here reads an example. The site's files that the loader's tests or the package build read otherwise still run it: its install, the published type descriptor schema and the CLI pages the CLI's help is held to, and the notice the engine's packages carry, engine/syntax/NOTICE.md.
   pull_request:
     branches:
       - main
