@@ -645,45 +645,62 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
     // A sequence moved to a new start reads each column it gives values to, its table locked
     // against writes until the file commits: every row of a table that was there before, where no
     // index serves the column's max and min (a valid btree index that leads with it, over every
-    // row). Which tables those are is read from the catalog before the file runs and after, running
-    // nothing more: one the sequence gave values to before counts; one it gives values to only after
-    // counts where the file names the sequence ahead of the read, as a default set there does, and
-    // not where that comes after it. Where the sequence isn't found before the file runs (a column
-    // renamed in it), what it gives values to after counts.
+    // row). Which columns those are is read from the catalog before the file runs and after, running
+    // nothing more, a column at a time. One the sequence gives values to in both counts; one only
+    // after counts where the file names the sequence ahead of the read (a default set there), and
+    // one only before where the file doesn't name the column ahead of it (a default dropped there).
+    // An index serves a column only where it does in both, as the file may drop it ahead of the
+    // read. Where the sequence isn't found before the file runs (a column renamed in it), what it
+    // gives values to after counts.
     let (opens, closes) = crate::diff::postgres::SEQUENCE_READ;
     let lines: Vec<&str> = m.sql.lines().collect();
     let reads: Vec<(usize, &str)> = lines.iter().enumerate().filter(|(_, l)| l.contains("set_config('reylo.sequence_goal', goal::text")).filter_map(|(k, l)| l.strip_prefix(opens).and_then(|rest| rest.split_once(closes)).map(|(s, _)| (k, s))).collect();
-    // Each table the sequence gives values to, with whether an index serves the column; None where
-    // the sequence isn't found.
+    // Each column the sequence gives values to: its table, the table's oid, its name, and whether
+    // an index serves it.
+    type Fed = Vec<(String, String, String, bool)>;
     let fed = |sequence: &str| {
         format!(
-            "select format('%s', c.rel) as t, c.rel::oid::text as oid, exists (select from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0] join pg_class x on x.oid = i.indexrelid join pg_am am on am.oid = x.relam \
+            "select format('%s', c.rel) as t, c.rel::oid::text as oid, c.attname::text as col, exists (select from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0] join pg_class x on x.oid = i.indexrelid join pg_am am on am.oid = x.relam \
             where i.indrelid = c.rel and a.attname = c.attname and i.indisvalid and i.indpred is null and am.amname = 'btree') as served from (select ({sequence})::regclass as s) q, lateral ({}) c where c.plain",
             crate::diff::postgres::sequence_columns("q.s")
         )
     };
-    let known = async |db: &mut Db, sequence: &str| db.rows(&format!("select ({sequence})::regclass is not null as known")).await.ok().and_then(|r| r.first().map(|r| r.flag("known"))).unwrap_or(false);
-    let mut was: Vec<Option<Vec<(String, String, bool)>>> = Vec::new();
+    let columns = |rows: &[crate::db::Row]| -> Fed { rows.iter().map(|r| (r.text("t").to_string(), r.text("oid").to_string(), r.text("col").to_string(), r.flag("served"))).collect() };
+    let mut was: Vec<Option<Fed>> = Vec::new();
     for (_, sequence) in &reads {
-        let rows = if known(db, sequence).await { db.rows(&fed(sequence)).await.ok().map(|rows| rows.iter().map(|r| (r.text("t").to_string(), r.text("oid").to_string(), r.flag("served"))).collect()) } else { None };
-        was.push(rows);
+        let known = db.rows(&format!("select ({sequence})::regclass is not null as known")).await.ok().and_then(|r| r.first().map(|r| r.flag("known"))).unwrap_or(false);
+        was.push(if known { db.rows(&fed(sequence)).await.ok().map(|rows| columns(&rows)) } else { None });
     }
     run(db, m).await?;
     let mut found: Vec<String> = Vec::new();
     for ((k, sequence), was) in reads.iter().zip(&was) {
-        let now: Vec<(String, String, bool)> = db.rows(&fed(sequence)).await.unwrap_or_default().iter().map(|r| (r.text("t").to_string(), r.text("oid").to_string(), r.flag("served"))).collect();
-        let name = sequence.trim_matches(|c: char| c == '\'' || c == '"');
-        let named_ahead = lines[..*k].iter().any(|l| l.contains(name.rsplit_once('.').map_or(name, |(_, n)| n)));
-        for (table, oid, served) in &now {
-            let read = match was {
-                None => !served,
-                Some(was) => match was.iter().find(|(_, o, _)| o == oid) {
-                    Some((_, _, served_then)) => !served_then,
-                    None => named_ahead && !served,
-                },
-            };
-            if read && before.values().any(|s| &s.oid == oid) {
-                found.push(table.clone());
+        let now = db.rows(&fed(sequence)).await.map(|rows| columns(&rows)).unwrap_or_default();
+        let ahead = &lines[..*k];
+        let bare = |name: &str| name.trim_matches(|c: char| c == '\'' || c == '"').rsplit_once('.').map_or(name.trim_matches(|c: char| c == '\'' || c == '"'), |(_, n)| n).trim_matches('"').to_string();
+        let names = |a: &str, b: &str| ahead.iter().any(|l| l.contains(a) && l.contains(b));
+        let mut read: Vec<(String, String)> = Vec::new();
+        match was {
+            None => read.extend(now.iter().filter(|(_, _, _, served)| !served).map(|(t, oid, _, _)| (t.clone(), oid.clone()))),
+            Some(was) => {
+                for (t, oid, col, served) in &now {
+                    let unserved = match was.iter().find(|(_, o, c, _)| o == oid && c == col) {
+                        Some((_, _, _, served_then)) => !(*served && *served_then),
+                        None => ahead.iter().any(|l| l.contains(&bare(sequence))) && !served,
+                    };
+                    if unserved {
+                        read.push((t.clone(), oid.clone()));
+                    }
+                }
+                for (t, oid, col, served) in was.iter().filter(|(_, o, c, _)| !now.iter().any(|(_, n, d, _)| n == o && d == c)) {
+                    if !served && !names(&bare(t), col) {
+                        read.push((t.clone(), oid.clone()));
+                    }
+                }
+            }
+        }
+        for (table, oid) in read {
+            if before.values().any(|s| s.oid == oid) && !found.contains(&table) {
+                found.push(table);
             }
         }
     }
