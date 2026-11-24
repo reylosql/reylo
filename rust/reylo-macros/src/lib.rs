@@ -65,12 +65,14 @@ fn expand(sql: &LitStr, module: ItemMod) -> TokenStream2 {
         quote!(#error #stand_ins)
     });
     let tracked = tracked();
+    let key = analysis_key();
     quote! {
         #(#attrs)*
         #vis mod #ident {
             #[allow(unused_imports)]
             use super::*;
             #(const _: &str = ::core::include_str!(#tracked);)*
+            #key
             #body
             #(#own)*
         }
@@ -319,12 +321,24 @@ pub fn reflect(attr: TokenStream, item: TokenStream) -> TokenStream {
         return quote!(#item #error).into();
     };
     match expand_enum(&name, item.clone()) {
-        Ok(tokens) => tokens.into(),
+        Ok(tokens) => {
+            let key = analysis_key();
+            quote!(#tokens #key).into()
+        }
         Err(e) => {
             let error = e.to_compile_error();
             quote!(#item #error).into()
         }
     }
+}
+
+/// An item that reads `REYLO_ANALYSIS_KEY`, which `reylo migrate deploy --dry-run -- <command>` sets
+/// to name the schema its shadow has, so that rustc compiles the crate again, and the macro reads
+/// the database again, when a build moves onto a shadow, off one, or onto another schema. Cargo
+/// tracks no variable a macro reads itself; it tracks one the expanded code names. The key holds no
+/// URL, so no credential reaches Cargo's records.
+fn analysis_key() -> TokenStream2 {
+    quote!(const _: ::core::option::Option<&str> = ::core::option_env!("REYLO_ANALYSIS_KEY");)
 }
 
 /// What the database says of a statement written to read what a `reflect` names.

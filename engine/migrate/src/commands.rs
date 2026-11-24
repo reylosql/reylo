@@ -4076,6 +4076,12 @@ async fn dry_run_on(opts: &Options, command: Option<&[String]>, made: &mut Vec<P
             log(&note("The command didn't run, since the deploy after it would refuse this database"));
             Ok(1)
         }
+        // A cut-off run whose change landed is replayed here as run, where a deploy with no
+        // fingerprint to hold it to runs it again, and fails on what it left.
+        Some(_) if !plan.landed.is_empty() && plan.unchanged != Some(true) => {
+            log(&note(format!("The command didn't run, since the deploy after it would run {} again", plan.landed.join(", "))));
+            Ok(1)
+        }
         Some(command) => {
             for path in made.drain(..) {
                 let _ = std::fs::remove_file(path);
@@ -4095,6 +4101,18 @@ async fn dry_run_on(opts: &Options, command: Option<&[String]>, made: &mut Vec<P
 async fn build_on_shadow(server: &mut Server, opts: &Options, plan: &Plan, version: Option<&str>, command: &[String], log: Log<'_>) -> Result<i32, Error> {
     let steps: Vec<&Migration> = plan.ran.iter().chain(&plan.records).chain(&plan.pending).collect();
     let texts: Vec<&str> = steps.iter().map(|m| m.sql.as_str()).collect();
+    // What names the shadow's schema to a build's caches, as its URL may not: the migrations replayed, in order.
+    let key = {
+        use sha2::Digest;
+        let mut hash = sha2::Sha256::new();
+        for m in &steps {
+            hash.update(m.name.as_bytes());
+            hash.update([0]);
+            hash.update(m.sql.as_bytes());
+            hash.update([0]);
+        }
+        hash.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect::<String>()
+    };
     let mut shadows = Shadows::new(server, &opts.url, &opts.root, &opts.cache, &texts).await;
     let lane = shadows.lane();
     shadows.push(lane, steps.into_iter().map(Step::of));
@@ -4125,9 +4143,15 @@ async fn build_on_shadow(server: &mut Server, opts: &Options, plan: &Plan, versi
             log(&format!("{} Running {} on a shadow database of the schema this deploy leaves", paint("green", "✓"), paint("cyan", &command.join(" "))));
             crate::terminal::set_spinner(false);
             let signals = Signals::new();
-            let child = tokio::process::Command::new(program(&command[0]))
+            let mut child = tokio::process::Command::new(program(&command[0]));
+            // A process group of its own, so that a signal, and the end of the run, reach every
+            // process the command starts (a shell's, a package manager's workers), not its first alone.
+            #[cfg(unix)]
+            child.process_group(0);
+            let child = child
                 .args(&command[1..])
                 .env(ANALYSIS_URL, &url)
+                .env(ANALYSIS_KEY, &key)
                 // The npm package's own handshake with this binary, which a reylo inside the command must not inherit.
                 .env_remove("REYLO_VERSION_MATCHED")
                 .spawn();
@@ -4196,14 +4220,18 @@ impl Signals {
 
 /// The command's exit code, waited for while the shadows' server session is kept alive (its lock is
 /// what keeps another run's sweep off the shadow), and while a signal meant for this run is passed
-/// to the command, which this run waits out before it drops the shadow. A command a signal ended
-/// exits as a shell reports it, 128 and the signal's number.
+/// to the command's process group. The group holds the terminal meanwhile, as a shell's job does, so
+/// that an interrupt typed there reaches it once. Whatever of the group is still running when the
+/// command exits is ended before the shadow it may read is dropped. A command a signal ended exits as
+/// a shell reports it, 128 and the signal's number.
 #[cfg(feature = "cli")]
 async fn wait_holding(server: &mut Server, mut child: tokio::process::Child, mut signals: Signals) -> i32 {
+    let group = child.id().map(|pid| pid as i32);
+    let terminal = group.is_some_and(take_terminal);
     let mut ping = tokio::time::interval(std::time::Duration::from_secs(60));
     ping.tick().await;
     let mut pinging = false;
-    loop {
+    let code = loop {
         // A ping runs beside the wait, and gives up rather than hold it on a connection gone silent.
         let (now, every, on) = (pinging, &mut ping, &mut *server);
         let keepalive = async move {
@@ -4214,32 +4242,88 @@ async fn wait_holding(server: &mut Server, mut child: tokio::process::Child, mut
             }
         };
         tokio::select! {
-            status = child.wait() => return match status {
+            status = child.wait() => break match status {
                 Ok(status) => exit_code(status),
                 Err(_) => 1,
             },
             () = keepalive => pinging = !pinging,
-            signal = signals.next() => forward(&child, signal),
+            signal = signals.next() => {
+                if let Some(pid) = group {
+                    signal_group(pid, signal);
+                }
+            }
         }
+    };
+    if terminal {
+        give_back_terminal();
+    }
+    if let Some(pid) = group {
+        end_group(pid).await;
+    }
+    code
+}
+
+/// Gives the terminal to the command's process group, where this run has it.
+#[cfg(feature = "cli")]
+fn take_terminal(pid: i32) -> bool {
+    #[cfg(unix)]
+    // SAFETY: isatty, getpgrp and tcgetpgrp only read; the SIGTTOU this run would get for handing the
+    // terminal back from a group no longer in front is ignored, as a shell ignores it.
+    unsafe {
+        if libc::isatty(0) == 0 || libc::tcgetpgrp(0) != libc::getpgrp() {
+            return false;
+        }
+        libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        libc::tcsetpgrp(0, pid) == 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
     }
 }
 
-/// Passes a signal this run received on to the command, but an interrupt from the terminal, which
-/// reached the command too, as one of the terminal's foreground group.
 #[cfg(feature = "cli")]
-fn forward(child: &tokio::process::Child, signal: i32) {
+fn give_back_terminal() {
     #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        // SAFETY: tcgetpgrp and getpgrp only read; kill(2) is of the child this run started and has not reaped yet.
-        unsafe {
-            if signal == libc::SIGINT && libc::tcgetpgrp(0) == libc::getpgrp() {
-                return;
-            }
-            libc::kill(pid as libc::pid_t, signal);
-        }
+    // SAFETY: hands the terminal back to this run's own process group, with SIGTTOU still ignored.
+    unsafe {
+        libc::tcsetpgrp(0, libc::getpgrp());
+    }
+}
+
+#[cfg(feature = "cli")]
+fn signal_group(pid: i32, signal: i32) {
+    #[cfg(unix)]
+    // SAFETY: kill(2) of the process group this run made for the command.
+    unsafe {
+        libc::kill(-pid, signal);
     }
     #[cfg(not(unix))]
-    let _ = (child, signal);
+    let _ = (pid, signal);
+}
+
+/// Ends what is left of the command's process group: asked to stop, then, after five seconds, made to.
+#[cfg(feature = "cli")]
+async fn end_group(pid: i32) {
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only asks whether any process of the group this run made is left.
+        let alive = || unsafe { libc::kill(-pid, 0) == 0 };
+        if !alive() {
+            return;
+        }
+        signal_group(pid, libc::SIGTERM);
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if !alive() {
+                return;
+            }
+        }
+        signal_group(pid, libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 #[cfg(feature = "cli")]
@@ -4270,6 +4354,10 @@ async fn server_version(db: &mut Db) -> Result<String, Error> {
 /// migrations' commands never do, so a deploy inside the command still reaches the project's
 /// database.
 pub const ANALYSIS_URL: &str = "REYLO_ANALYSIS_URL";
+
+/// A digest of the migrations the shadow in [`ANALYSIS_URL`] replayed, which a build's caches key on
+/// in its place: Cargo keeps a tracked variable's value, and the URL can hold a password.
+pub const ANALYSIS_KEY: &str = "REYLO_ANALYSIS_KEY";
 
 /// The program to start for a command's first word. On Windows a name with no extension is looked
 /// for with each of PATHEXT's, as a shell does, since `next` is `next.cmd` there: a path as it is

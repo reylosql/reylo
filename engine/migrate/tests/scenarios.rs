@@ -7867,7 +7867,32 @@ async fn a_first_deploys_sqlite_file_is_left_to_the_command(mut p: P) {
     assert!(!std::path::Path::new(&file).exists());
 }
 
+/// A cut-off run whose change landed, on a database with no fingerprint to hold it to: the deploy
+/// after the build would run it again, so the build doesn't run.
+async fn a_dry_run_runs_no_command_where_a_landed_run_would_run_again(mut p: P) {
+    if p.d == Dialect::Sqlite {
+        return;
+    }
+    let int = p.t.int;
+    let lone = if p.d == Dialect::Postgres { "create index concurrently a_id on a (id)" } else { "create index a_id on a (id)" };
+    p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027110000_index.sql", &format!("{lone};"));
+    let mut db = Db::connect(&p.url, &p.dir).await.unwrap();
+    let column = if p.d == Dialect::Mysql { "`sql`" } else { "sql" };
+    let insert = format!("insert into __reylo_migrations (name, {column}, applied_at) values ({}, {}, null)", db.param(1), db.param(2));
+    db.exec_with(&insert, &["20261027110000_index.sql", &format!("{lone};")]).await.unwrap();
+    db.exec(lone).await.unwrap();
+    db.exec("update __reylo_migrations set fingerprint = null").await.unwrap();
+    db.close().await;
+    p.output();
+    let ran = p.dir.join("ran");
+    assert_eq!(dry_run_then(&mut p, &format!("touch '{}'", ran.display())).await, 1, "{}", p.peek());
+    assert!(!ran.exists(), "{}", p.peek());
+}
+
 for_each_dialect!(
+    a_dry_run_runs_no_command_where_a_landed_run_would_run_again,
     a_dry_run_builds_on_a_shadow_of_what_deploy_leaves,
     a_dry_run_that_refuses_runs_no_command,
     a_dry_run_runs_no_command_for_a_schema_sql_the_deploy_refuses,
