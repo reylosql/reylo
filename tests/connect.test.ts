@@ -235,7 +235,7 @@ test("Postgres: an analysis waits on another session's lock for at most 10 s, or
   }
 });
 
-test("Postgres: a session a lock timeout gives up on is closed, so a role allowed one connection analyzes again once the lock is released", { skip: pgLive }, async () => {
+test("Postgres: a session a lock timeout gives up on is closed, so a role allowed one connection analyzes the next statement while the lock is still held", { skip: pgLive }, async () => {
   const { url, sql, drop } = await postgresDatabase("reylo_lock_one", "create table users (id bigint primary key, name text not null); create table orders (id bigint primary key)");
   const role = `reylo_lock_one_${process.pid}`;
   const sessions = async () => ((await sql.unsafe(`select pid from pg_catalog.pg_stat_activity where usename = '${role}'`)) as unknown[]).length;
@@ -243,18 +243,16 @@ test("Postgres: a session a lock timeout gives up on is closed, so a role allowe
   await sql.unsafe(`create role ${role} login connection limit 1`);
   const at = new URL(url);
   at.username = role;
-  const c = await (await engine("postgres")).open(`${at.href}?options=-c%20lock_timeout%3D1s`);
+  const c = await (await engine("postgres")).open(`${at.href}?options=-c%20lock_timeout%3D200ms`);
   try {
     await sql.begin(async (tx: any) => {
       await tx.unsafe("alter table users add column email text");
-      await assert.rejects(c.analyze("select id, name from users where id = :id"), (err: Error) => err.message.startsWith("A table this statement names is locked by another session"));
+      // The engine describes this statement more than once, for its JSON shape, so a describe is still queued behind the lock on the session given up on.
+      await assert.rejects(c.analyze("select to_jsonb(u) as u from users u"), (err: Error) => err.message.startsWith("A table this statement names is locked by another session"));
+      // At once, on the same handle: the role's one slot is the old session's until the server has seen it close.
+      assert.deepEqual((await c.analyze("select id from orders")).columns.map((col) => col.name), ["id"]);
     });
-    // The session given up on leaves the server once what was queued on it is done, which the lock's release lets it be.
-    for (let tries = 0; (await sessions()) > 0; tries++) {
-      assert.ok(tries < 100, "the session given up on never left the server");
-      await new Promise((done) => setTimeout(done, 50));
-    }
-    assert.deepEqual((await c.analyze("select id from orders")).columns.map((col) => col.name), ["id"]);
+    assert.equal(await sessions(), 1);
   } finally {
     await c.close();
     await sql.unsafe(`select pg_catalog.pg_terminate_backend(pid) from pg_catalog.pg_stat_activity where usename = '${role}'`);

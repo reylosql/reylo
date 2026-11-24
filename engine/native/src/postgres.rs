@@ -99,9 +99,17 @@ impl Connection {
 
     /// The connection opened again where a lock timeout retired its session, before a request is
     /// sent; until one opens, every request fails as the opening does, and none reaches the old one.
+    /// A refusal for too many connections is asked again, as [`open_replacement`] asks it.
     async fn ready(&mut self) -> Result<(), Value> {
         if self.retired {
-            self.reopen().await?;
+            let mut tries = 0;
+            while let Err(failure) = self.reopen().await {
+                if failure["code"] != TOO_MANY_CONNECTIONS || tries == REPLACEMENT_TRIES {
+                    return Err(failure);
+                }
+                tries += 1;
+                tokio::time::sleep(REPLACEMENT_WAIT).await;
+            }
             self.retired = false;
         }
         Ok(())
@@ -167,6 +175,31 @@ pub async fn open(url: &str) -> Result<(Client, String), Failure> {
 pub async fn open_driven(url: &str) -> Result<(Driven, String), Failure> {
     let Started { client, driver, version, .. } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
     Ok((Driven { client, driver }, server_version(&version)))
+}
+
+/// The error a server refuses a connection with when the role, the database or the server is at its
+/// limit of connections.
+const TOO_MANY_CONNECTIONS: &str = "53300";
+
+/// How many times, and how far apart, a connection that stands in for a retired one is asked again.
+const REPLACEMENT_TRIES: u32 = 20;
+const REPLACEMENT_WAIT: Duration = Duration::from_millis(50);
+
+/// As [`open_driven`], to stand in for a session just retired ([`Driven::retire`]). That session
+/// leaves the server a moment after it is closed, and until it has, a server at a limit of
+/// connections counts it: that refusal is asked again, for up to a second.
+pub async fn open_replacement(url: &str) -> Result<(Driven, String), Failure> {
+    let mut tries = 0;
+    loop {
+        match connect(url, None).await {
+            Ok(Started { client, driver, version, .. }) => return Ok((Driven { client, driver }, server_version(&version))),
+            Err(answer) if answer["code"] == TOO_MANY_CONNECTIONS && tries < REPLACEMENT_TRIES => {
+                tries += 1;
+                tokio::time::sleep(REPLACEMENT_WAIT).await;
+            }
+            Err(answer) => return Err(Failure::of(&answer)),
+        }
+    }
 }
 
 /// The diagnostic code of a statement whose dates the session writes in another style than ISO's.
