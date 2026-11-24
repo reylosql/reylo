@@ -13,7 +13,7 @@ COPY reylo/ /work/reylo/
 CMD ["migrate", "deploy"]
 ```
 
-It reads `DATABASE_URL`, and exits 1 when a migration fails.
+It reads `DATABASE_URL`, and exits 1 when a migration fails. Copy `.reylo.yaml` too, if you have one.
 
 ## Jobs
 
@@ -39,6 +39,7 @@ spec:
           env:
             - name: DATABASE_URL
               valueFrom:
+                # a Secret made before the first install
                 secretKeyRef: { name: app-database, key: url }
 ```
 

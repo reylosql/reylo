@@ -80,6 +80,7 @@ export const pageGroups = [
       { title: 'Cloudflare D1', href: '/d1' },
       { title: 'Turso', href: '/turso' },
       { title: 'Cloudflare Hyperdrive', href: '/hyperdrive' },
+      { title: 'Vercel', href: '/vercel' },
       { title: 'Render', href: '/render' },
       { title: 'Kubernetes', href: '/kubernetes' },
       { title: 'Railway', href: '/railway' },

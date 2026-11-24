@@ -1,6 +1,6 @@
 ---
 title: Railway
-description: How to run Reylo Migrate on Railway. The pre-deploy command that migrates your database before each deploy goes live, and the database URL it reads.
+description: How to run Reylo Migrate on Railway. The pre-deploy command that migrates your database before each deploy goes live, the database URL it reads, and images without Node.
 ---
 
 <p className="dk-subheader">Reylo Migrate on Railway</p>
@@ -26,12 +26,17 @@ Reference your Railway database's URL in your service's variables:
 DATABASE_URL=${{Postgres.DATABASE_URL}}
 ```
 
-## Without Node
+## Builds
 
-Copy the `reylo` command into your image from Reylo's:
+A build that type-checks reads your schema before the pre-deploy command migrates it. Give it [a database of its own](/deployment#build-before-migrate).
+
+## Other images
+
+Copy the `reylo` command from Reylo's image, with your `reylo` directory:
 
 ```dockerfile title="Dockerfile"
 COPY --from=ghcr.io/reylosql/reylo:0.8.3 /usr/local/bin/reylo /usr/local/bin/reylo
+COPY reylo/ reylo/
 ```
 
 Then run it directly:
@@ -44,3 +49,5 @@ Then run it directly:
   }
 }
 ```
+
+Copy `.reylo.yaml` too, if you have one.

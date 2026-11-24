@@ -184,7 +184,7 @@ The type check reads the local file that [`direct_url`](/d1#local-database) name
 
 ## A host that builds before it migrates [#build-before-migrate]
 
-A host that builds before it migrates, such as Vercel, starts with no database that has your schema. Build against a database of its own:
+A host that builds before it migrates starts with no database that has your schema. [Vercel](/vercel), [Render](/render), [Railway](/railway) and [Fly.io](/fly) all do. Build against a database of its own:
 
 1. Create an empty database.
 2. Run your migrations into it, which also tries each one before it reaches production.

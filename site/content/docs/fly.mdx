@@ -1,6 +1,6 @@
 ---
 title: Fly.io
-description: How to run Reylo Migrate on Fly.io. The release command that migrates your database before each deploy goes live, from a Node image or any other.
+description: How to run Reylo Migrate on Fly.io. The release command that migrates your database before each deploy goes live, the connection it needs, and images without Node.
 ---
 
 <p className="dk-subheader">Reylo Migrate on Fly.io</p>
@@ -16,24 +16,36 @@ It runs once per deploy, on a temporary Machine with the new image. A migration 
 
 ## Database
 
-The release command reads your app's secrets. Attaching a Fly Postgres database sets `DATABASE_URL`, which Reylo reads:
+Attaching a Managed Postgres cluster sets `DATABASE_URL` on your app:
 
 ```terminal
-$ fly postgres attach my-db
+$ fly mpg attach <cluster-id>
 ```
 
-Any other database takes a secret of its own:
+Fly recommends the cluster's direct connection for migrations. Set it as a secret of its own:
 
 ```terminal
-$ fly secrets set DATABASE_URL=postgres://…
+$ fly secrets set DIRECT_DATABASE_URL=postgresql://…@direct.<cluster-id>.flympg.net/…
 ```
 
-## Without Node
+Then point [`direct_url`](/configuration#direct_url) at it:
 
-Copy the `reylo` command into your image from Reylo's:
+```yaml title=".reylo.yaml"
+direct_url: ${DIRECT_DATABASE_URL:-${DATABASE_URL}}
+```
+
+## Builds
+
+A build that type-checks reads your schema before the release command migrates it. Give it [a database of its own](/deployment#build-before-migrate).
+
+## Other images
+
+Copy the `reylo` command from Reylo's image, with your `reylo` directory and `.reylo.yaml`:
 
 ```dockerfile title="Dockerfile"
 COPY --from=ghcr.io/reylosql/reylo:0.8.3 /usr/local/bin/reylo /usr/local/bin/reylo
+COPY reylo/ reylo/
+COPY .reylo.yaml ./
 ```
 
 Then run it directly:
