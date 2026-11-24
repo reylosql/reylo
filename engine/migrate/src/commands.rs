@@ -4538,11 +4538,14 @@ fn remade_tables(lost: &[String], from: &crate::diff::Schema, to: &crate::diff::
     out
 }
 
-/// The statements that keep a table's rows through a migration that creates it again: a copy at
-/// its top (without the rows of `apart`, partitions that become tables of their own), and at its
-/// end the rows put back: in each column the new table has from the one it was, `renames` (column
-/// ids, old and new) included, cast where its type changes, past an identity that only takes its own
-/// values, and each sequence of the new table moved past them, or to its start where that is further.
+/// The statements that keep a table's rows through a migration that creates it again. At its top,
+/// the table locked against writes, which its drop would lose, and its rows copied (without those of
+/// `apart`, partitions that become tables of their own, and of their partitions). Right after the
+/// statements that create it again, in the same file and before what a trigger made after them
+/// would do to the rows, the rows put back: in each column the new table has from the one it was,
+/// `renames` (column ids, old and new) included, cast where its type changes, past an identity that
+/// only takes its own values; and each sequence of the new table moved past them where that lies
+/// within its bounds and past its start.
 #[cfg(feature = "cli")]
 fn keep_rows(id: &str, from: &crate::diff::Schema, to: &crate::diff::Schema, renames: &[(String, String)], apart: &[String]) -> String {
     let full = id.trim_start_matches("table ");
@@ -4570,14 +4573,23 @@ fn keep_rows(id: &str, from: &crate::diff::Schema, to: &crate::diff::Schema, ren
     let reads = kept.iter().map(|(_, r, _)| r.as_str()).collect::<Vec<_>>().join(", ");
     let overriding = if kept.iter().any(|(_, _, def)| def.contains(" generated always as identity")) { " overriding system value" } else { "" };
     let literal = |t: &str| format!("'{}'", t.replace('\'', "''"));
-    let without = if apart.is_empty() { String::new() } else { format!(" where tableoid not in ({})", apart.iter().map(|a| format!("{}::regclass", literal(&shown(a.trim_start_matches("table "))))).collect::<Vec<_>>().join(", ")) };
-    let mut out = vec!["-- at the top".to_string(), format!("create table {copy} as select * from {table}{without};"), "-- at the end".to_string(), format!("insert into {table} ({names}){overriding} select {reads} from {copy};")];
+    let without = if apart.is_empty() { String::new() } else { format!(" where tableoid not in ({})", apart.iter().map(|a| format!("select relid from pg_partition_tree({}::regclass)", literal(&shown(a.trim_start_matches("table "))))).collect::<Vec<_>>().join(" union all ")) };
+    let partitioned = to.objects.get(id).is_some_and(|o| o.extra.iter().any(|l| l.starts_with("shape ") && l.contains(" partition by ")));
+    let after = if partitioned { format!("-- right after it creates {table} and its partitions") } else { format!("-- right after it creates {table}") };
+    let mut out = vec![
+        "-- at the top".to_string(),
+        format!("lock table {table} in exclusive mode;"),
+        format!("create table {copy} as select * from {table}{without};"),
+        after,
+        format!("insert into {table} ({names}){overriding} select {reads} from {copy};"),
+    ];
     for (c, _, def) in &kept {
         if def.contains(" as identity") || def.contains("nextval(") {
             let unquoted = c.strip_prefix('"').and_then(|c| c.strip_suffix('"')).map_or(c.to_string(), |c| c.replace("\"\"", "\""));
             let sequence = format!("pg_get_serial_sequence({}, {})", literal(&table), literal(&unquoted));
-            let (pick, edge, past) = if def.contains("increment by -") { ("least", "min", "- 1") } else { ("greatest", "max", "+ 1") };
-            out.push(format!("select setval({sequence}, {pick}({edge}({c}) {past}, (select seqstart from pg_sequence where seqrelid = {sequence}::regclass)), false) from {table};"));
+            let (edge, past, beyond) = if def.contains("increment by -") { ("min", "- 1", "<") } else { ("max", "+ 1", ">") };
+            let next = format!("{edge}({c})::numeric {past}");
+            out.push(format!("select setval({sequence}, coalesce((select {next} from {table} having {next} between seqmin and seqmax and {next} {beyond} seqstart), seqstart)::bigint, false) from pg_sequence where seqrelid = {sequence}::regclass;"));
         }
     }
     out.push(format!("drop table {copy};"));

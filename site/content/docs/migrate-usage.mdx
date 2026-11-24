@@ -544,8 +544,9 @@ $ reylo migrate new partition_users
   To keep the rows, add these lines to the migration it writes:
 
     -- at the top
+    lock table users in exclusive mode;
     create table users_rows as select * from users;
-    -- at the end
+    -- right after it creates users and its partitions
     insert into users (id, name) select id, name from users_rows;
     drop table users_rows;
 
@@ -558,8 +559,9 @@ Nothing was changed.
 Write it with `--drop users`, and add those lines:
 
 ```sql title="20261104150000_partition_users.sql"
--- loses data: users
+lock table users in exclusive mode; -- [!code ++]
 create table users_rows as select * from users; -- [!code ++]
+-- loses data: users
 drop table users;
 create table users (
   id integer not null,

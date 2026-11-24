@@ -5573,7 +5573,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
         for l in out.lines().map(str::trim) {
             match l {
                 "-- at the top" => under = 1,
-                "-- at the end" => under = 2,
+                _ if l.starts_with("-- right after it creates ") => under = 2,
                 "" => under = 0,
                 _ if under == 1 => top.push_str(&format!("{l}\n")),
                 _ if under == 2 => end.push_str(&format!("{l}\n")),
@@ -5591,7 +5591,9 @@ create trigger kids_note after insert on kids begin update parents set name = na
         p.output();
         let file = p.dir.join("migrations").join(p.files().into_iter().find(|f| f.ends_with(&format!("_{name}.sql"))).unwrap());
         let sql = std::fs::read_to_string(&file).unwrap();
-        std::fs::write(&file, format!("{top}{sql}\n{end}")).unwrap();
+        // Right after the statements that create the tables again.
+        let made = sql.rfind("\ncreate table ").map(|at| at + sql[at..].find(";\n").unwrap() + 2).unwrap_or_else(|| panic!("{sql}"));
+        std::fs::write(&file, format!("{top}{}{end}{}", &sql[..made], &sql[made..])).unwrap();
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         p.output();
         assert_eq!(p.status().await, 0, "{}", p.peek());
@@ -5619,7 +5621,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
         p.schema(hashed);
         let out = keep_the_rows(&mut p, "partition_users", &[]).await;
         kept(&mut p).await;
-        assert_has!(&out, r"✗ Postgres can't make users a partitioned table in place\n  A table is partitioned only when it's created, so this migration drops users and its rows to create it again\.\n  To keep the rows, add these lines to the migration it writes:\n\n    -- at the top\n    create table users_rows as select \* from users;\n    -- at the end\n    insert into users \(id, name\) overriding system value select id, name from users_rows;\n    select setval\(pg_get_serial_sequence\('users', 'id'\), greatest\(max\(id\) \+ 1, \(select seqstart from pg_sequence where seqrelid = pg_get_serial_sequence\('users', 'id'\)::regclass\)\), false\) from users;\n    drop table users_rows;\n\n  To write it, dropping the rows:\n    reylo migrate new partition_users --drop users\n");
+        assert_has!(&out, r"✗ Postgres can't make users a partitioned table in place\n  A table is partitioned only when it's created, so this migration drops users and its rows to create it again\.\n  To keep the rows, add these lines to the migration it writes:\n\n    -- at the top\n    lock table users in exclusive mode;\n    create table users_rows as select \* from users;\n    -- right after it creates users and its partitions\n    insert into users \(id, name\) overriding system value select id, name from users_rows;\n    select setval\(pg_get_serial_sequence\('users', 'id'\), coalesce\(\(select max\(id\)::numeric \+ 1 from users having max\(id\)::numeric \+ 1 between seqmin and seqmax and max\(id\)::numeric \+ 1 > seqstart\), seqstart\)::bigint, false\) from pg_sequence where seqrelid = pg_get_serial_sequence\('users', 'id'\)::regclass;\n    drop table users_rows;\n\n  To write it, dropping the rows:\n    reylo migrate new partition_users --drop users\n");
         // Made plain again: its partitions go first, so the copy at the top is what keeps the rows.
         p.schema(plain);
         let out = keep_the_rows(&mut p, "unpartition", &[]).await;
@@ -5655,18 +5657,19 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_has!(&out, r"insert into users \(display_name, id, score\) overriding system value select full_name, id, score::integer from users_rows;");
         assert_eq!(p.rows("select count(*) as n from users where display_name = 'u' || id and score = id and total = id * 3").await[0].text("n"), "10");
         assert_eq!(p.rows("insert into users (display_name) values ('next') returning id").await[0].text("id"), "1000");
-        // A list-partitioned table made plain, one of its partitions kept as a table of its own.
-        p.schema(&format!("{users} create table regions (id int generated always as identity, region text not null, name text, primary key (id, region)) partition by list (region); create table regions_eu partition of regions for values in ('eu'); create table regions_us partition of regions for values in ('us');"));
+        // A list-partitioned table made plain, one of its partitions kept as a table of its own, whose
+        // rows are in a partition of its own.
+        p.schema(&format!("{users} create table regions (id int generated always as identity, region text not null, name text, primary key (id, region)) partition by list (region); create table regions_eu partition of regions for values in ('eu'); create table regions_us partition of regions for values in ('us') partition by hash (id); create table regions_us_0 partition of regions_us for values with (modulus 1, remainder 0);"));
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "add_regions", &Default::default(), log).await).await, 0, "{}", p.peek());
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         p.output();
         p.exec("insert into regions (region, name) select case when g <= 5 then 'eu' else 'us' end, 'r' || g from generate_series(1, 10) g").await;
-        p.schema(&format!("{users} create table regions (id int generated always as identity, region text not null, name text, primary key (id, region)); create table regions_us (id int generated always as identity, region text not null, name text, primary key (id, region));"));
+        p.schema(&format!("{users} create table regions (id int generated always as identity, region text not null, name text, primary key (id, region)); create table regions_us (id int generated always as identity, region text not null, name text, primary key (id, region)) partition by hash (id); create table regions_us_0 partition of regions_us for values with (modulus 1, remainder 0);"));
         let out = keep_the_rows(&mut p, "unpartition_regions", &[]).await;
-        assert_has!(&out, r"create table regions_rows as select \* from regions where tableoid not in \('regions_us'::regclass\);");
+        assert_has!(&out, r"create table regions_rows as select \* from regions where tableoid not in \(select relid from pg_partition_tree\('regions_us'::regclass\)\);");
         assert_eq!(p.rows("select count(*) as n from regions where region = 'eu'").await[0].text("n"), "5");
         assert_eq!(p.rows("select count(*) as n from regions where region = 'us'").await[0].text("n"), "0");
-        assert_eq!(p.rows("select count(*) as n from regions_us where region = 'us'").await[0].text("n"), "5");
+        assert_eq!(p.rows("select count(*) as n from only regions_us_0 where region = 'us'").await[0].text("n"), "5");
     }
 
     pub async fn init_creates_the_extensions_its_schema_uses(mut p: P) {

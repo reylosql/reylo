@@ -3197,14 +3197,17 @@ fn ahead(was: &str, is: &str, descending: bool) -> bool {
 }
 
 /// A sequence moved forward to a `start` it hasn't reached, and past every value of each column it
-/// gives values to, but never back, which would give again a value it gave. It moves only where each
-/// such column holds its values as they are: an identity, an integer column it is owned by, or one
-/// whose default is it alone. Where one makes something else of them (`'INV-' || nextval(…)`, a
-/// view's default, a domain's), where its rows are isn't known, and it stays where it is. A value
-/// past the rows that lies outside the sequence's bounds is passed over, as rows there can't be got
-/// past. Where it stands, its bounds and its columns are read from the database as the block runs,
-/// since a `setval` leaves it uncalled at a value past its start.
-fn moved_to_start(sequence: &str, start: &str, increment: &str) -> String {
+/// gives values to, but never back, which would give again a value it gave: two blocks, the first
+/// before the alter of the sequence and the second after it. The first reads the columns while
+/// nothing is locked and keeps where the sequence is to go for the second (a setting of the
+/// transaction); the second, under the alter's lock, which holds back every `nextval`, reads where
+/// the sequence stands and restarts it there, which a failed migration undoes. It moves only where
+/// each column holds the sequence's values as they are: an identity, an integer column it is owned
+/// by, or one whose default is it alone. Where one makes something else of them (`'INV-' ||
+/// nextval(…)`, a view's default, a domain's), where its rows are isn't known, and it stays where it
+/// is. A value past the rows outside the new bounds, `low` to `high`, is passed over, as rows there
+/// can't be got past.
+fn moved_to_start(sequence: &str, start: &str, increment: &str, low: &str, high: &str) -> [String; 2] {
     let (edge, past, beyond) = if increment.starts_with('-') { ("min", "- 1", "<") } else { ("max", "+ 1", ">") };
     let integer = "a.atttypid in ('int2'::regtype, 'int4'::regtype, 'int8'::regtype)";
     let columns = format!(
@@ -3215,15 +3218,20 @@ fn moved_to_start(sequence: &str, start: &str, increment: &str) -> String {
         where d.classid = 'pg_attrdef'::regclass and d.refclassid = 'pg_class'::regclass and d.refobjid = s \
         union all select null, null, false from pg_depend d where d.classid = 'pg_type'::regclass and d.refclassid = 'pg_class'::regclass and d.refobjid = s"
     );
-    dollar_block(&format!(
-        "declare s regclass := {sequence}; stands numeric; goal numeric := {start}; reach numeric; low numeric; high numeric; c record; \
-        begin select seqmin, seqmax into low, high from pg_sequence where seqrelid = s; \
-        execute format('select case when is_called then last_value::numeric + ({increment}) else last_value end from %s', s) into stands; \
-        for c in {columns} loop if not c.plain then return; end if; \
+    let first = dollar_block(&format!(
+        "declare s regclass := {sequence}; goal numeric := {start}; reach numeric; c record; \
+        begin for c in {columns} loop if not c.plain then return; end if; \
         execute format('select {edge}(%I)::numeric {past} from %s', c.attname, c.rel) into reach; \
-        if reach {beyond} goal and reach between low and high then goal := reach; end if; end loop; \
-        if goal {beyond} stands and goal between low and high then perform setval(s, goal::bigint, false); end if; end"
-    ))
+        if reach {beyond} goal and reach between {low} and {high} then goal := reach; end if; end loop; \
+        perform set_config('reylo.sequence_goal', goal::text, true); end"
+    ));
+    let second = dollar_block(&format!(
+        "declare s regclass := {sequence}; goal numeric := nullif(current_setting('reylo.sequence_goal', true), '')::numeric; stands numeric; \
+        begin perform set_config('reylo.sequence_goal', '', true); if goal is null then return; end if; \
+        execute format('select case when is_called then last_value::numeric + ({increment}) else last_value end from %s', s) into stands; \
+        if goal {beyond} stands then execute format('alter sequence %s restart with %s', s, goal); end if; end"
+    ));
+    [first, second]
 }
 
 /// Whether `name` is one Postgres gives a not null it makes on `table`'s `column`: its name for it,
@@ -4554,21 +4562,20 @@ impl Alterer for PostgresAlterer {
                             set.push(if oy.contains_key("cycle") { "set cycle".into() } else { "set no cycle".into() });
                         }
                         // A start moved ahead moves the sequence where it hasn't got that far, as a
-                        // table made from the schema starts there. Where its bounds stay, that is
-                        // before the alter, whose lock blocks the table while the block reads it.
+                        // table made from the schema starts there: the table read before the alter,
+                        // the sequence moved after it, under its lock.
                         let moved = (ahead(&ex["start with"], &ey["start with"], descending) && !disjoint).then(|| {
                             let sequence = format!("pg_get_serial_sequence({}, {})", literal(&table), literal(&unquoted(&name)));
-                            moved_to_start(&sequence, &ey["start with"], &ey["increment by"])
+                            moved_to_start(&sequence, &ey["start with"], &ey["increment by"], &ey["minvalue"], &ey["maxvalue"])
                         });
-                        let first = ex["minvalue"] == ey["minvalue"] && ex["maxvalue"] == ey["maxvalue"] && a.ty == b.ty;
-                        if first {
-                            out.extend(moved.clone());
+                        if let Some([read, _]) = &moved {
+                            out.push(read.clone());
                         }
                         if !set.is_empty() {
                             out.push(format!("{at} {}", set.join(" ")));
                         }
-                        if !first {
-                            out.extend(moved);
+                        if let Some([_, restart]) = moved {
+                            out.push(restart);
                         }
                     }
                     _ => {}
@@ -4784,17 +4791,19 @@ impl Alterer for PostgresAlterer {
                         literal(name)
                     ));
                 }
-                // Where its bounds stay, before the alter, whose lock holds back every nextval while
-                // the block reads the columns it gives values to.
+                // A start moved ahead moves it where it hasn't got that far: the columns it gives
+                // values to read before the alter, it moved after, under the alter's lock.
                 let start = ey.get("start with").cloned().unwrap_or_default();
-                let moved = (ahead(ex.get("start with").map_or("", |s| s.as_str()), &start, descending) && !disjoint).then(|| moved_to_start(&literal(name), &start, ey.get("increment by").map_or("1", |i| i.as_str())));
-                let first = ex.get("minvalue") == ey.get("minvalue") && ex.get("maxvalue") == ey.get("maxvalue") && from.def.split_whitespace().nth(1) == to.def.split_whitespace().nth(1);
-                if first {
-                    out.extend(moved.clone());
+                let moved = (ahead(ex.get("start with").map_or("", |s| s.as_str()), &start, descending) && !disjoint).then(|| {
+                    let bound = |key: &str| ey.get(key).cloned().unwrap_or_default();
+                    moved_to_start(&literal(name), &start, ey.get("increment by").map_or("1", |i| i.as_str()), &bound("minvalue"), &bound("maxvalue"))
+                });
+                if let Some([read, _]) = &moved {
+                    out.push(read.clone());
                 }
                 out.push(format!("alter sequence {name} {}{}", to.def, if disjoint { " restart" } else { "" }));
-                if !first {
-                    out.extend(moved);
+                if let Some([_, restart]) = moved {
+                    out.push(restart);
                 }
                 Some(out)
             }
