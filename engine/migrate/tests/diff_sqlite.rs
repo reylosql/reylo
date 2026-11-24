@@ -260,14 +260,18 @@ async fn sqlite() {
             let back_fails = read(&case.join("back-fails.txt")).trim().to_string();
             let mut ready = true;
             if !back_fails.is_empty() {
+                let (held, valued, counted) = (counts(&mut from).await, values(&mut from).await, counters(&mut from).await);
                 let reverse = crate::plan(&mut from, &mut first).await;
                 let refused = match run(&mut from, &reverse).await {
                     Some(f) if f.contains(&back_fails) => None,
                     Some(f) => Some(format!("the way back failed otherwise than back-fails.txt says: {f}")),
                     None => Some(format!("the way back ran, where back-fails.txt says it fails with {back_fails}")),
                 };
-                ready = refused.is_none();
-                problems.extend(refused);
+                let (only_a, only_b) = difference(&catalog(&mut from).await.unwrap(), &catalog(&mut to).await.unwrap());
+                let same = only_a.is_empty() && only_b.is_empty() && counts(&mut from).await == held && values(&mut from).await == valued && counters(&mut from).await == counted;
+                let changed = (!same).then(|| "the way back that failed changed the database or its rows".to_string());
+                ready = refused.is_none() && changed.is_none();
+                problems.extend(refused.into_iter().chain(changed));
                 empty(&mut from).await;
             }
             let indent = |lines: Vec<String>| lines.iter().map(|l| format!("  {}", l.replace('\n', "\n  "))).collect::<Vec<_>>().join("\n");
