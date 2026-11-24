@@ -1,6 +1,6 @@
 ---
 title: Fly.io
-description: How to run Reylo Migrate on Fly.io. The release command that migrates your database before each deploy goes live, the connection it needs, and images without Node.
+description: How to run Reylo Migrate on Fly.io. The release command that migrates your database before each deploy goes live, the connection it needs, and other images.
 ---
 
 <p className="dk-subheader">Reylo Migrate on Fly.io</p>
@@ -25,7 +25,7 @@ $ fly mpg attach <cluster-id>
 Fly recommends the cluster's direct connection for migrations. Set it as a secret of its own:
 
 ```terminal
-$ fly secrets set DIRECT_DATABASE_URL=postgresql://…@direct.<cluster-id>.flympg.net/…
+$ fly secrets set DIRECT_DATABASE_URL="postgresql://…@direct.<cluster-id>.flympg.net/…"
 ```
 
 Then point [`direct_url`](/configuration#direct_url) at it:
@@ -38,9 +38,11 @@ direct_url: ${DIRECT_DATABASE_URL:-${DATABASE_URL}}
 
 A build that type-checks reads your schema before the release command migrates it. Give it [a database of its own](/deployment#build-before-migrate).
 
+Fly sets your secrets only when your app runs, not while it builds. So pass that database's URL as a [build secret](https://fly.io/docs/apps/build-secrets/).
+
 ## Other images
 
-Copy the `reylo` command from Reylo's image, with your `reylo` directory and `.reylo.yaml`:
+A Next.js standalone build, or any image without your `node_modules`, has no `reylo` command. Copy it from Reylo's image, with your `reylo` directory and `.reylo.yaml`:
 
 ```dockerfile title="Dockerfile"
 COPY --from=ghcr.io/reylosql/reylo:0.8.3 /usr/local/bin/reylo /usr/local/bin/reylo
@@ -54,3 +56,5 @@ Then run it directly:
 [deploy]
   release_command = "reylo migrate deploy"
 ```
+
+The release command replaces your image's `CMD`, and its `ENTRYPOINT` still runs. So start your app from `CMD`.

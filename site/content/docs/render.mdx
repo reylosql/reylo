@@ -1,6 +1,6 @@
 ---
 title: Render
-description: How to run Reylo Migrate on Render. The pre-deploy command that migrates your database before each deploy goes live, the database URL it reads, and images without Node.
+description: How to run Reylo Migrate on Render. The pre-deploy command that migrates your database before each deploy goes live, the database URL it reads, and other images.
 ---
 
 <p className="dk-subheader">Reylo Migrate on Render</p>
@@ -16,7 +16,13 @@ services:
     preDeployCommand: npx reylo migrate deploy
 ```
 
-It runs after the build, on an instance of its own. A migration that fails stops the deploy, and the previous one keeps serving. Pre-deploy commands need a paid instance type.
+It runs after the build, on an instance of its own. A migration that fails stops the deploy, and the previous one keeps serving. Pre-deploy commands need a paid plan.
+
+<Callout title="Previews">
+
+A pull request preview copies its service's variables, so its pre-deploy command migrates production. Point each preview's `DATABASE_URL` at a database of its own.
+
+</Callout>
 
 ## Database
 
@@ -40,14 +46,14 @@ A build that type-checks reads your schema before the pre-deploy command migrate
 
 ## Other images
 
-Copy the `reylo` command from Reylo's image, with your `reylo` directory:
+A Next.js standalone build, or any image without your `node_modules`, has no `reylo` command. Copy it from Reylo's image, with your `reylo` directory:
 
 ```dockerfile title="Dockerfile"
 COPY --from=ghcr.io/reylosql/reylo:0.8.3 /usr/local/bin/reylo /usr/local/bin/reylo
 COPY reylo/ reylo/
 ```
 
-Then run it directly:
+Copy `.reylo.yaml` too, if you have one. Then run it directly:
 
 ```yaml title="render.yaml"
 services:
@@ -57,5 +63,3 @@ services:
     # ...
     preDeployCommand: reylo migrate deploy
 ```
-
-Copy `.reylo.yaml` too, if you have one.

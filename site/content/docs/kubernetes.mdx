@@ -17,7 +17,7 @@ It reads `DATABASE_URL`, and exits 1 when a migration fails. Copy `.reylo.yaml` 
 
 ## Jobs
 
-Run the image as a Job before your app's pods change. Each deploy tool has a hook for it:
+Run the image as a Job before your app's pods change. Each deploy tool can run it first:
 
 ```yaml title="templates/migrate.yaml" tab="Helm"
 apiVersion: batch/v1
@@ -96,11 +96,11 @@ spec:
   prune: true
 ```
 
-A migration that fails fails the Job, and the app stays on its old version.
+A migration that fails fails the Job. The app stays on its old version, with the migrations before it applied.
 
 ## Init containers
 
-Run the image in each pod, before your app starts. Pods that start at once take turns, and the rest find nothing to run:
+Run the image in each pod, before your app starts. On Postgres and MySQL, pods that start at once take turns, and the rest find nothing to run:
 
 ```yaml title="app.yaml"
 apiVersion: apps/v1
@@ -123,4 +123,4 @@ spec:
           # ...
 ```
 
-A migration that fails keeps the new pods from starting.
+A migration that fails keeps the new pods from starting. An older image refuses a database that ran a newer migration, so after a rollback, its pods don't start either.
