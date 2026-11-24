@@ -4114,7 +4114,7 @@ on!(
     a_concurrent_reindex_is_said_to_block_nothing,
     new_builds_a_changed_index_before_it_drops_the_old_one,
     a_changed_unique_index_that_fails_to_build_leaves_the_old_one,
-    new_adds_a_deferrable_key_over_an_index_built_concurrently,
+    new_adds_a_key_over_an_index_built_concurrently,
     new_builds_an_index_on_a_materialized_view_concurrently,
     new_renames_an_index_changed_only_in_its_name,
     new_drops_a_foreign_key_on_a_replaced_key_with_it,
@@ -4122,6 +4122,8 @@ on!(
     a_primary_key_added_over_an_index_says_it_checks_for_nulls,
     new_renames_a_column_under_its_indexes_keys_and_views,
     a_renamed_key_column_whose_collation_changes_keeps_its_foreign_key,
+    a_rename_carries_its_constraints_sequence_and_views,
+    a_rename_that_cannot_run_first_is_planned_as_before,
     a_renamed_key_column_whose_stored_expression_changes_keeps_its_foreign_key,
     a_name_given_to_a_new_index_keeps_the_old_one_until_the_last_build,
 );
@@ -6291,43 +6293,54 @@ mod adversarial {
         assert_eq!(p.check_every_way().await.0, 0);
     }
 
-    pub async fn new_adds_a_deferrable_key_over_an_index_built_concurrently(mut p: P) {
-        let v1 = "create table teams (id int not null, name text not null, code text); create table users (id int primary key, team_id int); create table tags (id int not null);";
+    pub async fn new_adds_a_key_over_an_index_built_concurrently(mut p: P) {
+        let v1 = "create table teams (id int not null, name text not null, code text); create table users (id int primary key, team_id int);";
         p.schema(v1);
         p.file("20261027100000_v1.sql", v1);
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
-        p.exec("insert into teams values (1, 'a', 'x'), (2, 'b', null); insert into tags values (1)").await;
+        p.exec("insert into teams values (1, 'a', 'x'), (2, 'b', null)").await;
         p.output();
-        // A foreign key needs a key that isn't deferrable: the deferrable primary key is another table's.
         p.schema(
             "create table teams (id int not null, name text not null, code text,
               constraint teams_pkey primary key (id),
-              constraint teams_name_key unique (name) deferrable,
-              constraint teams_code_key unique nulls not distinct (code) include (name) deferrable initially deferred);
-            create table users (id int primary key, team_id int references teams (id) deferrable initially deferred);
-            create table tags (id int not null, constraint tags_pkey primary key (id) deferrable);",
+              constraint teams_code_key unique nulls not distinct (code) include (name));
+            create table users (id int primary key, team_id int references teams (id) deferrable initially deferred);",
         );
         // No --blocking: each key's index is built concurrently, then taken by the key.
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "keys", &Default::default(), log).await).await, 0, "{}", p.peek());
         let out = p.output();
-        assert!(!out.contains("deferrable deferrable") && !out.contains("deferred deferrable"), "each deferral is shown once:\n{out}");
-        assert_has!(&out, r"\+ constraint teams_name_key on teams: unique \(name\) deferrable(\n|$)");
+        assert!(!out.contains("deferred deferrable"), "a deferral is shown once:\n{out}");
         assert_has!(&out, r"\+ constraint users_team_id_fkey on users: foreign key \(team_id\) references teams\(id\) deferrable initially deferred(\n|$)");
         let all = written(&p, "keys").join("-- next\n");
         for statement in [
             "create unique index concurrently teams_pkey on teams (id);",
             "alter table teams add constraint teams_pkey primary key using index teams_pkey;",
-            "create unique index concurrently tags_pkey on tags (id);",
-            "alter table tags add constraint tags_pkey primary key using index tags_pkey deferrable;",
-            "alter table teams add constraint teams_name_key unique using index teams_name_key deferrable;",
             "create unique index concurrently teams_code_key on teams (code) include (name) nulls not distinct;",
-            "alter table teams add constraint teams_code_key unique using index teams_code_key deferrable initially deferred;",
+            "alter table teams add constraint teams_code_key unique using index teams_code_key;",
         ] {
             assert!(all.contains(statement), "{statement}:\n{all}");
         }
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.output();
         assert_eq!(p.check_every_way().await.0, 0, "the migrations reach schema.sql");
+        // A deferrable key still needs --blocking: an index built first would check each row at once.
+        p.schema(
+            "create table teams (id int not null, name text not null, code text,
+              constraint teams_pkey primary key (id),
+              constraint teams_code_key unique nulls not distinct (code) include (name),
+              constraint teams_name_key unique (name) deferrable);
+            create table users (id int primary key, team_id int references teams (id) deferrable initially deferred);",
+        );
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "deferrable", &Default::default(), log).await).await, 1);
+        assert_has!(p.output(), r"reylo migrate new deferrable --blocking");
+        let blocking = reylo_migrate::Choices { blocking: true, ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "deferrable", &blocking, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"\+ constraint teams_name_key on teams: unique \(name\) deferrable(\n|$)");
+        assert!(written(&p, "deferrable").concat().contains("alter table teams add constraint teams_name_key unique (name) deferrable;"), "{}", written(&p, "deferrable").concat());
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.check_every_way().await.0, 0);
     }
 
     pub async fn new_builds_an_index_on_a_materialized_view_concurrently(mut p: P) {
@@ -6470,6 +6483,66 @@ mod adversarial {
         let choices = reylo_migrate::Choices { rename: vec![(rename.0.into(), rename.1.into())], blocking: true, ..Default::default() };
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "rename", &choices, log).await).await, 0, "{}", p.peek());
         p.output();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.check_every_way().await.0, 0);
+    }
+
+    pub async fn a_rename_carries_its_constraints_sequence_and_views(mut p: P) {
+        let v1 = "create table t (id serial primary key, a int not null unique check (a > 0));
+            create table u (id int primary key, a int references t (a));
+            create view v as select a from t;
+            create view w as select * from t;";
+        p.schema(v1);
+        p.file("20261027100000_v1.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into t (a) values (1), (2); insert into u values (1, 1)").await;
+        p.output();
+        // The constraints named after the column, its serial's sequence and the views' columns take
+        // the new names, as a schema written anew names them.
+        p.schema(
+            "create table t (tid serial primary key, x int not null unique check (x > 0));
+            create table u (id int primary key, a int references t (x));
+            create view v as select x from t;
+            create view w as select * from t;",
+        );
+        let choices = reylo_migrate::Choices { rename: vec![("t.a".into(), "x".into()), ("t.id".into(), "tid".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "rename", &choices, log).await).await, 0, "{}", p.peek());
+        p.output();
+        let all = written(&p, "rename").join("-- next\n");
+        for kept in ["rename constraint t_a_key to t_x_key", "rename constraint t_a_check to t_x_check", "alter sequence t_id_seq rename to t_tid_seq", "alter view v rename column a to x", "alter view w rename column a to x", "alter view w rename column id to tid"] {
+            assert!(all.contains(kept), "{kept}:\n{all}");
+        }
+        for rebuilt in ["drop ", "create ", "add constraint", "concurrently"] {
+            assert!(!all.contains(rebuilt), "nothing is built again ({rebuilt}):\n{all}");
+        }
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.check_every_way().await.0, 0);
+        // The sequence goes on from where it was.
+        p.exec("insert into t (x) values (3)").await;
+        assert_eq!(p.rows("select max(tid)::text as n from t").await[0].text("n"), "3");
+    }
+
+    pub async fn a_rename_that_cannot_run_first_is_planned_as_before(mut p: P) {
+        // The not null's new name is a check's the plan drops: the rename runs where the plan has it.
+        let v1 = "create table t (id int primary key, a int not null, c int, constraint t_x_not_null check (c > 0));
+            create table s (id int primary key, b int, d int, constraint s_b_pos check (b > 0));";
+        p.schema(v1);
+        p.file("20261027100000_v1.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into t values (1, 1, 1); insert into s values (1, 1, 1)").await;
+        p.output();
+        // And one column's type changes as it is renamed, beside a rename that keeps its values.
+        p.schema(
+            "create table t (id int primary key, x int not null, c int);
+            create table s (id int primary key, b2 int, d2 bigint, constraint s_b_pos check (b2 > 0));",
+        );
+        let choices = reylo_migrate::Choices { rename: vec![("t.a".into(), "x".into()), ("s.b".into(), "b2".into()), ("s.d".into(), "d2".into())], blocking: true, ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "mixed", &choices, log).await).await, 0, "{}", p.peek());
+        p.output();
+        let all = written(&p, "mixed").join("-- next\n");
+        assert!(!all.contains("drop constraint s_b_pos"), "the check on the column that keeps its values stays:\n{all}");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.output();
         assert_eq!(p.check_every_way().await.0, 0);

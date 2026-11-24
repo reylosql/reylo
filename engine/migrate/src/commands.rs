@@ -6317,11 +6317,15 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
     settled.map(|r| r.map(|(plan, assumed)| Settled { renames, plan, assumed, tables, after_tables, after_columns }))
 }
 
-/// The statements of a Postgres plan that rename its columns, in order, each with the comments above
-/// it and the not null renamed after it.
+/// The statements of a Postgres plan that rename the columns `renamed` names (each an old column's
+/// id and the new one's), each rename's with the comments above it and the not null renamed after
+/// it, by the rename's place in `renamed`, in the plan's order.
 #[cfg(feature = "cli")]
-fn column_rename_statements(plan: &crate::diff::Plan) -> Vec<String> {
-    let renames = |s: &str, what: &str| s.trim_start().to_ascii_lowercase().starts_with("alter table ") && s.contains(what);
+fn column_rename_statements(plan: &crate::diff::Plan, renamed: &[&(String, String)]) -> Vec<(usize, Vec<String>)> {
+    let bare = |id: &str| crate::sql::last_written(id);
+    let table_of = |id: &str| id.strip_prefix("column ").and_then(|c| c.strip_suffix(bare(id).as_str())).and_then(|t| t.strip_suffix('.')).map(bare).unwrap_or_default();
+    let wanted: Vec<(String, String)> = renamed.iter().map(|(old, new)| (bare(&table_of(old)), format!(" rename column {} to {}", bare(old), bare(new)))).collect();
+    let is = |s: &str, what: &str| s.trim_start().to_ascii_lowercase().starts_with("alter table ") && s.contains(what);
     let (mut out, mut comments) = (Vec::new(), Vec::new());
     let mut statements = plan.statements.iter().peekable();
     while let Some(s) = statements.next() {
@@ -6329,35 +6333,136 @@ fn column_rename_statements(plan: &crate::diff::Plan) -> Vec<String> {
             comments.push(s.clone());
             continue;
         }
-        if renames(s, " rename column ") {
-            out.append(&mut comments);
-            out.push(s.clone());
-            if let Some(next) = statements.next_if(|n| renames(n, " rename constraint ")) {
-                out.push(next.clone());
+        let table = s.trim_start().get("alter table ".len()..).and_then(|rest| rest.split(" rename column ").next()).map(bare);
+        let which = wanted.iter().position(|(t, what)| s.trim_end().ends_with(what.as_str()) && table.as_deref() == Some(t.as_str()));
+        if let Some(k) = which.filter(|_| is(s, " rename column ")) {
+            let mut these = std::mem::take(&mut comments);
+            these.push(s.clone());
+            if let Some(next) = statements.next_if(|n| is(n, " rename constraint ")) {
+                these.push(next.clone());
             }
+            out.push((k, these));
         }
         comments.clear();
     }
     out
 }
 
-/// `plan`'s column renames run on `db`, and the plan from there to `target`, which carries `plan`'s
-/// renames for what is shown of them; None, running nothing, where a rename can't run first: its new
-/// name a column `db` has, which the plan drops before it, or a renamed column's values change (its
-/// type, collation or stored expression), which the plan makes what holds it again around.
+/// Runs `sql` on `db` whole or not at all: in a transaction of its own, or under a savepoint where
+/// `db` is in one already (`live`: a push's). Whether it ran.
+#[cfg(feature = "cli")]
+async fn run_or_undo(db: &mut Db, sql: &str, live: bool) -> Result<bool, Error> {
+    let (open, keep, undo) = if live { ("savepoint reylo_renames", "release savepoint reylo_renames", "rollback to savepoint reylo_renames") } else { ("begin", "commit", "rollback") };
+    db.exec(open).await?;
+    if db.script(sql).await.is_ok() {
+        db.exec(keep).await?;
+        return Ok(true);
+    }
+    db.exec(undo).await?;
+    if live {
+        db.exec(keep).await?;
+    }
+    Ok(false)
+}
+
+/// What follows the column renames `renamed` (each an old column's id and the new one's) once they
+/// ran on `db`, which then reads as `now`, as statements, where the target names it after the new
+/// column: a view's or a materialized view's column of the old column's name, which the server
+/// leaves as it was, where the view's definition isn't yet the target's; and a serial column's
+/// sequence, which keeps its name.
+#[cfg(feature = "cli")]
+async fn following_renames(db: &mut Db, now: &crate::diff::Schema, target: &Target, renamed: &[&(String, String)]) -> Result<Vec<String>, Error> {
+    use crate::diff::postgres::quote_ident;
+    let bare = |id: &str| crate::sql::last_written(id);
+    let mut out = Vec::new();
+    let views = db
+        .rows(
+            r"select format('%I.%I', n.nspname, c.relname) as rel, c.relkind::text as kind, a.attname as name
+            from pg_attribute a join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace
+            where c.relkind in ('v', 'm') and a.attnum > 0 and not a.attisdropped and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\_%'",
+        )
+        .await?;
+    for (old, new) in renamed {
+        let (old, new) = (bare(old), bare(new));
+        for v in views.iter().filter(|v| quote_ident(v.text("name")) == old) {
+            let (rel, word) = (v.text("rel"), if v.text("kind") == "m" { "materialized view" } else { "view" });
+            let id = format!("{word} {rel}");
+            let differs = now.objects.get(&id).zip(target.schema.objects.get(&id)).is_some_and(|(a, b)| a.def != b.def);
+            if differs && !views.iter().any(|w| w.text("rel") == rel && quote_ident(w.text("name")) == new) {
+                out.push(format!("alter {word} {rel} rename column {old} to {new}"));
+            }
+        }
+    }
+    for (_, new) in renamed {
+        let owned_by = |s: &crate::diff::Schema| s.objects.values().find(|o| o.kind == Some(crate::diff::Kind::Sequence) && o.goes_with.as_deref() == Some(new.as_str())).map(|o| o.id.clone());
+        let (Some(was), Some(is)) = (owned_by(now), owned_by(&target.schema)) else { continue };
+        if was != is && !now.objects.contains_key(&is) && !target.schema.objects.contains_key(&was) {
+            out.push(format!("alter sequence {} rename to {}", was.trim_start_matches("sequence "), bare(&is)));
+        }
+    }
+    crate::diff::postgres::style_statements(db, &mut out, &target.schema.verbatim).await?;
+    Ok(out)
+}
+
+/// The constraints of `now` that the target has under another name, on the same table and alike but
+/// for it, each once (a key, a check or a foreign key named after a renamed column), as statements
+/// that rename them.
+#[cfg(feature = "cli")]
+async fn constraint_renames(db: &mut Db, now: &crate::diff::Schema, target: &Target) -> Result<Vec<String>, Error> {
+    use crate::diff::Kind;
+    let constraints = |s: &crate::diff::Schema, other: &crate::diff::Schema| -> Vec<(String, String, String)> {
+        s.objects.values().filter(|o| o.kind == Some(Kind::Constraint) && !other.objects.contains_key(&o.id)).filter_map(|o| Some((o.id.clone(), o.owner.clone()?, o.def.clone()))).collect()
+    };
+    let (gone, come) = (constraints(now, &target.schema), constraints(&target.schema, now));
+    let mut out = Vec::new();
+    for (id, owner, def) in &gone {
+        let alike = |list: &[(String, String, String)]| list.iter().filter(|(_, o, d)| o == owner && d == def).count();
+        let [(new, _, _)] = come.iter().filter(|(_, o, d)| o == owner && d == def).collect::<Vec<_>>()[..] else { continue };
+        if alike(&gone) != 1 {
+            continue;
+        }
+        let Some(table) = owner.strip_prefix("table ") else { continue };
+        out.push(format!("alter table {table} rename constraint {} to {}", crate::sql::last_written(id), crate::sql::last_written(new)));
+    }
+    crate::diff::postgres::style_statements(db, &mut out, &target.schema.verbatim).await?;
+    Ok(out)
+}
+
+/// `plan`'s column renames run on `db` with what follows them, and the plan from there to `target`,
+/// which carries `plan`'s renames for what is shown of them; None, running nothing, where none can
+/// run first. A rename runs first where its column keeps its values (a change of type, collation or
+/// stored expression makes what holds it again around the change, as the plan writes it), its new
+/// name is no column of `db` (one the plan drops first), and it runs on `db` (its not null's new name
+/// may be one the plan frees first); the rest stay in the plan, as stated.
 #[cfg(feature = "cli")]
 async fn columns_renamed_first(db: &mut Db, plan: &crate::diff::Plan, current: &crate::diff::Schema, target: &Target, dropped: &std::collections::BTreeSet<String>, live: bool) -> Result<Option<(Vec<String>, crate::diff::Plan)>, Error> {
-    let ran = column_rename_statements(plan);
-    let runnable: Vec<String> = ran.iter().filter(|s| !s.starts_with("--")).map(|s| format!("{};", s.trim_end())).collect();
     let alterer = crate::diff::alterer(db).await?;
-    let keeps = |(old, new): &(String, String)| current.objects.get(old).zip(target.schema.objects.get(new)).is_some_and(|(a, b)| alterer.keeps_values(a, b));
-    if runnable.iter().filter(|s| s.contains(" rename column ")).count() != plan.renamed.len() || plan.renamed.iter().any(|(_, new)| current.objects.contains_key(new)) || !plan.renamed.iter().all(keeps) {
+    let candidates: Vec<&(String, String)> = plan.renamed.iter().filter(|(old, new)| !current.objects.contains_key(new) && current.objects.get(old).zip(target.schema.objects.get(new)).is_some_and(|(a, b)| alterer.keeps_values(a, b))).collect();
+    let sql = |statements: &[String]| statements.iter().filter(|s| !s.starts_with("--")).map(|s| format!("{};", s.trim_end())).collect::<Vec<_>>().join("\n");
+    let (mut ran, mut first) = (Vec::new(), Vec::new());
+    for (k, statements) in column_rename_statements(plan, &candidates) {
+        if !first.contains(&candidates[k]) && run_or_undo(db, &sql(&statements), live).await? {
+            ran.extend(statements);
+            first.push(candidates[k]);
+        }
+    }
+    if first.is_empty() {
         return Ok(None);
     }
-    db.script(&runnable.join("\n")).await?;
     let mut now = crate::diff::read(db).await?;
+    let following = following_renames(db, &now, target, &first).await?;
+    if !following.is_empty() && run_or_undo(db, &sql(&following), live).await? {
+        ran.extend(following);
+        now = crate::diff::read(db).await?;
+    }
+    let renamed_constraints = constraint_renames(db, &now, target).await?;
+    if !renamed_constraints.is_empty() && run_or_undo(db, &sql(&renamed_constraints), live).await? {
+        ran.extend(renamed_constraints);
+        now = crate::diff::read(db).await?;
+    }
     now.live = live;
-    let mut rest = crate::diff::plan_with(&now, &target.schema, alterer.as_ref(), &[], dropped);
+    let stated: Vec<(String, String)> = plan.renamed.iter().filter(|r| !first.contains(&r)).cloned().collect();
+    let mut rest = crate::diff::plan_with(&now, &target.schema, alterer.as_ref(), &stated, dropped);
     style(db, &mut rest, &target.schema).await?;
     (rest.renames, rest.renamed, rest.pairs) = (plan.renames.clone(), plan.renamed.clone(), plan.pairs.clone());
     Ok(Some((ran, rest)))
