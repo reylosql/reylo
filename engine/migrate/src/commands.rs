@@ -3069,36 +3069,65 @@ fn alters_rows(sql: &str, d: Dialect) -> bool {
     })
 }
 
-/// The constraints and indexes a migration drops and doesn't make again, by name as written: a
-/// changed `check` is dropped and added under its own name.
-fn dropped_by(sql: &str, d: Dialect) -> Vec<String> {
+/// A constraint or an index a migration drops: its name as the server keeps it, and as written,
+/// with the table a constraint (or a MySQL index) is dropped from, as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Dropped {
+    name: String,
+    written: String,
+    table: Option<String>,
+}
+
+/// The constraints and indexes a migration drops and doesn't make again: a changed `check` is
+/// dropped and added under its own name.
+fn dropped_by(sql: &str, d: Dialect) -> Vec<Dropped> {
     let (mut dropped, made) = dropped_and_made(sql, d);
-    dropped.retain(|n| !made.contains(n));
+    dropped.retain(|x| !made.contains(&x.name));
     dropped
 }
 
-/// The constraints and indexes a migration drops, and those it makes, by name as written.
-fn dropped_and_made(sql: &str, d: Dialect) -> (Vec<String>, Vec<String>) {
+/// The constraints and indexes a migration drops, and the names of those it makes.
+fn dropped_and_made(sql: &str, d: Dialect) -> (Vec<Dropped>, Vec<String>) {
     let (mut dropped, mut made) = (Vec::new(), Vec::new());
     for s in split_statements(sql, d) {
-        let up: Vec<String> = s.tokens.iter().map(|t| t.upper()).collect();
-        // A name as the server keeps it: a quoted one as written, an unquoted one folded to lowercase,
-        // as Postgres folds it and MySQL compares it.
-        let name_after = |k: usize| {
-            s.tokens.iter().skip(k).find(|t| !matches!(t.upper().as_str(), "CONCURRENTLY" | "IF" | "NOT" | "EXISTS")).map(|t| match t.kind {
-                crate::sql::TokenKind::Quoted if d == Dialect::Postgres => t.text.trim_matches('"').replace("\"\"", "\""),
-                // Postgres folds only ASCII letters of an unquoted name.
-                _ => t.text.trim_matches(['"', '`']).to_ascii_lowercase(),
+        let t = &s.tokens;
+        let up: Vec<String> = t.iter().map(|x| x.upper()).collect();
+        let skip = |mut k: usize| {
+            while matches!(up.get(k).map(String::as_str), Some("CONCURRENTLY" | "IF" | "NOT" | "EXISTS" | "ONLY")) {
+                k += 1;
+            }
+            k
+        };
+        // A dotted name from token `k`, as written: its tokens' offsets count from the file's start.
+        let written = |k: usize| -> Option<String> {
+            let mut end = k;
+            while t.get(end + 1).is_some_and(|x| x.text == ".") && t.get(end + 2).is_some() {
+                end += 2;
+            }
+            Some(sql[t.get(k)?.start..t[end].end].to_string())
+        };
+        // A name as the server keeps it, near enough to say it: a quoted one as written, an unquoted
+        // one with its ASCII letters lowered. The catalog, not this, says whether one is there.
+        let kept = |k: usize| {
+            t.get(k).map(|x| match x.kind {
+                crate::sql::TokenKind::Quoted if d == Dialect::Postgres => x.text.trim_matches('"').replace("\"\"", "\""),
+                _ => x.text.trim_matches(['"', '`']).to_ascii_lowercase(),
             })
         };
+        let table = (up.first().map(String::as_str) == Some("ALTER") && up.get(1).map(String::as_str) == Some("TABLE")).then(|| written(skip(2))).flatten();
         for k in 0..up.len() {
             let what = up.get(k + 1).map(String::as_str);
-            if up[k] == "DROP" && matches!(what, Some("INDEX" | "CONSTRAINT" | "CHECK")) {
-                dropped.extend(name_after(k + 2));
+            if up[k] == "DROP" && matches!(what, Some("INDEX" | "CONSTRAINT" | "CHECK" | "KEY")) {
+                let at = skip(k + 2);
+                if let (Some(name), Some(written)) = (kept(at), written(at)) {
+                    // Postgres's `drop index` names the index alone, schema-qualified where it is.
+                    let name = if table.is_none() { kept(at + if t.get(at + 1).is_some_and(|x| x.text == ".") { 2 } else { 0 }).unwrap_or(name) } else { name };
+                    dropped.push(Dropped { name, written, table: table.clone() });
+                }
             } else if (up[k] == "ADD" && matches!(what, Some("CONSTRAINT"))) || (up[k] == "INDEX" && k >= 1 && matches!(up[k - 1].as_str(), "CREATE" | "UNIQUE")) {
-                made.extend(name_after(if up[k] == "ADD" { k + 2 } else { k + 1 }));
+                made.extend(kept(skip(if up[k] == "ADD" { k + 2 } else { k + 1 })));
             } else if up[k] == "UNIQUE" && matches!(what, Some("KEY" | "INDEX")) {
-                made.extend(name_after(k + 2));
+                made.extend(kept(skip(k + 2)));
             }
         }
     }
@@ -3248,7 +3277,7 @@ fn tables_of(sql: &str, d: Dialect) -> Vec<String> {
 fn related(a: &str, b: &str, d: Dialect) -> bool {
     let objects = |sql: &str| -> Vec<String> {
         let (dropped, made) = dropped_and_made(sql, d);
-        tables_of(sql, d).into_iter().chain(dropped.iter().chain(&made).map(|n| n.to_ascii_lowercase())).collect()
+        tables_of(sql, d).into_iter().chain(dropped.iter().map(|x| &x.name).chain(&made).map(|n| n.to_ascii_lowercase())).collect()
     };
     let theirs = objects(b);
     objects(a).iter().any(|o| theirs.contains(o))
@@ -3286,19 +3315,25 @@ async fn unchecked_by(db: &mut Db, m: &Migration) -> Vec<(String, String)> {
     out
 }
 
-/// Of `names`, the constraints and indexes the database doesn't have: what a migration dropped is
-/// said to be gone only where it is, since a later migration may have made it again.
-async fn absent(db: &mut Db, names: Vec<String>) -> Vec<String> {
+/// Of `dropped`, the names of those the database doesn't have: what a migration dropped is said to
+/// be gone only where it is, since a later migration may have made it again. Each is looked for
+/// where its statement dropped it, a constraint on its own table, and its name read as the server
+/// reads it, so that a namesake elsewhere doesn't stand in for it.
+async fn absent(db: &mut Db, dropped: Vec<Dropped>) -> Vec<String> {
     let mut out = Vec::new();
-    for n in names {
-        let name = crate::db::literal(&n);
-        let sql = match db.dialect() {
-            Dialect::Postgres => format!("select 1 from pg_class where relname = {name} union all select 1 from pg_constraint where conname = {name}"),
-            Dialect::Mysql => format!("select 1 from information_schema.statistics where table_schema = database() and index_name = {name} union all select 1 from information_schema.table_constraints where constraint_schema = database() and constraint_name = {name}"),
-            Dialect::Sqlite => format!("select 1 from sqlite_schema where name = {name}"),
+    for x in dropped {
+        let (written, name) = (crate::db::literal(&x.written), crate::db::literal(&x.name));
+        let sql = match (db.dialect(), &x.table) {
+            (Dialect::Postgres, Some(table)) => format!("select not exists (select 1 from pg_constraint where conrelid = to_regclass({}) and conname = (parse_ident({written}))[1]) as gone", crate::db::literal(table)),
+            (Dialect::Postgres, None) => format!("select to_regclass({written}) is null as gone"),
+            (Dialect::Mysql, Some(table)) => {
+                let table = crate::db::literal(table.rsplit('.').next().unwrap_or(table).trim_matches('`'));
+                format!("select not exists (select 1 from information_schema.statistics where table_schema = database() and table_name = {table} and index_name = {name}) and not exists (select 1 from information_schema.table_constraints where constraint_schema = database() and table_name = {table} and constraint_name = {name}) as gone")
+            }
+            _ => format!("select not exists (select 1 from sqlite_schema where name = {name}) as gone"),
         };
-        if db.rows(&sql).await.is_ok_and(|rows| rows.is_empty()) {
-            out.push(n);
+        if db.rows(&sql).await.ok().and_then(|rows| rows.first().map(|r| r.flag("gone"))) == Some(true) {
+            out.push(x.name);
         }
     }
     out
@@ -3323,7 +3358,7 @@ async fn partway_lines(db: &mut Db, ran: &[&HistoryRow], pending: &[&Migration])
         for (table, name) in &unchecked {
             out.push(note(format!("Until it runs, rows written to {table} are held to {name}, and the rows already there aren't")));
         }
-        let dropped: Vec<String> = ran.iter().filter(|r| before.contains(&r.name)).flat_map(|r| dropped_by(&r.sql, db.dialect())).collect();
+        let dropped: Vec<Dropped> = ran.iter().filter(|r| before.contains(&r.name)).flat_map(|r| dropped_by(&r.sql, db.dialect())).collect();
         let dropped = absent(db, dropped).await;
         if !dropped.is_empty() {
             out.push(note(format!("Until it runs, {} {} dropped and not yet replaced", dropped.join(", "), if dropped.len() == 1 { "is" } else { "are" })));
@@ -3353,8 +3388,11 @@ async fn rows_failure(db: &mut Db, opts: &Options, m: &Migration, f: &Failure, r
         _ => b.table.clone(),
     };
     // A constraint the migration makes, as a `check` dropped and added under its own name, is in the
-    // catalog after the rollback as it was before: its definition there isn't the one that failed.
-    let made = dropped_and_made(&m.sql, d).1.iter().any(|n| if d == Dialect::Postgres { *n == b.name } else { n.eq_ignore_ascii_case(&b.name) });
+    // catalog after the rollback as it was before: its definition there isn't the one that failed,
+    // so a migration that makes any is read by none.
+    // Any it makes, rather than one by the name the server gave, which the server folds by its own
+    // rules (an unquoted `État` is `état` on a Latin-1 database).
+    let made = !dropped_and_made(&m.sql, d).1.is_empty();
     let catalog = if d == Dialect::Postgres && !made { pg_constraint_rows(db, b).await } else { None };
     let (query, unchecked, column) = match d {
         Dialect::Postgres => match catalog {
@@ -8123,8 +8161,10 @@ mod tests {
 
     #[test]
     fn what_a_migration_drops_is_read_by_name() {
-        assert_eq!(dropped_by("drop index concurrently if exists users_email;\nalter table users drop constraint \"Users_Key\";", Dialect::Postgres), ["users_email", "Users_Key"]);
-        assert_eq!(dropped_by("alter table users drop index users_org_email, add unique key users_email (email)", Dialect::Mysql), ["users_org_email"]);
+        let names = |sql: &str, d: Dialect| dropped_by(sql, d).into_iter().map(|x| (x.name, x.written, x.table)).collect::<Vec<_>>();
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(names("drop index concurrently if exists app.users_email;\nalter table only public.users drop constraint \"Users_Key\";", Dialect::Postgres), [("users_email".into(), "app.users_email".into(), None), ("Users_Key".into(), "\"Users_Key\"".into(), some("public.users"))]);
+        assert_eq!(names("alter table users drop index users_org_email, add unique key users_email (email)", Dialect::Mysql), [("users_org_email".into(), "users_org_email".into(), some("users"))]);
         assert!(dropped_by("alter table people drop constraint people_mood;\nalter table people add constraint people_mood check (mood in ('a')) not valid;", Dialect::Postgres).is_empty());
         assert!(dropped_by("drop index users_email;\ncreate unique index concurrently users_email on users (email);", Dialect::Postgres).is_empty());
     }

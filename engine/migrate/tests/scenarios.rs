@@ -2031,6 +2031,18 @@ async fn a_change_split_across_tables_is_said_partway(mut p: P) {
     assert_eq!(p.status().await, 1);
     let out = p.output();
     assert!(!out.contains("dropped"), "{out}");
+
+    // An index dropped is said so though another schema has one by its name.
+    std::fs::remove_file(p.dir.join("migrations").join("20261027120002_cleanup_3.sql")).unwrap();
+    p.file("20261027130000_elsewhere.sql", "create schema elsewhere;\ncreate table elsewhere.t (x int);\ncreate index a_x on elsewhere.t (x);\n");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027140000_swap.sql", "drop index a_x;\n");
+    p.file("20261027140001_swap_2.sql", "create unique index concurrently b_x on b (x);\n");
+    p.output();
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    assert_has!(p.output(), r"  The migration before it, 20261027140000_swap\.sql, of the same change is applied, so a_x is dropped and not yet replaced\.\n");
+    assert_eq!(p.status().await, 1);
+    assert_has!(p.output(), r"» Until it runs, a_x is dropped and not yet replaced\n");
 }
 
 /// A changed unique index built under a name of its own before the old one is dropped, and renamed
