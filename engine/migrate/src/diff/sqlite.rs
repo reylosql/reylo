@@ -654,47 +654,54 @@ impl Alterer for SqliteAlterer {
             }
             None => true,
         });
-        // The indexes each one's content reads, through views, by the target's schema: the
-        // relations a view's FROM and JOIN name (a table-valued call to an index among them,
-        // `join 'notes_fts'('word')`), never an alias.
+        // The indexes each one's content reads, by the target's schema: its content where that
+        // is another index, and every index a view on the way names, by any of its names, which
+        // may take an alias for an index but never misses one.
         let schemas = self.schemas.borrow();
+        let names: Vec<String> = rebuilds.iter().map(|(n, _)| n.clone()).collect();
         let reads = |name: &str| -> BTreeSet<String> {
             let mut out = BTreeSet::new();
             let Some((_, to)) = schemas.as_ref() else { return out };
             let Some(content) = to.objects.get(&format!("table {name}")).and_then(|o| Info::of(o).content).map(|(c, ..)| c) else { return out };
             let (mut queue, mut seen) = (vec![content], BTreeSet::new());
-            while let Some(view) = queue.pop() {
-                let Some(o) = to.objects.get(&format!("view {view}")).filter(|_| seen.insert(view.clone())) else { continue };
-                let tokens = tokenize(o.create.first().map_or("", String::as_str), Dialect::Sqlite);
-                let named = |k: usize| matches!(tokens[k].kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Str);
-                let read = (1..tokens.len()).filter(|&k| named(k) && (matches!(tokens[k - 1].upper().as_str(), "FROM" | "JOIN") || tokens[k - 1].text == ","));
-                // A name its schema qualifies (`main.notes_fts`) is the one after the dot.
-                let read = read.map(|k| if tokens.get(k + 1).is_some_and(|t| t.text == ".") && tokens.get(k + 2).is_some() && named(k + 2) { k + 2 } else { k });
-                for n in read.map(|k| fold(&unquote(&tokens[k]))) {
-                    if to.objects.get(&format!("table {n}")).is_some_and(|t| Info::of(t).content.is_some()) {
-                        out.insert(n.clone());
-                    }
-                    queue.push(n);
+            while let Some(relation) = queue.pop() {
+                if !seen.insert(relation.clone()) {
+                    continue;
                 }
+                if names.contains(&relation) {
+                    out.insert(relation.clone());
+                }
+                // An index the content is, which this rebuild doesn't refresh, reads its own.
+                if let Some(c) = to.objects.get(&format!("table {relation}")).and_then(|o| Info::of(o).content).map(|(c, ..)| c) {
+                    queue.push(c);
+                }
+                let Some(view) = to.objects.get(&format!("view {relation}")) else { continue };
+                let tokens = tokenize(view.create.first().map_or("", String::as_str), Dialect::Sqlite);
+                queue.extend(tokens.iter().filter(|t| matches!(t.kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Str)).map(|t| fold(&unquote(t))));
             }
             out.remove(name);
             out
         };
-        // Those over a table first, which read no other index; then those over a view, each after
-        // the indexes it reads. Where several read through views, which a view can name in more
-        // ways than this reads, they run again until a chain of any length has settled.
-        let through_view = |name: &str| schemas.as_ref().is_some_and(|(_, to)| to.objects.get(&format!("table {name}")).and_then(|o| Info::of(o).content).is_some_and(|(c, ..)| to.objects.contains_key(&format!("view {c}"))));
-        rebuilds.sort_by_key(|(n, _)| through_view(n));
-        let mut ordered: Vec<(String, String)> = Vec::new();
-        while !rebuilds.is_empty() {
-            let waiting: Vec<String> = rebuilds.iter().map(|(n, _)| n.clone()).collect();
-            let next = rebuilds.iter().position(|(n, _)| reads(n).iter().all(|r| !waiting.contains(r))).unwrap_or(0);
-            ordered.push(rebuilds.remove(next));
-        }
-        let viewed: Vec<String> = ordered.iter().filter(|(n, _)| through_view(n)).map(|(_, s)| s.clone()).collect();
-        statements.extend(ordered.into_iter().map(|(_, s)| s));
-        for _ in 1..viewed.len() {
-            statements.extend(viewed.iter().cloned());
+        let needs: Vec<BTreeSet<String>> = names.iter().map(|n| reads(n)).collect();
+        // Each after what it reads, in the plan's order otherwise. Indexes that read each other
+        // (an alias that names one) run again, once per index among them, so that whichever way
+        // they really read, the chain has settled.
+        let mut done: Vec<String> = Vec::new();
+        let mut left: Vec<usize> = (0..names.len()).collect();
+        while !left.is_empty() {
+            match left.iter().position(|&k| needs[k].iter().all(|n| done.contains(n))) {
+                Some(at) => {
+                    let k = left.remove(at);
+                    statements.push(rebuilds[k].1.clone());
+                    done.push(names[k].clone());
+                }
+                None => {
+                    for _ in 0..left.len() {
+                        statements.extend(left.iter().map(|&k| rebuilds[k].1.clone()));
+                    }
+                    break;
+                }
+            }
         }
     }
 
