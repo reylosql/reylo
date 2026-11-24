@@ -871,6 +871,19 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                 continue;
             }
         }
+        // A table whose definition changes only by its own columns' new names (its partition key's,
+        // which Postgres renames with the column, in the table and in each partition) is kept by
+        // the renames, where making it again would drop its rows.
+        if let Some(b) = to.objects.get(id).filter(|b| a.kind == Some(Kind::Table) && a.def != b.def) {
+            let prefix = format!("column {}.", id.strip_prefix("table ").unwrap_or(id));
+            let own: Vec<(&String, &String)> = renamed_columns.iter().filter(|(old, _)| old.starts_with(&prefix)).collect();
+            // Each name as the ids write it, which is as the definition does.
+            let swapped = own.iter().fold(a.def.clone(), |def, (old, new)| swap_name(&def, &old[prefix.len()..], new.strip_prefix(&prefix).unwrap_or(new)));
+            if !own.is_empty() && swapped == b.def {
+                kept_through.insert(id.clone(), own.iter().map(|(old, _)| (*old).clone()).collect());
+                continue;
+            }
+        }
         match to.objects.get(id) {
             None if left.contains(id) => {}
             None => {
