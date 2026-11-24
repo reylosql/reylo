@@ -550,9 +550,9 @@ struct Ahead {
     /// Of those, the ones set to `nextval` of a sequence: table, column and the sequence's name.
     fed: BTreeSet<(String, String, String)>,
     indexes: BTreeSet<String>,
-    /// The constraints dropped, by name: a key takes its index with it, and a partitioned table's
-    /// key its partitions' too, which the catalog names before the file runs.
-    keys: BTreeSet<String>,
+    /// The constraints dropped, table and name: a key takes its index with it, and a partitioned
+    /// table's key its partitions' too, which the catalog names before the file runs.
+    keys: BTreeSet<(String, String)>,
     owned: BTreeSet<String>,
 }
 
@@ -603,7 +603,7 @@ fn ahead_of_reads(sql: &str) -> Vec<Ahead> {
                                     now.fed.insert((table.clone(), cmd.name.clone(), sequence));
                                 }
                             } else if is(cmd.subtype, At::AtDropConstraint) {
-                                now.keys.insert(cmd.name.clone());
+                                now.keys.insert((table.clone(), cmd.name.clone()));
                             }
                         }
                     }
@@ -777,18 +777,19 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
     // file) by its name, as Postgres names a key's index.
     let mut aheads = ahead_of_reads(&m.sql);
     for ahead in aheads.iter_mut().filter(|a| !a.keys.is_empty()) {
-        let names = ahead.keys.iter().map(|k| format!("'{}'", k.replace('\'', "''"))).collect::<Vec<_>>().join(", ");
+        let literal = |t: &str| format!("'{}'", t.replace('\'', "''"));
+        let names = ahead.keys.iter().map(|(t, k)| format!("({}, {})", literal(t), literal(k))).collect::<Vec<_>>().join(", ");
         // A key owns its index; a foreign key only names the one it references, which stays.
         let rows = db
             .rows(&format!(
-                "with recursive k as (select conindid as i from pg_constraint where conname in ({names}) and contype in ('p', 'u', 'x') and conindid <> 0 \
+                "with recursive k as (select n.conindid as i from pg_constraint n join pg_class t on t.oid = n.conrelid where (t.relname, n.conname) in ({names}) and n.contype in ('p', 'u', 'x') and n.conindid <> 0 \
                 union select h.inhrelid from pg_inherits h join k on h.inhparent = k.i) select relname from k join pg_class c on c.oid = k.i"
             ))
             .await
             .unwrap_or_default();
-        let known: BTreeSet<String> = db.rows(&format!("select conname from pg_constraint where conname in ({names})")).await.unwrap_or_default().iter().map(|r| r.text("conname").to_string()).collect();
+        let known: BTreeSet<(String, String)> = db.rows(&format!("select t.relname, n.conname from pg_constraint n join pg_class t on t.oid = n.conrelid where (t.relname, n.conname) in ({names})")).await.unwrap_or_default().iter().map(|r| (r.text("relname").to_string(), r.text("conname").to_string())).collect();
         ahead.indexes.extend(rows.iter().map(|r| r.text("relname").to_string()));
-        let unknown: Vec<String> = ahead.keys.iter().filter(|k| !known.contains(*k)).cloned().collect();
+        let unknown: Vec<String> = ahead.keys.iter().filter(|k| !known.contains(*k)).map(|(_, k)| k.clone()).collect();
         ahead.indexes.extend(unknown);
     }
     run(db, m).await?;
@@ -875,7 +876,7 @@ mod tests {
         assert_eq!(first.defaults.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "code".to_string()), ("orders".to_string(), "dotted".to_string()), ("orders".to_string(), "total".to_string())], "a comment's words change nothing");
         assert_eq!(first.fed.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "code".to_string(), "other_no".to_string()), ("orders".to_string(), "dotted".to_string(), "order.no".to_string()), ("orders".to_string(), "total".to_string(), "order_no".to_string())]);
         assert_eq!(first.indexes.iter().cloned().collect::<Vec<_>>(), ["orders$Idx", "orders_id"]);
-        assert_eq!(first.keys.iter().cloned().collect::<Vec<_>>(), ["orders_pk"]);
+        assert_eq!(first.keys.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "orders_pk".to_string())]);
         assert_eq!(first.owned.iter().cloned().collect::<Vec<_>>(), ["tag_no"]);
         assert!(aheads[1].defaults.contains(&("orders".to_string(), "id".to_string())) && aheads[1].indexes.contains("later_idx"));
     }
