@@ -6296,19 +6296,21 @@ fn column_rename_statements(plan: &crate::diff::Plan) -> Vec<String> {
 }
 
 /// `plan`'s column renames run on `db`, and the plan from there to `target`, which carries `plan`'s
-/// renames for what is shown of them; None, running nothing, where a rename can't run first (its new
-/// name a column `db` has, which the plan drops before it).
+/// renames for what is shown of them; None, running nothing, where a rename can't run first: its new
+/// name a column `db` has, which the plan drops before it, or a renamed column's values change (its
+/// type, collation or stored expression), which the plan makes what holds it again around.
 #[cfg(feature = "cli")]
 async fn columns_renamed_first(db: &mut Db, plan: &crate::diff::Plan, current: &crate::diff::Schema, target: &Target, dropped: &std::collections::BTreeSet<String>, live: bool) -> Result<Option<(Vec<String>, crate::diff::Plan)>, Error> {
     let ran = column_rename_statements(plan);
     let runnable: Vec<String> = ran.iter().filter(|s| !s.starts_with("--")).map(|s| format!("{};", s.trim_end())).collect();
-    if runnable.iter().filter(|s| s.contains(" rename column ")).count() != plan.renamed.len() || plan.renamed.iter().any(|(_, new)| current.objects.contains_key(new)) {
+    let alterer = crate::diff::alterer(db).await?;
+    let keeps = |(old, new): &(String, String)| current.objects.get(old).zip(target.schema.objects.get(new)).is_some_and(|(a, b)| alterer.keeps_values(a, b));
+    if runnable.iter().filter(|s| s.contains(" rename column ")).count() != plan.renamed.len() || plan.renamed.iter().any(|(_, new)| current.objects.contains_key(new)) || !plan.renamed.iter().all(keeps) {
         return Ok(None);
     }
     db.script(&runnable.join("\n")).await?;
     let mut now = crate::diff::read(db).await?;
     now.live = live;
-    let alterer = crate::diff::alterer(db).await?;
     let mut rest = crate::diff::plan_with(&now, &target.schema, alterer.as_ref(), &[], dropped);
     style(db, &mut rest, &target.schema).await?;
     (rest.renames, rest.renamed, rest.pairs) = (plan.renames.clone(), plan.renamed.clone(), plan.pairs.clone());

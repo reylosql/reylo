@@ -4120,6 +4120,8 @@ on!(
     dev_rewinds_a_changed_index,
     a_primary_key_added_over_an_index_says_it_checks_for_nulls,
     new_renames_a_column_under_its_indexes_keys_and_views,
+    a_renamed_key_column_whose_collation_changes_keeps_its_foreign_key,
+    a_renamed_key_column_whose_stored_expression_changes_keeps_its_foreign_key,
     a_name_given_to_a_new_index_keeps_the_old_one_until_the_last_build,
 );
 
@@ -6436,6 +6438,48 @@ mod adversarial {
         p.output();
         assert_eq!(p.check_every_way().await.0, 0);
         assert_eq!(p.rows("select count(*)::text as n from comments").await[0].text("n"), "1");
+    }
+
+    /// `v1`, migrated with rows, then `v2` written by `migrate new` with `rename`, deployed and checked.
+    async fn renamed_to(p: &mut P, v1: &str, rows: &str, v2: &str, rename: (&str, &str)) {
+        p.schema(v1);
+        p.file("20261027100000_v1.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec(rows).await;
+        p.output();
+        p.schema(v2);
+        let choices = reylo_migrate::Choices { rename: vec![(rename.0.into(), rename.1.into())], blocking: true, ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "rename", &choices, log).await).await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.check_every_way().await.0, 0);
+    }
+
+    pub async fn a_renamed_key_column_whose_collation_changes_keeps_its_foreign_key(mut p: P) {
+        // The foreign key goes before both columns' collations change, and comes back after.
+        let collation = "create collation ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);";
+        renamed_to(
+            &mut p,
+            &format!("{collation} create table parents (old_id text primary key); create table children (id int primary key, parent_id text references parents(old_id));"),
+            "insert into parents values ('a'); insert into children values (1, 'a')",
+            &format!("{collation} create table parents (id text collate ci primary key); create table children (id int primary key, parent_id text collate ci references parents(id));"),
+            ("parents.old_id", "id"),
+        )
+        .await;
+    }
+
+    pub async fn a_renamed_key_column_whose_stored_expression_changes_keeps_its_foreign_key(mut p: P) {
+        renamed_to(
+            &mut p,
+            "create table parents (raw int not null, old_code int generated always as (raw + 1) stored, constraint parents_code_key unique (old_code));
+            create table children (raw int not null, parent_code int generated always as (raw + 1) stored, constraint children_parent_code_fkey foreign key (parent_code) references parents(old_code));",
+            "insert into parents values (1); insert into children values (1)",
+            "create table parents (raw int not null, code int generated always as (raw + 2) stored, constraint parents_code_key unique (code));
+            create table children (raw int not null, parent_code int generated always as (raw + 2) stored, constraint children_parent_code_fkey foreign key (parent_code) references parents(code));",
+            ("parents.old_code", "code"),
+        )
+        .await;
     }
 
     pub async fn a_name_given_to_a_new_index_keeps_the_old_one_until_the_last_build(mut p: P) {

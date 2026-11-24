@@ -1,5 +1,4 @@
--- file 1 of 4
-drop index parents_code_idx;
+-- file 1 of 5
 drop index pti;
 alter table pt drop constraint pt_key;
 -- children.child_id is renamed id, keeping its rows. If they are two columns, write instead:
@@ -22,9 +21,12 @@ alter table parents rename constraint parents_code_not_null to parents_slug_not_
 --   alter table pt add column b integer;
 alter table pt rename column a to b;
 alter table pt add constraint pt_key unique (b, v);
--- file 2 of 4
-create index concurrently parents_code_idx on parents (slug) where slug <> '';
--- file 3 of 4
+-- file 2 of 5
+create index concurrently parents_code_idx_new on parents (slug) where slug <> '';
+-- file 3 of 5
+drop index parents_code_idx;
+alter index parents_code_idx_new rename to parents_code_idx;
+-- file 4 of 5
 create index concurrently pt1_b_idx on pt1 using btree (b);
--- file 4 of 4
+-- file 5 of 5
 create index pti on pt using btree (b);
