@@ -4164,6 +4164,7 @@ on!(
     a_rename_that_cannot_run_first_is_planned_as_before,
     a_renamed_key_column_whose_stored_expression_changes_keeps_its_foreign_key,
     a_name_given_to_a_new_index_keeps_the_old_one_until_the_last_build,
+    a_foreign_key_added_back_under_another_name_holds_through_its_keys_swap,
 );
 
 #[tokio::test(flavor = "current_thread")]
@@ -6612,6 +6613,34 @@ mod adversarial {
         .await;
     }
 
+    pub async fn a_foreign_key_added_back_under_another_name_holds_through_its_keys_swap(mut p: P) {
+        let v1 = "create table parent (id int not null, constraint parent_id_key unique (id));
+            create table child (id int primary key, parent_id int, constraint child_fk_old foreign key (parent_id) references parent (id));";
+        p.schema(v1);
+        p.file("20261027100000_v1.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into parent values (1); insert into child values (1, 1)").await;
+        p.output();
+        p.schema(
+            "create table parent (id int not null, constraint parent_pkey primary key (id));
+            create table child (id int primary key, parent_id int, constraint child_fk_new foreign key (parent_id) references parent (id));",
+        );
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "pkey", &Default::default(), log).await).await, 0, "{}", p.peek());
+        p.output();
+        // Deployed a file at a time, a child row with no parent is refused after each.
+        let made: Vec<(String, String)> = p.files().into_iter().filter(|f| f.contains("_pkey")).map(|f| (f.clone(), std::fs::read_to_string(p.dir.join("migrations").join(&f)).unwrap())).collect();
+        for (f, _) in &made {
+            std::fs::remove_file(p.dir.join("migrations").join(f)).unwrap();
+        }
+        for (k, (f, sql)) in made.iter().enumerate() {
+            p.file(f, sql);
+            assert_eq!(p.migrate().await, 0, "{}", p.peek());
+            p.output();
+            assert!(p.try_rows(&format!("insert into child values ({}, 999)", 100 + k)).await.is_err(), "a child with no parent is refused after {f}");
+        }
+        assert_eq!(p.check_every_way().await.0, 0);
+    }
+
     pub async fn a_name_given_to_a_new_index_keeps_the_old_one_until_the_last_build(mut p: P) {
         let v1 = "create table accounts (id int primary key, email text, handle text); create unique index accounts_a on accounts (email);";
         p.schema(v1);
@@ -6636,19 +6665,29 @@ mod adversarial {
     }
 
     pub async fn a_primary_key_added_over_an_index_says_it_checks_for_nulls(mut p: P) {
-        p.file("20261027100000_t.sql", "create table t (id int, n int);");
+        p.file("20261027100000_t.sql", "create table t (id int, n int); create table s (id int, constraint s_id_present check (id is not null)); create table r (id int);");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
-        p.exec("insert into t values (1, 1)").await;
-        // Written by hand: the key's column isn't yet not null, so adding the key reads every row.
-        // A column the index only includes stays nullable, and isn't read.
+        p.exec("insert into t values (1, 1); insert into s values (1); insert into r values (1)").await;
+        // Written by hand: the key's column isn't yet not null, so adding the key reads every row,
+        // unless a validated check proves it; the index included column isn't read, and an index
+        // renamed before the key takes it is the same index.
         p.file("20261027110000_index.sql", "create unique index concurrently t_new on t (id) include (n);");
         p.file("20261027120000_key.sql", "alter table t add constraint t_pkey primary key using index t_new;");
-        p.schema("create table t (id int not null, n int, constraint t_pkey primary key (id) include (n));");
+        p.file("20261027130000_s_index.sql", "create unique index concurrently s_new on s (id);");
+        p.file("20261027140000_s_key.sql", "alter table s add constraint s_pkey primary key using index s_new;");
+        p.file("20261027150000_r_index.sql", "create unique index concurrently r_old on r (id);");
+        p.file("20261027160000_r_key.sql", "alter index r_old rename to r_new;\nalter table r add constraint r_pkey primary key using index r_new;");
+        p.schema(
+            "create table t (id int not null, n int, constraint t_pkey primary key (id) include (n));
+            create table s (id int not null, constraint s_id_present check (id is not null), constraint s_pkey primary key (id));
+            create table r (id int not null, constraint r_pkey primary key (id));",
+        );
         p.output();
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
         let out = p.output();
         assert_has!(&out, r"_key\.sql\n      ! It checks every row of t for a null in id while it blocks reads and writes to it");
-        assert!(!out.contains("a null in n "), "{out}");
+        assert_has!(&out, r"_r_key\.sql\n      ! It checks every row of r for a null in id while it blocks reads and writes to it");
+        assert!(!out.contains("a null in n ") && !out.contains("every row of s for a null"), "{out}");
     }
 
     pub async fn new_refuses_a_table_rewrite_until_blocking(mut p: P) {

@@ -30,6 +30,11 @@ pub struct Existing {
     pub indexes: BTreeMap<String, Index>,
     /// The name of every relation, as the server stores it: a temporary name is one none holds.
     pub names: BTreeSet<String>,
+    /// Every table, partitioned ones too, under both names, to its qualified name.
+    pub relations: BTreeMap<String, String>,
+    /// Each foreign key, by its table's qualified name and its own, to the qualified name of the
+    /// table it references.
+    pub foreign_keys: BTreeMap<(String, String), String>,
 }
 
 /// An index of a table that has rows.
@@ -59,7 +64,14 @@ struct Waits {
 impl Existing {
     /// The tables named, each under that name alone, with no index.
     pub fn of(tables: &[&str]) -> Existing {
-        Existing { tables: tables.iter().map(|t| (t.to_string(), t.to_string())).collect(), names: tables.iter().map(|t| crate::sql::last_written(t)).collect(), ..Existing::default() }
+        let tables: BTreeMap<String, String> = tables.iter().map(|t| (t.to_string(), t.to_string())).collect();
+        Existing { names: tables.keys().map(|t| crate::sql::last_written(t)).collect(), relations: tables.clone(), tables, ..Existing::default() }
+    }
+
+    /// With a foreign key named `name` on `table` that references `referenced`.
+    pub fn with_foreign_key(mut self, table: &str, name: &str, referenced: &str) -> Existing {
+        self.foreign_keys.insert((table.to_string(), name.to_string()), referenced.to_string());
+        self
     }
 
     /// With an index named `index` (as a statement names it) on `table`, of a constraint of the
@@ -91,8 +103,22 @@ pub async fn existing(db: &mut Db) -> Result<Existing, Error> {
             where t.relkind in ('r', 'm') and {OWN}"
         ))
         .await?;
-    let names = db.rows(&format!("select c.relname as stored from pg_class c join pg_namespace n on n.oid = c.relnamespace where {OWN}")).await?;
+    let names = db.rows(&format!("select c.relname as stored, c.oid::regclass::text as shown, format('%I.%I', n.nspname, c.relname) as qualified, c.relkind in ('r', 'm', 'p') as table from pg_class c join pg_namespace n on n.oid = c.relnamespace where {OWN}")).await?;
+    let foreign_keys = db
+        .rows(&format!(
+            "select format('%I.%I', n.nspname, c.relname) as table_name, co.conname as name, format('%I.%I', rn.nspname, r.relname) as referenced
+            from pg_constraint co join pg_class c on c.oid = co.conrelid join pg_namespace n on n.oid = c.relnamespace
+              join pg_class r on r.oid = co.confrelid join pg_namespace rn on rn.oid = r.relnamespace
+            where co.contype = 'f' and co.conparentid = 0 and {OWN}"
+        ))
+        .await?;
     let mut out = Existing { names: names.iter().map(|r| r.text("stored").to_string()).collect(), ..Existing::default() };
+    for r in names.iter().filter(|r| r.flag("table")) {
+        for name in [r.text("shown"), r.text("qualified")] {
+            out.relations.insert(name.to_string(), r.text("qualified").to_string());
+        }
+    }
+    out.foreign_keys = foreign_keys.iter().map(|r| ((r.text("table_name").to_string(), r.text("name").to_string()), r.text("referenced").to_string())).collect();
     for r in &tables {
         for name in [r.text("shown"), r.text("qualified")] {
             out.tables.insert(name.to_string(), r.text("qualified").to_string());
@@ -386,27 +412,32 @@ fn dropped_index(tree: Option<&N>, existing: &Existing, tables: &BTreeMap<String
     }
 }
 
-/// The foreign key a statement drops, as (its table, its name, the statement the plan adds it again
-/// in, the table it references), where the plan adds it again later.
-fn dropped_foreign_key(trees: &[Option<N>], k: usize, existing: &Existing, tables: &BTreeMap<String, String>) -> Option<(String, String, usize, String)> {
+/// The foreign key a statement drops, on a table of any kind, as (its table, its name, the table it
+/// references), and the statements after it that add a foreign key from its table to that one again,
+/// under whatever name.
+fn dropped_foreign_key(trees: &[Option<N>], k: usize, existing: &Existing) -> Option<(String, String, String, Vec<usize>)> {
     let Some(N::AlterTableStmt(a)) = trees[k].as_ref() else { return None };
-    let table = tables.get(&named(a.relation.as_ref()?))?;
+    let table = existing.relations.get(&named(a.relation.as_ref()?))?;
     let [cmd] = a.cmds.as_slice() else { return None };
     let Some(N::AlterTableCmd(cmd)) = &cmd.node else { return None };
-    if !is(cmd.subtype, At::AtDropConstraint) || existing.indexes.values().any(|i| i.table == *table && i.name == cmd.name) {
+    if !is(cmd.subtype, At::AtDropConstraint) {
         return None;
     }
-    trees.iter().enumerate().skip(k + 1).find_map(|(m, tree)| {
-        let Some(N::AlterTableStmt(b)) = tree else { return None };
-        (tables.get(&named(b.relation.as_ref()?)) == Some(table)).then_some(())?;
-        let [added] = b.cmds.as_slice() else { return None };
-        let Some(N::AlterTableCmd(added)) = &added.node else { return None };
-        let Some(N::Constraint(c)) = added.def.as_ref().and_then(|d| d.node.as_ref()) else { return None };
-        if !is(added.subtype, At::AtAddConstraint) || !is(c.contype, ConstrType::ConstrForeign) || c.conname != cmd.name {
-            return None;
-        }
-        Some((table.clone(), cmd.name.clone(), m, tables.get(&named(c.pktable.as_ref()?))?.clone()))
-    })
+    let referenced = existing.foreign_keys.get(&(table.clone(), cmd.name.clone()))?;
+    let adds = trees
+        .iter()
+        .enumerate()
+        .skip(k + 1)
+        .filter_map(|(m, tree)| {
+            let Some(N::AlterTableStmt(b)) = tree else { return None };
+            (existing.relations.get(&named(b.relation.as_ref()?)) == Some(table)).then_some(())?;
+            let [added] = b.cmds.as_slice() else { return None };
+            let Some(N::AlterTableCmd(added)) = &added.node else { return None };
+            let Some(N::Constraint(c)) = added.def.as_ref().and_then(|d| d.node.as_ref()) else { return None };
+            (is(added.subtype, At::AtAddConstraint) && is(c.contype, ConstrType::ConstrForeign) && existing.relations.get(&named(c.pktable.as_ref()?)) == Some(referenced)).then_some(m)
+        })
+        .collect();
+    Some((table.clone(), cmd.name.clone(), referenced.clone(), adds))
 }
 
 /// Whether a statement does something to `table` that its index or constraint `name`, kept a while
@@ -628,20 +659,27 @@ fn plan_lock_safe(plan: &Plan, existing: &Existing, build_first: bool) -> Option
         // A foreign key on a key the plan drops goes in the same transaction, where every drop on
         // the key's table waits, and comes back there once its key is in place.
         for k in 0..trees.len() {
-            let Some((table, name, added, referenced)) = dropped_foreign_key(&trees, k, existing, &tables) else { continue };
+            let Some((table, name, referenced, adds)) = dropped_foreign_key(&trees, k, existing) else { continue };
             let on: Vec<&(usize, Index)> = drops.iter().filter(|(d, i)| i.table == referenced && *d > k).collect();
             let Some(at) = waits.iter().find(|(_, w)| on.iter().any(|(d, _)| w.drops.contains(d))).map(|(at, _)| *at) else { continue };
-            if on.iter().any(|(d, _)| !deferred.contains(d)) || (k + 1..at).any(|m| disturbs(trees[m].as_ref(), &table, &name, &tables)) {
+            let relations = &existing.relations;
+            if on.iter().any(|(d, _)| !deferred.contains(d)) || (k + 1..at).any(|m| disturbs(trees[m].as_ref(), &table, &name, relations)) {
                 continue;
             }
             deferred.insert(k);
             let w = waits.entry(at).or_default();
             w.keys.push(k);
-            // Back in that transaction, but where a statement between them changes either table.
-            let between = if added < at { added + 1..at } else { at + 1..added };
-            if !between.into_iter().any(|m| disturbs(trees[m].as_ref(), &table, &name, &tables) || disturbs(trees[m].as_ref(), &referenced, &name, &tables)) {
-                deferred.insert(added);
-                w.back.push(added);
+            // Back in that transaction, under whatever name, but where a statement between them
+            // changes either table.
+            for added in adds {
+                if deferred.contains(&added) {
+                    continue;
+                }
+                let between = if added < at { added + 1..at } else { at + 1..added };
+                if !between.into_iter().any(|m| disturbs(trees[m].as_ref(), &table, &name, relations) || disturbs(trees[m].as_ref(), &referenced, &name, relations)) {
+                    deferred.insert(added);
+                    w.back.push(added);
+                }
             }
         }
     }
@@ -1163,11 +1201,16 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
     // again concurrently, which blocks no writes; and the tables whose every index it so rebuilds.
     let mut made: BTreeSet<String> = BTreeSet::new();
     let mut reindexed: BTreeSet<String> = BTreeSet::new();
-    // The columns an earlier statement of the file made not null, by table; and each primary key
-    // added over an index, as (table, index, those columns then), whose key columns not yet not
-    // null it checks every row of.
+    // The columns an earlier statement of the file made not null, by table; the indexes it renamed,
+    // each new name to the one before, and the key columns of those it made; and each primary key
+    // added over an index, as (table, the index as the catalog names it before the file runs, or
+    // its columns where the file makes it, the columns then made not null, the checks then
+    // validated), whose key columns no not null or validated check holds it checks every row of.
     let mut nulled: BTreeSet<(String, String)> = BTreeSet::new();
-    let mut keyed: Vec<(String, String, BTreeSet<String>)> = Vec::new();
+    let mut renamed_index: BTreeMap<String, String> = BTreeMap::new();
+    let mut index_columns: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    type Keyed = (String, Result<String, Vec<String>>, BTreeSet<String>, BTreeSet<(String, String)>);
+    let mut keyed: Vec<Keyed> = Vec::new();
     let mut add = |table: &str, what: String| {
         let hazard = Hazard { table: table.to_string(), what };
         if !hazards.contains(&hazard) {
@@ -1207,7 +1250,13 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                                 made.insert(c.conname.clone());
                                 if is(c.contype, ConstrType::ConstrPrimary) {
                                     let set = nulled.iter().filter(|(t, _)| *t == table).map(|(_, column)| column.clone()).collect();
-                                    keyed.push((table.clone(), c.indexname.clone(), set));
+                                    let mut index = c.indexname.clone();
+                                    for _ in 0..renamed_index.len() {
+                                        let Some(was) = renamed_index.get(&index) else { break };
+                                        index = was.clone();
+                                    }
+                                    let index = index_columns.get(&index).cloned().map_or(Ok(index), Err);
+                                    keyed.push((table.clone(), index, set, validated.clone()));
                                 }
                             }
                         } else if is(cmd.subtype, At::AtSetNotNull) {
@@ -1222,11 +1271,18 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                         locked.insert(table);
                     }
                 }
-                Some(N::IndexStmt(i)) if !i.concurrent => {
-                    made.insert(i.idxname.clone());
-                    if let Some(table) = i.relation.as_ref().and_then(|r| resolve(&named(r))) {
-                        add(&table, format!("builds an index on {table} while it blocks writes to it"));
-                        locked.insert(table);
+                Some(N::IndexStmt(i)) => {
+                    let columns: Option<Vec<String>> = i.index_params.iter().map(|p| match &p.node {
+                        Some(N::IndexElem(e)) if !e.name.is_empty() => Some(e.name.clone()),
+                        _ => None,
+                    }).collect();
+                    index_columns.extend(columns.map(|c| (i.idxname.clone(), c)));
+                    if !i.concurrent {
+                        made.insert(i.idxname.clone());
+                        if let Some(table) = i.relation.as_ref().and_then(|r| resolve(&named(r))) {
+                            add(&table, format!("builds an index on {table} while it blocks writes to it"));
+                            locked.insert(table);
+                        }
                     }
                 }
                 Some(N::ReindexStmt(r)) if r.params.iter().any(|p| matches!(&p.node, Some(N::DefElem(d)) if d.defname == "concurrently" && option_on(d))) => {
@@ -1239,6 +1295,13 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                 }
                 Some(N::RenameStmt(r)) if is(r.rename_type, ObjectType::ObjectIndex) => {
                     made.insert(r.newname.clone());
+                    if let Some(was) = &r.relation {
+                        let was = renamed_index.get(&was.relname).cloned().unwrap_or_else(|| was.relname.clone());
+                        renamed_index.insert(r.newname.clone(), was);
+                    }
+                    if let Some(columns) = r.relation.as_ref().and_then(|was| index_columns.get(&was.relname)).cloned() {
+                        index_columns.insert(r.newname.clone(), columns);
+                    }
                 }
                 Some(N::TruncateStmt(t)) => {
                     for r in &t.relations {
@@ -1252,17 +1315,26 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
         }
         }
     });
-    for (table, index, set) in keyed {
+    for (table, index, set, validated) in keyed {
         let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
-        let open = db
-            .rows(&format!(
-                "select a.attname as name from pg_index i join pg_class c on c.oid = i.indexrelid join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any((i.indkey::int2[])[0:i.indnkeyatts - 1])
-                where i.indrelid = to_regclass({}) and c.relname = {} and not a.attnotnull order by a.attnum",
-                literal(&table),
-                literal(&index)
-            ))
-            .await?;
-        for column in open.iter().map(|r| r.text("name").to_string()).filter(|c| !set.contains(c)) {
+        let open = match &index {
+            Ok(index) => {
+                db.rows(&format!(
+                    "select a.attname as name from pg_index i join pg_class c on c.oid = i.indexrelid join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any((i.indkey::int2[])[0:i.indnkeyatts - 1])
+                    where i.indrelid = to_regclass({}) and c.relname = {} and not a.attnotnull order by a.attnum",
+                    literal(&table),
+                    literal(index)
+                ))
+                .await?
+            }
+            Err(columns) => {
+                let names = columns.iter().map(|c| literal(c)).collect::<Vec<_>>().join(", ");
+                db.rows(&format!("select attname as name from pg_attribute where attrelid = to_regclass({}) and attname in ({names}) and not attnotnull order by attnum", literal(&table))).await?
+            }
+        };
+        // A not null a validated check proves is set without reading a row.
+        let proven = |column: &String| proofs.get(&(table.clone(), column.clone())).is_some_and(|(name, valid)| *valid || validated.contains(&(table.clone(), name.clone())));
+        for column in open.iter().map(|r| r.text("name").to_string()).filter(|c| !set.contains(c) && !proven(c)) {
             add(&table, format!("checks every row of {table} for a null in {} while it blocks reads and writes to it", quote_ident(&column)));
         }
     }
@@ -1669,7 +1741,7 @@ mod tests {
             ]
         );
         // A primary key moved to another column, the old key column kept unique and referenced.
-        let at = existing(&["posts", "comments"]).with_index("posts_pkey", "posts", 'p');
+        let at = existing(&["posts", "comments"]).with_index("posts_pkey", "posts", 'p').with_foreign_key("comments", "comments_post_slug_fkey", "posts");
         let files = lock_safe(
             &plan(&[
                 "alter table comments drop constraint comments_post_slug_fkey",
@@ -1722,7 +1794,7 @@ mod tests {
 
     #[test]
     fn keeps_a_foreign_key_back_with_its_key() {
-        let at = existing(&["t", "u", "tb"]).with_index("t_code_key", "t", 'u');
+        let at = existing(&["t", "u", "tb"]).with_index("t_code_key", "t", 'u').with_foreign_key("u", "u_code_fkey", "t");
         let files = lock_safe(
             &plan(&[
                 "alter table u drop constraint u_code_fkey",
@@ -1749,6 +1821,45 @@ mod tests {
                 strings(&["alter table u validate constraint u_code_fkey"]),
             ]
         );
+    }
+
+    #[test]
+    fn keeps_a_renamed_foreign_key_or_one_on_a_partitioned_table_with_its_key() {
+        // Added back under another name, it is still the one the key's swap drops and adds.
+        let mut at = existing(&["parent", "child"]).with_index("parent_id_key", "parent", 'u').with_foreign_key("child", "child_fk_old", "parent");
+        let files = lock_safe(
+            &plan(&[
+                "alter table child drop constraint child_fk_old",
+                "alter table parent drop constraint parent_id_key",
+                "alter table parent add constraint parent_pkey primary key (id)",
+                "alter table child add constraint child_fk_new foreign key (parent_id) references parent(id)",
+            ]),
+            &at,
+        )
+        .unwrap();
+        assert_eq!(
+            files[1],
+            strings(&[
+                "alter table child drop constraint child_fk_old",
+                "alter table parent drop constraint parent_id_key",
+                "alter table parent add constraint parent_pkey primary key using index parent_pkey",
+                "alter table child add constraint child_fk_new foreign key (parent_id) references parent(id) not valid",
+            ])
+        );
+        // On a partitioned table, which builds nothing concurrently, it comes back as it was written.
+        at.tables.remove("child");
+        let files = lock_safe(
+            &plan(&[
+                "alter table child drop constraint child_fk_old",
+                "alter table parent drop constraint parent_id_key",
+                "alter table parent add constraint parent_pkey primary key (id)",
+                "alter table child add constraint child_fk_old foreign key (parent_id) references parent(id)",
+            ]),
+            &at,
+        )
+        .unwrap();
+        assert_eq!(files[1].last().map(String::as_str), Some("alter table child add constraint child_fk_old foreign key (parent_id) references parent(id)"));
+        assert_eq!(files.len(), 2, "{files:?}");
     }
 
     #[test]
@@ -1811,7 +1922,7 @@ mod tests {
 
     #[test]
     fn drops_a_foreign_key_on_a_replaced_key_with_it() {
-        let at = existing(&["t", "u"]).with_index("t_code_key", "t", 'u');
+        let at = existing(&["t", "u"]).with_index("t_code_key", "t", 'u').with_foreign_key("u", "u_code_fkey", "t");
         let files = lock_safe(
             &plan(&[
                 "alter table u drop constraint u_code_fkey",
