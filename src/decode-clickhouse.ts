@@ -449,7 +449,7 @@ async function bytesOf(stream: unknown): Promise<{ bytes: Uint8Array; error?: un
 /** Why a result's columns are not the ones the type check read, as an error that says what to do. */
 function changed(query: QueryModule<"clickhouse">, what: string): Error {
   return new Error(
-    `${query.source ?? "The statement"} returned ${what}. The table changed after the type check, or the session that runs the statement has a setting the type check's session lacks, as join_use_nulls: build it again against this database, and put such a setting in the statement's SETTINGS clause.`,
+    `${query.source ?? "The statement"} returned ${what}. The table changed after the type check, or the session that runs the statement has a setting the type check's session lacks, as join_use_nulls, or a parameter's value picks a type the values the type check tried do not, as a tuple element's number can: build it again against this database, put such a setting in the statement's SETTINGS clause, and write such a value in the statement.`,
   );
 }
 
