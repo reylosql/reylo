@@ -671,7 +671,160 @@ async fn postgres(db: &mut Db) -> Result<Vec<String>, Error> {
     for (name, before) in was {
         db.exec(&format!("select set_config({}, {}, false)", literal(name), literal(&before))).await?;
     }
-    result
+    result.map(|lines| lines.iter().map(|l| pg_reread(l)).collect())
+}
+
+/// Postgres's rendering of an expression as Postgres renders it once it reads that rendering back.
+/// The two can differ, so a database made from another's rendering (init.sql, a replay of what the
+/// diff wrote) would never read as the same schema. Two shapes change, each written here as it is
+/// read back, and a rendering that has been read back is left as it is:
+/// - a cast of `ARRAY[…]` to an array type, `(ARRAY['a'::character varying])::text[]` (how
+///   `varchar_column in ('a', …)` renders), which the parser applies to each element instead:
+///   `ARRAY[('a'::character varying)::text]`;
+/// - an AND or OR whose first operand is the same operator, `((a AND b) AND c)` (as a database
+///   from an older server can hold), which the parser reads as one: `(a AND b AND c)`.
+pub(crate) fn pg_reread(text: &str) -> String {
+    if !text.contains("(ARRAY[") && !text.contains("((") {
+        return text.to_string();
+    }
+    let mut text = text.to_string();
+    while let Some(next) = reread_once(&text) {
+        text = next;
+    }
+    text
+}
+
+/// `text` with the first shape `pg_reread` rewrites written as it is read back, if it has one.
+fn reread_once(text: &str) -> Option<String> {
+    let t = tokenize(text, Dialect::Postgres);
+    let close = matching(&t);
+    (0..t.len()).find_map(|k| array_cast_at(text, &t, &close, k).or_else(|| flattened_at(text, &t, &close, k)))
+}
+
+fn symbol(t: &[Token], k: usize, s: &str) -> bool {
+    t.get(k).is_some_and(|t| t.kind == TokenKind::Symbol && t.text == s)
+}
+
+fn word(t: &[Token], k: usize, w: &str) -> bool {
+    t.get(k).is_some_and(|t| t.kind == TokenKind::Word && t.text.eq_ignore_ascii_case(w))
+}
+
+/// For each `(` and `[`, the index of the token that closes it.
+fn matching(t: &[Token]) -> Vec<Option<usize>> {
+    let mut close = vec![None; t.len()];
+    let mut open: Vec<usize> = Vec::new();
+    for (k, token) in t.iter().enumerate() {
+        if token.kind != TokenKind::Symbol {
+            continue;
+        }
+        match token.text.as_str() {
+            "(" | "[" => open.push(k),
+            ")" | "]" => {
+                if let Some(o) = open.pop() {
+                    if (t[o].text == "(") == (token.text == ")") {
+                        close[o] = Some(k);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    close
+}
+
+/// The tokens from `from` to `to` that are not inside a bracket of their own, by index.
+fn top_level(t: &[Token], close: &[Option<usize>], from: usize, to: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut k = from;
+    while k < to {
+        out.push(k);
+        k = close[k].map_or(k, |c| c) + 1;
+    }
+    out
+}
+
+/// The text of each element of the `ARRAY[…]` whose `[` is at `open`.
+fn elements<'a>(text: &'a str, t: &[Token], close: &[Option<usize>], open: usize) -> Option<Vec<&'a str>> {
+    let end = close[open]?;
+    let commas: Vec<usize> = top_level(t, close, open + 1, end).into_iter().filter(|&k| symbol(t, k, ",")).collect();
+    let mut bounds = vec![open];
+    bounds.extend(commas);
+    bounds.push(end);
+    bounds.windows(2).map(|w| (w[0] + 1 < w[1]).then(|| text[t[w[0] + 1].start..t[w[1] - 1].end].trim())).collect()
+}
+
+/// `element` cast to `ty` as the parser casts the element of an array cast to `ty[]`: an array
+/// within the array has each of its own elements cast, and one of that type already is left.
+fn cast_element(element: &str, ty: &str) -> String {
+    let t = tokenize(element, Dialect::Postgres);
+    let close = matching(&t);
+    if word(&t, 0, "ARRAY") && symbol(&t, 1, "[") && close[1] == Some(t.len() - 1) {
+        if let Some(inner) = elements(element, &t, &close, 1) {
+            return format!("ARRAY[{}]", inner.iter().map(|e| cast_element(e, ty)).collect::<Vec<_>>().join(", "));
+        }
+    }
+    if element.ends_with(&format!("::{ty}")) {
+        return element.to_string();
+    }
+    format!("({element})::{ty}")
+}
+
+/// `(ARRAY[e, …])::ty[]` at `k`, written as `ARRAY[(e)::ty, …]`.
+fn array_cast_at(text: &str, t: &[Token], close: &[Option<usize>], k: usize) -> Option<String> {
+    if !(symbol(t, k, "(") && word(t, k + 1, "ARRAY") && symbol(t, k + 2, "[")) {
+        return None;
+    }
+    let end = close[k + 2]?;
+    if close[k]? != end + 1 || !symbol(t, end + 2, "::") {
+        return None;
+    }
+    // The type, as the server writes one: words and quoted names, dotted, with a modifier in
+    // parentheses, then `[]`.
+    let first = end + 3;
+    let mut j = first;
+    let mut depth = 0;
+    loop {
+        let token = t.get(j)?;
+        match (token.kind, token.text.as_str()) {
+            (TokenKind::Symbol, "[") if depth == 0 => break,
+            (TokenKind::Symbol, "(") => depth += 1,
+            (TokenKind::Symbol, ")") if depth > 0 => depth -= 1,
+            (TokenKind::Symbol, ",") if depth > 0 => {}
+            (TokenKind::Symbol, ".") | (TokenKind::Word | TokenKind::Quoted, _) => {}
+            (TokenKind::Number, _) if depth > 0 => {}
+            _ => return None,
+        }
+        j += 1;
+    }
+    if j == first || depth != 0 || !symbol(t, j + 1, "]") {
+        return None;
+    }
+    let ty = &text[t[first].start..t[j - 1].end];
+    let items = elements(text, t, close, k + 2)?;
+    if items.is_empty() {
+        return None;
+    }
+    let array = format!("ARRAY[{}]", items.iter().map(|e| cast_element(e, ty)).collect::<Vec<_>>().join(", "));
+    Some(format!("{}{array}{}", &text[..t[k].start], &text[t[j + 1].end..]))
+}
+
+/// `((a AND b) AND c)` at `k`, written as `(a AND b AND c)`, and the same for OR.
+fn flattened_at(text: &str, t: &[Token], close: &[Option<usize>], k: usize) -> Option<String> {
+    if !(symbol(t, k, "(") && symbol(t, k + 1, "(")) {
+        return None;
+    }
+    let (end, inner) = (close[k]?, close[k + 1]?);
+    let op = ["AND", "OR"].into_iter().find(|op| word(t, inner + 1, op))?;
+    // Both are that operator's own: each joins its operands with it alone. BETWEEN, whose AND is
+    // its own, is never rendered as such in an expression, but a window's frame is.
+    let joins_with_op = |from: usize, to: usize| {
+        let top = top_level(t, close, from, to);
+        top.iter().any(|&i| word(t, i, op)) && !top.iter().any(|&i| ["AND", "OR", "BETWEEN"].iter().any(|w| *w != op && word(t, i, w)))
+    };
+    if inner < k + 3 || !joins_with_op(k + 2, inner) || !joins_with_op(k + 1, end) {
+        return None;
+    }
+    Some(format!("{}{}{}", &text[..t[k + 1].start], &text[t[k + 2].start..t[inner - 1].end], &text[t[inner].end..]))
 }
 
 async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
@@ -2056,6 +2209,40 @@ mod tests {
         assert_eq!(one_line(" SELECT 'a  b' AS x,\n    \"y  z\"::text\n   FROM t;"), "SELECT 'a  b' AS x, \"y  z\"::text FROM t;");
         assert_ne!(one_line("SELECT 'a  b'"), one_line("SELECT 'a b'"));
         assert_ne!(one_line("SELECT $$a  b$$"), one_line("SELECT $$a b$$"));
+    }
+
+    #[test]
+    fn a_postgres_rendering_reads_as_it_reads_back() {
+        // `status in ('open', 'closed')` on a varchar column, as a database holds it and as one
+        // made from that rendering does.
+        let source = "constraint public.items items_status_check CHECK (((status)::text = ANY ((ARRAY['open'::character varying, 'closed'::character varying])::text[])))";
+        let replayed = "constraint public.items items_status_check CHECK (((status)::text = ANY (ARRAY[('open'::character varying)::text, ('closed'::character varying)::text])))";
+        assert_eq!(pg_reread(source), replayed);
+        assert_eq!(pg_reread(replayed), replayed);
+        // NOT IN, a partial index's predicate, a modifier, a qualified quoted type, an array within
+        // the array, and an element already of the type.
+        assert_eq!(
+            pg_reread("CREATE INDEX i ON public.t USING btree (id) WHERE ((s)::text <> ALL ((ARRAY['a'::character varying, NULL::character varying])::text[]))"),
+            "CREATE INDEX i ON public.t USING btree (id) WHERE ((s)::text <> ALL (ARRAY[('a'::character varying)::text, (NULL::character varying)::text]))"
+        );
+        assert_eq!(pg_reread("(ARRAY[1, x])::numeric(10,2)[]"), "ARRAY[(1)::numeric(10,2), (x)::numeric(10,2)]");
+        assert_eq!(pg_reread("(ARRAY[a, b])::public.\"My Type\"[] = c"), "ARRAY[(a)::public.\"My Type\", (b)::public.\"My Type\"] = c");
+        assert_eq!(pg_reread("(ARRAY[ARRAY[a, b], ARRAY[c, (d)::text]])::text[]"), "ARRAY[ARRAY[(a)::text, (b)::text], ARRAY[(c)::text, (d)::text]]");
+        // A left-nested AND or OR is one, to any depth; a right-nested one is read as it is.
+        assert_eq!(pg_reread("CHECK ((((a > 0) AND (b > 0)) AND (c > 0)))"), "CHECK (((a > 0) AND (b > 0) AND (c > 0)))");
+        assert_eq!(pg_reread("((((a) OR (b)) OR (c)) OR d)"), "((a) OR (b) OR (c) OR d)");
+        assert_eq!(pg_reread("((a > 0) AND ((b > 0) AND (c > 0)))"), "((a > 0) AND ((b > 0) AND (c > 0)))");
+        // Other operators, and what only looks alike, are left.
+        for same in [
+            "(((a) OR (b)) AND (c))",
+            "((a = ANY (ARRAY[1, 2])) AND (b))",
+            "(ARRAY['a'::text])",
+            "('(ARRAY[a])::text[]'::text = b)",
+            "((a) = (b))",
+            "(f(x) OVER (ORDER BY y ROWS BETWEEN 1 PRECEDING AND CURRENT ROW))",
+        ] {
+            assert_eq!(pg_reread(same), same);
+        }
     }
 
     #[test]

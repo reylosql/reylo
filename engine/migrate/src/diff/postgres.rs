@@ -226,7 +226,17 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
     db.exec("set search_path = ''").await?;
     let result = read_objects(db).await;
     db.exec("reset search_path").await?;
-    result
+    // Every rendering as it reads back, as the catalog compares them: a database made from another's
+    // rendering then reads as the same.
+    result.map(|mut s| {
+        for o in s.objects.values_mut() {
+            o.def = crate::catalog::pg_reread(&o.def);
+            for text in o.create.iter_mut().chain(o.extra.iter_mut()) {
+                *text = crate::catalog::pg_reread(text);
+            }
+        }
+        s
+    })
 }
 
 async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
