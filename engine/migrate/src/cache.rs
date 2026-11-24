@@ -79,7 +79,7 @@ pub(crate) fn hex(h: &[u8]) -> String {
 /// reader reads, or how it writes a line, changes, so that a release that leaves the reading alone
 /// leaves every stored fingerprint comparable. A test holds each edit to the reader's code to that
 /// choice.
-const READER: u32 = 9;
+const READER: u32 = 10;
 
 /// The catalog reader's part of a fingerprint.
 pub(crate) fn reader_id() -> String {
@@ -442,7 +442,7 @@ impl Cache {
 #[cfg(feature = "cli")]
 async fn server_state(server: &mut Server) -> Result<String, Error> {
     match server {
-        Server::Postgres { admin, create, settings, privileges, copy_privileges, extensions, leave, environment, environment_role, owned, schema_grants, copy_schema_grants, .. } => {
+        Server::Postgres { admin, create, settings, privileges, copy_privileges, extensions, leave, environment, environment_role, owned, schema_grants, copy_schema_grants, platform_privileges, platform_schema_grants, publication, .. } => {
             // The server and its settings as a session sees them, the roles a grant may name, the
             // extensions a migration may create, and template1, which a new shadow is a copy of: a
             // change to it moves its counters of rows written.
@@ -462,6 +462,7 @@ async fn server_state(server: &mut Server) -> Result<String, Error> {
             let copied: Vec<String> = extensions.iter().filter(|(e, _)| !leave.contains(&e.to_lowercase())).map(|(e, s)| format!("{e} {s}")).collect();
             out.push_str(&format!("\n\x1fextensions {}\n\x1fschema grants {copy_schema_grants} {}\n\x1fenvironment {} {}", copied.join("\n"), schema_grants.join("\n"), environment_role.as_deref().unwrap_or_default(), environment.join("\n")));
             out.push_str(&format!("\n\x1fowned {}\n{}", owned.key(), owned.statements.join("\n")));
+            out.push_str(&format!("\n\x1fplatform {publication}\n{}\n{}", platform_privileges.join("\n"), platform_schema_grants.join("\n")));
             Ok(out)
         }
         Server::Mysql { admin, defaults, .. } => {
@@ -790,7 +791,7 @@ mod tests {
     }
 
     /// The digest of the catalog reader's code when `READER` was last set.
-    const READER_CODE: &str = "a7a89de1cb65";
+    const READER_CODE: &str = "8b25638510fb";
 
     #[test]
     fn the_catalog_reader_keeps_its_version() {

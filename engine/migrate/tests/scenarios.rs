@@ -4055,6 +4055,8 @@ on!(
     init_writes_a_database_of_grants_alone,
     init_writes_the_event_triggers_it_compares,
     init_writes_the_publications_it_compares,
+    a_project_begun_on_supabase_runs_on_a_new_supabase_database,
+    a_supabase_projects_change_to_its_data_api_grants_is_its_own,
     init_reads_an_in_list_on_a_varchar_column_as_it_reads_back,
     init_reads_a_row_comparison_as_it_reads_back,
     a_dump_keeps_a_function_body_as_written,
@@ -7080,6 +7082,89 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         let made: Vec<String> = q.rows("select pubname::text as n from pg_publication order by 1").await.iter().map(|r| r.text("n").to_string()).collect();
         assert_eq!(made, ["active_users", "supabase_realtime"]);
+    }
+
+    /// A database as Supabase makes it: the Data API's roles, granted `USAGE` on `public` and, through
+    /// `postgres`'s default privileges there, every privilege on what `postgres` makes in it; its
+    /// extensions in `extensions`; and its publication for Realtime, empty. The database says it is a
+    /// platform's, as a Supabase server's roles do: a role is the whole server's, and would make every
+    /// scenario beside this one a platform's.
+    async fn as_supabase_makes_it(p: &P) {
+        for role in ["anon", "authenticated", "service_role"] {
+            p.exec(&format!("do $$ begin create role {role} nologin; exception when duplicate_object or unique_violation then null; end $$")).await;
+        }
+        p.exec(&format!("alter database {} set reylo.platform_schemas = 'on'", p.name)).await;
+        p.exec("create schema extensions; create extension \"uuid-ossp\" with schema extensions; create extension pgcrypto with schema extensions; create extension pg_stat_statements with schema extensions").await;
+        p.exec("grant usage on schema public to postgres, anon, authenticated, service_role").await;
+        for objects in ["tables", "sequences", "functions"] {
+            p.exec(&format!("alter default privileges for role postgres in schema public grant all on {objects} to postgres, anon, authenticated, service_role")).await;
+        }
+        p.exec("create publication supabase_realtime").await;
+    }
+
+    /// A project begun from a Supabase database leaves Supabase's own to Supabase: init writes none of
+    /// its extensions, default privileges, grants or publication, but the table the project publishes
+    /// through that publication; and the project's migrations run on a new Supabase database, which
+    /// has them all already, without undoing any.
+    pub async fn a_project_begun_on_supabase_runs_on_a_new_supabase_database(mut p: P) {
+        as_supabase_makes_it(&p).await;
+        p.exec("create table profiles (id uuid primary key default extensions.gen_random_uuid(), name text)").await;
+        p.exec("create function touch() returns trigger language plpgsql as $$ begin return new; end $$").await;
+        p.exec("create view names as select name from profiles").await;
+        p.exec("alter publication supabase_realtime add table profiles").await;
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        let init = std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap();
+        for platform in ["create extension", "create publication", "default privileges", "grant usage on schema public", "grant all", "revoke"] {
+            assert!(!init.to_lowercase().contains(platform), "{platform}:\n{init}");
+        }
+        assert_has!(init, r"(?i)alter publication supabase_realtime (add|set) table only (public\.)?profiles");
+        p.strict = true;
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        as_supabase_makes_it(&q).await;
+        p.url = q.url.clone();
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(q.rows("select count(*) as n from pg_publication_tables where pubname = 'supabase_realtime' and tablename = 'profiles'").await[0].text("n"), "1");
+        let r = P::new(p.d).await.unwrap();
+        as_supabase_makes_it(&r).await;
+        p.url = r.url.clone();
+        p.output();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("Undid"), "{out}");
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+    }
+
+    /// A Supabase project that takes back some of what Supabase grants its Data API (from `anon`,
+    /// here) keeps the change in its schema, from what Supabase grants: init writes it before what
+    /// it makes, which is made with it, and a new Supabase database the migrations run on takes it
+    /// back too.
+    pub async fn a_supabase_projects_change_to_its_data_api_grants_is_its_own(mut p: P) {
+        as_supabase_makes_it(&p).await;
+        p.exec("alter default privileges for role postgres in schema public revoke all on tables from anon").await;
+        p.exec("revoke usage on schema public from anon").await;
+        p.exec("create table notes (id bigint generated always as identity primary key, body text)").await;
+        p.exec("revoke select on notes from authenticated").await;
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        let init = std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap();
+        assert_has!(init.clone(), r"(?i)alter default privileges (for role postgres )?in schema public revoke [a-z, ]+ on tables from anon");
+        assert_has!(init.clone(), r"(?i)revoke usage on schema public from anon");
+        assert_has!(init.clone(), r"(?i)revoke select on (table )?(public\.)?notes from authenticated");
+        p.strict = true;
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        as_supabase_makes_it(&q).await;
+        p.url = q.url.clone();
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        let granted = |role: &str| format!("select count(*) as n from information_schema.role_table_grants where table_name = 'notes' and grantee = '{role}' and privilege_type = 'SELECT'");
+        assert_eq!(q.rows(&granted("anon")).await[0].text("n"), "0");
+        assert_eq!(q.rows(&granted("authenticated")).await[0].text("n"), "0");
+        assert_eq!(q.rows(&granted("service_role")).await[0].text("n"), "1");
+        assert_eq!(q.rows("select count(*) as n from pg_namespace n, aclexplode(n.nspacl) x where n.nspname = 'public' and x.grantee = 'anon'::regrole").await[0].text("n"), "0");
     }
 
     /// A varchar column's `in (…)` renders as a cast of the whole array, which Postgres reads back as

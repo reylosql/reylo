@@ -452,6 +452,46 @@ pub const PLATFORM_SCHEMAS: &[&str] = &[
     "vault",
 ];
 
+/// The publication Supabase makes, empty, in every database, for its Realtime service: the
+/// platform's while it is as Supabase makes it ([`platform_publication_as_made`]), and made so in
+/// every shadow. The tables a project adds to it (`alter publication supabase_realtime add table …`)
+/// are the project's.
+pub const PLATFORM_PUBLICATION: &str = "supabase_realtime";
+
+/// The extensions a new Supabase database has in its `extensions` schema, which no project makes:
+/// the platform's there, as the schema is.
+pub const PLATFORM_EXTENSIONS: &[&str] = &["pg_stat_statements", "pgcrypto", "uuid-ossp"];
+
+/// The roles Supabase's Data API connects as. A new Supabase database grants them `USAGE` on
+/// `public`, as it does `postgres`, and every privilege on each table, sequence and function
+/// `postgres` makes there, through `postgres`'s default privileges in `public`: the platform's,
+/// where they are as it makes them. A project that changes them (`alter default privileges in
+/// schema public revoke all on tables from anon`) makes its change, from there.
+pub const PLATFORM_API_ROLES: &[&str] = &["anon", "authenticated", "service_role"];
+
+/// The role whose default privileges in `public` grant the API's roles what it makes.
+pub const PLATFORM_CREATOR: &str = "postgres";
+
+/// Whether the publication `p` (a `pg_publication` row) is the platform's as it makes it: on a
+/// platform's database, [`PLATFORM_PUBLICATION`] with no tables, every operation, and no option set.
+/// `version` is the server's, whose columns for schemas (15) and generated columns (18) it reads.
+pub(crate) fn platform_publication_as_made(p: &str, version: i64) -> String {
+    let schemas = if version >= 150000 { format!(" and not exists (select 1 from pg_publication_namespace s where s.pnpubid = {p}.oid)") } else { String::new() };
+    let generated = if version >= 180000 { format!(" and {p}.pubgencols <> 's'") } else { String::new() };
+    format!(
+        "({} and {p}.pubname = '{PLATFORM_PUBLICATION}' and not {p}.puballtables and {p}.pubinsert and {p}.pubupdate and {p}.pubdelete and {p}.pubtruncate and not {p}.pubviaroot
+           and not exists (select 1 from pg_publication_rel r where r.prpubid = {p}.oid){schemas}{generated})",
+        platform_names()
+    )
+}
+
+/// Whether the extension `x` (a `pg_extension` row) in the schema `n` is one a new Supabase database
+/// has ([`PLATFORM_EXTENSIONS`]), where it has it.
+pub(crate) fn platform_extension(x: &str, n: &str) -> String {
+    let names = PLATFORM_EXTENSIONS.iter().map(|e| format!("'{e}'")).collect::<Vec<_>>().join(", ");
+    format!("({} and {x}.extname in ({names}) and {n}.nspname = 'extensions')", platform_names())
+}
+
 /// The role a shadow database makes the platform's own objects as, where a superuser the connection
 /// may not act as owns them on the target: one the shadows' server has, which the connection may
 /// become, and which every comparison leaves out as it leaves out a platform's role. Reylo never
@@ -1361,7 +1401,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
                 from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid), ''),
               concat_ws(',', case when p.pubinsert then 'insert' end, case when p.pubupdate then 'update' end, case when p.pubdelete then 'delete' end, case when p.pubtruncate then 'truncate' end),
               case when p.pubviaroot then ' via root' else '' end) || {} || {} as line
-            from pg_publication p where {}
+            from pg_publication p where {} and not {}
             union all select format('base type %I.%I input=%s output=%s receive=%s send=%s typmod_in=%s typmod_out=%s analyze=%s length=%s byval=%s align=%s storage=%s category=%s preferred=%s delimiter=%s collatable=%s default=%s',
               n.nspname, t.typname, t.typinput, t.typoutput, t.typreceive, t.typsend, t.typmodin, t.typmodout, t.typanalyze, t.typlen, t.typbyval, t.typalign, t.typstorage, t.typcategory, t.typispreferred, t.typdelim, t.typcollation <> 0, coalesce(t.typdefault, ''))
             from pg_type t join pg_namespace n on n.oid = t.typnamespace where t.typtype = 'b' and t.typelem = 0 and t.typarray <> 0 and {ns} and {} and {}
@@ -1381,6 +1421,8 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             // Whether it publishes its tables' stored generated columns is Postgres 18's.
             if version >= 180000 { "case when p.pubgencols = 's' then ' generated columns stored' else '' end" } else { "''" },
             not_platform("p.pubowner"),
+            // The platform's publication, as it makes it, is in every database of the platform's.
+            platform_publication_as_made("p", version),
             not_extension("pg_type", "t"),
             not_platform("t.typowner"),
             not_extension("pg_type", "t"),

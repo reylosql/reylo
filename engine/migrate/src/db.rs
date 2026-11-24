@@ -1162,6 +1162,21 @@ async fn owned_by_platform(target: &mut Db, admin: &tokio_postgres::Client, url:
     Ok(Owned { statements: vec![], extensions, role: None, note: Some(note) })
 }
 
+/// What a new Supabase database has for its Data API, as the statements that make it: `postgres`'s
+/// default privileges in `public`, which grant the API's roles every privilege on each table,
+/// sequence and function `postgres` makes there, and the grants of `USAGE` on `public` to them and to
+/// `postgres`. One statement each, so that a server without one of the roles leaves out only it.
+#[cfg(feature = "cli")]
+fn platform_defaults() -> (Vec<String>, Vec<String>) {
+    use crate::catalog::{PLATFORM_API_ROLES, PLATFORM_CREATOR};
+    let privileges = ["tables", "sequences", "functions"]
+        .iter()
+        .flat_map(|objects| PLATFORM_API_ROLES.iter().map(move |role| format!("alter default privileges for role {PLATFORM_CREATOR} in schema public grant all on {objects} to {role}")))
+        .collect();
+    let grants = std::iter::once(&PLATFORM_CREATOR).chain(PLATFORM_API_ROLES).map(|role| format!("grant usage on schema public to {role}")).collect();
+    (privileges, grants)
+}
+
 /// Gives a shadow's session the target's word on whether it is a platform's (`settings`, the target
 /// database's own, carry [`crate::catalog::PLATFORM_SCHEMAS_SETTING`]).
 #[cfg(feature = "cli")]
@@ -1262,6 +1277,14 @@ pub enum Server {
         /// shadow but where SQL is written to make the database whole.
         schema_grants: Vec<String>,
         copy_schema_grants: bool,
+        /// On a Supabase target, what a new Supabase database has where a shadow takes none of the
+        /// target's: `postgres`'s default privileges in `public` for the Data API's roles, and their
+        /// grants on `public`, which SQL that changes them changes from there.
+        platform_privileges: Vec<String>,
+        platform_schema_grants: Vec<String>,
+        /// Whether each shadow is given the platform's publication, empty, as the target was:
+        /// Supabase's `supabase_realtime`, which a project's SQL adds its tables to.
+        publication: bool,
     },
     Mysql {
         admin: mysql_async::Conn,
@@ -1394,7 +1417,29 @@ impl Server {
                 let schemas: Vec<String> = std::iter::once("public".to_string()).chain(extensions.iter().map(|(_, s)| s.clone())).filter(|s| !platform.contains(s)).collect();
                 let schema_grants = schema_grants(target, &schemas).await?;
                 let owned = owned_by_platform(target, &admin, url, version).await?;
-                Ok(Server::Postgres { admin, url: server_url.to_string(), create, locale: unknown_locale, settings, privileges, copy_privileges: true, extensions, leave: vec![], environment, environment_role, owned, schema_grants, copy_schema_grants: true })
+                // On Supabase, what a new database there has: its default privileges and grants for
+                // the Data API, and its publication.
+                let (platform_privileges, platform_schema_grants) = if names { platform_defaults() } else { (vec![], vec![]) };
+                let publication = names && !target.rows(&format!("select 1 from pg_publication where pubname = {}", literal(crate::catalog::PLATFORM_PUBLICATION))).await?.is_empty();
+                Ok(Server::Postgres {
+                    admin,
+                    url: server_url.to_string(),
+                    create,
+                    locale: unknown_locale,
+                    settings,
+                    privileges,
+                    copy_privileges: true,
+                    extensions,
+                    leave: vec![],
+                    environment,
+                    environment_role,
+                    owned,
+                    schema_grants,
+                    copy_schema_grants: true,
+                    platform_privileges,
+                    platform_schema_grants,
+                    publication,
+                })
             }
             Dialect::Mysql => {
                 let admin = crate::db::open_mysql(&with_database(server_url, "")).await?;
@@ -1451,7 +1496,9 @@ impl Server {
     /// privileges) but not its database settings, which a copy does not take. The lock named after
     /// it is held until it is dropped; a copy that fails releases it.
     pub(crate) async fn pg_shadow(&mut self, template: Option<&str>) -> Result<Shadow, Error> {
-        let Server::Postgres { admin, url, create, locale, settings, privileges, copy_privileges, extensions, leave, environment, environment_role, owned, schema_grants, copy_schema_grants, .. } = self else { return Err(Error("not a Postgres server".into())) };
+        let Server::Postgres { admin, url, create, locale, settings, privileges, copy_privileges, extensions, leave, environment, environment_role, owned, schema_grants, copy_schema_grants, platform_privileges, platform_schema_grants, publication, .. } = self else {
+            return Err(Error("not a Postgres server".into()));
+        };
         let name = random_name();
         admin.batch_execute(&format!("select pg_advisory_lock(hashtextextended('{name}', 0))")).await.map_err(pg_error)?;
         let made = async {
@@ -1500,9 +1547,11 @@ impl Server {
         let mut db = Db::Postgres(client);
         // For the session too, where the database may not take the setting from the role connected.
         mark_platform_names(&mut db, settings).await;
-        if *copy_privileges && template.is_none() {
+        if template.is_none() {
             // A role or schema the shadow's server lacks leaves that one out; the comparison says what follows.
-            for statement in privileges.iter() {
+            // Where the project's SQL sets default privileges, it sets them from those a new database
+            // of the platform's has, which are none but on Supabase.
+            for statement in if *copy_privileges { privileges.iter() } else { platform_privileges.iter() } {
                 let _ = db.exec(statement).await;
             }
         }
@@ -1523,7 +1572,7 @@ impl Server {
             for (_, schema) in owned.extensions.iter().filter(|(e, s)| owned.role.is_some() && !leave.contains(&e.to_lowercase()) && !platform_schema(s) && s != "pg_catalog") {
                 let _ = db.exec(&format!("create schema if not exists {}", ident(schema))).await;
             }
-            for statement in schema_grants.iter().filter(|_| *copy_schema_grants) {
+            for statement in if *copy_schema_grants { schema_grants.iter() } else { platform_schema_grants.iter() } {
                 let _ = db.exec(statement).await;
             }
             if let (Some(role), false) = (environment_role.as_deref(), environment.is_empty()) {
@@ -1552,6 +1601,9 @@ impl Server {
             }
             for (extension, schema) in copied.iter().filter(|(_, s)| platform_schema(s)) {
                 let _ = db.exec(&format!("create extension if not exists {} with schema {}", ident(extension), ident(schema))).await;
+            }
+            if *publication {
+                let _ = db.exec(&format!("create publication {}", ident(crate::catalog::PLATFORM_PUBLICATION))).await;
             }
         }
         Ok(Shadow { db, name })
@@ -1607,9 +1659,21 @@ impl Server {
         }
     }
 
+    /// Shadows leave what a new database of the platform's has to the project's own files, which
+    /// make it, as a project begun before Reylo took it for the platform's did: its publication, and
+    /// its default privileges and grants for the Data API.
+    pub fn leave_platform(&mut self) {
+        if let Server::Postgres { publication, platform_privileges, platform_schema_grants, .. } = self {
+            *publication = false;
+            platform_privileges.clear();
+            platform_schema_grants.clear();
+        }
+    }
+
     /// Shadows take none of the target's default privileges or grants on its schemas: for SQL written
     /// to make the database whole (init's, introspect's), which makes them itself. Which of them a new
-    /// database on the server has already, no name tells, so they are all the SQL's.
+    /// database on the server has already, no name tells, so they are all the SQL's, but on Supabase,
+    /// whose new databases have their own, which shadows take.
     pub fn copy_no_privileges(&mut self) {
         if let Server::Postgres { copy_privileges, copy_schema_grants, .. } = self {
             *copy_privileges = false;
