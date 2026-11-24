@@ -111,7 +111,7 @@ export function lite(name: string): EngineType {
 export const array = (element: EngineType, nullable = true, name?: string): EngineType => ({ kind: "array", element: { type: element, ...(nullable ? { nullable: true } : {}) }, ...(name === undefined ? {} : { label: name }) });
 
 /** Text that is one of `labels`: an enum, or a column a CHECK keeps to them. */
-export const enumOf = (name: string, labels: string[]): EngineType => ({ kind: "enum", type: { kind: "text" }, values: labels, label: name });
+export const enumOf = (name: string, labels: string[]): EngineType => ({ kind: "enum", type: { kind: "text" }, values: labels.map((value) => ({ value })), label: name });
 
 export const field = (name: string, type: EngineType, nullable = false, optional = false): Field => ({ name, type, ...(nullable ? { nullable: true } : {}), ...(optional ? { optional: true } : {}) });
 

@@ -164,6 +164,13 @@ pub trait Alterer: Send {
         let _ = (from, renamed);
         None
     }
+    /// Whether an object whose definition differs from `from` to `to` stays as the server holds
+    /// it, the difference being a change it carries through (a foreign key's column losing its
+    /// stored expression, which keeps its values).
+    fn keeps(&self, from: &Object, to: &Object) -> bool {
+        let _ = (from, to);
+        false
+    }
     /// Whether a column changed from `from` to `to` keeps every value it holds (a new default), so
     /// that a key on it can stay as it is.
     fn keeps_values(&self, from: &Object, to: &Object) -> bool {
@@ -882,6 +889,9 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
             let changes = a.deps.iter().filter(|d| from.objects.get(*d).is_some_and(|c| c.kind == Some(Kind::Column))).any(|d| to.objects.get(renamed_columns.get(d).unwrap_or(d)).is_none_or(|c| !alterer.keeps_values(&from.objects[d], c)));
             if !under.is_empty() && !parented && !follows && !changes && alterer.renamed_under(a, &renamed_columns).is_some_and(|d| d == b.def) {
                 kept_through.insert(id.clone(), under);
+                continue;
+            }
+            if alterer.keeps(a, b) {
                 continue;
             }
         }

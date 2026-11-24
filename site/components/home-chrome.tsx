@@ -15,7 +15,7 @@ import './home-landing.css';
 const LINKS: [label: string, href: string][] = [
   ['Docs', introUrl],
   ['Playground', '/play'],
-  ['Migrate', '/migrate'],
+  ['Migrate', '/#migrate'],
   ['Blog', '/blog'],
 ];
 
@@ -134,7 +134,7 @@ export function Foot() {
         <a href={introUrl}>Docs</a>
         <a href="/inference">Inference</a>
         <a href="/play">Playground</a>
-        <a href="/migrate">Migrate</a>
+        <a href="/#migrate">Migrate</a>
         <a href="/blog">Blog</a>
         <a href={githubUrl}>GitHub</a>
         <a href="https://www.npmjs.com/package/reylo">npm</a>

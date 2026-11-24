@@ -94,7 +94,7 @@ test("the shape refuses an integer's exclusive bound, a UUID version outside 1 t
     { kind: "float", exponent_bits: 11, mantissa_bits: 52, exclusive_min: "0" },
     { kind: "decimal", exclusive_max: "1e126" },
     { kind: "uuid", versions: [4, 7] },
-    { kind: "enum", type: { kind: "text" }, values: ["a"] },
+    { kind: "enum", type: { kind: "text" }, values: [{ value: "a" }] },
     { kind: "union", members: [{ kind: "text" }, { kind: "bytes" }] },
   ]) assert.ok(type(t), `${JSON.stringify(t)}: ${ajv.errorsText(type.errors)}`);
   for (const t of [
@@ -106,7 +106,7 @@ test("the shape refuses an integer's exclusive bound, a UUID version outside 1 t
     { kind: "uuid", versions: [] },
     { kind: "uuid", versions: [7, 7] },
     { kind: "enum", type: { kind: "text" }, values: [] },
-    { kind: "enum", type: { kind: "text" }, values: ["a", "a"] },
+    { kind: "enum", type: { kind: "text" }, values: [{ value: "a" }, { value: "a" }] },
     { kind: "union", members: [{ kind: "text" }] },
     { kind: "intersection", members: [] },
     // A count is a whole number, as the Rust types read it: never a fraction, and never below zero where it is unsigned.

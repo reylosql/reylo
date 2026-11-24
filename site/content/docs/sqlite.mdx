@@ -425,7 +425,7 @@ SQLite doesn't report what a function returns, so Reylo keeps its own table of S
 
 **Functions that answer `NULL`**
 
-A function that can return `NULL` for non-null arguments is typed `| null`. That includes the date functions, given text they can't read, and math functions such as `sqrt` and `ln` outside their domain. So `date(placed_at)` is `string | null`, while `date('now')` is a `string`. A date function is also `| null` with a format or modifier that SQLite before 3.46 doesn't know, such as `%V` or `floor`.
+A function that can return `NULL` for non-null arguments is typed `| null`. That includes date functions on unreadable text, and math functions like `sqrt` and `ln` outside their domain. So `date(placed_at)` is `string | null`, while `date('now')` is `string`. Date functions are also `| null` with modifiers SQLite before 3.46 doesn't know, such as `%V` or `floor`.
 
 <Pairs>
 
@@ -488,13 +488,15 @@ Reylo infers [how many rows](/inference#unique-keys) a query returns. On SQLite:
 
 ## Parameters
 
+SQLite binds parameters dynamically, so Reylo infers each parameter's type from the columns and operators around it.
+
 ### Placeholders
 
 Write parameters as `:name`, `@name` or `$name`, one style per query. Pass `.run()` an object with those names, without the prefix. You can use SQLite's `?` or `?1` instead, but not beside names. Then `.run()` takes an object keyed by number, `{ 1: 42 }`.
 
 ### What a parameter takes
 
-A parameter accepts the same values `.run()` returns for its type, so you can pass a row straight into the next query:
+A parameter accepts the same values `.run()` returns for its type. You can pass a row straight into the next query:
 
 | Affinity | A parameter takes |
 | --- | --- |
@@ -890,7 +892,6 @@ What Reylo can't type on SQLite, and what to do instead:
 | Virtual table modules on a driver the type check doesn't run the query on, such as `bun:sqlite`, SQLite Wasm or a Durable Object: Reylo's SQLite has FTS3, FTS4, FTS5, R-tree, Geopoly and `dbstat` | Check that driver's SQLite yourself |
 | `REAL` arithmetic with no answer, such as `1e999 * 0`, which SQLite returns as `NULL` where Reylo types a number | Write `coalesce(price * qty, 0)` where a `REAL` may hold an infinity |
 | Integer arithmetic past 64 bits, such as `9223372036854775807 + 1`, which SQLite returns as a `REAL` where Reylo types an integer: `node:sqlite` returns that number, and `better-sqlite3` and libSQL throw an error | Cast an operand to `real` where a result may pass 2^63, as `cast(n as real) * 2` |
-| A query past 350 nested expressions, which SQLite rejects with "Expression tree is too large" | Split the query up |
 | A statement other than a query, such as `create index` or `pragma table_info(users)` | None: it returns nothing, or rows whose columns are all `unknown` and nullable |
 | A file of several statements, such as a migration | Put each statement in a file of its own |
 | A string in double quotes, such as `select "hello"`, which SQLite reads as text when no column has that name: `better-sqlite3`, `node:sqlite`, libSQL, Turso and SQLite Wasm refuse it, so the type check does too, with SQLite's message, though `sqlite3`, `sqlite` and `bun:sqlite` run it | Write the string in single quotes, `select 'hello'` |

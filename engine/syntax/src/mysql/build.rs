@@ -35,8 +35,8 @@ fn no<T>(what: &str) -> R<T> {
 
 /// Why a statement that parses has no AST: it nests deeper than [`super::Bounds::depth`].
 pub(crate) const TOO_DEEP: &str = "the statement nests too deeply";
-/// Why a statement that parses has no AST: it has more operators than [`super::Bounds::operators`].
-pub(crate) const TOO_MANY_OPERATORS: &str = "the statement has too many operators";
+/// Why a statement that parses has no AST: a chain of its operators is longer than [`super::Bounds::chain`].
+pub(crate) const TOO_LONG_A_CHAIN: &str = "the statement chains too many operators";
 
 impl<'a> B<'a> {
     pub(crate) fn new(t: &'a Tree<'a>, backslash: bool, bounds: super::Bounds) -> Self {
@@ -49,25 +49,36 @@ impl<'a> B<'a> {
         B { t, lines, chars, backslash, depth: Cell::new(0), bounds }
     }
 
-    /// How many operators the tree has: the nodes that join two operands or follow one.
-    fn operators(&self) -> usize {
-        self.t
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(i, n)| {
-                !n.leaf && {
-                    let id = *i as NodeId;
-                    let c = self.ch(id);
-                    match self.k(id) {
-                        "Expression" | "BoolPri" | "PredicateExpr" | "BitExpr" => c.len() > 1,
-                        "SimpleExpr" => c.len() == 3 && matches!(self.k(c[1]), "\"||\"" | "\"COLLATE\""),
-                        "SetOpr" => true,
-                        _ => false,
-                    }
-                }
-            })
-            .count()
+    /// Whether a node is an operator: one that joins two operands or follows one, or a set
+    /// operation's list of more than one query, or the set operation that joins the last query to
+    /// that list.
+    fn operator(&self, id: NodeId) -> bool {
+        let c = self.ch(id);
+        match self.k(id) {
+            "Expression" | "BoolPri" | "PredicateExpr" | "BitExpr" => c.len() > 1,
+            "SimpleExpr" => c.len() == 3 && matches!(self.k(c[1]), "\"||\"" | "\"COLLATE\""),
+            "SetOprClauseList" => c.len() > 1,
+            "SetOprStmtWoutLimitOrderBy" | "SetOprStmtWithLimitOrderBy" => c.len() > 1 && self.k(c[0]) == "SetOprClauseList",
+            _ => false,
+        }
+    }
+
+    /// How many operators the longest chain of them has: the most on any one path down the tree.
+    /// A chain (`a or b or …`, `a + b + …`, `… union all …`) is read into a tree as deep as it is
+    /// long, which every walk of the engine and the tree's drop recurse through, while operators
+    /// side by side, in separate columns or conditions, cost nothing.
+    fn chain(&self) -> usize {
+        let mut longest = 0;
+        let mut stack = vec![(self.t.root, 0)];
+        while let Some((id, above)) = stack.pop() {
+            if self.t.nodes[id as usize].leaf {
+                continue;
+            }
+            let here = above + usize::from(self.operator(id));
+            longest = longest.max(here);
+            stack.extend(self.ch(id).iter().map(|&c| (c, here)));
+        }
+        longest
     }
 
     /// Runs `f` a level deeper, refusing past the bound.
@@ -143,8 +154,8 @@ impl<'a> B<'a> {
         if let Some(e) = self.t.errors.first() {
             return no(&e.message);
         }
-        if self.operators() > self.bounds.operators {
-            return no(TOO_MANY_OPERATORS);
+        if self.chain() > self.bounds.chain {
+            return no(TOO_LONG_A_CHAIN);
         }
         let mut out = Vec::new();
         let mut stack = vec![self.t.root];
