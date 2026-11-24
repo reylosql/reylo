@@ -75,9 +75,10 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 impl ParseError {
-    /// Whether the grammar reads the text, and only the [`Bounds`] the parse was given refuse it.
+    /// Whether the text nests deeper than the parse reads: past the grammar's stack, or past the
+    /// [`Bounds`] the parse was given. Any other error is the text's own.
     pub fn past_bounds(&self) -> bool {
-        self.0 == build::TOO_DEEP || self.0 == build::TOO_MANY_OPERATORS
+        self.0 == build::TOO_DEEP || self.0 == build::TOO_MANY_OPERATORS || self.0.starts_with(crate::lalr::EXHAUSTED)
     }
 }
 
@@ -273,6 +274,9 @@ mod tests {
         let refused = |text: String| parse(&text, Options::default(), BOUNDS).unwrap_err();
         assert!(refused(format!("select {}a{} as x", "coalesce(".repeat(250), ", b)".repeat(250))).past_bounds());
         assert!(refused(format!("select {} as x", vec!["a"; 502].join(" + "))).past_bounds());
+        // The grammar's own stack runs out first on some shapes, far past the bounds.
+        let exhausted = refused(format!("select {}a{} as x", "(".repeat(100_000), ")".repeat(100_000)));
+        assert!(exhausted.0.starts_with(crate::lalr::EXHAUSTED) && exhausted.past_bounds(), "{exhausted}");
         assert!(!refused("select from where".to_string()).past_bounds());
     }
 
