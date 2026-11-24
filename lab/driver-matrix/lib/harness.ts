@@ -434,7 +434,7 @@ const TYPED_COLUMNS: Record<Dialect, ([string, string] | [string, string, string
   sqlite: [["id", "int"], ["n", "int"], ["r", "float"], ["s", "text"], ["b", "bytes"], ["doc", "json"], ["flag", "bool"], ["x", "unknown"]],
 };
 
-const mood = { kind: "enum", type: { kind: "text" }, values: ["ok", "sad"], label: "driver_matrix.mood" };
+const mood = { kind: "enum", type: { kind: "text" }, values: [{ value: "ok" }, { value: "sad" }], label: "driver_matrix.mood" };
 const my = (kind: string, label: string, more: object = {}) => ({ kind, ...more, label });
 /** The parameter types the engine gives `c = :c` for each `typed` column (tests/render.test.ts, ROUND_TRIPS): on MySQL by the column it is compared with (engine/mysql `mysql_params.rs`), on SQLite by the column's affinity. */
 const ROUND_TRIP: Record<Dialect, Record<string, unknown>> = {
@@ -448,7 +448,7 @@ const ROUND_TRIP: Record<Dialect, Record<string, unknown>> = {
   },
   mysql: {
     big: my("integer", "bigint", { bits: 64 }), ubig: my("integer", "bigint", { bits: 64, unsigned: true }), amount: my("decimal", "decimal"), day: my("date", "date"), at: my("datetime", "datetime", { tick: "1/1000000" }), doc: my("json", "json"),
-    bit1: { kind: "union", members: [{ kind: "boolean" }, my("array", "bit", { element: { type: { kind: "boolean" } } })] }, raw: my("bytes", "blob"), tags: my("array", "set", { distinct: true, element: { type: { kind: "enum", type: { kind: "text" }, values: ["x", "y", "z"] } } }), kind: my("enum", "enum", { type: { kind: "text" }, values: ["a", "b"] }),
+    bit1: { kind: "union", members: [{ kind: "boolean" }, my("array", "bit", { element: { type: { kind: "boolean" } } })] }, raw: my("bytes", "blob"), tags: my("array", "set", { distinct: true, element: { type: { kind: "enum", type: { kind: "text" }, values: [{ value: "x" }, { value: "y" }, { value: "z" }] } } }), kind: my("enum", "enum", { type: { kind: "text" }, values: [{ value: "a" }, { value: "b" }] }),
     flag: my("integer", "tinyint(1)", { bits: 8 }), yr: my("integer", "year", { bits: 16, min: "0", max: "2155" }), f8: my("float", "double", { exponent_bits: 11, mantissa_bits: 52 }), tm: my("duration", "time", { max: "PT838H59M59S", tick: "1/1000000" }), s: my("text", "varchar"),
   },
   sqlite: {

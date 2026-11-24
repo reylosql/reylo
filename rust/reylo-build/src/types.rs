@@ -357,7 +357,8 @@ impl Types {
             // A list of text values a CHECK, a MySQL ENUM or the statement names (`case … then 'a'
             // else 'b' end`): an enum read from its text. A single value, as a literal column, is text.
             if self.is_text_list(&e.ty) && e.values.len() >= 2 {
-                let reference = self.list_enum(&e.values, label);
+                let values: Vec<String> = e.texts().map(String::from).collect();
+                let reference = self.list_enum(&values, label);
                 return Ok(Shape::Leaf { ty: { let i = &reference.ident; quote!(#i) }, leaf: Leaf::Label, enumeration: Some(reference) });
             }
         }
@@ -563,7 +564,8 @@ impl Types {
             return Ok(reference.clone());
         }
         let Kind::Enum(e) = &t.kind else { unreachable!("is_postgres_enum checked the kind") };
-        if e.values.is_empty() {
+        let values: Vec<String> = e.texts().map(String::from).collect();
+        if values.is_empty() {
             return Err(syn::Error::new(self.span, format!("the enum {name} has no values")));
         }
         let (schema, short) = qualified(&name);
@@ -577,12 +579,12 @@ impl Types {
                 let module_ident = syn::parse_str::<Ident>(&module).map_err(|e| syn::Error::new(self.span, e.to_string()))?;
                 self.items.push(quote!(pub use __reylo_shared_root::#module_ident::#shared_name as #ident;));
                 if !self.shared_enums.iter().any(|s| s.qualified == name) {
-                    self.shared_enums.push(SharedEnum { qualified: name.clone(), schema: module, name: base, tokens: postgres_enum_tokens(&shared_name, &name, &e.values) });
+                    self.shared_enums.push(SharedEnum { qualified: name.clone(), schema: module, name: base, tokens: postgres_enum_tokens(&shared_name, &name, &values) });
                 }
             }
-            None => self.items.push(postgres_enum_tokens(&ident, &name, &e.values)),
+            None => self.items.push(postgres_enum_tokens(&ident, &name, &values)),
         }
-        let reference = EnumRef { ident, labels: e.values.clone() };
+        let reference = EnumRef { ident, labels: values };
         self.enums.insert(format!("type:{name}"), reference.clone());
         Ok(reference)
     }

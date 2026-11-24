@@ -100,7 +100,7 @@ pub fn narrow(ty: &Type, literals: &[Literal]) -> Option<Type> {
             (Kind::Integer(_), Literal::Boolean(b)) => if *b { "1" } else { "0" }.to_string(),
             _ => return None,
         };
-        if known.is_some_and(|known| !known.contains(&value)) {
+        if known.is_some_and(|known| !known.iter().any(|k| k.value == value)) {
             return None;
         }
         push(&mut values, value);
@@ -109,6 +109,8 @@ pub fn narrow(ty: &Type, literals: &[Literal]) -> Option<Type> {
         return None;
     }
     let label = if known.is_some() { ty.label.clone() } else { None };
+    // A value the enum already lists keeps its name.
+    let values = values.into_iter().map(|v| known.and_then(|known| known.iter().find(|k| k.value == v)).cloned().unwrap_or_else(|| v.into())).collect();
     Some(Type { kind: Kind::Enum(EnumType { ty: Box::new(base.clone()), values }), label, comment: ty.comment.clone().filter(|_| known.is_some()), title: ty.title.clone().filter(|_| known.is_some()) })
 }
 
@@ -219,14 +221,14 @@ mod tests {
         assert_eq!((narrow(&uint8, &[number("255")]).is_some(), narrow(&uint8, &[number("-1")])), (true, None));
 
         let numeric = Type::decimal(DecimalType::default()).named("numeric");
-        assert_eq!(serde_json::to_value(narrow(&numeric, &[number("1.50"), number("2")]).unwrap()).unwrap()["values"], serde_json::json!(["1.5", "2"]));
+        assert_eq!(serde_json::to_value(narrow(&numeric, &[number("1.50"), number("2")]).unwrap()).unwrap()["values"], serde_json::json!([{"value": "1.5"}, {"value": "2"}]));
         let money = Type::decimal(DecimalType { precision: Some(4), min_scale: Some(2), max_scale: Some(2), ..DecimalType::default() });
         assert!(narrow(&money, &[number("12.30")]).is_some());
         assert_eq!(narrow(&money, &[number("1.234")]), None);
         assert_eq!(narrow(&money, &[number("123")]), None);
 
         let float8 = Type::new(Kind::Float(FloatType { exponent_bits: 11, mantissa_bits: 52, ..FloatType::default() })).named("float8");
-        assert_eq!(serde_json::to_value(narrow(&float8, &[number("0.1"), number("1e2"), number("1.50")]).unwrap()).unwrap()["values"], serde_json::json!(["0.1", "100", "1.5"]));
+        assert_eq!(serde_json::to_value(narrow(&float8, &[number("0.1"), number("1e2"), number("1.50")]).unwrap()).unwrap()["values"], serde_json::json!([{"value": "0.1"}, {"value": "100"}, {"value": "1.5"}]));
         // A number of more than fifteen significant digits, or past a normal double's range, is one a
         // server may read or print otherwise.
         assert_eq!(narrow(&float8, &[number("1.918287769068991566283487")]), None);
