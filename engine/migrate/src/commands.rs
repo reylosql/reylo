@@ -1570,14 +1570,15 @@ fn fills_existing(statement: &crate::sql::Statement) -> bool {
     use crate::sql::TokenKind;
     let t = &statement.tokens;
     let words: Vec<String> = t.iter().map(crate::sql::Token::upper).collect();
-    // A name and a parenthesis, but for a keyword's (`where (…)`, `check (…)`) and the table a
-    // reference names.
-    const NO_CALL: &[&str] = &["WHERE", "AND", "OR", "NOT", "IN", "IS", "EXISTS", "ANY", "ALL", "SOME", "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "CHECK", "ON", "USING", "AS", "LIKE", "ILIKE", "ROW", "SELECT", "FROM", "DEFAULT", "INCLUDE"];
+    // A name and a parenthesis, but for a reserved word's, which names no function (`where (…)`,
+    // `check (…)`), and the table a reference names. A name after a schema's is a function's,
+    // whatever it is spelled.
+    const NO_CALL: &[&str] = &["WHERE", "AND", "OR", "NOT", "IN", "IS", "EXISTS", "ANY", "ALL", "SOME", "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "CHECK", "LIKE", "ILIKE", "ROW"];
     let call = |i: usize| {
         i > 0
             && t[i].text == "("
             && t[i].kind == TokenKind::Symbol
-            && (t[i - 1].kind == TokenKind::Quoted || (t[i - 1].kind == TokenKind::Word && !NO_CALL.contains(&words[i - 1].as_str())))
+            && (t[i - 1].kind == TokenKind::Quoted || (t[i - 1].kind == TokenKind::Word && (!NO_CALL.contains(&words[i - 1].as_str()) || (i > 1 && t[i - 2].text == "."))))
             && !(i > 1 && words[i - 2] == "REFERENCES")
     };
     if words.first().map(String::as_str) == Some("CREATE") && words.iter().take(4).any(|w| w == "INDEX") {
@@ -8055,6 +8056,10 @@ mod tests {
         assert!(!fills("create index t_k on t (id) where id > 0 and (email is null or id < 9)"));
         assert!(!fills("alter table t add column v int default 1 check (v > 0)"));
         assert!(!fills("alter table t add column v int default 0 references r (id)"));
+        assert!(fills("alter table t add column v int default public.include(1)"));
+        assert!(fills("create index t_k on t (public.include(id))"));
+        assert!(fills("create index t_k on t (id) where public.any(id)"));
+        assert!(fills("create index t_k on t (include(id))"));
     }
 
     #[test]
