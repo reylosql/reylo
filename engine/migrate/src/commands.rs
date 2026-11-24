@@ -1621,6 +1621,9 @@ pub struct Plan {
     /// The migrations the database ran, in its order: with no lock, a pending one that sorts before
     /// any of them must be shown to end where name order does.
     pub ran: Vec<Migration>,
+    /// What a deploy with no fingerprint to compare runs, in its order, as the check read it: the
+    /// pending migrations with the landed ones in their places, which it runs again.
+    pub deploys: Vec<Migration>,
 }
 
 /// An index a lone `create index concurrently` (or `reindex concurrently`) left invalid when it was
@@ -2444,11 +2447,12 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
         // A lone statement cut off before its row was finished did run, or did not: the database says
         // which, and one that landed is recorded, as the row it started says it ran.
         let started: Vec<String> = history.iter().filter(|r| !r.applied).map(|r| r.name.clone()).collect();
+        let deploys = pending.clone();
         let mut run = Run { live: &live, url: &opts.url, schema_sql: schema_sql.as_deref(), schema: shown(&opts.schema), applied_files: &applied_files, records, pending, started, landed: vec![], d };
         let result = check_in_shadows(&mut shadows, db, &mut run).await;
         shadows.finish().await;
         let problems = result?;
-        Ok(Plan { problems, records: run.records, pending: run.pending, unchanged, resumed, landed: run.landed, leftovers, ran: applied_files.clone() })
+        Ok(Plan { problems, records: run.records, pending: run.pending, unchanged, resumed, landed: run.landed, leftovers, ran: applied_files.clone(), deploys })
     }
 }
 
@@ -4095,14 +4099,9 @@ async fn dry_run_on(opts: &Options, command: Option<&[String]>, made: &mut Vec<P
 async fn build_on_shadow(server: &mut Server, opts: &Options, plan: &Plan, version: Option<&str>, command: &[String], log: Log<'_>) -> Result<i32, Error> {
     // A cut-off run whose change landed is in the shadow as run. A deploy with no fingerprint to
     // hold it to runs it again, over what it left: so does the shadow, which fails where that would.
-    // It runs it in its place among the pending ones, as the deploy runs them, in the migrations' run order.
-    let deployed: Vec<Migration> = if plan.unchanged == Some(true) || plan.landed.is_empty() {
-        plan.pending.clone()
-    } else {
-        let (files, _) = opts.migrations()?;
-        run_order(opts, &files).into_iter().filter(|m| plan.landed.contains(&m.name) || plan.pending.iter().any(|p| p.name == m.name)).collect()
-    };
-    let steps: Vec<&Migration> = plan.ran.iter().chain(&plan.records).chain(&deployed).collect();
+    // It runs it in its place among the pending ones, as the deploy runs them, from the texts the check read.
+    let deployed: &[Migration] = if plan.unchanged == Some(true) || plan.landed.is_empty() { &plan.pending } else { &plan.deploys };
+    let steps: Vec<&Migration> = plan.ran.iter().chain(&plan.records).chain(deployed).collect();
     let texts: Vec<&str> = steps.iter().map(|m| m.sql.as_str()).collect();
     // What tells a build's caches that this run's shadow is another database from any before it, as
     // its URL may not, and which holds no credential: one key a run. The same migrations can type
