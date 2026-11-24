@@ -6442,6 +6442,12 @@ mod adversarial {
         let choices = reylo_migrate::Choices { rename: vec![("posts.pid".into(), "post_id".into())], ..Default::default() };
         // The rename alone: the server renames the column in each index, key, check and view.
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "rename_pid", &choices, log).await).await, 0, "{}", p.peek());
+        // The summary is the rename alone.
+        let out = p.output();
+        assert_has!(&out, r"~ column posts\.\[-pid-\]\{\+post_id\+\}");
+        for line in ["constraint", "index", "view"] {
+            assert!(!out.contains(&format!("+ {line}")) && !out.contains(&format!("- {line}")), "{out}");
+        }
         let all = written(&p, "rename_pid").join("-- next\n");
         assert!(all.contains("alter table posts rename column pid to post_id;"), "{all}");
         for rebuilt in ["drop ", "create ", "add constraint", "concurrently"] {

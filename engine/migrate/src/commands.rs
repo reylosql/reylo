@@ -1149,6 +1149,8 @@ struct Steps<'a> {
     before: &'a [String],
     moved: Option<&'a [String]>,
     renamed: Option<&'a [String]>,
+    /// The schema once the column renames that ran first ran, where any did.
+    columns: Option<&'a [String]>,
     after: &'a [String],
 }
 
@@ -1220,7 +1222,48 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
             out.push(changed_line(&readable(&a), &readable(&b)));
         }
     }
+    // What only took a renamed column's new name (a key, an index or a view over it), as the renames
+    // that ran first left it and as it still is after, is left out: the server renamed it with the
+    // column. A line is matched by its text with the column's new name in it, a view by its name.
+    if let Some(renamed_columns) = steps.columns {
+        let (r_gone, r_came) = difference(steps.renamed.or(steps.moved).unwrap_or(steps.before), renamed_columns);
+        let names: Vec<(String, String)> = columns.iter().map(|(old, new)| (crate::sql::last_written(old), crate::sql::last_written(new))).collect();
+        let swapped = |line: &str| names.iter().fold(line.to_string(), |text, (old, new)| swap_word(&text, old, new));
+        // A line as the table renames left it.
+        let at = |g: &String| moved_with.iter().find(|(m, _)| m == g).map_or(g.clone(), |(_, c)| c.clone());
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for by_name in [false, true] {
+            let open: Vec<String> = gone.iter().filter(|g| r_gone.contains(&at(g)) && !pairs.iter().any(|(p, _)| p == *g)).cloned().collect();
+            for g in &open {
+                let (line, renamed) = (at(g), swapped(&at(g)));
+                let same = |c: &&String| if by_name { line.starts_with("view ") && split_head(c).0 == split_head(&line).0 } else { **c == renamed };
+                if let Some(c) = came.iter().filter(|c| r_came.contains(c) && !pairs.iter().any(|(_, t)| t == *c)).find(same) {
+                    pairs.push((g.clone(), c.clone()));
+                }
+            }
+        }
+        gone.retain(|g| !pairs.iter().any(|(p, _)| p == g));
+        came.retain(|c| !pairs.iter().any(|(_, t)| t == c));
+    }
     out.extend(listed(&gone, &came, steps.before, steps.after, steps.dialect));
+    out
+}
+
+/// `text` with the name `old` (a column's) written `new` wherever it stands whole.
+fn swap_word(text: &str, old: &str, new: &str) -> String {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let (mut out, mut rest, mut before) = (String::with_capacity(text.len()), text, None::<char>);
+    while let Some(c) = rest.chars().next() {
+        if !old.is_empty() && rest.starts_with(old) && !before.is_some_and(ident) && !rest[old.len()..].chars().next().is_some_and(ident) {
+            out.push_str(new);
+            before = new.chars().last();
+            rest = &rest[old.len()..];
+            continue;
+        }
+        out.push(c);
+        before = Some(c);
+        rest = &rest[c.len_utf8()..];
+    }
     out
 }
 
@@ -6097,6 +6140,8 @@ struct Settled {
     tables: Vec<(String, String)>,
     /// The catalog as the table renames left it, read before any column was renamed, where one was.
     after_tables: Option<Vec<String>>,
+    /// The catalog once the column renames that ran first ran, where any did.
+    after_columns: Option<Vec<String>>,
 }
 
 /// The plan from `db`, which reads as `current`, to `target`, as `choices` settles it: tables renamed
@@ -6252,7 +6297,7 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
     // On Postgres the columns the plan renames are renamed first, on `db` itself, and the rest
     // planned from there: the server renames a column in every index, constraint, view and policy
     // that names it, which a plan from before the rename would drop and make again.
-    let mut after_tables = None;
+    let (mut after_tables, mut after_columns) = (None, None);
     let settled = match settled {
         Ok(Ok((plan, assumed, dropped))) if d == Dialect::Postgres && !plan.renamed.is_empty() => {
             if !renamed_tables.is_empty() {
@@ -6261,6 +6306,7 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
             match columns_renamed_first(db, &plan, &current, target, &dropped, live).await? {
                 Some((ran, rest)) => {
                     renames.extend(ran);
+                    after_columns = Some(catalog(db).await?);
                     Ok(Ok((rest, assumed)))
                 }
                 None => Ok(Ok((plan, assumed))),
@@ -6268,7 +6314,7 @@ async fn settle(db: &mut Db, mut current: crate::diff::Schema, target: &Target, 
         }
         other => other.map(|r| r.map(|(plan, assumed, _)| (plan, assumed))),
     };
-    settled.map(|r| r.map(|(plan, assumed)| Settled { renames, plan, assumed, tables, after_tables }))
+    settled.map(|r| r.map(|(plan, assumed)| Settled { renames, plan, assumed, tables, after_tables, after_columns }))
 }
 
 /// The statements of a Postgres plan that rename its columns, in order, each with the comments above
@@ -6424,7 +6470,7 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
         let indexes = if d == Dialect::Postgres { crate::diff::postgres::index_names(shadows.db(a)).await? } else { Default::default() };
         let target = Target { schema: target, indexes };
         let asked = Asked::migration(migration, rewrites);
-        let Settled { renames, mut plan, assumed, tables, after_tables } = match settle(shadows.db(c), current, &target, false, choices, Some(&asked), false).await? {
+        let Settled { renames, mut plan, assumed, tables, after_tables, after_columns } = match settle(shadows.db(c), current, &target, false, choices, Some(&asked), false).await? {
             Ok(settled) => settled,
             Err(problems) => return Ok(Err(problems)),
         };
@@ -6561,7 +6607,7 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
             notes.push(format!("      {}", paint("cyan", &create_command(&asked, choices, &names, &[]))));
         }
         if failed.is_none() && reached == wanted {
-            let steps = Steps { dialect: d, before: &before, moved: moved.as_deref(), renamed: renamed.as_deref(), after: &reached };
+            let steps = Steps { dialect: d, before: &before, moved: moved.as_deref(), renamed: renamed.as_deref(), columns: after_columns.as_deref(), after: &reached };
             return Ok(Ok(Drafted { lock_safe: split_files.is_some(), commits, changes: summary_lines(&steps, &tables, &plan.renamed), ..drafted(texts, 0, notes, false) }));
         }
         let mut remaining = Vec::new();
@@ -9214,16 +9260,29 @@ mod tests {
         // A column renamed, beside one dropped and one added.
         let before = lines(&["table public.posts", "column public.posts.title character varying(100)", "column public.posts.body text"]);
         let after = lines(&["table public.posts", "column public.posts.heading character varying(200)", "column public.posts.summary text"]);
-        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: None, after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: None, columns: None, after: &after };
         let columns = vec![("column public.posts.title".to_string(), "column public.posts.heading".to_string())];
         assert_eq!(summary_lines(&steps, &[], &columns), ["  ~ column posts.[-title-]{+heading+} character varying([-100-]{+200+})", "  + column posts.summary text", "  - column posts.body text"]);
+        // A column renamed first: what only took its new name is left out, and what changes besides
+        // is listed as it was before and is after.
+        let before = lines(&["table public.posts", "column public.posts.pid integer not null", "constraint public.posts pid_pos CHECK ((pid > 0))", "index CREATE INDEX posts_pid ON public.posts USING btree (pid)", "index CREATE INDEX posts_pid_title ON public.posts USING btree (pid, title)", "view public.v as SELECT pid FROM posts;"]);
+        let renamed = lines(&["table public.posts", "column public.posts.post_id integer not null", "constraint public.posts pid_pos CHECK ((post_id > 0))", "index CREATE INDEX posts_pid ON public.posts USING btree (post_id)", "index CREATE INDEX posts_pid_title ON public.posts USING btree (post_id, title)", "view public.v as SELECT post_id AS pid FROM posts;"]);
+        let mut after = renamed.clone();
+        after[4] = "index CREATE INDEX posts_pid_title ON public.posts USING btree (post_id DESC, title)".to_string();
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: None, columns: Some(&renamed), after: &after };
+        let columns = vec![("column public.posts.pid".to_string(), "column public.posts.post_id".to_string())];
+        let shown = summary_lines(&steps, &[], &columns);
+        assert_eq!(shown[0], "  ~ column posts.[-pid-]{+post_id+} integer not null");
+        assert_eq!(shown.len(), 3, "{shown:?}");
+        assert!(shown[1..].iter().all(|l| l.contains("posts_pid_title")), "{shown:?}");
+        assert_eq!(swap_word("(pid, pid_x, xpid) pid", "pid", "post_id"), "(post_id, pid_x, xpid) post_id");
         // A table renamed: what only took its new name is left out, a default that changes besides is
         // listed as it was before and is after, and a column of it renamed is a rename under the
         // table's new name.
         let before = lines(&["table public.orders", "column public.orders.id integer not null", "column public.orders.title text", "column public.orders.kind text default 'orders'::text", "constraint public.orders orders_pkey PRIMARY KEY (id)"]);
         let renamed = lines(&["table public.invoices", "column public.invoices.id integer not null", "column public.invoices.title text", "column public.invoices.kind text default 'orders'::text", "constraint public.invoices invoices_pkey PRIMARY KEY (id)"]);
         let after = lines(&["table public.invoices", "column public.invoices.id integer not null", "column public.invoices.heading text", "column public.invoices.kind text default 'invoices'::text", "constraint public.invoices invoices_pkey PRIMARY KEY (id)"]);
-        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), columns: None, after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string())];
         let columns = vec![("column public.invoices.title".to_string(), "column public.invoices.heading".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &columns), ["  ~ table [-orders-]{+invoices+}", "  ~ column invoices.[-title-]{+heading+} text", "  + column invoices.kind text default 'invoices'::text", "  - column orders.kind text default 'orders'::text"]);
@@ -9232,30 +9291,30 @@ mod tests {
         let before = lines(&["table public.alpha", "column public.alpha.alpha_code integer", "column public.alpha.beta_code integer"]);
         let renamed = lines(&["table public.beta", "column public.beta.alpha_code integer", "column public.beta.beta_code integer"]);
         let after = lines(&["table public.beta", "column public.beta.beta_code integer"]);
-        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), columns: None, after: &after };
         let tables = vec![("table public.alpha".to_string(), "table public.beta".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-alpha-]{+beta+}", "  - column alpha.alpha_code integer"]);
         let before = lines(&["table public.orders", "table public.clients", "constraint public.orders fk_client FOREIGN KEY (client_id) REFERENCES public.clients(id)"]);
         let after = lines(&["table public.invoices", "table public.customers", "constraint public.invoices fk_client FOREIGN KEY (client_id) REFERENCES public.customers(id)"]);
-        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), columns: None, after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string()), ("table public.clients".to_string(), "table public.customers".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}", "  ~ table [-clients-]{+customers+}"]);
         // A column whose name starts with another renamed table's is no reference to it.
         let before = lines(&["table public.orders", "table public.clients", "constraint public.orders fk_account FOREIGN KEY (clients_id) REFERENCES public.accounts(id)"]);
         let after = lines(&["table public.invoices", "table public.customers", "constraint public.invoices fk_account FOREIGN KEY (clients_id) REFERENCES public.accounts(id)"]);
-        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), columns: None, after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string()), ("table public.clients".to_string(), "table public.customers".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}", "  ~ table [-clients-]{+customers+}"]);
         // A view that names a renamed table, as Postgres rewrites it, is the same view.
         let before = lines(&["table public.orders", "view public.order_count as SELECT count(orders.id) AS count FROM (orders JOIN details ON ((orders.id = details.id)));"]);
         let after = lines(&["table public.invoices", "view public.order_count as SELECT count(invoices.id) AS count FROM (invoices JOIN details ON ((invoices.id = details.id)));"]);
-        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), columns: None, after: &after };
         let tables = vec![("table public.orders".to_string(), "table public.invoices".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-orders-]{+invoices+}"]);
         // A view whose quoted name holds a renamed table's name is another view still.
         let before = lines(&["table public.alpha", "view public.omega as SELECT 1 AS n;", "view public.\"public.alpha\" as SELECT omega.n FROM omega;", "view public.\"public.omega\" as SELECT alpha.id FROM alpha;"]);
         let after = lines(&["table public.omega", "view public.\"public.omega\" as SELECT omega.id FROM omega;"]);
-        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&after), columns: None, after: &after };
         let tables = vec![("table public.alpha".to_string(), "table public.omega".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-alpha-]{+omega+}", "  - view omega as SELECT 1 AS n;", "  - view \"public.alpha\" as SELECT omega.n FROM omega;"]);
         assert_eq!(renamed_in("view public.\"public.alpha\" as SELECT 1 FROM public.alpha", &[("public.alpha".to_string(), "public.omega".to_string())], true), "view public.\"public.alpha\" as SELECT 1 FROM public.omega");
@@ -9274,21 +9333,21 @@ mod tests {
         let before = lines(&["table east.orders", "table west.orders", "column west.orders.title text", "constraint west.orders orders_pkey PRIMARY KEY (id)"]);
         let renamed = lines(&["table east.invoices", "table west.shipments", "column west.shipments.title text", "constraint west.shipments shipments_pkey PRIMARY KEY (id)"]);
         let after = lines(&["table east.invoices", "table west.shipments", "column west.shipments.heading text", "constraint west.shipments shipments_pkey PRIMARY KEY (id)"]);
-        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), columns: None, after: &after };
         let tables = vec![("table east.orders".to_string(), "table east.invoices".to_string()), ("table west.orders".to_string(), "table west.shipments".to_string())];
         let columns = vec![("column west.shipments.title".to_string(), "column west.shipments.heading".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &columns), ["  ~ table east.[-orders-]{+invoices+}", "  ~ table west.[-orders-]{+shipments+}", "  ~ column west.shipments.[-title-]{+heading+} text"]);
         // A view the table rename drops, where the table takes its name, stays listed.
         let before = lines(&["table public.t_data", "column public.t_data.id integer", "view public.data select id from public.t_data", "view public.q select id from public.data"]);
         let renamed = lines(&["table public.data", "column public.data.id integer"]);
-        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), after: &renamed };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: None, renamed: Some(&renamed), columns: None, after: &renamed };
         let tables = vec![("table public.t_data".to_string(), "table public.data".to_string())];
         assert_eq!(summary_lines(&steps, &tables, &[]), ["  ~ table [-t_data-]{+data+}", "  - view data select id from t_data", "  - view q select id from data"]);
         // A table moved to another schema shows as the move's endpoints, never a line in between.
         let before = lines(&["table public.orders", "column public.orders.status text default 'orders'::text"]);
         let moved = lines(&["table archive.orders", "column archive.orders.status text default 'orders'::text"]);
         let after = lines(&["table archive.orders", "column archive.orders.status text default 'archived'::text"]);
-        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: Some(&moved), renamed: None, after: &after };
+        let steps = Steps { dialect: Dialect::Postgres, before: &before, moved: Some(&moved), renamed: None, columns: None, after: &after };
         assert_eq!(summary_lines(&steps, &[], &[]), ["  + table archive.orders", "      status text default 'archived'::text", "  - table orders", "      status text default 'orders'::text"]);
     }
 
