@@ -4310,8 +4310,12 @@ impl Alterer for PostgresAlterer {
     }
 
     fn keeps_values(&self, from: &Object, to: &Object) -> bool {
-        let without_default = |def: &str| Column { default: None, ..parse_column(def) };
-        from.kind == Some(Kind::Column) && without_default(&from.def) == without_default(&to.def)
+        // A default, a not null and an identity change no value the column holds.
+        let values = |def: &str| {
+            let c = parse_column(def);
+            (c.ty, c.collation, c.generated)
+        };
+        from.kind == Some(Kind::Column) && values(&from.def) == values(&to.def)
     }
 
     fn alter(&self, from: &Object, to: &Object) -> Option<Vec<String>> {
