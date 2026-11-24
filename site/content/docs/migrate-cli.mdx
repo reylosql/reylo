@@ -546,7 +546,7 @@ $ reylo migrate status --url $PROD_URL
 
 Most commands use shadow databases: throwaway databases where Reylo Migrate replays your migrations to read the schema they make. A deploy needs none:
 
-| Needs a shadow database | Needs none |
+| Uses a shadow database | Uses none |
 | --- | --- |
 | `reylo migrate init` | `reylo migrate deploy` |
 | `reylo migrate new` | `reylo migrate status` |
