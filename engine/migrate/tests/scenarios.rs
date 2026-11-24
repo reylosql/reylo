@@ -3681,6 +3681,30 @@ async fn a_trigger_swapped_with_a_change_to_its_table() {
     assert_eq!(p.rows("select hits from users").await[0].text("hits"), "1", "the old trigger ran");
 }
 
+/// A foreign key added to a trigger's table as the trigger changes: under the lock with the swap, the
+/// table it references locked too, so the old trigger runs until the swap; and where the key fails on
+/// a row, the old trigger stays.
+#[tokio::test(flavor = "current_thread")]
+async fn a_trigger_swapped_with_a_key_added_to_its_table() {
+    let Some(mut p) = P::new(Dialect::Mysql).await else { return };
+    let schema = |key: &str, by: u32| format!("create table accounts (id int primary key);\ncreate table users (id int primary key, account_id int, touches int not null default 0{key});\ncreate trigger users_touch before update on users for each row set new.touches = old.touches + {by};\n");
+    p.schema(&schema("", 1));
+    assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "users", &Default::default(), log).await).await, 0, "{}", p.peek());
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    p.exec("insert into accounts values (1); insert into users values (1, 2, 0)").await;
+    p.schema(&schema(", foreign key (account_id) references accounts (id)", 2));
+    // MySQL adds a key by copying the table, which --blocking accepts.
+    let blocking = reylo_migrate::Choices { blocking: true, ..Default::default() };
+    assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "key", &blocking, log).await).await, 0, "{}", p.peek());
+    let sql = std::fs::read_to_string(p.dir.join("migrations").join(p.files().last().unwrap())).unwrap();
+    assert!(sql.starts_with("lock tables users write, accounts write;\nalter table users add constraint ") && sql.ends_with("drop trigger users_touch;\ncreate trigger users_touch before update on users for each row set new.touches = old.touches + 2;\nunlock tables;\n"), "{sql}");
+    p.output();
+    assert_eq!(p.dev().await, 1);
+    assert_has!(p.output(), r"foreign key constraint fails");
+    p.exec("update users set account_id = 1").await;
+    assert_eq!(p.rows("select touches from users").await[0].text("touches"), "1", "the old trigger ran");
+}
+
 /// A partition taken out of a MySQL table drops its rows with it, as a Postgres partition does: the
 /// migration is refused until `--drop` names it, then drops it in place. One added at the end is
 /// added in place.

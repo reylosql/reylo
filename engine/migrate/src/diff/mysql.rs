@@ -1492,8 +1492,9 @@ fn lock_swaps(swaps: &[Swap], statements: &mut Vec<String>) {
         let named = match swapped.iter().find(|w| w.drop == **s || w.create == **s) {
             Some(w) => Some(w.tables.clone()),
             None if is_trigger_create(s) => trigger_table(s).map(|t| vec![t]),
-            // A change to a table, but a foreign key's, which needs the table it references locked too.
-            None => altered_table(s).filter(|_| !s.to_ascii_lowercase().contains(" references ")).map(|t| vec![t]),
+            // A change to a table, with the tables a foreign key it adds references, which MySQL
+            // needs locked too.
+            None => altered_table(s).map(|t| std::iter::once(t).chain(referenced_tables(s)).collect()),
         };
         let Some(named) = named else {
             for w in &swapped {
@@ -1531,6 +1532,12 @@ fn crossable(statement: &str, swapped: &[&Swap]) -> bool {
         _ => None,
     };
     object.and_then(name_of).is_some_and(|o| !named(&o))
+}
+
+/// The tables a statement's foreign keys reference, as it names them.
+fn referenced_tables(statement: &str) -> Vec<String> {
+    let tokens = tokenize(statement, Dialect::Mysql);
+    tokens.windows(2).filter(|w| w[0].upper() == "REFERENCES").map(|w| w[1].text.clone()).collect()
 }
 
 /// The table an `alter table` changes, as it names it.
@@ -1882,6 +1889,11 @@ mod tests {
         assert_eq!(
             swapped(&["drop trigger a_touch", "alter table a remove partitioning", "alter table a rename column n to m", "alter table z add column v int", "alter table a partition by list (id) (partition p values in (1))", "create trigger a_touch before update on a for each row set new.m = 2"]),
             ["lock tables a write, z write;\nalter table a remove partitioning;\nalter table a rename column n to m;\nalter table z add column v int;\nalter table a partition by list (id) (partition p values in (1));\ndrop trigger a_touch;\ncreate trigger a_touch before update on a for each row set new.m = 2;\nunlock tables"]
+        );
+        // A foreign key added locks the table it references too.
+        assert_eq!(
+            swapped(&["drop trigger a_touch", "alter table a add constraint a_x foreign key (x) references `order` (id)", "create trigger a_touch before update on a for each row set new.m = 2"]),
+            ["lock tables a write, `order` write;\nalter table a add constraint a_x foreign key (x) references `order` (id);\ndrop trigger a_touch;\ncreate trigger a_touch before update on a for each row set new.m = 2;\nunlock tables"]
         );
         // So would a function it calls, which isn't a table's change: written apart, saying so.
         let plan = swapped(&["drop trigger a_touch", "drop function f", "create function f () returns int return 2", "create trigger a_touch before update on a for each row set new.m = 2"]);
