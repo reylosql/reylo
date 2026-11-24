@@ -733,7 +733,7 @@ fn matching(t: &[Token]) -> Vec<Option<usize>> {
 }
 
 /// The tokens from `from` to `to` that are not inside a bracket of their own, by index.
-fn top_level(t: &[Token], close: &[Option<usize>], from: usize, to: usize) -> Vec<usize> {
+fn top_level(close: &[Option<usize>], from: usize, to: usize) -> Vec<usize> {
     let mut out = Vec::new();
     let mut k = from;
     while k < to {
@@ -746,7 +746,7 @@ fn top_level(t: &[Token], close: &[Option<usize>], from: usize, to: usize) -> Ve
 /// The text of each element of the `ARRAY[…]` whose `[` is at `open`.
 fn elements<'a>(text: &'a str, t: &[Token], close: &[Option<usize>], open: usize) -> Option<Vec<&'a str>> {
     let end = close[open]?;
-    let commas: Vec<usize> = top_level(t, close, open + 1, end).into_iter().filter(|&k| symbol(t, k, ",")).collect();
+    let commas: Vec<usize> = top_level(close, open + 1, end).into_iter().filter(|&k| symbol(t, k, ",")).collect();
     let mut bounds = vec![open];
     bounds.extend(commas);
     bounds.push(end);
@@ -818,7 +818,7 @@ fn flattened_at(text: &str, t: &[Token], close: &[Option<usize>], k: usize) -> O
     // Both are that operator's own: each joins its operands with it alone. BETWEEN, whose AND is
     // its own, is never rendered as such in an expression, but a window's frame is.
     let joins_with_op = |from: usize, to: usize| {
-        let top = top_level(t, close, from, to);
+        let top = top_level(close, from, to);
         top.iter().any(|&i| word(t, i, op)) && !top.iter().any(|&i| ["AND", "OR", "BETWEEN"].iter().any(|w| *w != op && word(t, i, w)))
     };
     if inner < k + 3 || !joins_with_op(k + 2, inner) || !joins_with_op(k + 1, end) {
