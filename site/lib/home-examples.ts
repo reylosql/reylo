@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { createHighlighter } from 'shiki';
 import type { Plugin } from 'vite';
@@ -23,11 +24,34 @@ export type HomeExample = { id: string; title: string; lede: string; variants: P
 export type HomeData = {
   examples: HomeExample[];
   intro: { sql: Line[]; tables: Record<string, Line[]>; ts: Line[]; type: Line[] };
+  /** The intro's statement with `u.email` added to its select list, and the type then, `email` beside `name`: the first line of each as it was and as it is, then the type whole. */
+  edit: { before: Line; after: Line; rest: Line[]; type: Line[]; added: number };
+  /** The editor section's misspelled statement (content/sections/01-setup.mdx), and the error the content mapper gives it (lib/sql-errors.json). */
+  error: { file: string; sql: Line[]; line: number; start: number; end: number; message: string; source: string };
+  /** One main.ts per driver, from the Usage section's driver tabs (content/sections/02-usage.mdx). */
+  drivers: { name: string; dialect: Dialect; ts: Line[] }[];
 };
 
 const VIRTUAL = 'virtual:home-examples';
 const SECTION = 'content/sections/03-inference.mdx';
 const INTRO = 'content/docs/index.mdx';
+const SETUP = 'content/sections/01-setup.mdx';
+const USAGE = 'content/sections/02-usage.mdx';
+/** The drivers the homepage shows, by tab and dialect, in the order of the docs' feature card that names them. */
+const DRIVERS: [name: string, dialect: Dialect][] = [
+  ['pg', 'postgres'],
+  ['postgres.js', 'postgres'],
+  ['Bun.sql', 'postgres'],
+  ['Neon', 'postgres'],
+  ['mysql2', 'mysql'],
+  ['PlanetScale', 'mysql'],
+  ['better-sqlite3', 'sqlite'],
+  ['node:sqlite', 'sqlite'],
+  ['libSQL', 'sqlite'],
+  ['Cloudflare D1', 'sqlite'],
+  ['Drizzle', 'postgres'],
+  ['Knex', 'postgres'],
+];
 /** How many characters of a type fit on a line before it breaks: the docs' cards' width (lib/remark-mapper.ts). */
 const WIDTH = 64;
 const THEMES = { light: 'github-light', dark: 'github-dark' };
@@ -166,8 +190,40 @@ export async function buildHomeData(site = process.cwd(), modules: Modules = rea
   const main = collect(parsePage(path.join(site, INTRO))).find((b) => b.name === 'main.ts')?.node.value;
   if (main === undefined) throw new Error(`lib/home-examples.ts: no main.ts block in ${INTRO}.`);
   const ts = main.split('\n').filter((l) => !l.startsWith('// @')).join('\n').replace(/\n+author\?\.[\s\S]*$/, '');
+  // The edit an agent makes: `u.email` added to the select list, and the type it then gives, from
+  // the schema's own note on the column (`email text unique -- email: string | null`).
+  const introSql = intro.node.value.replace(/^(?:--[^\n]*\n)+/, '').replace(/\n$/, '');
+  const [first, ...rest] = introSql.split('\n');
+  const edited = first.replace('u.name,', 'u.name, u.email,');
+  if (edited === first) throw new Error(`lib/home-examples.ts: the intro's get_author.sql no longer selects u.name; update the homepage's edit.`);
+  const typeText = `const author: ${formatType(resultType(row, cardinality), 44)}`;
+  const typeLines = typeText.split('\n');
+  const nameAt = typeLines.findIndex((l) => /^\s+name: string;$/.test(l));
+  if (nameAt < 0) throw new Error(`lib/home-examples.ts: the intro's type has no \`name: string\`; update the homepage's edit.`);
+  typeLines.splice(nameAt + 1, 0, typeLines[nameAt].replace('name: string', 'email: string | null'));
+  const edit = { before: lines(first, 'sql')[0]!, after: lines(edited, 'sql')[0]!, rest: lines(rest.join('\n'), 'sql'), type: lines(typeLines.join('\n'), 'ts'), added: nameAt + 1 };
+
+  // The editor section's misspelled statement, and its captured error.
+  const errorBlock = collect(parsePage(path.join(site, SETUP))).find((b) => b.name === 'get_user.sql' && b.dialect === 'postgres' && /\berrors\b/.test(b.node.meta ?? ''));
+  const errors = JSON.parse(readFileSync(path.join(site, 'lib/sql-errors.json'), 'utf8')) as Record<string, Record<string, Record<string, { start: { line: number; column: number }; end: { line: number; column: number }; message: string; source: string }[]>>>;
+  const captured = errorBlock && errors.postgres?.['get_user.sql']?.[errorBlock.hash]?.[0];
+  if (!errorBlock || !captured) throw new Error(`lib/home-examples.ts: no captured error for get_user.sql in ${SETUP}; run \`nub run capture\` in site/.`);
+  const error = { file: 'get_user.sql', sql: lines(errorBlock.node.value, 'sql'), line: captured.start.line - 1, start: captured.start.column, end: captured.end.column, message: captured.message, source: captured.source };
+
+  // Each driver's main.ts, without Twoslash's lines.
+  const usage = collect(parsePage(path.join(site, USAGE)));
+  const drivers = DRIVERS.map(([name, dialect]) => {
+    const block = usage.find((b) => b.name === name && b.dialect === dialect);
+    if (!block) throw new Error(`lib/home-examples.ts: no ${name} tab for ${dialect} in ${USAGE}.`);
+    const code = block.node.value.split('\n').filter((l) => !/^\/\/ (@|---cut---)|^\/\/\/ <reference/.test(l)).join('\n');
+    return { name, dialect, ts: lines(code, 'ts') };
+  });
+
   const data: HomeData = {
     examples,
+    edit,
+    error,
+    drivers,
     // The hero shows the statement without the docs' leading comment, which points at the hovers.
     intro: { ...statement(intro.node.value.replace(/^(?:--[^\n]*\n)+/, ''), pageTables.postgres ?? new Map()), ts: lines(ts, 'ts'), type: lines(`const author: ${formatType(resultType(row, cardinality), 44)}`, 'ts') },
   };
@@ -183,7 +239,7 @@ export function homeExamples(): Plugin {
     async load(id) {
       if (id !== `\0${VIRTUAL}`) return;
       const site = process.cwd();
-      for (const file of [SECTION, INTRO, 'lib/sql-modules.json']) this.addWatchFile(path.join(site, file));
+      for (const file of [SECTION, INTRO, SETUP, USAGE, 'lib/sql-modules.json', 'lib/sql-errors.json']) this.addWatchFile(path.join(site, file));
       return `export default ${JSON.stringify(await buildHomeData(site))};`;
     },
   };

@@ -57,6 +57,9 @@ test("a Postgres statement nested to the bound is read whole, one level past it 
     const past = await engine.analyze(nested(shape, n + 1), "postgres", io);
     assert.deepEqual([past.kind, past.cardinality, past.cardinalityReason], [undefined, "many", "the statement did not parse locally"], `${shape} at ${n + 1}`);
     assert.ok(past.columns.every((c) => c.nullable) && past.diagnostics.length === 0, `${shape} at ${n + 1}`);
+    // The loss of precision fails nothing, since the types are still sound, and the hover says why.
+    assert.equal(at.notes?.length ?? 0, 0, `${shape} at ${n}`);
+    assert.match(past.notes?.join("\n") ?? "", /^This statement nests deeper than the analysis reads/, `${shape} at ${n + 1}`);
   }
   // Far past the bound, and long lists that do not nest at all.
   assert.equal((await engine.analyze(nested("sum", 100_000), "postgres", io)).kind, undefined);
@@ -107,6 +110,7 @@ test("a MySQL statement nested to the bound is analyzed, and one far past it fal
   for (const shape of ["sum", "or", "case", "and_or"]) {
     const past = await engine.analyze(nested(shape, 100_000), "mysql", mysql);
     assert.equal(past.cardinality, "many", `${shape} at 100000`);
+    assert.match(past.notes?.join("\n") ?? "", /^This statement nests deeper than the analysis reads/, `${shape} at 100000`);
   }
   const plain = await engine.analyze("select id as x from users where id = 1", "mysql", mysql);
   assert.equal(plain.columns.length, 1);

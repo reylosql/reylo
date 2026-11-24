@@ -16,6 +16,8 @@ Reylo runs in a Worker on Postgres and MySQL through Hyperdrive, Cloudflare's co
 
 ## Postgres
 
+Connect with the binding's connection string and close the client with `ctx.waitUntil()`:
+
 ```ts tab="pg"
 import { Client } from "pg";
 import getUser from "./get_user.sql";
@@ -47,4 +49,41 @@ export default {
 
 ## MySQL
 
-Hyperdrive refuses prepared statements. So Reylo runs [`mysql2`](/mysql#mysql2) there through `query()`, with each value written into the statement. Reylo runs `mariadb` without prepared statements wherever it runs ([`mariadb`](/mysql#mariadb)).
+Hyperdrive refuses prepared statements. Reylo runs [`mysql2`](/mysql#mysql2) through `query()` with values written into the statement, and runs [`mariadb`](/mysql#mariadb) without prepared statements everywhere:
+
+```ts tab="mysql2"
+import mysql from "mysql2/promise";
+import getUser from "./get_user.sql";
+
+export default {
+  async fetch(request: Request, env: { HYPERDRIVE: Hyperdrive }, ctx: ExecutionContext) {
+    const { host, port, user, password, database } = env.HYPERDRIVE;
+    const conn = await mysql.createConnection({
+      host,
+      port,
+      user,
+      password,
+      database,
+      disableEval: true, // required in Workers
+    });
+    const row = await getUser.run(conn, { id: 1 });
+    ctx.waitUntil(conn.end());
+    return Response.json(row);
+  },
+};
+```
+
+```ts tab="mariadb"
+import mariadb from "mariadb";
+import getUser from "./get_user.sql";
+
+export default {
+  async fetch(request: Request, env: { HYPERDRIVE: Hyperdrive }, ctx: ExecutionContext) {
+    const { host, port, user, password, database } = env.HYPERDRIVE;
+    const conn = await mariadb.createConnection({ host, port, user, password, database });
+    const row = await getUser.run(conn, { id: 1 });
+    ctx.waitUntil(conn.end());
+    return Response.json(row);
+  },
+};
+```

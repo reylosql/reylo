@@ -18,6 +18,14 @@ const ICONS: Record<CompareCell['state'], ReactNode> = {
 };
 const WORDS = { y: 'Yes', p: 'Partly', n: 'No' };
 
+/** A yes only in a tool's paid build: the check in yellow, with a small lock at its foot. */
+const PRO = (
+  <span className="reylo-compare-pro">
+    <svg viewBox="4.4 4.4 11.2 11.2" aria-hidden="true"><path d="M5.6 10.4l2.9 2.9 5.9-6.4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+    <svg className="reylo-compare-lock" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 5.5V4a2 2 0 0 1 4 0v1.5" fill="none" stroke="currentColor" strokeWidth="1.4" /><rect x="2" y="5.25" width="8" height="5.75" rx="1.25" fill="currentColor" /></svg>
+  </span>
+);
+
 const html = (text: string) => ({ __html: text });
 
 /** A query a tool got wrong, in the labelled rows of the docs' inference cards, with what it infers and what the type should be. Its code is highlighted at build time (lib/compare-cards.ts). */
@@ -50,16 +58,16 @@ function Card({ card }: { card: CompareCard }) {
   );
 }
 
-/** A cross or half circle: hovered, or tapped on a phone, the docs' popup shows a query the tool got wrong, or why it has the mark. A migration table's cell no run has measured yet is empty. */
+/** A cross, a half circle or a paid build's check: hovered, or tapped on a phone, the docs' popup shows a query the tool got wrong, or why it has the mark. A migration table's cell no run has measured yet is empty. */
 function Mark({ tool, row, label, cell, set }: { tool: string; row: string; label: string; cell: CompareCell | undefined; set?: CompareSetName }) {
   if (!cell) return null;
-  if (cell.state === 'y') return <span className="reylo-compare-mark" role="img" aria-label={WORDS.y}>{ICONS.y}</span>;
+  if (cell.state === 'y' && !cell.pro) return <span className="reylo-compare-mark" role="img" aria-label={WORDS.y}>{ICONS.y}</span>;
   const card = set === 'migrate' ? undefined : cards[`${tool}:${row}`];
   const { results, name: reylo } = compareSet(set);
   const name = tool === 'reylo' ? reylo : tool === 'postgrestypedsql' ? 'Postgres Typed SQL' : results.tools[tool]?.name ?? tool;
   return (
     <Popup delay={60}>
-      <PopupTrigger className="reylo-compare-mark" aria-label={`${name}, ${label}: ${WORDS[cell.state]}`}>{ICONS[cell.state]}</PopupTrigger>
+      <PopupTrigger className="reylo-compare-mark" aria-label={`${name}, ${label}: ${cell.pro ? 'Yes, in the paid build' : WORDS[cell.state]}`}>{cell.pro ? PRO : ICONS[cell.state]}</PopupTrigger>
       <PopupContent side="top" sideOffset={6} className={card ? 'reylo-compare-pop reylo-compare-pop-card' : 'reylo-compare-pop'}>
         {card ? <Card card={card} /> : <p><Text>{cell.note ?? ''}</Text></p>}
       </PopupContent>

@@ -71,7 +71,7 @@ $ reylo migrate init
     reylo migrate new <name>
 ```
 
-It reads every schema. Where its own SQL can't make your schema exactly, it writes the database's own dump, which on Postgres needs `pg_dump` of your server's version or newer.
+It reads every schema. Where its own SQL can't reproduce your schema exactly, it falls back to the database's dump. On Postgres, that needs `pg_dump` matching your server's version or newer.
 
 It leaves out the history tables of other migration tools, as it leaves out its own:
 
@@ -103,7 +103,7 @@ Writes the next migration, from your change to `schema.sql`.
 - It first checks that your development database ran each migration as it now reads. An edited or deleted one, such as another branch's, is refused until `reylo migrate dev` settles it.
 - With no `schema.sql`, it writes what your development database has that your migrations don't. That's [schemaless mode](/migrate/usage#schemaless-mode).
 - Edit the file freely, and add any data changes.
-- On Postgres, new constraints and indexes never block writes, and a table rewrite needs `--blocking`. Each statement gives up a busy lock after half a second and retries.
+- On Postgres, new constraints and indexes never block writes, and a table rewrite needs `--blocking`. A statement gives up a busy lock after half a second, and its migration runs again from the start.
 - On Postgres, a new enum value the change also uses gets a migration of its own, before its first use. Postgres can't use a value in the transaction that adds it.
 - On MySQL, a change that copies its table while it blocks writes needs `--blocking`. That's most column type changes, a removed enum value and a table partitioned anew.
 - On MySQL, a trigger that changes is dropped and made again in one migration, under `lock tables`. No write to its table runs without it.
@@ -254,9 +254,9 @@ Applying to postgres://db.example.com/app
     reylo migrate dev
 ```
 
-A deploy cut off between migrations picks up where it stopped, once it has checked that the schema hasn't changed since. Where the check fails or can't run, as on MySQL, it's refused until `reylo migrate history push` stores the fingerprint again, which needs a shadow database.
+A deploy cut off between migrations resumes once it confirms the schema hasn't changed. If that check fails or can't run (as on MySQL), run `reylo migrate history push` to store the fingerprint again. That command needs a shadow database.
 
-A migration and the build that needs it go live at different moments. The old build's queries fail on a renamed or dropped column. So rename in steps. To rename `users.email` to `contact`, add the new column and copy its values, then deploy code that reads `contact` and writes both:
+Migrations and app builds go live at different times, so old builds fail on renamed or dropped columns. Rename in two steps. To rename `users.email` to `contact`, add `contact`, copy values, and deploy code that reads `contact` and writes both:
 
 ```sql title="20261110120000_add_contact.sql"
 alter table users add column contact text;
@@ -507,11 +507,9 @@ create table users (
 );
 ```
 
-In a terminal, a spinner shows while it reads, and the SQL is coloured. A pipe or a redirect gets plain SQL.
+In a terminal, a spinner shows while it reads and SQL output is coloured. Piped or redirected output is plain SQL. If verification can't run, or `--schema` selects a subset, it prints the database's dump instead. On Postgres, that requires `pg_dump` matching your server's version or newer.
 
-Where it can't check the schema, or `--schema` names only some of your schemas, it prints the database's own dump instead. On Postgres, the dump needs `pg_dump` of your server's version or newer.
-
-To save it over `schema.sql`, write another file first, so a failed run can't empty it:
+To save it over `schema.sql`, write a temporary file first so a failed run can't empty it:
 
 ```terminal
 $ reylo db introspect > schema.new.sql && mv schema.new.sql reylo/schema.sql
@@ -563,7 +561,7 @@ A migration that would reach past its shadow is refused by every command, `deplo
 - changes a role, a database, a tablespace or a server setting
 - on MySQL, names a database, as in `app.users`
 
-Make roles with your server's setup, outside the migrations. Reylo doesn't check inside a `do` block, but every shadow runs one on its server, your database's own unless `shadow_url` names another.
+Make roles with your server's setup, outside the migrations. Reylo doesn't inspect `do` blocks, so every shadow runs them on your database's server unless `shadow_url` names another.
 
 Where your role can't create a database, point `shadow_url` at a server that can, running the same version:
 

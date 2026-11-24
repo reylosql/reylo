@@ -1,11 +1,11 @@
 ---
 title: Durable Objects
-description: How to use Reylo with a Cloudflare Durable Object's SQLite database. The Vite plugin, the schema the type check reads, synchronous queries, migrations the object runs on itself, tests, and the SQLite functions Cloudflare blocks.
+description: Use Reylo with Cloudflare Durable Objects SQLite. Covers the Vite plugin, local schema setup, synchronous queries, embedded migrations, tests and blocked functions.
 ---
 
 <p className="dk-subheader">Reylo on a Durable Object's database</p>
 
-A Durable Object's database is SQLite, so everything on the [SQLite](/sqlite) page holds for it. D1 is on [Cloudflare D1](/d1).
+A Durable Object's database is SQLite, so everything on the [SQLite](/sqlite) page applies (for shared databases, see [Cloudflare D1](/d1)).
 
 | | |
 | --- | --- |
@@ -147,7 +147,8 @@ How the migrations reach the object:
 - Where `reylo migrate deploy` would refuse your files, `migrate` throws the same refusal and runs nothing. A migration the lock doesn't list yet is one such case.
 - Each object runs the ones it hasn't run when it starts, each in a transaction. It records them in `__reylo_migrations`, so a deploy reaches every object the next time it runs.
 - An object that ran a migration the bundle lacks, or one edited since, throws and runs nothing.
-- A Durable Object keeps foreign keys on during a migration. A migration from `reylo migrate new` keeps every row: it rebuilds the tables that reference a rebuilt table along with it. A rebuild you write by hand drops a table others still reference. The drop then fails and rolls back, or deletes or nulls their rows under `on delete cascade` or `on delete set null`.
+
+Durable Objects keep foreign keys enabled during migrations. Migrations from `reylo migrate new` preserve every row by rebuilding referencing tables alongside any rebuilt table. A hand-written table rebuild that drops a referenced table fails and rolls back, or cascades deletes and nulls under `on delete cascade` / `on delete set null`.
 
 ## Tests
 

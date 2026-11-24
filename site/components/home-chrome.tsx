@@ -15,7 +15,7 @@ import './home-landing.css';
 const LINKS: [label: string, href: string][] = [
   ['Docs', introUrl],
   ['Playground', '/play'],
-  ['Migrate', '/migrate'],
+  ['Migrate', '/#migrate'],
   ['Blog', '/blog'],
 ];
 
@@ -56,8 +56,11 @@ function CopyIcon({ done }: { done: boolean }) {
   );
 }
 
-/** The install command, with "Read the docs", which opens the docs (`docs`, the intro by default) at their top: side by side where the width allows. `centered` centres the two. */
-export function Install({ centered, docs = introUrl }: { centered?: boolean; docs?: string }) {
+/**
+ * The install command, with "Read the docs", which opens the docs (`docs`, the intro by default) at their top: side by side where the width allows. `centered` centres the two.
+ * Given an `agentPrompt`, a quiet "Copy agent prompt" sits on its own line under them, the next step for a reader who sets projects up with a coding agent.
+ */
+export function Install({ centered, docs = introUrl, agentPrompt }: { centered?: boolean; docs?: string; agentPrompt?: string }) {
   const [copied, setCopied] = useState(false);
   const command = INSTALL;
   return (
@@ -88,6 +91,7 @@ export function Install({ centered, docs = introUrl }: { centered?: boolean; doc
           </svg>
         </a>
       </div>
+      {agentPrompt !== undefined && <CopyAgentPromptLink text={agentPrompt} />}
     </div>
   );
 }
@@ -130,12 +134,49 @@ export function Foot() {
         <a href={introUrl}>Docs</a>
         <a href="/inference">Inference</a>
         <a href="/play">Playground</a>
-        <a href="/migrate">Migrate</a>
+        <a href="/#migrate">Migrate</a>
         <a href="/blog">Blog</a>
         <a href={githubUrl}>GitHub</a>
         <a href="https://www.npmjs.com/package/reylo">npm</a>
       </div>
       <span className="ml-license">Released under the MIT License.</span>
     </footer>
+  );
+}
+
+/** Lucide's sparkles, the mark of docs-kit's "Copy agent prompt": the prompt is for a coding agent. */
+function SparklesIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
+      <path d="M20 3v4" />
+      <path d="M22 5h-4" />
+      <path d="M4 17v2" />
+      <path d="M5 18H3" />
+    </svg>
+  );
+}
+
+/** "Copy agent prompt" under the install row, as a link: it copies the setup prompt the docs' agent card holds, and says "Copied" in the same place. */
+function CopyAgentPromptLink({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="ml-agent"
+      onClick={() => {
+        void navigator.clipboard.writeText(text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1600);
+      }}
+    >
+      <SparklesIcon />
+      <span className="ml-agent-label">
+        <span data-shown={!copied || undefined}>Copy agent prompt</span>
+        <span data-shown={copied || undefined} aria-live="polite">
+          Copied
+        </span>
+      </span>
+    </button>
   );
 }
