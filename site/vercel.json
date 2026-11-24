@@ -169,6 +169,36 @@
         "Content-Type": "text/markdown; charset=utf-8",
         "Vary": "Accept"
       }
+    },
+    {
+      "src": "^/blog$",
+      "has": [
+        {
+          "type": "header",
+          "key": "accept",
+          "value": "^(?:(?!(?:^|,)\\s*text/html(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$))).)*(?:^|,)\\s*text/(?:x-)?markdown(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$)).*$"
+        }
+      ],
+      "dest": "/blog.md",
+      "headers": {
+        "Content-Type": "text/markdown; charset=utf-8",
+        "Vary": "Accept"
+      }
+    },
+    {
+      "src": "^/blog/([a-z0-9-]+)$",
+      "has": [
+        {
+          "type": "header",
+          "key": "accept",
+          "value": "^(?:(?!(?:^|,)\\s*text/html(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$))).)*(?:^|,)\\s*text/(?:x-)?markdown(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$)).*$"
+        }
+      ],
+      "dest": "/blog/$1.md",
+      "headers": {
+        "Content-Type": "text/markdown; charset=utf-8",
+        "Vary": "Accept"
+      }
     }
   ],
   "redirects": [
@@ -230,7 +260,7 @@
   ],
   "headers": [
     {
-      "source": "/:page(|docs|typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs|migrate|play)",
+      "source": "/:page(|docs|typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs|migrate|blog|play)",
       "headers": [
         {
           "key": "Vary",
@@ -240,6 +270,15 @@
     },
     {
       "source": "/migrate/:sub(docs|usage|cli|compare)",
+      "headers": [
+        {
+          "key": "Vary",
+          "value": "Accept"
+        }
+      ]
+    },
+    {
+      "source": "/blog/:slug",
       "headers": [
         {
           "key": "Vary",

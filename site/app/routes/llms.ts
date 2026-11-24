@@ -1,3 +1,4 @@
+import { posts } from '@/lib/blog';
 import { apiMarkdown, REYLO_API } from '@/lib/live/api-docs';
 import { markdownPath, pageGroups, siteUrl } from '@/lib/layout.shared';
 import { markdownOf } from '@/lib/markdown';
@@ -57,7 +58,12 @@ export async function loader() {
     const summary = summaryOf(bySlug.get(guide.slug) ?? '');
     indexLines.push(`- [${guide.title}](${siteUrl}${markdownPath(guide.slug)})${summary ? `: ${summary}` : ''}`);
   }
-  indexLines.push(`- [Playground API](${siteUrl}/play/api.md): Analyze a Postgres query over HTTP without a local database.`, '', '---', '');
+  indexLines.push(`- [Playground API](${siteUrl}/play/api.md): Analyze a Postgres query over HTTP without a local database.`, '');
+  indexLines.push('## Blog', '');
+  for (const post of posts) {
+    indexLines.push(`- [${post.title}](${siteUrl}/blog/${post.slug}.md) (${post.date}): ${post.description}`);
+  }
+  indexLines.push('', '---', '');
 
   const text = [indexLines.join('\n'), ...rendered.map(([, md]) => md), api].join('\n');
   return new Response(text, { headers: { 'Content-Type': 'text/markdown; charset=utf-8' } });

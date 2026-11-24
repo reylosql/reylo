@@ -76,3 +76,26 @@ export async function markdownOf(slug: string): Promise<string> {
   const sources = (await Promise.all(files.map((file) => readFile(file, 'utf8')))).map((text) => expandTypeDefs(expandAnchors(expandAsides(expandSteps(expandCompare(expandErrors(expandInferenceCards(rustContent(text)))))))));
   return pageMarkdown(sources, { site: siteUrl, page: docsUrl(slug ? `/${slug}` : '/') });
 }
+
+/** A blog post of content/blog as Markdown, at /blog/<slug>.md, with its date and release link. */
+export async function blogMarkdownOf(slug: string, meta?: { date: string; release?: { tag: string; url: string } }): Promise<string> {
+  const raw = await readFile(path.resolve('content/blog', `${slug}.mdx`), 'utf8');
+  const expanded = expandAnchors(expandAsides(expandSteps(expandCompare(rustContent(raw)))));
+  const rendered = await pageMarkdown([expanded], { site: siteUrl, page: `/blog/${slug}` });
+  if (!meta) return rendered;
+  const byline = `Published ${meta.date}${meta.release ? ` · [${meta.release.tag} on GitHub](${meta.release.url})` : ''}`;
+  return rendered.replace(/^(# [^\n]+\n\n> [^\n]+\n)/, `$1\n${byline}\n`);
+}
+
+/** The blog index as Markdown, at /blog.md, listing each post newest first with its .md URL. */
+export function blogIndexMarkdown(posts: readonly { slug: string; title: string; description: string; date: string }[]): string {
+  const lines = [
+    '# Reylo Blog',
+    '',
+    '> What each release of Reylo changed.',
+    '',
+    ...posts.map((p) => `- [${p.title}](${siteUrl}/blog/${p.slug}.md) (${p.date}): ${p.description}`),
+    '',
+  ];
+  return lines.join('\n');
+}
