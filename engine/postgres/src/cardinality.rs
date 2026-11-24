@@ -280,12 +280,19 @@ pub(crate) use names;
 
 /// The key parts of index `i`, `k` from 0 (`indkey` and `indcollation` count from 0), each with
 /// its `pg_attribute` row `a`: the index's own for an expression part, else the table's column.
+/// The parts are counted off the index's own columns, `n` from 1, so the planner expects a few
+/// rows rather than `generate_series`'s thousand, and `a` is joined on `attrelid` and `attnum`
+/// alone, so it is read through `pg_attribute`'s index: a `CASE` around the whole condition
+/// scans every column of the database once per key part.
 macro_rules! key_parts {
     () => {
-        "FROM pg_catalog.generate_series(0, i.indnkeyatts::pg_catalog.int4 OPERATOR(pg_catalog.-) 1) AS k \
-      JOIN pg_catalog.pg_attribute a ON CASE WHEN i.indkey[k] OPERATOR(pg_catalog.=) 0 \
-        THEN a.attrelid OPERATOR(pg_catalog.=) i.indexrelid AND a.attnum OPERATOR(pg_catalog.=) (k OPERATOR(pg_catalog.+) 1) \
-        ELSE a.attrelid OPERATOR(pg_catalog.=) i.indrelid AND a.attnum OPERATOR(pg_catalog.=) i.indkey[k] AND NOT a.attisdropped END"
+        "FROM (SELECT x.attnum OPERATOR(pg_catalog.-) 1 AS k, x.attnum AS n FROM pg_catalog.pg_attribute x \
+        WHERE x.attrelid OPERATOR(pg_catalog.=) i.indexrelid AND x.attnum OPERATOR(pg_catalog.>) 0 \
+          AND x.attnum OPERATOR(pg_catalog.<=) i.indnkeyatts) AS k \
+      JOIN pg_catalog.pg_attribute a \
+        ON a.attrelid OPERATOR(pg_catalog.=) CASE WHEN i.indkey[k] OPERATOR(pg_catalog.=) 0 THEN i.indexrelid ELSE i.indrelid END \
+        AND a.attnum OPERATOR(pg_catalog.=) CASE WHEN i.indkey[k] OPERATOR(pg_catalog.=) 0 THEN k.n ELSE i.indkey[k] END \
+        AND (i.indkey[k] OPERATOR(pg_catalog.=) 0 OR NOT a.attisdropped)"
     };
 }
 
