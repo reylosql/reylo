@@ -4338,9 +4338,13 @@ impl Alterer for PostgresAlterer {
     }
 
     fn keeps(&self, from: &Object, to: &Object) -> bool {
-        // A foreign key whose columns only lose their stored expressions, which keeps their values.
-        let computes = |l: &str| l.starts_with("-- computes ");
-        from.kind == Some(Kind::Constraint) && to.def.lines().all(|l| from.def.lines().any(|f| f == l)) && from.def.lines().filter(|l| !to.def.lines().any(|t| t == *l)).all(computes)
+        // A foreign key, alike but for stored expressions its columns lose, which keep their values.
+        let parts = |def: &str| -> (String, Vec<String>) {
+            let mut parts = def.split("\n-- computes ").map(String::from);
+            (parts.next().unwrap_or_default(), parts.collect())
+        };
+        let ((a, was), (b, is)) = (parts(&from.def), parts(&to.def));
+        from.kind == Some(Kind::Constraint) && a.starts_with("FOREIGN KEY") && a == b && is.len() < was.len() && is.iter().all(|e| was.contains(e))
     }
 
     fn alter(&self, from: &Object, to: &Object) -> Option<Vec<String>> {
