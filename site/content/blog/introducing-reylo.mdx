@@ -1,10 +1,9 @@
 ---
 title: "Introducing Reylo"
-description: "Reylo infers the types of SQL queries from your database, so TypeScript imports a SQL file fully typed, with no generated code."
-date: 2026-11-23
+description: "Reylo lets you import SQL files directly into TypeScript with full type safety, with every type inferred from your database."
+date: 2026-11-24
+author: Colin McDonnell
 ---
-
-Reylo imports SQL files into TypeScript, fully typed.
 
 <PageSchema>
 
@@ -112,7 +111,7 @@ create table events (
 
 </PageSchema>
 
-Write a query:
+Reylo lets you import SQL files directly into TypeScript with full type safety. If you have a query like this:
 
 ```sql title="get_author.sql"
 -- hover a table to see its declaration
@@ -123,7 +122,7 @@ where u.id = :id::int
 group by u.id
 ```
 
-Import it, and hover over `author` to see its type:
+You can import it straight into TypeScript. Hover over `author` to see the type Reylo infers for it:
 
 ```ts twoslash title="main.ts" dialect="postgres"
 // @noErrors
@@ -134,11 +133,11 @@ const db = postgres(process.env.DATABASE_URL);
 const author = await getAuthor.run(db, { id: 1 });
 ```
 
-There's no codegen step and no generated file. The types come straight from your database. The query runs on the driver you already use, on Postgres, MySQL or SQLite.
+There's no codegen step and no generated file: the types come straight from your database. The query runs on whatever driver you already use, on Postgres, MySQL or SQLite.
 
 ## Why Reylo
 
-There have been three ways to query a database from TypeScript, and each falls short:
+Until now, there have been three ways to query a database from TypeScript, and each of them falls short:
 
 - **ORMs and query builders** — Prisma, Drizzle and Kysely build your SQL from TypeScript. But they're a second language over SQL. Whatever they can't express falls back to a raw query you type by hand.
 - **Raw SQL** — You write the SQL yourself, and declare each query's row type by hand. Nothing checks that type against the database, so it drifts as the schema changes.
@@ -161,7 +160,7 @@ When TypeScript meets a `.sql` import, Reylo sends the query to your live develo
 
 <HowItWorksDiagram />
 
-From those, Reylo infers the types, including some remarkably complex ones:
+From all of that, Reylo infers your types, including some remarkably complex ones. A few examples:
 
 <Tabs items={["Left joins", "Aggregates", "JSON aggregation", "JSON Schema"]}>
 <Tab value="Left joins" id="how-left-joins">
@@ -292,7 +291,7 @@ where id = :id::int
 </Tab>
 </Tabs>
 
-And a typo in your SQL is a type error, with the database's own message:
+And yes, a typo in your SQL is a type error too, with the database's own message:
 
 ```sql tab="get_user.sql" dialect="all" errors
 select id, nmae, email
@@ -302,19 +301,19 @@ where id = :id::int
 
 ## Try it
 
-Edit the query, and its types follow. Postgres runs in this tab through PGlite, and Reylo's engine runs beside it as WebAssembly:
+You can try it right here. Click into the query and start editing, and the types update as you type. Postgres runs in this tab through PGlite, with Reylo's engine beside it as WebAssembly:
 
 <PlayEmbed />
 
 ## Get started
 
-Install Reylo and TypeScript 7.1:
+To use it in your own project, install Reylo along with TypeScript 7.1:
 
 ```sh
 npm install reylo
 npm install -D typescript@next
 ```
 
-Then add the `tsconfig.json` entry above, and Reylo's plugin for your runtime or bundler, as [the setup](/typescript#setup) shows.
+Then you add the `tsconfig.json` entry from above, plus Reylo's plugin for your runtime or bundler. [The setup guide](/typescript#setup) walks through each one.
 
-Reylo also writes your migrations, in plain SQL, with [Reylo Migrate](/blog/reylo-migrate). It's MIT licensed, on [GitHub](https://github.com/reylosql/reylo).
+Reylo can also write your migrations, in plain SQL, with [Reylo Migrate](/blog/reylo-migrate). It's all MIT licensed and on [GitHub](https://github.com/reylosql/reylo).

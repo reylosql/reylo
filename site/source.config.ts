@@ -9,13 +9,13 @@ const mdxOptions = async (environment: Parameters<typeof import('./lib/mdx-optio
 export const docs = defineDocs({ dir: 'content/docs', docs: { mdxOptions } });
 export const sections = defineCollections({ type: 'doc', dir: 'content/sections', mdxOptions });
 
-// The blog's posts, at /blog/<name> (lib/blog.ts): each names its description and its date, and a release's post its tag, whose GitHub release it links. The fields reuse the schema's own string type, so the site needs no schema library of its own.
+// The blog's posts, at /blog/<name> (lib/blog.ts): each names its description and its date, a release's post its tag, whose GitHub release it links, and a post with a byline its author (lib/blog.ts). The fields reuse the schema's own string type, so the site needs no schema library of its own.
 const text = frontmatterSchema.shape.title;
 export const blog = defineCollections({
   type: 'doc',
   dir: 'content/blog',
   mdxOptions,
-  schema: frontmatterSchema.extend({ description: text, date: text.regex(/^\d{4}-\d{2}-\d{2}$/), release: text.optional() }),
+  schema: frontmatterSchema.extend({ description: text, date: text.regex(/^\d{4}-\d{2}-\d{2}$/), release: text.optional(), author: text.optional() }),
 });
 
 export default defineConfig();

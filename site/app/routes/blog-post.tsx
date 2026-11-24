@@ -37,8 +37,8 @@ export default function BlogPost({ loaderData }: Route.ComponentProps) {
 
 /**
  * A post: under the homepage's bar (components/home-chrome.tsx), as the blog's index is, one column
- * in the middle of the window with no page list and no table of contents, its date and a release's
- * GitHub release under the title. The column is the docs' own page element, `#nd-page` with
+ * in the middle of the window with no page list and no table of contents, its byline under the title:
+ * the author's avatar and name where the post names one, its date, and a release's GitHub release. The column is the docs' own page element, `#nd-page` with
  * Fumadocs' title and body, so the docs' components look in a post as they do in the docs; a
  * playground (components/play-embed.tsx) is wider than the column (components/blog-post.css).
  */
@@ -51,15 +51,29 @@ function PostContent({ loaderData }: Pick<Route.ComponentProps, 'loaderData'>) {
       <main className="bp-main">
         <article id="nd-page" className="bp-article">
           <DocsTitle>{post.title}</DocsTitle>
-          <p className="dk-subheader">
-            <time dateTime={post.date}>{post.shown}</time>
-            {post.release && (
-              <>
-                {' · '}
-                <a href={post.release.url}>{post.release.tag} on GitHub</a>
-              </>
+          <div className="bp-byline">
+            {post.author && (
+              <a className="bp-author" href={post.author.url}>
+                <img src={post.author.avatar} alt="" width={36} height={36} />
+              </a>
             )}
-          </p>
+            <div className="bp-byline-text">
+              {post.author && (
+                <a className="bp-author-name" href={post.author.url}>
+                  {post.author.name}
+                </a>
+              )}
+              <span className="bp-byline-meta">
+                <time dateTime={post.date}>{post.shown}</time>
+                {post.release && (
+                  <>
+                    {' · '}
+                    <a href={post.release.url}>{post.release.tag} on GitHub</a>
+                  </>
+                )}
+              </span>
+            </div>
+          </div>
           <DocsBody>
             <PlayDataContext value={loaderData.play}>
               <file.default components={getMDXComponents()} />
