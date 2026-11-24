@@ -10,5 +10,3 @@ create view searchable as select notes.id as rowid, notes.body from notes join m
 create virtual table filtered using fts4(body, content='searchable');
 insert into z_notes_fts (z_notes_fts) values ('rebuild');
 insert into filtered (filtered) values ('rebuild');
-insert into z_notes_fts (z_notes_fts) values ('rebuild');
-insert into filtered (filtered) values ('rebuild');
