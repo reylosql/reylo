@@ -550,10 +550,8 @@ struct Ahead {
     /// Of those, the ones set to `nextval` of a sequence: table, column and the sequence's name.
     fed: BTreeSet<(String, String, String)>,
     indexes: BTreeSet<String>,
-    /// The constraints dropped, by name: a key's index, named as the key is, goes with it, and a
-    /// partitioned table's key takes its partitions' with it, whatever their tables. A constraint
-    /// of that name elsewhere counts too, which asks --blocking where none is needed rather than
-    /// pass over a read with no index.
+    /// The constraints dropped, by name: a key takes its index with it, and a partitioned table's
+    /// key its partitions' too, which the catalog names before the file runs.
     keys: BTreeSet<String>,
     owned: BTreeSet<String>,
 }
@@ -774,7 +772,24 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
         let known = db.rows(&format!("select ({sequence})::regclass is not null as known")).await.ok().and_then(|r| r.first().map(|r| r.flag("known"))).unwrap_or(false);
         was.push(if known { db.rows(&fed(sequence)).await.ok().map(|rows| columns(&rows)) } else { None });
     }
-    let aheads = ahead_of_reads(&m.sql);
+    // The indexes each key dropped ahead of a read takes with it: its own and, under a partitioned
+    // table, those attached beneath it; a key the catalog doesn't hold yet (made in the file) by
+    // its name, as Postgres names a key's index.
+    let mut aheads = ahead_of_reads(&m.sql);
+    for ahead in aheads.iter_mut().filter(|a| !a.keys.is_empty()) {
+        let names = ahead.keys.iter().map(|k| format!("'{}'", k.replace('\'', "''"))).collect::<Vec<_>>().join(", ");
+        let rows = db
+            .rows(&format!(
+                "with recursive k as (select conindid as i, conname from pg_constraint where conname in ({names}) and conindid <> 0 \
+                union select h.inhrelid, k.conname from pg_inherits h join k on h.inhparent = k.i) select relname, conname from k join pg_class c on c.oid = k.i"
+            ))
+            .await
+            .unwrap_or_default();
+        let known: BTreeSet<String> = rows.iter().map(|r| r.text("conname").to_string()).collect();
+        ahead.indexes.extend(rows.iter().map(|r| r.text("relname").to_string()));
+        let unknown: Vec<String> = ahead.keys.iter().filter(|k| !known.contains(*k)).cloned().collect();
+        ahead.indexes.extend(unknown);
+    }
     run(db, m).await?;
     let mut found: Vec<String> = Vec::new();
     for (k, ((_, sequence), was)) in reads.iter().zip(&was).enumerate() {
@@ -783,7 +798,7 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
         let owner = db.rows(&format!("select relname from pg_class where oid = ({sequence})::regclass")).await.ok().and_then(|r| r.first().map(|r| r.text("relname").to_string())).unwrap_or_default();
         // Served where the read runs: by an index there before that the file doesn't drop ahead of
         // it, or one there after that the file makes ahead of it.
-        let dropped = |i: &String| ahead.indexes.contains(i) || ahead.keys.contains(i);
+        let dropped = |i: &String| ahead.indexes.contains(i);
         let served = |then: &[String], after: &[String]| then.iter().any(|i| after.contains(i) || !dropped(i)) || after.iter().any(|i| !then.contains(i) && ahead.indexes.contains(i));
         let mut read: Vec<(String, String)> = Vec::new();
         match was {
