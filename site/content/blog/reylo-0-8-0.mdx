@@ -99,7 +99,7 @@ The returned `note` is a `string`, where it was nullable ([#267](https://github.
 - **Keyed writes:** `update … from` and `delete … using` that pin a key return a row or `null`, as do single-row `insert … select` statements ([#190](https://github.com/reylosql/reylo/pull/190))
 - **Constants:** columns filled with constants infer literal types such as `"user" | "post"` ([#243](https://github.com/reylosql/reylo/pull/243))
 - **Whole rows:** derived tables, subqueries, `with` queries and aliased joins infer field-by-field row types ([#167](https://github.com/reylosql/reylo/pull/167))
-- **Arrays:** nested arrays are typed at every level; `array_remove(tags, null)` and `CHECK` constraints make elements non-null ([#181](https://github.com/reylosql/reylo/pull/181), [#166](https://github.com/reylosql/reylo/pull/166), [#287](https://github.com/reylosql/reylo/pull/287))
+- **Arrays:** nested arrays are typed at every level; `array_remove(tags, null)` and `CHECK` constraints that exclude `NULL` make elements non-null ([#181](https://github.com/reylosql/reylo/pull/181), [#166](https://github.com/reylosql/reylo/pull/166), [#287](https://github.com/reylosql/reylo/pull/287))
 - **Check constraints:** `tags <@ array['a', 'b']` infers `("a" | "b")[]`, and `jsonb_typeof(doc) = 'object'` infers an object ([#190](https://github.com/reylosql/reylo/pull/190), [#171](https://github.com/reylosql/reylo/pull/171))
 - **Triggers:** `BEFORE` triggers that always return `new` (such as an `updated_at` trigger) no longer make writes nullable ([#190](https://github.com/reylosql/reylo/pull/190))
 - **Grouped JSON:** objects pairing an aggregate with a grouped column are typed inside scalar subqueries, and at top level on MySQL ([#230](https://github.com/reylosql/reylo/pull/230))
