@@ -1923,6 +1923,16 @@ async fn rows_failures_on_postgres_say_only_what_they_know(mut p: P) {
     let out = p.output();
     assert!(out.contains("failed on rows that break people_handle") && !out.contains("List the rows"), "{out}");
     std::fs::remove_file(p.dir.join("migrations").join("20261027160001_handle.sql")).unwrap();
+    // The same through a domain over `citext`, whose equality is its base type's.
+    p.file("20261027160001_handle.sql", "create domain handle_text as citext;\nalter table people add column alias handle_text;\n");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("update people set alias = handle").await;
+    p.file("20261027160004_alias.sql", "create unique index concurrently people_alias on people (alias text_ops);\n");
+    p.output();
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    let out = p.output();
+    assert!(out.contains("failed on rows that break people_alias") && !out.contains("List the rows"), "{out}");
+    std::fs::remove_file(p.dir.join("migrations").join("20261027160004_alias.sql")).unwrap();
     // A `varchar` key, which takes `text`'s class and its equality, is listed.
     p.file("20261027160002_code.sql", "alter table people add column code varchar(10);\n");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
@@ -1938,14 +1948,22 @@ async fn rows_failures_on_postgres_say_only_what_they_know(mut p: P) {
     // catalog holds the old one, whose definition isn't the one that failed.
     p.file("20261027170000_tighten.sql", "alter table people add constraint people_handle_short check (length(handle) < 10);\n");
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
-    // Named unquoted in capitals, which Postgres folds.
-    p.file("20261027170001_tighten_more.sql", "alter table people drop constraint PEOPLE_HANDLE_SHORT;\nalter table people add constraint PEOPLE_HANDLE_SHORT check (handle in ('b', 'B'));\n");
-    p.output();
-    assert_eq!(p.migrate().await, 1, "{}", p.peek());
-    let out = p.output();
-    assert_has!(&out, r"failed on rows that break people_handle_short\n[\s\S]*  Fix the rows that break it here, then deploy again:\n");
-    assert!(!out.contains("List the rows"), "{out}");
-    std::fs::remove_file(p.dir.join("migrations").join("20261027170001_tighten_more.sql")).unwrap();
+    // Named unquoted in capitals, which Postgres folds, and with a letter outside ASCII, which it
+    // keeps as written.
+    p.file("20261027170001_etat.sql", "alter table people add constraint État check (length(handle) < 10);\n");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    for (file, name, sql) in [
+        ("20261027170002_tighten_more.sql", "people_handle_short", "alter table people drop constraint PEOPLE_HANDLE_SHORT;\nalter table people add constraint PEOPLE_HANDLE_SHORT check (handle in ('b', 'B'));\n"),
+        ("20261027170002_tighten_etat.sql", "État", "alter table people drop constraint État;\nalter table people add constraint État check (handle in ('b', 'B'));\n"),
+    ] {
+        p.file(file, sql);
+        p.output();
+        assert_eq!(p.migrate().await, 1, "{}", p.peek());
+        let out = p.output();
+        assert_has!(&out, &format!(r"failed on rows that break {name}\n[\s\S]*  Fix the rows that break it here, then deploy again:\n"));
+        assert!(!out.contains("List the rows"), "{out}");
+        std::fs::remove_file(p.dir.join("migrations").join(file)).unwrap();
+    }
 
     // A column named by a reserved word is quoted in the query.
     p.file("20261027180000_order.sql", "alter table people add column \"order\" int;\n");
@@ -1999,6 +2017,20 @@ async fn a_change_split_across_tables_is_said_partway(mut p: P) {
     assert_has!(p.output(), r"  The migration before it, 20261027110000_unique_x\.sql, of the same change is applied\.\n[\s\S]*only development ran 20261027110001_unique_x_2\.sql, change b_x in ");
     assert_eq!(p.status().await, 1);
     assert_has!(p.output(), r"» This database ran part of one change: 20261027110000_unique_x\.sql, and not 20261027110001_unique_x_2\.sql\n");
+
+    // An index a migration of the same name dropped, which a later one made again, isn't said to
+    // be dropped.
+    std::fs::remove_file(p.dir.join("migrations").join("20261027110001_unique_x_2.sql")).unwrap();
+    p.file("20261027120000_cleanup.sql", "drop index a_x;\n");
+    p.file("20261027120001_restore.sql", "create unique index a_x on a (x);\n");
+    p.file("20261027120002_cleanup_3.sql", "create unique index concurrently b_x on b (x);\n");
+    p.output();
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    let out = p.output();
+    assert!(out.contains("failed on rows that break b_x") && !out.contains("dropped"), "{out}");
+    assert_eq!(p.status().await, 1);
+    let out = p.output();
+    assert!(!out.contains("dropped"), "{out}");
 }
 
 /// A changed unique index built under a name of its own before the old one is dropped, and renamed

@@ -2968,12 +2968,14 @@ async fn duplicates_query(db: &mut Db, b: &Breach) -> Option<String> {
     // A key whose operator class isn't its type's own compares by an equality `group by` doesn't
     // use (`text_ops` on a `citext` column or expression), so its duplicates can't be listed. The
     // index's own column has each key's type, an expression's too; a type with no default class
-    // of its own (`varchar`) takes another's, by the same equality.
+    // of its own (`varchar`) takes another's, by the same equality. A domain's key is left out: its
+    // equality is its base type's, which may be one with a class of its own (a domain over `citext`).
     let sql = format!(
         "select i.indrelid::regclass::text as t, pg_get_expr(i.indpred, i.indrelid, true) as pred, coalesce((to_jsonb(i) ->> 'indnullsnotdistinct')::boolean, false) as nnd,
            not exists (select 1 from generate_series(1, i.indnkeyatts) k join pg_opclass o on o.oid = i.indclass[k - 1]
                join pg_attribute ia on ia.attrelid = i.indexrelid and ia.attnum = k
-             where not o.opcdefault or (o.opcintype <> ia.atttypid and exists (select 1 from pg_opclass t where t.opcmethod = o.opcmethod and t.opcdefault and t.opcintype = ia.atttypid))) as own,
+               join pg_type ty on ty.oid = ia.atttypid
+             where not o.opcdefault or ty.typtype = 'd' or (o.opcintype <> ia.atttypid and exists (select 1 from pg_opclass t where t.opcmethod = o.opcmethod and t.opcdefault and t.opcintype = ia.atttypid))) as own,
            (select string_agg(pg_get_indexdef(i.indexrelid, k, true) || coalesce((select ' collate ' || quote_ident(n.nspname) || '.' || quote_ident(co.collname) from pg_collation co join pg_namespace n on n.oid = co.collnamespace
                where co.oid = i.indcollation[k - 1] and co.oid <> coalesce((select a.attcollation from pg_attribute a where a.attrelid = i.indrelid and a.attnum = i.indkey[k - 1] and i.indkey[k - 1] > 0), 100)), ''), chr(31) order by k)
              from generate_series(1, i.indnkeyatts) k) as keys
@@ -3085,7 +3087,8 @@ fn dropped_and_made(sql: &str, d: Dialect) -> (Vec<String>, Vec<String>) {
         let name_after = |k: usize| {
             s.tokens.iter().skip(k).find(|t| !matches!(t.upper().as_str(), "CONCURRENTLY" | "IF" | "NOT" | "EXISTS")).map(|t| match t.kind {
                 crate::sql::TokenKind::Quoted if d == Dialect::Postgres => t.text.trim_matches('"').replace("\"\"", "\""),
-                _ => t.text.trim_matches(['"', '`']).to_lowercase(),
+                // Postgres folds only ASCII letters of an unquoted name.
+                _ => t.text.trim_matches(['"', '`']).to_ascii_lowercase(),
             })
         };
         for k in 0..up.len() {
@@ -3235,7 +3238,7 @@ fn tables_of(sql: &str, d: Dialect) -> Vec<String> {
         while s.tokens.get(k + 1).is_some_and(|t| t.text == ".") && s.tokens.get(k + 2).is_some() {
             k += 2;
         }
-        out.extend(s.tokens.get(k).map(|t| t.text.trim_matches(['"', '`']).to_lowercase()));
+        out.extend(s.tokens.get(k).map(|t| t.text.trim_matches(['"', '`']).to_ascii_lowercase()));
     }
     out
 }
@@ -3245,7 +3248,7 @@ fn tables_of(sql: &str, d: Dialect) -> Vec<String> {
 fn related(a: &str, b: &str, d: Dialect) -> bool {
     let objects = |sql: &str| -> Vec<String> {
         let (dropped, made) = dropped_and_made(sql, d);
-        tables_of(sql, d).into_iter().chain(dropped.iter().chain(&made).map(|n| n.to_lowercase())).collect()
+        tables_of(sql, d).into_iter().chain(dropped.iter().chain(&made).map(|n| n.to_ascii_lowercase())).collect()
     };
     let theirs = objects(b);
     objects(a).iter().any(|o| theirs.contains(o))
@@ -3283,6 +3286,24 @@ async fn unchecked_by(db: &mut Db, m: &Migration) -> Vec<(String, String)> {
     out
 }
 
+/// Of `names`, the constraints and indexes the database doesn't have: what a migration dropped is
+/// said to be gone only where it is, since a later migration may have made it again.
+async fn absent(db: &mut Db, names: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for n in names {
+        let name = crate::db::literal(&n);
+        let sql = match db.dialect() {
+            Dialect::Postgres => format!("select 1 from pg_class where relname = {name} union all select 1 from pg_constraint where conname = {name}"),
+            Dialect::Mysql => format!("select 1 from information_schema.statistics where table_schema = database() and index_name = {name} union all select 1 from information_schema.table_constraints where constraint_schema = database() and constraint_name = {name}"),
+            Dialect::Sqlite => format!("select 1 from sqlite_schema where name = {name}"),
+        };
+        if db.rows(&sql).await.is_ok_and(|rows| rows.is_empty()) {
+            out.push(n);
+        }
+    }
+    out
+}
+
 /// What `status` says of a change `migrate new` wrote as several migrations that this database ran
 /// only part of: which of them ran and which haven't, and on Postgres, what a constraint the first
 /// added unchecked holds until the rest run.
@@ -3303,6 +3324,7 @@ async fn partway_lines(db: &mut Db, ran: &[&HistoryRow], pending: &[&Migration])
             out.push(note(format!("Until it runs, rows written to {table} are held to {name}, and the rows already there aren't")));
         }
         let dropped: Vec<String> = ran.iter().filter(|r| before.contains(&r.name)).flat_map(|r| dropped_by(&r.sql, db.dialect())).collect();
+        let dropped = absent(db, dropped).await;
         if !dropped.is_empty() {
             out.push(note(format!("Until it runs, {} {} dropped and not yet replaced", dropped.join(", "), if dropped.len() == 1 { "is" } else { "are" })));
         }
@@ -3385,7 +3407,7 @@ async fn rows_failure(db: &mut Db, opts: &Options, m: &Migration, f: &Failure, r
             _ => format!("The constraint {} is in place without checking the rows already in {table}: rows written from now on are held to it, and those aren't.", b.name),
         });
     } else if let Some(earlier) = &earlier {
-        let dropped: Vec<String> = texts.iter().flat_map(|sql| dropped_by(sql, d)).collect();
+        let dropped = absent(db, texts.iter().flat_map(|sql| dropped_by(sql, d)).collect()).await;
         let is = if before.len() == 1 { "is" } else { "are" };
         problem = problem.note(match dropped.as_slice() {
             [] => format!("{earlier} of the same change {is} applied."),
