@@ -274,6 +274,33 @@ export type Inputs = Readonly<Record<string, { readonly type: EngineType; readon
 
 export type AnyClient = Record<string, any> & ((...args: any[]) => any);
 
+/** Where the client `effect` from `reylo/effect` passes to `.run()` for a SQLite statement keeps the Effect SQL client it reads through (src/effect.ts). */
+export const EFFECT_SQL: unique symbol = Symbol("reylo.effectSql");
+
+/**
+ * A statement's run on an Effect SQL client (src/effect.ts), each rejecting with the `SqlError`
+ * Effect's client raised. On SQLite, `driver` is the client's own name for its driver
+ * (`sqlite-node`, `d1`, …), `exact` whether it reads every INTEGER as a BigInt, `values` the rows by
+ * position and `objects` by the driver's column names. On Postgres, `text` runs the statement with
+ * every column in the text format, each value the server's text, and `key` is the client, under
+ * which Reylo keeps what it learned of the database's own types.
+ */
+export type EffectSql = {
+  readonly [EFFECT_SQL]:
+    | {
+        readonly dialect: "sqlite";
+        readonly driver: string;
+        readonly exact: boolean;
+        values(text: string, values: unknown[]): Promise<unknown[][]>;
+        objects(text: string, values: unknown[]): Promise<unknown[]>;
+      }
+    | {
+        readonly dialect: "postgres";
+        readonly key: object;
+        text(text: string, values: (string | null)[]): Promise<{ readonly fields: readonly { readonly name: string; readonly dataTypeId: number }[]; readonly rows: readonly (readonly (string | null)[])[] }>;
+      };
+};
+
 /**
  * The parameters: an object keyed by name, or by number for positional placeholders (`$1` and
  * `?` give `{ 1: ..., 2: ... }`, and `params` is `["1", "2"]`). An array is refused, since
@@ -292,6 +319,8 @@ export function execute<D extends Dialect>(
   params: ParamsInput = {},
 ): unknown[] | Promise<unknown[]> {
   const c = underneath(client as AnyClient);
+  // Effect SQL's client has an unsafe() whose statement is an Effect, which no await runs.
+  if (c != null && (typeof c === "object" || typeof c === "function") && "~effect/sql/SqlClient" in c) throw new TypeError(`reylo cannot run a statement on an Effect SQL client with .run(), which takes a driver's own client: inside an Effect, run the query with effect(query, params) from reylo/effect.`);
   if (isKnex(c)) return onKnexConnection(c, query.dialect, (connection) => execute(connection as ClientFor<D>, query, params));
   const runSync = query.runtime.runSync;
   if (runSync && (isSyncSqlite(c) || isDurableObjectSql(c))) return withCodecs(query, executeSyncSqlite(c, query, params, runSync));

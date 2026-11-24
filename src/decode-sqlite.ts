@@ -37,7 +37,7 @@
 //   only be one; a BIGINT's number within 2^53, or libSQL's BigInt or digits, is its BigInt.
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, coerce, columnKind, DecodeError, exactInteger, ParameterError, refuseTruth, truth, type Columns, type Kind } from "./values.ts";
-import { isDurableObjectSql, isSqlJs, isSqliteWasm, isTurso, type AnyClient as Client, type Bound, type QueryModule, type Runtime } from "./execute.ts";
+import { EFFECT_SQL, isDurableObjectSql, isSqlJs, isSqliteWasm, isTurso, type AnyClient as Client, type Bound, type EffectSql, type QueryModule, type Runtime } from "./execute.ts";
 import { readSqliteError } from "./query-error.ts";
 import type { EngineType } from "./engine-type.ts";
 
@@ -377,9 +377,23 @@ function numberOrDigits(v: unknown, type: EngineType | undefined, driver: "sqlit
 
 /** A SQLite statement's rows on each SQLite driver's client that answers through a promise, each value given its kind, or undefined on any other client. */
 async function runSqlite(c: Client, query: QueryModule<"sqlite">, { text, values, names }: Bound): Promise<unknown[] | undefined> {
-  if (isTurso(c)) tursoValues(names, values);
   const type = (i: number) => query.inputs?.[names[i]!]?.type;
   const columns = query.columns;
+  const effect = (c as Partial<EffectSql>)[EFFECT_SQL];
+  if (effect?.dialect === "sqlite") {
+    // D1 and a Durable Object refuse a BigInt, and SQLite Wasm wraps a whole number past 2^63, through Effect as on their own clients.
+    const driver = effect.driver;
+    const bound = driver === "d1" || driver === "sqlite-do" ? values.map((v, i) => numberOrDigits(v, type(i), driver === "d1" ? "d1" : "durable-object")) : driver === "sqlite-wasm" ? sqliteWasmValues(names, values) : values;
+    const options = { exact: effect.exact, d1: driver === "d1" };
+    // By position under the module's names, so that two columns of one name keep both values; a
+    // result of another width than the module declares, or a query without its columns, by the
+    // driver's names.
+    if (!columns?.length) return normalize(await effect.objects(text, bound), columns, options);
+    const rows = await effect.values(text, bound);
+    if (rows.length && rows[0]!.length !== columns.length) throw new DecodeError(`The statement returned ${rows[0]!.length} columns where the query declares ${columns.length}: its tables changed after the query was built. Build it again.`);
+    return normalize(rows.map(rowOf(columns.map(([name]) => name))), columns, options);
+  }
+  if (isTurso(c)) tursoValues(names, values);
   if (typeof c.unsafe === "function") return normalize(await c.unsafe(text, values), columns);
   if (typeof c.execute === "function") {
     const result = await c.execute({ sql: text, args: values });

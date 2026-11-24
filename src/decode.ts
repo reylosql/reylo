@@ -27,8 +27,8 @@
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
 import { civilFromDays, coerce, DecodeError, elementKind, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
-import { lastOfEach, rowOf, type RowBuilder } from "./row.ts";
-import { arrayLiteral, asByteaHex, isJsonValue, jsonText, jsonValue, postgresText, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
+import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, jsonText, jsonValue, postgresText, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
 
 type AnyClient = Record<string, any>;
@@ -263,6 +263,30 @@ async function pgFamily(key: object, run: (types: object) => Promise<PgResult>, 
     }
   }
   return rows;
+}
+
+/**
+ * A statement on Effect SQL's Postgres client, whose `queryText` hands over every value as the
+ * server's text, by position: each decoded by Reylo's table, as on pg, under the module's names
+ * where the result is still its columns (`namesInResult`), else under the result's.
+ */
+async function effectPostgres(effect: Extract<EffectSql[typeof EFFECT_SQL], { dialect: "postgres" }>, text: string, values: (string | null)[], columns: Columns | undefined): Promise<unknown[]> {
+  const load: Load = async (sql) => (await effect.text(sql, [])).rows as (string | null)[][];
+  return pgFamily(
+    effect.key,
+    async (types) => {
+      const result = await effect.text(text, values);
+      const names = result.fields.map((f) => f.name);
+      const build = rowOf(columns?.length ? namesInResult(columns.map(([name]) => name), names) : names);
+      const decoders = result.fields.map((f) => (types as ReturnType<typeof pgTypes>["table"]).getTypeParser(f.dataTypeId));
+      return {
+        rows: result.rows.map((row) => build(row.map((v, i) => (v === null ? null : decoders[i]!(v))))),
+        fields: result.fields.map((f) => ({ name: f.name, dataTypeID: f.dataTypeId })),
+      };
+    },
+    columns,
+    load,
+  );
 }
 
 /** A decoder table that keeps every value its text: the catalog's rows, whatever the app registered. */
@@ -954,6 +978,11 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
   // parameter's type and sends an object as its String() ("invalid input syntax for type json"),
   // so it gets the JSON text, which the server reads as the parameter's type.
   const json = () => bound.map((v, i) => (isJsonParam(v, i) ? jsonText(v) : v));
+  // Effect SQL's client (src/effect.ts) binds a string as an untyped text parameter, which the
+  // server reads as the parameter's type, and a number or a Date by its JavaScript type, so every
+  // value goes as the text Postgres reads.
+  const effect = (c as Partial<EffectSql>)[EFFECT_SQL];
+  if (effect?.dialect === "postgres") return await effectPostgres(effect, text, bound.map((v, i) => postgresText(query, names[i]!, v)), query.columns);
   // Slonik before every other query(): its query() takes only its sql tag's queries.
   if (isSlonik(c)) return await slonik(c, text, marks, json().map(slonikParam), query.columns);
   // Drizzle's driver writes an array as its literal and binds a Uint8Array as bytea, as pg does.
