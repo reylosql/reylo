@@ -2263,7 +2263,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         .rows(
             "select co.conrelid, format('%s', d.refclassid::regclass) as rcls, d.refobjid, d.refobjsubid
             from pg_constraint co join pg_depend d on d.classid = 'pg_constraint'::regclass and d.objid = co.oid and d.deptype = 'n'
-            where co.contype = 'c' and co.coninhcount > 0 and d.refclassid <> 'pg_class'::regclass and d.refobjid >= 16384",
+            where co.contype = 'c' and co.coninhcount > 0 and not (d.refclassid = 'pg_class'::regclass and d.refobjid = co.conrelid) and d.refobjid >= 16384",
         )
         .await?
     {
