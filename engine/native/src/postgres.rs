@@ -25,12 +25,17 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// left open in another client, a `vacuum full`) ends the analysis with a message rather than
 /// stalling the type check until its transaction ends. Postgres's own default waits forever. A
 /// shorter `lock_timeout` the session already has, from the URL's `options`, the role or the
-/// database, is kept. With it, a `client_connection_check_interval` (Postgres 14 and later), unless
-/// the session has one: a session retired at a lock timeout ([`Driven::retire`]) may still have a
-/// describe waiting on the server behind the same lock, and a backend that waits on a lock notices
-/// its client gone only by that check, so without it the session would keep its server slot until
-/// that wait ran out too.
-const LOCK_WAIT: &str = "select pg_catalog.set_config('lock_timeout', '10s', false) from pg_catalog.pg_settings where name OPERATOR(pg_catalog.=) 'lock_timeout' and (setting::pg_catalog.int8 OPERATOR(pg_catalog.=) 0 or setting::pg_catalog.int8 OPERATOR(pg_catalog.>) 10000); select pg_catalog.set_config('client_connection_check_interval', '100ms', false) from pg_catalog.pg_settings where name OPERATOR(pg_catalog.=) 'client_connection_check_interval' and setting::pg_catalog.int8 OPERATOR(pg_catalog.=) 0";
+/// database, is kept.
+const LOCK_WAIT: &str = "select pg_catalog.set_config('lock_timeout', '10s', false) from pg_catalog.pg_settings where name OPERATOR(pg_catalog.=) 'lock_timeout' and (setting::pg_catalog.int8 OPERATOR(pg_catalog.=) 0 or setting::pg_catalog.int8 OPERATOR(pg_catalog.>) 10000)";
+
+/// What every analysis connection runs after [`LOCK_WAIT`], on its own, since a server may refuse it
+/// and a refusal would undo a statement sent with it: a `client_connection_check_interval` (Postgres
+/// 14 and later), unless the session has one. A session retired at a lock timeout
+/// ([`Driven::retire`]) may still have a describe waiting on the server behind the same lock, and a
+/// backend that waits on a lock notices its client gone only by that check, so without it the
+/// session keeps its server slot until that wait runs out too. A server on a platform it cannot
+/// check on (Windows) refuses any value but 0, and is analyzed without it.
+const DISCONNECT_CHECK: &str = "select pg_catalog.set_config('client_connection_check_interval', '100ms', false) from pg_catalog.pg_settings where name OPERATOR(pg_catalog.=) 'client_connection_check_interval' and setting::pg_catalog.int8 OPERATOR(pg_catalog.=) 0";
 
 /// The URL parameters tokio-postgres reads itself. libpq's TLS settings are read here (`sslmode`,
 /// `sslrootcert`, `sslcert`, `sslkey`, `sslpassword`), and `ssl`, which node-postgres and
@@ -97,6 +102,7 @@ impl Connection {
         if let Some(setup) = &self.setup {
             client.batch_execute(setup).await.map_err(|e| json!({ "status": "unreachable", "message": e.to_string() }))?;
         }
+        let _ = client.batch_execute(DISCONNECT_CHECK).await;
         (self.client, self.date_style, self.prepared) = (Driven { client, driver }, date_style, Prepared::default());
         Ok(())
     }
@@ -392,7 +398,9 @@ impl Program for Postgres {
 /// that refuses it, one that speaks Postgres's protocol without its catalog, is analyzed as before,
 /// under its own `lock_timeout`.
 pub async fn bound_lock_wait(client: &Client) -> bool {
-    client.batch_execute(LOCK_WAIT).await.is_ok()
+    let bounded = client.batch_execute(LOCK_WAIT).await.is_ok();
+    let _ = client.batch_execute(DISCONNECT_CHECK).await;
+    bounded
 }
 
 /// [`LOCK_WAIT`] run on a new connection, and kept as what a connection that replaces it runs, where

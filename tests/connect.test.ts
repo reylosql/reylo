@@ -214,8 +214,9 @@ test("Postgres: an analysis waits on another session's lock for at most 10 s, or
     assert.equal(await setting(url), "10s");
     assert.equal(await setting(`${url}?options=-c%20lock_timeout%3D1min`), "10s");
     assert.equal(await setting(`${url}?options=-c%20lock_timeout%3D1s`), "1s");
-    // A backend waiting on a lock notices its client gone by this check alone.
-    assert.equal(await setting(url, "client_connection_check_interval"), "100ms");
+    // A backend waiting on a lock notices its client gone by this check alone, which a server on a platform it cannot check on refuses; the bound on the wait holds either way.
+    const checks = await sql.begin((tx: any) => tx.unsafe("set local client_connection_check_interval = '100ms'")).then(() => true, () => false);
+    assert.equal(await setting(url, "client_connection_check_interval"), checks ? "100ms" : "0");
     const locked = (err: Error) => !(err instanceof Unreachable) && err.message === "A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_timeout. Run it again once the lock is released: pg_locks lists the session that holds it";
     // An alter table left open in another session holds the table's lock until its transaction ends.
     await sql.begin(async (tx: any) => {
@@ -237,8 +238,13 @@ test("Postgres: an analysis waits on another session's lock for at most 10 s, or
   }
 });
 
-test("Postgres: a session a lock timeout gives up on is closed, so a role allowed one connection analyzes the next statement while the lock is still held", { skip: pgLive }, async () => {
+test("Postgres: a session a lock timeout gives up on is closed, so a role allowed one connection analyzes the next statement while the lock is still held", { skip: pgLive }, async (t) => {
   const { url, sql, drop } = await postgresDatabase("reylo_lock_one", "create table users (id bigint primary key, name text not null); create table orders (id bigint primary key)");
+  if (!(await sql.begin((tx: any) => tx.unsafe("set local client_connection_check_interval = '100ms'")).then(() => true, () => false))) {
+    await drop();
+    t.skip("this server cannot notice a client gone while a statement waits on a lock, as Postgres on Windows cannot");
+    return;
+  }
   const role = `reylo_lock_one_${process.pid}`;
   const sessions = async () => ((await sql.unsafe(`select pid from pg_catalog.pg_stat_activity where usename = '${role}'`)) as unknown[]).length;
   await sql.unsafe(`drop role if exists ${role}`);
