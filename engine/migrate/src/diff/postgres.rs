@@ -2751,12 +2751,18 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
             // where the target doesn't keep it under the name it has: an index on the table, or a
             // sequence the same column owns or takes its default from. A name the target gives
             // something else is let go.
-            let column = o.goes_with.as_ref().map(|c| c.replacen(&format!("column {old_rel}."), &format!("column {new_rel}."), 1));
+            // The table's columns that own the sequence or take values from it, under the new name.
+            let users: Vec<String> = current
+                .objects
+                .values()
+                .filter(|c| c.kind == Some(Kind::Column) && c.owner.as_deref() == Some(old_table.as_str()) && (c.deps.contains(&o.id) || o.goes_with.as_deref() == Some(c.id.as_str())))
+                .map(|c| c.id.replacen(&format!("column {old_rel}."), &format!("column {new_rel}."), 1))
+                .collect();
             let ours = |t: &Object| {
                 t.kind == o.kind
                     && match o.kind {
                         Some(Kind::Index) => t.owner.as_deref() == Some(new_table.as_str()),
-                        Some(Kind::Sequence) => t.goes_with.is_some() && t.goes_with == column || column.as_ref().and_then(|c| target.objects.get(c)).is_some_and(|c| c.deps.contains(&t.id)),
+                        Some(Kind::Sequence) => users.iter().any(|u| t.goes_with.as_deref() == Some(u.as_str()) || target.objects.get(u).is_some_and(|c| c.deps.contains(&t.id))),
                         _ => true,
                     }
             };

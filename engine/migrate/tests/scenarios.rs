@@ -3971,6 +3971,7 @@ macro_rules! on {
 on!(
     Postgres,
     a_table_renamed_to_a_name_postgres_quotes_or_shortens_keeps_its_constraints,
+    a_table_renamed_keeps_the_sequences_its_columns_use,
     a_suggested_command_says_blocking_where_its_migration_needs_it,
     a_column_renamed_with_its_declared_not_null_renames_it_once,
     a_suggested_blocking_names_the_rewrite_it_accepts,
@@ -4621,10 +4622,14 @@ mod adversarial {
         assert_eq!(p.rows("select id from plain order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
         p.output();
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
-        p.output();
+    }
+
+    /// A table renamed with the sequences its columns use, whatever names the target gives others:
+    /// each is renamed with its table, keeping its count.
+    pub async fn a_table_renamed_keeps_the_sequences_its_columns_use(mut p: P) {
         // A serial's sequence, whose old name the target gives a sequence of its own: the serial's is
         // renamed with its table, keeping its count, and the other made.
-        let rest = format!("{rest} create table dest (x integer); create index {kept} on dest (x); create table holder (x integer); create index dest_x_idx on holder (x); create table plain (id integer generated always as identity, note text);");
+        let rest = String::new();
         p.file("20991231000002_t.sql", "create table source (id serial primary key, note text);");
         p.schema(&format!("{rest} create table source (id serial primary key, note text);"));
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
@@ -4673,6 +4678,22 @@ mod adversarial {
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.exec("insert into first_id_seq_more (note) values ('b')").await;
         assert_eq!(p.rows("select id from first_id_seq_more order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+        p.output();
+        // A sequence another column of the table takes values from, which it still does after.
+        let rest = format!("{rest} create table first_id_seq_more (id serial primary key, note text); create sequence first_id_seq; create table later (id integer primary key, note text); create sequence later_id_seq;");
+        p.file("20991231000008_t.sql", "create table counted (id serial primary key, ticket integer unique default nextval('counted_id_seq'));");
+        p.schema(&format!("{rest} create table counted (id serial primary key, ticket integer unique default nextval('counted_id_seq'));"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into counted (id) values (100)").await;
+        p.output();
+        p.schema(&format!("{rest} create sequence tallied_id_seq as integer; create table tallied (id integer primary key, ticket integer unique default nextval('tallied_id_seq'));"));
+        let choices = reylo_migrate::Choices { rename: vec![("counted".into(), "tallied".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tallied", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into tallied (id) values (101)").await;
+        assert_eq!(p.rows("select ticket from tallied order by id").await.iter().map(|r| r.text("ticket").to_string()).collect::<Vec<_>>(), ["1", "2"]);
     }
 
     /// A refusal's suggested command carries --blocking where the migration it writes rewrites a
