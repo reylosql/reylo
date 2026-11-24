@@ -1178,6 +1178,12 @@ pub(crate) const API_SETTINGS: [&[(&str, &[&str])]; 2] = [&[("tables", &["DELETE
 /// grants now (`current`), all but those a project's SQL changes (`changed`), as most of the rest
 /// grant or don't; on where it changes them all, as every new Supabase database once started.
 pub(crate) fn api_settings(current: &[ApiPrivilege], changed: &[ApiPrivilege]) -> [bool; 2] {
+    api_settings_shown(current, changed).map(|shown| shown.unwrap_or(true))
+}
+
+/// As [`api_settings`], but none for a setting all of whose privileges `changed` holds, which the
+/// privileges left say nothing of.
+pub(crate) fn api_settings_shown(current: &[ApiPrivilege], changed: &[ApiPrivilege]) -> [Option<bool>; 2] {
     API_SETTINGS.map(|setting| {
         let (mut on, mut off) = (0, 0);
         for (objects, privileges) in setting {
@@ -1195,7 +1201,7 @@ pub(crate) fn api_settings(current: &[ApiPrivilege], changed: &[ApiPrivilege]) -
                 }
             }
         }
-        on >= off
+        (on + off > 0).then_some(on >= off)
     })
 }
 

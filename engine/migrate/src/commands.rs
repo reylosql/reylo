@@ -416,7 +416,7 @@ async fn ensure_history(db: &mut Db) -> Result<(), Error> {
             }
             // On Supabase, the settings the database began under, which its shadows begin under.
             if let Some(on) = api_began(db).await? {
-                db.exec(&format!("comment on table {HISTORY_TABLE} is {}", crate::db::literal(&crate::db::api_settings_note(on)))).await?;
+                note_api_began(db, on).await?;
             }
             db.exec("commit").await
         }
@@ -3026,6 +3026,61 @@ async fn api_began(db: &mut Db) -> Result<Option<[bool; 2]>, Error> {
     Ok(Some(crate::db::api_settings(&current, &changed)))
 }
 
+/// The settings a Supabase database that `history push` records `files` on may have begun under:
+/// the one its history table notes, else each its privileges show, leaving out every one the files
+/// change, which may have run before Reylo recorded any; both, for a setting whose privileges they
+/// change all of. None off Supabase.
+async fn api_began_adopting(db: &mut Db, files: &[Migration]) -> Result<Vec<[bool; 2]>, Error> {
+    let Some(noted) = api_began(db).await? else { return Ok(vec![]) };
+    if has_history(db).await? && db.rows(&format!("select obj_description(to_regclass('{HISTORY_TABLE}'), 'pg_class') as note")).await?.first().and_then(|r| r.get("note")).and_then(crate::db::api_settings_in_note).is_some() {
+        return Ok(vec![noted]);
+    }
+    let changed: Vec<crate::db::ApiPrivilege> = files.iter().map(|f| f.sql.as_str()).chain(read_history(db).await?.iter().filter(|r| r.applied).map(|r| r.sql.as_str()).collect::<Vec<_>>()).flat_map(api_privileges_in).collect();
+    let current = crate::db::api_privileges(&crate::db::default_privileges(db).await?);
+    let shown = crate::db::api_settings_shown(&current, &changed);
+    let choices = |s: Option<bool>| s.map_or(vec![true, false], |s| vec![s]);
+    Ok(choices(shown[0]).into_iter().flat_map(|tables| choices(shown[1]).into_iter().map(move |functions| [tables, functions])).collect())
+}
+
+/// Of `candidates` ([`api_began_adopting`]), the first under which a replay of `order` reaches
+/// `live` at any point, which is how the database began; else the first.
+#[cfg(feature = "cli")]
+async fn api_began_replaying(server: &mut Server, opts: &Options, order: &[Migration], live: &[String], candidates: &[[bool; 2]]) -> Result<Option<[bool; 2]>, Error> {
+    let texts: Vec<&str> = order.iter().map(|f| f.sql.as_str()).collect();
+    for on in candidates {
+        server.began_with(*on);
+        let mut shadows = Shadows::new(server, &opts.url, &opts.root, &opts.cache, &texts).await;
+        let reached = async {
+            let lane = shadows.lane();
+            if shadows.open(lane).await?.is_err() {
+                return Ok::<_, Error>(false);
+            }
+            shadows.taint(lane);
+            for k in 0..=order.len() {
+                let now = crate::catalog::without_comments(&catalog(shadows.db(lane)).await?);
+                if crate::catalog::without_extra_children(live, &now) == now {
+                    return Ok(true);
+                }
+                if k == order.len() || run(shadows.db(lane), &order[k]).await.is_err() {
+                    return Ok(false);
+                }
+            }
+            Ok(false)
+        }
+        .await;
+        shadows.finish().await;
+        if reached? {
+            return Ok(Some(*on));
+        }
+    }
+    Ok(candidates.first().copied())
+}
+
+/// Notes on the history table the settings a Supabase database began under ([`crate::db::api_settings_note`]).
+async fn note_api_began(db: &mut Db, on: [bool; 2]) -> Result<(), Error> {
+    db.exec(&format!("comment on table {HISTORY_TABLE} is {}", crate::db::literal(&crate::db::api_settings_note(on)))).await
+}
+
 /// The default privileges in `public` a text grants or revokes Supabase's Data API roles, of those
 /// a project's settings decide ([`crate::db::API_SETTINGS`]).
 fn api_privileges_in(text: &str) -> Vec<crate::db::ApiPrivilege> {
@@ -4383,6 +4438,14 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     let l = read_lock(opts).unwrap_or_default();
     let order: Vec<Migration> = if lock_free(opts) { files.clone() } else { l.entries.iter().filter_map(|e| files.iter().find(|f| f.name == e.name).cloned()).collect() };
     let live = crate::catalog::without_comments(&catalog(db).await?);
+    // On Supabase, the settings the database began under, which the migrations it ran may have
+    // changed before any was recorded: the one a replay reaches it from, where its privileges can't
+    // tell.
+    let candidates = api_began_adopting(db, &order).await?;
+    let began = if candidates.len() > 1 { api_began_replaying(server, opts, &order, &live, &candidates).await? } else { candidates.first().copied() };
+    if let Some(on) = began {
+        server.began_with(on);
+    }
     let texts: Vec<&str> = order.iter().map(|f| f.sql.as_str()).chain(schema_sql.as_deref()).collect();
     let mut shadows = Shadows::new(server, &opts.url, &opts.root, &opts.cache, &texts).await;
     // Everything agrees but the history it writes: the migrations reach schema.sql.
@@ -4587,6 +4650,9 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     let recorded = &order[..n];
     let before = before_rows;
     ensure_history(db).await?;
+    if let Some(on) = began {
+        note_api_began(db, on).await?;
+    }
     // The schema it records, which running nothing leaves as it is, on the last row.
     let lines = catalog(db).await?;
     let value = fingerprint_of(db, &lines).await?;

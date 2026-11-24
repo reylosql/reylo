@@ -4062,6 +4062,7 @@ on!(
     a_project_begun_where_new_tables_are_hidden_runs_where_they_are_exposed,
     a_later_change_to_supabases_default_grants_leaves_earlier_tables_alone,
     a_pending_change_to_supabases_default_grants_changes_nothing_yet,
+    a_supabase_database_adopted_after_a_change_to_its_default_grants_keeps_its_tables,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
     init_reads_an_in_list_on_a_varchar_column_as_it_reads_back,
@@ -7277,6 +7278,30 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(holds(&p, "posts", "anon", "SELECT").await, "0");
         assert_eq!(holds(&p, "notes", "anon", "SELECT").await, "1");
+    }
+
+    /// A Supabase database that ran its migrations before Reylo recorded them, one of which changed
+    /// what Supabase grants the Data API's roles by default after a table was made: history push
+    /// records them from how the database began, which the privileges they leave alone show, or,
+    /// where they change all of them, the replay that reaches the database; and the checks after
+    /// find the table as it is.
+    pub async fn a_supabase_database_adopted_after_a_change_to_its_default_grants_keeps_its_tables(p: P) {
+        let tables = "alter default privileges in schema public grant select, insert, update, delete on tables to anon, authenticated, service_role;\n";
+        let sequences = "alter default privileges in schema public grant usage, select on sequences to anon, authenticated, service_role;\n";
+        let q = P::new(p.d).await.unwrap();
+        for (mut db, exposing) in [(p, tables.to_string()), (q, format!("{tables}\n{sequences}"))] {
+            as_supabase_makes_it(&db, false).await;
+            let posts = "create table posts (id int primary key);\n";
+            db.file("20261124000000_posts.sql", posts);
+            db.file("20261124000001_expose_new_tables.sql", &exposing);
+            db.schema(&format!("{posts}\n{exposing}"));
+            db.exec(posts).await;
+            db.exec(&exposing).await;
+            assert_eq!(db.history_push().await, 0, "{}", db.peek());
+            assert_eq!(db.history().await.len(), 2);
+            assert_eq!(db.dry_run().await, 0, "{}", db.peek());
+            assert_eq!(holds(&db, "posts", "anon", "SELECT").await, "0");
+        }
     }
 
     /// A Supabase database whose one change is to what its Data API's roles are granted by default
