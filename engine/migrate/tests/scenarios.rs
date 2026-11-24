@@ -7059,19 +7059,25 @@ create trigger kids_note after insert on kids begin update parents set name = na
     /// A varchar column's `in (…)` renders as a cast of the whole array, which Postgres reads back as
     /// a cast of each element: a database made from that rendering is still the same schema, so init
     /// starts the project, with such a list in a check, a partial index's predicate and a policy,
-    /// and a later migration leaves them alone.
+    /// and a later migration leaves them alone. A comment that holds such text is compared as
+    /// written.
     pub async fn init_reads_an_in_list_on_a_varchar_column_as_it_reads_back(mut p: P) {
         p.exec("create table items (id int primary key, status varchar(10) not null check (status in ('open', 'closed')))").await;
         p.exec("create index open_items on items (id) where status not in ('closed', 'gone')").await;
         p.exec("alter table items enable row level security").await;
         p.exec("create policy open_only on items using (status in ('open', 'new')) with check (status in ('open', 'closed'))").await;
+        p.exec("comment on table items is 'Example: \"((a AND b) AND c)\"'").await;
         assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
         assert_eq!(p.status().await, 0, "{}", p.peek());
-        p.schema(&format!("{}\ncreate table notes (id int primary key);\n", std::fs::read_to_string(p.dir.join("schema.sql")).unwrap()));
+        // A comment's text is compared as written, and a change to it is a migration.
+        let schema = std::fs::read_to_string(p.dir.join("schema.sql")).unwrap();
+        assert!(schema.contains("((a AND b) AND c)"), "{schema}");
+        p.schema(&format!("{}\ncreate table notes (id int primary key);\n", schema.replace("((a AND b) AND c)", "(a AND b AND c)")));
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "notes", &Default::default(), log).await).await, 0, "{}", p.peek());
         let written = p.files().into_iter().find(|f| f.ends_with("_notes.sql")).unwrap();
         let sql = std::fs::read_to_string(p.dir.join("migrations").join(&written)).unwrap();
-        assert!(!sql.contains("items"), "the migration remakes nothing of items:\n{sql}");
+        assert!(sql.contains("(a AND b AND c)"), "the comment's change is in the migration:\n{sql}");
+        assert!(!sql.contains("check") && !sql.contains("index") && !sql.contains("policy"), "the migration remakes nothing of items:\n{sql}");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_eq!(p.status().await, 0, "{}", p.peek());
     }

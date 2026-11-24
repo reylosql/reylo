@@ -229,7 +229,8 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
     // Every rendering as it reads back, as the catalog compares them: a database made from another's
     // rendering then reads as the same.
     result.map(|mut s| {
-        for o in s.objects.values_mut() {
+        // A comment's text is no SQL.
+        for o in s.objects.values_mut().filter(|o| o.kind != Some(Kind::Comment)) {
             o.def = crate::catalog::pg_reread(&o.def);
             for text in o.create.iter_mut().chain(o.extra.iter_mut()) {
                 *text = crate::catalog::pg_reread(text);
