@@ -4012,6 +4012,7 @@ on!(
     grants_compare_without_their_grantor,
     a_migration_that_creates_a_role_is_refused,
     a_role_grant_is_refused_by_deploy_too,
+    a_role_in_schema_sql_is_refused_before_any_shadow,
     an_object_the_comparison_does_not_read_is_not_a_match,
     a_failed_concurrent_index_leaves_nothing,
     a_failed_lone_statement_may_leave_its_change,
@@ -4106,7 +4107,7 @@ on!(Postgres, init_keeps_a_publications_generated_columns, init_makes_a_wrapper_
 on!(Sqlite, a_virtual_tables_own_tables_are_not_in_the_dump, an_external_content_index_is_rebuilt_from_its_rows);
 mod on_mysql {
     use super::*;
-    on!(Mysql, a_comment_made_by_hand_stops_nothing, a_comment_in_schema_sql_is_written, a_role_that_cannot_create_databases_is_told_of_shadow_url, a_grant_is_written_pushed_and_left_by_no_shadow, grants_an_account_cannot_read_back_are_refused);
+    on!(Mysql, a_comment_made_by_hand_stops_nothing, a_comment_in_schema_sql_is_written, a_role_that_cannot_create_databases_is_told_of_shadow_url, a_grant_is_written_pushed_and_left_by_no_shadow, grants_an_account_cannot_read_back_are_refused, an_account_or_role_grant_in_schema_sql_is_refused_before_any_shadow);
 }
 on!(Sqlite, a_rebuild_keeps_every_row_where_foreign_keys_are_on, a_rebuild_keeps_tables_that_reference_each_other, libsqls_own_sql_migrates, a_libsql_history_replays_on_a_branch_without_it, a_table_renamed_keeps_its_rows_key_and_counter, a_turso_engines_own_tables_are_tursos);
 mod on_turso {
@@ -5841,6 +5842,37 @@ mod adversarial {
         p.exec(&format!("drop role {writer}; drop role {reader}")).await;
     }
 
+    /// schema.sql is loaded into a shadow by every command that drafts or compares, and a shadow's
+    /// server keeps a role made there: each refuses it before any shadow, as it does a migration's.
+    pub async fn a_role_in_schema_sql_is_refused_before_any_shadow(mut p: P) {
+        let role = format!("madv_schema_role_{}", std::process::id());
+        p.exec(&format!("drop role if exists {role}")).await;
+        p.linear();
+        p.file("20261027100000_t.sql", "create table t (id int);");
+        p.schema(&format!("create table t (id int);\ncreate role {role};"));
+        let refused = format!(r"✗ \S*schema\.sql can't be replayed in a shadow database\n\n    create role {role}\n\n  It changes a role, which belongs to the server\.\n  Run it outside the migrations");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "add_role", &Default::default(), log).await).await, 1);
+        assert_has!(p.output(), &refused);
+        assert_eq!(p.files(), ["20261027100000_t.sql"], "no migration was written");
+        assert_eq!(p.dev().await, 1);
+        assert_has!(p.output(), &refused);
+        assert_eq!(p.dry_run().await, 1);
+        assert_has!(p.output(), &refused);
+        assert_eq!(p.status().await, 1);
+        assert_has!(p.output(), &refused);
+        assert_eq!(p.history_push().await, 1);
+        assert_has!(p.output(), &refused);
+        std::fs::remove_file(p.dir.join(reylo_migrate::lock::LOCK)).unwrap();
+        assert_eq!(p.run(async |o, log| reylo_migrate::lock_from_history(o, log).await).await, 1);
+        assert_has!(p.output(), &refused);
+        // A migration's role is refused by `migrate new` too, which replays every migration.
+        p.schema("create table t (id int);");
+        p.file("20261027110000_role.sql", &format!("create role {role};"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "more", &Default::default(), log).await).await, 1);
+        assert_has!(p.output(), &format!(r"✗ Migration 20261027110000_role\.sql can't be replayed in a shadow database\n\n    create role {role}\n"));
+        assert!(p.rows(&format!("select 1 from pg_roles where rolname = '{role}'")).await.is_empty(), "no shadow created the role on the server");
+    }
+
     pub async fn an_object_the_comparison_does_not_read_is_not_a_match(mut p: P) {
         p.schema("create table t (x int); create aggregate total (int) (sfunc = int4pl, stype = int);");
         p.file("20261027100000_t.sql", "create table t (x int);");
@@ -6042,6 +6074,29 @@ mod adversarial {
         assert_has!(p.output(), r"grant select on t to `madv_reader`@`%`");
         assert_eq!(p.rows("select count(*) as n from mysql.tables_priv where user = 'madv_reader' and db = database() and table_priv = 'Select'").await[0].text("n"), "1");
         assert_eq!(p.rows(shadows).await[0].text("n"), "0", "a shadow's grants outlived it");
+    }
+
+    /// An account made in schema.sql, or a role granted to one, would be made on the shadow's server
+    /// by `migrate new`: refused before any shadow, as in a migration.
+    pub async fn an_account_or_role_grant_in_schema_sql_is_refused_before_any_shadow(mut p: P) {
+        let (user, role) = (format!("madv_schema_user_{}", std::process::id()), format!("madv_schema_role_{}", std::process::id()));
+        p.exec(&format!("drop user if exists '{user}'@'%'; drop role if exists '{role}'")).await;
+        p.linear();
+        p.file("20261027100000_t.sql", "create table t (id int primary key);");
+        p.schema(&format!("create table t (id int primary key);\ncreate user '{user}'@'%';"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "add_user", &Default::default(), log).await).await, 1);
+        assert_has!(p.output(), r"✗ \S*schema\.sql can't be replayed in a shadow database\n\n    create user '…'@'…'\n");
+        assert_eq!(p.dev().await, 1);
+        assert_has!(p.output(), r"✗ \S*schema\.sql can't be replayed in a shadow database");
+        assert!(p.rows(&format!("select 1 from mysql.user where user = '{user}'")).await.is_empty(), "no shadow created the account on the server");
+        // A role's grant to an account that exists is the server's too.
+        p.exec(&format!("create role '{role}'; create user '{user}'@'%'")).await;
+        p.schema(&format!("create table t (id int primary key);\ngrant '{role}' to '{user}'@'%';"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "add_grant", &Default::default(), log).await).await, 1);
+        assert_has!(p.output(), r"✗ \S*schema\.sql can't be replayed in a shadow database\n\n    grant '…' to '…'@'…'\n\n  It grants or revokes a role, which belongs to the server\.");
+        assert_eq!(p.files(), ["20261027100000_t.sql"], "no migration was written");
+        assert!(p.rows(&format!("select 1 from mysql.role_edges where from_user = '{role}' and to_user = '{user}'")).await.is_empty(), "nothing was granted");
+        p.exec(&format!("drop user '{user}'@'%'; drop role '{role}'")).await;
     }
 
     /// An account with its database's privileges alone sees only its own grants in MySQL, so the

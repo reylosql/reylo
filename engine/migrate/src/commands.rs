@@ -2362,16 +2362,13 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
         }
     }
     if server.is_some() {
-        let schema_name = opts.schema.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "schema.sql".into());
-        for (name, sql) in files.iter().map(|f| (f.name.as_str(), f.sql.as_str())).chain(schema_sql.as_deref().map(|s| (schema_name.as_str(), s))) {
-            problems.extend(replay_problem(name, sql, d));
-        }
+        problems.extend(replay_problems(opts, &files, schema_sql.as_deref(), d));
         problems.extend(unreadable_grants(db, opts, &files, schema_sql.as_deref()).await?);
     } else {
         // A deploy replays nothing, but runs no migration a shadow can't replay: once it ran, every
         // command that replays the migrations, status and the dry run among them, would refuse it.
         for p in &pending {
-            problems.extend(replay_problem(&p.name, &p.sql, d).map(|problem| problem.note("A deploy needs no shadow, but once it ran this, every command that replays the migrations would refuse it.")));
+            problems.extend(replay_problem(&format!("Migration {}", p.name), &p.sql, d).map(|problem| problem.note("A deploy needs no shadow, but once it ran this, every command that replays the migrations would refuse it.")));
         }
     }
     if !problems.is_empty() {
@@ -3041,6 +3038,11 @@ async fn late_on(db: &mut Db, opts: &Options, plan: &Plan) -> Result<Option<Prob
             return Ok(Some(unchecked()));
         }
         let (files, _) = opts.migrations()?;
+        // The replay takes every file, those this database ran too, which the check before this
+        // one didn't hold to a shadow.
+        if let Some(problem) = replay_problems(opts, &files, None, db.dialect()).into_iter().next() {
+            return Ok(Some(problem));
+        }
         let mut server = shadow_server(db, opts).await?;
         let texts: Vec<&str> = files.iter().map(|f| f.sql.as_str()).collect();
         let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &texts).await;
@@ -4225,7 +4227,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     let d = db.dialect();
     let (files, strays) = opts.migrations()?;
     let before_rows = read_history(db).await?;
-    let mut problems = file_problems(opts, &files, &strays, None, d);
+    let mut problems = file_problems(opts, &files, &strays, opts.schema_text().as_deref(), d);
     problems.extend(unreadable_grants(db, opts, &files, None).await?);
     problems.extend(missing_dir(opts, &before_rows));
     if !problems.is_empty() {
@@ -4873,14 +4875,15 @@ async fn lock_from_history_on(db: &mut Db, server: &mut Server, opts: &Options, 
     let _held = lock(db, opts).await?;
     let (files, _) = opts.migrations()?;
     let history = if has_history(db).await? { read_history(db).await? } else { vec![] };
+    let schema_sql = opts.schema_text();
     let mut problems = applied_unlike(opts, &history, &files, d);
     if history.iter().any(|r| !r.applied) {
         problems.push(Problem::new("run-cut-off", "A run on this database was cut off before it finished").fix("Finish it first", &["reylo migrate dev"]));
     }
+    problems.extend(replay_problems(opts, &files, schema_sql.as_deref(), d));
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
     }
-    let schema_sql = opts.schema_text();
     let texts: Vec<&str> = files.iter().map(|f| f.sql.as_str()).chain(schema_sql.as_deref()).collect();
     let mut shadows = Shadows::new(server, &opts.url, &opts.root, &opts.cache, &texts).await;
     let next = locked(&mut shadows, db, opts, &files, schema_sql.as_deref()).await.map(|(next, _)| next);
@@ -5103,6 +5106,11 @@ pub async fn create(opts: &Options, name: &str, choices: &Choices, log: Log<'_>)
     // resolved first.
     if let Err(problem) = read_lock(opts) {
         return Ok(refuse(&[problem], log));
+    }
+    // Before any of them reaches a shadow: what reaches past one, a role, is made on its server.
+    let problems = replay_problems(opts, &files, opts.schema_text().as_deref(), Dialect::of_url(&opts.url)?);
+    if !problems.is_empty() {
+        return Ok(refuse(&problems, log));
     }
     let files = run_order(opts, &files);
     // The plan starts from every migration file, drafts not yet applied anywhere included, and is
@@ -7768,22 +7776,28 @@ fn file_problems(opts: &Options, files: &[Migration], strays: &[String], schema_
             problems.push(Problem::new("not-atomic", format!("Migration {} can't run atomically", f.name)).note(why));
         }
     }
-    let schema_name = opts.schema.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "schema.sql".into());
-    for (name, sql) in files.iter().map(|f| (f.name.as_str(), f.sql.as_str())).chain(schema_sql.map(|s| (schema_name.as_str(), s))) {
-        problems.extend(replay_problem(name, sql, d));
-    }
+    problems.extend(replay_problems(opts, files, schema_sql, d));
+    problems
+}
+
+/// The refusals of the project's texts a shadow can't replay: each migration's, then schema.sql's.
+/// Every command that loads them into a shadow checks them first, since the shadow's server keeps
+/// what reaches past it: a role made there is made for the whole server.
+fn replay_problems(opts: &Options, files: &[Migration], schema_sql: Option<&str>, d: Dialect) -> Vec<Problem> {
+    let mut problems: Vec<Problem> = files.iter().filter_map(|f| replay_problem(&format!("Migration {}", f.name), &f.sql, d)).collect();
+    problems.extend(schema_sql.and_then(|sql| replay_problem(&shown(&opts.schema), sql, d)));
     problems
 }
 
 /// The refusal of a file with a statement a shadow can't replay: the statement, why, and what to
-/// do instead.
-fn replay_problem(name: &str, sql: &str, d: Dialect) -> Option<Problem> {
+/// do instead. `file` is how the title names it, as "Migration <name>".
+fn replay_problem(file: &str, sql: &str, d: Dialect) -> Option<Problem> {
     let u = unreplayable(sql, d)?;
     let mut why = u.why;
     if let Some(first) = why.get_mut(..1) {
         first.make_ascii_uppercase();
     }
-    let problem = Problem::new("not-replayable", format!("Migration {name} can't be replayed in a shadow database")).sql(&u.statement).note(format!("{why}."));
+    let problem = Problem::new("not-replayable", format!("{file} can't be replayed in a shadow database")).sql(&u.statement).note(format!("{why}."));
     Some(match u.instead {
         Some(instead) => problem.note(instead),
         None => problem,

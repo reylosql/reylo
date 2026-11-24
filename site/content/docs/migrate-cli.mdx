@@ -556,7 +556,7 @@ Each database makes them its own way:
 - **MySQL:** on your database's server, with `create database`, so your user needs the `CREATE` privilege on every database. PlanetScale refuses `create database`, so point `shadow_url` at a plain MySQL 8.4 server.
 - **SQLite:** in memory. There's nothing to grant. A [Turso](/turso#migrations) database's shadows run on libSQL's own engine.
 
-A migration that would reach past its shadow is refused by every command, `deploy` and `status` included. That's one that:
+Every command refuses a migration that would reach past its shadow, `deploy` and `status` included, and every command but `deploy` refuses a `schema.sql` that would. That's one with a statement that:
 
 - changes a role, a database, a tablespace or a server setting
 - on MySQL, names a database, as in `app.users`
