@@ -1,0 +1,54 @@
+---
+title: Render
+description: How to run Reylo Migrate on Render. The pre-deploy command that migrates your database before each deploy goes live, and the database URL it reads.
+---
+
+<p className="dk-subheader">Reylo Migrate on Render</p>
+
+Run your migrations as your service's pre-deploy command:
+
+```yaml title="render.yaml"
+services:
+  - type: web
+    name: app
+    runtime: node
+    # ...
+    preDeployCommand: npx reylo migrate deploy
+```
+
+It runs after the build, on an instance of its own. A migration that fails stops the deploy, and the previous one keeps serving. Pre-deploy commands run on paid instance types.
+
+## Database
+
+Set `DATABASE_URL` from your Render database:
+
+```yaml title="render.yaml"
+services:
+  - type: web
+    name: app
+    # ...
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: db
+          property: connectionString
+```
+
+## Without Node
+
+Copy the `reylo` command into your image from Reylo's:
+
+```dockerfile title="Dockerfile"
+COPY --from=ghcr.io/reylosql/reylo:0.8.3 /usr/local/bin/reylo /usr/local/bin/reylo
+```
+
+Then run it directly:
+
+```yaml title="render.yaml"
+services:
+  - type: web
+    name: app
+    runtime: docker
+    # ...
+    preDeployCommand: reylo migrate deploy
+```

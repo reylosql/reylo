@@ -79,6 +79,18 @@ $ reylo migrate deploy
 $ reylo migrate status
 ```
 
+Run the deploy before your new code goes live. Each host has a step for it: [Fly.io](/fly), [Render](/render), [Railway](/railway) and [Kubernetes](/kubernetes). Two deploys at once take turns. So each instance of your app can instead run [`migrate()`](#api) as it starts.
+
+To deploy from a container, copy your `reylo` directory into Reylo's image:
+
+```dockerfile title="Dockerfile.migrate"
+FROM ghcr.io/reylosql/reylo:0.8.3
+COPY reylo/ /work/reylo/
+CMD ["migrate", "deploy"]
+```
+
+It reads `DATABASE_URL`, and exits 1 when a migration fails.
+
 ### Starting over
 
 Rebuild your development database from your migrations, or empty it:

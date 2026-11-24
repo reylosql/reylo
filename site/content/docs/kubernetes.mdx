@@ -1,0 +1,124 @@
+---
+title: Kubernetes
+description: How to run Reylo Migrate on Kubernetes. An image of your migrations, run as a Job before each rollout with Helm, Argo CD or Flux, or in each pod as it starts.
+---
+
+<p className="dk-subheader">Reylo Migrate on Kubernetes</p>
+
+Build an image of your migrations from Reylo's:
+
+```dockerfile title="Dockerfile.migrate"
+FROM ghcr.io/reylosql/reylo:0.8.3
+COPY reylo/ /work/reylo/
+CMD ["migrate", "deploy"]
+```
+
+It reads `DATABASE_URL`, and exits 1 when a migration fails.
+
+## Jobs
+
+Run the image as a Job before your app's pods change. Each deploy tool has a hook for it:
+
+```yaml title="templates/migrate.yaml" tab="Helm"
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-migrate
+  annotations:
+    # before the app changes, on install and on each upgrade
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: app-migrate:{{ .Values.tag }}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: app-database, key: url }
+```
+
+```yaml title="migrate.yaml" tab="Argo CD"
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: app-migrate
+  annotations:
+    # before each sync
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: app-migrate:1.4.0
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: app-database, key: url }
+```
+
+```yaml title="flux/app.yaml" tab="Flux"
+# the Job, in ./migrate/
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: app-migrate
+spec:
+  sourceRef: { kind: GitRepository, name: app }
+  path: ./migrate/
+  interval: 60m
+  prune: true
+  # wait for the Job to finish, and run it again when its image changes
+  wait: true
+  force: true
+---
+# the app, once the Job has finished
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: app
+spec:
+  dependsOn:
+    - name: app-migrate
+  sourceRef: { kind: GitRepository, name: app }
+  path: ./deploy/
+  interval: 60m
+  prune: true
+```
+
+A migration that fails fails the Job, and the app stays on its old version.
+
+## Init containers
+
+Run the image in each pod, before your app starts. Pods that start at once take turns, and the rest find nothing to run:
+
+```yaml title="app.yaml"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  # ...
+  template:
+    spec:
+      initContainers:
+        - name: migrate
+          image: app-migrate:1.4.0
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: app-database, key: url }
+      containers:
+        - name: app
+          # ...
+```
+
+A migration that fails keeps the new pods from starting.

@@ -18,9 +18,11 @@
 /duckdb
 /durable-objects
 /faq
+/fly
 /hosted
 /hyperdrive
 /inference
+/kubernetes
 /migrate
 /migrate/cli
 /migrate/compare
@@ -36,6 +38,8 @@
 /play
 /postgres
 /prisma
+/railway
+/render
 /rtd
 /rust
 /schema-changes
