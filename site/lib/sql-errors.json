@@ -55,6 +55,22 @@
     }
   },
   "clickhouse": {
+    "ch_add_taxed.sql": {
+      "3bd33f490a98e77f": [
+        {
+          "start": {
+            "line": 2,
+            "column": 37
+          },
+          "end": {
+            "line": 2,
+            "column": 59
+          },
+          "source": "reylo(10)",
+          "message": "{total:Decimal(12, 2)} is in a value of the type Float64 that is written to the column total, of the type Decimal(12, 2). ClickHouse converts a value of another type to the column's, and changes one the column cannot hold without an error. Give the value the column's type: declare its parameters so, or convert it in the statement, as CAST(… AS Decimal(12, 2)) does."
+        }
+      ]
+    },
     "ch_add_wide.sql": {
       "eaae186fd3b928a2": [
         {
