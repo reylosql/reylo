@@ -4599,6 +4599,28 @@ mod adversarial {
             assert_eq!(p.dry_run().await, 0, "{}", p.peek());
             p.output();
         }
+        // An index the target keeps under its name, while another table holds the name a rename
+        // would give it; and an identity whose table's name holds a quote, its sequence named by
+        // Postgres.
+        let kept = format!("{}_x_idx", "c".repeat(57));
+        let quoted = format!("q\"{}", "q".repeat(61));
+        let written = format!("\"{}\"", quoted.replace('"', "\"\""));
+        let rest = format!("{refs} {} {}", table("ledger"), other(&wide));
+        p.file("20991231000000_t.sql", &format!("create table {} (x integer); create index on {} (x); create table holder (x integer); create index dest_x_idx on holder (x); create table {written} (id integer generated always as identity, note text);", "c".repeat(63), "c".repeat(63)));
+        p.schema(&format!("{rest} create table {} (x integer); create index {kept} on {} (x); create table holder (x integer); create index dest_x_idx on holder (x); create table {written} (id integer generated always as identity, note text);", "c".repeat(63), "c".repeat(63)));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec(&format!("insert into {written} (note) values ('n')")).await;
+        p.output();
+        p.schema(&format!("{rest} create table dest (x integer); create index {kept} on dest (x); create table holder (x integer); create index dest_x_idx on holder (x); create table plain (id integer generated always as identity, note text);"));
+        let choices = reylo_migrate::Choices { rename: vec![("c".repeat(63), "dest".into()), (written.clone(), "plain".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "edges", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into plain (note) values ('m')").await;
+        assert_eq!(p.rows("select id from plain order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+        p.output();
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     }
 
     /// A refusal's suggested command carries --blocking where the migration it writes rewrites a

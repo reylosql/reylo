@@ -997,6 +997,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                         .map(|n| format!("not null name {n}"))
                         .into_iter()
                         .chain(identity_name.map(|n| format!("{IDENTITY_SEQUENCE}{n}")))
+                        .chain(c.get("identity_name").map(|n| format!("{IDENTITY_SEQUENCE_IS}{n}")))
                         .chain((kind == "p").then(|| "partitioned".to_string()))
                         .chain((!c.text("generated").is_empty()).then(|| super::GENERATED.to_string()))
                         .chain((c.flag("inherited") && !partition).then(|| "inherited".to_string()))
@@ -2745,7 +2746,10 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
             let made = renamed_name(&name, old, new);
             let wanted = declared::quote_ident(&made);
             let at = if o.kind == Some(Kind::Constraint) { new_rel.to_string() } else { prefix.clone() };
-            if made == unquoted(&name) || !target.objects.get(&format!("{word} {at}.{wanted}")).is_some_and(|t| t.kind == o.kind) {
+            // Renamed only onto what the target has under that name on the renamed table, and only
+            // where the target doesn't keep it under the name it has.
+            let ours = |t: &Object| t.kind == o.kind && (o.kind != Some(Kind::Index) || t.owner.as_deref() == Some(new_table.as_str()));
+            if made == unquoted(&name) || target.objects.contains_key(&o.id) || !target.objects.get(&format!("{word} {at}.{wanted}")).is_some_and(ours) {
                 continue;
             }
             if o.kind == Some(Kind::Constraint) {
@@ -2767,7 +2771,8 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
             let Some(t) = target.objects.get(&format!("column {new_rel}.{column}")).filter(|t| parse_column(&t.def).identity.is_some()) else { continue };
             let column = column.strip_prefix('"').and_then(|c| c.strip_suffix('"')).map(|c| c.replace("\"\"", "\"")).unwrap_or_else(|| column.to_string());
             let chosen = |table: &str| format!("{schema}.{}", declared::quote_ident(&declared::object_name(&unquoted(table), Some(&column), "seq")));
-            let (was, now) = (identity_sequence(o).unwrap_or_else(|| chosen(old)), identity_sequence(t).unwrap_or_else(|| chosen(new)));
+            let actual = |o: &Object| o.extra.iter().find_map(|l| l.strip_prefix(IDENTITY_SEQUENCE_IS)).map(String::from).or_else(|| identity_sequence(o));
+            let (was, now) = (actual(o).unwrap_or_else(|| chosen(old)), actual(t).unwrap_or_else(|| chosen(new)));
             if was != now {
                 out.push(format!("alter sequence {was} rename to {}", last(&now).1));
             }
@@ -2821,6 +2826,9 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
 
 /// What precedes the name of an identity's sequence where it isn't the one Postgres would choose.
 const IDENTITY_SEQUENCE: &str = "identity sequence ";
+
+/// What precedes the name of an identity's sequence, whichever it is: what a table's rename renames.
+const IDENTITY_SEQUENCE_IS: &str = "sequence of the identity ";
 
 /// The name of an identity column's sequence, where Postgres wouldn't have chosen it.
 fn identity_sequence(o: &Object) -> Option<String> {
