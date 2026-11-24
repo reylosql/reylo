@@ -4054,6 +4054,7 @@ on!(
     init_writes_the_event_triggers_it_compares,
     init_writes_the_publications_it_compares,
     init_reads_an_in_list_on_a_varchar_column_as_it_reads_back,
+    init_reads_a_row_comparison_as_it_reads_back,
     a_dump_keeps_a_function_body_as_written,
     a_history_that_does_not_replay_is_refused_before_anything_changes,
     without_a_lock_a_history_out_of_name_order_is_held_to_name_order,
@@ -7082,6 +7083,29 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert!(sql.contains("(a AND b AND c)"), "the comment's change is in the migration:\n{sql}");
         assert!(!sql.contains("check") && !sql.contains("index") && !sql.contains("policy"), "the migration remakes no check, index or policy:\n{sql}");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+    }
+
+    /// A row comparison of three or more columns is stored as ORs nested to the left, which
+    /// Postgres reads back as one: init starts the project, with such a comparison in a check, a
+    /// trigger's condition and a partial index's predicate.
+    pub async fn init_reads_a_row_comparison_as_it_reads_back(mut p: P) {
+        p.exec(
+            "create table t (id int primary key, a int, b int, c int, d int, e int, f int,
+              constraint c_distinct check ((a, b, c) is distinct from (d, e, f)),
+              constraint c_not_distinct check ((a, b, c) is not distinct from (d, e, f)),
+              constraint c_four check ((a, b, c, id) is distinct from (d, e, f, id)),
+              constraint c_eq check ((a, b, c) = (d, e, f) or a is null),
+              constraint c_ne check ((a, b, c) <> (d, e, f) or a is null),
+              constraint c_lt check ((a, b, c) < (d, e, f) or a is null),
+              constraint c_mixed check (((a, b, c) is distinct from (d, e, f)) and a > 0 and b > 0))",
+        )
+        .await;
+        p.exec("create function f() returns trigger language plpgsql as $$ begin return new; end $$").await;
+        p.exec("create trigger t_changed after update of a, b, c on t for each row when ((old.a, old.b, old.c) is distinct from (new.a, new.b, new.c)) execute function f()").await;
+        p.exec("create trigger t_same after update on t for each row when ((old.a, old.b, old.c) is not distinct from (new.a, new.b, new.c)) execute function f()").await;
+        p.exec("create index t_pi on t (id) where (a, b, c) is distinct from (d, e, f)").await;
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
         assert_eq!(p.status().await, 0, "{}", p.peek());
     }
 

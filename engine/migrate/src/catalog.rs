@@ -682,8 +682,10 @@ async fn postgres(db: &mut Db) -> Result<Vec<String>, Error> {
 /// - a cast of `ARRAY[…]` of values to an array type, `(ARRAY['a'::character varying])::text[]`
 ///   (how `varchar_column in ('a', …)` renders), which the parser applies to each element instead:
 ///   `ARRAY[('a'::character varying)::text]`;
-/// - an AND or OR whose first operand is the same operator, `((a AND b) AND c)` (as a database
-///   from an older server can hold), which the parser reads as one: `(a AND b AND c)`.
+/// - an AND or OR whose first operand is the same operator, `((a AND b) AND c)`, which the parser
+///   reads as one: `(a AND b AND c)`. The server stores a row `IS DISTINCT FROM` of three or more
+///   columns that way, and a row `<>` once it is ORed with another term, as can a database from an
+///   older server.
 pub(crate) fn pg_reread(text: &str) -> String {
     if !text.contains("(ARRAY[") && !text.contains("((") {
         return text.to_string();
@@ -2267,6 +2269,24 @@ mod tests {
         assert_eq!(pg_reread("CHECK ((((a > 0) AND (b > 0)) AND (c > 0)))"), "CHECK (((a > 0) AND (b > 0) AND (c > 0)))");
         assert_eq!(pg_reread("((((a) OR (b)) OR (c)) OR d)"), "((a) OR (b) OR (c) OR d)");
         assert_eq!(pg_reread("((a > 0) AND ((b > 0) AND (c > 0)))"), "((a > 0) AND ((b > 0) AND (c > 0)))");
+        // A row comparison of three or more columns, as the server stores it.
+        for (source, replayed) in [
+            ("CHECK ((((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e)) OR (c IS DISTINCT FROM f)))", "CHECK (((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e) OR (c IS DISTINCT FROM f)))"),
+            ("CHECK ((NOT (((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e)) OR (c IS DISTINCT FROM f))))", "CHECK ((NOT ((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e) OR (c IS DISTINCT FROM f))))"),
+            ("CHECK (((((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e)) OR (c IS DISTINCT FROM f)) AND (a > 0) AND (b > 0)))", "CHECK ((((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e) OR (c IS DISTINCT FROM f)) AND (a > 0) AND (b > 0)))"),
+            ("CHECK ((((a <> d) OR (b <> e) OR (c <> f)) OR (a IS NULL)))", "CHECK (((a <> d) OR (b <> e) OR (c <> f) OR (a IS NULL)))"),
+            (
+                "CREATE TRIGGER t_changed AFTER UPDATE OF a, b, c ON public.t FOR EACH ROW WHEN ((((old.a IS DISTINCT FROM new.a) OR (old.b IS DISTINCT FROM new.b)) OR (old.c IS DISTINCT FROM new.c))) EXECUTE FUNCTION f()",
+                "CREATE TRIGGER t_changed AFTER UPDATE OF a, b, c ON public.t FOR EACH ROW WHEN (((old.a IS DISTINCT FROM new.a) OR (old.b IS DISTINCT FROM new.b) OR (old.c IS DISTINCT FROM new.c))) EXECUTE FUNCTION f()",
+            ),
+            (
+                "CREATE INDEX t_pi ON public.t USING btree (id) WHERE (((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e)) OR (c IS DISTINCT FROM f))",
+                "CREATE INDEX t_pi ON public.t USING btree (id) WHERE ((a IS DISTINCT FROM d) OR (b IS DISTINCT FROM e) OR (c IS DISTINCT FROM f))",
+            ),
+        ] {
+            assert_eq!(pg_reread(source), replayed);
+            assert_eq!(pg_reread(replayed), replayed);
+        }
         // Other operators, and what only looks alike, are left.
         for same in [
             "(((a) OR (b)) AND (c))",
