@@ -641,8 +641,12 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             "select co.oid, co.conindid, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, format('%I', co.conname) as name,
               pg_get_constraintdef(co.oid, false) as def, co.condeferrable as deferrable, co.condeferred as deferred, co.convalidated as validated, co.contype as type,
               case when co.contype = 'f' then
-                (select string_agg(format_type(a.atttypid, null), ', ' order by k.n) from unnest(co.conkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.conrelid and a.attnum = k.num)
-                || ' to ' || (select string_agg(format_type(a.atttypid, null), ', ' order by k.n) from unnest(co.confkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.confrelid and a.attnum = k.num)
+                (select string_agg(format_type(a.atttypid, null)
+                  || case when a.attcollation <> t.typcollation then ' collate ' || (select format('%I.%I', cn.nspname, cl.collname) from pg_collation cl join pg_namespace cn on cn.oid = cl.collnamespace where cl.oid = a.attcollation) else '' end
+                  || case when a.attgenerated = 's' then ' as ' || pg_get_expr(ad.adbin, ad.adrelid) else '' end, ', ' order by k.n) from unnest(co.conkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.conrelid and a.attnum = k.num join pg_type t on t.oid = a.atttypid left join pg_attrdef ad on ad.adrelid = a.attrelid and ad.adnum = a.attnum)
+                || ' to ' || (select string_agg(format_type(a.atttypid, null)
+                  || case when a.attcollation <> t.typcollation then ' collate ' || (select format('%I.%I', cn.nspname, cl.collname) from pg_collation cl join pg_namespace cn on cn.oid = cl.collnamespace where cl.oid = a.attcollation) else '' end
+                  || case when a.attgenerated = 's' then ' as ' || pg_get_expr(ad.adbin, ad.adrelid) else '' end, ', ' order by k.n) from unnest(co.confkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.confrelid and a.attnum = k.num join pg_type t on t.oid = a.atttypid left join pg_attrdef ad on ad.adrelid = a.attrelid and ad.adnum = a.attnum)
               end as linked,
               case when co.contype in ('p', 'u') then (select string_agg(o, ', ' order by o) from pg_class ic, unnest(ic.reloptions) o where ic.oid = co.conindid) end as index_options,
               case when co.contype in ('p', 'u', 'x') then (select format('%I.%I', inn.nspname, ic.relname) from pg_class ic join pg_namespace inn on inn.oid = ic.relnamespace where ic.oid = co.conindid) end as index_name,
@@ -685,8 +689,9 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         if inline {
             inline_constraints.entry(oid(&r, "reloid")).or_default().push(format!("constraint {name} {def}"));
         }
-        // A foreign key holds while the types of the columns it links compare; a change of either
-        // side's type makes it again around the change, so that both columns can change between.
+        // A foreign key holds while the values of the columns it links compare; a change of either
+        // side's type, collation or stored expression makes it again around the change, so that
+        // both columns can change between.
         let linked = r.get("linked").map(|l| format!("\n-- links {l}")).unwrap_or_default();
         // A key's index storage parameters change in place on its index; anything else about it
         // makes it again.
