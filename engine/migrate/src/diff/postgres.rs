@@ -4208,6 +4208,23 @@ impl Alterer for PostgresAlterer {
         out
     }
 
+    fn copies_dropped(&self, from: &Object, to: &Object) -> Vec<String> {
+        // A table that leaves a parent drops its copies of the parent's checks after it leaves. One
+        // it added itself before it joined is its own as well, which the parent's drop leaves: what
+        // the check calls goes after the table's change.
+        if from.kind != Some(Kind::Table) || !joins_or_leaves(from, to).1 {
+            return Vec::new();
+        }
+        let part = |o: &Object, what: &str| o.extra.iter().find_map(|l| l.strip_prefix(what)).map(String::from);
+        let kept = part(to, "inherits ").map(|p| names_in(&p)).unwrap_or_default();
+        let mut parents: Vec<String> = part(from, "inherits ").map(|p| names_in(&p)).unwrap_or_default().into_iter().filter(|p| !kept.contains(p)).collect();
+        if part(from, "partition of ") != part(to, "partition of ") {
+            parents.extend(part(from, "partition of ").as_deref().and_then(split_qualified).map(|(p, _)| p.to_string()));
+        }
+        let copies: Vec<String> = from.extra.iter().filter_map(|l| l.strip_prefix(COPIED_CONSTRAINT)?.split(SEP).next()).map(String::from).collect();
+        parents.iter().flat_map(|p| copies.iter().map(move |c| format!("constraint {p}.{c}"))).collect()
+    }
+
     fn releases(&self, from: &Object, to: &Object) -> bool {
         // A partition detached, whose indexes stop being its table's, or a table that stops
         // inheriting from a parent, whose columns of that parent's become its own.
