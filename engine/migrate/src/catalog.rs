@@ -679,7 +679,7 @@ async fn postgres(db: &mut Db) -> Result<Vec<String>, Error> {
 /// The two can differ, so a database made from another's rendering (init.sql, a replay of what the
 /// diff wrote) would never read as the same schema. Two shapes change, each written here as it is
 /// read back, and a rendering that has been read back is left as it is:
-/// - a cast of `ARRAY[…]` of literals to an array type, `(ARRAY['a'::character varying])::text[]`
+/// - a cast of `ARRAY[…]` of values to an array type, `(ARRAY['a'::character varying])::text[]`
 ///   (how `varchar_column in ('a', …)` renders), which the parser applies to each element instead:
 ///   `ARRAY[('a'::character varying)::text]`;
 /// - an AND or OR whose first operand is the same operator, `((a AND b) AND c)` (as a database
@@ -774,31 +774,36 @@ fn type_end(t: &[Token], first: usize) -> Option<usize> {
     (j > first && depth == 0).then_some(j)
 }
 
-/// `element` cast to `ty` as the parser casts the element of an array cast to `ty[]`, where the
-/// text alone says what that is: an `ARRAY[…]` within the array has each of its own elements cast,
-/// and a literal of a type that is no array is cast to `ty`, or left where it has that type
-/// already. An element of any other kind (a column, a call) may be an array itself, which the
-/// parser would cast to `ty[]`, so for those the text can't say, and it is `None`.
-fn cast_element(element: &str, ty: &str) -> Option<String> {
-    let t = tokenize(element, Dialect::Postgres);
-    let close = matching(&t);
-    if word(&t, 0, "ARRAY") && symbol(&t, 1, "[") && close[1] == Some(t.len() - 1) {
-        let inner = elements(element, &t, &close, 1)?;
-        let cast: Option<Vec<String>> = inner.iter().map(|e| cast_element(e, ty)).collect();
-        return Some(format!("ARRAY[{}]", cast?.join(", ")));
-    }
-    let literal = match t.as_slice() {
-        [one] => one.kind == TokenKind::Number || word(&t, 0, "TRUE") || word(&t, 0, "FALSE"),
-        [value, ..] => (value.kind == TokenKind::Str || word(&t, 0, "NULL")) && symbol(&t, 1, "::") && type_end(&t, 2) == Some(t.len()),
+/// The elements of an `ARRAY[…]` cast to `ty[]`, each cast as the parser casts it, where the text
+/// says how. Every element of one array has one type, so a literal of a type that is no array says
+/// they are all values, each then cast to `ty` (or left, where it has that type already). Elements
+/// that are all `ARRAY[…]` have their own elements cast. Otherwise (`ARRAY[arr]`) they may be
+/// arrays themselves, which the parser casts to `ty[]`, and it is `None`.
+fn cast_elements(items: &[&str], ty: &str) -> Option<Vec<String>> {
+    let read: Vec<(Vec<Token>, Vec<Option<usize>>)> = items.iter().map(|e| {
+        let t = tokenize(e, Dialect::Postgres);
+        let close = matching(&t);
+        (t, close)
+    }).collect();
+    let value = |t: &[Token]| match t {
+        [one] => one.kind == TokenKind::Number || word(t, 0, "TRUE") || word(t, 0, "FALSE"),
+        [first, ..] => (first.kind == TokenKind::Str || word(t, 0, "NULL")) && symbol(t, 1, "::") && type_end(t, 2) == Some(t.len()),
         [] => false,
     };
-    if !literal {
-        return None;
+    if read.iter().any(|(t, _)| value(t)) {
+        let cast = |e: &&str| if e.ends_with(&format!("::{ty}")) { e.to_string() } else { format!("({e})::{ty}") };
+        return Some(items.iter().map(cast).collect());
     }
-    if element.ends_with(&format!("::{ty}")) {
-        return Some(element.to_string());
-    }
-    Some(format!("({element})::{ty}"))
+    items
+        .iter()
+        .zip(&read)
+        .map(|(e, (t, close))| {
+            if !(word(t, 0, "ARRAY") && symbol(t, 1, "[") && close[1] == Some(t.len() - 1)) {
+                return None;
+            }
+            Some(format!("ARRAY[{}]", cast_elements(&elements(e, t, close, 1)?, ty)?.join(", ")))
+        })
+        .collect()
 }
 
 /// `(ARRAY[e, …])::ty[]` at `k`, written as `ARRAY[(e)::ty, …]`.
@@ -820,8 +825,7 @@ fn array_cast_at(text: &str, t: &[Token], close: &[Option<usize>], k: usize) -> 
     if items.is_empty() {
         return None;
     }
-    let cast: Option<Vec<String>> = items.iter().map(|e| cast_element(e, ty)).collect();
-    Some(format!("{}ARRAY[{}]{}", &text[..t[k].start], cast?.join(", "), &text[t[j + 1].end..]))
+    Some(format!("{}ARRAY[{}]{}", &text[..t[k].start], cast_elements(&items, ty)?.join(", "), &text[t[j + 1].end..]))
 }
 
 /// `((a AND b) AND c)` at `k`, written as `(a AND b AND c)`, and the same for OR.
@@ -2241,6 +2245,7 @@ mod tests {
             pg_reread("CREATE INDEX i ON public.t USING btree (id) WHERE ((s)::text <> ALL ((ARRAY['a'::character varying, NULL::character varying])::text[]))"),
             "CREATE INDEX i ON public.t USING btree (id) WHERE ((s)::text <> ALL (ARRAY[('a'::character varying)::text, (NULL::character varying)::text]))"
         );
+        assert_eq!(pg_reread("(ARRAY['a'::character varying, public.vf(), (x)::text])::text[]"), "ARRAY[('a'::character varying)::text, (public.vf())::text, (x)::text]");
         assert_eq!(pg_reread("(ARRAY[1, '2.5'::numeric(4,1)])::numeric(10,2)[]"), "ARRAY[(1)::numeric(10,2), ('2.5'::numeric(4,1))::numeric(10,2)]");
         assert_eq!(pg_reread("(ARRAY['a'::text, true])::public.\"My Type\"[] = c"), "ARRAY[('a'::text)::public.\"My Type\", (true)::public.\"My Type\"] = c");
         assert_eq!(pg_reread("(ARRAY[ARRAY[1, 2], ARRAY[3, '4'::text]])::text[]"), "ARRAY[ARRAY[(1)::text, (2)::text], ARRAY[(3)::text, '4'::text]]");
@@ -2257,7 +2262,7 @@ mod tests {
             "((a) = (b))",
             // A column or a call may be an array itself, which the parser casts to an array.
             "COALESCE(NULL::text[], (ARRAY[arr])::text[])",
-            "(ARRAY['a'::character varying, f(x)])::text[]",
+            "(ARRAY[f(x), arr])::text[]",
             "(ARRAY['{a}'::character varying[]])::text[]",
             "(f(x) OVER (ORDER BY y ROWS BETWEEN 1 PRECEDING AND CURRENT ROW))",
         ] {

@@ -7066,6 +7066,9 @@ create trigger kids_note after insert on kids begin update parents set name = na
         p.exec("create index open_items on items (id) where status not in ('closed', 'gone')").await;
         p.exec("alter table items enable row level security").await;
         p.exec("create policy open_only on items using (status in ('open', 'new')) with check (status in ('open', 'closed'))").await;
+        // A call in the list is a value too, as the literals beside it say.
+        p.exec("create function vf() returns varchar language sql as 'select ''c''::varchar'").await;
+        p.exec("create table tags (name varchar(10) check (name in ('a', 'b', vf())))").await;
         p.exec("comment on table items is 'Example: \"((a AND b) AND c)\"'").await;
         assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
         assert_eq!(p.status().await, 0, "{}", p.peek());
@@ -7077,7 +7080,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
         let written = p.files().into_iter().find(|f| f.ends_with("_notes.sql")).unwrap();
         let sql = std::fs::read_to_string(p.dir.join("migrations").join(&written)).unwrap();
         assert!(sql.contains("(a AND b AND c)"), "the comment's change is in the migration:\n{sql}");
-        assert!(!sql.contains("check") && !sql.contains("index") && !sql.contains("policy"), "the migration remakes nothing of items:\n{sql}");
+        assert!(!sql.contains("check") && !sql.contains("index") && !sql.contains("policy"), "the migration remakes no check, index or policy:\n{sql}");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_eq!(p.status().await, 0, "{}", p.peek());
     }
