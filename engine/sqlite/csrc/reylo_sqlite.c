@@ -1144,9 +1144,6 @@ static char *missingSchema(const char *zSql, const char *zMsg, int *piOfst, int 
 ** moves both. */
 #define REYLO_TREE_VERSION 3
 
-/* How deep the user's statement may nest: see reylo_sqlite_analyze. */
-#define REYLO_SQLITE_EXPR_DEPTH 350
-
 /*
 ** Analyzes one statement against the schema DDL, with the host's scalar functions (azFn[i] taking
 ** aFnArg[i] arguments, -1 for any number) registered on the replay, its columns named as zSent,
@@ -1163,7 +1160,7 @@ char *reylo_sqlite_analyze(
   sqlite3_str *out = sqlite3_str_new(0);
   sqlite3_str *schemaErrors = sqlite3_str_new(0);
   sqlite3_stmt *pStmt = 0, *pNames = 0;
-  int rc, i, n, nDepth;
+  int rc, i, n;
   sqlite3_str_appendchar(schemaErrors, 1, '[');
   rc = openSchema(azDdl, nDdl, azFn, aFnArg, nFn, azHost, aHostArg, zHostType, nHost, schemaErrors);
   closeArr(schemaErrors);
@@ -1181,16 +1178,11 @@ char *reylo_sqlite_analyze(
   gHost = azHost; gnHost = nHost; gExtra = azFn; gnExtra = nFn; gnDenied = 0; gDeniedView = 0;
   if( nHost>=0 ) sqlite3_set_authorizer(gDb, functionAuth, 0);
   installHooks(1);
-  /* The statement's expressions nest at most REYLO_SQLITE_EXPR_DEPTH deep, 350 where SQLite's own
-  ** bound is 1,000: the analysis of a tree that deep is what the WebAssembly engine can afford on
-  ** the JavaScript engine's stack beside a host that holds 45% of it, as the bound on Postgres's
-  ** tree is for Postgres (core/src/stack.rs). At 500, a nested CASE or function call needed 55% of Node's
-  ** stack before V8 optimized the engine and 62% after on Node 24; at 350 the deepest statement
-  ** of every shape needs at most 42% (measured on Node 24 and 26, 2026-10-21). The schema's own
-  ** statements keep SQLite's bound. */
-  nDepth = sqlite3_limit(gDb, SQLITE_LIMIT_EXPR_DEPTH, REYLO_SQLITE_EXPR_DEPTH);
+  /* The statement's expressions nest as deep as SQLite's own bound, SQLITE_MAX_EXPR_DEPTH (1,000),
+  ** which an app's SQLite holds it to as well: the engine runs natively alone, on the stack
+  ** core/src/stack.rs gives it, where an unoptimized build reads the deepest statement of every
+  ** shape SQLite takes (src/sqlite.rs's tests). */
   rc = sqlite3_prepare_v2(gDb, zSql, -1, &pStmt, 0);
-  sqlite3_limit(gDb, SQLITE_LIMIT_EXPR_DEPTH, nDepth);
   installHooks(0);
   if( nHost>=0 ) sqlite3_set_authorizer(gDb, 0, 0);
   gInsertSelect = 0;

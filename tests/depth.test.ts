@@ -9,7 +9,7 @@ import { Session } from "../src/analyze.ts";
 
 // How deeply a statement may nest for the engine to read it: the engine reads at most 1,000
 // levels of Postgres's parse tree (engine/core/src/stack.rs), the same in every host of the engine, and the
-// embedded SQLite reads an expression 350 deep, where SQLite's own bound is 1,000. These are the deepest statements of each shape that parse, as engine/core/src/stack.rs's
+// embedded SQLite reads an expression as deep as SQLite's own bound, 1,000. These are the deepest statements of each shape that parse, as engine/core/src/stack.rs's
 // tests have them.
 function nested(shape: string, n: number): string {
   const fold = (start: string, f: (s: string, i: number) => string) => Array.from({ length: n }, (_, i) => i).reduce(f, start);
@@ -27,11 +27,11 @@ function nested(shape: string, n: number): string {
   throw new Error(`no shape ${shape}`);
 }
 const POSTGRES_BOUNDS: [string, number][] = [["sum", 496], ["concat", 496], ["and_or", 495], ["case", 493], ["coalesce", 495], ["json", 495], ["subquery", 164]];
-const SQLITE_BOUNDS: [string, number][] = [["sum", 350], ["and_or", 348], ["case", 348], ["coalesce", 349], ["subquery", 23]];
-// MySQL's statements nest to a fifth of the bound, 200 levels, which a parenthesized operand
-// (`id = 0 or (…)`) and a subquery each spend two of, and have at most 500 operators, as
-// engine/mysql/src/mysql.rs's tests have them.
-const MYSQL_BOUNDS: [string, number][] = [["sum", 501], ["and_or", 99], ["case", 198], ["coalesce", 198], ["subquery", 98]];
+const SQLITE_BOUNDS: [string, number][] = [["sum", 1000], ["and_or", 830], ["case", 623], ["coalesce", 830], ["subquery", 42]];
+// MySQL's statements nest 200 levels, which a parenthesized operand (`id = 0 or (…)`) and a
+// subquery each spend two of, and chain at most 2,000 operators, as engine/mysql/src/mysql.rs's
+// tests have them.
+const MYSQL_BOUNDS: [string, number][] = [["sum", 2001], ["or", 2000], ["and_or", 99], ["case", 198], ["coalesce", 198], ["subquery", 98]];
 
 // A server that describes every statement as one int4 column and answers every catalog query with
 // no rows: enough for the engine to parse the statement and run every pass over its tree.
@@ -84,7 +84,7 @@ test("a SQLite statement nested to the engine's bound is typed, and one level pa
       assert.ok(at.ok && at.analysis.kind === "select" && at.analysis.diagnostics.length === 0, `${shape} at ${n}: ${JSON.stringify(at).slice(0, 300)}`);
       const past = await session.analyze(nested(shape, n + 1), { force: true });
       assert.ok(past.ok, `${shape} at ${n + 1}`);
-      assert.deepEqual(past.ok && past.analysis.diagnostics.map((d) => d.message), ["Expression tree is too large (maximum depth 350)"], `${shape} at ${n + 1}`);
+      assert.deepEqual(past.ok && past.analysis.diagnostics.map((d) => d.message), ["Expression tree is too large (maximum depth 1000)"], `${shape} at ${n + 1}`);
     }
     const plain = await session.analyze("select id, name from users where id = :id", { force: true });
     assert.ok(plain.ok && plain.analysis.cardinality === "at_most_one");

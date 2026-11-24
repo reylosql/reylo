@@ -78,7 +78,7 @@ impl ParseError {
     /// Whether the text nests deeper than the parse reads: past the grammar's stack, or past the
     /// [`Bounds`] the parse was given. Any other error is the text's own.
     pub fn past_bounds(&self) -> bool {
-        self.0 == build::TOO_DEEP || self.0 == build::TOO_MANY_OPERATORS || self.0.starts_with(crate::lalr::EXHAUSTED)
+        self.0 == build::TOO_DEEP || self.0 == build::TOO_LONG_A_CHAIN || self.0.starts_with(crate::lalr::EXHAUSTED)
     }
 }
 
@@ -88,8 +88,9 @@ pub struct Bounds {
     /// How deeply expressions nest in other than operators (a call's arguments, a parenthesized
     /// operand, a CASE), and queries and tables: a subquery spends two levels.
     pub depth: usize,
-    /// How many operators the whole statement has, each a level of the tree its chain makes.
-    pub operators: usize,
+    /// How many operators one chain of them may have (`a or b or …`, `a + b + …`, `… union all …`),
+    /// each a level of the tree the chain makes. Operators in separate chains do not add up.
+    pub chain: usize,
 }
 
 /// The statements of `text` as the AST, read under `opts`, within `bounds`. The build recurses as
@@ -267,13 +268,18 @@ mod tests {
         assert!(!parse_tree("select 1 /*!80000 nonsense here */").errors.is_empty());
     }
 
-    const BOUNDS: Bounds = Bounds { depth: 200, operators: 500 };
+    const BOUNDS: Bounds = Bounds { depth: 200, chain: 2_000 };
 
     #[test]
     fn only_a_statement_past_the_bounds_is_past_them() {
         let refused = |text: String| parse(&text, Options::default(), BOUNDS).unwrap_err();
         assert!(refused(format!("select {}a{} as x", "coalesce(".repeat(250), ", b)".repeat(250))).past_bounds());
-        assert!(refused(format!("select {} as x", vec!["a"; 502].join(" + "))).past_bounds());
+        assert!(refused(format!("select {} as x", vec!["a"; 2_002].join(" + "))).past_bounds());
+        assert!(refused(vec!["select 1"; 2_005].join(" union all ")).past_bounds());
+        // Operators side by side, each chain short, are read however many there are.
+        let wide = (0..5_000).map(|i| format!("a = {i} as c{i}")).collect::<Vec<_>>().join(", ");
+        assert!(parse(&format!("select {wide}"), Options::default(), BOUNDS).is_ok());
+        assert!(parse(&format!("select a from t where {}", (0..1_900).map(|i| format!("a = {i}")).collect::<Vec<_>>().join(" or ")), Options::default(), BOUNDS).is_ok());
         // The grammar's own stack runs out first on some shapes, far past the bounds.
         let exhausted = refused(format!("select {}a{} as x", "(".repeat(100_000), ")".repeat(100_000)));
         assert!(exhausted.0.starts_with(crate::lalr::EXHAUSTED) && exhausted.past_bounds(), "{exhausted}");
