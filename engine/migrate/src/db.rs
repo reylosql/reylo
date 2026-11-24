@@ -1162,33 +1162,79 @@ async fn owned_by_platform(target: &mut Db, admin: &tokio_postgres::Client, url:
     Ok(Owned { statements: vec![], extensions, role: None, note: Some(note) })
 }
 
-/// What a new Supabase database had for its Data API before Supabase stopped exposing new tables
-/// through it, as the statements that make it: `postgres`'s default privileges in `public`, which
-/// grant the API's roles every privilege on each table, sequence and function `postgres` makes there,
-/// and the grants of `USAGE` on `public` to them and to `postgres`. SQL written to make a database
-/// whole writes its changes to them from there, which any new Supabase database takes the same way.
-/// One statement each, so that a server without one of the roles leaves out only it.
-#[cfg(feature = "cli")]
-fn platform_defaults() -> (Vec<String>, Vec<String>) {
+/// A privilege one of Supabase's Data API roles may have by default on what `postgres` makes in
+/// `public`: `(objects, role, privilege)`, as `("tables", "anon", "SELECT")`.
+pub(crate) type ApiPrivilege = (String, String, String);
+
+/// The privileges a Supabase project's settings grant its Data API's roles by default, or not, each
+/// set together: whether new tables are exposed to the API (reading and writing a table's rows, and
+/// using a sequence), and whether new functions are. Supabase turned the first off for new projects
+/// in 2026 and for every hosted project later, while its local stack keeps it on unless told
+/// otherwise. A new Supabase database grants every other privilege on what `postgres` makes in
+/// `public` either way.
+pub(crate) const API_SETTINGS: [&[(&str, &[&str])]; 2] = [&[("tables", &["DELETE", "INSERT", "SELECT", "UPDATE"]), ("sequences", &["SELECT", "USAGE"])], &[("functions", &["EXECUTE"])]];
+
+/// For each of [`API_SETTINGS`], whether a database started with it on: read from the privileges it
+/// grants now (`current`), all but those a project's SQL changes (`changed`), as most of the rest
+/// grant or don't; on where it changes them all, as every new Supabase database once started.
+pub(crate) fn api_settings(current: &[ApiPrivilege], changed: &[ApiPrivilege]) -> [bool; 2] {
+    API_SETTINGS.map(|setting| {
+        let (mut on, mut off) = (0, 0);
+        for (objects, privileges) in setting {
+            for role in crate::catalog::PLATFORM_API_ROLES {
+                for privilege in privileges.iter() {
+                    let one = (objects.to_string(), role.to_string(), privilege.to_string());
+                    if changed.contains(&one) {
+                        continue;
+                    }
+                    if current.contains(&one) {
+                        on += 1;
+                    } else {
+                        off += 1;
+                    }
+                }
+            }
+        }
+        on >= off
+    })
+}
+
+/// What a new Supabase database starts with for its Data API, under the settings `on`
+/// ([`api_settings`]), as the statements that make it: `postgres`'s default privileges in `public`
+/// for the API's roles, and the grants of `USAGE` on `public` to them and to `postgres`. One
+/// statement each, so that a server without one of the roles leaves out only it.
+pub(crate) fn platform_defaults(on: [bool; 2]) -> (Vec<String>, Vec<String>) {
     use crate::catalog::{PLATFORM_API_ROLES, PLATFORM_CREATOR};
-    let privileges = ["tables", "sequences", "functions"]
-        .iter()
-        .flat_map(|objects| PLATFORM_API_ROLES.iter().map(move |role| format!("alter default privileges for role {PLATFORM_CREATOR} in schema public grant all on {objects} to {role}")))
-        .collect();
+    let head = format!("alter default privileges for role {PLATFORM_CREATOR} in schema public");
+    let mut privileges: Vec<String> = Vec::new();
+    for role in PLATFORM_API_ROLES {
+        for objects in ["tables", "sequences", "functions"] {
+            privileges.push(format!("{head} grant all on {objects} to {role}"));
+        }
+        for (setting, on) in API_SETTINGS.iter().zip(on) {
+            for (objects, taken) in setting.iter().filter(|_| !on) {
+                privileges.push(format!("{head} revoke {} on {objects} from {role}", taken.join(", ").to_lowercase()));
+            }
+        }
+    }
     let grants = std::iter::once(&PLATFORM_CREATOR).chain(PLATFORM_API_ROLES).map(|role| format!("grant usage on schema public to {role}")).collect();
     (privileges, grants)
 }
 
-/// Whether `statement`, one of [`default_privileges`], grants one of Supabase's Data API roles a
-/// privilege on what `postgres` makes in `public`: the role that runs the migrations is `postgres` on
-/// Supabase, whose own name none of its statements, or another role named for `postgres`.
-#[cfg(feature = "cli")]
-fn platform_privilege(statement: &str) -> bool {
+/// What `statements`, each one of [`default_privileges`], grant the Data API's roles on what
+/// `postgres` makes in `public`: the role that runs the migrations is `postgres` on Supabase, whose
+/// own name none of its statements, or another role named for `postgres`.
+pub(crate) fn api_privileges(statements: &[String]) -> Vec<ApiPrivilege> {
     use crate::catalog::{PLATFORM_API_ROLES, PLATFORM_CREATOR};
-    let Some(rest) = statement.strip_prefix("alter default privileges in schema public ").or_else(|| statement.strip_prefix(&format!("alter default privileges for role {PLATFORM_CREATOR} in schema public "))) else { return false };
-    let rest = rest.trim_end_matches(" with grant option");
-    let Some((what, role)) = rest.rsplit_once(" to ").or_else(|| rest.rsplit_once(" from ")) else { return false };
-    PLATFORM_API_ROLES.contains(&role) && ["tables", "sequences", "functions"].iter().any(|o| what.ends_with(&format!(" on {o}")))
+    statements
+        .iter()
+        .filter_map(|statement| {
+            let rest = statement.strip_prefix("alter default privileges in schema public grant ").or_else(|| statement.strip_prefix(&format!("alter default privileges for role {PLATFORM_CREATOR} in schema public grant ")))?;
+            let (privilege, rest) = rest.split_once(" on ")?;
+            let (objects, role) = rest.trim_end_matches(" with grant option").split_once(" to ")?;
+            (PLATFORM_API_ROLES.contains(&role) && ["tables", "sequences", "functions"].contains(&objects)).then(|| (objects.to_string(), role.to_string(), privilege.to_uppercase()))
+        })
+        .collect()
 }
 
 /// Gives a shadow's session the target's word on whether it is a platform's (`settings`, the target
@@ -1293,12 +1339,13 @@ pub enum Server {
         copy_schema_grants: bool,
         /// On a Supabase target, what a shadow is given where it takes none of the target's default
         /// privileges or grants on its schemas: the default privileges `postgres` gives the Data
-        /// API's roles in `public`, the target's own, which Supabase sets as it chooses (and which
-        /// a project's SQL changes from there); or, for SQL written to make the database whole,
-        /// those and their grants on `public` as a new database had them before Supabase stopped
-        /// exposing new tables, which that SQL changes from there.
+        /// API's roles in `public` as the target started with them, under its project's settings
+        /// ([`api_settings`]), which the project's SQL changes from there; and, for SQL written to
+        /// make the database whole, their grants on `public` as a new database has them.
         platform_privileges: Vec<String>,
         platform_schema_grants: Vec<String>,
+        /// What those default privileges grant on the target now ([`api_privileges`]).
+        api: Vec<ApiPrivilege>,
         /// Whether the target is Supabase's.
         platform: bool,
         /// Whether each shadow is given the platform's publication, empty, as the target was:
@@ -1438,7 +1485,8 @@ impl Server {
                 let owned = owned_by_platform(target, &admin, url, version).await?;
                 // On Supabase, the default privileges its Data API's roles have, the target's own,
                 // which Supabase sets for every project as it chooses; and its publication.
-                let platform_privileges = if names { privileges.iter().filter(|s| platform_privilege(s)).cloned().collect() } else { vec![] };
+                let api = if names { api_privileges(&privileges) } else { vec![] };
+                let platform_privileges = if names { platform_defaults(api_settings(&api, &[])).0 } else { vec![] };
                 let publication = names && !target.rows(&format!("select 1 from pg_publication where pubname = {}", literal(crate::catalog::PLATFORM_PUBLICATION))).await?.is_empty();
                 Ok(Server::Postgres {
                     admin,
@@ -1457,6 +1505,7 @@ impl Server {
                     copy_schema_grants: true,
                     platform_privileges,
                     platform_schema_grants: vec![],
+                    api,
                     platform: names,
                     publication,
                 })
@@ -1691,16 +1740,24 @@ impl Server {
         }
     }
 
+    /// Which of the default privileges Supabase gives the Data API's roles the project's own SQL
+    /// changes (`changed`): the rest say how the target started, which its shadows start as.
+    pub fn changed_api_privileges(&mut self, changed: &[ApiPrivilege]) {
+        if let Server::Postgres { platform_privileges, api, platform: true, .. } = self {
+            *platform_privileges = platform_defaults(api_settings(api, changed)).0;
+        }
+    }
+
     /// Shadows take none of the target's default privileges or grants on its schemas: for SQL written
     /// to make the database whole (init's, introspect's), which makes them itself. Which of them a new
     /// database on the server has already, no name tells, so they are all the SQL's, but on Supabase,
     /// whose new databases have their own, which shadows take.
     pub fn copy_no_privileges(&mut self) {
-        if let Server::Postgres { copy_privileges, copy_schema_grants, platform_privileges, platform_schema_grants, platform, .. } = self {
+        if let Server::Postgres { copy_privileges, copy_schema_grants, platform_schema_grants, platform, .. } = self {
             *copy_privileges = false;
             *copy_schema_grants = false;
             if *platform {
-                (*platform_privileges, *platform_schema_grants) = platform_defaults();
+                *platform_schema_grants = platform_defaults([true, true]).1;
             }
         }
     }
@@ -1827,6 +1884,24 @@ pub(crate) async fn default_privileges(target: &mut Db) -> Result<Vec<String>, E
 #[cfg(test)]
 mod url_tests {
     use super::*;
+
+    #[test]
+    fn a_supabase_databases_settings_are_read_from_what_its_sql_leaves_alone() {
+        let all = |objects: &str, privileges: &[&str], roles: &[&str]| -> Vec<ApiPrivilege> { roles.iter().flat_map(|r| privileges.iter().map(move |p| (objects.to_string(), r.to_string(), p.to_string()))).collect() };
+        let roles = ["anon", "authenticated", "service_role"];
+        let tables = ["DELETE", "INSERT", "SELECT", "UPDATE"];
+        let exposed: Vec<ApiPrivilege> = [all("tables", &tables, &roles), all("sequences", &["SELECT", "USAGE"], &roles), all("functions", &["EXECUTE"], &roles)].concat();
+        assert_eq!(api_settings(&exposed, &[]), [true, true]);
+        assert_eq!(api_settings(&all("functions", &["EXECUTE"], &roles), &[]), [false, true]);
+        // Taken from anon alone, the rest say how it started; and a change to anon alone says nothing.
+        let hidden_from_anon: Vec<ApiPrivilege> = exposed.iter().filter(|(_, r, _)| r != "anon").cloned().collect();
+        assert_eq!(api_settings(&hidden_from_anon, &[]), [true, true]);
+        assert_eq!(api_settings(&all("tables", &["SELECT"], &["authenticated"]), &all("tables", &["SELECT"], &["authenticated"])), [false, false]);
+        // Every one changed says nothing either: it started as Supabase's projects once all did.
+        assert_eq!(api_settings(&[], &exposed), [true, true]);
+        let (privileges, _) = platform_defaults([false, true]);
+        assert!(privileges.contains(&"alter default privileges for role postgres in schema public revoke delete, insert, select, update on tables from anon".to_string()), "{privileges:?}");
+    }
 
     #[test]
     fn a_table_change_runs_strict_where_the_session_isnt() {

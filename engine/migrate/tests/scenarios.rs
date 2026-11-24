@@ -4058,6 +4058,9 @@ on!(
     a_project_begun_on_supabase_runs_on_a_new_supabase_database,
     a_supabase_projects_change_to_its_data_api_grants_is_its_own,
     a_supabase_database_whose_one_change_is_a_default_grant_is_not_empty,
+    a_new_supabase_database_starts_an_empty_project_either_way,
+    a_project_begun_where_new_tables_are_hidden_runs_where_they_are_exposed,
+    a_later_change_to_supabases_default_grants_leaves_earlier_tables_alone,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
     init_reads_an_in_list_on_a_varchar_column_as_it_reads_back,
@@ -7185,6 +7188,67 @@ create trigger kids_note after insert on kids begin update parents set name = na
             assert_eq!(holds(&q, "notes", "service_role", "SELECT").await, "1", "exposes: {exposes}");
             assert_eq!(q.rows("select count(*) as n from pg_namespace n, aclexplode(n.nspacl) x where n.nspname = 'public' and x.grantee = 'anon'::regrole").await[0].text("n"), "0");
         }
+    }
+
+    /// A new Supabase database holds no schema, whether its project exposes new tables to the Data
+    /// API or not: init starts a project with no migrations.
+    pub async fn a_new_supabase_database_starts_an_empty_project_either_way(p: P) {
+        let q = P::new(p.d).await.unwrap();
+        for (mut db, exposes) in [(p, true), (q, false)] {
+            as_supabase_makes_it(&db, exposes).await;
+            assert_eq!(db.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", db.peek());
+            assert_eq!(std::fs::read_to_string(db.dir.join("schema.sql")).unwrap(), "", "exposes: {exposes}");
+            assert!(db.files().is_empty(), "exposes: {exposes}: {:?}", db.files());
+        }
+    }
+
+    /// A project begun on a Supabase database whose project doesn't expose new tables to the Data API
+    /// leaves that setting to each database, and writes each table's own grants: on a database that
+    /// exposes new tables, its table is granted what it was and no more, and the database still
+    /// exposes the next.
+    pub async fn a_project_begun_where_new_tables_are_hidden_runs_where_they_are_exposed(mut p: P) {
+        as_supabase_makes_it(&p, false).await;
+        p.exec("create table notes (id int primary key, body text); grant select on notes to anon; grant select, insert, update, delete on notes to authenticated, service_role").await;
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
+        let init = std::fs::read_to_string(p.dir.join("migrations/init.sql")).unwrap();
+        assert!(!init.to_lowercase().contains("default privileges"), "{init}");
+        p.strict = true;
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        as_supabase_makes_it(&q, true).await;
+        p.url = q.url.clone();
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(holds(&q, "notes", "anon", "SELECT").await, "1");
+        assert_eq!(holds(&q, "notes", "anon", "INSERT").await, "0");
+        assert_eq!(holds(&q, "notes", "authenticated", "DELETE").await, "1");
+        q.exec("create table later (id int)").await;
+        assert_eq!(holds(&q, "later", "anon", "SELECT").await, "1");
+    }
+
+    /// A migration that changes what Supabase grants the Data API's roles by default changes it for
+    /// what is made after it alone: replayed from what the database started with, a table made
+    /// before it keeps what it was granted, and the checks and the next migration find nothing
+    /// changed.
+    pub async fn a_later_change_to_supabases_default_grants_leaves_earlier_tables_alone(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        let posts = "create table posts (id int primary key);\n";
+        p.schema(posts);
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "posts", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let hidden = format!("{posts}\nalter default privileges in schema public revoke select on tables from anon;\n");
+        p.schema(&hidden);
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "hide_new_tables", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        p.schema(&format!("{hidden}\ncreate table notes (id int primary key);\n"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "notes", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(holds(&p, "posts", "anon", "SELECT").await, "1");
+        assert_eq!(holds(&p, "notes", "anon", "SELECT").await, "0");
     }
 
     /// A Supabase database whose one change is to what its Data API's roles are granted by default

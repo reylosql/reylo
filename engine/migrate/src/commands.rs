@@ -3004,6 +3004,43 @@ fn creates_platform_publication(opts: &Options) -> bool {
     texts.iter().any(|t| PUBLICATION.is_match(&crate::sql::tokenize(t, Dialect::Postgres).iter().map(|token| token.text.clone()).collect::<Vec<_>>().join(" ")))
 }
 
+/// Which of the default privileges Supabase gives its Data API's roles in `public`
+/// ([`crate::db::API_SETTINGS`]) the project's own files grant or revoke.
+fn changed_api_privileges(opts: &Options) -> Vec<crate::db::ApiPrivilege> {
+    let mut texts = vec![opts.schema_text().unwrap_or_default()];
+    texts.extend(opts.migrations().map(|(files, _)| files.into_iter().map(|f| f.sql).collect::<Vec<_>>()).unwrap_or_default());
+    texts.iter().flat_map(|t| api_privileges_in(t)).collect()
+}
+
+/// The default privileges in `public` a text grants or revokes Supabase's Data API roles, of those
+/// a project's settings decide ([`crate::db::API_SETTINGS`]).
+fn api_privileges_in(text: &str) -> Vec<crate::db::ApiPrivilege> {
+    static CHANGE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"alter default privileges (?:for (?:role|user) ([^;]+?) )?in schema ([^;]+?) (?:grant|revoke) (?:grant option for )?([^;]+?) on (tables|sequences|functions|routines) (?:to|from) ([^;]+?)(?: with grant option| cascade| restrict)?(?: ;|$)").expect("a valid pattern")
+    });
+    // What a comment says changes nothing: matched in the text with comments taken out.
+    let uncommented = crate::sql::tokenize(text, Dialect::Postgres).iter().map(|token| token.text.to_lowercase()).collect::<Vec<_>>().join(" ").replace(" , ", ", ");
+    let names = |list: &str| list.split(',').map(|n| n.trim().trim_matches('"').to_string()).collect::<Vec<_>>();
+    let mut out = Vec::new();
+    for c in CHANGE.captures_iter(&uncommented) {
+        let for_creator = c.get(1).is_none_or(|roles| names(roles.as_str()).iter().any(|r| r == crate::catalog::PLATFORM_CREATOR));
+        if !for_creator || !names(&c[2]).iter().any(|s| s == "public") {
+            continue;
+        }
+        let objects = if &c[4] == "routines" { "functions" } else { &c[4] };
+        let named = names(&c[3]);
+        let all = named.iter().any(|p| p == "all" || p == "all privileges");
+        for (o, privileges) in crate::db::API_SETTINGS.iter().flat_map(|s| s.iter()).filter(|(o, _)| *o == objects) {
+            for privilege in privileges.iter().filter(|p| all || named.iter().any(|n| n.eq_ignore_ascii_case(p))) {
+                for role in names(&c[5]).iter().filter(|r| crate::catalog::PLATFORM_API_ROLES.contains(&r.as_str())) {
+                    out.push((o.to_string(), role.clone(), privilege.to_string()));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The extensions a text creates.
 fn extensions_in(text: &str) -> Vec<String> {
     static EXTENSION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\bcreate\s+extension\s+(?:if\s+not\s+exists\s+)?"?([A-Za-z0-9_-]+)"?"#).expect("a valid pattern"));
@@ -3090,6 +3127,7 @@ async fn with_shadows(mut db: Db, opts: &Options) -> Result<(Db, Server, usize),
 async fn shadow_server(db: &mut Db, opts: &Options) -> Result<Server, Error> {
     let mut server = Server::open(db, &opts.url, opts.shadow_url.as_deref()).await?;
     server.copy_default_privileges(!sets_default_privileges(opts));
+    server.changed_api_privileges(&changed_api_privileges(opts));
     server.leave_extensions(created_extensions(opts));
     server.leave_schemas(created_schemas(opts));
     if creates_platform_publication(opts) {
@@ -5321,6 +5359,7 @@ async fn unneeded_by_history(opts: &Options, files: &[Migration], extensions: Ve
     db.close().await;
     let mut server = server?;
     server.copy_default_privileges(!sets_default_privileges(opts));
+    server.changed_api_privileges(&changed_api_privileges(opts));
     if creates_platform_publication(opts) {
         server.leave_platform();
     }
@@ -6393,6 +6432,7 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
     }
     let mut server = Server::open(&mut db, &opts.url, opts.shadow_url.as_deref()).await?;
     server.copy_default_privileges(!sets_default_privileges(opts));
+    server.changed_api_privileges(&changed_api_privileges(opts));
     if creates_platform_publication(opts) {
         server.leave_platform();
     }
@@ -6943,8 +6983,10 @@ struct Api {
     /// Whether the database is Supabase's.
     on: bool,
     /// What the project changed of the default privileges and the grants on `public`, as the
-    /// statements that change them from what a new database had.
+    /// statements that change them from what a new database started with.
     changes: Vec<String>,
+    /// The project's settings the database started under ([`crate::db::api_settings`]).
+    settings: [bool; 2],
 }
 
 impl Api {
@@ -6960,7 +7002,7 @@ impl Api {
         // grant option.
         let cells = db
             .rows(&format!(
-                "select o.objects, quote_ident(r.rolname) as role,
+                "select o.objects, quote_ident(r.rolname) as role, r.rolname as raw,
                    (select string_agg(b.privilege_type, ',' order by b.privilege_type) from aclexplode(acldefault(o.k::\"char\", c.oid)) b where b.grantee = c.oid) as everything,
                    (select string_agg(x.privilege_type, ',' order by x.privilege_type) from pg_default_acl d, aclexplode(d.defaclacl) x
                      where d.defaclrole = c.oid and d.defaclnamespace = 'public'::regnamespace and d.defaclobjtype = o.d::\"char\" and x.grantee = r.oid) as has,
@@ -6972,13 +7014,23 @@ impl Api {
             ))
             .await?;
         let list = |r: &crate::db::Row, column: &str| r.get(column).map(|l| l.split(',').map(String::from).collect::<Vec<_>>()).unwrap_or_default();
+        // The settings it started under, which a new database of any project with them has too.
+        let current: Vec<crate::db::ApiPrivilege> = cells.iter().flat_map(|r| list(r, "has").into_iter().map(move |p| (r.text("objects").to_lowercase(), r.text("raw").to_string(), p))).collect();
+        api.settings = crate::db::api_settings(&current, &[]);
         for r in &cells {
             let (all, has) = (list(r, "everything"), list(r, "has"));
-            let lacks: Vec<&String> = all.iter().filter(|p| !has.contains(p)).collect();
+            let objects = r.text("objects").to_lowercase();
+            let off: Vec<&str> = crate::db::API_SETTINGS.iter().zip(api.settings).filter(|(_, on)| !on).flat_map(|(s, _)| s.iter()).filter(|(o, _)| *o == objects).flat_map(|(_, p)| p.iter().copied()).collect();
+            let started: Vec<&String> = all.iter().filter(|p| !off.contains(&p.as_str())).collect();
+            let lacks: Vec<&&String> = started.iter().filter(|p| !has.contains(p)).collect();
+            let more: Vec<&String> = has.iter().filter(|p| !started.contains(p)).collect();
             let head = format!("ALTER DEFAULT PRIVILEGES FOR ROLE {PLATFORM_CREATOR} IN SCHEMA public");
             if !lacks.is_empty() {
-                let what = if lacks.len() == all.len() { "ALL".to_string() } else { lacks.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ") };
+                let what = if has.is_empty() { "ALL".to_string() } else { lacks.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", ") };
                 api.changes.push(format!("{head} REVOKE {what} ON {} FROM {}", r.text("objects"), r.text("role")));
+            }
+            if !more.is_empty() {
+                api.changes.push(format!("{head} GRANT {} ON {} TO {}", more.iter().map(|p| p.as_str()).collect::<Vec<_>>().join(", "), r.text("objects"), r.text("role")));
             }
             let grantable = list(r, "grantable");
             if !grantable.is_empty() {
@@ -7016,10 +7068,11 @@ impl Api {
 
     /// The statements that give each table, sequence and function in `public` its own grants to the
     /// Data API's roles on any Supabase database, where [`Api::changes`] runs first: after pg_dump's
-    /// grants of what it has (`own` false), what the default privileges give it and it lacks,
-    /// revoked, and a grant option they give and it lacks, taken back; or, beside Reylo's own SQL
-    /// (`own` true), which grants only what they don't give, the grants of what they give it. A new
-    /// Supabase database gives it no more than they do, once the changes have run.
+    /// grants of what it has (`own` false), what the default privileges give it and it lacks, or
+    /// would give it on a project whose settings grant more, revoked, and a grant option they give
+    /// and it lacks, taken back; or, beside Reylo's own SQL (`own` true), which grants only what they
+    /// don't give and revokes what they give and it lacks, the grants of what they give it, and the
+    /// revokes of what more they would give.
     async fn objects(&self, db: &mut Db, own: bool) -> Result<Vec<String>, Error> {
         use crate::catalog::{not_extension, not_platform, pg_not_history, PLATFORM_API_ROLES, PLATFORM_CREATOR};
         if !self.on {
@@ -7028,12 +7081,29 @@ impl Api {
         let roles = PLATFORM_API_ROLES.iter().map(|r| crate::db::literal(r)).collect::<Vec<_>>().join(", ");
         // Reylo's own SQL names what is in `public` unqualified, as it does the rest.
         let name = |schema: &str, object: &str| if own { format!("format('%I', {object})") } else { format!("format('%I.%I', {schema}, {object})") };
+        // What a new database of a project with the settings off would grant them, were they on:
+        // revoked too, since the database the SQL runs on may have them on.
+        let could: Vec<String> = crate::db::API_SETTINGS
+            .iter()
+            .zip(self.settings)
+            .filter(|(_, on)| !on)
+            .flat_map(|(setting, _)| setting.iter())
+            .flat_map(|(objects, privileges)| {
+                let k = match *objects {
+                    "tables" => "r",
+                    "sequences" => "S",
+                    _ => "f",
+                };
+                PLATFORM_API_ROLES.iter().flat_map(move |role| privileges.iter().map(move |p| format!("('{k}'::\"char\", '{role}', '{p}')")))
+            })
+            .collect();
+        let could = if could.is_empty() { "select null::\"char\" as k, null::text as rolname, null::text as p where false".to_string() } else { format!("select * from (values {}) v(k, rolname, p)", could.join(", ")) };
         let rows = db
             .rows(&format!(
                 "with made as (
                    select d.defaclobjtype as k, x.grantee, x.privilege_type as p, x.is_grantable as g from pg_default_acl d, aclexplode(d.defaclacl) x
                    where d.defaclrole = (select oid from pg_roles where rolname = {creator}) and d.defaclnamespace = 'public'::regnamespace
-                 ), object as (
+                 ), could as ({could}), object as (
                    select case c.relkind when 'S' then 'S' else 'r' end::\"char\" as k, case c.relkind when 'S' then 's' else 'r' end::\"char\" as a,
                      case c.relkind when 'S' then 'SEQUENCE' else 'TABLE' end as word, {} as name, coalesce(c.relacl, acldefault(case c.relkind when 'S' then 's' else 'r' end::\"char\", c.relowner)) as acl, c.relowner as owner
                    from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S') and {} and {}
@@ -7046,12 +7116,13 @@ impl Api {
                      exists (select 1 from aclexplode(o.acl) x where x.grantee = r.oid and x.privilege_type = b.privilege_type) as has,
                      exists (select 1 from aclexplode(o.acl) x where x.grantee = r.oid and x.privilege_type = b.privilege_type and x.is_grantable) as has_option,
                      exists (select 1 from made m where m.k = o.k and m.grantee = r.oid and m.p = b.privilege_type) as made,
-                     exists (select 1 from made m where m.k = o.k and m.grantee = r.oid and m.p = b.privilege_type and m.g) as made_option
+                     exists (select 1 from made m where m.k = o.k and m.grantee = r.oid and m.p = b.privilege_type and m.g) as made_option,
+                     exists (select 1 from could c where c.k = o.k and c.rolname = r.rolname::text and c.p = b.privilege_type) as could
                    from object o cross join pg_roles r cross join lateral aclexplode(acldefault(o.a, o.owner)) b
                    where r.rolname in ({roles}) and b.grantee = o.owner
                  ), statement as (
                    select 0 as n, 'GRANT' as verb, word, name, rolname, p, total from cell where {own} and has and made
-                   union all select 1, 'REVOKE', word, name, rolname, p, total from cell where not {own} and made and not has
+                   union all select 1, 'REVOKE', word, name, rolname, p, total from cell where not has and ((not {own} and (made or could)) or ({own} and could and not made))
                    union all select 2, 'REVOKE GRANT OPTION FOR', word, name, rolname, p, total from cell where not {own} and made_option and has and not has_option
                  ), by_role as (
                    select n, verb, word, name, rolname, case when count(*) = max(total) then 'ALL' else string_agg(p, ', ' order by p) end as ps from statement group by n, verb, word, name, rolname
@@ -9267,6 +9338,17 @@ mod tests {
         more.push("column public.t.x integer".into());
         assert_eq!(sides(&more, &two), (true, false));
         assert_eq!(sides(&[two.clone(), vec!["column public.t.x integer".into()]].concat(), &three), (true, true));
+    }
+
+    #[test]
+    fn a_change_to_supabases_default_grants_is_read_from_the_sql() {
+        let sql = "-- alter default privileges in schema public revoke all on tables from anon;\nALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE SELECT, INSERT ON TABLES FROM \"anon\", authenticated;\nalter default privileges in schema api revoke select on tables from anon;\nalter default privileges for role other in schema public revoke select on tables from anon;\nalter default privileges in schema public grant all on sequences to service_role with grant option;\n";
+        let read = api_privileges_in(sql);
+        let changed: Vec<(&str, &str, &str)> = read.iter().map(|(o, r, p)| (o.as_str(), r.as_str(), p.as_str())).collect();
+        assert_eq!(
+            changed,
+            [("tables", "anon", "INSERT"), ("tables", "authenticated", "INSERT"), ("tables", "anon", "SELECT"), ("tables", "authenticated", "SELECT"), ("sequences", "service_role", "SELECT"), ("sequences", "service_role", "USAGE")]
+        );
     }
 
     #[test]
