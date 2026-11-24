@@ -132,7 +132,7 @@ fn reach() -> String {
 /// The note on a statement [`AnalyzeError::TooDeep`] refuses, which is typed from the server's
 /// describe alone.
 pub fn too_deep_note() -> String {
-    format!("This statement nests deeper than the analysis reads, so it is typed from the server's describe alone: each column may be null, and it may return any number of rows. The analysis reads {}.", reach())
+    format!("This statement nests deeper than the analysis reads, so it is typed from the server's describe alone: each column it returns may be null, in any number of rows. The analysis reads {}.", reach())
 }
 
 /// Analyze one rewritten statement (placeholders already `$n`).

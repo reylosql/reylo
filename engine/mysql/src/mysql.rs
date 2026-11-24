@@ -2476,7 +2476,7 @@ const BOUNDS: syntax::mysql::Bounds = syntax::mysql::Bounds { depth: crate::stac
 /// The note on a statement past [`BOUNDS`], which is typed from the server's prepare alone.
 pub(crate) fn too_deep_note() -> String {
     format!(
-        "This statement nests deeper than the analysis reads, so it is typed from the server's prepare alone: each column may be null, and it may return any number of rows. The analysis reads {} levels of nesting, which a call's arguments, a parenthesized operand and a CASE each spend one of and a subquery two, and {} operators in all.",
+        "This statement nests deeper than the analysis reads, so it is typed from the server's prepare alone: each column it returns may be null, in any number of rows. The analysis reads {} levels of nesting, which a call's arguments, a parenthesized operand and a CASE each spend one of and a subquery two, and {} operators in all.",
         BOUNDS.depth, BOUNDS.operators
     )
 }
