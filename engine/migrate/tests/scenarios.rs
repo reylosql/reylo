@@ -7147,7 +7147,8 @@ create trigger kids_note after insert on kids begin update parents set name = na
         let before = "create table log (id bigint generated always as identity, msg text); create table events (id bigint generated always as identity primary key, msg text); create table active (id bigint generated always as identity, live boolean); create index active_live on active (id) where live; create table renamed (id bigint generated always as identity, msg text); create sequence stage_no; create table stage (id bigint, n text); create sequence later_no; create table later (id bigint, n text); create sequence fed_no; create table fed (id bigint default nextval('fed_no'), n text); \
             create sequence order_no; create table orders (id bigint primary key, secondary_id bigint default nextval('order_no')); alter sequence order_no owned by orders.id; \
             create sequence idx_no; create table idx (id bigint default nextval('idx_no')); create index idx_id on idx (id); \
-            create sequence dropdef_no; create table dropdef (id bigint default nextval('dropdef_no'));";
+            create sequence dropdef_no; create table dropdef (id bigint default nextval('dropdef_no')); \
+            create sequence rn_no; create table rn (id bigint default nextval('rn_no'));";
         p.schema(before);
         p.file("20261027100000_log.sql", before);
         assert_eq!(p.dev().await, 0, "{}", p.peek());
@@ -7159,15 +7160,16 @@ create trigger kids_note after insert on kids begin update parents set name = na
             create sequence order_no start with 1000; create table orders (id bigint primary key, secondary_id bigint default nextval('order_no')); alter sequence order_no owned by orders.id; \
             create sequence idx_no start with 1000; create table idx (id bigint default nextval('idx_no')); \
             create sequence dropdef_no start with 1000; create table dropdef (id bigint); \
+            create sequence rn_no start with 1000; create table rn (new_id bigint default nextval('rn_no')); \
             create sequence stage_no start with 1000; create table stage (id bigint, n text); alter sequence stage_no owned by stage.id; create table log (id bigint generated always as identity (start with 1000), msg text); create table events (id bigint generated always as identity (start with 1000) primary key, msg text); create table active (id bigint generated always as identity (start with 1000), live boolean); create index active_live on active (id) where live; create table renamed (new_id bigint generated always as identity (start with 1000), msg text);");
-        let rename = vec![("renamed.id".to_string(), "new_id".to_string())];
+        let rename = vec![("renamed.id".to_string(), "new_id".to_string()), ("rn.id".to_string(), "new_id".to_string())];
         let choices = reylo_migrate::Choices { rename: rename.clone(), ..Default::default() };
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "move_ids", &choices, log).await).await, 1);
         let out = p.output();
         assert!(!out.contains("of later while"), "{out}");
-        // An indexed column the sequence owns hides no other column it feeds; an index the change
-        // drops serves no read.
-        for table in ["log", "active", "renamed", "fed", "orders", "idx"] {
+        // An indexed column the sequence owns hides no other column it feeds; a column renamed
+        // ahead of the read is still read.
+        for table in ["log", "active", "renamed", "fed", "orders", "rn"] {
             assert_has!(&out, &format!(r"reads every row of {table} while it blocks writes to it, to move a sequence past them"));
         }
         assert!(!out.contains("of events while"), "an indexed column is read through its index: {out}");
@@ -7183,6 +7185,9 @@ create trigger kids_note after insert on kids begin update parents set name = na
         let at = |text: &str| file.lines().position(|l| l.contains(text)).unwrap_or_else(|| panic!("{file}"));
         let read_first = at("'public.dropdef_no'") < at("alter column id drop default");
         assert_eq!(out.contains("of dropdef while"), read_first, "{file}");
+        // An index the change drops serves the read only where it is dropped after it.
+        let dropped_first = file.lines().position(|l| l.contains("drop index") && l.contains("idx_id")).is_some_and(|d| d < at("'public.idx_no'"));
+        assert_eq!(out.contains("of idx while"), dropped_first, "{file}");
     }
 
     /// The check of a sequence's read reads the catalog and runs nothing of the file but the file:
