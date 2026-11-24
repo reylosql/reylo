@@ -333,10 +333,10 @@ pub fn reflect(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// An item that reads `REYLO_ANALYSIS_KEY`, which `reylo migrate deploy --dry-run -- <command>` sets
-/// to name the schema its shadow has, so that rustc compiles the crate again, and the macro reads
-/// the database again, when a build moves onto a shadow, off one, or onto another schema. Cargo
-/// tracks no variable a macro reads itself; it tracks one the expanded code names. The key holds no
-/// URL, so no credential reaches Cargo's records.
+/// anew for each run's shadow, so that rustc compiles the crate again, and the macro reads the
+/// database again, when a build moves onto a shadow, off one, or onto another. Cargo tracks no
+/// variable a macro reads itself; it tracks one the expanded code names. The key holds no URL, so
+/// no credential reaches Cargo's records.
 fn analysis_key() -> TokenStream2 {
     quote!(const _: ::core::option::Option<&str> = ::core::option_env!("REYLO_ANALYSIS_KEY");)
 }

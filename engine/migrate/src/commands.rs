@@ -4076,12 +4076,6 @@ async fn dry_run_on(opts: &Options, command: Option<&[String]>, made: &mut Vec<P
             log(&note("The command didn't run, since the deploy after it would refuse this database"));
             Ok(1)
         }
-        // A cut-off run whose change landed is replayed here as run, where a deploy with no
-        // fingerprint to hold it to runs it again, and fails on what it left.
-        Some(_) if !plan.landed.is_empty() && plan.unchanged != Some(true) => {
-            log(&note(format!("The command didn't run, since the deploy after it would run {} again", plan.landed.join(", "))));
-            Ok(1)
-        }
         Some(command) => {
             for path in made.drain(..) {
                 let _ = std::fs::remove_file(path);
@@ -4099,20 +4093,15 @@ async fn dry_run_on(opts: &Options, command: Option<&[String]>, made: &mut Vec<P
 /// `version` is the target's server version, where the shadows are on another server.
 #[cfg(feature = "cli")]
 async fn build_on_shadow(server: &mut Server, opts: &Options, plan: &Plan, version: Option<&str>, command: &[String], log: Log<'_>) -> Result<i32, Error> {
-    let steps: Vec<&Migration> = plan.ran.iter().chain(&plan.records).chain(&plan.pending).collect();
+    // A cut-off run whose change landed is in the shadow as run. A deploy with no fingerprint to
+    // hold it to runs it again, over what it left: so does the shadow, which fails where that would.
+    let again: Vec<&Migration> = if plan.unchanged == Some(true) { vec![] } else { plan.records.iter().filter(|m| plan.landed.contains(&m.name)).collect() };
+    let steps: Vec<&Migration> = plan.ran.iter().chain(&plan.records).chain(again).chain(&plan.pending).collect();
     let texts: Vec<&str> = steps.iter().map(|m| m.sql.as_str()).collect();
-    // What names the shadow's schema to a build's caches, as its URL may not: the migrations replayed, in order.
-    let key = {
-        use sha2::Digest;
-        let mut hash = sha2::Sha256::new();
-        for m in &steps {
-            hash.update(m.name.as_bytes());
-            hash.update([0]);
-            hash.update(m.sql.as_bytes());
-            hash.update([0]);
-        }
-        hash.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect::<String>()
-    };
+    // What tells a build's caches that this run's shadow is another database from any before it, as
+    // its URL may not, and which holds no credential: one key a run. The same migrations can type
+    // otherwise on another server, so nothing a key could be made of would answer for both.
+    let key = crate::db::random_name();
     let mut shadows = Shadows::new(server, &opts.url, &opts.root, &opts.cache, &texts).await;
     let lane = shadows.lane();
     shadows.push(lane, steps.into_iter().map(Step::of));
@@ -4144,10 +4133,15 @@ async fn build_on_shadow(server: &mut Server, opts: &Options, plan: &Plan, versi
             crate::terminal::set_spinner(false);
             let signals = Signals::new();
             let mut child = tokio::process::Command::new(program(&command[0]));
-            // A process group of its own, so that a signal, and the end of the run, reach every
-            // process the command starts (a shell's, a package manager's workers), not its first alone.
+            // Away from a terminal (CI, a build host), a process group of its own, so that a signal,
+            // and the end of the run, reach every process the command starts (a shell's, a package
+            // manager's workers), not its first alone. At one, this run's group, which the terminal's
+            // interrupt and suspend already reach whole, as the shell's job control expects.
+            let own_group = !interactive();
             #[cfg(unix)]
-            child.process_group(0);
+            if own_group {
+                child.process_group(0);
+            }
             let child = child
                 .args(&command[1..])
                 .env(ANALYSIS_URL, &url)
@@ -4156,7 +4150,7 @@ async fn build_on_shadow(server: &mut Server, opts: &Options, plan: &Plan, versi
                 .env_remove("REYLO_VERSION_MATCHED")
                 .spawn();
             match child {
-                Ok(child) => Ok(wait_holding(shadows.server, child, signals).await),
+                Ok(child) => Ok(wait_holding(shadows.server, child, own_group, signals).await),
                 Err(e) => Err(Error(format!("cannot run {}: {e}", command[0]))),
             }
         }
@@ -4220,14 +4214,13 @@ impl Signals {
 
 /// The command's exit code, waited for while the shadows' server session is kept alive (its lock is
 /// what keeps another run's sweep off the shadow), and while a signal meant for this run is passed
-/// to the command's process group. The group holds the terminal meanwhile, as a shell's job does, so
-/// that an interrupt typed there reaches it once. Whatever of the group is still running when the
-/// command exits is ended before the shadow it may read is dropped. A command a signal ended exits as
-/// a shell reports it, 128 and the signal's number.
+/// on: to the command's own process group, or, where it shares this run's at a terminal, to the
+/// command, but an interrupt the terminal gave the whole group. Whatever of an own group is still
+/// running when the command exits is ended before the shadow it may read is dropped. A command a
+/// signal ended exits as a shell reports it, 128 and the signal's number.
 #[cfg(feature = "cli")]
-async fn wait_holding(server: &mut Server, mut child: tokio::process::Child, mut signals: Signals) -> i32 {
-    let group = child.id().map(|pid| pid as i32);
-    let terminal = group.is_some_and(take_terminal);
+async fn wait_holding(server: &mut Server, mut child: tokio::process::Child, own_group: bool, mut signals: Signals) -> i32 {
+    let pid = child.id().map(|pid| pid as i32);
     let mut ping = tokio::time::interval(std::time::Duration::from_secs(60));
     ping.tick().await;
     let mut pinging = false;
@@ -4247,49 +4240,51 @@ async fn wait_holding(server: &mut Server, mut child: tokio::process::Child, mut
                 Err(_) => 1,
             },
             () = keepalive => pinging = !pinging,
-            signal = signals.next() => {
-                if let Some(pid) = group {
-                    signal_group(pid, signal);
-                }
-            }
+            signal = signals.next() => match pid {
+                Some(pid) if own_group => signal_group(pid, signal),
+                Some(pid) if !is_interrupt(signal) => signal_process(pid, signal),
+                _ => {}
+            },
         }
     };
-    if terminal {
-        give_back_terminal();
-    }
-    if let Some(pid) = group {
+    if let (Some(pid), true) = (pid, own_group) {
         end_group(pid).await;
     }
     code
 }
 
-/// Gives the terminal to the command's process group, where this run has it.
+/// Whether this run is in front at a terminal, where the terminal's signals reach its whole group.
 #[cfg(feature = "cli")]
-fn take_terminal(pid: i32) -> bool {
+fn interactive() -> bool {
     #[cfg(unix)]
-    // SAFETY: isatty, getpgrp and tcgetpgrp only read; the SIGTTOU this run would get for handing the
-    // terminal back from a group no longer in front is ignored, as a shell ignores it.
+    // SAFETY: isatty, tcgetpgrp and getpgrp only read.
     unsafe {
-        if libc::isatty(0) == 0 || libc::tcgetpgrp(0) != libc::getpgrp() {
-            return false;
-        }
-        libc::signal(libc::SIGTTOU, libc::SIG_IGN);
-        libc::tcsetpgrp(0, pid) == 0
+        libc::isatty(0) == 1 && libc::tcgetpgrp(0) == libc::getpgrp()
     }
     #[cfg(not(unix))]
+    false
+}
+
+#[cfg(feature = "cli")]
+fn is_interrupt(signal: i32) -> bool {
+    #[cfg(unix)]
+    return signal == libc::SIGINT;
+    #[cfg(not(unix))]
     {
-        let _ = pid;
+        let _ = signal;
         false
     }
 }
 
 #[cfg(feature = "cli")]
-fn give_back_terminal() {
+fn signal_process(pid: i32, signal: i32) {
     #[cfg(unix)]
-    // SAFETY: hands the terminal back to this run's own process group, with SIGTTOU still ignored.
+    // SAFETY: kill(2) of the command this run started and has not reaped yet.
     unsafe {
-        libc::tcsetpgrp(0, libc::getpgrp());
+        libc::kill(pid, signal);
     }
+    #[cfg(not(unix))]
+    let _ = (pid, signal);
 }
 
 #[cfg(feature = "cli")]
@@ -4355,8 +4350,8 @@ async fn server_version(db: &mut Db) -> Result<String, Error> {
 /// database.
 pub const ANALYSIS_URL: &str = "REYLO_ANALYSIS_URL";
 
-/// A digest of the migrations the shadow in [`ANALYSIS_URL`] replayed, which a build's caches key on
-/// in its place: Cargo keeps a tracked variable's value, and the URL can hold a password.
+/// A key of each run's shadow in [`ANALYSIS_URL`], which a build's caches track in its place: Cargo
+/// keeps a tracked variable's value, and the URL can hold a password.
 pub const ANALYSIS_KEY: &str = "REYLO_ANALYSIS_KEY";
 
 /// The program to start for a command's first word. On Windows a name with no extension is looked

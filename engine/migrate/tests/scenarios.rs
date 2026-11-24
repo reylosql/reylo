@@ -7867,14 +7867,18 @@ async fn a_first_deploys_sqlite_file_is_left_to_the_command(mut p: P) {
     assert!(!std::path::Path::new(&file).exists());
 }
 
-/// A cut-off run whose change landed, on a database with no fingerprint to hold it to: the deploy
-/// after the build would run it again, so the build doesn't run.
-async fn a_dry_run_runs_no_command_where_a_landed_run_would_run_again(mut p: P) {
-    if p.d == Dialect::Sqlite {
+/// A cut-off run whose change landed, on a database with no fingerprint to hold it to, which the
+/// deploy after the build runs again: the build runs where that succeeds, and not where it fails.
+async fn a_landed_run_the_deploy_retries(mut p: P, idempotent: bool) {
+    if p.d == Dialect::Sqlite || (idempotent && p.d != Dialect::Postgres) {
         return;
     }
     let int = p.t.int;
-    let lone = if p.d == Dialect::Postgres { "create index concurrently a_id on a (id)" } else { "create index a_id on a (id)" };
+    let lone = match (p.d, idempotent) {
+        (Dialect::Postgres, true) => "create index concurrently if not exists a_id on a (id)",
+        (Dialect::Postgres, false) => "create index concurrently a_id on a (id)",
+        _ => "create index a_id on a (id)",
+    };
     p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
     p.file("20261027110000_index.sql", &format!("{lone};"));
@@ -7887,12 +7891,23 @@ async fn a_dry_run_runs_no_command_where_a_landed_run_would_run_again(mut p: P) 
     db.close().await;
     p.output();
     let ran = p.dir.join("ran");
-    assert_eq!(dry_run_then(&mut p, &format!("touch '{}'", ran.display())).await, 1, "{}", p.peek());
-    assert!(!ran.exists(), "{}", p.peek());
+    let code = dry_run_then(&mut p, &format!("touch '{}'", ran.display())).await;
+    assert_eq!((code, ran.exists()), (if idempotent { 0 } else { 1 }, idempotent), "{}", p.peek());
+    // The deploy agrees.
+    assert_eq!(p.migrate().await, if idempotent { 0 } else { 1 }, "{}", p.peek());
+}
+
+async fn a_landed_run_the_deploy_retries_and_fails_stops_the_build(p: P) {
+    a_landed_run_the_deploy_retries(p, false).await
+}
+
+async fn a_landed_run_the_deploy_retries_cleanly_lets_the_build_run(p: P) {
+    a_landed_run_the_deploy_retries(p, true).await
 }
 
 for_each_dialect!(
-    a_dry_run_runs_no_command_where_a_landed_run_would_run_again,
+    a_landed_run_the_deploy_retries_and_fails_stops_the_build,
+    a_landed_run_the_deploy_retries_cleanly_lets_the_build_run,
     a_dry_run_builds_on_a_shadow_of_what_deploy_leaves,
     a_dry_run_that_refuses_runs_no_command,
     a_dry_run_runs_no_command_for_a_schema_sql_the_deploy_refuses,
