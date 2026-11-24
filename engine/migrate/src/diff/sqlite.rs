@@ -655,8 +655,8 @@ impl Alterer for SqliteAlterer {
             None => true,
         });
         // The indexes each one's content reads, by the target's schema: its content where that
-        // is another index, and every index a view on the way names, by any of its names, which
-        // may take an alias for an index but never misses one.
+        // is another index, the index an `fts5vocab` table reads, and the relations a view on the
+        // way reads.
         let schemas = self.schemas.borrow();
         let names: Vec<String> = rebuilds.iter().map(|(n, _)| n.clone()).collect();
         let reads = |name: &str| -> BTreeSet<String> {
@@ -672,20 +672,20 @@ impl Alterer for SqliteAlterer {
                     out.insert(relation.clone());
                 }
                 // An index the content is, which this rebuild doesn't refresh, reads its own.
-                if let Some(c) = to.objects.get(&format!("table {relation}")).and_then(|o| Info::of(o).content).map(|(c, ..)| c) {
-                    queue.push(c);
+                if let Some(o) = to.objects.get(&format!("table {relation}")) {
+                    queue.extend(Info::of(o).content.map(|(c, ..)| c));
+                    queue.extend(o.create.first().and_then(|sql| vocabulary_of(sql)));
                 }
-                let Some(view) = to.objects.get(&format!("view {relation}")) else { continue };
-                let tokens = tokenize(view.create.first().map_or("", String::as_str), Dialect::Sqlite);
-                queue.extend(tokens.iter().filter(|t| matches!(t.kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Str)).map(|t| fold(&unquote(t))));
+                if let Some(view) = to.objects.get(&format!("view {relation}")) {
+                    queue.extend(relations_read(view.create.first().map_or("", String::as_str)));
+                }
             }
             out.remove(name);
             out
         };
         let needs: Vec<BTreeSet<String>> = names.iter().map(|n| reads(n)).collect();
-        // Each after what it reads, in the plan's order otherwise. Indexes that read each other
-        // (an alias that names one) run again, once per index among them, so that whichever way
-        // they really read, the chain has settled.
+        // Each after what it reads, in the plan's order otherwise. Indexes that read each other,
+        // which no rebuild can settle, run in the plan's order.
         let mut done: Vec<String> = Vec::new();
         let mut left: Vec<usize> = (0..names.len()).collect();
         while !left.is_empty() {
@@ -696,9 +696,7 @@ impl Alterer for SqliteAlterer {
                     done.push(names[k].clone());
                 }
                 None => {
-                    for _ in 0..left.len() {
-                        statements.extend(left.iter().map(|&k| rebuilds[k].1.clone()));
-                    }
+                    statements.extend(left.iter().map(|&k| rebuilds[k].1.clone()));
                     break;
                 }
             }
@@ -1145,6 +1143,53 @@ fn reindexed(a: &Info, b: &Info, renamed: &BTreeMap<String, String>, old_parts: 
         .collect()
 }
 
+/// The relations a view's text reads, folded: each its FROM clauses name, a table-valued call
+/// (`join 'notes_fts'('word')`) among them and the name after a schema (`main.notes_fts`), and
+/// never an alias, a column or a string the rest of the text holds.
+fn relations_read(sql: &str) -> Vec<String> {
+    let tokens = tokenize(sql, Dialect::Sqlite);
+    let named = |k: usize| tokens.get(k).is_some_and(|t| matches!(t.kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Str));
+    // Whether each depth of parentheses is in a FROM clause.
+    let mut from: Vec<bool> = vec![false];
+    let mut out = Vec::new();
+    for (k, t) in tokens.iter().enumerate() {
+        match t.text.as_str() {
+            "(" => from.push(false),
+            ")" => {
+                from.pop();
+                if from.is_empty() {
+                    from.push(false);
+                }
+            }
+            _ => {}
+        }
+        let here = from.len() - 1;
+        match t.upper().as_str() {
+            "FROM" => from[here] = true,
+            "WHERE" | "GROUP" | "HAVING" | "ORDER" | "LIMIT" | "WINDOW" | "UNION" | "INTERSECT" | "EXCEPT" | "SELECT" | "VALUES" => from[here] = false,
+            _ => {}
+        }
+        let Some(prev) = k.checked_sub(1).map(|j| &tokens[j]) else { continue };
+        if named(k) && (matches!(prev.upper().as_str(), "FROM" | "JOIN") || (prev.text == "," && from[here])) {
+            let at = if tokens.get(k + 1).is_some_and(|n| n.text == ".") && named(k + 2) { k + 2 } else { k };
+            out.push(fold(&unquote(&tokens[at])));
+        }
+    }
+    out
+}
+
+/// The FTS5 table an `fts5vocab` table's text reads, folded: its first argument, or its second
+/// where the first names a schema.
+fn vocabulary_of(sql: &str) -> Option<String> {
+    let tokens = tokenize(sql, Dialect::Sqlite);
+    let using = tokens.iter().position(|t| t.upper() == "USING")?;
+    if fold(&unquote(tokens.get(using + 1)?)) != "fts5vocab" {
+        return None;
+    }
+    let args: Vec<String> = tokens[using + 2..].iter().filter(|t| matches!(t.kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Str)).map(|t| fold(&unquote(t))).collect();
+    args.get(if args.len() > 2 { 1 } else { 0 }).cloned()
+}
+
 /// The full-text table a statement rebuilds the index of (`rebuild`'s), folded.
 fn rebuilt(statement: &str) -> Option<String> {
     let tokens = tokenize(statement, Dialect::Sqlite);
@@ -1325,6 +1370,16 @@ mod tests {
         assert_eq!(content("create virtual table f using fts5(body, content='')"), None);
         assert_eq!(content("create virtual table f using fts5(body, tokenize='unicode61 remove_diacritics 2')"), None);
         assert_eq!(content("create virtual table f using rtree(id, x0, x1)"), None);
+    }
+
+    #[test]
+    fn reads_the_relations_a_view_reads() {
+        let read = |sql: &str| relations_read(sql);
+        assert_eq!(read("create view v as select f.id, 'filtered' as kind from notes as f join main.\"Z_Root\"('word') as hit on hit.rowid = f.id, other o where f.category <> 'filtered'"), ["notes", "z_root", "other"]);
+        assert_eq!(read("create view v as select a, filtered from (select x as a, y as filtered from t1, t2) join 'docs'('x')"), ["t1", "t2", "docs"]);
+        assert_eq!(vocabulary_of("CREATE VIRTUAL TABLE v USING fts5vocab(z_root, 'instance')"), Some("z_root".to_string()));
+        assert_eq!(vocabulary_of("create virtual table v using fts5vocab(main, \"Docs\", row)"), Some("docs".to_string()));
+        assert_eq!(vocabulary_of("create virtual table v using fts5(body)"), None);
     }
 
     #[test]
