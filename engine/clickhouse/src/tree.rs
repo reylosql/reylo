@@ -17,6 +17,11 @@
 //!   leaves each shard's rows unmerged, and bounds nothing.
 //!
 //! The tree's text is the server's to change, so what is not recognized proves nothing.
+//!
+//! The tree also says which columns of a SELECT hold values that depend on a parameter
+//! ([`flows`]), which a write is held by: there, what is not recognized depends on one.
+
+use std::collections::{HashMap, HashSet};
 
 /// What a query tree proves of the statement's row count.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -146,9 +151,679 @@ pub fn rows(lines: &[&str]) -> Rows {
     Rows { at_most_one, one, aggregate }
 }
 
+/// The server's tree of a SELECT, a node a line: how far in it stands, and its text.
+struct Tree<'a> {
+    nodes: Vec<(usize, &'a str)>,
+    /// Where the node of each id is first written: one that stands in several places is written whole at each.
+    ids: HashMap<&'a str, usize>,
+    /// The lines that are a query's column names, and no nodes.
+    names: Vec<bool>,
+    /// Whether a type is one a parameter written as a constant has.
+    constant: &'a dyn Fn(&str) -> bool,
+}
+
+/// A `COLUMN` node's name, its type, and the id of the node its values come from.
+fn column(text: &str) -> Option<(&str, &str, &str)> {
+    let rest = text.strip_prefix("COLUMN id: ")?;
+    let (rest, source) = rest.rsplit_once(", source_id: ")?;
+    let (rest, ty) = rest.rsplit_once(", result_type: ")?;
+    Some((rest.split_once("column_name: ")?.1, ty, source))
+}
+
+impl<'a> Tree<'a> {
+    /// The tree the lines are, where they are one. A name or a text with a line break in it
+    /// parts its node's line, and what stands under the rest of the line would be read as
+    /// under nothing, or as a node the query does not have. So every line is a level under one
+    /// before it, each list has the nodes it counts, and each query its columns once, as many
+    /// as it computes.
+    fn read(lines: &[&'a str], constant: &'a dyn Fn(&str) -> bool) -> Option<Tree<'a>> {
+        let placed = |(i, line): (usize, &&str)| match i {
+            0 => indent(line) == 0,
+            _ => indent(line) > 0 && indent(line) % 2 == 0 && indent(line) <= indent(lines[i - 1]) + 2,
+        };
+        if lines.is_empty() || !lines.iter().enumerate().all(placed) {
+            return None;
+        }
+        let tree = Tree::of(lines, constant);
+        let counted = |i: usize| match tree.nodes[i].1.rsplit_once("nodes: ").map(|(_, count)| count.parse::<usize>()) {
+            Some(Ok(count)) => count == tree.children(i).len(),
+            _ => false,
+        };
+        let once = |i: usize| {
+            let sections = |name: &str| tree.children(i).into_iter().filter(|&child| tree.nodes[child].1 == name).count();
+            sections("PROJECTION") <= 1 && sections("PROJECTION COLUMNS") <= 1 && tree.columns(i).is_none_or(|columns| tree.listed(i, "PROJECTION").is_some_and(|items| items.len() == columns.len()))
+        };
+        let sound = (0..tree.nodes.len()).filter(|&i| !tree.names[i]).all(|i| match tree.kind(i) {
+            "LIST" => counted(i),
+            "QUERY" => once(i),
+            _ => true,
+        });
+        sound.then_some(tree)
+    }
+
+    fn of(lines: &[&'a str], constant: &'a dyn Fn(&str) -> bool) -> Tree<'a> {
+        let nodes: Vec<(usize, &str)> = lines.iter().map(|line| (indent(line), line.trim_start_matches(' '))).collect();
+        let mut names = vec![false; nodes.len()];
+        let mut ids = HashMap::new();
+        let mut columns: Option<usize> = None;
+        for (i, &(depth, text)) in nodes.iter().enumerate() {
+            if columns.is_some_and(|under| depth > under) {
+                names[i] = true;
+                continue;
+            }
+            columns = (text == "PROJECTION COLUMNS").then_some(depth);
+            let kind = text.split(' ').next().unwrap_or_default();
+            if let Some(id) = text[kind.len()..].strip_prefix(" id: ") {
+                ids.entry(id.split(',').next().unwrap_or_default()).or_insert(i);
+            }
+        }
+        Tree { nodes, ids, names, constant }
+    }
+
+    fn kind(&self, i: usize) -> &'a str {
+        self.nodes[i].1.split(' ').next().unwrap_or_default()
+    }
+
+    /// Past the last line under the node at `i`.
+    fn end(&self, i: usize) -> usize {
+        (i + 1..self.nodes.len()).find(|&j| self.nodes[j].0 <= self.nodes[i].0).unwrap_or(self.nodes.len())
+    }
+
+    /// The lines a level under the node at `i`.
+    fn children(&self, i: usize) -> Vec<usize> {
+        (i + 1..self.end(i)).filter(|&j| self.nodes[j].0 == self.nodes[i].0 + 2).collect()
+    }
+
+    fn section(&self, i: usize, name: &str) -> Option<usize> {
+        self.children(i).into_iter().find(|&child| self.nodes[child].1 == name)
+    }
+
+    /// The nodes of the list that a section of the node at `i` holds.
+    fn listed(&self, i: usize, name: &str) -> Option<Vec<usize>> {
+        let list = self.children(self.section(i, name)?).into_iter().find(|&child| self.kind(child) == "LIST")?;
+        Some(self.children(list))
+    }
+
+    /// Whether the node at `i` is what a parameter is written as: the function that makes a
+    /// column of a constant, or a constant's conversion to a type a parameter written as one has.
+    fn stands_in(&self, i: usize) -> bool {
+        let Some(rest) = self.nodes[i].1.strip_prefix("FUNCTION id: ") else { return false };
+        let Some((_, name)) = rest.split_once("function_name: ") else { return true };
+        match name.split(',').next().unwrap_or_default() {
+            "materialize" => true,
+            "CAST" | "_CAST" | "defaultValueOfTypeName" => rest.rsplit_once("result_type: ").is_none_or(|(_, ty)| (self.constant)(ty)),
+            _ => false,
+        }
+    }
+
+    /// Whether what the lines from `from` to `to` compute depends on a parameter: one of them is
+    /// a parameter, or a column whose values do.
+    fn depends(&self, from: usize, to: usize, seen: &mut HashSet<(usize, usize)>) -> bool {
+        for i in (from..to).filter(|&i| !self.names[i]) {
+            if self.stands_in(i) {
+                return true;
+            }
+            if self.kind(i) == "COLUMN" && column(self.nodes[i].1).is_none_or(|(name, ty, source)| self.sourced(source, name, ty, seen)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether the column `name` of the node with the id `source` holds values that depend on a
+    /// parameter. A source the engine does not know may be anything, so its columns do.
+    fn sourced(&self, source: &str, name: &str, ty: &str, seen: &mut HashSet<(usize, usize)>) -> bool {
+        let Some(&at) = self.ids.get(source) else { return true };
+        match self.kind(at) {
+            // A join's column holds the columns it joins under it, a lambda's argument is of what
+            // its function is given, and an INTERPOLATE's column is the query's own: each is read
+            // where it stands.
+            "JOIN" | "LAMBDA" | "INTERPOLATE" => false,
+            // A table's rows are its own, and a table function's are of its arguments.
+            "TABLE" | "TABLE_FUNCTION" => self.depends(at + 1, self.end(at), seen),
+            // The expression the ARRAY JOIN unfolds into the column.
+            "ARRAY_JOIN" => match self.listed(at, "JOIN EXPRESSIONS") {
+                None => true,
+                Some(joined) => {
+                    let named: Vec<usize> = joined.into_iter().filter(|&c| column(self.nodes[c].1).is_some_and(|(joined, ..)| joined == name)).collect();
+                    named.is_empty() || named.into_iter().any(|c| seen.insert((at, c)) && self.depends(c + 1, self.end(c), seen))
+                }
+            },
+            "QUERY" | "UNION" => {
+                let Some(columns) = self.columns(at) else { return true };
+                // The column by its name and its type, or by its name where a union's type is another.
+                let own = format!("{name} {ty}");
+                let mut places: Vec<usize> = (0..columns.len()).filter(|&c| columns[c] == own).collect();
+                if places.is_empty() {
+                    places = (0..columns.len()).filter(|&c| columns[c].strip_prefix(name).is_some_and(|rest| rest.starts_with(' '))).collect();
+                }
+                places.is_empty() || places.into_iter().any(|c| self.produced(at, c, seen))
+            }
+            _ => true,
+        }
+    }
+
+    /// The columns of the query at `i`, each a name and a type, or of a set operation's first query.
+    fn columns(&self, i: usize) -> Option<Vec<&'a str>> {
+        match self.kind(i) {
+            "QUERY" => Some(self.children(self.section(i, "PROJECTION COLUMNS")?).into_iter().map(|c| self.nodes[c].1).collect()),
+            "UNION" => self.columns(*self.listed(i, "QUERIES")?.first()?),
+            _ => None,
+        }
+    }
+
+    /// Whether the column numbered `c` of the query at `i` is a conversion to a type the statement
+    /// names: a `CAST` at the top of what it computes, or of what the server folded it from,
+    /// whose type is a constant the statement writes, with nothing under it that it was computed
+    /// from. A column read from a subquery is what the subquery's column is, and a set
+    /// operation's what each of its queries' is.
+    fn converted(&self, i: usize, c: usize, seen: &mut HashSet<(usize, usize)>) -> bool {
+        match self.kind(i) {
+            "QUERY" => {
+                let Some(item) = self.listed(i, "PROJECTION").and_then(|items| items.get(c).copied()) else { return false };
+                // What a constant was folded from stands under it.
+                let top = match self.kind(item) {
+                    "CONSTANT" => self.section(item, "EXPRESSION").and_then(|folded| self.children(folded).first().copied()).unwrap_or(item),
+                    _ => item,
+                };
+                let function = |name: &str| self.nodes[top].1.strip_prefix("FUNCTION id: ").and_then(|rest| rest.split_once("function_name: ")).is_some_and(|(_, after)| after.split(',').next() == Some(name));
+                if function("CAST") || function("_CAST") {
+                    // The type it converts to is its last argument.
+                    let named = self.listed(top, "ARGUMENTS").and_then(|arguments| arguments.last().copied());
+                    return named.is_some_and(|ty| self.kind(ty) == "CONSTANT" && self.end(ty) == ty + 1);
+                }
+                // A subquery's column, by its name and its type, each one it may be.
+                let Some((name, ty, source)) = column(self.nodes[top].1) else { return false };
+                let Some(&at) = self.ids.get(source) else { return false };
+                let Some(columns) = self.columns(at) else { return false };
+                let own = format!("{name} {ty}");
+                let places: Vec<usize> = (0..columns.len()).filter(|&place| columns[place] == own).collect();
+                seen.insert((i, c)) && !places.is_empty() && places.into_iter().all(|place| self.converted(at, place, seen))
+            }
+            "UNION" => self.listed(i, "QUERIES").is_some_and(|queries| !queries.is_empty() && queries.into_iter().all(|query| self.converted(query, c, seen))),
+            _ => false,
+        }
+    }
+
+    /// Whether the column numbered `c` of the query at `i` depends on a parameter: in a set
+    /// operation, the column of any of its queries.
+    fn produced(&self, i: usize, c: usize, seen: &mut HashSet<(usize, usize)>) -> bool {
+        match self.kind(i) {
+            // A column read a second time has been answered.
+            "QUERY" if !seen.insert((i, c)) => false,
+            "QUERY" => match self.listed(i, "PROJECTION").and_then(|items| items.get(c).copied()) {
+                Some(item) => self.depends(item, self.end(item), seen),
+                None => true,
+            },
+            "UNION" => self.listed(i, "QUERIES").is_none_or(|queries| queries.into_iter().any(|query| self.produced(query, c, seen))),
+            _ => true,
+        }
+    }
+}
+
+/// Which of a SELECT's columns hold values that depend on a parameter, from the server's tree of
+/// the SELECT with each parameter written as what stands for it: a column is `materialize(…)`,
+/// and a constant a `CAST` to its type, which `constant` tells from the statement's own. The
+/// tree has each alias and each `WITH` written out where it is used, each `*` as its columns, and
+/// each column of a subquery by the query it comes from, so a column depends on a parameter where
+/// its expression holds one, or reads a column that does: of a subquery, a set operation, an
+/// `ARRAY JOIN` or a table function. A row a `WITH FILL` adds is of the parameters that bound it.
+/// A parameter that only keeps rows, in a `WHERE` or a join's condition, is in no column.
+/// `None` where the lines are no query's tree, and where an `INTERPOLATE` computes with a
+/// parameter: it converts what it computes to its column's type, inside the SELECT.
+pub fn flows(lines: &[&str], constant: &dyn Fn(&str) -> bool) -> Option<Vec<bool>> {
+    let tree = Tree::read(lines, constant)?;
+    let count = tree.columns(0)?.len();
+    if (0..tree.nodes.len()).any(|i| !tree.names[i] && tree.nodes[i].1 == "INTERPOLATE" && tree.depends(i + 1, tree.end(i), &mut HashSet::new())) {
+        return None;
+    }
+    let mut flows: Vec<bool> = (0..count).map(|c| tree.produced(0, c, &mut HashSet::new())).collect();
+    if lines.iter().any(|line| line.contains("with_fill: 1")) && (0..tree.nodes.len()).any(|i| !tree.names[i] && tree.stands_in(i)) {
+        flows = vec![true; count];
+    }
+    Some(flows)
+}
+
+/// Which of a SELECT's columns are each a conversion to a type the statement names, a `CAST` at
+/// the top of what the column computes: the type such a column has is the statement's to say,
+/// whatever value a parameter the server read as a constant has. `None` where the lines are no
+/// query's tree.
+pub fn conversions(lines: &[&str]) -> Option<Vec<bool>> {
+    let tree = Tree::read(lines, &|_| false)?;
+    let count = tree.columns(0)?.len();
+    Some((0..count).map(|c| tree.converted(0, c, &mut HashSet::new())).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The server's own trees, of ClickHouse 26.9, each of the statement named above it.
+    const FLOWS: &[(&str, &str, &[&str], &[bool])] = &[
+        // a subquery's column, read through a star: SELECT * FROM (SELECT 11 AS id, materialize(defaultValueOfTypeName('UInt64')) AS a)
+        ("a subquery's column, read through a star", r#"QUERY id: 0
+  PROJECTION COLUMNS
+    id UInt8
+    a UInt64
+  PROJECTION
+    LIST id: 1, nodes: 2
+      COLUMN id: 2, column_name: id, result_type: UInt8, source_id: 3
+      COLUMN id: 4, column_name: a, result_type: UInt64, source_id: 3
+  JOIN TREE
+    QUERY id: 3, alias: __table1, is_subquery: 1
+      PROJECTION COLUMNS
+        id UInt8
+        a UInt64
+      PROJECTION
+        LIST id: 5, nodes: 2
+          CONSTANT id: 6, constant_value: UInt64_11, constant_value_type: UInt8
+          FUNCTION id: 7, function_name: materialize, function_type: ordinary, result_type: UInt64
+            ARGUMENTS
+              LIST id: 8, nodes: 1
+                CONSTANT id: 9, constant_value: UInt64_0, constant_value_type: UInt64
+                  EXPRESSION
+                    FUNCTION id: 10, function_name: defaultValueOfTypeName, function_type: ordinary, result_type: UInt64
+                      ARGUMENTS
+                        LIST id: 11, nodes: 1
+                          CONSTANT id: 12, constant_value: 'UInt64', constant_value_type: String
+      JOIN TREE
+        TABLE id: 13, alias: __table2, table_name: system.one"#, &[], &[false, true]),
+        // a WITH's name, and a name of what computes with it: WITH materialize(defaultValueOfTypeName('UInt64')) AS x SELECT 10, x, x + 1 AS y
+        ("a WITH's name, and a name of what computes with it", r#"QUERY id: 0
+  PROJECTION COLUMNS
+    10 UInt8
+    x UInt64
+    y UInt64
+  PROJECTION
+    LIST id: 1, nodes: 3
+      CONSTANT id: 2, constant_value: UInt64_10, constant_value_type: UInt8
+      FUNCTION id: 3, function_name: materialize, function_type: ordinary, result_type: UInt64
+        ARGUMENTS
+          LIST id: 4, nodes: 1
+            CONSTANT id: 5, constant_value: UInt64_0, constant_value_type: UInt64
+              EXPRESSION
+                FUNCTION id: 6, function_name: defaultValueOfTypeName, function_type: ordinary, result_type: UInt64
+                  ARGUMENTS
+                    LIST id: 7, nodes: 1
+                      CONSTANT id: 8, constant_value: 'UInt64', constant_value_type: String
+      FUNCTION id: 9, function_name: plus, function_type: ordinary, result_type: UInt64
+        ARGUMENTS
+          LIST id: 10, nodes: 2
+            FUNCTION id: 3, function_name: materialize, function_type: ordinary, result_type: UInt64
+              ARGUMENTS
+                LIST id: 4, nodes: 1
+                  CONSTANT id: 5, constant_value: UInt64_0, constant_value_type: UInt64
+                    EXPRESSION
+                      FUNCTION id: 6, function_name: defaultValueOfTypeName, function_type: ordinary, result_type: UInt64
+                        ARGUMENTS
+                          LIST id: 7, nodes: 1
+                            CONSTANT id: 8, constant_value: 'UInt64', constant_value_type: String
+            CONSTANT id: 11, constant_value: UInt64_1, constant_value_type: UInt8
+  JOIN TREE
+    TABLE id: 12, alias: __table1, table_name: system.one"#, &[], &[false, true, true]),
+        // a set operation's column, of any of its queries: SELECT id FROM src UNION ALL SELECT materialize(defaultValueOfTypeName('UInt64'))
+        ("a set operation's column, of any of its queries", r#"UNION id: 0, union_mode: UNION_ALL
+  QUERIES
+    LIST id: 1, nodes: 2
+      QUERY id: 2, alias: __table1
+        PROJECTION COLUMNS
+          id UInt8
+        PROJECTION
+          LIST id: 3, nodes: 1
+            COLUMN id: 4, column_name: id, result_type: UInt8, source_id: 5
+        JOIN TREE
+          TABLE id: 5, alias: __table2, table_name: default.src
+      QUERY id: 6, alias: __table3
+        PROJECTION COLUMNS
+          materialize(defaultValueOfTypeName('UInt64')) UInt64
+        PROJECTION
+          LIST id: 7, nodes: 1
+            FUNCTION id: 8, function_name: materialize, function_type: ordinary, result_type: UInt64
+              ARGUMENTS
+                LIST id: 9, nodes: 1
+                  CONSTANT id: 10, constant_value: UInt64_0, constant_value_type: UInt64
+                    EXPRESSION
+                      FUNCTION id: 11, function_name: defaultValueOfTypeName, function_type: ordinary, result_type: UInt64
+                        ARGUMENTS
+                          LIST id: 12, nodes: 1
+                            CONSTANT id: 13, constant_value: 'UInt64', constant_value_type: String
+        JOIN TREE
+          TABLE id: 14, alias: __table4, table_name: system.one"#, &[], &[true]),
+        // a common table expression's column: WITH c AS (SELECT id, materialize(defaultValueOfTypeName('UInt64')) + 1 AS v FROM src) SELECT c.id, v FROM c
+        ("a common table expression's column", r#"QUERY id: 0
+  PROJECTION COLUMNS
+    id UInt8
+    v UInt64
+  PROJECTION
+    LIST id: 1, nodes: 2
+      COLUMN id: 2, column_name: id, result_type: UInt8, source_id: 3
+      COLUMN id: 4, column_name: v, result_type: UInt64, source_id: 3
+  JOIN TREE
+    QUERY id: 3, alias: __table1, is_subquery: 1, is_cte: 1, cte_name: c
+      PROJECTION COLUMNS
+        id UInt8
+        v UInt64
+      PROJECTION
+        LIST id: 5, nodes: 2
+          COLUMN id: 6, column_name: id, result_type: UInt8, source_id: 7
+          FUNCTION id: 8, function_name: plus, function_type: ordinary, result_type: UInt64
+            ARGUMENTS
+              LIST id: 9, nodes: 2
+                FUNCTION id: 10, function_name: materialize, function_type: ordinary, result_type: UInt64
+                  ARGUMENTS
+                    LIST id: 11, nodes: 1
+                      CONSTANT id: 12, constant_value: UInt64_0, constant_value_type: UInt64
+                        EXPRESSION
+                          FUNCTION id: 13, function_name: defaultValueOfTypeName, function_type: ordinary, result_type: UInt64
+                            ARGUMENTS
+                              LIST id: 14, nodes: 1
+                                CONSTANT id: 15, constant_value: 'UInt64', constant_value_type: String
+                CONSTANT id: 16, constant_value: UInt64_1, constant_value_type: UInt8
+      JOIN TREE
+        TABLE id: 7, alias: __table2, table_name: default.src"#, &[], &[false, true]),
+        // an ARRAY JOIN's column, and no column of a join or of a condition: SELECT id, e, y FROM src ARRAY JOIN [materialize(defaultValueOfTypeName('UInt64'))] AS e JOIN o USING (id) WHERE id IN (SELECT materialize(defaultValueOfTypeName('UInt64')))
+        ("an ARRAY JOIN's column, and no column of a join or of a condition", r#"QUERY id: 0
+  PROJECTION COLUMNS
+    id UInt8
+    e UInt64
+    y UInt64
+  PROJECTION
+    LIST id: 1, nodes: 3
+      COLUMN id: 2, column_name: id, result_type: UInt8, source_id: 3
+      COLUMN id: 4, column_name: __array_join_exp_1, result_type: UInt64, source_id: 5
+      COLUMN id: 6, column_name: y, result_type: UInt64, source_id: 7
+  JOIN TREE
+    JOIN id: 8, strictness: ALL, kind: INNER
+      LEFT TABLE EXPRESSION
+        ARRAY_JOIN id: 5, is_left: 0
+          TABLE EXPRESSION
+            TABLE id: 3, alias: __table2, table_name: default.src
+          JOIN EXPRESSIONS
+            LIST id: 9, nodes: 1
+              COLUMN id: 10, alias: __array_join_exp_1, column_name: __array_join_exp_1, result_type: UInt64, source_id: 5
+                EXPRESSION
+                  FUNCTION id: 11, function_name: array, function_type: ordinary, result_type: Array(UInt64)
+                    ARGUMENTS
+                      LIST id: 12, nodes: 1
+                        FUNCTION id: 13, function_name: materialize, function_type: ordinary, result_type: UInt64
+                          ARGUMENTS
+                            LIST id: 14, nodes: 1
+                              CONSTANT id: 15, constant_value: UInt64_0, constant_value_type: UInt64
+                                EXPRESSION
+                                  FUNCTION id: 16, function_name: defaultValueOfTypeName, function_type: ordinary, result_type: UInt64
+                                    ARGUMENTS
+                                      LIST id: 17, nodes: 1
+                                        CONSTANT id: 18, constant_value: 'UInt64', constant_value_type: String
+      RIGHT TABLE EXPRESSION
+        TABLE id: 7, alias: __table3, table_name: default.o
+      JOIN EXPRESSION
+        LIST id: 19, nodes: 1
+          COLUMN id: 20, column_name: id, result_type: UInt8, source_id: 8
+            EXPRESSION
+              LIST id: 21, nodes: 2
+                COLUMN id: 22, column_name: id, result_type: UInt8, source_id: 3
+                COLUMN id: 23, column_name: id, result_type: UInt8, source_id: 7
+  WHERE
+    FUNCTION id: 24, function_name: in, function_type: ordinary, result_type: UInt8
+      ARGUMENTS
+        LIST id: 25, nodes: 2
+          COLUMN id: 2, column_name: id, result_type: UInt8, source_id: 3
+          QUERY id: 26, is_subquery: 1
+            PROJECTION COLUMNS
+              materialize(defaultValueOfTypeName('UInt64')) UInt64
+            PROJECTION
+              LIST id: 27, nodes: 1
+                FUNCTION id: 28, function_name: materialize, function_type: ordinary, result_type: UInt64
+                  ARGUMENTS
+                    LIST id: 29, nodes: 1
+                      CONSTANT id: 30, constant_value: UInt64_0, constant_value_type: UInt64
+                        EXPRESSION
+                          FUNCTION id: 31, function_name: defaultValueOfTypeName, function_type: ordinary, result_type: UInt64
+                            ARGUMENTS
+                              LIST id: 32, nodes: 1
+                                CONSTANT id: 33, constant_value: 'UInt64', constant_value_type: String
+            JOIN TREE
+              TABLE id: 34, alias: __table1, table_name: system.one"#, &[], &[false, true, false]),
+        // a parameter that only keeps rows is in no column: SELECT id, x FROM src WHERE x = materialize(defaultValueOfTypeName('UInt64')) ORDER BY id LIMIT 3
+        ("a parameter that only keeps rows is in no column", r#"QUERY id: 0
+  PROJECTION COLUMNS
+    id UInt8
+    x UInt64
+  PROJECTION
+    LIST id: 1, nodes: 2
+      COLUMN id: 2, column_name: id, result_type: UInt8, source_id: 3
+      COLUMN id: 4, column_name: x, result_type: UInt64, source_id: 3
+  JOIN TREE
+    TABLE id: 3, alias: __table1, table_name: default.src
+  WHERE
+    FUNCTION id: 5, function_name: equals, function_type: ordinary, result_type: UInt8
+      ARGUMENTS
+        LIST id: 6, nodes: 2
+          COLUMN id: 4, column_name: x, result_type: UInt64, source_id: 3
+          FUNCTION id: 7, function_name: materialize, function_type: ordinary, result_type: UInt64
+            ARGUMENTS
+              LIST id: 8, nodes: 1
+                CONSTANT id: 9, constant_value: UInt64_0, constant_value_type: UInt64
+                  EXPRESSION
+                    FUNCTION id: 10, function_name: defaultValueOfTypeName, function_type: ordinary, result_type: UInt64
+                      ARGUMENTS
+                        LIST id: 11, nodes: 1
+                          CONSTANT id: 12, constant_value: 'UInt64', constant_value_type: String
+  ORDER BY
+    LIST id: 13, nodes: 1
+      SORT id: 14, sort_direction: ASCENDING, with_fill: 0
+        EXPRESSION id
+          COLUMN id: 2, column_name: id, result_type: UInt8, source_id: 3
+  LIMIT
+    CONSTANT id: 15, constant_value: UInt64_3, constant_value_type: UInt64"#, &[], &[false, false]),
+        // a scalar subquery that holds one: SELECT 1, (SELECT max(x) FROM src WHERE x = materialize(defaultValueOfTypeName('UInt64')))
+        ("a scalar subquery that holds one", r#"QUERY id: 0
+  PROJECTION COLUMNS
+    1 UInt8
+    _subquery_1 Nullable(UInt64)
+  PROJECTION
+    LIST id: 1, nodes: 2
+      CONSTANT id: 2, constant_value: UInt64_1, constant_value_type: UInt8
+      CONSTANT id: 3, constant_value: UInt64_0, constant_value_type: Nullable(UInt64)
+        EXPRESSION
+          QUERY id: 4, is_subquery: 1
+            PROJECTION COLUMNS
+              max(x) UInt64
+            PROJECTION
+              LIST id: 5, nodes: 1
+                FUNCTION id: 6, function_name: max, function_type: aggregate, result_type: UInt64
+                  ARGUMENTS
+                    LIST id: 7, nodes: 1
+                      COLUMN id: 8, column_name: x, result_type: UInt64, source_id: 9
+            JOIN TREE
+              TABLE id: 9, table_name: default.src
+            WHERE
+              FUNCTION id: 10, function_name: equals, function_type: ordinary, result_type: UInt8
+                ARGUMENTS
+                  LIST id: 11, nodes: 2
+                    COLUMN id: 8, column_name: x, result_type: UInt64, source_id: 9
+                    FUNCTION id: 12, function_name: materialize, function_type: ordinary, result_type: UInt64
+                      ARGUMENTS
+                        LIST id: 13, nodes: 1
+                          CONSTANT id: 14, constant_value: UInt64_0, constant_value_type: UInt64
+                            EXPRESSION
+                              FUNCTION id: 15, function_name: defaultValueOfTypeName, function_type: ordinary, result_type: UInt64
+                                ARGUMENTS
+                                  LIST id: 16, nodes: 1
+                                    CONSTANT id: 17, constant_value: 'UInt64', constant_value_type: String
+  JOIN TREE
+    TABLE id: 18, alias: __table1, table_name: system.one"#, &[], &[false, true]),
+        // a constant of a parameter's type, and not the statement's own conversion: SELECT x IN (CAST(1, 'UInt64'), 2), x, CAST(x, 'UInt8'), position('abc' IN CAST('a', 'String')) FROM src WHERE id = CAST(1, 'UInt8') LIMIT CAST(1, 'UInt64')
+        ("a constant of a parameter's type, and not the statement's own conversion", r#"QUERY id: 0
+  PROJECTION COLUMNS
+    in(x, (CAST(1, 'UInt64'), 2)) UInt8
+    x UInt64
+    CAST(x, 'UInt8') UInt8
+    position(CAST('a', 'String'), 'abc') UInt64
+  PROJECTION
+    LIST id: 1, nodes: 4
+      FUNCTION id: 2, function_name: in, function_type: ordinary, result_type: UInt8
+        ARGUMENTS
+          LIST id: 3, nodes: 2
+            COLUMN id: 4, column_name: x, result_type: UInt64, source_id: 5
+            CONSTANT id: 6, constant_value: Tuple_(UInt64_1, UInt64_2), constant_value_type: Tuple(UInt64, UInt8)
+              EXPRESSION
+                FUNCTION id: 7, function_name: tuple, function_type: ordinary, result_type: Tuple(UInt64, UInt8)
+                  ARGUMENTS
+                    LIST id: 8, nodes: 2
+                      CONSTANT id: 9, constant_value: UInt64_1, constant_value_type: UInt64
+                        EXPRESSION
+                          FUNCTION id: 10, function_name: CAST, function_type: ordinary, result_type: UInt64
+                            ARGUMENTS
+                              LIST id: 11, nodes: 2
+                                CONSTANT id: 12, constant_value: UInt64_1, constant_value_type: UInt8
+                                CONSTANT id: 13, constant_value: 'UInt64', constant_value_type: String
+                      CONSTANT id: 14, constant_value: UInt64_2, constant_value_type: UInt8
+      COLUMN id: 4, column_name: x, result_type: UInt64, source_id: 5
+      FUNCTION id: 15, function_name: CAST, function_type: ordinary, result_type: UInt8
+        ARGUMENTS
+          LIST id: 16, nodes: 2
+            COLUMN id: 4, column_name: x, result_type: UInt64, source_id: 5
+            CONSTANT id: 17, constant_value: 'UInt8', constant_value_type: String
+      CONSTANT id: 18, constant_value: UInt64_0, constant_value_type: UInt64
+        EXPRESSION
+          FUNCTION id: 19, function_name: position, function_type: ordinary, result_type: UInt64
+            ARGUMENTS
+              LIST id: 20, nodes: 2
+                CONSTANT id: 21, constant_value: 'a', constant_value_type: String
+                  EXPRESSION
+                    FUNCTION id: 22, function_name: CAST, function_type: ordinary, result_type: String
+                      ARGUMENTS
+                        LIST id: 23, nodes: 2
+                          CONSTANT id: 24, constant_value: 'a', constant_value_type: String
+                          CONSTANT id: 25, constant_value: 'String', constant_value_type: String
+                CONSTANT id: 26, constant_value: 'abc', constant_value_type: String
+  JOIN TREE
+    TABLE id: 5, alias: __table1, table_name: default.src
+  WHERE
+    FUNCTION id: 27, function_name: equals, function_type: ordinary, result_type: UInt8
+      ARGUMENTS
+        LIST id: 28, nodes: 2
+          COLUMN id: 29, column_name: id, result_type: UInt8, source_id: 5
+          CONSTANT id: 30, constant_value: UInt64_1, constant_value_type: UInt8
+            EXPRESSION
+              FUNCTION id: 31, function_name: CAST, function_type: ordinary, result_type: UInt8
+                ARGUMENTS
+                  LIST id: 32, nodes: 2
+                    CONSTANT id: 33, constant_value: UInt64_1, constant_value_type: UInt8
+                    CONSTANT id: 34, constant_value: 'UInt8', constant_value_type: String
+  LIMIT
+    CONSTANT id: 35, constant_value: UInt64_1, constant_value_type: UInt64
+      EXPRESSION
+        FUNCTION id: 36, function_name: CAST, function_type: ordinary, result_type: UInt64
+          ARGUMENTS
+            LIST id: 37, nodes: 2
+              CONSTANT id: 38, constant_value: UInt64_1, constant_value_type: UInt8
+              CONSTANT id: 39, constant_value: 'UInt64', constant_value_type: String"#, &["UInt64", "String"], &[true, false, false, true]),
+        // a table function's rows are of its arguments: SELECT number, 1 FROM numbers(CAST(3, 'UInt64'))
+        ("a table function's rows are of its arguments", r#"QUERY id: 0
+  PROJECTION COLUMNS
+    number UInt64
+    1 UInt8
+  PROJECTION
+    LIST id: 1, nodes: 2
+      COLUMN id: 2, column_name: number, result_type: UInt64, source_id: 3
+      CONSTANT id: 4, constant_value: UInt64_1, constant_value_type: UInt8
+  JOIN TREE
+    TABLE_FUNCTION id: 3, alias: __table1, table_function_name: numbers
+      ARGUMENTS
+        LIST id: 5, nodes: 1
+          CONSTANT id: 6, constant_value: UInt64_3, constant_value_type: UInt64
+            EXPRESSION
+              FUNCTION id: 7, function_name: CAST, function_type: ordinary, result_type: UInt64
+                ARGUMENTS
+                  LIST id: 8, nodes: 2
+                    CONSTANT id: 9, constant_value: UInt64_3, constant_value_type: UInt8
+                    CONSTANT id: 10, constant_value: 'UInt64', constant_value_type: String"#, &["UInt64"], &[true, false]),
+        // a row a WITH FILL adds is of what bounds it: SELECT id, 1 FROM src ORDER BY id WITH FILL TO CAST(9, 'UInt8')
+        ("a row a WITH FILL adds is of what bounds it", r#"QUERY id: 0
+  PROJECTION COLUMNS
+    id UInt8
+    1 UInt8
+  PROJECTION
+    LIST id: 1, nodes: 2
+      COLUMN id: 2, column_name: id, result_type: UInt8, source_id: 3
+      CONSTANT id: 4, constant_value: UInt64_1, constant_value_type: UInt8
+  JOIN TREE
+    TABLE id: 3, alias: __table1, table_name: default.src
+  ORDER BY
+    LIST id: 5, nodes: 1
+      SORT id: 6, sort_direction: ASCENDING, with_fill: 1
+        EXPRESSION id
+          COLUMN id: 2, column_name: id, result_type: UInt8, source_id: 3
+        FILL TO
+          CONSTANT id: 7, constant_value: UInt64_9, constant_value_type: UInt8
+            EXPRESSION
+              FUNCTION id: 8, function_name: CAST, function_type: ordinary, result_type: UInt8
+                ARGUMENTS
+                  LIST id: 9, nodes: 2
+                    CONSTANT id: 10, constant_value: UInt64_9, constant_value_type: UInt8
+                    CONSTANT id: 11, constant_value: 'UInt8', constant_value_type: String"#, &["UInt8"], &[true, true]),
+    ];
+
+    #[test]
+    fn a_column_is_a_conversion_where_a_cast_stands_at_its_top() {
+        let read = |tree: &str| conversions(&tree.lines().collect::<Vec<_>>());
+        let query = |items: &str, count: usize| format!("QUERY id: 0\n  PROJECTION COLUMNS{}\n  PROJECTION\n    LIST id: 1, nodes: {count}\n{items}\n  JOIN TREE\n    TABLE id: 3, table_name: app.t", (0..count).map(|i| format!("\n    c{i} UInt8")).collect::<String>());
+        // A CAST, one the server folded a constant from, and what is neither: a function that computes, and a table's column.
+        let to = |depth: usize, id: usize| format!("\n{0}ARGUMENTS\n{0}  LIST id: {id}, nodes: 2\n{0}    COLUMN id: {1}, column_name: c4, result_type: UInt64, source_id: 3\n{0}    CONSTANT id: {2}, constant_value: 'UInt8', constant_value_type: String", " ".repeat(depth), id + 1, id + 2);
+        let items = format!(
+            "      FUNCTION id: 4, function_name: _CAST, function_type: ordinary, result_type: UInt8{}\n      CONSTANT id: 5, constant_value: UInt64_1, constant_value_type: UInt8\n        EXPRESSION\n          FUNCTION id: 6, function_name: CAST, function_type: ordinary, result_type: UInt8{}\n      FUNCTION id: 7, function_name: tupleElement, function_type: ordinary, result_type: UInt8\n      CONSTANT id: 8, constant_value: UInt64_1, constant_value_type: UInt8\n        EXPRESSION\n          FUNCTION id: 9, function_name: tupleElement, function_type: ordinary, result_type: UInt8\n      COLUMN id: 10, column_name: c4, result_type: UInt8, source_id: 3",
+            to(8, 20),
+            to(12, 30)
+        );
+        let items = items.as_str();
+        assert_eq!(read(&query(items, 5)), Some(vec![true, true, false, false, false]));
+        // A CAST to a type the statement computes names no one type: the constant it converts to was folded from something.
+        let computed = query(items, 5).replacen("constant_value: 'UInt8', constant_value_type: String", "constant_value: 'UInt8', constant_value_type: String\n              EXPRESSION\n                FUNCTION id: 40, function_name: if, function_type: ordinary, result_type: String", 1);
+        assert_eq!(read(&computed), Some(vec![false, true, false, false, false]));
+        // A subquery's column is what the subquery's is, and a set operation's what each of its queries' is.
+        let (_, starred, ..) = FLOWS[0];
+        assert_eq!(read(starred), Some(vec![false, false]));
+        let cast = |depth: usize| format!("{0}ARGUMENTS\n{0}  LIST id: 50, nodes: 2\n{0}    CONSTANT id: 51, constant_value: UInt64_1, constant_value_type: UInt8\n{0}    CONSTANT id: 52, constant_value: 'UInt8', constant_value_type: String", " ".repeat(depth));
+        let through = format!("QUERY id: 0\n  PROJECTION COLUMNS\n    v UInt8\n  PROJECTION\n    LIST id: 1, nodes: 1\n      COLUMN id: 2, column_name: v, result_type: UInt8, source_id: 3\n  JOIN TREE\n    QUERY id: 3, is_subquery: 1\n      PROJECTION COLUMNS\n        v UInt8\n      PROJECTION\n        LIST id: 4, nodes: 1\n          FUNCTION id: 5, function_name: CAST, function_type: ordinary, result_type: UInt8\n{}", cast(12));
+        let through = through.as_str();
+        assert_eq!(read(through), Some(vec![true]));
+        let union = format!("UNION id: 0, union_mode: UNION_ALL\n  QUERIES\n    LIST id: 1, nodes: 2\n      QUERY id: 2\n        PROJECTION COLUMNS\n          v UInt8\n        PROJECTION\n          LIST id: 3, nodes: 1\n            FUNCTION id: 4, function_name: CAST, function_type: ordinary, result_type: UInt8\n{0}\n      QUERY id: 5\n        PROJECTION COLUMNS\n          v UInt8\n        PROJECTION\n          LIST id: 6, nodes: 1\n            FUNCTION id: 7, function_name: plus, function_type: ordinary, result_type: UInt8\n{0}", cast(14));
+        assert_eq!(read(&union), Some(vec![false]));
+        assert_eq!(read(&union.replace("function_name: plus", "function_name: _CAST")), Some(vec![true]));
+        assert_eq!(read("Expression"), None);
+    }
+
+    #[test]
+    fn a_column_depends_on_a_parameter_where_the_tree_says_its_values_come_from_one() {
+        for (what, tree, constants, expected) in FLOWS {
+            let lines: Vec<&str> = tree.lines().collect();
+            assert_eq!(flows(&lines, &|ty| constants.contains(&ty)).as_deref(), Some(*expected), "{what}");
+        }
+        // What is no query's tree says nothing, and neither does one a line of which stands where no node can.
+        assert_eq!(flows(&[], &|_| false), None);
+        assert_eq!(flows(&["Expression"], &|_| false), None);
+        let (_, tree, ..) = FLOWS[0];
+        let parted = tree.replacen("alias: __table1", "alias: a\nb", 1);
+        assert_eq!(flows(&parted.lines().collect::<Vec<_>>(), &|_| false), None);
+        // A list with a node more than it counts is one a name forged, and so is a query's second list of columns.
+        let forged = tree.replacen("      COLUMN id: 2, column_name: id, result_type: UInt8, source_id: 3", "      COLUMN id: 2, column_name: id, result_type: UInt8, source_id: 3\n      CONSTANT id: 98, constant_value: UInt64_1, constant_value_type: UInt8", 1);
+        assert_ne!(forged, tree);
+        assert_eq!(flows(&forged.lines().collect::<Vec<_>>(), &|_| false), None);
+        let twice = tree.replacen("  PROJECTION\n", "  PROJECTION COLUMNS\n    id UInt8\n  PROJECTION\n", 1);
+        assert_eq!(flows(&twice.lines().collect::<Vec<_>>(), &|_| false), None);
+        // An INTERPOLATE that computes with a parameter converts it inside the SELECT, which no column's type shows.
+        let filled = "QUERY id: 0\n  PROJECTION COLUMNS\n    a UInt8\n  PROJECTION\n    LIST id: 1, nodes: 1\n      COLUMN id: 2, column_name: a, result_type: UInt8, source_id: 3\n  JOIN TREE\n    TABLE id: 3, table_name: app.t\n  INTERPOLATE\n    LIST id: 4, nodes: 1\n      INTERPOLATE id: 5\n        EXPRESSION\n          COLUMN id: 2, column_name: a, result_type: UInt8, source_id: 3\n        INTERPOLATE_EXPRESSION\n          FUNCTION id: 6, function_name: materialize, function_type: ordinary, result_type: UInt64";
+        assert_eq!(flows(&filled.lines().collect::<Vec<_>>(), &|_| false), None);
+        assert_eq!(flows(&filled.replace("function_name: materialize", "function_name: plus").lines().collect::<Vec<_>>(), &|_| false), Some(vec![false]));
+        // A source the tree does not show, or one of a kind the engine does not know, may be a parameter's.
+        let unknown = "QUERY id: 0\n  PROJECTION COLUMNS\n    a UInt8\n    b UInt8\n  PROJECTION\n    LIST id: 1, nodes: 2\n      COLUMN id: 2, column_name: a, result_type: UInt8, source_id: 9\n      COLUMN id: 4, column_name: b, result_type: UInt8, source_id: 3\n  JOIN TREE\n    TABLE id: 3, table_name: app.t";
+        assert_eq!(flows(&unknown.lines().collect::<Vec<_>>(), &|_| false), Some(vec![true, false]));
+        let other = unknown.replace("TABLE id: 3, table_name: app.t", "SOMETHING id: 3");
+        assert_eq!(flows(&other.lines().collect::<Vec<_>>(), &|_| false), Some(vec![true, true]));
+    }
+
 
     #[test]
     fn a_result_that_is_more_than_rows_or_written_otherwise_is_refused() {

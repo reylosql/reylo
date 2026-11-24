@@ -1,1 +1,1 @@
-INSERT INTO orders SELECT * EXCEPT (placed), {placed:Date} FROM orders
+INSERT INTO orders SELECT * EXCEPT (placed), {placed:DateTime} FROM orders
