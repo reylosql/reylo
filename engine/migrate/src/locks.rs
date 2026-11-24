@@ -553,7 +553,7 @@ struct Ahead {
     /// The constraints dropped, table (as written, and as the catalog named it before the file ran,
     /// through any rename ahead) and name: a key takes its index with it, and a partitioned table's key its
     /// partitions' too, which the catalog names before the file runs.
-    keys: BTreeSet<(String, String)>,
+    keys: Vec<(Vec<String>, String)>,
     owned: BTreeSet<String>,
 }
 
@@ -614,7 +614,7 @@ fn ahead_of_reads(sql: &str) -> Vec<Ahead> {
                             } else if is(cmd.subtype, At::AtDropConstraint) {
                                 // Under its name as written too: a rename of a table of that name
                                 // in another schema mustn't hide the key it drops.
-                                now.keys.extend(was.get(&table).cloned().into_iter().chain([table.clone()]).map(|t| (t, cmd.name.clone())));
+                                now.keys.push((was.get(&table).cloned().into_iter().chain([table.clone()]).collect(), cmd.name.clone()));
                             }
                         }
                     }
@@ -789,7 +789,7 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
     let mut aheads = ahead_of_reads(&m.sql);
     for ahead in aheads.iter_mut().filter(|a| !a.keys.is_empty()) {
         let literal = |t: &str| format!("'{}'", t.replace('\'', "''"));
-        let names = ahead.keys.iter().map(|(t, k)| format!("({}, {})", literal(t), literal(k))).collect::<Vec<_>>().join(", ");
+        let names = ahead.keys.iter().flat_map(|(tables, k)| tables.iter().map(move |t| (t, k))).map(|(t, k)| format!("({}, {})", literal(t), literal(k))).collect::<Vec<_>>().join(", ");
         // A key owns its index; a foreign key only names the one it references, which stays.
         let rows = db
             .rows(&format!(
@@ -800,7 +800,8 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
             .unwrap_or_default();
         let known: BTreeSet<(String, String)> = db.rows(&format!("select t.relname, n.conname from pg_constraint n join pg_class t on t.oid = n.conrelid where (t.relname, n.conname) in ({names})")).await.unwrap_or_default().iter().map(|r| (r.text("relname").to_string(), r.text("conname").to_string())).collect();
         ahead.indexes.extend(rows.iter().map(|r| r.text("relname").to_string()));
-        let unknown: Vec<String> = ahead.keys.iter().filter(|k| !known.contains(*k)).map(|(_, k)| k.clone()).collect();
+        // One drop, under whichever of its names the catalog knows: by its name alone where neither.
+        let unknown: Vec<String> = ahead.keys.iter().filter(|(tables, k)| !tables.iter().any(|t| known.contains(&(t.clone(), k.clone())))).map(|(_, k)| k.clone()).collect();
         ahead.indexes.extend(unknown);
     }
     run(db, m).await?;
@@ -887,7 +888,7 @@ mod tests {
         assert_eq!(first.defaults.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "code".to_string()), ("orders".to_string(), "dotted".to_string()), ("orders".to_string(), "total".to_string())], "a comment's words change nothing");
         assert_eq!(first.fed.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "code".to_string(), "other_no".to_string()), ("orders".to_string(), "dotted".to_string(), "order.no".to_string()), ("orders".to_string(), "total".to_string(), "order_no".to_string())]);
         assert_eq!(first.indexes.iter().cloned().collect::<Vec<_>>(), ["orders$Idx", "orders_id"]);
-        assert_eq!(first.keys.iter().cloned().collect::<Vec<_>>(), [("orders".to_string(), "orders_pk".to_string()), ("purchases".to_string(), "orders_pk".to_string())]);
+        assert_eq!(first.keys, [(vec!["orders".to_string(), "purchases".to_string()], "orders_pk".to_string())]);
         assert_eq!(first.owned.iter().cloned().collect::<Vec<_>>(), ["tag_no"]);
         assert!(aheads[1].defaults.contains(&("orders".to_string(), "id".to_string())) && aheads[1].indexes.contains("later_idx"));
     }
