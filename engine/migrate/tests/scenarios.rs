@@ -4453,6 +4453,87 @@ async fn a_dry_run_checks_new_constraints_against_this_databases_rows() {
     }
 }
 
+/// A table dropped and made again as it was reads as unchanged in the catalog, while its rows are
+/// gone: the dry run says so, from the migration's statements.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_says_a_table_made_again_loses_its_rows() {
+    for d in [Dialect::Postgres, Dialect::Sqlite] {
+        let Some(mut p) = P::new(d).await else { continue };
+        let logs = "create table logs (id int primary key, note varchar(20));";
+        p.file("20261027100000_logs.sql", logs);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into logs values (1, 'a'); insert into logs values (2, 'b')").await;
+        p.file("20261027110000_reset_logs.sql", &format!("drop table logs;\n{logs}"));
+        p.schema(logs);
+        p.output();
+        assert_eq!(p.dry_run().await, 0, "{d:?}: {}", p.peek());
+        assert_has!(p.output(), r"_reset_logs\.sql\n(      ! [^\n]*\n)*      ! It drops the table logs and its 2 rows on this database");
+    }
+}
+
+/// A composite unique key is checked on every column of it; a foreign key whose parent rows a
+/// pending migration adds first is left to the deploy, which meets them; and so is a NOT NULL on a
+/// column dropped and added again, which holds none of the target's values.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_checks_composite_keys_and_waits_on_a_parent_filled_first() {
+    for d in [Dialect::Postgres, Dialect::Mysql] {
+        let Some(mut p) = P::new(d).await else { continue };
+        p.file("20261027100000_pairs.sql", "create table pairs (id int primary key, a int, b int);");
+        p.file("20261027100001_teams.sql", "create table teams (id int primary key);");
+        p.file("20261027100002_members.sql", "create table members (id int primary key, team_id int);");
+        p.file("20261027100003_tags.sql", "create table tags (id int primary key, status varchar(20));");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into pairs values (1, 1, 1); insert into pairs values (2, 1, 1); insert into pairs values (3, 1, null); insert into pairs values (4, 1, 2); insert into teams values (1); insert into members values (1, 9); insert into tags values (1, null)").await;
+        // A column dropped and added again under its name holds none of the target's values.
+        p.file("20261027105900_drop_status.sql", "alter table tags drop column status;");
+        p.file("20261027105901_add_status.sql", "alter table tags add column status varchar(20) not null default 'active';");
+        p.file("20261027110000_pairs_ab.sql", "create unique index pairs_ab on pairs (a, b);");
+        p.file("20261027110001_team_9.sql", "insert into teams values (9);");
+        p.file("20261027110002_members_team.sql", "alter table members add constraint members_team foreign key (team_id) references teams (id);");
+        p.schema("create table pairs (id int primary key, a int, b int);\ncreate unique index pairs_ab on pairs (a, b);\ncreate table teams (id int primary key);\ncreate table members (id int primary key, team_id int, constraint members_team foreign key (team_id) references teams (id));\ncreate table tags (id int primary key, status varchar(20) not null default 'active');\n");
+        p.output();
+        assert_eq!(p.dry_run().await, 1, "{d:?}: {}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"_pairs_ab\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 value repeats in pairs_ab\n");
+        assert!(!out.contains("nulls in tags.status"), "{d:?}: the column added again holds none of the old values: {out}");
+        assert!(!out.contains("breaks members_team"), "{d:?}: the parent row comes first: {out}");
+    }
+}
+
+/// On Postgres: a check whose function writes is read in a read-only transaction, which refuses the
+/// write, so the target is left as it was and the check unsaid; a type change that rewrites values
+/// before a check of the same file meets them is left to the deploy; and a NOT NULL added `not valid`
+/// holds no row to it until a later migration validates it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_reads_postgres_rows_only_as_the_deploy_meets_them() {
+    let Some(mut p) = P::new(Dialect::Postgres).await else { return };
+    let version: u32 = p.rows("show server_version_num").await[0].text("server_version_num").parse().unwrap();
+    let base = "create table audit (n int);\ncreate function plan_ok(p text) returns boolean language plpgsql as $$ begin insert into audit values (1); return p in ('free', 'pro'); end $$;\ncreate table users (id int primary key, plan text, email text);";
+    p.file("20261027100000_base.sql", base);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into users values (1, 'Free', null), (2, 'gold', 'a@x')").await;
+    p.file("20261027110002_plan_ok.sql", "alter table users add constraint users_plan_ok check (plan_ok(plan));");
+    p.file("20261027110003_lower_plan.sql", "alter table users alter column plan type varchar(10) using lower(plan);\nalter table users add constraint users_plan_lower check (plan = lower(plan));");
+    let mut schema = format!("{base}\nalter table users alter column plan type varchar(10);\nalter table users add constraint users_plan_ok check (plan_ok(plan));\nalter table users add constraint users_plan_lower check (plan = lower(plan));\n");
+    if version >= 180000 {
+        p.file("20261027110000_email_not_valid.sql", "alter table users add constraint users_email_nn not null email not valid;");
+        p.file("20261027110001_email_validate.sql", "alter table users validate constraint users_email_nn;");
+        schema.push_str("alter table users add constraint users_email_nn not null email;\n");
+    }
+    p.schema(&schema);
+    p.output();
+    let code = p.dry_run().await;
+    let out = p.output();
+    assert_eq!(p.rows("select count(*) as n from audit").await[0].text("n"), "0", "the target is left as it was: {out}");
+    assert!(!out.contains("users_plan_ok") && !out.contains("users_plan_lower"), "{out}");
+    if version >= 180000 {
+        assert_eq!(code, 1, "{out}");
+        assert_has!(&out, r"_email_not_valid\.sql\n    · \d+_email_validate\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row has nulls in users\.email\n");
+    } else {
+        assert_eq!(code, 0, "{out}");
+    }
+}
+
 /// A trigger swapped under a lock with a change to its table: the change runs first, so one that
 /// fails on a row leaves the old trigger as it was; and one MySQL can't make by changing the
 /// table's definition alone blocks reads and writes under the lock, so it needs `--blocking`, as
