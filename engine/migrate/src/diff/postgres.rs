@@ -2758,15 +2758,21 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
                 .filter(|c| c.kind == Some(Kind::Column) && c.owner.as_deref() == Some(old_table.as_str()) && (c.deps.contains(&o.id) || o.goes_with.as_deref() == Some(c.id.as_str())))
                 .map(|c| c.id.replacen(&format!("column {old_rel}."), &format!("column {new_rel}."), 1))
                 .collect();
-            let ours = |t: &Object| {
-                t.kind == o.kind
-                    && match o.kind {
-                        Some(Kind::Index) => t.owner.as_deref() == Some(new_table.as_str()),
-                        Some(Kind::Sequence) => users.iter().any(|u| t.goes_with.as_deref() == Some(u.as_str()) || target.objects.get(u).is_some_and(|c| c.deps.contains(&t.id))),
-                        _ => true,
-                    }
+            // How surely the target's object is this one: an index on the table; a sequence the same
+            // column owns, else one a column takes values from. The name that holds it more surely wins.
+            let hold = |t: &Object| -> u8 {
+                if t.kind != o.kind {
+                    return 0;
+                }
+                match o.kind {
+                    Some(Kind::Index) => u8::from(t.owner.as_deref() == Some(new_table.as_str())),
+                    Some(Kind::Sequence) if users.iter().any(|u| t.goes_with.as_deref() == Some(u.as_str())) => 2,
+                    Some(Kind::Sequence) => u8::from(users.iter().any(|u| target.objects.get(u).is_some_and(|c| c.deps.contains(&t.id)))),
+                    _ => 1,
+                }
             };
-            if made == unquoted(&name) || target.objects.get(&o.id).is_some_and(ours) || !target.objects.get(&format!("{word} {at}.{wanted}")).is_some_and(ours) {
+            let (kept, there) = (target.objects.get(&o.id).map_or(0, hold), target.objects.get(&format!("{word} {at}.{wanted}")).map_or(0, hold));
+            if made == unquoted(&name) || there == 0 || kept >= there {
                 continue;
             }
             if o.kind == Some(Kind::Constraint) {

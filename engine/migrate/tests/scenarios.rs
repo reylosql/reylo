@@ -4694,6 +4694,23 @@ mod adversarial {
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.exec("insert into tallied (id) values (101)").await;
         assert_eq!(p.rows("select ticket from tallied order by id").await.iter().map(|r| r.text("ticket").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+        p.output();
+        // A sequence its column owns under the new name, though another column names it under the
+        // old: renamed, keeping its count.
+        let rest = format!("{rest} create sequence tallied_id_seq as integer; create table tallied (id integer primary key, ticket integer unique default nextval('tallied_id_seq'));");
+        p.file("20991231000010_t.sql", "create table owned (id serial primary key, seq_ref regclass default 'owned_id_seq'::regclass);");
+        p.schema(&format!("{rest} create table owned (id serial primary key, seq_ref regclass default 'owned_id_seq'::regclass);"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into owned default values").await;
+        p.output();
+        p.schema(&format!("{rest} create sequence owned_id_seq as integer; create table held (id serial primary key, seq_ref regclass default 'owned_id_seq'::regclass);"));
+        let choices = reylo_migrate::Choices { rename: vec![("owned".into(), "held".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "held", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into held default values").await;
+        assert_eq!(p.rows("select id from held order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
     }
 
     /// A refusal's suggested command carries --blocking where the migration it writes rewrites a
