@@ -717,8 +717,9 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             "select a.attrelid as rel, a.attnum as num, format('%I', a.attname) as name, format_type(a.atttypid, a.atttypmod) as type, a.attnotnull as notnull,
               pg_get_expr(d.adbin, d.adrelid) as def, d.oid as defoid, a.attidentity as identity, {} as identity_options, a.attgenerated as generated, a.attislocal as local, a.attinhcount > 0 as inherited,
               (select format('%I.%I', sn.nspname, sc.relname) from pg_depend sd join pg_class sc on sc.oid = sd.objid join pg_namespace sn on sn.oid = sc.relnamespace
-                where sd.classid = 'pg_class'::regclass and sd.refclassid = 'pg_class'::regclass and sd.refobjid = a.attrelid and sd.refobjsubid = a.attnum and sd.deptype = 'i'
-                  and (sc.relnamespace <> c.relnamespace or sc.relname <> left(c.relname || '_' || a.attname || '_seq', 63))) as identity_name,
+                where sd.classid = 'pg_class'::regclass and sd.refclassid = 'pg_class'::regclass and sd.refobjid = a.attrelid and sd.refobjsubid = a.attnum and sd.deptype = 'i') as identity_name,
+              (select sc.relname from pg_depend sd join pg_class sc on sc.oid = sd.objid
+                where sd.classid = 'pg_class'::regclass and sd.refclassid = 'pg_class'::regclass and sd.refobjid = a.attrelid and sd.refobjsubid = a.attnum and sd.deptype = 'i' and sc.relnamespace = c.relnamespace) as identity_own_name,
               case when a.attcollation <> t.typcollation then (select format('%I.%I', cn.nspname, co.collname) from pg_collation co join pg_namespace cn on cn.oid = co.collnamespace where co.oid = a.attcollation) end as collation,
               col_description(a.attrelid, a.attnum) as comment, {} as nn_valid, {} as acl,
               (select format('%I.%I', sn.nspname, sc.relname) || chr(31) || case when sc.relpersistence <> c.relpersistence then sc.relpersistence::text else '' end || chr(31) || coalesce(obj_description(sc.oid, 'pg_class'), '')
@@ -887,9 +888,11 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             // column is made without it, and it is added after, by its name, not valid.
             let unvalidated = c.flag("notnull") && !c.flag("nn_valid") && !c.flag("noinherit");
             let full = column_def(c, kind == "c");
-            // An identity's sequence named otherwise than Postgres would name it is made under its
-            // name; which name it has is no part of the definition compared.
-            let named = c.get("identity_name").map(|n| named_identity(&full, n)).unwrap_or_else(|| full.clone());
+            // An identity's sequence named otherwise than Postgres would name it (in another schema,
+            // or not as `makeObjectName` makes it of the table's and the column's names) is made under
+            // its name; which name it has is no part of the definition compared.
+            let identity_name = c.get("identity_name").filter(|_| c.get("identity_own_name").is_none_or(|own| own != declared::object_name(&unquoted(split_last(&name).1), Some(&unquoted(c.text("name"))), "seq")));
+            let named = identity_name.map(|n| named_identity(&full, n)).unwrap_or_else(|| full.clone());
             // A not null of its own named otherwise than Postgres would name it (`constraint
             // a_required not null`) is made under that name.
             let declared = c.get("nn_name").filter(|n| matches!(kind, "r" | "p") && !c.flag("inherited") && !generated_not_null(n, &name, &unquoted(c.text("name")))).map(String::from);
@@ -993,7 +996,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                         .get("nn_name")
                         .map(|n| format!("not null name {n}"))
                         .into_iter()
-                        .chain(c.get("identity_name").map(|n| format!("{IDENTITY_SEQUENCE}{n}")))
+                        .chain(identity_name.map(|n| format!("{IDENTITY_SEQUENCE}{n}")))
                         .chain((kind == "p").then(|| "partitioned".to_string()))
                         .chain((!c.text("generated").is_empty()).then(|| super::GENERATED.to_string()))
                         .chain((c.flag("inherited") && !partition).then(|| "inherited".to_string()))
@@ -2763,7 +2766,7 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
             let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
             let Some(t) = target.objects.get(&format!("column {new_rel}.{column}")).filter(|t| parse_column(&t.def).identity.is_some()) else { continue };
             let column = column.strip_prefix('"').and_then(|c| c.strip_suffix('"')).map(|c| c.replace("\"\"", "\"")).unwrap_or_else(|| column.to_string());
-            let chosen = |table: &str| format!("{schema}.{}", declared::quote_ident(&object_name(&unquoted(table), Some(&column), "seq")));
+            let chosen = |table: &str| format!("{schema}.{}", declared::quote_ident(&declared::object_name(&unquoted(table), Some(&column), "seq")));
             let (was, now) = (identity_sequence(o).unwrap_or_else(|| chosen(old)), identity_sequence(t).unwrap_or_else(|| chosen(new)));
             if was != now {
                 out.push(format!("alter sequence {was} rename to {}", last(&now).1));
@@ -3255,33 +3258,7 @@ fn default_not_null(table: &str, column: &str) -> String {
 /// The name Postgres makes of a table's name, a column's and `label` (`not_null`, or `not_null1` where
 /// that was taken).
 fn not_null_named(table: &str, column: &str, label: &str) -> String {
-    object_name(&unquoted(split_last(table).1), Some(column), label)
-}
-
-/// The name Postgres makes of a table's name, the names of the columns it is on (joined by `_`) where
-/// it is on some, and `label` (`pkey`, `key`, `idx`, `seq`, …), each as Postgres holds it: past 63
-/// bytes, the longer of the first two is shortened a byte at a time until it fits, each then cut at a
-/// character's edge (`makeObjectName`).
-fn object_name(table: &str, columns: Option<&str>, label: &str) -> String {
-    let room = 63usize.saturating_sub(label.len() + 1 + usize::from(columns.is_some()));
-    let (mut a, mut b) = (table.len(), columns.map_or(0, str::len));
-    while a + b > room {
-        if a > b {
-            a -= 1;
-        } else {
-            b -= 1;
-        }
-    }
-    let clip = |s: &str, mut n: usize| -> String {
-        while !s.is_char_boundary(n) {
-            n -= 1;
-        }
-        s[..n].to_string()
-    };
-    match columns {
-        Some(columns) => format!("{}_{}_{label}", clip(table, a), clip(columns, b)),
-        None => format!("{}_{label}", clip(table, a)),
-    }
+    declared::object_name(&unquoted(split_last(table).1), Some(column), label)
 }
 
 /// Whether `after`, a name as a line of the catalog writes it, is what a table's rename from `old` to
@@ -3297,15 +3274,17 @@ pub fn renamed_as(before: &str, after: &str, old: &str, new: &str) -> bool {
 /// any other has the old name's words in it swapped for the new.
 fn renamed_name(name: &str, old: &str, new: &str) -> String {
     let (name, old, new) = (unquoted(name), unquoted(old), unquoted(new));
-    if let Some(rest) = name.strip_prefix(old.as_str()).and_then(|r| r.strip_prefix('_')) {
+    // The old name as it stands in `name`: whole, or shortened where Postgres shortened it.
+    for cut in (1..=old.len()).rev().filter(|&n| old.is_char_boundary(n)) {
+        let Some(rest) = name.strip_prefix(&old[..cut]).and_then(|r| r.strip_prefix('_')) else { continue };
         let end = rest.len() - rest.bytes().rev().take_while(u8::is_ascii_digit).count();
         let word = &rest[..end];
         for label in ["not_null", "pkey", "fkey", "check", "excl", "idx", "seq", "key"] {
             let columns = if word == label { Some(None) } else { word.strip_suffix(label).and_then(|c| c.strip_suffix('_')).map(Some) };
             let Some(columns) = columns else { continue };
             let numbered = &rest[end - label.len()..];
-            if object_name(&old, columns, numbered) == name {
-                return object_name(&new, columns, numbered);
+            if declared::object_name(&old, columns, numbered) == name {
+                return declared::object_name(&new, columns, numbered);
             }
         }
     }

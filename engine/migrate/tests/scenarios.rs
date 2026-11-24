@@ -4567,11 +4567,26 @@ mod adversarial {
         p.exec("insert into refs values (1); insert into ledger (email, note, ref_id) values ('a', 'n', 1)").await;
         p.output();
         let long = "a".repeat(63);
-        for (written, named) in [(r#""123""#.to_string(), "123".to_string()), (long.clone(), long.clone())] {
+        // A sequence named by hand as Postgres would once have been thought to name it, which a
+        // rename leaves alone.
+        let wide = "w".repeat(60);
+        let other = |name: &str| format!("create table {name} (id integer generated always as identity (sequence name {wide}_id) primary key);");
+        p.file("20261027110000_t.sql", &other(&wide));
+        p.schema(&format!("{refs} {} {}", table("ledger"), other(&wide)));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec(&format!("insert into {wide} default values")).await;
+        p.output();
+        let mut old = "ledger".to_string();
+        for (written, named) in [(r#""123""#.to_string(), "123".to_string()), (long.clone(), long.clone()), ("ledger".to_string(), "ledger".to_string())] {
             let before = p.files().len();
-            p.schema(&format!("{refs} {}", table(&written)));
-            let old = if named == "123" { "ledger".to_string() } else { "123".to_string() };
-            let choices = reylo_migrate::Choices { rename: vec![(old, named.clone())], ..Default::default() };
+            let (other_old, other_new) = if named == "ledger" { ("short".to_string(), wide.clone()) } else if named == "123" { (wide.clone(), "short".to_string()) } else { ("short".to_string(), "short".to_string()) };
+            p.schema(&format!("{refs} {} {}", table(&written), other(&other_new)));
+            let mut rename = vec![(old.clone(), named.clone())];
+            if other_old != other_new {
+                rename.push((other_old, other_new));
+            }
+            old = named.clone();
+            let choices = reylo_migrate::Choices { rename, ..Default::default() };
             assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "renamed", &choices, log).await).await, 0, "{}", p.peek());
             let out = p.output();
             assert!(!out.contains("doesn't reach"), "{out}");
@@ -4579,6 +4594,7 @@ mod adversarial {
             assert_eq!(p.files().len(), before + 1);
             assert_eq!(p.migrate().await, 0, "{}", p.peek());
             assert_eq!(p.rows(&format!("select email from {written}")).await[0].text("email"), "a");
+            p.exec(&format!("insert into {} default values", if named == "ledger" { &wide } else { "short" })).await;
             p.output();
             assert_eq!(p.dry_run().await, 0, "{}", p.peek());
             p.output();
