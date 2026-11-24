@@ -9,8 +9,8 @@ on:
       matrix:
         description: The platforms of npm/platforms.json, as a matrix
         value: ${{ jobs.platforms.outputs.matrix }}
-  # A pull request that changes how the binary is built, packaged, found or served is checked the same way on every platform, before a release meets it.
-  pull_request:
+  # Each push to main that changes the binary's program, how it is built, packaged or found, or this workflow, so that a platform's break shows on main at the latest.
+  push:
     branches:
       - main
     paths:
@@ -19,16 +19,53 @@ on:
       - engine/migrate/**
       - engine/syntax/**
       - rust/reylo-build/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .cargo/**
+      - engine/build.sh
+      - engine/*/Cargo.toml
+      - engine/*/build.rs
+      - engine/*/csrc/**
+      - engine/core/src/stack.rs
       - npm/**
       - scripts/build.ts
       - src/cli.ts
       - src/native.ts
       - src/engine.ts
-      - .cargo/**
-      - Cargo.lock
-      - rust-toolchain.toml
       - .github/scripts/build-binary.sh
       - .github/scripts/install-check.ts
+      - .github/scripts/with-node.sh
+      - .github/scripts/pack-binaries.sh
+      - .github/scripts/channels*.sh
+      - .github/workflows/binaries.yml
+      - .github/workflows/channels.yml
+      - .github/workflows/release.yml
+  # A pull request that changes how the binary is built, packaged, found or started is checked the same way on every platform, before a release meets it: the build (the toolchain, Cargo's manifests and lockfile, each crate's build script and the C it compiles, which differ by target), the stack the analysis runs on, which differs by platform and which the install check reads statements nested to the bound of, how a Rust project's command finds the binary of its version, the packages, and how the loader and the reylo command find and run it. Every other change to the engine is built and tested on Linux by test.yml, and on every platform on its push to main.
+  pull_request:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .cargo/**
+      - engine/build.sh
+      - engine/*/Cargo.toml
+      - engine/*/build.rs
+      - engine/*/csrc/**
+      - engine/core/src/stack.rs
+      - engine/cli/src/matched.rs
+      - rust/reylo-build/Cargo.toml
+      - npm/**
+      - scripts/build.ts
+      - src/cli.ts
+      - src/native.ts
+      - src/engine.ts
+      - .github/scripts/build-binary.sh
+      - .github/scripts/install-check.ts
+      - .github/scripts/with-node.sh
+      - .github/scripts/pack-binaries.sh
       - .github/workflows/binaries.yml
       - .github/workflows/release.yml
   # One platform's binary from any branch, to run on that platform with no build of its own: `gh workflow run binaries.yml --ref <branch> -f platform=darwin-arm64`, then `gh run download <run> -n engine-darwin-arm64`. Nothing is packed or installed.
@@ -42,7 +79,7 @@ on:
 permissions:
   contents: read
 
-# A pull request's new commit cancels the run of its last one; a release's run is never cancelled.
+# A pull request's new commit cancels the run of its last one; a push to main's run and a release's are never cancelled.
 concurrency:
   group: binaries-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

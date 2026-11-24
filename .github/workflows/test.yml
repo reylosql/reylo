@@ -6,9 +6,24 @@ on:
   push:
     branches:
       - main
+  # A pull request that changes only Markdown, the docs site or the examples runs none of this: Vercel's build of the site checks the site (its type check, links, headings and routes, and that the captured types are current), and no job here reads an example. The site's files that the loader's tests or the package build read still run it: its install, reylo play's page, the published type descriptor schema and the CLI pages the CLI's help is held to.
   pull_request:
     branches:
       - main
+    paths:
+      - "**"
+      - ".cargo/**"
+      - ".github/**"
+      - "!**/*.md"
+      - "!examples/**"
+      - "!site/**"
+      - site/package.json
+      - site/pnpm-lock.yaml
+      - site/play-page/**
+      - site/vite.play.config.ts
+      - site/public/typedefs/**
+      - site/content/docs/cli.mdx
+      - site/content/docs/migrate-cli.mdx
   # release.yml runs the whole of this before it stages anything, so a release passes every check
   workflow_call:
   # A branch's checks with no pull request, and so no review: `gh workflow run test.yml --ref <branch>`. A release's run reads as this event too, since a called workflow takes its caller's, so what tells the two apart is `inputs.scope`, which only a dispatch of this file sets.
@@ -78,12 +93,14 @@ jobs:
             exit 0
           fi
           # A renamed file counts at both paths, so a file moved out of a path that runs everything still does.
-          files=$(git diff --name-only --no-renames "$base" HEAD)
+          # Markdown reaches no build or test of the engine.
+          files=$(git diff --name-only --no-renames "$base" HEAD | grep -v '\.md$' || true)
           echo "$files"
           # Core, the syntax crate, the crate the oracle answers through, the oracle's own code and its mutations, the build, the code lists the
           # oracle reads, the format's schema and examples the engine's tests and the oracle read, the validators'
-          # measurements the engine's tests read, and CI itself reach every database.
-          if grep -qE '^(\.cargo/|engine/(core|syntax|build-support|native|wasip2)/|engine/build\.sh$|oracle/src/|oracle/Cargo\.toml$|oracle/mutations\.json$|Cargo\.(toml|lock)$|rust-toolchain|src/error-codes-|spec/typedefs\.schema\.json$|spec/examples\.json$|wiki/json-schema-checks/|\.github/)' <<<"$files"; then
+          # measurements the engine's tests read, and this workflow and the scripts its jobs run reach every database.
+          # The other workflows and their scripts run none of these jobs, so they reach none.
+          if grep -qE '^(\.cargo/|engine/(core|syntax|build-support|native|wasip2)/|engine/build\.sh$|oracle/src/|oracle/Cargo\.toml$|oracle/mutations\.json$|Cargo\.(toml|lock)$|rust-toolchain|src/error-codes-|spec/typedefs\.schema\.json$|spec/examples\.json$|wiki/json-schema-checks/|\.github/workflows/test\.yml$|\.github/scripts/(build-playground|json-schema-validators|postgres-19-extensions|rust-demos|rust-package-check)\.sh$)' <<<"$files"; then
             everything >> "$GITHUB_OUTPUT"
             exit 0
           fi
