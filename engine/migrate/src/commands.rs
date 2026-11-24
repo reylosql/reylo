@@ -7858,9 +7858,11 @@ fn replay_problems(opts: &Options, files: &[Migration], schema_sql: Option<&str>
 }
 
 /// The same of what a database ran, for a command that replays its history as it ran: a row whose
-/// file reads the same is the file's to refuse, by [`replay_problems`].
+/// file is the same text is the file's to refuse, by [`replay_problems`]. Only the same text: two
+/// that are the same statements to [`same_statements`] may still read otherwise on a server, as
+/// MySQL reads a versioned comment.
 fn history_replay_problems(history: &[HistoryRow], files: &[Migration], d: Dialect) -> Vec<Problem> {
-    let as_file = |r: &HistoryRow| files.iter().any(|f| f.name == r.name && same_statements(&f.sql, &r.sql, d));
+    let as_file = |r: &HistoryRow| files.iter().any(|f| f.name == r.name && f.sql == r.sql);
     history.iter().filter(|r| r.applied && !as_file(r)).filter_map(|r| replay_problem(&format!("Migration {}, as this database ran it,", r.name), &r.sql, d)).collect()
 }
 
