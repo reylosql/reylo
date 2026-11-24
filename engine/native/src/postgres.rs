@@ -57,6 +57,9 @@ struct Connection {
     date_style: String,
     /// What a session of this connection runs under, set again on a connection that replaces it.
     setup: Option<String>,
+    /// Whether the session is given up on, after a lock timeout left describes queued on it behind
+    /// the same lock: nothing more is sent through it, and the next request opens another.
+    retired: bool,
 }
 
 impl Connection {
@@ -72,19 +75,30 @@ impl Connection {
         Ok(())
     }
 
+    /// The connection opened again where a lock timeout retired its session, before a request is
+    /// sent; until one opens, every request fails as the opening does, and none reaches the old one.
+    async fn ready(&mut self) -> Result<(), Value> {
+        if self.retired {
+            self.reopen().await?;
+            self.retired = false;
+        }
+        Ok(())
+    }
+
     /// The analysis of one statement over the connection, opened again once where the server
     /// closed it; a failure is the answer the program gives for it.
     async fn analyze(&mut self, sql: &str) -> Result<Analysis, Value> {
+        self.ready().await?;
         let mut result = answers::analyze_prepared(&self.client, &self.prepared, sql, &mut self.answers).await;
         if matches!(&result, Err(ReplayError::Host(e)) if self.client.is_closed() || e.0.starts_with(answers::ENDED)) {
             self.reopen().await?;
             result = answers::analyze_prepared(&self.client, &self.prepared, sql, &mut self.answers).await;
         }
-        // A lock timeout leaves the statement's other describes queued on the connection behind the
-        // same lock: the next statement gets a connection of its own rather than wait behind them.
-        // One that cannot be opened now is left for that statement to find out.
+        // A lock timeout leaves the statement's other describes queued on the session behind the
+        // same lock: it is reported now, and the next request opens a session of its own rather
+        // than wait behind them.
         if matches!(&result, Err(ReplayError::Host(e)) if e.0.starts_with(answers::LOCKED)) {
-            let _ = self.reopen().await;
+            self.retired = true;
         }
         match result {
             Ok(mut analysis) => {
@@ -187,7 +201,7 @@ impl Session {
         }
         let Started { client, version, date_style } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
         let setup = lock_wait(&client).await;
-        Ok(Session { connection: Connection { client, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup }, version: server_version(&version) })
+        Ok(Session { connection: Connection { client, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup, retired: false }, version: server_version(&version) })
     }
 
     /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
@@ -228,7 +242,7 @@ impl Program for Postgres {
                     Ok(Started { client, version, date_style }) => {
                         let setup = lock_wait(&client).await;
                         self.next += 1;
-                        self.connections.insert(self.next, Connection { client, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup });
+                        self.connections.insert(self.next, Connection { client, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup, retired: false });
                         json!({ "status": "opened", "conn": self.next, "version": server_version(&version) })
                     }
                     Err(failure) => failure,
@@ -246,6 +260,9 @@ impl Program for Postgres {
             "describe" => match self.connections.get_mut(&conn) {
                 None => closed(conn),
                 Some(c) => {
+                    if let Err(failure) = c.ready().await {
+                        return Some(failure);
+                    }
                     let mut result = c.client.prepare(sql).await;
                     if matches!(&result, Err(e) if c.client.is_closed() || answers::ended(e)) {
                         if let Err(failure) = c.reopen().await {
@@ -268,6 +285,9 @@ impl Program for Postgres {
             "query" => match self.connections.get_mut(&conn) {
                 None => closed(conn),
                 Some(c) => {
+                    if let Err(failure) = c.ready().await {
+                        return Some(failure);
+                    }
                     let params = request["params"].as_array().cloned().unwrap_or_default();
                     let mut result = answers::PreparedAnswers(&c.client, &c.prepared).query(sql, &params).await;
                     if matches!(&result, Err(e) if c.client.is_closed() || e.0.starts_with(answers::ENDED)) {

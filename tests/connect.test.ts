@@ -235,18 +235,18 @@ test("Postgres: an analysis waits on another session's lock for at most 10 s, or
   }
 });
 
-test("reylo analyze and reylo generate stop waiting on another session's lock at lock_timeout, as the type check does", { skip: pgLive }, async () => {
+test("reylo analyze and reylo generate stop waiting on another session's lock at 10 s, as the type check does", { skip: pgLive }, async () => {
   const { url, sql, drop } = await postgresDatabase("reylo_lock_wait_cli", "create table users (id bigint primary key, name text not null)");
   const project = mkdtempSync(join(tmpdir(), "reylo-lock-project-"));
-  writeFileSync(join(project, ".reylo.yaml"), `direct_url: ${JSON.stringify(`${url}?options=-c%20lock_timeout%3D1s`)}\n`);
+  writeFileSync(join(project, ".reylo.yaml"), `direct_url: ${JSON.stringify(url)}\n`);
   writeFileSync(join(project, "q.sql"), "select id, name from users where id = :id");
   try {
     await sql.begin(async (tx: any) => {
       await tx.unsafe("alter table users add column email text");
       // The lock is the server's to hold, so a synchronous run stalls nothing it needs.
-      // The generator reads the schema's fingerprint first, whose catalog functions wait on the same lock.
+      // The generator runs under no lock_timeout of its own, so only the engine's bound ends its wait; it reads the schema's fingerprint first, whose catalog functions wait on the same lock. The analysis takes a shorter one from its URL.
       for (const [args, said] of [
-        [["analyze", "q.sql"], /A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_timeout/],
+        [["analyze", "q.sql", "--url", `${url}?options=-c%20lock_timeout%3D1s`], /A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_timeout/],
         [["generate", "rust-sqlx", "q.sql"], /the schema fingerprint failed: canceling statement due to lock timeout/],
       ] as const) {
         const run = spawnSync(nativeBinary(), args, { cwd: project, encoding: "utf8", timeout: 20_000 });
