@@ -5846,7 +5846,7 @@ async fn as_its_migrations_leave_it(opts: &Options, files: &[Migration]) -> Resu
         }
         let created = created_extensions(opts);
         let added: Vec<String> = if d == Dialect::Postgres { project_extensions(&mut db).await?.into_iter().filter(|x| !created.contains(x)).collect() } else { vec![] };
-        Ok(schema_as_sql_on(&mut db, opts, &[], true).await?.map(|sql| (passing_over_existing(&sql, d), added)).map_err(|problem| vec![problem]))
+        Ok(schema_as_sql_on(&mut db, opts, &[], true, &mut Vec::new()).await?.map(|sql| (passing_over_existing(&sql, d), added)).map_err(|problem| vec![problem]))
     }
     .await;
     db.close().await;
@@ -7325,17 +7325,20 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
 #[cfg(feature = "cli")]
 async fn schema_as_sql(opts: &Options, schemas: &[String]) -> Result<Result<String, Problem>, Error> {
     let mut db = Db::open(opts).await?;
-    let result = schema_as_sql_on(&mut db, opts, schemas, true).await;
+    let result = schema_as_sql_on(&mut db, opts, schemas, true, &mut Vec::new()).await;
     db.close().await;
     result
 }
 
 /// `shadowed` is whether the command needs shadow databases anyway: where none can be made, it is
-/// told so, rather than given the dump.
+/// told so, rather than given the dump. Where none can be made on the server `shadow_url` names,
+/// every command is refused: that server is the project's for shadows, so one that can't make them
+/// is a setting to fix, not a reason to print SQL of another kind. Where the text is the dump,
+/// `dumped` says why, as lines a person reads.
 #[cfg(feature = "cli")]
-async fn schema_as_sql_on(db: &mut Db, opts: &Options, schemas: &[String], shadowed: bool) -> Result<Result<String, Problem>, Error> {
+async fn schema_as_sql_on(db: &mut Db, opts: &Options, schemas: &[String], shadowed: bool, dumped: &mut Vec<String>) -> Result<Result<String, Problem>, Error> {
     if db.dialect() != Dialect::Postgres {
-        return checked_against_dump(db, opts, schemas).await.map(Ok);
+        return checked_against_dump(db, opts, schemas, shadowed, dumped).await;
     }
     // Reylo's own SQL, checked against the database itself, needs no pg_dump: only the dump it
     // falls back on does. It makes every schema, so --schema naming only some of those that hold
@@ -7347,7 +7350,8 @@ async fn schema_as_sql_on(db: &mut Db, opts: &Options, schemas: &[String], shado
         match own_sql(db, opts).await? {
             Ok(sql) => return Ok(Ok(sql)),
             Err(NotOwn::NoShadow(e)) if shadowed => return Err(e),
-            Err(NotOwn::NoShadow(e)) => vec![format!("  No shadow database can be made to check Reylo's own SQL for it: {e}")],
+            Err(NotOwn::NoShadow(e)) if opts.shadow_url.is_some() => return Ok(Err(shadow_url_problem(&e))),
+            Err(NotOwn::NoShadow(e)) => no_shadow(&e),
             Err(NotOwn::Short(why)) => why,
         }
     };
@@ -7355,7 +7359,25 @@ async fn schema_as_sql_on(db: &mut Db, opts: &Options, schemas: &[String], shado
     if let Err(missing) = crate::db::find_pg_dump(version / 10000) {
         return Ok(Err(pg_dump_problem(&missing, why)));
     }
-    dump_from(db, opts, schemas).await.map(Ok)
+    let sql = dump_from(db, opts, schemas).await?;
+    *dumped = why;
+    Ok(Ok(sql))
+}
+
+/// Why the schema is the dump where no shadow database can be made on the database's own server,
+/// `shadow_url` unset.
+#[cfg(feature = "cli")]
+fn no_shadow(e: &Error) -> Vec<String> {
+    vec![format!("  No shadow database can be made to check Reylo's own SQL for it: {e}")]
+}
+
+/// The refusal where no shadow database can be made on the server `shadow_url` names.
+#[cfg(feature = "cli")]
+fn shadow_url_problem(e: &Error) -> Problem {
+    Problem::new("shadow-url-unusable", "No shadow database can be made on the server shadow_url names")
+        .lines([format!("  {e}")])
+        .note("Reylo's own SQL is checked on a shadow database before it's printed.")
+        .note("Make sure that server is running and its role can create a database, or set shadow_url in .reylo.yaml to one that can.")
 }
 
 /// What --schema (`schemas`, where it names any) leaves out: each schema of the project's it doesn't
@@ -7562,21 +7584,32 @@ fn install_pg_dump(major: i64) -> Option<String> {
 }
 
 /// The schema of a MySQL or SQLite database as SQL that makes it: Reylo's own, where a shadow shows
-/// it makes exactly what the database's own dump makes, else the dump.
+/// it makes exactly what the database's own dump makes, else the dump, and `why` says why. Where no
+/// shadow can be made, as [`schema_as_sql_on`].
 #[cfg(feature = "cli")]
-async fn checked_against_dump(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<String, Error> {
+async fn checked_against_dump(db: &mut Db, opts: &Options, schemas: &[String], shadowed: bool, why: &mut Vec<String>) -> Result<Result<String, Problem>, Error> {
     let dumped = dump_from(db, opts, schemas).await?;
     // Where no shadow database can be made (a role without CREATEDB, and no shadow_url), the dump.
-    let Ok(mut server) = shadow_server(db, opts).await else { return Ok(dumped) };
+    let mut server = match shadow_server(db, opts).await {
+        Ok(server) => server,
+        Err(e) if shadowed => return Err(e),
+        Err(e) if opts.shadow_url.is_some() => return Ok(Err(shadow_url_problem(&e))),
+        Err(e) => {
+            *why = no_shadow(&e);
+            return Ok(Ok(dumped));
+        }
+    };
     let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &[dumped.as_str()]).await;
     let styled = async {
         // The plan from an empty database to this one, as `new` writes a migration.
         let empty = shadows.lane();
-        if !matches!(shadows.open(empty).await, Ok(Ok(()))) {
-            return Ok(None);
+        match shadows.open(empty).await {
+            Ok(Ok(())) => {}
+            Err(e) => return Ok(Err(NotOwn::NoShadow(e))),
+            Ok(Err(_)) => return Ok(Err(NotOwn::NoShadow(Error("an empty shadow database can't be made".into())))),
         }
         shadows.taint(empty);
-        let Some(planned) = plan_text(shadows.db(empty), db, None).await else { return Ok(None) };
+        let Some(planned) = plan_text(shadows.db(empty), db, None).await else { return Ok(Err(NotOwn::Short(vec!["  Reylo can't write it as SQL of its own".to_string()]))) };
         // A blank line between statements, for a file a person reads whole; one with comments of
         // the plan's own stays as written.
         let sql = if planned.lines().any(|l| l.trim_start().starts_with("--")) {
@@ -7588,18 +7621,26 @@ async fn checked_against_dump(db: &mut Db, opts: &Options, schemas: &[String]) -
         shadows.push(from_dump, [Step::script("the dump", &dumped)]);
         shadows.push(from_plan, [Step::script("schema.sql", &sql)]);
         Ok::<_, Error>(match (shadows.lines(from_dump).await?, shadows.lines(from_plan).await?) {
-            (Ok(a), Ok(b)) if a == b => Some(sql),
-            _ => None,
+            (Ok(a), Ok(b)) if a == b => Ok(sql),
+            (Err((_, e)), _) => Err(NotOwn::Short(vec![format!("  The dump fails on a shadow database: {e}")])),
+            (_, Err((_, e))) => Err(NotOwn::Short(vec![format!("  Reylo's own SQL for it fails on a shadow database: {e}")])),
+            _ => Err(NotOwn::Short(vec!["  Reylo's own SQL doesn't make what the dump does".to_string()])),
         })
     }
     .await;
     shadows.finish().await;
     server.close().await;
-    // Whatever keeps the plan from being shown to make the dump's schema leaves the dump.
-    match styled {
-        Ok(Some(sql)) => Ok(format!("{}\n", sql.trim_end())),
-        _ => Ok(dumped),
-    }
+    // Whatever keeps the plan from being shown to make the dump's schema leaves the dump, but a
+    // shadow that can't be made or fails on its server.
+    *why = match styled {
+        Ok(Ok(sql)) => return Ok(Ok(format!("{}\n", sql.trim_end()))),
+        Ok(Err(NotOwn::NoShadow(e))) | Err(e) if shadowed => return Err(e),
+        Ok(Err(NotOwn::NoShadow(e))) | Err(e) if opts.shadow_url.is_some() => return Ok(Err(shadow_url_problem(&e))),
+        Ok(Err(NotOwn::NoShadow(e))) => no_shadow(&e),
+        Err(e) => vec![format!("  Reylo's own SQL can't be checked on a shadow database: {e}")],
+        Ok(Err(NotOwn::Short(lines))) => lines,
+    };
+    Ok(Ok(dumped))
 }
 
 /// A statement of pg_dump's without the column options a platform stamps on every column it makes,
@@ -8099,19 +8140,31 @@ pub async fn db_introspect(opts: &Options, schemas: &[String], log: Log<'_>) -> 
     there(opts)?;
     let spinning = crate::terminal::spinner(format!("Introspecting {}", shown_url(&opts.url)));
     let mut db = Db::open(opts).await?;
+    let d = db.dialect();
+    let mut dumped = Vec::new();
     let result = async {
         let new = new_database(&mut db).await?;
         if !holds_sql(&catalog(&mut db).await?, &new) {
             return Ok(Ok(String::new()));
         }
         let schemas = with_referenced(&mut db, schemas, &mut *log).await?;
-        schema_as_sql_on(&mut db, opts, &schemas, false).await
+        schema_as_sql_on(&mut db, opts, &schemas, false, &mut dumped).await
     }
     .await;
     db.close().await;
     drop(spinning);
     Ok(match result? {
-        Ok(sql) => Ok(sql),
+        Ok(sql) => {
+            // The dump is SQL of another kind than Reylo's own, so a run that saves it over
+            // schema.sql is told so, on stderr, beside the SQL.
+            if !dumped.is_empty() {
+                log(&note(if d == Dialect::Postgres { "Printing pg_dump's output, not Reylo's own SQL" } else { "Printing the database's own dump, not Reylo's own SQL" }));
+                for line in &dumped {
+                    log(line);
+                }
+            }
+            Ok(sql)
+        }
         Err(problem) => Err(refuse(&[problem], log)),
     })
 }

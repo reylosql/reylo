@@ -386,6 +386,16 @@ fn undo_in(out: &str) -> String {
     quoted.replace("'\\''", "'")
 }
 
+/// Makes `p` connect to its Postgres database as a role that owns it and can't create a database, with
+/// no shadow_url: no shadow database can be made, so its schema as SQL is the dump. The role is the
+/// one `a_role_that_cannot_create_databases_is_told_of_shadow_url` makes, so no other role changes
+/// every replay cache's key on the server under the scenarios beside it.
+async fn with_no_shadows(p: &mut P) {
+    p.exec("do $$ begin create role madv_nocreate login nocreatedb; exception when duplicate_object or unique_violation then null; end $$").await;
+    p.exec(&format!("alter database {} owner to madv_nocreate", p.name)).await;
+    p.url = as_role(&p.url, "madv_nocreate");
+}
+
 /// `url` connecting as `role`, with no password: the test servers trust their local connections.
 fn as_role(url: &str, role: &str) -> String {
     regex::Regex::new(r"^([a-z]+://)(?:[^@/]*@)?").unwrap().replace(url, format!("${{1}}{role}@").as_str()).into_owned()
@@ -1249,11 +1259,10 @@ async fn init_leaves_out_another_tools_history(p: P) {
 /// too, and the sequences they own.
 #[tokio::test(flavor = "current_thread")]
 async fn the_dump_leaves_out_another_tools_history() {
-    let Some(p) = P::new(Dialect::Postgres).await else { return };
+    let Some(mut p) = P::new(Dialect::Postgres).await else { return };
+    with_no_shadows(&mut p).await;
     p.exec(&format!("create table users (id bigint primary key, email text not null);{}", other_tools_history(&p))).await;
-    // A shadows' server that answers nothing leaves the dump.
-    let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
-    let text = introspect(&opts).await;
+    let text = introspect(&p.opts()).await;
     assert!(text.contains("CREATE TABLE public.users"), "{text}");
     assert!(!has(&text, "(?i)prisma|knex|drizzle|databasechangelog"), "{text}");
 }
@@ -5200,7 +5209,9 @@ mod adversarial {
     }
 
     /// A role that may not create a database (PlanetScale's, some managed ones') can make no shadow:
-    /// the refusal names shadow_url, and `init` leaves no project behind.
+    /// the refusal names shadow_url, and `init` leaves no project behind. introspect prints the
+    /// database's own dump instead, and says why on stderr; with a shadow_url that makes no shadow
+    /// either, it is refused.
     pub async fn a_role_that_cannot_create_databases_is_told_of_shadow_url(mut p: P) {
         let role = "madv_nocreate";
         match p.d {
@@ -5218,6 +5229,21 @@ mod adversarial {
         assert!(!p.dir.join("schema.sql").exists(), "init left schema.sql");
         assert!(!p.dir.join(reylo_migrate::lock::LOCK).exists(), "init left the lock");
         assert!(p.files().is_empty(), "init left {:?}", p.files());
+        let mut said = Vec::new();
+        let text = match reylo_migrate::db_introspect(&opts, &[], &mut |l: &str| said.push(l.to_string())).await {
+            Ok(Ok(text)) => text,
+            other => panic!("introspect: {:?}\n{}", other.map_err(|e| e.0), said.join("\n")),
+        };
+        assert_has!(text, "(?i)create table");
+        assert_has!(said.join("\n"), r"^» Printing (pg_dump's output|the database's own dump), not Reylo's own SQL\n  No shadow database can be made to check Reylo's own SQL for it: [\s\S]+shadow_url[\s\S]*$");
+        // A shadow_url that answers nothing, and one whose role can't create a database either.
+        let nowhere = if p.d == Dialect::Postgres { "postgres://postgres@127.0.0.1:1/none" } else { "mysql://root@127.0.0.1:1/none" };
+        for shadow_url in [nowhere.to_string(), p.url.clone()] {
+            let mut said = Vec::new();
+            let result = reylo_migrate::db_introspect(&Options { shadow_url: Some(shadow_url.clone()), ..p.opts() }, &[], &mut |l: &str| said.push(l.to_string())).await;
+            assert!(matches!(result, Ok(Err(1))), "{shadow_url}: {}", said.join("\n"));
+            assert_has!(said.join("\n"), r"^✗ No shadow database can be made on the server shadow_url names\n  [\s\S]+\n  Reylo's own SQL is checked on a shadow database before it's printed\.\n  Make sure that server is running and its role can create a database, or set shadow_url in \.reylo\.yaml to one that can\.\n\nNothing was changed\.$");
+        }
         p.schema("create table users (id int primary key);");
         p.file("20261027100000_users.sql", "create table users (id int primary key);");
         let e = reylo_migrate::dry_run(&opts, &mut |_: &str| {}).await.expect_err("no shadow database can be made");
@@ -5226,12 +5252,10 @@ mod adversarial {
 
     /// Where no shadow can be made, the schema is the dump, which makes each extension's schema before
     /// it: once, however many extensions share it (Supabase keeps three in `extensions`).
-    pub async fn a_dump_makes_a_schema_its_extensions_share_once(p: P) {
+    pub async fn a_dump_makes_a_schema_its_extensions_share_once(mut p: P) {
+        with_no_shadows(&mut p).await;
         p.exec("create schema extensions; create extension citext with schema extensions; create extension pgcrypto with schema extensions; create table users (id int primary key)").await;
-        // A shadows' server that answers nothing leaves the dump, with no role made for it: a new
-        // role would change every replay cache's key on the server under the scenarios beside it.
-        let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
-        let text = introspect(&opts).await;
+        let text = introspect(&p.opts()).await;
         assert_eq!(text.matches("CREATE SCHEMA IF NOT EXISTS extensions").count(), 1, "{text}");
         assert!(text.contains("CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA extensions") && text.contains("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions"), "{text}");
     }
@@ -5258,9 +5282,10 @@ mod adversarial {
 
     /// Where Reylo's own SQL can't be checked (no shadow database can be made here) and no pg_dump can
     /// dump the database instead, introspect says why, what it found and how to get one.
-    pub async fn introspect_with_no_check_and_no_pg_dump_says_how_to_get_one(p: P) {
+    pub async fn introspect_with_no_check_and_no_pg_dump_says_how_to_get_one(mut p: P) {
+        with_no_shadows(&mut p).await;
         p.exec("create table users (id int primary key)").await;
-        let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
+        let opts = p.opts();
         let mut dirs = vec![];
         // A pg_dump too old to read the server, which is named.
         #[cfg(unix)]
@@ -5323,11 +5348,10 @@ mod adversarial {
 
     /// The dump reads a schema whose name has capitals as it is named: pg_dump folds what --schema
     /// gives it unless it is quoted.
-    pub async fn the_dump_reads_a_schema_named_with_capitals(p: P) {
+    pub async fn the_dump_reads_a_schema_named_with_capitals(mut p: P) {
+        with_no_shadows(&mut p).await;
         p.exec(r#"create schema "CaseSensitive"; create table "CaseSensitive".items (id int); create table users (id int primary key)"#).await;
-        // A shadows' server that answers nothing leaves the dump.
-        let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
-        let text = introspect(&opts).await;
+        let text = introspect(&p.opts()).await;
         assert!(text.contains(r#"CREATE TABLE "CaseSensitive".items"#) && text.contains("CREATE TABLE public.users"), "{text}");
     }
 

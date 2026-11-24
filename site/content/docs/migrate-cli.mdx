@@ -533,7 +533,15 @@ create table users (
 );
 ```
 
-In a terminal, a spinner shows while it reads and SQL output is coloured. Piped or redirected output is plain SQL. If verification can't run, or `--schema` selects a subset, it prints the database's dump instead. On Postgres, that requires `pg_dump` matching your server's version or newer.
+In a terminal, a spinner shows while it reads and SQL output is coloured. Piped or redirected output is plain SQL.
+
+Where it can't check the schema, it prints the database's own dump instead, and says why on stderr. That's where:
+
+- Reylo's SQL can't make all of your schema
+- your role can't create a database, and `shadow_url` is unset
+- `--schema` names only some of your schemas
+
+On Postgres, the dump needs `pg_dump` of your server's version or newer. Where it checks the schema, a `shadow_url` whose server can't make a shadow database fails the run.
 
 To save it over `schema.sql`, write a temporary file first so a failed run can't empty it:
 
@@ -564,17 +572,18 @@ $ reylo migrate status --url $PROD_URL
 
 Most commands use shadow databases: throwaway databases where Reylo Migrate replays your migrations to read the schema they make. A deploy needs none:
 
-| Needs a shadow database | Needs none |
+| Uses a shadow database | Uses none |
 | --- | --- |
 | `reylo migrate init` | `reylo migrate deploy` |
 | `reylo migrate new` | `reylo migrate status` |
-| `reylo migrate dev` | `reylo db introspect` |
-| `reylo migrate deploy --dry-run` | `reylo db wipe` |
+| `reylo migrate dev` | `reylo db wipe` |
+| `reylo migrate deploy --dry-run` | |
 | `reylo migrate lock` | |
 | `reylo migrate history push` | |
 | `reylo migrate history pull` | |
 | `reylo db push` | |
 | `reylo db reset` | |
+| `reylo db introspect` | |
 
 Each database makes them its own way:
 
