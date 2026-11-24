@@ -5046,9 +5046,15 @@ fn column_of(id: &str) -> Option<(String, String)> {
 /// The table a foreign key's definition references, as it writes it (`parents`, `public.parents`).
 fn references(def: &str) -> Option<String> {
     let tokens = crate::sql::tokenize(def, Dialect::Postgres);
-    let at = tokens.iter().position(|t| t.upper() == "REFERENCES")?;
+    let at = tokens.iter().position(|t| is_keyword(t) && t.text == "REFERENCES")?;
     let end = tokens[at + 1..].iter().position(|t| t.text == "(").map(|k| at + 1 + k)?;
     Some(def[tokens.get(at + 1)?.start..tokens[end - 1].end].to_string())
+}
+
+/// Whether a word of a definition the server wrote is a keyword, which it writes in capitals, and
+/// not a name, which it writes in lowercase or quotes.
+fn is_keyword(t: &crate::sql::Token) -> bool {
+    t.kind == crate::sql::TokenKind::Word && t.text.bytes().any(|b| b.is_ascii_uppercase())
 }
 
 /// A name as the catalog holds it: a word folded to lowercase, a quoted name unquoted.
@@ -5079,11 +5085,27 @@ fn renamed_key(def: &str, own: &BTreeMap<String, String>, referenced: Option<&BT
     use crate::sql::TokenKind::{Quoted, Symbol, Word};
     let tokens = crate::sql::tokenize(def, Dialect::Postgres);
     let symbol = |k: usize, s: &str| tokens.get(k).is_some_and(|t| t.kind == Symbol && t.text == s);
-    let upper = |k: usize| tokens.get(k).map(|t| t.upper()).unwrap_or_default();
+    // A keyword as the server writes it, in capitals: a name it writes is lowercase or quoted.
+    let upper = |k: usize| tokens.get(k).filter(|t| is_keyword(t)).map(|t| t.text.clone()).unwrap_or_default();
     // Each column name of a list: its token, and the names it is renamed by.
     let mut columns: BTreeMap<usize, &BTreeMap<String, String>> = BTreeMap::new();
     let mut k = 0;
+    let mut depth = 0;
     while k < tokens.len() {
+        // Lists open only at the top, before a predicate: what is in parentheses or after WHERE is
+        // an expression.
+        if symbol(k, "(") || symbol(k, ")") {
+            depth += if symbol(k, "(") { 1 } else { -1 };
+            k += 1;
+            continue;
+        }
+        if depth != 0 || upper(k) == "WHERE" {
+            if depth == 0 {
+                break;
+            }
+            k += 1;
+            continue;
+        }
         // Where a list of columns opens, and whose they are.
         let list = match upper(k).as_str() {
             "KEY" if matches!(upper(k.wrapping_sub(1)).as_str(), "PRIMARY" | "FOREIGN") && symbol(k + 1, "(") => Some((k + 1, own)),
@@ -5123,7 +5145,7 @@ fn renamed_key(def: &str, own: &BTreeMap<String, String>, referenced: Option<&BT
             } else if symbol(at, ")") || symbol(at, ",") {
                 if depth == 1 {
                     let first = if upper(start) == "PERIOD" && at > start + 1 { start + 1 } else { start };
-                    if first < at && matches!(tokens[first].kind, Word | Quoted) && !symbol(first + 1, "(") && !symbol(first + 1, ".") {
+                    if first < at && matches!(tokens[first].kind, Word | Quoted) && !is_keyword(&tokens[first]) && !symbol(first + 1, "(") && !symbol(first + 1, ".") {
                         columns.insert(first, names);
                     }
                     start = at + 1;
@@ -5142,7 +5164,7 @@ fn renamed_key(def: &str, own: &BTreeMap<String, String>, referenced: Option<&BT
     let mut out = String::with_capacity(def.len());
     let mut from = 0;
     for (k, t) in tokens.iter().enumerate() {
-        let Some(name) = token_name(t) else { continue };
+        let Some(name) = token_name(t).filter(|_| !is_keyword(t)) else { continue };
         match columns.get(&k) {
             Some(names) => {
                 if let Some(new) = names.get(&name) {
@@ -5188,6 +5210,11 @@ mod tests {
         // A foreign key to a table the plan doesn't read keeps its own.
         assert_eq!(renamed_key("FOREIGN KEY (id) REFERENCES ext.codes(id)", &names(&[("id", "code")]), None), None);
         assert_eq!(references("FOREIGN KEY (id) REFERENCES public.parents(id) ON DELETE CASCADE").as_deref(), Some("public.parents"));
+        // A column named as a keyword is a name, and a keyword in an expression opens no list.
+        assert_eq!(renamed_key("PRIMARY KEY (key)", &names(&[("key", "api_key")]), Some(&none)).as_deref(), Some("PRIMARY KEY (api_key)"));
+        assert_eq!(renamed_key("CREATE INDEX i ON public.t USING btree (period DESC)", &names(&[("period", "p")]), Some(&none)).as_deref(), Some("CREATE INDEX i ON public.t USING btree (p DESC)"));
+        assert_eq!(renamed_key("CREATE INDEX i ON public.t USING btree (c) WHERE include(a, a => 1)", &names(&[("a", "b")]), Some(&none)), None);
+        assert_eq!(renamed_key("CREATE INDEX i ON public.t USING btree (c) WHERE (a > 0) INCLUDE (a)", &names(&[("a", "b")]), Some(&none)), None);
         assert_eq!(renamed_key("CHECK ((a > 0))", &names(&[("a", "b")]), Some(&none)), None);
     }
 
