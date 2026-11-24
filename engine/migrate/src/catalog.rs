@@ -392,6 +392,12 @@ pub async fn user_schemas(db: &mut Db) -> Result<Vec<String>, Error> {
 
 pub(crate) const PG_USER_NS: &str = r"n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\_toast%' and n.nspname not like 'pg\_temp%'";
 
+/// [`PG_USER_NS`] of the schema `nspname` names, an expression: a temporary schema's objects are its
+/// session's, and gone when it ends, so no fingerprint a run stores may hold them.
+pub(crate) fn pg_user_ns(nspname: &str) -> String {
+    PG_USER_NS.replace("n.nspname", nspname)
+}
+
 /// The roles a hosting platform creates its own objects as: what they own is the platform's, never
 /// compared (the comparison would report every platform upgrade as drift). Supabase's are the 21 its
 /// own diff engine leaves out (pg-delta's `SUPABASE_SYSTEM_ROLES`); Neon's system role is
@@ -1091,9 +1097,10 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             left join pg_class fc on fc.oid = co.confrelid left join pg_namespace fn on fn.oid = fc.relnamespace
             left join pg_class c on c.oid = co.conrelid left join pg_namespace n on n.oid = c.relnamespace
             left join pg_type t on t.oid = co.contypid left join pg_namespace tn on tn.oid = t.typnamespace
-            where co.contype <> 'n' and coalesce(n.nspname, tn.nspname) not in ('pg_catalog', 'information_schema') and (c.oid is null or {})
+            where co.contype <> 'n' and {} and (c.oid is null or {})
               and not exists (select 1 from pg_depend e where e.classid = 'pg_class'::regclass and e.objid = co.conrelid and e.deptype = 'e')
               and {} and {}",
+            pg_user_ns("coalesce(n.nspname, tn.nspname)"),
             pg_not_history("c"),
             format!("(case when c.oid is not null then {} else {} end)", project_relation("c", "n"), not_platform("t.typowner")),
             not_extension("pg_constraint", "co")
@@ -1237,7 +1244,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             "select format('%I.%I', n.nspname, c.relname) as rel, p.polname as name, p.polcmd as cmd, p.polpermissive as permissive,
               (select string_agg(case when r = 0 then 'PUBLIC' else pg_get_userbyid(r) end, ',' order by 1) from unnest(p.polroles) r) as roles,
               pg_get_expr(p.polqual, p.polrelid) as qual, pg_get_expr(p.polwithcheck, p.polrelid) as check
-            from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace where {}",
+            from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace where {ns} and {}",
             not_history("c.relname")
         ))
         .await?
@@ -1293,13 +1300,13 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             union all select 'constraint ' || format('%I', co.conname) || ' on ' || case when cc.oid is not null then format('%I.%I', cn.nspname, cc.relname) else format('%I.%I', tn.nspname, ct.typname) end, null, obj_description(co.oid, 'pg_constraint'), null
             from pg_constraint co left join pg_class cc on cc.oid = co.conrelid left join pg_namespace cn on cn.oid = cc.relnamespace
               left join pg_type ct on ct.oid = co.contypid left join pg_namespace tn on tn.oid = ct.typnamespace
-            where coalesce(cn.nspname, tn.nspname) not in ('pg_catalog', 'information_schema') and (cc.oid is null or {})
+            where {} and (cc.oid is null or {})
             union all select 'statistics ' || format('%I.%I', n.nspname, sx.stxname), null, obj_description(sx.oid, 'pg_statistic_ext'), null
             from pg_statistic_ext sx join pg_namespace n on n.oid = sx.stxnamespace where {ns}
             union all select 'trigger ' || format('%I', tg.tgname) || ' on ' || format('%I.%I', n.nspname, c.relname), null, obj_description(tg.oid, 'pg_trigger'), null
             from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace where not tg.tgisinternal and {ns} and {}
             union all select 'policy ' || format('%I', po.polname) || ' on ' || format('%I.%I', n.nspname, c.relname), null, obj_description(po.oid, 'pg_policy'), null
-            from pg_policy po join pg_class c on c.oid = po.polrelid join pg_namespace n on n.oid = c.relnamespace where {}
+            from pg_policy po join pg_class c on c.oid = po.polrelid join pg_namespace n on n.oid = c.relnamespace where {ns} and {}
             union all select 'collation ' || format('%I.%I', n.nspname, co.collname), null, obj_description(co.oid, 'pg_collation'), null
             from pg_collation co join pg_namespace n on n.oid = co.collnamespace where {ns} and {}
             union all select 'publication ' || format('%I', pb.pubname), null, obj_description(pb.oid, 'pg_publication'), null from pg_publication pb
@@ -1327,6 +1334,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             not_extension("pg_class", "c"),
             project_relation("c", "n"),
             pg_not_history("c"),
+            pg_user_ns("coalesce(cn.nspname, tn.nspname)"),
             pg_not_history("cc"),
             not_history("c.relname"),
             not_history("c.relname"),
