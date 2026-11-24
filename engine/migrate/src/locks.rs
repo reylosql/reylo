@@ -370,7 +370,7 @@ async fn mysql_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard>, Error>
                 hazards.push(Hazard { what: mysql_hazard(&s.text, &table, true), table });
             }
         }
-        run(db, m, false).await?;
+        run(db, m).await?;
         return Ok(hazards);
     }
     let tried = match statements.as_slice() {
@@ -378,7 +378,7 @@ async fn mysql_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard>, Error>
         _ => None,
     };
     let Some((table, tried)) = tried.filter(|(table, _)| there.contains(&table.to_lowercase())) else {
-        run(db, m, false).await?;
+        run(db, m).await?;
         return Ok(vec![]);
     };
     let written = &statements[0].text;
@@ -386,7 +386,7 @@ async fn mysql_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard>, Error>
     // the author's, said as it is; `lock=default` is tried as `lock=none` in its place.
     let tried = match named_lock(written) {
         Some((lock, ..)) if lock == "SHARED" || lock == "EXCLUSIVE" => {
-            run(db, m, false).await?;
+            run(db, m).await?;
             return Ok(vec![Hazard { what: mysql_hazard(written, &table, lock == "EXCLUSIVE"), table }]);
         }
         Some((lock, start, end)) if lock == "DEFAULT" => format!("{}none{}", &written[..start], &written[end..]),
@@ -396,11 +396,11 @@ async fn mysql_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard>, Error>
     match db.script(&tried).await {
         Ok(()) => Ok(vec![]),
         Err(e) if e.0.contains("LOCK=NONE is not supported") => {
-            run(db, m, false).await?;
+            run(db, m).await?;
             Ok(vec![Hazard { what: mysql_hazard(written, &table, false), table }])
         }
         // A statement that fails for its own reasons fails the same way as written.
-        Err(_) => run(db, m, false).await.map(|()| vec![]),
+        Err(_) => run(db, m).await.map(|()| vec![]),
     }
 }
 
