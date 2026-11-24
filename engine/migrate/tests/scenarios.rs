@@ -3951,7 +3951,7 @@ async fn a_trigger_swapped_with_a_key_added_to_its_table() {
     let blocking = reylo_migrate::Choices { blocking: true, ..Default::default() };
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "key", &blocking, log).await).await, 0, "{}", p.peek());
     let sql = std::fs::read_to_string(p.dir.join("migrations").join(p.files().last().unwrap())).unwrap();
-    assert!(sql.starts_with("lock tables users write, accounts write;\n") && sql.contains("\nalter table users add constraint users_ibfk_1 foreign key (account_id) references accounts (id);\n") && sql.ends_with("drop trigger users_touch;\ncreate trigger users_touch before update on users for each row set new.touches = old.touches + 2;\nunlock tables;\n"), "{sql}");
+    assert!(sql.starts_with("lock tables users write, accounts read;\n") && sql.contains("\nalter table users add constraint users_ibfk_1 foreign key (account_id) references accounts (id);\n") && sql.ends_with("drop trigger users_touch;\ncreate trigger users_touch before update on users for each row set new.touches = old.touches + 2;\nunlock tables;\n"), "{sql}");
     p.output();
     assert_eq!(p.dev().await, 1);
     assert_has!(p.output(), r"foreign key constraint fails");

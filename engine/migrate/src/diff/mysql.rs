@@ -1488,31 +1488,34 @@ fn lock_swaps(swaps: &[Swap], statements: &mut Vec<String>) {
     let (notes, held): (Vec<&String>, Vec<&String>) = moved[from..=last].iter().partition(|s| s.starts_with("--"));
     let (changes, made): (Vec<&String>, Vec<&String>) = held.into_iter().partition(|s| altered_table(s).is_some());
     let group: Vec<&String> = changes.into_iter().chain(drops.iter()).chain(made).collect();
-    let mut tables: Vec<String> = Vec::new();
+    // Each table to lock, and whether the group writes it: a table only a foreign key it adds
+    // references is read, to check the key, and stays readable. The names are the server's own, so
+    // two that differ in case are two tables.
+    let mut tables: Vec<(String, bool)> = Vec::new();
+    let mut lock = |table: String, write: bool| match tables.iter_mut().find(|(t, _)| t.trim_matches('`') == table.trim_matches('`')) {
+        Some((_, w)) => *w |= write,
+        None => tables.push((table, write)),
+    };
     for s in &group {
-        let named = match swapped.iter().find(|w| w.drop == **s || w.create == **s) {
-            Some(w) => Some(w.tables.clone()),
-            None if is_trigger_create(s) => trigger_table(s).map(|t| vec![t]),
-            // A change to a table, with the tables a foreign key it adds references, which MySQL
-            // needs locked too.
-            None => altered_table(s).map(|t| std::iter::once(t).chain(referenced_tables(s)).collect()),
-        };
-        let Some(named) = named else {
+        if let Some(w) = swapped.iter().find(|w| w.drop == **s || w.create == **s) {
+            w.tables.iter().for_each(|t| lock(t.clone(), true));
+        } else if let Some(table) = is_trigger_create(s).then(|| trigger_table(s)).flatten() {
+            lock(table, true);
+        } else if let Some(table) = altered_table(s) {
+            lock(table, true);
+            referenced_tables(s).into_iter().for_each(|t| lock(t, false));
+        } else {
             for w in &swapped {
                 let name = w.drop.trim_start_matches("drop trigger ");
                 let k = statements.iter().position(|s| *s == w.drop).expect("a drop");
                 statements.insert(k, format!("-- Until {name} is made again, writes to {} run without it", w.tables.first().map(String::as_str).unwrap_or("its table")));
             }
             return;
-        };
-        for t in named {
-            if !tables.iter().any(|have| have.eq_ignore_ascii_case(&t)) {
-                tables.push(t);
-            }
         }
     }
+    let tables: Vec<String> = tables.into_iter().map(|(t, write)| format!("{t} {}", if write { "write" } else { "read" })).collect();
     let body: Vec<&str> = group.iter().map(|s| s.trim_end().trim_end_matches(';')).collect();
-    let locked = format!("lock tables {} write;\n{};\nunlock tables", tables.join(" write, "), body.join(";\n"));
+    let locked = format!("lock tables {};\n{};\nunlock tables", tables.join(", "), body.join(";\n"));
     *statements = moved[..from].iter().cloned().chain(notes.into_iter().cloned()).chain([locked]).chain(moved[last + 1..].iter().cloned()).collect();
 }
 
@@ -1891,11 +1894,13 @@ mod tests {
             swapped(&["drop trigger a_touch", "alter table a remove partitioning", "alter table a rename column n to m", "alter table z add column v int", "alter table a partition by list (id) (partition p values in (1))", "create trigger a_touch before update on a for each row set new.m = 2"]),
             ["lock tables a write, z write;\nalter table a remove partitioning;\nalter table a rename column n to m;\nalter table z add column v int;\nalter table a partition by list (id) (partition p values in (1));\ndrop trigger a_touch;\ncreate trigger a_touch before update on a for each row set new.m = 2;\nunlock tables"]
         );
-        // A foreign key added locks the table it references too.
+        // A foreign key added locks the table it references too, to read; one that differs in case is
+        // another table.
         assert_eq!(
             swapped(&["drop trigger a_touch", "alter table a add constraint a_x foreign key (x) references `order` (id)", "create trigger a_touch before update on a for each row set new.m = 2"]),
-            ["lock tables a write, `order` write;\nalter table a add constraint a_x foreign key (x) references `order` (id);\ndrop trigger a_touch;\ncreate trigger a_touch before update on a for each row set new.m = 2;\nunlock tables"]
+            ["lock tables a write, `order` read;\nalter table a add constraint a_x foreign key (x) references `order` (id);\ndrop trigger a_touch;\ncreate trigger a_touch before update on a for each row set new.m = 2;\nunlock tables"]
         );
+        assert!(swapped(&["drop trigger a_touch", "alter table a add constraint a_x foreign key (x) references A (id)", "create trigger a_touch before update on a for each row set new.m = 2"])[0].starts_with("lock tables a write, A read;\n"));
         // So would a function it calls, which isn't a table's change: written apart, saying so.
         let plan = swapped(&["drop trigger a_touch", "drop function f", "create function f () returns int return 2", "create trigger a_touch before update on a for each row set new.m = 2"]);
         assert_eq!(plan[0], "-- Until a_touch is made again, writes to a run without it");
