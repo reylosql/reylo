@@ -74,6 +74,13 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+impl ParseError {
+    /// Whether the grammar reads the text, and only the [`Bounds`] the parse was given refuse it.
+    pub fn past_bounds(&self) -> bool {
+        self.0 == build::TOO_DEEP || self.0 == build::TOO_MANY_OPERATORS
+    }
+}
+
 /// How far a statement's AST may go, so that a walk of it, and its drop, stay within a stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bounds {
@@ -260,6 +267,14 @@ mod tests {
     }
 
     const BOUNDS: Bounds = Bounds { depth: 200, operators: 500 };
+
+    #[test]
+    fn only_a_statement_past_the_bounds_is_past_them() {
+        let refused = |text: String| parse(&text, Options::default(), BOUNDS).unwrap_err();
+        assert!(refused(format!("select {}a{} as x", "coalesce(".repeat(250), ", b)".repeat(250))).past_bounds());
+        assert!(refused(format!("select {} as x", vec!["a"; 502].join(" + "))).past_bounds());
+        assert!(!refused("select from where".to_string()).past_bounds());
+    }
 
     fn printed(text: &str) -> String {
         parse(text, Options::default(), BOUNDS).unwrap_or_else(|e| panic!("{text}: {e}")).iter().map(|s| s.to_string()).collect::<Vec<_>>().join("; ")
