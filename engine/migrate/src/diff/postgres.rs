@@ -3456,6 +3456,16 @@ fn columns_left(from: &Object, to: &Object) -> Vec<(String, String)> {
     let has: BTreeSet<&str> = to.extra.iter().filter_map(|l| l.strip_prefix(TABLE_COLUMN)?.split(SEP).next()).collect();
     // A generated column before the columns it reads.
     let mut left: Vec<(String, String, String)> = held_columns(from).into_iter().filter(|(id, _, _)| !has.contains(id.as_str())).collect();
+    // A table made a table of a type drops its own columns it had from another as well here too:
+    // the type it then takes refuses a column of its own, and the other held them till now.
+    let of = |o: &Object| o.extra.iter().find_map(|l| l.strip_prefix("of ")).map(String::from);
+    if of(to).is_some() && of(from) != of(to) {
+        left.extend(from.extra.iter().filter_map(|l| {
+            let f: Vec<&str> = l.strip_prefix(TABLE_COLUMN)?.split(SEP).collect();
+            let (id, held, name, add, from_parent) = (*f.first()?, *f.get(1)?, *f.get(2)?, *f.get(3)?, f.get(5).copied().unwrap_or_default());
+            (held == "own" && from_parent == "inherited" && !has.contains(id)).then(|| (id.to_string(), name.to_string(), add.to_string()))
+        }));
+    }
     left.sort_by_key(|(_, _, add)| !add.contains(" generated always as ("));
     left.into_iter().map(|(id, column, _)| (id, format!("alter table {name} drop column if exists {column}"))).collect()
 }
