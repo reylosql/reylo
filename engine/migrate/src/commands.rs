@@ -4095,8 +4095,14 @@ async fn dry_run_on(opts: &Options, command: Option<&[String]>, made: &mut Vec<P
 async fn build_on_shadow(server: &mut Server, opts: &Options, plan: &Plan, version: Option<&str>, command: &[String], log: Log<'_>) -> Result<i32, Error> {
     // A cut-off run whose change landed is in the shadow as run. A deploy with no fingerprint to
     // hold it to runs it again, over what it left: so does the shadow, which fails where that would.
-    let again: Vec<&Migration> = if plan.unchanged == Some(true) { vec![] } else { plan.records.iter().filter(|m| plan.landed.contains(&m.name)).collect() };
-    let steps: Vec<&Migration> = plan.ran.iter().chain(&plan.records).chain(again).chain(&plan.pending).collect();
+    // It runs it in its place among the pending ones, as the deploy runs them, in the migrations' run order.
+    let deployed: Vec<Migration> = if plan.unchanged == Some(true) || plan.landed.is_empty() {
+        plan.pending.clone()
+    } else {
+        let (files, _) = opts.migrations()?;
+        run_order(opts, &files).into_iter().filter(|m| plan.landed.contains(&m.name) || plan.pending.iter().any(|p| p.name == m.name)).collect()
+    };
+    let steps: Vec<&Migration> = plan.ran.iter().chain(&plan.records).chain(&deployed).collect();
     let texts: Vec<&str> = steps.iter().map(|m| m.sql.as_str()).collect();
     // What tells a build's caches that this run's shadow is another database from any before it, as
     // its URL may not, and which holds no credential: one key a run. The same migrations can type

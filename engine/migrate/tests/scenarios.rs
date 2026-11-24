@@ -7929,7 +7929,33 @@ async fn a_landed_run_the_deploy_retries_cleanly_lets_the_build_run(p: P) {
     a_landed_run_the_deploy_retries(p, true).await
 }
 
+/// A pending migration that the deploy runs before a landed run's retry, and that makes the retry
+/// fail: the shadow retries it in the same place, so the build runs exactly where the deploy succeeds.
+async fn a_landed_run_is_retried_where_the_deploy_retries_it(mut p: P) {
+    if p.d != Dialect::Postgres {
+        return;
+    }
+    let lone = "create unique index concurrently if not exists a_id on a (id)";
+    p.file("20261027100000_a.sql", "create table a (id int);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027120000_index.sql", &format!("{lone};"));
+    let mut db = Db::connect(&p.url, &p.dir).await.unwrap();
+    db.exec_with("insert into __reylo_migrations (name, sql, applied_at) values ($1, $2, null)", &["20261027120000_index.sql", &format!("{lone};")]).await.unwrap();
+    db.exec(lone).await.unwrap();
+    db.exec("update __reylo_migrations set fingerprint = null").await.unwrap();
+    db.close().await;
+    // Before the index in run order: it drops what landed, and writes rows the index refuses.
+    p.file("20261027110000_dup.sql", "drop index a_id; insert into a values (1), (1);");
+    p.output();
+    let ran = p.dir.join("ran");
+    let code = dry_run_then(&mut p, &format!("touch '{}'", ran.display())).await;
+    let built = ran.exists();
+    let deployed = p.migrate().await;
+    assert_eq!((code == 0, built), (deployed == 0, deployed == 0), "the build runs where the deploy succeeds: {}", p.peek());
+}
+
 for_each_dialect!(
+    a_landed_run_is_retried_where_the_deploy_retries_it,
     a_landed_run_the_deploy_retries_and_fails_stops_the_build,
     a_landed_run_the_deploy_retries_cleanly_lets_the_build_run,
     a_dry_run_builds_on_a_shadow_of_what_deploy_leaves,
