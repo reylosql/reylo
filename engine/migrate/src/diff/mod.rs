@@ -164,6 +164,11 @@ pub trait Alterer: Send {
         let _ = (from, renamed);
         None
     }
+    /// Whether a column changed from `from` to `to` keeps every value it holds (a new default), so
+    /// that a key on it can stay as it is.
+    fn keeps_values(&self, from: &Object, to: &Object) -> bool {
+        from.def == to.def
+    }
     /// Both schemas, given before it asks for any statement: an alterer whose statements for one
     /// table reach others (SQLite's rebuild, the tables that reference it) reads them.
     fn schemas(&self, from: &Schema, to: &Schema) {
@@ -858,9 +863,9 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
             // the old column's, nor on a column renamed with its parent's.
             let parented = a.owner.as_deref().is_some_and(|t| [from, to].iter().any(|s| s.objects.values().any(|o| o.kind == Some(Kind::Table) && parent_of(o).as_deref() == Some(t))));
             let follows = under.iter().any(|old| followers.contains(&renamed_columns[old]));
-            // Nor where a column it holds changes otherwise (its type, its collation), which the
-            // server may refuse under it.
-            let changes = a.deps.iter().filter(|d| from.objects.get(*d).is_some_and(|c| c.kind == Some(Kind::Column))).any(|d| to.objects.get(renamed_columns.get(d).unwrap_or(d)).is_none_or(|c| alterer.remakes(&from.objects[d], c)));
+            // Nor where a column it holds changes its values (its type, its collation, a stored
+            // expression), which the server may refuse under it.
+            let changes = a.deps.iter().filter(|d| from.objects.get(*d).is_some_and(|c| c.kind == Some(Kind::Column))).any(|d| to.objects.get(renamed_columns.get(d).unwrap_or(d)).is_none_or(|c| !alterer.keeps_values(&from.objects[d], c)));
             if !under.is_empty() && !parented && !follows && !changes && alterer.renamed_under(a, &renamed_columns).is_some_and(|d| d == b.def) {
                 kept_through.insert(id.clone(), under);
                 continue;

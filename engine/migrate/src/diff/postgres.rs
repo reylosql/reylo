@@ -4309,6 +4309,11 @@ impl Alterer for PostgresAlterer {
         renamed_key(&from.def, &names(own), referenced.map(|r| names(&r)).as_ref())
     }
 
+    fn keeps_values(&self, from: &Object, to: &Object) -> bool {
+        let without_default = |def: &str| Column { default: None, ..parse_column(def) };
+        from.kind == Some(Kind::Column) && without_default(&from.def) == without_default(&to.def)
+    }
+
     fn alter(&self, from: &Object, to: &Object) -> Option<Vec<String>> {
         let (table, name) = match to.kind? {
             Kind::Column => {
