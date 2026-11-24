@@ -366,9 +366,14 @@ fn decimal_digits(t: &Named) -> Option<(u32, u32)> {
 /// - the column's own type, a time zone aside, which changes no instant;
 /// - a value that is never NULL in a `Nullable` column, and a member's own type in a `Variant`,
 ///   but a text in a `Variant` of more than text, which the server reads as any member it can;
-/// - a whole number in a column of whole numbers that holds its whole range, a float in a wider
-///   float, a decimal in one with no fewer digits either side of the point, and an enum in one
-///   that has each of its labels at the same number;
+/// - a whole number in a column of whole numbers that holds its whole range, or of floats that
+///   hold each of its values exactly, a float in a wider float, a decimal in one with no fewer
+///   digits either side of the point, or with as many after it in a storage as wide, and an enum
+///   in one that has each of its labels at the same number;
+/// - a whole number in a decimal with as many digits before the point as its furthest value has;
+/// - a `Bool` in a column of whole numbers, a `DateTime` in a `DateTime64`, a `DateTime64` in
+///   one of a finer tick and a `Date` in a `Date32`, each of which the wider type holds as it is;
+/// - any value in a `Dynamic`, which holds each as the type it has;
 /// - an array, a tuple or a map whose elements are each kept, a tuple's names the column's own
 ///   where both name them.
 pub fn kept(from: &Named, column: &Named) -> bool {
@@ -376,6 +381,11 @@ pub fn kept(from: &Named, column: &Named) -> bool {
 }
 
 fn keeps(to: &Named, from: &Named) -> bool {
+    // A Dynamic holds a value of any type as that type, a NULL included, and nothing has the
+    // type Nothing but the NULL of a `Nullable(Nothing)` and the elements of an empty array.
+    if to.name == "Dynamic" || from.name == "Nothing" {
+        return true;
+    }
     let inner = |t: &'_ Named| -> Option<Named> {
         match (t.name.as_str(), t.args.as_slice()) {
             ("Nullable", [Arg::Type(inner)]) => Some(inner.clone()),
@@ -405,8 +415,36 @@ fn keeps(to: &Named, from: &Named) -> bool {
     if let (Some(bits), Some(into)) = (float_bits(&from.name), float_bits(&to.name)) {
         return bits <= into;
     }
+    // A whole number in a float that holds every one of its width exactly: a signed one's
+    // furthest value is a power of two, which a float holds whatever its size.
+    if let (Some((bits, unsigned)), Some(into)) = (integer(&from.name), float_bits(&to.name)) {
+        return bits - u32::from(!unsigned) <= into;
+    }
+    // A whole number in a decimal with as many digits before the point as its furthest value has.
+    if let (Some((bits, unsigned)), Some((into, into_scale))) = (integer(&from.name), decimal_digits(to)) {
+        let digits = match (bits - u32::from(!unsigned), unsigned) {
+            (8 | 7, _) => 3,
+            (16 | 15, _) => 5,
+            (32 | 31, _) => 10,
+            (64, _) => 20,
+            (63, _) => 19,
+            (128 | 127, _) => 39,
+            (256, _) => 78,
+            _ => 77,
+        };
+        return digits <= into - into_scale.min(into);
+    }
     if let (Some((digits, scale)), Some((into, into_scale))) = (decimal_digits(from), decimal_digits(to)) {
-        return scale <= into_scale && digits - scale.min(digits) <= into - into_scale.min(into);
+        // A decimal is stored as a whole number of 32, 64, 128 or 256 bits. With the same digits
+        // after the point in a storage as wide, the stored number is the same one: ClickHouse's
+        // own arithmetic gives the sum of two `Decimal(12, 2)` its storage's digits, `Decimal(18, 2)`.
+        let stored = |digits: u32| match digits {
+            0..=9 => 32,
+            10..=18 => 64,
+            19..=38 => 128,
+            _ => 256,
+        };
+        return scale <= into_scale && (digits - scale.min(digits) <= into - into_scale.min(into) || (scale == into_scale && stored(digits) == stored(into)));
     }
     let labels = |t: &'_ Named| -> Vec<(String, i64)> { t.args.iter().filter_map(|a| if let Arg::Label(label, n) = a { Some((label.clone(), *n)) } else { None }).collect() };
     match (from.name.as_str(), to.name.as_str()) {
@@ -415,7 +453,13 @@ fn keeps(to: &Named, from: &Named) -> bool {
             labels(from).iter().all(|label| into.contains(label))
         }
         ("DateTime", "DateTime") => true,
-        ("DateTime64", "DateTime64") => from.number(0) == to.number(0),
+        // A tick of a coarser clock is a whole number of a finer one's.
+        ("DateTime64", "DateTime64") => from.number(0).unwrap_or(3) <= to.number(0).unwrap_or(3),
+        // A second is a tick of any finer clock, and a day of the narrower calendar one of the
+        // wider: both of the wider types reach further back and further on.
+        ("DateTime", "DateTime64") | ("Date", "Date32") => true,
+        // True and false are 1 and 0, which every whole number holds.
+        ("Bool", into) => integer(into).is_some(),
         ("Array", "Array") | ("Map", "Map") | ("Tuple", "Tuple") => {
             let parts = |t: &'_ Named| -> Option<Vec<(Option<String>, Named)>> {
                 t.args
@@ -609,7 +653,7 @@ mod tests {
             ("String", &["String", "LowCardinality(String)", "Nullable(String)"]),
             ("Nullable(String)", &["Nullable(String)", "LowCardinality(Nullable(String))"]),
             ("DateTime", &["DateTime('UTC')"]),
-            ("DateTime64(3, 'UTC')", &["DateTime64(3)", "DateTime64(3, 'Europe/Berlin')"]),
+            ("DateTime64(3, 'UTC')", &["DateTime64(3)", "DateTime64(3, 'Europe/Berlin')", "DateTime64(6)", "DateTime64(9, 'UTC')"]),
             ("Decimal(9, 2)", &["Decimal32(2)"]),
             ("Tuple(Float64, Float64)", &["Point"]),
             ("Array(Tuple(a UInt8, b String))", &["Nested(a UInt8, b String)"]),
@@ -621,6 +665,30 @@ mod tests {
             ("BFloat16", &["Float32", "Float64"]),
             ("Float32", &["Float64"]),
             ("Decimal(9, 2)", &["Decimal(18, 2)", "Decimal(18, 4)", "Decimal64(4)"]),
+            // A decimal of as many digits after the point, in a storage as wide: what a sum of the column's own type is.
+            ("Decimal(18, 2)", &["Decimal(12, 2)", "Decimal64(2)"]),
+            ("Decimal(9, 2)", &["Decimal(5, 2)"]),
+            // A whole number in a decimal with the digits for its furthest value.
+            ("UInt8", &["Decimal(9, 0)", "Decimal(5, 2)"]),
+            ("UInt32", &["Decimal(18, 4)", "Decimal(12, 2)"]),
+            ("Int64", &["Decimal(38, 2)", "Decimal(19, 0)"]),
+            ("UInt64", &["Decimal(38, 18)"]),
+            // Any value in a Dynamic, and a NULL or an empty array of no type where one of a type goes.
+            ("UInt64", &["Dynamic", "Dynamic(max_types=8)"]),
+            ("Nullable(String)", &["Dynamic"]),
+            ("Array(Tuple(UInt8, String))", &["Dynamic", "Array(Dynamic)"]),
+            ("Nullable(Nothing)", &["Nullable(String)", "Variant(UInt64, String)"]),
+            ("Array(Nothing)", &["Array(String)", "Array(Nullable(UInt8))"]),
+            // A whole number in a float that holds each of its values exactly.
+            ("UInt8", &["BFloat16", "Float32", "Float64"]),
+            ("Int16", &["Float32", "Float64"]),
+            ("UInt32", &["Float64", "Nullable(Float64)"]),
+            ("Int32", &["Float64"]),
+            // True and false in a whole number, a second in a finer clock, a day in the wider calendar.
+            ("Bool", &["UInt8", "Int8", "UInt64", "Nullable(UInt8)"]),
+            ("DateTime", &["DateTime64(3)", "DateTime64(3, 'UTC')", "DateTime64(0)", "DateTime64(9)"]),
+            ("DateTime('Asia/Tokyo')", &["DateTime64(3, 'UTC')"]),
+            ("Date", &["Date32", "Nullable(Date32)"]),
             // An enum whose labels the column has, each at its number.
             ("Enum8('a' = 1)", &["Enum8('a' = 1, 'b' = 2)", "Enum16('a' = 1, 'b' = 2)"]),
             // A member's own type in a Variant, and a NULL.
@@ -645,21 +713,26 @@ mod tests {
         // members moved. The rest it refuses only as the statement runs, or keeps by a rule that is
         // not written down here.
         let changed: &[(&str, &[&str])] = &[
-            ("UInt64", &["UInt8", "Int64", "Float64", "Bool", "Date", "DateTime", "DateTime64(3)", "IPv4", "Time", "Variant(UInt8, String)", "Dynamic", "String"]),
+            ("UInt64", &["UInt8", "Int64", "Float64", "Bool", "Date", "DateTime", "DateTime64(3)", "IPv4", "Time", "Variant(UInt8, String)", "String", "Decimal(18, 0)", "Decimal(38, 20)"]),
             ("Int8", &["UInt8", "UInt64"]),
-            ("UInt8", &["Int8", "Bool", "Float32", "Date", "Variant(UInt64, String)", "Decimal(9, 0)"]),
+            ("UInt8", &["Int8", "Bool", "Date", "Variant(UInt64, String)", "Decimal(4, 2)"]),
+            ("UInt16", &["BFloat16"]),
+            ("UInt32", &["Float32", "Decimal(9, 0)", "Decimal(12, 4)"]),
+            ("Int64", &["Float64", "Decimal(18, 0)"]),
+            ("Nullable(Nothing)", &["String", "UInt8"]),
             ("Float64", &["Float32", "Int32", "Decimal(9, 2)"]),
-            ("Decimal(18, 4)", &["Decimal(18, 2)", "Decimal(9, 4)", "Float64"]),
+            ("Decimal(18, 4)", &["Decimal(18, 2)", "Decimal(9, 4)", "Decimal(12, 2)", "Float64"]),
+            ("Decimal(38, 2)", &["Decimal(18, 2)", "Decimal(12, 2)"]),
             // A text in a Variant of more than text is stored as the member its text reads as: 123 as a number.
             ("String", &["UInt8", "Date", "Array(UInt8)", "Enum8('a' = 1, 'b' = 2)", "FixedString(2)", "UUID", "JSON", "Variant(UInt8, Date)", "Variant(UInt64, String)"]),
             ("Nullable(String)", &["Variant(UInt64, String)"]),
             ("Array(String)", &["Array(Variant(String, Date))"]),
             ("Nullable(UInt8)", &["UInt8", "UInt64"]),
-            ("Bool", &["Date", "UInt8"]),
-            ("Date", &["Date32", "BFloat16", "UInt16"]),
+            ("Bool", &["Date", "Float64", "String"]),
+            ("Date", &["BFloat16", "UInt16", "DateTime", "DateTime64(3)"]),
             ("Date32", &["Date", "DateTime64(9)"]),
-            ("DateTime", &["Date", "DateTime64(3)"]),
-            ("DateTime64(6)", &["DateTime64(3)", "DateTime64(9)", "DateTime"]),
+            ("DateTime", &["Date", "Date32"]),
+            ("DateTime64(6)", &["DateTime64(3)", "DateTime"]),
             ("Enum8('a' = 1)", &["Enum8('a' = 2)", "Enum8('b' = 1)", "UInt8"]),
             ("Enum16('a' = 1000)", &["UInt8"]),
             ("IPv6", &["IPv4"]),
