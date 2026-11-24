@@ -1186,7 +1186,8 @@ fn summary_lines(steps: &Steps<'_>, tables: &[(String, String)], columns: &[(Str
         let same_other = |g: &str, c: &str| {
             let (g, c) = (renamed_in(g, &names, steps.dialect == Dialect::Postgres), c);
             let (x, y) = (top_words(&g), top_words(c));
-            x.len() == y.len() && x.iter().zip(&y).all(|(a, b)| a == b || (!a.contains('(') && bare.iter().any(|(old, new)| crate::diff::swap_name(a, old, new) == *b)))
+            let postgres = steps.dialect == Dialect::Postgres;
+            x.len() == y.len() && x.iter().zip(&y).all(|(a, b)| a == b || (!a.contains('(') && bare.iter().any(|(old, new)| crate::diff::swap_name(a, old, new) == *b || (postgres && crate::diff::postgres::renamed_as(a, b, old, new)))))
         };
         for g in &r_gone {
             // A view is the same view by its name, which a table rename never changes, whatever the

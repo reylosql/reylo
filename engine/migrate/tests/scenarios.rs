@@ -3970,6 +3970,7 @@ macro_rules! on {
 
 on!(
     Postgres,
+    a_table_renamed_to_a_name_postgres_quotes_or_shortens_keeps_its_constraints,
     a_suggested_command_says_blocking_where_its_migration_needs_it,
     a_column_renamed_with_its_declared_not_null_renames_it_once,
     a_suggested_blocking_names_the_rewrite_it_accepts,
@@ -4554,6 +4555,35 @@ async fn a_mysql_change_that_copies_its_table_is_refused_until_blocking() {
 
 mod adversarial {
     use super::*;
+
+    /// A table renamed to a name Postgres must quote, or one so long that it shortens the names it
+    /// makes from it: what Postgres named after the table takes the name it would make from the new
+    /// one, so nothing is made again and the migration reaches the target.
+    pub async fn a_table_renamed_to_a_name_postgres_quotes_or_shortens_keeps_its_constraints(mut p: P) {
+        let table = |name: &str| format!("create table {name} (id integer generated always as identity primary key, email text not null unique, note text check (note <> ''), ref_id integer references refs (id)); create index on {name} (note);");
+        let refs = "create table refs (id integer primary key);";
+        p.file("20261027100000_t.sql", &format!("{refs} {}", table("ledger")));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into refs values (1); insert into ledger (email, note, ref_id) values ('a', 'n', 1)").await;
+        p.output();
+        let long = "a".repeat(63);
+        for (written, named) in [(r#""123""#.to_string(), "123".to_string()), (long.clone(), long.clone())] {
+            let before = p.files().len();
+            p.schema(&format!("{refs} {}", table(&written)));
+            let old = if named == "123" { "ledger".to_string() } else { "123".to_string() };
+            let choices = reylo_migrate::Choices { rename: vec![(old, named.clone())], ..Default::default() };
+            assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "renamed", &choices, log).await).await, 0, "{}", p.peek());
+            let out = p.output();
+            assert!(!out.contains("doesn't reach"), "{out}");
+            assert!(out.lines().all(|l| !l.trim_start().starts_with("- ") && !l.trim_start().starts_with("+ ")), "nothing is dropped or made again: {out}");
+            assert_eq!(p.files().len(), before + 1);
+            assert_eq!(p.migrate().await, 0, "{}", p.peek());
+            assert_eq!(p.rows(&format!("select email from {written}")).await[0].text("email"), "a");
+            p.output();
+            assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+            p.output();
+        }
+    }
 
     /// A refusal's suggested command carries --blocking where the migration it writes rewrites a
     /// table, so that it is not refused again for that: a line of several guesses, and a type change

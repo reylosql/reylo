@@ -2739,13 +2739,14 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
         for o in current.objects.values().filter(|o| matches!(o.kind, Some(Kind::Constraint | Kind::Index | Kind::Sequence)) && related(o)) {
             let Some((word, rest)) = o.id.split_once(' ') else { continue };
             let (prefix, name) = last(rest);
-            let wanted = crate::diff::swap_name(&name, old, new);
+            let made = renamed_name(&name, old, new);
+            let wanted = declared::quote_ident(&made);
             let at = if o.kind == Some(Kind::Constraint) { new_rel.to_string() } else { prefix.clone() };
-            if wanted == name || !target.objects.get(&format!("{word} {at}.{wanted}")).is_some_and(|t| t.kind == o.kind) {
+            if made == unquoted(&name) || !target.objects.get(&format!("{word} {at}.{wanted}")).is_some_and(|t| t.kind == o.kind) {
                 continue;
             }
             if o.kind == Some(Kind::Constraint) {
-                given.push(unquoted(&wanted));
+                given.push(made);
             }
             out.push(match o.kind {
                 Some(Kind::Constraint) => format!("alter table {at} rename constraint {name} to {wanted}"),
@@ -2762,13 +2763,7 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
             let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
             let Some(t) = target.objects.get(&format!("column {new_rel}.{column}")).filter(|t| parse_column(&t.def).identity.is_some()) else { continue };
             let column = column.strip_prefix('"').and_then(|c| c.strip_suffix('"')).map(|c| c.replace("\"\"", "\"")).unwrap_or_else(|| column.to_string());
-            let chosen = |table: &str| {
-                let mut name = format!("{table}_{column}_seq");
-                while name.len() > 63 {
-                    name.pop();
-                }
-                format!("{schema}.{}", declared::quote_ident(&name))
-            };
+            let chosen = |table: &str| format!("{schema}.{}", declared::quote_ident(&object_name(&unquoted(table), Some(&column), "seq")));
             let (was, now) = (identity_sequence(o).unwrap_or_else(|| chosen(old)), identity_sequence(t).unwrap_or_else(|| chosen(new)));
             if was != now {
                 out.push(format!("alter sequence {was} rename to {}", last(&now).1));
@@ -2792,10 +2787,10 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
         for o in &columns {
             let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
             let (Some(name), Some(kept)) = (not_null_name(o), target.objects.get(&format!("column {new_rel}.{column}"))) else { continue };
-            let wanted = crate::diff::swap_name(&name, old, new);
-            if wanted != name && not_null_name(kept).as_deref() == Some(wanted.as_str()) {
-                given.push(unquoted(&wanted));
-                kept_renames.push(format!("alter table {new_rel} rename constraint {name} to {wanted}"));
+            let made = renamed_name(&name, old, new);
+            if made != unquoted(&name) && not_null_name(kept).is_some_and(|n| unquoted(&n) == made) {
+                kept_renames.push(format!("alter table {new_rel} rename constraint {name} to {}", declared::quote_ident(&made)));
+                given.push(made);
             }
         }
         // One the target has no column for: the name Postgres would make, as it holds it, with a
@@ -2872,7 +2867,7 @@ pub async fn inherited_renames(db: &mut Db, target: &BTreeMap<String, BTreeSet<S
         let (Some(have), Some(want)) = (now.get(rel), target.get(rel)) else { continue };
         let schema = split_last(rel).0;
         for name in have.iter().filter(|n| !want.contains(*n)) {
-            let wanted = crate::diff::swap_name(name, old, new);
+            let wanted = renamed_name(name, old, new);
             if wanted != *name && want.contains(&wanted) && !have.contains(&wanted) {
                 out.push(format!("alter index {schema}.{} rename to {}", quote(name), quote(&wanted)));
             }
@@ -3258,12 +3253,18 @@ fn default_not_null(table: &str, column: &str) -> String {
 }
 
 /// The name Postgres makes of a table's name, a column's and `label` (`not_null`, or `not_null1` where
-/// that was taken): past 63 bytes, the longer of the table's and the column's names is shortened a
-/// byte at a time until it fits, each then cut at a character's edge (`makeObjectName`).
+/// that was taken).
 fn not_null_named(table: &str, column: &str, label: &str) -> String {
-    let table = unquoted(split_last(table).1);
-    let room = 63usize.saturating_sub(label.len() + 2);
-    let (mut a, mut b) = (table.len(), column.len());
+    object_name(&unquoted(split_last(table).1), Some(column), label)
+}
+
+/// The name Postgres makes of a table's name, the names of the columns it is on (joined by `_`) where
+/// it is on some, and `label` (`pkey`, `key`, `idx`, `seq`, …), each as Postgres holds it: past 63
+/// bytes, the longer of the first two is shortened a byte at a time until it fits, each then cut at a
+/// character's edge (`makeObjectName`).
+fn object_name(table: &str, columns: Option<&str>, label: &str) -> String {
+    let room = 63usize.saturating_sub(label.len() + 1 + usize::from(columns.is_some()));
+    let (mut a, mut b) = (table.len(), columns.map_or(0, str::len));
     while a + b > room {
         if a > b {
             a -= 1;
@@ -3277,7 +3278,38 @@ fn not_null_named(table: &str, column: &str, label: &str) -> String {
         }
         s[..n].to_string()
     };
-    format!("{}_{}_{label}", clip(&table, a), clip(column, b))
+    match columns {
+        Some(columns) => format!("{}_{}_{label}", clip(table, a), clip(columns, b)),
+        None => format!("{}_{label}", clip(table, a)),
+    }
+}
+
+/// Whether `after`, a name as a line of the catalog writes it, is what a table's rename from `old` to
+/// `new` makes of `before`, under the same schema where either has one.
+pub fn renamed_as(before: &str, after: &str, old: &str, new: &str) -> bool {
+    let ((a_schema, a), (b_schema, b)) = (split_last(before), split_last(after));
+    a_schema == b_schema && renamed_name(a, old, new) == unquoted(b)
+}
+
+/// What `name`, of something on a table renamed from `old` to `new`, is to be called after it, as
+/// Postgres holds names: one Postgres made from the table's name (`users_pkey`, `users_email_key`,
+/// `users_id_seq`, `users_email_not_null1`) is made again from the new name as Postgres makes it, and
+/// any other has the old name's words in it swapped for the new.
+fn renamed_name(name: &str, old: &str, new: &str) -> String {
+    let (name, old, new) = (unquoted(name), unquoted(old), unquoted(new));
+    if let Some(rest) = name.strip_prefix(old.as_str()).and_then(|r| r.strip_prefix('_')) {
+        let end = rest.len() - rest.bytes().rev().take_while(u8::is_ascii_digit).count();
+        let word = &rest[..end];
+        for label in ["not_null", "pkey", "fkey", "check", "excl", "idx", "seq", "key"] {
+            let columns = if word == label { Some(None) } else { word.strip_suffix(label).and_then(|c| c.strip_suffix('_')).map(Some) };
+            let Some(columns) = columns else { continue };
+            let numbered = &rest[end - label.len()..];
+            if object_name(&old, columns, numbered) == name {
+                return object_name(&new, columns, numbered);
+            }
+        }
+    }
+    crate::diff::swap_name(&name, &old, &new)
 }
 
 /// A name as Postgres holds it, from how it is written: a quoted one without its quotes.
