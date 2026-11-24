@@ -1578,7 +1578,7 @@ fn fills_existing(statement: &crate::sql::Statement) -> bool {
     const INFIX: &[&str] = &["LIKE", "ILIKE", "SIMILAR", "IS"];
     let ends_operand = |j: usize| match t[j].kind {
         TokenKind::Quoted | TokenKind::Str | TokenKind::Number => true,
-        TokenKind::Word => !NO_CALL.contains(&words[j].as_str()) && !INFIX.contains(&words[j].as_str()),
+        TokenKind::Word => !NO_CALL.contains(&words[j].as_str()) && !INFIX.contains(&words[j].as_str()) && words[j] != "DEFAULT",
         TokenKind::Symbol => t[j].text == ")",
     };
     let infix = |i: usize| {
