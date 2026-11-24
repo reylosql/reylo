@@ -3976,9 +3976,15 @@ mod tests {
         // 200 levels of nesting, which a parenthesized operand (`id = 0 or (…)`) and a subquery
         // each spend two of, and chains of 2,000 operators ([`BOUNDS`]). A statement past either is
         // an error to parse, left to the server's describe, never an overflow of the stack.
-        let deepest = |shape: &str| crate::stack::run(|| (1..5_000).take_while(|&n| parse(&SessionDialect::default(), &crate::stack::nested(shape, n)).is_ok()).last().unwrap_or(0));
-        let found: Vec<(&str, usize)> = ["sum", "or", "and_or", "case", "coalesce", "subquery"].into_iter().map(|shape| (shape, deepest(shape))).collect();
-        assert_eq!(found, vec![("sum", 2_001), ("or", 2_000), ("and_or", 99), ("case", 198), ("coalesce", 198), ("subquery", 98)]);
+        let deepest = |shape: &str| crate::stack::run(|| (1..1_000).take_while(|&n| parse(&SessionDialect::default(), &crate::stack::nested(shape, n)).is_ok()).last().unwrap_or(0));
+        let mut found: Vec<(&str, usize)> = ["and_or", "case", "coalesce", "subquery"].into_iter().map(|shape| (shape, deepest(shape))).collect();
+        assert_eq!(found, vec![("and_or", 99), ("case", 198), ("coalesce", 198), ("subquery", 98)]);
+        // The chains, at the bound and one past it.
+        let reads = |shape: &str, n: usize| crate::stack::run(|| parse(&SessionDialect::default(), &crate::stack::nested(shape, n)).is_ok());
+        for (shape, n) in [("sum", 2_001), ("or", 2_000)] {
+            assert!(reads(shape, n) && !reads(shape, n + 1), "{shape} at {n}");
+            found.push((shape, n));
+        }
         for shape in ["sum", "case", "or", "and_or"] {
             assert!(crate::stack::run(|| parse(&SessionDialect::default(), &crate::stack::nested(shape, 100_000)).is_err()), "{shape}");
         }

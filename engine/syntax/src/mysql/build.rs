@@ -50,13 +50,15 @@ impl<'a> B<'a> {
     }
 
     /// Whether a node is an operator: one that joins two operands or follows one, or a set
-    /// operation's list of more than one query.
+    /// operation's list of more than one query, or the set operation that joins the last query to
+    /// that list.
     fn operator(&self, id: NodeId) -> bool {
         let c = self.ch(id);
         match self.k(id) {
             "Expression" | "BoolPri" | "PredicateExpr" | "BitExpr" => c.len() > 1,
             "SimpleExpr" => c.len() == 3 && matches!(self.k(c[1]), "\"||\"" | "\"COLLATE\""),
             "SetOprClauseList" => c.len() > 1,
+            "SetOprStmtWoutLimitOrderBy" | "SetOprStmtWithLimitOrderBy" => c.len() > 1 && self.k(c[0]) == "SetOprClauseList",
             _ => false,
         }
     }

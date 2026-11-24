@@ -274,12 +274,12 @@ mod tests {
     fn only_a_statement_past_the_bounds_is_past_them() {
         let refused = |text: String| parse(&text, Options::default(), BOUNDS).unwrap_err();
         assert!(refused(format!("select {}a{} as x", "coalesce(".repeat(250), ", b)".repeat(250))).past_bounds());
-        assert!(refused(format!("select {} as x", vec!["a"; 2_002].join(" + "))).past_bounds());
-        assert!(refused(vec!["select 1"; 2_005].join(" union all ")).past_bounds());
+        assert!(refused(format!("select {} as x", vec!["a"; BOUNDS.chain + 2].join(" + "))).past_bounds());
+        assert!(refused(vec!["select 1"; BOUNDS.chain + 2].join(" union all ")).past_bounds());
         // Operators side by side, each chain short, are read however many there are.
         let wide = (0..5_000).map(|i| format!("a = {i} as c{i}")).collect::<Vec<_>>().join(", ");
         assert!(parse(&format!("select {wide}"), Options::default(), BOUNDS).is_ok());
-        assert!(parse(&format!("select a from t where {}", (0..1_900).map(|i| format!("a = {i}")).collect::<Vec<_>>().join(" or ")), Options::default(), BOUNDS).is_ok());
+        assert!(parse(&format!("select a from t where {}", (0..BOUNDS.chain).map(|i| format!("a = {i}")).collect::<Vec<_>>().join(" or ")), Options::default(), BOUNDS).is_ok());
         // The grammar's own stack runs out first on some shapes, far past the bounds.
         let exhausted = refused(format!("select {}a{} as x", "(".repeat(100_000), ")".repeat(100_000)));
         assert!(exhausted.0.starts_with(crate::lalr::EXHAUSTED) && exhausted.past_bounds(), "{exhausted}");
@@ -331,12 +331,15 @@ mod tests {
 
     #[test]
     fn refuses_past_its_bounds() {
-        let sum = |n: usize| format!("select {} as x", vec!["a"; n].join(" + "));
-        assert!(parse(&sum(500), Options::default(), BOUNDS).is_ok());
-        assert!(parse(&sum(502), Options::default(), BOUNDS).is_err());
+        // A chain of `BOUNDS.chain` operators is read, and one more is refused.
+        let sum = |n: usize| format!("select {} as x", vec!["a"; n + 1].join(" + "));
+        assert!(parse(&sum(BOUNDS.chain), Options::default(), BOUNDS).is_ok());
+        assert!(parse(&sum(BOUNDS.chain + 1), Options::default(), BOUNDS).is_err());
         let unions = |n: usize| vec!["select 1"; n + 1].join(" union all ");
-        assert!(parse(&unions(500), Options::default(), BOUNDS).is_ok());
-        assert!(parse(&unions(501), Options::default(), BOUNDS).is_err());
+        assert!(parse(&unions(BOUNDS.chain), Options::default(), BOUNDS).is_ok());
+        assert!(parse(&unions(BOUNDS.chain + 1), Options::default(), BOUNDS).is_err());
+        assert!(parse(&unions(1), Options::default(), Bounds { chain: 1, ..BOUNDS }).is_ok());
+        assert!(parse(&unions(1), Options::default(), Bounds { chain: 0, ..BOUNDS }).is_err());
         let calls = |n: usize| format!("select {}a{} as x", "abs(".repeat(n), ")".repeat(n));
         assert!(parse(&calls(150), Options::default(), BOUNDS).is_ok());
         assert!(parse(&calls(250), Options::default(), BOUNDS).is_err());
