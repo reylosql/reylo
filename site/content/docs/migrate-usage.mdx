@@ -106,6 +106,31 @@ $ reylo migrate deploy --url $PROD_URL
 
 It moves yours past no migration that changes data. Past one, it refuses and says to undo your change on production, then deploy. It prints the undo where it can run it safely. A server that ran them before yours, such as staging, takes your change too. Its deploy refusal gives the commands.
 
+### Moving from another tool
+
+Start from a database your old tool migrated, then record the baseline on every other database:
+
+```terminal
+# write schema.sql and init.sql from your development database
+$ reylo migrate init
+
+# record init.sql as run on production, running nothing
+$ reylo migrate history push --url $PROD_URL
+```
+
+Reylo leaves the old tool's history table out of both files and every comparison. Drop it once nothing reads it:
+
+```sql tab="Prisma Migrate"
+drop table if exists _prisma_migrations;
+```
+
+```sql tab="Drizzle Kit"
+drop table if exists drizzle.__drizzle_migrations;
+
+-- where nothing else is in the drizzle schema
+drop schema if exists drizzle;
+```
+
 ## Schema <code className="dk-aside">schema.sql</code> [#schema-schemasql]
 
 Declare your schema in plain SQL, as you would on the database. Reylo Migrate compares and migrates:
@@ -117,7 +142,7 @@ Declare your schema in plain SQL, as you would on the database. Reylo Migrate co
 - Triggers, functions (Postgres and MySQL), and procedures and events (MySQL)
 - Partitions (Postgres and MySQL)
 - Row level security policies, sequences, extensions and schemas (Postgres)
-- Grants and comments (Postgres and MySQL)
+- Grants and comments (Postgres and MySQL), and default privileges (Postgres)
 - `STRICT` and `WITHOUT ROWID` tables (SQLite)
 
 #### Enums and domains
@@ -185,7 +210,14 @@ create policy documents_own on documents
 
 ```sql
 grant select on room_totals to reporting;
+alter default privileges in schema public grant select on tables to reporting;
 comment on column users.verified_at is 'When they confirmed their email';
+```
+
+Roles belong to the server, so a migration can't create one. Create each role your grants name on a new server before you deploy to it:
+
+```sql
+create role reporting nologin;
 ```
 
 On MySQL, an account sees only its own grants unless it may read the privilege tables. An account that isn't an administrator needs them granted:

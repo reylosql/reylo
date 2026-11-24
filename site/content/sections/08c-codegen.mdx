@@ -1,0 +1,65 @@
+---
+title: "Codegen"
+---
+
+## Codegen
+
+Reylo can write your queries to one TypeScript file instead.
+
+```sh
+npx reylo generate typescript 'src/queries/**/*.sql' --out src/queries.ts
+```
+
+Each `.sql` file becomes an export, named after the file in camelCase:
+
+```text
+src/
+  queries.ts          written by reylo generate
+  queries/
+    users/
+      get_user.sql    getUser
+    posts/
+      list-posts.sql  listPosts
+```
+
+Import the queries from that file:
+
+```ts
+import postgres from "postgres";
+import { getUser } from "./queries.ts";
+
+const db = postgres(process.env.DATABASE_URL);
+const user = await getUser.run(db, { id: 1 });
+```
+
+The file needs no TypeScript 7.1, content mapper, bundler plugin or preload.
+
+### Types
+
+Each export's parameter and row types are on its name:
+
+```ts
+import { getUser } from "./queries.ts";
+
+const params: getUser.Params = { id: 1 };
+const user: getUser.Row | null = await getUser.run(db, params);
+```
+
+### Names
+
+Two `.sql` files with the same name fail, whatever folders they're in:
+
+```terminal
+$ npx reylo generate typescript 'src/queries/**/*.sql' --out src/queries.ts
+✗ src/queries/admin/get-user.sql and src/queries/users/get_user.sql are both the export getUser: rename one
+```
+
+### CI
+
+Generate again in CI, against its database, and fail when the file changed:
+
+```sh
+npx reylo generate typescript 'src/queries/**/*.sql' --out src/queries.ts && git diff --exit-code
+```
+
+An edited query runs its old SQL until the file is written again.

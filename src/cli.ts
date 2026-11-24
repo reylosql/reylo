@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // The `reylo` command: the native `reylo` binary (src/native.ts finds it), run with this process's
 // arguments, standard streams and exit code, but for `reylo play`, the playground's server
-// (src/play.ts), which renders each statement's types as TypeScript and so runs here.
+// (src/play.ts), and `reylo generate typescript` (src/generate.ts), which render each statement's
+// types as TypeScript and so run here.
 //
 // npm's `bin` must name a file in the package itself, so this file stands between the command and
 // the binary. It waits for the binary rather than replacing itself, which Node cannot do: a signal
@@ -16,6 +17,9 @@ const args = process.argv.slice(2);
 if (args[0] === "play") {
   const { play } = await import("./play.ts");
   process.exitCode = await play(args.slice(1));
+} else if (args[0] === "generate" && args[1] === "typescript") {
+  const { generateTypescript } = await import("./generate.ts");
+  process.exitCode = await generateTypescript(args.slice(2));
 } else {
   let binary: string;
   try {

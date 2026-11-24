@@ -3,12 +3,12 @@
 //! with an empty search_path so that every name is qualified, and every dependency is the server's
 //! own record of it (`pg_depend`): nothing of the database is parsed. The objects are those the
 //! comparator reads, with the same exclusions: the platform's roles' objects, extensions' members,
-//! and Reylo's history table, and also the comments and privileges it does not read. What the plan
+//! and the history tables, Reylo's own and other tools', and also the comments and privileges it does not read. What the plan
 //! creates an object with is then the text `schema.sql` declared it with, where `declare` can match
 //! the two, since the server's rendering of an expression is not always one it reads back to itself.
 
 use super::{Alterer, Change, Kind, Object, Schema, TypeClass};
-use crate::catalog::{not_extension, not_platform, not_platform_schema, project_extension, project_relation, HISTORY_TABLE, PG_USER_NS};
+use crate::catalog::{not_extension, not_history, not_platform, not_platform_schema, pg_not_history, pg_not_history_schema, project_extension, project_relation, PG_USER_NS};
 use crate::db::{Db, Row};
 use crate::{Dialect, Error};
 use regex::Regex;
@@ -233,14 +233,18 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
     let mut s = Schema::default();
     let mut ids = Ids::default();
     let ns = PG_USER_NS;
-    let history = HISTORY_TABLE;
+    // The history tables, and what comes with them, are left out: `c` or `t` the `pg_class` row.
+    let kept_c = pg_not_history("c");
+    let kept_t = pg_not_history("t");
+    let kept_rel = not_history("c.relname");
 
     for r in db
         .rows(&format!(
-            "select n.oid, format('%I', n.nspname) as name, {} as acl from pg_namespace n where {ns} and {} and {}",
+            "select n.oid, format('%I', n.nspname) as name, {} as acl from pg_namespace n where {ns} and {} and {} and {}",
             acl("n.nspacl", 'n', "n.nspowner"),
             not_extension("pg_namespace", "n"),
-            not_platform_schema("n")
+            not_platform_schema("n"),
+            pg_not_history_schema("n")
         ))
         .await?
     {
@@ -476,7 +480,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
               (select d.refobjsubid from pg_depend d where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'a' and d.refobjsubid > 0) as owned_att,
               c.relpersistence = 'u' as unlogged
             from pg_sequence s join pg_class c on c.oid = s.seqrelid join pg_namespace n on n.oid = c.relnamespace
-            where {ns} and {} and {}
+            where {ns} and {} and {} and {kept_c}
               and not exists (select 1 from pg_depend d where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.deptype = 'i')",
             acl_in("c.relacl", 's', "c.relowner", Some("c.relnamespace")),
             not_extension("pg_class", "c"),
@@ -560,7 +564,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                 when 'i' then (select format('using index %I', ic.relname) from pg_index i join pg_class ic on ic.oid = i.indexrelid where i.indrelid = c.oid and i.indisreplident) end end as replica,
               (select i.indexrelid from pg_index i where i.indrelid = c.oid and i.indisreplident) as replica_index
             from pg_class c join pg_namespace n on n.oid = c.relnamespace
-            where c.relkind in ('r', 'p', 'v', 'm', 'f', 'c') and {ns} and {} and {} and c.relname <> '{history}'
+            where c.relkind in ('r', 'p', 'v', 'm', 'f', 'c') and {ns} and {} and {} and {kept_c}
               and not exists (select 1 from pg_depend e where e.classid = 'pg_type'::regclass and e.objid = c.reltype and e.deptype = 'e')",
             acl_in("c.relacl", 'r', "c.relowner", Some("c.relnamespace")),
             acl_in("t.typacl", 'T', "t.typowner", Some("t.typnamespace")),
@@ -633,7 +637,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
               case when co.contype in ('p', 'u', 'x') then (select format('%I.%I', inn.nspname, ic.relname) from pg_class ic join pg_namespace inn on inn.oid = ic.relnamespace where ic.oid = co.conindid) end as index_name,
               c.relkind = 'p' and co.contype in ('p', 'u', 'x') and not coalesce((select i.indisvalid from pg_index i where i.indexrelid = co.conindid), true) as alone
             from pg_constraint co join pg_class c on c.oid = co.conrelid join pg_namespace n on n.oid = c.relnamespace
-            where co.contype not in ('n', 't') and co.conislocal and co.coninhcount = 0 and {ns} and c.relname <> '{history}' and {} and {}
+            where co.contype not in ('n', 't') and co.conislocal and co.coninhcount = 0 and {ns} and {kept_c} and {} and {}
             order by co.contype, co.conname",
             project_relation("c", "n"),
             not_extension("pg_constraint", "co")
@@ -717,7 +721,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
               case when a.attfdwoptions is not null then {} end as fdwoptions
             from pg_attribute a join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace join pg_type t on t.oid = a.atttypid
             left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
-            where a.attnum > 0 and not a.attisdropped and c.relkind in ('r', 'p', 'v', 'm', 'f', 'c') and {ns} and {} and {} and c.relname <> '{history}'
+            where a.attnum > 0 and not a.attisdropped and c.relkind in ('r', 'p', 'v', 'm', 'f', 'c') and {ns} and {} and {} and {kept_c}
             order by a.attrelid, a.attnum",
             // Postgres 18 records a column's NOT NULL as a constraint, which may be kept from the
             // table's children (NO INHERIT).
@@ -877,7 +881,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             let named = c.get("identity_name").map(|n| named_identity(&full, n)).unwrap_or_else(|| full.clone());
             // A not null of its own named otherwise than Postgres would name it (`constraint
             // a_required not null`) is made under that name.
-            let declared = c.get("nn_name").filter(|n| matches!(kind, "r" | "p") && !c.flag("inherited") && !generated_not_null(n, &name, c.text("name"))).map(String::from);
+            let declared = c.get("nn_name").filter(|n| matches!(kind, "r" | "p") && !c.flag("inherited") && !generated_not_null(n, &name, &unquoted(c.text("name")))).map(String::from);
             // One left unvalidated is added after, by its name, as below.
             let named = match declared.as_deref().filter(|_| !unvalidated) {
                 Some(n) if named.ends_with(" not null") => format!("{} constraint {n} not null", named.trim_end_matches(" not null")),
@@ -1233,7 +1237,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
               i.indisvalid as valid, t.relkind = 'p' as partitioned, i.indisclustered as clustered, format('%I.%I', tn.nspname, t.relname) as table_name,
               (select string_agg(a.attnum || '=' || a.attstattarget, ',' order by a.attnum) from pg_attribute a where a.attrelid = i.indexrelid and coalesce(a.attstattarget, -1) >= 0) as stattargets
             from pg_index i join pg_class c on c.oid = i.indexrelid join pg_namespace n on n.oid = c.relnamespace join pg_class t on t.oid = i.indrelid join pg_namespace tn on tn.oid = t.relnamespace
-            where {ns} and {} and {} and t.relname <> '{history}'",
+            where {ns} and {} and {} and {kept_t}",
             not_extension("pg_class", "c"),
             project_relation("t", "n")
         ))
@@ -1497,7 +1501,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         .rows(&format!(
             "select tg.oid, format('%I', tg.tgname) as name, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, pg_get_triggerdef(tg.oid, false) as def, tg.tgenabled as enabled
             from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace join pg_proc f on f.oid = tg.tgfoid
-            where not tg.tgisinternal and tg.tgparentid = 0 and {ns} and {} and {}",
+            where not tg.tgisinternal and tg.tgparentid = 0 and {ns} and {} and {} and {kept_rel}",
             not_extension("pg_class", "c"),
             not_platform("f.proowner")
         ))
@@ -1532,7 +1536,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             "select format('%I', tg.tgname) as name, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, tg.tgenabled as enabled, tg.tgparentid as parent,
               (select p.tgenabled from pg_trigger p where p.oid = tg.tgparentid) as parent_enabled
             from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace
-            where tg.tgparentid <> 0 and tg.tgenabled <> (select p.tgenabled from pg_trigger p where p.oid = tg.tgparentid) and {ns} and {}",
+            where tg.tgparentid <> 0 and tg.tgenabled <> (select p.tgenabled from pg_trigger p where p.oid = tg.tgparentid) and {ns} and {} and {kept_rel}",
             not_extension("pg_class", "c")
         ))
         .await?
@@ -1561,12 +1565,12 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
     }
 
     for r in db
-        .rows(
+        .rows(&format!(
             "select p.oid, format('%I', p.polname) as name, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, p.polcmd as cmd, p.polpermissive as permissive,
               (select string_agg(case when r = 0 then 'public' else quote_ident(pg_get_userbyid(r)) end, ', ' order by 1) from unnest(p.polroles) r) as roles,
               pg_get_expr(p.polqual, p.polrelid) as qual, pg_get_expr(p.polwithcheck, p.polrelid) as check
-            from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace",
-        )
+            from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace where {kept_rel}",
+        ))
         .await?
     {
         let (rel, name) = (r.text("rel"), r.text("name"));
@@ -1601,7 +1605,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
     for r in db
         .rows(&format!(
             "select r.oid, r.ev_class, format('%I', r.rulename) as name, format('%I.%I', n.nspname, c.relname) as rel, pg_get_ruledef(r.oid, false) as def, r.rulename = '_RETURN' as view, r.ev_enabled as enabled
-            from pg_rewrite r join pg_class c on c.oid = r.ev_class join pg_namespace n on n.oid = c.relnamespace where {ns} and {}",
+            from pg_rewrite r join pg_class c on c.oid = r.ev_class join pg_namespace n on n.oid = c.relnamespace where {ns} and {} and {kept_rel}",
             project_relation("c", "n")
         ))
         .await?
@@ -2160,7 +2164,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         .rows(&format!(
             "select format('%s', k.classid::regclass) as cls, k.objid, o.type, o.identity, format('%I', pg_get_userbyid(k.owner)) as owner
             from ({}) k, lateral pg_identify_object(k.classid, k.objid, 0) o where k.owner <> {}",
-            crate::catalog::owned_objects(HISTORY_TABLE),
+            crate::catalog::owned_objects(),
             crate::catalog::runner()
         ))
         .await?
@@ -2719,6 +2723,8 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
     for (old, new, old_table, new_table) in renamed {
         let related = |o: &Object| o.owner.as_deref() == Some(old_table.as_str()) || o.goes_with.as_ref().is_some_and(|c| current.objects.get(c).is_some_and(|c| c.owner.as_deref() == Some(old_table.as_str())));
         let new_rel = new_table.strip_prefix("table ").unwrap_or(new_table);
+        // The names the renames below give the table's constraints, which no other may be given.
+        let mut given: Vec<String> = Vec::new();
         for o in current.objects.values().filter(|o| matches!(o.kind, Some(Kind::Constraint | Kind::Index | Kind::Sequence)) && related(o)) {
             let Some((word, rest)) = o.id.split_once(' ') else { continue };
             let (prefix, name) = last(rest);
@@ -2726,6 +2732,9 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
             let at = if o.kind == Some(Kind::Constraint) { new_rel.to_string() } else { prefix.clone() };
             if wanted == name || !target.objects.get(&format!("{word} {at}.{wanted}")).is_some_and(|t| t.kind == o.kind) {
                 continue;
+            }
+            if o.kind == Some(Kind::Constraint) {
+                given.push(unquoted(&wanted));
             }
             out.push(match o.kind {
                 Some(Kind::Constraint) => format!("alter table {at} rename constraint {name} to {wanted}"),
@@ -2754,15 +2763,49 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
                 out.push(format!("alter sequence {was} rename to {}", last(&now).1));
             }
         }
-        // Each column's not null, which Postgres 18 names after the table too.
-        for o in current.objects.values().filter(|o| o.kind == Some(Kind::Column) && o.owner.as_deref() == Some(old_table.as_str())) {
+        // Each column's not null, which Postgres 18 names after the table too. One the target has no
+        // column for, which the plan renames or drops, takes the name Postgres would give it under
+        // the new table where Postgres named it, so that the column reads as one made there, unless
+        // a constraint of the table holds that name.
+        let columns: Vec<&Object> = current.objects.values().filter(|o| o.kind == Some(Kind::Column) && o.owner.as_deref() == Some(old_table.as_str())).collect();
+        // Its own constraints, and those it holds as copies of another table's, an inherited check's.
+        let copied: Vec<String> = current.objects.get(old_table.as_str()).map_or(vec![], |t| t.extra.iter().filter_map(|l| l.strip_prefix(COPIED_CONSTRAINT)?.split(SEP).next()).map(unquoted).collect());
+        let held = |wanted: &str| {
+            columns.iter().any(|c| not_null_name(c).is_some_and(|n| unquoted(&n) == unquoted(wanted)))
+                || copied.contains(&unquoted(wanted))
+                || current.objects.values().any(|c| c.kind == Some(Kind::Constraint) && related(c) && c.id.split_once(' ').is_some_and(|(_, rest)| unquoted(&last(rest).1) == unquoted(wanted)))
+        };
+        // A kept column's not null takes the target's name; those renames go last, after the others
+        // have let go of the names they hold, and what they give no other is given.
+        let mut kept_renames = Vec::new();
+        for o in &columns {
             let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
-            let Some(name) = not_null_name(o) else { continue };
+            let (Some(name), Some(kept)) = (not_null_name(o), target.objects.get(&format!("column {new_rel}.{column}"))) else { continue };
             let wanted = crate::diff::swap_name(&name, old, new);
-            if wanted != name && target.objects.get(&format!("column {new_rel}.{column}")).and_then(not_null_name).as_deref() == Some(wanted.as_str()) {
-                out.push(format!("alter table {new_rel} rename constraint {name} to {wanted}"));
+            if wanted != name && not_null_name(kept).as_deref() == Some(wanted.as_str()) {
+                given.push(unquoted(&wanted));
+                kept_renames.push(format!("alter table {new_rel} rename constraint {name} to {wanted}"));
             }
         }
+        // One the target has no column for: the name Postgres would make, as it holds it, with a
+        // number after its label where that is held or given, as Postgres numbers it.
+        for o in &columns {
+            let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
+            let Some(name) = not_null_name(o) else { continue };
+            if target.objects.contains_key(&format!("column {new_rel}.{column}")) {
+                continue;
+            }
+            let column = unquoted(column);
+            if !generated_not_null(&name, old_rel, &column) {
+                continue;
+            }
+            let made = (0..100).map(|n| not_null_named(new_rel, &column, &if n == 0 { "not_null".to_string() } else { format!("not_null{n}") })).find(|m| *m == unquoted(&name) || (!held(m) && !given.contains(m)));
+            if let Some(made) = made.filter(|m| *m != unquoted(&name)) {
+                out.push(format!("alter table {new_rel} rename constraint {name} to {}", declared::quote_ident(&made)));
+                given.push(made);
+            }
+        }
+        out.extend(kept_renames);
     }
     out
 }
@@ -3235,22 +3278,42 @@ fn moved_to_start(sequence: &str, start: &str, increment: &str, low: &str, high:
     [first, second]
 }
 
-/// Whether `name` is one Postgres gives a not null it makes on `table`'s `column`: its name for it,
-/// or with a number after where another constraint of the schema held that name.
+/// Whether `name` is one Postgres gives a not null it makes on `table`'s `column`, the column's name
+/// as Postgres holds it: its name for it, or the one it gives where another constraint of the schema
+/// held that name, with a number after its label.
 fn generated_not_null(name: &str, table: &str, column: &str) -> bool {
     let name = unquoted(name);
-    let made = default_not_null(table, column);
-    name.strip_prefix(made.as_str()).is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_digit()))
+    let number = name.len() - name.bytes().rev().take_while(u8::is_ascii_digit).count();
+    name[..number].ends_with("_not_null") && not_null_named(table, column, &name[number - "not_null".len()..]) == name
 }
 
-/// The name Postgres gives a not null it makes on a table's column, as it holds it.
+/// The name Postgres gives a not null it makes on a table's column, the column's name and its own as
+/// Postgres holds them.
 fn default_not_null(table: &str, column: &str) -> String {
-    let name = format!("{}_{}_not_null", unquoted(split_last(table).1), unquoted(column));
-    let mut end = name.len().min(63);
-    while !name.is_char_boundary(end) {
-        end -= 1;
+    not_null_named(table, column, "not_null")
+}
+
+/// The name Postgres makes of a table's name, a column's and `label` (`not_null`, or `not_null1` where
+/// that was taken): past 63 bytes, the longer of the table's and the column's names is shortened a
+/// byte at a time until it fits, each then cut at a character's edge (`makeObjectName`).
+fn not_null_named(table: &str, column: &str, label: &str) -> String {
+    let table = unquoted(split_last(table).1);
+    let room = 63usize.saturating_sub(label.len() + 2);
+    let (mut a, mut b) = (table.len(), column.len());
+    while a + b > room {
+        if a > b {
+            a -= 1;
+        } else {
+            b -= 1;
+        }
     }
-    name[..end].to_string()
+    let clip = |s: &str, mut n: usize| -> String {
+        while !s.is_char_boundary(n) {
+            n -= 1;
+        }
+        s[..n].to_string()
+    };
+    format!("{}_{}_{label}", clip(&table, a), clip(column, b))
 }
 
 /// A name as Postgres holds it, from how it is written: a quoted one without its quotes.
@@ -4592,7 +4655,7 @@ impl Alterer for PostgresAlterer {
                 } else if b.not_null && (!a.not_null || a.no_inherit != b.no_inherit || (a.not_valid && !b.not_valid)) && !not_null_done {
                     // A not null the target names otherwise than Postgres would is added under its name.
                     let named = declared(to)
-                        .or_else(|| to.extra.iter().find_map(|l| l.strip_prefix("not null name ")).filter(|n| !generated_not_null(n, &table, &name)).map(String::from))
+                        .or_else(|| to.extra.iter().find_map(|l| l.strip_prefix("not null name ")).filter(|n| !generated_not_null(n, &table, &unquoted(&name))).map(String::from))
                         .filter(|_| !a.not_null || a.no_inherit != b.no_inherit);
                     out.push(match named {
                         Some(n) if b.no_inherit => format!("alter table {table} add constraint {n} not null {name} no inherit"),
@@ -4606,7 +4669,7 @@ impl Alterer for PostgresAlterer {
                 // column's rename and a table's joining rename theirs.
                 let dropped = out.iter().any(|s| s.ends_with(" drop not null"));
                 if a.not_null && b.not_null && !dropped && (declared(from).is_some() || declared(to).is_some()) {
-                    let made = default_not_null(&table, &name);
+                    let made = default_not_null(&table, &unquoted(&name));
                     let made = if made.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') { made } else { crate::db::ident(&made) };
                     let want = declared(to).unwrap_or(made);
                     if let Some(now) = not_null_name(from).filter(|now| unquoted(now) != unquoted(&want)) {
