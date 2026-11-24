@@ -915,15 +915,20 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         }
         // A table whose definition changes only by its own columns' new names (its partition key's,
         // which Postgres renames with the column, in the table and in each partition) is kept by
-        // the renames, where making it again would drop its rows: where each renamed column keeps
-        // its values, as a key's column can't change type, and each partition stays attached to it.
+        // the renames, where making it again would drop its rows: where each renamed column of the
+        // key keeps its values, as a key's column can't change type, and each partition stays
+        // attached to it.
         if let Some(b) = to.objects.get(id).filter(|b| a.kind == Some(Kind::Table) && a.def != b.def) {
             let prefix = format!("column {}.", id.strip_prefix("table ").unwrap_or(id));
             let own: Vec<(&String, &String)> = renamed_columns.iter().filter(|(old, _)| old.starts_with(&prefix)).collect();
             // Each name as the ids write it, which is as the definition does.
             let swapped = own.iter().fold(a.def.clone(), |def, (old, new)| renamed_identifier(&def, &old[prefix.len()..], new.strip_prefix(&prefix).unwrap_or(new)));
-            let keeps = own.iter().all(|(old, new)| to.objects.get(*new).is_some_and(|n| alterer.keeps_values(&from.objects[*old], n)));
-            let attached = from.objects.iter().filter(|(_, o)| o.kind == Some(Kind::Table) && parent_of(o).as_deref() == Some(id.as_str())).all(|(p, _)| to.objects.get(p).is_some_and(|o| parent_of(o).as_deref() == Some(id.as_str())));
+            // The key's columns can't change type; the others change as any column does.
+            let key = a.def.split_once(" partition by ").map_or("", |(_, k)| k);
+            let in_key = |old: &str| renamed_identifier(key, old, "\u{1}") != key;
+            let keeps = own.iter().filter(|(old, _)| in_key(&old[prefix.len()..])).all(|(old, new)| to.objects.get(*new).is_some_and(|n| alterer.keeps_values(&from.objects[*old], n)));
+            // A partition made at run time, which the target doesn't declare, stays attached too.
+            let attached = from.objects.iter().filter(|(_, o)| o.kind == Some(Kind::Table) && parent_of(o).as_deref() == Some(id.as_str())).all(|(p, _)| left.contains(p) || to.objects.get(p).is_some_and(|o| parent_of(o).as_deref() == Some(id.as_str())));
             if !own.is_empty() && swapped == b.def && keeps && attached {
                 kept_through.insert(id.clone(), own.iter().map(|(old, _)| (*old).clone()).collect());
                 continue;

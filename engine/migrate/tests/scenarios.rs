@@ -4082,6 +4082,7 @@ on!(
     an_extension_in_a_schema_of_its_own_is_dumped_after_it,
     an_extension_left_in_a_schema_of_the_projects_own_stops_no_push,
     a_partition_dropped_at_run_time_is_data,
+    a_key_renamed_keeps_a_partition_made_at_run_time,
     a_table_made_partitioned_is_refused_for_what_postgres_cant_change,
     the_lines_that_keep_a_remade_tables_rows_follow_the_change,
     a_remade_tables_sequences_move_past_the_rows_put_back,
@@ -7283,6 +7284,20 @@ create trigger kids_note after insert on kids begin update parents set name = na
         p.url = q.url.clone();
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
         assert_has!(p.output(), r"reads every row of log while it blocks writes to it, to move a sequence past them");
+    }
+
+    /// A partitioned table whose key column is renamed keeps a partition made at run time, which
+    /// the schema doesn't declare, with its rows: the column is renamed in it too.
+    pub async fn a_key_renamed_keeps_a_partition_made_at_run_time(mut p: P) {
+        let before = "create table m (old_id int, n text) partition by range (old_id); create table m_1 partition of m for values from (0) to (100);";
+        p.schema(before);
+        p.file("20261027100000_m.sql", before);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("create table m_runtime partition of m for values from (100) to (200); insert into m values (150, 'kept')").await;
+        p.output();
+        p.schema("create table m (new_id int, n text) partition by range (new_id); create table m_1 partition of m for values from (0) to (100);");
+        assert_eq!(p.db_push().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("select n from m_runtime where new_id = 150").await[0].text("n"), "kept");
     }
 
     pub async fn init_creates_the_extensions_its_schema_uses(mut p: P) {
