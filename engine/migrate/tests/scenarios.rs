@@ -3577,14 +3577,12 @@ async fn a_changed_trigger_is_made_again_under_a_lock_on_its_table() {
     let body = "select action_statement as s from information_schema.triggers where trigger_schema = database() and trigger_name = 'users_touch'";
     assert_eq!(p.rows(body).await[0].text("s"), "set new.updated_at = utc_timestamp()");
 
-    // With a column the new trigger sets: the column first, then the swap.
+    // With a column the new trigger sets: the column first, under the lock with the swap.
     let table = "create table users (id int primary key, n int not null default 0, updated_at datetime, touches int not null default 0);\n";
     p.schema(&format!("{table}create trigger users_touch before update on users for each row set new.touches = old.touches + 1;\n"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "count_touches", &Default::default(), log).await).await, 0, "{}", p.peek());
-    let files = p.files();
-    assert_eq!(files.len(), before + 3, "{}", p.peek());
-    assert_eq!(std::fs::read_to_string(p.dir.join("migrations").join(&files[before + 1])).unwrap(), "alter table users add column touches int not null default '0';\n");
-    assert_eq!(read(&p), "lock tables users write;\ndrop trigger users_touch;\ncreate trigger users_touch before update on users for each row set new.touches = old.touches + 1;\nunlock tables;\n");
+    assert_eq!(p.files().len(), before + 2, "{}", p.peek());
+    assert_eq!(read(&p), "lock tables users write;\nalter table users add column touches int not null default '0';\ndrop trigger users_touch;\ncreate trigger users_touch before update on users for each row set new.touches = old.touches + 1;\nunlock tables;\n");
     assert_eq!(p.dev().await, 0, "{}", p.peek());
     p.exec("update users set n = n + 1").await;
     assert_eq!(p.rows("select touches from users").await[0].text("touches"), "1");
@@ -3675,10 +3673,7 @@ async fn a_trigger_swapped_with_a_change_to_its_table() {
     // A change that fails on the row: the old trigger stays, and still runs.
     p.schema(&table("n int not null, mood enum('a') not null default 'a', hits int not null default 0", "hits").replace("old.hits + 1", "old.hits + 2"));
     assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "drop_b", &blocking, log).await).await, 0, "{}", p.peek());
-    // The change keeps every column the trigger reads, so it runs before the swap, on its own.
-    let files = p.files();
-    assert!(std::fs::read_to_string(p.dir.join("migrations").join(&files[files.len() - 2])).unwrap().starts_with("alter table users modify column mood enum('a')"));
-    assert_eq!(read(&p), "lock tables users write;\ndrop trigger users_touch;\ncreate trigger users_touch before update on users for each row set new.hits = old.hits + 2;\nunlock tables;\n");
+    assert!(read(&p).starts_with("lock tables users write;\nalter table users modify column mood enum('a')"), "{}", read(&p));
     p.output();
     assert_eq!(p.dev().await, 1);
     assert_has!(p.output(), r"Data truncated for column 'mood' at row 1");

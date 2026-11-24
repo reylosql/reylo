@@ -425,16 +425,18 @@ fn named_lock(statement: &str) -> Option<(String, usize, usize)> {
     found
 }
 
-/// The tables MySQL statements make (`create table`), each name unquoted and in lowercase: a change
-/// to one of them after, in the same migration or in a pending one, reads no rows.
+/// The tables MySQL statements make (`create table`, not `if not exists`), each name unquoted and in
+/// lowercase: a change to one of them after, in the same migration or in a pending one, reads no
+/// rows.
 pub(crate) fn mysql_tables_made<'a>(sqls: impl IntoIterator<Item = &'a str>) -> BTreeSet<String> {
     let mut made = BTreeSet::new();
     for sql in sqls {
         for statement in crate::sql::split_statements(sql, Dialect::Mysql) {
             let t = &statement.tokens;
             let words: Vec<String> = t.iter().take(5).map(crate::sql::Token::upper).collect();
+            // One `if not exists` may find a table with rows, and make nothing.
             let at = match words.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-                ["CREATE", "TABLE", "IF", "NOT", "EXISTS"] => 5,
+                ["CREATE", "TABLE", "IF", ..] => continue,
                 ["CREATE", "TABLE", ..] => 2,
                 _ => continue,
             };

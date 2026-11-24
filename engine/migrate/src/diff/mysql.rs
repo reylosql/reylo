@@ -1465,13 +1465,12 @@ fn trigger_table(create: &str) -> Option<String> {
 /// on their tables. MySQL has no `create or replace trigger`, and commits each DDL statement on its
 /// own: between a trigger's drop and its create, a write to its table would run without it, and if
 /// the create failed the table would stay without it. Under the lock, a write waits for the group,
-/// then runs with the new trigger. The drops move later, to just before the creates, past what
-/// can't break the trigger they drop ([`crossable`]). What can, a column it reads dropped or
-/// renamed, goes under the lock and runs before the drops, so that it fails, if it fails, with the
-/// old trigger still in place; and what comes after it among the plan's other changes runs after
-/// the group, with the new trigger in place. Where the group would hold anything but triggers and
-/// changes to tables, it isn't written so, and a comment above each drop says what runs without the
-/// trigger.
+/// then runs with the new trigger. The drops move later, past what can't touch the triggers they
+/// drop ([`crossable`]), and nothing else moves: the group holds the rest of the plan up to the last
+/// create, in the plan's order, which makes what each new trigger needs before it, but with the
+/// changes to tables first, so that one that fails, as a column's change can on a row, fails with
+/// the old trigger still in place. Where the group would hold anything but triggers and changes to
+/// tables, it isn't written so, and a comment above each drop says what runs without the trigger.
 fn lock_swaps(swaps: &[Swap], statements: &mut Vec<String>) {
     let at = |s: &String, statements: &[String]| statements.iter().position(|t| t == s);
     let swapped: Vec<&Swap> = swaps.iter().filter(|w| matches!((at(&w.drop, statements), at(&w.create, statements)), (Some(d), Some(c)) if d < c)).collect();
@@ -1483,18 +1482,10 @@ fn lock_swaps(swaps: &[Swap], statements: &mut Vec<String>) {
     let moved: Vec<String> = statements.iter().filter(|s| !drops.contains(*s)).cloned().collect();
     let first = swapped.iter().filter_map(|w| at(&w.create, &moved)).min().expect("a create");
     let last = swapped.iter().filter_map(|w| at(&w.create, &moved)).max().expect("a create");
-    // The statements before the creates that would break a trigger they drop: the group holds the
-    // first of them to the last.
-    let breaking: Vec<usize> = (first_drop..first).filter(|k| !moved[*k].starts_with("--") && !crossable(&moved[*k], &swapped)).collect();
-    let (from, to) = match (breaking.first(), breaking.last()) {
-        (Some(a), Some(b)) => (*a, b + 1),
-        _ => (first, first),
-    };
+    let from = (first_drop..first).find(|k| !moved[*k].starts_with("--") && !crossable(&moved[*k], &swapped)).unwrap_or(first);
     // A comment among them goes above the group, which is one file.
-    let held: Vec<&String> = moved[from..to].iter().chain(&moved[first..=last]).collect();
-    let notes: Vec<String> = held.iter().filter(|s| s.starts_with("--")).map(|s| s.to_string()).collect();
-    let changes: Vec<&String> = moved[from..to].iter().filter(|s| !s.starts_with("--")).collect();
-    let made: Vec<&String> = moved[first..=last].iter().filter(|s| !s.starts_with("--")).collect();
+    let (notes, held): (Vec<&String>, Vec<&String>) = moved[from..=last].iter().partition(|s| s.starts_with("--"));
+    let (changes, made): (Vec<&String>, Vec<&String>) = held.into_iter().partition(|s| altered_table(s).is_some());
     let group: Vec<&String> = changes.into_iter().chain(drops.iter()).chain(made).collect();
     let mut tables: Vec<String> = Vec::new();
     for s in &group {
@@ -1520,63 +1511,32 @@ fn lock_swaps(swaps: &[Swap], statements: &mut Vec<String>) {
     }
     let body: Vec<&str> = group.iter().map(|s| s.trim_end().trim_end_matches(';')).collect();
     let locked = format!("lock tables {} write;\n{};\nunlock tables", tables.join(" write, "), body.join(";\n"));
-    *statements = moved[..from].iter().cloned().chain(notes).chain([locked]).chain(moved[to..first].iter().cloned()).chain(moved[last + 1..].iter().cloned()).collect();
+    *statements = moved[..from].iter().cloned().chain(notes.into_iter().cloned()).chain([locked]).chain(moved[last + 1..].iter().cloned()).collect();
 }
 
-/// Whether a statement can run while a swapped trigger still runs, before its drop, and leave it
-/// working: a `create` of anything, a change to a table that keeps every column it had (a type
-/// changed, a column or index added, the partitions changed), or a statement on an object none of
-/// the swapped triggers is on or names.
+/// Whether a statement can run while a swapped trigger still runs, before its drop, and leave it as
+/// it works: one on an object none of the swapped triggers is on or names, or that makes a new one.
 fn crossable(statement: &str, swapped: &[&Swap]) -> bool {
     let tokens = tokenize(statement, Dialect::Mysql);
-    let words: Vec<String> = tokens.iter().take(4).map(Token::upper).collect();
-    if words.first().is_some_and(|w| w == "CREATE") {
-        return true;
-    }
+    let words: Vec<String> = tokens.iter().take(5).map(Token::upper).collect();
     let named = |object: &str| swapped.iter().any(|w| w.tables.iter().any(|t| t.trim_matches('`').eq_ignore_ascii_case(object)) || tokenize(&w.old, Dialect::Mysql).iter().filter_map(name_of).any(|n| n.eq_ignore_ascii_case(object)));
-    // The object a drop, a rename or an alter acts on.
+    let replaces = words.iter().take(3).any(|w| w == "REPLACE");
+    // What the statement acts on: a table's change, an object dropped or renamed, or one made.
     let object = match words.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["CREATE", ..] if !replaces => return true,
         ["ALTER", "TABLE", ..] | ["RENAME", "TABLE", ..] => tokens.get(2),
-        ["DROP", _, "IF", "EXISTS"] => tokens.get(4),
+        ["DROP", _, "IF", "EXISTS", ..] => tokens.get(4),
         ["DROP", ..] => tokens.get(2),
+        ["CREATE", "OR", "REPLACE", ..] => tokens.iter().skip(3).skip_while(|t| !matches!(t.upper().as_str(), "VIEW" | "FUNCTION" | "PROCEDURE")).nth(1),
         _ => None,
     };
-    let Some(object) = object.and_then(name_of) else { return false };
-    if altered_table(statement).is_some() && !takes_columns(statement) {
-        return true;
-    }
-    !named(&object)
+    object.and_then(name_of).is_some_and(|o| !named(&o))
 }
 
 /// The table an `alter table` changes, as it names it.
 fn altered_table(statement: &str) -> Option<String> {
     let tokens = tokenize(statement, Dialect::Mysql);
     (tokens.len() > 2 && tokens[0].upper() == "ALTER" && tokens[1].upper() == "TABLE").then(|| tokens[2].text.clone())
-}
-
-/// Whether an `alter table` drops or renames a column, or renames its table: what a trigger that
-/// reads the column, or names the table, no longer finds.
-fn takes_columns(statement: &str) -> bool {
-    let tokens = tokenize(statement, Dialect::Mysql);
-    let mut depth = 0;
-    let mut starts = vec![3];
-    for (k, t) in tokens.iter().enumerate().skip(3) {
-        match t.text.as_str() {
-            "(" => depth += 1,
-            ")" => depth -= 1,
-            "," if depth == 0 => starts.push(k + 1),
-            _ => {}
-        }
-    }
-    let kept = ["INDEX", "KEY", "PRIMARY", "FOREIGN", "CHECK", "CONSTRAINT", "PARTITION", "FULLTEXT", "SPATIAL", "UNIQUE"];
-    starts.iter().any(|k| {
-        let next = tokens.get(k + 1).map(Token::upper).unwrap_or_default();
-        match tokens.get(*k).map(Token::upper).as_deref() {
-            Some("CHANGE") => true,
-            Some("RENAME" | "DROP") => !kept.contains(&next.as_str()),
-            _ => false,
-        }
-    })
 }
 
 /// Whether a statement makes a trigger, whatever its definer.
@@ -1903,32 +1863,26 @@ mod tests {
             lock_swaps(&[swap("a_touch", "a", "set new.m = 2"), swap("b_touch", "b", "set new.n = 3")], &mut plan);
             plan
         };
-        // The drops wait past what only adds to a table, and past what no trigger names.
+        // The drops wait past what no trigger names; a change to a table one is on or names goes in
+        // the group, first.
         assert_eq!(
             swapped(&["drop trigger a_touch", "drop trigger b_touch", "drop view v", "alter table a add column m int", "create trigger a_touch before update on a for each row set new.m = 2", "create trigger a_new after insert on a for each row set @x = 1", "create trigger b_touch before update on b for each row set new.n = 3", "create view w as select 1"]),
             [
                 "drop view v",
-                "alter table a add column m int",
-                "lock tables a write, b write;\ndrop trigger a_touch;\ndrop trigger b_touch;\ncreate trigger a_touch before update on a for each row set new.m = 2;\ncreate trigger a_new after insert on a for each row set @x = 1;\ncreate trigger b_touch before update on b for each row set new.n = 3;\nunlock tables",
+                "lock tables a write, b write;\nalter table a add column m int;\ndrop trigger a_touch;\ndrop trigger b_touch;\ncreate trigger a_touch before update on a for each row set new.m = 2;\ncreate trigger a_new after insert on a for each row set @x = 1;\ncreate trigger b_touch before update on b for each row set new.n = 3;\nunlock tables",
                 "create view w as select 1",
             ]
         );
-        // A change that renames a column the trigger reads goes under the lock, and its comment above.
+        // A change that renames a column the trigger reads, and its comment above.
         assert_eq!(
             swapped(&["drop trigger a_touch", "-- n is renamed m, keeping its rows.", "alter table a rename column n to m", "create trigger a_touch before update on a for each row set new.m = 2"]),
             ["-- n is renamed m, keeping its rows.", "lock tables a write;\nalter table a rename column n to m;\ndrop trigger a_touch;\ncreate trigger a_touch before update on a for each row set new.m = 2;\nunlock tables"]
         );
-        // What keeps every column runs outside the lock, before it or after it as the plan has it, so
-        // that one that fails, before or after, leaves a trigger that works.
+        // Every change between, in the plan's order, so the new trigger has what it needs.
         assert_eq!(
-            swapped(&["drop trigger a_touch", "alter table a remove partitioning", "alter table a rename column n to m", "alter table a partition by list (id) (partition p values in (1))", "create trigger a_touch before update on a for each row set new.m = 2"]),
-            [
-                "alter table a remove partitioning",
-                "lock tables a write;\nalter table a rename column n to m;\ndrop trigger a_touch;\ncreate trigger a_touch before update on a for each row set new.m = 2;\nunlock tables",
-                "alter table a partition by list (id) (partition p values in (1))",
-            ]
+            swapped(&["drop trigger a_touch", "alter table a remove partitioning", "alter table a rename column n to m", "alter table z add column v int", "alter table a partition by list (id) (partition p values in (1))", "create trigger a_touch before update on a for each row set new.m = 2"]),
+            ["lock tables a write, z write;\nalter table a remove partitioning;\nalter table a rename column n to m;\nalter table z add column v int;\nalter table a partition by list (id) (partition p values in (1));\ndrop trigger a_touch;\ncreate trigger a_touch before update on a for each row set new.m = 2;\nunlock tables"]
         );
-        assert_eq!(swapped(&["drop trigger a_touch", "alter table a modify column n bigint, drop index k", "create trigger a_touch before update on a for each row set new.m = 2"])[0], "alter table a modify column n bigint, drop index k");
         // So would a function it calls, which isn't a table's change: written apart, saying so.
         let plan = swapped(&["drop trigger a_touch", "drop function f", "create function f () returns int return 2", "create trigger a_touch before update on a for each row set new.m = 2"]);
         assert_eq!(plan[0], "-- Until a_touch is made again, writes to a run without it");
