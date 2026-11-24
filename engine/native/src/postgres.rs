@@ -80,6 +80,12 @@ impl Connection {
             self.reopen().await?;
             result = answers::analyze_prepared(&self.client, &self.prepared, sql, &mut self.answers).await;
         }
+        // A lock timeout leaves the statement's other describes queued on the connection behind the
+        // same lock: the next statement gets a connection of its own rather than wait behind them.
+        // One that cannot be opened now is left for that statement to find out.
+        if matches!(&result, Err(ReplayError::Host(e)) if e.0.starts_with(answers::LOCKED)) {
+            let _ = self.reopen().await;
+        }
         match result {
             Ok(mut analysis) => {
                 held_to_iso(&mut analysis, sql, &self.date_style);
@@ -296,11 +302,17 @@ impl Program for Postgres {
     }
 }
 
+/// Runs [`LOCK_WAIT`] on a connection that analyzes, and says whether the server took it. A server
+/// that refuses it, one that speaks Postgres's protocol without its catalog, is analyzed as before,
+/// under its own `lock_timeout`.
+pub async fn bound_lock_wait(client: &Client) -> bool {
+    client.batch_execute(LOCK_WAIT).await.is_ok()
+}
+
 /// [`LOCK_WAIT`] run on a new connection, and kept as what a connection that replaces it runs, where
-/// the server took it. A server that refuses it, one that speaks Postgres's protocol without its
-/// catalog, is analyzed as before, under its own `lock_timeout`.
+/// the server took it.
 async fn lock_wait(client: &Client) -> Option<String> {
-    client.batch_execute(LOCK_WAIT).await.ok().map(|()| LOCK_WAIT.to_string())
+    bound_lock_wait(client).await.then(|| LOCK_WAIT.to_string())
 }
 
 fn closed(conn: u64) -> Value {

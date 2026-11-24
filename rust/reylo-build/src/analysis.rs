@@ -305,8 +305,13 @@ async fn postgres(located: &Located, queries: &Path, sql: &str, session: &mut Se
         Err(Failure::Unreachable(why)) => return offline(located, queries, &statement, &server, false, &located.cannot_connect(&session.url, &why)),
         Err(other) => return Err(other.to_string()),
     };
-    let analysis = reylo_engine::clients::tokio_postgres::analyze(client, sql, &mut session.answers).await.map_err(|e| e.to_string())?;
-    remember(&located.cache, &own, Dialect::Postgres, &schema, &analysis)
+    let analysis = reylo_engine::clients::tokio_postgres::analyze(client, sql, &mut session.answers).await;
+    // A lock timeout leaves the statement's other describes queued on the connection behind the same
+    // lock: the next statement opens a new one rather than wait behind them.
+    if matches!(&analysis, Err(reylo_engine::ReplayError::Host(e)) if e.0.starts_with(reylo_engine::clients::tokio_postgres::LOCKED)) {
+        session.conn = None;
+    }
+    remember(&located.cache, &own, Dialect::Postgres, &schema, &analysis.map_err(|e| e.to_string())?)
 }
 
 /// The session's client, connected again where the server closed it.
@@ -316,7 +321,10 @@ async fn postgres_client<'c>(conn: &'c mut Option<Client>, url: &str) -> Result<
         if let Some(refusal) = reylo_engine::postgres::transaction_pooler(url) {
             return Err(Failure::Error(refusal));
         }
-        *conn = Some(reylo_engine::postgres::open(url).await?.0);
+        let client = reylo_engine::postgres::open(url).await?.0;
+        // Waiting on a table's lock at most as long as the type check does.
+        reylo_engine::postgres::bound_lock_wait(&client).await;
+        *conn = Some(client);
     }
     Ok(conn.as_ref().expect("connected above"))
 }
@@ -388,7 +396,10 @@ async fn mysql_fingerprint(conn: &mut Option<mysql_async::Conn>, url: &str) -> R
 #[cfg(feature = "mysql")]
 async fn mysql_conn<'c>(conn: &'c mut Option<mysql_async::Conn>, url: &str) -> Result<&'c mut mysql_async::Conn, Failure> {
     if conn.is_none() {
-        *conn = Some(reylo_engine::mysql::open(url).await?.0);
+        let mut opened = reylo_engine::mysql::open(url).await?.0;
+        // Waiting on a table's lock at most as long as the type check does.
+        reylo_engine::mysql::bound_lock_wait(&mut opened).await;
+        *conn = Some(opened);
     }
     Ok(conn.as_mut().expect("connected above"))
 }

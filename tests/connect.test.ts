@@ -198,8 +198,8 @@ test("Postgres: where the role or the database sets another DateStyle than ISO, 
   }
 });
 
-test("Postgres: an analysis waits on another session's lock for at most 10 s, or the session's own shorter lock_timeout, then names that session, and nothing is kept as the statement's error", { skip: pgLive }, async () => {
-  const { url, sql, drop } = await postgresDatabase("reylo_lock_wait", "create table users (id bigint primary key, name text not null)");
+test("Postgres: an analysis waits on another session's lock for at most 10 s, or the session's own shorter lock_timeout, once per statement, and nothing is kept as the statement's error", { skip: pgLive }, async () => {
+  const { url, sql, drop } = await postgresDatabase("reylo_lock_wait", "create table users (id bigint primary key, name text not null); create table orders (id bigint primary key)");
   const e = await engine("postgres");
   const setting = async (at: string) => {
     const c = await e.open(at);
@@ -214,24 +214,58 @@ test("Postgres: an analysis waits on another session's lock for at most 10 s, or
     assert.equal(await setting(url), "10s");
     assert.equal(await setting(`${url}?options=-c%20lock_timeout%3D1min`), "10s");
     assert.equal(await setting(`${url}?options=-c%20lock_timeout%3D1s`), "1s");
-    const statement = "select id, name from users where id = :id";
+    const locked = (err: Error) => !(err instanceof Unreachable) && err.message === "A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_timeout. Run it again once the lock is released: pg_locks lists the session that holds it";
     // An alter table left open in another session holds the table's lock until its transaction ends.
     await sql.begin(async (tx: any) => {
       await tx.unsafe("alter table users add column email text");
-      await assert.rejects(c.analyze(statement), (err: Error) => !(err instanceof Unreachable) && /^A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_timeout: users by pid \d+ \([^)]*idle in transaction: alter table users add column email text\)\. Run it again once the lock is released$/.test(err.message));
+      await assert.rejects(c.analyze("select id, name from users where id = :id"), locked);
+      // A statement that the engine describes more than once, for its JSON shape, waits out the lock once.
+      const started = Date.now();
+      await assert.rejects(c.analyze("select to_jsonb(u) as u from users u"), locked);
+      assert.ok(Date.now() - started < 1800, `waited ${Date.now() - started} ms`);
+      // The next statement waits behind none of those describes.
+      const next = Date.now();
+      assert.deepEqual((await c.analyze("select id from orders")).columns.map((col) => col.name), ["id"]);
+      assert.ok(Date.now() - next < 900, `waited ${Date.now() - next} ms`);
     });
-    assert.deepEqual((await c.analyze(statement)).columns.map((col) => col.name), ["id", "name"]);
+    assert.deepEqual((await c.analyze("select id, name from users where id = :id")).columns.map((col) => col.name), ["id", "name"]);
   } finally {
     await c.close();
     await drop();
   }
 });
 
+test("reylo analyze and reylo generate stop waiting on another session's lock at lock_timeout, as the type check does", { skip: pgLive }, async () => {
+  const { url, sql, drop } = await postgresDatabase("reylo_lock_wait_cli", "create table users (id bigint primary key, name text not null)");
+  const project = mkdtempSync(join(tmpdir(), "reylo-lock-project-"));
+  writeFileSync(join(project, ".reylo.yaml"), `direct_url: ${JSON.stringify(`${url}?options=-c%20lock_timeout%3D1s`)}\n`);
+  writeFileSync(join(project, "q.sql"), "select id, name from users where id = :id");
+  try {
+    await sql.begin(async (tx: any) => {
+      await tx.unsafe("alter table users add column email text");
+      // The lock is the server's to hold, so a synchronous run stalls nothing it needs.
+      // The generator reads the schema's fingerprint first, whose catalog functions wait on the same lock.
+      for (const [args, said] of [
+        [["analyze", "q.sql"], /A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_timeout/],
+        [["generate", "rust-sqlx", "q.sql"], /the schema fingerprint failed: canceling statement due to lock timeout/],
+      ] as const) {
+        const run = spawnSync(nativeBinary(), args, { cwd: project, encoding: "utf8", timeout: 20_000 });
+        assert.equal(run.signal, null, `reylo ${args.join(" ")} was still waiting after 20 s`);
+        assert.notEqual(run.status, 0, args.join(" "));
+        assert.match(run.stderr + run.stdout, said, args.join(" "));
+      }
+    });
+  } finally {
+    await drop();
+  }
+});
+
 test("MySQL: an analysis queued behind an alter table waits for at most 10 s, or the session's own shorter lock_wait_timeout, and nothing is kept as the statement's error", { skip: mysqlLive }, async () => {
-  const { url, db, drop } = await mysqlDatabase("reylo_lock_wait", "create table users (id bigint primary key, name text not null)");
+  const { url, db, rows, drop } = await mysqlDatabase("reylo_lock_wait", "create table users (id bigint primary key, name text not null)");
   const u = new URL(url);
   const alterer = await driver("mysql2/promise").createConnection({ host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: u.pathname.slice(1) });
   const c = await (await engine("mysql")).open(url);
+  let altering: Promise<unknown> | undefined;
   try {
     assert.equal(Number(((await c.query("select @@session.lock_wait_timeout", [])) as [[unknown]])[0][0]), 10);
     await c.query("set session lock_wait_timeout = 1", []);
@@ -239,13 +273,19 @@ test("MySQL: an analysis queued behind an alter table waits for at most 10 s, or
     // A transaction that has read the table, and an alter table waiting for it to end: every new statement on the table queues behind the alter.
     await db.query("begin");
     await db.query("select * from users");
-    const altering = alterer.query("alter table users add column email text");
-    await new Promise((done) => setTimeout(done, 300));
-    await assert.rejects(c.analyze(statement), (err: Error) => !(err instanceof Unreachable) && /^A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_wait_timeout\. Run it again once the lock is released: SHOW PROCESSLIST lists the session that holds it$/.test(err.message));
+    altering = alterer.query("alter table users add column email text");
+    for (let tries = 0; (await rows("select id from performance_schema.processlist where state = 'Waiting for table metadata lock'")).length === 0; tries++) {
+      assert.ok(tries < 100, "the alter table never waited for the table's metadata lock");
+      await new Promise((done) => setTimeout(done, 50));
+    }
+    await assert.rejects(c.analyze(statement), (err: Error) => !(err instanceof Unreachable) && err.message === "A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_wait_timeout. Run it again once the lock is released: SHOW PROCESSLIST lists the session that holds it");
     await db.query("commit");
     await altering;
     assert.deepEqual((await c.analyze(statement)).columns.map((col) => col.name), ["id", "name"]);
   } finally {
+    // The open transaction is what the alter waits for: ended first, so that nothing below waits behind it.
+    await db.query("rollback").catch(() => {});
+    await altering?.catch(() => {});
     await c.close();
     await alterer.end();
     await drop();

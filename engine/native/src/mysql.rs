@@ -209,10 +209,16 @@ async fn rows(conn: &mut Conn, text: String) -> mysql_async::Result<Vec<Vec<Valu
     Ok(rows)
 }
 
+/// Runs [`LOCK_WAIT`] on a connection that analyzes, and says whether the server took it. A server
+/// that refuses it is analyzed as before, under its own setting.
+pub async fn bound_lock_wait(conn: &mut Conn) -> bool {
+    conn.query_drop(LOCK_WAIT).await.is_ok()
+}
+
 /// [`LOCK_WAIT`] run on a new connection, and kept as what a connection that replaces it runs, where
-/// the server took it. A server that refuses it is analyzed as before, under its own setting.
+/// the server took it.
 async fn lock_wait(conn: &mut Conn) -> Option<String> {
-    conn.query_drop(LOCK_WAIT).await.ok().map(|()| LOCK_WAIT.to_string())
+    bound_lock_wait(conn).await.then(|| LOCK_WAIT.to_string())
 }
 
 fn closed(id: u64) -> Value {

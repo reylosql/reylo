@@ -63,7 +63,7 @@ pub trait ConcurrentAnswerer<D> {
     /// As [`Answerer::query`].
     fn query(&self, sql: &str, params: &[Value]) -> impl Future<Output = Result<Result<Vec<Vec<Value>>, DbError>, Self::Error>> + Send;
 
-    /// Whether `error` ended the session, so that nothing else asked on it can still finish. A round stops at such an error; after any other it lets what it already asked finish, since a request dropped halfway can leave its state on a session the host goes on using.
+    /// Whether `error` ended the session, or leaves it to the host to give up on, so that nothing else asked on it need finish. A round stops at such an error at once; after any other it lets what it already asked finish, since a request dropped halfway can leave its state on a session the host goes on using.
     fn ends_session(&self, _error: &Self::Error) -> bool {
         true
     }
@@ -272,7 +272,7 @@ pub async fn run_concurrent<Db: Database, A: ConcurrentAnswerer<Db::Describe>>(s
     Err(ReplayError::Unsettled)
 }
 
-/// The futures' outputs in their order, the futures polled together, up to and including the first error. Once every future before that error has settled, an error `stops` says stops the rest returns at once; after any other, the rest are polled to their end first.
+/// The futures' outputs in their order, the futures polled together, up to and including the first error. An error `stops` says stops the rest returns at once, wherever it falls: a future before it that is still open may be queued behind the same wait on the session, so the outputs end with the first error before it where one has settled, else with it, after the outputs settled before the first open future. After any other error, the rest are polled to their end first.
 async fn join_to_first_error<T, E, F: Future<Output = Result<T, E>>>(futures: impl IntoIterator<Item = F>, stops: impl Fn(&E) -> bool) -> Vec<Result<T, E>> {
     let mut futures: Vec<std::pin::Pin<Box<F>>> = futures.into_iter().map(Box::pin).collect();
     let mut outputs: Vec<Option<Result<T, E>>> = futures.iter().map(|_| None).collect();
@@ -285,20 +285,31 @@ async fn join_to_first_error<T, E, F: Future<Output = Result<T, E>>>(futures: im
             }
         }
         let done = outputs.iter().all(Option::is_some);
-        match outputs.iter().find(|output| !matches!(output, Some(Ok(_)))) {
-            Some(Some(Err(error))) if stops(error) => std::task::Poll::Ready(()),
-            _ if done => std::task::Poll::Ready(()),
-            _ => std::task::Poll::Pending,
+        let stopped = outputs.iter().any(|output| matches!(output, Some(Err(error)) if stops(error)));
+        if done || stopped {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
         }
     })
     .await;
+    let stopping = outputs.iter().position(|output| matches!(output, Some(Err(error)) if stops(error)));
     let mut settled = Vec::with_capacity(outputs.len());
-    for output in outputs {
-        let Some(output) = output else { break };
-        let failed = output.is_err();
-        settled.push(output);
-        if failed {
-            break;
+    for i in 0..outputs.len() {
+        match outputs[i].take() {
+            Some(Ok(value)) => settled.push(Ok(value)),
+            Some(Err(error)) => {
+                settled.push(Err(error));
+                break;
+            }
+            // Open when a later future's error stopped the round: that error ends it here. Its
+            // caller returns at the first error, before reading what it stands beside.
+            None => {
+                if let Some(Some(Err(error))) = stopping.and_then(|s| outputs.get_mut(s)).map(Option::take) {
+                    settled.push(Err(error));
+                }
+                break;
+            }
         }
     }
     settled
@@ -526,6 +537,30 @@ mod tests {
         let mut counting = Counting::default();
         ready(run_async::<Toy, _>("select 1", &mut counting, &mut cache)).unwrap();
         assert_eq!((counting.describes, counting.queries), (0, 1));
+    }
+
+    /// A host whose query gives up on the session while the describe asked before it is still waiting, as a describe queued behind the same lock waits.
+    struct Behind;
+
+    impl ConcurrentAnswerer<String> for Behind {
+        type Error = String;
+        fn describe(&self, _sql: &str) -> impl Future<Output = Result<Result<String, DbError>, String>> + Send {
+            async {
+                std::future::pending::<()>().await;
+                Ok(Ok(String::new()))
+            }
+        }
+        fn query(&self, _sql: &str, _params: &[Value]) -> impl Future<Output = Result<Result<Vec<Vec<Value>>, DbError>, String>> + Send {
+            async { Err("locked".to_string()) }
+        }
+    }
+
+    #[test]
+    fn an_error_that_stops_the_round_ends_it_while_a_need_asked_before_it_is_open() {
+        match settled(run_concurrent::<Toy, _>("select 1", &Behind, &mut AnswerCache::default())) {
+            Err(ReplayError::Host(e)) => assert_eq!(e, "locked"),
+            other => panic!("expected the host's error, got {:?}", other.map(|a| a.diagnostics)),
+        }
     }
 
     /// A host whose describe fails with an error the session survives, and whose query is still on its way.
