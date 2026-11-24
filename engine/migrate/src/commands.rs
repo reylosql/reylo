@@ -7206,7 +7206,9 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     std::fs::write(&init, &sql)?;
     // The history is the lock's: init.sql is its first line, and reaches schema.sql.
     roles.retain(|role| names(&sql, role));
-    let entries = lock::chain([(INIT, sql.as_str())]);
+    // Locked as every check reads the file back: `canonical` keeps the rest after a `#` as written,
+    // its last newline included.
+    let entries = lock::chain([(INIT, normalized(&sql).as_str())]);
     let schema = Some(lock::schema_sum(&entries[0].sum, &sql));
     lock::write(&opts.lock, &lock::Lock { schema, entries })?;
     // init.sql is recorded as run, which the tree says. One that can't start (no shadow database can
