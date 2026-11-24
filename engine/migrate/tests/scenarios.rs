@@ -4599,18 +4599,39 @@ async fn a_dry_run_checks_a_constraint_beside_a_drop() {
         p.file("20261027100000_users.sql", "create table users (id int primary key, bio varchar(20), plan varchar(10));");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.exec("insert into users values (1, 'a', 'free'); insert into users values (2, null, 'team')").await;
-        let check = "alter table users add constraint users_plan_check check (plan in ('free', 'pro'));";
+        // A backtick inside a string names no column.
+        let check = "alter table users add constraint users_plan_check check (plan in ('free', 'pro', '`code`'));";
         if d == Dialect::Mysql {
             p.file("20261027110000_drop_bio.sql", "alter table users drop column bio;");
             p.file("20261027110001_plan_check.sql", check);
         } else {
             p.file("20261027110001_plan_check.sql", &format!("alter table users drop column bio;\n{check}"));
         }
-        p.schema("create table users (id int primary key, plan varchar(10), constraint users_plan_check check (plan in ('free', 'pro')));\n");
+        p.schema("create table users (id int primary key, plan varchar(10), constraint users_plan_check check (plan in ('free', 'pro', '`code`')));\n");
         p.output();
         assert_eq!(p.dry_run().await, 1, "{d:?}: {}", p.peek());
         assert_has!(p.output(), r"_plan_check\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks users_plan_check\n");
     }
+}
+
+/// On Postgres: a check that reads the whole row as well as a column reads every column, so one
+/// added before it leaves it to the deploy; and `"Plan"` and `plan` are two columns, so a type change
+/// of the one isn't hidden by the other.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_reads_postgres_columns_as_postgres_names_them() {
+    let Some(mut p) = P::new(Dialect::Postgres).await else { return };
+    let base = "create table accounts (id int primary key);\ncreate table plans (id int primary key, \"Plan\" text, plan text);";
+    p.file("20261027100000_base.sql", base);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into accounts values (1); insert into plans values (1, 'Free', 'x')").await;
+    p.file("20261027110000_flag.sql", "alter table accounts add column flag boolean;");
+    p.file("20261027110001_flag_check.sql", "alter table accounts add constraint accounts_flag check (id > 0 and to_jsonb(accounts.*) ? 'flag');");
+    p.file("20261027110002_plan_lower.sql", "alter table plans alter column \"Plan\" type varchar(10) using lower(\"Plan\");\nalter table plans add constraint plans_plan_lower check (\"Plan\" = lower(\"Plan\"));");
+    p.schema("create table accounts (id int primary key, flag boolean, constraint accounts_flag check (id > 0 and to_jsonb(accounts.*) ? 'flag'));\ncreate table plans (id int primary key, \"Plan\" varchar(10), plan text, constraint plans_plan_lower check (\"Plan\" = lower(\"Plan\")));\n");
+    p.output();
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    let out = p.output();
+    assert!(!out.contains("✗"), "{out}");
 }
 
 /// On Postgres: a drop names its table by schema, so one of two tables of a name is said to be

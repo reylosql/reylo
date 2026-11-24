@@ -4138,11 +4138,11 @@ async fn pending_findings(shadows: &mut Shadows<'_>, target: &mut Db, ran: &[Mig
         data_changed |= split_statements(&m.sql, d).iter().any(|s| changes_data(s, d));
         let (dropped_tables, dropped_columns) = drops_of(&m.sql, d);
         let (renamed_tables, renamed_columns) = renames_of(&m.sql, d);
-        gone_tables.extend(dropped_tables.into_iter().map(|(_, t)| t).chain(renamed_tables).map(|t| t.to_lowercase()));
-        gone_columns.extend(dropped_columns.into_iter().map(|((_, t), c)| (t, c)).chain(renamed_columns).map(|(t, c)| (t.to_lowercase(), c.to_lowercase())));
+        gone_tables.extend(dropped_tables.into_iter().map(|(_, t)| t).chain(renamed_tables).map(|t| folded(&t, d)));
+        gone_columns.extend(dropped_columns.into_iter().map(|((_, t), c)| (t, c)).chain(renamed_columns).map(|(t, c)| (folded(&t, d), folded(&c, d))));
         let now = row_checks(shadows.db(lane)).await;
         let tables_now = if data_changed { BTreeMap::new() } else { table_identities(shadows.db(lane)).await };
-        let bare = |t: &str| unquoted(&crate::sql::last_written(t), d).to_lowercase();
+        let bare = |t: &str| folded(&unquoted(&crate::sql::last_written(t), d), d);
         // Whether `columns` of `table` (all of them, for None) are those the target holds: the same
         // table, each column as it was, and none dropped or renamed by a pending statement.
         let unchanged = |table: &str, columns: Option<&[String]>| -> bool {
@@ -4318,6 +4318,17 @@ fn unquoted(name: &str, d: Dialect) -> String {
         name.to_ascii_lowercase()
     } else {
         name.to_string()
+    }
+}
+
+/// A name as a check compares it: as Postgres keeps it, where `"Plan"` and `plan` are two columns;
+/// lowercased on MySQL and SQLite, whose column names are the same in any case.
+#[cfg(feature = "cli")]
+fn folded(name: &str, d: Dialect) -> String {
+    if d == Dialect::Postgres {
+        name.to_string()
+    } else {
+        name.to_lowercase()
     }
 }
 
@@ -4539,20 +4550,20 @@ async fn row_checks(db: &mut Db) -> BTreeMap<String, RowCheck> {
             let sql = format!(
                 "select 'k' as kind, c.contype::text as sub, c.conrelid::regclass::text as t, c.conname::text as name, pg_get_constraintdef(c.oid) as def,
                      case when c.contype = 'f' then c.confrelid::regclass::text end as parent,
-                     (select string_agg(lower(a.attname), chr(31)) from unnest(c.conkey) k(n) join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.n) as cols,
-                     (select string_agg(lower(a.attname), chr(31)) from unnest(c.confkey) k(n) join pg_attribute a on a.attrelid = c.confrelid and a.attnum = k.n) as refs,
+                     case when not 0 = any (c.conkey) then (select string_agg(a.attname, chr(31)) from unnest(c.conkey) k(n) join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.n) end as cols,
+                     (select string_agg(a.attname, chr(31)) from unnest(c.confkey) k(n) join pg_attribute a on a.attrelid = c.confrelid and a.attnum = k.n) as refs,
                      c.contype = 'c' and c.connoinherit as only
                    from pg_constraint c join pg_class r on r.oid = c.conrelid join pg_namespace n on n.oid = r.relnamespace
                    where c.contype in ('c', 'f', 'u', 'p') and c.convalidated and c.conislocal and c.conparentid = 0 and r.relkind in ('r', 'p') and {user}
                  union all
                  select 'i', '', i.indrelid::regclass::text, ic.relname::text, pg_get_indexdef(i.indexrelid), null,
-                     case when i.indpred is null and not 0 = any (i.indkey::int2[]) then (select string_agg(lower(a.attname), chr(31)) from unnest(i.indkey::int2[]) k(n) join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.n) end,
+                     case when i.indpred is null and not 0 = any (i.indkey::int2[]) then (select string_agg(a.attname, chr(31)) from unnest(i.indkey::int2[]) k(n) join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.n) end,
                      null, false
                    from pg_index i join pg_class ic on ic.oid = i.indexrelid join pg_class r on r.oid = i.indrelid join pg_namespace n on n.oid = r.relnamespace
                    where i.indisunique and i.indisvalid and r.relkind in ('r', 'p') and not r.relispartition and {user}
                      and not exists (select 1 from pg_constraint x where x.conindid = i.indexrelid and x.conrelid = i.indrelid and x.contype in ('p', 'u', 'x'))
                  union all
-                 select 'n', '', r.oid::regclass::text, quote_ident(a.attname), '', null, lower(a.attname), null, false
+                 select 'n', '', r.oid::regclass::text, quote_ident(a.attname), '', null, a.attname::text, null, false
                    from pg_attribute a join pg_class r on r.oid = a.attrelid join pg_namespace n on n.oid = r.relnamespace
                    where a.attnotnull and a.attnum > 0 and not a.attisdropped and r.relkind in ('r', 'p') and not r.relispartition and {user}
                      and not exists (select 1 from pg_constraint x where x.conrelid = r.oid and x.contype = 'n' and not x.convalidated and a.attnum = any (x.conkey))"
@@ -4608,7 +4619,9 @@ async fn row_checks(db: &mut Db) -> BTreeMap<String, RowCheck> {
                         0 => Some(vec![name.to_lowercase()]),
                         // The columns a check's clause names, each in backticks as MySQL stores it.
                         1 => {
-                            let named: Vec<String> = Regex::new(r"`((?:[^`]|``)+)`").unwrap().captures_iter(&crate::diff::mysql::stored_text(def)).map(|c| c[1].replace("``", "`").to_lowercase()).collect();
+                            // Its quoted identifiers, as MySQL's lexer reads them: never a backtick inside a string.
+                            let clause = format!("select {}", crate::diff::mysql::stored_text(def));
+                            let named: Vec<String> = split_statements(&clause, Dialect::Mysql).iter().flat_map(|s| s.tokens.iter()).filter(|t| t.kind == crate::sql::TokenKind::Quoted && t.text.starts_with('`')).map(|t| unquoted(&t.text, Dialect::Mysql).to_lowercase()).collect();
                             (!named.is_empty()).then_some(named)
                         }
                         _ => Some(raw(def)),
@@ -4647,7 +4660,7 @@ async fn table_identities(db: &mut Db) -> BTreeMap<String, TableIdentity> {
                        from pg_class c join pg_namespace n on n.oid = c.relnamespace where {user}"
                 ),
                 format!(
-                    "select c.oid::regclass::text as t, lower(a.attname) as c, a.attnum || '/' || a.atttypid || '/' || a.atttypmod as i
+                    "select c.oid::regclass::text as t, a.attname::text as c, a.attnum || '/' || a.atttypid || '/' || a.atttypmod as i
                        from pg_attribute a join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace
                        where a.attnum > 0 and not a.attisdropped and {user}"
                 ),
