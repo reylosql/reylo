@@ -3732,6 +3732,21 @@ mod adversarial {
         assert!(!out.contains("doesn't reach"), "{out}");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         assert_eq!(p.rows(&format!("select x from {wider}")).await[0].text("x"), "original");
+        p.output();
+        // A dropped column's not null is given no name a kept column's not null is renamed to.
+        let before = format!("{before} create table {wider} (note text, x text default 'missing' not null, joined integer);");
+        p.file("20991231000010_t.sql", "create table src (a text not null, b text constraint src_a_not_null1 not null, constraint dst_a_not_null check (b <> ''));");
+        p.schema(&format!("{before} create table src (a text not null, b text constraint src_a_not_null1 not null, constraint dst_a_not_null check (b <> ''));"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into src values ('a', 'b')").await;
+        p.output();
+        p.schema(&format!("{before} create table dst (b text constraint dst_a_not_null1 not null, constraint dst_a_not_null check (b <> ''));"));
+        let choices = reylo_migrate::Choices { drop: vec!["src.a".into()], rename: vec![("src".into(), "dst".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "dst", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("select b from dst").await[0].text("b"), "b");
     }
 
     /// A column whose not null has a name of its own, renamed with a change to its definition: the

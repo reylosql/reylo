@@ -2719,6 +2719,8 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
     for (old, new, old_table, new_table) in renamed {
         let related = |o: &Object| o.owner.as_deref() == Some(old_table.as_str()) || o.goes_with.as_ref().is_some_and(|c| current.objects.get(c).is_some_and(|c| c.owner.as_deref() == Some(old_table.as_str())));
         let new_rel = new_table.strip_prefix("table ").unwrap_or(new_table);
+        // The names the renames below give the table's constraints, which no other may be given.
+        let mut given: Vec<String> = Vec::new();
         for o in current.objects.values().filter(|o| matches!(o.kind, Some(Kind::Constraint | Kind::Index | Kind::Sequence)) && related(o)) {
             let Some((word, rest)) = o.id.split_once(' ') else { continue };
             let (prefix, name) = last(rest);
@@ -2726,6 +2728,9 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
             let at = if o.kind == Some(Kind::Constraint) { new_rel.to_string() } else { prefix.clone() };
             if wanted == name || !target.objects.get(&format!("{word} {at}.{wanted}")).is_some_and(|t| t.kind == o.kind) {
                 continue;
+            }
+            if o.kind == Some(Kind::Constraint) {
+                given.push(unquoted(&wanted));
             }
             out.push(match o.kind {
                 Some(Kind::Constraint) => format!("alter table {at} rename constraint {name} to {wanted}"),
@@ -2766,30 +2771,37 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
                 || copied.contains(&unquoted(wanted))
                 || current.objects.values().any(|c| c.kind == Some(Kind::Constraint) && related(c) && c.id.split_once(' ').is_some_and(|(_, rest)| unquoted(&last(rest).1) == unquoted(wanted)))
         };
-        // The names given so far, which two columns' names cut short alike could both be given.
-        let mut given: Vec<String> = Vec::new();
+        // A kept column's not null takes the target's name; those renames go last, after the others
+        // have let go of the names they hold, and what they give no other is given.
+        let mut kept_renames = Vec::new();
+        for o in &columns {
+            let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
+            let (Some(name), Some(kept)) = (not_null_name(o), target.objects.get(&format!("column {new_rel}.{column}"))) else { continue };
+            let wanted = crate::diff::swap_name(&name, old, new);
+            if wanted != name && not_null_name(kept).as_deref() == Some(wanted.as_str()) {
+                given.push(unquoted(&wanted));
+                kept_renames.push(format!("alter table {new_rel} rename constraint {name} to {wanted}"));
+            }
+        }
+        // One the target has no column for: the name Postgres would make, as it holds it, with a
+        // number after its label where that is held or given, as Postgres numbers it.
         for o in &columns {
             let Some(column) = o.id.strip_prefix(&format!("column {old_rel}.")) else { continue };
             let Some(name) = not_null_name(o) else { continue };
-            let Some(kept) = target.objects.get(&format!("column {new_rel}.{column}")) else {
-                // The name Postgres would make, as it holds it: with a number after its label where
-                // that is held, as Postgres numbers it.
-                let column = unquoted(column);
-                if !generated_not_null(&name, old_rel, &column) {
-                    continue;
-                }
-                let made = (0..100).map(|n| not_null_named(new_rel, &column, &if n == 0 { "not_null".to_string() } else { format!("not_null{n}") })).find(|m| *m == unquoted(&name) || (!held(m) && !given.contains(m)));
-                if let Some(made) = made.filter(|m| *m != unquoted(&name)) {
-                    out.push(format!("alter table {new_rel} rename constraint {name} to {}", declared::quote_ident(&made)));
-                    given.push(made);
-                }
+            if target.objects.contains_key(&format!("column {new_rel}.{column}")) {
                 continue;
-            };
-            let wanted = crate::diff::swap_name(&name, old, new);
-            if wanted != name && not_null_name(kept).as_deref() == Some(wanted.as_str()) {
-                out.push(format!("alter table {new_rel} rename constraint {name} to {wanted}"));
+            }
+            let column = unquoted(column);
+            if !generated_not_null(&name, old_rel, &column) {
+                continue;
+            }
+            let made = (0..100).map(|n| not_null_named(new_rel, &column, &if n == 0 { "not_null".to_string() } else { format!("not_null{n}") })).find(|m| *m == unquoted(&name) || (!held(m) && !given.contains(m)));
+            if let Some(made) = made.filter(|m| *m != unquoted(&name)) {
+                out.push(format!("alter table {new_rel} rename constraint {name} to {}", declared::quote_ident(&made)));
+                given.push(made);
             }
         }
+        out.extend(kept_renames);
     }
     out
 }
