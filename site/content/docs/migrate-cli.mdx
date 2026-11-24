@@ -103,7 +103,7 @@ Writes the next migration, from your change to `schema.sql`.
 - It first checks that your development database ran each migration as it now reads. An edited or deleted one, such as another branch's, is refused until `reylo migrate dev` settles it.
 - With no `schema.sql`, it writes what your development database has that your migrations don't. That's [schemaless mode](/migrate/usage#schemaless-mode).
 - Edit the file freely, and add any data changes.
-- On Postgres, new constraints and indexes never block writes, and a table rewrite needs `--blocking`. Each statement gives up a busy lock after half a second and retries.
+- On Postgres, new constraints and indexes never block writes, and a table rewrite needs `--blocking`. A statement gives up a busy lock after half a second, and its migration runs again from the start.
 - On Postgres, a changed index or key is built beside the old one, then takes its place.
 - On Postgres, a new enum value the change also uses gets a migration of its own, before its first use. Postgres can't use a value in the transaction that adds it.
 - On MySQL, a change that copies its table while it blocks writes needs `--blocking`. That's most column type changes, a removed enum value and a table partitioned anew.

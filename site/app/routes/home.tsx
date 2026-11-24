@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { Route } from './+types/home';
 import { HomeLanding } from '@/components/home-landing';
+import { agentPromptFiles, readAgentPrompt } from '@/lib/agent-prompt';
 import { siteTitle, siteUrl } from '@/lib/layout.shared';
 import { movedAnchorsScript } from '@/lib/moved-anchors';
 import { ogAlt, ogSize } from '@/lib/og';
@@ -13,13 +14,13 @@ import { structuredData } from '@/lib/structured-data';
  * Reylo's homepage, at / (components/home-landing.tsx); the docs open at /docs. Run at build time,
  * when the page is rendered to a file: the intro's description, for the metadata; the hash of the
  * link preview's route, which its URL carries, so that a change to the card changes the URL and the
- * caches of X and Slack fetch the new card; and Reylo's star count, for the nav's GitHub pill, or none
- * when GitHub can't be reached.
+ * caches of X and Slack fetch the new card; Reylo's star count, for the nav's GitHub pill, or none
+ * when GitHub can't be reached; and the setup prompt the hero's "Copy agent prompt" copies.
  */
 export async function loader() {
   const description = source.getPage([])?.data.description ?? '';
   const og = createHash('sha256').update(await readFile('app/routes/opengraph-image.tsx')).digest('hex').slice(0, 16);
-  return { description, og, stars: await fetchStars() };
+  return { description, og, stars: await fetchStars(), agentPrompt: await readAgentPrompt(agentPromptFiles.reylo) };
 }
 
 /** The site's metadata: its title, the intro's description, and the link previews, whose image is app/routes/opengraph-image.tsx. */
@@ -68,7 +69,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     <>
       <script dangerouslySetInnerHTML={{ __html: movedAnchorsScript }} />
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: structuredData(loaderData.description) }} />
-      <HomeLanding stars={loaderData.stars} />
+      <HomeLanding stars={loaderData.stars} agentPrompt={loaderData.agentPrompt} />
     </>
   );
 }

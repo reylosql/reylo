@@ -68,11 +68,12 @@ export const compareOrmRows: { id: string; label: string; asks?: string }[] = [
  * The migration tools beside Reylo Migrate, on /migrate/compare and in its launch post, in an order
  * that keeps the longer subtitles from sitting side by side. Every mark
  * comes from lib/migrate-compare-results.json, written from real runs of each tool on Postgres 18,
- * MySQL 8.4 and SQLite.
+ * MySQL 8.4 and SQLite, but Atlas's, which are Atlas Pro's documented behavior, since its free
+ * builds leave out views, functions, triggers and policies.
  */
 export const migrateTools = [
   { id: 'prisma', name: 'Prisma', sub: 'TypeScript', href: 'https://www.prisma.io/orm' },
-  { id: 'atlas', name: 'Atlas', sub: 'Go', href: 'https://atlasgo.io' },
+  { id: 'atlas', name: 'Atlas Pro', sub: 'Go', href: 'https://atlasgo.io' },
   { id: 'drizzle', name: 'Drizzle Kit', sub: 'TypeScript', href: 'https://orm.drizzle.team/docs/kit-overview' },
   { id: 'flyway', name: 'Flyway', sub: 'Java', href: 'https://github.com/flyway/flyway' },
   { id: 'pgdelta', name: 'pg-delta', sub: 'Supabase', href: 'https://github.com/supabase/pg-toolbelt/tree/main/packages/pg-delta' },

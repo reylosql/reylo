@@ -632,3 +632,53 @@
   }
 
 }
+
+/* "Copy agent prompt" under the hero's install row (components/home-chrome.tsx): a quiet link with a
+   dotted underline, the sparkles in the accent. Both labels share one grid cell, so "Copied" moves nothing. */
+.ml-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 1rem;
+  color: var(--color-fd-muted-foreground);
+  cursor: pointer;
+}
+.ml-agent svg {
+  flex: none;
+  width: 1rem;
+  height: 1rem;
+  color: var(--dk-accent);
+  /* centred on the label's capitals, which sit low in IBM Plex Sans's line box */
+  translate: 0 0.375px;
+}
+.ml-agent-label {
+  display: grid;
+  justify-items: start;
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in oklab, currentColor 55%, transparent);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 0.3em;
+}
+.ml-agent-label > span {
+  grid-area: 1 / 1;
+  visibility: hidden;
+}
+.ml-agent-label > [data-shown] {
+  visibility: visible;
+}
+.ml-agent:hover {
+  color: var(--color-fd-foreground);
+}
+.ml-agent:hover .ml-agent-label {
+  text-decoration-color: currentColor;
+}
+.ml-agent:focus-visible {
+  outline: 2px solid var(--dk-accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}

@@ -249,8 +249,8 @@
       }
     },
     "atlas": {
-      "name": "Atlas",
-      "version": "1.4.2 standard, 1.3.1 community",
+      "name": "Atlas Pro",
+      "version": "Pro, from its documentation on 2026-11-24",
       "cells": {
         "sql-schema": {
           "state": "y"
@@ -268,67 +268,62 @@
           "state": "y"
         },
         "domains": {
-          "state": "p",
-          "note": "The free standard build refuses domains until `atlas login`, and the community build adds the column without creating its domain."
+          "state": "y"
         },
         "views": {
-          "state": "p",
-          "note": "The free standard build refuses views until `atlas login`, and the community build ignores them."
+          "state": "y"
         },
         "functions": {
-          "state": "p",
-          "note": "The free standard build refuses functions until `atlas login`, and the community build ignores them."
+          "state": "y"
         },
         "triggers": {
-          "state": "p",
-          "note": "The free standard build refuses a trigger's function until `atlas login`, and the community build ignores both."
+          "state": "y"
         },
         "rls": {
-          "state": "p",
-          "note": "The free standard build refuses policies until `atlas login`, and the community build ignores them."
+          "state": "y"
         },
         "extensions": {
-          "state": "p",
-          "note": "The free standard build refuses extensions until `atlas login`, and the community build ignores them."
+          "state": "y"
         },
         "three-dialects": {
           "state": "y"
         },
         "renames": {
-          "state": "y"
+          "state": "p",
+          "note": "A rename keeps its rows only when answered at a prompt in a terminal or marked with `-- atlas:renamed_from`. Otherwise, as in CI or an agent's shell, `atlas migrate diff` writes a drop and an add without a word."
         },
         "data-loss": {
           "state": "p",
-          "note": "With `atlas migrate diff`, the drop is written and `atlas migrate apply` runs it without asking, while `atlas schema apply` asks to approve every plan alike."
+          "note": "A drop fails `atlas migrate lint` until the file says `-- atlas:nolint destructive`, but `atlas migrate diff` writes it and `atlas migrate apply` runs it without asking."
         },
         "view-dependencies": {
           "state": "p",
-          "note": "The free standard build refuses the view until `atlas login`, and the community build's `alter column type` fails on it."
+          "note": "Atlas's documentation never says that a view reading the column is taken down and put back around the change."
         },
         "non-blocking": {
           "state": "p",
-          "note": "Only with `concurrent_index` turned on in `atlas.hcl`; by default `atlas schema apply` writes a plain `create index`."
+          "note": "Only with `concurrent_index` turned on in `atlas.hcl`; by default a new index is a plain `create index`."
         },
         "shadow": {
           "state": "y"
         },
         "drift": {
           "state": "p",
-          "note": "On a database with a hand-added column, the free builds' `atlas migrate apply` ran the pending migration without a word."
+          "note": "Only with a `check \"migrate_apply\"` block in `atlas.hcl` whose drift check is set to `on_error = FAIL`."
         },
         "out-of-order": {
           "state": "y"
         },
         "branch-switch": {
-          "state": "n",
-          "note": "After a switch, `atlas migrate apply` refused this branch's migration as out of order, or ran it beside the other branch's table, and the community build has no `atlas migrate down`."
+          "state": "p",
+          "note": "A migration is reverted by hand with `atlas migrate down`, before the switch, while the other branch's files are still there. After the switch, `atlas migrate apply` fails on this branch's migration as out of order."
         },
         "lockfile": {
           "state": "y"
         },
         "open-source": {
-          "state": "p",
-          "note": "The Apache-2.0 community build leaves `atlas migrate down` to the standard build, under Ariga's EULA, and drift alerts to Atlas Pro."
+          "state": "n",
+          "note": "Atlas Pro is proprietary, at $9 per seat a month, and runs only on a machine signed in with `atlas login`. The Apache-2.0 community build leaves out views, functions, triggers, policies, extensions, domains, linting and drift checks."
         }
       }
     },

@@ -13,7 +13,7 @@ import { githubUrl, migrateCompareUrl, migrateDocsUrl } from '@/lib/layout.share
  * (content/docs/migrate.mdx), and the docs are a page of their own, at /migrate/docs. The players
  * run on timers from the moment the page loads; nothing here reads the scroll position.
  */
-export function MigrateLanding({ stars }: { stars?: number }) {
+export function MigrateLanding({ stars, agentPrompt }: { stars?: number; agentPrompt?: string }) {
   return (
     <div className="ml rh">
       <Nav
@@ -33,7 +33,7 @@ export function MigrateLanding({ stars }: { stars?: number }) {
             <span>SQL-first</span> <em>schema and migrations.</em>
           </h1>
           <p className="ml-lede">Model your schema in <code>schema.sql</code>. Generate migrations, or write your own. Works on Postgres, MySQL and SQLite.</p>
-          <Install docs={migrateDocsUrl} />
+          <Install docs={migrateDocsUrl} agentPrompt={agentPrompt} />
         </div>
         <div className="ml-hero-visual">
           <SchemaToMigration />

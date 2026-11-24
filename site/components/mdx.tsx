@@ -17,8 +17,8 @@ import { Pairs, Rules } from './value-pairs';
  */
 export function getMDXComponents(components?: MDXComponents) {
   return docsMdxComponents({
-    // The setup instructions for a coding agent at the top of Setup.
-    AgentPrompt: ({ children }: { children: ReactNode }) => <AgentPrompt title="Set up Reylo with an agent">{children}</AgentPrompt>,
+    // The setup instructions for a coding agent: Reylo's in Setup, Reylo Migrate's on its intro, which names its own title.
+    AgentPrompt: ({ children, title = 'Set up Reylo with an agent' }: { children: ReactNode; title?: string }) => <AgentPrompt title={title}>{children}</AgentPrompt>,
     // A page's schema.sql blocks, which the capture analyzes the page's statements against and each
     // table's hover shows (lib/table-hovers.ts), and which the page itself doesn't show.
     PageSchema: () => null,
