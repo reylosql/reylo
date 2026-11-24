@@ -541,7 +541,8 @@ async fn storage(db: &mut Db) -> Result<BTreeMap<String, Stored>, Error> {
 }
 
 /// The names a line of SQL writes, as Postgres reads them: a quoted one as written (a doubled quote
-/// one quote), an unquoted word (`$` part of it) folded to lower case. String literals hold none.
+/// one quote), an unquoted word (`$` part of it) with its ASCII letters folded to lower case. A
+/// string literal's names are those it holds, as `nextval('public.order_no')` reads its own.
 fn identifiers(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut chars = line.chars().peekable();
@@ -562,15 +563,20 @@ fn identifiers(line: &str) -> Vec<String> {
             }
             out.push(name);
         } else if c == '\'' {
+            let mut text = String::new();
             while let Some(c) = chars.next() {
-                if c == '\'' && chars.next_if_eq(&'\'').is_none() {
-                    break;
+                if c == '\'' {
+                    if chars.next_if_eq(&'\'').is_none() {
+                        break;
+                    }
                 }
+                text.push(c);
             }
+            out.extend(identifiers(&text));
         } else if c.is_alphabetic() || c == '_' {
-            let mut word = c.to_lowercase().to_string();
+            let mut word = c.to_ascii_lowercase().to_string();
             while let Some(&c) = chars.peek().filter(|c| c.is_alphanumeric() || **c == '_' || **c == '$') {
-                word.extend(c.to_lowercase());
+                word.push(c.to_ascii_lowercase());
                 chars.next();
             }
             out.push(word);
@@ -787,7 +793,8 @@ mod tests {
 
     #[test]
     fn identifiers_are_read_as_postgres_reads_them() {
-        assert_eq!(super::identifiers(r#"drop index "orders$Idx", ORDERS_ID; alter table "T""x" alter column "ID" set default nextval('order_no')"#), ["drop", "index", "orders$Idx", "orders_id", "alter", "table", "T\"x", "alter", "column", "ID", "set", "default", "nextval"]);
+        assert_eq!(super::identifiers(r#"drop index "orders$Idx", ORDERS_ID; alter table "T""x" alter column "ID" set default nextval('public.Order_No'::regclass)"#), ["drop", "index", "orders$Idx", "orders_id", "alter", "table", "T\"x", "alter", "column", "ID", "set", "default", "nextval", "public", "order_no", "regclass"]);
+        assert_eq!(super::identifiers("drop index ÉvéNEMENTS_IDX"), ["drop", "index", "Événements_idx"]);
     }
 
     use super::*;
