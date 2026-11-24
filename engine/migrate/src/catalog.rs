@@ -791,8 +791,17 @@ fn cast_elements(items: &[&str], ty: &str) -> Option<Vec<String>> {
         [] => false,
     };
     if read.iter().any(|(t, _)| value(t)) {
-        let cast = |e: &&str| if e.ends_with(&format!("::{ty}")) { e.to_string() } else { format!("({e})::{ty}") };
-        return Some(items.iter().map(cast).collect());
+        // A cast goes beneath a collation: `(x COLLATE "C")` reads back as `((x)::ty COLLATE "C")`.
+        let cast = |(e, (t, close)): (&&str, &(Vec<Token>, Vec<Option<usize>>))| {
+            let last = t.len().saturating_sub(1);
+            let collate = (symbol(t, 0, "(") && close[0] == Some(last)).then(|| top_level(close, 1, last).into_iter().find(|&k| word(t, k, "COLLATE"))).flatten();
+            match collate {
+                Some(c) if c > 1 && type_end(t, c + 1) == Some(last) => format!("(({})::{ty} COLLATE {})", &e[t[1].start..t[c - 1].end], &e[t[c + 1].start..t[last - 1].end]),
+                _ if e.ends_with(&format!("::{ty}")) => e.to_string(),
+                _ => format!("({e})::{ty}"),
+            }
+        };
+        return Some(items.iter().zip(&read).map(cast).collect());
     }
     items
         .iter()
@@ -2246,6 +2255,7 @@ mod tests {
             "CREATE INDEX i ON public.t USING btree (id) WHERE ((s)::text <> ALL (ARRAY[('a'::character varying)::text, (NULL::character varying)::text]))"
         );
         assert_eq!(pg_reread("(ARRAY['a'::character varying, public.vf(), (x)::text])::text[]"), "ARRAY[('a'::character varying)::text, (public.vf())::text, (x)::text]");
+        assert_eq!(pg_reread("(ARRAY['a'::character varying, (public.vf() COLLATE \"C\")])::text[]"), "ARRAY[('a'::character varying)::text, ((public.vf())::text COLLATE \"C\")]");
         assert_eq!(pg_reread("(ARRAY[1, '2.5'::numeric(4,1)])::numeric(10,2)[]"), "ARRAY[(1)::numeric(10,2), ('2.5'::numeric(4,1))::numeric(10,2)]");
         assert_eq!(pg_reread("(ARRAY['a'::text, true])::public.\"My Type\"[] = c"), "ARRAY[('a'::text)::public.\"My Type\", (true)::public.\"My Type\"] = c");
         assert_eq!(pg_reread("(ARRAY[ARRAY[1, 2], ARRAY[3, '4'::text]])::text[]"), "ARRAY[ARRAY[(1)::text, (2)::text], ARRAY[(3)::text, '4'::text]]");
