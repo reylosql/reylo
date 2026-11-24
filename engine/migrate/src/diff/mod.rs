@@ -157,6 +157,13 @@ pub trait Alterer: Send {
         let _ = (from, to);
         None
     }
+    /// The definition `from` has once the server renames the columns `renamed` names under it (each
+    /// an old column's id, to the new one's), as a key's column list follows its columns; None where
+    /// it can't tell. An object whose definition then is the target's is left as it is.
+    fn renamed_under(&self, from: &Object, renamed: &BTreeMap<String, String>) -> Option<String> {
+        let _ = (from, renamed);
+        None
+    }
     /// Both schemas, given before it asks for any statement: an alterer whose statements for one
     /// table reach others (SQLite's rebuild, the tables that reference it) reads them.
     fn schemas(&self, from: &Schema, to: &Schema) {
@@ -840,7 +847,22 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
     // Altered in a way a view, rule, policy or trigger on it blocks, and of those, made again.
     let mut blocking: BTreeSet<String> = BTreeSet::new();
     let mut remade: BTreeSet<String> = BTreeSet::new();
+    // What the server renames with a renamed column (a key on it, a foreign key to it), whose
+    // definition then is the target's, stays as it is, with the renamed columns it needs.
+    let renamed_columns: BTreeMap<String, String> = decided.iter().map(|(new, (old, _))| (old.clone(), new.clone())).collect();
+    let mut kept_through: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (id, a) in &from.objects {
+        if let Some(b) = to.objects.get(id).filter(|b| a.def != b.def) {
+            let under: Vec<String> = a.deps.iter().filter(|d| renamed_columns.contains_key(*d)).cloned().collect();
+            // Not on a table with partitions or children, whose copies of it keep names made from
+            // the old column's, nor on a column renamed with its parent's.
+            let parented = a.owner.as_deref().is_some_and(|t| [from, to].iter().any(|s| s.objects.values().any(|o| o.kind == Some(Kind::Table) && parent_of(o).as_deref() == Some(t))));
+            let follows = under.iter().any(|old| followers.contains(&renamed_columns[old]));
+            if !under.is_empty() && !parented && !follows && alterer.renamed_under(a, &renamed_columns).is_some_and(|d| d == b.def) {
+                kept_through.insert(id.clone(), under);
+                continue;
+            }
+        }
         match to.objects.get(id) {
             None if left.contains(id) => {}
             None => {
@@ -950,6 +972,13 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
     for (new_id, (old_id, _)) in &renames {
         drops.remove(old_id);
         creates.remove(new_id);
+    }
+    // One whose column the plan doesn't rename after all (its table made again) is made again.
+    for (id, under) in &kept_through {
+        if !under.iter().all(|old| renames.values().any(|(o, _)| o == old)) {
+            drops.insert(id.clone());
+            creates.insert(id.clone());
+        }
     }
 
     // Whatever depends on an object dropped and created again goes and comes back with it, and so

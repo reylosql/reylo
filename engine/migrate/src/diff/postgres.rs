@@ -4297,6 +4297,18 @@ impl Alterer for PostgresAlterer {
         Some(out)
     }
 
+    fn renamed_under(&self, from: &Object, renamed: &BTreeMap<String, String>) -> Option<String> {
+        if !matches!(from.kind, Some(Kind::Constraint | Kind::Index)) {
+            return None;
+        }
+        let own = from.owner.as_deref()?.strip_prefix("table ")?;
+        // A foreign key's referenced columns are another table's, which it depends on, or its own
+        // table's where it names that; else a table the plan doesn't read, whose names it can't tell.
+        let referenced = from.deps.iter().filter_map(|d| column_of(d)).map(|(t, _)| t).find(|t| t != own).or_else(|| references(&from.def).is_none_or(|r| r == own || own.ends_with(&format!(".{r}"))).then(|| own.to_string()));
+        let names = |table: &str| -> BTreeMap<String, String> { renamed.iter().filter_map(|(old, new)| Some((column_of(old)?, column_of(new)?))).filter(|((t, _), _)| t == table).map(|((_, old), (_, new))| (catalog_name(&old), new)).collect() };
+        renamed_key(&from.def, &names(own), referenced.map(|r| names(&r)).as_ref())
+    }
+
     fn alter(&self, from: &Object, to: &Object) -> Option<Vec<String>> {
         let (table, name) = match to.kind? {
             Kind::Column => {
@@ -5024,6 +5036,129 @@ impl Alterer for PostgresAlterer {
     }
 }
 
+/// A column's id split into its table (`public.t`) and its name as written.
+fn column_of(id: &str) -> Option<(String, String)> {
+    let rest = id.strip_prefix("column ")?;
+    let name = super::last_written(rest);
+    Some((rest.strip_suffix(name.as_str())?.strip_suffix('.')?.to_string(), name))
+}
+
+/// The table a foreign key's definition references, as it writes it (`parents`, `public.parents`).
+fn references(def: &str) -> Option<String> {
+    let tokens = crate::sql::tokenize(def, Dialect::Postgres);
+    let at = tokens.iter().position(|t| t.upper() == "REFERENCES")?;
+    let end = tokens[at + 1..].iter().position(|t| t.text == "(").map(|k| at + 1 + k)?;
+    Some(def[tokens.get(at + 1)?.start..tokens[end - 1].end].to_string())
+}
+
+/// A name as the catalog holds it: a word folded to lowercase, a quoted name unquoted.
+fn catalog_name(written: &str) -> String {
+    match crate::sql::tokenize(written, Dialect::Postgres).first() {
+        Some(t) => token_name(t).unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
+fn token_name(t: &crate::sql::Token) -> Option<String> {
+    use crate::sql::TokenKind::{Quoted, Word};
+    match t.kind {
+        Word => Some(t.text.to_ascii_lowercase()),
+        Quoted => Some(t.text.get(1..t.text.len().saturating_sub(1)).unwrap_or_default().replace("\"\"", "\"")),
+        _ => None,
+    }
+}
+
+/// A key's or an index's definition (`PRIMARY KEY (id)`, `FOREIGN KEY (a) REFERENCES t(id)`,
+/// `CREATE INDEX i ON public.t USING btree (a)`) once the server renames the columns of its own table
+/// that `own` names, and of the table its foreign key references that `referenced` names (each by
+/// its name as the catalog holds it, to the new one as written): the names in its column lists
+/// follow. None where a renamed column's name is anywhere else in it (an expression, a predicate),
+/// which this can't tell is that column.
+fn renamed_key(def: &str, own: &BTreeMap<String, String>, referenced: Option<&BTreeMap<String, String>>) -> Option<String> {
+    let unread = BTreeMap::new();
+    use crate::sql::TokenKind::{Quoted, Symbol, Word};
+    let tokens = crate::sql::tokenize(def, Dialect::Postgres);
+    let symbol = |k: usize, s: &str| tokens.get(k).is_some_and(|t| t.kind == Symbol && t.text == s);
+    let upper = |k: usize| tokens.get(k).map(|t| t.upper()).unwrap_or_default();
+    // Each column name of a list: its token, and the names it is renamed by.
+    let mut columns: BTreeMap<usize, &BTreeMap<String, String>> = BTreeMap::new();
+    let mut k = 0;
+    while k < tokens.len() {
+        // Where a list of columns opens, and whose they are.
+        let list = match upper(k).as_str() {
+            "KEY" if matches!(upper(k.wrapping_sub(1)).as_str(), "PRIMARY" | "FOREIGN") && symbol(k + 1, "(") => Some((k + 1, own)),
+            "INCLUDE" if symbol(k + 1, "(") => Some((k + 1, own)),
+            "UNIQUE" => {
+                let mut at = k + 1;
+                if upper(at) == "NULLS" {
+                    at += if upper(at + 1) == "NOT" { 3 } else { 2 };
+                }
+                symbol(at, "(").then_some((at, own))
+            }
+            // An index's (or an exclusion constraint's) elements, after its access method.
+            "USING" if tokens.get(k + 1).is_some_and(|t| t.kind == Word) && symbol(k + 2, "(") => Some((k + 2, own)),
+            "REFERENCES" => {
+                let mut at = k + 1;
+                while tokens.get(at).is_some_and(|t| matches!(t.kind, Word | Quoted)) && symbol(at + 1, ".") {
+                    at += 2;
+                }
+                if symbol(at + 1, "(") && referenced.is_none() {
+                    return None;
+                }
+                symbol(at + 1, "(").then_some((at + 1, referenced.unwrap_or(&unread)))
+            }
+            _ => None,
+        };
+        let Some((open, names)) = list else {
+            k += 1;
+            continue;
+        };
+        // Each element's column is its first name, or the one after PERIOD, unless it is a call.
+        let mut depth = 0;
+        let mut start = open + 1;
+        let mut at = open;
+        while at < tokens.len() {
+            if symbol(at, "(") {
+                depth += 1;
+            } else if symbol(at, ")") || symbol(at, ",") {
+                if depth == 1 {
+                    let first = if upper(start) == "PERIOD" && at > start + 1 { start + 1 } else { start };
+                    if first < at && matches!(tokens[first].kind, Word | Quoted) && !symbol(first + 1, "(") && !symbol(first + 1, ".") {
+                        columns.insert(first, names);
+                    }
+                    start = at + 1;
+                }
+                if symbol(at, ")") {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+            at += 1;
+        }
+        k = at + 1;
+    }
+    let mut out = String::with_capacity(def.len());
+    let mut from = 0;
+    for (k, t) in tokens.iter().enumerate() {
+        let Some(name) = token_name(t) else { continue };
+        match columns.get(&k) {
+            Some(names) => {
+                if let Some(new) = names.get(&name) {
+                    out.push_str(&def[from..t.start]);
+                    out.push_str(new);
+                    from = t.end;
+                }
+            }
+            None if own.contains_key(&name) || referenced.is_some_and(|r| r.contains_key(&name)) => return None,
+            None => {}
+        }
+    }
+    out.push_str(&def[from..]);
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5032,6 +5167,28 @@ mod tests {
     fn a_do_block_is_quoted_by_a_tag_its_body_lacks() {
         assert_eq!(dollar_block("begin end"), "do $reylo$ begin end $reylo$");
         assert_eq!(dollar_block("select 'uses $reylo$ and $reylo1$'"), "do $reylo2$ select 'uses $reylo$ and $reylo1$' $reylo2$");
+    }
+
+    #[test]
+    fn a_key_follows_its_renamed_columns() {
+        let names = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> { pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect() };
+        let none = names(&[]);
+        assert_eq!(renamed_key("PRIMARY KEY (id)", &names(&[("id", "parent_id")]), Some(&none)).as_deref(), Some("PRIMARY KEY (parent_id)"));
+        let fk = "FOREIGN KEY (parent_id) REFERENCES parents(id) ON DELETE CASCADE\n-- links uuid to uuid";
+        assert_eq!(renamed_key(fk, &none, Some(&names(&[("id", "parent_id")]))).as_deref(), Some("FOREIGN KEY (parent_id) REFERENCES parents(parent_id) ON DELETE CASCADE\n-- links uuid to uuid"));
+        // Each list is its own table's: the referencing column of the same name stays.
+        assert_eq!(renamed_key("FOREIGN KEY (id) REFERENCES public.parents(id)", &none, Some(&names(&[("id", "x")]))).as_deref(), Some("FOREIGN KEY (id) REFERENCES public.parents(x)"));
+        assert_eq!(renamed_key("UNIQUE NULLS NOT DISTINCT (\"Code\") INCLUDE (id)", &names(&[("Code", "\"Slug\"")]), Some(&none)).as_deref(), Some("UNIQUE NULLS NOT DISTINCT (\"Slug\") INCLUDE (id)"));
+        assert_eq!(renamed_key("FOREIGN KEY (id, PERIOD valid_at) REFERENCES t(id, PERIOD valid_at)", &none, Some(&names(&[("valid_at", "during")]))).as_deref(), Some("FOREIGN KEY (id, PERIOD valid_at) REFERENCES t(id, PERIOD during)"));
+        assert_eq!(renamed_key("CREATE INDEX i ON public.t USING btree (a DESC NULLS LAST) INCLUDE (b)", &names(&[("a", "c"), ("b", "d")]), Some(&none)).as_deref(), Some("CREATE INDEX i ON public.t USING btree (c DESC NULLS LAST) INCLUDE (d)"));
+        // A renamed column anywhere else is left for the plan to make again.
+        assert_eq!(renamed_key("CREATE INDEX i ON public.t USING btree (a) WHERE (a > 0)", &names(&[("a", "b")]), Some(&none)), None);
+        assert_eq!(renamed_key("CREATE INDEX i ON public.t USING btree (lower(a))", &names(&[("a", "b")]), Some(&none)), None);
+        assert_eq!(renamed_key("FOREIGN KEY (a, c) REFERENCES p(x) ON DELETE SET NULL (a)", &names(&[("a", "b")]), Some(&none)), None);
+        // A foreign key to a table the plan doesn't read keeps its own.
+        assert_eq!(renamed_key("FOREIGN KEY (id) REFERENCES ext.codes(id)", &names(&[("id", "code")]), None), None);
+        assert_eq!(references("FOREIGN KEY (id) REFERENCES public.parents(id) ON DELETE CASCADE").as_deref(), Some("public.parents"));
+        assert_eq!(renamed_key("CHECK ((a > 0))", &names(&[("a", "b")]), Some(&none)), None);
     }
 
     #[test]
