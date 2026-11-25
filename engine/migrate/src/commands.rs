@@ -7244,8 +7244,13 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
         // Each named as --drop takes it for that one alone: as shown, else by as much of its whole
         // name as tells it apart; where none does, no one command can accept them all.
         let spell = |id: &String, name: &String| -> Option<String> {
-            let parts = split_name(&shown_id(id));
-            std::iter::once(name.clone()).chain((0..parts.len()).rev().map(|k| parts[k..].join("."))).find(|c| matches!(resolve(&all, c), Ok(hits) if hits.len() == 1 && hits[0] == *id))
+            // Each part quoted where a dot or another character would split or change it.
+            let quote = |part: &String| if part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$') { part.clone() } else { format!("\"{}\"", part.replace('"', "\"\"")) };
+            let parts: Vec<String> = split_name(&shown_id(id)).iter().map(quote).collect();
+            std::iter::once(name.clone())
+                .chain((0..parts.len()).rev().map(|k| parts[k..].join(".")))
+                .chain(std::iter::once(shown_id(id)))
+                .find(|c| matches!(resolve(&all, c), Ok(hits) if hits.len() == 1 && hits[0] == *id))
         };
         let spelled: Vec<Option<String>> = unstated.iter().map(|l| spell(l, &display(l))).chain(unnamed.iter().map(|(id, name, _)| spell(id, name))).collect();
         let apart = !ambiguous && spelled.iter().all(Option::is_some);
@@ -10096,6 +10101,11 @@ mod tests {
         let drops = command.split("--drop ").nth(1).unwrap().split(' ').next().unwrap().split(',').map(String::from).collect::<Vec<_>>();
         let ids: Vec<String> = lost.iter().cloned().chain(narrowed.iter().map(|(id, _, _)| id.clone())).collect();
         assert!(drops.iter().all(|d| matches!(resolve(&ids, d), Ok(hits) if hits.len() == 1)), "{command}");
+        // A name with a dot in it keeps its quotes.
+        let narrowed: Vec<(String, String, String)> = vec![("column public.events.\"net.price\"".into(), "column events.\"net.price\"".into(), "loses".into()), ("column archive.events.\"net.price\"".into(), "column archive.events.\"net.price\"".into(), "loses".into())];
+        let problems = drop_problems(&[], &[], &narrowed, &[], &none, &nothing, &[], &Choices::default(), &Asked::migration("narrow", &[]));
+        let command = problems[1].json()["fixes"][0]["commands"][0].as_str().expect("the command for every change").to_string();
+        assert!(command.contains(r#"public.events."net.price""#) && command.contains(r#"archive.events."net.price""#), "{command}");
     }
 
     #[test]
