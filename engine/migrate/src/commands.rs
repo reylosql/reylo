@@ -6220,12 +6220,14 @@ fn drop_problems_of(lost: &[String], shown: &[String], narrowed: &[(String, Stri
         let r = reading(&stated, std::slice::from_ref(name), &[]);
         problems.push(asked.hazards(&r).iter().fold(Problem::new("loses-data", format!("Column {name} {why}")), |p, w| p.note(format!("It also {w}."))).offer("To accept that", asked, r));
     } else if !unnamed.is_empty() {
-        let names: Vec<String> = unstated.iter().map(|l| display(l)).chain(unnamed.iter().map(|(_, name, _)| name.clone())).collect();
+        // A name --drop would take for more than one of them is written with its schema.
+        let flag = |id: &String, name: &String| -> String { if matches!(resolve(&all, name), Ok(hits) if hits.len() == 1) { name.clone() } else { shown_id(id) } };
+        let names: Vec<String> = unstated.iter().map(|l| flag(l, &display(l))).chain(unnamed.iter().map(|(id, name, _)| flag(id, name))).collect();
         let all = reading(&stated, &names, &[]);
         // Where two of the names are one, --drop can't tell them apart, as the drop's refusal says.
         let apart = names.iter().enumerate().all(|(k, n)| !names[..k].contains(n));
-        for (k, (_, name, why)) in unnamed.iter().enumerate() {
-            let mut problem = Problem::new("loses-data", format!("Column {name} {why}")).hint("To accept that", &format!("--drop {}", shell_word(name)));
+        for (k, (id, name, why)) in unnamed.iter().enumerate() {
+            let mut problem = Problem::new("loses-data", format!("Column {name} {why}")).hint("To accept that", &format!("--drop {}", shell_word(&flag(id, name))));
             if k + 1 == unnamed.len() && apart {
                 problem = asked.hazards(&all).iter().fold(problem, |p, w| p.note(format!("It also {w}."))).offer("To accept every change", asked, all.clone());
             }
@@ -8968,6 +8970,11 @@ mod tests {
         let (lost, shown) = (["column public.t.p1".to_string(), "table public.t.p1".to_string()], ["column t.p1".to_string(), "table t.p1".to_string()]);
         let problems = drop_problems(&lost, &shown, &narrowed, &[], &none, &nothing, &[], &Choices::default(), &Asked::migration("narrow", &[]));
         assert!(problems.iter().all(|p| p.json().get("fixes").is_none()), "no command to repeat the refusal: {problems:?}");
+        // A name two schemas share is written with its schema.
+        let narrowed: Vec<(String, String, String)> = vec![("column public.events.price".into(), "column events.price".into(), "loses".into()), ("column archive.events.price".into(), "column archive.events.price".into(), "loses".into())];
+        let problems = drop_problems(&[], &[], &narrowed, &[], &none, &nothing, &[], &Choices::default(), &Asked::migration("narrow", &[]));
+        assert!(problems[0].lines.iter().any(|l| l == "    --drop public.events.price"), "{:?}", problems[0].lines);
+        assert_eq!(problems[1].json()["fixes"][0]["commands"], serde_json::json!(["reylo migrate new narrow --drop public.events.price,archive.events.price"]));
     }
 
     #[test]
