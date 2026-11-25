@@ -38,18 +38,20 @@ direct_url: ${DIRECT_DATABASE_URL:-${DATABASE_URL}}
 
 Run your build on a dry run of the deploy. Its type check then reads the schema the release command leaves.
 
-Fly sets your secrets only when your app runs, not while it builds. So pass the URL as a [build secret](https://fly.io/docs/apps/build-secrets/):
+Fly sets your secrets only when your app runs, not while it builds. So pass the direct connection as a [build secret](https://fly.io/docs/apps/build-secrets/):
 
 ```dockerfile title="Dockerfile"
-RUN --mount=type=secret,id=DATABASE_URL \
-  DATABASE_URL="$(cat /run/secrets/DATABASE_URL)" npx reylo migrate deploy --dry-run -- npm run build
+RUN --mount=type=secret,id=DIRECT_DATABASE_URL \
+  DIRECT_DATABASE_URL="$(cat /run/secrets/DIRECT_DATABASE_URL)" npx reylo migrate deploy --dry-run -- npm run build
 ```
 
-Deploy with it:
+Deploy with it, from your shell:
 
-```sh
-fly deploy --build-secret DATABASE_URL="$DATABASE_URL"
+```terminal
+$ fly deploy --build-secret DIRECT_DATABASE_URL="postgresql://…@direct.<cluster-id>.flympg.net/…"
 ```
+
+The build connects to the cluster, so it has to reach Fly's private network.
 
 ## Other images
 
