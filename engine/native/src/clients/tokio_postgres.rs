@@ -129,6 +129,10 @@ async fn describe(client: &Client, sql: &str) -> Result<Result<Describe, DbError
             // analysis asks again. The server cannot say which session it waited for once the wait
             // has ended, so none is named.
             Some(d) if *d.code() == ::tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE => Err(HostError(format!("{LOCKED}. Run it again once the lock is released: pg_locks lists the session that holds it"))),
+            // A describe cancelled, as by a `statement_timeout` shorter than the lock wait or a
+            // `pg_cancel_backend` while it waited on such a lock: a describe runs nothing, so the
+            // cancel says nothing of the statement either, and nothing is kept as its error.
+            Some(d) if *d.code() == ::tokio_postgres::error::SqlState::QUERY_CANCELED => Err(HostError(format!("The server cancelled the analysis of this statement: {}", pg_message(&e)))),
             Some(d) => {
                 let position = match d.position() {
                     Some(::tokio_postgres::error::ErrorPosition::Original(p)) => Some(*p as usize),
