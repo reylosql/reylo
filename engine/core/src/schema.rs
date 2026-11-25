@@ -494,6 +494,9 @@ mod tests {
         assert_eq!(list.json_schema(WIRE), json!({"type": "array", "items": {"anyOf": [{"anyOf": [{"type": "number", "format": "decimal"}, {"enum": ["NaN", "Infinity", "-Infinity"]}]}, {"type": "null"}]}}));
         let posts = Type::json_of(Slot::non_null(Type::array(Slot::non_null(post))));
         assert_eq!(posts.json_schema(WIRE), json!({"type": "array", "items": expected}));
+        // A key that is always null admits null alone, which `type` names once.
+        let none = Type::json_of(Slot::non_null(Type::structure(vec![field("a", Type::null(), true)])));
+        assert_eq!(none.json_schema(WIRE)["properties"]["a"], json!({"type": "null"}));
     }
 
     #[test]
