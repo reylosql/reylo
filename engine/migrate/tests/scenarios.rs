@@ -4115,6 +4115,9 @@ on!(
     a_migration_creating_supabases_publication_is_refused_where_it_exists,
     a_migration_making_a_dropped_supabase_extension_replays,
     a_later_reinstall_of_a_supabase_extension_leaves_it_to_earlier_migrations,
+    a_supabase_database_that_began_without_an_extension_replays_its_making,
+    init_refuses_supabases_publication_of_every_table,
+    a_migration_that_makes_supabases_publication_again_runs,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
     init_reads_an_in_list_on_a_varchar_column_as_it_reads_back,
@@ -7934,6 +7937,46 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.status().await, 0, "{}", p.peek());
     }
 
+    /// A Supabase database that began without one of Supabase's extensions replays its migrations from
+    /// how it began, which its history notes: one that makes the extension only if it isn't there, in
+    /// `public`, makes it there, and a later one moves it back; the checks and a reset find it so.
+    pub async fn a_supabase_database_that_began_without_an_extension_replays_its_making(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        p.exec("drop extension \"uuid-ossp\"").await;
+        p.file("20261124000000_posts.sql", "create extension if not exists \"uuid-ossp\" with schema public;\n\ncreate table posts (id uuid primary key default public.uuid_generate_v4());\n");
+        p.file("20261124000001_move.sql", "drop extension \"uuid-ossp\" cascade;\n\ncreate extension \"uuid-ossp\" with schema extensions;\n\nalter table posts alter column id set default extensions.uuid_generate_v4();\n");
+        p.schema("create extension \"uuid-ossp\" with schema extensions;\n\ncreate table posts (id uuid primary key default extensions.uuid_generate_v4());\n");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert_eq!(p.run(async |o, log| reylo_migrate::db_reset(o, false, log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("select n.nspname as s from pg_extension x join pg_namespace n on n.oid = x.extnamespace where x.extname = 'uuid-ossp'").await[0].text("s"), "extensions");
+    }
+
+    /// A Supabase database whose `supabase_realtime` was made again to publish every table can't be
+    /// begun from: init refuses it before writing anything, with the command that names its tables.
+    pub async fn init_refuses_supabases_publication_of_every_table(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        p.exec("create table posts (id int primary key)").await;
+        p.exec("drop publication supabase_realtime; create publication supabase_realtime for all tables").await;
+        p.output();
+        assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 1, "{}", p.peek());
+        assert_has!(p.output(), r"create publication supabase_realtime for table public\.posts");
+        assert!(!p.dir.join("schema.sql").exists());
+    }
+
+    /// A migration that drops `supabase_realtime` and makes it again is no project's own copy of it:
+    /// it runs, and replays, where the publication is.
+    pub async fn a_migration_that_makes_supabases_publication_again_runs(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        let sql = "create table posts (id int primary key);\n\ndrop publication supabase_realtime;\n\ncreate publication supabase_realtime for table posts;\n";
+        p.schema("create table posts (id int primary key);\n\nalter publication supabase_realtime add table posts;\n");
+        p.file("20261124000000_posts.sql", sql);
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    }
+
     /// A project begun before Reylo left `supabase_realtime` to Supabase creates it in its first
     /// migration, which fails on a new Supabase database: the checks say so before anything runs.
     pub async fn a_migration_creating_supabases_publication_is_refused_where_it_exists(mut p: P) {
@@ -7944,7 +7987,9 @@ create trigger kids_note after insert on kids begin update parents set name = na
         p.output();
         assert_eq!(p.dry_run().await, 1, "{}", p.peek());
         assert_eq!(p.migrate().await, 1, "{}", p.peek());
-        assert_has!(p.output(), r"Migration init\.sql creates supabase_realtime, which this Supabase database has already");
+        let out = p.output();
+        assert_has!(out.clone(), r"Migration init\.sql creates supabase_realtime, which this Supabase database has already");
+        assert_has!(out, r"reylo migrate history push --url <url>");
         assert_eq!(p.rows("select count(*) as n from pg_class where relname = 'profiles'").await[0].text("n"), "0");
     }
 

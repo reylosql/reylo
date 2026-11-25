@@ -415,9 +415,11 @@ async fn ensure_history(db: &mut Db) -> Result<(), Error> {
             for r in granted {
                 db.exec(&format!("revoke all on table {HISTORY_TABLE} from {}", r.text("grantee"))).await?;
             }
-            // On Supabase, the settings the database began under, which its shadows begin under.
+            // On Supabase, how the database began, which its shadows begin as: it has run no
+            // migration of Reylo's yet.
             if let Some(on) = api_began(db).await? {
-                note_api_began(db, on).await?;
+                let extensions = platform_extensions_now(db).await?;
+                note_api_began(db, on, &extensions).await?;
             }
             db.exec("commit").await
         }
@@ -2437,17 +2439,23 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
     let pending: Vec<Migration> = files.iter().filter(|f| !applied_files.iter().any(|a| a.name == f.name) && !records.contains(f)).cloned().collect();
     // A migration that creates the publication every Supabase database has, as a project begun
     // before Reylo left it to Supabase writes it, fails on one.
-    if d == Dialect::Postgres && pending.iter().any(|p| creates_platform_publication_in(&p.sql)) {
+    // The first pending migration that creates or drops it, in the order they run.
+    let first = pending.iter().find_map(|p| platform_publication_created_first(&[p.sql.as_str()]).map(|created| (p, created)));
+    if let (Dialect::Postgres, Some((p, true))) = (d, first) {
         let has = db
             .rows(&format!("select 1 from pg_publication where pubname = {} and {}", crate::db::literal(crate::catalog::PLATFORM_PUBLICATION), crate::catalog::platform_names()))
             .await?;
         if !has.is_empty() {
-            for p in pending.iter().filter(|p| creates_platform_publication_in(&p.sql)) {
-                problems.push(
-                    Problem::new("platform-publication-exists", format!("Migration {} creates {}, which this Supabase database has already", p.name, crate::catalog::PLATFORM_PUBLICATION))
-                        .note(format!("Every Supabase database has it. A migration adds its tables to it, with alter publication {} add table.", crate::catalog::PLATFORM_PUBLICATION)),
-                );
+            let name = crate::catalog::PLATFORM_PUBLICATION;
+            let mut problem = Problem::new("platform-publication-exists", format!("Migration {} creates {name}, which this Supabase database has already", p.name))
+                .note(format!("Every Supabase database has it, and a migration adds its tables to it with alter publication {name} add table."));
+            if p.name == INIT {
+                problem = problem
+                    .note(format!("A project begun with an earlier version of Reylo creates it in {INIT}."))
+                    .fix("Start the migrations again from your development database, which ran them all", &["mv reylo reylo-old", "reylo migrate init"])
+                    .fix("Then record them on each other database that ran the old ones, running nothing", &["reylo migrate history push --url <url>"]);
             }
+            problems.push(problem);
         }
     }
     // init.sql, which `init` writes, holds the whole schema and runs only on an empty database.
@@ -3027,25 +3035,44 @@ fn created_schemas(opts: &Options) -> Vec<String> {
 /// before Reylo took what a new Supabase database has for Supabase's did: they make all of it, so
 /// its shadows leave all of it to them.
 fn creates_platform_publication(opts: &Options) -> bool {
-    let mut texts = vec![opts.schema_text().unwrap_or_default()];
-    texts.extend(opts.migrations().map(|(files, _)| files.into_iter().map(|f| f.sql).collect::<Vec<_>>()).unwrap_or_default());
-    texts.iter().any(|t| creates_platform_publication_in(t))
+    let files = opts.migrations().map(|(files, _)| run_order(opts, &files)).unwrap_or_default();
+    let texts: Vec<String> = files.into_iter().map(|f| f.sql).chain(opts.schema_text()).collect();
+    platform_publication_created_first(&texts.iter().map(String::as_str).collect::<Vec<_>>()) == Some(true)
 }
 
-/// Whether a text creates the platform's publication: read as SQL, so that text in a string or a
-/// comment, or a quoted name of another case, is none.
-fn creates_platform_publication_in(text: &str) -> bool {
+/// Whether the first statement in `texts`, in their order, that creates or drops the platform's
+/// publication creates it: read as SQL, so that text in a string or a comment, or a quoted name of
+/// another case, is none. None where no statement does either.
+fn platform_publication_created_first(texts: &[&str]) -> Option<bool> {
     use crate::sql::TokenKind;
-    let tokens = crate::sql::tokenize(text, Dialect::Postgres);
-    tokens.windows(3).any(|w| {
-        w[0].upper() == "CREATE"
-            && w[1].upper() == "PUBLICATION"
-            && match w[2].kind {
-                TokenKind::Word => w[2].text.eq_ignore_ascii_case(crate::catalog::PLATFORM_PUBLICATION),
-                TokenKind::Quoted => quoted_name(&w[2].text) == crate::catalog::PLATFORM_PUBLICATION,
-                _ => false,
+    let named = |t: &crate::sql::Token| match t.kind {
+        TokenKind::Word => t.text.eq_ignore_ascii_case(crate::catalog::PLATFORM_PUBLICATION),
+        TokenKind::Quoted => quoted_name(&t.text) == crate::catalog::PLATFORM_PUBLICATION,
+        _ => false,
+    };
+    for text in texts {
+        let tokens = crate::sql::tokenize(text, Dialect::Postgres);
+        for k in 0..tokens.len() {
+            match (tokens[k].upper().as_str(), tokens.get(k + 1).map(|t| t.upper())) {
+                ("CREATE", Some(p)) if p == "PUBLICATION" && tokens.get(k + 2).is_some_and(named) => return Some(true),
+                ("DROP", Some(p)) if p == "PUBLICATION" => {
+                    // Each name of its list.
+                    let mut j = if tokens.get(k + 2).is_some_and(|t| t.upper() == "IF") { k + 4 } else { k + 2 };
+                    while let Some(t) = tokens.get(j).filter(|t| matches!(t.kind, TokenKind::Word | TokenKind::Quoted)) {
+                        if named(t) {
+                            return Some(false);
+                        }
+                        if !tokens.get(j + 1).is_some_and(|t| t.text == ",") {
+                            break;
+                        }
+                        j += 2;
+                    }
+                }
+                _ => {}
             }
-    })
+        }
+    }
+    None
 }
 
 /// A Postgres quoted identifier's name: its outer quotes taken off, and each doubled quote in it
@@ -3065,31 +3092,43 @@ fn unconditional_extensions(opts: &Options) -> Vec<String> {
 
 /// As [`unconditional_extensions`], of the migrations' texts in the order they run.
 fn extensions_begun_without(texts: &[&str]) -> Vec<String> {
+    extension_first_touches(texts).into_iter().filter(|(_, touch)| *touch == Touch::Created).map(|(n, _)| n).collect()
+}
+
+/// What a statement does to an extension: creates it whether or not the database has it already,
+/// creates it only where it hasn't, or drops it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Touch {
+    Created,
+    CreatedIfMissing,
+    Dropped,
+}
+
+/// Each extension's first statement in `texts`, in their order: by name, a word's lowercase.
+fn extension_first_touches(texts: &[&str]) -> Vec<(String, Touch)> {
     use crate::sql::TokenKind;
     let name = |t: &crate::sql::Token| match t.kind {
         TokenKind::Word => Some(t.text.to_lowercase()),
         TokenKind::Quoted => Some(quoted_name(&t.text)),
         _ => None,
     };
-    // Each extension's first statement: whether it takes the database to have begun without it.
-    let mut first: Vec<(String, bool)> = Vec::new();
+    let mut first: Vec<(String, Touch)> = Vec::new();
     for text in texts {
         let tokens = crate::sql::tokenize(text, Dialect::Postgres);
         for k in 0..tokens.len() {
-            let mut touched: Vec<(String, bool)> = Vec::new();
+            let mut touched: Vec<(String, Touch)> = Vec::new();
             match (tokens[k].upper().as_str(), tokens.get(k + 1).map(|t| t.upper())) {
                 ("CREATE", Some(e)) if e == "EXTENSION" => {
                     let conditional = tokens.get(k + 2).is_some_and(|t| t.upper() == "IF");
-                    let at = if conditional { k + 5 } else { k + 2 };
-                    if let Some(n) = tokens.get(at).and_then(name) {
-                        touched.push((n, !conditional));
+                    if let Some(n) = tokens.get(if conditional { k + 5 } else { k + 2 }).and_then(name) {
+                        touched.push((n, if conditional { Touch::CreatedIfMissing } else { Touch::Created }));
                     }
                 }
                 ("DROP", Some(e)) if e == "EXTENSION" => {
                     let mut j = if tokens.get(k + 2).is_some_and(|t| t.upper() == "IF") { k + 4 } else { k + 2 };
                     // Each name of its list.
                     while let Some(n) = tokens.get(j).and_then(name) {
-                        touched.push((n, false));
+                        touched.push((n, Touch::Dropped));
                         if tokens.get(j + 1).is_some_and(|t| t.text == ",") {
                             j += 2;
                         } else {
@@ -3099,14 +3138,65 @@ fn extensions_begun_without(texts: &[&str]) -> Vec<String> {
                 }
                 _ => {}
             }
-            for (n, without) in touched {
+            for (n, touch) in touched {
                 if !first.iter().any(|(f, _)| *f == n) {
-                    first.push((n, without));
+                    first.push((n, touch));
                 }
             }
         }
     }
-    first.into_iter().filter(|(_, without)| *without).map(|(n, _)| n).collect()
+    first
+}
+
+/// Which of Supabase's own extensions a Supabase database has now, in `extensions`, by name.
+async fn platform_extensions_now(db: &mut Db) -> Result<Vec<String>, Error> {
+    let rows = db
+        .rows(&format!("select x.extname as name from pg_extension x join pg_namespace n on n.oid = x.extnamespace where {} order by 1", crate::catalog::platform_extension("x", "n")))
+        .await?;
+    Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
+}
+
+/// Which of Supabase's own extensions a Supabase database began with: as its history table notes,
+/// else, where it has run no migration, those it has; none where neither tells, or off Supabase.
+async fn extensions_began(db: &mut Db) -> Result<Option<Vec<String>>, Error> {
+    if api_began(db).await?.is_none() {
+        return Ok(None);
+    }
+    if has_history(db).await? {
+        let note = db.rows(&format!("select obj_description(to_regclass('{HISTORY_TABLE}'), 'pg_class') as note")).await?;
+        if let Some(began) = note.first().and_then(|r| r.get("note")).and_then(crate::db::extensions_in_note) {
+            return Ok(Some(began));
+        }
+        if read_history(db).await?.iter().any(|r| r.applied) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(platform_extensions_now(db).await?))
+}
+
+/// Which of Supabase's own extensions a Supabase database that `history push` records `files` on
+/// began with: as its history table notes, else those it has but one the files' first statement
+/// creates unconditionally, and any it lacks that their first statement drops.
+async fn extensions_began_adopting(db: &mut Db, files: &[Migration]) -> Result<Option<Vec<String>>, Error> {
+    if api_began(db).await?.is_none() {
+        return Ok(None);
+    }
+    if has_history(db).await? {
+        let note = db.rows(&format!("select obj_description(to_regclass('{HISTORY_TABLE}'), 'pg_class') as note")).await?;
+        if let Some(began) = note.first().and_then(|r| r.get("note")).and_then(crate::db::extensions_in_note) {
+            return Ok(Some(began));
+        }
+    }
+    let touches = extension_first_touches(&files.iter().map(|f| f.sql.as_str()).collect::<Vec<_>>());
+    let touch = |e: &str| touches.iter().find(|(n, _)| n.eq_ignore_ascii_case(e)).map(|(_, t)| *t);
+    let mut began: Vec<String> = platform_extensions_now(db).await?.into_iter().filter(|e| touch(e) != Some(Touch::Created)).collect();
+    for e in crate::catalog::PLATFORM_EXTENSIONS {
+        if touch(e) == Some(Touch::Dropped) && !began.iter().any(|b| b == e) {
+            began.push(e.to_string());
+        }
+    }
+    began.sort();
+    Ok(Some(began))
 }
 
 /// The extensions the project's files create that its shadows leave to them: all but one every new
@@ -3201,9 +3291,9 @@ async fn api_began_replaying(server: &mut Server, opts: &Options, order: &[Migra
     Ok(best.map(|(_, on)| on).or_else(|| candidates.first().copied()))
 }
 
-/// Notes on the history table the settings a Supabase database began under ([`crate::db::api_settings_note`]).
-async fn note_api_began(db: &mut Db, on: [bool; 2]) -> Result<(), Error> {
-    db.exec(&format!("comment on table {HISTORY_TABLE} is {}", crate::db::literal(&crate::db::api_settings_note(on)))).await
+/// Notes on the history table how a Supabase database began ([`crate::db::api_settings_note`]).
+async fn note_api_began(db: &mut Db, on: [bool; 2], extensions: &[String]) -> Result<(), Error> {
+    db.exec(&format!("comment on table {HISTORY_TABLE} is {}", crate::db::literal(&crate::db::api_settings_note(on, extensions)))).await
 }
 
 /// The default privileges in `public` a text grants or revokes Supabase's Data API roles, of those
@@ -3323,6 +3413,9 @@ async fn shadow_server(db: &mut Db, opts: &Options) -> Result<Server, Error> {
     server.copy_default_privileges(!sets_default_privileges(opts));
     if let Some(on) = api_began(db).await? {
         server.began_with(on);
+    }
+    if let Some(extensions) = extensions_began(db).await? {
+        server.began_with_extensions(extensions);
     }
     server.leave_extensions(left_extensions(&server, opts));
     server.leave_schemas(created_schemas(opts));
@@ -5218,6 +5311,10 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     // On Supabase, the settings the database began under, which the migrations it ran may have
     // changed before any was recorded: the one a replay reaches it from, where its privileges can't
     // tell.
+    let began_extensions = extensions_began_adopting(db, &order).await?;
+    if let Some(extensions) = began_extensions.clone() {
+        server.began_with_extensions(extensions);
+    }
     let candidates = api_began_adopting(db, &order).await?;
     let began = if candidates.len() > 1 { api_began_replaying(server, opts, &order, &live, schema_sql.as_deref(), &candidates).await? } else { candidates.first().copied() };
     if let Some(on) = began {
@@ -5428,7 +5525,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     let before = before_rows;
     ensure_history(db).await?;
     if let Some(on) = began {
-        note_api_began(db, on).await?;
+        note_api_began(db, on, &began_extensions.unwrap_or_default()).await?;
     }
     // The schema it records, which running nothing leaves as it is, on the last row.
     let lines = catalog(db).await?;
@@ -5965,7 +6062,13 @@ async fn emptied(db: &mut Db, server: &mut Server, opts: &Options, log: Log<'_>)
     let counts = table_rows(db).await?;
     let d = db.dialect();
     // The extensions the project's files create go too: they create them again.
-    let mut then: Vec<String> = if d == Dialect::Postgres { left_extensions(server, opts).iter().map(|x| format!("drop extension if exists {}", crate::db::ident(x))).collect() } else { vec![] };
+    let left = if d == Dialect::Postgres { left_extensions(server, opts) } else { vec![] };
+    let mut then: Vec<String> = left.iter().map(|x| format!("drop extension if exists {}", crate::db::ident(x))).collect();
+    // And Supabase's own it began with go back to how it began, for the migrations that use them.
+    for e in server.began_extensions().iter().filter(|e| !left.contains(e)) {
+        then.push("create schema if not exists extensions".to_string());
+        then.push(format!("create extension if not exists {} with schema extensions", crate::db::ident(e)));
+    }
     let had_history = has_history(db).await? && !read_history(db).await?.is_empty();
     if has_history(db).await? {
         let forget = format!("delete from {HISTORY_TABLE}");
@@ -6216,11 +6319,15 @@ async fn unneeded_by_history(opts: &Options, files: &[Migration], extensions: Ve
     let mut db = Db::open(opts).await?;
     let server = Server::open(&mut db, &opts.url, opts.shadow_url.as_deref()).await;
     let began = api_began(&mut db).await;
+    let began_extensions = extensions_began(&mut db).await;
     db.close().await;
     let mut server = server?;
     server.copy_default_privileges(!sets_default_privileges(opts));
     if let Some(on) = began? {
         server.began_with(on);
+    }
+    if let Some(extensions) = began_extensions? {
+        server.began_with_extensions(extensions);
     }
     if creates_platform_publication(opts) {
         server.leave_platform();
@@ -7477,6 +7584,9 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
     if let Some(on) = api_began(&mut db).await? {
         server.began_with(on);
     }
+    if let Some(extensions) = extensions_began(&mut db).await? {
+        server.began_with_extensions(extensions);
+    }
     if creates_platform_publication(opts) {
         server.leave_platform();
     }
@@ -8617,12 +8727,24 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     let left = left_out(&mut db, schemas).await;
     let roles = named_roles(&mut db).await;
     let new = new_database(&mut db).await;
+    let realtime = platform_publication_of_all_tables(&mut db).await;
     db.close().await;
     let problems = problems?;
     let mut roles = roles?;
     let new = new?;
     if !problems.is_empty() {
         return Ok(refuse(&problems, log));
+    }
+    // Supabase's publication made to publish every table, which no migration can make it do on
+    // another Supabase database: the refusal names its tables.
+    if let Some(tables) = realtime? {
+        let name = crate::catalog::PLATFORM_PUBLICATION;
+        let create = if tables.is_empty() { format!("create publication {name}") } else { format!("create publication {name} for table {}", tables.join(", ")) };
+        let republish = format!("reylo run {} {}", shell_word(&format!("drop publication {name}")), shell_word(&create));
+        let problem = Problem::new("platform-publication-all-tables", format!("This database's {name} publishes every table, which no migration can make it do"))
+            .note(format!("Every Supabase database has {name} publishing none, and alter publication can't make it publish all tables. Name the tables it publishes instead: a table made later joins it when a migration adds it."))
+            .fix("Publish this database's tables by name, then start again", &[republish.as_str(), "reylo migrate init"]);
+        return Ok(refuse(&[problem], log));
     }
     let left = left?;
     if !left.is_empty() {
@@ -8696,6 +8818,22 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
         log(&note(format!("{INIT} names {named}: make {} on each new server before it runs there, since a migration may not", if roles.len() == 1 { "it" } else { "them" })));
     }
     Ok(code)
+}
+
+/// On a Supabase database whose `supabase_realtime` publishes every table, the tables it publishes
+/// now, each with its schema; none otherwise.
+#[cfg(feature = "cli")]
+async fn platform_publication_of_all_tables(db: &mut Db) -> Result<Option<Vec<String>>, Error> {
+    if db.dialect() != Dialect::Postgres {
+        return Ok(None);
+    }
+    let name = crate::db::literal(crate::catalog::PLATFORM_PUBLICATION);
+    let all = db.rows(&format!("select 1 from pg_publication where pubname = {name} and puballtables and {}", crate::catalog::platform_names())).await?;
+    if all.is_empty() {
+        return Ok(None);
+    }
+    let rows = db.rows(&format!("select format('%I.%I', schemaname, tablename) as t from pg_publication_tables where pubname = {name} order by 1")).await?;
+    Ok(Some(rows.iter().map(|r| r.text("t").to_string()).collect()))
 }
 
 /// The roles the database names, as an owner, a grantee or a policy's role, that a new server
@@ -10467,13 +10605,17 @@ mod tests {
 
     #[test]
     fn creating_supabases_publication_is_read_as_sql() {
-        assert!(creates_platform_publication_in("create publication supabase_realtime;"));
-        assert!(creates_platform_publication_in("CREATE PUBLICATION \"supabase_realtime\" FOR ALL TABLES;"));
-        assert!(!creates_platform_publication_in("insert into snippets values ('create publication supabase_realtime;');"));
-        assert!(!creates_platform_publication_in("-- create publication supabase_realtime\nselect 1;"));
-        assert!(!creates_platform_publication_in("create publication \"Supabase_Realtime\";"));
-        assert!(!creates_platform_publication_in("create publication supabase_realtime_messages;"));
-        assert!(!creates_platform_publication_in("create publication \"\"\"supabase_realtime\"\"\";"));
+        let first = |text: &str| platform_publication_created_first(&[text]);
+        assert_eq!(first("create publication supabase_realtime;"), Some(true));
+        assert_eq!(first("CREATE PUBLICATION \"supabase_realtime\" FOR ALL TABLES;"), Some(true));
+        assert_eq!(first("insert into snippets values ('create publication supabase_realtime;');"), None);
+        assert_eq!(first("-- create publication supabase_realtime\nselect 1;"), None);
+        assert_eq!(first("create publication \"Supabase_Realtime\";"), None);
+        assert_eq!(first("create publication supabase_realtime_messages;"), None);
+        assert_eq!(first("create publication \"\"\"supabase_realtime\"\"\";"), None);
+        // Dropped first, of any name its list holds, it is made again rather than made twice.
+        assert_eq!(first("drop publication if exists other, supabase_realtime;\ncreate publication supabase_realtime for all tables;"), Some(false));
+        assert_eq!(platform_publication_created_first(&["drop publication supabase_realtime;", "create publication supabase_realtime;"]), Some(false));
     }
 
     #[test]

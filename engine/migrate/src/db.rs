@@ -1205,11 +1205,25 @@ pub(crate) fn api_settings_shown(current: &[ApiPrivilege], changed: &[ApiPrivile
     })
 }
 
-/// The note on the history table that records the settings ([`API_SETTINGS`]) a Supabase database
-/// began under, which nothing else shows once a migration changes all a setting decides.
-pub(crate) fn api_settings_note(on: [bool; 2]) -> String {
+/// The note on the history table that records how a Supabase database began: under which settings
+/// ([`API_SETTINGS`]), and with which of Supabase's own extensions
+/// ([`crate::catalog::PLATFORM_EXTENSIONS`]), which nothing else shows once its migrations have
+/// changed them.
+pub(crate) fn api_settings_note(on: [bool; 2], extensions: &[String]) -> String {
     let said = |on: bool| if on { "exposed" } else { "not exposed" };
-    format!("Reylo Migrate's history. This database began with Supabase's Data API settings: new tables {}, new functions {}.", said(on[0]), said(on[1]))
+    let with = if extensions.is_empty() { "none of Supabase's extensions".to_string() } else { format!("Supabase's extensions {}", extensions.join(", ")) };
+    format!("Reylo Migrate's history. This database began with Supabase's Data API settings: new tables {}, new functions {}. It began with {with}.", said(on[0]), said(on[1]))
+}
+
+/// The extensions of Supabase's a history table's `note` records the database began with
+/// ([`api_settings_note`]).
+pub(crate) fn extensions_in_note(note: &str) -> Option<Vec<String>> {
+    if note.contains("It began with none of Supabase's extensions.") {
+        return Some(vec![]);
+    }
+    let rest = note.split_once("It began with Supabase's extensions ")?.1;
+    let list = rest.split_once('.')?.0;
+    Some(list.split(", ").map(String::from).collect())
 }
 
 /// The settings a history table's `note` records ([`api_settings_note`]).
@@ -1374,6 +1388,9 @@ pub enum Server {
         platform_schema_grants: Vec<String>,
         /// Whether the target is Supabase's.
         platform: bool,
+        /// Which of Supabase's own extensions the target began with, where that is known: what a
+        /// shadow has of them, in `extensions`, whatever the target has now.
+        began_extensions: Option<Vec<String>>,
         /// Whether each shadow is given the platform's publication, empty, as the target was:
         /// Supabase's `supabase_realtime`, which a project's SQL adds its tables to.
         publication: bool,
@@ -1531,6 +1548,7 @@ impl Server {
                     platform_privileges,
                     platform_schema_grants: vec![],
                     platform: names,
+                    began_extensions: None,
                     publication,
                 })
             }
@@ -1589,7 +1607,7 @@ impl Server {
     /// privileges) but not its database settings, which a copy does not take. The lock named after
     /// it is held until it is dropped; a copy that fails releases it.
     pub(crate) async fn pg_shadow(&mut self, template: Option<&str>) -> Result<Shadow, Error> {
-        let Server::Postgres { admin, url, create, locale, settings, privileges, copy_privileges, extensions, leave, environment, environment_role, owned, schema_grants, copy_schema_grants, platform_privileges, platform_schema_grants, publication, .. } = self else {
+        let Server::Postgres { admin, url, create, locale, settings, privileges, copy_privileges, extensions, leave, environment, environment_role, owned, schema_grants, copy_schema_grants, platform_privileges, platform_schema_grants, publication, began_extensions, .. } = self else {
             return Err(Error("not a Postgres server".into()));
         };
         let name = random_name();
@@ -1656,7 +1674,13 @@ impl Server {
             // the replay, which says so.
             // The extensions in a schema of the project's first, which the platform's own may use;
             // those in a platform's schema after it is made, as the platform made it.
-            let copied: Vec<&(String, String)> = extensions.iter().filter(|(e, _)| !leave.contains(&e.to_lowercase()) && !owned.extensions.iter().any(|(o, _)| o == e)).collect();
+            // Supabase's own, where it is known which the target began with, as it began.
+            let begun = |e: &str| began_extensions.is_some() && crate::catalog::PLATFORM_EXTENSIONS.iter().any(|p| p.eq_ignore_ascii_case(e));
+            let copied: Vec<&(String, String)> = extensions.iter().filter(|(e, _)| !leave.contains(&e.to_lowercase()) && !owned.extensions.iter().any(|(o, _)| o == e) && !begun(e)).collect();
+            for e in began_extensions.iter().flatten().filter(|e| !leave.contains(&e.to_lowercase())) {
+                let _ = db.exec("create schema if not exists extensions").await;
+                let _ = db.exec(&format!("create extension if not exists {} with schema extensions", ident(e))).await;
+            }
             let platform_schema = |schema: &str| environment.iter().chain(owned.statements.iter()).any(|st| st.trim_start().to_ascii_lowercase().starts_with(&format!("create schema {}", schema.to_ascii_lowercase())));
             for (extension, schema) in copied.iter().filter(|(_, s)| !platform_schema(s)) {
                 let _ = db.exec(&format!("create schema if not exists {}", ident(schema))).await;
@@ -1739,8 +1763,26 @@ impl Server {
     /// target has it ([`crate::catalog::PLATFORM_EXTENSIONS`]): a shadow has it as the target does,
     /// where the project's files create it only if it isn't there, and a reset leaves it.
     pub fn platform_extension(&self, name: &str) -> bool {
-        let Server::Postgres { extensions, platform: true, .. } = self else { return false };
+        let Server::Postgres { extensions, platform: true, began_extensions, .. } = self else { return false };
+        if let Some(began) = began_extensions {
+            return began.iter().any(|b| b.eq_ignore_ascii_case(name));
+        }
         crate::catalog::PLATFORM_EXTENSIONS.iter().any(|p| p.eq_ignore_ascii_case(name)) && extensions.iter().any(|(e, s)| e.eq_ignore_ascii_case(name) && s == "extensions")
+    }
+
+    /// Which of Supabase's own extensions the target began with, where that is known.
+    pub fn began_extensions(&self) -> Vec<String> {
+        match self {
+            Server::Postgres { began_extensions: Some(began), platform: true, .. } => began.clone(),
+            _ => vec![],
+        }
+    }
+
+    /// Which of Supabase's own extensions the target began with, which its shadows begin with.
+    pub fn began_with_extensions(&mut self, names: Vec<String>) {
+        if let Server::Postgres { began_extensions, platform: true, .. } = self {
+            *began_extensions = Some(names);
+        }
     }
 
     /// The schemas the project's own files create: an extension the target keeps in one of them (one
@@ -1930,8 +1972,11 @@ mod url_tests {
         assert_eq!(api_settings(&all("tables", &["SELECT"], &["authenticated"]), &all("tables", &["SELECT"], &["authenticated"])), [false, false]);
         // Every one changed says nothing either: it started as Supabase's projects once all did.
         assert_eq!(api_settings(&[], &exposed), [true, true]);
-        assert_eq!(api_settings_in_note(&api_settings_note([false, true])), Some([false, true]));
-        assert_eq!(api_settings_in_note(&api_settings_note([true, false])), Some([true, false]));
+        assert_eq!(api_settings_in_note(&api_settings_note([false, true], &[])), Some([false, true]));
+        assert_eq!(api_settings_in_note(&api_settings_note([true, false], &[])), Some([true, false]));
+        assert_eq!(extensions_in_note(&api_settings_note([true, true], &["pgcrypto".into(), "uuid-ossp".into()])), Some(vec!["pgcrypto".to_string(), "uuid-ossp".to_string()]));
+        assert_eq!(extensions_in_note(&api_settings_note([true, true], &[])), Some(vec![]));
+        assert_eq!(extensions_in_note("Reylo Migrate's history. This database began with Supabase's Data API settings: new tables exposed, new functions exposed."), None);
         assert_eq!(api_settings_in_note("the history"), None);
         let (privileges, _) = platform_defaults([false, true]);
         assert!(privileges.contains(&"alter default privileges for role postgres in schema public revoke delete, insert, select, update on tables from anon".to_string()), "{privileges:?}");
