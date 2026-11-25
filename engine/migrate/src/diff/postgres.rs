@@ -1115,7 +1115,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                             // Before Postgres 17 nothing sets it again: the migration stops rather than
                             // leave the partition computing its table's.
                             let why = format!("Postgres before 17 can't give {name}.{} its own generation expression again", c.text("name"));
-                            format!("do $reylo$ begin raise exception '{}'; end $reylo$", why.replace('\'', "''"))
+                            dollar_block(&format!("begin raise exception using message = {}; end", literal(&why)))
                         }
                     });
                 s.add(Object {
