@@ -210,6 +210,7 @@ Commands:
   dev                      Apply pending migrations, rewinding if needed (may drop data), and write the lockfile
   deploy                   Run what the lock lists, with no shadow database
     --dry-run              Try it on a shadow database, running nothing here
+      -- <command>         Then run the command, such as your build, typed against that shadow
   status                   Check that this database and the files are in step
   lock                     Write the lock from this database's history
   history push             Record the migrations this database's schema has

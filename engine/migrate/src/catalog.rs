@@ -1139,7 +1139,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
               -- A foreign key's copy for each partition of the table it references is named in the
               -- order the partitions were made: it is read as its key's, for that partition.
               case when pc.conrelid = co.conrelid then pc.conname || ' for ' || format('%I.%I', fn.nspname, fc.relname) else co.conname end as name,
-              pg_get_constraintdef(co.oid, false) as def, co.condeferrable as deferrable, co.condeferred as deferred, co.convalidated as validated
+              pg_get_constraintdef(co.oid, false) as def
             from pg_constraint co
             left join pg_constraint pc on pc.oid = co.conparentid
             left join pg_class fc on fc.oid = co.confrelid left join pg_namespace fn on fn.oid = fc.relnamespace
@@ -1155,12 +1155,8 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
         ))
         .await?
     {
-        let deferral = match (r.flag("deferrable"), r.flag("deferred")) {
-            (true, true) => " deferrable initially deferred",
-            (true, false) => " deferrable",
-            _ => "",
-        };
-        lines.push(format!("constraint {} {} {}{deferral}{}", r.text("rel"), r.text("name"), r.text("def"), if r.flag("validated") { "" } else { " not valid" }));
+        // The server's rendering says DEFERRABLE, INITIALLY DEFERRED and NOT VALID itself.
+        lines.push(format!("constraint {} {} {}", r.text("rel"), r.text("name"), r.text("def")));
     }
 
     for r in db

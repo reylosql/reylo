@@ -1,3 +1,5 @@
+-- loses data: h.id
+-- loses data: h.c
 alter table h no inherit p;
 alter table h drop column if exists g;
 alter table h drop column if exists id;

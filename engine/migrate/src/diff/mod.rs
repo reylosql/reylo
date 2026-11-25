@@ -261,6 +261,13 @@ pub trait Alterer: Send {
         let _ = (from, to);
         Vec::new()
     }
+    /// Whether a change of `from` to `to` binds the object's columns to another that then holds them
+    /// (a table made a table of a type), after which the server converts none of them: the changes
+    /// that convert them go first.
+    fn binds(&self, from: &Object, to: &Object) -> bool {
+        let _ = (from, to);
+        false
+    }
     /// Whether a change of `from` to `to` lets go of the objects of it that something else holds (a
     /// partition detached from its table, whose indexes are then its own to drop), so that their
     /// drops wait for the change rather than go before it.
@@ -459,6 +466,61 @@ pub use crate::sql::last_written;
 
 /// `text` with the name `old` (a table's) written `new` wherever it stands as a name or as the start
 /// of one (`users` in `users_pkey`, `nextval('users_id_seq')`), ignoring case.
+/// `text` with each identifier that is `old` exactly (as written, quoted or not, an unquoted one in
+/// any case) made `new`: never part of a longer name, nor inside a string literal.
+fn renamed_identifier(text: &str, old: &str, new: &str) -> String {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        if c == '\'' {
+            // A literal, kept as written, a doubled quote inside it included.
+            let mut end = 1;
+            let bytes = rest.as_bytes();
+            while end < bytes.len() {
+                if bytes[end] == b'\'' {
+                    if bytes.get(end + 1) == Some(&b'\'') {
+                        end += 2;
+                        continue;
+                    }
+                    end += 1;
+                    break;
+                }
+                end += 1;
+            }
+            out.push_str(&rest[..end]);
+            rest = &rest[end..];
+        } else if c == '"' {
+            // A quoted name, a doubled quote inside it included.
+            let bytes = rest.as_bytes();
+            let mut end = 1;
+            while end < bytes.len() {
+                if bytes[end] == b'"' {
+                    if bytes.get(end + 1) == Some(&b'"') {
+                        end += 2;
+                        continue;
+                    }
+                    end += 1;
+                    break;
+                }
+                end += 1;
+            }
+            let word = &rest[..end];
+            out.push_str(if word == old { new } else { word });
+            rest = &rest[end..];
+        } else if ident(c) {
+            let end = rest.find(|c: char| !ident(c)).unwrap_or(rest.len());
+            let word = &rest[..end];
+            out.push_str(if !old.starts_with('"') && word.eq_ignore_ascii_case(old) { new } else { word });
+            rest = &rest[end..];
+        } else {
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
+}
+
 pub fn swap_name(text: &str, old: &str, new: &str) -> String {
     if old.is_empty() {
         return text.to_string();
@@ -888,6 +950,27 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                 continue;
             }
         }
+        // A partitioned table (Postgres's) whose definition changes only by its own columns' new names (its partition key's,
+        // which Postgres renames with the column, in the table and in each partition) is kept by
+        // the renames, where making it again would drop its rows: where each renamed column of the
+        // key keeps its values, as a key's column can't change type, and each partition stays
+        // attached to it.
+        if let Some(b) = to.objects.get(id).filter(|b| a.kind == Some(Kind::Table) && a.def != b.def && a.def.contains(" partition by ") && b.def.contains(" partition by ")) {
+            let prefix = format!("column {}.", id.strip_prefix("table ").unwrap_or(id));
+            let own: Vec<(&String, &String)> = renamed_columns.iter().filter(|(old, _)| old.starts_with(&prefix)).collect();
+            // Each name as the ids write it, which is as the definition does.
+            let swapped = own.iter().fold(a.def.clone(), |def, (old, new)| renamed_identifier(&def, &old[prefix.len()..], new.strip_prefix(&prefix).unwrap_or(new)));
+            // The key's columns can't change type; the others change as any column does.
+            let key = a.def.split_once(" partition by ").map_or("", |(_, k)| k);
+            let in_key = |old: &str| renamed_identifier(key, old, "\u{1}") != key;
+            let keeps = own.iter().filter(|(old, _)| in_key(&old[prefix.len()..])).all(|(old, new)| to.objects.get(*new).is_some_and(|n| alterer.keeps_values(&from.objects[*old], n)));
+            // A partition made at run time, which the target doesn't declare, stays attached too.
+            let attached = from.objects.iter().filter(|(_, o)| o.kind == Some(Kind::Table) && parent_of(o).as_deref() == Some(id.as_str())).all(|(p, _)| left.contains(p) || to.objects.get(p).is_some_and(|o| parent_of(o).as_deref() == Some(id.as_str())));
+            if !own.is_empty() && swapped == b.def && keeps && attached {
+                kept_through.insert(id.clone(), own.iter().map(|(old, _)| (*old).clone()).collect());
+                continue;
+            }
+        }
         match to.objects.get(id) {
             None if left.contains(id) => {}
             None => {
@@ -994,6 +1077,30 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
             renames.insert(new_id.clone(), (old_id.clone(), statements));
         }
     }
+    // An index of a table that goes while one alike but for its name comes is renamed, which builds
+    // nothing: where each is the other's only match, nothing hangs on either (a comment, a setting,
+    // a key that references it), and the new name is no relation's in the schema the plan starts from.
+    let held_by = |s: &Schema, id: &str| s.objects.values().any(|o| o.owner.as_deref() == Some(id) || o.deps.contains(id) || o.goes_with.as_deref() == Some(id));
+    let plain_index = |s: &Schema, id: &str| s.objects.get(id).is_some_and(|o| o.kind == Some(Kind::Index) && o.goes_with.is_none() && o.after.is_empty() && !o.def.contains('\n') && !held_by(s, id));
+    // A constraint's name is its index's too.
+    let names_in = |s: &Schema, but: &str| -> BTreeSet<String> { s.objects.values().filter(|o| o.id != but && matches!(o.kind, Some(Kind::Table | Kind::View | Kind::Sequence | Kind::Index | Kind::Constraint))).filter_map(|o| o.id.split_once(' ').map(|(_, n)| last_written(n))).collect() };
+    let named_relations = names_in(from, "");
+    let gone_indexes: Vec<String> = drops.iter().filter(|id| !to.objects.contains_key(id.as_str()) && plain_index(from, id.as_str()) && !renames.values().any(|(old, _)| old == *id)).cloned().collect();
+    let come_indexes: Vec<String> = creates.iter().filter(|id| !from.objects.contains_key(id.as_str()) && plain_index(to, id.as_str()) && !renames.contains_key(id.as_str())).cloned().collect();
+    let alike = |old: &str, new: &str| from.objects[old].owner == to.objects[new].owner && alterer.renames_as(&from.objects[old], &to.objects[new]);
+    let mut index_renames = Vec::new();
+    for old_id in &gone_indexes {
+        let [new_id] = come_indexes.iter().filter(|n| alike(old_id.as_str(), n.as_str())).collect::<Vec<&String>>()[..] else { continue };
+        // Nor where the target gives the old name to something else, which the plan may make first.
+        let old_name = last_written(old_id.strip_prefix("index ").unwrap_or(old_id));
+        if gone_indexes.iter().filter(|o| alike(o.as_str(), new_id.as_str())).count() != 1 || named_relations.contains(&last_written(new_id.strip_prefix("index ").unwrap_or(new_id))) || names_in(to, new_id).contains(&old_name) {
+            continue;
+        }
+        if let Some(statements) = alterer.rename(&from.objects[old_id], &to.objects[new_id]) {
+            index_renames.push((new_id.clone(), (old_id.clone(), statements)));
+        }
+    }
+    renames.extend(index_renames);
     for (new_id, (old_id, _)) in &renames {
         drops.remove(old_id);
         creates.remove(new_id);
@@ -1197,6 +1304,10 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         }
     }
 
+    // What the plan drops, itself or with its owner (an index's statistics, the index made again),
+    // is taken off and put back around no change: it is made as the target has it after.
+    hooks.retain(|id, _| !drops.contains(id) && !owners(from, id).iter().any(|w| drops.contains(*w)));
+
     // A revoke of what an object is given as it is made is made only with its owner, or with the
     // change of the column that makes it (an identity's sequence), and dropped only with its owner:
     // an object already there was never given it. One made is kept even where what gives it is new,
@@ -1289,6 +1400,8 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
     }
     // The objects whose change lets go of what of them something else holds.
     let releases = |id: &str| -> bool { alters.contains_key(id) && from.objects.get(id).zip(to.objects.get(id)).is_some_and(|(a, b)| alterer.releases(a, b)) };
+    // The objects whose change binds their columns to another (a table made a table of a type).
+    let binds = |id: &str| -> bool { alters.contains_key(id) && from.objects.get(id).zip(to.objects.get(id)).is_some_and(|(a, b)| alterer.binds(a, b)) };
     // What of a table its change may let go of: its indexes, and the columns it takes from another.
     let held_by_another = |d: &str| from.objects.get(d).is_some_and(|o| o.kind == Some(Kind::Index) || (o.kind == Some(Kind::Column) && o.deps.iter().any(|x| from.objects.get(x).is_some_and(|c| c.kind == Some(Kind::Column) && c.owner != o.owner))));
     // The edges: an op runs after every op in `after[op]`.
@@ -1473,11 +1586,25 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                     }
                 }
                 // A change that converts columns after their tables leave what held them (a typed
-                // table's type), which refused the conversion.
+                // table's type), which refused the conversion: but for a table's own column, where the
+                // table's change binds it to a type, which converts nothing after.
                 if matches!(op, Op::Alter(_)) {
                     for c in converted.get(id.as_str()).into_iter().flatten() {
-                        if let Some(j) = from.objects.get(c).and_then(|c| c.owner.clone()).filter(|w| releases(w)).and_then(|w| find(Op::Alter(w))) {
+                        if let Some(j) = from.objects.get(c).and_then(|c| c.owner.clone()).filter(|w| releases(w) && !(binds(w) && !held_by_another(c))).and_then(|w| find(Op::Alter(w))) {
                             after[k].insert(j);
+                        }
+                    }
+                }
+                // And a table that comes to be held so (made a table of a type) after the changes
+                // that convert its own columns; one another held waits for the table to leave it.
+                if let (Op::Alter(_), Some(f)) = (op, from.objects.get(id.as_str())) {
+                    if alterer.binds(f, o) {
+                        for (x, columns) in &converted {
+                            if x != id && columns.iter().any(|c| from.objects.get(c).is_some_and(|c| c.owner.as_deref() == Some(id.as_str())) && !(releases(id) && held_by_another(c))) {
+                                if let Some(j) = find(Op::Alter(x.clone())) {
+                                    after[k].insert(j);
+                                }
+                            }
                         }
                     }
                 }
@@ -1859,7 +1986,8 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                 if let Some((old_id, _)) = renames.get(id).filter(|_| !followers.contains(id)) {
                     plan.renamed.push((old_id.clone(), id.clone()));
                 }
-                if let Some((old_id, _)) = renames.get(id).filter(|(old_id, _)| !stated.contains(old_id) && !followers.contains(id)) {
+                // A column's, which keeps its rows: an index renamed holds none, and is no guess.
+                if let Some((old_id, _)) = renames.get(id).filter(|(old_id, _)| !stated.contains(old_id) && !followers.contains(id) && from.objects[old_id].kind == Some(Kind::Column)) {
                     // The guess is written down with what to write instead, should the two columns
                     // be two: the old one's drop and the new one's add.
                     let new_name = last_written(id);

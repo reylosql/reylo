@@ -37,9 +37,25 @@ const web = service("web", {
 
 ## Builds
 
-A build that type-checks reads your schema before the pre-deploy command migrates it. Give it [a database of its own](/deployment#build-before-migrate).
+Run your build on a dry run of the deploy. Its type check then reads the schema the pre-deploy command leaves.
 
-Railway's builds can't reach your private network. So use that database's public URL.
+Railway's builds can't reach your private network. So give the web service your database's public URL, which Railway sets once the database's [public networking](https://docs.railway.com/databases/postgresql#connecting-externally) is on:
+
+```ts title=".railway/railway.ts"
+const web = service("web", {
+  // ...
+  env: {
+    DATABASE_URL: db.env.DATABASE_URL,
+    DATABASE_PUBLIC_URL: db.env.DATABASE_PUBLIC_URL,
+  },
+});
+```
+
+Then name it on the dry run:
+
+```sh title="Build Command"
+npx reylo migrate deploy --dry-run --url "$DATABASE_PUBLIC_URL" -- npm run build
+```
 
 ## Other images
 

@@ -1,21 +1,21 @@
 ---
 title: Vercel
-description: How to run Reylo Migrate on Vercel. Build against a database of its own, then migrate production as the build's last step, just before the deploy goes live.
+description: How to run Reylo Migrate on Vercel. Build on a shadow of the schema the deploy leaves, then migrate production as the build's last step, just before the deploy goes live.
 ---
 
 <p className="dk-subheader">Reylo Migrate on Vercel</p>
 
-Migrate production as the build's last step:
+Run the build on a dry run of the deploy, then migrate production as the build's last step:
 
 ```json title="package.json"
 {
   "scripts": {
-    "vercel-build": "reylo migrate deploy && next build && reylo migrate deploy --url \"$DATABASE_URL_UNPOOLED\""
+    "vercel-build": "reylo migrate deploy --dry-run -- next build && reylo migrate deploy"
   }
 }
 ```
 
-Vercel runs this script unless your project sets a Build Command. Nothing of yours runs between the build and going live, and a build or migration that fails stops the deploy.
+The build's type check reads a shadow of the schema the deploy leaves, never production's. Vercel runs this script unless your project sets a Build Command. Nothing of yours runs between the build and going live, and a build or migration that fails stops the deploy.
 
 <Callout title="Previews">
 
@@ -25,22 +25,12 @@ Preview builds run the same script, on the Preview environment's variables. Give
 
 ## Database
 
-A migration needs your database's direct connection string. Neon's Vercel integration sets it as `DATABASE_URL_UNPOOLED`, in each environment, and can create a branch for each preview deployment.
-
-## Build database
-
-The build reads your schema before production has it. So point it at a database of its own, such as a Neon branch:
+A migration needs your database's direct connection string. Neon's Vercel integration sets it as `DATABASE_URL_UNPOOLED`, in each environment, and can create a branch for each preview deployment:
 
 ```yaml title=".reylo.yaml"
-direct_url: ${BUILD_DATABASE_URL:-${DATABASE_URL_UNPOOLED:-${DATABASE_URL}}}
+direct_url: ${DATABASE_URL_UNPOOLED:-${DATABASE_URL}}
 ```
 
-Set `BUILD_DATABASE_URL` in the Production environment only, to that database's direct connection string. A preview build reads its own database, which the script migrates first.
-
-A migration can reach that database and then fail on production. Reset the branch from its parent before you change the migration:
-
-```terminal
-$ neon branches reset build --parent
-```
+The dry run makes its shadow on that database's server. Where its role can't create databases, set [`shadow_url`](/configuration#shadow_url).
 
 Pages the build prerenders still query production, before it's migrated. Render a page that reads a new column on each request.

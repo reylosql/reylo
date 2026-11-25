@@ -229,7 +229,7 @@ async fn apply(db: &mut Db, target: &diff::Schema, alterer: &diff::postgres::Pos
     }
     let mut plan = diff::plan(&diff::postgres::read(db).await.unwrap(), target, alterer);
     diff::postgres::style(db, &mut plan, &target.verbatim).await.unwrap();
-    let existing = locks::existing_tables(db).await.unwrap();
+    let existing = locks::existing(db).await.unwrap();
     if failed.is_none() {
         failed = run_files(db, &files_of(&plan, &existing)).await;
     }
@@ -260,7 +260,7 @@ async fn leg(db: &mut Db, target: &diff::Schema, like: &mut Db, alterer: &diff::
 
 /// The plan as the files `reylo migrate new` writes: one, or several in the lock-safe shape or
 /// where the plan commits partway.
-fn files_of(plan: &diff::Plan, existing: &std::collections::BTreeSet<String>) -> Vec<String> {
+fn files_of(plan: &diff::Plan, existing: &locks::Existing) -> Vec<String> {
     match locks::lock_safe(plan, existing) {
         Some(files) => locks::file_texts(plan, &files),
         None => vec![plan.runnable().map(|s| format!("{};", s.trim_end())).collect::<Vec<_>>().join("\n")],
@@ -338,7 +338,7 @@ async fn postgres() {
         // statement would block writes to a table with rows while it reads them all, and run as
         // written: each file in a transaction of its own, but an index built concurrently.
         diff::postgres::style(&mut from, &mut plan, &target.verbatim).await.unwrap();
-        let existing = locks::existing_tables(&mut from).await.unwrap();
+        let existing = locks::existing(&mut from).await.unwrap();
         let files = files_of(&plan, &existing);
         if failed.is_none() {
             failed = run_files(&mut from, &files).await;

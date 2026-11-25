@@ -552,7 +552,7 @@ async fn pg_apply(db: &mut Db, target: &diff::Schema, alterer: &diff::postgres::
     }
     let mut plan = diff::plan(&diff::postgres::read(db).await.map_err(s)?, target, alterer);
     diff::postgres::style(db, &mut plan, &target.verbatim).await.map_err(s)?;
-    let existing = locks::existing_tables(db).await.map_err(s)?;
+    let existing = locks::existing(db).await.map_err(s)?;
     let files = match locks::lock_safe(&plan, &existing) {
         Some(files) => locks::file_texts(&plan, &files),
         None => vec![plan.runnable().map(|s| format!("{};", s.trim_end())).collect::<Vec<_>>().join("\n")],
