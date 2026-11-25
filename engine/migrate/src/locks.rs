@@ -556,6 +556,16 @@ fn names_made(tree: Option<&N>) -> Vec<String> {
     }
 }
 
+/// A name written with its schema, as (the schema, the name), each as the server stores it.
+fn split_qualified(name: &str) -> Option<(String, String)> {
+    let parsed = syntax::postgres::parse(&format!("select * from {name}"), 0).ok()?;
+    let [raw] = parsed.protobuf.stmts.as_slice() else { return None };
+    let Some(N::SelectStmt(select)) = raw.stmt.as_ref()?.node.as_ref() else { return None };
+    let [from] = select.from_clause.as_slice() else { return None };
+    let Some(N::RangeVar(r)) = &from.node else { return None };
+    (!r.schemaname.is_empty()).then(|| (r.schemaname.clone(), r.relname.clone()))
+}
+
 /// Whether a statement gives `table` a constraint named `name`: adds one, or renames one to it.
 fn takes_constraint_name(tree: Option<&N>, table: &str, name: &str, tables: &BTreeMap<String, String>) -> bool {
     let on = |r: Option<&RangeVar>| r.and_then(|r| tables.get(&named(r))).is_some_and(|t| t == table);
@@ -1371,7 +1381,11 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
     // catalog's under its name before the file ran, or the key columns of one the file made. A name
     // with no entry is the catalog's own; one the file moved its index out of holds none.
     let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    // A relation's schema: as written, else as the catalog resolves its name.
     let namespace_of = async |db: &mut Db, name: &str| -> Option<String> {
+        if let Some((schema, _)) = split_qualified(name) {
+            return Some(schema);
+        }
         db.rows(&format!("select n.nspname as ns from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = to_regclass({})", literal(name))).await.ok()?.first().map(|r| r.text("ns").to_string())
     };
     let mut bound: BTreeMap<(String, String), Result<String, Vec<String>>> = BTreeMap::new();
@@ -1384,7 +1398,7 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                 }
             }
             Named::Renamed(written, old, new) => {
-                // Where the catalog has none of the name, the one the file made under it.
+                // Unwritten, and where the catalog has none of the name, the one the file made under it.
                 let made_as = {
                     let mut by_name = bound.keys().filter(|(_, n)| *n == old).map(|(ns, _)| ns.clone());
                     let first = by_name.next();
