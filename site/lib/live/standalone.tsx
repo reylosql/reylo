@@ -2,7 +2,8 @@
 // (lib/live/app.tsx) on the project's own database, which the server reads at `/api/page` and
 // analyzes each statement against at `/api/analyze`. It opens on the address's `?q=`, or on a
 // query of the schema's first table.
-import '../../play-page/fonts.css';
+// The docs' own faces and stylesheet, so the page sets its text in the face the docs do.
+import '../../app/fonts.css';
 import '../../app/global.css';
 import { useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
