@@ -2784,7 +2784,7 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
                         .map(|u| {
                             let column = target.objects.get(u);
                             let refers = column.is_some_and(|c| c.deps.contains(&t.id));
-                            let draws = t.goes_with.as_deref() == Some(u.as_str()) || (refers && column.is_some_and(|c| c.def.contains("nextval(")));
+                            let draws = t.goes_with.as_deref() == Some(u.as_str()) || (refers && column.is_some_and(|c| draws_from(&c.def, &t.id)));
                             match (draws, refers) {
                                 (true, _) if owner.as_deref() == Some(u.as_str()) => 4,
                                 (true, _) => 2,
@@ -2870,6 +2870,18 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
         out.extend(kept_renames);
     }
     out
+}
+
+/// Whether a column's definition calls `nextval` on the sequence `sequence` (its id), named as the
+/// definition names it: whole, or without its schema.
+fn draws_from(def: &str, sequence: &str) -> bool {
+    static NEXTVAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"nextval\('((?:[^']|'')+)'").expect("a valid pattern"));
+    let Some(name) = sequence.strip_prefix("sequence ") else { return false };
+    let (schema, last) = split_last(name);
+    NEXTVAL.captures_iter(def).any(|c| {
+        let (s, l) = split_last(&c[1]);
+        unquoted(l) == unquoted(last) && (s.is_empty() || unquoted(s) == unquoted(schema))
+    })
 }
 
 /// What precedes the name of an identity's sequence where it isn't the one Postgres would choose.

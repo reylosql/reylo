@@ -4789,6 +4789,22 @@ mod adversarial {
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.exec("insert into getter (id) values (101)").await;
         assert_eq!(p.rows("select ticket from getter order by id").await.iter().map(|r| r.text("ticket").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+        p.output();
+        // A default that names one sequence and draws from another: the count is the one it draws.
+        let rest = format!("{rest} create sequence giver_id_seq as integer; create sequence getter_id_seq as integer; create table getter (id integer primary key, ticket integer unique default nextval('getter_id_seq'), seq_ref regclass default 'giver_id_seq'::regclass); alter sequence getter_id_seq owned by getter.ticket;");
+        p.file("20991231000016_t.sql", "create sequence lender_id_seq; create table lender (id text primary key default ('lender_id_seq'::regclass::text || '-' || nextval('lender_id_seq')::text)); alter sequence lender_id_seq owned by lender.id;");
+        p.schema(&format!("{rest} create sequence lender_id_seq; create table lender (id text primary key default ('lender_id_seq'::regclass::text || '-' || nextval('lender_id_seq')::text)); alter sequence lender_id_seq owned by lender.id;"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into lender default values").await;
+        p.output();
+        p.schema(&format!("{rest} create sequence lender_id_seq; create sequence borrower_id_seq; create table borrower (id text primary key default ('lender_id_seq'::regclass::text || '-' || nextval('borrower_id_seq')::text)); alter sequence borrower_id_seq owned by borrower.id;"));
+        let choices = reylo_migrate::Choices { rename: vec![("lender".into(), "borrower".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "borrower", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into borrower default values").await;
+        assert_eq!(p.rows("select id from borrower order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["lender_id_seq-1", "lender_id_seq-2"]);
     }
 
     /// A refusal's suggested command carries --blocking where the migration it writes rewrites a
