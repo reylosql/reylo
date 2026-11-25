@@ -1,6 +1,6 @@
 {
   "from": "/Users/colin/Documents/docs-kit",
-  "commit": "3b5e175",
+  "commit": "c7ecbd1",
   "files": {
     "package.json": "af27bb874698efc935f2a24c79f0dfdd8edb9513db0c511f5952c85c15eccd90",
     "README.md": "39515ebf1f40004d7b2029542fe56391ded99a9e699c025e2d91faa43f8cbd7b",
@@ -45,7 +45,7 @@
     "src/routes/not-found.tsx": "ac314cfe4b734edf47f47b24b9b429aad41f4c8b7f1e26a663b86ffe79dc0f23",
     "src/routes/robots.ts": "2beb1d3443d416ca0a475a45b787ba36f4878ae4b3c927a2afff3fa3d86d28c0",
     "src/routes/sitemap.ts": "5be6406d6bb93ffaa42a25f486a8e388c959edc39f2305c7f91b8152c6e4771b",
-    "src/routes.ts": "5ed600b5a80d831d5cb16593e2fc214c5dac428c6ff483656ad0fac304a32a9c",
+    "src/routes.ts": "df61527f9cf6f4009f5dd9a2d5f0b6c251e34b06fdcffbe90a3b2f96dd798e7d",
     "src/search/engine.ts": "1046f5bf4b33d5bfe07fb440dcd1103adb0e8f74ef763a6dacd585ce7730e748",
     "src/search/index.ts": "632413cfa8c6307c94d68faf966837869c2be6591f56e7c13f1bb048e389a1fa",
     "src/site.ts": "890e6b073cd9e12f0c9fdc40c94a819891cbd9a6b76c4bd2f60335fc2c667439",

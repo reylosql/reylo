@@ -60,7 +60,7 @@ export function docsRoutes({ page = 'routes/page.tsx', ...options }: DocsRoutesO
  * `react-router.config.ts`, with the same options; the site adds its own routes' paths.
  */
 export function docsPrerender(options: DocsRoutesOptions = {}): string[] {
-  const pages = options.page === false ? [] : pageSlugs();
+  const pages = pageSlugs();
   const several = pages.length > 1 && options.markdown !== false;
   const files: [string, Own | undefined][] = [
     ['/404', options.notFound],
@@ -69,5 +69,5 @@ export function docsPrerender(options: DocsRoutesOptions = {}): string[] {
     ['/sitemap.xml', options.sitemap],
     ['/manifest.webmanifest', options.manifest],
   ];
-  return [...pages.map((slug) => `/${slug}`), ...(several ? pages.map((slug) => `/${slug || 'index'}.md`) : []), ...files.filter(([, file]) => file !== false).map(([path]) => path)];
+  return [...(options.page === false ? [] : pages.map((slug) => `/${slug}`)), ...(several ? pages.map((slug) => `/${slug || 'index'}.md`) : []), ...files.filter(([, file]) => file !== false).map(([path]) => path)];
 }
