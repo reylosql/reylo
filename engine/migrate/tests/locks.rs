@@ -125,7 +125,7 @@ async fn postgres_locks() {
             from.exec("vacuum analyze").await.unwrap();
             let mut plan = diff::plan(&diff::postgres::read(&mut from).await.unwrap(), &wanted, &alterer);
             diff::postgres::style(&mut from, &mut plan, &wanted.verbatim).await.unwrap();
-            let existing = locks::existing_tables(&mut from).await.unwrap();
+            let existing = locks::existing(&mut from).await.unwrap();
             let files = match (lock_safe, locks::lock_safe(&plan, &existing)) {
                 (true, Some(files)) => locks::file_texts(&plan, &files),
                 (true, None) => panic!("{name}: the plan has no lock-safe shape to measure:\n{}", plan.sql()),

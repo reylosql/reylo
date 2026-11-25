@@ -1,3 +1,4 @@
+-- loses data: h.id
 -- loses data: t
 alter table g no inherit h;
 alter table h no inherit t;
