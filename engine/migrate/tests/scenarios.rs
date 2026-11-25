@@ -6121,7 +6121,7 @@ mod adversarial {
         p.linear();
         p.file("20261027100000_t.sql", "create table t (id int);");
         p.schema(&format!("create table t (id int);\ncreate role {role};"));
-        let refused = format!(r"✗ \S*schema\.sql can't be replayed in a shadow database\n\n    create role {role}\n\n  It changes a role, which belongs to the server\.\n  Run it outside the migrations");
+        let refused = format!(r"✗ \S*schema\.sql can't be replayed in a shadow database\n    create role {role}\n  It changes a role, which belongs to the server\.\n  Run it outside the migrations");
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "add_role", &Default::default(), log).await).await, 1);
         assert_has!(p.output(), &refused);
         assert_eq!(p.files(), ["20261027100000_t.sql"], "no migration was written");
@@ -6140,7 +6140,7 @@ mod adversarial {
         p.schema("create table t (id int);");
         p.file("20261027110000_role.sql", &format!("create role {role};"));
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "more", &Default::default(), log).await).await, 1);
-        assert_has!(p.output(), &format!(r"✗ Migration 20261027110000_role\.sql can't be replayed in a shadow database\n\n    create role {role}\n"));
+        assert_has!(p.output(), &format!(r"✗ Migration 20261027110000_role\.sql can't be replayed in a shadow database\n    create role {role}\n"));
         assert!(p.rows(&format!("select 1 from pg_roles where rolname = '{role}'")).await.is_empty(), "no shadow created the role on the server");
     }
 
@@ -6152,7 +6152,7 @@ mod adversarial {
         p.schema("create table t (id int);");
         p.file("20261027100000_t.sql", "create table t (id int);");
         p.exec(&format!("create table t (id int); create table __reylo_migrations (name text primary key, sql text not null, applied_at timestamptz); insert into __reylo_migrations values ('20261027100000_t.sql', 'create table t (id int); create role {role};', now())")).await;
-        let refused = format!(r"✗ Migration 20261027100000_t\.sql, as this database ran it, can't be replayed in a shadow database\n\n    create role {role}\n\n  It changes a role, which belongs to the server\.");
+        let refused = format!(r"✗ Migration 20261027100000_t\.sql, as this database ran it, can't be replayed in a shadow database\n    create role {role}\n  It changes a role, which belongs to the server\.");
         assert_eq!(p.run(async |o, log| reylo_migrate::history_pull(o, log).await).await, 1);
         assert_has!(p.output(), &refused);
         assert_eq!(p.dev().await, 1);
@@ -6372,7 +6372,7 @@ mod adversarial {
         p.file("20261027100000_t.sql", "create table t (id int primary key);");
         p.schema(&format!("create table t (id int primary key);\ncreate user '{user}'@'%';"));
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "add_user", &Default::default(), log).await).await, 1);
-        assert_has!(p.output(), r"✗ \S*schema\.sql can't be replayed in a shadow database\n\n    create user '…'@'…'\n");
+        assert_has!(p.output(), r"✗ \S*schema\.sql can't be replayed in a shadow database\n    create user '…'@'…'\n");
         assert_eq!(p.dev().await, 1);
         assert_has!(p.output(), r"✗ \S*schema\.sql can't be replayed in a shadow database");
         assert!(p.rows(&format!("select 1 from mysql.user where user = '{user}'")).await.is_empty(), "no shadow created the account on the server");
@@ -6380,7 +6380,7 @@ mod adversarial {
         p.exec(&format!("create role '{role}'; create user '{user}'@'%'")).await;
         p.schema(&format!("create table t (id int primary key);\ngrant '{role}' to '{user}'@'%';"));
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "add_grant", &Default::default(), log).await).await, 1);
-        assert_has!(p.output(), r"✗ \S*schema\.sql can't be replayed in a shadow database\n\n    grant '…' to '…'@'…'\n\n  It grants or revokes a role, which belongs to the server\.");
+        assert_has!(p.output(), r"✗ \S*schema\.sql can't be replayed in a shadow database\n    grant '…' to '…'@'…'\n  It grants or revokes a role, which belongs to the server\.");
         assert_eq!(p.files(), ["20261027100000_t.sql"], "no migration was written");
         assert!(p.rows(&format!("select 1 from mysql.role_edges where from_user = '{role}' and to_user = '{user}'")).await.is_empty(), "nothing was granted");
         p.exec(&format!("drop user '{user}'@'%'; drop role '{role}'")).await;
