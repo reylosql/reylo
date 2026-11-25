@@ -4068,6 +4068,7 @@ on!(
     init_locks_a_schema_that_uses_a_hash_operator,
     init_locks_a_schema_with_a_carriage_return_in_a_string,
     a_platforms_schemas_and_extensions_are_in_every_shadow,
+    a_shadow_holds_the_platforms_schemas_alone,
     a_platforms_extension_in_pg_catalog_is_not_the_projects,
     a_role_that_is_no_superuser_runs_every_command,
     a_platform_roles_default_privileges_are_the_platforms,
@@ -6105,6 +6106,7 @@ mod adversarial {
     /// `reylo_platform`, a role the server's administrator made and the role connected may become:
     /// the migration replays, and no command reports them.
     pub async fn the_platforms_objects_are_in_every_shadow_as_a_role_of_its_own(mut p: P) {
+        reylo_migrate::db::set_pg_dump_dirs(Some(vec![]));
         p.exec("do $$ begin create role madv_tigeradmin login createdb; exception when duplicate_object or unique_violation then null; end $$").await;
         p.exec("do $$ begin create role reylo_platform nologin; exception when duplicate_object or unique_violation then null; end $$").await;
         p.exec("grant reylo_platform to madv_tigeradmin").await;
@@ -6126,6 +6128,7 @@ mod adversarial {
         let said = p.output();
         assert!(!said.contains("leave out"), "{said}");
         assert_eq!(p.rows("select h, p from v").await[0].text("p"), "2");
+        reylo_migrate::db::set_pg_dump_dirs(None);
     }
 
     /// A trusted extension a role that is no superuser put in `pg_catalog` itself is the project's:
@@ -6475,16 +6478,39 @@ mod adversarial {
         assert_has!(p.output(), r"This database was changed outside its migrations[\s\S]*policy own on auth\.users");
     }
 
+    /// With no pg_dump anywhere, as on a build machine: the platform's schemas are read and planned as
+    /// a migration is, and made in every shadow as a role of the platform's.
     pub async fn a_platforms_schemas_and_extensions_are_in_every_shadow(mut p: P) {
-        // As Supabase makes a project: a schema a platform's role owns, with the table a project's
-        // key and trigger name, and an extension in a schema of the project's role.
+        reylo_migrate::db::set_pg_dump_dirs(Some(vec![]));
+        // As Supabase makes a project: schemas its roles own, with what a project's key, trigger,
+        // policy, column and view use, and an extension in a schema of the project's role.
         p.exec("do $$ begin create role supabase_auth_admin; exception when duplicate_object or unique_violation then null; end $$").await;
-        p.exec("create schema auth authorization supabase_auth_admin; create table auth.users (id uuid primary key); alter table auth.users owner to supabase_auth_admin").await;
+        p.exec("do $$ begin create role supabase_storage_admin; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec(
+            "create schema auth authorization supabase_auth_admin; create schema storage authorization supabase_storage_admin;
+            set role supabase_auth_admin;
+            create type auth.aal_level as enum ('aal1', 'aal2');
+            create table auth.users (id uuid primary key, email text, aal auth.aal_level default 'aal1', created_at timestamptz default now(), confirmed_at timestamptz generated always as (created_at) stored);
+            create index users_email on auth.users (email) where email is not null;
+            create table auth.refresh_tokens (id bigserial primary key, user_id uuid references auth.users on delete cascade);
+            create function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
+            create function auth.touch() returns trigger language plpgsql as $$ begin return new; end $$;
+            create trigger touch before update on auth.users for each row execute function auth.touch();
+            create view auth.emails as select id, email from auth.users;
+            alter table auth.users enable row level security;
+            grant usage on schema auth to supabase_storage_admin; grant references on auth.users to supabase_storage_admin;
+            set role supabase_storage_admin;
+            create table storage.objects (id uuid primary key, owner uuid references auth.users, name text);
+            reset role;",
+        )
+        .await;
         p.exec("create schema extensions; create extension pgcrypto with schema extensions").await;
         p.schema(
-            "create table profiles (id uuid primary key references auth.users on delete cascade, token text default encode(extensions.gen_random_bytes(8), 'hex'));
+            "create table profiles (id uuid primary key references auth.users on delete cascade, aal auth.aal_level, token text default encode(extensions.gen_random_bytes(8), 'hex'));
             create function handle_new_user() returns trigger language plpgsql as $$ begin insert into public.profiles (id) values (new.id); return new; end $$;
-            create trigger on_auth_user_created after insert on auth.users for each row execute function handle_new_user();",
+            create trigger on_auth_user_created after insert on auth.users for each row execute function handle_new_user();
+            create policy own on auth.users using (id = auth.uid());
+            create view profile_emails as select p.id, e.email from profiles p join auth.emails e on e.id = p.id;",
         );
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "profiles", &Default::default(), log).await).await, 0, "{}", p.peek());
         let written = std::fs::read_to_string(p.dir.join("migrations").join(&p.files()[0])).unwrap();
@@ -6492,9 +6518,45 @@ mod adversarial {
         assert!(!written.contains("create schema auth") && !written.contains("create table auth.users") && !written.contains("create extension"), "{written}");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        p.strict = true;
+        assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(p.rows("select 1 from pg_extension where extname = 'pgcrypto'").await.len(), 1, "the platform's extension stays");
-        p.exec("insert into auth.users values ('00000000-0000-0000-0000-000000000001')").await;
+        p.exec("insert into auth.users (id) values ('00000000-0000-0000-0000-000000000001')").await;
         assert_eq!(p.rows("select token from profiles").await.len(), 1, "the trigger and the default ran");
+        reylo_migrate::db::set_pg_dump_dirs(None);
+    }
+
+    /// What a shadow is given of the platform's schemas: what they hold, made as the platform's role,
+    /// and none of what the project made on them or what lies outside them.
+    pub async fn a_shadow_holds_the_platforms_schemas_alone(p: P) {
+        reylo_migrate::db::set_pg_dump_dirs(Some(vec![]));
+        p.exec("do $$ begin create role supabase_auth_admin; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec(
+            "create schema auth authorization supabase_auth_admin; set role supabase_auth_admin;
+            create table auth.users (id uuid primary key); create function auth.uid() returns uuid language sql as 'select null::uuid';
+            create function auth.touch() returns trigger language plpgsql as $$ begin return new; end $$;
+            create trigger touch before update on auth.users for each row execute function auth.touch(); reset role;
+            create function public.on_signup() returns trigger language plpgsql as $$ begin return new; end $$;
+            create trigger on_signup after insert on auth.users for each row execute function public.on_signup();
+            create policy own on auth.users using (id = auth.uid()); comment on table auth.users is 'the platform''s';",
+        )
+        .await;
+        let mut target = Db::connect(&p.url, &p.dir).await.unwrap();
+        let mut server = Server::open(&mut target, &p.url, None).await.unwrap();
+        let mut shadow = server.shadow().await.unwrap();
+        // Made as a role of the platform's, which every comparison leaves out: not the role connected.
+        let made = shadow.db.rows("select string_agg(c.relname, ', ' order by c.relname) as r, bool_and(c.relowner <> (select oid from pg_roles where rolname = current_user))::text as theirs from pg_class c where c.relnamespace = 'auth'::regnamespace").await.unwrap();
+        assert_eq!((made[0].text("r"), made[0].text("theirs")), ("users, users_pkey", "true"));
+        let triggers = shadow.db.rows("select string_agg(tgname, ', ' order by tgname) as t from pg_trigger where tgrelid = 'auth.users'::regclass").await.unwrap();
+        assert_eq!(triggers[0].text("t"), "touch", "the platform's trigger alone");
+        assert!(shadow.db.rows("select 1 from pg_policy").await.unwrap().is_empty(), "no policy");
+        assert!(shadow.db.rows("select 1 from pg_proc where proname = 'on_signup'").await.unwrap().is_empty(), "nothing outside the platform's schemas");
+        assert!(shadow.db.rows("select 1 from pg_description where objoid = 'auth.users'::regclass").await.unwrap().is_empty(), "no comment");
+        assert_eq!(shadow.db.rows("select 1 from pg_proc where proname = 'uid' and pronamespace = 'auth'::regnamespace").await.unwrap().len(), 1);
+        server.drop_shadow(shadow).await;
+        server.close().await;
+        target.close().await;
+        reylo_migrate::db::set_pg_dump_dirs(None);
     }
 
     /// As Azure makes its `postgres` database: an extension its superuser made in `pg_catalog`

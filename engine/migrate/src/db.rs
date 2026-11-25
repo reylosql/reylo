@@ -1017,34 +1017,18 @@ fn without_password(url: &str) -> (String, Option<String>) {
     }
 }
 
-/// The platform's own schemas on the target, as the statements that make them, without owners,
+/// The platform's own schemas on the target, as the statements that make them, read and planned
+/// as `migrate new` plans (no pg_dump, which a build machine often lacks): without owners,
 /// privileges or comments, and without the extensions, which a shadow makes itself. What the
 /// project made on the platform's tables is left to the project's own SQL, which makes it again: a
 /// policy (Reylo takes every policy for the project's), and a trigger whose function is outside the
 /// platform's schemas (`on_auth_user_created`, calling `public.handle_new_user()`).
-fn platform_ddl(url: &str, major: i64, schemas: &[String]) -> Result<Vec<String>, Error> {
-    let mut args: Vec<String> = ["--schema-only", "--no-owner", "--no-privileges", "--no-comments", "--no-publications", "--no-subscriptions", "--no-security-labels", "--no-tablespaces"].map(String::from).to_vec();
-    for s in schemas {
-        args.push("--schema".into());
-        args.push(s.clone());
-    }
-    let text = pg_dump(url, major, &args)?;
-    let kept: Vec<&str> = text.lines().filter(|l| !l.starts_with('\\') && !l.starts_with("SET ") && !l.starts_with("SELECT pg_catalog.set_config") && !l.starts_with("--")).collect();
-    Ok(crate::sql::split_statements(&kept.join("\n"), Dialect::Postgres)
-        .into_iter()
-        .map(|s| s.text)
-        .filter(|t| {
-            let head = t.trim_start().to_ascii_uppercase();
-            if head.starts_with("CREATE EXTENSION") || head.starts_with("COMMENT ON EXTENSION") || head.starts_with("CREATE POLICY") {
-                return false;
-            }
-            if head.starts_with("CREATE TRIGGER") || head.starts_with("CREATE CONSTRAINT TRIGGER") {
-                static FUNCTION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)\bexecute\s+(?:function|procedure)\s+"?([^".(\s]+)"?\."#).expect("a valid pattern"));
-                return FUNCTION.captures(t).is_some_and(|c| schemas.iter().any(|s| s.eq_ignore_ascii_case(&c[1])));
-            }
-            true
-        })
-        .collect())
+#[cfg(feature = "cli")]
+async fn platform_ddl(target: &mut Db, schemas: &[String]) -> Result<Vec<String>, Error> {
+    let platform = crate::diff::postgres::read_platform(target, schemas).await?;
+    let alterer = crate::diff::alterer(target).await?;
+    let plan = crate::diff::plan(&crate::diff::Schema::default(), &platform, alterer.as_ref());
+    Ok(plan.statements.into_iter().filter(|s| !s.trim_start().starts_with("--")).collect())
 }
 
 /// How the note opens that says what every shadow leaves out of the target.
@@ -1091,7 +1075,7 @@ async fn make_as(admin: &tokio_postgres::Client, db: &mut Db, name: &str, bare: 
 #[cfg(feature = "cli")]
 #[derive(Default)]
 pub struct Owned {
-    /// Its schemas, whole, as pg_dump makes them, with the privileges the target gives on them, and
+    /// Its schemas, whole, as Reylo plans them, with the privileges the target gives on them, and
     /// its routines in the project's schemas.
     pub(crate) statements: Vec<String>,
     /// Its extensions (Tiger Cloud's `timescaledb`, Azure's `pgaadauth`), each `(name, schema)`.
@@ -1116,7 +1100,7 @@ impl Owned {
 /// Reylo makes no role itself: a role is the whole server's, and outlives every run, so the shadows'
 /// server, often the target's own, is given one only by whoever runs it.
 #[cfg(feature = "cli")]
-async fn owned_by_platform(target: &mut Db, admin: &tokio_postgres::Client, url: &str, version: i64) -> Result<Owned, Error> {
+async fn owned_by_platform(target: &mut Db, admin: &tokio_postgres::Client) -> Result<Owned, Error> {
     use crate::catalog::{beyond_reach, in_project_schema, not_extension, not_platform_schema, PG_USER_NS, PLATFORM_ROLES, SHADOW_PLATFORM_ROLE};
     let named = PLATFORM_ROLES.iter().map(|r| literal(r)).collect::<Vec<_>>().join(", ");
     let theirs = |owner: &str| format!("{} and pg_get_userbyid({owner}) <> all (array[{named}])", beyond_reach(owner));
@@ -1147,7 +1131,7 @@ async fn owned_by_platform(target: &mut Db, admin: &tokio_postgres::Client, url:
     let mut owners: Vec<String> = rows.iter().map(|r| r.text("owner").to_string()).collect();
     owners.sort();
     owners.dedup();
-    let mut statements = if schemas.is_empty() { vec![] } else { platform_ddl(url, version / 10000, &schemas).unwrap_or_default() };
+    let mut statements = if schemas.is_empty() { vec![] } else { platform_ddl(target, &schemas).await? };
     statements.extend(schema_grants(target, &schemas).await?);
     statements.extend(of("f").map(|r| r.text("a").to_string()));
     let extensions = of("x").map(|r| (r.text("a").to_string(), r.text("b").to_string())).collect();
@@ -1525,12 +1509,11 @@ impl Server {
                     let can = if version >= 160000 { "SET" } else { "MEMBER" };
                     target.rows(&format!("select rolname as r from pg_roles where rolname in ({roles}) and pg_has_role(current_user, oid, '{can}') order by rolname limit 1")).await?.first().map(|r| r.text("r").to_string())
                 };
-                // Made where the shadows may become one of the platform's roles; a dump that fails
-                // leaves them without, as before.
-                let environment = if environment_role.is_some() { platform_ddl(url, version / 10000, &platform).unwrap_or_default() } else { vec![] };
+                // Made where the shadows may become one of the platform's roles.
+                let environment = if environment_role.is_some() { platform_ddl(target, &platform).await? } else { vec![] };
                 let schemas: Vec<String> = std::iter::once("public".to_string()).chain(extensions.iter().map(|(_, s)| s.clone())).filter(|s| !platform.contains(s)).collect();
                 let schema_grants = schema_grants(target, &schemas).await?;
-                let owned = owned_by_platform(target, &admin, url, version).await?;
+                let owned = owned_by_platform(target, &admin).await?;
                 // On Supabase, the default privileges its Data API's roles have, the target's own,
                 // which Supabase sets for every project as it chooses; and its publication.
                 let platform_privileges = if names { platform_defaults(api_settings(&api_privileges(&privileges), &[])).0 } else { vec![] };
