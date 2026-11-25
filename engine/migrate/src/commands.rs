@@ -3041,23 +3041,27 @@ fn creates_platform_publication_in(text: &str) -> bool {
             && w[1].upper() == "PUBLICATION"
             && match w[2].kind {
                 TokenKind::Word => w[2].text.eq_ignore_ascii_case(crate::catalog::PLATFORM_PUBLICATION),
-                TokenKind::Quoted => w[2].text.trim_matches('"') == crate::catalog::PLATFORM_PUBLICATION,
+                TokenKind::Quoted => unquoted(&w[2].text) == crate::catalog::PLATFORM_PUBLICATION,
                 _ => false,
             }
     })
 }
 
-/// The extensions the project's files take a database to have begun without: those whose first
-/// statement, in the order the migrations run and then in schema.sql, creates them whether or not
-/// the database has them already (with no `if not exists`), rather than dropping them first. By
-/// name, lowercase.
+/// A quoted identifier's name: its outer quotes taken off, and each doubled quote in it made one.
+fn unquoted(text: &str) -> String {
+    text.strip_prefix('"').and_then(|t| t.strip_suffix('"')).unwrap_or(text).replace("\"\"", "\"")
+}
+
+/// The extensions the project's migrations take a database to have begun without: those whose first
+/// statement, in the order the migrations run, creates them whether or not the database has them
+/// already (with no `if not exists`), rather than dropping them first. By name: a word's lowercase.
 fn unconditional_extensions(opts: &Options) -> Vec<String> {
     use crate::sql::TokenKind;
     let files = opts.migrations().map(|(files, _)| run_order(opts, &files)).unwrap_or_default();
-    let texts: Vec<String> = files.into_iter().map(|f| f.sql).chain(opts.schema_text()).collect();
+    let texts: Vec<String> = files.into_iter().map(|f| f.sql).collect();
     let name = |t: &crate::sql::Token| match t.kind {
         TokenKind::Word => Some(t.text.to_lowercase()),
-        TokenKind::Quoted => Some(t.text.trim_matches('"').to_lowercase()),
+        TokenKind::Quoted => Some(unquoted(&t.text)),
         _ => None,
     };
     // Each extension's first statement: whether it creates it unconditionally.
@@ -9764,6 +9768,7 @@ mod tests {
         assert!(!creates_platform_publication_in("-- create publication supabase_realtime\nselect 1;"));
         assert!(!creates_platform_publication_in("create publication \"Supabase_Realtime\";"));
         assert!(!creates_platform_publication_in("create publication supabase_realtime_messages;"));
+        assert!(!creates_platform_publication_in("create publication \"\"\"supabase_realtime\"\"\";"));
     }
 
     #[test]
