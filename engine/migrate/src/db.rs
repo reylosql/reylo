@@ -1860,6 +1860,20 @@ impl Server {
         }
     }
 
+    /// Whether the target is a Supabase database whose shadows begin as Supabase makes one.
+    pub fn is_platform(&self) -> bool {
+        matches!(self, Server::Postgres { platform: true, .. })
+    }
+
+    /// Shadows begin with no default privileges at all, so that a grant to the Data API's roles is
+    /// one the SQL states.
+    pub fn grant_by_default_nothing(&mut self) {
+        if let Server::Postgres { copy_privileges, platform_privileges, .. } = self {
+            *copy_privileges = false;
+            platform_privileges.clear();
+        }
+    }
+
     /// The settings the target began under ([`API_SETTINGS`]), which its shadows begin under.
     pub fn began_with(&mut self, on: [bool; 2]) {
         if let Server::Postgres { platform_privileges, platform: true, .. } = self {

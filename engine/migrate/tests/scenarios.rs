@@ -4153,6 +4153,7 @@ on!(
     a_supabase_extension_kept_elsewhere_stays_the_environments,
     a_supabase_extension_a_migration_moved_begins_where_it_was,
     a_supabase_database_adopted_after_moving_or_updating_an_extension_replays_it,
+    a_stated_grant_supabase_also_gives_by_default_is_written,
     a_migration_that_makes_supabases_publication_again_runs,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
@@ -8851,6 +8852,37 @@ create trigger kids_note after insert on kids begin update parents set name = na
             assert_eq!(db.history().await.len(), 2);
             assert_eq!(db.dry_run().await, 0, "{}", db.peek());
         }
+    }
+
+    /// A grant to the Data API's roles that schema.sql states is written into the migration even where
+    /// the development database's default privileges give it too, as a Supabase database that
+    /// exposes new tables to the API does: a database that exposes none, as a new project does, gets
+    /// it from the migration. A grant added later, which changes nothing on the development
+    /// database, is a migration of its own.
+    pub async fn a_stated_grant_supabase_also_gives_by_default_is_written(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        let ping = "create function ping() returns int language sql as 'select 1';\n\ngrant execute on function ping() to anon;\n";
+        p.schema(&format!("create table notes (id int primary key);\n\ngrant select on table notes to anon;\n\ngrant all on table notes to service_role;\n\ncreate sequence counter;\n\ngrant usage on sequence counter to authenticated;\n\n{ping}"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "notes", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let notes = p.files().into_iter().map(|f| std::fs::read_to_string(p.dir.join("migrations").join(f)).unwrap()).collect::<String>();
+        assert_has!(notes.clone(), r"grant select on table notes to anon;");
+        assert_has!(notes.clone(), r"grant all on table notes to service_role;");
+        assert_has!(notes.clone(), r"grant usage on sequence counter to authenticated;");
+        assert_has!(notes, r"grant execute on function ping\(\) to anon;");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.schema(&format!("create table notes (id int primary key);\n\ngrant select on table notes to anon, authenticated;\n\ngrant all on table notes to service_role;\n\ncreate sequence counter;\n\ngrant usage on sequence counter to authenticated;\n\n{ping}"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "readers", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.files().len(), 2, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        as_supabase_makes_it(&q, false).await;
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(holds(&q, "notes", "anon", "SELECT").await, "1");
+        assert_eq!(holds(&q, "notes", "authenticated", "SELECT").await, "1");
+        assert_eq!(holds(&q, "notes", "anon", "INSERT").await, "0");
+        assert_eq!(holds(&q, "notes", "service_role", "DELETE").await, "1");
+        assert_eq!(q.rows("select has_sequence_privilege('authenticated', 'counter', 'USAGE')::text as n").await[0].text("n"), "true");
     }
 
     /// A Supabase database that began without one of Supabase's extensions replays its migrations from

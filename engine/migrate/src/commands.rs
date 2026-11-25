@@ -8426,8 +8426,101 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
     }
     .await;
     shadows.finish().await;
+    // On Supabase, a grant to the Data API's roles that schema.sql states is written even where the
+    // target's default privileges give it too: a database whose settings give less needs it.
+    let result = match result {
+        Ok(Ok(mut drafted)) if drafted.code == 0 && server.is_platform() => match stated_grants(&mut server, opts, files, schema_sql, &drafted.texts).await {
+            Ok(grants) if !grants.is_empty() => {
+                let text = grants.iter().map(|g| format!("{g};")).collect::<Vec<_>>().join("\n");
+                match drafted.texts.last_mut().filter(|_| !drafted.empty) {
+                    Some(last) => *last = format!("{}\n\n{text}\n", last.trim_end()),
+                    None => drafted.texts = vec![format!("{text}\n")],
+                }
+                drafted.changes.extend(grants.iter().map(|g| format!("  {} {g}", paint("green", "+"))));
+                drafted.empty = false;
+                Ok(Ok(drafted))
+            }
+            Ok(_) => Ok(Ok(drafted)),
+            Err(e) => Err(e),
+        },
+        other => other,
+    };
     server.close().await;
     result
+}
+
+/// The grants to the Data API's roles that `schema_sql` states and the migrations `files` and the
+/// drafted `texts` don't make, as statements: read on shadows that take no default privileges, where
+/// only what the SQL states grants those roles anything. None where either side fails to replay,
+/// which the draft has said already.
+#[cfg(feature = "cli")]
+async fn stated_grants(server: &mut Server, opts: &Options, files: &[Migration], schema_sql: &str, texts: &[String]) -> Result<Vec<String>, Error> {
+    server.grant_by_default_nothing();
+    let drafted: Vec<Migration> = texts.iter().enumerate().map(|(i, sql)| Migration { name: format!("drafted {}", i + 1), time: String::new(), path: PathBuf::new(), sql: sql.clone() }).collect();
+    let all: Vec<&str> = files.iter().chain(&drafted).map(|f| f.sql.as_str()).chain([schema_sql]).collect();
+    let mut shadows = Shadows::new(server, &opts.url, &opts.root, &opts.cache, &all).await;
+    let result = async {
+        let a = shadows.lane();
+        shadows.push(a, [Step::script("schema.sql", schema_sql)]);
+        if shadows.open(a).await?.is_err() {
+            return Ok(vec![]);
+        }
+        let c = shadows.lane();
+        shadows.push(c, files.iter().chain(&drafted).map(Step::of));
+        if shadows.open(c).await?.is_err() {
+            return Ok(vec![]);
+        }
+        let stated = api_grants(shadows.db(a)).await?;
+        let made = api_grants(shadows.db(c)).await?;
+        // Each object's missing privileges, then the roles that lack the same ones together.
+        let mut lacks: Vec<(String, String, Vec<String>, String)> = Vec::new();
+        for (object, role, privileges, all) in &stated {
+            let has = made.iter().find(|(o, r, _, _)| o == object && r == role).map(|(_, _, p, _)| p.clone()).unwrap_or_default();
+            let missing: Vec<String> = privileges.iter().filter(|p| !has.contains(p)).cloned().collect();
+            if !missing.is_empty() {
+                lacks.push((object.clone(), role.clone(), missing, all.clone()));
+            }
+        }
+        let mut grants: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+        for (object, role, missing, all) in lacks {
+            let what = if missing.join(",") == all { vec!["all".to_string()] } else { missing };
+            match grants.iter_mut().find(|(o, p, _)| *o == object && *p == what) {
+                Some((_, _, roles)) => roles.push(role),
+                None => grants.push((object, what, vec![role])),
+            }
+        }
+        Ok(grants.into_iter().map(|(object, privileges, roles)| format!("grant {} on {object} to {}", privileges.join(", "), roles.join(", "))).collect())
+    }
+    .await;
+    shadows.finish().await;
+    result
+}
+
+/// Each object's privileges the Data API's roles hold, by object (as a grant names it: `table
+/// notes`, `function ping()`), role, its privileges and all those its kind has, lowercase, sorted
+/// and comma-joined.
+#[cfg(feature = "cli")]
+async fn api_grants(db: &mut Db) -> Result<Vec<(String, String, Vec<String>, String)>, Error> {
+    let roles = crate::catalog::PLATFORM_API_ROLES.iter().map(|r| crate::db::literal(r)).collect::<Vec<_>>().join(", ");
+    let rows = db
+        .rows(&format!(
+            "select o.object, r.rolname as role, string_agg(lower(a.privilege_type), ',' order by lower(a.privilege_type)) as privileges,
+               (select string_agg(lower(d.privilege_type), ',' order by lower(d.privilege_type)) from aclexplode(acldefault(o.kind, o.owner)) d) as every
+             from (
+               select format('%s %s', case c.relkind when 'S' then 'sequence' else 'table' end, c.oid::regclass) as object, c.relacl as acl, c.relowner as owner, case c.relkind when 'S' then 's' else 'r' end::\"char\" as kind
+               from pg_class c join pg_namespace n on n.oid = c.relnamespace
+               where c.relkind in ('r', 'p', 'v', 'm', 'f', 'S') and n.nspname not in ('pg_catalog', 'information_schema') and c.relacl is not null
+               union all
+               select format('%s %s', case p.prokind when 'p' then 'procedure' else 'function' end, p.oid::regprocedure), p.proacl, p.proowner, 'f'::\"char\"
+               from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+               where n.nspname not in ('pg_catalog', 'information_schema') and p.proacl is not null
+             ) o, aclexplode(o.acl) a join pg_roles r on r.oid = a.grantee
+             where r.rolname in ({roles})
+             group by o.object, r.rolname, o.kind, o.owner
+             order by 1, 2"
+        ))
+        .await?;
+    Ok(rows.iter().map(|r| (r.text("object").to_string(), r.text("role").to_string(), r.text("privileges").split(',').map(str::to_string).collect(), r.text("every").to_string())).collect())
 }
 
 /// The database's schema as SQL that makes it, for init's schema.sql, `db introspect` and a `migrate
