@@ -1248,6 +1248,22 @@ test("an unsupported client rejects, naming what it has and what reylo takes", a
   await assert.rejects(one.run(null as never), /reylo cannot run a sqlite statement on null\./);
 });
 
+test("an Effect SQL client is refused before it runs anything: its unsafe() hands back an Effect, which an await never runs", async () => {
+  let ran = 0;
+  // Effect SQL's client is its sql template tag, a function, with its type id and an unsafe() whose statement is an Effect: Effect 4's id a string, Effect 3's (@effect/sql) a symbol.
+  const unsafe = () => (ran++, { "~effect/Effect": {} });
+  const clients = [Object.assign(() => ({}), { "~effect/sql/SqlClient": "~effect/sql/SqlClient", unsafe }), Object.assign(() => ({}), { [Symbol.for("@effect/sql/SqlClient")]: Symbol.for("@effect/sql/SqlClient"), unsafe })];
+  const effectClient = /^TypeError: reylo cannot run a statement on an Effect SQL client: \.run\(\) takes a driver's own client/;
+  const write = defineQuery<{}, unknown, "none", "sqlite">({ dialect: "sqlite", sql: "insert into t values (1)", params: [], cardinality: "none" });
+  const read = defineQuery<{}, unknown, "many", "sqlite">({ dialect: "sqlite", sql: "select 1", params: [] });
+  for (const sql of clients) {
+    await assert.rejects(write.run(sql as never), effectClient);
+    await assert.rejects(read.run(sql as never), effectClient);
+    await assert.rejects(() => execute(sql as never, pg, { id: 1, name: "ada" }) as Promise<unknown>, effectClient);
+  }
+  assert.equal(ran, 0);
+});
+
 test("postgres: a client that is none of the drivers' is refused before it runs anything, a wrapper around one included", async () => {
   let ran = 0;
   const rows = async () => (ran++, { rows: [{ id: "1" }] });

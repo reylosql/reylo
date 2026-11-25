@@ -641,9 +641,16 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             "select co.oid, co.conindid, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, format('%I', co.conname) as name,
               pg_get_constraintdef(co.oid, false) as def, co.condeferrable as deferrable, co.condeferred as deferred, co.convalidated as validated, co.contype as type,
               case when co.contype = 'f' then
-                (select string_agg(format_type(a.atttypid, null), ', ' order by k.n) from unnest(co.conkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.conrelid and a.attnum = k.num)
-                || ' to ' || (select string_agg(format_type(a.atttypid, null), ', ' order by k.n) from unnest(co.confkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.confrelid and a.attnum = k.num)
+                (select string_agg(format_type(a.atttypid, null)
+                  || case when a.attcollation <> t.typcollation then ' collate ' || (select format('%I.%I', cn.nspname, cl.collname) from pg_collation cl join pg_namespace cn on cn.oid = cl.collnamespace where cl.oid = a.attcollation) else '' end, ', ' order by k.n) from unnest(co.conkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.conrelid and a.attnum = k.num join pg_type t on t.oid = a.atttypid)
+                || ' to ' || (select string_agg(format_type(a.atttypid, null)
+                  || case when a.attcollation <> t.typcollation then ' collate ' || (select format('%I.%I', cn.nspname, cl.collname) from pg_collation cl join pg_namespace cn on cn.oid = cl.collnamespace where cl.oid = a.attcollation) else '' end, ', ' order by k.n) from unnest(co.confkey) with ordinality k(num, n) join pg_attribute a on a.attrelid = co.confrelid and a.attnum = k.num join pg_type t on t.oid = a.atttypid)
               end as linked,
+              case when co.contype = 'f' then
+                (select string_agg(format(E'\n-- computes %s %s as %s', side, k.n, encode(textsend(pg_get_expr(ad.adbin, ad.adrelid)), 'hex')), '' order by side, k.n)
+                  from (select 'own' as side, co.conrelid as rel, co.conkey as keys union all select 'referenced', co.confrelid, co.confkey) s cross join lateral unnest(s.keys) with ordinality k(num, n)
+                  join pg_attribute a on a.attrelid = s.rel and a.attnum = k.num join pg_attrdef ad on ad.adrelid = a.attrelid and ad.adnum = a.attnum where a.attgenerated = 's')
+              end as computed,
               case when co.contype in ('p', 'u') then (select string_agg(o, ', ' order by o) from pg_class ic, unnest(ic.reloptions) o where ic.oid = co.conindid) end as index_options,
               case when co.contype in ('p', 'u', 'x') then (select format('%I.%I', inn.nspname, ic.relname) from pg_class ic join pg_namespace inn on inn.oid = ic.relnamespace where ic.oid = co.conindid) end as index_name,
               c.relkind = 'p' and co.contype in ('p', 'u', 'x') and not coalesce((select i.indisvalid from pg_index i where i.indexrelid = co.conindid), true) as alone
@@ -685,9 +692,11 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         if inline {
             inline_constraints.entry(oid(&r, "reloid")).or_default().push(format!("constraint {name} {def}"));
         }
-        // A foreign key holds while the types of the columns it links compare; a change of either
-        // side's type makes it again around the change, so that both columns can change between.
-        let linked = r.get("linked").map(|l| format!("\n-- links {l}")).unwrap_or_default();
+        // A foreign key holds while the values of the columns it links compare; a change of either
+        // side's type, collation or stored expression makes it again around the change, so that
+        // both columns can change between. A stored expression that goes keeps the values; each is
+        // written as its text in hex, on one line that no line of it can stand in for.
+        let linked = r.get("linked").map(|l| format!("\n-- links {l}{}", r.get("computed").unwrap_or_default())).unwrap_or_default();
         // A key's index storage parameters change in place on its index; anything else about it
         // makes it again.
         // A partitioned table's key index takes no options in place: it is made again.
@@ -1580,7 +1589,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             "select p.oid, format('%I', p.polname) as name, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, p.polcmd as cmd, p.polpermissive as permissive,
               (select string_agg(case when r = 0 then 'public' else quote_ident(pg_get_userbyid(r)) end, ', ' order by 1) from unnest(p.polroles) r) as roles,
               pg_get_expr(p.polqual, p.polrelid) as qual, pg_get_expr(p.polwithcheck, p.polrelid) as check
-            from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace where {kept_rel}",
+            from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace where {ns} and {kept_rel}",
         ))
         .await?
     {
@@ -1651,7 +1660,8 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         .rows(&format!(
             "select s.oid, format('%I.%I', n.nspname, s.stxname) as name, pg_get_statisticsobjdef(s.oid) as def, s.stxrelid as rel,
               nullif(coalesce(s.stxstattarget::int, -1), -1) as target
-            from pg_statistic_ext s join pg_namespace n on n.oid = s.stxnamespace where {ns} and {}",
+            from pg_statistic_ext s join pg_namespace n on n.oid = s.stxnamespace where {ns} and {} and {}",
+            crate::catalog::on_no_temporary_table("s"),
             format!("({} or {})", not_platform("s.stxowner"), not_platform_schema("n"))
         ))
         .await?
@@ -2254,6 +2264,24 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                 if let Some(o) = s.objects.get_mut(&from) {
                     o.deps.insert(to);
                 }
+            }
+        }
+    }
+    // A table's copy of another's check is no object of its own, but holds what it calls: the
+    // table carries that, read off the copy itself, whichever ancestor the check came down from.
+    for r in db
+        .rows(
+            "select co.conrelid, format('%s', d.refclassid::regclass) as rcls, d.refobjid, d.refobjsubid
+            from pg_constraint co join pg_depend d on d.classid = 'pg_constraint'::regclass and d.objid = co.oid and d.deptype = 'n'
+            where co.contype = 'c' and co.coninhcount > 0 and not (d.refclassid = 'pg_class'::regclass and d.refobjid = co.conrelid) and d.refobjid >= 16384",
+        )
+        .await?
+    {
+        let (Some(table), Some(read)) = (ids.of("pg_class", oid(&r, "conrelid"), 0), ids.of(r.text("rcls"), oid(&r, "refobjid"), r.text("refobjsubid").parse().unwrap_or(0))) else { continue };
+        if let Some(o) = s.objects.get_mut(&table) {
+            let line = format!("{COPY_READS}{read}");
+            if !o.extra.contains(&line) {
+                o.extra.push(line);
             }
         }
     }
@@ -3474,6 +3502,8 @@ fn columns_left(from: &Object, to: &Object) -> Vec<(String, String)> {
 /// name and definition).
 const OWN_CONSTRAINT: &str = "constraint of table ";
 const COPIED_CONSTRAINT: &str = "constraint copied to table ";
+/// What a table's copy of another's check calls, by id.
+const COPY_READS: &str = "copied check reads ";
 
 /// The constraints a table's joining or leaving another carries across, by the server's rules: one
 /// it leaves keeps its copies of the other's as its own, and one it joins takes its own that match
@@ -4265,7 +4295,20 @@ impl Alterer for PostgresAlterer {
         let columns: Vec<String> = to.extra.iter().filter_map(|l| l.strip_prefix(TABLE_COLUMN)?.split(SEP).nth(2)).map(String::from).collect();
         let mut out: Vec<String> = parents.iter().flat_map(|p| copies.iter().map(move |c| format!("constraint {p}.{c}"))).collect();
         out.extend(parents.iter().flat_map(|p| columns.iter().map(move |c| format!("column {p}.{c}"))));
+        // A parent's check may be a copy itself, of an ancestor's: what the copies call, as the
+        // target records them, is made first too.
+        out.extend(to.extra.iter().filter_map(|l| l.strip_prefix(COPY_READS)).map(String::from));
         out
+    }
+
+    fn copies_read(&self, from: &Object, to: &Object) -> Vec<String> {
+        // A table that leaves a parent drops its copies of the parent's checks after it leaves. One
+        // it added itself before it joined is its own as well, which the parent's drop leaves: what
+        // the check calls, as the copy's own records say, goes after the table's change.
+        if from.kind != Some(Kind::Table) || !joins_or_leaves(from, to).1 {
+            return Vec::new();
+        }
+        from.extra.iter().filter_map(|l| l.strip_prefix(COPY_READS)).map(String::from).collect()
     }
 
     fn releases(&self, from: &Object, to: &Object) -> bool {
@@ -4387,6 +4430,16 @@ impl Alterer for PostgresAlterer {
             (c.ty, c.collation, c.generated)
         };
         from.kind == Some(Kind::Column) && values(&from.def) == values(&to.def)
+    }
+
+    fn keeps(&self, from: &Object, to: &Object) -> bool {
+        // A foreign key, alike but for stored expressions its columns lose, which keep their values.
+        let parts = |def: &str| -> (String, Vec<String>) {
+            let mut parts = def.split("\n-- computes ").map(String::from);
+            (parts.next().unwrap_or_default(), parts.collect())
+        };
+        let ((a, was), (b, is)) = (parts(&from.def), parts(&to.def));
+        from.kind == Some(Kind::Constraint) && a.starts_with("FOREIGN KEY") && a == b && is.len() < was.len() && is.iter().all(|e| was.contains(e))
     }
 
     fn alter(&self, from: &Object, to: &Object) -> Option<Vec<String>> {

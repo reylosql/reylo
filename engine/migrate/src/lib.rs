@@ -39,7 +39,7 @@ pub mod terminal;
 mod time;
 
 #[cfg(feature = "cli")]
-pub use commands::{create, db_introspect, db_push, db_push_watch, db_reset, db_wipe, deploy, dev, dry_run, history_pull, history_push, init, lock_from_history, run_sql, status, Choices, Push};
+pub use commands::{create, db_introspect, db_push, db_push_watch, db_reset, db_wipe, deploy, dev, dry_run, dry_run_then, history_pull, history_push, init, lock_from_history, run_sql, status, Choices, Push};
 pub use commands::{deploy_on_host, status_on_host, Embedded, Options};
 
 /// What went wrong, as a sentence for the person running the command.

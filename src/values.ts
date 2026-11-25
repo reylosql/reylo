@@ -323,7 +323,7 @@ export function columnKind(t: EngineType, dialect: Dialect): Kind {
     // One of a few values of its type: a MySQL ENUM of known labels holds one of them or `''`,
     // which the run time refuses, and any other is its type's.
     case "enum":
-      return dialect === "mysql" && name === "enum" && t.type.kind === "text" && !t.values.includes("") ? "enum" : columnKind(t.type, dialect);
+      return dialect === "mysql" && name === "enum" && t.type.kind === "text" && !t.values.some((v) => v.value === "") ? "enum" : columnKind(t.type, dialect);
     case "range":
     case "multirange":
       // A Postgres range is an object of its bounds, each decoded from its text as its subtype is.

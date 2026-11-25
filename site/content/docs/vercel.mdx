@@ -1,0 +1,36 @@
+---
+title: Vercel
+description: How to run Reylo Migrate on Vercel. Build on a shadow of the schema the deploy leaves, then migrate production as the build's last step, just before the deploy goes live.
+---
+
+<p className="dk-subheader">Reylo Migrate on Vercel</p>
+
+Run the build on a dry run of the deploy, then migrate production as the build's last step:
+
+```json title="package.json"
+{
+  "scripts": {
+    "vercel-build": "reylo migrate deploy --dry-run -- next build && reylo migrate deploy"
+  }
+}
+```
+
+The build's type check reads a shadow of the schema the deploy leaves, never production's. Vercel runs this script unless your project sets a Build Command. Nothing of yours runs between the build and going live, and a build or migration that fails stops the deploy.
+
+<Callout title="Previews">
+
+Preview builds run the same script, on the Preview environment's variables. Give previews a database of their own, or they migrate production.
+
+</Callout>
+
+## Database
+
+A migration needs your database's direct connection string. Neon's Vercel integration sets it as `DATABASE_URL_UNPOOLED`, in each environment, and can create a branch for each preview deployment:
+
+```yaml title=".reylo.yaml"
+direct_url: ${DATABASE_URL_UNPOOLED:-${DATABASE_URL}}
+```
+
+The dry run makes its shadow on that database's server. Where its role can't create databases, set [`shadow_url`](/configuration#shadow_url).
+
+Pages the build prerenders still query production, before it's migrated. Render a page that reads a new column on each request.

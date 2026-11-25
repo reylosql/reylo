@@ -32,6 +32,7 @@ Commands:
   dev                      Apply pending migrations, rewinding if needed (may drop data), and write the lockfile
   deploy                   Run what the lock lists, with no shadow database
     --dry-run              Try it on a shadow database, running nothing here
+      -- <command>         Then run the command, such as your build, typed against that shadow
   status                   Check that this database and the files are in step
   lock                     Write the lock from this database's history
   history push             Record the migrations this database's schema has
@@ -223,6 +224,38 @@ $ reylo migrate deploy --dry-run
 ✓ The migrations match reylo/schema.sql
 ✓ Tried the pending migration on a shadow database:
     · 20261104140347_add_bio.sql
+```
+
+It says what each pending migration blocks and drops, written by hand or not. A constraint your rows already break fails it:
+
+```sql title="20261124235900_tidy_users.sql"
+alter table users drop column bio;
+alter table users add constraint users_plan_check check (plan in ('free', 'pro'));
+```
+
+Try it on production:
+
+```terminal
+$ reylo migrate deploy --dry-run --url $PROD_URL
+✓ This database is as its migrations left it
+✓ The migrations match reylo/schema.sql
+✓ Tried the pending migration on a shadow database:
+    · 20261124235900_tidy_users.sql
+      ! It checks every row of users while it blocks reads and writes to it
+      ! It drops users.bio, which holds a value in 1403 rows on this database
+      ✗ It fails on this database: 8 rows break users_plan_check
+        List them:
+          select * from users where not (plan = ANY (ARRAY['free'::text, 'pro'::text]));
+
+✗ The deploy would fail on rows this database holds
+  Fix the rows, or the migration where no database has run it yet, then try again:
+    reylo migrate deploy --dry-run
+```
+
+To type your build against the schema the deploy leaves, put it after `--`. It runs on the dry run's shadow database, which is dropped when it exits:
+
+```sh
+reylo migrate deploy --dry-run -- next build
 ```
 
 A failed migration rolls back and records nothing. Fix the file, run `reylo migrate dev`, and deploy again. Where a database already ran the old version, write a new migration instead.
@@ -500,7 +533,15 @@ create table users (
 );
 ```
 
-In a terminal, a spinner shows while it reads and SQL output is coloured. Piped or redirected output is plain SQL. If verification can't run, or `--schema` selects a subset, it prints the database's dump instead. On Postgres, that requires `pg_dump` matching your server's version or newer.
+In a terminal, a spinner shows while it reads and SQL output is coloured. Piped or redirected output is plain SQL.
+
+Where it can't check the schema, it prints the database's own dump instead, and says why on stderr. That's where:
+
+- Reylo's SQL can't make all of your schema
+- your role can't create a database, and `shadow_url` is unset
+- `--schema` names only some of your schemas
+
+On Postgres, the dump needs `pg_dump` of your server's version or newer. Where it checks the schema, a `shadow_url` whose server can't make a shadow database fails the run.
 
 To save it over `schema.sql`, write a temporary file first so a failed run can't empty it:
 
@@ -531,17 +572,18 @@ $ reylo migrate status --url $PROD_URL
 
 Most commands use shadow databases: throwaway databases where Reylo Migrate replays your migrations to read the schema they make. A deploy needs none:
 
-| Needs a shadow database | Needs none |
+| Uses a shadow database | Uses none |
 | --- | --- |
 | `reylo migrate init` | `reylo migrate deploy` |
 | `reylo migrate new` | `reylo migrate status` |
-| `reylo migrate dev` | `reylo db introspect` |
-| `reylo migrate deploy --dry-run` | `reylo db wipe` |
+| `reylo migrate dev` | `reylo db wipe` |
+| `reylo migrate deploy --dry-run` | |
 | `reylo migrate lock` | |
 | `reylo migrate history push` | |
 | `reylo migrate history pull` | |
 | `reylo db push` | |
 | `reylo db reset` | |
+| `reylo db introspect` | |
 
 Each database makes them its own way:
 
@@ -549,7 +591,7 @@ Each database makes them its own way:
 - **MySQL:** on your database's server, with `create database`, so your user needs the `CREATE` privilege on every database. PlanetScale refuses `create database`, so point `shadow_url` at a plain MySQL 8.4 server.
 - **SQLite:** in memory. There's nothing to grant. A [Turso](/turso#migrations) database's shadows run on libSQL's own engine.
 
-A migration that would reach past its shadow is refused by every command, `deploy` and `status` included. That's one that:
+Every command refuses a migration that would reach past its shadow, `deploy` and `status` included. A `schema.sql` that would is refused by `status` and by every command that loads it into a shadow. That's one with a statement that:
 
 - changes a role, a database, a tablespace or a server setting
 - on MySQL, names a database, as in `app.users`

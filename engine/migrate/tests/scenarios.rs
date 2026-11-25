@@ -386,6 +386,16 @@ fn undo_in(out: &str) -> String {
     quoted.replace("'\\''", "'")
 }
 
+/// Makes `p` connect to its Postgres database as a role that owns it and can't create a database, with
+/// no shadow_url: no shadow database can be made, so its schema as SQL is the dump. The role is the
+/// one `a_role_that_cannot_create_databases_is_told_of_shadow_url` makes, so no other role changes
+/// every replay cache's key on the server under the scenarios beside it.
+async fn with_no_shadows(p: &mut P) {
+    p.exec("do $$ begin create role madv_nocreate login nocreatedb; exception when duplicate_object or unique_violation then null; end $$").await;
+    p.exec(&format!("alter database {} owner to madv_nocreate", p.name)).await;
+    p.url = as_role(&p.url, "madv_nocreate");
+}
+
 /// `url` connecting as `role`, with no password: the test servers trust their local connections.
 fn as_role(url: &str, role: &str) -> String {
     regex::Regex::new(r"^([a-z]+://)(?:[^@/]*@)?").unwrap().replace(url, format!("${{1}}{role}@").as_str()).into_owned()
@@ -1250,11 +1260,10 @@ async fn init_leaves_out_another_tools_history(p: P) {
 /// too, and the sequences they own.
 #[tokio::test(flavor = "current_thread")]
 async fn the_dump_leaves_out_another_tools_history() {
-    let Some(p) = P::new(Dialect::Postgres).await else { return };
+    let Some(mut p) = P::new(Dialect::Postgres).await else { return };
+    with_no_shadows(&mut p).await;
     p.exec(&format!("create table users (id bigint primary key, email text not null);{}", other_tools_history(&p))).await;
-    // A shadows' server that answers nothing leaves the dump.
-    let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
-    let text = introspect(&opts).await;
+    let text = introspect(&p.opts()).await;
     assert!(text.contains("CREATE TABLE public.users"), "{text}");
     assert!(!has(&text, "(?i)prisma|knex|drizzle|databasechangelog"), "{text}");
 }
@@ -2514,11 +2523,10 @@ async fn a_cached_prefix_replays_only_what_follows_it(mut p: P) {
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     let stats = reylo_migrate::cache::take_stats();
     if keeps_databases {
-        // A copy for the check, and one for the locks the pending migration holds, run on Postgres.
-        let copies = if p.d == Dialect::Postgres { 2 } else { 1 };
-        assert_eq!((stats.replayed, stats.copies), (2, copies), "{stats:?}");
+        // A copy for the check, and one the pending migration runs on to say what it locks and drops.
+        assert_eq!((stats.replayed, stats.copies), (2, 2), "{stats:?}");
     } else {
-        // The check's replay, and the history again for the locks the pending migration holds.
+        // The check's replay, and the history again for what the pending migration locks and drops.
         assert_eq!(stats.replayed, 8, "{stats:?}");
     }
     reylo_migrate::cache::set_enabled(None);
@@ -4039,6 +4047,8 @@ on!(
     grants_compare_without_their_grantor,
     a_migration_that_creates_a_role_is_refused,
     a_role_grant_is_refused_by_deploy_too,
+    a_role_in_schema_sql_is_refused_before_any_shadow,
+    a_role_a_database_ran_is_refused_before_its_replay,
     an_object_the_comparison_does_not_read_is_not_a_match,
     a_failed_concurrent_index_leaves_nothing,
     a_failed_lone_statement_may_leave_its_change,
@@ -4101,6 +4111,7 @@ on!(
     a_change_by_hand_is_shown_alone_beside_a_function_of_many_lines,
     an_enum_value_added_is_ahead_on_the_side_that_added_it,
     a_comment_a_migration_adds_is_the_migrations,
+    a_temporary_tables_constraints_and_policies_are_no_drift,
 );
 on!(Mysql, a_migration_that_names_a_database_is_refused);
 on!(
@@ -4109,6 +4120,7 @@ on!(
     an_extension_in_a_schema_of_its_own_is_dumped_after_it,
     an_extension_left_in_a_schema_of_the_projects_own_stops_no_push,
     a_partition_dropped_at_run_time_is_data,
+    a_key_renamed_keeps_a_partition_made_at_run_time,
     a_table_made_partitioned_is_refused_for_what_postgres_cant_change,
     the_lines_that_keep_a_remade_tables_rows_follow_the_change,
     a_remade_tables_sequences_move_past_the_rows_put_back,
@@ -4133,7 +4145,7 @@ on!(Postgres, init_keeps_a_publications_generated_columns, init_makes_a_wrapper_
 on!(Sqlite, a_virtual_tables_own_tables_are_not_in_the_dump, an_external_content_index_is_rebuilt_from_its_rows);
 mod on_mysql {
     use super::*;
-    on!(Mysql, a_comment_made_by_hand_stops_nothing, a_comment_in_schema_sql_is_written, a_role_that_cannot_create_databases_is_told_of_shadow_url, a_grant_is_written_pushed_and_left_by_no_shadow, grants_an_account_cannot_read_back_are_refused);
+    on!(Mysql, a_comment_made_by_hand_stops_nothing, a_comment_in_schema_sql_is_written, a_role_that_cannot_create_databases_is_told_of_shadow_url, a_grant_is_written_pushed_and_left_by_no_shadow, grants_an_account_cannot_read_back_are_refused, an_account_or_role_grant_in_schema_sql_is_refused_before_any_shadow);
 }
 on!(Sqlite, a_rebuild_keeps_every_row_where_foreign_keys_are_on, a_rebuild_keeps_tables_that_reference_each_other, libsqls_own_sql_migrates, a_libsql_history_replays_on_a_branch_without_it, a_table_renamed_keeps_its_rows_key_and_counter, a_turso_engines_own_tables_are_tursos);
 mod on_turso {
@@ -4457,6 +4469,224 @@ async fn a_dry_run_says_what_blocks_a_table_renamed_before() {
     p.output();
     assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     assert_has!(p.output(), r"_narrow\.sql\n      ! It rewrites accounts, copying every row while it blocks writes to it");
+}
+
+/// A dry run says what each pending migration drops, one written by hand too, with what this
+/// database holds of it; a column renamed keeps its rows, and isn't said to be dropped.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_says_what_pending_migrations_drop() {
+    for d in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
+        let Some(mut p) = P::new(d).await else { continue };
+        p.file("20261027100000_users.sql", "create table users (id int primary key, bio varchar(20), nick varchar(20), n bigint);");
+        p.file("20261027100001_tags.sql", "create table tags (id int primary key);");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into users values (1, 'a', null, 1); insert into users values (2, null, null, 2); insert into users values (3, 'c', null, 3); insert into tags values (1)").await;
+        p.file("20261027110000_drop_bio.sql", "alter table users drop column bio;");
+        p.file("20261027110001_drop_nick.sql", "alter table users drop column nick;");
+        p.file("20261027110002_drop_tags.sql", "drop table tags;");
+        p.file("20261027110003_rename_n.sql", "alter table users rename column n to amount;");
+        p.schema("create table users (id int primary key, amount bigint);\n");
+        p.output();
+        assert_eq!(p.dry_run().await, 0, "{d:?}: {}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"_drop_bio\.sql\n      ! It drops users\.bio, which holds a value in 2 rows on this database\n");
+        assert_has!(&out, r"_drop_nick\.sql\n      ! It drops users\.nick, which holds no value on this database\n");
+        assert_has!(&out, r"_drop_tags\.sql\n      ! It drops the table tags and its 1 row on this database\n");
+        assert!(out.trim_end().ends_with("_rename_n.sql"), "{d:?}: a rename keeps its rows: {out}");
+    }
+}
+
+/// A dry run checks each constraint a pending migration adds against the rows this database holds,
+/// and fails where some break it, listing them. One whose table a pending migration changes the
+/// rows of first is left to the deploy: the rows it meets are those the change leaves.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_checks_new_constraints_against_this_databases_rows() {
+    for d in [Dialect::Postgres, Dialect::Mysql] {
+        let Some(mut p) = P::new(d).await else { continue };
+        p.file("20261027100000_teams.sql", "create table teams (id int primary key);");
+        p.file("20261027100001_users.sql", "create table users (id int primary key, email varchar(100), plan varchar(10), team_id int);");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into teams values (1); insert into users values (1, 'a@x', 'free', 1); insert into users values (2, 'a@x', 'gold', null); insert into users values (3, null, 'pro', 9)").await;
+        p.file("20261027110000_plan.sql", "alter table users add constraint users_plan check (plan in ('free', 'pro'));");
+        p.file("20261027110001_email.sql", "create unique index users_email on users (email);");
+        p.file("20261027110002_team.sql", "alter table users add constraint users_team foreign key (team_id) references teams (id);");
+        let not_null = if d == Dialect::Mysql { "alter table users modify email varchar(100) not null;" } else { "alter table users alter column email set not null;" };
+        p.file("20261027110003_email_not_null.sql", not_null);
+        p.schema("create table teams (id int primary key);\ncreate table users (id int primary key, email varchar(100) not null, plan varchar(10), team_id int, constraint users_plan check (plan in ('free', 'pro')), constraint users_team foreign key (team_id) references teams (id));\ncreate unique index users_email on users (email);\n");
+        p.output();
+        assert_eq!(p.dry_run().await, 1, "{d:?}: {}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"_plan\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks users_plan\n        List them:\n          select \* from [^\n]+\n");
+        assert_has!(&out, r"_email\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 value repeats in users_email\n");
+        assert_has!(&out, r"_team\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks users_team\n");
+        assert_has!(&out, r"_email_not_null\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row has nulls in users\.email\n");
+        assert_has!(&out, r"✗ The deploy would fail on rows this database holds\n");
+
+        // A backfill before them: the constraints meet the rows it leaves, which no read of this
+        // database can say, so the deploy is left to find out.
+        p.file("20261027105959_backfill.sql", "update users set plan = 'free', email = concat('u', id, '@x'), team_id = 1;");
+        p.output();
+        assert_eq!(p.dry_run().await, 0, "{d:?}: {}", p.peek());
+        assert!(!p.output().contains("✗"), "{d:?}: the backfill changes the rows first");
+    }
+}
+
+/// A table dropped and made again as it was reads as unchanged in the catalog, while its rows are
+/// gone: the dry run says so, from the migration's statements.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_says_a_table_made_again_loses_its_rows() {
+    for d in [Dialect::Postgres, Dialect::Sqlite] {
+        let Some(mut p) = P::new(d).await else { continue };
+        let logs = "create table logs (id int primary key, note varchar(20));";
+        p.file("20261027100000_logs.sql", logs);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into logs values (1, 'a'); insert into logs values (2, 'b')").await;
+        p.file("20261027110000_reset_logs.sql", &format!("drop table logs;\n{logs}"));
+        p.schema(logs);
+        p.output();
+        assert_eq!(p.dry_run().await, 0, "{d:?}: {}", p.peek());
+        assert_has!(p.output(), r"_reset_logs\.sql\n(      ! [^\n]*\n)*      ! It drops the table logs and its 2 rows on this database");
+    }
+}
+
+/// A composite unique key is checked on every column of it; a foreign key whose parent rows a
+/// pending migration adds first is left to the deploy, which meets them; and so is a NOT NULL on a
+/// column dropped and added again, which holds none of the target's values.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_checks_composite_keys_and_waits_on_a_parent_filled_first() {
+    for d in [Dialect::Postgres, Dialect::Mysql] {
+        let Some(mut p) = P::new(d).await else { continue };
+        p.file("20261027100000_pairs.sql", "create table pairs (id int primary key, a int, b int);");
+        p.file("20261027100001_teams.sql", "create table teams (id int primary key);");
+        p.file("20261027100002_members.sql", "create table members (id int primary key, team_id int);");
+        p.file("20261027100003_tags.sql", "create table tags (id int primary key, status varchar(20));");
+        p.file("20261027100004_codes.sql", "create table codes (id int primary key, code varchar(10));");
+        p.file("20261027100005_holders.sql", "create table holders (id int primary key, code varchar(10));");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into codes values (1, 'a'); insert into holders values (1, 'x')").await;
+        // A key whose referenced column is dropped and added again meets the values that leaves.
+        p.file("20261027105800_drop_code.sql", "alter table codes drop column code;");
+        p.file("20261027105801_add_code.sql", "alter table codes add column code varchar(10) not null default 'x';");
+        p.file("20261027105802_code_key.sql", "alter table codes add constraint codes_code unique (code);");
+        p.file("20261027105803_holders_code.sql", "alter table holders add constraint holders_code foreign key (code) references codes (code);");
+        p.exec("insert into pairs values (1, 1, 1); insert into pairs values (2, 1, 1); insert into pairs values (3, 1, null); insert into pairs values (4, 1, 2); insert into teams values (1); insert into members values (1, 9); insert into tags values (1, null)").await;
+        // A column dropped and added again under its name holds none of the target's values.
+        p.file("20261027105900_drop_status.sql", "alter table tags drop column status;");
+        p.file("20261027105901_add_status.sql", "alter table tags add column status varchar(20) not null default 'active';");
+        p.file("20261027110000_pairs_ab.sql", "create unique index pairs_ab on pairs (a, b);");
+        p.file("20261027110001_team_9.sql", "insert into teams values (9);");
+        p.file("20261027110002_members_team.sql", "alter table members add constraint members_team foreign key (team_id) references teams (id);");
+        p.schema("create table pairs (id int primary key, a int, b int);\ncreate unique index pairs_ab on pairs (a, b);\ncreate table teams (id int primary key);\ncreate table members (id int primary key, team_id int, constraint members_team foreign key (team_id) references teams (id));\ncreate table tags (id int primary key, status varchar(20) not null default 'active');\ncreate table codes (id int primary key, code varchar(10) not null default 'x', constraint codes_code unique (code));\ncreate table holders (id int primary key, code varchar(10), constraint holders_code foreign key (code) references codes (code));\n");
+        p.output();
+        assert_eq!(p.dry_run().await, 1, "{d:?}: {}", p.peek());
+        let out = p.output();
+        assert_has!(&out, r"_pairs_ab\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 value repeats in pairs_ab\n");
+        assert!(!out.contains("nulls in tags.status"), "{d:?}: the column added again holds none of the old values: {out}");
+        assert!(!out.contains("breaks holders_code"), "{d:?}: the referenced column added again holds none of the old values: {out}");
+        assert!(!out.contains("breaks members_team"), "{d:?}: the parent row comes first: {out}");
+    }
+}
+
+/// On Postgres: a check whose function writes is read in a read-only transaction, which refuses the
+/// write, so the target is left as it was and the check unsaid; a type change that rewrites values
+/// before a check of the same file meets them is left to the deploy; and a NOT NULL added `not valid`
+/// holds no row to it until a later migration validates it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_reads_postgres_rows_only_as_the_deploy_meets_them() {
+    let Some(mut p) = P::new(Dialect::Postgres).await else { return };
+    let version: u32 = p.rows("show server_version_num").await[0].text("server_version_num").parse().unwrap();
+    let base = "create table audit (n int);\ncreate function plan_ok(p text) returns boolean language plpgsql as $$ begin insert into audit values (1); return p in ('free', 'pro'); end $$;\ncreate table users (id int primary key, plan text, email text);";
+    p.file("20261027100000_base.sql", base);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into users values (1, 'Free', null), (2, 'gold', 'a@x')").await;
+    p.file("20261027110002_plan_ok.sql", "alter table users add constraint users_plan_ok check (plan_ok(plan));");
+    p.file("20261027110003_lower_plan.sql", "alter table users alter column plan type varchar(10) using lower(plan);\nalter table users add constraint users_plan_lower check (plan = lower(plan));");
+    let mut schema = format!("{base}\nalter table users alter column plan type varchar(10);\nalter table users add constraint users_plan_ok check (plan_ok(plan));\nalter table users add constraint users_plan_lower check (plan = lower(plan));\n");
+    if version >= 180000 {
+        p.file("20261027110000_email_not_valid.sql", "alter table users add constraint users_email_nn not null email not valid;");
+        p.file("20261027110001_email_validate.sql", "alter table users validate constraint users_email_nn;");
+        schema.push_str("alter table users add constraint users_email_nn not null email;\n");
+    }
+    p.schema(&schema);
+    p.output();
+    let code = p.dry_run().await;
+    let out = p.output();
+    assert_eq!(p.rows("select count(*) as n from audit").await[0].text("n"), "0", "the target is left as it was: {out}");
+    assert!(!out.contains("users_plan_ok") && !out.contains("users_plan_lower"), "{out}");
+    if version >= 180000 {
+        assert_eq!(code, 1, "{out}");
+        assert_has!(&out, r"_email_not_valid\.sql\n    · \d+_email_validate\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row has nulls in users\.email\n");
+    } else {
+        assert_eq!(code, 0, "{out}");
+    }
+}
+
+/// A check beside a drop of another column of its table, in one migration on Postgres and in two
+/// on MySQL, is checked against the target's rows: the column it reads is as the target has it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_checks_a_constraint_beside_a_drop() {
+    for d in [Dialect::Postgres, Dialect::Mysql] {
+        let Some(mut p) = P::new(d).await else { continue };
+        p.file("20261027100000_users.sql", "create table users (id int primary key, bio varchar(20), plan varchar(10));");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into users values (1, 'a', 'free'); insert into users values (2, null, 'team')").await;
+        // A backtick inside a string names no column.
+        let check = "alter table users add constraint users_plan_check check (plan in ('free', 'pro', '`code`'));";
+        if d == Dialect::Mysql {
+            p.file("20261027110000_drop_bio.sql", "alter table users drop column bio;");
+            p.file("20261027110001_plan_check.sql", check);
+        } else {
+            p.file("20261027110001_plan_check.sql", &format!("alter table users drop column bio;\n{check}"));
+        }
+        p.schema("create table users (id int primary key, plan varchar(10), constraint users_plan_check check (plan in ('free', 'pro', '`code`')));\n");
+        p.output();
+        assert_eq!(p.dry_run().await, 1, "{d:?}: {}", p.peek());
+        assert_has!(p.output(), r"_plan_check\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks users_plan_check\n");
+    }
+}
+
+/// On Postgres: a check that reads the whole row as well as a column reads every column, so one
+/// added before it leaves it to the deploy; and `"Plan"` and `plan` are two columns, so a type change
+/// of the one isn't hidden by the other.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_reads_postgres_columns_as_postgres_names_them() {
+    let Some(mut p) = P::new(Dialect::Postgres).await else { return };
+    let base = "create table accounts (id int primary key);\ncreate table plans (id int primary key, \"Plan\" text, plan text);";
+    p.file("20261027100000_base.sql", base);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into accounts values (1); insert into plans values (1, 'Free', 'x')").await;
+    p.file("20261027110000_flag.sql", "alter table accounts add column flag boolean;");
+    p.file("20261027110001_flag_check.sql", "alter table accounts add constraint accounts_flag check (id > 0 and to_jsonb(accounts.*) ? 'flag');");
+    p.file("20261027110002_plan_lower.sql", "alter table plans alter column \"Plan\" type varchar(10) using lower(\"Plan\");\nalter table plans add constraint plans_plan_lower check (\"Plan\" = lower(\"Plan\"));");
+    p.schema("create table accounts (id int primary key, flag boolean, constraint accounts_flag check (id > 0 and to_jsonb(accounts.*) ? 'flag'));\ncreate table plans (id int primary key, \"Plan\" varchar(10), plan text, constraint plans_plan_lower check (\"Plan\" = lower(\"Plan\")));\n");
+    p.output();
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    let out = p.output();
+    assert!(!out.contains("✗"), "{out}");
+}
+
+/// On Postgres: a drop names its table by schema, so one of two tables of a name is said to be
+/// dropped alone; a `check … no inherit` holds its own table's rows; and a NOT NULL on a partitioned
+/// table after a pending migration detaches a partition meets the rows the partitions left keep.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_reads_postgres_tables_by_schema_and_partition() {
+    let Some(mut p) = P::new(Dialect::Postgres).await else { return };
+    let base = "create schema billing;\ncreate schema analytics;\ncreate table billing.logs (id int primary key);\ncreate table analytics.logs (id int primary key);\ncreate table users (id int primary key, plan text);\ncreate table m (id int, k int, v int) partition by list (k);\ncreate table m1 partition of m for values in (1);\ncreate table m2 partition of m for values in (2);";
+    p.file("20261027100000_base.sql", base);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into billing.logs values (1), (2); insert into analytics.logs values (1); insert into users values (1, 'gold'); insert into m values (1, 1, null), (2, 2, 5)").await;
+    p.file("20261027110000_reset_billing_logs.sql", "drop table billing.logs;\ncreate table billing.logs (id int primary key);");
+    p.file("20261027110001_plan_free.sql", "alter table users add constraint users_plan_free check (plan = 'free') no inherit;");
+    p.file("20261027110002_detach_m1.sql", "alter table m detach partition m1;");
+    p.file("20261027110003_v_not_null.sql", "alter table m alter column v set not null;");
+    p.schema("create schema billing;\ncreate schema analytics;\ncreate table billing.logs (id int primary key);\ncreate table analytics.logs (id int primary key);\ncreate table users (id int primary key, plan text, constraint users_plan_free check (plan = 'free') no inherit);\ncreate table m (id int, k int, v int not null) partition by list (k);\ncreate table m1 (id int, k int, v int);\ncreate table m2 partition of m for values in (2);\n");
+    p.output();
+    assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+    let out = p.output();
+    assert_has!(&out, r"_reset_billing_logs\.sql\n(      ! [^\n]*\n)*      ! It drops the table billing\.logs and its 2 rows on this database\n");
+    assert!(!out.contains("analytics.logs"), "{out}");
+    assert_has!(&out, r"_plan_free\.sql\n(      ! [^\n]*\n)*      ✗ It fails on this database: 1 row breaks users_plan_free\n        List them:\n          select \* from only users ");
+    assert!(!out.contains("nulls in m.v"), "the detached partition's rows aren't m's: {out}");
 }
 
 /// A trigger swapped under a lock with a change to its table: the change runs first, so one that
@@ -5031,7 +5261,9 @@ mod adversarial {
     }
 
     /// A role that may not create a database (PlanetScale's, some managed ones') can make no shadow:
-    /// the refusal names shadow_url, and `init` leaves no project behind.
+    /// the refusal names shadow_url, and `init` leaves no project behind. introspect prints the
+    /// database's own dump instead, and says why on stderr; with a shadow_url that makes no shadow
+    /// either, it is refused.
     pub async fn a_role_that_cannot_create_databases_is_told_of_shadow_url(mut p: P) {
         let role = "madv_nocreate";
         match p.d {
@@ -5049,6 +5281,21 @@ mod adversarial {
         assert!(!p.dir.join("schema.sql").exists(), "init left schema.sql");
         assert!(!p.dir.join(reylo_migrate::lock::LOCK).exists(), "init left the lock");
         assert!(p.files().is_empty(), "init left {:?}", p.files());
+        let mut said = Vec::new();
+        let text = match reylo_migrate::db_introspect(&opts, &[], &mut |l: &str| said.push(l.to_string())).await {
+            Ok(Ok(text)) => text,
+            other => panic!("introspect: {:?}\n{}", other.map_err(|e| e.0), said.join("\n")),
+        };
+        assert_has!(text, "(?i)create table");
+        assert_has!(said.join("\n"), r"^» Printing (pg_dump's output|the database's own dump), not Reylo's own SQL\n  No shadow database can be made to check Reylo's own SQL for it: [\s\S]+shadow_url[\s\S]*$");
+        // A shadow_url that answers nothing, and one whose role can't create a database either.
+        let nowhere = if p.d == Dialect::Postgres { "postgres://postgres@127.0.0.1:1/none" } else { "mysql://root@127.0.0.1:1/none" };
+        for shadow_url in [nowhere.to_string(), p.url.clone()] {
+            let mut said = Vec::new();
+            let result = reylo_migrate::db_introspect(&Options { shadow_url: Some(shadow_url.clone()), ..p.opts() }, &[], &mut |l: &str| said.push(l.to_string())).await;
+            assert!(matches!(result, Ok(Err(1))), "{shadow_url}: {}", said.join("\n"));
+            assert_has!(said.join("\n"), r"^✗ No shadow database can be made on the server shadow_url names\n  [\s\S]+\n  Reylo's own SQL is checked on a shadow database before it's printed\.\n  Make sure that server is running and its role can create a database, or set shadow_url in \.reylo\.yaml to one that can\.\n\nNothing was changed\.$");
+        }
         p.schema("create table users (id int primary key);");
         p.file("20261027100000_users.sql", "create table users (id int primary key);");
         let e = reylo_migrate::dry_run(&opts, &mut |_: &str| {}).await.expect_err("no shadow database can be made");
@@ -5057,12 +5304,10 @@ mod adversarial {
 
     /// Where no shadow can be made, the schema is the dump, which makes each extension's schema before
     /// it: once, however many extensions share it (Supabase keeps three in `extensions`).
-    pub async fn a_dump_makes_a_schema_its_extensions_share_once(p: P) {
+    pub async fn a_dump_makes_a_schema_its_extensions_share_once(mut p: P) {
+        with_no_shadows(&mut p).await;
         p.exec("create schema extensions; create extension citext with schema extensions; create extension pgcrypto with schema extensions; create table users (id int primary key)").await;
-        // A shadows' server that answers nothing leaves the dump, with no role made for it: a new
-        // role would change every replay cache's key on the server under the scenarios beside it.
-        let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
-        let text = introspect(&opts).await;
+        let text = introspect(&p.opts()).await;
         assert_eq!(text.matches("CREATE SCHEMA IF NOT EXISTS extensions").count(), 1, "{text}");
         assert!(text.contains("CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA extensions") && text.contains("CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions"), "{text}");
     }
@@ -5089,9 +5334,10 @@ mod adversarial {
 
     /// Where Reylo's own SQL can't be checked (no shadow database can be made here) and no pg_dump can
     /// dump the database instead, introspect says why, what it found and how to get one.
-    pub async fn introspect_with_no_check_and_no_pg_dump_says_how_to_get_one(p: P) {
+    pub async fn introspect_with_no_check_and_no_pg_dump_says_how_to_get_one(mut p: P) {
+        with_no_shadows(&mut p).await;
         p.exec("create table users (id int primary key)").await;
-        let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
+        let opts = p.opts();
         let mut dirs = vec![];
         // A pg_dump too old to read the server, which is named.
         #[cfg(unix)]
@@ -5154,11 +5400,10 @@ mod adversarial {
 
     /// The dump reads a schema whose name has capitals as it is named: pg_dump folds what --schema
     /// gives it unless it is quoted.
-    pub async fn the_dump_reads_a_schema_named_with_capitals(p: P) {
+    pub async fn the_dump_reads_a_schema_named_with_capitals(mut p: P) {
+        with_no_shadows(&mut p).await;
         p.exec(r#"create schema "CaseSensitive"; create table "CaseSensitive".items (id int); create table users (id int primary key)"#).await;
-        // A shadows' server that answers nothing leaves the dump.
-        let opts = Options { shadow_url: Some("postgres://postgres@127.0.0.1:1/none".into()), ..p.opts() };
-        let text = introspect(&opts).await;
+        let text = introspect(&p.opts()).await;
         assert!(text.contains(r#"CREATE TABLE "CaseSensitive".items"#) && text.contains("CREATE TABLE public.users"), "{text}");
     }
 
@@ -5868,6 +6113,53 @@ mod adversarial {
         p.exec(&format!("drop role {writer}; drop role {reader}")).await;
     }
 
+    /// schema.sql is loaded into a shadow by every command that drafts or compares, and a shadow's
+    /// server keeps a role made there: each refuses it before any shadow, as it does a migration's.
+    pub async fn a_role_in_schema_sql_is_refused_before_any_shadow(mut p: P) {
+        let role = format!("madv_schema_role_{}", std::process::id());
+        p.exec(&format!("drop role if exists {role}")).await;
+        p.linear();
+        p.file("20261027100000_t.sql", "create table t (id int);");
+        p.schema(&format!("create table t (id int);\ncreate role {role};"));
+        let refused = format!(r"✗ \S*schema\.sql can't be replayed in a shadow database\n\n    create role {role}\n\n  It changes a role, which belongs to the server\.\n  Run it outside the migrations");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "add_role", &Default::default(), log).await).await, 1);
+        assert_has!(p.output(), &refused);
+        assert_eq!(p.files(), ["20261027100000_t.sql"], "no migration was written");
+        assert_eq!(p.dev().await, 1);
+        assert_has!(p.output(), &refused);
+        assert_eq!(p.dry_run().await, 1);
+        assert_has!(p.output(), &refused);
+        assert_eq!(p.status().await, 1);
+        assert_has!(p.output(), &refused);
+        assert_eq!(p.history_push().await, 1);
+        assert_has!(p.output(), &refused);
+        std::fs::remove_file(p.dir.join(reylo_migrate::lock::LOCK)).unwrap();
+        assert_eq!(p.run(async |o, log| reylo_migrate::lock_from_history(o, log).await).await, 1);
+        assert_has!(p.output(), &refused);
+        // A migration's role is refused by `migrate new` too, which replays every migration.
+        p.schema("create table t (id int);");
+        p.file("20261027110000_role.sql", &format!("create role {role};"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "more", &Default::default(), log).await).await, 1);
+        assert_has!(p.output(), &format!(r"✗ Migration 20261027110000_role\.sql can't be replayed in a shadow database\n\n    create role {role}\n"));
+        assert!(p.rows(&format!("select 1 from pg_roles where rolname = '{role}'")).await.is_empty(), "no shadow created the role on the server");
+    }
+
+    /// `history pull`, and `dev` rewinding a migration edited since, replay what the database ran
+    /// rather than the files, so a role an older run or another tool recorded is refused there.
+    pub async fn a_role_a_database_ran_is_refused_before_its_replay(mut p: P) {
+        let role = format!("madv_ran_role_{}", std::process::id());
+        p.exec(&format!("drop role if exists {role}")).await;
+        p.schema("create table t (id int);");
+        p.file("20261027100000_t.sql", "create table t (id int);");
+        p.exec(&format!("create table t (id int); create table __reylo_migrations (name text primary key, sql text not null, applied_at timestamptz); insert into __reylo_migrations values ('20261027100000_t.sql', 'create table t (id int); create role {role};', now())")).await;
+        let refused = format!(r"✗ Migration 20261027100000_t\.sql, as this database ran it, can't be replayed in a shadow database\n\n    create role {role}\n\n  It changes a role, which belongs to the server\.");
+        assert_eq!(p.run(async |o, log| reylo_migrate::history_pull(o, log).await).await, 1);
+        assert_has!(p.output(), &refused);
+        assert_eq!(p.dev().await, 1);
+        assert_has!(p.output(), &refused);
+        assert!(p.rows(&format!("select 1 from pg_roles where rolname = '{role}'")).await.is_empty(), "no shadow created the role on the server");
+    }
+
     pub async fn an_object_the_comparison_does_not_read_is_not_a_match(mut p: P) {
         p.schema("create table t (x int); create aggregate total (int) (sfunc = int4pl, stype = int);");
         p.file("20261027100000_t.sql", "create table t (x int);");
@@ -6071,6 +6363,29 @@ mod adversarial {
         assert_eq!(p.rows(shadows).await[0].text("n"), "0", "a shadow's grants outlived it");
     }
 
+    /// An account made in schema.sql, or a role granted to one, would be made on the shadow's server
+    /// by `migrate new`: refused before any shadow, as in a migration.
+    pub async fn an_account_or_role_grant_in_schema_sql_is_refused_before_any_shadow(mut p: P) {
+        let (user, role) = (format!("madv_schema_user_{}", std::process::id()), format!("madv_schema_role_{}", std::process::id()));
+        p.exec(&format!("drop user if exists '{user}'@'%'; drop role if exists '{role}'")).await;
+        p.linear();
+        p.file("20261027100000_t.sql", "create table t (id int primary key);");
+        p.schema(&format!("create table t (id int primary key);\ncreate user '{user}'@'%';"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "add_user", &Default::default(), log).await).await, 1);
+        assert_has!(p.output(), r"✗ \S*schema\.sql can't be replayed in a shadow database\n\n    create user '…'@'…'\n");
+        assert_eq!(p.dev().await, 1);
+        assert_has!(p.output(), r"✗ \S*schema\.sql can't be replayed in a shadow database");
+        assert!(p.rows(&format!("select 1 from mysql.user where user = '{user}'")).await.is_empty(), "no shadow created the account on the server");
+        // A role's grant to an account that exists is the server's too.
+        p.exec(&format!("create role '{role}'; create user '{user}'@'%'")).await;
+        p.schema(&format!("create table t (id int primary key);\ngrant '{role}' to '{user}'@'%';"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "add_grant", &Default::default(), log).await).await, 1);
+        assert_has!(p.output(), r"✗ \S*schema\.sql can't be replayed in a shadow database\n\n    grant '…' to '…'@'…'\n\n  It grants or revokes a role, which belongs to the server\.");
+        assert_eq!(p.files(), ["20261027100000_t.sql"], "no migration was written");
+        assert!(p.rows(&format!("select 1 from mysql.role_edges where from_user = '{role}' and to_user = '{user}'")).await.is_empty(), "nothing was granted");
+        p.exec(&format!("drop user '{user}'@'%'; drop role '{role}'")).await;
+    }
+
     /// An account with its database's privileges alone sees only its own grants in MySQL, so the
     /// grants schema.sql makes would be planned from nothing: they are refused, naming what to grant.
     pub async fn grants_an_account_cannot_read_back_are_refused(mut p: P) {
@@ -6105,6 +6420,34 @@ mod adversarial {
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_has!(p.output(), "Up to date");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    }
+
+    /// A temporary table is its session's: its key, its checks, its policies, its statistics (made in
+    /// `public`, the first schema of the search path) and their comments are gone when the run that
+    /// made them ends, and are in no fingerprint and no comparison.
+    pub async fn a_temporary_tables_constraints_and_policies_are_no_drift(mut p: P) {
+        p.schema("create table t (id int primary key);");
+        p.file(
+            "20261027100000_t.sql",
+            "create table t (id int primary key);
+            create temp table scratch (key int primary key, n int check (n > 0));
+            comment on constraint scratch_pkey on scratch is 'for this session';
+            create policy everyone on scratch using (true);
+            comment on policy everyone on scratch is 'for this session';
+            create statistics scratch_stats on key, n from scratch;
+            alter statistics scratch_stats set statistics 500;
+            comment on statistics scratch_stats is 'for this session';",
+        );
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_has!(p.output(), "Up to date");
+        let (code, out) = p.check_every_way().await;
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(p.history_push().await, 0, "{}", p.peek());
+        p.output();
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_has!(p.output(), "Up to date");
     }
 
     /// An enum is one line of the catalog, so a value added changes that line on both sides: schema.sql's
@@ -7314,6 +7657,20 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_has!(p.output(), r"reads every row of log while it blocks writes to it, to move a sequence past them");
     }
 
+    /// A partitioned table whose key column is renamed keeps a partition made at run time, which
+    /// the schema doesn't declare, with its rows: the column is renamed in it too.
+    pub async fn a_key_renamed_keeps_a_partition_made_at_run_time(mut p: P) {
+        let before = "create table m (old_id int, n text) partition by range (old_id); create table m_1 partition of m for values from (0) to (100);";
+        p.schema(before);
+        p.file("20261027100000_m.sql", before);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("create table m_runtime partition of m for values from (100) to (200); insert into m values (150, 'kept')").await;
+        p.output();
+        p.schema("create table m (new_id int, n text) partition by range (new_id); create table m_1 partition of m for values from (0) to (100);");
+        assert_eq!(p.db_push().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("select n from m_runtime where new_id = 150").await[0].text("n"), "kept");
+    }
+
     pub async fn init_creates_the_extensions_its_schema_uses(mut p: P) {
         p.exec("create extension citext; create table u (id int primary key, email citext);").await;
         assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
@@ -7812,3 +8169,159 @@ async fn a_turso_connection_left_idle_opens_again_outside_a_transaction() {
     assert!(e.0.contains("idle too long"), "{e}");
     assert_eq!(idle.rows("select count(*) as n from t").await.unwrap()[0].text("n"), "0", "the transaction was rolled back");
 }
+
+/// `deploy --dry-run -- <command>`, the command a shell runs, with its exit code, and what it saw.
+async fn dry_run_then(p: &mut P, script: &str) -> i32 {
+    let command = vec!["sh".to_string(), "-c".to_string(), script.to_string()];
+    p.run(async |o, log| reylo_migrate::dry_run_then(o, Some(&command), log).await).await
+}
+
+async fn a_dry_run_builds_on_a_shadow_of_what_deploy_leaves(mut p: P) {
+    let (id, text) = (p.t.id, p.t.text);
+    p.file("20990101000000_users.sql", &format!("create table users (id {id}, email {text});"));
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20990101010000_nick.sql", &format!("alter table users add column nick {text};"));
+    p.output();
+    let dir = p.dir.display().to_string();
+    // The command sees the shadow's URL, a SQLite shadow as a file it can copy, and its exit code is the run's.
+    let script = format!(r#"printf %s "$REYLO_ANALYSIS_URL" > '{dir}/url.txt'; case "$REYLO_ANALYSIS_URL" in sqlite:*) cp "${{REYLO_ANALYSIS_URL#sqlite:}}" '{dir}/seen.db';; esac; exit 7"#);
+    assert_eq!(dry_run_then(&mut p, &script).await, 7, "{}", p.peek());
+    let url = std::fs::read_to_string(p.dir.join("url.txt")).unwrap();
+    assert_ne!(url, p.url, "the command must read a shadow, never the database itself");
+    match p.d {
+        // The shadow had both migrations, and is gone with the command.
+        Dialect::Sqlite => {
+            assert!(!std::path::Path::new(url.trim_start_matches("sqlite:")).exists(), "{url}");
+            let mut seen = Db::connect(&format!("sqlite:{dir}/seen.db"), &p.dir).await.unwrap();
+            let columns: Vec<String> = seen.rows("select name from pragma_table_info('users')").await.unwrap().iter().map(|r| r.text("name").to_string()).collect();
+            seen.close().await;
+            assert_eq!(columns, ["id", "email", "nick"]);
+        }
+        _ => {
+            let name = url.rsplit('/').next().unwrap().split('?').next().unwrap().to_string();
+            assert!(name.starts_with("reylo_shadow_"), "{url}");
+            let left = if p.d == Dialect::Postgres { format!("select count(*) as n from pg_database where datname = '{name}'") } else { format!("select count(*) as n from information_schema.schemata where schema_name = '{name}'") };
+            assert_eq!(p.rows(&left).await[0].text("n"), "0", "{url}");
+        }
+    }
+    // Nothing ran here: the deploy after the build runs the pending migration.
+    assert_eq!(p.history().await, ["20990101000000_users.sql"]);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.history().await, ["20990101000000_users.sql", "20990101010000_nick.sql"]);
+}
+
+async fn a_dry_run_that_refuses_runs_no_command(mut p: P) {
+    let (id, text) = (p.t.id, p.t.text);
+    p.file("20990101000000_users.sql", &format!("create table users (id {id}, email {text});"));
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    // An applied migration edited since, which the deploy after the build would refuse.
+    p.file("20990101000000_users.sql", &format!("create table users (id {id}, email {text}, nick {text});"));
+    p.output();
+    let ran = p.dir.join("ran");
+    assert_eq!(dry_run_then(&mut p, &format!("touch '{}'", ran.display())).await, 1, "{}", p.peek());
+    assert!(!ran.exists(), "{}", p.peek());
+}
+
+async fn a_dry_run_runs_no_command_for_a_schema_sql_the_deploy_refuses(mut p: P) {
+    let int = p.t.int;
+    p.linear();
+    p.schema(&format!("create table a (id {int});"));
+    p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    // The same schema, written otherwise: the migrations still reach it, and the lock's checksum no longer holds.
+    p.schema(&format!("CREATE TABLE a (id {int});"));
+    p.output();
+    let ran = p.dir.join("ran");
+    assert_eq!(dry_run_then(&mut p, &format!("touch '{}'", ran.display())).await, 1, "{}", p.peek());
+    assert!(!ran.exists(), "{}", p.peek());
+    assert_has!(p.output(), r"The schema changed since the lock was written");
+}
+
+/// A first deploy's SQLite file, which the dry run opens and removes, is the command's once it runs.
+async fn a_first_deploys_sqlite_file_is_left_to_the_command(mut p: P) {
+    if p.d != Dialect::Sqlite || p.server.is_some() {
+        return;
+    }
+    let file = p.url.trim_start_matches("sqlite:").to_string();
+    let _ = std::fs::remove_file(&file);
+    p.file("20990101000000_users.sql", &format!("create table users (id {});", p.t.id));
+    assert_eq!(dry_run_then(&mut p, &format!("printf kept > '{file}'")).await, 0, "{}", p.peek());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "kept");
+    // With nothing to run, the file the dry run made is gone after it.
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    assert!(!std::path::Path::new(&file).exists());
+}
+
+/// A cut-off run whose change landed, on a database with no fingerprint to hold it to, which the
+/// deploy after the build runs again: the build runs where that succeeds, and not where it fails.
+async fn a_landed_run_the_deploy_retries(mut p: P, idempotent: bool) {
+    if p.d == Dialect::Sqlite || (idempotent && p.d != Dialect::Postgres) {
+        return;
+    }
+    let int = p.t.int;
+    let lone = match (p.d, idempotent) {
+        (Dialect::Postgres, true) => "create index concurrently if not exists a_id on a (id)",
+        (Dialect::Postgres, false) => "create index concurrently a_id on a (id)",
+        _ => "create index a_id on a (id)",
+    };
+    p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027110000_index.sql", &format!("{lone};"));
+    let mut db = Db::connect(&p.url, &p.dir).await.unwrap();
+    let column = if p.d == Dialect::Mysql { "`sql`" } else { "sql" };
+    let insert = format!("insert into __reylo_migrations (name, {column}, applied_at) values ({}, {}, null)", db.param(1), db.param(2));
+    db.exec_with(&insert, &["20261027110000_index.sql", &format!("{lone};")]).await.unwrap();
+    db.exec(lone).await.unwrap();
+    db.exec("update __reylo_migrations set fingerprint = null").await.unwrap();
+    db.close().await;
+    p.output();
+    let ran = p.dir.join("ran");
+    let code = dry_run_then(&mut p, &format!("touch '{}'", ran.display())).await;
+    assert_eq!((code, ran.exists()), (if idempotent { 0 } else { 1 }, idempotent), "{}", p.peek());
+    // The deploy agrees.
+    assert_eq!(p.migrate().await, if idempotent { 0 } else { 1 }, "{}", p.peek());
+}
+
+async fn a_landed_run_the_deploy_retries_and_fails_stops_the_build(p: P) {
+    a_landed_run_the_deploy_retries(p, false).await
+}
+
+async fn a_landed_run_the_deploy_retries_cleanly_lets_the_build_run(p: P) {
+    a_landed_run_the_deploy_retries(p, true).await
+}
+
+/// A pending migration that the deploy runs before a landed run's retry, and that makes the retry
+/// fail: the shadow retries it in the same place, so the build runs exactly where the deploy succeeds.
+async fn a_landed_run_is_retried_where_the_deploy_retries_it(mut p: P) {
+    if p.d != Dialect::Postgres {
+        return;
+    }
+    let lone = "create unique index concurrently if not exists a_id on a (id)";
+    p.file("20261027100000_a.sql", "create table a (id int);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027120000_index.sql", &format!("{lone};"));
+    let mut db = Db::connect(&p.url, &p.dir).await.unwrap();
+    db.exec_with("insert into __reylo_migrations (name, sql, applied_at) values ($1, $2, null)", &["20261027120000_index.sql", &format!("{lone};")]).await.unwrap();
+    db.exec(lone).await.unwrap();
+    db.exec("update __reylo_migrations set fingerprint = null").await.unwrap();
+    db.close().await;
+    // Before the index in run order: it drops what landed, and writes rows the index refuses.
+    p.file("20261027110000_dup.sql", "drop index a_id; insert into a values (1), (1);");
+    p.output();
+    let ran = p.dir.join("ran");
+    let code = dry_run_then(&mut p, &format!("touch '{}'", ran.display())).await;
+    let built = ran.exists();
+    let deployed = p.migrate().await;
+    assert_eq!((code == 0, built), (deployed == 0, deployed == 0), "the build runs where the deploy succeeds: {}", p.peek());
+}
+
+for_each_dialect!(
+    a_landed_run_is_retried_where_the_deploy_retries_it,
+    a_landed_run_the_deploy_retries_and_fails_stops_the_build,
+    a_landed_run_the_deploy_retries_cleanly_lets_the_build_run,
+    a_dry_run_builds_on_a_shadow_of_what_deploy_leaves,
+    a_dry_run_that_refuses_runs_no_command,
+    a_dry_run_runs_no_command_for_a_schema_sql_the_deploy_refuses,
+    a_first_deploys_sqlite_file_is_left_to_the_command,
+);

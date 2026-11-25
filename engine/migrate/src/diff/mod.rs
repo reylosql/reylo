@@ -164,6 +164,13 @@ pub trait Alterer: Send {
         let _ = (from, renamed);
         None
     }
+    /// Whether an object whose definition differs from `from` to `to` stays as the server holds
+    /// it, the difference being a change it carries through (a foreign key's column losing its
+    /// stored expression, which keeps its values).
+    fn keeps(&self, from: &Object, to: &Object) -> bool {
+        let _ = (from, to);
+        false
+    }
     /// Whether a column changed from `from` to `to` keeps every value it holds (a new default), so
     /// that a key on it can stay as it is.
     fn keeps_values(&self, from: &Object, to: &Object) -> bool {
@@ -244,6 +251,13 @@ pub trait Alterer: Send {
     /// The objects a change of `from` to `to` needs made first beyond its own dependencies (a table
     /// that joins a parent takes copies of the parent's checks, which need what those call).
     fn waits_for(&self, from: &Object, to: &Object) -> Vec<String> {
+        let _ = (from, to);
+        Vec::new()
+    }
+    /// What the copies of another object's that a change of `from` to `to` drops itself depend on (a
+    /// table that leaves a parent drops its copies of the parent's checks, and what those call): each
+    /// dropped after the change, since a copy the table also had of its own outlives the other's.
+    fn copies_read(&self, from: &Object, to: &Object) -> Vec<String> {
         let _ = (from, to);
         Vec::new()
     }
@@ -445,6 +459,61 @@ pub use crate::sql::last_written;
 
 /// `text` with the name `old` (a table's) written `new` wherever it stands as a name or as the start
 /// of one (`users` in `users_pkey`, `nextval('users_id_seq')`), ignoring case.
+/// `text` with each identifier that is `old` exactly (as written, quoted or not, an unquoted one in
+/// any case) made `new`: never part of a longer name, nor inside a string literal.
+fn renamed_identifier(text: &str, old: &str, new: &str) -> String {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        if c == '\'' {
+            // A literal, kept as written, a doubled quote inside it included.
+            let mut end = 1;
+            let bytes = rest.as_bytes();
+            while end < bytes.len() {
+                if bytes[end] == b'\'' {
+                    if bytes.get(end + 1) == Some(&b'\'') {
+                        end += 2;
+                        continue;
+                    }
+                    end += 1;
+                    break;
+                }
+                end += 1;
+            }
+            out.push_str(&rest[..end]);
+            rest = &rest[end..];
+        } else if c == '"' {
+            // A quoted name, a doubled quote inside it included.
+            let bytes = rest.as_bytes();
+            let mut end = 1;
+            while end < bytes.len() {
+                if bytes[end] == b'"' {
+                    if bytes.get(end + 1) == Some(&b'"') {
+                        end += 2;
+                        continue;
+                    }
+                    end += 1;
+                    break;
+                }
+                end += 1;
+            }
+            let word = &rest[..end];
+            out.push_str(if word == old { new } else { word });
+            rest = &rest[end..];
+        } else if ident(c) {
+            let end = rest.find(|c: char| !ident(c)).unwrap_or(rest.len());
+            let word = &rest[..end];
+            out.push_str(if !old.starts_with('"') && word.eq_ignore_ascii_case(old) { new } else { word });
+            rest = &rest[end..];
+        } else {
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
+}
+
 pub fn swap_name(text: &str, old: &str, new: &str) -> String {
     if old.is_empty() {
         return text.to_string();
@@ -868,6 +937,30 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
             let changes = a.deps.iter().filter(|d| from.objects.get(*d).is_some_and(|c| c.kind == Some(Kind::Column))).any(|d| to.objects.get(renamed_columns.get(d).unwrap_or(d)).is_none_or(|c| !alterer.keeps_values(&from.objects[d], c)));
             if !under.is_empty() && !parented && !follows && !changes && alterer.renamed_under(a, &renamed_columns).is_some_and(|d| d == b.def) {
                 kept_through.insert(id.clone(), under);
+                continue;
+            }
+            if alterer.keeps(a, b) {
+                continue;
+            }
+        }
+        // A partitioned table (Postgres's) whose definition changes only by its own columns' new names (its partition key's,
+        // which Postgres renames with the column, in the table and in each partition) is kept by
+        // the renames, where making it again would drop its rows: where each renamed column of the
+        // key keeps its values, as a key's column can't change type, and each partition stays
+        // attached to it.
+        if let Some(b) = to.objects.get(id).filter(|b| a.kind == Some(Kind::Table) && a.def != b.def && a.def.contains(" partition by ") && b.def.contains(" partition by ")) {
+            let prefix = format!("column {}.", id.strip_prefix("table ").unwrap_or(id));
+            let own: Vec<(&String, &String)> = renamed_columns.iter().filter(|(old, _)| old.starts_with(&prefix)).collect();
+            // Each name as the ids write it, which is as the definition does.
+            let swapped = own.iter().fold(a.def.clone(), |def, (old, new)| renamed_identifier(&def, &old[prefix.len()..], new.strip_prefix(&prefix).unwrap_or(new)));
+            // The key's columns can't change type; the others change as any column does.
+            let key = a.def.split_once(" partition by ").map_or("", |(_, k)| k);
+            let in_key = |old: &str| renamed_identifier(key, old, "\u{1}") != key;
+            let keeps = own.iter().filter(|(old, _)| in_key(&old[prefix.len()..])).all(|(old, new)| to.objects.get(*new).is_some_and(|n| alterer.keeps_values(&from.objects[*old], n)));
+            // A partition made at run time, which the target doesn't declare, stays attached too.
+            let attached = from.objects.iter().filter(|(_, o)| o.kind == Some(Kind::Table) && parent_of(o).as_deref() == Some(id.as_str())).all(|(p, _)| left.contains(p) || to.objects.get(p).is_some_and(|o| parent_of(o).as_deref() == Some(id.as_str())));
+            if !own.is_empty() && swapped == b.def && keeps && attached {
+                kept_through.insert(id.clone(), own.iter().map(|(old, _)| (*old).clone()).collect());
                 continue;
             }
         }
@@ -1300,6 +1393,15 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         }
         None
     };
+    // The changes that drop copies of another object themselves, by what those copies depend on.
+    let mut copies_need: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (k, op) in ops.iter().enumerate() {
+        let Op::Alter(id) = op else { continue };
+        let (Some(f), Some(t)) = (from.objects.get(id), to.objects.get(id)) else { continue };
+        for d in alterer.copies_read(f, t) {
+            copies_need.entry(d).or_default().push(k);
+        }
+    }
     for (k, op) in ops.iter().enumerate() {
         match op {
             Op::Create(id) | Op::Alter(id) => {
@@ -1623,6 +1725,11 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                     if let Some(j) = find(Op::Alter(owner.clone())) {
                         after[k].insert(j);
                     }
+                }
+                // After a change that drops copies depending on it (a table leaving a parent whose
+                // check calls it, the table's copy of which is its own too).
+                for j in copies_need.get(id.as_str()).into_iter().flatten().filter(|j| **j != k) {
+                    after[k].insert(*j);
                 }
                 // After the drops of what it owns that go on their own, before it.
                 for owned in with_owned(from, id).into_iter().filter(|o| *o != id.as_str()) {

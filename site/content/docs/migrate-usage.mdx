@@ -81,6 +81,10 @@ $ reylo migrate deploy
 $ reylo migrate status
 ```
 
+Run the deploy before your new code goes live. On Postgres and MySQL, two deploys at once take turns. So each instance of your app can instead run [`migrate()`](#api) as it starts. An older release then won't start on a database a newer one migrated.
+
+Your old code keeps serving while the deploy runs, and after one that fails. So drop a column only once no running code reads it.
+
 ### Starting over
 
 Rebuild your development database from your migrations, or empty it:
@@ -152,7 +156,7 @@ Declare your schema in plain SQL, as you would on the database. Reylo Migrate co
 - Generated columns, and identity columns (Postgres)
 - Enums (Postgres and MySQL), domains, composite and range types (Postgres)
 - Views, and materialized views (Postgres)
-- Triggers, functions (Postgres and MySQL), and procedures and events (MySQL)
+- Triggers, functions and procedures (Postgres and MySQL), and events (MySQL)
 - Partitions (Postgres and MySQL)
 - Row level security policies, sequences, extensions and schemas (Postgres)
 - Grants and comments (Postgres and MySQL), and default privileges (Postgres)
@@ -227,7 +231,7 @@ alter default privileges in schema public grant select on tables to reporting;
 comment on column users.verified_at is 'When they confirmed their email';
 ```
 
-Roles belong to the server, so a migration can't create one. Create each role your grants name on a new server before you deploy to it:
+Roles belong to the server, so neither a migration nor `schema.sql` can create one. Create each role your grants name on a new server before you deploy to it:
 
 ```sql
 create role reporting nologin;

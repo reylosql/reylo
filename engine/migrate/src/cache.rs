@@ -79,7 +79,7 @@ pub(crate) fn hex(h: &[u8]) -> String {
 /// reader reads, or how it writes a line, changes, so that a release that leaves the reading alone
 /// leaves every stored fingerprint comparable. A test holds each edit to the reader's code to that
 /// choice.
-const READER: u32 = 9;
+const READER: u32 = 10;
 
 /// The catalog reader's part of a fingerprint.
 pub(crate) fn reader_id() -> String {
@@ -567,7 +567,7 @@ pub(crate) async fn snapshot(db: &mut Db) -> Result<String, Error> {
 
 /// Copies the main database of `from` over that of `to`, page by page, as SQLite's backup API does.
 #[cfg(feature = "cli")]
-fn sqlite_backup(from: &rusqlite::Connection, to: &rusqlite::Connection) -> Result<(), Error> {
+pub(crate) fn sqlite_backup(from: &rusqlite::Connection, to: &rusqlite::Connection) -> Result<(), Error> {
     use rusqlite::ffi;
     // SAFETY: both handles are open connections that outlive the backup, which is finished before
     // this returns; neither is used by another thread meanwhile.
@@ -790,7 +790,7 @@ mod tests {
     }
 
     /// The digest of the catalog reader's code when `READER` was last set.
-    const READER_CODE: &str = "a7a89de1cb65";
+    const READER_CODE: &str = "4620d38ad3ed";
 
     #[test]
     fn the_catalog_reader_keeps_its_version() {
