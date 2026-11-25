@@ -21,7 +21,7 @@
 //!
 //! The pass knows what the parser knows about text: single-quoted literals (with `''`), `E''`
 //! escape strings (with backslashes), dollar quoting (Postgres's), double-quoted identifiers, line comments,
-//! nested block comments, and `::` casts. MySQL reads text its own way, by the session's
+//! nested block comments (on SQLite one ends at its first `*/`), and `::` casts. MySQL reads text its own way, by the session's
 //! `sql_mode` ([`MysqlText`]): a backslash in a string escapes the character after it, a
 //! double-quoted word is a string, `#` starts a line comment as `-- ` does (`--` followed by
 //! anything else is two minus signs), a block comment ends at its first `*/`, and backquotes quote
@@ -418,8 +418,8 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
                 }
                 opaque.push((start, i));
             }
-            // A MySQL block comment does not nest: it ends at the first `*/`.
-            b'/' if b.get(i + 1) == Some(&b'*') && mysql => {
+            // A MySQL or SQLite block comment does not nest: it ends at the first `*/`.
+            b'/' if b.get(i + 1) == Some(&b'*') && (mysql || dialect == Dialect::Sqlite) => {
                 let Some(close) = find_bytes(b, b"*/", i + 2) else {
                     return Err(LexError { message: "unterminated block comment".into(), offset: i });
                 };
