@@ -3031,10 +3031,52 @@ fn creates_platform_publication(opts: &Options) -> bool {
     texts.iter().any(|t| creates_platform_publication_in(t))
 }
 
-/// Whether a text creates the platform's publication.
+/// Whether a text creates the platform's publication: read as SQL, so that text in a string or a
+/// comment, or a quoted name of another case, is none.
 fn creates_platform_publication_in(text: &str) -> bool {
-    static PUBLICATION: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r#"(?i)\bcreate\s+publication\s+"?{}"?(?:\s|;|$)"#, crate::catalog::PLATFORM_PUBLICATION)).expect("a valid pattern"));
-    PUBLICATION.is_match(&crate::sql::tokenize(text, Dialect::Postgres).iter().map(|token| token.text.clone()).collect::<Vec<_>>().join(" "))
+    use crate::sql::TokenKind;
+    let tokens = crate::sql::tokenize(text, Dialect::Postgres);
+    tokens.windows(3).any(|w| {
+        w[0].upper() == "CREATE"
+            && w[1].upper() == "PUBLICATION"
+            && match w[2].kind {
+                TokenKind::Word => w[2].text.eq_ignore_ascii_case(crate::catalog::PLATFORM_PUBLICATION),
+                TokenKind::Quoted => w[2].text.trim_matches('"') == crate::catalog::PLATFORM_PUBLICATION,
+                _ => false,
+            }
+    })
+}
+
+/// The extensions the project's files create whether or not the database has them already (with
+/// no `if not exists`), by name, lowercase.
+fn unconditional_extensions(opts: &Options) -> Vec<String> {
+    use crate::sql::TokenKind;
+    let mut texts = vec![opts.schema_text().unwrap_or_default()];
+    texts.extend(opts.migrations().map(|(files, _)| files.into_iter().map(|f| f.sql).collect::<Vec<_>>()).unwrap_or_default());
+    texts
+        .iter()
+        .flat_map(|t| {
+            let tokens = crate::sql::tokenize(t, Dialect::Postgres);
+            tokens
+                .windows(3)
+                .filter(|w| w[0].upper() == "CREATE" && w[1].upper() == "EXTENSION" && w[2].upper() != "IF")
+                .filter_map(|w| match w[2].kind {
+                    TokenKind::Word => Some(w[2].text.to_lowercase()),
+                    TokenKind::Quoted => Some(w[2].text.trim_matches('"').to_lowercase()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The extensions the project's files create that its shadows leave to them: all but one every new
+/// database of the target's platform has there ([`Server::platform_extension`]), which they create
+/// only where it isn't.
+#[cfg(feature = "cli")]
+fn left_extensions(server: &Server, opts: &Options) -> Vec<String> {
+    let unconditional = unconditional_extensions(opts);
+    created_extensions(opts).into_iter().filter(|e| !server.platform_extension(e) || unconditional.contains(e)).collect()
 }
 
 /// The settings a Supabase database began under ([`crate::db::API_SETTINGS`]): as its history table
@@ -3243,7 +3285,7 @@ async fn shadow_server(db: &mut Db, opts: &Options) -> Result<Server, Error> {
     if let Some(on) = api_began(db).await? {
         server.began_with(on);
     }
-    server.leave_extensions(created_extensions(opts));
+    server.leave_extensions(left_extensions(&server, opts));
     server.leave_schemas(created_schemas(opts));
     if creates_platform_publication(opts) {
         server.leave_platform();
@@ -5232,7 +5274,7 @@ async fn emptied(db: &mut Db, server: &mut Server, opts: &Options, log: Log<'_>)
     let counts = table_rows(db).await?;
     let d = db.dialect();
     // The extensions the project's files create go too: they create them again.
-    let mut then: Vec<String> = if d == Dialect::Postgres { created_extensions(opts).iter().filter(|x| !server.platform_extension(x)).map(|x| format!("drop extension if exists {}", crate::db::ident(x))).collect() } else { vec![] };
+    let mut then: Vec<String> = if d == Dialect::Postgres { left_extensions(server, opts).iter().map(|x| format!("drop extension if exists {}", crate::db::ident(x))).collect() } else { vec![] };
     let had_history = has_history(db).await? && !read_history(db).await?.is_empty();
     if has_history(db).await? {
         let forget = format!("delete from {HISTORY_TABLE}");
@@ -5496,7 +5538,8 @@ async fn unneeded_by_history(opts: &Options, files: &[Migration], extensions: Ve
     // The catalog's lines of a shadow that leaves out `left`, after the migrations or with none run;
     // nothing where they fail.
     let mut lines = async |left: &[String], history: bool| -> Result<Option<BTreeSet<String>>, Error> {
-        server.leave_extensions(created_extensions(opts).into_iter().chain(left.iter().cloned()).collect());
+        let created = left_extensions(&server, opts);
+        server.leave_extensions(created.into_iter().chain(left.iter().cloned()).collect());
         server.leave_schemas(created_schemas(opts));
         let mut shadows = Shadows::new(&mut server, &opts.url, &opts.root, &opts.cache, &texts).await;
         let lane = shadows.lane();
@@ -6746,7 +6789,7 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
     if creates_platform_publication(opts) {
         server.leave_platform();
     }
-    server.leave_extensions(created_extensions(opts).into_iter().chain(added.iter().cloned()).collect());
+    server.leave_extensions(left_extensions(&server, opts).into_iter().chain(added.iter().cloned()).collect());
     server.leave_schemas(created_schemas(opts));
     left_out_note(&server, log);
     db.close().await;
@@ -9701,6 +9744,16 @@ mod tests {
         more.push("column public.t.x integer".into());
         assert_eq!(sides(&more, &two), (true, false));
         assert_eq!(sides(&[two.clone(), vec!["column public.t.x integer".into()]].concat(), &three), (true, true));
+    }
+
+    #[test]
+    fn creating_supabases_publication_is_read_as_sql() {
+        assert!(creates_platform_publication_in("create publication supabase_realtime;"));
+        assert!(creates_platform_publication_in("CREATE PUBLICATION \"supabase_realtime\" FOR ALL TABLES;"));
+        assert!(!creates_platform_publication_in("insert into snippets values ('create publication supabase_realtime;');"));
+        assert!(!creates_platform_publication_in("-- create publication supabase_realtime\nselect 1;"));
+        assert!(!creates_platform_publication_in("create publication \"Supabase_Realtime\";"));
+        assert!(!creates_platform_publication_in("create publication supabase_realtime_messages;"));
     }
 
     #[test]

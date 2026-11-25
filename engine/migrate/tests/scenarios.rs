@@ -4114,6 +4114,7 @@ on!(
     a_supabase_database_adopted_before_a_backfill_runs_it,
     supabases_extensions_stay_its_own_when_a_file_creates_one,
     a_migration_creating_supabases_publication_is_refused_where_it_exists,
+    a_migration_making_a_dropped_supabase_extension_replays,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
     init_reads_an_in_list_on_a_varchar_column_as_it_reads_back,
@@ -7683,6 +7684,21 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(p.run(async |o, log| reylo_migrate::db_reset(o, false, log).await).await, 0, "{}", p.peek());
         assert_eq!(p.rows("select n.nspname as s from pg_extension x join pg_namespace n on n.oid = x.extnamespace where x.extname = 'uuid-ossp'").await[0].text("s"), "extensions");
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+    }
+
+    /// A migration that creates one of Supabase's own extensions where it was dropped, with no `if not
+    /// exists`, makes it in the shadows too, where it would otherwise be there already.
+    pub async fn a_migration_making_a_dropped_supabase_extension_replays(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        p.exec("drop extension pg_stat_statements").await;
+        let sql = "create extension pg_stat_statements with schema extensions;\n";
+        p.schema(sql);
+        p.file("20261124000000_statements.sql", sql);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(p.run(async |o, log| reylo_migrate::db_reset(o, false, log).await).await, 0, "{}", p.peek());
         assert_eq!(p.status().await, 0, "{}", p.peek());
     }
 
