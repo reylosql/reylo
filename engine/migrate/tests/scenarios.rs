@@ -4004,6 +4004,7 @@ on!(
     Postgres,
     a_table_renamed_to_a_name_postgres_quotes_or_shortens_keeps_its_constraints,
     a_table_renamed_keeps_the_sequences_its_columns_use,
+    a_table_renamed_keeps_the_counter_its_column_draws_from,
     a_suggested_command_says_blocking_where_its_migration_needs_it,
     a_column_renamed_with_its_declared_not_null_renames_it_once,
     a_suggested_blocking_names_the_rewrite_it_accepts,
@@ -4733,10 +4734,14 @@ mod adversarial {
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.exec("insert into tallied (id) values (101)").await;
         assert_eq!(p.rows("select ticket from tallied order by id").await.iter().map(|r| r.text("ticket").to_string()).collect::<Vec<_>>(), ["1", "2"]);
-        p.output();
+    }
+
+    /// A table renamed while its columns change which sequence they draw from: the count stays with
+    /// the column that draws from it.
+    pub async fn a_table_renamed_keeps_the_counter_its_column_draws_from(mut p: P) {
         // A sequence its column owns under the new name, though another column names it under the
         // old: renamed, keeping its count.
-        let rest = format!("{rest} create sequence tallied_id_seq as integer; create table tallied (id integer primary key, ticket integer unique default nextval('tallied_id_seq'));");
+        let rest = String::new();
         p.file("20991231000010_t.sql", "create table owned (id serial primary key, seq_ref regclass default 'owned_id_seq'::regclass);");
         p.schema(&format!("{rest} create table owned (id serial primary key, seq_ref regclass default 'owned_id_seq'::regclass);"));
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
@@ -4767,6 +4772,23 @@ mod adversarial {
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.exec("insert into taker default values").await;
         assert_eq!(p.rows("select id, ticket from taker where id <> 1").await.iter().map(|r| format!("{} {}", r.text("id"), r.text("ticket"))).collect::<Vec<_>>(), ["2 1"]);
+        p.output();
+        // A sequence its owner stops drawing from, while another column keeps drawing from it under
+        // the new name and only names it under the old: that column keeps its count.
+        let rest = format!("{rest} create sequence donor_id_seq as integer; create sequence taker_id_seq as integer; create table taker (id integer primary key default nextval('donor_id_seq'), ticket integer default nextval('taker_id_seq')); alter sequence taker_id_seq owned by taker.ticket;");
+        p.file("20991231000014_t.sql", "create table giver (id serial primary key, ticket integer unique default nextval('giver_id_seq'), seq_ref regclass default 'giver_id_seq'::regclass);");
+        p.schema(&format!("{rest} create table giver (id serial primary key, ticket integer unique default nextval('giver_id_seq'), seq_ref regclass default 'giver_id_seq'::regclass);"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into giver (id) values (100)").await;
+        p.output();
+        p.schema(&format!("{rest} create sequence giver_id_seq as integer; create sequence getter_id_seq as integer; create table getter (id integer primary key, ticket integer unique default nextval('getter_id_seq'), seq_ref regclass default 'giver_id_seq'::regclass); alter sequence getter_id_seq owned by getter.ticket;"));
+        let choices = reylo_migrate::Choices { rename: vec![("giver".into(), "getter".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "getter", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into getter (id) values (101)").await;
+        assert_eq!(p.rows("select ticket from getter order by id").await.iter().map(|r| r.text("ticket").to_string()).collect::<Vec<_>>(), ["1", "2"]);
     }
 
     /// A refusal's suggested command carries --blocking where the migration it writes rewrites a

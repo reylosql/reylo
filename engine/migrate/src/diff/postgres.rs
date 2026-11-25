@@ -2768,8 +2768,8 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
                 .map(|c| c.id.replacen(&format!("column {old_rel}."), &format!("column {new_rel}."), 1))
                 .collect();
             // How surely the target's object is this one: an index on the table; a sequence the column
-            // that owned it still owns, else one a column of the table owns or takes values from. The
-            // name that holds it more surely wins.
+            // that owned it still draws from, else one another column of the table draws from, else
+            // one a column names. The name that holds it more surely wins.
             let owner = o.goes_with.as_ref().map(|c| c.replacen(&format!("column {old_rel}."), &format!("column {new_rel}."), 1));
             let hold = |t: &Object| -> u8 {
                 if t.kind != o.kind {
@@ -2777,8 +2777,23 @@ pub fn derived_renames(current: &Schema, target: &Schema, renamed: &[(String, St
                 }
                 match o.kind {
                     Some(Kind::Index) => u8::from(t.owner.as_deref() == Some(new_table.as_str())),
-                    Some(Kind::Sequence) if t.goes_with.is_some() && t.goes_with == owner => 2,
-                    Some(Kind::Sequence) => u8::from(users.iter().any(|u| t.goes_with.as_deref() == Some(u.as_str()) || target.objects.get(u).is_some_and(|c| c.deps.contains(&t.id)))),
+                    // A column draws from it where it owns it or its default calls nextval on it; the
+                    // column that owned it drawing outranks another, and either a mere reference.
+                    Some(Kind::Sequence) => users
+                        .iter()
+                        .map(|u| {
+                            let column = target.objects.get(u);
+                            let refers = column.is_some_and(|c| c.deps.contains(&t.id));
+                            let draws = t.goes_with.as_deref() == Some(u.as_str()) || (refers && column.is_some_and(|c| c.def.contains("nextval(")));
+                            match (draws, refers) {
+                                (true, _) if owner.as_deref() == Some(u.as_str()) => 4,
+                                (true, _) => 2,
+                                (false, true) => 1,
+                                _ => 0,
+                            }
+                        })
+                        .max()
+                        .unwrap_or(0),
                     _ => 1,
                 }
             };
