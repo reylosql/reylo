@@ -149,6 +149,18 @@ fn is_name_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_'
 }
 
+/// The first character of a Postgres name, and of a dollar quote's tag, as its scanner reads one
+/// (`ident_start` in `scan.l`): every byte past ASCII is a letter there.
+fn is_pg_name_start(c: u8) -> bool {
+    is_name_start(c) || c >= 0x80
+}
+
+/// A character of a Postgres name past its first (`ident_cont`): a `$` as well, so `é$1` and
+/// `a$t$` are each one name, in which neither a placeholder nor a dollar quote starts.
+fn is_pg_name_char(c: u8) -> bool {
+    is_name_char(c) || c == b'$' || c >= 0x80
+}
+
 /// Whether a ClickHouse statement's code from `from`, where a conditional's `?` ends, up to `to`,
 /// where a `:` stands, is a whole operand: each parenthesis and bracket it opens is closed, and
 /// what it ends with ends an expression, as a name, a number, a string, a placeholder and a
@@ -213,6 +225,16 @@ fn name_end(b: &[u8], start: usize) -> usize {
     j
 }
 
+/// A name or a number from `start`, whole: a Postgres name as its scanner reads one, which starts
+/// with no digit (`1$t$` is a number and a dollar quote's opener).
+fn word_end(b: &[u8], start: usize, dialect: Dialect) -> usize {
+    if dialect == Dialect::Postgres && is_pg_name_start(b[start]) {
+        (start..b.len()).find(|&j| !is_pg_name_char(b[j])).unwrap_or(b.len())
+    } else {
+        name_end(b, start)
+    }
+}
+
 /// A placeholder name from `start`: a name, then any `.segment` that starts like one
 /// (`:auth.user_id`). `:t.*` stops before the dot.
 fn dotted_name_end(b: &[u8], start: usize) -> usize {
@@ -242,14 +264,17 @@ fn digits_end(b: &[u8], start: usize) -> usize {
     j
 }
 
-/// `$tag$` at `i`: the offset one past its closing `$`, when `i` starts a dollar-quote opener.
+/// `$tag$` at `i`: the offset one past its closing `$`, when `i` starts a dollar-quote opener. A
+/// tag is a Postgres name with no `$` in it (`$本文$`).
 fn dollar_tag_end(b: &[u8], i: usize) -> Option<usize> {
     if b.get(i) != Some(&b'$') {
         return None;
     }
     let mut j = i + 1;
-    if j < b.len() && is_name_start(b[j]) {
-        j = name_end(b, j);
+    if j < b.len() && is_pg_name_start(b[j]) {
+        while j < b.len() && b[j] != b'$' && is_pg_name_char(b[j]) {
+            j += 1;
+        }
     }
     (b.get(j) == Some(&b'$')).then_some(j + 1)
 }
@@ -451,7 +476,7 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
                     // A `::` cast: the type name after it is not a parameter.
                     i += 2;
                     if i < b.len() && is_name_start(b[i]) {
-                        i = name_end(b, i);
+                        i = word_end(b, i, dialect);
                     }
                     last = Last::Operand;
                     continue;
@@ -486,6 +511,12 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
                     // `tags[(:n)]`. An array constructor's `[` (`array[:a, :b]`) follows `array`
                     // or another `[`, not an operand.
                     _ if last == Last::Subscript && dialect == Dialect::Postgres => {
+                        i += 1;
+                        last = Last::Other;
+                    }
+                    // A colon right after a name or a number opens nothing (`arr[lo:hi]`), and a
+                    // Postgres name may end in `$` or a byte past ASCII (`x[café:fin]`).
+                    _ if dialect == Dialect::Postgres && i > 0 && is_pg_name_char(b[i - 1]) => {
                         i += 1;
                         last = Last::Other;
                     }
@@ -644,8 +675,8 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
             // Whitespace leaves what was read last as it was, as a comment does.
             _ if c.is_ascii_whitespace() => i += 1,
             // A name or a number, whole: `array` opens a constructor, anything else is an operand.
-            _ if is_name_char(c) => {
-                let end = name_end(b, i);
+            _ if is_name_char(c) || (dialect == Dialect::Postgres && is_pg_name_start(c)) => {
+                let end = word_end(b, i, dialect);
                 last = if sql[i..end].eq_ignore_ascii_case("array") { Last::Other } else { Last::Operand };
                 i = end;
             }
