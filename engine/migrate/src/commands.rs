@@ -3042,14 +3042,15 @@ fn creates_platform_publication_in(text: &str) -> bool {
             && w[1].upper() == "PUBLICATION"
             && match w[2].kind {
                 TokenKind::Word => w[2].text.eq_ignore_ascii_case(crate::catalog::PLATFORM_PUBLICATION),
-                TokenKind::Quoted => unquoted(&w[2].text) == crate::catalog::PLATFORM_PUBLICATION,
+                TokenKind::Quoted => quoted_name(&w[2].text) == crate::catalog::PLATFORM_PUBLICATION,
                 _ => false,
             }
     })
 }
 
-/// A quoted identifier's name: its outer quotes taken off, and each doubled quote in it made one.
-fn unquoted(text: &str) -> String {
+/// A Postgres quoted identifier's name: its outer quotes taken off, and each doubled quote in it
+/// made one.
+fn quoted_name(text: &str) -> String {
     text.strip_prefix('"').and_then(|t| t.strip_suffix('"')).unwrap_or(text).replace("\"\"", "\"")
 }
 
@@ -3062,7 +3063,7 @@ fn unconditional_extensions(opts: &Options) -> Vec<String> {
     let texts: Vec<String> = files.into_iter().map(|f| f.sql).collect();
     let name = |t: &crate::sql::Token| match t.kind {
         TokenKind::Word => Some(t.text.to_lowercase()),
-        TokenKind::Quoted => Some(unquoted(&t.text)),
+        TokenKind::Quoted => Some(quoted_name(&t.text)),
         _ => None,
     };
     // Each extension's first statement: whether it creates it unconditionally.
