@@ -770,9 +770,15 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
     // Each table's columns' defaults and not nulls, by name: a partition's that differ are its own.
     let names: BTreeMap<u32, String> = rels.iter().map(|r| (oid(r, "oid"), r.text("name").to_string())).collect();
     let mut column_states: BTreeMap<(String, String), (Option<String>, bool)> = BTreeMap::new();
+    // Each generated column's expression, which a partition may give otherwise.
+    let mut generations: BTreeMap<(String, String), String> = BTreeMap::new();
     for (rel, cols) in &columns {
         for c in cols {
-            column_states.insert((names.get(rel).cloned().unwrap_or_default(), c.text("name").to_string()), (c.get("def").filter(|_| c.text("generated").is_empty()).map(String::from), c.flag("notnull")));
+            let key = (names.get(rel).cloned().unwrap_or_default(), c.text("name").to_string());
+            if !c.text("generated").is_empty() {
+                generations.insert(key.clone(), c.text("def").to_string());
+            }
+            column_states.insert(key, (c.get("def").filter(|_| c.text("generated").is_empty()).map(String::from), c.flag("notnull")));
         }
     }
     for r in &rels {
@@ -932,7 +938,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                 _ => made.clone(),
             };
             let from_parent = if c.flag("inherited") || partition { "inherited" } else { "" };
-            table_columns.push(format!("{TABLE_COLUMN}{col_id}{SEP}{held}{SEP}{}{SEP}alter table {name} add column {} {added}{SEP}{}{SEP}{from_parent}", c.text("name"), c.text("name"), c.text("nn_name")));
+            table_columns.push(format!("{TABLE_COLUMN}{col_id}{SEP}{held}{SEP}{}{SEP}alter table {name} add column {} {added}{SEP}{}{SEP}{from_parent}{SEP}{}", c.text("name"), c.text("name"), c.text("nn_name"), if c.flag("notnull") { "not null" } else { "" }));
             // Each column below changes in place. Only a change of its type or collation is refused
             // under a view, rule, policy or trigger on it, which the alterer's `remakes` says; a
             // default, a not null, an identity or a generated expression changes under them.
@@ -1096,11 +1102,19 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                         overrides.push(format!("{} {}", c.text("name"), said.join(" ")));
                     }
                 }
+                // A generation expression of its own, which a column made again on its table leaves
+                // the table's: set again after.
+                let own_expression = r
+                    .get("parent")
+                    .and_then(|p| generations.get(&(p.to_string(), c.text("name").to_string())))
+                    .filter(|parent| !c.text("generated").is_empty() && c.text("def") != parent.as_str())
+                    .map(|_| format!("alter table {name} alter column {} set expression as ({})", c.text("name"), c.text("def")));
                 s.add(Object {
                     id: col_id,
                     kind: Some(Kind::Column),
                     owner: Some(id.clone()),
                     def: def.clone(),
+                    create: own_expression.into_iter().collect(),
                     inline: true,
                     change: Change::Alter { blocks: false },
                     extra: std::iter::once("partition".to_string()).chain((kind == "p").then(|| "partitioned".to_string())).chain(c.get("nn_name").map(|n| format!("not null name {n}"))).collect(),
@@ -3512,7 +3526,18 @@ fn columns_joined(from: &Object, to: &Object) -> Vec<(String, String)> {
         return Vec::new();
     }
     let had: BTreeSet<&str> = from.extra.iter().filter_map(|l| l.strip_prefix(TABLE_COLUMN)?.split(SEP).next()).collect();
-    held_columns(to).into_iter().filter(|(id, _, _)| !had.contains(id.as_str())).map(|(id, _, add)| (id, add)).collect()
+    let mut joined: Vec<(String, String)> = held_columns(to).into_iter().filter(|(id, _, _)| !had.contains(id.as_str())).map(|(id, _, add)| (id, add)).collect();
+    // A table of a type, which takes no column of its own, adds those it is to have of its own as
+    // well as from another here too, once it leaves the type.
+    let of = |o: &Object| o.extra.iter().find_map(|l| l.strip_prefix("of ")).map(String::from);
+    if of(from).is_some() && of(from) != of(to) {
+        joined.extend(to.extra.iter().filter_map(|l| {
+            let f: Vec<&str> = l.strip_prefix(TABLE_COLUMN)?.split(SEP).collect();
+            let (id, held, add, from_parent) = (*f.first()?, *f.get(1)?, *f.get(3)?, f.get(5).copied().unwrap_or_default());
+            (held == "own" && from_parent == "inherited" && !had.contains(id)).then(|| (id.to_string(), add.to_string()))
+        }));
+    }
+    joined
 }
 
 /// The columns a table that leaves another or a type had from it and is no longer to have, each its
@@ -4006,8 +4031,8 @@ fn through_text(columns: &[Moved], statements: &[String]) -> Vec<String> {
 }
 
 /// The defaults of a type's columns that tables hold from others (a child's, a partition's), which
-/// move with those others' columns: each taken off its own table before the move, and the target's
-/// set back after.
+/// move with those others' columns: each taken off its own table before the move, and set back after
+/// where the target keeps it.
 fn held_defaults(from: &Object, to: &Object) -> (Vec<String>, Vec<String>) {
     let lines = |o: &Object| -> Vec<Vec<String>> { o.extra.iter().filter_map(|l| l.strip_prefix(HELD_COLUMN)).map(|h| h.split(SEP).map(String::from).collect()).collect() };
     let target = lines(to);
@@ -4018,7 +4043,8 @@ fn held_defaults(from: &Object, to: &Object) -> (Vec<String>, Vec<String>) {
             continue;
         }
         off.push(format!("alter table only {table} alter column {column} drop default"));
-        if let Some(d) = target.iter().find(|g| g.first() == Some(table) && g.get(1) == Some(column)).and_then(|g| g.get(3)).filter(|d| !d.is_empty()) {
+        // One the target changes is the column's own change to set, after what it calls.
+        if let Some(d) = target.iter().find(|g| g.first() == Some(table) && g.get(1) == Some(column)).and_then(|g| g.get(3)).filter(|d| *d == default) {
             back.push(format!("alter table only {table} alter column {column} set default {d}"));
         }
     }
@@ -4391,6 +4417,23 @@ impl Alterer for PostgresAlterer {
         // A table made a table of a type, whose columns then change only with the type's attributes.
         let of = |o: &Object| o.extra.iter().find_map(|l| l.strip_prefix("of ")).map(String::from);
         to.kind == Some(Kind::Table) && of(to).is_some() && of(from) != of(to)
+    }
+
+    fn loses(&self, from: &Object, to: &Object) -> Vec<String> {
+        // A table that leaves another drops itself the columns it had from it that the target
+        // lacks, with their values; a generated column's are its expression's, which go with none.
+        if from.kind != Some(Kind::Table) {
+            return Vec::new();
+        }
+        let generated: BTreeSet<String> = from
+            .extra
+            .iter()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.strip_prefix(TABLE_COLUMN)?.split(SEP).collect();
+                f.get(3)?.contains(" generated always as (").then(|| f[0].to_string())
+            })
+            .collect();
+        columns_left(from, to).into_iter().map(|(id, _)| id).filter(|id| !generated.contains(id)).collect()
     }
 
     fn releases(&self, from: &Object, to: &Object) -> bool {
@@ -5097,9 +5140,10 @@ impl Alterer for PostgresAlterer {
                 // lacks, is the table's own once it leaves, and goes then.
                 if !had.is_empty() && has.is_empty() {
                     let lines = |o: &Object| -> Vec<Vec<String>> { o.extra.iter().filter_map(|l| l.strip_prefix(TABLE_COLUMN)).map(|l| l.split(SEP).map(String::from).collect()).collect() };
+                    let not_null = |f: &Vec<String>| f.get(6).is_some_and(|n| n == "not null");
                     let target = lines(to);
-                    for f in lines(from).iter().filter(|f| f.get(5).map(String::as_str) == Some("inherited") && f.get(1).map(String::as_str) != Some("partition") && f.get(4).is_some_and(|n| !n.is_empty())) {
-                        if target.iter().any(|t| t.first() == f.first() && t.get(4).is_none_or(|n| n.is_empty())) {
+                    for f in lines(from).iter().filter(|f| f.get(5).map(String::as_str) == Some("inherited") && f.get(1).map(String::as_str) != Some("partition") && not_null(f)) {
+                        if target.iter().any(|t| t.first() == f.first() && !not_null(t)) {
                             out.push(format!("alter table {name} alter column {} drop not null", f[2]));
                         }
                     }

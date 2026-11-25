@@ -1,3 +1,4 @@
+-- loses data: h0."c2,x"
 -- loses data: "t0,x"
 create type "ty0""x" as (
   id integer,

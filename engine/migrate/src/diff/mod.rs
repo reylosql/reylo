@@ -1300,6 +1300,8 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
     }
     // The objects whose change lets go of what of them something else holds.
     let releases = |id: &str| -> bool { alters.contains_key(id) && from.objects.get(id).zip(to.objects.get(id)).is_some_and(|(a, b)| alterer.releases(a, b)) };
+    // The objects whose change binds their columns to another (a table made a table of a type).
+    let binds = |id: &str| -> bool { alters.contains_key(id) && from.objects.get(id).zip(to.objects.get(id)).is_some_and(|(a, b)| alterer.binds(a, b)) };
     // What of a table its change may let go of: its indexes, and the columns it takes from another.
     let held_by_another = |d: &str| from.objects.get(d).is_some_and(|o| o.kind == Some(Kind::Index) || (o.kind == Some(Kind::Column) && o.deps.iter().any(|x| from.objects.get(x).is_some_and(|c| c.kind == Some(Kind::Column) && c.owner != o.owner))));
     // The edges: an op runs after every op in `after[op]`.
@@ -1484,20 +1486,21 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                     }
                 }
                 // A change that converts columns after their tables leave what held them (a typed
-                // table's type), which refused the conversion.
+                // table's type), which refused the conversion: but for a table's own column, where the
+                // table's change binds it to a type, which converts nothing after.
                 if matches!(op, Op::Alter(_)) {
                     for c in converted.get(id.as_str()).into_iter().flatten() {
-                        if let Some(j) = from.objects.get(c).and_then(|c| c.owner.clone()).filter(|w| releases(w)).and_then(|w| find(Op::Alter(w))) {
+                        if let Some(j) = from.objects.get(c).and_then(|c| c.owner.clone()).filter(|w| releases(w) && !(binds(w) && !held_by_another(c))).and_then(|w| find(Op::Alter(w))) {
                             after[k].insert(j);
                         }
                     }
                 }
                 // And a table that comes to be held so (made a table of a type) after the changes
-                // that convert its columns.
+                // that convert its own columns; one another held waits for the table to leave it.
                 if let (Op::Alter(_), Some(f)) = (op, from.objects.get(id.as_str())) {
                     if alterer.binds(f, o) {
                         for (x, columns) in &converted {
-                            if x != id && columns.iter().any(|c| from.objects.get(c).is_some_and(|c| c.owner.as_deref() == Some(id.as_str()))) {
+                            if x != id && columns.iter().any(|c| from.objects.get(c).is_some_and(|c| c.owner.as_deref() == Some(id.as_str())) && !(releases(id) && held_by_another(c))) {
                                 if let Some(j) = find(Op::Alter(x.clone())) {
                                     after[k].insert(j);
                                 }
