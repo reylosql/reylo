@@ -2269,12 +2269,13 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
     }
     // What holds a value of a relation's row type in a stored expression, as a dependency on the
     // type records it: on the row type itself, or on a type carrying it (an array, a domain, a range,
-    // a composite type or a table with a column of it). Postgres refuses a change of the type of any
-    // of the relation's columns under a view's query or a column's default that does, and under a
-    // function's SQL-standard body or argument default that does (14.25, 15.20, 16.16, 17.12, 18.7
-    // and later). A function depends on the types of its arguments and result too, which its stored
-    // text names by oid only where its body or a default holds them. A generated column is made
-    // again around a change of what it reads, as its own rule says.
+    // a composite type or a table with a column of it). Postgres refuses to rewrite the relation (a
+    // change of a column's type, a column added with a default) under a view's query or a column's
+    // default that does, and under a function's SQL-standard body or argument default that does, a
+    // parameter of the row type the body reads included (14.25, 15.20, 16.16, 17.12, 18.7 and
+    // later). A function depends on the types of its arguments and result too, which its stored text
+    // names by oid only where its body or a default holds them. A generated column is made again
+    // around a change of what it reads, as its own rule says.
     for r in db
         .rows(
             "with recursive edges(inner_type, outer_type) as (
@@ -2293,7 +2294,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
               left join pg_attrdef ad on d.classid = 'pg_attrdef'::regclass and ad.oid = d.objid
             where d.deptype = 'n' and d.classid in ('pg_proc'::regclass, 'pg_rewrite'::regclass, 'pg_attrdef'::regclass)
               and not exists (select 1 from pg_attribute a where a.attrelid = ad.adrelid and a.attnum = ad.adnum and a.attgenerated <> '')
-              and (d.classid <> 'pg_proc'::regclass or concat(p.prosqlbody::text, ' ', p.proargdefaults::text) ~ ('\\m' || c.type || '\\M'))",
+              and (d.classid <> 'pg_proc'::regclass or concat(p.prosqlbody::text, ' ', p.proargdefaults::text) ~ (E'\\\\m' || c.type || E'\\\\M'))",
         )
         .await?
     {
@@ -4459,6 +4460,13 @@ impl Alterer for PostgresAlterer {
         let referenced = from.deps.iter().filter_map(|d| column_of(d)).map(|(t, _)| t).find(|t| t != own).or_else(|| references(&from.def).is_none_or(|r| r == own || own.ends_with(&format!(".{r}"))).then(|| own.to_string()));
         let names = |table: &str| -> BTreeMap<String, String> { renamed.iter().filter_map(|(old, new)| Some((column_of(old)?, column_of(new)?))).filter(|((t, _), _)| t == table).map(|((_, old), (_, new))| (catalog_name(&old), new)).collect() };
         renamed_key(&from.def, &names(own), referenced.map(|r| names(&r)).as_ref())
+    }
+
+    fn fills(&self, column: &Object) -> bool {
+        // The server fills each row with the column's value as it adds one with a default, an
+        // identity or a generated expression, a constant default included.
+        let c = parse_column(&column.def);
+        column.kind == Some(Kind::Column) && (c.default.is_some() || c.identity.is_some() || c.generated.is_some())
     }
 
     fn keeps_values(&self, from: &Object, to: &Object) -> bool {
