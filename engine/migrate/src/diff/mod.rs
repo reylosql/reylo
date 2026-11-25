@@ -883,7 +883,7 @@ fn setter_at(statement: &str) -> Option<usize> {
 /// The statements of `statements` that set the column's default `set` sets, taken out of them, with
 /// what each opens with up to its default, on the table alone (`only`) or not alike.
 fn default_set_apart(statements: &mut Vec<String>, set: &str) -> Option<(String, Vec<String>)> {
-    let opening = |s: &str| setter_at(s).map(|k| s[..k].replacen("alter table only ", "alter table ", 1));
+    let opening = |s: &str| setter_at(s).map(|k| s[..k].strip_prefix("alter table only ").map_or_else(|| s[..k].to_string(), |rest| format!("alter table {rest}")));
     let at = opening(set)?;
     let (later, now): (Vec<String>, Vec<String>) = statements.drain(..).partition(|s| opening(s).as_deref() == Some(at.as_str()));
     *statements = now;
