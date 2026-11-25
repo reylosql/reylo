@@ -4010,6 +4010,9 @@ macro_rules! on {
 
 on!(
     Postgres,
+    a_table_renamed_to_a_name_postgres_quotes_or_shortens_keeps_its_constraints,
+    a_table_renamed_keeps_the_sequences_its_columns_use,
+    a_table_renamed_keeps_the_counter_its_column_draws_from,
     a_suggested_command_says_blocking_where_its_migration_needs_it,
     a_column_renamed_with_its_declared_not_null_renames_it_once,
     a_suggested_blocking_names_the_rewrite_it_accepts,
@@ -4838,6 +4841,232 @@ async fn a_mysql_change_that_copies_its_table_is_refused_until_blocking() {
 
 mod adversarial {
     use super::*;
+
+    /// A table renamed to a name Postgres must quote, or one so long that it shortens the names it
+    /// makes from it: what Postgres named after the table takes the name it would make from the new
+    /// one, so nothing is made again and the migration reaches the target.
+    pub async fn a_table_renamed_to_a_name_postgres_quotes_or_shortens_keeps_its_constraints(mut p: P) {
+        let table = |name: &str| format!("create table {name} (id integer generated always as identity primary key, email text not null unique, note text check (note <> ''), ref_id integer references refs (id)); create index on {name} (note);");
+        let refs = "create table refs (id integer primary key);";
+        p.file("20261027100000_t.sql", &format!("{refs} {}", table("ledger")));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into refs values (1); insert into ledger (email, note, ref_id) values ('a', 'n', 1)").await;
+        p.output();
+        let long = "a".repeat(63);
+        // A sequence named by hand as Postgres would once have been thought to name it, which a
+        // rename leaves alone.
+        let wide = "w".repeat(60);
+        let other = |name: &str| format!("create table {name} (id integer generated always as identity (sequence name {wide}_id) primary key);");
+        p.file("20261027110000_t.sql", &other(&wide));
+        p.schema(&format!("{refs} {} {}", table("ledger"), other(&wide)));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec(&format!("insert into {wide} default values")).await;
+        p.output();
+        let mut old = "ledger".to_string();
+        for (written, named) in [(r#""123""#.to_string(), "123".to_string()), (long.clone(), long.clone()), ("ledger".to_string(), "ledger".to_string())] {
+            let before = p.files().len();
+            let (other_old, other_new) = if named == "ledger" { ("short".to_string(), wide.clone()) } else if named == "123" { (wide.clone(), "short".to_string()) } else { ("short".to_string(), "short".to_string()) };
+            p.schema(&format!("{refs} {} {}", table(&written), other(&other_new)));
+            let mut rename = vec![(old.clone(), named.clone())];
+            if other_old != other_new {
+                rename.push((other_old, other_new));
+            }
+            old = named.clone();
+            let choices = reylo_migrate::Choices { rename, ..Default::default() };
+            assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "renamed", &choices, log).await).await, 0, "{}", p.peek());
+            let out = p.output();
+            assert!(!out.contains("doesn't reach"), "{out}");
+            assert!(out.lines().all(|l| !l.trim_start().starts_with("- ") && !l.trim_start().starts_with("+ ")), "nothing is dropped or made again: {out}");
+            assert_eq!(p.files().len(), before + 1);
+            assert_eq!(p.migrate().await, 0, "{}", p.peek());
+            assert_eq!(p.rows(&format!("select email from {written}")).await[0].text("email"), "a");
+            p.exec(&format!("insert into {} default values", if named == "ledger" { &wide } else { "short" })).await;
+            p.output();
+            assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+            p.output();
+        }
+        // An index the target keeps under its name, while another table holds the name a rename
+        // would give it; and an identity whose table's name holds a quote, its sequence named by
+        // Postgres.
+        let kept = format!("{}_x_idx", "c".repeat(57));
+        let quoted = format!("q\"{}", "q".repeat(61));
+        let written = format!("\"{}\"", quoted.replace('"', "\"\""));
+        let rest = format!("{refs} {} {}", table("ledger"), other(&wide));
+        p.file("20991231000000_t.sql", &format!("create table {} (x integer); create index on {} (x); create table holder (x integer); create index dest_x_idx on holder (x); create table {written} (id integer generated always as identity, note text);", "c".repeat(63), "c".repeat(63)));
+        p.schema(&format!("{rest} create table {} (x integer); create index {kept} on {} (x); create table holder (x integer); create index dest_x_idx on holder (x); create table {written} (id integer generated always as identity, note text);", "c".repeat(63), "c".repeat(63)));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec(&format!("insert into {written} (note) values ('n')")).await;
+        p.output();
+        p.schema(&format!("{rest} create table dest (x integer); create index {kept} on dest (x); create table holder (x integer); create index dest_x_idx on holder (x); create table plain (id integer generated always as identity, note text);"));
+        let choices = reylo_migrate::Choices { rename: vec![("c".repeat(63), "dest".into()), (written.clone(), "plain".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "edges", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into plain (note) values ('m')").await;
+        assert_eq!(p.rows("select id from plain order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+        p.output();
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    }
+
+    /// A table renamed with the sequences its columns use, whatever names the target gives others:
+    /// each is renamed with its table, keeping its count.
+    pub async fn a_table_renamed_keeps_the_sequences_its_columns_use(mut p: P) {
+        // A serial's sequence, whose old name the target gives a sequence of its own: the serial's is
+        // renamed with its table, keeping its count, and the other made.
+        let rest = String::new();
+        p.file("20991231000002_t.sql", "create table source (id serial primary key, note text);");
+        p.schema(&format!("{rest} create table source (id serial primary key, note text);"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into source (note) values ('a')").await;
+        p.output();
+        p.schema(&format!("{rest} create table target (id serial primary key, note text); create sequence source_id_seq;"));
+        let choices = reylo_migrate::Choices { rename: vec![("source".into(), "target".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "serial", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into target (note) values ('b')").await;
+        assert_eq!(p.rows("select id from target order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+        p.output();
+        // A serial's sequence the renamed table's column still takes its default from, though it no
+        // longer owns it: renamed, keeping its count.
+        let rest = format!("{rest} create table target (id serial primary key, note text); create sequence source_id_seq;");
+        p.file("20991231000004_t.sql", "create table origin (id serial primary key, note text);");
+        p.schema(&format!("{rest} create table origin (id serial primary key, note text);"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into origin (note) values ('a')").await;
+        p.output();
+        p.schema(&format!("{rest} create sequence moved_id_seq as integer; create table moved (id integer default nextval('moved_id_seq') primary key, note text);"));
+        let choices = reylo_migrate::Choices { rename: vec![("origin".into(), "moved".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "unowned", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into moved (note) values ('b')").await;
+        assert_eq!(p.rows("select id from moved order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+        p.output();
+        // A new name that holds the sequence's old one, beside a sequence of its own under the old
+        // name; and a sequence the target gives the name a rename would, which the renamed column
+        // no longer uses.
+        let rest = format!("{rest} create sequence moved_id_seq as integer; create table moved (id integer default nextval('moved_id_seq') primary key, note text);");
+        p.file("20991231000006_t.sql", "create table first (id serial primary key, note text); create table second (id serial primary key, note text); create sequence later_id_seq;");
+        p.schema(&format!("{rest} create table first (id serial primary key, note text); create table second (id serial primary key, note text); create sequence later_id_seq;"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into first (note) values ('a'); insert into second (note) values ('a')").await;
+        p.output();
+        p.schema(&format!("{rest} create table first_id_seq_more (id serial primary key, note text); create sequence first_id_seq; create table later (id integer primary key, note text); create sequence later_id_seq;"));
+        let choices = reylo_migrate::Choices { rename: vec![("first".into(), "first_id_seq_more".into()), ("second".into(), "later".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "names", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into first_id_seq_more (note) values ('b')").await;
+        assert_eq!(p.rows("select id from first_id_seq_more order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+        p.output();
+        // A sequence another column of the table takes values from, which it still does after.
+        let rest = format!("{rest} create table first_id_seq_more (id serial primary key, note text); create sequence first_id_seq; create table later (id integer primary key, note text); create sequence later_id_seq;");
+        p.file("20991231000008_t.sql", "create table counted (id serial primary key, ticket integer unique default nextval('counted_id_seq'));");
+        p.schema(&format!("{rest} create table counted (id serial primary key, ticket integer unique default nextval('counted_id_seq'));"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into counted (id) values (100)").await;
+        p.output();
+        p.schema(&format!("{rest} create sequence tallied_id_seq as integer; create table tallied (id integer primary key, ticket integer unique default nextval('tallied_id_seq'));"));
+        let choices = reylo_migrate::Choices { rename: vec![("counted".into(), "tallied".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "tallied", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into tallied (id) values (101)").await;
+        assert_eq!(p.rows("select ticket from tallied order by id").await.iter().map(|r| r.text("ticket").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+    }
+
+    /// A table renamed while its columns change which sequence they draw from: the count stays with
+    /// the column that draws from it.
+    pub async fn a_table_renamed_keeps_the_counter_its_column_draws_from(mut p: P) {
+        // A sequence its column owns under the new name, though another column names it under the
+        // old: renamed, keeping its count.
+        let rest = String::new();
+        p.file("20991231000010_t.sql", "create table owned (id serial primary key, seq_ref regclass default 'owned_id_seq'::regclass);");
+        p.schema(&format!("{rest} create table owned (id serial primary key, seq_ref regclass default 'owned_id_seq'::regclass);"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into owned default values").await;
+        p.output();
+        p.schema(&format!("{rest} create sequence owned_id_seq as integer; create table held (id serial primary key, seq_ref regclass default 'owned_id_seq'::regclass);"));
+        let choices = reylo_migrate::Choices { rename: vec![("owned".into(), "held".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "held", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into held default values").await;
+        assert_eq!(p.rows("select id from held order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+        p.output();
+        // A sequence the column that owned it keeps using, unowned, while the new name goes to a
+        // sequence another column owns: the column keeps its count.
+        let rest = format!("{rest} create sequence owned_id_seq as integer; create table held (id serial primary key, seq_ref regclass default 'owned_id_seq'::regclass);");
+        p.file("20991231000012_t.sql", "create table donor (id serial primary key, ticket integer default nextval('donor_id_seq'));");
+        p.schema(&format!("{rest} create table donor (id serial primary key, ticket integer default nextval('donor_id_seq'));"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into donor (ticket) values (100)").await;
+        p.output();
+        p.schema(&format!("{rest} create sequence donor_id_seq as integer; create sequence taker_id_seq as integer; create table taker (id integer primary key default nextval('donor_id_seq'), ticket integer default nextval('taker_id_seq')); alter sequence taker_id_seq owned by taker.ticket;"));
+        let choices = reylo_migrate::Choices { rename: vec![("donor".into(), "taker".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "taker", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into taker default values").await;
+        assert_eq!(p.rows("select id, ticket from taker where id <> 1").await.iter().map(|r| format!("{} {}", r.text("id"), r.text("ticket"))).collect::<Vec<_>>(), ["2 1"]);
+        p.output();
+        // A sequence its owner stops drawing from, while another column keeps drawing from it under
+        // the new name and only names it under the old: that column keeps its count.
+        let rest = format!("{rest} create sequence donor_id_seq as integer; create sequence taker_id_seq as integer; create table taker (id integer primary key default nextval('donor_id_seq'), ticket integer default nextval('taker_id_seq')); alter sequence taker_id_seq owned by taker.ticket;");
+        p.file("20991231000014_t.sql", "create table giver (id serial primary key, ticket integer unique default nextval('giver_id_seq'), seq_ref regclass default 'giver_id_seq'::regclass);");
+        p.schema(&format!("{rest} create table giver (id serial primary key, ticket integer unique default nextval('giver_id_seq'), seq_ref regclass default 'giver_id_seq'::regclass);"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into giver (id) values (100)").await;
+        p.output();
+        p.schema(&format!("{rest} create sequence giver_id_seq as integer; create sequence getter_id_seq as integer; create table getter (id integer primary key, ticket integer unique default nextval('getter_id_seq'), seq_ref regclass default 'giver_id_seq'::regclass); alter sequence getter_id_seq owned by getter.ticket;"));
+        let choices = reylo_migrate::Choices { rename: vec![("giver".into(), "getter".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "getter", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into getter (id) values (101)").await;
+        assert_eq!(p.rows("select ticket from getter order by id").await.iter().map(|r| r.text("ticket").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+        p.output();
+        // A default that names one sequence and draws from another: the count is the one it draws.
+        let rest = format!("{rest} create sequence giver_id_seq as integer; create sequence getter_id_seq as integer; create table getter (id integer primary key, ticket integer unique default nextval('getter_id_seq'), seq_ref regclass default 'giver_id_seq'::regclass); alter sequence getter_id_seq owned by getter.ticket;");
+        p.file("20991231000016_t.sql", "create sequence lender_id_seq; create table lender (id text primary key default ('lender_id_seq'::regclass::text || '-' || nextval('lender_id_seq')::text)); alter sequence lender_id_seq owned by lender.id;");
+        p.schema(&format!("{rest} create sequence lender_id_seq; create table lender (id text primary key default ('lender_id_seq'::regclass::text || '-' || nextval('lender_id_seq')::text)); alter sequence lender_id_seq owned by lender.id;"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into lender default values").await;
+        p.output();
+        p.schema(&format!("{rest} create sequence lender_id_seq; create sequence borrower_id_seq; create table borrower (id text primary key default ('lender_id_seq'::regclass::text || '-' || nextval('borrower_id_seq')::text)); alter sequence borrower_id_seq owned by borrower.id;"));
+        let choices = reylo_migrate::Choices { rename: vec![("lender".into(), "borrower".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "borrower", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into borrower default values").await;
+        assert_eq!(p.rows("select id from borrower order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["lender_id_seq-1", "lender_id_seq-2"]);
+        p.output();
+        // A new name holding a quote, which a default's string literal writes twice.
+        let rest = format!("{rest} create sequence lender_id_seq; create sequence borrower_id_seq; create table borrower (id text primary key default ('lender_id_seq'::regclass::text || '-' || nextval('borrower_id_seq')::text)); alter sequence borrower_id_seq owned by borrower.id;");
+        p.file("20991231000018_t.sql", "create sequence payer_id_seq; create table payer (id bigint primary key default nextval('payer_id_seq'), seq_ref regclass default 'payer_id_seq'::regclass); alter sequence payer_id_seq owned by payer.id;");
+        p.schema(&format!("{rest} create sequence payer_id_seq; create table payer (id bigint primary key default nextval('payer_id_seq'), seq_ref regclass default 'payer_id_seq'::regclass); alter sequence payer_id_seq owned by payer.id;"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into payer default values").await;
+        p.output();
+        p.schema(&format!(r#"{rest} create sequence payer_id_seq; create sequence "payee's_id_seq"; create table "payee's" (id bigint primary key default nextval('"payee''s_id_seq"'), seq_ref regclass default 'payer_id_seq'::regclass);"#));
+        let choices = reylo_migrate::Choices { rename: vec![("payer".into(), "payee's".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "payee", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec(r#"insert into "payee's" default values"#).await;
+        assert_eq!(p.rows(r#"select id from "payee's" order by id"#).await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
+    }
 
     /// A refusal's suggested command carries --blocking where the migration it writes rewrites a
     /// table, so that it is not refused again for that: a line of several guesses, and a type change
