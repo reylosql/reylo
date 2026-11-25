@@ -5,4 +5,3 @@ alter table t alter column n type bigint;
 --   alter table u add column y text default row(0, 0)::t::text;
 alter table u rename column x to y;
 alter table u alter column y set default row(0, 0)::t::text;
-alter table u alter column y set default (row(0, (0)::bigint)::t)::text;

@@ -3,7 +3,9 @@
 //! one to the other, runs the plan on the first as a deploy runs its files, and requires its catalog to equal the second's
 //! and every table both have to keep its own rows, value for value (a partitioned table's are its partitions'); `server.sql`, where a case has one, makes what it
 //! needs of the server itself (a role), and `check.sql` runs after the plan, so a case can require
-//! what no catalog shows (an identity that gives an unused value next). Planned again after it, the
+//! what no catalog shows (an identity that gives an unused value next); `renames.txt` states
+//! renames as `reylo migrate new --rename` does, one `<old id> -> <new id>` to a line, which the way
+//! back states the other way round. Planned again after it, the
 //! database needs nothing more. Then the same database goes back to v1, with its rows, as a rewind
 //! takes it, and up to v2 again, unless the case's `one-way.txt` says why it can't: each leg must
 //! reach the other side's catalog, keep every row and the values of each column both sides have, and
@@ -216,7 +218,7 @@ fn read(path: &Path) -> String {
 /// Takes `db` to `target` as the corpus's forward leg does: a moved table first, then the plan in
 /// schema.sql's style, as its files. Gives the statements, the tables moved to another schema, and
 /// the statement that failed.
-async fn apply(db: &mut Db, target: &diff::Schema, alterer: &diff::postgres::PostgresAlterer) -> (Vec<String>, Vec<(String, String)>, Option<String>) {
+async fn apply(db: &mut Db, target: &diff::Schema, alterer: &diff::postgres::PostgresAlterer, stated: &[(String, String)]) -> (Vec<String>, Vec<(String, String)>, Option<String>) {
     let current = diff::postgres::read(db).await.unwrap();
     let moved = diff::postgres::moved(&current, target);
     let mut moves = diff::postgres::moves(&current, target);
@@ -227,7 +229,7 @@ async fn apply(db: &mut Db, target: &diff::Schema, alterer: &diff::postgres::Pos
             failed = Some(format!("{s}: {e}"));
         }
     }
-    let mut plan = diff::plan(&diff::postgres::read(db).await.unwrap(), target, alterer);
+    let mut plan = diff::plan_with(&diff::postgres::read(db).await.unwrap(), target, alterer, stated, &Default::default());
     diff::postgres::style(db, &mut plan, &target.verbatim).await.unwrap();
     let existing = locks::existing(db).await.unwrap();
     if failed.is_none() {
@@ -239,10 +241,10 @@ async fn apply(db: &mut Db, target: &diff::Schema, alterer: &diff::postgres::Pos
 /// Takes `db`, with its rows, to `target` as `apply` does, and says how it fell short of `like`, a
 /// database built as `target`: the statement that failed, each line the two differ in, the rows and
 /// values it changed, and what a second plan would still run. Empty where it reached it.
-async fn leg(db: &mut Db, target: &diff::Schema, like: &mut Db, alterer: &diff::postgres::PostgresAlterer, skip: &[String]) -> Vec<String> {
+async fn leg(db: &mut Db, target: &diff::Schema, like: &mut Db, alterer: &diff::postgres::PostgresAlterer, skip: &[String], stated: &[(String, String)]) -> Vec<String> {
     let before = counts(db).await;
     let rows_before = values(db, None, &Default::default(), skip).await;
-    let (statements, moved, failed) = apply(db, target, alterer).await;
+    let (statements, moved, failed) = apply(db, target, alterer, stated).await;
     let mut lines: Vec<String> = failed.iter().map(|f| format!("the plan failed at {f}")).collect();
     let (only_a, only_b) = differences(db, like).await;
     lines.extend(only_a.iter().map(|l| format!("- {l}")).chain(only_b.iter().map(|l| format!("+ {l}"))));
@@ -333,7 +335,9 @@ async fn postgres() {
                 failed = Some(format!("{s}: {e}"));
             }
         }
-        let mut plan = diff::plan(&diff::postgres::read(&mut from).await.unwrap(), &target, &alterer);
+        let stated: Vec<(String, String)> = read(&case.join("renames.txt")).lines().filter_map(|l| l.split_once(" -> ")).map(|(a, b)| (a.trim().to_string(), b.trim().to_string())).collect();
+        let back_stated: Vec<(String, String)> = stated.iter().map(|(a, b)| (b.clone(), a.clone())).collect();
+        let mut plan = diff::plan_with(&diff::postgres::read(&mut from).await.unwrap(), &target, &alterer, &stated, &Default::default());
         // Written as `create` writes it, in schema.sql's style and in the lock-safe shape where a
         // statement would block writes to a table with rows while it reads them all, and run as
         // written: each file in a transaction of its own, but an index built concurrently.
@@ -408,7 +412,7 @@ async fn postgres() {
             let mut ready = true;
             if !back_fails.is_empty() {
                 let (held, valued) = (counts(&mut from).await, values(&mut from, None, &Default::default(), &skip).await);
-                let (_, _, failed) = apply(&mut from, &origin, &alterer).await;
+                let (_, _, failed) = apply(&mut from, &origin, &alterer, &back_stated).await;
                 let (only_a, only_b) = differences(&mut from, &mut to).await;
                 let refused = match failed {
                     Some(f) if f.contains(&back_fails) => None,
@@ -422,11 +426,11 @@ async fn postgres() {
                 empty(&mut from).await;
             }
             let indent = |lines: Vec<String>| lines.iter().map(|l| format!("  {}", l.replace('\n', "\n  "))).collect::<Vec<_>>().join("\n");
-            let back = if ready { leg(&mut from, &origin, &mut first, &alterer, &skip).await } else { vec![] };
+            let back = if ready { leg(&mut from, &origin, &mut first, &alterer, &skip, &back_stated).await } else { vec![] };
             if !back.is_empty() {
                 problems.push(format!("back from v2 to v1:\n{}", indent(back)));
             } else if ready {
-                let up = leg(&mut from, &target, &mut to, &alterer, &skip).await;
+                let up = leg(&mut from, &target, &mut to, &alterer, &skip, &stated).await;
                 if !up.is_empty() {
                     problems.push(format!("up from v1 to v2 again:\n{}", indent(up)));
                 }

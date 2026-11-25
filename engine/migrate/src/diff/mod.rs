@@ -865,6 +865,26 @@ fn rewrites(from: &Schema, to: &Schema, alterer: &dyn Alterer, alters: &BTreeMap
     out
 }
 
+/// The statements of `statements` that set a column's default as `set` does, taken out of them,
+/// with what each opens with up to its default: `set`'s own opening, read outside quoted names, which
+/// may hold the words themselves.
+fn default_set_apart(statements: &mut Vec<String>, set: &str) -> Option<(String, Vec<String>)> {
+    const SET: &str = " set default ";
+    let mut quote: Option<char> = None;
+    let at = set.char_indices().find_map(|(k, c)| {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (None, '"' | '`') => quote = Some(c),
+            (None, _) if set[k..].starts_with(SET) => return Some(set[..k + SET.len()].to_string()),
+            _ => {}
+        }
+        None
+    })?;
+    let (later, now): (Vec<String>, Vec<String>) = statements.drain(..).partition(|s| s.starts_with(&at));
+    *statements = now;
+    Some((at, later))
+}
+
 /// The plan from `from` to `to`.
 pub fn plan(from: &Schema, to: &Schema, alterer: &dyn Alterer) -> Plan {
     plan_with(from, to, alterer, &[], &BTreeSet::new())
@@ -1478,9 +1498,7 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         }
         let Some((unset, set)) = alterer.unhook(a, b) else { continue };
         let Some(set) = set.into_iter().next() else { continue };
-        let Some(at) = set.find(" set default ").map(|k| set[..k + 13].to_string()) else { continue };
-        let (later, now): (Vec<String>, Vec<String>) = statements.drain(..).partition(|s| s.starts_with(&at));
-        *statements = now;
+        let Some((at, later)) = default_set_apart(statements, &set) else { continue };
         // What takes the default off already (its old one holding a row) stays.
         let on = hooks.entry(id.clone()).or_default();
         for s in if swapped { unset } else { vec![] } {
@@ -1491,6 +1509,19 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         on.1.retain(|s| !s.starts_with(&at));
         on.1.extend(if later.is_empty() { vec![set] } else { later });
         deferred.insert(id.clone());
+    }
+    // A column renamed whose new default holds such a row has it set apart under its new name too.
+    for (new_id, (old_id, statements)) in renames.iter_mut() {
+        let (Some(a), Some(b)) = (from.objects.get(old_id.as_str()), to.objects.get(new_id.as_str())) else { continue };
+        if b.kind != Some(Kind::Column) || !rewritten.iter().any(|rel| holds_row(b, rel)) {
+            continue;
+        }
+        let Some(set) = alterer.unhook(a, b).and_then(|(_, set)| set.into_iter().next()) else { continue };
+        let Some((at, later)) = default_set_apart(statements, &set) else { continue };
+        let on = hooks.entry(new_id.clone()).or_default();
+        on.1.retain(|s| !s.starts_with(&at));
+        on.1.extend(if later.is_empty() { vec![set] } else { later });
+        deferred.insert(new_id.clone());
     }
 
     let mut ops: Vec<Op> = Vec::new();
@@ -2015,9 +2046,9 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
             }
             for h in to.objects.values().filter(|h| holds_row(h, &rel)) {
                 // A column made with its table, by the table's create. A column's own change waits
-                // for nothing here: its default, set apart, does.
+                // for nothing here where its default is set apart, which does.
                 let made = find(Op::Create(h.id.clone())).or_else(|| h.owner.clone().and_then(|w| find(Op::Create(w))));
-                let changed = find(Op::Alter(h.id.clone())).filter(|_| h.kind != Some(Kind::Column));
+                let changed = find(Op::Alter(h.id.clone())).filter(|_| h.kind != Some(Kind::Column) || !deferred.contains(&h.id));
                 for j in [made, changed, find(Op::Rehook(h.id.clone()))].into_iter().flatten().filter(|j| *j != k) {
                     after[j].insert(k);
                 }
