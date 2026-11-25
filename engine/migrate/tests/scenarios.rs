@@ -6938,10 +6938,11 @@ mod adversarial {
         p.file(
             "20261027100000_t.sql",
             "create table t (id int, n int); create table s (id int, constraint s_id_present check (id is not null)); create table r (id int);
-            create table q (id int); create table other (id int); create index other_idx on other (id); create table z (id int, constraint z_id_present check (id is not null));",
+            create table q (id int); create table other (id int); create index other_idx on other (id); create table z (id int, constraint z_id_present check (id is not null));
+            create schema a; create schema b; create table a.u (id int); create unique index same on a.u (id); create table b.t (id int); create unique index same on b.t (id);",
         );
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
-        p.exec("insert into t values (1, 1); insert into s values (1); insert into r values (1); insert into q values (1); insert into z values (1)").await;
+        p.exec("insert into t values (1, 1); insert into s values (1); insert into r values (1); insert into q values (1); insert into z values (1); insert into b.t values (1)").await;
         // Written by hand: the key's column isn't yet not null, so adding the key reads every row,
         // unless a validated check proves it; the index included column isn't read, and an index
         // renamed before the key takes it is the same index.
@@ -6956,13 +6957,16 @@ mod adversarial {
         p.file("20261027180000_q_key.sql", "alter index q_idx rename to q_tmp;\nalter index other_idx rename to q_idx;\nalter table q add constraint q_pkey primary key using index q_tmp;");
         p.file("20261027190000_z_index.sql", "create unique index concurrently z_new on z (id);");
         p.file("20261027200000_z_key.sql", "alter table z drop constraint z_id_present;\nalter table z add constraint z_pkey primary key using index z_new;");
+        // An index of the same name in another schema, renamed, is another index.
+        p.file("20261027210000_b_key.sql", "alter index a.same rename to same2;\nalter table b.t add constraint t_pk primary key using index same;");
         p.schema(
             "create table t (id int not null, n int, constraint t_pkey primary key (id) include (n));
             create table s (id int not null, constraint s_id_present check (id is not null), constraint s_pkey primary key (id));
             create table r (id int not null, constraint r_pkey primary key (id));
             create table q (id int not null, constraint q_pkey primary key (id));
             create table other (id int); create index q_idx on other (id);
-            create table z (id int not null, constraint z_pkey primary key (id));",
+            create table z (id int not null, constraint z_pkey primary key (id));
+            create schema a; create schema b; create table a.u (id int); create unique index same2 on a.u (id); create table b.t (id int not null, constraint t_pk primary key (id));",
         );
         p.output();
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
@@ -6971,6 +6975,7 @@ mod adversarial {
         assert_has!(&out, r"_r_key\.sql\n      ! It checks every row of r for a null in id while it blocks reads and writes to it");
         assert_has!(&out, r"_q_key\.sql\n      ! It checks every row of q for a null in id while it blocks reads and writes to it");
         assert_has!(&out, r"_z_key\.sql\n      ! It checks every row of z for a null in id while it blocks reads and writes to it");
+        assert_has!(&out, r"_b_key\.sql\n      ! It checks every row of b\.t for a null in id while it blocks reads and writes to it");
         assert!(!out.contains("a null in n ") && !out.contains("every row of s for a null"), "{out}");
     }
 

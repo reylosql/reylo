@@ -452,7 +452,15 @@ fn dropped_foreign_key(trees: &[Option<N>], k: usize, existing: &Existing) -> Op
             let [added] = b.cmds.as_slice() else { return None };
             let Some(N::AlterTableCmd(added)) = &added.node else { return None };
             let Some(N::Constraint(c)) = added.def.as_ref().and_then(|d| d.node.as_ref()) else { return None };
-            let same = names(&c.fk_attrs) == key.columns && names(&c.pk_attrs) == key.referenced_columns;
+            // The same pairs of columns, in whatever order.
+            let pairs = |from: Vec<String>, to: Vec<String>| -> Option<Vec<(String, String)>> {
+                (from.len() == to.len() && !from.is_empty()).then(|| {
+                    let mut pairs: Vec<(String, String)> = from.into_iter().zip(to).collect();
+                    pairs.sort();
+                    pairs
+                })
+            };
+            let same = pairs(names(&c.fk_attrs), names(&c.pk_attrs)).is_some_and(|p| Some(p) == pairs(key.columns.clone(), key.referenced_columns.clone()));
             (is(added.subtype, At::AtAddConstraint) && is(c.contype, ConstrType::ConstrForeign) && existing.relations.get(&named(c.pktable.as_ref()?)) == Some(referenced) && same).then_some(m)
         })
         .collect();
@@ -685,20 +693,26 @@ fn plan_lock_safe(plan: &Plan, existing: &Existing, build_first: bool) -> Option
             if on.iter().any(|(d, _)| !deferred.contains(d)) || (k + 1..at).any(|m| disturbs(trees[m].as_ref(), &table, &name, relations)) {
                 continue;
             }
+            // Back in that transaction, under whatever name, but where a statement between them
+            // changes either table.
+            let moving: Vec<usize> = adds
+                .into_iter()
+                .filter(|added| !deferred.contains(added))
+                .filter(|&added| {
+                    let between = if added < at { added + 1..at } else { at + 1..added };
+                    !between.into_iter().any(|m| disturbs(trees[m].as_ref(), &table, &name, relations) || disturbs(trees[m].as_ref(), &referenced, &name, relations))
+                })
+                .collect();
+            // Nor where a statement before the swap that stays where it is takes its name.
+            if (k + 1..=at).any(|m| !moving.contains(&m) && names_made(trees[m].as_ref()).contains(&name)) {
+                continue;
+            }
             deferred.insert(k);
             let w = waits.entry(at).or_default();
             w.keys.push(k);
-            // Back in that transaction, under whatever name, but where a statement between them
-            // changes either table.
-            for added in adds {
-                if deferred.contains(&added) {
-                    continue;
-                }
-                let between = if added < at { added + 1..at } else { at + 1..added };
-                if !between.into_iter().any(|m| disturbs(trees[m].as_ref(), &table, &name, relations) || disturbs(trees[m].as_ref(), &referenced, &name, relations)) {
-                    deferred.insert(added);
-                    w.back.push(added);
-                }
+            for added in moving {
+                deferred.insert(added);
+                w.back.push(added);
             }
         }
     }
@@ -1228,7 +1242,7 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
     let mut nulled: BTreeSet<(String, String)> = BTreeSet::new();
     // Which index each name the file has moved names: the catalog's under its name before the file
     // ran, or the key columns of one the file made. A name with no entry is the catalog's own.
-    let mut bound: BTreeMap<String, Result<String, Vec<String>>> = BTreeMap::new();
+    let mut bound: BTreeMap<(String, String), Result<String, Vec<String>>> = BTreeMap::new();
     // The constraints an earlier statement of the file dropped, which prove nothing after.
     let mut dropped: BTreeSet<(String, String)> = BTreeSet::new();
     type Keyed = (String, Result<String, Vec<String>>, BTreeSet<String>, BTreeSet<(String, String)>, BTreeSet<(String, String)>);
@@ -1272,7 +1286,9 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                                 made.insert(c.conname.clone());
                                 if is(c.contype, ConstrType::ConstrPrimary) {
                                     let set = nulled.iter().filter(|(t, _)| *t == table).map(|(_, column)| column.clone()).collect();
-                                    let index = bound.get(&c.indexname).cloned().unwrap_or_else(|| Ok(c.indexname.clone()));
+                                    // In the table's schema, as written.
+                                    let schema = a.relation.as_ref().map(|r| r.schemaname.clone()).unwrap_or_default();
+                                    let index = bound.get(&(schema, c.indexname.clone())).cloned().unwrap_or_else(|| Ok(c.indexname.clone()));
                                     keyed.push((table.clone(), index, set, validated.clone(), dropped.clone()));
                                 }
                             }
@@ -1296,7 +1312,8 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                         _ => None,
                     }).collect();
                     if let Some(columns) = columns {
-                        bound.insert(i.idxname.clone(), Err(columns));
+                        let schema = i.relation.as_ref().map(|r| r.schemaname.clone()).unwrap_or_default();
+                        bound.insert((schema, i.idxname.clone()), Err(columns));
                     }
                     if !i.concurrent {
                         made.insert(i.idxname.clone());
@@ -1318,9 +1335,10 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                     made.insert(r.newname.clone());
                     // The index under the old name moves to the new one, and the old name holds none.
                     if let Some(was) = &r.relation {
-                        let index = bound.remove(&was.relname).unwrap_or_else(|| Ok(was.relname.clone()));
-                        bound.insert(r.newname.clone(), index);
-                        bound.insert(was.relname.clone(), Err(vec![]));
+                        let (old, new) = ((was.schemaname.clone(), was.relname.clone()), (was.schemaname.clone(), r.newname.clone()));
+                        let index = bound.remove(&old).unwrap_or_else(|| Ok(was.relname.clone()));
+                        bound.insert(new, index);
+                        bound.insert(old, Err(vec![]));
                     }
                 }
                 Some(N::TruncateStmt(t)) => {
@@ -1907,6 +1925,25 @@ mod tests {
         assert!(at("alter table child drop constraint child_fk") < at("alter table parent drop constraint parent_id_key"));
         assert!(at("alter table child add constraint child_fk ") < at("alter table parent add constraint zzz"));
         assert!(at("alter table parent add constraint zzz") < at("alter table child add constraint child_alt_fk"));
+    }
+
+    #[test]
+    fn keeps_a_composite_foreign_key_added_back_in_another_order_with_its_key() {
+        let at = existing(&["parent", "child"]).with_index("parent_a_b_key", "parent", 'u').with_foreign_key("child", "child_fk", &["a", "b"], "parent", &["a", "b"]);
+        let files = lock_safe(
+            &plan(&[
+                "alter table child drop constraint child_fk",
+                "alter table parent drop constraint parent_a_b_key",
+                "alter table parent add constraint parent_pkey primary key (a, b)",
+                "create index parent_b on parent (b)",
+                "alter table child add constraint child_fk foreign key (b, a) references parent(b, a)",
+            ]),
+            &at,
+        )
+        .unwrap();
+        let swap = files.iter().find(|f| f.iter().any(|l| l.contains("drop constraint child_fk"))).unwrap_or_else(|| panic!("{files:?}"));
+        assert!(swap.iter().any(|l| l.starts_with("alter table child add constraint child_fk foreign key (b, a)")), "{files:?}");
+        assert!(files.iter().position(|f| f == swap) > files.iter().position(|f| f.iter().any(|l| l.contains("concurrently parent_b"))), "{files:?}");
     }
 
     #[test]
