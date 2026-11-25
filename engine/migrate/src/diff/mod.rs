@@ -865,24 +865,29 @@ fn rewrites(from: &Schema, to: &Schema, alterer: &dyn Alterer, alters: &BTreeMap
     out
 }
 
-/// The statements of `statements` that set a column's default as `set` does, taken out of them,
-/// with what each opens with up to its default: `set`'s own opening, read outside quoted names, which
-/// may hold the words themselves.
-fn default_set_apart(statements: &mut Vec<String>, set: &str) -> Option<(String, Vec<String>)> {
+/// Where a statement's ` set default ` is, read outside quoted names, which may hold the words.
+fn setter_at(statement: &str) -> Option<usize> {
     const SET: &str = " set default ";
     let mut quote: Option<char> = None;
-    let at = set.char_indices().find_map(|(k, c)| {
+    statement.char_indices().find_map(|(k, c)| {
         match (quote, c) {
             (Some(q), c) if c == q => quote = None,
             (None, '"' | '`') => quote = Some(c),
-            (None, _) if set[k..].starts_with(SET) => return Some(set[..k + SET.len()].to_string()),
+            (None, _) if statement[k..].starts_with(SET) => return Some(k + SET.len()),
             _ => {}
         }
         None
-    })?;
-    let (later, now): (Vec<String>, Vec<String>) = statements.drain(..).partition(|s| s.starts_with(&at));
+    })
+}
+
+/// The statements of `statements` that set the column's default `set` sets, taken out of them, with
+/// what each opens with up to its default, on the table alone (`only`) or not alike.
+fn default_set_apart(statements: &mut Vec<String>, set: &str) -> Option<(String, Vec<String>)> {
+    let opening = |s: &str| setter_at(s).map(|k| s[..k].replacen("alter table only ", "alter table ", 1));
+    let at = opening(set)?;
+    let (later, now): (Vec<String>, Vec<String>) = statements.drain(..).partition(|s| opening(s).as_deref() == Some(at.as_str()));
     *statements = now;
-    Some((at, later))
+    Some((set[..setter_at(set)?].to_string(), later))
 }
 
 /// The plan from `from` to `to`.
