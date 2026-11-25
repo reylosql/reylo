@@ -846,7 +846,7 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
         .iter()
         .flat_map(|text| {
             let tokens = tokenize(text, Dialect::Sqlite);
-            (0..tokens.len()).filter(|&k| tokens[k].upper() == "REFERENCES").filter_map(|k| tokens.get(k + 1).and_then(name_of)).collect::<Vec<_>>()
+            (0..tokens.len()).filter(|&k| tokens[k].upper() == "REFERENCES").filter_map(|k| tokens.get(k + 1).and_then(qualifier)).collect::<Vec<_>>()
         })
         .filter(|table| family.iter().any(|(x, _)| fold(&x.name) == *table))
         .collect();
@@ -969,8 +969,10 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
             if k == at {
                 return Some(scratch_of(own));
             }
+            // A table a foreign key names, as a string too (`references 'users'`), which SQLite reads
+            // as the name.
             if references.contains(&k) {
-                return scratches.get(&name_of(t)?).map(|(_, q)| q.clone());
+                return scratches.get(&qualifier(t)?).map(|(_, q)| q.clone());
             }
             None
         }))
@@ -1368,6 +1370,10 @@ fn before_renames(sql: &str, renamed: &BTreeMap<String, String>, written_as: &BT
     let qualifies = |k: usize| tokens.get(k + 1).is_some_and(|n| n.text == ".");
     let mut skip = BTreeSet::new();
     for (k, t) in tokens.iter().enumerate() {
+        // The table a foreign key names is no column.
+        if t.upper() == "REFERENCES" {
+            skip.insert(k + 1);
+        }
         // Another table's columns, but not those of a foreign key to the table itself.
         if t.upper() == "REFERENCES" && tokens.get(k + 1).and_then(qualifier) != own {
             let mut j = k + 2;
@@ -1383,7 +1389,9 @@ fn before_renames(sql: &str, renamed: &BTreeMap<String, String>, written_as: &BT
         if k <= open || skip.contains(&k) || tokens.get(k + 1).is_some_and(|n| n.text == "(") || qualified_elsewhere(k) || qualifies(k) {
             return None;
         }
-        let old = renamed.get(&name_of(t)?)?;
+        // After the table's own name and a dot, a string names a column too (`t.'new'`).
+        let after_dot = tokens.get(k.wrapping_sub(1)).is_some_and(|p| p.text == ".");
+        let old = renamed.get(&(if after_dot { qualifier(t) } else { name_of(t) })?)?;
         Some(written_as.get(old).cloned().unwrap_or_else(|| quote(old)))
     })
 }
@@ -1428,6 +1436,7 @@ mod tests {
         // A column renamed to the table's name leaves the qualifier be.
         let to_t = BTreeMap::from([("t".to_string(), "old".to_string())]);
         assert_eq!(before_renames("CREATE TABLE t (t integer, check (t.t > 0))", &to_t, &BTreeMap::new()), "CREATE TABLE t (old integer, check (t.old > 0))");
+        assert_eq!(before_renames("CREATE TABLE t (t integer primary key, p integer references t, check (t.'t' > 0 and p <> 't'))", &to_t, &BTreeMap::new()), "CREATE TABLE t (old integer primary key, p integer references t, check (t.old > 0 and p <> 't'))");
         assert!(names_itself("create table u (old integer check (main.u.old > 0))", "u") && names_itself("create table u (x check ('u'.x))", "u") && !names_itself("create table u (x check (main.x > 0))", "u"));
     }
 
