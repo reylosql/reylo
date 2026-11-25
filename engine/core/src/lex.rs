@@ -21,7 +21,8 @@
 //!
 //! The pass knows what the parser knows about text: single-quoted literals (with `''`), `E''`
 //! escape strings (with backslashes), dollar quoting (Postgres's), double-quoted identifiers, line comments,
-//! nested block comments (on SQLite one ends at its first `*/`), and `::` casts. MySQL reads text its own way, by the session's
+//! nested block comments, and `::` casts. SQLite's block comment does not nest: it ends at its first `*/`,
+//! or at the end of the text where no `*/` closes it, as SQLite reads it. MySQL reads text its own way, by the session's
 //! `sql_mode` ([`MysqlText`]): a backslash in a string escapes the character after it, a
 //! double-quoted word is a string, `#` starts a line comment as `-- ` does (`--` followed by
 //! anything else is two minus signs), a block comment ends at its first `*/`, and backquotes quote
@@ -418,13 +419,17 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
                 }
                 opaque.push((start, i));
             }
-            // A MySQL or SQLite block comment does not nest: it ends at the first `*/`.
+            // A MySQL or SQLite block comment does not nest: it ends at the first `*/`. One that no
+            // `*/` closes runs to the end of the text on SQLite, which prepares it so, and is an
+            // error on MySQL, which refuses it.
             b'/' if b.get(i + 1) == Some(&b'*') && (mysql || dialect == Dialect::Sqlite) => {
-                let Some(close) = find_bytes(b, b"*/", i + 2) else {
-                    return Err(LexError { message: "unterminated block comment".into(), offset: i });
+                let end = match find_bytes(b, b"*/", i + 2) {
+                    Some(close) => close + 2,
+                    None if mysql => return Err(LexError { message: "unterminated block comment".into(), offset: i }),
+                    None => b.len(),
                 };
-                opaque.push((i, close + 2));
-                i = close + 2;
+                opaque.push((i, end));
+                i = end;
             }
             b'/' if b.get(i + 1) == Some(&b'*') => {
                 let start = i;
@@ -970,6 +975,9 @@ mod tests {
         // A SQLite block comment does not nest: it ends at the first `*/`, whatever it holds.
         assert_eq!(names("select id /* see /* below */, :x from t", Dialect::Sqlite), ["x"]);
         assert_eq!(names("select name from t where id = /* /* */ :id -- */", Dialect::Sqlite), ["id"]);
+        // One that no `*/` closes runs to the end of the text, as SQLite reads it.
+        assert_eq!(names("select :x /* :y", Dialect::Sqlite), ["x"]);
+        assert_eq!(lex("select 1 /* a", Dialect::Sqlite).unwrap().opaque, [(9, 13)]);
         assert_eq!(names("select json_extract(j, '$.a') = ? and x = :n", Dialect::Sqlite), ["1", "n"]);
         // SQLite's bracketed name is text, whatever it holds; elsewhere a `[` opens a subscript.
         assert_eq!(names("select [a'b] as x, :p as p, [c'd?] as y, [n:m] from t", Dialect::Sqlite), ["p"]);
@@ -1132,7 +1140,6 @@ mod tests {
         assert_eq!(at("select 1, E'abc", Dialect::Postgres), 10);
         assert_eq!(at("select 1, $x$abc", Dialect::Postgres), 10);
         assert_eq!(at("select 1, /* a /* b */", Dialect::Postgres), 10);
-        assert_eq!(at("select 1, /* a", Dialect::Sqlite), 10);
         assert_eq!(at("select 1, /* a", Dialect::Mysql), 10);
     }
 
