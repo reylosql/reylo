@@ -4420,7 +4420,9 @@ impl Alterer for PostgresAlterer {
         let only = if (to.extra.iter().any(|l| l == "partitioned") && parse_column(&from.def).ty == parse_column(&to.def).ty) || to.extra.iter().any(|l| l == INHERITED_FROM) { "only " } else { "" };
         let at = format!("alter table {only}{table} alter column {name}");
         let drop = parse_column(&from.def).default.map(|_| format!("{at} drop default"));
-        let set = parse_column(&to.def).default.map(|d| format!("{at} set default {d}"));
+        // Set under the name the column has then, where the plan renames it.
+        let now = format!("alter table {only}{} alter column {}", to.owner.as_deref()?.strip_prefix("table ")?, super::last_written(to.id.strip_prefix("column ")?));
+        let set = parse_column(&to.def).default.map(|d| format!("{now} set default {d}"));
         Some((drop.into_iter().collect(), set.into_iter().collect()))
     }
 
