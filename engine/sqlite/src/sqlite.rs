@@ -1239,9 +1239,12 @@ fn nulls_with(n: &Node, extras: &Extras) -> HashSet<(i64, String)> {
         "column" => n.column.clone().map(|c| HashSet::from([(n.cursor, c)])).unwrap_or_default(),
         "+" | "-" | "*" | "/" | "%" | "||" => n.left.iter().chain(n.right.iter()).flat_map(|x| nulls_with(x, extras)).collect(),
         "neg" | "pos" | "cast" | "collate" => n.left.as_deref().map(|x| nulls_with(x, extras)).unwrap_or_default(),
-        // `replace(X, '', Z)` is X whatever Z is: NULL for a NULL in its first two arguments alone.
+        // `replace(X, '', Z)` is X whatever Z is: NULL for a NULL in its first two arguments, and in Z only behind a pattern that is a text literal other than ''.
         "function" if !n.agg && !n.window && n.name.as_deref().is_some_and(|f| STRICT.contains(&f) && extras.function(f, n.args.len()).is_none()) => {
-            let strict = if n.name.as_deref() == Some("replace") { 2 } else { n.args.len() };
+            let strict = match n.name.as_deref() {
+                Some("replace") if !n.args.get(1).and_then(literal_text).is_some_and(|p| !p.is_empty()) => 2,
+                _ => n.args.len(),
+            };
             n.args.iter().take(strict).flat_map(|x| nulls_with(x, extras)).collect()
         }
         _ => HashSet::new(),

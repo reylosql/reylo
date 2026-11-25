@@ -23,6 +23,7 @@ many_posts.sql: many (id: int64) -> { title: TEXT(text(UTF-8, ill-formed) | byte
 outer_on_group.sql: many (id: int64) -> { name: TEXT(text(UTF-8, ill-formed) | bytes)?, n: int64 }
 replace_empty_pattern.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes)?, email: TEXT(text(UTF-8, ill-formed) | bytes)? }
 replace_null_pattern.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), email: TEXT(text(UTF-8, ill-formed) | bytes) }
+replace_null_replacement.sql: many () -> { name: TEXT(text(UTF-8, ill-formed) | bytes), email: TEXT(text(UTF-8, ill-formed) | bytes) }
 right_after_inner.sql: many () -> { email: TEXT(text(UTF-8, ill-formed) | bytes)?, title: TEXT(text(UTF-8, ill-formed) | bytes)? }
 self_join.sql: at_most_one (id: int64) -> { name: TEXT(text(UTF-8, ill-formed) | bytes) }
 subquery_pinned.sql: at_most_one (id: int64) -> { name: TEXT(text(UTF-8, ill-formed) | bytes) }
