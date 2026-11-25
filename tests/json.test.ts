@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { Ajv2020 } from "ajv/dist/2020.js";
 import { validate } from "../src/json-schema.ts";
 import { sqlModule } from "../src/loader.ts";
 import { reyloImport } from "../src/module-types.ts";
@@ -205,20 +206,30 @@ test("Postgres: a float or a numeric inside JSON is a number, NaN and the infini
   }
 });
 
-test("MySQL: a BIT(1) inside JSON is the text MySQL writes of its bytes, which the output schema admits, on mysql2 and mariadb", { skip: mysqlLive }, async () => {
-  const own = await mysqlDatabase("reylo_json_bit", "create table flags (id int primary key, b bit(1)); insert into flags values (1, b'1'), (2, b'0'), (3, null)");
+test("MySQL: a BIT inside JSON is the text MySQL writes of its bytes at any width, which the output schema admits, on mysql2 and mariadb", { skip: mysqlLive }, async () => {
+  const own = await mysqlDatabase("reylo_json_bit", "create table flags (id int primary key, b bit(1), b8 bit(8), b16 bit(16)); insert into flags values (1, b'1', 5, 258), (2, b'0', 0, 0), (3, null, null, null)");
   const root = project(own.url, "mysql2");
   const u = new URL(own.url);
   const mariadb = await driver("mariadb").createConnection({ host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: u.pathname.slice(1) });
+  // ajv as it comes refuses a schema that names a format it has no rule for, such as `hex`.
+  const ajv = new Ajv2020();
   try {
-    const one = (await built(root, "one", "select json_object('v', b) as doc from flags where id = :id\n")) as Built & { outputSchema: Record<string, unknown> };
-    const all = (await built(root, "all", "select json_arrayagg(b) as bits from flags\n")) as Built & { outputSchema: Record<string, unknown> };
-    for (const client of [own.db, mariadb]) {
-      const docs = [];
-      for (const id of [1, 2, 3]) docs.push(JSON.parse(JSON.stringify(await one.run(client, { id }))));
-      assert.deepEqual(docs, [{ doc: { v: "base64:type16:AQ==" } }, { doc: { v: "base64:type16:AA==" } }, { doc: { v: null } }]);
-      for (const doc of docs) assert.equal(validate(one.outputSchema, doc), undefined);
-      assert.equal(validate(all.outputSchema, JSON.parse(JSON.stringify(await all.run(client)))), undefined);
+    for (const [column, texts] of [["b", ["AQ==", "AA=="]], ["b8", ["BQ==", "AA=="]], ["b16", ["AQI=", "AAA="]]] as const) {
+      const one = (await built(root, `one_${column}`, `select json_object('v', ${column}) as doc from flags where id = :id\n`)) as Built & { outputSchema: Record<string, unknown> };
+      const all = (await built(root, `all_${column}`, `select json_arrayagg(${column}) as bits from flags\n`)) as Built & { outputSchema: Record<string, unknown> };
+      const [checkOne, checkAll] = [ajv.compile(one.outputSchema), ajv.compile(all.outputSchema)];
+      for (const client of [own.db, mariadb]) {
+        const docs = [];
+        for (const id of [1, 2, 3]) docs.push(JSON.parse(JSON.stringify(await one.run(client, { id }))));
+        assert.deepEqual(docs, [...texts.map((t) => ({ doc: { v: `base64:type16:${t}` } })), { doc: { v: null } }]);
+        for (const doc of docs) {
+          assert.equal(validate(one.outputSchema, doc), undefined);
+          assert.ok(checkOne(doc), ajv.errorsText(checkOne.errors));
+        }
+        const bits = JSON.parse(JSON.stringify(await all.run(client)));
+        assert.equal(validate(all.outputSchema, bits), undefined);
+        assert.ok(checkAll(bits), ajv.errorsText(checkAll.errors));
+      }
     }
   } finally {
     await mariadb.end();

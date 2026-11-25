@@ -90,9 +90,9 @@ function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean
       const text = [...(t.nan ? ["NaN"] : []), ...(t.infinity ? ["Infinity", "-Infinity"] : [])];
       return dialect === "postgres" && inUnion && text.length ? { anyOf: [number, { enum: text }] } : number;
     }
-    // MySQL writes a BIT inside a document as its bytes in base64 (`base64:type16:AQ==`), so a
-    // BIT(1) is no truth value there (src/render.ts).
-    if (dialect === "mysql" && name === "bit" && kind === "bool") return { type: "string" };
+    // MySQL writes a BIT inside a document as its bytes in base64 (`base64:type16:AQ==`), at any
+    // width: no truth value for a BIT(1), and no hex for a wider one (src/render.ts).
+    if (dialect === "mysql" && name === "bit") return { type: "string" };
     if (kind === "bytes") return { type: "string", format: "hex" };
     // Postgres's own interval text: the run time converts a column's interval, never one inside a document.
     if (t.kind === "duration" && dialect === "postgres") return { type: "string", description: "pg type interval" };
