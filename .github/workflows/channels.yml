@@ -8,7 +8,7 @@ name: channels
 # from a release's SHA256SUMS, and the container image, .github/docker/Dockerfile. release.yml
 # publishes the formula, the manifest and the image once a release is out.
 on:
-  # binaries.yml, on a pull request that changes the binary and within each release, before anything
+  # binaries.yml, on each run that builds every platform, a release's before anything
   # is staged: the binaries that run built (its `engine-<platform>` artifacts), packed as the release
   # will carry them and served on each runner's 127.0.0.1.
   workflow_call:
