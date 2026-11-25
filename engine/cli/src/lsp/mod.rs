@@ -299,7 +299,7 @@ impl Locator {
         }
         let (before, said, same_files) = known.map_or((None, None, false), |k| (Some(k.url.clone()), k.said.clone(), k.signature == now));
         let refused = || format!("{}: direct_url runs a command, which reylo lsp runs only with --allow-url-command, so its files get no database", key.display());
-        let read = project.map(|p| if p.url_runs_command() && !self.allow_commands { Err(refused()) } else { p.type_check_url() });
+        let read = project.map(|p| if p.url_runs_command() && !self.allow_commands { Err(refused()) } else { p.analysis_url() });
         let problem = resolved.as_ref().err().cloned().or_else(|| read.as_ref().and_then(|r| r.as_ref().err().cloned()));
         let url = read.and_then(|r| r.ok().flatten()).map(|(url, _)| url).filter(|u| !u.is_empty());
         let named = url.as_deref().and_then(project::dialect_of);

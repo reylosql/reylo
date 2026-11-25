@@ -4093,6 +4093,7 @@ on!(
     an_extension_in_a_schema_of_its_own_is_dumped_after_it,
     an_extension_left_in_a_schema_of_the_projects_own_stops_no_push,
     a_partition_dropped_at_run_time_is_data,
+    a_key_renamed_keeps_a_partition_made_at_run_time,
     a_table_made_partitioned_is_refused_for_what_postgres_cant_change,
     the_lines_that_keep_a_remade_tables_rows_follow_the_change,
     a_remade_tables_sequences_move_past_the_rows_put_back,
@@ -8112,6 +8113,20 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_has!(p.output(), r"reads every row of log while it blocks writes to it, to move a sequence past them");
     }
 
+    /// A partitioned table whose key column is renamed keeps a partition made at run time, which
+    /// the schema doesn't declare, with its rows: the column is renamed in it too.
+    pub async fn a_key_renamed_keeps_a_partition_made_at_run_time(mut p: P) {
+        let before = "create table m (old_id int, n text) partition by range (old_id); create table m_1 partition of m for values from (0) to (100);";
+        p.schema(before);
+        p.file("20261027100000_m.sql", before);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.exec("create table m_runtime partition of m for values from (100) to (200); insert into m values (150, 'kept')").await;
+        p.output();
+        p.schema("create table m (new_id int, n text) partition by range (new_id); create table m_1 partition of m for values from (0) to (100);");
+        assert_eq!(p.db_push().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("select n from m_runtime where new_id = 150").await[0].text("n"), "kept");
+    }
+
     pub async fn init_creates_the_extensions_its_schema_uses(mut p: P) {
         p.exec("create extension citext; create table u (id int primary key, email citext);").await;
         assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 0, "{}", p.peek());
@@ -8610,3 +8625,159 @@ async fn a_turso_connection_left_idle_opens_again_outside_a_transaction() {
     assert!(e.0.contains("idle too long"), "{e}");
     assert_eq!(idle.rows("select count(*) as n from t").await.unwrap()[0].text("n"), "0", "the transaction was rolled back");
 }
+
+/// `deploy --dry-run -- <command>`, the command a shell runs, with its exit code, and what it saw.
+async fn dry_run_then(p: &mut P, script: &str) -> i32 {
+    let command = vec!["sh".to_string(), "-c".to_string(), script.to_string()];
+    p.run(async |o, log| reylo_migrate::dry_run_then(o, Some(&command), log).await).await
+}
+
+async fn a_dry_run_builds_on_a_shadow_of_what_deploy_leaves(mut p: P) {
+    let (id, text) = (p.t.id, p.t.text);
+    p.file("20990101000000_users.sql", &format!("create table users (id {id}, email {text});"));
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20990101010000_nick.sql", &format!("alter table users add column nick {text};"));
+    p.output();
+    let dir = p.dir.display().to_string();
+    // The command sees the shadow's URL, a SQLite shadow as a file it can copy, and its exit code is the run's.
+    let script = format!(r#"printf %s "$REYLO_ANALYSIS_URL" > '{dir}/url.txt'; case "$REYLO_ANALYSIS_URL" in sqlite:*) cp "${{REYLO_ANALYSIS_URL#sqlite:}}" '{dir}/seen.db';; esac; exit 7"#);
+    assert_eq!(dry_run_then(&mut p, &script).await, 7, "{}", p.peek());
+    let url = std::fs::read_to_string(p.dir.join("url.txt")).unwrap();
+    assert_ne!(url, p.url, "the command must read a shadow, never the database itself");
+    match p.d {
+        // The shadow had both migrations, and is gone with the command.
+        Dialect::Sqlite => {
+            assert!(!std::path::Path::new(url.trim_start_matches("sqlite:")).exists(), "{url}");
+            let mut seen = Db::connect(&format!("sqlite:{dir}/seen.db"), &p.dir).await.unwrap();
+            let columns: Vec<String> = seen.rows("select name from pragma_table_info('users')").await.unwrap().iter().map(|r| r.text("name").to_string()).collect();
+            seen.close().await;
+            assert_eq!(columns, ["id", "email", "nick"]);
+        }
+        _ => {
+            let name = url.rsplit('/').next().unwrap().split('?').next().unwrap().to_string();
+            assert!(name.starts_with("reylo_shadow_"), "{url}");
+            let left = if p.d == Dialect::Postgres { format!("select count(*) as n from pg_database where datname = '{name}'") } else { format!("select count(*) as n from information_schema.schemata where schema_name = '{name}'") };
+            assert_eq!(p.rows(&left).await[0].text("n"), "0", "{url}");
+        }
+    }
+    // Nothing ran here: the deploy after the build runs the pending migration.
+    assert_eq!(p.history().await, ["20990101000000_users.sql"]);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_eq!(p.history().await, ["20990101000000_users.sql", "20990101010000_nick.sql"]);
+}
+
+async fn a_dry_run_that_refuses_runs_no_command(mut p: P) {
+    let (id, text) = (p.t.id, p.t.text);
+    p.file("20990101000000_users.sql", &format!("create table users (id {id}, email {text});"));
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    // An applied migration edited since, which the deploy after the build would refuse.
+    p.file("20990101000000_users.sql", &format!("create table users (id {id}, email {text}, nick {text});"));
+    p.output();
+    let ran = p.dir.join("ran");
+    assert_eq!(dry_run_then(&mut p, &format!("touch '{}'", ran.display())).await, 1, "{}", p.peek());
+    assert!(!ran.exists(), "{}", p.peek());
+}
+
+async fn a_dry_run_runs_no_command_for_a_schema_sql_the_deploy_refuses(mut p: P) {
+    let int = p.t.int;
+    p.linear();
+    p.schema(&format!("create table a (id {int});"));
+    p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    // The same schema, written otherwise: the migrations still reach it, and the lock's checksum no longer holds.
+    p.schema(&format!("CREATE TABLE a (id {int});"));
+    p.output();
+    let ran = p.dir.join("ran");
+    assert_eq!(dry_run_then(&mut p, &format!("touch '{}'", ran.display())).await, 1, "{}", p.peek());
+    assert!(!ran.exists(), "{}", p.peek());
+    assert_has!(p.output(), r"The schema changed since the lock was written");
+}
+
+/// A first deploy's SQLite file, which the dry run opens and removes, is the command's once it runs.
+async fn a_first_deploys_sqlite_file_is_left_to_the_command(mut p: P) {
+    if p.d != Dialect::Sqlite || p.server.is_some() {
+        return;
+    }
+    let file = p.url.trim_start_matches("sqlite:").to_string();
+    let _ = std::fs::remove_file(&file);
+    p.file("20990101000000_users.sql", &format!("create table users (id {});", p.t.id));
+    assert_eq!(dry_run_then(&mut p, &format!("printf kept > '{file}'")).await, 0, "{}", p.peek());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "kept");
+    // With nothing to run, the file the dry run made is gone after it.
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    assert!(!std::path::Path::new(&file).exists());
+}
+
+/// A cut-off run whose change landed, on a database with no fingerprint to hold it to, which the
+/// deploy after the build runs again: the build runs where that succeeds, and not where it fails.
+async fn a_landed_run_the_deploy_retries(mut p: P, idempotent: bool) {
+    if p.d == Dialect::Sqlite || (idempotent && p.d != Dialect::Postgres) {
+        return;
+    }
+    let int = p.t.int;
+    let lone = match (p.d, idempotent) {
+        (Dialect::Postgres, true) => "create index concurrently if not exists a_id on a (id)",
+        (Dialect::Postgres, false) => "create index concurrently a_id on a (id)",
+        _ => "create index a_id on a (id)",
+    };
+    p.file("20261027100000_a.sql", &format!("create table a (id {int});"));
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027110000_index.sql", &format!("{lone};"));
+    let mut db = Db::connect(&p.url, &p.dir).await.unwrap();
+    let column = if p.d == Dialect::Mysql { "`sql`" } else { "sql" };
+    let insert = format!("insert into __reylo_migrations (name, {column}, applied_at) values ({}, {}, null)", db.param(1), db.param(2));
+    db.exec_with(&insert, &["20261027110000_index.sql", &format!("{lone};")]).await.unwrap();
+    db.exec(lone).await.unwrap();
+    db.exec("update __reylo_migrations set fingerprint = null").await.unwrap();
+    db.close().await;
+    p.output();
+    let ran = p.dir.join("ran");
+    let code = dry_run_then(&mut p, &format!("touch '{}'", ran.display())).await;
+    assert_eq!((code, ran.exists()), (if idempotent { 0 } else { 1 }, idempotent), "{}", p.peek());
+    // The deploy agrees.
+    assert_eq!(p.migrate().await, if idempotent { 0 } else { 1 }, "{}", p.peek());
+}
+
+async fn a_landed_run_the_deploy_retries_and_fails_stops_the_build(p: P) {
+    a_landed_run_the_deploy_retries(p, false).await
+}
+
+async fn a_landed_run_the_deploy_retries_cleanly_lets_the_build_run(p: P) {
+    a_landed_run_the_deploy_retries(p, true).await
+}
+
+/// A pending migration that the deploy runs before a landed run's retry, and that makes the retry
+/// fail: the shadow retries it in the same place, so the build runs exactly where the deploy succeeds.
+async fn a_landed_run_is_retried_where_the_deploy_retries_it(mut p: P) {
+    if p.d != Dialect::Postgres {
+        return;
+    }
+    let lone = "create unique index concurrently if not exists a_id on a (id)";
+    p.file("20261027100000_a.sql", "create table a (id int);");
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.file("20261027120000_index.sql", &format!("{lone};"));
+    let mut db = Db::connect(&p.url, &p.dir).await.unwrap();
+    db.exec_with("insert into __reylo_migrations (name, sql, applied_at) values ($1, $2, null)", &["20261027120000_index.sql", &format!("{lone};")]).await.unwrap();
+    db.exec(lone).await.unwrap();
+    db.exec("update __reylo_migrations set fingerprint = null").await.unwrap();
+    db.close().await;
+    // Before the index in run order: it drops what landed, and writes rows the index refuses.
+    p.file("20261027110000_dup.sql", "drop index a_id; insert into a values (1), (1);");
+    p.output();
+    let ran = p.dir.join("ran");
+    let code = dry_run_then(&mut p, &format!("touch '{}'", ran.display())).await;
+    let built = ran.exists();
+    let deployed = p.migrate().await;
+    assert_eq!((code == 0, built), (deployed == 0, deployed == 0), "the build runs where the deploy succeeds: {}", p.peek());
+}
+
+for_each_dialect!(
+    a_landed_run_is_retried_where_the_deploy_retries_it,
+    a_landed_run_the_deploy_retries_and_fails_stops_the_build,
+    a_landed_run_the_deploy_retries_cleanly_lets_the_build_run,
+    a_dry_run_builds_on_a_shadow_of_what_deploy_leaves,
+    a_dry_run_that_refuses_runs_no_command,
+    a_dry_run_runs_no_command_for_a_schema_sql_the_deploy_refuses,
+    a_first_deploys_sqlite_file_is_left_to_the_command,
+);
