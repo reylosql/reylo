@@ -1675,10 +1675,13 @@ impl Server {
             // The extensions in a schema of the project's first, which the platform's own may use;
             // those in a platform's schema after it is made, as the platform made it.
             // Supabase's own, where it is known which the target began with, as it began.
-            let begun = |e: &str, s: &str| began_extensions.is_some() && s == "extensions" && crate::catalog::PLATFORM_EXTENSIONS.iter().any(|p| p.eq_ignore_ascii_case(e));
+            // One it began without that it has elsewhere, where no migration made it, is the
+            // environment's there, and copied; one it began with that is elsewhere now was moved there
+            // since, which the migrations replay.
+            let began = |e: &str| began_extensions.iter().flatten().any(|b| b.eq_ignore_ascii_case(e));
+            let begun = |e: &str, s: &str| began_extensions.is_some() && crate::catalog::PLATFORM_EXTENSIONS.iter().any(|p| p.eq_ignore_ascii_case(e)) && (s == "extensions" || began(e));
             let copied: Vec<&(String, String)> = extensions.iter().filter(|(e, s)| !leave.contains(&e.to_lowercase()) && !owned.extensions.iter().any(|(o, _)| o == e) && !begun(e, s)).collect();
-            // One the target has elsewhere, where no migration put it, is copied there instead.
-            for e in began_extensions.iter().flatten().filter(|e| !leave.contains(&e.to_lowercase()) && !extensions.iter().any(|(x, s)| x.eq_ignore_ascii_case(e) && s != "extensions")) {
+            for e in began_extensions.iter().flatten().filter(|e| !leave.contains(&e.to_lowercase())) {
                 let _ = db.exec("create schema if not exists extensions").await;
                 let _ = db.exec(&format!("create extension if not exists {} with schema extensions", ident(e))).await;
             }
@@ -1769,6 +1772,12 @@ impl Server {
             return began.iter().any(|b| b.eq_ignore_ascii_case(name));
         }
         crate::catalog::PLATFORM_EXTENSIONS.iter().any(|p| p.eq_ignore_ascii_case(name)) && extensions.iter().any(|(e, s)| e.eq_ignore_ascii_case(name) && s == "extensions")
+    }
+
+    /// The schema the target has an extension in, by name.
+    pub fn extension_schema(&self, name: &str) -> Option<&str> {
+        let Server::Postgres { extensions, .. } = self else { return None };
+        extensions.iter().find(|(e, _)| e.eq_ignore_ascii_case(name)).map(|(_, s)| s.as_str())
     }
 
     /// Which of Supabase's own extensions the target began with, where that is known.

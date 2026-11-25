@@ -4118,6 +4118,7 @@ on!(
     a_supabase_database_that_began_without_an_extension_replays_its_making,
     init_refuses_supabases_publication_of_every_table,
     a_supabase_extension_kept_elsewhere_stays_the_environments,
+    a_supabase_extension_a_migration_moved_begins_where_it_was,
     a_migration_that_makes_supabases_publication_again_runs,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
@@ -7936,6 +7937,23 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
         assert_eq!(p.run(async |o, log| reylo_migrate::db_reset(o, false, log).await).await, 0, "{}", p.peek());
         assert_eq!(p.status().await, 0, "{}", p.peek());
+    }
+
+    /// A migration that moves one of Supabase's own extensions out of `extensions` leaves it there to
+    /// every migration before it: the checks replay from how the database began, and a reset moves
+    /// it back before running them again.
+    pub async fn a_supabase_extension_a_migration_moved_begins_where_it_was(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        p.file("20261124000000_posts.sql", "create table posts (id uuid primary key default extensions.uuid_generate_v4());\n");
+        p.file("20261124000001_move.sql", "alter extension \"uuid-ossp\" set schema public;\n");
+        p.schema("alter extension \"uuid-ossp\" set schema public;\n\ncreate table posts (id uuid primary key default public.uuid_generate_v4());\n");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        p.schema("alter extension \"uuid-ossp\" set schema public;\n\ncreate table posts (id uuid primary key default public.uuid_generate_v4(), body text);\n");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "body", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.run(async |o, log| reylo_migrate::db_reset(o, false, log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("select n.nspname as s from pg_extension x join pg_namespace n on n.oid = x.extnamespace where x.extname = 'uuid-ossp'").await[0].text("s"), "public");
     }
 
     /// A Supabase database that began without one of Supabase's extensions replays its migrations from

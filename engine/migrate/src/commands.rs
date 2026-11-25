@@ -3097,12 +3097,13 @@ fn extensions_begun_without(texts: &[&str]) -> Vec<String> {
 }
 
 /// What a statement does to an extension: creates it whether or not the database has it already,
-/// creates it only where it hasn't, or drops it.
+/// creates it only where it hasn't, drops it, or alters it, as moving it to another schema does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Touch {
     Created,
     CreatedIfMissing,
     Dropped,
+    Altered,
 }
 
 /// Each extension's first statement in `texts`, in their order: by name, a word's lowercase.
@@ -3123,6 +3124,11 @@ fn extension_first_touches(texts: &[&str]) -> Vec<(String, Touch)> {
                     let conditional = tokens.get(k + 2).is_some_and(|t| t.upper() == "IF");
                     if let Some(n) = tokens.get(if conditional { k + 5 } else { k + 2 }).and_then(name) {
                         touched.push((n, if conditional { Touch::CreatedIfMissing } else { Touch::Created }));
+                    }
+                }
+                ("ALTER", Some(e)) if e == "EXTENSION" => {
+                    if let Some(n) = tokens.get(k + 2).and_then(name) {
+                        touched.push((n, Touch::Altered));
                     }
                 }
                 ("DROP", Some(e)) if e == "EXTENSION" => {
@@ -3176,8 +3182,9 @@ async fn extensions_began(db: &mut Db) -> Result<Option<Vec<String>>, Error> {
 }
 
 /// Which of Supabase's own extensions a Supabase database that `history push` records `files` on
-/// began with: as its history table notes, else those it has but one the files' first statement
-/// creates unconditionally, and any it lacks that their first statement drops.
+/// began with: as its history table notes, else those it has in `extensions` but one the files'
+/// first statement creates unconditionally, and any the first statement drops or alters, as moving
+/// it out of `extensions` does.
 async fn extensions_began_adopting(db: &mut Db, files: &[Migration]) -> Result<Option<Vec<String>>, Error> {
     if api_began(db).await?.is_none() {
         return Ok(None);
@@ -3192,7 +3199,7 @@ async fn extensions_began_adopting(db: &mut Db, files: &[Migration]) -> Result<O
     let touch = |e: &str| touches.iter().find(|(n, _)| n.eq_ignore_ascii_case(e)).map(|(_, t)| *t);
     let mut began: Vec<String> = platform_extensions_now(db).await?.into_iter().filter(|e| touch(e) != Some(Touch::Created)).collect();
     for e in crate::catalog::PLATFORM_EXTENSIONS {
-        if touch(e) == Some(Touch::Dropped) && !began.iter().any(|b| b == e) {
+        if matches!(touch(e), Some(Touch::Dropped | Touch::Altered)) && !began.iter().any(|b| b == e) {
             began.push(e.to_string());
         }
     }
@@ -6065,10 +6072,14 @@ async fn emptied(db: &mut Db, server: &mut Server, opts: &Options, log: Log<'_>)
     // The extensions the project's files create go too: they create them again.
     let left = if d == Dialect::Postgres { left_extensions(server, opts) } else { vec![] };
     let mut then: Vec<String> = left.iter().map(|x| format!("drop extension if exists {}", crate::db::ident(x))).collect();
-    // And Supabase's own it began with go back to how it began, for the migrations that use them.
+    // And Supabase's own it began with go back to how it began, for the migrations that use them:
+    // one a migration moved, back to `extensions`.
     for e in server.began_extensions().iter().filter(|e| !left.contains(e)) {
         then.push("create schema if not exists extensions".to_string());
-        then.push(format!("create extension if not exists {} with schema extensions", crate::db::ident(e)));
+        then.push(match server.extension_schema(e) {
+            Some(s) if s != "extensions" => format!("alter extension {} set schema extensions", crate::db::ident(e)),
+            _ => format!("create extension if not exists {} with schema extensions", crate::db::ident(e)),
+        });
     }
     let had_history = has_history(db).await? && !read_history(db).await?.is_empty();
     if has_history(db).await? {
@@ -10612,6 +10623,8 @@ mod tests {
         // A drop first, of any name its list holds, says it began with it.
         assert!(begun(&["drop extension pg_stat_statements, \"uuid-ossp\" cascade;", "create extension \"uuid-ossp\" with schema extensions;"]).is_empty());
         assert!(begun(&["insert into t values ('create extension pgcrypto');"]).is_empty());
+        // As does moving it first.
+        assert_eq!(extension_first_touches(&["alter extension \"uuid-ossp\" set schema public;", "drop extension \"uuid-ossp\";"]), [("uuid-ossp".to_string(), Touch::Altered)]);
     }
 
     #[test]
