@@ -470,7 +470,20 @@ fn renamed_identifier(text: &str, old: &str, new: &str) -> String {
             out.push_str(&rest[..end]);
             rest = &rest[end..];
         } else if c == '"' {
-            let end = rest[1..].find('"').map_or(rest.len(), |k| k + 2);
+            // A quoted name, a doubled quote inside it included.
+            let bytes = rest.as_bytes();
+            let mut end = 1;
+            while end < bytes.len() {
+                if bytes[end] == b'"' {
+                    if bytes.get(end + 1) == Some(&b'"') {
+                        end += 2;
+                        continue;
+                    }
+                    end += 1;
+                    break;
+                }
+                end += 1;
+            }
             let word = &rest[..end];
             out.push_str(if word == old { new } else { word });
             rest = &rest[end..];
@@ -913,12 +926,12 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                 continue;
             }
         }
-        // A table whose definition changes only by its own columns' new names (its partition key's,
+        // A partitioned table (Postgres's) whose definition changes only by its own columns' new names (its partition key's,
         // which Postgres renames with the column, in the table and in each partition) is kept by
         // the renames, where making it again would drop its rows: where each renamed column of the
         // key keeps its values, as a key's column can't change type, and each partition stays
         // attached to it.
-        if let Some(b) = to.objects.get(id).filter(|b| a.kind == Some(Kind::Table) && a.def != b.def) {
+        if let Some(b) = to.objects.get(id).filter(|b| a.kind == Some(Kind::Table) && a.def != b.def && a.def.contains(" partition by ") && b.def.contains(" partition by ")) {
             let prefix = format!("column {}.", id.strip_prefix("table ").unwrap_or(id));
             let own: Vec<(&String, &String)> = renamed_columns.iter().filter(|(old, _)| old.starts_with(&prefix)).collect();
             // Each name as the ids write it, which is as the definition does.
