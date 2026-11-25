@@ -19,9 +19,10 @@ pub fn prose(sql: &str, dialect: Dialect) -> Option<String> {
 
 /// The `--` lines and `/* … */` blocks before the statement's first token, markers stripped and
 /// lines kept: a blank line between two comments, or a change from one form to the other, starts a
-/// paragraph. Read as the dialect reads comments: Postgres nests block comments, MySQL's
-/// `--` is one only before a space or a control character and `#` starts one too, and MySQL's
-/// `/*!` and `/*+` are code to the server, so they end the prose.
+/// paragraph. Read as the dialect reads comments: Postgres nests block comments and ends a `--`
+/// one at a carriage return as at a line feed, MySQL's `--` is one only before a space or a
+/// control character and `#` starts one too, and MySQL's `/*!` and `/*+` are code to the server,
+/// so they end the prose.
 pub fn leading(sql: &str, dialect: Dialect) -> Leading {
     let bytes = sql.as_bytes();
     let mut paragraphs: Vec<Vec<String>> = Vec::new();
@@ -38,7 +39,7 @@ pub fn leading(sql: &str, dialect: Dialect) -> Leading {
         // ClickHouse's `#` starts a comment before a space or a `!`.
         let hash = ch == Some(b'#') && (mysql || (dialect == Dialect::Clickhouse && matches!(next, Some(b' ' | b'!'))));
         if dash || hash {
-            let stop = sql[at..].find('\n').map_or(sql.len(), |n| at + n);
+            let stop = sql[at..].find(|c| c == '\n' || (dialect == Dialect::Postgres && c == '\r')).map_or(sql.len(), |n| at + n);
             let text = &sql[at + if ch == Some(b'#') { 1 } else { 2 }..stop];
             if last != Some(true) || blank_before || paragraphs.is_empty() {
                 paragraphs.push(Vec::new());

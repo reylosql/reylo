@@ -148,9 +148,10 @@ fn lex_on(sql: &str, dialect: Dialect, server: Option<u64>) -> (Vec<Token>, Vec<
             i = text;
             continue;
         }
-        // Comments. MySQL reads `--` as a comment only before whitespace or a control character.
+        // Comments. MySQL reads `--` as a comment only before whitespace or a control character, and
+        // Postgres ends one at a carriage return as at a line feed.
         if ch == b'-' && next == Some(b'-') && !(mysql && i + 2 < n && b[i + 2] > 32) {
-            i = sql[i..].find('\n').map_or(n, |e| i + e + 1);
+            i = sql[i..].find(|c| c == '\n' || (postgres && c == '\r')).map_or(n, |e| i + e + 1);
             continue;
         }
         if ch == b'#' && mysql {

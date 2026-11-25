@@ -337,6 +337,7 @@ pub fn lex_mysql(sql: &str, named: Named, text: MysqlText) -> Result<Lexed, LexE
 
 fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Result<Lexed, LexError> {
     let sqlite_named = dialect == Dialect::Sqlite && named == Named::Dialect;
+    let postgres = dialect == Dialect::Postgres;
     let mysql = dialect == Dialect::Mysql;
     let clickhouse = dialect == Dialect::Clickhouse;
     let b = sql.as_bytes();
@@ -402,10 +403,11 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
                 last = Last::Operand;
             }
             // MySQL's `--` starts a comment only before a space or a control character, or at the
-            // end of the text: `:a --:b` is `:a - (-:b)`.
+            // end of the text: `:a --:b` is `:a - (-:b)`. Postgres ends one at a carriage return as
+            // at a line feed, while MySQL, SQLite and ClickHouse read on to the line feed.
             b'-' if b.get(i + 1) == Some(&b'-') && !(mysql && b.get(i + 2).is_some_and(|&n| n > b' ' && n != 0x7f)) => {
                 let start = i;
-                while i < b.len() && b[i] != b'\n' {
+                while i < b.len() && b[i] != b'\n' && !(postgres && b[i] == b'\r') {
                     i += 1;
                 }
                 opaque.push((start, i));
