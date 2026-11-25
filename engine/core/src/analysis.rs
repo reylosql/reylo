@@ -209,10 +209,12 @@ pub fn result_items(sql: &str, dialect: Dialect) -> Option<Vec<(usize, usize)>> 
     const SET_OPERATIONS: [&str; 3] = ["union", "intersect", "except"];
     let bytes = sql.as_bytes();
     // The words and commas outside parentheses, strings and comments; which bytes are code (not a
-    // comment, not whitespace); the first group of parentheses outside all others; and the end.
+    // comment, not whitespace), and which of those are a string's or a quoted name's; the first
+    // group of parentheses outside all others; and the end.
     let mut words: Vec<(usize, usize)> = Vec::new();
     let mut commas = Vec::new();
     let mut code = vec![false; bytes.len()];
+    let mut quoted = vec![false; bytes.len()];
     let mut group: Option<(usize, usize)> = None;
     let mut open_at = 0;
     let mut end = bytes.len();
@@ -233,6 +235,7 @@ pub fn result_items(sql: &str, dialect: Dialect) -> Option<Vec<(usize, usize)>> 
                 }
                 i = (i + 1).min(bytes.len());
                 code[from..i].fill(true);
+                quoted[from..i].fill(true);
                 continue;
             }
             b'-' if bytes.get(i + 1) == Some(&b'-') => {
@@ -264,6 +267,7 @@ pub fn result_items(sql: &str, dialect: Dialect) -> Option<Vec<(usize, usize)>> 
                     let close = bytes[t + 1..].windows(tag.len()).position(|w| w == tag);
                     let to = close.map_or(bytes.len(), |c| t + 1 + c + tag.len());
                     code[i..to].fill(true);
+                    quoted[i..to].fill(true);
                     i = to;
                     continue;
                 }
@@ -344,8 +348,8 @@ pub fn result_items(sql: &str, dialect: Dialect) -> Option<Vec<(usize, usize)>> 
             let mut d = 0;
             let close = (open..bytes.len()).find(|&j| {
                 d += match bytes[j] {
-                    b'(' if code[j] => 1,
-                    b')' if code[j] => -1,
+                    b'(' if code[j] && !quoted[j] => 1,
+                    b')' if code[j] && !quoted[j] => -1,
                     _ => 0,
                 };
                 d == 0
@@ -588,6 +592,8 @@ mod result_items {
         assert_eq!(pg("select a, f(b, c), 'x, y' from t").unwrap(), ["a", "f(b, c)", "'x, y'"]);
         assert_eq!(pg("with w as (select 1, 2) select a, b from w").unwrap(), ["a", "b"]);
         assert_eq!(pg("select distinct on (a, b) a, b from t order by a").unwrap(), ["a", "b"]);
+        assert_eq!(pg("select distinct on (')'::text) 1 + 2, 3 as n").unwrap(), ["1 + 2", "3 as n"]);
+        assert_eq!(pg("select distinct on ($本文$/*)*/$本文$::text) 1 + 2, 3 as n").unwrap(), ["1 + 2", "3 as n"]);
         assert_eq!(pg("select all a /* , */, b -- , c\n from t").unwrap(), ["a", "b"]);
         assert_eq!(pg("insert into t select 1, 2 returning id, x + 1").unwrap(), ["id", "x + 1"]);
         assert_eq!(pg("select $$a, b$$, $1 from t").unwrap(), ["$$a, b$$", "$1"]);
