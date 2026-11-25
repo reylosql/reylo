@@ -127,6 +127,12 @@ reylo migrate init
 reylo migrate history push --url <url>
 ```
 
+The new `init.sql` makes the schema alone. Insert the rows a new database needs in a new migration, skipping rows already there:
+
+```sql
+insert into plans (id, name) values (1, 'free') on conflict do nothing;
+```
+
 About the local database:
 
 - The local database has Supabase's own schemas, such as `auth` and `storage`. A query that reads `auth.users` is typed as it is on your project.
