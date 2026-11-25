@@ -1239,7 +1239,11 @@ fn nulls_with(n: &Node, extras: &Extras) -> HashSet<(i64, String)> {
         "column" => n.column.clone().map(|c| HashSet::from([(n.cursor, c)])).unwrap_or_default(),
         "+" | "-" | "*" | "/" | "%" | "||" => n.left.iter().chain(n.right.iter()).flat_map(|x| nulls_with(x, extras)).collect(),
         "neg" | "pos" | "cast" | "collate" => n.left.as_deref().map(|x| nulls_with(x, extras)).unwrap_or_default(),
-        "function" if !n.agg && !n.window && n.name.as_deref().is_some_and(|f| STRICT.contains(&f) && extras.function(f, n.args.len()).is_none()) => n.args.iter().flat_map(|x| nulls_with(x, extras)).collect(),
+        // `replace(X, '', Z)` is X whatever Z is: NULL for a NULL in its first two arguments alone.
+        "function" if !n.agg && !n.window && n.name.as_deref().is_some_and(|f| STRICT.contains(&f) && extras.function(f, n.args.len()).is_none()) => {
+            let strict = if n.name.as_deref() == Some("replace") { 2 } else { n.args.len() };
+            n.args.iter().take(strict).flat_map(|x| nulls_with(x, extras)).collect()
+        }
         _ => HashSet::new(),
     }
 }
