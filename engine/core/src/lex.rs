@@ -421,11 +421,12 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
             }
             // A MySQL or SQLite block comment does not nest: it ends at the first `*/`. One that no
             // `*/` closes runs to the end of the text on SQLite, which prepares it so, and is an
-            // error on MySQL, which refuses it.
+            // error on MySQL, which refuses it. A `/*` with nothing after it is an error on SQLite
+            // too, which reads it as the operators `/` and `*`.
             b'/' if b.get(i + 1) == Some(&b'*') && (mysql || dialect == Dialect::Sqlite) => {
                 let end = match find_bytes(b, b"*/", i + 2) {
                     Some(close) => close + 2,
-                    None if mysql => return Err(LexError { message: "unterminated block comment".into(), offset: i }),
+                    None if mysql || i + 2 == b.len() => return Err(LexError { message: "unterminated block comment".into(), offset: i }),
                     None => b.len(),
                 };
                 opaque.push((i, end));
@@ -978,6 +979,9 @@ mod tests {
         // One that no `*/` closes runs to the end of the text, as SQLite reads it.
         assert_eq!(names("select :x /* :y", Dialect::Sqlite), ["x"]);
         assert_eq!(lex("select 1 /* a", Dialect::Sqlite).unwrap().opaque, [(9, 13)]);
+        assert_eq!(lex("select 1 /*\n", Dialect::Sqlite).unwrap().opaque, [(9, 12)]);
+        // A `/*` with nothing after it is two operators to SQLite, which refuses them.
+        assert_eq!(lex("select 1; /*", Dialect::Sqlite).unwrap_err().offset, 10);
         assert_eq!(names("select json_extract(j, '$.a') = ? and x = :n", Dialect::Sqlite), ["1", "n"]);
         // SQLite's bracketed name is text, whatever it holds; elsewhere a `[` opens a subscript.
         assert_eq!(names("select [a'b] as x, :p as p, [c'd?] as y, [n:m] from t", Dialect::Sqlite), ["p"]);
