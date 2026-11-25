@@ -1,4 +1,5 @@
 set check_function_bodies = off;
+alter table h alter column c drop default;
 alter table only h alter column c drop default;
 alter table t alter column c type text using c::text;
 alter type p alter attribute a type bigint;
