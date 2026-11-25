@@ -253,6 +253,35 @@ test("Postgres: an analysis cancelled while it waits on another session's lock, 
   }
 });
 
+test("Postgres: an analysis whose describe is cancelled before another of its round waits out lock_timeout fails at the lock timeout, and the next statement on the same handle answers while the lock is still held", { skip: pgLive }, async () => {
+  const { url, sql, drop } = await postgresDatabase("reylo_lock_cancel_round", "create table posts (id bigint primary key); create table orders (id bigint primary key)");
+  const e = await engine("postgres");
+  const c = await e.open(`${url}?options=-c%20lock_timeout%3D1s`);
+  const watch = await e.open(url);
+  // Three WITH queries over one table, which the engine describes together in one round once the catalog's answers are kept.
+  const statement = (x: number, y: number, z: number) => `with a as (select id from posts where id = ${x}), b as (select id from posts where id = ${y}), c as (select id from posts where id = ${z}) select a.id as a_id, b.id as b_id, c.id as c_id from a, b, c`;
+  try {
+    const session = Number(((await c.query("select pg_catalog.pg_backend_pid()", [])) as [[unknown]])[0][0]);
+    await c.analyze(statement(4, 5, 6));
+    await sql.begin(async (tx: any) => {
+      await tx.unsafe("lock table posts in access exclusive mode");
+      const analyzing = c.analyze(statement(1, 2, 3));
+      for (let tries = 0; ((await watch.query(`select pid from pg_catalog.pg_stat_activity where pid = ${session} and wait_event_type = 'Lock'`, [])) as unknown[]).length === 0; tries++) {
+        assert.ok(tries < 100, "the analysis never waited for the table's lock");
+        await new Promise((done) => setTimeout(done, 50));
+      }
+      // The round's first describe is cancelled; the next waits out lock_timeout, the rest still queued behind it.
+      await watch.query(`select pg_catalog.pg_cancel_backend(${session})`, []);
+      await assert.rejects(analyzing, (err: Error) => !(err instanceof Unreachable) && err.message === "A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_timeout. Run it again once the lock is released: pg_locks lists the session that holds it");
+      assert.deepEqual((await c.analyze("select id from orders")).columns.map((col) => col.name), ["id"]);
+    });
+  } finally {
+    await watch.close();
+    await c.close();
+    await drop();
+  }
+});
+
 test("Postgres: a session a lock timeout gives up on is closed, so a role allowed one connection analyzes the next statement while the lock is still held", { skip: pgLive }, async (t) => {
   const { url, sql, drop } = await postgresDatabase("reylo_lock_one", "create table users (id bigint primary key, name text not null); create table orders (id bigint primary key)");
   if (!(await sql.begin((tx: any) => tx.unsafe("set local client_connection_check_interval = '100ms'")).then(() => true, () => false))) {

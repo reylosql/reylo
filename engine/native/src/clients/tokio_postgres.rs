@@ -13,7 +13,7 @@ use reylo_engine_postgres::Postgres;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::OnceCell;
 
 /// What a Postgres describe is answered with.
@@ -21,13 +21,57 @@ pub type Describe = <Postgres as Database>::Describe;
 
 /// The analysis of `sql`, its needs answered over `client`, each round's together.
 pub async fn analyze(client: &Client, sql: &str, cache: &mut AnswerCache<Describe>) -> Result<Analysis, ReplayError<HostError>> {
-    crate::replay::run_concurrent::<Postgres, _>(sql, &Answers(client), cache).await
+    replay(sql, Answers(client), cache).await
 }
 
 /// As [`analyze`], each catalog query prepared once over `client` and kept in `prepared` for the
 /// analyses after it on the same client.
 pub async fn analyze_prepared(client: &Client, prepared: &Prepared, sql: &str, cache: &mut AnswerCache<Describe>) -> Result<Analysis, ReplayError<HostError>> {
-    crate::replay::run_concurrent::<Postgres, _>(sql, &PreparedAnswers(client, prepared), cache).await
+    replay(sql, PreparedAnswers(client, prepared), cache).await
+}
+
+/// The replay over `answers`, failing with the lock timeout wherever one stopped a round. A round
+/// that stops at a lock timeout fails with an error asked before it where one has settled, such as a
+/// describe cancelled while it waited on the same lock; the session still has the round's later
+/// describes queued behind that lock, and only [`LOCKED`] tells the caller to open another.
+async fn replay<A: ConcurrentAnswerer<Describe, Error = HostError> + Sync>(sql: &str, answers: A, cache: &mut AnswerCache<Describe>) -> Result<Analysis, ReplayError<HostError>> {
+    let watched = Watched { answers, locked: OnceLock::new() };
+    let result = crate::replay::run_concurrent::<Postgres, _>(sql, &watched, cache).await;
+    match (result, watched.locked.into_inner()) {
+        (Err(ReplayError::Host(_)), Some(locked)) => Err(ReplayError::Host(locked)),
+        (result, _) => result,
+    }
+}
+
+/// A replay's answers, and the lock timeout one of its describes answered with.
+struct Watched<A> {
+    answers: A,
+    locked: OnceLock<HostError>,
+}
+
+impl<A: ConcurrentAnswerer<Describe, Error = HostError> + Sync> ConcurrentAnswerer<Describe> for Watched<A> {
+    type Error = HostError;
+
+    fn describe(&self, sql: &str) -> impl Future<Output = Result<Result<Describe, DbError>, HostError>> + Send {
+        let asked = self.answers.describe(sql);
+        async move {
+            let answered = asked.await;
+            if let Err(e) = &answered {
+                if e.0.starts_with(LOCKED) {
+                    let _ = self.locked.set(e.clone());
+                }
+            }
+            answered
+        }
+    }
+
+    fn query(&self, sql: &str, params: &[Value]) -> impl Future<Output = Result<Result<Vec<Vec<Value>>, DbError>, HostError>> + Send {
+        self.answers.query(sql, params)
+    }
+
+    fn ends_session(&self, error: &HostError) -> bool {
+        self.answers.ends_session(error)
+    }
 }
 
 /// The catalog queries prepared over one client, by their text. A text several needs of one round
