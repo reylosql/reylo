@@ -4119,6 +4119,7 @@ on!(
     init_refuses_supabases_publication_of_every_table,
     a_supabase_extension_kept_elsewhere_stays_the_environments,
     a_supabase_extension_a_migration_moved_begins_where_it_was,
+    a_supabase_database_adopted_after_moving_or_updating_an_extension_replays_it,
     a_migration_that_makes_supabases_publication_again_runs,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
@@ -7954,6 +7955,29 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.run(async |o, log| reylo_migrate::db_reset(o, false, log).await).await, 0, "{}", p.peek());
         assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(p.rows("select n.nspname as s from pg_extension x join pg_namespace n on n.oid = x.extnamespace where x.extname = 'uuid-ossp'").await[0].text("s"), "public");
+    }
+
+    /// A Supabase database that ran its migrations before Reylo recorded them, which moved one of
+    /// Supabase's own extensions out of `extensions` or updated one the environment put in `public`:
+    /// history push records them replaying from where each began, and the checks after agree.
+    pub async fn a_supabase_database_adopted_after_moving_or_updating_an_extension_replays_it(p: P) {
+        let q = P::new(p.d).await.unwrap();
+        let moved = ("create table posts (id uuid primary key default extensions.uuid_generate_v4());\n", "alter extension \"uuid-ossp\" set schema public;\n");
+        let updated = ("create table posts (id uuid primary key default public.uuid_generate_v4());\n", "alter extension \"uuid-ossp\" update;\n");
+        for (mut db, (posts, then), provided) in [(p, moved, false), (q, updated, true)] {
+            as_supabase_makes_it(&db, true).await;
+            if provided {
+                db.exec("drop extension \"uuid-ossp\"; create extension \"uuid-ossp\" with schema public").await;
+            }
+            db.file("20261124000000_posts.sql", posts);
+            db.file("20261124000001_extension.sql", then);
+            db.schema(&format!("{}create table posts (id uuid primary key default public.uuid_generate_v4());\n", if provided { "" } else { then }));
+            db.exec(posts).await;
+            db.exec(then).await;
+            assert_eq!(db.history_push().await, 0, "{}", db.peek());
+            assert_eq!(db.history().await.len(), 2);
+            assert_eq!(db.dry_run().await, 0, "{}", db.peek());
+        }
     }
 
     /// A Supabase database that began without one of Supabase's extensions replays its migrations from

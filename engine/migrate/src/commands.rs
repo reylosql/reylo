@@ -3097,13 +3097,14 @@ fn extensions_begun_without(texts: &[&str]) -> Vec<String> {
 }
 
 /// What a statement does to an extension: creates it whether or not the database has it already,
-/// creates it only where it hasn't, drops it, or alters it, as moving it to another schema does.
+/// creates it only where it hasn't, drops it, or moves it out of `extensions`, where Supabase makes
+/// its own. Another change to it says nothing of where it began, and is none.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Touch {
     Created,
     CreatedIfMissing,
     Dropped,
-    Altered,
+    MovedOut,
 }
 
 /// Each extension's first statement in `texts`, in their order: by name, a word's lowercase.
@@ -3127,8 +3128,11 @@ fn extension_first_touches(texts: &[&str]) -> Vec<(String, Touch)> {
                     }
                 }
                 ("ALTER", Some(e)) if e == "EXTENSION" => {
-                    if let Some(n) = tokens.get(k + 2).and_then(name) {
-                        touched.push((n, Touch::Altered));
+                    let set_schema = tokens.get(k + 3).is_some_and(|t| t.upper() == "SET") && tokens.get(k + 4).is_some_and(|t| t.upper() == "SCHEMA");
+                    if let (Some(n), true, Some(to)) = (tokens.get(k + 2).and_then(name), set_schema, tokens.get(k + 5).and_then(name)) {
+                        if to != "extensions" {
+                            touched.push((n, Touch::MovedOut));
+                        }
                     }
                 }
                 ("DROP", Some(e)) if e == "EXTENSION" => {
@@ -3183,8 +3187,8 @@ async fn extensions_began(db: &mut Db) -> Result<Option<Vec<String>>, Error> {
 
 /// Which of Supabase's own extensions a Supabase database that `history push` records `files` on
 /// began with: as its history table notes, else those it has in `extensions` but one the files'
-/// first statement creates unconditionally, and any the first statement drops or alters, as moving
-/// it out of `extensions` does.
+/// first statement creates unconditionally, and any their first statement drops or moves out of
+/// `extensions`.
 async fn extensions_began_adopting(db: &mut Db, files: &[Migration]) -> Result<Option<Vec<String>>, Error> {
     if api_began(db).await?.is_none() {
         return Ok(None);
@@ -3199,7 +3203,7 @@ async fn extensions_began_adopting(db: &mut Db, files: &[Migration]) -> Result<O
     let touch = |e: &str| touches.iter().find(|(n, _)| n.eq_ignore_ascii_case(e)).map(|(_, t)| *t);
     let mut began: Vec<String> = platform_extensions_now(db).await?.into_iter().filter(|e| touch(e) != Some(Touch::Created)).collect();
     for e in crate::catalog::PLATFORM_EXTENSIONS {
-        if matches!(touch(e), Some(Touch::Dropped | Touch::Altered)) && !began.iter().any(|b| b == e) {
+        if matches!(touch(e), Some(Touch::Dropped | Touch::MovedOut)) && !began.iter().any(|b| b == e) {
             began.push(e.to_string());
         }
     }
@@ -10623,8 +10627,9 @@ mod tests {
         // A drop first, of any name its list holds, says it began with it.
         assert!(begun(&["drop extension pg_stat_statements, \"uuid-ossp\" cascade;", "create extension \"uuid-ossp\" with schema extensions;"]).is_empty());
         assert!(begun(&["insert into t values ('create extension pgcrypto');"]).is_empty());
-        // As does moving it first.
-        assert_eq!(extension_first_touches(&["alter extension \"uuid-ossp\" set schema public;", "drop extension \"uuid-ossp\";"]), [("uuid-ossp".to_string(), Touch::Altered)]);
+        // As does moving it out of `extensions` first; updating it says nothing of where it was.
+        assert_eq!(extension_first_touches(&["alter extension \"uuid-ossp\" set schema public;", "drop extension \"uuid-ossp\";"]), [("uuid-ossp".to_string(), Touch::MovedOut)]);
+        assert!(extension_first_touches(&["alter extension \"uuid-ossp\" update;", "alter extension pgcrypto set schema extensions;"]).is_empty());
     }
 
     #[test]
