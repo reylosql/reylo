@@ -4115,6 +4115,7 @@ on!(
     supabases_extensions_stay_its_own_when_a_file_creates_one,
     a_migration_creating_supabases_publication_is_refused_where_it_exists,
     a_migration_making_a_dropped_supabase_extension_replays,
+    a_later_reinstall_of_a_supabase_extension_leaves_it_to_earlier_migrations,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
     init_reads_an_in_list_on_a_varchar_column_as_it_reads_back,
@@ -7698,6 +7699,20 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
         assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(p.run(async |o, log| reylo_migrate::db_reset(o, false, log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+    }
+
+    /// A migration that drops one of Supabase's own extensions and makes it again leaves it to every
+    /// migration before it, which may use it: the database began with it.
+    pub async fn a_later_reinstall_of_a_supabase_extension_leaves_it_to_earlier_migrations(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        let posts = "create table posts (id uuid primary key default extensions.uuid_generate_v4());\n";
+        p.schema(posts);
+        p.file("20261124000000_posts.sql", posts);
+        p.file("20261124000001_reinstall.sql", "drop extension \"uuid-ossp\" cascade;\n\ncreate extension \"uuid-ossp\" with schema extensions;\n\nalter table posts alter column id set default extensions.uuid_generate_v4();\n");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
         assert_eq!(p.run(async |o, log| reylo_migrate::db_reset(o, false, log).await).await, 0, "{}", p.peek());
         assert_eq!(p.status().await, 0, "{}", p.peek());
     }

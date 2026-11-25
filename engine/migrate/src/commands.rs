@@ -3047,27 +3047,37 @@ fn creates_platform_publication_in(text: &str) -> bool {
     })
 }
 
-/// The extensions the project's files create whether or not the database has them already (with
-/// no `if not exists`), by name, lowercase.
+/// The extensions the project's files take a database to have begun without: those whose first
+/// statement, in the order the migrations run and then in schema.sql, creates them whether or not
+/// the database has them already (with no `if not exists`), rather than dropping them first. By
+/// name, lowercase.
 fn unconditional_extensions(opts: &Options) -> Vec<String> {
     use crate::sql::TokenKind;
-    let mut texts = vec![opts.schema_text().unwrap_or_default()];
-    texts.extend(opts.migrations().map(|(files, _)| files.into_iter().map(|f| f.sql).collect::<Vec<_>>()).unwrap_or_default());
-    texts
-        .iter()
-        .flat_map(|t| {
-            let tokens = crate::sql::tokenize(t, Dialect::Postgres);
-            tokens
-                .windows(3)
-                .filter(|w| w[0].upper() == "CREATE" && w[1].upper() == "EXTENSION" && w[2].upper() != "IF")
-                .filter_map(|w| match w[2].kind {
-                    TokenKind::Word => Some(w[2].text.to_lowercase()),
-                    TokenKind::Quoted => Some(w[2].text.trim_matches('"').to_lowercase()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    let files = opts.migrations().map(|(files, _)| run_order(opts, &files)).unwrap_or_default();
+    let texts: Vec<String> = files.into_iter().map(|f| f.sql).chain(opts.schema_text()).collect();
+    let name = |t: &crate::sql::Token| match t.kind {
+        TokenKind::Word => Some(t.text.to_lowercase()),
+        TokenKind::Quoted => Some(t.text.trim_matches('"').to_lowercase()),
+        _ => None,
+    };
+    // Each extension's first statement: whether it creates it unconditionally.
+    let mut first: Vec<(String, bool)> = Vec::new();
+    for text in &texts {
+        let tokens = crate::sql::tokenize(text, Dialect::Postgres);
+        for k in 0..tokens.len() {
+            let touched = match (tokens[k].upper().as_str(), tokens.get(k + 1).map(|t| t.upper())) {
+                ("CREATE", Some(e)) if e == "EXTENSION" => tokens.get(k + 2).and_then(|t| if t.upper() == "IF" { tokens.get(k + 5).and_then(name).map(|n| (n, false)) } else { name(t).map(|n| (n, true)) }),
+                ("DROP", Some(e)) if e == "EXTENSION" => tokens.get(k + 2).and_then(|t| if t.upper() == "IF" { tokens.get(k + 4).and_then(name) } else { name(t) }).map(|n| (n, false)),
+                _ => None,
+            };
+            if let Some((n, unconditional)) = touched {
+                if !first.iter().any(|(f, _)| *f == n) {
+                    first.push((n, unconditional));
+                }
+            }
+        }
+    }
+    first.into_iter().filter(|(_, unconditional)| *unconditional).map(|(n, _)| n).collect()
 }
 
 /// The extensions the project's files create that its shadows leave to them: all but one every new
