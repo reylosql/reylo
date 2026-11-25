@@ -373,7 +373,8 @@ function grouped(ts: string): string {
  * of one name, and so does `JSON.parse` of two keys of one name. The engine reports the columns.
  */
 export function lastOfEachName<T extends { name: string }>(items: readonly T[]): T[] {
-  return items.filter((item, i) => !items.slice(i + 1).some((later) => later.name === item.name));
+  const last = new Map(items.map((item, i) => [item.name, i]));
+  return items.filter((item, i) => last.get(item.name) === i);
 }
 
 /** An object type of JSON-encoded fields, each nullable as the engine says. */

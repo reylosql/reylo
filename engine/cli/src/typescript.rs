@@ -9,6 +9,7 @@
 
 use regex::Regex;
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 /// The column the types are laid out within.
@@ -917,7 +918,8 @@ fn grouped(ts: &str) -> String {
 
 /// The last of each name, as an object keeps the last of two keys of one name.
 fn last_of_each_name(items: &[Value]) -> Vec<&Value> {
-    items.iter().enumerate().filter(|(i, item)| !items[i + 1..].iter().any(|later| later["name"] == item["name"])).map(|(_, item)| item).collect()
+    let last: HashMap<String, usize> = items.iter().enumerate().map(|(i, item)| (item["name"].to_string(), i)).collect();
+    items.iter().enumerate().filter(|(i, item)| last[&item["name"].to_string()] == *i).map(|(_, item)| item).collect()
 }
 
 /// An object type of JSON-encoded fields, each nullable as the engine says.
