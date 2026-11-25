@@ -184,10 +184,15 @@ pub trait Alterer: Send {
     fn keeps_values(&self, from: &Object, to: &Object) -> bool {
         from.def == to.def
     }
-    /// Whether adding the column writes a value into each row of its table (a default, an identity,
-    /// a generated expression), which rewrites the table.
-    fn fills(&self, column: &Object) -> bool {
-        let _ = column;
+    /// Whether adding the column (of `schema`) writes a value into each row of its table (a default,
+    /// an identity, a generated expression, its type's own), which rewrites the table.
+    fn fills(&self, column: &Object, schema: &Schema) -> bool {
+        let _ = (column, schema);
+        false
+    }
+    /// Whether a type's change checks each value of it the tables hold (a domain's new check).
+    fn validates(&self, from: &Object, to: &Object) -> bool {
+        let _ = (from, to);
         false
     }
     /// Both schemas, given before it asks for any statement: an alterer whose statements for one
@@ -802,9 +807,11 @@ fn holds_row(o: &Object, rel: &str) -> bool {
 }
 
 /// The relations the plan rewrites, each with the steps that do: a column whose values change (its
-/// type, its collation, a stored expression), in place, under its new name or through the change
-/// that converts it, and a column added, or made again, that writes a value into each row.
-fn rewrites(from: &Schema, to: &Schema, alterer: &dyn Alterer, alters: &BTreeMap<String, Vec<String>>, creates: &BTreeSet<String>, renames: &BTreeMap<String, (String, Vec<String>)>, converted: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, BTreeSet<Op>> {
+/// type, its collation, a stored expression), in place, under its new name, through the change that
+/// converts it, or with the type made again under it; a column checked against its type's new
+/// check; and a column added, or made again, that writes a value into each row.
+#[allow(clippy::too_many_arguments)]
+fn rewrites(from: &Schema, to: &Schema, alterer: &dyn Alterer, alters: &BTreeMap<String, Vec<String>>, creates: &BTreeSet<String>, renames: &BTreeMap<String, (String, Vec<String>)>, converted: &BTreeMap<String, Vec<String>>, remade: &BTreeSet<String>, taken_by: &BTreeMap<String, String>) -> BTreeMap<String, BTreeSet<Op>> {
     let mut out: BTreeMap<String, BTreeSet<Op>> = BTreeMap::new();
     let mut add = |column: &Object, op: Op| {
         if let Some(rel) = &column.owner {
@@ -827,8 +834,25 @@ fn rewrites(from: &Schema, to: &Schema, alterer: &dyn Alterer, alters: &BTreeMap
             add(c, Op::Alter(op.clone()));
         }
     }
+    // A column of a type made again (an enum that loses a label), or taken along by one (a domain
+    // over it), changes with the type's change.
+    for c in from.objects.values().filter(|c| c.kind == Some(Kind::Column) && remade.contains(&c.id) && !alters.contains_key(&c.id) && to.objects.contains_key(&c.id)) {
+        for d in c.deps.iter().filter(|d| remade.contains(*d) && from.objects.get(*d).is_some_and(|t| t.kind == Some(Kind::Type))) {
+            let step = if alters.contains_key(d) { Some(d) } else { taken_by.get(d) };
+            if let Some(step) = step.filter(|s| alters.contains_key(*s)) {
+                add(c, Op::Alter(step.clone()));
+            }
+        }
+    }
+    for id in alters.keys() {
+        if from.objects.get(id).zip(to.objects.get(id)).is_some_and(|(a, b)| alterer.validates(a, b)) {
+            for c in from.objects.values().filter(|c| c.kind == Some(Kind::Column) && c.deps.contains(id) && to.objects.contains_key(&c.id)) {
+                add(c, Op::Alter(id.clone()));
+            }
+        }
+    }
     for c in creates.iter().map(|id| &to.objects[id]) {
-        if c.kind == Some(Kind::Column) && c.owner.as_ref().is_some_and(|w| from.objects.contains_key(w) && !creates.contains(w)) && alterer.fills(c) {
+        if c.kind == Some(Kind::Column) && c.owner.as_ref().is_some_and(|w| from.objects.contains_key(w) && !creates.contains(w)) && alterer.fills(c, to) {
             add(c, Op::Create(c.id.clone()));
         }
     }
@@ -1315,7 +1339,7 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
         // with it), and a column's default is taken off, but where the column is moved to another
         // type and back, which takes it off itself.
         let mut held: Vec<String> = Vec::new();
-        for rel in rewrites(from, to, alterer, &alters, &creates, &renames, &converted).keys() {
+        for rel in rewrites(from, to, alterer, &alters, &creates, &renames, &converted, &remade, &taken_by).keys() {
             for h in from.objects.values().filter(|h| holds_row(h, rel)) {
                 if h.kind != Some(Kind::Column) {
                     if to.objects.contains_key(&h.id) && !(drops.contains(&h.id) && creates.contains(&h.id)) {
@@ -1912,7 +1936,7 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
     // A rewrite of a relation after what holds a value of its row goes (or takes its default off),
     // and before what holds one comes back (or sets its default again). Before the rule below,
     // which then leaves a function made after such a rewrite alone.
-    for (rel, steps) in rewrites(from, to, alterer, &alters, &creates, &renames, &converted) {
+    for (rel, steps) in rewrites(from, to, alterer, &alters, &creates, &renames, &converted, &remade, &taken_by) {
         for k in steps.into_iter().filter_map(|step| find(step)) {
             for h in from.objects.values().filter(|h| holds_row(h, &rel)) {
                 for j in [drop_of(&h.id), find(Op::Unhook(h.id.clone()))].into_iter().flatten().filter(|j| *j != k) {
@@ -1920,7 +1944,9 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                 }
             }
             for h in to.objects.values().filter(|h| holds_row(h, &rel)) {
-                for j in [Op::Create(h.id.clone()), Op::Alter(h.id.clone()), Op::Rehook(h.id.clone())].into_iter().filter_map(|op| find(op)).filter(|j| *j != k) {
+                // A column made with its table, by the table's create.
+                let made = find(Op::Create(h.id.clone())).or_else(|| h.owner.clone().and_then(|w| find(Op::Create(w))));
+                for j in [made, find(Op::Alter(h.id.clone())), find(Op::Rehook(h.id.clone()))].into_iter().flatten().filter(|j| *j != k) {
                     after[j].insert(k);
                 }
             }

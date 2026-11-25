@@ -4462,11 +4462,19 @@ impl Alterer for PostgresAlterer {
         renamed_key(&from.def, &names(own), referenced.map(|r| names(&r)).as_ref())
     }
 
-    fn fills(&self, column: &Object) -> bool {
+    fn fills(&self, column: &Object, schema: &Schema) -> bool {
         // The server fills each row with the column's value as it adds one with a default, an
-        // identity or a generated expression, a constant default included.
+        // identity or a generated expression, a constant default included, or of a domain with a
+        // default or a constraint, its base domains' included.
+        fn constrained(schema: &Schema, id: &str) -> bool {
+            schema.objects.get(id).filter(|t| t.def.starts_with("domain ")).is_some_and(|t| t.extra.iter().any(|l| l.starts_with("default ") || l.starts_with("check ") || l == "not null") || t.deps.iter().any(|d| constrained(schema, d)))
+        }
         let c = parse_column(&column.def);
-        column.kind == Some(Kind::Column) && (c.default.is_some() || c.identity.is_some() || c.generated.is_some())
+        column.kind == Some(Kind::Column) && (c.default.is_some() || c.identity.is_some() || c.generated.is_some() || column.deps.iter().any(|d| constrained(schema, d)))
+    }
+
+    fn validates(&self, from: &Object, to: &Object) -> bool {
+        domain_validates(from, to)
     }
 
     fn keeps_values(&self, from: &Object, to: &Object) -> bool {
