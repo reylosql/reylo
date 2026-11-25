@@ -1204,6 +1204,20 @@ mod tests {
     }
 
     #[test]
+    fn postgres_names_past_ascii() {
+        // Postgres reads every byte past ASCII as a letter, in a name and in a dollar quote's tag,
+        // and a `$` past a name's first character as the name's, so nothing opens inside a name.
+        for sql in ["select $本文$it's$本文$ as s", "select $本文$ $1 :x $本文$ as s", "select 1 as é$1", "select 1 as a$t$", "select 1 as é$$9", "select 1::a$t$ as d"] {
+            assert_eq!(lex(sql, Dialect::Postgres).map(|l| l.params), Ok(Vec::new()), "{sql}");
+        }
+        // A colon after such a name is a slice's, as after any other.
+        assert_eq!(names("select x[café:fin], café[:n] from t where id = :id", Dialect::Postgres), ["id"]);
+        // A parameter's name is ASCII still, and SQLite ends a name before a colon.
+        assert!(names("select :été", Dialect::Postgres).is_empty());
+        assert_eq!(names("select é:a", Dialect::Sqlite), ["a"]);
+    }
+
+    #[test]
     fn opaque_spans() {
         let sql = "select 'a''b', \"q\"\"r\", $t$ :x $t$, e'\\'' -- c :y\n/* d /* :z */ */ :w";
         let l = lex(sql, Dialect::Postgres).unwrap();
