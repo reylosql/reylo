@@ -2453,7 +2453,8 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
                 problem = problem
                     .note(format!("A project begun with an earlier version of Reylo creates it in {INIT}."))
                     .fix("Start the migrations again from your development database, which ran them all", &["mv reylo reylo-old", "reylo migrate init"])
-                    .fix("Then record them on each other database that ran the old ones, running nothing", &["reylo migrate history push --url <url>"]);
+                    .fix("Then record them on each other database that ran the old ones, running nothing", &["reylo migrate history push --url <url>"])
+                    .note(format!("The new {INIT} makes the schema alone, so rows a new database needs go into a new migration, with insert … on conflict do nothing."));
             }
             problems.push(problem);
         }
@@ -8739,7 +8740,8 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
     // another Supabase database: the refusal names its tables.
     if let Some(tables) = realtime? {
         let name = crate::catalog::PLATFORM_PUBLICATION;
-        let create = if tables.is_empty() { format!("create publication {name}") } else { format!("create publication {name} for table {}", tables.join(", ")) };
+        let (tables, with) = tables;
+        let create = format!("create publication {name}{}{with}", if tables.is_empty() { String::new() } else { format!(" for table {}", tables.join(", ")) });
         let republish = format!("reylo run {} {}", shell_word(&format!("drop publication {name}")), shell_word(&create));
         let problem = Problem::new("platform-publication-all-tables", format!("This database's {name} publishes every table, which no migration can make it do"))
             .note(format!("Every Supabase database has {name} publishing none, and alter publication can't make it publish all tables. Name the tables it publishes instead: a table made later joins it when a migration adds it."))
@@ -8821,19 +8823,28 @@ async fn init_in(opts: &Options, schemas: &[String], log: Log<'_>) -> Result<i32
 }
 
 /// On a Supabase database whose `supabase_realtime` publishes every table, the tables it publishes
-/// now, each with its schema; none otherwise.
+/// now, each with its schema, and the options it is made with, as `create publication` writes them
+/// after its tables; none otherwise.
 #[cfg(feature = "cli")]
-async fn platform_publication_of_all_tables(db: &mut Db) -> Result<Option<Vec<String>>, Error> {
+async fn platform_publication_of_all_tables(db: &mut Db) -> Result<Option<(Vec<String>, String)>, Error> {
     if db.dialect() != Dialect::Postgres {
         return Ok(None);
     }
     let name = crate::db::literal(crate::catalog::PLATFORM_PUBLICATION);
-    let all = db.rows(&format!("select 1 from pg_publication where pubname = {name} and puballtables and {}", crate::catalog::platform_names())).await?;
-    if all.is_empty() {
-        return Ok(None);
-    }
+    let all = db
+        .rows(&format!(
+            "select concat_ws(', ',
+               case when not (p.pubinsert and p.pubupdate and p.pubdelete and p.pubtruncate) then format('publish = %L', concat_ws(', ', case when p.pubinsert then 'insert' end, case when p.pubupdate then 'update' end, case when p.pubdelete then 'delete' end, case when p.pubtruncate then 'truncate' end)) end,
+               case when p.pubviaroot then 'publish_via_partition_root = true' end,
+               case when (to_jsonb(p) ->> 'pubgencols') = 's' then 'publish_generated_columns = stored' end) as options
+             from pg_publication p where p.pubname = {name} and p.puballtables and {}",
+            crate::catalog::platform_names()
+        ))
+        .await?;
+    let Some(options) = all.first().map(|r| r.text("options").to_string()) else { return Ok(None) };
     let rows = db.rows(&format!("select format('%I.%I', schemaname, tablename) as t from pg_publication_tables where pubname = {name} order by 1")).await?;
-    Ok(Some(rows.iter().map(|r| r.text("t").to_string()).collect()))
+    let with = if options.is_empty() { String::new() } else { format!(" with ({options})") };
+    Ok(Some((rows.iter().map(|r| r.text("t").to_string()).collect(), with)))
 }
 
 /// The roles the database names, as an owner, a grantee or a policy's role, that a new server

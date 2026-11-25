@@ -4117,6 +4117,7 @@ on!(
     a_later_reinstall_of_a_supabase_extension_leaves_it_to_earlier_migrations,
     a_supabase_database_that_began_without_an_extension_replays_its_making,
     init_refuses_supabases_publication_of_every_table,
+    a_supabase_extension_kept_elsewhere_stays_the_environments,
     a_migration_that_makes_supabases_publication_again_runs,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
@@ -7958,10 +7959,10 @@ create trigger kids_note after insert on kids begin update parents set name = na
     pub async fn init_refuses_supabases_publication_of_every_table(mut p: P) {
         as_supabase_makes_it(&p, true).await;
         p.exec("create table posts (id int primary key)").await;
-        p.exec("drop publication supabase_realtime; create publication supabase_realtime for all tables").await;
+        p.exec("drop publication supabase_realtime; create publication supabase_realtime for all tables with (publish = 'insert')").await;
         p.output();
         assert_eq!(p.run(async |o, log| reylo_migrate::init(o, &[], log).await).await, 1, "{}", p.peek());
-        assert_has!(p.output(), r"create publication supabase_realtime for table public\.posts");
+        assert_has!(p.output(), r"create publication supabase_realtime for table public\.posts with \(publish = '\\''insert'\\''\)");
         assert!(!p.dir.join("schema.sql").exists());
     }
 
@@ -7974,6 +7975,17 @@ create trigger kids_note after insert on kids begin update parents set name = na
         p.file("20261124000000_posts.sql", sql);
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    }
+
+    /// One of Supabase's extensions a database has in another schema, where no migration put it, is
+    /// the environment's there: a declaration that calls it is drafted as on any database.
+    pub async fn a_supabase_extension_kept_elsewhere_stays_the_environments(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        p.exec("drop extension \"uuid-ossp\"; create extension \"uuid-ossp\" with schema public").await;
+        p.schema("create table posts (id uuid primary key default public.uuid_generate_v4());\n");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "posts", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
     }
 

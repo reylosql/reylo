@@ -1675,9 +1675,10 @@ impl Server {
             // The extensions in a schema of the project's first, which the platform's own may use;
             // those in a platform's schema after it is made, as the platform made it.
             // Supabase's own, where it is known which the target began with, as it began.
-            let begun = |e: &str| began_extensions.is_some() && crate::catalog::PLATFORM_EXTENSIONS.iter().any(|p| p.eq_ignore_ascii_case(e));
-            let copied: Vec<&(String, String)> = extensions.iter().filter(|(e, _)| !leave.contains(&e.to_lowercase()) && !owned.extensions.iter().any(|(o, _)| o == e) && !begun(e)).collect();
-            for e in began_extensions.iter().flatten().filter(|e| !leave.contains(&e.to_lowercase())) {
+            let begun = |e: &str, s: &str| began_extensions.is_some() && s == "extensions" && crate::catalog::PLATFORM_EXTENSIONS.iter().any(|p| p.eq_ignore_ascii_case(e));
+            let copied: Vec<&(String, String)> = extensions.iter().filter(|(e, s)| !leave.contains(&e.to_lowercase()) && !owned.extensions.iter().any(|(o, _)| o == e) && !begun(e, s)).collect();
+            // One the target has elsewhere, where no migration put it, is copied there instead.
+            for e in began_extensions.iter().flatten().filter(|e| !leave.contains(&e.to_lowercase()) && !extensions.iter().any(|(x, s)| x.eq_ignore_ascii_case(e) && s != "extensions")) {
                 let _ = db.exec("create schema if not exists extensions").await;
                 let _ = db.exec(&format!("create extension if not exists {} with schema extensions", ident(e))).await;
             }
