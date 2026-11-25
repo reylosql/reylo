@@ -967,6 +967,9 @@ mod tests {
     fn skips_text_and_casts() {
         let sql = "select ':x' as a, \":y\" as b, e'\\':z' as c, $$:w$$ as d, x::int, arr[1:2], tags ? 'k' -- :c\n /* :d /* :e */ */ from t where id = :id";
         assert_eq!(names(sql, Dialect::Postgres), ["id"]);
+        // A SQLite block comment does not nest: it ends at the first `*/`, whatever it holds.
+        assert_eq!(names("select id /* see /* below */, :x from t", Dialect::Sqlite), ["x"]);
+        assert_eq!(names("select name from t where id = /* /* */ :id -- */", Dialect::Sqlite), ["id"]);
         assert_eq!(names("select json_extract(j, '$.a') = ? and x = :n", Dialect::Sqlite), ["1", "n"]);
         // SQLite's bracketed name is text, whatever it holds; elsewhere a `[` opens a subscript.
         assert_eq!(names("select [a'b] as x, :p as p, [c'd?] as y, [n:m] from t", Dialect::Sqlite), ["p"]);
