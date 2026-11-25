@@ -975,6 +975,24 @@ mod tests {
     }
 
     #[test]
+    fn a_line_comment_ends_where_its_database_ends_it() {
+        // Postgres ends a `--` comment at a carriage return as at a line feed, so what follows a
+        // bare one is code there; MySQL, SQLite and ClickHouse read on to the line feed.
+        assert_eq!(names("select $1::int as a --note\r, $2::int as b", Dialect::Postgres), ["1", "2"]);
+        assert_eq!(names("select :a::int as a --note\r, :b::int as b", Dialect::Postgres), ["a", "b"]);
+        assert_eq!(names("select :a -- note\r, :b\n, :c", Dialect::Mysql), ["a", "c"]);
+        assert_eq!(names("select :a # note\r, :b\n, :c", Dialect::Mysql), ["a", "c"]);
+        assert_eq!(names("select :a -- note\r, :b\n, :c", Dialect::Sqlite), ["a", "c"]);
+        assert_eq!(names("SELECT {a:Int32} -- note\r, {b:Int32}\n, {c:Int32}", Dialect::Clickhouse), ["a", "c"]);
+        // A line that ends in `\r\n` reads the same either way.
+        let sql = "-- the user\r\nselect :id -- by id\r\n;\r\n-- done\r\n";
+        let l = lex(sql, Dialect::Postgres).unwrap();
+        assert_eq!(l.params, ["id"]);
+        assert_eq!(first_word(sql, &l), "select");
+        assert_eq!(one_statement(sql, &l, &["select"]), Ok(Statement::Query));
+    }
+
+    #[test]
     fn one_named_form_and_the_native_positional_one() {
         // A form the dialect would misread is an error that says what to write.
         let err = |sql: &str, d: Dialect| lex(sql, d).unwrap_err();

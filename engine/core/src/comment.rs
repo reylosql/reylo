@@ -128,6 +128,10 @@ mod tests {
         assert_eq!(prose("-- a\n/* b */ select 1", Dialect::Postgres), "a\n\nb");
         assert_eq!(prose("select 1 -- not before", Dialect::Postgres), "");
         assert_eq!(leading("-- a\nselect 1", Dialect::Postgres).end, 4);
+        // Postgres ends a `--` comment at a carriage return as at a line feed.
+        assert_eq!(prose("-- One user,\r--   by id.\rselect 1", Dialect::Postgres), "One user,\n  by id.");
+        assert_eq!(leading("-- a\rselect 1", Dialect::Postgres).end, 4);
+        assert_eq!(prose("-- a\r\n\r\n-- b\r\nselect 1", Dialect::Postgres), "a\n\nb");
     }
 
     #[test]
