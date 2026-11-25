@@ -273,9 +273,9 @@ test("Postgres: an analysis whose describe is cancelled before another of its ro
       // The round's first describe is cancelled; the next waits out lock_timeout, the rest still queued behind it.
       await watch.query(`select pg_catalog.pg_cancel_backend(${session})`, []);
       await assert.rejects(analyzing, (err: Error) => !(err instanceof Unreachable) && err.message === "A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_timeout. Run it again once the lock is released: pg_locks lists the session that holds it");
+      assert.deepEqual((await c.analyze("select id from orders")).columns.map((col) => col.name), ["id"]);
       // The session is given up on, with the round's last describe still queued on it: the handle goes on in another.
       assert.notEqual(Number(((await c.query("select pg_catalog.pg_backend_pid()", [])) as [[unknown]])[0][0]), session);
-      assert.deepEqual((await c.analyze("select id from orders")).columns.map((col) => col.name), ["id"]);
     });
   } finally {
     await watch.close();
