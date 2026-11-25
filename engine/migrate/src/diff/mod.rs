@@ -800,7 +800,6 @@ fn drops_apart(from: &Schema, drops: &BTreeSet<String>) -> BTreeSet<String> {
     }
 }
 
-/// The plan from `from` to `to`.
 /// Whether an object holds a value of the row type of the relation `rel` ([`HOLDS_ROW`]).
 fn holds_row(o: &Object, rel: &str) -> bool {
     o.extra.iter().any(|l| l.strip_prefix(HOLDS_ROW) == Some(rel))
@@ -859,6 +858,7 @@ fn rewrites(from: &Schema, to: &Schema, alterer: &dyn Alterer, alters: &BTreeMap
     out
 }
 
+/// The plan from `from` to `to`.
 pub fn plan(from: &Schema, to: &Schema, alterer: &dyn Alterer) -> Plan {
     plan_with(from, to, alterer, &[], &BTreeSet::new())
 }
