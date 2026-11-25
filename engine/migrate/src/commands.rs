@@ -3056,8 +3056,8 @@ fn quoted_name(text: &str) -> String {
 
 /// The extensions the project's migrations take a database to have begun without: those whose first
 /// statement, in the order the migrations run, creates them whether or not the database has them
-/// already (with no `if not exists`), or only if it hasn't but in a schema other than `extensions`,
-/// where Supabase keeps them, rather than dropping them first. By name: a word's lowercase.
+/// already (with no `if not exists`), rather than dropping them first, or creating them only where
+/// they aren't, which does nothing where Supabase made them. By name: a word's lowercase.
 fn unconditional_extensions(opts: &Options) -> Vec<String> {
     let files = opts.migrations().map(|(files, _)| run_order(opts, &files)).unwrap_or_default();
     extensions_begun_without(&files.iter().map(|f| f.sql.as_str()).collect::<Vec<_>>())
@@ -3082,13 +3082,7 @@ fn extensions_begun_without(texts: &[&str]) -> Vec<String> {
                     let conditional = tokens.get(k + 2).is_some_and(|t| t.upper() == "IF");
                     let at = if conditional { k + 5 } else { k + 2 };
                     if let Some(n) = tokens.get(at).and_then(name) {
-                        // The schema it names, after an optional `with`.
-                        let mut j = at + 1;
-                        if tokens.get(j).is_some_and(|t| t.upper() == "WITH") {
-                            j += 1;
-                        }
-                        let schema = tokens.get(j).filter(|t| t.upper() == "SCHEMA").and_then(|_| tokens.get(j + 1)).and_then(name);
-                        touched.push((n, !conditional || schema.is_some_and(|s| s != "extensions")));
+                        touched.push((n, !conditional));
                     }
                 }
                 ("DROP", Some(e)) if e == "EXTENSION" => {
@@ -10465,7 +10459,7 @@ mod tests {
         assert_eq!(begun(&["create extension pg_stat_statements with schema extensions;"]), ["pg_stat_statements"]);
         assert!(begun(&["create extension if not exists \"uuid-ossp\";"]).is_empty());
         assert!(begun(&["create extension if not exists \"uuid-ossp\" with schema extensions;"]).is_empty());
-        assert_eq!(begun(&["create extension if not exists \"uuid-ossp\" schema public;"]), ["uuid-ossp"]);
+        assert!(begun(&["create extension if not exists \"uuid-ossp\" with schema public;", "create table t (id uuid default extensions.uuid_generate_v4());"]).is_empty());
         // A drop first, of any name its list holds, says it began with it.
         assert!(begun(&["drop extension pg_stat_statements, \"uuid-ossp\" cascade;", "create extension \"uuid-ossp\" with schema extensions;"]).is_empty());
         assert!(begun(&["insert into t values ('create extension pgcrypto');"]).is_empty());
