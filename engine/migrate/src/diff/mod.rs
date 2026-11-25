@@ -76,6 +76,13 @@ pub const ENVIRONMENTS: &str = "may be the environment's";
 /// its owner. Its `after` names what gives the privilege.
 pub const AS_MADE: &str = "revoked as it is made";
 
+/// An `extra` line of a function, a view or a column whose stored expressions hold a value of a
+/// relation's row type (a constant of a composite type in a SQL function's body or an argument's
+/// default, a cast to it in a view's query or a column's default), followed by the relation's id.
+/// Its database refuses to change the type of any of the relation's columns under it: the function
+/// or the view goes and comes back around the change, and the column's default is taken off.
+pub const HOLDS_ROW: &str = "holds a value of the row of ";
+
 /// One object of a schema.
 #[derive(Clone, Debug, Default)]
 pub struct Object {
@@ -1093,6 +1100,18 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
             dependents.entry(owner.as_str()).or_default().push(id.as_str());
         }
     }
+    // What holds a value of a relation's row type is on each column both have of the relation, whose
+    // change of type it blocks.
+    for (id, o) in &from.objects {
+        for held in o.extra.iter().filter_map(|l| l.strip_prefix(HOLDS_ROW)) {
+            for c in from.objects.values().filter(|c| c.kind == Some(Kind::Column) && c.owner.as_deref() == Some(held) && to.objects.contains_key(&c.id)) {
+                let on = dependents.entry(c.id.as_str()).or_default();
+                if !on.contains(&id.as_str()) {
+                    on.push(id.as_str());
+                }
+            }
+        }
+    }
     // What goes with an object made again goes and comes back too: a partition's index with its
     // table's.
     let mut goers: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
@@ -1130,6 +1149,32 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
             for dependent in dependents.get(id.as_str()).into_iter().flatten() {
                 let d = &from.objects[*dependent];
                 let owned = d.owner.as_deref() == Some(id.as_str());
+                // What holds a value of the column's relation's row type blocks a change of the
+                // column: a column's default is taken off around it, and a function or a view, which
+                // the server lets stand under any but a change of the column's type, is made again
+                // around that.
+                let holds = (d.kind == Some(Kind::Column) || !d.deps.contains(&id)) && from.objects[&id].owner.as_ref().is_some_and(|w| d.extra.iter().any(|l| l.strip_prefix(HOLDS_ROW) == Some(w.as_str())));
+                if holds && d.kind == Some(Kind::Column) && !replaced {
+                    // One the change moves to another type and back takes its default off itself.
+                    let moved = converted.values().flatten().any(|c| c.as_str() == *dependent);
+                    if let Some(hook) = to.objects.get(*dependent).filter(|_| !moved).and_then(|t| alterer.unhook(d, t)) {
+                        let held = hooks.entry(dependent.to_string()).or_default();
+                        for s in hook.0 {
+                            if !held.0.contains(&s) {
+                                held.0.push(s);
+                            }
+                        }
+                        for s in hook.1 {
+                            if !held.1.contains(&s) {
+                                held.1.push(s);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if holds && (replaced || !remade.contains(&id)) {
+                    continue;
+                }
                 // A column whose default calls a function that goes has its default taken off first.
                 if gone && from.objects[&id].kind == Some(Kind::Function) && d.kind == Some(Kind::Column) && !owned && !d.extra.iter().any(|l| l == GENERATED) && !drops.contains(*dependent) {
                     if let Some(hook) = to.objects.get(*dependent).and_then(|t| alterer.unhook(d, t)) {
@@ -1218,7 +1263,7 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                 // A type made again takes the functions that take or give it along, and a column's
                 // new type those whose bodies read it: each is made again around the change, as what
                 // is on a column is.
-                let made_again = remade.contains(&id) && d.kind == Some(Kind::Function);
+                let made_again = remade.contains(&id) && (d.kind == Some(Kind::Function) || holds);
                 // What takes its column off and puts it back around the change keeps itself.
                 if !replaced && !owned && !drops.contains(*dependent) {
                     if let Some(hook) = to.objects.get(*dependent).and_then(|t| alterer.around(d, t, &from.objects[&id])) {
@@ -1717,6 +1762,14 @@ pub fn plan_with(from: &Schema, to: &Schema, alterer: &dyn Alterer, renames_stat
                 }
                 if let Some(j) = find(Op::Alter(id.clone())) {
                     after[k].insert(j);
+                }
+                // After the changes of the types of the columns of a relation whose row it holds.
+                for held in from.objects.get(id).into_iter().flat_map(|o| o.extra.iter().filter_map(|l| l.strip_prefix(HOLDS_ROW))) {
+                    for c in from.objects.values().filter(|c| c.kind == Some(Kind::Column) && c.owner.as_deref() == Some(held)) {
+                        if let Some(j) = find(Op::Alter(c.id.clone())) {
+                            after[k].insert(j);
+                        }
+                    }
                 }
             }
             Op::Drop(id) => {

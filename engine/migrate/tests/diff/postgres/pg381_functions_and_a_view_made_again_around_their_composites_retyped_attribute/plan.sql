@@ -1,0 +1,13 @@
+set check_function_bodies = off;
+drop function b_of(p);
+drop function named(p);
+drop function two();
+drop view threes;
+alter table t alter column c type text using c::text;
+alter type p alter attribute a type bigint;
+alter table t alter column c type p using c::text::p;
+create view threes as select (row(3, 'three')::p).b as b;
+create function b_of(x p) returns text language sql immutable return (x).b;
+create function named(x p default row(0, 'none')::p) returns text language plpgsql immutable as $$ begin return x.b; end $$;
+create function two() returns p language sql immutable return row(2, 'two')::p;
+reset check_function_bodies;
