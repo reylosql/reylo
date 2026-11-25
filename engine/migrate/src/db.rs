@@ -1730,9 +1730,18 @@ impl Server {
 
     /// The extensions the project's own files create, which a shadow leaves to them.
     pub fn leave_extensions(&mut self, names: Vec<String>) {
+        let names = names.into_iter().filter(|n| !self.platform_extension(n)).collect();
         if let Server::Postgres { leave, .. } = self {
             *leave = names;
         }
+    }
+
+    /// Whether the extension `name` is one every new database of the target's platform has where the
+    /// target has it ([`crate::catalog::PLATFORM_EXTENSIONS`]): a shadow has it as the target does,
+    /// whatever the project's files say, and nothing drops it.
+    pub fn platform_extension(&self, name: &str) -> bool {
+        let Server::Postgres { extensions, platform: true, .. } = self else { return false };
+        crate::catalog::PLATFORM_EXTENSIONS.iter().any(|p| p.eq_ignore_ascii_case(name)) && extensions.iter().any(|(e, s)| e.eq_ignore_ascii_case(name) && s == "extensions")
     }
 
     /// The schemas the project's own files create: an extension the target keeps in one of them (one

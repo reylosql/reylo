@@ -4111,6 +4111,9 @@ on!(
     a_later_change_to_supabases_default_grants_leaves_earlier_tables_alone,
     a_pending_change_to_supabases_default_grants_changes_nothing_yet,
     a_supabase_database_adopted_after_a_change_to_its_default_grants_keeps_its_tables,
+    a_supabase_database_adopted_before_a_backfill_runs_it,
+    supabases_extensions_stay_its_own_when_a_file_creates_one,
+    a_migration_creating_supabases_publication_is_refused_where_it_exists,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
     init_reads_an_in_list_on_a_varchar_column_as_it_reads_back,
@@ -7649,6 +7652,52 @@ create trigger kids_note after insert on kids begin update parents set name = na
             assert_eq!(db.dry_run().await, 0, "{}", db.peek());
             assert_eq!(holds(&db, "posts", "anon", "SELECT").await, "0");
         }
+    }
+
+    /// A Supabase database that ran a table's migration before Reylo recorded it, but not the next,
+    /// which takes the Data API's roles' grants back and changes rows: history push records the
+    /// first alone, from the start under which the database ran the fewest, and deploy runs the
+    /// second, rows and all.
+    pub async fn a_supabase_database_adopted_before_a_backfill_runs_it(mut p: P) {
+        as_supabase_makes_it(&p, false).await;
+        let posts = "create table posts (id int primary key, body text);\n";
+        let hide = "alter default privileges in schema public revoke select, insert, update, delete on tables from anon, authenticated, service_role;\n\nalter default privileges in schema public revoke usage, select on sequences from anon, authenticated, service_role;\n\nrevoke select, insert, update, delete on posts from anon, authenticated, service_role;\n";
+        p.file("20261124000000_posts.sql", posts);
+        p.file("20261124000001_hide.sql", &format!("{hide}\nupdate posts set body = 'new';\n"));
+        p.schema(&format!("{posts}\n{hide}"));
+        p.exec(posts).await;
+        p.exec("insert into posts values (1, 'old')").await;
+        assert_eq!(p.history_push().await, 0, "{}", p.peek());
+        assert_eq!(p.history().await, ["20261124000000_posts.sql"]);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(p.rows("select body from posts").await[0].text("body"), "new");
+    }
+
+    /// Supabase's own extensions stay where Supabase put them, whatever the project's files say:
+    /// one a file creates with no schema is no change, and a reset leaves it.
+    pub async fn supabases_extensions_stay_its_own_when_a_file_creates_one(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        p.schema("create extension if not exists \"uuid-ossp\";\n\ncreate table posts (id uuid primary key default extensions.uuid_generate_v4());\n");
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "posts", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(p.run(async |o, log| reylo_migrate::db_reset(o, false, log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.rows("select n.nspname as s from pg_extension x join pg_namespace n on n.oid = x.extnamespace where x.extname = 'uuid-ossp'").await[0].text("s"), "extensions");
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+    }
+
+    /// A project begun before Reylo left `supabase_realtime` to Supabase creates it in its first
+    /// migration, which fails on a new Supabase database: the checks say so before anything runs.
+    pub async fn a_migration_creating_supabases_publication_is_refused_where_it_exists(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        let sql = "create table profiles (id int primary key);\n\ncreate publication supabase_realtime;\n";
+        p.schema(sql);
+        p.file("init.sql", sql);
+        p.output();
+        assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+        assert_eq!(p.migrate().await, 1, "{}", p.peek());
+        assert_has!(p.output(), r"Migration init\.sql creates supabase_realtime, which this Supabase database has already");
+        assert_eq!(p.rows("select count(*) as n from pg_class where relname = 'profiles'").await[0].text("n"), "0");
     }
 
     /// A Supabase database whose one change is to what its Data API's roles are granted by default

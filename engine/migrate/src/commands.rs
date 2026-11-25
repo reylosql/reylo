@@ -982,12 +982,11 @@ fn without_default_grants(lines: &[String]) -> Vec<String> {
 }
 
 /// One side of a diff without the privileges an object it adds is made with, under the default
-/// privileges of the role that makes it (`schema`, that side's whole schema, holds them): on
-/// Supabase, every table, sequence and function made in `public` grants each of the Data API's roles
-/// every privilege, which the SQL that makes it needn't grant.
-fn without_made_grants(lines: &[String], schema: &[String]) -> Vec<String> {
-    let relation = |line: &str, name: &str| ["table ", "view ", "materialized view ", "foreign table "].iter().any(|k| line.strip_prefix(k).is_some_and(|rest| crate::catalog::name_at(rest) == name));
-    let made = |name: &str| lines.iter().any(|l| relation(l, name)) || lines.iter().any(|l| l.strip_prefix("sequence ").is_some_and(|rest| crate::catalog::name_at(rest) == name));
+/// privileges of the role that makes it: `schema`, that side's whole schema, holds them, and an
+/// object `other`, the other side's, lacks is one it adds. On Supabase, every table, sequence and
+/// function made in `public` grants each of the Data API's roles every privilege, which the SQL that
+/// makes it needn't grant. A grant that changes on an object both sides have is kept.
+fn without_made_grants(lines: &[String], schema: &[String], other: &[String]) -> Vec<String> {
     // The defaults of the role that makes an object, which name no role: `(schema, objects, entry)`.
     let defaults: Vec<(Option<&str>, &str, String)> = schema
         .iter()
@@ -1007,9 +1006,19 @@ fn without_made_grants(lines: &[String], schema: &[String]) -> Vec<String> {
             };
             let (privilege, rest) = rest.split_once(" on ")?;
             let (objects, role) = rest.split_once(" to ")?;
+            let role = if role == "public" { "PUBLIC" } else { role };
             Some((schema, objects, format!("{role}:{}{option}", privilege.to_uppercase())))
         })
         .collect();
+    if defaults.is_empty() {
+        return lines.to_vec();
+    }
+    let relation = |line: &str, name: &str| ["table ", "view ", "materialized view ", "foreign table "].iter().any(|k| line.strip_prefix(k).is_some_and(|rest| crate::catalog::name_at(rest) == name));
+    let sequence = |line: &str, name: &str| line.strip_prefix("sequence ").is_some_and(|rest| crate::catalog::name_at(rest) == name);
+    let routine = |line: &str, name: &str| {
+        let base = name.split('(').next().unwrap_or_default();
+        line.strip_prefix("function ").is_some_and(|def| def.contains(&format!(" FUNCTION {base}(")) || def.contains(&format!(" PROCEDURE {base}(")))
+    };
     lines
         .iter()
         .filter_map(|l| {
@@ -1024,19 +1033,19 @@ fn without_made_grants(lines: &[String], schema: &[String]) -> Vec<String> {
             } else {
                 ("tables", object)
             };
-            let schema_of = crate::catalog::name_at(name).split('.').next().unwrap_or_default().trim_matches('"').to_string();
-            let new = match objects {
-                "tables" => lines.iter().any(|o| relation(o, name)),
+            let in_other = match objects {
+                "tables" => other.iter().any(|o| relation(o, name)),
                 "sequences" if object.starts_with("sequence of identity ") => {
                     let table = name.rsplit_once('.').map(|(t, _)| t).unwrap_or_default();
-                    lines.iter().any(|o| relation(o, table))
+                    other.iter().any(|o| relation(o, table))
                 }
-                "sequences" => made(name),
-                _ => lines.iter().any(|o| o.strip_prefix("function ").is_some_and(|def| def.contains(&format!(" FUNCTION {}", name.split('(').next().unwrap_or_default())) || def.contains(&format!(" PROCEDURE {}", name.split('(').next().unwrap_or_default())))),
+                "sequences" => other.iter().any(|o| sequence(o, name)),
+                _ => other.iter().any(|o| routine(o, name)),
             };
-            if !new {
+            if in_other {
                 return Some(l.clone());
             }
+            let schema_of = crate::catalog::name_at(name).split('.').next().unwrap_or_default().trim_matches('"').to_string();
             let kept: Vec<&str> = acl.split(',').filter(|entry| !defaults.iter().any(|(s, o, e)| *o == objects && e == entry && s.is_none_or(|s| s.trim_matches('"') == schema_of))).collect();
             match kept.len() {
                 0 => None,
@@ -1391,7 +1400,7 @@ fn top_words(line: &str) -> Vec<&str> {
 fn listed(gone: &[String], came: &[String], before: &[String], after: &[String], d: Dialect) -> Vec<String> {
     let mysql = d == Dialect::Mysql;
     const MAX: usize = 20;
-    let (gone, came) = (without_default_grants(&without_made_grants(gone, before)), without_default_grants(&without_made_grants(came, after)));
+    let (gone, came) = (without_default_grants(&without_made_grants(gone, before, after)), without_default_grants(&without_made_grants(came, after, before)));
     let constraint_names = |lines: &[String]| -> Vec<String> { lines.iter().filter_map(|l| l.strip_prefix("constraint ")).filter_map(|rest| rest.split(' ').nth(1)).map(str::to_string).collect() };
     let made_by_constraint = |line: &str, names: &[String]| names.iter().any(|n| line.starts_with("index ") && line.contains(&format!(" INDEX {n} ON ")));
     let (gone_names, came_names) = (constraint_names(&gone), constraint_names(&came));
@@ -2425,6 +2434,21 @@ pub async fn check(db: &mut Db, server: Option<&mut Server>, opts: &Options) -> 
     // Nothing is recorded without running but what a cut-off run of Reylo's own left (below).
     let records: Vec<Migration> = Vec::new();
     let pending: Vec<Migration> = files.iter().filter(|f| !applied_files.iter().any(|a| a.name == f.name) && !records.contains(f)).cloned().collect();
+    // A migration that creates the publication every Supabase database has, as a project begun
+    // before Reylo left it to Supabase writes it, fails on one.
+    if d == Dialect::Postgres && pending.iter().any(|p| creates_platform_publication_in(&p.sql)) {
+        let has = db
+            .rows(&format!("select 1 from pg_publication where pubname = {} and {}", crate::db::literal(crate::catalog::PLATFORM_PUBLICATION), crate::catalog::platform_names()))
+            .await?;
+        if !has.is_empty() {
+            for p in pending.iter().filter(|p| creates_platform_publication_in(&p.sql)) {
+                problems.push(
+                    Problem::new("platform-publication-exists", format!("Migration {} creates {}, which this Supabase database has already", p.name, crate::catalog::PLATFORM_PUBLICATION))
+                        .note(format!("Every Supabase database has it. A migration adds its tables to it, with alter publication {} add table.", crate::catalog::PLATFORM_PUBLICATION)),
+                );
+            }
+        }
+    }
     // init.sql, which `init` writes, holds the whole schema and runs only on an empty database.
     for p in pending.iter().filter(|f| f.name != INIT) {
         if let Some(why) = atomicity_problem(&p.sql, d) {
@@ -3002,10 +3026,15 @@ fn created_schemas(opts: &Options) -> Vec<String> {
 /// before Reylo took what a new Supabase database has for Supabase's did: they make all of it, so
 /// its shadows leave all of it to them.
 fn creates_platform_publication(opts: &Options) -> bool {
-    static PUBLICATION: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r#"(?i)\bcreate\s+publication\s+"?{}"?(?:\s|;|$)"#, crate::catalog::PLATFORM_PUBLICATION)).expect("a valid pattern"));
     let mut texts = vec![opts.schema_text().unwrap_or_default()];
     texts.extend(opts.migrations().map(|(files, _)| files.into_iter().map(|f| f.sql).collect::<Vec<_>>()).unwrap_or_default());
-    texts.iter().any(|t| PUBLICATION.is_match(&crate::sql::tokenize(t, Dialect::Postgres).iter().map(|token| token.text.clone()).collect::<Vec<_>>().join(" ")))
+    texts.iter().any(|t| creates_platform_publication_in(t))
+}
+
+/// Whether a text creates the platform's publication.
+fn creates_platform_publication_in(text: &str) -> bool {
+    static PUBLICATION: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r#"(?i)\bcreate\s+publication\s+"?{}"?(?:\s|;|$)"#, crate::catalog::PLATFORM_PUBLICATION)).expect("a valid pattern"));
+    PUBLICATION.is_match(&crate::sql::tokenize(text, Dialect::Postgres).iter().map(|token| token.text.clone()).collect::<Vec<_>>().join(" "))
 }
 
 /// The settings a Supabase database began under ([`crate::db::API_SETTINGS`]): as its history table
@@ -3042,38 +3071,53 @@ async fn api_began_adopting(db: &mut Db, files: &[Migration]) -> Result<Vec<[boo
     Ok(choices(shown[0]).into_iter().flat_map(|tables| choices(shown[1]).into_iter().map(move |functions| [tables, functions])).collect())
 }
 
-/// Of `candidates` ([`api_began_adopting`]), the first under which a replay of `order` reaches
-/// `live` at any point, which is how the database began; else the first.
+/// Of `candidates` ([`api_began_adopting`]), the one the database began under: of those under which
+/// the whole of `order` replays and ends as `schema_sql` does, the one whose replay reaches `live`
+/// after the fewest migrations, so that none is taken to have run that a database begun under
+/// another needn't have (a migration that changes data, above all); else the first.
 #[cfg(feature = "cli")]
-async fn api_began_replaying(server: &mut Server, opts: &Options, order: &[Migration], live: &[String], candidates: &[[bool; 2]]) -> Result<Option<[bool; 2]>, Error> {
-    let texts: Vec<&str> = order.iter().map(|f| f.sql.as_str()).collect();
+async fn api_began_replaying(server: &mut Server, opts: &Options, order: &[Migration], live: &[String], schema_sql: Option<&str>, candidates: &[[bool; 2]]) -> Result<Option<[bool; 2]>, Error> {
+    let texts: Vec<&str> = order.iter().map(|f| f.sql.as_str()).chain(schema_sql).collect();
+    let mut best: Option<(usize, [bool; 2])> = None;
     for on in candidates {
         server.began_with(*on);
         let mut shadows = Shadows::new(server, &opts.url, &opts.root, &opts.cache, &texts).await;
         let reached = async {
             let lane = shadows.lane();
             if shadows.open(lane).await?.is_err() {
-                return Ok::<_, Error>(false);
+                return Ok::<_, Error>(None);
             }
             shadows.taint(lane);
+            let mut first = None;
+            let mut end = Vec::new();
             for k in 0..=order.len() {
-                let now = crate::catalog::without_comments(&catalog(shadows.db(lane)).await?);
-                if crate::catalog::without_extra_children(live, &now) == now {
-                    return Ok(true);
+                end = catalog(shadows.db(lane)).await?;
+                let now = crate::catalog::without_comments(&end);
+                if first.is_none() && crate::catalog::without_extra_children(live, &now) == now {
+                    first = Some(k);
                 }
-                if k == order.len() || run(shadows.db(lane), &order[k]).await.is_err() {
-                    return Ok(false);
+                if k < order.len() && run(shadows.db(lane), &order[k]).await.is_err() {
+                    return Ok(None);
                 }
             }
-            Ok(false)
+            if let Some(sql) = schema_sql {
+                let declared = shadows.lane();
+                shadows.push(declared, [Step::script("schema.sql", sql)]);
+                if !matches!(shadows.lines(declared).await?, Ok(lines) if lines == end) {
+                    return Ok(None);
+                }
+            }
+            Ok(first)
         }
         .await;
         shadows.finish().await;
-        if reached? {
-            return Ok(Some(*on));
+        if let Some(k) = reached? {
+            if best.is_none_or(|(b, _)| k < b) {
+                best = Some((k, *on));
+            }
         }
     }
-    Ok(candidates.first().copied())
+    Ok(best.map(|(_, on)| on).or_else(|| candidates.first().copied()))
 }
 
 /// Notes on the history table the settings a Supabase database began under ([`crate::db::api_settings_note`]).
@@ -4442,7 +4486,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     // changed before any was recorded: the one a replay reaches it from, where its privileges can't
     // tell.
     let candidates = api_began_adopting(db, &order).await?;
-    let began = if candidates.len() > 1 { api_began_replaying(server, opts, &order, &live, &candidates).await? } else { candidates.first().copied() };
+    let began = if candidates.len() > 1 { api_began_replaying(server, opts, &order, &live, schema_sql.as_deref(), &candidates).await? } else { candidates.first().copied() };
     if let Some(on) = began {
         server.began_with(on);
     }
@@ -5188,7 +5232,7 @@ async fn emptied(db: &mut Db, server: &mut Server, opts: &Options, log: Log<'_>)
     let counts = table_rows(db).await?;
     let d = db.dialect();
     // The extensions the project's files create go too: they create them again.
-    let mut then: Vec<String> = if d == Dialect::Postgres { created_extensions(opts).iter().map(|x| format!("drop extension if exists {}", crate::db::ident(x))).collect() } else { vec![] };
+    let mut then: Vec<String> = if d == Dialect::Postgres { created_extensions(opts).iter().filter(|x| !server.platform_extension(x)).map(|x| format!("drop extension if exists {}", crate::db::ident(x))).collect() } else { vec![] };
     let had_history = has_history(db).await? && !read_history(db).await?.is_empty();
     if has_history(db).await? {
         let forget = format!("delete from {HISTORY_TABLE}");
@@ -9684,10 +9728,11 @@ mod tests {
             "grant api.events anon:SELECT",
         ]);
         let after: Vec<String> = came.iter().cloned().chain(defaults.iter().map(|d| d.to_string())).collect();
+        let before = lines(&["table public.old", "table api.events"]);
         // What the defaults give a new table, in its schema or everywhere, isn't listed; what else it
         // grants is, and so is a grant on a table both sides have.
         assert_eq!(
-            without_made_grants(&came, &after),
+            without_made_grants(&came, &after, &before),
             lines(&["table public.posts", "column public.posts.id integer not null", "grant public.posts reporting:SELECT", "grant public.old anon:SELECT", "table api.events", "grant api.events anon:SELECT"])
         );
     }
