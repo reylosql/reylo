@@ -677,8 +677,8 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
                 if fields.is_empty() {
                     return "Record<never, never>".into();
                 }
-                let each: Vec<String> = fields
-                    .iter()
+                let each: Vec<String> = last_of_each_name(fields)
+                    .into_iter()
                     .map(|f| {
                         let ty = render_type(&f["type"], false, dialect, codecs);
                         format!("{}: {}", ident(f["name"].as_str().unwrap_or_default()), if is_true(&f["nullable"]) { or_null(&ty) } else { ty })
@@ -970,7 +970,7 @@ fn render_param_type(t: &Value, dialect: &str, in_row: bool, members: Option<&Va
                 if fields.is_empty() {
                     return "Record<never, never>".into();
                 }
-                let each: Vec<String> = fields.iter().map(|f| format!("{}: {}", ident(f["name"].as_str().unwrap_or_default()), slot(f))).collect();
+                let each: Vec<String> = last_of_each_name(fields).into_iter().map(|f| format!("{}: {}", ident(f["name"].as_str().unwrap_or_default()), slot(f))).collect();
                 return format!("{{ {} }}", each.join("; "));
             }
             "tuple" => return format!("[{}]", items(&t["elements"]).iter().map(slot).collect::<Vec<_>>().join(", ")),
@@ -1016,8 +1016,8 @@ fn render_param_type(t: &Value, dialect: &str, in_row: bool, members: Option<&Va
         if fields.is_empty() {
             return "Record<never, never>".into();
         }
-        let each: Vec<String> = fields
-            .iter()
+        let each: Vec<String> = last_of_each_name(fields)
+            .into_iter()
             .map(|f| {
                 let ty = render_param_type(&f["type"], dialect, true, None, codecs);
                 format!("{}: {}", ident(f["name"].as_str().unwrap_or_default()), if is_true(&f["nullable"]) { or_null(&ty) } else { ty })

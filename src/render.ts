@@ -153,8 +153,9 @@ export function renderType(t: EngineType, inJson = false, dialect: Dialect = "po
       // A row inside a document is an object of its fields; a built-in geometric type, its text.
       if (inJson) return dialect === "postgres" && name !== "record" && json[name] !== undefined ? json[name]! : renderFields(t.fields, dialect, t.extra);
       // A Postgres row value, and a geometric type, is an object of its fields, each as a column
-      // of its type is (src/values.ts), and so is a ClickHouse tuple whose elements have names.
-      if (dialect === "postgres" || dialect === "clickhouse") return t.fields.length ? `{ ${t.fields.map((f) => `${ident(f.name)}: ${(f.nullable ? orNull : (x: string) => x)(renderType(f.type, false, dialect, codecs))}`).join("; ")} }` : "Record<never, never>";
+      // of its type is (src/values.ts), and so is a ClickHouse tuple whose elements have names. Of
+      // two fields of one name the object keeps the last, as the decoder does.
+      if (dialect === "postgres" || dialect === "clickhouse") return t.fields.length ? `{ ${lastOfEachName(t.fields).map((f) => `${ident(f.name)}: ${(f.nullable ? orNull : (x: string) => x)(renderType(f.type, false, dialect, codecs))}`).join("; ")} }` : "Record<never, never>";
       break;
     // A JSON value: what the statement built, the values a schema admits, or any JSON.
     case "json":
@@ -421,7 +422,7 @@ export function renderParamType(t: EngineType, dialect: Dialect = "postgres", in
     if (t.kind === "array") {
       return `${grouped(slot(t.element))}[]`;
     }
-    if (t.kind === "struct") return t.fields.length ? `{ ${t.fields.map((f) => `${ident(f.name)}: ${slot(f)}`).join("; ")} }` : "Record<never, never>";
+    if (t.kind === "struct") return t.fields.length ? `{ ${lastOfEachName(t.fields).map((f) => `${ident(f.name)}: ${slot(f)}`).join("; ")} }` : "Record<never, never>";
     if (t.kind === "tuple") return `[${t.elements.map(slot).join(", ")}]`;
     if (kind === "int8") return "number | bigint";
   }
@@ -451,7 +452,7 @@ export function renderParamType(t: EngineType, dialect: Dialect = "postgres", in
   // takes it, null where the field may be; a geometric type the object it returns.
   if (dialect === "postgres" && t.kind === "struct" && members === undefined && kind !== "text") {
     if (!isRowKind(kind)) return renderType(t, false, dialect, codecs);
-    return t.fields.length ? `{ ${t.fields.map((f) => `${ident(f.name)}: ${(f.nullable ? orNull : (x: string) => x)(renderParamType(f.type, dialect, true, undefined, codecs))}`).join("; ")} }` : "Record<never, never>";
+    return t.fields.length ? `{ ${lastOfEachName(t.fields).map((f) => `${ident(f.name)}: ${(f.nullable ? orNull : (x: string) => x)(renderParamType(f.type, dialect, true, undefined, codecs))}`).join("; ")} }` : "Record<never, never>";
   }
   if (dialect !== "sqlite") {
     if (kind === "int8") return "number | bigint | string";
