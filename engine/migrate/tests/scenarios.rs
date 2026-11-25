@@ -4154,6 +4154,7 @@ on!(
     a_supabase_extension_a_migration_moved_begins_where_it_was,
     a_supabase_database_adopted_after_moving_or_updating_an_extension_replays_it,
     a_stated_grant_supabase_also_gives_by_default_is_written,
+    a_stated_grant_keeps_the_schema_its_search_path_needs,
     a_migration_that_makes_supabases_publication_again_runs,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
@@ -8893,6 +8894,23 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(holds(&q, "notes", "anon", "INSERT").await, "0");
         assert_eq!(holds(&q, "notes", "service_role", "DELETE").await, "1");
         assert_eq!(q.rows("select has_sequence_privilege('authenticated', 'counter', 'USAGE')::text as n").await[0].text("n"), "true");
+    }
+
+    /// On a Supabase database whose search_path reads another schema before `public`, a stated grant
+    /// on a table in `public` keeps its schema where a table of the same name comes first, as the
+    /// plan writes it: the grant reaches the table schema.sql names.
+    pub async fn a_stated_grant_keeps_the_schema_its_search_path_needs(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        p.exec(&format!("alter database {} set search_path = private, public", p.name)).await;
+        let tables = "create schema private;\n\ncreate table private.notes (id int primary key);\n\ncreate table public.notes (id int primary key);\n";
+        p.file("20261125000000_notes.sql", tables);
+        p.schema(tables);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.schema(&format!("{tables}\ngrant select on table public.notes to anon;\n"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "readers", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let readers = std::fs::read_to_string(p.dir.join("migrations").join(p.files().last().unwrap())).unwrap();
+        assert_has!(readers, r"grant select on table public\.notes to anon;");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
     }
 
     /// A Supabase database that began without one of Supabase's extensions replays its migrations from

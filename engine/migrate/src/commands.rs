@@ -8462,7 +8462,8 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
 #[cfg(feature = "cli")]
 async fn stated_grants(server: &mut Server, opts: &Options, files: &[Migration], schema_sql: &str, texts: &[String]) -> Result<Result<Vec<String>, String>, Error> {
     server.grant_by_default_nothing();
-    let drafted: Vec<Migration> = texts.iter().enumerate().map(|(i, sql)| Migration { name: format!("drafted {}", i + 1), time: String::new(), path: PathBuf::new(), sql: sql.clone() }).collect();
+    let named = |i: usize| if texts.len() == 1 { "the new migration".to_string() } else { format!("the new migration's file {}", i + 1) };
+    let drafted: Vec<Migration> = texts.iter().enumerate().map(|(i, sql)| Migration { name: named(i), time: String::new(), path: PathBuf::new(), sql: sql.clone() }).collect();
     let all: Vec<&str> = files.iter().chain(&drafted).map(|f| f.sql.as_str()).chain([schema_sql]).collect();
     let mut shadows = Shadows::new(server, &opts.url, &opts.root, &opts.cache, &all).await;
     let result = async {
@@ -8479,6 +8480,8 @@ async fn stated_grants(server: &mut Server, opts: &Options, files: &[Migration],
         if let Err((m, e)) = shadows.open(c).await? {
             return Ok(Err(format!("{m} fails without default privileges: {e}")));
         }
+        // Past the migrations, the replay is of files no later run has under these names.
+        shadows.taint(c);
         let stated = api_grants(shadows.db(a)).await?;
         let made = api_grants(shadows.db(c)).await?;
         // Each object's missing privileges, then the roles that lack the same ones together.
@@ -8498,12 +8501,10 @@ async fn stated_grants(server: &mut Server, opts: &Options, files: &[Migration],
                 None => grants.push((object, what, vec![role])),
             }
         }
-        // Written as the plan writes names: unqualified in `public`.
-        let shown = |object: &str| match object.split_once(' ') {
-            Some((kind, name)) => format!("{kind} {}", name.strip_prefix("public.").unwrap_or(name)),
-            None => object.to_string(),
-        };
-        Ok(Ok(grants.into_iter().map(|(object, privileges, roles)| format!("grant {} on {} to {}", privileges.join(", "), shown(&object), roles.join(", "))).collect()))
+        // Each name written as the plan writes it, without a schema the migrations' search_path reads.
+        let mut statements: Vec<String> = grants.into_iter().map(|(object, privileges, roles)| format!("grant {} on {object} to {}", privileges.join(", "), roles.join(", "))).collect();
+        crate::diff::postgres::style_statements(shadows.db(c), &mut statements, &Default::default()).await?;
+        Ok(Ok(statements))
     }
     .await;
     shadows.finish().await;
