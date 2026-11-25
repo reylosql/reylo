@@ -4154,7 +4154,7 @@ on!(
     a_supabase_extension_a_migration_moved_begins_where_it_was,
     a_supabase_database_adopted_after_moving_or_updating_an_extension_replays_it,
     a_stated_grant_supabase_also_gives_by_default_is_written,
-    a_stated_grant_keeps_the_schema_its_search_path_needs,
+    a_stated_grant_keeps_its_table_and_its_option,
     a_migration_that_makes_supabases_publication_again_runs,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
@@ -8870,15 +8870,15 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "notes", &Default::default(), log).await).await, 0, "{}", p.peek());
         let read = |p: &P| p.files().into_iter().map(|f| std::fs::read_to_string(p.dir.join("migrations").join(f)).unwrap()).collect::<Vec<_>>();
         let notes = read(&p).concat();
-        assert_has!(notes.clone(), r"grant select on table notes to anon;");
-        assert_has!(notes.clone(), r"grant all on table notes to service_role;");
-        assert_has!(notes.clone(), r"grant usage on sequence counter to authenticated;");
-        assert_has!(notes, r"grant execute on function ping\(\) to anon;");
+        assert_has!(notes.clone(), r"grant select on table public\.notes to anon;");
+        assert_has!(notes.clone(), r"grant all on table public\.notes to service_role;");
+        assert_has!(notes.clone(), r"grant usage on sequence public\.counter to authenticated;");
+        assert_has!(notes, r"grant execute on function public\.ping\(\) to anon;");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         p.schema(&format!("{head}create index notes_title on public.notes (title);\n\ngrant select on table public.notes to anon, authenticated;\n\n{rest}"));
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "readers", &Default::default(), log).await).await, 0, "{}", p.peek());
         let files = read(&p);
-        assert!(files.iter().any(|f| f.contains("grant select on table notes to authenticated;")), "{files:?}");
+        assert!(files.iter().any(|f| f.contains("grant select on table public.notes to authenticated;")), "{files:?}");
         assert!(!files.iter().any(|f| f.contains("concurrently") && f.contains("grant ")), "{files:?}");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "again", &Default::default(), log).await).await, 0, "{}", p.peek());
@@ -8896,21 +8896,32 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(q.rows("select has_sequence_privilege('authenticated', 'counter', 'USAGE')::text as n").await[0].text("n"), "true");
     }
 
-    /// On a Supabase database whose search_path reads another schema before `public`, a stated grant
-    /// on a table in `public` keeps its schema where a table of the same name comes first, as the
-    /// plan writes it: the grant reaches the table schema.sql names.
-    pub async fn a_stated_grant_keeps_the_schema_its_search_path_needs(mut p: P) {
+    /// A stated grant names its table with its schema, so it reaches the table schema.sql names
+    /// whatever search_path a migration leaves the session with; it keeps the grant option the
+    /// development database's default privileges also give; and a grant on a temporary table
+    /// schema.sql makes for itself writes nothing.
+    pub async fn a_stated_grant_keeps_its_table_and_its_option(mut p: P) {
         as_supabase_makes_it(&p, true).await;
-        p.exec(&format!("alter database {} set search_path = private, public", p.name)).await;
+        p.exec("alter default privileges for role postgres in schema public grant select on tables to authenticated with grant option").await;
         let tables = "create schema private;\n\ncreate table private.notes (id int primary key);\n\ncreate table public.notes (id int primary key);\n";
-        p.file("20261125000000_notes.sql", tables);
+        p.file("20261125000000_notes.sql", &format!("{tables}\nset search_path = private, public;\n"));
         p.schema(tables);
         assert_eq!(p.dev().await, 0, "{}", p.peek());
-        p.schema(&format!("{tables}\ngrant select on table public.notes to anon;\n"));
+        p.schema(&format!("{tables}\ngrant select on table public.notes to anon;\n\ngrant select on table public.notes to authenticated with grant option;\n\ncreate temporary table notes (id int);\n\ngrant insert on table notes to service_role;\n"));
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "readers", &Default::default(), log).await).await, 0, "{}", p.peek());
         let readers = std::fs::read_to_string(p.dir.join("migrations").join(p.files().last().unwrap())).unwrap();
-        assert_has!(readers, r"grant select on table public\.notes to anon;");
+        assert_has!(readers.clone(), r"grant select on table public\.notes to anon;");
+        assert_has!(readers.clone(), r"grant select on table public\.notes to authenticated with grant option;");
+        assert!(!readers.contains("service_role"), "{readers}");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        as_supabase_makes_it(&q, false).await;
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        let granted = |schema: &str, role: &str, grantable: &str| format!("select count(*)::text as n from information_schema.role_table_grants where table_schema = '{schema}' and table_name = 'notes' and grantee = '{role}' and privilege_type = 'SELECT' and is_grantable = '{grantable}'");
+        assert_eq!(q.rows(&granted("public", "anon", "NO")).await[0].text("n"), "1");
+        assert_eq!(q.rows(&granted("private", "anon", "NO")).await[0].text("n"), "0");
+        assert_eq!(q.rows(&granted("public", "authenticated", "YES")).await[0].text("n"), "1");
     }
 
     /// A Supabase database that began without one of Supabase's extensions replays its migrations from

@@ -8484,26 +8484,25 @@ async fn stated_grants(server: &mut Server, opts: &Options, files: &[Migration],
         shadows.taint(c);
         let stated = api_grants(shadows.db(a)).await?;
         let made = api_grants(shadows.db(c)).await?;
-        // Each object's missing privileges, then the roles that lack the same ones together.
-        let mut lacks: Vec<(String, String, Vec<String>, String)> = Vec::new();
-        for (object, role, privileges, all) in &stated {
-            let has = made.iter().find(|(o, r, _, _)| o == object && r == role).map(|(_, _, p, _)| p.clone()).unwrap_or_default();
-            let missing: Vec<String> = privileges.iter().filter(|p| !has.contains(p)).cloned().collect();
-            if !missing.is_empty() {
-                lacks.push((object.clone(), role.clone(), missing, all.clone()));
+        // Each object's privileges a role lacks, or lacks the grant option of, then the roles that lack
+        // the same ones together. Each name keeps its schema: a migration may leave its session with
+        // another search_path, and the grant must reach the object schema.sql names.
+        let mut grants: Vec<(String, String, bool, Vec<String>)> = Vec::new();
+        for (object, role, privileges, every) in &stated {
+            let has: &[(String, bool)] = made.iter().find(|(o, r, _, _)| o == object && r == role).map_or(&[], |(_, _, p, _)| p.as_slice());
+            for option in [false, true] {
+                let missing: Vec<&str> = privileges.iter().filter(|(p, g)| *g == option && !has.iter().any(|(h, hg)| h == p && (*hg || !option))).map(|(p, _)| p.as_str()).collect();
+                if missing.is_empty() {
+                    continue;
+                }
+                let what = if missing.join(",") == *every { "all".to_string() } else { missing.join(", ") };
+                match grants.iter_mut().find(|(o, w, g, _)| o == object && *w == what && *g == option) {
+                    Some((_, _, _, roles)) => roles.push(role.clone()),
+                    None => grants.push((object.clone(), what, option, vec![role.clone()])),
+                }
             }
         }
-        let mut grants: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
-        for (object, role, missing, all) in lacks {
-            let what = if missing.join(",") == all { vec!["all".to_string()] } else { missing };
-            match grants.iter_mut().find(|(o, p, _)| *o == object && *p == what) {
-                Some((_, _, roles)) => roles.push(role),
-                None => grants.push((object, what, vec![role])),
-            }
-        }
-        // Each name written as the plan writes it, without a schema the migrations' search_path reads.
-        let mut statements: Vec<String> = grants.into_iter().map(|(object, privileges, roles)| format!("grant {} on {object} to {}", privileges.join(", "), roles.join(", "))).collect();
-        crate::diff::postgres::style_statements(shadows.db(c), &mut statements, &Default::default()).await?;
+        let statements = grants.into_iter().map(|(object, what, option, roles)| format!("grant {what} on {object} to {}{}", roles.join(", "), if option { " with grant option" } else { "" })).collect();
         Ok(Ok(statements))
     }
     .await;
@@ -8512,27 +8511,28 @@ async fn stated_grants(server: &mut Server, opts: &Options, files: &[Migration],
 }
 
 /// Each object's privileges the Data API's roles hold, by object (as a grant names it, with its
-/// schema: `table public.notes`, `function public.ping()`), role, its privileges and all those its
-/// kind has, lowercase, sorted and comma-joined. Not in a schema the platform makes for itself, which
-/// no migration writes to.
+/// schema: `table public.notes`, `function public.ping()`), role, its privileges (lowercase and
+/// sorted, each with whether it carries the grant option) and all those its kind has, comma-joined.
+/// Not in a schema the platform makes for itself, which no migration writes to, nor a session's own
+/// temporary schema.
 #[cfg(feature = "cli")]
-async fn api_grants(db: &mut Db) -> Result<Vec<(String, String, Vec<String>, String)>, Error> {
+async fn api_grants(db: &mut Db) -> Result<Vec<(String, String, Vec<(String, bool)>, String)>, Error> {
     let roles = crate::catalog::PLATFORM_API_ROLES.iter().map(|r| crate::db::literal(r)).collect::<Vec<_>>().join(", ");
-    let schemas = crate::catalog::not_platform_schema("n");
+    let schemas = format!("{} and {}", crate::catalog::PG_USER_NS, crate::catalog::not_platform_schema("n"));
     // Every name with its schema, whatever search_path the SQL left the session with.
     db.exec("set search_path = ''").await?;
     let rows = db
         .rows(&format!(
-            "select o.object, r.rolname as role, string_agg(lower(a.privilege_type), ',' order by lower(a.privilege_type)) as privileges,
+            "select o.object, r.rolname as role, string_agg(lower(a.privilege_type) || case when a.is_grantable then '*' else '' end, ',' order by lower(a.privilege_type)) as privileges,
                (select string_agg(lower(d.privilege_type), ',' order by lower(d.privilege_type)) from aclexplode(acldefault(o.kind, o.owner)) d) as every
              from (
                select format('%s %s', case c.relkind when 'S' then 'sequence' else 'table' end, c.oid::regclass) as object, c.relacl as acl, c.relowner as owner, case c.relkind when 'S' then 's' else 'r' end::\"char\" as kind
                from pg_class c join pg_namespace n on n.oid = c.relnamespace
-               where c.relkind in ('r', 'p', 'v', 'm', 'f', 'S') and n.nspname not in ('pg_catalog', 'information_schema') and {schemas} and c.relacl is not null
+               where c.relkind in ('r', 'p', 'v', 'm', 'f', 'S') and {schemas} and c.relacl is not null
                union all
                select format('%s %s', case p.prokind when 'p' then 'procedure' else 'function' end, p.oid::regprocedure), p.proacl, p.proowner, 'f'::\"char\"
                from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-               where n.nspname not in ('pg_catalog', 'information_schema') and {schemas} and p.proacl is not null
+               where {schemas} and p.proacl is not null
              ) o, aclexplode(o.acl) a join pg_roles r on r.oid = a.grantee
              where r.rolname in ({roles})
              group by o.object, r.rolname, o.kind, o.owner
@@ -8540,7 +8540,8 @@ async fn api_grants(db: &mut Db) -> Result<Vec<(String, String, Vec<String>, Str
         ))
         .await;
     db.exec("reset search_path").await?;
-    Ok(rows?.iter().map(|r| (r.text("object").to_string(), r.text("role").to_string(), r.text("privileges").split(',').map(str::to_string).collect(), r.text("every").to_string())).collect())
+    let privileges = |text: &str| text.split(',').map(|p| (p.trim_end_matches('*').to_string(), p.ends_with('*'))).collect();
+    Ok(rows?.iter().map(|r| (r.text("object").to_string(), r.text("role").to_string(), privileges(r.text("privileges")), r.text("every").to_string())).collect())
 }
 
 /// The database's schema as SQL that makes it, for init's schema.sql, `db introspect` and a `migrate
