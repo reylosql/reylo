@@ -8858,22 +8858,32 @@ create trigger kids_note after insert on kids begin update parents set name = na
     /// the development database's default privileges give it too, as a Supabase database that
     /// exposes new tables to the API does: a database that exposes none, as a new project does, gets
     /// it from the migration. A grant added later, which changes nothing on the development
-    /// database, is a migration of its own.
+    /// database, is a migration of its own, in a file apart from an index built concurrently; and a
+    /// schema.sql that names everything with its schema, as a dump does, asks for nothing more once
+    /// the migrations make it.
     pub async fn a_stated_grant_supabase_also_gives_by_default_is_written(mut p: P) {
         as_supabase_makes_it(&p, true).await;
-        let ping = "create function ping() returns int language sql as 'select 1';\n\ngrant execute on function ping() to anon;\n";
-        p.schema(&format!("create table notes (id int primary key);\n\ngrant select on table notes to anon;\n\ngrant all on table notes to service_role;\n\ncreate sequence counter;\n\ngrant usage on sequence counter to authenticated;\n\n{ping}"));
+        let head = "select pg_catalog.set_config('search_path', '', false);\n\ncreate table public.notes (id int primary key, title text);\n\n";
+        let rest = "grant all on table public.notes to service_role;\n\ncreate sequence public.counter;\n\ngrant usage on sequence public.counter to authenticated;\n\ncreate function public.ping() returns int language sql as 'select 1';\n\ngrant execute on function public.ping() to anon;\n";
+        p.schema(&format!("{head}grant select on table public.notes to anon;\n\n{rest}"));
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "notes", &Default::default(), log).await).await, 0, "{}", p.peek());
-        let notes = p.files().into_iter().map(|f| std::fs::read_to_string(p.dir.join("migrations").join(f)).unwrap()).collect::<String>();
+        let read = |p: &P| p.files().into_iter().map(|f| std::fs::read_to_string(p.dir.join("migrations").join(f)).unwrap()).collect::<Vec<_>>();
+        let notes = read(&p).concat();
         assert_has!(notes.clone(), r"grant select on table notes to anon;");
         assert_has!(notes.clone(), r"grant all on table notes to service_role;");
         assert_has!(notes.clone(), r"grant usage on sequence counter to authenticated;");
         assert_has!(notes, r"grant execute on function ping\(\) to anon;");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
-        p.schema(&format!("create table notes (id int primary key);\n\ngrant select on table notes to anon, authenticated;\n\ngrant all on table notes to service_role;\n\ncreate sequence counter;\n\ngrant usage on sequence counter to authenticated;\n\n{ping}"));
+        p.schema(&format!("{head}create index notes_title on public.notes (title);\n\ngrant select on table public.notes to anon, authenticated;\n\n{rest}"));
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "readers", &Default::default(), log).await).await, 0, "{}", p.peek());
-        assert_eq!(p.files().len(), 2, "{}", p.peek());
+        let files = read(&p);
+        assert!(files.iter().any(|f| f.contains("grant select on table notes to authenticated;")), "{files:?}");
+        assert!(!files.iter().any(|f| f.contains("concurrently") && f.contains("grant ")), "{files:?}");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "again", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let again = read(&p);
+        assert_eq!(again.len(), files.len() + 1);
+        assert!(!again.last().unwrap().contains("grant "), "{}", again.last().unwrap());
         let q = P::new(p.d).await.unwrap();
         as_supabase_makes_it(&q, false).await;
         p.url = q.url.clone();

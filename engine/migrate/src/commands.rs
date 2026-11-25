@@ -8163,7 +8163,7 @@ async fn columns_renamed_first(db: &mut Db, plan: &crate::diff::Plan, current: &
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 #[cfg(feature = "cli")]
 async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, added: &[String], migration: &str, choices: &Choices, log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
-    let first = draft_with(opts, files, schema_sql, target_name, added, migration, choices, &[], log).await?;
+    let first = draft_with(opts, files, schema_sql, target_name, added, migration, choices, &[], true, log).await?;
     // On Postgres and MySQL, each command a refusal suggests is tried, and takes `--blocking` where
     // the migration it writes would be refused for nothing else: one more run would only add it.
     let readings: Vec<Choices> = match &first {
@@ -8180,7 +8180,7 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
     };
     let mut rewrites = Vec::new();
     for r in readings {
-        if let Ok(Err(problems)) = draft_with(opts, files, schema_sql, target_name, added, migration, &r, &[], &mut |_: &str| {}).await {
+        if let Ok(Err(problems)) = draft_with(opts, files, schema_sql, target_name, added, migration, &r, &[], false, &mut |_: &str| {}).await {
             if !problems.is_empty() && problems.iter().all(|p| p.code == "blocks-writes") {
                 rewrites.push((r, problems.iter().flat_map(|p| p.hazards.iter().cloned()).collect()));
             }
@@ -8189,14 +8189,15 @@ async fn draft(opts: &Options, files: &[Migration], schema_sql: &str, target_nam
     if rewrites.is_empty() {
         return Ok(first);
     }
-    draft_with(opts, files, schema_sql, target_name, added, migration, choices, &rewrites, &mut |_: &str| {}).await
+    draft_with(opts, files, schema_sql, target_name, added, migration, choices, &rewrites, true, &mut |_: &str| {}).await
 }
 
 /// `draft`, with the suggested commands `rewrites` names (each as it states its flags, without
-/// `--blocking`, with what holds the lock) taking `--blocking`, and the refusal saying why.
+/// `--blocking`, with what holds the lock) taking `--blocking`, and the refusal saying why; on
+/// Supabase, with the grants schema.sql states ([`stated_grants`]) where `grants`.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 #[cfg(feature = "cli")]
-async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, added: &[String], migration: &str, choices: &Choices, rewrites: &[(Choices, Vec<String>)], log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
+async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, target_name: &str, added: &[String], migration: &str, choices: &Choices, rewrites: &[(Choices, Vec<String>)], grants: bool, log: Log<'_>) -> Result<Result<Drafted, Vec<Problem>>, Error> {
     let drafted = |texts: Vec<String>, code: i32, notes: Vec<String>, empty: bool| Drafted { texts, code, notes, empty, target: target_name.to_string(), lock_safe: false, commits: 0, changes: vec![] };
     let mut db = Db::open(opts).await?;
     let mut problems = out_of_reach(&mut db, &opts.url).await?;
@@ -8427,22 +8428,28 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
     .await;
     shadows.finish().await;
     // On Supabase, a grant to the Data API's roles that schema.sql states is written even where the
-    // target's default privileges give it too: a database whose settings give less needs it.
+    // target's default privileges give it too: a database whose settings give less needs it. Not to
+    // a migration left empty to write by hand, which runs no plan.
     let result = match result {
-        Ok(Ok(mut drafted)) if drafted.code == 0 && server.is_platform() => match stated_grants(&mut server, opts, files, schema_sql, &drafted.texts).await {
-            Ok(grants) if !grants.is_empty() => {
-                let text = grants.iter().map(|g| format!("{g};")).collect::<Vec<_>>().join("\n");
-                match drafted.texts.last_mut().filter(|_| !drafted.empty) {
-                    Some(last) => *last = format!("{}\n\n{text}\n", last.trim_end()),
-                    None => drafted.texts = vec![format!("{text}\n")],
+        Ok(Ok(mut drafted)) if grants && drafted.code == 0 && server.is_platform() && (drafted.empty || drafted.texts.iter().any(|t| !t.trim().is_empty())) => {
+            match stated_grants(&mut server, opts, files, schema_sql, &drafted.texts).await {
+                Ok(Ok(grants)) if !grants.is_empty() => {
+                    let text = format!("{}\n", grants.iter().map(|g| format!("{g};")).collect::<Vec<_>>().join("\n"));
+                    // After the last file, or in one of their own where it runs alone, as an index
+                    // built concurrently does.
+                    match drafted.texts.last_mut().filter(|last| !drafted.empty && !crate::sql::runs_alone(last, Dialect::Postgres)) {
+                        Some(last) => *last = format!("{}\n\n{text}", last.trim_end()),
+                        None if drafted.empty => drafted.texts = vec![text],
+                        None => drafted.texts.push(text),
+                    }
+                    drafted.changes.extend(grants.iter().map(|g| format!("  {} {g}", paint("green", "+"))));
+                    drafted.empty = false;
                 }
-                drafted.changes.extend(grants.iter().map(|g| format!("  {} {g}", paint("green", "+"))));
-                drafted.empty = false;
-                Ok(Ok(drafted))
+                Ok(Ok(_)) => {}
+                Ok(Err(why)) | Err(Error(why)) => drafted.notes.push(format!("  {} It may leave out a grant {target_name} states to the Data API's roles: {why}", paint("yellow", "!"))),
             }
-            Ok(_) => Ok(Ok(drafted)),
-            Err(e) => Err(e),
-        },
+            Ok(Ok(drafted))
+        }
         other => other,
     };
     server.close().await;
@@ -8451,10 +8458,9 @@ async fn draft_with(opts: &Options, files: &[Migration], schema_sql: &str, targe
 
 /// The grants to the Data API's roles that `schema_sql` states and the migrations `files` and the
 /// drafted `texts` don't make, as statements: read on shadows that take no default privileges, where
-/// only what the SQL states grants those roles anything. None where either side fails to replay,
-/// which the draft has said already.
+/// only what the SQL states grants those roles anything; or why they can't be read.
 #[cfg(feature = "cli")]
-async fn stated_grants(server: &mut Server, opts: &Options, files: &[Migration], schema_sql: &str, texts: &[String]) -> Result<Vec<String>, Error> {
+async fn stated_grants(server: &mut Server, opts: &Options, files: &[Migration], schema_sql: &str, texts: &[String]) -> Result<Result<Vec<String>, String>, Error> {
     server.grant_by_default_nothing();
     let drafted: Vec<Migration> = texts.iter().enumerate().map(|(i, sql)| Migration { name: format!("drafted {}", i + 1), time: String::new(), path: PathBuf::new(), sql: sql.clone() }).collect();
     let all: Vec<&str> = files.iter().chain(&drafted).map(|f| f.sql.as_str()).chain([schema_sql]).collect();
@@ -8462,13 +8468,16 @@ async fn stated_grants(server: &mut Server, opts: &Options, files: &[Migration],
     let result = async {
         let a = shadows.lane();
         shadows.push(a, [Step::script("schema.sql", schema_sql)]);
-        if shadows.open(a).await?.is_err() {
-            return Ok(vec![]);
+        if let Err((m, e)) = shadows.open(a).await? {
+            return Ok(Err(format!("{m} fails without default privileges: {e}")));
         }
+        // The migrations' replay is kept, as the next draft starts from it.
         let c = shadows.lane();
-        shadows.push(c, files.iter().chain(&drafted).map(Step::of));
-        if shadows.open(c).await?.is_err() {
-            return Ok(vec![]);
+        shadows.push(c, files.iter().map(Step::of));
+        shadows.mark(c);
+        shadows.push(c, drafted.iter().map(Step::of));
+        if let Err((m, e)) = shadows.open(c).await? {
+            return Ok(Err(format!("{m} fails without default privileges: {e}")));
         }
         let stated = api_grants(shadows.db(a)).await?;
         let made = api_grants(shadows.db(c)).await?;
@@ -8489,19 +8498,28 @@ async fn stated_grants(server: &mut Server, opts: &Options, files: &[Migration],
                 None => grants.push((object, what, vec![role])),
             }
         }
-        Ok(grants.into_iter().map(|(object, privileges, roles)| format!("grant {} on {object} to {}", privileges.join(", "), roles.join(", "))).collect())
+        // Written as the plan writes names: unqualified in `public`.
+        let shown = |object: &str| match object.split_once(' ') {
+            Some((kind, name)) => format!("{kind} {}", name.strip_prefix("public.").unwrap_or(name)),
+            None => object.to_string(),
+        };
+        Ok(Ok(grants.into_iter().map(|(object, privileges, roles)| format!("grant {} on {} to {}", privileges.join(", "), shown(&object), roles.join(", "))).collect()))
     }
     .await;
     shadows.finish().await;
     result
 }
 
-/// Each object's privileges the Data API's roles hold, by object (as a grant names it: `table
-/// notes`, `function ping()`), role, its privileges and all those its kind has, lowercase, sorted
-/// and comma-joined.
+/// Each object's privileges the Data API's roles hold, by object (as a grant names it, with its
+/// schema: `table public.notes`, `function public.ping()`), role, its privileges and all those its
+/// kind has, lowercase, sorted and comma-joined. Not in a schema the platform makes for itself, which
+/// no migration writes to.
 #[cfg(feature = "cli")]
 async fn api_grants(db: &mut Db) -> Result<Vec<(String, String, Vec<String>, String)>, Error> {
     let roles = crate::catalog::PLATFORM_API_ROLES.iter().map(|r| crate::db::literal(r)).collect::<Vec<_>>().join(", ");
+    let schemas = crate::catalog::not_platform_schema("n");
+    // Every name with its schema, whatever search_path the SQL left the session with.
+    db.exec("set search_path = ''").await?;
     let rows = db
         .rows(&format!(
             "select o.object, r.rolname as role, string_agg(lower(a.privilege_type), ',' order by lower(a.privilege_type)) as privileges,
@@ -8509,18 +8527,19 @@ async fn api_grants(db: &mut Db) -> Result<Vec<(String, String, Vec<String>, Str
              from (
                select format('%s %s', case c.relkind when 'S' then 'sequence' else 'table' end, c.oid::regclass) as object, c.relacl as acl, c.relowner as owner, case c.relkind when 'S' then 's' else 'r' end::\"char\" as kind
                from pg_class c join pg_namespace n on n.oid = c.relnamespace
-               where c.relkind in ('r', 'p', 'v', 'm', 'f', 'S') and n.nspname not in ('pg_catalog', 'information_schema') and c.relacl is not null
+               where c.relkind in ('r', 'p', 'v', 'm', 'f', 'S') and n.nspname not in ('pg_catalog', 'information_schema') and {schemas} and c.relacl is not null
                union all
                select format('%s %s', case p.prokind when 'p' then 'procedure' else 'function' end, p.oid::regprocedure), p.proacl, p.proowner, 'f'::\"char\"
                from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-               where n.nspname not in ('pg_catalog', 'information_schema') and p.proacl is not null
+               where n.nspname not in ('pg_catalog', 'information_schema') and {schemas} and p.proacl is not null
              ) o, aclexplode(o.acl) a join pg_roles r on r.oid = a.grantee
              where r.rolname in ({roles})
              group by o.object, r.rolname, o.kind, o.owner
              order by 1, 2"
         ))
-        .await?;
-    Ok(rows.iter().map(|r| (r.text("object").to_string(), r.text("role").to_string(), r.text("privileges").split(',').map(str::to_string).collect(), r.text("every").to_string())).collect())
+        .await;
+    db.exec("reset search_path").await?;
+    Ok(rows?.iter().map(|r| (r.text("object").to_string(), r.text("role").to_string(), r.text("privileges").split(',').map(str::to_string).collect(), r.text("every").to_string())).collect())
 }
 
 /// The database's schema as SQL that makes it, for init's schema.sql, `db introspect` and a `migrate
