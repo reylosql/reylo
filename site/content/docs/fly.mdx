@@ -45,13 +45,11 @@ RUN --mount=type=secret,id=DIRECT_DATABASE_URL \
   DIRECT_DATABASE_URL="$(cat /run/secrets/DIRECT_DATABASE_URL)" npx reylo migrate deploy --dry-run -- npm run build
 ```
 
-Deploy with it, from your shell:
+The build connects to the cluster over Fly's private network, which Depot's builders can't reach. So deploy from your shell on Fly's own builder:
 
 ```terminal
-$ fly deploy --build-secret DIRECT_DATABASE_URL="postgresql://…@direct.<cluster-id>.flympg.net/…"
+$ fly deploy --depot=false --build-secret DIRECT_DATABASE_URL="postgresql://…@direct.<cluster-id>.flympg.net/…"
 ```
-
-The build connects to the cluster, so it has to reach Fly's private network.
 
 ## Other images
 
