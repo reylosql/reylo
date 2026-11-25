@@ -46,11 +46,13 @@ impl SchemaOptions {
     }
 }
 
-/// The schema admitting null as well: a bare `type` becomes the two-member list, anything else
-/// an `anyOf` with null; the empty schema already admits everything.
+/// The schema admitting null as well: a bare `type` becomes the two-member list, unless it is
+/// `null` already, and anything else an `anyOf` with null; the empty schema already admits
+/// everything.
 pub fn nullable(schema: Value) -> Value {
     match schema {
         Value::Object(map) if map.len() == 1 && map.contains_key("type") => match &map["type"] {
+            Value::String(t) if t == "null" => Value::Object(map),
             Value::String(t) => json!({"type": [t, "null"]}),
             _ => json!({"anyOf": [Value::Object(map), {"type": "null"}]}),
         },

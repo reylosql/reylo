@@ -22,10 +22,10 @@ type Analysis = {
   value?: boolean;
 };
 
-/** The schema admitting null as well: a bare `type` gets `"null"` beside it, anything else an `anyOf` with null. */
+/** The schema admitting null as well: a bare `type` gets `"null"` beside it, unless it is `"null"` already, and anything else an `anyOf` with null. */
 function nullable(schema: Schema | JsonSchema): Schema | JsonSchema {
   if (schema === true || (typeof schema === "object" && Object.keys(schema).length === 0)) return schema;
-  if (typeof schema === "object" && Object.keys(schema).length === 1 && typeof schema.type === "string") return { type: [schema.type, "null"] };
+  if (typeof schema === "object" && Object.keys(schema).length === 1 && typeof schema.type === "string") return schema.type === "null" ? schema : { type: [schema.type, "null"] };
   return { anyOf: [schema, { type: "null" }] };
 }
 
