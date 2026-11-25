@@ -48,7 +48,7 @@ RUN --mount=type=secret,id=DIRECT_DATABASE_URL \
 The build connects to the cluster over Fly's private network, which Depot's builders can't reach. So deploy from your shell on Fly's own builder:
 
 ```terminal
-$ fly deploy --depot=false --build-secret DIRECT_DATABASE_URL="postgresql://…@direct.<cluster-id>.flympg.net/…"
+$ fly deploy --remote-only --depot=false --build-secret DIRECT_DATABASE_URL="postgresql://…@direct.<cluster-id>.flympg.net/…"
 ```
 
 ## Other images
