@@ -458,6 +458,10 @@ export function isTurso(c: AnyClient): boolean {
 
 async function executeAsync(c: AnyClient | null | undefined, query: QueryModule, params: ParamsInput): Promise<unknown[]> {
   if (c == null || (typeof c !== "object" && typeof c !== "function")) throw unsupported(c, query.dialect);
+  // Effect SQL's client has an unsafe() whose statement is an Effect, which an await never runs:
+  // taken for Bun.sql's on SQLite, a read gave no rows and a write ran nothing. Effect 4 brands
+  // the client with a string, Effect 3's @effect/sql with a symbol.
+  if ("~effect/sql/SqlClient" in c || Symbol.for("@effect/sql/SqlClient") in c) throw new TypeError(`reylo cannot run a statement on an Effect SQL client: .run() takes a driver's own client, and Effect SQL's statements are Effects, which only Effect's runtime runs.`);
   checkParams(query, params);
   if (query.dialect === "postgres") await checkMoneyLocale(c, query);
   const rows = await query.runtime.run(c, query, statement(query, params));

@@ -250,6 +250,32 @@ $ reylo migrate deploy --dry-run
     · 20261104140347_add_bio.sql
 ```
 
+It says what each pending migration blocks and drops, written by hand or not. A constraint your rows already break fails it:
+
+```sql title="20261124235900_tidy_users.sql"
+alter table users drop column bio;
+alter table users add constraint users_plan_check check (plan in ('free', 'pro'));
+```
+
+Try it on production:
+
+```terminal
+$ reylo migrate deploy --dry-run --url $PROD_URL
+✓ This database is as its migrations left it
+✓ The migrations match reylo/schema.sql
+✓ Tried the pending migration on a shadow database:
+    · 20261124235900_tidy_users.sql
+      ! It checks every row of users while it blocks reads and writes to it
+      ! It drops users.bio, which holds a value in 1403 rows on this database
+      ✗ It fails on this database: 8 rows break users_plan_check
+        List them:
+          select * from users where not (plan = ANY (ARRAY['free'::text, 'pro'::text]));
+
+✗ The deploy would fail on rows this database holds
+  Fix the rows, or the migration where no database has run it yet, then try again:
+    reylo migrate deploy --dry-run
+```
+
 A failed migration rolls back and records nothing. Fix the file, run `reylo migrate dev`, and deploy again. Where a database already ran the old version, write a new migration instead.
 
 A migration can also fail on rows the database already holds. The refusal gives a query that lists them, to fix before you deploy again:

@@ -81,6 +81,10 @@ $ reylo migrate deploy
 $ reylo migrate status
 ```
 
+Run the deploy before your new code goes live. On Postgres and MySQL, two deploys at once take turns. So each instance of your app can instead run [`migrate()`](#api) as it starts. An older release then won't start on a database a newer one migrated.
+
+Your old code keeps serving while the deploy runs, and after one that fails. So drop a column only once no running code reads it.
+
 ### Starting over
 
 Rebuild your development database from your migrations, or empty it:
