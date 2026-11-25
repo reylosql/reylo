@@ -297,7 +297,7 @@ export type EffectSql = {
     | {
         readonly dialect: "postgres";
         readonly key: object;
-        text(text: string, values: (string | null)[]): Promise<{ readonly fields: readonly { readonly name: string; readonly dataTypeId: number }[]; readonly rows: readonly (readonly (string | null)[])[] }>;
+        text(text: string, values: (string | null)[]): Promise<{ readonly fields: readonly { readonly name: string; readonly dataTypeId: number }[]; readonly values: readonly (readonly (string | null)[])[] }>;
       };
 };
 

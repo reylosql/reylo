@@ -10,7 +10,7 @@
 // - MySQL (`@effect/sql-mysql2`): the connection keeps mysql2's PoolConnection on `conn`, which
 //   `.run()` takes as it is, so the statement runs with Reylo's own per-query options.
 // - Postgres (`@effect/sql-pg`): Effect's own client of the wire protocol reads every result in
-//   the binary format and decodes it with its own codecs; its `queryText` reads one statement's
+//   the binary format and decodes it with its own codecs; its `queryTextValues` reads one statement's
 //   columns in the text format instead, each value the server's text, which Reylo decodes as it
 //   does pg's (src/decode.ts).
 // - SQLite (`@effect/sql-sqlite-node`, `-sqlite-bun`, `-sqlite-wasm`, `-sqlite-do`, `-d1`,
@@ -62,7 +62,7 @@ export function effect<Params, Row, C extends Cardinality, D extends Dialect>(qu
     const failure = (error: unknown) => (SqlError.isSqlError(error) ? error : undefined);
     if (query.dialect === "postgres") {
       const pg = sql as SqlClient.SqlClient & Partial<PgText>;
-      if (typeof pg.queryText !== "function") return yield* Effect.die(new TypeError(`reylo cannot read this Effect Postgres client's results: it decodes each value itself from the server's text, which @effect/sql-pg's queryText() hands over, and this version of @effect/sql-pg has none. Update @effect/sql-pg.`));
+      if (typeof pg.queryTextValues !== "function") return yield* Effect.die(new TypeError(`reylo cannot read this Effect Postgres client's results: it decodes each value itself from the server's text, which @effect/sql-pg's queryTextValues() hands over, and this version of @effect/sql-pg has none. Update @effect/sql-pg.`));
       return yield* settle((signal) => query.run(postgresClient(pg as PgText & object, context, signal) as never, ...args), failure);
     }
     return yield* settle((signal) => query.run(sqliteClient(sql, context, signal) as never, ...args), failure);
@@ -154,18 +154,18 @@ function sqliteClient(sql: SqlClient.SqlClient, context: Context.Context<never>,
   };
 }
 
-/** `queryText` of @effect/sql-pg's client: one statement, every column in the text format, its rows by position. */
+/** `queryTextValues` of @effect/sql-pg's client: one statement, every column in the text format, its rows by position. */
 type PgText = {
-  readonly queryText: (sql: string, params?: ReadonlyArray<unknown>) => Effect.Effect<{ readonly fields: ReadonlyArray<{ readonly name: string; readonly dataTypeId: number }>; readonly rows: ReadonlyArray<ReadonlyArray<string | null>> }, SqlError.SqlError>;
+  readonly queryTextValues: (sql: string, params?: ReadonlyArray<unknown>) => Effect.Effect<{ readonly fields: ReadonlyArray<{ readonly name: string; readonly dataTypeId: number }>; readonly values: ReadonlyArray<ReadonlyArray<string | null>> }, SqlError.SqlError>;
 };
 
 /**
  * The client `.run()` takes for a Postgres statement on Effect SQL (src/decode.ts): each statement
- * through the client's `queryText`, in the Effect's context, so that inside `withTransaction` it
+ * through the client's `queryTextValues`, in the Effect's context, so that inside `withTransaction` it
  * runs on the transaction's connection. What Reylo learns of the database's own types it keeps
  * under the client.
  */
 function postgresClient(pg: PgText & object, context: Context.Context<never>, signal: AbortSignal): EffectSql {
   const runPromise = Effect.runPromiseWith(context);
-  return { [EFFECT_SQL]: { dialect: "postgres", key: pg, text: (text, values) => runPromise(pg.queryText(text, values), { signal }) } };
+  return { [EFFECT_SQL]: { dialect: "postgres", key: pg, text: (text, values) => runPromise(pg.queryTextValues(text, values), { signal }) } };
 }

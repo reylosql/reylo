@@ -266,12 +266,12 @@ async function pgFamily(key: object, run: (types: object) => Promise<PgResult>, 
 }
 
 /**
- * A statement on Effect SQL's Postgres client, whose `queryText` hands over every value as the
+ * A statement on Effect SQL's Postgres client, whose `queryTextValues` hands over every value as the
  * server's text, by position: each decoded by Reylo's table, as on pg, under the module's names
  * where the result is still its columns (`namesInResult`), else under the result's.
  */
 async function effectPostgres(effect: Extract<EffectSql[typeof EFFECT_SQL], { dialect: "postgres" }>, text: string, values: (string | null)[], columns: Columns | undefined): Promise<unknown[]> {
-  const load: Load = async (sql) => (await effect.text(sql, [])).rows as (string | null)[][];
+  const load: Load = async (sql) => (await effect.text(sql, [])).values as (string | null)[][];
   return pgFamily(
     effect.key,
     async (types) => {
@@ -280,7 +280,7 @@ async function effectPostgres(effect: Extract<EffectSql[typeof EFFECT_SQL], { di
       const build = rowOf(columns?.length ? namesInResult(columns.map(([name]) => name), names) : names);
       const decoders = result.fields.map((f) => (types as ReturnType<typeof pgTypes>["table"]).getTypeParser(f.dataTypeId));
       return {
-        rows: result.rows.map((row) => build(row.map((v, i) => (v === null ? null : decoders[i]!(v))))),
+        rows: result.values.map((row) => build(row.map((v, i) => (v === null ? null : decoders[i]!(v))))),
         fields: result.fields.map((f) => ({ name: f.name, dataTypeID: f.dataTypeId })),
       };
     },

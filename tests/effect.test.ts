@@ -213,7 +213,7 @@ test("Effect's mysql2 client gives the driver matrix's typed row as .run() gives
   }
 });
 
-test("Effect's pg client gives the driver matrix's typed row as .run() gives it on postgres.js, through queryText(), and takes it back", { skip: pgLive }, async () => {
+test("Effect's pg client gives the driver matrix's typed row as .run() gives it on postgres.js, through queryTextValues(), and takes it back", { skip: pgLive }, async () => {
   const database = await postgresDatabase(
     "reylo_effect",
     `create type mood as enum ('ok', 'sad');
@@ -245,12 +245,12 @@ test("Effect's pg client gives the driver matrix's typed row as .run() gives it 
         )
         .pipe(Effect.flip);
       const duplicate = yield* Effect.flip(effect(insert, { k: 1 }));
-      return { rows, same, inside, after: yield* effect(count), duplicate, queryText: "queryText" in sql };
+      return { rows, same, inside, after: yield* effect(count), duplicate, queryTextValues: "queryTextValues" in sql };
     });
     const exit = await Effect.runPromise(Effect.exit(program).pipe(Effect.provide(PgClient.layer({ url: Redacted.make(database.url) }))));
     const client = await Effect.runPromise(SqlClient.SqlClient.pipe(Effect.provide(PgClient.layer({ url: Redacted.make(database.url) }))));
-    if (!("queryText" in client)) {
-      // A release of @effect/sql-pg before queryText(): its own codecs decode every value, which Reylo cannot read back.
+    if (!("queryTextValues" in client)) {
+      // A release of @effect/sql-pg before queryTextValues(): its own codecs decode every value, which Reylo cannot read back.
       assert.match(String((defect(exit) as Error).message), /this version of @effect\/sql-pg has none\. Update @effect\/sql-pg/);
       return;
     }
