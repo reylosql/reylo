@@ -7927,7 +7927,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
         let posts = "create table posts (id uuid primary key default extensions.uuid_generate_v4());\n";
         p.schema(posts);
         p.file("20261124000000_posts.sql", posts);
-        p.file("20261124000001_reinstall.sql", "drop extension \"uuid-ossp\" cascade;\n\ncreate extension \"uuid-ossp\" with schema extensions;\n\nalter table posts alter column id set default extensions.uuid_generate_v4();\n");
+        p.file("20261124000001_reinstall.sql", "drop extension pg_stat_statements, \"uuid-ossp\" cascade;\n\ncreate extension \"uuid-ossp\" with schema extensions;\n\ncreate extension pg_stat_statements with schema extensions;\n\nalter table posts alter column id set default extensions.uuid_generate_v4();\n");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
         assert_eq!(p.run(async |o, log| reylo_migrate::db_reset(o, false, log).await).await, 0, "{}", p.peek());

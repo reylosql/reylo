@@ -3056,34 +3056,63 @@ fn quoted_name(text: &str) -> String {
 
 /// The extensions the project's migrations take a database to have begun without: those whose first
 /// statement, in the order the migrations run, creates them whether or not the database has them
-/// already (with no `if not exists`), rather than dropping them first. By name: a word's lowercase.
+/// already (with no `if not exists`), or only if it hasn't but in a schema other than `extensions`,
+/// where Supabase keeps them, rather than dropping them first. By name: a word's lowercase.
 fn unconditional_extensions(opts: &Options) -> Vec<String> {
-    use crate::sql::TokenKind;
     let files = opts.migrations().map(|(files, _)| run_order(opts, &files)).unwrap_or_default();
-    let texts: Vec<String> = files.into_iter().map(|f| f.sql).collect();
+    extensions_begun_without(&files.iter().map(|f| f.sql.as_str()).collect::<Vec<_>>())
+}
+
+/// As [`unconditional_extensions`], of the migrations' texts in the order they run.
+fn extensions_begun_without(texts: &[&str]) -> Vec<String> {
+    use crate::sql::TokenKind;
     let name = |t: &crate::sql::Token| match t.kind {
         TokenKind::Word => Some(t.text.to_lowercase()),
         TokenKind::Quoted => Some(quoted_name(&t.text)),
         _ => None,
     };
-    // Each extension's first statement: whether it creates it unconditionally.
+    // Each extension's first statement: whether it takes the database to have begun without it.
     let mut first: Vec<(String, bool)> = Vec::new();
-    for text in &texts {
+    for text in texts {
         let tokens = crate::sql::tokenize(text, Dialect::Postgres);
         for k in 0..tokens.len() {
-            let touched = match (tokens[k].upper().as_str(), tokens.get(k + 1).map(|t| t.upper())) {
-                ("CREATE", Some(e)) if e == "EXTENSION" => tokens.get(k + 2).and_then(|t| if t.upper() == "IF" { tokens.get(k + 5).and_then(name).map(|n| (n, false)) } else { name(t).map(|n| (n, true)) }),
-                ("DROP", Some(e)) if e == "EXTENSION" => tokens.get(k + 2).and_then(|t| if t.upper() == "IF" { tokens.get(k + 4).and_then(name) } else { name(t) }).map(|n| (n, false)),
-                _ => None,
-            };
-            if let Some((n, unconditional)) = touched {
+            let mut touched: Vec<(String, bool)> = Vec::new();
+            match (tokens[k].upper().as_str(), tokens.get(k + 1).map(|t| t.upper())) {
+                ("CREATE", Some(e)) if e == "EXTENSION" => {
+                    let conditional = tokens.get(k + 2).is_some_and(|t| t.upper() == "IF");
+                    let at = if conditional { k + 5 } else { k + 2 };
+                    if let Some(n) = tokens.get(at).and_then(name) {
+                        // The schema it names, after an optional `with`.
+                        let mut j = at + 1;
+                        if tokens.get(j).is_some_and(|t| t.upper() == "WITH") {
+                            j += 1;
+                        }
+                        let schema = tokens.get(j).filter(|t| t.upper() == "SCHEMA").and_then(|_| tokens.get(j + 1)).and_then(name);
+                        touched.push((n, !conditional || schema.is_some_and(|s| s != "extensions")));
+                    }
+                }
+                ("DROP", Some(e)) if e == "EXTENSION" => {
+                    let mut j = if tokens.get(k + 2).is_some_and(|t| t.upper() == "IF") { k + 4 } else { k + 2 };
+                    // Each name of its list.
+                    while let Some(n) = tokens.get(j).and_then(name) {
+                        touched.push((n, false));
+                        if tokens.get(j + 1).is_some_and(|t| t.text == ",") {
+                            j += 2;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for (n, without) in touched {
                 if !first.iter().any(|(f, _)| *f == n) {
-                    first.push((n, unconditional));
+                    first.push((n, without));
                 }
             }
         }
     }
-    first.into_iter().filter(|(_, unconditional)| *unconditional).map(|(n, _)| n).collect()
+    first.into_iter().filter(|(_, without)| *without).map(|(n, _)| n).collect()
 }
 
 /// The extensions the project's files create that its shadows leave to them: all but one every new
@@ -10428,6 +10457,18 @@ mod tests {
         more.push("column public.t.x integer".into());
         assert_eq!(sides(&more, &two), (true, false));
         assert_eq!(sides(&[two.clone(), vec!["column public.t.x integer".into()]].concat(), &three), (true, true));
+    }
+
+    #[test]
+    fn an_extension_begun_without_is_read_from_its_first_statement() {
+        let begun = |texts: &[&str]| extensions_begun_without(texts);
+        assert_eq!(begun(&["create extension pg_stat_statements with schema extensions;"]), ["pg_stat_statements"]);
+        assert!(begun(&["create extension if not exists \"uuid-ossp\";"]).is_empty());
+        assert!(begun(&["create extension if not exists \"uuid-ossp\" with schema extensions;"]).is_empty());
+        assert_eq!(begun(&["create extension if not exists \"uuid-ossp\" schema public;"]), ["uuid-ossp"]);
+        // A drop first, of any name its list holds, says it began with it.
+        assert!(begun(&["drop extension pg_stat_statements, \"uuid-ossp\" cascade;", "create extension \"uuid-ossp\" with schema extensions;"]).is_empty());
+        assert!(begun(&["insert into t values ('create extension pgcrypto');"]).is_empty());
     }
 
     #[test]
