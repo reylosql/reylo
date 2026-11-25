@@ -556,6 +556,19 @@ fn names_made(tree: Option<&N>) -> Vec<String> {
     }
 }
 
+/// Whether a statement gives `table` a constraint named `name`: adds one, or renames one to it.
+fn takes_constraint_name(tree: Option<&N>, table: &str, name: &str, tables: &BTreeMap<String, String>) -> bool {
+    let on = |r: Option<&RangeVar>| r.and_then(|r| tables.get(&named(r))).is_some_and(|t| t == table);
+    match tree {
+        Some(N::AlterTableStmt(a)) if on(a.relation.as_ref()) => a.cmds.iter().any(|c| match &c.node {
+            Some(N::AlterTableCmd(c)) if is(c.subtype, At::AtAddConstraint) => matches!(c.def.as_ref().and_then(|d| d.node.as_ref()), Some(N::Constraint(k)) if k.conname == name),
+            _ => false,
+        }),
+        Some(N::RenameStmt(r)) => is(r.rename_type, ObjectType::ObjectTabconstraint) && on(r.relation.as_ref()) && r.newname == name,
+        _ => false,
+    }
+}
+
 /// Whether a statement names the index `name`: alters, renames or comments on it, clusters its
 /// table on it, makes it the replica identity, or adds a constraint over it.
 fn names_index(tree: Option<&N>, name: &str) -> bool {
@@ -703,8 +716,9 @@ fn plan_lock_safe(plan: &Plan, existing: &Existing, build_first: bool) -> Option
                     !between.into_iter().any(|m| disturbs(trees[m].as_ref(), &table, &name, relations) || disturbs(trees[m].as_ref(), &referenced, &name, relations))
                 })
                 .collect();
-            // Nor where a statement before the swap that stays where it is takes its name.
-            if (k + 1..=at).any(|m| !moving.contains(&m) && names_made(trees[m].as_ref()).contains(&name)) {
+            // Nor where a statement before the swap that stays where it is gives its table a
+            // constraint of its name.
+            if (k + 1..=at).any(|m| !moving.contains(&m) && takes_constraint_name(trees[m].as_ref(), &table, &name, relations)) {
                 continue;
             }
             deferred.insert(k);
@@ -1240,13 +1254,20 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
     // its columns where the file makes it, the columns then made not null, the checks then
     // validated), whose key columns no not null or validated check holds it checks every row of.
     let mut nulled: BTreeSet<(String, String)> = BTreeSet::new();
-    // Which index each name the file has moved names: the catalog's under its name before the file
-    // ran, or the key columns of one the file made. A name with no entry is the catalog's own.
-    let mut bound: BTreeMap<(String, String), Result<String, Vec<String>>> = BTreeMap::new();
     // The constraints an earlier statement of the file dropped, which prove nothing after.
     let mut dropped: BTreeSet<(String, String)> = BTreeSet::new();
-    type Keyed = (String, Result<String, Vec<String>>, BTreeSet<String>, BTreeSet<(String, String)>, BTreeSet<(String, String)>);
-    let mut keyed: Vec<Keyed> = Vec::new();
+    // What the file does to index names, in order, read against the catalog once it is parsed.
+    enum Named {
+        /// An index it makes: its table as written, its name, its key columns.
+        Made(String, String, Vec<String>),
+        /// One it renames: as written, its name as stored, and the name it takes.
+        Renamed(String, String, String),
+        /// A primary key added over one: its table as written and as the catalog names it, the
+        /// index's name, and the columns then made not null, the checks then validated and the
+        /// constraints then dropped.
+        Keyed(String, String, String, BTreeSet<String>, BTreeSet<(String, String)>, BTreeSet<(String, String)>),
+    }
+    let mut named_events: Vec<Named> = Vec::new();
     let mut add = |table: &str, what: String| {
         let hazard = Hazard { table: table.to_string(), what };
         if !hazards.contains(&hazard) {
@@ -1286,10 +1307,8 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                                 made.insert(c.conname.clone());
                                 if is(c.contype, ConstrType::ConstrPrimary) {
                                     let set = nulled.iter().filter(|(t, _)| *t == table).map(|(_, column)| column.clone()).collect();
-                                    // In the table's schema, as written.
-                                    let schema = a.relation.as_ref().map(|r| r.schemaname.clone()).unwrap_or_default();
-                                    let index = bound.get(&(schema, c.indexname.clone())).cloned().unwrap_or_else(|| Ok(c.indexname.clone()));
-                                    keyed.push((table.clone(), index, set, validated.clone(), dropped.clone()));
+                                    let written = a.relation.as_ref().map(named).unwrap_or_default();
+                                    named_events.push(Named::Keyed(written, table.clone(), c.indexname.clone(), set, validated.clone(), dropped.clone()));
                                 }
                             }
                         } else if is(cmd.subtype, At::AtDropConstraint) {
@@ -1311,9 +1330,8 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                         Some(N::IndexElem(e)) if !e.name.is_empty() => Some(e.name.clone()),
                         _ => None,
                     }).collect();
-                    if let Some(columns) = columns {
-                        let schema = i.relation.as_ref().map(|r| r.schemaname.clone()).unwrap_or_default();
-                        bound.insert((schema, i.idxname.clone()), Err(columns));
+                    if let (Some(columns), Some(table)) = (columns, i.relation.as_ref()) {
+                        named_events.push(Named::Made(named(table), i.idxname.clone(), columns));
                     }
                     if !i.concurrent {
                         made.insert(i.idxname.clone());
@@ -1333,12 +1351,8 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                 }
                 Some(N::RenameStmt(r)) if is(r.rename_type, ObjectType::ObjectIndex) => {
                     made.insert(r.newname.clone());
-                    // The index under the old name moves to the new one, and the old name holds none.
                     if let Some(was) = &r.relation {
-                        let (old, new) = ((was.schemaname.clone(), was.relname.clone()), (was.schemaname.clone(), r.newname.clone()));
-                        let index = bound.remove(&old).unwrap_or_else(|| Ok(was.relname.clone()));
-                        bound.insert(new, index);
-                        bound.insert(old, Err(vec![]));
+                        named_events.push(Named::Renamed(named(was), was.relname.clone(), r.newname.clone()));
                     }
                 }
                 Some(N::TruncateStmt(t)) => {
@@ -1353,6 +1367,41 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
         }
         }
     });
+    // Which index each name the file has moved names, by its schema as the catalog resolves it: the
+    // catalog's under its name before the file ran, or the key columns of one the file made. A name
+    // with no entry is the catalog's own; one the file moved its index out of holds none.
+    let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let namespace_of = async |db: &mut Db, name: &str| -> Option<String> {
+        db.rows(&format!("select n.nspname as ns from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = to_regclass({})", literal(name))).await.ok()?.first().map(|r| r.text("ns").to_string())
+    };
+    let mut bound: BTreeMap<(String, String), Result<String, Vec<String>>> = BTreeMap::new();
+    let mut keyed = Vec::new();
+    for event in named_events {
+        match event {
+            Named::Made(table, name, columns) => {
+                if let Some(ns) = namespace_of(db, &table).await {
+                    bound.insert((ns, name), Err(columns));
+                }
+            }
+            Named::Renamed(written, old, new) => {
+                // Where the catalog has none of the name, the one the file made under it.
+                let made_as = {
+                    let mut by_name = bound.keys().filter(|(_, n)| *n == old).map(|(ns, _)| ns.clone());
+                    let first = by_name.next();
+                    if by_name.next().is_none() { first } else { None }
+                };
+                let Some(ns) = namespace_of(db, &written).await.or(made_as) else { continue };
+                let index = bound.remove(&(ns.clone(), old.clone())).unwrap_or_else(|| Ok(old.clone()));
+                bound.insert((ns.clone(), new), index);
+                bound.insert((ns, old), Err(vec![]));
+            }
+            Named::Keyed(written, table, index, set, validated, dropped) => {
+                let ns = namespace_of(db, &written).await;
+                let index = ns.and_then(|ns| bound.get(&(ns, index.clone())).cloned()).unwrap_or(Ok(index));
+                keyed.push((table, index, set, validated, dropped));
+            }
+        }
+    }
     for (table, index, set, validated, dropped) in keyed {
         let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
         let open = match &index {
@@ -1944,6 +1993,24 @@ mod tests {
         let swap = files.iter().find(|f| f.iter().any(|l| l.contains("drop constraint child_fk"))).unwrap_or_else(|| panic!("{files:?}"));
         assert!(swap.iter().any(|l| l.starts_with("alter table child add constraint child_fk foreign key (b, a)")), "{files:?}");
         assert!(files.iter().position(|f| f == swap) > files.iter().position(|f| f.iter().any(|l| l.contains("concurrently parent_b"))), "{files:?}");
+    }
+
+    #[test]
+    fn moves_a_foreign_key_named_as_the_new_key_with_it() {
+        // A foreign key and the key it references may share a name: they are on different tables.
+        let at = existing(&["cases", "case_notes"]).with_index("cases_id_key", "cases", 'u').with_foreign_key("case_notes", "cases_pkey", &["case_id"], "cases", &["id"]);
+        let files = lock_safe(
+            &plan(&[
+                "alter table case_notes drop constraint cases_pkey",
+                "alter table cases drop constraint cases_id_key",
+                "alter table cases add constraint cases_pkey primary key (id)",
+                "alter table case_notes add constraint cases_pkey foreign key (case_id) references cases(id)",
+            ]),
+            &at,
+        )
+        .unwrap();
+        assert_eq!(files[0], strings(&["create unique index concurrently cases_pkey on cases (id)"]), "{files:?}");
+        assert_eq!(files[1][0], "alter table case_notes drop constraint cases_pkey", "{files:?}");
     }
 
     #[test]
