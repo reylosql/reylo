@@ -175,6 +175,28 @@ struct Args {
     rest: Vec<String>,
 }
 
+/// The names a `--drop` value lists, split at each comma outside a quoted name, as a name with a
+/// comma in it is written: `public."net.price,usd",tags`.
+fn drop_names(value: &str) -> Vec<String> {
+    let (mut out, mut name, mut quote) = (Vec::new(), String::new(), None::<char>);
+    for ch in value.chars() {
+        match (quote, ch) {
+            (None, ',') => out.push(std::mem::take(&mut name)),
+            (None, '"' | '`') => {
+                quote = Some(ch);
+                name.push(ch);
+            }
+            (Some(q), _) if ch == q => {
+                quote = None;
+                name.push(ch);
+            }
+            _ => name.push(ch),
+        }
+    }
+    out.push(name);
+    out.into_iter().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect()
+}
+
 fn parse(args: &[String]) -> Result<Args, String> {
     let mut out = Args::default();
     let mut k = 0;
@@ -199,7 +221,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--schema" => out.schemas.push(value()?),
             "--file" | "-f" => out.files.push(value()?),
-            "--drop" => out.drops.extend(value()?.split(',').map(str::trim).filter(|n| !n.is_empty()).map(String::from)),
+            "--drop" => out.drops.extend(drop_names(&value()?)),
             "--rename" => {
                 let v = value()?;
                 let (old, new) = v.split_once('=').ok_or_else(|| format!("--rename takes <old name>=<new name>, a table as users=accounts or a column as users.bio=about, not {v}"))?;
@@ -628,7 +650,14 @@ pub fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{ci, painted_usage, usage, COMMANDS};
+    use super::{ci, drop_names, painted_usage, usage, COMMANDS};
+
+    #[test]
+    fn a_drop_list_splits_at_commas_outside_quoted_names() {
+        assert_eq!(drop_names(r#"public.events."net.price,usd",archive.events."net.price,usd""#), [r#"public.events."net.price,usd""#, r#"archive.events."net.price,usd""#]);
+        assert_eq!(drop_names("users.bio, tags,,"), ["users.bio", "tags"]);
+        assert_eq!(drop_names("t.`a,b`,t.c"), ["t.`a,b`", "t.c"]);
+    }
 
     #[test]
     fn ci_is_any_value_but_empty_false_or_0() {
