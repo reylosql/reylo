@@ -379,11 +379,16 @@ test("MySQL: an analysis interrupted by KILL QUERY while it waits behind an alte
   let altering: Promise<unknown> | undefined;
   try {
     const session = Number(((await c.query("select connection_id()", [])) as [[unknown]])[0][0]);
+    const altererSession = Number(((await alterer.query("select connection_id() as id")) as [[{ id: unknown }]])[0][0].id);
     const statement = "select id, name from users where id = :id";
-    // A transaction that has read the table, and an alter table waiting for it to end: the analysis's prepare queues behind the alter, within the engine's 10 s bound, until it is killed.
+    // A transaction that has read the table, and an alter table waiting for it to end: the analysis's prepare, sent once the alter waits, queues behind it, within the engine's 10 s bound, until it is killed.
     await db.query("begin");
     await db.query("select * from users");
     altering = alterer.query("alter table users add column email text");
+    for (let tries = 0; (await rows(`select id from performance_schema.processlist where id = ${altererSession} and state = 'Waiting for table metadata lock'`)).length === 0; tries++) {
+      assert.ok(tries < 100, "the alter table never waited for the table's metadata lock");
+      await new Promise((done) => setTimeout(done, 50));
+    }
     const analyzing = c.analyze(statement);
     for (let tries = 0; (await rows(`select id from performance_schema.processlist where id = ${session} and state = 'Waiting for table metadata lock'`)).length === 0; tries++) {
       assert.ok(tries < 100, "the analysis never waited for the table's metadata lock");
