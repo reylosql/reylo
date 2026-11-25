@@ -4180,6 +4180,7 @@ on!(
     a_renamed_key_column_whose_stored_expression_changes_keeps_its_foreign_key,
     a_name_given_to_a_new_index_keeps_the_old_one_until_the_last_build,
     a_foreign_key_added_back_under_another_name_holds_through_its_keys_swap,
+    a_partitioned_tables_foreign_key_holds_through_its_keys_swap,
 );
 
 #[tokio::test(flavor = "current_thread")]
@@ -7213,6 +7214,38 @@ mod adversarial {
         assert_eq!(p.check_every_way().await.0, 0);
     }
 
+    pub async fn a_partitioned_tables_foreign_key_holds_through_its_keys_swap(mut p: P) {
+        let v1 = "create table parent (id int not null, constraint parent_id_key unique (id));
+            create table child (id int, parent_id int, constraint child_parent_fk foreign key (parent_id) references parent (id)) partition by range (id);
+            create table child0 partition of child for values from (0) to (1000000);";
+        p.schema(v1);
+        p.file("20261027100000_v1.sql", v1);
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into parent values (1); insert into child values (1, 1)").await;
+        p.output();
+        p.schema(
+            "create table parent (id int not null, constraint parent_pkey primary key (id));
+            create table child (id int, parent_id int, constraint child_parent_fk foreign key (parent_id) references parent (id)) partition by range (id);
+            create table child0 partition of child for values from (0) to (1000000);",
+        );
+        let blocking = reylo_migrate::Choices { blocking: true, ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "pkey", &blocking, log).await).await, 0, "{}", p.peek());
+        p.output();
+        // Deployed a file at a time, a child row with no parent is refused after each.
+        let made: Vec<(String, String)> = p.files().into_iter().filter(|f| f.contains("_pkey")).map(|f| (f.clone(), std::fs::read_to_string(p.dir.join("migrations").join(&f)).unwrap())).collect();
+        assert!(made.len() > 1, "the key is built first: {made:#?}");
+        for (f, _) in &made {
+            std::fs::remove_file(p.dir.join("migrations").join(f)).unwrap();
+        }
+        for (k, (f, sql)) in made.iter().enumerate() {
+            p.file(f, sql);
+            assert_eq!(p.migrate().await, 0, "{}", p.peek());
+            p.output();
+            assert!(p.try_rows(&format!("insert into child values ({}, 999)", 100 + k)).await.is_err(), "a child with no parent is refused after {f}: {made:#?}");
+        }
+        assert_eq!(p.check_every_way().await.0, 0);
+    }
+
     pub async fn a_name_given_to_a_new_index_keeps_the_old_one_until_the_last_build(mut p: P) {
         let v1 = "create table accounts (id int primary key, email text, handle text); create unique index accounts_a on accounts (email);";
         p.schema(v1);
@@ -7243,10 +7276,11 @@ mod adversarial {
             create table q (id int); create table other (id int); create index other_idx on other (id); create table z (id int, constraint z_id_present check (id is not null));
             create schema a; create schema b; create table a.u (id int); create unique index same on a.u (id); create table b.t (id int); create unique index same on b.t (id);
             create table p (id int); create unique index p_idx on p (id);
-            create table a.q (id int); create unique index q_idx on a.q (id); create table b.v (id int); create index v_idx on b.v (id);",
+            create table a.q (id int); create unique index q_idx on a.q (id); create table b.v (id int); create index v_idx on b.v (id);
+            create table a.w (id int); create unique index w_idx on a.w (id);",
         );
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
-        p.exec("insert into t values (1, 1); insert into s values (1); insert into r values (1); insert into q values (1); insert into z values (1); insert into b.t values (1); insert into p values (1); insert into a.q values (1)").await;
+        p.exec("insert into t values (1, 1); insert into s values (1); insert into r values (1); insert into q values (1); insert into z values (1); insert into b.t values (1); insert into p values (1); insert into a.q values (1); insert into a.w values (1)").await;
         // Written by hand: the key's column isn't yet not null, so adding the key reads every row,
         // unless a validated check proves it; the index included column isn't read, and an index
         // renamed before the key takes it is the same index.
@@ -7267,6 +7301,8 @@ mod adversarial {
         p.file("20261027220000_p_key.sql", "alter index public.p_idx rename to p_tmp;\nalter table p add constraint p_pk primary key using index p_tmp;");
         // And one renamed by its schema into a name two schemas took earlier in the file.
         p.file("20261027230000_q_key.sql", "alter index b.v_idx rename to idx;\nalter index a.q_idx rename to idx;\nalter index a.idx rename to q_tmp;\nalter table a.q add constraint q_pk primary key using index q_tmp;");
+        // And a rename Postgres skips, of an index there isn't, into the name the key takes.
+        p.file("20261027240000_w_key.sql", "alter index if exists a.missing rename to w_idx;\nalter table a.w add constraint w_pk primary key using index w_idx;");
         p.schema(
             "create table t (id int not null, n int, constraint t_pkey primary key (id) include (n));
             create table s (id int not null, constraint s_id_present check (id is not null), constraint s_pkey primary key (id));
@@ -7276,7 +7312,8 @@ mod adversarial {
             create table z (id int not null, constraint z_pkey primary key (id));
             create schema a; create schema b; create table a.u (id int); create unique index same2 on a.u (id); create table b.t (id int not null, constraint t_pk primary key (id));
             create table p (id int not null, constraint p_pk primary key (id));
-            create table a.q (id int not null, constraint q_pk primary key (id)); create table b.v (id int); create index idx on b.v (id);",
+            create table a.q (id int not null, constraint q_pk primary key (id)); create table b.v (id int); create index idx on b.v (id);
+            create table a.w (id int not null, constraint w_pk primary key (id));",
         );
         p.output();
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
@@ -7288,6 +7325,7 @@ mod adversarial {
         assert_has!(&out, r"_b_key\.sql\n      ! It checks every row of b\.t for a null in id while it blocks reads and writes to it");
         assert_has!(&out, r"_p_key\.sql\n      ! It checks every row of p for a null in id while it blocks reads and writes to it");
         assert_has!(&out, r"_q_key\.sql\n      ! It checks every row of a\.q for a null in id while it blocks reads and writes to it");
+        assert_has!(&out, r"_w_key\.sql\n      ! It checks every row of a\.w for a null in id while it blocks reads and writes to it");
         assert!(!out.contains("a null in n ") && !out.contains("every row of s for a null"), "{out}");
     }
 

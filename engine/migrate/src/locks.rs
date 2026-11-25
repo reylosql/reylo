@@ -1405,7 +1405,19 @@ pub(crate) async fn run_watched(db: &mut Db, m: &Migration) -> Result<Vec<Hazard
                     if by_name.next().is_none() { first } else { None }
                 };
                 let Some(ns) = namespace_of(db, &written).await.or(made_as) else { continue };
-                let index = bound.remove(&(ns.clone(), old.clone())).unwrap_or_else(|| Ok(old.clone()));
+                // An index the name doesn't hold, the file's or the catalog's, Postgres doesn't rename:
+                // `if exists` skips it, and without it the file fails.
+                let index = match bound.get(&(ns.clone(), old.clone())) {
+                    Some(Err(columns)) if columns.is_empty() => continue,
+                    Some(index) => index.clone(),
+                    None => {
+                        let held = format!("select exists (select from pg_class where oid = to_regclass({}) and relkind in ('i', 'I'))::text as held", literal(&written));
+                        if !db.rows(&held).await.ok().and_then(|r| r.first().map(|r| r.text("held") == "true")).unwrap_or(false) {
+                            continue;
+                        }
+                        Ok(old.clone())
+                    }
+                };
                 bound.insert((ns.clone(), new), index);
                 bound.insert((ns, old), Err(vec![]));
             }
