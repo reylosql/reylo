@@ -195,9 +195,6 @@ The dry run replays your database's migrations and the pending ones into a shado
 
 Where your database's role can't create databases, set [`shadow_url`](/configuration#shadow_url).
 
-> [!WARNING]
-> Your build's own queries still run on `DATABASE_URL`. A page it prerenders with a column the deploy adds fails until that deploy has run.
-
 With another migration tool, build against a database of your own:
 
 1. Create an empty database.
@@ -205,6 +202,10 @@ With another migration tool, build against a database of your own:
 3. Run the build with [`direct_url`](/configuration#direct_url) pointed at that database.
 4. Drop it.
 5. Migrate your deployment's own database.
+
+[Vercel](/vercel), [Render](/render), [Railway](/railway) and [Fly.io](/fly) all build first.
+
+Pages the build prerenders still query production, before it's migrated. Render a page that reads a new column on each request.
 
 ## Errors
 
