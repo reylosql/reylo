@@ -938,7 +938,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                 _ => made.clone(),
             };
             let from_parent = if c.flag("inherited") || partition { "inherited" } else { "" };
-            table_columns.push(format!("{TABLE_COLUMN}{col_id}{SEP}{held}{SEP}{}{SEP}alter table {name} add column {} {added}{SEP}{}{SEP}{from_parent}{SEP}{}", c.text("name"), c.text("name"), c.text("nn_name"), if c.flag("notnull") { "not null" } else { "" }));
+            table_columns.push(format!("{TABLE_COLUMN}{col_id}{SEP}{held}{SEP}{}{SEP}alter table {name} add column {} {added}{SEP}{}{SEP}{from_parent}{SEP}{}{SEP}{}", c.text("name"), c.text("name"), c.text("nn_name"), if c.flag("notnull") { "not null" } else { "" }, if c.text("generated").is_empty() { "" } else { "generated" }));
             // Each column below changes in place. Only a change of its type or collation is refused
             // under a view, rule, policy or trigger on it, which the alterer's `remakes` says; a
             // default, a not null, an identity or a generated expression changes under them.
@@ -1108,7 +1108,16 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                     .get("parent")
                     .and_then(|p| generations.get(&(p.to_string(), c.text("name").to_string())))
                     .filter(|parent| !c.text("generated").is_empty() && c.text("def") != parent.as_str())
-                    .map(|_| format!("alter table {name} alter column {} set expression as ({})", c.text("name"), c.text("def")));
+                    .map(|_| {
+                        if version >= 170000 {
+                            format!("alter table {name} alter column {} set expression as ({})", c.text("name"), c.text("def"))
+                        } else {
+                            // Before Postgres 17 nothing sets it again: the migration stops rather than
+                            // leave the partition computing its table's.
+                            let why = format!("Postgres before 17 can't give {name}.{} its own generation expression again", c.text("name"));
+                            format!("do $reylo$ begin raise exception '{}'; end $reylo$", why.replace('\'', "''"))
+                        }
+                    });
                 s.add(Object {
                     id: col_id,
                     kind: Some(Kind::Column),
@@ -3537,6 +3546,9 @@ fn columns_joined(from: &Object, to: &Object) -> Vec<(String, String)> {
             (held == "own" && from_parent == "inherited" && !had.contains(id)).then(|| (id.to_string(), add.to_string()))
         }));
     }
+    // A generated column after the columns it reads.
+    let generated = generated_columns(to);
+    joined.sort_by_key(|(id, _)| generated.contains(id));
     joined
 }
 
@@ -3561,8 +3573,20 @@ fn columns_left(from: &Object, to: &Object) -> Vec<(String, String)> {
             (held == "own" && from_parent == "inherited" && !has.contains(id)).then(|| (id.to_string(), name.to_string(), add.to_string()))
         }));
     }
-    left.sort_by_key(|(_, _, add)| !add.contains(" generated always as ("));
+    let generated = generated_columns(from);
+    left.sort_by_key(|(id, _, _)| !generated.contains(id));
     left.into_iter().map(|(id, column, _)| (id, format!("alter table {name} drop column if exists {column}"))).collect()
+}
+
+/// The generated columns a table carries, by id.
+fn generated_columns(o: &Object) -> BTreeSet<String> {
+    o.extra
+        .iter()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.strip_prefix(TABLE_COLUMN)?.split(SEP).collect();
+            (f.get(7) == Some(&"generated")).then(|| f[0].to_string())
+        })
+        .collect()
 }
 
 /// A table's own constraint (its id, name and definition), and its copy of another table's (its
@@ -4425,14 +4449,7 @@ impl Alterer for PostgresAlterer {
         if from.kind != Some(Kind::Table) {
             return Vec::new();
         }
-        let generated: BTreeSet<String> = from
-            .extra
-            .iter()
-            .filter_map(|l| {
-                let f: Vec<&str> = l.strip_prefix(TABLE_COLUMN)?.split(SEP).collect();
-                f.get(3)?.contains(" generated always as (").then(|| f[0].to_string())
-            })
-            .collect();
+        let generated = generated_columns(from);
         columns_left(from, to).into_iter().map(|(id, _)| id).filter(|id| !generated.contains(id)).collect()
     }
 
