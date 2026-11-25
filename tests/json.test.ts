@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { validate } from "../src/json-schema.ts";
 import { sqlModule } from "../src/loader.ts";
 import { reyloImport } from "../src/module-types.ts";
 import { closeSessions, declarations, driver, DRIVERS, INDEX, mysqlDatabase, mysqlLive, pgLive, postgresDatabase, ROOT } from "./helpers.ts";
@@ -199,6 +200,28 @@ test("Postgres: a float or a numeric inside JSON is a number, NaN and the infini
     }
   } finally {
     await client.end();
+    await closeSessions();
+    await own.drop();
+  }
+});
+
+test("MySQL: a BIT(1) inside JSON is the text MySQL writes of its bytes, which the output schema admits, on mysql2 and mariadb", { skip: mysqlLive }, async () => {
+  const own = await mysqlDatabase("reylo_json_bit", "create table flags (id int primary key, b bit(1)); insert into flags values (1, b'1'), (2, b'0'), (3, null)");
+  const root = project(own.url, "mysql2");
+  const u = new URL(own.url);
+  const mariadb = await driver("mariadb").createConnection({ host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: u.pathname.slice(1) });
+  try {
+    const one = (await built(root, "one", "select json_object('v', b) as doc from flags where id = :id\n")) as Built & { outputSchema: Record<string, unknown> };
+    const all = (await built(root, "all", "select json_arrayagg(b) as bits from flags\n")) as Built & { outputSchema: Record<string, unknown> };
+    for (const client of [own.db, mariadb]) {
+      const docs = [];
+      for (const id of [1, 2, 3]) docs.push(JSON.parse(JSON.stringify(await one.run(client, { id }))));
+      assert.deepEqual(docs, [{ doc: { v: "base64:type16:AQ==" } }, { doc: { v: "base64:type16:AA==" } }, { doc: { v: null } }]);
+      for (const doc of docs) assert.equal(validate(one.outputSchema, doc), undefined);
+      assert.equal(validate(all.outputSchema, JSON.parse(JSON.stringify(await all.run(client)))), undefined);
+    }
+  } finally {
+    await mariadb.end();
     await closeSessions();
     await own.drop();
   }
