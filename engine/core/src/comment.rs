@@ -31,7 +31,10 @@ pub fn leading(sql: &str, dialect: Dialect) -> Leading {
     let mut end = 0;
     loop {
         let ws = sql[i..].len() - sql[i..].trim_start().len();
-        let blank_before = sql[i..i + ws].matches('\n').count() > 1;
+        // Postgres ends a line at a bare carriage return too, and `\r\n` is one line end.
+        let gap = &sql[i..i + ws];
+        let breaks = if dialect == Dialect::Postgres { gap.matches('\n').count() + gap.matches('\r').count() - gap.matches("\r\n").count() } else { gap.matches('\n').count() };
+        let blank_before = breaks > 1;
         let at = i + ws;
         let (ch, next) = (bytes.get(at).copied(), bytes.get(at + 1).copied());
         let mysql = dialect == Dialect::Mysql;
@@ -133,6 +136,8 @@ mod tests {
         assert_eq!(prose("-- One user,\r--   by id.\rselect 1", Dialect::Postgres), "One user,\n  by id.");
         assert_eq!(leading("-- a\rselect 1", Dialect::Postgres).end, 4);
         assert_eq!(prose("-- a\r\n\r\n-- b\r\nselect 1", Dialect::Postgres), "a\n\nb");
+        assert_eq!(prose("-- a\r\r-- b\rselect 1", Dialect::Postgres), "a\n\nb");
+        assert_eq!(prose("-- a\r\n-- b\r\nselect 1", Dialect::Postgres), "a\nb");
     }
 
     #[test]

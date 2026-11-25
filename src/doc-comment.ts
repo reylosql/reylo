@@ -25,10 +25,14 @@ export function leadingComment(sql: string, dialect?: Dialect): Leading {
     const at = i + ws.length;
     const ch = sql[at];
     const next = sql[at + 1];
-    const blankBefore = (ws.match(/\n/g)?.length ?? 0) > 1;
+    // Postgres ends a line at a bare carriage return too, and `\r\n` is one line end.
+    const blankBefore = (ws.match(dialect === "postgres" ? /\r\n?|\n/g : /\n/g)?.length ?? 0) > 1;
     const lineComment = (ch === "-" && next === "-" && !(dialect === "mysql" && at + 2 < sql.length && sql.charCodeAt(at + 2) > 32 && sql.charCodeAt(at + 2) !== 127)) || (ch === "#" && (dialect === "mysql" || (dialect === "clickhouse" && (next === " " || next === "!"))));
     if (lineComment) {
-      const stop = sql.indexOf("\n", at);
+      // Postgres ends a `--` comment at a carriage return as at a line feed.
+      const lineEnd = (dialect === "postgres" ? /[\r\n]/g : /\n/g);
+      lineEnd.lastIndex = at;
+      const stop = lineEnd.exec(sql)?.index ?? -1;
       const text = sql.slice(at + (ch === "#" ? 1 : 2), stop === -1 ? sql.length : stop);
       if (!lines || last !== "line" || blankBefore) paragraphs.push((lines = []));
       lines.push(text);
