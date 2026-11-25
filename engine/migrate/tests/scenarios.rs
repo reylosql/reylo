@@ -4805,6 +4805,22 @@ mod adversarial {
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         p.exec("insert into borrower default values").await;
         assert_eq!(p.rows("select id from borrower order by id").await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["lender_id_seq-1", "lender_id_seq-2"]);
+        p.output();
+        // A new name holding a quote, which a default's string literal writes twice.
+        let rest = format!("{rest} create sequence lender_id_seq; create sequence borrower_id_seq; create table borrower (id text primary key default ('lender_id_seq'::regclass::text || '-' || nextval('borrower_id_seq')::text)); alter sequence borrower_id_seq owned by borrower.id;");
+        p.file("20991231000018_t.sql", "create sequence payer_id_seq; create table payer (id bigint primary key default nextval('payer_id_seq'), seq_ref regclass default 'payer_id_seq'::regclass); alter sequence payer_id_seq owned by payer.id;");
+        p.schema(&format!("{rest} create sequence payer_id_seq; create table payer (id bigint primary key default nextval('payer_id_seq'), seq_ref regclass default 'payer_id_seq'::regclass); alter sequence payer_id_seq owned by payer.id;"));
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec("insert into payer default values").await;
+        p.output();
+        p.schema(&format!(r#"{rest} create sequence payer_id_seq; create sequence "payee's_id_seq"; create table "payee's" (id bigint primary key default nextval('"payee''s_id_seq"'), seq_ref regclass default 'payer_id_seq'::regclass);"#));
+        let choices = reylo_migrate::Choices { rename: vec![("payer".into(), "payee's".into())], ..Default::default() };
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "payee", &choices, log).await).await, 0, "{}", p.peek());
+        let out = p.output();
+        assert!(!out.contains("doesn't reach"), "{out}");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        p.exec(r#"insert into "payee's" default values"#).await;
+        assert_eq!(p.rows(r#"select id from "payee's" order by id"#).await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1", "2"]);
     }
 
     /// A refusal's suggested command carries --blocking where the migration it writes rewrites a

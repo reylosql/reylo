@@ -2879,7 +2879,9 @@ fn draws_from(def: &str, sequence: &str) -> bool {
     let Some(name) = sequence.strip_prefix("sequence ") else { return false };
     let (schema, last) = split_last(name);
     NEXTVAL.captures_iter(def).any(|c| {
-        let (s, l) = split_last(&c[1]);
+        // The argument is a string literal, a quote in it written twice.
+        let name = c[1].replace("''", "'");
+        let (s, l) = split_last(&name);
         unquoted(l) == unquoted(last) && (s.is_empty() || unquoted(s) == unquoted(schema))
     })
 }
