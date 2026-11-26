@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import { anyEngine, DIAGNOSTIC, engine, reason, MissingEngine, REYLO_VERSION, Unreachable, type Analysis, type Engine, type Lexed } from "./engine.ts";
-import { packageDir, resolveProject, sqlitePath, type ResolvedProject } from "./project.ts";
+import { packageDir, resolveProject, sqlitePath, type Dialect, type ResolvedProject } from "./project.ts";
 import { NotMysql, refusedLogin } from "./connection.ts";
 import { openProjectDrivers, placeRefusal, projectDriverVersions, type SqliteDriver } from "./sqlite-drivers.ts";
 
@@ -59,6 +59,20 @@ const OFFLINE_TTL = 60_000;
 // (`releaseConnections`), and a loader (webpack, Rspack, Turbopack) has no such signal. The type
 // check's session keeps its connection.
 const BUILD_IDLE = 250;
+/**
+ * The URL parameters that choose the server or the database a session reads, beside the URL's
+ * host and path, as each dialect's engine reads them (engine/native/src/): libpq's, among them
+ * `user`, which names the role as the URL's user part does, and `options`, which may set the
+ * search path a name is read through; mysql2's socket; and ClickHouse's database and the path in
+ * front of its interface. They name a session's entries with its server (`#server`), as `server`
+ * in rust/reylo-build/src/analysis.rs names them.
+ */
+const CHOOSING: Record<Dialect, readonly string[]> = {
+  postgres: ["dbname", "host", "hostaddr", "options", "port", "user"],
+  mysql: ["socket", "socketPath"],
+  clickhouse: ["ch_database", "clickhouse_setting_database", "pathname"],
+  sqlite: [],
+};
 
 const sessions = new Map<string, Session>();
 
@@ -420,14 +434,18 @@ export class Session {
     return `Cannot type-check against the database at ${this.where()} (${this.project.urlSource}): it is ${e.server}, and Reylo type-checks MySQL statements against MySQL. Point the type check's URL at a MySQL server, 8.4 or later, with the same schema.`;
   }
 
-  /** The server, without credentials, that names this session's entries: none with no URL, which writes none. */
+  /**
+   * The server, without credentials, that names this session's entries: none with no URL, which
+   * writes none. The URL's parameters that choose the server or the database follow it, so that
+   * two databases they tell apart keep an entry each.
+   */
   #server(): string {
     const { dialect, url, root } = this.project;
     if (!url) return "";
     if (dialect === "sqlite") return sqlitePath(url, root);
     try {
       const u = new URL(url);
-      return `${u.protocol}//${u.username}@${u.host}${u.pathname}`;
+      return `${u.protocol}//${u.username}@${u.host}${u.pathname}${choosing(url, dialect)}`;
     } catch {
       return url;
     }
@@ -572,6 +590,32 @@ export async function releaseConnections(): Promise<void> {
 }
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+
+/**
+ * The parameters of `url` that choose its server or database (`CHOOSING`), as `?name=value&…`,
+ * or nothing where it has none, which keeps the name its entries were written under. Each is read
+ * off the URL as written, as the engine reads it, a `+` being a plus; its value is decoded, or
+ * kept as written where it does not decode, and encoded again, so that a database has one name
+ * however its URL spells it. They are sorted by name alone, since the hosts are tried in order.
+ */
+function choosing(url: string, dialect: Dialect): string {
+  const at = url.indexOf("?");
+  const pairs = at < 0 ? [] : url.slice(at + 1).split("&").map((pair): [string, string] => {
+    const eq = pair.indexOf("=");
+    return eq < 0 ? [pair, ""] : [pair.slice(0, eq), pair.slice(eq + 1)];
+  });
+  const chosen = pairs.filter(([key]) => CHOOSING[dialect].includes(key)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return chosen.length ? `?${chosen.map(([key, value]) => `${key}=${encodeURIComponent(decoded(value))}`).join("&")}` : "";
+}
+
+/** A URL parameter's value decoded, or as written where it does not decode. */
+function decoded(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
 
 function readEntry(file: string): Entry | undefined {
   if (!existsSync(file)) return undefined;

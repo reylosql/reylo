@@ -556,13 +556,55 @@ fn statement_key(dialect: Dialect, sql: &str) -> Option<String> {
     Some(sha256(&json!([ENTRY_VERSION, dialect.fingerprint()?, dialect.name(), sql]).to_string())[..32].to_string())
 }
 
-/// The server, without credentials: the scheme, the user, the host and port, and the database.
+/// The server, without credentials: the scheme, the user, the host and port, the database, and the
+/// URL's parameters that choose the server or the database, as `#server` in `src/analyze.ts` names
+/// it (both are held to entry-name-cases.json). A parameter is read off the URL as written, as the
+/// engine reads it, a `+` being a plus; its value is decoded and encoded again, so that a database
+/// has one name however its URL spells it. They are sorted by name alone, since the hosts are tried
+/// in order.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 fn server(url: &str) -> String {
-    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
-    let (authority, path) = rest.split_once('/').map_or((rest, String::new()), |(a, p)| (a, format!("/{}", p.split('?').next().unwrap_or(""))));
+    let (base, query) = url.split_once('?').unwrap_or((url, ""));
+    let (scheme, rest) = base.split_once("://").unwrap_or(("", base));
+    let (authority, path) = rest.split_once('/').map_or((rest, String::new()), |(a, p)| (a, format!("/{p}")));
     let (user, host) = authority.rsplit_once('@').map_or(("", authority), |(u, h)| (u.split(':').next().unwrap_or(""), h));
-    format!("{scheme}://{user}@{host}{path}")
+    // libpq's, as the engine reads them, and mysql2's socket (`CHOOSING` in `src/analyze.ts`).
+    let choosing: &[&str] = match Dialect::of(url) {
+        Ok(Dialect::Postgres) => &["dbname", "host", "hostaddr", "options", "port", "user"],
+        Ok(Dialect::Mysql) => &["socket", "socketPath"],
+        _ => &[],
+    };
+    let mut chosen: Vec<(&str, &str)> = query.split('&').map(|pair| pair.split_once('=').unwrap_or((pair, ""))).filter(|(key, _)| choosing.contains(key)).collect();
+    chosen.sort_by_key(|(key, _)| *key);
+    let chosen: Vec<String> = chosen.iter().map(|(key, value)| format!("{key}={}", encoded(&decoded(value)))).collect();
+    let query = if chosen.is_empty() { String::new() } else { format!("?{}", chosen.join("&")) };
+    format!("{scheme}://{user}@{host}{path}{query}")
+}
+
+/// A URL parameter's value decoded as `decodeURIComponent` decodes it, or as written where that
+/// throws: a `%` that starts no escape, or escapes that are no UTF-8.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+fn decoded(value: &str) -> String {
+    let hex = |at: usize| value.as_bytes().get(at).and_then(|b| char::from(*b).to_digit(16));
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut at = 0;
+    while let Some(&b) = value.as_bytes().get(at) {
+        if b != b'%' {
+            bytes.push(b);
+            at += 1;
+            continue;
+        }
+        let (Some(high), Some(low)) = (hex(at + 1), hex(at + 2)) else { return value.to_string() };
+        bytes.push((high * 16 + low) as u8);
+        at += 3;
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| value.to_string())
+}
+
+/// A URL parameter's value as `encodeURIComponent` writes it.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+fn encoded(value: &str) -> String {
+    value.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) { char::from(b).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
 fn sha256(text: &str) -> String {
