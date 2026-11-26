@@ -840,7 +840,7 @@ test("postgres: Neon's neon() before 0.10, which sends a Buffer as JSON, gets a 
   assert.deepEqual(seen[0], ["\\x0102ff", "\\x0102ff", "\\x0010ab", "\\x", 1]);
 });
 
-test("postgres: PGlite, which picks a parameter's serializer by the oid the server describes, gets binary data as bytea's hex text, so a domain over bytea stores the bytes and keeps its own operators", { skip: !existsSync(join(DRIVERS, "@electric-sql", "pglite")) && "lab/drivers is not installed" }, async () => {
+test("postgres: PGlite, which picks a parameter's serializer by the oid the server describes, gets binary data whose toString() is bytea's hex text, so a domain over bytea stores the bytes and keeps its own operators", { skip: !existsSync(join(DRIVERS, "@electric-sql", "pglite")) && "lab/drivers is not installed" }, async () => {
   const { PGlite } = driver("@electric-sql/pglite");
   const lite = new PGlite();
   await lite.exec(`create domain blob as bytea; create domain small_blob as blob check (length(value) < 8);
@@ -850,7 +850,8 @@ test("postgres: PGlite, which picks a parameter's serializer by the oid the serv
     create domain digest as bytea;
     create function same_prefix(digest, digest) returns boolean language sql immutable as 'select substring($1 from 1 for 2) = substring($2 from 1 for 2)';
     create operator = (leftarg = digest, rightarg = digest, function = same_prefix);
-    create table d (x digest); insert into d values ('\\xdead0000'), ('\\xbeef')`);
+    create table d (x digest); insert into d values ('\\xdead0000'), ('\\xbeef');
+    create domain mapped as bytea; create table m (x mapped)`);
   // 00 and 5c, which the domain refused as text, between bytes that are no UTF-8.
   const bytes = new Uint8Array([0xde, 0xad, 0x00, 0x5c, 0xbe, 0xef]);
   const hex = "dead005cbeef";
@@ -874,6 +875,11 @@ test("postgres: PGlite, which picks a parameter's serializer by the oid the serv
     // The parameter's type stays the server's to infer, as on every other driver: the domain's.
     assert.deepEqual(await one("select encode(pick(v, :p), 'hex') as h from b where id = 1", { p: new Uint8Array([1]) }), { h: hex }, "an anyelement function, given the domain twice");
     assert.deepEqual(await one("select count(*)::int as n from d where x = :p", { p: new Uint8Array([0xde, 0xad, 0x11]) }), { n: 1 }, "the domain's own operator");
+    // A domain the app gave bytea's serializer still gets the bytes through it.
+    lite.serializers[(await lite.query("select 'mapped'::regtype::oid as oid")).rows[0].oid] = lite.serializers[17];
+    await execute(lite, { dialect: "postgres", sql: "insert into m values (:x)", params: ["x"], inputs: { x: by } }, { x: bytes });
+    assert.deepEqual((await lite.query("select encode(x, 'hex') as h from m")).rows, [{ h: hex }], "a domain mapped to bytea's serializer");
+    assert.equal(bytes.toString(), "222,173,0,92,190,239", "the app's own value is left as it is");
   } finally {
     await lite.close();
   }

@@ -355,7 +355,20 @@ const PGLITE_STATEMENTS = 2000;
 // Listed on PGlite's first statement, so that a bundle of another database's queries holds neither table.
 let builtinOids: number[] | undefined;
 const keepText = (x: string) => x;
-const BYTEA_AS_TEXT = { 17: keepText };
+
+// PGlite picks each parameter's serializer by the oid the server describes, which for a domain
+// over bytea is the domain's own, with no serializer: a Uint8Array went as its toString(),
+// `222,173`, and was stored as the bytes of that text (electric-sql/pglite#1244). Binary data goes
+// as a view whose toString() is bytea's hex text, which the server reads with the domain's base
+// type; a serializer for the oid, bytea's own or one the app maps the domain to, still gets a
+// Uint8Array. Declaring the parameter bytea instead would change the statement: an operator
+// defined on the domain would no longer apply.
+function hexOnToString(v: unknown): unknown {
+  if (!(v instanceof Uint8Array)) return v;
+  const view = v.subarray(0);
+  Object.defineProperty(view, "toString", { value: () => asByteaHex(view) });
+  return view;
+}
 
 async function pglite(db: AnyClient, text: string, values: unknown[], columns: Columns | undefined): Promise<unknown[]> {
   // A statement met for the first time names every built-in type Reylo decodes, and every oid the
@@ -365,13 +378,7 @@ async function pglite(db: AnyClient, text: string, values: unknown[], columns: C
   const oids = named ?? new Set([...builtinOids, ...Object.keys(db.parsers ?? {}).map(Number)]);
   const parsers: Record<number, Decoder> = {};
   for (const oid of oids) parsers[oid] = builtinDecoder(oid) ?? keepText;
-  // PGlite picks each parameter's serializer by the oid the server describes, which for a domain
-  // over bytea is the domain's own, with no serializer: a Uint8Array went as its toString(),
-  // `222,173`, and was stored as the bytes of that text (electric-sql/pglite#1244). Binary data
-  // goes as bytea's hex text, which the server reads with the domain's base type, and bytea's own
-  // serializer, which takes a Uint8Array alone, keeps that text. Declaring the parameter bytea
-  // instead would change the statement: an operator defined on the domain would no longer apply.
-  const result = await db.query(text, values.map(asByteaHex), { rowMode: "object", parsers, serializers: BYTEA_AS_TEXT });
+  const result = await db.query(text, values.map(hexOnToString), { rowMode: "object", parsers });
   const rows: Record<string, unknown>[] = result.rows;
   const fields: Field[] = (result.fields ?? []).map((f: { name: string; dataTypeID: number }) => ({ name: f.name, oid: f.dataTypeID }));
   // Created types, which the table kept as text, an oid the table did not name, which went through
