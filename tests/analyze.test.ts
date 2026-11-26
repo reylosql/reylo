@@ -244,7 +244,7 @@ test("a build that cannot reach the database reads reylo/.cache/ with another UR
 
 test("an entry is named by its server and the URL's parameters that choose the database as the URL writes them, as reylo-build names it", async () => {
   // reylo-build names its entries by the same cases but ClickHouse's (rust/reylo-build/src/analysis.rs), so that the two share reylo/.cache/.
-  const cases: { case: string; url: string; server: string }[] = JSON.parse(readFileSync(new URL("../rust/reylo-build/src/entry-name-cases.json", import.meta.url), "utf8"));
+  const cases: { case: string; url: string; server: string; env?: Record<string, string> }[] = JSON.parse(readFileSync(new URL("../rust/reylo-build/src/entry-name-cases.json", import.meta.url), "utf8"));
   // A ClickHouse bearer token, which reylo-build reads no URL with: the engine sends the database header beside it in either order, so it names no entry, and its value never reaches a name.
   cases.push(
     { case: "a ClickHouse database header before a bearer token", url: "clickhouse+http://127.0.0.1:8123/?http_header_X-ClickHouse-Database=analytics&access_token=secret", server: "clickhouse+http://@127.0.0.1:8123/?http_header_X-ClickHouse-Database=analytics" },
@@ -253,12 +253,26 @@ test("an entry is named by its server and the URL's parameters that choose the d
   );
   const root = mkdtempSync(join(tmpdir(), "reylo-entry-names-"));
   writeFileSync(join(root, "package.json"), "{}");
-  for (const c of cases) {
-    const session = await Session.open(root, { DATABASE_URL: c.url });
-    try {
-      assert.ok(session.entryFile("select 1").endsWith(`-${createHash("sha256").update(c.server).digest("hex").slice(0, 16)}.json`), c.case);
-    } finally {
-      await session.close();
+  // The variables libpq reads, which the engine reads from this process's environment: each case's own, and none of the machine's.
+  const variables = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"];
+  const saved = Object.fromEntries(variables.map((name) => [name, process.env[name]]));
+  try {
+    for (const c of cases) {
+      for (const name of variables) {
+        if (c.env?.[name] === undefined) delete process.env[name];
+        else process.env[name] = c.env[name];
+      }
+      const session = await Session.open(root, { DATABASE_URL: c.url });
+      try {
+        assert.ok(session.entryFile("select 1").endsWith(`-${createHash("sha256").update(c.server).digest("hex").slice(0, 16)}.json`), c.case);
+      } finally {
+        await session.close();
+      }
+    }
+  } finally {
+    for (const name of variables) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
     }
   }
 });

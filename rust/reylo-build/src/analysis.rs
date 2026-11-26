@@ -558,13 +558,26 @@ fn statement_key(dialect: Dialect, sql: &str) -> Option<String> {
 
 /// The server, without credentials: the scheme, the user, the host and port, the database, and the
 /// URL's parameters that choose the server or the database, as `#server` in `src/analyze.ts` names
-/// it (both are held to entry-name-cases.json). A name is matched decoded, as the loader's bridge
-/// to a Unix socket reads it, and kept as written, since the engine reads it undecoded. A value is
-/// kept as written too, since each reader of the URL decodes it its own way, so that a database
-/// written two ways is at most analyzed again under a name of its own. They keep the URL's order,
-/// which decides the host tried first and which of `socket` and `socketPath` the engine opens.
+/// it (both are held to entry-name-cases.json). A name is matched decoded, as the engine and the
+/// loader's bridge to a Unix socket read it. A name and its value are kept as written, since each
+/// reader of the URL decodes a value its own way, so that a database written two ways is at most
+/// analyzed again under a name of its own. They keep the URL's order, which decides which of
+/// `socket` and `socketPath` the engine opens. On Postgres, the variables the engine reads for a
+/// part the URL leaves out (`ENVIRONMENT`) follow them, encoded.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 fn server(url: &str) -> String {
+    server_in(url, &|name| std::env::var(name).ok())
+}
+
+/// The variables libpq reads for a part of the URL it leaves out, as the engine reads them, but for
+/// the system's user name, which a URL with no user takes on every machine it is copied to, so that
+/// a cache built in CI is still read on a laptop (`ENVIRONMENT` in `src/analyze.ts`).
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+const ENVIRONMENT: [&str; 5] = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"];
+
+/// [`server`], with the variables `env` gives.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+fn server_in(url: &str, env: &dyn Fn(&str) -> Option<String>) -> String {
     let (base, query) = url.split_once('?').unwrap_or((url, ""));
     let (scheme, rest) = base.split_once("://").unwrap_or(("", base));
     let (authority, path) = rest.split_once('/').map_or((rest, String::new()), |(a, p)| (a, format!("/{p}")));
@@ -575,9 +588,34 @@ fn server(url: &str) -> String {
         Ok(Dialect::Mysql) => &["socket", "socketPath"],
         _ => &[],
     };
-    let chosen: Vec<&str> = query.split('&').filter(|pair| choosing.contains(&decoded(pair.split('=').next().unwrap_or_default()).as_str())).collect();
+    let listed = |pair: &str| decoded(pair.split('=').next().unwrap_or_default());
+    let mut chosen: Vec<String> = query.split('&').filter(|pair| choosing.contains(&listed(pair).as_str())).map(String::from).collect();
+    if matches!(Dialect::of(url), Ok(Dialect::Postgres)) {
+        let named = |name: &str| chosen.iter().any(|pair| listed(pair) == name);
+        // The authority's hosts, each with its port where it writes one.
+        let hosts: Vec<(&str, Option<&str>)> = host.split(',').filter(|h| !h.is_empty()).map(|chunk| match chunk.strip_prefix('[').and_then(|c| c.split_once(']')) {
+            Some((name, rest)) => (name, rest.strip_prefix(':')),
+            None => chunk.split_once(':').map_or((chunk, None), |(name, port)| (name, Some(port))),
+        }).collect();
+        let left_out = [
+            hosts.is_empty() && !named("host") && !named("hostaddr"),
+            // Several hosts with no port take 5432 each, as libpq reads them.
+            hosts.len() <= 1 && !hosts.iter().any(|(_, port)| port.is_some_and(|p| !p.is_empty())) && !named("port"),
+            user.is_empty() && !named("user"),
+            (path.is_empty() || path == "/") && !named("dbname"),
+            !named("options"),
+        ];
+        let found: Vec<String> = ENVIRONMENT.iter().zip(left_out).filter(|(_, out)| *out).filter_map(|(name, _)| env(name).filter(|v| !v.is_empty()).map(|value| format!("{name}={}", encoded(&value)))).collect();
+        chosen.extend(found);
+    }
     let query = if chosen.is_empty() { String::new() } else { format!("?{}", chosen.join("&")) };
     format!("{scheme}://{user}@{host}{path}{query}")
+}
+
+/// A value as `encodeURIComponent` writes it.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+fn encoded(value: &str) -> String {
+    value.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) { char::from(b).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
 /// A URL parameter's name decoded as `decodeURIComponent` decodes it, or as written where that
@@ -676,7 +714,8 @@ mod tests {
             if super::Dialect::of(url).is_err() {
                 continue;
             }
-            assert_eq!(super::server(url), case["server"].as_str().unwrap(), "{}", case["case"]);
+            let env = |name: &str| case["env"][name].as_str().map(String::from);
+            assert_eq!(super::server_in(url, &env), case["server"].as_str().unwrap(), "{}", case["case"]);
         }
     }
 

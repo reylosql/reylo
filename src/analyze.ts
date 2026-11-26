@@ -443,12 +443,7 @@ export class Session {
     const { dialect, url, root } = this.project;
     if (!url) return "";
     if (dialect === "sqlite") return sqlitePath(url, root);
-    try {
-      const u = new URL(url);
-      return `${u.protocol}//${u.username}@${u.host}${u.pathname}${choosing(url, dialect)}`;
-    } catch {
-      return url;
-    }
+    return serverName(url, dialect, process.env);
   }
 
   /** The database as a person names it: host, port and database, or the SQLite file. */
@@ -592,21 +587,52 @@ export async function releaseConnections(): Promise<void> {
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
 /**
- * The parameters of `url` that choose its server or database (`CHOOSING`), as `?name=value&…`,
- * or nothing where it has none, which keeps the name its entries were written under. A name is
- * matched decoded, as the bridge to a Unix socket reads it (src/host-url.ts), and a header's in
- * any case, as HTTP compares header names; it is kept as written, since the engine reads a name
- * undecoded. A value is kept as written too, since its readers decode it each their own way
- * (libpq reads a `+` as a plus, ClickHouse and the engine's MySQL socket as a space), so that a
- * database written two ways is at most analyzed again under a name of its own. They keep the
- * URL's order, which decides the host tried first and which of `socket` and `socketPath` the
- * engine opens.
+ * The server `url` names, without credentials: the scheme, the user, the hosts and ports, and the
+ * path, read off the text as `server` in rust/reylo-build/src/analysis.rs reads them (both are held
+ * to entry-name-cases.json), since `URL` refuses a URL libpq reads, as `postgres://app@/shop` and a
+ * list of hosts. Then the parameters that choose the server or the database (`CHOOSING`), as
+ * `?name=value&…`, or nothing where it has none, which keeps the name its entries were written
+ * under. A name is matched decoded, as the engine and the bridge to a Unix socket read it
+ * (src/host-url.ts), and a header's in any case, as HTTP compares header names. A name and its
+ * value are kept as written, since their readers decode a value each their own way (libpq reads a
+ * `+` as a plus, ClickHouse and mysql2 as a space), so that a database written two ways is at most
+ * analyzed again under a name of its own. They keep the URL's order, which decides which of
+ * `socket` and `socketPath` the engine opens. On Postgres, the variables the engine and the bridge
+ * read for a part the URL leaves out (`ENVIRONMENT`) follow them, encoded.
  */
-function choosing(url: string, dialect: Dialect): string {
-  const at = url.indexOf("?");
-  const chosen = at < 0 ? [] : url.slice(at + 1).split("&").filter((pair) => CHOOSING[dialect].includes(listed(pair)));
-  return chosen.length ? `?${chosen.join("&")}` : "";
+function serverName(url: string, dialect: Dialect, env: Record<string, string | undefined>): string {
+  const q = url.indexOf("?");
+  const [base, query] = q < 0 ? [url, ""] : [url.slice(0, q), url.slice(q + 1)];
+  const s = base.indexOf("://");
+  const [scheme, rest] = s < 0 ? ["", base] : [base.slice(0, s), base.slice(s + 3)];
+  const p = rest.indexOf("/");
+  const [authority, path] = p < 0 ? [rest, ""] : [rest.slice(0, p), rest.slice(p)];
+  const a = authority.lastIndexOf("@");
+  const [user, host] = a < 0 ? ["", authority] : [authority.slice(0, a).split(":")[0]!, authority.slice(a + 1)];
+  const chosen = query ? query.split("&").filter((pair) => CHOOSING[dialect].includes(listed(pair))) : [];
+  if (dialect === "postgres") {
+    const named = new Set(chosen.map(listed));
+    // The authority's hosts, each with its port where it writes one: an IPv6 address in brackets.
+    const hosts = host.split(",").filter(Boolean).map((chunk) => /^\[[^\]]*\](?::(.*))?$/.exec(chunk)?.[1] ?? (chunk.startsWith("[") ? undefined : chunk.split(":")[1]));
+    const leftOut: Record<(typeof ENVIRONMENT)[number], boolean> = {
+      PGHOST: hosts.length === 0 && !named.has("host") && !named.has("hostaddr"),
+      // Several hosts with no port take 5432 each, as libpq reads them.
+      PGPORT: hosts.length <= 1 && !hosts.some((port) => port) && !named.has("port"),
+      PGUSER: !user && !named.has("user"),
+      PGDATABASE: (path === "" || path === "/") && !named.has("dbname"),
+      PGOPTIONS: !named.has("options"),
+    };
+    for (const name of ENVIRONMENT) if (leftOut[name] && env[name]) chosen.push(`${name}=${encodeURIComponent(env[name])}`);
+  }
+  return `${scheme}://${user}@${host}${path}${chosen.length ? `?${chosen.join("&")}` : ""}`;
 }
+
+/**
+ * The variables libpq reads for a part of the URL it leaves out, as the engine reads them
+ * (engine/native/src/postgres.rs), but for the system's user name, which a URL with no user takes
+ * on every machine it is copied to, so that a cache built in CI is still read on a laptop.
+ */
+const ENVIRONMENT = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"] as const;
 
 /**
  * A URL parameter's name as `CHOOSING` lists it: decoded, or as written where it does not decode,

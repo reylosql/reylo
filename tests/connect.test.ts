@@ -526,6 +526,17 @@ test("a socket the bridge cannot open is reported with its reason, a Unix socket
   await assert.rejects((await engine("mysql")).open(`mysql://root@localhost/app?socketPath=${encodeURIComponent(path)}`), (e: Error) => e instanceof Unreachable && e.message.startsWith(`cannot open the socket ${path}: connect ENOENT`));
 });
 
+test("the bridge opens the MySQL socket mysql2 would, socketPath before socket, a + in its path a space", { skip: process.platform === "win32" }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "reylo-sock-"));
+  for (const [query, path] of [
+    [`socket=${dir}/a.sock&socketPath=${dir}/b.sock`, `${dir}/b.sock`],
+    [`socketPath=${dir}/b.sock&socket=${dir}/a.sock`, `${dir}/b.sock`],
+    [`socketPath=${dir}/a+b.sock`, `${dir}/a b.sock`],
+  ]) {
+    await assert.rejects((await engine("mysql")).open(`mysql://root@localhost/app?${query}`), (e: Error) => e instanceof Unreachable && e.message.startsWith(`cannot open the socket ${path}: connect ENOENT`), query);
+  }
+});
+
 test("PGHOST names the socket's directory where the URL names no host, as libpq reads it", async () => {
   // As on a system with Unix sockets: the bridge itself is a TCP server, which every system opens.
   const bridged = await hostUrl("postgres://u@/d", { PGHOST: "/var/run/postgresql", PGPORT: "5433" }, "linux");

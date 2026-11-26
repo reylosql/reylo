@@ -103,6 +103,9 @@ impl Server {
         let mut token = None;
         for pair in query.split('&').filter(|p| !p.is_empty()) {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            // A name is read decoded, as `@clickhouse/client` reads the URL's parameters.
+            let key = percent(&key.replace('+', " "));
+            let key = key.as_str();
             let value = percent(&value.replace('+', " "));
             let setting = key.strip_prefix("clickhouse_setting_").or_else(|| key.strip_prefix("ch_"));
             match (key, setting, key.strip_prefix("http_header_")) {
@@ -225,8 +228,10 @@ mod tests {
         let proxied = Server::of("HTTP://localhost/analytics?pathname=/clickhouse/&access_token=t0ken").unwrap();
         assert_eq!(proxied.endpoint, "http://localhost/clickhouse/");
         assert_eq!(proxied.headers, [("Authorization".to_string(), "Bearer t0ken".to_string())]);
-        // The token takes the login's place alone, wherever the URL writes it.
-        for url in ["http://app:secret@localhost/?http_header_X-ClickHouse-Database=a&access_token=t0ken", "http://app:secret@localhost/?access_token=t0ken&http_header_X-ClickHouse-Database=a"] {
+        // A parameter's name is read decoded.
+        assert_eq!(Server::of("http://localhost/?%63h_database=a").unwrap().parameters, [("database".to_string(), "a".to_string())]);
+        // A header the URL names is sent beside a token, wherever the URL writes the two.
+        for url in ["http://localhost/?http_header_X-ClickHouse-Database=a&access_token=t0ken", "http://localhost/?access_token=t0ken&http_header_X-ClickHouse-Database=a"] {
             assert_eq!(Server::of(url).unwrap().headers, [("Authorization", "Bearer t0ken"), ("X-ClickHouse-Database", "a")].map(|(k, v)| (k.to_string(), v.to_string())), "{url}");
         }
     }
