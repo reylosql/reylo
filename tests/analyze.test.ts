@@ -607,6 +607,13 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
       assert.equal(await fingerprint(), next, change);
       last = next;
     }
+    // A temporary aggregate is one session's, which another session's statement names only by that
+    // session's number, as it names a temporary function: the fingerprint each new session reads
+    // holds while the test's own connection makes one and after it drops it.
+    for (const change of ["create aggregate pg_temp.review_total(int) (sfunc = pg_catalog.int4pl, stype = int, initcond = '0')", "drop aggregate pg_temp.review_total(int)"]) {
+      await db.unsafe(change);
+      assert.equal(await fingerprint(), last, change);
+    }
   } finally {
     await own.drop();
   }
