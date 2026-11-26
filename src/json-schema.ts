@@ -98,17 +98,22 @@ function check(schema: Schema, value: unknown, path: string, out: Failure[]): Ev
 
   if (s.type !== undefined) {
     const types = Array.isArray(s.type) ? (s.type as string[]) : [s.type as string];
-    if (!types.some((t) => is(t, value))) return fail(out, path, `must be ${types.join(" or ")}, got ${kind(value)}`);
+    if (!types.some((t) => is(t, value))) {
+      // A whole number past 2^53 - 1 may already be another one, which JSON would store as given.
+      if (types.includes("integer") && typeof value === "number" && Number.isInteger(value)) return fail(out, path, `must be integer, and ${BigInt(value)} is past 2^53 - 1, where a number stops being exact, so pass it as a BigInt`);
+      return fail(out, path, `must be ${types.join(" or ")}, got ${kind(value)}`);
+    }
   }
   if (Array.isArray(s.enum) && !s.enum.some((e) => equal(e, value))) return fail(out, path, `must be one of ${s.enum.map((e) => JSON.stringify(e)).join(", ")}`);
   if ("const" in s && !equal(s.const, value)) return fail(out, path, `must be ${JSON.stringify(s.const)}`);
 
-  if (typeof value === "number") {
+  if (typeof value === "number" || typeof value === "bigint") {
+    // A BigInt compares with a number exactly, as each of these comparisons does.
     if (typeof s.multipleOf === "number" && !multiple(value, s.multipleOf)) return fail(out, path, `must be a multiple of ${s.multipleOf}`);
-    if (typeof s.maximum === "number" && value > s.maximum) return fail(out, path, `must be at most ${s.maximum}`);
-    if (typeof s.exclusiveMaximum === "number" && value >= s.exclusiveMaximum) return fail(out, path, `must be less than ${s.exclusiveMaximum}`);
-    if (typeof s.minimum === "number" && value < s.minimum) return fail(out, path, `must be at least ${s.minimum}`);
-    if (typeof s.exclusiveMinimum === "number" && value <= s.exclusiveMinimum) return fail(out, path, `must be more than ${s.exclusiveMinimum}`);
+    if (typeof s.maximum === "number" && value > s.maximum) return fail(out, path, `must be at most ${bound(s.maximum)}`);
+    if (typeof s.exclusiveMaximum === "number" && value >= s.exclusiveMaximum) return fail(out, path, `must be less than ${bound(s.exclusiveMaximum)}`);
+    if (typeof s.minimum === "number" && value < s.minimum) return fail(out, path, `must be at least ${bound(s.minimum)}`);
+    if (typeof s.exclusiveMinimum === "number" && value <= s.exclusiveMinimum) return fail(out, path, `must be more than ${bound(s.exclusiveMinimum)}`);
   }
   if (typeof value === "string") {
     // A length counts code points, as JSON Schema says.
@@ -232,6 +237,9 @@ function check(schema: Schema, value: unknown, path: string, out: Failure[]): Ev
   return evaluated;
 }
 
+/** A bound as its digits: a whole number past 2^53 prints as 4611686018427388000 otherwise. */
+const bound = (n: number) => (Number.isInteger(n) && !Number.isSafeInteger(n) ? BigInt(n).toString() : String(n));
+
 function fail(out: Failure[], path: string, message: string, replace = false): undefined {
   if (replace) out.length = 0;
   out.push({ path, message });
@@ -242,8 +250,10 @@ function is(type: string, v: unknown): boolean {
   switch (type) {
     case "null": return v === null;
     case "boolean": return typeof v === "boolean";
-    case "number": return typeof v === "number" && Number.isFinite(v);
-    case "integer": return typeof v === "number" && Number.isInteger(v);
+    // A BigInt is a whole number, which JSON writes as its digits (`jsonText`, src/execute.ts); a
+    // whole number past 2^53 - 1 is no integer here, since it may already be another one.
+    case "number": return (typeof v === "number" && Number.isFinite(v)) || typeof v === "bigint";
+    case "integer": return Number.isSafeInteger(v) || typeof v === "bigint";
     case "string": return typeof v === "string";
     case "array": return Array.isArray(v);
     case "object": return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -255,13 +265,16 @@ function kind(v: unknown): string {
   if (v === null) return "null";
   if (Array.isArray(v)) return "an array";
   if (typeof v === "number") return Number.isInteger(v) ? "an integer" : "a number";
+  if (typeof v === "bigint") return "an integer, a BigInt";
   if (typeof v === "object") return "an object";
   return `a ${typeof v}`;
 }
 
-/** JSON equality: numbers by value (1 and 1.0 alike), objects by their keys whatever the order. */
+/** JSON equality: numbers by value (1, 1.0 and 1n alike), objects by their keys whatever the order. */
 function equal(a: unknown, b: unknown): boolean {
   if (a === b) return true;
+  // `==` between a BigInt and a number compares their values exactly.
+  if ((typeof a === "bigint" && typeof b === "number") || (typeof a === "number" && typeof b === "bigint")) return a == b;
   if (typeof a !== typeof b || a === null || b === null || typeof a !== "object") return false;
   if (Array.isArray(a) !== Array.isArray(b)) return false;
   if (Array.isArray(a)) {
@@ -285,11 +298,11 @@ const item = (v: unknown) => (written(v) ? v : null);
 // remainder is taken exactly: 0.3 is a multiple of 0.1, and 1.0000000000000002 is none of 1. A
 // division of doubles cannot say it: past 2^53 every quotient is whole, and below, 0.3 / 0.1
 // misses 3 by a unit in its last place.
-function multiple(value: number, of: number): boolean {
+function multiple(value: number | bigint, of: number): boolean {
   // JSON Schema asks for a divisor above zero: one that is zero or not finite divides nothing, and
   // nothing divides a value that is not finite.
-  if (!Number.isFinite(value) || !Number.isFinite(of) || of === 0) return false;
-  const [v, ve] = decimal(value);
+  if ((typeof value === "number" && !Number.isFinite(value)) || !Number.isFinite(of) || of === 0) return false;
+  const [v, ve] = typeof value === "bigint" ? [value, 0] : decimal(value);
   const [o, oe] = decimal(of);
   const e = Math.min(ve, oe);
   return (v * 10n ** BigInt(ve - e)) % (o * 10n ** BigInt(oe - e)) === 0n;

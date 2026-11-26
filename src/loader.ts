@@ -214,11 +214,12 @@ export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: stri
     const beside = c.delimiter ?? c.described;
     return beside === undefined ? [c.name, kind] : [c.name, kind, beside];
   });
-  // Where each Postgres JSON column holds a float or a decimal that may be NaN or an infinity,
-  // which the run time gives as that number, or a Postgres array it holds to one level (src/render.ts,
-  // `jsonNumbers`), by position beside `columns`: two columns may share a name, each with its own
-  // type. Under `allow_nested_arrays: true` a Postgres array nests there too, held to no depth.
-  const nonFinite = dialect === "postgres" ? (m.allowNestedArrays ? analysisWithNestedArrays(analysis) : analysis).columns.map((c) => jsonNumbers(c.type) ?? null) : [];
+  // Where each JSON column holds a 64-bit integer, whose number past 2^53 - 1 the run time
+  // refuses, and on Postgres a float or a decimal that may be NaN or an infinity, which the run time
+  // gives as that number, or a Postgres array it holds to one level (src/render.ts, `jsonNumbers`),
+  // by position beside `columns`: two columns may share a name, each with its own type. Under
+  // `allow_nested_arrays: true` a Postgres array nests there too, held to no depth.
+  const nonFinite = dialect === "clickhouse" ? [] : (dialect === "postgres" && m.allowNestedArrays ? analysisWithNestedArrays(analysis) : analysis).columns.map((c) => jsonNumbers(c.type, false, dialect) ?? null);
   const codecs = moduleCodecs(m);
   const libraries = moduleLibraries(m);
   const library = [...libraries].find((l) => l !== "ip-address");

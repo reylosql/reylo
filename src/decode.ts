@@ -26,7 +26,7 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, DecodeError, elementKind, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
+import { civilFromDays, coerce, DecodeError, withRawIntegers, elementKind, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
 import { lastOfEach, rowOf, type RowBuilder } from "./row.ts";
 import { arrayLiteral, asByteaHex, isJsonValue, jsonText, jsonValue, postgresText, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
@@ -1016,7 +1016,7 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
     // as it is either way. A query without inputs gets its values as they are, as on every driver.
     const bun = typeof c.commitDistributed === "function";
     // Each handle Bun.sql gives out, a transaction's, a savepoint's and a reserved connection's too, carries its client's options.
-    const bunJson = bun && c.options?.prepare === false ? jsonText : (v: unknown) => ({ toJSON: () => jsonValue(v) });
+    const bunJson = bun && c.options?.prepare === false ? jsonText : (v: unknown) => ({ toJSON: () => withRawIntegers(jsonValue(v)) });
     const mapped = bun ? bound.map((v, i) => (isJsonParam(v, i) ? bunJson(v) : v)) : query.inputs ? bound.map((v, i) => c.typed(postgresText(query, names[i]!, v), 705)) : bound;
     if (!bun) return await postgresJs(c, text, mapped, query.columns, query.row);
     return (await bunRaw(c, text, mapped, query.columns, query.row)) ?? bunRows(await c.unsafe(text, mapped), query.columns, true);

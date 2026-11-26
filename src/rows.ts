@@ -9,7 +9,7 @@
 import type { EngineType, JsonSchema } from "./engine-type.ts";
 import type { Marks } from "./execute.ts";
 import { validate, withDefaults } from "./json-schema.ts";
-import { columnKind, describe, given, hstoreText, ParameterError, postgresInterval, postgresLiteral, postgresYear, vectorText, zoned } from "./values.ts";
+import { columnKind, describe, given, hstoreText, jsonStringify, ParameterError, postgresInterval, postgresLiteral, postgresYear, vectorText, zoned } from "./values.ts";
 
 export { describe, zoned } from "./values.ts";
 
@@ -127,16 +127,16 @@ export function prepareRows(name: string, type: RowsType, value: unknown, dialec
  * a JSON parameter of its own is written. Postgres takes the rows as they are.
  */
 function jsonMember(f: RowField, v: unknown, dialect: Dialect): unknown {
-  return dialect !== "postgres" && f.type.kind === "json" ? new Raw(JSON.stringify(v)) : v;
+  return dialect !== "postgres" && f.type.kind === "json" ? new Raw(jsonStringify(v)) : v;
 }
 
 /** One value checked against its type, as the JSON the database reads; `fail` says why not. */
 function check(type: EngineType, written: string, v: unknown, dialect: Dialect, fail: (message: string) => never): unknown {
   switch (type.kind) {
     case "json":
-      // JSON.stringify throws on a BigInt and skips a function; a JSON member holds JSON.
+      // A JSON member holds JSON, a BigInt written as its digits: JSON.stringify skips a function.
       try {
-        if (JSON.stringify(v) === undefined) fail(`is ${written}, which holds a JSON value; got ${describe(v)}.`);
+        if (jsonStringify(v) === undefined) fail(`is ${written}, which holds a JSON value; got ${describe(v)}.`);
       } catch (e) {
         fail(`is ${written}, which holds a JSON value: ${(e as Error).message}.`);
       }

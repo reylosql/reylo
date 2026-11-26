@@ -10,7 +10,7 @@
 // the databases its queries are written for.
 
 import type { QueryError } from "./query-error.ts";
-import { columnKind, describe, given, hstoreText, isArrayValued, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresLiteral, postgresYear, rowMasks, vectorText, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
+import { columnKind, describe, given, hstoreText, isArrayValued, isMultirangeKind, isRangeKind, isRowKind, jsonStringify, numbersInJson, ParameterError, postgresInterval, postgresLiteral, postgresYear, rowMasks, vectorText, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
 import { bareName, holdsWholeArrays, isMysqlSet, schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
@@ -202,7 +202,7 @@ export type QueryModule<D extends Dialect = Dialect> = {
   readonly inputs?: Inputs | undefined;
   /** Each output column's name and kind (src/values.ts), in order: what the run time gives each value (every build step puts it in the module). */
   readonly columns?: Columns | undefined;
-  /** Where each Postgres JSON column, by position beside `columns`, holds a float or a decimal that may be NaN or an infinity, which the run time gives as that number, or a Postgres array it holds to one level (src/values.ts, `numbersInJson`); `null` for a column that holds neither. */
+  /** Where each JSON column, by position beside `columns`, holds a 64-bit integer, whose number past 2^53 - 1 the run time refuses, or on Postgres a float or a decimal that may be NaN or an infinity, which the run time gives as that number, or a Postgres array it holds to one level (src/values.ts, `numbersInJson`); `null` for a column that holds none. */
   readonly nonFinite?: readonly (JsonNumbers | null)[] | undefined;
   /** Each row as an object of the columns' names, one shape for every row (src/row.ts): every build step puts it in the module, beside `columns`. */
   readonly row?: RowBuilder | undefined;
@@ -295,18 +295,29 @@ export function execute<D extends Dialect>(
   if (isKnex(c)) return onKnexConnection(c, query.dialect, (connection) => execute(connection as ClientFor<D>, query, params));
   const runSync = query.runtime.runSync;
   if (runSync && (isSyncSqlite(c) || isDurableObjectSql(c))) return withCodecs(query, executeSyncSqlite(c, query, params, runSync));
-  const nonFinite = query.dialect === "postgres" && query.nonFinite !== undefined && query.columns !== undefined ? rowMasks(query.columns, query.nonFinite) : [];
+  const nonFinite = jsonPlans(query);
   // A Postgres array column holds the dimensions its type declares and no more (src/values.ts, `withinDimensions`), unless the project lets it nest.
   const arrays = query.dialect === "postgres" && !query.nestedArrays ? (query.columns ?? []).filter(([, kind]) => kind.endsWith("[]")) : [];
   if (!nonFinite.length && !arrays.length) return withCodecs(query, executeAsync(c, query, params));
-  return withCodecs(query, executeAsync(c, query, params).then((rows) => {
-    for (const row of rows as Record<string, unknown>[]) {
-      // Postgres writes a non-finite float or decimal inside JSON as text, whichever driver reads it.
-      for (const [name, at] of nonFinite) row[name] = numbersInJson(row[name], at, name);
-      for (const [name, kind] of arrays) withinDimensions(row[name], kind, name);
-    }
-    return rows;
-  }));
+  return withCodecs(query, executeAsync(c, query, params).then((rows) => inJson(rows, nonFinite, arrays)));
+}
+
+/**
+ * Each JSON column's plan of what the run time reads inside its document, by name: inside JSON a
+ * statement builds, Postgres writes a non-finite float or decimal as text, and JSON.parse rounds an
+ * integer past 2^53 - 1, whichever driver reads it.
+ */
+function jsonPlans(query: QueryModule): (readonly [name: string, at: JsonNumbers])[] {
+  return query.nonFinite !== undefined && query.columns !== undefined ? rowMasks(query.columns, query.nonFinite) : [];
+}
+
+/** The rows with what each JSON column's plan reads inside its document read there, and each Postgres array column held to its dimensions. */
+function inJson(rows: unknown[], nonFinite: readonly (readonly [name: string, at: JsonNumbers])[], arrays: Columns): unknown[] {
+  for (const row of rows as Record<string, unknown>[]) {
+    for (const [name, at] of nonFinite) row[name] = numbersInJson(row[name], at, name);
+    for (const [name, kind] of arrays) withinDimensions(row[name], kind, name);
+  }
+  return rows;
 }
 
 /** The rows with the codecs of the module's columns applied where they stand (src/codecs.ts): one pass, where a column holds one. */
@@ -381,7 +392,10 @@ export function executeSync<D extends Dialect>(client: SyncClientFor<D>, query: 
 function executeSyncSqlite<D extends Dialect>(c: AnyClient, query: QueryModule<D>, params: ParamsInput, runSync: NonNullable<Runtime<D>["runSync"]>): unknown[] | Promise<unknown[]> {
   if (isSqlJs(c) && !sqlJsCurrent(c)) throw new TypeError(`This sql.js binds a BigInt as its text and throws SQLite's errors with no code, which .try() could not tell apart: reylo takes sql.js ${SQLJS_MIN} or later.`);
   checkParams(query, params);
-  return runSync(c, query, statement(query, params));
+  const rows = runSync(c, query, statement(query, params));
+  const plans = jsonPlans(query);
+  if (!plans.length) return rows;
+  return Array.isArray(rows) ? inJson(rows, plans, []) : rows.then((r) => inJson(r, plans, []));
 }
 
 // SQLite Wasm's oo1 Database: prepare() and selectObjects(), which no other driver has. Its
@@ -708,8 +722,8 @@ const JSON_NULL: unique symbol = Symbol("JSON null");
 /** A JSON parameter's value as JSON: `JSON_NULL` as null. */
 export const jsonValue = (v: unknown) => (v === JSON_NULL ? null : v);
 
-/** A JSON parameter's value as the JSON text a driver binds. */
-export const jsonText = (v: unknown) => JSON.stringify(jsonValue(v));
+/** A JSON parameter's value as the JSON text a driver binds, each BigInt in it as its digits. */
+export const jsonText = (v: unknown) => jsonStringify(jsonValue(v));
 
 // A date or time value's type says whether it has a zone (src/render.ts),
 // and a value that would be read in a zone nobody chose is refused before the

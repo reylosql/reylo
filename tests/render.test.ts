@@ -262,6 +262,22 @@ test("the run time converts each float or decimal inside Postgres JSON that may 
   assert.deepEqual(jsonNumbers(doc(record([field("x", pg("float8")), field("x", pg("int4"))]))), undefined);
 });
 
+test("the run time refuses an integer past 2^53 - 1 where a 64-bit integer stands inside JSON, on every dialect but ClickHouse", () => {
+  // `json_build_object('id', id, 'n', n, 'big', big)`, and its SQLite and MySQL forms.
+  assert.deepEqual(jsonNumbers(doc(record([field("id", pg("int4")), field("big", pg("int8")), field("o", pg("oid"))]))), { keys: [["big", "integer"]] });
+  assert.deepEqual(jsonNumbers(doc({ kind: "array", element: { type: record([field("amount", lite("int8")), field("n", lite("integer")), field("lead", lite("bool"))]) } }), false, "sqlite"), { items: { keys: [["amount", "integer"], ["n", "integer"]] } });
+  assert.deepEqual(jsonNumbers(doc(record([field("id", my("int")), field("big", my("bigint")), field("u", { kind: "integer", bits: 64, unsigned: true })])), false, "mysql"), { keys: [["big", "integer"], ["u", "integer"]] });
+  assert.equal(jsonNumbers(doc(record([field("big", { kind: "integer", bits: 64 })])), false, "clickhouse"), undefined);
+  // Outside JSON a 64-bit integer is a BigInt already, and on SQLite and MySQL a float is a number inside JSON too.
+  assert.equal(jsonNumbers(pg("int8")), undefined);
+  assert.equal(jsonNumbers(lite("int8"), false, "sqlite"), undefined);
+  assert.equal(jsonNumbers(doc(record([field("f", lite("real"))])), false, "sqlite"), undefined);
+  const rounds = { items: { keys: [["amount", "integer"]] } } as const;
+  assert.deepEqual(numbersInJson([{ amount: 9007199254740991 }, { amount: -9007199254740991 }, { amount: null }], rounds, "rounds"), [{ amount: 9007199254740991 }, { amount: -9007199254740991 }, { amount: null }]);
+  assert.throws(() => numbersInJson([{ amount: 1 }, { amount: 9007199254740993 }], rounds, "rounds"), /Column "rounds" holds, inside its JSON at \/1\/amount, the integer 9007199254740992, which is past 2\^53 - 1, where JSON\.parse rounds a number/);
+  assert.throws(() => numbersInJson({ "a/b": -9007199254740992 }, { keys: [["a/b", "integer"]] }, "doc"), /at \/a~1b, the integer -9007199254740992/);
+});
+
 test("two columns or keys of one name keep the last, as a row object and JSON.parse do", () => {
   assert.equal(renderType(doc(record([field("x", pg("text")), field("x", pg("int4"), true)])), false, "postgres"), "{ x: number | null }");
   // A row whose columns were not read (a subquery's) is an object of them inside a document.
@@ -359,9 +375,12 @@ test("a JSON column a CHECK holds to a JSON Schema is the type of the values the
   assert.equal(renderType(json(false)), "never");
   assert.equal(renderType(json({})), "Json");
   assert.equal(renderType(json({ type: "array" })), "Json[]");
-  // Reylo parses JSON on every driver; inside a document, and as a parameter, the schema's type stands.
+  // Reylo parses JSON on every driver; inside a document the schema's type stands, and a parameter's
+  // integer takes a BigInt too, which `.run()` writes as its digits, so one past 2^53 - 1 stays exact.
   assert.equal(renderType(json(open), true, "postgres"), "{ name: string; age?: number | null }");
-  assert.equal(renderParamType(json(open), "postgres"), "{ name: string; age?: number | null }");
+  assert.equal(renderParamType(json(open), "postgres"), "{ name: string; age?: number | bigint | null }");
+  assert.equal(renderParamType(json({ type: "array", items: { type: ["number", "integer"], minimum: 0 } }), "sqlite"), "(number | bigint)[]");
+  assert.equal(renderParamType(json({ type: "array", prefixItems: [{ type: "integer" }], items: { type: "number" } }), "mysql"), "[(number | bigint)?, ...number[]]");
   assert.equal(renderType({ kind: "json" }), "Json");
 });
 

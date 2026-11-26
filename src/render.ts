@@ -189,40 +189,45 @@ export function renderType(t: EngineType, inJson = false, dialect: Dialect = "po
 const FLAT_ELEMENTS: ReadonlySet<EngineType["kind"]> = new Set(["boolean", "integer", "float", "decimal", "text", "bytes", "uuid", "enum", "date", "time", "datetime", "instant", "zoned_datetime", "duration", "struct", "map"]);
 
 /**
- * Where a Postgres value of type `t` holds a float or a decimal inside JSON that may be NaN or an
- * infinity, which Postgres writes there as the text `"NaN"`, `"Infinity"` or `"-Infinity"` and the
- * run time gives as that number (src/values.ts, `numbersInJson`): `true` for such a value, `items`
- * for an array's elements (through nested arrays where Postgres's own may nest), `keys` for an
+ * What the run time reads inside a document a statement builds (src/values.ts, `numbersInJson`):
+ * on Postgres, a float or a decimal that may be NaN or an infinity, which Postgres writes there as
+ * the text `"NaN"`, `"Infinity"` or `"-Infinity"` and the run time gives as that number, `true`;
+ * on every dialect but ClickHouse, an integer wider than a double holds exactly, whose number past
+ * 2^53 - 1 JSON.parse may already have rounded and the run time refuses, `"integer"`; `items` for
+ * an array's elements (through nested arrays where Postgres's own may nest), `keys` for an
  * object's fields; undefined where it holds none. It walks the type as `renderType` prints it, so
- * each place printed `number` there is one the run time converts. It marks `flat` each Postgres
- * array inside JSON the run time holds to one level.
+ * each place printed `number` there is one the run time reads. It marks `flat` each Postgres array
+ * inside JSON the run time holds to one level.
  */
-export function jsonNumbers(t: EngineType, inJson = false): JsonNumbers | undefined {
+export function jsonNumbers(t: EngineType, inJson = false, dialect: Dialect = "postgres"): JsonNumbers | undefined {
   const name = bareName(t);
   switch (t.kind) {
     case "float":
     case "decimal":
-      return inJson && (t.nan === true || t.infinity === true) ? true : undefined;
+      return inJson && dialect === "postgres" && (t.nan === true || t.infinity === true) ? true : undefined;
+    case "integer":
+      // A signed integer of 55 bits or more, or an unsigned one of 54 or more, holds a number past 2^53 - 1.
+      return inJson && dialect !== "clickhouse" && !(dialect === "postgres" && name === "oid") && (t.unsigned ? t.bits : t.bits - 1) > 53 ? "integer" : undefined;
     case "array": {
-      if (inJson ? json[name] !== undefined : !columnKind(t, "postgres").endsWith("[]")) return undefined;
-      const items = jsonNumbers(t.element.type, inJson);
+      if (inJson ? dialect === "postgres" && json[name] !== undefined : dialect !== "postgres" || !columnKind(t, "postgres").endsWith("[]")) return undefined;
+      const items = jsonNumbers(t.element.type, inJson, dialect);
       // A Postgres array inside a document has as many levels as its value, which the run time
       // holds to one, as it does a column's (src/values.ts, `numbersInJson`), unless the project lets
       // it nest; an array whose elements may be JSON arrays themselves can't be told from a deeper one.
-      const flat = inJson && !nestsAnyDeep(t) && postgresArray(t) && FLAT_ELEMENTS.has(t.element.type.kind);
+      const flat = inJson && dialect === "postgres" && !nestsAnyDeep(t) && postgresArray(t) && FLAT_ELEMENTS.has(t.element.type.kind);
       if (items === undefined && !flat) return undefined;
       return { items: items ?? false, ...(nestsAnyDeep(t) ? { deep: true as const } : {}), ...(flat ? { flat: true as const } : {}) };
     }
     case "struct": {
-      if (!inJson || json[name] !== undefined) return undefined;
+      if (!inJson || (dialect === "postgres" && json[name] !== undefined)) return undefined;
       const keys = lastOfEachName(t.fields).flatMap((f): [string, JsonNumbers][] => {
-        const inner = jsonNumbers(f.type, true);
+        const inner = jsonNumbers(f.type, true, dialect);
         return inner === undefined ? [] : [[f.name, inner]];
       });
       return keys.length ? { keys } : undefined;
     }
     case "json":
-      return t.content === undefined ? undefined : jsonNumbers(t.content.type, true);
+      return t.content === undefined ? undefined : jsonNumbers(t.content.type, true, dialect);
     default:
       return undefined;
   }
@@ -240,18 +245,19 @@ export function jsonNumbers(t: EngineType, inJson = false): JsonNumbers | undefi
  * is one of a union's objects (`besideObjects`): `"k" in v` narrows a union to the members that name
  * `k` or have a signature, and an open member that names no `k` may still hold one of any type.
  */
-export function schemaType(schema: unknown, besideObjects = false): string {
+export function schemaType(schema: unknown, besideObjects = false, input = false): string {
   if (schema === false) return "never";
   if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return JSON_TYPE;
   const m = schema as Record<string, unknown>;
   if (Array.isArray(m.anyOf)) {
     const shared = besideObjects || objectAlternatives(m) > 1;
-    return union(m.anyOf.map((s) => schemaType(s, shared)));
+    return union(m.anyOf.map((s) => schemaType(s, shared, input)));
   }
   if (Array.isArray(m.enum)) return union(m.enum.map(literalType));
   if (m.not !== undefined) return "never";
-  const kinds = kindsOf(m);
-  return kinds.length ? union(kinds.map((kind) => kindType(kind, m, besideObjects))) : JSON_TYPE;
+  // A parameter's integer, `number | bigint`, holds every number it takes.
+  const kinds = kindsOf(m).filter((kind, _, all) => !(input && kind === "number" && all.includes("integer")));
+  return kinds.length ? union(kinds.map((kind) => kindType(kind, m, besideObjects, input))) : JSON_TYPE;
 }
 
 function kindsOf(m: Record<string, unknown>): string[] {
@@ -267,15 +273,17 @@ function objectAlternatives(schema: unknown): number {
   return kindsOf(m).includes("object") ? 1 : 0;
 }
 
-function kindType(kind: string, m: Record<string, unknown>, besideObjects: boolean): string {
+function kindType(kind: string, m: Record<string, unknown>, besideObjects: boolean, input: boolean): string {
   switch (kind) {
     case "string": return "string";
-    case "integer": case "number": return "number";
+    // A parameter's integer takes a BigInt too, written as its digits (src/values.ts, `jsonStringify`).
+    case "integer": return input ? "number | bigint" : "number";
+    case "number": return "number";
     case "boolean": return "boolean";
     case "null": return "null";
     case "array": {
-      const prefix = Array.isArray(m.prefixItems) ? m.prefixItems.map((s) => schemaType(s)) : [];
-      const rest = m.items === undefined ? JSON_TYPE : schemaType(m.items);
+      const prefix = Array.isArray(m.prefixItems) ? m.prefixItems.map((s) => schemaType(s, false, input)) : [];
+      const rest = m.items === undefined ? JSON_TYPE : schemaType(m.items, false, input);
       if (!prefix.length) return rest === "never" ? "[]" : `${grouped(rest)}[]`;
       const min = typeof m.minItems === "number" ? m.minItems : 0;
       const items = prefix.map((item, i) => (i < min ? item : `${grouped(item)}?`));
@@ -285,8 +293,8 @@ function kindType(kind: string, m: Record<string, unknown>, besideObjects: boole
     case "object": {
       const properties = m.properties !== null && typeof m.properties === "object" && !Array.isArray(m.properties) ? (m.properties as Record<string, unknown>) : {};
       const required = Array.isArray(m.required) ? m.required : [];
-      const fields = Object.entries(properties).map(([key, value]) => `${ident(key)}${required.includes(key) ? "" : "?"}: ${schemaType(value)}`);
-      const rest = m.additionalProperties === undefined || m.additionalProperties === false ? "never" : schemaType(m.additionalProperties);
+      const fields = Object.entries(properties).map(([key, value]) => `${ident(key)}${required.includes(key) ? "" : "?"}: ${schemaType(value, false, input)}`);
+      const rest = m.additionalProperties === undefined || m.additionalProperties === false ? "never" : schemaType(m.additionalProperties, false, input);
       const open = m.additionalProperties === undefined || rest === JSON_TYPE;
       const signature = fields.length ? (rest !== "never" && rest !== JSON_TYPE) || (open && besideObjects) : rest !== "never";
       if (signature) fields.push(`[key: string]: ${fields.length ? `${JSON_TYPE} | undefined` : rest}`);
@@ -431,7 +439,7 @@ export function renderParamType(t: EngineType, dialect: Dialect = "postgres", in
   // `JSON.stringify`, so one with no schema takes whatever that writes, a value with a `toJSON()`
   // among them; its null is JSON's null where the statement takes no SQL NULL (src/execute.ts),
   // so `JsonInput` admits it either way.
-  if (t.kind === "json") return t.schema === undefined ? JSON_INPUT_TYPE : schemaType(schemaOf(t));
+  if (t.kind === "json") return t.schema === undefined ? JSON_INPUT_TYPE : schemaType(schemaOf(t), false, true);
   // A structured parameter: one row, or an array of rows, each key as a parameter of its type
   // takes it, `?` where the caller may leave it out, `| null` where it may be null.
   if (members !== undefined) {

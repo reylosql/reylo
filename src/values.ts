@@ -53,13 +53,14 @@ export type Kind = string;
 export type Columns = readonly (readonly [name: string, kind: Kind, delimiter?: string])[];
 
 /**
- * What the run time reads inside a Postgres document (src/render.ts, `jsonNumbers`): where it holds
- * a float or a decimal that may be NaN or an infinity, which Postgres writes there as text, `true`
- * for such a value; for an array, `items` for its elements (`false` where they need nothing),
- * through nested arrays where `deep`, and `flat` where it is a Postgres array held to one level;
- * and `keys` for an object's fields.
+ * What the run time reads inside a document a statement builds (src/render.ts, `jsonNumbers`):
+ * where it holds a float or a decimal that may be NaN or an infinity, which Postgres writes there
+ * as text, `true` for such a value; where it holds an integer wider than a double holds exactly,
+ * `"integer"`; for an array, `items` for its elements (`false` where they need nothing), through
+ * nested arrays where `deep`, and `flat` where it is a Postgres array held to one level; and `keys`
+ * for an object's fields.
  */
-export type JsonNumbers = true | { readonly items: JsonNumbers | false; readonly deep?: true; readonly flat?: true } | { readonly keys: readonly (readonly [key: string, at: JsonNumbers])[] };
+export type JsonNumbers = true | "integer" | { readonly items: JsonNumbers | false; readonly deep?: true; readonly flat?: true } | { readonly keys: readonly (readonly [key: string, at: JsonNumbers])[] };
 
 /**
  * The JSON columns of a row whose non-finite numbers `.run()` gives as numbers: each name's last
@@ -76,10 +77,19 @@ export function rowMasks(columns: Columns, nonFinite: readonly (JsonNumbers | nu
  * `at`, `"NaN"`, `"Infinity"` or `"-Infinity"`, as that number, in place: JSON has no number for
  * one, and a float outside a document is one already. A Postgres array there is written with as
  * many levels as its value has, which Postgres doesn't hold to the one its type has, so one of
- * more is refused, naming `column`, as `withinDimensions` refuses a column's.
+ * more is refused, naming `column`, as `withinDimensions` refuses a column's. So is a number past
+ * 2^53 - 1 where a 64-bit integer stands, which JSON.parse may already have rounded to it: a column
+ * of the integer is an exact BigInt, and a number refuses such a value rather than round it.
  */
-export function numbersInJson(v: unknown, at: JsonNumbers, column = ""): unknown {
+export function numbersInJson(v: unknown, at: JsonNumbers, column = "", path = ""): unknown {
   if (at === true) return v === "NaN" ? NaN : v === "Infinity" ? Infinity : v === "-Infinity" ? -Infinity : v;
+  if (at === "integer") {
+    // A finite double past 2^53 - 1 is whole, so its digits are BigInt's.
+    if (typeof v === "number" && Math.abs(v) > Number.MAX_SAFE_INTEGER) {
+      throw new DecodeError(`Column "${column}" holds, inside its JSON${path ? ` at ${path}` : ""}, the integer ${Number.isFinite(v) ? BigInt(v) : v}, which is past 2^53 - 1, where JSON.parse rounds a number, so it may have been another one. Select the integer as a column of its own, which comes back an exact BigInt, or write it into the document as text and read that with BigInt().`);
+    }
+    return v;
+  }
   if (v === null || typeof v !== "object") return v;
   if ("items" in at) {
     if (!Array.isArray(v)) return v;
@@ -91,13 +101,13 @@ export function numbersInJson(v: unknown, at: JsonNumbers, column = ""): unknown
     // A Postgres array nests to any depth, each level an array; where its element is a JSON array
     // as well, an array is read as the element, since the two cannot be told apart.
     const nested = at.deep === true && !(typeof items === "object" && "items" in items);
-    for (let i = 0; i < v.length; i++) v[i] = nested && Array.isArray(v[i]) ? numbersInJson(v[i], at, column) : numbersInJson(v[i], items, column);
+    for (let i = 0; i < v.length; i++) v[i] = nested && Array.isArray(v[i]) ? numbersInJson(v[i], at, column, `${path}/${i}`) : numbersInJson(v[i], items, column, `${path}/${i}`);
     return v;
   }
   const o = v as Record<string, unknown>;
   for (const [key, inner] of at.keys) {
     if (!Object.prototype.hasOwnProperty.call(o, key)) continue;
-    const value = numbersInJson(o[key], inner, column);
+    const value = numbersInJson(o[key], inner, column, `${path}/${key.replace(/~/g, "~0").replace(/\//g, "~1")}`);
     // `__proto__` is an own key JSON.parse made, which an assignment would not reach.
     if (key === "__proto__") Object.defineProperty(o, key, { value, writable: true, enumerable: true, configurable: true });
     else o[key] = value;
@@ -1210,6 +1220,45 @@ export class DecodeError extends TypeError {}
 
 /** Why a parameter's value cannot be bound: Reylo's error, naming the parameter. */
 export class ParameterError extends TypeError {}
+
+/**
+ * A JSON value as its text, as JSON.stringify writes it, but each BigInt in it as its digits, which
+ * JSON.stringify refuses and a schema's `integer` takes (src/json-schema.ts). `JSON.rawJSON`
+ * writes them, named through a cast, since a project may type-check the run time with a `lib`
+ * older than it.
+ */
+export function jsonStringify(v: unknown): string {
+  return JSON.stringify(v, (_key, x: unknown) => (typeof x === "bigint" ? rawInteger(x) : x));
+}
+
+/** A JSON value with each BigInt in it as `JSON.rawJSON` of its digits, for a driver that serializes the value itself (Bun.sql): a copy where it holds one. */
+export function withRawIntegers(v: unknown): unknown {
+  return v !== null && typeof v === "object" && !holdsBigInt(v) ? v : rawCopy(v);
+}
+
+function rawCopy(v: unknown): unknown {
+  if (typeof v === "bigint") return rawInteger(v);
+  if (v === null || typeof v !== "object" || (JSON as { isRawJSON?: (x: unknown) => boolean }).isRawJSON?.(v)) return v;
+  // What JSON.stringify writes for the value: its toJSON()'s (a Date's), or its items and own keys.
+  if (typeof (v as { toJSON?: unknown }).toJSON === "function") return rawCopy((v as { toJSON(key: string): unknown }).toJSON(""));
+  if (Array.isArray(v)) return Array.from(v, rawCopy);
+  return Object.fromEntries(Object.entries(v).map(([key, x]) => [key, rawCopy(x)]));
+}
+
+function holdsBigInt(v: object): boolean {
+  let found = false;
+  JSON.stringify(v, (_key, x: unknown) => {
+    if (typeof x === "bigint") found = true;
+    return found ? undefined : x;
+  });
+  return found;
+}
+
+function rawInteger(x: bigint): unknown {
+  const raw = (JSON as { rawJSON?: (text: string) => unknown }).rawJSON;
+  if (raw === undefined) throw new ParameterError(`A JSON parameter holds the BigInt ${x}, and this runtime has no JSON.rawJSON to write it exactly: pass it as a number, up to 2^53 - 1.`);
+  return raw(x.toString());
+}
 
 /**
  * A string for a `timestamptz` names its zone: without one the server reads it in the session's

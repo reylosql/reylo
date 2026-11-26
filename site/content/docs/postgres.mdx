@@ -348,7 +348,8 @@ Inside JSON, a value can differ from the same value in a column:
 
 | Value | Inside JSON |
 | --- | --- |
-| A number past 2^53 | loses precision in `JSON.parse` |
+| A 64-bit integer past 2^53 | an error naming its column, since `JSON.parse` rounds it |
+| Any other number past 2^53 | rounded by `JSON.parse` |
 | `timestamptz` | the session's time zone, not UTC |
 | `bytea` | hex text |
 | `oid` | text |
@@ -360,7 +361,9 @@ Inside JSON, a value can differ from the same value in a column:
 
 <Pairs>
 
-- `jsonb_build_object('n', 9007199254740993::bigint)` → `{ n: 9007199254740992 }`
+- `jsonb_build_object('n', 9007199254740993::bigint)` → `throws TypeError`
+- `jsonb_build_object('n', 9007199254740993::bigint::text)` → `{ n: "9007199254740993" }`
+- `jsonb_build_object('n', 9007199254740993::numeric)` → `{ n: 9007199254740992 }`
 - `jsonb_build_object('n', 12.50::numeric)` → `{ n: 12.5 }`
 - `jsonb_build_object('n', 'NaN'::numeric)` → `{ n: NaN }`
 - `jsonb_build_object('at', '2026-10-20 08:00:00+00'::timestamptz)` → `{ at: "2026-10-20T01:00:00-07:00" }`
