@@ -9,6 +9,8 @@ import { mysql } from "../src/decode-mysql.ts";
 import { sqlite } from "../src/decode-sqlite.ts";
 import { clickhouse } from "../src/decode-clickhouse.ts";
 import { codecRuntime } from "../src/codecs.ts";
+import { postgresTypes } from "../src/postgres-types.ts";
+import { installPostgresTypes } from "../src/values.ts";
 import type { ClientFor, Dialect, ParamsInput, SyncClientFor } from "../src/execute.ts";
 import { handWritten } from "./helpers.ts";
 
@@ -16,6 +18,9 @@ import { handWritten } from "./helpers.ts";
 export type QueryModule<D extends Dialect = Dialect> = Omit<run.QueryModule<D>, "runtime" | "codecRuntime">;
 
 const RUNTIMES: { readonly [D in Dialect]: run.Runtime<D> } = { postgres, mysql, sqlite, clickhouse };
+
+// Postgres's rarer types, as `defineQuery` installs them.
+installPostgresTypes(postgresTypes);
 
 // One module with its runtime per module a test wrote, so that what the run time keeps by module
 // (src/execute.ts, `moneyParams`) keeps it as it would for a defined query.

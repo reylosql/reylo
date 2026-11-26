@@ -8,7 +8,8 @@ import { standardQuery, type StandardQueryV1 } from "./standard-query.ts";
 import type { Structured } from "./rows.ts";
 import type { RowBuilder } from "./row.ts";
 import type { Checks } from "./checks.ts";
-import { DecodeError, ParameterError, type Columns, type JsonNumbers } from "./values.ts";
+import { DecodeError, installPostgresTypes, ParameterError, type Columns, type JsonNumbers, type PostgresTypes } from "./values.ts";
+import { postgresTypes } from "./postgres-types.ts";
 import type { QueryError } from "./query-error.ts";
 import { postgres } from "./decode.ts";
 import { mysql } from "./decode-mysql.ts";
@@ -22,6 +23,7 @@ export type { QueryTrace } from "./trace.ts";
 export type { StandardQueryV1 } from "./standard-query.ts";
 export { checks } from "./checks.ts";
 export { codecRuntime } from "./codecs.ts";
+export { postgresTypes } from "./postgres-types.ts";
 export { migrate, type MigrationStorage } from "./migrate.ts";
 export type { MigrateOptions } from "./build-time.ts";
 export type { AnalyzeInput } from "./build-time.ts";
@@ -197,6 +199,8 @@ export type QueryDefinition = {
   libraries?: Libraries;
   /** `js.codecs` at run time, `codecRuntime` from "reylo": a build step passes it where `codecs` or a parameter names a codec, so that an app none of whose statements holds such a value bundles none of it. */
   codecRuntime?: CodecRuntime;
+  /** Postgres's rarer types at run time, `postgresTypes` from "reylo": a build step passes it where the statement reads or binds a row value, a range, a geometric type, an hstore, a money or a non-finite number inside JSON, so that an app none of whose statements does bundles none of it. A query defined with `defineQuery` has it. */
+  postgresTypes?: PostgresTypes;
   /** Each structured parameter in a MySQL insert, with the lists of `text` the run time writes again for the keys a call carries (a Postgres or SQLite insert copies its defaults instead). */
   structured?: readonly Structured[];
   /** The `.sql` file, relative to the project's root and written with `/`: the query's `source`. Every build step puts it in the module. */
@@ -231,7 +235,7 @@ const RUNTIMES: { readonly [D in Dialect]: Runtime<D> } = { postgres, mysql, sql
  * so that a bundle holds no other dialect's drivers and error codes.
  */
 export function defineQuery<Params, Row, C extends Cardinality, D extends Dialect>(def: QueryDefinition & { dialect: D; cardinality?: C }): Query<Params, Row, C, D> {
-  return define(RUNTIMES[def.dialect] as Runtime<D>, def);
+  return define(RUNTIMES[def.dialect] as Runtime<D>, def.dialect === "postgres" ? { postgresTypes, ...def } : def);
 }
 
 /** A Postgres query, as a module a build step writes defines one (`defineQuery`). */
@@ -256,6 +260,7 @@ export function defineClickhouseQuery<Params, Row, C extends Cardinality>(def: O
 
 function define<Params, Row, C extends Cardinality, D extends Dialect>(runtime: Runtime<D>, def: Omit<QueryDefinition, "dialect"> & { cardinality?: C }): Query<Params, Row, C, D> {
   const dialect = runtime.dialect;
+  if (def.postgresTypes) installPostgresTypes(def.postgresTypes);
   const cardinality = (def.cardinality ?? "many") as C;
   const missingSchema = () => {
     throw new Error(`No JSON Schema is available for this query: a module a build step writes carries it, and a query defined by hand has none.`);

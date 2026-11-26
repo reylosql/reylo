@@ -10,7 +10,7 @@ import { Session } from "./analyze.ts";
 import { libraryProblem, sourceName } from "./project.ts";
 import { rowSource } from "./row.ts";
 import { querySchemas } from "./schema.ts";
-import { columnKind } from "./values.ts";
+import { columnKind, holdsRareKind } from "./values.ts";
 import { jsonNumbers } from "./render.ts";
 import { analysisWithBases, analysisWithNestedArrays } from "./engine-type.ts";
 import { planLibraries, planOf, type Codecs, type Library, type Plan } from "./codecs.ts";
@@ -150,17 +150,17 @@ export function moduleLibraries(m: ModuleInput): Set<Library> {
 
 /** The text of a statement's module: its imports, its exports, and the definition of its query, field by field. */
 export function moduleCode(m: ModuleInput): string {
-  const { checked, coded, imports } = moduleImports(m);
+  const { checked, coded, typed, imports } = moduleImports(m);
   const define = DEFINE[m.dialect];
   return [
-    `import { ${define}${checked ? ", checks" : ""}${coded ? ", codecRuntime" : ""} } from "reylo";`,
+    `import { ${define}${checked ? ", checks" : ""}${coded ? ", codecRuntime" : ""}${typed ? ", postgresTypes" : ""} } from "reylo";`,
     ...imports,
     // `sql` is the compiled statement and `raw` the file as written. The comment naming the file
     // (src/sqlcommenter.ts) is added where the statement is sent, so `sql` leaves it out.
     `export const sql = ${JSON.stringify(compiledText(m))};`,
     `export const raw = ${JSON.stringify(m.raw)};`,
     `export const params = ${JSON.stringify(m.params)};`,
-    `export default ${define}(${moduleDefinition(m, { raw: "raw", sql: "sql", params: "params", checks: "checks", codecRuntime: "codecRuntime" })});`,
+    `export default ${define}(${moduleDefinition(m, { raw: "raw", sql: "sql", params: "params", checks: "checks", codecRuntime: "codecRuntime", postgresTypes: "postgresTypes" })});`,
     ``,
   ].join("\n");
 }
@@ -176,12 +176,17 @@ export function trimmedStatement(sql: string): string {
   return trimmed.endsWith("/*") && trimmed.length < sql.length ? sql.slice(0, trimmed.length + 1) : trimmed;
 }
 
+/** Where each Postgres JSON column holds a float or a decimal that may be NaN or an infinity, or an array held to one level, by position beside `columns` (`moduleDefinition`). */
+function moduleNonFinite(m: ModuleInput): (ReturnType<typeof jsonNumbers> | null)[] {
+  return m.dialect === "postgres" ? (m.allowNestedArrays ? analysisWithNestedArrays(m.analysis) : m.analysis).columns.map((c) => jsonNumbers(c.type) ?? null) : [];
+}
+
 /**
  * What a statement's module imports besides its dialect's define function: whether it needs
  * reylo's `checks` and its `codecRuntime`, and each library a codec builds its values with, by the
  * names the module's definition calls them (`ReyloDecimal`, `ReyloIpAddress`).
  */
-export function moduleImports(m: ModuleInput): { checked: boolean; coded: boolean; imports: string[] } {
+export function moduleImports(m: ModuleInput): { checked: boolean; coded: boolean; typed: boolean; imports: string[] } {
   const { analysis } = m;
   // A decimal library's class by a default import, which every version gives as its class, and
   // ip-address whole.
@@ -196,17 +201,22 @@ export function moduleImports(m: ModuleInput): { checked: boolean; coded: boolea
   // A value a codec gives another type is converted with reylo's `codecRuntime`, imported only where
   // the statement holds one, so that an app none of whose statements does bundles none of it.
   const coded = Object.keys(moduleCodecs(m)).length > 0 || Object.values(moduleInputs(m)).some((i) => i.codec !== undefined);
-  return { checked, coded, imports };
+  // Postgres's rarer types (src/postgres-types.ts) are imported only where the statement reads or binds
+  // one: a row value, a range, a geometric type, an hstore or a money, anywhere in a column's or a
+  // parameter's value, or a non-finite number inside its JSON. A structured parameter is written by
+  // `checks` (src/rows.ts).
+  const typed = m.dialect === "postgres" && (moduleNonFinite(m).some((at) => at !== null) || [...analysis.columns, ...analysis.params.filter((p) => p.members === undefined)].some((c) => holdsRareKind(columnKind(c.type, "postgres"))));
+  return { checked, coded, typed, imports };
 }
 
 /**
  * The object a statement's module passes its dialect's define function, field by field, as source
  * text. `names` are the sources of the values a module holds apart from the definition: the
  * statement as written (`raw`), the compiled one (`sql`), the parameters' names, and reylo's
- * `checks` and `codecRuntime`. A field whose source is its own name is written as a shorthand. `multiline` puts each
+ * `checks`, `codecRuntime` and `postgresTypes`. A field whose source is its own name is written as a shorthand. `multiline` puts each
  * field on a line of its own, for a file that is read and diffed.
  */
-export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: string; params: string; checks: string; codecRuntime: string }, multiline = false): string {
+export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: string; params: string; checks: string; codecRuntime: string; postgresTypes: string }, multiline = false): string {
   const { analysis, dialect } = m;
   const inputs = moduleInputs(m);
   // Each output column's name and kind, from the table the declared types come from: what the run
@@ -221,12 +231,12 @@ export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: stri
   // which the run time gives as that number, or a Postgres array it holds to one level (src/render.ts,
   // `jsonNumbers`), by position beside `columns`: two columns may share a name, each with its own
   // type. Under `allow_nested_arrays: true` a Postgres array nests there too, held to no depth.
-  const nonFinite = dialect === "postgres" ? (m.allowNestedArrays ? analysisWithNestedArrays(analysis) : analysis).columns.map((c) => jsonNumbers(c.type) ?? null) : [];
+  const nonFinite = moduleNonFinite(m);
   const codecs = moduleCodecs(m);
   const libraries = moduleLibraries(m);
   const library = [...libraries].find((l) => l !== "ip-address");
   const handed = [...(library === undefined ? [] : ["decimal: ReyloDecimal"]), ...(libraries.has("ip-address") ? ["inet: ReyloIpAddress"] : [])];
-  const { checked, coded } = moduleImports(m);
+  const { checked, coded, typed } = moduleImports(m);
   const text = compiledText(m);
   // A structured parameter's lists, at JavaScript's offsets into the statement (the engine's are
   // UTF-8 bytes).
@@ -249,6 +259,7 @@ export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: stri
     ["codecs", Object.keys(codecs).length ? JSON.stringify(codecs) : undefined],
     ["libraries", handed.length ? `{ ${handed.join(", ")} }` : undefined],
     ["codecRuntime", coded ? names.codecRuntime : undefined],
+    ["postgresTypes", typed ? names.postgresTypes : undefined],
     ["row", columns.length ? rowSource(columns.map(([name]) => name as string)) : undefined],
     ["nonFinite", nonFinite.some((at) => at !== null) ? JSON.stringify(nonFinite) : undefined],
     ["key", analysis.key && JSON.stringify(analysis.key)],

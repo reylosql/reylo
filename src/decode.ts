@@ -26,7 +26,7 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, coercePostgres, columnKind, instantOfDate, DecodeError, describe, elementKind, hstoreText, isArrayValued, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresLiteral, postgresYear, rowMasks, scalarKind, textDecoder, utf8, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
+import { civilFromDays, coerce, coercePostgres, columnKind, DecodeError, describe, elementKind, instantOfDate, isArrayValued, isRareKind, isRowKind, ParameterError, postgresInterval, postgresTypesFor, postgresYear, scalarKind, textDecoder, utf8, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
 import { bareName, type EngineType } from "./engine-type.ts";
 import { lastOfEach, rowOf, type RowBuilder } from "./row.ts";
 import { arrayLiteral, asByteaHex, isJsonValue, isTime, wrappers, jsonText, jsonValue, postgresText, vectorParameter, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
@@ -1022,14 +1022,12 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
 /** A Postgres column's text as its kind, with the non-finite numbers inside its JSON as numbers and an array held to its dimensions, as `.run()` gives them (src/execute.ts). */
 function postgresDecoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined): (v: string) => unknown {
   const decode = textDecoder(kind, delim);
-  const numbers = nonFinite === undefined ? decode : (v: string) => numbersInJson(decode(v), nonFinite, name);
+  const inJson = nonFinite === undefined ? undefined : postgresTypesFor("json").numbersInJson;
+  const numbers = nonFinite === undefined ? decode : (v: string) => inJson!(decode(v), nonFinite, name);
   return kind.endsWith("[]") && !nestedArrays ? (v) => withinDimensions(numbers(v), kind, name) : numbers;
 }
 
-/** The clients whose session writes a `money` in the C locale's form, which `checkMoneyLocale` has seen. */
-const moneyLocales = new WeakSet<object>();
-
-/** The statements that take a Postgres `money` parameter, anywhere in its value. */
+/** The statements that take a Postgres `money` parameter, anywhere in its value: the first such parameter's name, else null. */
 const moneyParams = new WeakMap<object, string | null>();
 
 /** Whether `t` holds a Postgres `money`, itself or in an array's elements or a structured parameter's fields. */
@@ -1040,32 +1038,12 @@ function holdsMoney(t: EngineType): boolean {
   return false;
 }
 
-/**
- * Postgres reads a `money` parameter in the session's lc_monetary, which under another locale can
- * read the same text as another amount without an error (under de_DE, `1234.56` is 123456.00):
- * `.run()` reads a money in the C locale's form and refuses another, and a parameter is refused
- * under a session that does not write 1234.50 as the C locale's `$1,234.50`. A client is checked once, before the first statement that takes
- * one, by the text its session writes for 1234.50; a client whose check fails to run is not held up.
- */
-async function checkMoneyLocale(c: Client, query: QueryModule<"postgres">): Promise<void> {
+/** Before a statement with a `money` parameter, the check that its session writes one in the C locale's form (src/postgres-types.ts, `checkMoney`). */
+async function beforePostgres(c: Client, query: QueryModule<"postgres">): Promise<void> {
   let name = moneyParams.get(query);
   if (name === undefined) moneyParams.set(query, (name = Object.entries(query.inputs ?? {}).find(([, input]) => holdsMoney(input.type))?.[0] ?? null));
-  if (name === null || moneyLocales.has(c as object)) return;
-  let written: unknown;
-  try {
-    const rows = await runPostgres(c, { dialect: "postgres", runtime: query.runtime, sql: MONEY_CHECK, params: [], text: MONEY_CHECK, order: [], marks: [], columns: [["m", "text"]] }, { text: MONEY_CHECK, values: [], names: [], marks: [] });
-    // A client that is none of the drivers' is refused when the statement itself runs.
-    if (rows === undefined) return;
-    written = (rows[0] as { m?: unknown } | undefined)?.m;
-  } catch {
-    return;
-  }
-  if (written === "$1,234.50") return void moneyLocales.add(c as object);
-  throw new ParameterError(`Parameter "${name}" is a Postgres money, which Postgres reads in the session's lc_monetary, and this session writes 1234.50 as ${JSON.stringify(written)}, not the C locale's "$1,234.50", so it could store the parameter as another amount. Set lc_monetary = 'C' on the session, the role or the database, or cast the parameter to numeric in the statement (:${name}::numeric).`);
+  if (name !== null) await postgresTypesFor("money").checkMoney(c, query, name);
 }
-
-/** The text a session writes for a money of 1234.50, in its lc_monetary. */
-const MONEY_CHECK = "select 1234.50::numeric::money::text as m";
 
 // What `.run()` returns goes back in as Postgres reads it (the round-trip rule, src/render.ts): a date
 // or time with an extended or BC year in Postgres's own form, which refuses `+010000` and `0000`, a
@@ -1077,7 +1055,7 @@ function postgresValue(type: EngineType, v: unknown, name: string): unknown {
   const kind = columnKind(type, "postgres");
   // A row value, a geometric type and a range go as the text Postgres reads, from the object
   // `.run()` returns for them, and an array of them as an array of those texts (below).
-  if (!kind.endsWith("[]") && (isRowKind(kind) || GEOMETRIC_KINDS.has(kind) || isRangeKind(kind) || isMultirangeKind(kind))) return postgresLiteral(type, v, (message) => {
+  if (!kind.endsWith("[]") && kind !== "hstore" && kind !== "money" && isRareKind(kind)) return postgresTypesFor(kind).literal(type, v, (message) => {
     throw new ParameterError(`Parameter "${name}" is ${message}`);
   });
   if (type.kind === "array" && kind.endsWith("[]")) return Array.isArray(v) ? v.map((e) => (e == null ? e : postgresValue(Array.isArray(e) && !isArrayValued(columnKind(type.element.type, "postgres")) ? type : type.element.type, e, name))) : v;
@@ -1085,7 +1063,7 @@ function postgresValue(type: EngineType, v: unknown, name: string): unknown {
     if (!v.length) throw new ParameterError(`Parameter "${name}" is a pgvector ${bareName(type)}, which has one dimension at least; got an empty array.`);
     return vectorParameter(v, name, `a pgvector ${bareName(type)}`);
   }
-  if (kind === "hstore" && typeof v === "object" && v !== null) return hstoreText(v, (message) => {
+  if (kind === "hstore" && typeof v === "object" && v !== null) return postgresTypesFor(kind).hstoreText(v, (message) => {
     throw new ParameterError(`Parameter "${name}" ${message}`);
   });
   // A money holds cents in the C locale Reylo reads it in, and Postgres rounds a value past them
@@ -1097,9 +1075,6 @@ function postgresValue(type: EngineType, v: unknown, name: string): unknown {
   return kind === "interval" ? postgresInterval(v) : v;
 }
 
-/** Postgres's geometric types' kinds (src/values.ts). */
-const GEOMETRIC_KINDS: ReadonlySet<string> = new Set(["point", "line", "lseg", "box", "path", "polygon", "circle"]);
-
 /**
  * The rows as `.run()` returns them: Postgres writes a non-finite float or decimal inside JSON as
  * text, whichever driver reads it, so each is given as the number it is; and an array column holds
@@ -1107,11 +1082,12 @@ const GEOMETRIC_KINDS: ReadonlySet<string> = new Set(["point", "line", "lseg", "
  * project lets it nest.
  */
 function postgresRows(query: QueryModule<"postgres">, rows: unknown[]): unknown[] {
-  const nonFinite = query.nonFinite !== undefined && query.columns !== undefined ? rowMasks(query.columns, query.nonFinite) : [];
+  const nonFinite = query.nonFinite !== undefined && query.columns !== undefined ? postgresTypesFor("json").rowMasks(query.columns, query.nonFinite) : [];
   const arrays = query.nestedArrays ? [] : (query.columns ?? []).filter(([, kind]) => kind.endsWith("[]"));
   if (!nonFinite.length && !arrays.length) return rows;
+  const numbers = nonFinite.length ? postgresTypesFor("json").numbersInJson : undefined;
   for (const row of rows as Record<string, unknown>[]) {
-    for (const [name, at] of nonFinite) row[name] = numbersInJson(row[name], at, name);
+    for (const [name, at] of nonFinite) row[name] = numbers!(row[name], at, name);
     for (const [name, kind] of arrays) withinDimensions(row[name], kind, name);
   }
   return rows;
@@ -1122,7 +1098,7 @@ export const postgres: Runtime<"postgres"> = {
   dialect: "postgres",
   run: runPostgres,
   wrappers,
-  before: checkMoneyLocale,
+  before: beforePostgres,
   after: postgresRows,
   readError: readPostgresError,
   decoder: postgresDecoder,

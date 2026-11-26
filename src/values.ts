@@ -27,6 +27,7 @@
 // This module runs in every generated module's process, so it names no Node type: a Buffer is
 // reached through `globalThis` where one exists.
 import { bareName, isMysqlSet, type EngineType } from "./engine-type.ts";
+import type { AnyClient, QueryModule } from "./execute.ts";
 
 export type Dialect = "postgres" | "mysql" | "sqlite" | "clickhouse";
 
@@ -981,13 +982,12 @@ export function postgresLiteral(t: EngineType, v: unknown, fail: (message: strin
 /** A MySQL SET from its text, its members joined by commas (`a,c`), none for an empty one. */
 const members = (x: string): Set<string> => new Set(x === "" ? [] : x.split(","));
 
-const TEXT_DECODERS: Readonly<Record<ScalarKind, Decoder>> = {
+const TEXT_DECODERS: Readonly<Record<Exclude<ScalarKind, RareKind>, Decoder>> = {
   bool: (x) => x === "t",
   int: number,
   float: number,
   int8: (x) => BigInt(x),
   decimal: identity,
-  money,
   text: identity,
   date,
   timestamp,
@@ -997,6 +997,16 @@ const TEXT_DECODERS: Readonly<Record<ScalarKind, Decoder>> = {
   bytes: bytea,
   // pgvector prints the shortest text of each float, `[1,2.5,1e-07]`, which JSON reads exactly.
   vector: (x) => JSON.parse(x),
+  enum: identity,
+  set: (x) => members(x),
+  geometry: identity,
+  unknown: identity,
+};
+
+/** Postgres's kinds whose readers come with its rarer types (`postgresTypes`): the geometric types, hstore and money. */
+type RareKind = Geometric | "hstore" | "money";
+const RARE_DECODERS: Readonly<Record<RareKind, Decoder>> = {
+  money,
   hstore,
   point: (x) => points(x)[0],
   line: (x) => {
@@ -1011,10 +1021,6 @@ const TEXT_DECODERS: Readonly<Record<ScalarKind, Decoder>> = {
   path: (x) => ({ closed: x[0] === "(", points: points(x) }),
   polygon: points,
   circle: (x) => ({ center: points(x)[0], radius: +x.slice(x.lastIndexOf(",") + 1, -1) }),
-  enum: identity,
-  set: (x) => members(x),
-  geometry: identity,
-  unknown: identity,
 };
 
 /**
@@ -1086,7 +1092,7 @@ export function elementKind(kind: Kind): Kind {
 }
 
 /** The decoder of an array of row values: parseArray, in one pass over a flat array's text, which is nearly every array of rows. An element is quoted, a backslash escaping within it, unless it is `NULL` or a row with no character to quote. */
-function rowsDecoder(element: Decoder): Decoder {
+export function rowsDecoder(element: Decoder): Decoder {
   return (x) => {
     if (x.charCodeAt(0) !== LEFT_BRACE || x.charCodeAt(1) === LEFT_BRACE) return parseArray(x, element);
     const out: unknown[] = [];
@@ -1124,8 +1130,14 @@ function rowsDecoder(element: Decoder): Decoder {
 export function textDecoder(kind: Kind, delim = ","): Decoder {
   if (kind.endsWith("[]")) {
     const element = textDecoder(elementKind(kind), delim);
-    return isRowKind(elementKind(kind)) && delim === "," ? rowsDecoder(element) : (x) => parseArray(x, element, delim);
+    return isRowKind(elementKind(kind)) && delim === "," ? postgresTypesFor(kind).rowsDecoder(element) : (x) => parseArray(x, element, delim);
   }
+  if (isRareKind(kind)) return postgresTypesFor(kind).decoder(kind);
+  return TEXT_DECODERS[kind as Exclude<ScalarKind, RareKind>] ?? identity;
+}
+
+/** The text decoder of a kind of Postgres's rarer types (`isRareKind`). */
+export function rareDecoder(kind: Kind): Decoder {
   if (isRowKind(kind)) return rowDecoder(kind);
   if (isRangeKind(kind)) {
     const bound = textDecoder(subtypeKind(kind));
@@ -1135,7 +1147,47 @@ export function textDecoder(kind: Kind, delim = ","): Decoder {
     const bound = textDecoder(subtypeKind(kind));
     return (x) => multirangeParts(x).map((r) => parseRange(r, bound));
   }
-  return TEXT_DECODERS[kind as ScalarKind] ?? identity;
+  return RARE_DECODERS[kind as RareKind];
+}
+
+// ---------------------------------------------------------------------------------------------
+// Postgres's rarer types: row values, ranges and multiranges, the geometric types, hstore and
+// money, and the non-finite numbers inside its JSON. A build step's module passes them,
+// `postgresTypes` from "reylo" (src/postgres-types.ts), where its statement reads or binds one, and
+// its define function installs them, so that an app none of whose statements holds one bundles
+// none of their readers and writers. They are installed once for the process rather than handed
+// down with each query, since every driver's path reads values by kind alone.
+
+/** A kind of Postgres's rarer types, itself and not in an array's elements: a row value, a range, a multirange, a geometric type, an hstore or a money. */
+export const isRareKind = (kind: Kind): boolean => isRowKind(kind) || isRangeKind(kind) || isMultirangeKind(kind) || RARE_KIND.test(kind);
+const RARE_KIND = /^(?:point|line|lseg|box|path|polygon|circle|hstore|money)$/;
+
+/** Whether a kind holds one of Postgres's rarer types anywhere: in its elements, a row value's fields, or a range's bounds. What the module a build step writes imports them for (src/loader.ts). */
+export const holdsRareKind = (kind: Kind): boolean => /\(|range:|\b(?:point|line|lseg|box|path|polygon|circle|hstore|money)\b/.test(kind);
+
+/** Postgres's rarer types' readers and writers, `postgresTypes` (src/postgres-types.ts). */
+export type PostgresTypes = {
+  readonly decoder: (kind: Kind) => Decoder;
+  readonly rowsDecoder: (element: Decoder) => Decoder;
+  readonly literal: (t: EngineType, v: unknown, fail: (message: string) => never) => string;
+  readonly hstoreText: (v: object, fail: (message: string) => never) => string;
+  readonly numbersInJson: (v: unknown, at: JsonNumbers, column?: string) => unknown;
+  readonly rowMasks: (columns: Columns, nonFinite: readonly (JsonNumbers | null)[]) => (readonly [name: string, at: JsonNumbers])[];
+  /** The check that a session writes a `money` in the C locale's form, before a statement with a `money` parameter, `name`, runs. */
+  readonly checkMoney: (c: AnyClient, query: QueryModule<"postgres">, name: string) => Promise<void>;
+};
+
+let installed: PostgresTypes | undefined;
+
+/** Postgres's rarer types for every query of the process, as a define function is handed them. */
+export function installPostgresTypes(types: PostgresTypes): void {
+  installed = types;
+}
+
+/** Postgres's rarer types, which a value of `kind` needs; refused where no query installed them. */
+export function postgresTypesFor(kind: Kind): PostgresTypes {
+  if (installed) return installed;
+  throw new TypeError(`Reylo reads and writes a Postgres ${isRowKind(kind) ? "row value" : isRangeKind(kind) ? "range" : isMultirangeKind(kind) ? "multirange" : kind} with Reylo's postgresTypes, which a module a build step writes passes where its statement holds one; a query defined by definePostgresQuery by hand passes it too: definePostgresQuery({ …, postgresTypes }) with postgresTypes from "reylo".`);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1373,11 +1425,9 @@ export function coercePostgres(kind: Kind, v: unknown, column: string, delim = "
   if (v === null || v === undefined) return null;
   if (kind.endsWith("[]")) return typeof v === "string" ? parseArray(v, (s) => coercePostgres(elementKind(kind), s, column), delim) : coerceArray(kind, v, column, (k, e) => coercePostgres(k, e, column));
   // A row value, a range and a geometric type are their text where no driver parses them.
-  if (isRowKind(kind) || isRangeKind(kind) || isMultirangeKind(kind)) return typeof v === "string" ? textDecoder(kind)(v) : v;
-  if (GEOMETRIC.has(kind)) return typeof v === "string" ? TEXT_DECODERS[kind as Geometric](v) : v;
+  // A row value, a range, a geometric type, an hstore and a money are their text where no driver parses them.
+  if (isRareKind(kind)) return typeof v === "string" ? textDecoder(kind)(v) : v;
   switch (kind) {
-    case "money":
-      return typeof v === "string" ? money(v) : v;
     case "timestamptz":
       if (typeof v === "string") return instant(v);
       if (v instanceof Date) return instantOfDate(v, column);
@@ -1386,8 +1436,6 @@ export function coercePostgres(kind: Kind, v: unknown, column: string, delim = "
       return v;
     case "interval":
       return typeof v === "string" ? duration(v) : v;
-    case "hstore":
-      return typeof v === "string" ? hstore(v) : v;
     default:
       return coerce(kind, v, column, true);
   }

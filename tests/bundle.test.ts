@@ -1,5 +1,7 @@
 // What an app's bundle holds of the run time: the half of the dialect its queries are written for,
-// and no other dialect's drivers or error codes (src/execute.ts, `Runtime`).
+// and no other dialect's drivers or error codes (src/execute.ts, `Runtime`); and what only some
+// statements need, `js.codecs` (src/codecs.ts) and Postgres's rarer types (src/postgres-types.ts),
+// only where a module passes it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
@@ -16,12 +18,48 @@ const OWN: Record<Dialect, string[]> = {
   clickhouse: ["src/decode-clickhouse.ts", "src/error-codes-clickhouse.ts"],
 };
 
+/** Text only another dialect's half of the run time, or a part a module passes, holds: a bundle without them holds none of it. */
+const ELSEWHERE: Record<string, RegExp> = {
+  "Postgres's money check": /lc_monetary/,
+  "Postgres's hstore": /is an hstore/,
+  "Postgres's row values": /whose field/,
+  "Postgres's ranges": /whose lower is a bound|leave it out for an unbounded/,
+  "pgvector": /pgvector/,
+  "SQLite's synchronous clients": /This sql\.js binds|SQLite Wasm binds/,
+  "Knex": /Knex/,
+};
+
+/** What each dialect's bundle of `.run()` on a query of plain columns may hold of `ELSEWHERE`. */
+const HELD: Record<Dialect, string[]> = {
+  postgres: ["Knex", "pgvector"],
+  mysql: ["Knex"],
+  sqlite: ["Knex", "SQLite's synchronous clients"],
+  clickhouse: [],
+};
+
+/** A bundle of `module`, the text a build step writes, which runs its query with `.run()`: the files it holds and its text. */
+async function bundle(module: string): Promise<{ files: string[]; text: string }> {
+  const contents = `${module}\nexport const go = (client) => q.run(client, {});\n`;
+  const { metafile, outputFiles } = await build({ stdin: { contents, resolveDir: ROOT }, bundle: true, minify: true, platform: "node", format: "esm", write: false, metafile: true, alias: { reylo: join(ROOT, "src", "index.ts") }, logLevel: "silent" });
+  const files = Object.entries(Object.values(metafile.outputs)[0]!.inputs).flatMap(([path, input]) => (input.bytesInOutput > 0 ? [path] : []));
+  return { files, text: outputFiles[0]!.text };
+}
+
 test("a bundle of a query holds its dialect's drivers and error codes, and no other dialect's", async () => {
   for (const dialect of Object.keys(OWN) as Dialect[]) {
     // The module a build step writes, as src/loader.ts writes it.
-    const contents = `import { ${DEFINE[dialect]} } from "reylo";\nexport default ${DEFINE[dialect]}({ sql: "select 1 as n", params: [], cardinality: "one", columns: [["n", "int"]] });\n`;
-    const { metafile } = await build({ stdin: { contents, resolveDir: ROOT }, bundle: true, minify: true, platform: "node", format: "esm", write: false, metafile: true, alias: { reylo: join(ROOT, "src", "index.ts") }, logLevel: "silent" });
-    const held = Object.entries(Object.values(metafile.outputs)[0]!.inputs).flatMap(([path, input]) => (input.bytesInOutput > 0 && /^src\/(decode|error-codes)/.test(path) ? [path] : []));
-    assert.deepEqual(held.sort(), OWN[dialect].sort(), dialect);
+    const { files, text } = await bundle(`import { ${DEFINE[dialect]} } from "reylo";\nconst q = ${DEFINE[dialect]}({ sql: "select 1 as n", params: [], cardinality: "one", columns: [["n", "int"]] });`);
+    assert.deepEqual(files.filter((path) => /^src\/(decode|error-codes)/.test(path)).sort(), OWN[dialect].sort(), dialect);
+    // Neither js.codecs nor Postgres's rarer types, which no module passed.
+    for (const path of ["src/codecs.ts", "src/geojson.ts", "src/postgres-types.ts"]) assert.ok(!files.includes(path), `${dialect} holds ${path}`);
+    for (const [part, marker] of Object.entries(ELSEWHERE)) assert.equal(marker.test(text), HELD[dialect].includes(part), `${dialect}: ${part}`);
   }
+});
+
+test("a bundle holds js.codecs and Postgres's rarer types where a module passes them", async () => {
+  const coded = await bundle(`import { definePostgresQuery, codecRuntime } from "reylo";\nconst q = definePostgresQuery({ sql: "select now() as at", params: [], columns: [["at", "timestamptz"]], codecs: { at: "instant" }, codecRuntime });`);
+  assert.ok(coded.files.includes("src/codecs.ts"));
+  const typed = await bundle(`import { definePostgresQuery, postgresTypes } from "reylo";\nconst q = definePostgresQuery({ sql: "select point(1, 2) as p", params: [], columns: [["p", "point"]], postgresTypes });`);
+  assert.ok(typed.files.includes("src/postgres-types.ts"));
+  assert.match(typed.text, /lc_monetary/);
 });
