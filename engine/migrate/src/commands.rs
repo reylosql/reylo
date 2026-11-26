@@ -8532,7 +8532,7 @@ async fn api_grants(db: &mut Db) -> Result<Vec<(String, String, Vec<(String, boo
                where c.relkind in ('r', 'p', 'v', 'm', 'f', 'S') and {schemas} and c.relacl is not null
                union all
                select format('%s %I.%I(%s)', case p.prokind when 'p' then 'procedure' else 'function' end, n.nspname, p.proname,
-                   (select coalesce(string_agg(case when t.typcategory = 'A' and t.typelem <> 0 then format('%I.%I[]', en.nspname, e.typname) else format('%I.%I', tn.nspname, t.typname) end, ', ' order by x.ord), '')
+                   (select coalesce(string_agg(case when e.typarray = t.oid then format('%I.%I[]', en.nspname, e.typname) else format('%I.%I', tn.nspname, t.typname) end, ', ' order by x.ord), '')
                     from unnest(p.proargtypes::oid[]) with ordinality x(typ, ord) join pg_type t on t.oid = x.typ join pg_namespace tn on tn.oid = t.typnamespace
                     left join pg_type e on e.oid = t.typelem left join pg_namespace en on en.oid = e.typnamespace)),
                  p.proacl, p.proowner, 'f'::\"char\"
