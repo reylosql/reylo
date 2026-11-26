@@ -12,7 +12,7 @@ export const compareResults = results as unknown as { at: string; tools: Record<
 
 /** The tools beside Reylo, in an order that keeps the longer names from sitting side by side. */
 export const compareTools = [
-  { id: 'sqlc', name: 'sqlc', sub: 'Go', href: 'https://sqlc.dev' },
+  { id: 'sqlc', name: 'sqlc', sub: 'TypeScript', href: 'https://sqlc.dev' },
   { id: 'pgtyped', name: 'PgTyped', sub: 'TypeScript', href: 'https://pgtyped.dev' },
   { id: 'sqlx', name: 'sqlx', sub: 'Rust', href: 'https://github.com/transact-rs/sqlx' },
   { id: 'typedsql', name: 'TypedSQL', sub: 'Prisma', href: 'https://www.prisma.io/docs/orm/prisma-client/using-raw-sql/typedsql' },
@@ -53,11 +53,11 @@ export const compareOrmRows: { id: string; label: string; asks?: string }[] = [
   row('expression-nullability'),
   { id: 'aggregates', label: 'Aggregates', asks: 'Each column of a `group by` query is typed, with the null each aggregate can return.' },
   { id: 'windows', label: 'Window functions', asks: 'A window function is typed, as `row_number() over (…)` and `lag(…)`.' },
-  { id: 'subqueries', label: 'Subqueries', asks: 'A scalar subquery, an `exists` and a derived table are typed by what they return.' },
+  { id: 'subqueries', label: 'Subqueries', asks: 'A scalar subquery, a lateral join, an `exists` and a derived table are typed by what they return.' },
   { id: 'with-queries', label: 'WITH queries', asks: 'The columns of a `with` query are typed where the main query reads them, recursive ones included.' },
   { id: 'set-operations', label: 'Set operations', asks: 'A `union` or an `except` is typed by both its sides.' },
   { id: 'returning', label: 'Returning rows', asks: 'The row an `insert`, `update`, `delete` or upsert returns is typed.' },
-  { id: 'enums', label: 'Enums', asks: 'An enum column is typed as the union of its values.' },
+  { id: 'enums', label: 'Enums', asks: 'An enum, `CHECK` constraint or literal union is typed as the union of its values.' },
   row('parameter-types'),
   row('parameter-nullability'),
   row('cardinality'),

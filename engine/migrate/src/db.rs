@@ -1017,12 +1017,41 @@ fn without_password(url: &str) -> (String, Option<String>) {
     }
 }
 
-/// The platform's own schemas on the target, as the statements that make them, without owners,
+/// The platform's own schemas on the target, as the statements that make them, read and planned
+/// as `migrate new` plans (no pg_dump, which a build machine often lacks): without owners,
 /// privileges or comments, and without the extensions, which a shadow makes itself. What the
 /// project made on the platform's tables is left to the project's own SQL, which makes it again: a
 /// policy (Reylo takes every policy for the project's), and a trigger whose function is outside the
-/// platform's schemas (`on_auth_user_created`, calling `public.handle_new_user()`).
-fn platform_ddl(url: &str, major: i64, schemas: &[String]) -> Result<Vec<String>, Error> {
+/// platform's schemas (`on_auth_user_created`, calling `public.handle_new_user()`). Where they hold
+/// what Reylo can't make (a text search configuration), pg_dump makes them, where there is one;
+/// where there is none, the rest, and the note that says what every shadow leaves out.
+#[cfg(feature = "cli")]
+async fn platform_ddl(target: &mut Db, url: &str, version: i64, schemas: &[String]) -> Result<(Vec<String>, Option<String>), Error> {
+    let read = async {
+        let unread = crate::diff::postgres::platform_unread(target, schemas).await?;
+        let platform = crate::diff::postgres::read_platform(target, schemas).await?;
+        let alterer = crate::diff::alterer(target).await?;
+        Ok::<_, Error>((unread, crate::diff::plan(&crate::diff::Schema::default(), &platform, alterer.as_ref())))
+    };
+    let (unread, plan) = read.await.map_err(|e| Error(format!("reading the platform's schemas {} for shadow databases: {e}", schemas.join(", "))))?;
+    let mut note = None;
+    if !unread.is_empty() {
+        let major = version / 10000;
+        let fix = match find_pg_dump(major) {
+            Err(_) => format!("pg_dump {major} or newer, where it's installed, makes it"),
+            Ok(_) => match platform_dump(url, major, schemas) {
+                Ok(dumped) => return Ok((dumped, None)),
+                Err(e) => e.0,
+            },
+        };
+        note = Some(format!("· {LEFT_OUT} {}, the platform's, which Reylo can't make, so a migration that uses it fails in them: {fix}", unread.join(", ")));
+    }
+    Ok((plan.statements.into_iter().filter(|s| !s.trim_start().starts_with("--")).collect(), note))
+}
+
+/// The platform's schemas `schemas` as pg_dump makes them, with what [`platform_ddl`] says it leaves
+/// out left out.
+fn platform_dump(url: &str, major: i64, schemas: &[String]) -> Result<Vec<String>, Error> {
     let mut args: Vec<String> = ["--schema-only", "--no-owner", "--no-privileges", "--no-comments", "--no-publications", "--no-subscriptions", "--no-security-labels", "--no-tablespaces"].map(String::from).to_vec();
     for s in schemas {
         args.push("--schema".into());
@@ -1091,7 +1120,7 @@ async fn make_as(admin: &tokio_postgres::Client, db: &mut Db, name: &str, bare: 
 #[cfg(feature = "cli")]
 #[derive(Default)]
 pub struct Owned {
-    /// Its schemas, whole, as pg_dump makes them, with the privileges the target gives on them, and
+    /// Its schemas, whole, as Reylo plans them, with the privileges the target gives on them, and
     /// its routines in the project's schemas.
     pub(crate) statements: Vec<String>,
     /// Its extensions (Tiger Cloud's `timescaledb`, Azure's `pgaadauth`), each `(name, schema)`.
@@ -1147,14 +1176,14 @@ async fn owned_by_platform(target: &mut Db, admin: &tokio_postgres::Client, url:
     let mut owners: Vec<String> = rows.iter().map(|r| r.text("owner").to_string()).collect();
     owners.sort();
     owners.dedup();
-    let mut statements = if schemas.is_empty() { vec![] } else { platform_ddl(url, version / 10000, &schemas).unwrap_or_default() };
-    statements.extend(schema_grants(target, &schemas).await?);
-    statements.extend(of("f").map(|r| r.text("a").to_string()));
     let extensions = of("x").map(|r| (r.text("a").to_string(), r.text("b").to_string())).collect();
     let role = SHADOW_PLATFORM_ROLE;
     let may = format!("select pg_has_role(current_user, oid, case when current_setting('server_version_num')::int >= 160000 then 'SET' else 'MEMBER' end)::text as may from pg_roles where rolname = {}", literal(role));
     if pg_rows(admin, &may).await?.first().is_some_and(|r| r.text("may") == "true") {
-        return Ok(Owned { statements, extensions, role: Some(role.to_string()), note: None });
+        let (mut statements, note) = if schemas.is_empty() { (vec![], None) } else { platform_ddl(target, url, version, &schemas).await? };
+        statements.extend(schema_grants(target, &schemas).await?);
+        statements.extend(of("f").map(|r| r.text("a").to_string()));
+        return Ok(Owned { statements, extensions, role: Some(role.to_string()), note });
     }
     // The role the shadows are made as, which takes on the role to make it: `shadow_url`'s, else
     // the target's.
@@ -1512,8 +1541,10 @@ impl Server {
                     .map(|r| (r.text("name").to_string(), r.text("schema").to_string()))
                     .collect();
                 let roles = crate::catalog::PLATFORM_ROLES.iter().map(|r| literal(r)).collect::<Vec<_>>().join(", ");
+                // Not `public`, which Postgres 14 and older made the bootstrap superuser's, a platform's
+                // role on Supabase.
                 let platform: Vec<String> = target
-                    .rows(&format!("select nspname as n from pg_namespace where pg_get_userbyid(nspowner) in ({roles}) and nspname not like 'pg\\_%' and nspname <> 'information_schema' order by 1"))
+                    .rows(&format!("select nspname as n from pg_namespace where pg_get_userbyid(nspowner) in ({roles}) and nspname not like 'pg\\_%' and nspname <> 'information_schema' and nspname <> 'public' order by 1"))
                     .await?
                     .iter()
                     .map(|r| r.text("n").to_string())
@@ -1525,12 +1556,13 @@ impl Server {
                     let can = if version >= 160000 { "SET" } else { "MEMBER" };
                     target.rows(&format!("select rolname as r from pg_roles where rolname in ({roles}) and pg_has_role(current_user, oid, '{can}') order by rolname limit 1")).await?.first().map(|r| r.text("r").to_string())
                 };
-                // Made where the shadows may become one of the platform's roles; a dump that fails
-                // leaves them without, as before.
-                let environment = if environment_role.is_some() { platform_ddl(url, version / 10000, &platform).unwrap_or_default() } else { vec![] };
+                // Made where the shadows may become one of the platform's roles.
+                let (environment, left_out) = if environment_role.is_some() { platform_ddl(target, url, version, &platform).await? } else { (vec![], None) };
                 let schemas: Vec<String> = std::iter::once("public".to_string()).chain(extensions.iter().map(|(_, s)| s.clone())).filter(|s| !platform.contains(s)).collect();
                 let schema_grants = schema_grants(target, &schemas).await?;
-                let owned = owned_by_platform(target, &admin, url, version).await?;
+                let mut owned = owned_by_platform(target, &admin, url, version).await?;
+                // What every shadow leaves out, said once.
+                owned.note = [left_out, owned.note.take()].into_iter().flatten().reduce(|a, b| format!("{a}\n{b}"));
                 // On Supabase, the default privileges its Data API's roles have, the target's own,
                 // which Supabase sets for every project as it chooses; and its publication.
                 let platform_privileges = if names { platform_defaults(api_settings(&api_privileges(&privileges), &[])).0 } else { vec![] };
@@ -1706,13 +1738,13 @@ impl Server {
             }
             let owned_extensions: Vec<&(String, String)> = owned.extensions.iter().filter(|(e, _)| !leave.contains(&e.to_lowercase())).collect();
             if let Some(role) = owned.role.as_deref() {
-                // Its extensions after its schemas, which they may be in, and before its routines,
+                // Its extensions after its schemas, which they may be in, and before the rest of it,
                 // which may use them; one no role but a superuser may make, made by a superuser
                 // connected and given to the role.
-                let routines = owned.statements.iter().position(|st| st.starts_with("CREATE OR REPLACE ")).unwrap_or(owned.statements.len());
-                let mut statements = owned.statements[..routines].to_vec();
+                let after = owned.statements.iter().position(|st| !st.to_ascii_lowercase().starts_with("create schema ")).unwrap_or(owned.statements.len());
+                let mut statements = owned.statements[..after].to_vec();
                 statements.extend(owned_extensions.iter().map(|(e, s)| format!("create extension if not exists {} with schema {}", ident(e), ident(s))));
-                statements.extend(owned.statements[routines..].iter().cloned());
+                statements.extend(owned.statements[after..].iter().cloned());
                 make_as(admin, &mut db, &name, role, &statements, &["USAGE", "CREATE"]).await;
                 let superuser = db.rows("select rolsuper::text as s from pg_roles where rolname = current_user").await.ok().is_some_and(|r| r.first().is_some_and(|r| r.text("s") == "true"));
                 for (extension, schema) in owned_extensions.iter().filter(|_| superuser) {

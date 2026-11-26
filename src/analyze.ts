@@ -51,6 +51,8 @@ const ENTRY_VERSION = 1;
 // in a running dev server or editor within seconds. Once the database is found unreachable, the
 // session stays offline for a minute instead of paying the connect timeout per file.
 const SCHEMA_TTL = 5_000;
+/** How many times a statement is analyzed while the schema moves under its analysis, before the last analysis is given and written nowhere. */
+const ANALYSES = 3;
 /** How many databases' entries a statement keeps. */
 const ENTRIES_KEPT = 4;
 const OFFLINE_TTL = 60_000;
@@ -92,6 +94,8 @@ export class Session {
   /** What `reylo/.cache/queries` held when this session first looked. */
   #listing: string[] | undefined;
   #schema: { value: string | null; at: number; error?: string; fatal?: boolean } | undefined;
+  /** The fingerprint read last, or the unverified value that stood in for one, which a spell offline leaves in place: the engine's answers are of that schema. */
+  #known: string | undefined;
 
   private constructor(engine: Engine | MissingEngine, project: ResolvedProject, idle: number, dir: string, env: Record<string, string | undefined>) {
     this.root = project.root;
@@ -312,25 +316,44 @@ export class Session {
     const shared = options.force || options.store === false ? undefined : this.#sameSchema(sql, schema.value);
     if (shared) return { ok: true, analysis: shared.entry.analysis, source: "cache", entry: shared.file };
     let analysis: Analysis;
-    const io = this.#connection();
-    try {
-      analysis = await (await io).analyze(sql);
-    } catch (e) {
-      // A dead connection is reopened by the next call; a server error is reported.
-      if (e instanceof Unreachable) {
-        this.#drop(io);
-        this.#schema = { value: null, at: Date.now(), error: reason(e) };
-        return { ok: false, message: this.cannotConnect(reason(e)), code: DIAGNOSTIC.unreachable };
+    let label: string = schema.value;
+    for (let tries = 1; ; tries++) {
+      const io = this.#connection();
+      try {
+        analysis = await (await io).analyze(sql);
+      } catch (e) {
+        // A dead connection is reopened by the next call; a server error is reported.
+        if (e instanceof Unreachable) {
+          this.#drop(io);
+          this.#schema = { value: null, at: Date.now(), error: reason(e) };
+          return { ok: false, message: this.cannotConnect(reason(e)), code: DIAGNOSTIC.unreachable };
+        }
+        if (e instanceof NotMysql) {
+          this.#drop(io);
+          this.#schema = { value: null, at: Date.now(), error: this.notMysql(e), fatal: true };
+          return { ok: false, message: this.#schema.error!, code: DIAGNOSTIC.unreachable };
+        }
+        return { ok: false, message: (e as Error).message, code: DIAGNOSTIC.unreachable };
       }
-      if (e instanceof NotMysql) {
-        this.#drop(io);
-        this.#schema = { value: null, at: Date.now(), error: this.notMysql(e), fatal: true };
-        return { ok: false, message: this.#schema.error!, code: DIAGNOSTIC.unreachable };
-      }
-      return { ok: false, message: (e as Error).message, code: DIAGNOSTIC.unreachable };
+      // A fingerprint the server refused to compute is this session's own, and labels nothing another reads.
+      if (options.store === false || label.startsWith("unverified ")) break;
+      // The fingerprint was read before the analysis, as long as SCHEMA_TTL ago, and the analysis is of
+      // the schema as it was while it ran, with the answers the engine kept since the fingerprint last
+      // moved. An entry labelled with a fingerprint that a migration has since moved would be served to
+      // a database that still has the old schema, or has gone back to it, so the fingerprint is read
+      // again now, and the entry written only where it has not moved. Where it has, the engine's
+      // answers are dropped (`schema()`) and the statement analyzed again.
+      await this.recheck();
+      const read = await this.schema();
+      const now = read.value;
+      if (now === label) break;
+      // A read that found the database gone leaves the next statement to try it again, rather than a minute offline.
+      if (now === null && !read.fatal) this.#schema = undefined;
+      if (now === null || now.startsWith("unverified ") || tries === ANALYSES) return { ok: true, analysis, source: "database", entry: file };
+      label = now;
     }
     if (options.store !== false) {
-      writeEntry(this.project.cache, file, { version: ENTRY_VERSION, dialect: this.project.dialect, schema: schema.value, analysis, at: Date.now() });
+      writeEntry(this.project.cache, file, { version: ENTRY_VERSION, dialect: this.project.dialect, schema: label, analysis, at: Date.now() });
       this.#prune(sql, file);
     }
     return { ok: true, analysis, source: "database", entry: file };
@@ -357,17 +380,21 @@ export class Session {
     try {
       const rows = await io.query(FINGERPRINT[this.project.dialect], []);
       const value = createHash("sha256").update(JSON.stringify(rows)).digest("hex").slice(0, 16);
-      // The engine's answers describe the old schema too.
-      if (this.#schema?.value && this.#schema.value !== value) await io.forget().catch(() => {});
+      // The engine's answers describe the old schema too, and outlast a spell offline.
+      if (this.#known !== undefined && this.#known !== value) await io.forget().catch(() => {});
+      this.#known = value;
       this.#schema = { value, at: now };
     } catch (e) {
       if (e instanceof Unreachable) {
         this.#drop(pending);
         this.#schema = { value: null, at: now, error: reason(e) };
       } else {
-        // With no fingerprint to tell a change by, the engine's answers last as long as this value.
+        // With no fingerprint to tell a change by, the engine's answers last as long as this value, and
+        // are dropped once a fingerprint is read again.
         await io.forget().catch(() => {});
-        this.#schema = { value: `unverified ${process.pid} ${now}`, at: now };
+        const value = `unverified ${process.pid} ${now}`;
+        this.#schema = { value, at: now };
+        this.#known = value;
       }
     }
     return this.#schema;
@@ -606,7 +633,8 @@ function writeEntry(cache: string, file: string, entry: Entry): void {
  * One query per dialect whose rows change when anything an analysis reads changes: relations and
  * their columns with their type modifiers (a `varchar(n)`'s size, a `numeric(p,s)`'s precision) and whether each is an identity or a generated one, inheritance, constraints, indexes, row triggers and rules (nullability and the row
  * count read them), enum labels, a user's collations with whether each is deterministic (a key's equality and a CHECK's narrowing read it), domains with their base type's modifier, functions with their arguments' names, their result columns, their defaults, volatility, strictness,
- * kind and variadic argument, user operators and casts (the trust check reads them), view
+ * kind and variadic argument, the functions each aggregate runs with their volatility and language (whether a call may
+ * write), user operators and casts (the trust check reads them), view
  * definitions and column comments (a field's doc comment), and the server settings that change a statement's types;
  * and what the errors a statement may raise are read from: defaults (a domain's too), generated columns, policies and
  * operator classes on Postgres, and triggers, foreign keys, checks with their expressions and whether each is enforced, and every schema's stored functions on MySQL. SQLite's whole schema is
@@ -622,7 +650,10 @@ function writeEntry(cache: string, file: string, entry: Entry): void {
 // `||` of each field makes. The server's own `pg_get_viewdef` and `pg_get_ruledef` read a rule
 // through a query of bare operators, which a user's `=` of oids answers too: a view's or a rule's
 // row is then NULL, and left out.
-const NS = `not (n.nspname operator(pg_catalog.=) any ('{pg_catalog,information_schema}'::pg_catalog.name[])) and n.nspname operator(pg_catalog.!~) '^pg_(toast|temp)'::pg_catalog.text`;
+// A temporary schema holds one session's objects, which another session's statement names only by
+// that session's number, and a TOAST schema none that a statement names.
+const NOT_TEMP = `n.nspname operator(pg_catalog.!~) '^pg_(toast|temp)'::pg_catalog.text`;
+const NS = `not (n.nspname operator(pg_catalog.=) any ('{pg_catalog,information_schema}'::pg_catalog.name[])) and ${NOT_TEMP}`;
 const cat = (...parts: string[]) => parts.join(" operator(pg_catalog.||) ");
 const lit = (s: string) => `'${s}'::pg_catalog.text`;
 const line = (tag: string, ...fields: string[]) => cat(lit(`${tag} `), ...fields.flatMap((f, i) => (i ? [lit(" "), f] : [f])));
@@ -656,6 +687,7 @@ const POSTGRES_FINGERPRINT = `select pg_catalog.md5(coalesce(pg_catalog.string_a
     union all select ${line("l", named("regcollation", "l.oid"), txt("l.collprovider"), txt("l.collisdeterministic"), or(txt("l.collcollate")))} from pg_catalog.pg_collation l where l.oid operator(pg_catalog.>=) ${USER}
     union all select ${line("t", type("t.oid"), txt("t.typname"), txt("t.typtype"), type("t.typbasetype"), out("int4", "t.typtypmod"), txt("t.typnotnull"), md5(or("t.typdefault")))} from pg_catalog.pg_type t join pg_catalog.pg_namespace n on ${eq("n.oid", "t.typnamespace")} where ${NS}
     union all select ${line("f", named("regprocedure", "p.oid"), type("p.prorettype"), txt("p.proretset"), md5(or("p.prosrc")), md5(or("pg_catalog.pg_get_function_sqlbody(p.oid)")), or(txt("p.proconfig")), md5(or("pg_catalog.pg_get_expr(p.proargdefaults, 0::pg_catalog.oid)")), txt("p.prokind"), txt("p.provolatile"), txt("p.proisstrict"), out("int2", "p.pronargdefaults"), type("p.provariadic"), or(txt("p.proargnames")), or(txt("p.proargmodes")), or(txt("p.proallargtypes::pg_catalog.regtype[]")))} from pg_catalog.pg_proc p join pg_catalog.pg_namespace n on ${eq("n.oid", "p.pronamespace")} where ${NS}
+    union all select ${line("s", named("regprocedure", "s.aggfnoid::pg_catalog.oid"), named("regprocedure", "f.oid"), txt("f.provolatile"), txt("l.lanname"))} from pg_catalog.pg_aggregate s join pg_catalog.pg_proc p on ${eq("p.oid", "s.aggfnoid::pg_catalog.oid")} join pg_catalog.pg_namespace n on ${eq("n.oid", "p.pronamespace")} join pg_catalog.pg_proc f on f.oid operator(pg_catalog.=) any (array[${["aggtransfn", "aggfinalfn", "aggcombinefn", "aggmtransfn", "aggminvtransfn", "aggmfinalfn"].map((fn) => `s.${fn}::pg_catalog.oid`).join(", ")}]) join pg_catalog.pg_language l on ${eq("l.oid", "f.prolang")} where (${NS} or (p.oid operator(pg_catalog.>=) ${USER} and ${NOT_TEMP}))
     union all select ${line("k", type("k.castsource"), type("k.casttarget"), named("regprocedure", "k.castfunc"), txt("k.castcontext"), txt("k.castmethod"))} from pg_catalog.pg_cast k where k.oid operator(pg_catalog.>=) ${USER}
     union all select ${line("w", relation("c.oid"), md5("pg_catalog.pg_get_viewdef(c.oid)"))} from pg_catalog.pg_class c join pg_catalog.pg_namespace n on ${eq("n.oid", "c.relnamespace")} where c.relkind operator(pg_catalog.=) any ('{v,m}'::pg_catalog."char"[]) and ${NS}
     union all select ${line("x", relation("d.adrelid"), out("int2", "d.adnum"), md5("pg_catalog.pg_get_expr(d.adbin, d.adrelid)"))} from pg_catalog.pg_attrdef d ${rel("d", "adrelid")} where ${NS}

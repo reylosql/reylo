@@ -6,7 +6,8 @@ export type Card = "one" | "maybeOne" | "many" | "none";
 
 // `anyNullOn`: databases where either answer is right. MySQL's string functions return NULL when the result would exceed max_allowed_packet, whatever their arguments, so its server calls them nullable and a tool may follow it or not.
 // `labels`: the values of an enum, each of which the column's type must name.
-export interface WantColumn { name: string; nullable?: boolean; shape?: string[]; anyNullOn?: Db[]; labels?: string[] }
+// `notLiteral`: a numeric column whose value grows beyond its seed (e.g. a recursive CTE), so a single numeric literal type like `1` is wrong.
+export interface WantColumn { name: string; nullable?: boolean; array?: true; shape?: string[]; shapeFields?: Record<string, { kind?: Kind; nullable?: boolean }>; anyNullOn?: Db[]; labels?: string[]; notLiteral?: true }
 // `value`: the TypeScript type of the value a caller passes, for a tool that checks the value at each call instead of typing the parameter.
 // `anyNullOn`: databases where either answer is right, as SQLite's INTEGER PRIMARY KEY, which assigns a rowid for a null.
 export interface WantParam { kinds?: Kind[]; nullable?: boolean; shape?: string[]; value?: string; anyNullOn?: Db[] }
@@ -32,6 +33,7 @@ export const OUTER_JOINS: Probe[] = [
   { id: "left", sql: "select u.name, p.title from users u left join posts p on p.author_id = u.id", columns: [nn("name"), nu("title")] },
   { id: "left-sorted", sql: "select u.name, p.title from users u left join posts p on p.author_id = u.id order by p.title", columns: [nn("name"), nu("title")] },
   { id: "left-where", sql: "select u.name, p.title from users u left join posts p on p.author_id = u.id where u.id = $1", columns: [nn("name"), nu("title")], params: [{ value: "number" }] },
+  { id: "left-narrowed", sql: "select u.name, p.title from users u left join posts p on p.author_id = u.id where p.score > 0", columns: [nn("name"), nn("title")] },
   { id: "left-subquery", sql: "select u.name, x.title from users u left join (select author_id, title from posts) x on x.author_id = u.id", columns: [nn("name"), nu("title")] },
   { id: "right", sql: "select u.name, p.title from posts p right join users u on u.id = p.author_id", columns: [nn("name"), nu("title")] },
   { id: "full", sql: NO_FULL_JOIN("select u.name, p.title from users u full join posts p on p.author_id = u.id"), columns: [nu("name"), nu("title")] },
@@ -92,6 +94,8 @@ export const CARDINALITY: Probe[] = [
 export const JSON_SHAPES: Probe[] = [
   { id: "object", sql: { postgres: "select json_build_object('id', id, 'name', name) as v from users", mysql: "select json_object('id', id, 'name', name) as v from users", sqlite: "select json_object('id', id, 'name', name) as v from users" }, columns: [{ name: "v", shape: ["id", "name"] }] },
   { id: "aggregate", sql: { postgres: "select json_agg(json_build_object('id', id, 'title', title)) as v from posts", mysql: "select json_arrayagg(json_object('id', id, 'title', title)) as v from posts", sqlite: "select json_group_array(json_object('id', id, 'title', title)) as v from posts" }, columns: [{ name: "v", shape: ["id", "title"] }] },
+  { id: "grouped-aggregate", sql: { postgres: "select u.name, jsonb_agg(jsonb_build_object('id', p.id, 'title', p.title)) as v from users u join posts p on p.author_id = u.id group by u.id", mysql: "select u.name, json_arrayagg(json_object('id', p.id, 'title', p.title)) as v from users u join posts p on p.author_id = u.id group by u.id, u.name", sqlite: "select u.name, json_group_array(json_object('id', p.id, 'title', p.title)) as v from users u join posts p on p.author_id = u.id group by u.id" }, columns: [nn("name"), { name: "v", shape: ["id", "title"] }] },
+  { id: "correlated-rows", sql: { postgres: "select u.name, (select jsonb_agg(p order by p.id) from posts p where p.author_id = u.id) as v from users u" }, columns: [nn("name"), { name: "v", nullable: true, shape: ["id", "title"] }] },
 ];
 
 export const JSON_SCHEMA: Probe[] = [
@@ -115,6 +119,8 @@ export const WINDOWS: Probe[] = [
   { id: "lag", sql: "select id, lag(title) over (order by id) as v from posts", columns: [nn("id"), nu("v")] },
 ];
 export const SUBQUERIES: Probe[] = [
+  { id: "dashboard", sql: { postgres: "with recent as (select id, title from posts order by id desc limit 5) select (select count(*)::int from users) as user_count, (select coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'title', r.title)), '[]') from recent r) as recent_posts", mysql: "with recent as (select id, title from posts order by id desc limit 5) select (select count(*) from users) as user_count, (select coalesce(json_arrayagg(json_object('id', r.id, 'title', r.title)), json_array()) from recent r) as recent_posts", sqlite: "with recent as (select id, title from posts order by id desc limit 5) select (select count(*) from users) as user_count, (select json_group_array(json_object('id', r.id, 'title', r.title)) from recent r) as recent_posts" }, columns: [nn("user_count"), { name: "recent_posts", nullable: false, array: true, shape: ["id", "title"], shapeFields: { id: { kind: "num", nullable: false }, title: { kind: "text", nullable: false } } }] },
+  { id: "lateral-latest", sql: { postgres: "select u.name, p.title, p.score from users u left join lateral (select title, score from posts where author_id = u.id order by created_at desc limit 1) p on true", mysql: "select u.name, p.title, p.score from users u left join lateral (select title, score from posts where author_id = u.id order by created_at desc limit 1) p on true" }, columns: [nn("name"), nu("title"), nu("score")] },
   { id: "scalar-count", sql: "select u.name, (select count(*) from posts p where p.author_id = u.id) as v from users u", columns: nn2("name", "v") },
   { id: "scalar-max", sql: "select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u", columns: [nn("name"), nu("v")] },
   { id: "exists", sql: "select u.name, exists (select 1 from posts p where p.author_id = u.id) as v from users u", columns: nn2("name", "v") },
@@ -124,17 +130,19 @@ export const SUBQUERIES: Probe[] = [
 export const WITH_QUERIES: Probe[] = [
   { id: "join", sql: "with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u join counts c on c.author_id = u.id", columns: nn2("name", "n") },
   { id: "left-join", sql: "with counts as (select author_id, count(*) as n from posts group by author_id) select u.name, c.n from users u left join counts c on c.author_id = u.id", columns: [nn("name"), nu("n")] },
-  { id: "recursive", sql: "with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 5) select n from nums", columns: [nn("n")] },
+  { id: "recursive", sql: "with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 5) select n from nums", columns: [{ name: "n", nullable: false, notLiteral: true }] },
 ];
 export const SET_OPERATIONS: Probe[] = [
   { id: "union", sql: "select name as v from users union select title from posts", columns: [nn("v")] },
   { id: "union-nullable", sql: "select nickname as v from users union all select title from posts", columns: [nu("v")] },
+  { id: "union-widening", sql: "select id as v from users union all select score from posts", columns: [nu("v")] },
   { id: "except", sql: "select id as v from users except select author_id from posts", columns: [nn("v")] },
 ];
 const NO_MYSQL = (sql: string) => ({ postgres: sql, sqlite: sql });
 export const RETURNING: Probe[] = [
   { id: "insert", sql: NO_MYSQL("insert into posts (id, author_id, title) values ($1, $2, $3) returning id, score"), columns: [nn("id"), nu("score")], params: [{ value: "number" }, { value: "number" }, { value: "string" }] },
   { id: "update", sql: NO_MYSQL("update users set nickname = $1 where id = $2 returning name, nickname"), columns: [nn("name"), nu("nickname")], params: [{ value: "string | null" }, { value: "number" }] },
+  { id: "update-narrowed", sql: NO_MYSQL("update users set nickname = 'anon' where id = $1 returning nickname"), columns: [nn("nickname")], params: [{ value: "number" }] },
   { id: "delete", sql: NO_MYSQL("delete from posts where id = $1 returning title"), columns: [nn("title")], params: [{ value: "number" }] },
   { id: "upsert", sql: NO_MYSQL("insert into users (id, email, name) values ($1, $2, $3) on conflict (id) do update set name = excluded.name returning id, nickname"), columns: [nn("id"), nu("nickname")], params: [{ value: "number" }, { value: "string" }, { value: "string" }] },
 ];
@@ -142,6 +150,8 @@ const ROLES = ["admin", "member"];
 export const ENUMS: Probe[] = [
   { id: "column", sql: { postgres: "select role from users", mysql: "select role from users" }, columns: [{ name: "role", nullable: false, labels: ROLES }] },
   { id: "derived", sql: { postgres: "select x.r from (select role as r from users) x", mysql: "select x.r from (select role as r from users) x" }, columns: [{ name: "r", nullable: false, labels: ROLES }] },
+  { id: "check-union", sql: { postgres: "select status from tickets" }, columns: [{ name: "status", nullable: false, labels: ["open", "closed"] }] },
+  { id: "literal-union", sql: "select 'user' as kind, name as label from users union all select 'post', title from posts", columns: [{ name: "kind", nullable: false, labels: ["user", "post"] }, nn("label")] },
 ];
 // The groups only the ORM table shows, run for Reylo and the ORMs.
 export const ORM_GROUPS: [string, Probe[]][] = [["aggregates", AGGREGATES], ["windows", WINDOWS], ["subqueries", SUBQUERIES], ["with-queries", WITH_QUERIES], ["set-operations", SET_OPERATIONS], ["returning", RETURNING], ["enums", ENUMS]];
