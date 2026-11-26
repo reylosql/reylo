@@ -17,7 +17,7 @@ import { array, field, lite, my, pg, record } from "./descriptors.ts";
 import { decodeCodec, decodeCodecs, decodePlan, encodeCodec, encodePlan, leafCodec, planLibraries, planOf, type Codecs, type DecimalClass } from "../src/codecs.ts";
 import { execute, executeSync, type QueryModule } from "./run.ts";
 import { postgresJsSql } from "./stand-ins.ts";
-import { codecRuntime, defineQuery } from "../src/index.ts";
+import { codecRuntime, definePostgresQuery, defineQuery } from "../src/index.ts";
 import { moduleTypes, standardColumnsType } from "../src/module-types.ts";
 import { renderParamType, renderType } from "../src/render.ts";
 import { querySchemas, typeSchema } from "../src/schema.ts";
@@ -275,9 +275,9 @@ test("a Standard Query gives a codec's columns the same type as run, by decode a
   assert.equal(standardColumnsType([{ name: "at", type: pg("timestamptz"), nullable: false }] as any, "postgres", every), `readonly [{ readonly name: "at"; decode(value: string): Temporal.Instant }]`);
 });
 
-test("a query defined by hand whose columns name a codec is refused without the codecs' run time", () => {
-  const q = defineQuery<{}, { at: unknown }, "many", "postgres">({ dialect: "postgres", sql: "select at from t", params: [], cardinality: "many", columns: [["at", "timestamptz"]], codecs: { at: "instant" }, source: "at.sql" });
-  assert.throws(() => q["~standard"].query.decode([["2026-10-20 10:00:00+02"]]), { name: "TypeError", message: /^at\.sql: This statement holds a value js\.codecs gives another type, which the run time converts with Reylo's codecRuntime; a query defined by hand passes it: defineQuery\(\{ …, codecRuntime \}\)/ });
+test("a query defined by its dialect's define function whose columns name a codec is refused without the codecs' run time, which defineQuery passes itself", () => {
+  const q = definePostgresQuery<{}, { at: unknown }, "many">({ sql: "select at from t", params: [], cardinality: "many", columns: [["at", "timestamptz"]], codecs: { at: "instant" }, source: "at.sql" });
+  assert.throws(() => q["~standard"].query.decode([["2026-10-20 10:00:00+02"]]), { name: "TypeError", message: /^at\.sql: This statement holds a value js\.codecs gives another type, which the run time converts with Reylo's codecRuntime, which a module a build step writes passes: build a module an earlier reylo wrote again \(reylo generate typescript writes the files it wrote\)\. A query defined by hand with its dialect's define function passes it too: definePostgresQuery\(\{ …, codecRuntime \}\)/ });
 });
 
 test("decodeCodecs leaves the columns it names no plan for as they are", () => {

@@ -10,6 +10,7 @@ import type { RowBuilder } from "./row.ts";
 import type { Checks } from "./checks.ts";
 import { DecodeError, installPostgresTypes, ParameterError, type Columns, type JsonNumbers, type PostgresTypes } from "./values.ts";
 import { postgresTypes } from "./postgres-types.ts";
+import { codecRuntime } from "./codecs.ts";
 import type { QueryError } from "./query-error.ts";
 import { postgres } from "./decode.ts";
 import { mysql } from "./decode-mysql.ts";
@@ -22,8 +23,9 @@ export type { ClickhouseClient, ClientFor, Dialect, Inputs, MysqlClient, Postgre
 export type { QueryTrace } from "./trace.ts";
 export type { StandardQueryV1 } from "./standard-query.ts";
 export { checks } from "./checks.ts";
-export { codecRuntime } from "./codecs.ts";
+export { codecRuntime, type CodecRuntime } from "./codecs.ts";
 export { postgresTypes } from "./postgres-types.ts";
+export type { PostgresTypes } from "./values.ts";
 export { migrate, type MigrationStorage } from "./migrate.ts";
 export type { MigrateOptions } from "./build-time.ts";
 export type { AnalyzeInput } from "./build-time.ts";
@@ -197,7 +199,7 @@ export type QueryDefinition = {
   codecs?: Readonly<Record<string, Plan>>;
   /** The classes the codecs build values with (`decimal`, the class of `js.codecs.decimal`'s library), which a build step's module imports from the app's install where a codec needs one. */
   libraries?: Libraries;
-  /** `js.codecs` at run time, `codecRuntime` from "reylo": a build step passes it where `codecs` or a parameter names a codec, so that an app none of whose statements holds such a value bundles none of it. */
+  /** `js.codecs` at run time, `codecRuntime` from "reylo": a build step passes it where `codecs` or a parameter names a codec, so that an app none of whose statements holds such a value bundles none of it. A query defined with `defineQuery` has it. */
   codecRuntime?: CodecRuntime;
   /** Postgres's rarer types at run time, `postgresTypes` from "reylo": a build step passes it where the statement reads or binds a row value, a range, a geometric type, an hstore, a money or a non-finite number inside JSON, so that an app none of whose statements does bundles none of it. A query defined with `defineQuery` has it. */
   postgresTypes?: PostgresTypes;
@@ -235,7 +237,7 @@ const RUNTIMES: { readonly [D in Dialect]: Runtime<D> } = { postgres, mysql, sql
  * so that a bundle holds no other dialect's drivers and error codes.
  */
 export function defineQuery<Params, Row, C extends Cardinality, D extends Dialect>(def: QueryDefinition & { dialect: D; cardinality?: C }): Query<Params, Row, C, D> {
-  return define(RUNTIMES[def.dialect] as Runtime<D>, def.dialect === "postgres" ? { postgresTypes, ...def } : def);
+  return define(RUNTIMES[def.dialect] as Runtime<D>, { ...def, codecRuntime: def.codecRuntime ?? codecRuntime, ...(def.dialect === "postgres" ? { postgresTypes: def.postgresTypes ?? postgresTypes } : {}) });
 }
 
 /** A Postgres query, as a module a build step writes defines one (`defineQuery`). */

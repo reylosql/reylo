@@ -31,9 +31,9 @@ function transform(_source: string, path: string, options: Options): { code: str
 
 // The loader's module has one import, two named exports and a default (`src/loader.ts`); each is
 // one line, since the values are JSON.
-function commonJs(path: string, code: string): string {
+export function commonJs(path: string, code: string): string {
   const out = code
-    .replace(/^import \{ (define\w*Query(?:, checks)?) \} from "reylo";$/m, (_, names: string) => `const { ${names} } = require("reylo");`)
+    .replace(/^import \{ (define\w*Query(?:, \w+)*) \} from "reylo";$/m, (_, names: string) => `const { ${names} } = require("reylo");`)
     .replace(/^export const (\w+) = /gm, "const $1 = exports.$1 = ")
     .replace(/^export default /m, "exports.default = ");
   if (/^(import|export) /m.test(out)) throw new Error(`${path}: reylo's module has a shape reylo/jest cannot make CommonJS.`);

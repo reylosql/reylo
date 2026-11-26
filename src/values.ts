@@ -1130,10 +1130,22 @@ export function rowsDecoder(element: Decoder): Decoder {
 export function textDecoder(kind: Kind, delim = ","): Decoder {
   if (kind.endsWith("[]")) {
     const element = textDecoder(elementKind(kind), delim);
-    return isRowKind(elementKind(kind)) && delim === "," ? postgresTypesFor(kind).rowsDecoder(element) : (x) => parseArray(x, element, delim);
+    return isRowKind(elementKind(kind)) && delim === "," ? rare(kind, (types) => types.rowsDecoder(element)) : (x) => parseArray(x, element, delim);
   }
-  if (isRareKind(kind)) return postgresTypesFor(kind).decoder(kind);
+  if (isRareKind(kind)) return rare(kind, (types) => types.decoder(kind));
   return TEXT_DECODERS[kind as Exclude<ScalarKind, RareKind>] ?? identity;
+}
+
+/**
+ * A decoder of Postgres's rarer types, `of` the installed ones; where none are installed yet, taken
+ * from them on the first value it reads, and refused then if there are still none. Building one
+ * never throws: a driver's table of every built-in type's decoder (PGlite's, pg's) is built for
+ * statements that read none of them.
+ */
+function rare(kind: Kind, of: (types: PostgresTypes) => Decoder): Decoder {
+  if (installed) return of(installed);
+  let decode: Decoder | undefined;
+  return (x) => (decode ??= of(postgresTypesFor(kind)))(x);
 }
 
 /** The text decoder of a kind of Postgres's rarer types (`isRareKind`). */
@@ -1184,10 +1196,10 @@ export function installPostgresTypes(types: PostgresTypes): void {
   installed = types;
 }
 
-/** Postgres's rarer types, which a value of `kind` needs (`json` for a non-finite number inside JSON); refused where no query installed them. */
-export function postgresTypesFor(kind: Kind): PostgresTypes {
+/** Postgres's rarer types, which a value of `kind` needs (`json` for a non-finite number inside JSON); refused where no query installed them, naming the query's file where it is known. */
+export function postgresTypesFor(kind: Kind, source?: string): PostgresTypes {
   if (installed) return installed;
-  throw new TypeError(`Reylo reads and writes ${kind === "json" ? "a non-finite number inside Postgres JSON" : `a Postgres ${isRowKind(kind) ? "row value" : isRangeKind(kind) ? "range" : isMultirangeKind(kind) ? "multirange" : kind}`} with Reylo's postgresTypes, which a module a build step writes passes where its statement holds one; a query defined by definePostgresQuery by hand passes it too: definePostgresQuery({ …, postgresTypes }) with postgresTypes from "reylo".`);
+  throw new TypeError(`${source ? `${source}: ` : ""}Reylo reads and writes ${kind === "json" ? "a non-finite number inside Postgres JSON" : `a Postgres ${isRowKind(kind) ? "row value" : isRangeKind(kind) ? "range" : isMultirangeKind(kind) ? "multirange" : kind}`} with Reylo's postgresTypes, which a module a build step writes passes where its statement holds one: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by definePostgresQuery by hand passes it too: definePostgresQuery({ …, postgresTypes }) with postgresTypes from "reylo".`);
 }
 
 // ---------------------------------------------------------------------------------------------

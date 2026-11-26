@@ -9,7 +9,7 @@ import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { DEFINE } from "../src/loader.ts";
 import type { Dialect } from "../src/execute.ts";
-import { ROOT } from "./helpers.ts";
+import { DRIVERS, ROOT } from "./helpers.ts";
 
 /** Each dialect's drivers and error codes. MySQL's include Bun.sql's reader of rows, which Postgres's module holds (`bunRows`). */
 const OWN: Record<Dialect, string[]> = {
@@ -24,7 +24,8 @@ const ELSEWHERE: Record<string, RegExp> = {
   "Postgres's money check": /lc_monetary/,
   "Postgres's hstore": /is an hstore/,
   "Postgres's row values": /whose field/,
-  "Postgres's ranges": /whose lower is a bound|leave it out for an unbounded/,
+  "Postgres's ranges": /is a bound, never null/,
+  "Postgres's money": /not the C locale's form/,
   "pgvector": /pgvector/,
   "SQLite's synchronous clients": /This sql\.js binds|SQLite Wasm binds/,
   "Knex": /Knex/,
@@ -74,4 +75,41 @@ test("a query of Postgres's rarer types reads them with the postgresTypes its mo
   };
   assert.equal(await run(`import { definePostgresQuery, postgresTypes } from "reylo";\nconst q = definePostgresQuery({ sql: "select p from t", params: [], cardinality: "one", columns: [["p", "point"]], postgresTypes });`), '{"p":{"x":1.5,"y":-2}}');
   assert.match(await run(`import { definePostgresQuery } from "reylo";\nconst q = definePostgresQuery({ sql: "select p from t", params: [], cardinality: "one", columns: [["p", "point"]] });`), /^Reylo reads and writes a Postgres point with Reylo's postgresTypes, which a module a build step writes passes where its statement holds one/);
+});
+
+/** What `script` prints, run in a process of its own, where nothing has installed Postgres's rarer types. */
+function fresh(script: string): string {
+  const out = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8" });
+  return (out.stdout + out.stderr).trim();
+}
+
+test("a kind needs Postgres's rarer types exactly where the module a build step writes imports them for it", () => {
+  // Each kind with a value of it as Postgres writes it: a module imports postgresTypes for a kind
+  // holdsRareKind names, and the run time reads a value of every other kind without them.
+  const values: [kind: string, text: string][] = [
+    ["int", "1"], ["int8", "1"], ["text", "x"], ["bool", "t"], ["decimal", "1.5"], ["float", "NaN"], ["json", "{}"], ["bytes", "\\x00"], ["vector", "[1]"],
+    ["date", "2026-01-02"], ["timestamp", "2026-01-02 03:04:05"], ["timestamptz", "2026-01-02 03:04:05+00"], ["interval", "1 day"], ["int[]", "{1,2}"], ["text[][]", "{{a}}"],
+    ["point", "(1,2)"], ["line", "{1,-1,0}"], ["lseg", "[(0,0),(1,1)]"], ["box", "(3,4),(1,2)"], ["path", "((0,0),(1,1))"], ["polygon", "((0,0),(1,1))"], ["circle", "<(1,2),3>"],
+    ["box[]", "{(3,4),(1,2)}"], ["hstore", '"a"=>"1"'], ["money", "$1.00"], ["money[]", '{"$1.00"}'], ["range:int", "[1,5)"], ["multirange:int8", "{[1,3)}"], ["range:timestamptz[]", '{"[2026-01-01 00:00:00+00,)"}'],
+    ['(["a","int"])', "(1)"], ['(["a","int"])[]', '{"(1)"}'], ['(["p","text"],["q","int[]"])', '(x,"{1}")'],
+  ];
+  const values_ts = JSON.stringify(join(ROOT, "src", "values.ts"));
+  const out = fresh(`const { holdsRareKind, textDecoder } = await import(${values_ts});
+for (const [kind, text] of ${JSON.stringify(values)}) {
+  let needs = false;
+  const decode = textDecoder(kind);
+  try { decode(text); } catch (e) { needs = /postgresTypes/.test(e.message); }
+  console.log(kind, holdsRareKind(kind) === needs ? "ok" : "holds " + holdsRareKind(kind) + ", needs " + needs);
+}`);
+  assert.deepEqual(out.split("\n").filter((line) => !line.endsWith(" ok")), [], out);
+});
+
+test("PGlite reads a statement of plain columns in a process where nothing installed Postgres's rarer types, and refuses one of them before it runs", async () => {
+  const run = async (module: string) => {
+    const { outputFiles } = await build({ stdin: { contents: `${module}\nexport { q };\n`, resolveDir: ROOT }, bundle: true, platform: "node", format: "esm", write: false, alias: { reylo: join(ROOT, "src", "index.ts") }, logLevel: "silent" });
+    const pglite = JSON.stringify(join(DRIVERS, "@electric-sql", "pglite", "dist", "index.js"));
+    return fresh(`${outputFiles[0]!.text}\nconst { PGlite } = await import(${pglite});\nconst db = new PGlite();\ntry { console.log(JSON.stringify(await q.run(db))); } catch (e) { console.log(e.message); }`);
+  };
+  assert.equal(await run(`import { definePostgresQuery } from "reylo";\nconst q = definePostgresQuery({ sql: "select 1::int as n, 'x' as t", params: [], cardinality: "one", columns: [["n", "int"], ["t", "text"]] });`), '{"n":1,"t":"x"}');
+  assert.match(await run(`import { definePostgresQuery } from "reylo";\nconst q = definePostgresQuery({ sql: "insert into nowhere default values returning point(1, 2) as p", params: [], cardinality: "one", columns: [["p", "point"]], source: "p.sql" });`), /^p\.sql: Reylo reads and writes a Postgres point with Reylo's postgresTypes/);
 });

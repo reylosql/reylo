@@ -26,7 +26,7 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, coercePostgres, columnKind, DecodeError, describe, elementKind, instantOfDate, isArrayValued, isRareKind, isRowKind, ParameterError, postgresInterval, postgresTypesFor, postgresYear, scalarKind, textDecoder, utf8, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
+import { civilFromDays, coerce, coercePostgres, columnKind, DecodeError, describe, elementKind, holdsRareKind, instantOfDate, isArrayValued, isRareKind, isRowKind, ParameterError, postgresInterval, postgresTypesFor, postgresYear, scalarKind, textDecoder, utf8, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
 import { bareName, type EngineType } from "./engine-type.ts";
 import { lastOfEach, rowOf, type RowBuilder } from "./row.ts";
 import { arrayLiteral, asByteaHex, isJsonValue, isTime, wrappers, jsonText, jsonValue, postgresText, vectorParameter, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
@@ -195,29 +195,21 @@ function pgTypes(key: object) {
   const known = learnedOf(key);
   let binary = false;
   let pending = false;
-  let refused: unknown;
   const table = {
     getTypeParser(oid: number, format?: string): Decoder {
       if (format !== undefined && format !== "text") {
         binary = true;
         return () => BINARY;
       }
-      try {
-        const b = builtinDecoder(oid);
-        if (b) return b;
-        const k = known.get(oid);
-        if (k) return textDecoder(k.kind, k.delim);
-      } catch (error) {
-        // pg asks for a parser where it catches no error, so a type whose decoder Reylo refuses
-        // (Postgres's rarer types, which no query installed) is refused once the statement has run.
-        refused ??= error;
-        return (text) => text;
-      }
+      const b = builtinDecoder(oid);
+      if (b) return b;
+      const k = known.get(oid);
+      if (k) return textDecoder(k.kind, k.delim);
       pending = true;
       return (text) => new Pending(oid, text);
     },
   };
-  return { table, sawBinary: () => binary, sawPending: () => pending, refused: () => refused };
+  return { table, sawBinary: () => binary, sawPending: () => pending };
 }
 
 const refuseBinary = () =>
@@ -246,7 +238,6 @@ async function pgFamily(key: object, run: (types: object) => Promise<PgResult>, 
   const result = await run(types.table);
   const rows = Array.isArray(result) ? (result as Record<string, unknown>[]) : result.rows;
   if (types.sawBinary()) throw refuseBinary();
-  if (types.refused() !== undefined) throw types.refused();
   // The table goes by oid, which says nothing of a built-in row's fields, so those are still text.
   const rowColumns = columns?.filter(([, kind]) => isRowKind(kind));
   if (rowColumns?.length) {
@@ -1028,7 +1019,7 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
   return undefined;
 }
 
-/** A Postgres column's text as its kind, with the non-finite numbers inside its JSON as numbers and an array held to its dimensions, as `.run()` gives them (src/execute.ts). */
+/** A Postgres column's text as its kind, with the non-finite numbers inside its JSON as numbers and an array held to its dimensions, as `.run()` gives them (`postgresRows`). */
 function postgresDecoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined): (v: string) => unknown {
   const decode = textDecoder(kind, delim);
   const inJson = nonFinite === undefined ? undefined : postgresTypesFor("json").numbersInJson;
@@ -1047,11 +1038,16 @@ function holdsMoney(t: EngineType): boolean {
   return false;
 }
 
-/** Before a statement with a `money` parameter, the check that its session writes one in the C locale's form (src/postgres-types.ts, `checkMoney`). */
+/** Before the statement runs: Postgres's rarer types where it reads them, and, before a statement with a `money` parameter, the check that its session writes one in the C locale's form (src/postgres-types.ts, `checkMoney`). */
 async function beforePostgres(c: Client, query: QueryModule<"postgres">): Promise<void> {
+  // A column of Postgres's rarer types is refused before the statement runs, not after a write it
+  // returns from has committed, where its module passes none (one an earlier reylo wrote).
+  const rare = query.columns?.find(([, kind]) => holdsRareKind(kind));
+  if (rare) postgresTypesFor(rare[1], query.source);
+  if (query.nonFinite?.some((at) => at !== null)) postgresTypesFor("json", query.source);
   let name = moneyParams.get(query);
   if (name === undefined) moneyParams.set(query, (name = Object.entries(query.inputs ?? {}).find(([, input]) => holdsMoney(input.type))?.[0] ?? null));
-  if (name !== null) await postgresTypesFor("money").checkMoney(c, query, name);
+  if (name !== null) await postgresTypesFor("money", query.source).checkMoney(c, query, name);
 }
 
 // What `.run()` returns goes back in as Postgres reads it (the round-trip rule, src/render.ts): a date

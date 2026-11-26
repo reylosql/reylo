@@ -490,7 +490,6 @@ function isTurso(c: Client): boolean {
 
 /** The rows of a synchronous client: a Durable Object's SQL storage, whose exec() refuses a BigInt ("Cannot convert a BigInt value to a number"), SQLite Wasm's oo1 Database (`runSqliteWasm`), sql.js's Database (`runSqlJs`), or a database with prepare() (`runSyncSqlite`). */
 function runSqliteSync(c: Client, query: QueryModule<"sqlite">, { text, values, names }: Bound): unknown[] | Promise<unknown[]> {
-  if (isSqlJs(c) && !sqlJsCurrent(c)) throw new TypeError(`This sql.js binds a BigInt as its text and throws SQLite's errors with no code, which .try() could not tell apart: reylo takes sql.js ${SQLJS_MIN} or later.`);
   // Every Database of Turso's has maxWriteReplicationIndex(), and its compat Database has no sync()
   // (nor batch() before 0.7); the libsql package's Database has both of the first two, and binds
   // 2^63 as a REAL.
@@ -501,6 +500,13 @@ function runSqliteSync(c: Client, query: QueryModule<"sqlite">, { text, values, 
   return runSyncSqlite(c, text, values, query.columns);
 }
 
+/** Whether `c` answers at once (`Runtime`), refused first where it is an sql.js too old to bind a BigInt or to code its errors. */
+function answersAtOnce(c: Client): boolean {
+  if (!isSyncSqlite(c) && !isDurableObjectSql(c)) return false;
+  if (isSqlJs(c) && !sqlJsCurrent(c)) throw new TypeError(`This sql.js binds a BigInt as its text and throws SQLite's errors with no code, which .try() could not tell apart: reylo takes sql.js ${SQLJS_MIN} or later.`);
+  return true;
+}
+
 /** SQLite's half of the run time (src/execute.ts, `Runtime`), which `defineSqliteQuery` passes. */
 export const sqlite: Runtime<"sqlite"> = {
   dialect: "sqlite",
@@ -508,7 +514,7 @@ export const sqlite: Runtime<"sqlite"> = {
   runSync: runSqliteSync,
   executeSync,
   wrappers,
-  answersAtOnce: (c) => isSyncSqlite(c) || isDurableObjectSql(c),
+  answersAtOnce,
   readError: readSqliteError,
   readErrorSync: readSqliteError,
   decoder: sqliteDecoder,
