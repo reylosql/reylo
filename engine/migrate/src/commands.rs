@@ -1834,10 +1834,13 @@ impl Plan {
 }
 
 /// Whether two texts are the same statements, comments and whitespace aside; on MySQL, an executable
-/// comment's version too, which says whether its text runs.
+/// comment's version too, which says whether its text runs. Line endings are read as the lock reads
+/// them ([`normalized`]), inside a string too, so that a migration checked out with CRLF is still
+/// the one a database ran with LF, and the other way round.
 fn same_statements(a: &str, b: &str, d: Dialect) -> bool {
+    let (a, b) = (normalized(a), normalized(b));
     let tokens = |sql: &str| split_statements(sql, d).into_iter().map(|s| s.tokens.into_iter().map(|t| t.text).collect::<Vec<_>>()).collect::<Vec<_>>();
-    tokens(a) == tokens(b) && crate::sql::gates(a, d) == crate::sql::gates(b, d)
+    tokens(&a) == tokens(&b) && crate::sql::gates(&a, d) == crate::sql::gates(&b, d)
 }
 
 /// The statements of a migration that change data, as their first words: such a migration always
