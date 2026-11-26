@@ -281,16 +281,25 @@ const written = (v: unknown) => v !== undefined && typeof v !== "function" && ty
 const holds = (o: Object_, key: string) => Object.prototype.hasOwnProperty.call(o, key) && written(o[key]);
 const item = (v: unknown) => (written(v) ? v : null);
 
+// Each number is read as the decimal it prints as, the text JSON.stringify stores, and the
+// remainder is taken exactly: 0.3 is a multiple of 0.1, and 1.0000000000000002 is none of 1. A
+// division of doubles cannot say it: past 2^53 every quotient is whole, and below, 0.3 / 0.1
+// misses 3 by a unit in its last place.
 function multiple(value: number, of: number): boolean {
-  const q = value / of;
-  // Within the division's own rounding error of a whole number, as a decimal multiple like 0.01
-  // needs; past the largest double, the remainder says it (1e308 is a multiple of 0.5).
-  if (!Number.isFinite(q)) return value % of === 0;
-  // Zero is the multiple of everything; no other value is a multiple by rounding to it.
-  const whole = Math.round(q);
-  if (whole === 0) return value === 0;
-  // The error a division of two doubles leaves grows with the quotient, a few units in its last place.
-  return Math.abs(q - whole) <= Number.EPSILON * 8 * Math.abs(q);
+  // JSON Schema asks for a divisor above zero: one that is zero or not finite divides nothing, and
+  // nothing divides a value that is not finite.
+  if (!Number.isFinite(value) || !Number.isFinite(of) || of === 0) return false;
+  const [v, ve] = decimal(value);
+  const [o, oe] = decimal(of);
+  const e = Math.min(ve, oe);
+  return (v * 10n ** BigInt(ve - e)) % (o * 10n ** BigInt(oe - e)) === 0n;
+}
+
+/** A finite number as the decimal it prints as: its digits, and the power of ten they are scaled by. */
+function decimal(n: number): [digits: bigint, exponent: number] {
+  const [mantissa, exponent = "0"] = String(n).split("e");
+  const [whole, fraction = ""] = mantissa!.split(".");
+  return [BigInt(whole! + fraction), Number(exponent) - fraction.length];
 }
 
 const regexes = new Map<string, RegExp>();
