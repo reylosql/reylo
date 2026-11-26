@@ -17,14 +17,17 @@
 //   does pg's (src/decode.ts).
 // - SQLite (`@effect/sql-sqlite-node`, `-sqlite-bun`, `-sqlite-do`, `-d1`, `-libsql`): each
 //   driver turns a storage class into a JavaScript value in native code, as on its own client, so
-//   Reylo normalizes the rows Effect's statement returns (src/decode-sqlite.ts), with Effect's
+//   Reylo normalizes the rows Effect's statement returns, by the driver's own column names as
+//   `.run()` reads them (src/decode-sqlite.ts), with Effect's
 //   `SafeIntegers` on for the statement on the two clients that read it, so that an INTEGER past
 //   2^53 comes back exact, and with no `CurrentTransformer`, which would rewrite the statement.
 //
-// Each statement checks that its Effect was not interrupted before it starts, so that a statement
-// Reylo runs after another (a check, a catalog query) is never sent once the caller has gone.
+// On Postgres and SQLite each statement runs as a fiber of its own in the caller's context, which
+// `settle` keeps: interrupted, `effect()` interrupts them and waits until each has ended, Effect's
+// own cancel included, and a statement Reylo would run after another (a check, a catalog query) is
+// never started.
 
-import { Effect, Option, type Context, type Scope, type Semaphore } from "effect";
+import { Cause, Effect, Exit, Fiber, Option, type Context, type Scope, type Semaphore } from "effect";
 import { SqlClient, SqlError, Statement } from "effect/sql";
 import { EFFECT_SQL, type Dialect, type EffectSql } from "./execute.ts";
 import type { Cardinality, Materialize, ParamsArg, Query } from "./index.ts";
@@ -69,33 +72,51 @@ export function effect<Params, Row, C extends Cardinality, D extends Dialect>(qu
     }
     // A failed statement rejects with the `SqlError` Effect's client raised, classified by Effect.
     const context = yield* Effect.context<never>();
-    const failure = (error: unknown) => (SqlError.isSqlError(error) ? error : undefined);
     if (query.dialect === "postgres") {
       const pg = sql as SqlClient.SqlClient & Partial<PgText>;
       if (typeof pg.queryTextValues !== "function") return yield* Effect.die(new TypeError(`reylo cannot read this Effect Postgres client's results: it decodes each value itself from the server's text, which @effect/sql-pg's queryTextValues() hands over, and this version of @effect/sql-pg has none. Update @effect/sql-pg.`));
-      return yield* settle((signal) => query.run(postgresClient(pg as PgText & object, context, signal) as never, ...args), failure);
+      return yield* settle(context, (start) => query.run(postgresClient(pg as PgText & object, start) as never, ...args));
     }
-    return yield* settle((signal) => query.run(sqliteClient(sql, context, signal) as never, ...args), failure);
+    return yield* settle(context, (start) => query.run(sqliteClient(sql, start) as never, ...args));
   });
 }
 
+/** Runs one of Effect's statements for the promise `.run()` awaits. */
+type Start = <X>(statement: Effect.Effect<X, SqlError.SqlError>) => Promise<X>;
+
 /**
- * The promise's value, its rejection as the Effect's failure where `failure` reads one, and any
- * other rejection (a value Reylo refuses, a row count the statement cannot return) as a defect, as
- * `.try()` gives back the database's errors alone.
+ * The value of `run`, whose statements each run as a fiber of their own in `context`: its rejection
+ * with Effect's `SqlError` as the Effect's failure, any other (a value Reylo refuses, a row count
+ * the statement cannot return) as a defect, as `.try()` gives back the database's errors alone.
+ * Interrupted, it interrupts every statement still running and waits until each has ended, and
+ * starts no other.
  */
-function settle<A>(run: (signal: AbortSignal) => Promise<A>, failure: (error: unknown) => SqlError.SqlError | undefined): Effect.Effect<A, SqlError.SqlError> {
-  return Effect.flatten(
-    Effect.promise((signal) =>
-      run(signal).then(
-        (value) => Effect.succeed(value),
-        (error) => {
-          const failed = failure(error);
-          return failed ? Effect.fail(failed) : Effect.die(error);
-        },
-      ),
-    ),
-  );
+function settle<A>(context: Context.Context<never>, run: (start: Start) => Promise<A>): Effect.Effect<A, SqlError.SqlError> {
+  return Effect.callback<A, SqlError.SqlError>((resume) => {
+    const fork = Effect.runForkWith(context);
+    const running = new Set<Fiber.Fiber<unknown, SqlError.SqlError>>();
+    let interrupted = false;
+    const start: Start = (statement) => {
+      if (interrupted) return Promise.reject(new Error("The Effect running this statement was interrupted."));
+      const fiber = fork(statement);
+      running.add(fiber);
+      return new Promise((resolve, reject) => {
+        fiber.addObserver((exit) => {
+          running.delete(fiber);
+          if (Exit.isSuccess(exit)) resolve(exit.value);
+          else reject(Cause.squash(exit.cause));
+        });
+      });
+    };
+    run(start).then(
+      (value) => resume(Effect.succeed(value)),
+      (error) => resume(SqlError.isSqlError(error) ? Effect.fail(error) : Effect.die(error)),
+    );
+    return Effect.suspend(() => {
+      interrupted = true;
+      return Effect.forEach([...running], Fiber.interrupt, { discard: true });
+    });
+  });
 }
 
 /** The transaction's connection inside `withTransaction`, else one of the client's own for the statement. */
@@ -246,25 +267,21 @@ function mysqlError(error: Error & { errno?: unknown; sqlMessage?: unknown }): S
 
 /**
  * The client `.run()` takes for a SQLite statement on Effect SQL (src/decode-sqlite.ts): each
- * statement through the client's own `unsafe`, in the Effect's context, so that inside
- * `withTransaction` it runs on the transaction's connection. A failed statement rejects with
- * Effect's `SqlError`, which `.try()` reads as the database's error it holds.
+ * statement through the client's own `unsafe`, read whole as the driver returned it, in the
+ * Effect's context, so that inside `withTransaction` it runs on the transaction's connection. A
+ * failed statement rejects with Effect's `SqlError`.
  */
-function sqliteClient(sql: SqlClient.SqlClient, context: Context.Context<never>, signal: AbortSignal): EffectSql {
+function sqliteClient(sql: SqlClient.SqlClient, start: Start): EffectSql {
   const exact = sql.driver === "sqlite-node" || sql.driver === "sqlite-bun";
-  const runPromise = Effect.runPromiseWith(context);
-  const read = <A>(statement: Effect.Effect<A, SqlError.SqlError>) => {
-    if (signal.aborted) return Promise.reject(signal.reason);
-    const own = Effect.provideService(statement, Statement.CurrentTransformer, undefined);
-    return runPromise(exact ? Effect.provideService(own, SqlClient.SafeIntegers, true) : own, { signal });
-  };
   return {
     [EFFECT_SQL]: {
       dialect: "sqlite",
       driver: sql.driver,
       exact,
-      values: (text, values) => read(sql.unsafe(text, values).values) as Promise<unknown[][]>,
-      objects: (text, values) => read(sql.unsafe(text, values).raw) as Promise<unknown[]>,
+      raw: (text, values) => {
+        const statement = Effect.provideService(sql.unsafe(text, values).raw, Statement.CurrentTransformer, undefined);
+        return start(exact ? Effect.provideService(statement, SqlClient.SafeIntegers, true) : statement);
+      },
     },
   };
 }
@@ -276,11 +293,10 @@ type PgText = {
 
 /**
  * The client `.run()` takes for a Postgres statement on Effect SQL (src/decode.ts): each statement
- * through the client's `queryTextValues`, in the Effect's context, so that inside `withTransaction` it
- * runs on the transaction's connection. What Reylo learns of the database's own types it keeps
+ * through the client's `queryTextValues`, in the Effect's context, so that inside `withTransaction`
+ * it runs on the transaction's connection. What Reylo learns of the database's own types it keeps
  * under the client.
  */
-function postgresClient(pg: PgText & object, context: Context.Context<never>, signal: AbortSignal): EffectSql {
-  const runPromise = Effect.runPromiseWith(context);
-  return { [EFFECT_SQL]: { dialect: "postgres", key: pg, text: (text, values) => (signal.aborted ? Promise.reject(signal.reason) : runPromise(pg.queryTextValues(text, values), { signal })) } };
+function postgresClient(pg: PgText & object, start: Start): EffectSql {
+  return { [EFFECT_SQL]: { dialect: "postgres", key: pg, text: (text, values) => start(pg.queryTextValues(text, values)) } };
 }

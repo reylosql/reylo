@@ -120,21 +120,21 @@ test("a SQLite database error fails as Effect's SqlError, and a value Reylo refu
   assert.match(String((defect(none) as Error).message), /Expected exactly one row, got 0/);
 });
 
-test("a SQLite query whose result has another width than it declares is refused, and one without columns reads the driver's names", async () => {
-  const declared = sqlite<{}, unknown>("select * from t", [["id", "int"]]);
-  const bare = defineQuery<{}, unknown, "many", "sqlite">({ dialect: "sqlite", sql: "select id, id + 1 as next from t", params: [] });
-  const program = Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    yield* sql.unsafe("create table t (id integer primary key, extra text)");
-    yield* sql.unsafe("insert into t values (1, 'x')");
-    return [yield* Effect.exit(effect(declared)), yield* effect(bare)] as const;
-  });
-  const [wider, rows] = await Effect.runPromise(program.pipe(Effect.provide(sqliteLayer())));
-  assert.match(String((defect(wider) as Error).message), /returned 2 columns where the query declares 1/);
-  assert.deepEqual(
-    (rows as Record<string, unknown>[]).map((r) => ({ ...r })),
-    [{ id: 1, next: 2 }],
-  );
+test("a SQLite query reads Effect's rows by the driver's names, as .run() does, after its table's columns move", async () => {
+  // Built when the table was (a, b); the table is now (b, a, c).
+  const declared = sqlite<{}, unknown>("select * from t", [["a", "int"], ["b", "int"]]);
+  const bare = defineQuery<{}, unknown, "many", "sqlite">({ dialect: "sqlite", sql: "select a, a + 1 as next from t", params: [] });
+  const file = join(mkdtempSync(join(tmpdir(), "reylo-effect-")), "app.db");
+  const db = new DatabaseSync(file);
+  db.exec("create table t (b integer, a integer, c text); insert into t values (2, 1, 'x')");
+  try {
+    const direct = [await declared.run(db), await bare.run(db)];
+    const viaEffect = await Effect.runPromise(Effect.all([effect(declared), effect(bare)]).pipe(Effect.provide(SqliteClient.layer({ filename: file }))));
+    assert.deepStrictEqual(viaEffect, direct);
+    assert.deepEqual(viaEffect.map((rows) => rows.map((r) => ({ ...(r as object) }))), [[{ b: 2, a: 1, c: "x" }], [{ a: 1, next: 2 }]]);
+  } finally {
+    db.close();
+  }
 });
 
 test("a query for another database is a defect, naming the clients its database runs on", async () => {
@@ -312,6 +312,33 @@ test("a MySQL statement whose connection the server ends fails as SqlError, as E
     });
     const lost = await Effect.runPromise(program.pipe(Effect.provide(MysqlClient.layer({ url: Redacted.make(database.url), maxConnections: 4 }))));
     assert.ok(SqlError.isSqlError(lost), String(lost));
+  } finally {
+    await database.drop();
+  }
+});
+
+test("an interrupted Postgres statement has stopped on the server by the time effect() returns", { skip: pgLive }, async () => {
+  const database = await postgresDatabase("reylo_effect_cancel");
+  try {
+    const slow = postgres<{}, unknown, "one">("select pg_sleep(5)::text as slept", [["slept", "text"]], "one");
+    const seen: { timedOut?: Exit.Exit<unknown, unknown>; active?: number } = {};
+    const program = Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      // The cancelled statement aborts the transaction, whose COMMIT then rolls it back.
+      return yield* Effect.exit(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            seen.timedOut = yield* Effect.exit(effect(slow).pipe(Effect.timeout("300 millis")));
+            const rows = yield* Effect.promise((): Promise<{ n: number }[]> => database.sql.unsafe("select count(*)::int as n from pg_stat_activity where state = 'active' and query like 'select pg_sleep(5)%'"));
+            seen.active = rows[0]!.n;
+          }),
+        ),
+      );
+    });
+    const committed = await Effect.runPromise(program.pipe(Effect.provide(PgClient.layer({ url: Redacted.make(database.url) }))));
+    assert.ok(seen.timedOut && Exit.isFailure(seen.timedOut));
+    assert.equal(seen.active, 0);
+    assert.ok(Exit.isFailure(committed));
   } finally {
     await database.drop();
   }

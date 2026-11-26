@@ -280,8 +280,8 @@ export const EFFECT_SQL: unique symbol = Symbol.for("reylo.effectSql");
 /**
  * A statement's run on an Effect SQL client (src/effect.ts), each rejecting with the `SqlError`
  * Effect's client raised. On SQLite, `driver` is the client's own name for its driver
- * (`sqlite-node`, `d1`, …), `exact` whether it reads every INTEGER as a BigInt, `values` the rows by
- * position and `objects` by the driver's column names. On Postgres, `text` runs the statement with
+ * (`sqlite-node`, `d1`, …), `exact` whether it reads every INTEGER as a BigInt, and `raw` the
+ * statement's result as the driver returned it. On Postgres, `text` runs the statement with
  * every column in the text format, each value the server's text, and `key` is the client, under
  * which Reylo keeps what it learned of the database's own types.
  */
@@ -291,8 +291,7 @@ export type EffectSql = {
         readonly dialect: "sqlite";
         readonly driver: string;
         readonly exact: boolean;
-        values(text: string, values: unknown[]): Promise<unknown[][]>;
-        objects(text: string, values: unknown[]): Promise<unknown[]>;
+        raw(text: string, values: unknown[]): Promise<unknown>;
       }
     | {
         readonly dialect: "postgres";
