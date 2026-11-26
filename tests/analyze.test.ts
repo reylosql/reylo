@@ -388,6 +388,36 @@ test("a session names its entries by libpq's variables as it started, as its con
   }
 });
 
+test("a session's connection reads libpq's variables as the session started, so its analysis is of the database its entries name", { skip: live }, async () => {
+  const first = await postgresDatabase("reylo_env_first", "create table t (v int not null)");
+  const second = await postgresDatabase("reylo_env_second", "create table t (v text)");
+  const root = mkdtempSync(join(tmpdir(), "reylo-entry-environment-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const saved = process.env.PGDATABASE;
+  // The URL names no database: PGDATABASE does.
+  const url = new URL(first.url);
+  url.pathname = "/";
+  try {
+    process.env.PGDATABASE = new URL(first.url).pathname.slice(1);
+    const session = await Session.open(root, { DATABASE_URL: url.href });
+    // Changed before the session's first connection, which still opens the database its entries name.
+    process.env.PGDATABASE = new URL(second.url).pathname.slice(1);
+    try {
+      const typed = await session.analyze("select v from t");
+      assert.ok(typed.ok);
+      // The first database's `v`, which is never null, where the second's may be.
+      assert.ok(!typed.analysis.columns[0]!.nullable);
+    } finally {
+      await session.close();
+    }
+  } finally {
+    if (saved === undefined) delete process.env.PGDATABASE;
+    else process.env.PGDATABASE = saved;
+    await first.drop();
+    await second.drop();
+  }
+});
+
 test("on a server, a URL that fails reads that server's own entry and no other's, and a build says once that it reads reylo/.cache/ unchecked", { skip: live }, async (t) => {
   const { url, sql, drop } = await postgresDatabase("reylo_offline", "create table users (id int primary key, email text not null)");
   // Another database on the same server, whose users differ.
