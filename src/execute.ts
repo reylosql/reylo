@@ -323,8 +323,7 @@ export function execute<D extends Dialect>(
 function withCodecs(query: QueryModule, rows: unknown[] | Promise<unknown[]>): unknown[] | Promise<unknown[]> {
   const codecs = query.codecs;
   if (codecs === undefined || Object.keys(codecs).length === 0) return rows;
-  const run = codecsOf(query);
-  return Array.isArray(rows) ? run.decodeCodecs(rows, codecs, query.libraries) : rows.then((r) => run.decodeCodecs(r, codecs, query.libraries));
+  return Array.isArray(rows) ? codecsOf(query).decodeCodecs(rows, codecs, query.libraries) : rows.then((r) => codecsOf(query).decodeCodecs(r, codecs, query.libraries));
 }
 
 /** `js.codecs` at run time (src/codecs.ts): every build step passes it where the statement holds a value a codec gives another type. */
@@ -446,6 +445,9 @@ function checkParams(query: QueryModule, input: unknown): asserts input is Recor
 // PGlite, better-sqlite3 and Bun.sql already do; postgres.js, mysql2, node:sqlite and libSQL
 // would reject it instead.
 function statement(query: QueryModule, params: ParamsInput) {
+  // A column of a family js.codecs gives another type is refused before the statement runs, not
+  // after a write it returns from has committed, where its module passes no codecRuntime.
+  if (query.codecs !== undefined && Object.keys(query.codecs).length) codecsOf(query);
   // The build step already compiled the statement; only the values need ordering.
   const compiled = compile(query);
   const bound: Bound = { text: compiled.text, values: compiled.order.map((name) => value(params, name)), names: compiled.order, marks: compiled.marks };

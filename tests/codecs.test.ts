@@ -275,9 +275,13 @@ test("a Standard Query gives a codec's columns the same type as run, by decode a
   assert.equal(standardColumnsType([{ name: "at", type: pg("timestamptz"), nullable: false }] as any, "postgres", every), `readonly [{ readonly name: "at"; decode(value: string): Temporal.Instant }]`);
 });
 
-test("a query defined by its dialect's define function whose columns name a codec is refused without the codecs' run time, which defineQuery passes itself", () => {
+test("a query defined by its dialect's define function whose columns name a codec is refused without the codecs' run time, which defineQuery passes itself", async () => {
   const q = definePostgresQuery<{}, { at: unknown }, "many">({ sql: "select at from t", params: [], cardinality: "many", columns: [["at", "timestamptz"]], codecs: { at: "instant" }, source: "at.sql" });
   assert.throws(() => q["~standard"].query.decode([["2026-10-20 10:00:00+02"]]), { name: "TypeError", message: /^at\.sql: This statement holds a value js\.codecs gives another type, which the run time converts with Reylo's codecRuntime, which a module a build step writes passes: build a module an earlier reylo wrote again \(reylo generate typescript writes the files it wrote\)\. A query defined by hand with its dialect's define function passes it too: definePostgresQuery\(\{ …, codecRuntime \}\)/ });
+  // `.run()` refuses it before the statement runs, so a write that returns such a column never commits.
+  const calls: unknown[] = [];
+  await assert.rejects(q.run({ query: async (...args: unknown[]) => (calls.push(args), { rows: [] }) } as never), { name: "TypeError", message: /^at\.sql: This statement holds a value js\.codecs gives another type/ });
+  assert.deepEqual(calls, []);
 });
 
 test("decodeCodecs leaves the columns it names no plan for as they are", () => {
