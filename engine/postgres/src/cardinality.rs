@@ -74,7 +74,9 @@ use crate::levels::{Columns, Level, Withs};
 use crate::pgtypes::oid;
 use syntax::postgres::protobuf::{self, node::Node as NodeEnum, SelectStmt};
 use serde_json::Value;
+use std::cell::LazyCell;
 use std::collections::HashSet;
+use std::ops::Deref;
 
 /// The shapes the build proves return exactly one row, for the diagnostic that refuses a
 /// middleware it cannot prove.
@@ -1110,14 +1112,15 @@ impl<'a> From<'a> {
 
     /// The keys of each subquery, WITH query and view, by item, read from its statement
     /// ([`output_keys`]): they pin it as a unique index pins a table. None for a table or an item
-    /// already proved to return one row.
-    fn derived_keys(&self, dialect: Dialect, trust: &Trust, catalog: &Catalog) -> Vec<Vec<Key>> {
+    /// already proved to return one row. Reading the keys on demand lets a direct row bound
+    /// settle an item without walking its statement again.
+    fn derived_keys<'f>(&'f self, dialect: Dialect, trust: &'f Trust, catalog: &'f Catalog) -> Vec<impl Deref<Target = Vec<Key>> + 'f> {
         (0..self.items.len())
-            .map(|i| match &self.items[i].source {
+            .map(|i| LazyCell::new(move || match &self.items[i].source {
                 _ if self.items[i].proven_one => Vec::new(),
                 Source::Relation(rv) if !catalog.views.contains_key(&catalog_name(rv)) => Vec::new(),
                 _ => self.item_keys(i, dialect, trust, catalog),
-            })
+            }))
             .collect()
     }
 
@@ -1125,7 +1128,7 @@ impl<'a> From<'a> {
     /// one item alone, whether every row of it meets one row at most of each other item. `keys`
     /// are [`From::derived_keys`].
     #[allow(clippy::too_many_arguments)]
-    fn determined_from(&self, mut done: Vec<bool>, keys: &[Vec<Key>], constant: bool, dialect: Dialect, trust: &Trust, catalog: &Catalog) -> Vec<bool> {
+    fn determined_from(&self, mut done: Vec<bool>, keys: &[impl Deref<Target = Vec<Key>>], constant: bool, dialect: Dialect, trust: &Trust, catalog: &Catalog) -> Vec<bool> {
         let n = self.items.len();
         // The items of one row at most per row of the rest (rule 4).
         let per_row: Vec<bool> = self
@@ -3847,6 +3850,9 @@ mod tests {
             ("SELECT s.n FROM (SELECT count(*) AS n FROM todos) s LEFT JOIN users u ON u.id = s.n", 2),
             ("SELECT s.n FROM (SELECT 1 AS n) s CROSS JOIN LATERAL (SELECT s.n) t", 3),
             ("SELECT s.n FROM (SELECT 1 AS n) s LEFT JOIN (SELECT 2 AS n) t ON false", 3),
+            ("SELECT s.n FROM (SELECT 1 AS n) s LEFT JOIN
+                (SELECT t.n FROM (SELECT 2 AS n) t LEFT JOIN (SELECT count(*) AS n FROM todos) c ON t.n = c.n) r
+                ON s.n = r.n", 5),
         ] {
             EXACT_PROOFS.set(0);
             assert_eq!(pg(sql), Ok(()), "{sql}");
