@@ -274,8 +274,8 @@ export type Inputs = Readonly<Record<string, { readonly type: EngineType; readon
 
 export type AnyClient = Record<string, any> & ((...args: any[]) => any);
 
-/** Where the client `effect` from `reylo/effect` passes to `.run()` for a SQLite statement keeps the Effect SQL client it reads through (src/effect.ts). */
-export const EFFECT_SQL: unique symbol = Symbol("reylo.effectSql");
+/** Where the client `effect` from `reylo/effect` passes to `.run()` for a SQLite or Postgres statement keeps the Effect SQL client it reads through (src/effect.ts). */
+export const EFFECT_SQL: unique symbol = Symbol.for("reylo.effectSql");
 
 /**
  * A statement's run on an Effect SQL client (src/effect.ts), each rejecting with the `SqlError`
@@ -488,7 +488,7 @@ async function executeAsync(c: AnyClient | null | undefined, query: QueryModule,
   // Effect SQL's client has an unsafe() whose statement is an Effect, which an await never runs:
   // taken for Bun.sql's on SQLite, a read gave no rows and a write ran nothing. Effect 4 brands
   // the client with a string, Effect 3's @effect/sql with a symbol.
-  if ("~effect/sql/SqlClient" in c || Symbol.for("@effect/sql/SqlClient") in c) throw new TypeError(`reylo cannot run a statement on an Effect SQL client: .run() takes a driver's own client. Inside an Effect, run the query with effect(query, params) from reylo/effect, on Effect 4.1.6 or later.`);
+  if ("~effect/sql/SqlClient" in c || Symbol.for("@effect/sql/SqlClient") in c) throw new TypeError(`reylo cannot run a statement on an Effect SQL client: .run() takes a driver's own client. Inside an Effect, run the query with effect(query, params) from reylo/effect.`);
   checkParams(query, params);
   if (query.dialect === "postgres") await checkMoneyLocale(c, query);
   const rows = await query.runtime.run(c, query, statement(query, params));
@@ -520,7 +520,10 @@ function holdsMoney(t: EngineType): boolean {
 async function checkMoneyLocale(c: AnyClient, query: QueryModule): Promise<void> {
   let name = moneyParams.get(query);
   if (name === undefined) moneyParams.set(query, (name = Object.entries(query.inputs ?? {}).find(([, input]) => holdsMoney(input.type))?.[0] ?? null));
-  if (name === null || moneyLocales.has(c as object)) return;
+  // A client effect() passes (src/effect.ts) is made for one call, and checks under the client it reads through.
+  const effect = (c as Partial<EffectSql>)[EFFECT_SQL];
+  const key = effect?.dialect === "postgres" ? effect.key : (c as object);
+  if (name === null || moneyLocales.has(key)) return;
   let written: unknown;
   try {
     const rows = await executeAsync(c, { dialect: "postgres", runtime: query.runtime, sql: MONEY_CHECK, params: [], text: MONEY_CHECK, order: [], marks: [], columns: [["m", "text"]] }, {});
@@ -528,7 +531,7 @@ async function checkMoneyLocale(c: AnyClient, query: QueryModule): Promise<void>
   } catch {
     return;
   }
-  if (written === "$1,234.50") return void moneyLocales.add(c as object);
+  if (written === "$1,234.50") return void moneyLocales.add(key);
   throw new ParameterError(`Parameter "${name}" is a Postgres money, which Postgres reads in the session's lc_monetary, and this session writes 1234.50 as ${JSON.stringify(written)}, not the C locale's "$1,234.50", so it could store the parameter as another amount. Set lc_monetary = 'C' on the session, the role or the database, or cast the parameter to numeric in the statement (:${name}::numeric).`);
 }
 

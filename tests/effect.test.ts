@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Cause, Effect, Exit, Redacted } from "effect";
+import { Cause, Effect, Exit, Fiber, Redacted } from "effect";
 import { SqlClient, SqlError } from "effect/sql";
 import { SqliteClient } from "@effect/sql-sqlite-node";
 import { MysqlClient } from "@effect/sql-mysql2";
@@ -70,6 +70,20 @@ test("a SQLite query on Effect's libSQL client, which reads no BigInt by default
   ]);
 });
 
+test("a SQLite query without its columns on Effect's libSQL client reads the rows of libSQL's own result", async () => {
+  const bare = defineQuery<{}, unknown, "many", "sqlite">({ dialect: "sqlite", sql: "select id, id + 1 as next from t order by id", params: [] });
+  const insert = defineQuery<{}, unknown, "many", "sqlite">({ dialect: "sqlite", sql: "insert into t (id) values (3) returning id", params: [] });
+  const program = Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql.unsafe("create table t (id integer primary key)");
+    yield* sql.unsafe("insert into t values (1), (2)");
+    return [yield* effect(bare), yield* effect(insert)] as const;
+  });
+  const [rows, inserted] = await Effect.runPromise(program.pipe(Effect.provide(LibsqlClient.layer({ url: "file::memory:" }))));
+  assert.deepEqual(rows.map((r) => ({ ...(r as object) })).map(({ id, next }: any) => ({ id, next })), [{ id: 1, next: 2 }, { id: 2, next: 3 }]);
+  assert.deepEqual(inserted.map(({ id }: any) => id), [3]);
+});
+
 test("a SQLite query runs on the transaction's connection inside withTransaction", async () => {
   const insert = sqlite<{ id: number }, never, "none">("insert into t (id) values (:id)", undefined, "none");
   const count = sqlite<{}, number, "one">("select count(*) from t", [["count(*)", "int"]], "one", true);
@@ -137,7 +151,7 @@ test(".run() refuses an Effect SQL client, whose unsafe() hands back an Effect r
       return yield* Effect.promise(() => q.run(sql as never).then(() => undefined, (error: unknown) => error));
     }).pipe(Effect.provide(sqliteLayer())),
   );
-  assert.match(String((rejected as Error).message), /an Effect SQL client: \.run\(\) takes a driver's own client\. Inside an Effect, run the query with effect\(query, params\) from reylo\/effect, on Effect 4\.1\.6 or later\./);
+  assert.match(String((rejected as Error).message), /an Effect SQL client: \.run\(\) takes a driver's own client\. Inside an Effect, run the query with effect\(query, params\) from reylo\/effect\./);
 });
 
 
@@ -256,6 +270,35 @@ test("Effect's pg client gives the driver matrix's typed row as .run() gives it 
     assert.deepEqual([inside, after], [{ n: 2 }, { n: 1 }]);
     assert.ok(SqlError.isSqlError(duplicate));
     assert.equal(duplicate.reason._tag, "UniqueViolation");
+  } finally {
+    await database.drop();
+  }
+});
+
+test("an interrupted MySQL statement is stopped with KILL QUERY before its connection goes back, and a lost connection fails as SqlError", { skip: mysqlLive }, async () => {
+  const database = await mysqlDatabase("reylo_effect_kill");
+  try {
+    const slow = mysql<{}, unknown, "one">("select sleep(5) as slept", [["slept", "int"]], "one");
+    const running = mysql<{}, bigint, "one">("select count(*) from information_schema.processlist where info = 'select sleep(5) as slept'", [["count(*)", "int8"]], "one", true);
+    const program = Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      // Interrupted by its timeout, the statement is killed, and has ended by the time the Effect has.
+      const timedOut = yield* Effect.exit(effect(slow).pipe(Effect.timeout("300 millis")));
+      const left = yield* effect(running);
+      // The server ends the statement's connection: mysql2's own error, which has no number, fails it as SqlError.
+      const fiber = yield* Effect.forkChild(Effect.flip(effect(slow)));
+      let thread: unknown;
+      for (let i = 0; i < 50 && thread === undefined; i++) {
+        yield* Effect.sleep("50 millis");
+        thread = ((yield* sql.unsafe("select id from information_schema.processlist where info = 'select sleep(5) as slept'")) as { id?: unknown }[])[0]?.id;
+      }
+      yield* sql.unsafe(`kill ${Number(thread)}`);
+      return { timedOut, left, lost: yield* Fiber.join(fiber) };
+    });
+    const { timedOut, left, lost } = await Effect.runPromise(program.pipe(Effect.provide(MysqlClient.layer({ url: Redacted.make(database.url), maxConnections: 4 }))));
+    assert.ok(Exit.isFailure(timedOut));
+    assert.equal(left, 0n);
+    assert.ok(SqlError.isSqlError(lost), String(lost));
   } finally {
     await database.drop();
   }

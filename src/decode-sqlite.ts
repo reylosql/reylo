@@ -381,14 +381,22 @@ async function runSqlite(c: Client, query: QueryModule<"sqlite">, { text, values
   const columns = query.columns;
   const effect = (c as Partial<EffectSql>)[EFFECT_SQL];
   if (effect?.dialect === "sqlite") {
-    // D1 and a Durable Object refuse a BigInt, and SQLite Wasm wraps a whole number past 2^63, through Effect as on their own clients.
+    // D1 and a Durable Object refuse a BigInt, through Effect as on their own clients.
     const driver = effect.driver;
-    const bound = driver === "d1" || driver === "sqlite-do" ? values.map((v, i) => numberOrDigits(v, type(i), driver === "d1" ? "d1" : "durable-object")) : driver === "sqlite-wasm" ? sqliteWasmValues(names, values) : values;
+    const bound = driver === "d1" || driver === "sqlite-do" ? values.map((v, i) => numberOrDigits(v, type(i), driver === "d1" ? "d1" : "durable-object")) : values;
     const options = { exact: effect.exact, d1: driver === "d1" };
     // By position under the module's names, so that two columns of one name keep both values; a
     // result of another width than the module declares, or a query without its columns, by the
     // driver's names.
-    if (!columns?.length) return normalize(await effect.objects(text, bound), columns, options);
+    if (!columns?.length) {
+      // Effect's raw result is the driver's own: rows on node:sqlite, bun:sqlite and a Durable
+      // Object, libSQL's ResultSet and D1's result read as `.run()` reads them, and a write's
+      // count on node:sqlite.
+      const raw = (await effect.objects(text, bound)) as unknown[] | { rows?: unknown; columns?: unknown; results?: unknown };
+      if (Array.isArray(raw)) return normalize(raw, columns, options);
+      if (Array.isArray(raw?.rows)) return normalize(libsqlRows(raw.rows, columns, Array.isArray(raw.columns) ? raw.columns : undefined), columns, options);
+      return normalize(Array.isArray(raw?.results) ? raw.results : [], columns, options);
+    }
     const rows = await effect.values(text, bound);
     if (rows.length && rows[0]!.length !== columns.length) throw new DecodeError(`The statement returned ${rows[0]!.length} columns where the query declares ${columns.length}: its tables changed after the query was built. Build it again.`);
     return normalize(rows.map(rowOf(columns.map(([name]) => name))), columns, options);
