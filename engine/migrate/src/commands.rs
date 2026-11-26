@@ -1844,12 +1844,12 @@ impl Plan {
 /// past a bare carriage return), and only then are the line endings inside each token read as the
 /// lock reads them ([`line_feeds`]): a migration checked out with CRLF is still the one a database
 /// ran with LF, and the other way round, even where a string in it spans lines. A quoted name keeps
-/// its line endings, since CRLF in it names another table than LF, but for SQLite's `"…"`, which
-/// SQLite reads as a string where it names no column.
+/// its line endings, since CRLF in it names another table than LF; so does SQLite's `"…"`, which
+/// SQLite reads as a string only where it names no column, so that a name is never read as another.
 fn same_statements(a: &str, b: &str, d: Dialect) -> bool {
     use crate::sql::TokenKind;
     let text = |t: crate::sql::Token| match t.kind {
-        TokenKind::Quoted if !(d == Dialect::Sqlite && t.text.starts_with('"')) => t.text,
+        TokenKind::Quoted => t.text,
         _ => line_feeds(&t.text),
     };
     let tokens = |sql: &str| split_statements(sql, d).into_iter().map(|s| s.tokens.into_iter().map(text).collect::<Vec<_>>()).collect::<Vec<_>>();
@@ -11788,7 +11788,7 @@ mod tests {
         assert!(!same_statements("insert into `a\r\nb` values (1);", "insert into `a\nb` values (1);", m));
         assert!(!same_statements("insert into [a\r\nb] values (1);", "insert into [a\nb] values (1);", s));
         assert!(!same_statements("insert into `a\r\nb` values (1);", "insert into `a\nb` values (1);", s));
-        // SQLite reads `"…"` as a string where it names no column, so its line endings are read as a string's.
-        assert!(same_statements("insert into t values (\"a\r\nb\");", "insert into t values (\"a\nb\");", s));
+        // SQLite reads `"…"` as a string only where it names no column: it may name one.
+        assert!(!same_statements("insert into \"a\r\nb\" values (1);", "insert into \"a\nb\" values (1);", s));
     }
 }
