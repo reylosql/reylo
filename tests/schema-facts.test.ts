@@ -81,6 +81,10 @@ test("a number's facts are written where its form here is a JSON number and they
   assert.deepEqual(output(numeric), { type: "string", format: "decimal" });
   assert.equal((output(numeric, true) as { minimum?: number }).minimum, 0);
   assert.equal((output(numeric, true) as { exclusiveMaximum?: number }).exclusiveMaximum, undefined);
+  // A divisor is written only where a JSON number is that very decimal: one a double rounds would hold a value to another divisor.
+  const divisor = (multiple_of: string) => (output({ kind: "decimal", label: "numeric", multiple_of } as EngineType, true) as { multipleOf?: number }).multipleOf;
+  assert.deepEqual([divisor("0.01"), divisor("0.50"), divisor("2.5e-3"), divisor("1E2")], [0.01, 0.5, 0.0025, 100]);
+  for (const text of ["1e-400", "9007199254740993", "0.10000000000000000001", "1e400"]) assert.equal(divisor(text), undefined, text);
 });
 
 test("an array's size is written on an array", () => {

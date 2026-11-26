@@ -199,6 +199,28 @@ function exactNumber(text: string, whole: boolean): number | undefined {
 }
 
 /**
+ * A divisor the format writes as text, where a JSON number holds that very decimal: the validator
+ * reads a divisor as the decimal it prints as, so one a double rounds, as 1e-400 to zero or
+ * 9007199254740993 to its neighbour, would hold a value to another divisor.
+ */
+function exactDivisor(text: string, whole: boolean): number | undefined {
+  const value = exactNumber(text, whole);
+  const written = decimal(text);
+  return value !== undefined && value !== 0 && written !== undefined && decimal(String(value)) === written ? value : undefined;
+}
+
+/** A decimal's text as its digits and power of ten, with no zero to spare, as `1.50` and `15e-1` both read `15e-1`. */
+function decimal(text: string): string | undefined {
+  const m = /^[+-]?(\d*)(?:\.(\d*))?(?:e([+-]?\d+))?$/i.exec(text.trim());
+  if (m === null || (m[1] === "" && (m[2] ?? "") === "")) return undefined;
+  let digits = BigInt((m[1] || "0") + (m[2] ?? ""));
+  let exponent = Number(m[3] ?? 0) - (m[2] ?? "").length;
+  if (digits === 0n) return "0";
+  while (digits % 10n === 0n) (digits /= 10n), exponent++;
+  return `${digits}e${exponent}`;
+}
+
+/**
  * An I-Regexp (RFC 9485), which matches a whole value, as the ECMAScript expression JSON Schema's
  * `pattern` reads: anchored at both ends, each `.` outside a class the `[^\n\r]` I-Regexp means by
  * it (RFC 9485 §5.3), and a `^` or a `$`, which I-Regexp reads as itself, escaped
@@ -262,7 +284,8 @@ function withFacts(schema: Schema | JsonSchema, t: EngineType, input: boolean): 
       bound(t.exclusive_min, "exclusiveMinimum");
       bound(t.exclusive_max, "exclusiveMaximum");
     }
-    if (t.kind !== "float") bound(t.multiple_of, "multipleOf");
+    const divisor = t.kind === "float" || t.multiple_of === undefined ? undefined : exactDivisor(t.multiple_of, whole);
+    if (divisor !== undefined) facts.multipleOf = divisor;
   }
   if (t.kind === "array" && schema.type === "array" && t.size !== undefined) sized(t.size, "minItems", "maxItems", false);
   if (t.kind === "map" && schema.type === "object" && t.size !== undefined) sized(t.size, "minProperties", "maxProperties", false);
