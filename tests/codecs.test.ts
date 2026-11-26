@@ -120,7 +120,7 @@ test("a codec position is declared its codec's type, through every part Reylo de
   const schemas = querySchemas(analysis, "postgres", every);
   const row = (schemas.output as any).items.properties;
   assert.deepEqual([row.id, row.price, row.total, row.took], [{ type: "integer", format: "int64" }, { type: "number" }, { type: ["number", "null"] }, { type: "string", description: "an ISO 8601 duration with its sign in front (P1Y2M3DT4H5M6.789S, -P1D)" }]);
-  assert.deepEqual(row.at, { anyOf: [{ type: "string", format: "date-time" }, { type: "string", pattern: "^[+-][0-9]{6,}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$" }] });
+  assert.deepEqual(row.at, { anyOf: [{ type: "string", format: "date-time" }, { type: "string", pattern: "^([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3}))-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$" }] });
   assert.equal(validate(row.at, JSON.parse(JSON.stringify(Temporal.Instant.from("+012345-01-01T00:00:00Z")))), undefined);
 });
 

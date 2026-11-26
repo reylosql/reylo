@@ -574,23 +574,39 @@ test("the kinds: a BIGINT is a BigInt, and an integer a temporary table may wide
   // digits do not write; inside a document Postgres writes such a year its own way (five digits, or BC after it).
   assert.deepEqual(typeSchema({ kind: "instant", tick: "1/1000000", label: "timestamptz" } as EngineType, "postgres"), { type: "string", format: "date-time" });
   const past = {
-    date: ["^[+-][0-9]{6,}-[0-9]{2}-[0-9]{2}$", "^([0-9]{5,}-[0-9]{2}-[0-9]{2}|[0-9]{4}-[0-9]{2}-[0-9]{2} BC)$"],
+    date: ["^([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3}))-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$", "^([1-9][0-9]{4,}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])|(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]) BC)$"],
     "date-time": [
-      "^[+-][0-9]{6,}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
-      "^([0-9]{5,}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?[+-][0-9]{2}:[0-9]{2}(:[0-9]{2})?|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?[+-][0-9]{2}:[0-9]{2}(:[0-9]{2})? BC)$",
+      "^([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3}))-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$",
+      "^([1-9][0-9]{4,}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-]([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?|(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-]([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])? BC)$",
     ],
   };
+  // Each value at the edges, as `.run()` returns it and as Postgres writes it inside a document: the first and last day
+  // of each type, 1 BC, 2 BC and the year 10000, a Temporal.Instant's JSON and a parameter with an offset, and inside a
+  // document an offset to the second at its largest west and east (Asia/Manila and America/Metlakatla before their first
+  // standard time), and one past 15 hours, as a POSIX session zone writes it.
   const years = {
-    date: [["-000001-06-01", "+012345-01-01", "+5874897-12-31"], ["0002-06-01 BC", "12345-01-01"]],
-    "date-time": [["-004712-01-01T00:00:00.000000Z", "+012345-01-01T00:00:00.000000Z"], ["12344-12-31T19:00:00.5-05:00", "0002-05-31T19:03:58-04:56:02 BC"]],
+    date: [["-000001-06-01", "+012345-01-01", "-004713-11-24", "+5874897-12-31", "+010000-01-01"], ["0002-06-01 BC", "12345-01-01", "4714-11-24 BC", "5874897-12-31", "0001-01-01 BC", "10000-01-01"]],
+    "date-time": [
+      ["-004712-01-01T00:00:00.000000Z", "+012345-01-01T00:00:00.000000Z", "-004713-11-24T00:00:00.000000Z", "+294276-12-31T23:59:59.999999Z", "-000001-12-31T23:59:59.500000Z", "+010000-01-01T00:00:00.000000Z", "+012345-01-01T00:00:00Z", "+012345-01-01T05:30:00+05:30"],
+      ["12344-12-31T19:00:00.5-05:00", "0002-05-31T19:03:58-04:56:02 BC", "4714-11-24T00:00:00+00:00 BC", "4714-11-23T08:03:52-15:56:08 BC", "4714-11-24T15:13:42+15:13:42 BC", "294276-12-31T23:59:59.999999+00:00", "294277-01-01T08:59:59.999999+09:00", "0001-01-01T00:00:00+00:00 BC", "10000-01-01T20:00:00+20:00"],
+    ],
+  };
+  // What no `.run()` returns, and the server refuses or reads as a year of four digits: a field out of its range, a signed
+  // year within 0000–9999 (`+002026`, and `-000000`, which ISO 8601 forbids), and text around the value.
+  const malformed = {
+    date: [["+012345-13-01", "+002026-13-01", "+002026-06-01", "+009999-12-31", "+000000-06-01", "-000000-06-01", "+012345-00-01", "+012345-01-00", "+012345-01-32", "+0012345-01-01", "012345-01-01", "x+012345-01-01", "+012345-01-01x"], ["12345-13-01", "12345-01-32", "01234-01-01", "0000-01-01 BC", "0002-00-01 BC", "12345-01-01 BC", "x12345-01-01", "12345-01-01x", "0002-06-01 BCx"]],
+    "date-time": [
+      ["+012345-01-01T99:00:00Z", "+012345-01-01T24:00:00Z", "+012345-01-01T00:60:00Z", "+012345-01-01T00:00:60Z", "+012345-01-01T00:00:00+24:00", "+012345-01-01T00:00:00+00:60", "+012345-01-01T00:00:00-04:56:02", "-000000-06-01T00:00:00Z", "+002026-06-01T00:00:00Z", "+012345-13-01T00:00:00Z", "+012345-01-01T00:00:00Zx"],
+      ["12345-01-01T24:00:00+00:00", "12345-01-01T00:00:00+24:00", "12345-01-01T00:00:00+00:00:60", "0002-05-31T19:03:60-04:56:02 BC", "12345-13-01T00:00:00+00:00", "12345-01-01T00:00:00Z", "0000-01-01T00:00:00+00:00 BC", "x12345-01-01T00:00:00+00:00"],
+    ],
   };
   for (const [t, format] of [[pg("timestamptz"), "date-time"], [pg("date"), "date"]] as const) {
     for (const [input, inJson] of [[false, false], [true, false], [false, true]] as const) {
       const schema = typeSchema(t as EngineType, "postgres", input, inJson) as JsonSchema;
-      assert.deepEqual(schema, { anyOf: [{ type: "string", format }, { type: "string", pattern: past[format][+inJson] }, { enum: ["infinity", "-infinity"] }] });
       // The year 0000, 1 BC, has four digits, which the format takes.
-      for (const v of ["infinity", "-infinity", ...(format === "date" ? ["2026-11-22", "0000-06-01"] : ["2026-11-22T10:00:00Z"]), ...years[format][+inJson]!]) assert.equal(validate(schema, v), undefined, v);
-      for (const v of years[format][+!inJson]!) assert.notEqual(validate(schema, v), undefined, v);
+      for (const v of ["infinity", "-infinity", ...(format === "date" ? ["2026-11-22", "0000-06-01"] : ["2026-11-22T10:00:00Z", "0000-01-01T00:00:00.000000Z"]), ...years[format][+inJson]!]) assert.equal(validate(schema, v), undefined, v);
+      for (const v of [...years[format][+!inJson]!, ...malformed[format][+inJson]!]) assert.notEqual(validate(schema, v), undefined, v);
+      assert.deepEqual(schema, { anyOf: [{ type: "string", format }, { type: "string", pattern: past[format][+inJson] }, { enum: ["infinity", "-infinity"] }] });
     }
   }
   // A date of a database that stays within 0000–9999, MySQL's, keeps the format alone.

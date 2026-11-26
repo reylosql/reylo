@@ -133,19 +133,27 @@ function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean
   }
 }
 
+// The fields of a date's and an instant's text, each within its range: a year from 0001 to 9999, a
+// month and a day, a time of day, and an offset from UTC within RFC 3339's 23:59. The same in
+// engine/core.
+const YEAR = "(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})";
+const MONTH_DAY = "-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])";
+const CLOCK = "T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?";
+const OFFSET = "[+-]([01][0-9]|2[0-3]):[0-5][0-9]";
+/** ISO 8601's extended year of a value outside 0000–9999, as `isoYear` writes it: a sign and six digits or more, never `-000000`. */
+const EXTENDED_YEAR = `([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00${YEAR})`;
+/** An instant's time as Postgres writes it inside a document, its offset to the second before the zone's first standard time. */
+const DOCUMENT_TIME = `${CLOCK}${OFFSET}(:[0-5][0-9])?`;
+
 /**
  * A year that RFC 3339's four digits do not write, as a date's or an instant's text has it: ISO
- * 8601's extended year, a sign and six digits or more, where the run time writes the value
- * (`isoYear`, and a Temporal value's JSON), and inside a document Postgres's own, five digits or
- * more, or four with BC after the value (`12345-01-01`, `0002-06-01 BC`), an instant before its
- * zone's first standard time with its offset to the second. The same in engine/core.
+ * 8601's extended year where the run time writes the value (`isoYear`, and a Temporal value's
+ * JSON), and inside a document Postgres's own, five digits or more, or four with BC after the
+ * value (`12345-01-01`, `0002-06-01 BC`). The same in engine/core.
  */
 const PAST_YEARS = {
-  date: ["^[+-][0-9]{6,}-[0-9]{2}-[0-9]{2}$", "^([0-9]{5,}-[0-9]{2}-[0-9]{2}|[0-9]{4}-[0-9]{2}-[0-9]{2} BC)$"],
-  instant: [
-    "^[+-][0-9]{6,}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
-    "^([0-9]{5,}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?[+-][0-9]{2}:[0-9]{2}(:[0-9]{2})?|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?[+-][0-9]{2}:[0-9]{2}(:[0-9]{2})? BC)$",
-  ],
+  date: [`^${EXTENDED_YEAR}${MONTH_DAY}$`, `^([1-9][0-9]{4,}${MONTH_DAY}|${YEAR}${MONTH_DAY} BC)$`],
+  instant: [`^${EXTENDED_YEAR}${MONTH_DAY}${CLOCK}(Z|${OFFSET})$`, `^([1-9][0-9]{4,}${MONTH_DAY}${DOCUMENT_TIME}|${YEAR}${MONTH_DAY}${DOCUMENT_TIME} BC)$`],
 } as const;
 
 /** The text of a year outside 0000–9999, which a bound with a sign says a date or an instant of `t` reaches, standing where `inJson` says. */
