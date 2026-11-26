@@ -1,0 +1,16 @@
+alter table t alter column c drop default;
+alter table t alter column c type text using c::text;
+alter table u alter column n drop default;
+alter table u alter column n type text using n::text;
+alter table u alter column shown drop default;
+alter table u alter column shown type text using shown::text;
+alter type p alter attribute a type bigint;
+alter table t alter column c type p using c::text::p;
+alter table t alter column c set default row((0)::bigint, 'zero'::text)::p;
+alter table u alter column n type integer using n::text::integer;
+alter table u alter column n set default (row((7)::bigint, 'seven'::text)::p).a;
+alter table u alter column shown type text using shown::text::text;
+alter table u alter column shown set default (row((1)::bigint, 'one'::text)::p)::text;
+alter table t alter column c set default row(0, 'zero')::p;
+alter table u alter column n set default (row(7, 'seven')::p).a;
+alter table u alter column shown set default row(1, 'one')::p::text;

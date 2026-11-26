@@ -238,6 +238,52 @@ test("Postgres: an analysis waits on another session's lock for at most 10 s, or
   }
 });
 
+test("Postgres: an analysis cancelled while it waits on another session's lock, as by a statement_timeout shorter than the engine's bound, fails and nothing is kept as the statement's error", { skip: pgLive }, async () => {
+  const { url, sql, drop } = await postgresDatabase("reylo_lock_cancel", "create table users (id bigint primary key, name text not null)");
+  const c = await (await engine("postgres")).open(`${url}?options=-c%20statement_timeout%3D1s`);
+  try {
+    await sql.begin(async (tx: any) => {
+      await tx.unsafe("alter table users add column email text");
+      await assert.rejects(c.analyze("select id, name from users where id = :id"), (err: Error) => !(err instanceof Unreachable) && err.message === "The server cancelled the analysis of this statement: canceling statement due to statement timeout (57014)");
+    });
+    assert.deepEqual((await c.analyze("select id, name from users where id = :id")).columns.map((col) => col.name), ["id", "name"]);
+  } finally {
+    await c.close();
+    await drop();
+  }
+});
+
+test("Postgres: an analysis whose describe is cancelled before another of its round waits out lock_timeout fails at the lock timeout, and the next statement on the same handle answers while the lock is still held", { skip: pgLive }, async () => {
+  const { url, sql, drop } = await postgresDatabase("reylo_lock_cancel_round", "create table posts (id bigint primary key); create table orders (id bigint primary key)");
+  const e = await engine("postgres");
+  const c = await e.open(`${url}?options=-c%20lock_timeout%3D1s`);
+  const watch = await e.open(url);
+  // Three WITH queries over one table, which the engine describes together in one round once the catalog's answers are kept.
+  const statement = (x: number, y: number, z: number) => `with a as (select id from posts where id = ${x}), b as (select id from posts where id = ${y}), c as (select id from posts where id = ${z}) select a.id as a_id, b.id as b_id, c.id as c_id from a, b, c`;
+  try {
+    const session = Number(((await c.query("select pg_catalog.pg_backend_pid()", [])) as [[unknown]])[0][0]);
+    await c.analyze(statement(4, 5, 6));
+    await sql.begin(async (tx: any) => {
+      await tx.unsafe("lock table posts in access exclusive mode");
+      const analyzing = c.analyze(statement(1, 2, 3));
+      for (let tries = 0; ((await watch.query(`select pid from pg_catalog.pg_stat_activity where pid = ${session} and wait_event_type = 'Lock'`, [])) as unknown[]).length === 0; tries++) {
+        assert.ok(tries < 100, "the analysis never waited for the table's lock");
+        await new Promise((done) => setTimeout(done, 50));
+      }
+      // The round's first describe is cancelled; the next waits out lock_timeout, the rest still queued behind it.
+      await watch.query(`select pg_catalog.pg_cancel_backend(${session})`, []);
+      await assert.rejects(analyzing, (err: Error) => !(err instanceof Unreachable) && err.message === "A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_timeout. Run it again once the lock is released: pg_locks lists the session that holds it");
+      assert.deepEqual((await c.analyze("select id from orders")).columns.map((col) => col.name), ["id"]);
+      // The session is given up on, with the round's last describe still queued on it: the handle goes on in another.
+      assert.notEqual(Number(((await c.query("select pg_catalog.pg_backend_pid()", [])) as [[unknown]])[0][0]), session);
+    });
+  } finally {
+    await watch.close();
+    await c.close();
+    await drop();
+  }
+});
+
 test("Postgres: a session a lock timeout gives up on is closed, so a role allowed one connection analyzes the next statement while the lock is still held", { skip: pgLive }, async (t) => {
   const { url, sql, drop } = await postgresDatabase("reylo_lock_one", "create table users (id bigint primary key, name text not null); create table orders (id bigint primary key)");
   if (!(await sql.begin((tx: any) => tx.unsafe("set local client_connection_check_interval = '100ms'")).then(() => true, () => false))) {
@@ -314,6 +360,44 @@ test("MySQL: an analysis queued behind an alter table waits for at most 10 s, or
       await new Promise((done) => setTimeout(done, 50));
     }
     await assert.rejects(c.analyze(statement), (err: Error) => !(err instanceof Unreachable) && err.message === "A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_wait_timeout. Run it again once the lock is released: SHOW PROCESSLIST lists the session that holds it");
+    await db.query("commit");
+    await altering;
+    assert.deepEqual((await c.analyze(statement)).columns.map((col) => col.name), ["id", "name"]);
+  } finally {
+    // The open transaction is what the alter waits for: ended first, so that nothing below waits behind it.
+    await db.query("rollback").catch(() => {});
+    await altering?.catch(() => {});
+    await c.close();
+    await alterer.end();
+    await drop();
+  }
+});
+
+test("MySQL: an analysis interrupted by KILL QUERY while it waits behind an alter table fails and nothing is kept as the statement's error", { skip: mysqlLive }, async () => {
+  const { url, db, rows, drop } = await mysqlDatabase("reylo_lock_kill", "create table users (id bigint primary key, name text not null)");
+  const u = new URL(url);
+  const alterer = await driver("mysql2/promise").createConnection({ host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: u.pathname.slice(1) });
+  const c = await (await engine("mysql")).open(url);
+  let altering: Promise<unknown> | undefined;
+  try {
+    const session = Number(((await c.query("select connection_id()", [])) as [[unknown]])[0][0]);
+    const altererSession = Number(((await alterer.query("select connection_id() as id")) as [[{ id: unknown }]])[0][0].id);
+    const statement = "select id, name from users where id = :id";
+    // A transaction that has read the table, and an alter table waiting for it to end: the analysis's prepare, sent once the alter waits, queues behind it, within the engine's 10 s bound, until it is killed.
+    await db.query("begin");
+    await db.query("select * from users");
+    altering = alterer.query("alter table users add column email text");
+    for (let tries = 0; (await rows(`select id from performance_schema.processlist where id = ${altererSession} and state = 'Waiting for table metadata lock'`)).length === 0; tries++) {
+      assert.ok(tries < 100, "the alter table never waited for the table's metadata lock");
+      await new Promise((done) => setTimeout(done, 50));
+    }
+    const analyzing = c.analyze(statement);
+    for (let tries = 0; (await rows(`select id from performance_schema.processlist where id = ${session} and state = 'Waiting for table metadata lock'`)).length === 0; tries++) {
+      assert.ok(tries < 100, "the analysis never waited for the table's metadata lock");
+      await new Promise((done) => setTimeout(done, 50));
+    }
+    await db.query(`kill query ${session}`);
+    await assert.rejects(analyzing, (err: Error) => !(err instanceof Unreachable) && err.message === "The server interrupted the analysis of this statement: Query execution was interrupted (1317)");
     await db.query("commit");
     await altering;
     assert.deepEqual((await c.analyze(statement)).columns.map((col) => col.name), ["id", "name"]);

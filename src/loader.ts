@@ -86,7 +86,7 @@ export async function moduleInputOf(path: string, sql: string): Promise<{ input:
   const dialect = session.project.dialect;
   // Each placeholder's place in the compiled statement, where a driver takes the statement in
   // pieces or with its values written in (src/execute.ts, `QueryModule`); SQLite has no such driver.
-  const marks = dialect === "sqlite" ? undefined : await marksOf(analysis, analysis.rewritten.sql.trimEnd(), dialect, (region) => session.lex(region));
+  const marks = dialect === "sqlite" ? undefined : await marksOf(analysis, trimmedStatement(analysis.rewritten.sql), dialect, (region) => session.lex(region));
   const input: ModuleInput = { analysis, raw: sql, params, marks, source: sourceName(path), dialect, codecs: session.project.codecs, sqlcommenter: session.project.sqlcommenter, allowNestedArrays: session.project.allowNestedArrays };
   // The libraries a codec builds values with are imported from the app's own install beside the
   // `.sql` file.
@@ -167,7 +167,13 @@ export function moduleCode(m: ModuleInput): string {
 
 /** The compiled statement without the file's trailing blank lines: the module's `sql`. The comment naming the file is added where the statement is sent (src/execute.ts, `sentText`). */
 export function compiledText(m: ModuleInput): string {
-  return m.analysis.rewritten.sql.trimEnd();
+  return trimmedStatement(m.analysis.rewritten.sql);
+}
+
+/** A statement without its trailing whitespace, but for one character after a `/*` it would leave last: SQLite reads a block comment that no `*` and `/` close as a comment to the end of the text when anything follows its `/*`, and a bare `/*` as two operators, which it refuses. */
+export function trimmedStatement(sql: string): string {
+  const trimmed = sql.trimEnd();
+  return trimmed.endsWith("/*") && trimmed.length < sql.length ? sql.slice(0, trimmed.length + 1) : trimmed;
 }
 
 /**

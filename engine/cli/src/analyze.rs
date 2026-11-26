@@ -29,8 +29,9 @@ Formats:
   typescript                Its parameters and what .run() resolves to, as TypeScript types
   rust                      Its module for sqlx, as reylo generate rust-sqlx writes it
 
-The database is --url, else the project file's direct_url, else DATABASE_URL, from the
-environment or the .env files; a relative SQLite path in --url is read from the working
+The database is --url, else, run by reylo migrate deploy --dry-run -- <command>, its shadow
+database, else the project file's direct_url, else DATABASE_URL, from the environment or the
+.env files; a relative SQLite path in --url is read from the working
 directory, one in the project's URL from the project's root. A statement the engine cannot
 analyze is printed with one diagnostic that says why. Exits with 1 when any statement has a
 diagnostic, and with 2 when the database cannot be reached or the statements cannot be read.";
@@ -183,7 +184,7 @@ pub fn run(args: &[String]) -> i32 {
     }
     let given = url.is_some();
     // The URL, and where it came from, which a message about it names as the type check does.
-    let (url, source) = match url.map(|url| Ok(Some((url, "--url".to_string())))).unwrap_or_else(|| project.type_check_url()) {
+    let (url, source) = match url.map(|url| Ok(Some((url, "--url".to_string())))).unwrap_or_else(|| project.analysis_url()) {
         Ok(Some((url, source))) if !url.is_empty() => (url, source),
         Ok(_) => return fail(&project.missing_url()),
         Err(message) => return fail(&message),
@@ -229,7 +230,7 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
         Ok(session) => session,
         // A command in `direct_url` that makes a short-lived token is run again once the token is
         // refused, as the type check runs it again.
-        Err(Failure::Refused(_)) if !given && project.url_runs_command() => match project.type_check_url() {
+        Err(Failure::Refused(_)) if !given && project.url_runs_command() => match project.analysis_url() {
             Ok(Some((fresh, _))) => match Session::open(dialect, &fresh, base).await {
                 Ok(session) => session,
                 Err(failure) => return fail(&failure.to_string()),

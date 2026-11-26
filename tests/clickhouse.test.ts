@@ -441,6 +441,9 @@ test("ClickHouse: a select is typed from the server's own description, nullabili
     assert.deepEqual(schemas.inputSchema.properties, { ids: { type: "array", items: { anyOf: [{ type: "integer", format: "int32" }, { type: "null" }] } }, wide: { type: "integer" }, count: { type: "integer", format: "int64" } });
     assert.deepEqual(schemas.outputSchema.items.properties, schemas.inputSchema.properties);
     assert.deepEqual(await schemas.run(db.client, { ids: [1, null], wide: 2n ** 100n, count: 3 }), [{ ids: [1, null], wide: 2n ** 100n, count: 3n }]);
+    // A value that is always null admits null alone, which `type` names once.
+    const nothing = await built(root, "nothing", "SELECT NULL AS n");
+    assert.deepEqual(nothing.outputSchema.items.properties.n, { type: "null" });
     // The web client reads the same bytes.
     const web = driver("@clickhouse/client-web").createClient({ url: db.address });
     try {

@@ -21,7 +21,8 @@
 //!
 //! The pass knows what the parser knows about text: single-quoted literals (with `''`), `E''`
 //! escape strings (with backslashes), dollar quoting (Postgres's), double-quoted identifiers, line comments,
-//! nested block comments, and `::` casts. MySQL reads text its own way, by the session's
+//! nested block comments, and `::` casts. SQLite's block comment does not nest: it ends at its first `*/`,
+//! or at the end of the text where no `*/` closes it, as SQLite reads it. MySQL reads text its own way, by the session's
 //! `sql_mode` ([`MysqlText`]): a backslash in a string escapes the character after it, a
 //! double-quoted word is a string, `#` starts a line comment as `-- ` does (`--` followed by
 //! anything else is two minus signs), a block comment ends at its first `*/`, and backquotes quote
@@ -149,6 +150,18 @@ fn is_name_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_'
 }
 
+/// The first character of a Postgres name, and of a dollar quote's tag, as its scanner reads one
+/// (`ident_start` in `scan.l`): every byte past ASCII is a letter there.
+fn is_pg_name_start(c: u8) -> bool {
+    is_name_start(c) || c >= 0x80
+}
+
+/// A character of a Postgres name past its first (`ident_cont`): a `$` as well, so `é$1` and
+/// `a$t$` are each one name, in which neither a placeholder nor a dollar quote starts.
+fn is_pg_name_char(c: u8) -> bool {
+    is_name_char(c) || c == b'$' || c >= 0x80
+}
+
 /// Whether a ClickHouse statement's code from `from`, where a conditional's `?` ends, up to `to`,
 /// where a `:` stands, is a whole operand: each parenthesis and bracket it opens is closed, and
 /// what it ends with ends an expression, as a name, a number, a string, a placeholder and a
@@ -213,6 +226,16 @@ fn name_end(b: &[u8], start: usize) -> usize {
     j
 }
 
+/// A name or a number from `start`, whole: a Postgres name as its scanner reads one, which starts
+/// with no digit (`1$t$` is a number and a dollar quote's opener).
+fn word_end(b: &[u8], start: usize, dialect: Dialect) -> usize {
+    if dialect == Dialect::Postgres && is_pg_name_start(b[start]) {
+        (start..b.len()).find(|&j| !is_pg_name_char(b[j])).unwrap_or(b.len())
+    } else {
+        name_end(b, start)
+    }
+}
+
 /// A placeholder name from `start`: a name, then any `.segment` that starts like one
 /// (`:auth.user_id`). `:t.*` stops before the dot.
 fn dotted_name_end(b: &[u8], start: usize) -> usize {
@@ -242,14 +265,17 @@ fn digits_end(b: &[u8], start: usize) -> usize {
     j
 }
 
-/// `$tag$` at `i`: the offset one past its closing `$`, when `i` starts a dollar-quote opener.
+/// `$tag$` at `i`: the offset one past its closing `$`, when `i` starts a dollar-quote opener. A
+/// tag is a Postgres name with no `$` in it (`$本文$`).
 fn dollar_tag_end(b: &[u8], i: usize) -> Option<usize> {
     if b.get(i) != Some(&b'$') {
         return None;
     }
     let mut j = i + 1;
-    if j < b.len() && is_name_start(b[j]) {
-        j = name_end(b, j);
+    if j < b.len() && is_pg_name_start(b[j]) {
+        while j < b.len() && b[j] != b'$' && is_pg_name_char(b[j]) {
+            j += 1;
+        }
     }
     (b.get(j) == Some(&b'$')).then_some(j + 1)
 }
@@ -337,6 +363,7 @@ pub fn lex_mysql(sql: &str, named: Named, text: MysqlText) -> Result<Lexed, LexE
 
 fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Result<Lexed, LexError> {
     let sqlite_named = dialect == Dialect::Sqlite && named == Named::Dialect;
+    let postgres = dialect == Dialect::Postgres;
     let mysql = dialect == Dialect::Mysql;
     let clickhouse = dialect == Dialect::Clickhouse;
     let b = sql.as_bytes();
@@ -402,10 +429,11 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
                 last = Last::Operand;
             }
             // MySQL's `--` starts a comment only before a space or a control character, or at the
-            // end of the text: `:a --:b` is `:a - (-:b)`.
+            // end of the text: `:a --:b` is `:a - (-:b)`. Postgres ends one at a carriage return as
+            // at a line feed, while MySQL, SQLite and ClickHouse read on to the line feed.
             b'-' if b.get(i + 1) == Some(&b'-') && !(mysql && b.get(i + 2).is_some_and(|&n| n > b' ' && n != 0x7f)) => {
                 let start = i;
-                while i < b.len() && b[i] != b'\n' {
+                while i < b.len() && b[i] != b'\n' && !(postgres && b[i] == b'\r') {
                     i += 1;
                 }
                 opaque.push((start, i));
@@ -418,13 +446,18 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
                 }
                 opaque.push((start, i));
             }
-            // A MySQL block comment does not nest: it ends at the first `*/`.
-            b'/' if b.get(i + 1) == Some(&b'*') && mysql => {
-                let Some(close) = find_bytes(b, b"*/", i + 2) else {
-                    return Err(LexError { message: "unterminated block comment".into(), offset: i });
+            // A MySQL or SQLite block comment does not nest: it ends at the first `*/`. One that no
+            // `*/` closes runs to the end of the text on SQLite, which prepares it so, and is an
+            // error on MySQL, which refuses it. A `/*` with nothing after it is an error on SQLite
+            // too, which reads it as the operators `/` and `*`.
+            b'/' if b.get(i + 1) == Some(&b'*') && (mysql || dialect == Dialect::Sqlite) => {
+                let end = match find_bytes(b, b"*/", i + 2) {
+                    Some(close) => close + 2,
+                    None if mysql || i + 2 == b.len() => return Err(LexError { message: "unterminated block comment".into(), offset: i }),
+                    None => b.len(),
                 };
-                opaque.push((i, close + 2));
-                i = close + 2;
+                opaque.push((i, end));
+                i = end;
             }
             b'/' if b.get(i + 1) == Some(&b'*') => {
                 let start = i;
@@ -451,7 +484,7 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
                     // A `::` cast: the type name after it is not a parameter.
                     i += 2;
                     if i < b.len() && is_name_start(b[i]) {
-                        i = name_end(b, i);
+                        i = word_end(b, i, dialect);
                     }
                     last = Last::Operand;
                     continue;
@@ -486,6 +519,12 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
                     // `tags[(:n)]`. An array constructor's `[` (`array[:a, :b]`) follows `array`
                     // or another `[`, not an operand.
                     _ if last == Last::Subscript && dialect == Dialect::Postgres => {
+                        i += 1;
+                        last = Last::Other;
+                    }
+                    // A colon right after a name or a number opens nothing (`arr[lo:hi]`), and a
+                    // Postgres name may end in `$` or a byte past ASCII (`x[café:fin]`).
+                    _ if dialect == Dialect::Postgres && i > 0 && is_pg_name_char(b[i - 1]) => {
                         i += 1;
                         last = Last::Other;
                     }
@@ -644,8 +683,8 @@ fn lex_text(sql: &str, dialect: Dialect, named: Named, text: MysqlText) -> Resul
             // Whitespace leaves what was read last as it was, as a comment does.
             _ if c.is_ascii_whitespace() => i += 1,
             // A name or a number, whole: `array` opens a constructor, anything else is an operand.
-            _ if is_name_char(c) => {
-                let end = name_end(b, i);
+            _ if is_name_char(c) || (dialect == Dialect::Postgres && is_pg_name_start(c)) => {
+                let end = word_end(b, i, dialect);
                 last = if sql[i..end].eq_ignore_ascii_case("array") { Last::Other } else { Last::Operand };
                 i = end;
             }
@@ -967,11 +1006,38 @@ mod tests {
     fn skips_text_and_casts() {
         let sql = "select ':x' as a, \":y\" as b, e'\\':z' as c, $$:w$$ as d, x::int, arr[1:2], tags ? 'k' -- :c\n /* :d /* :e */ */ from t where id = :id";
         assert_eq!(names(sql, Dialect::Postgres), ["id"]);
+        // A SQLite block comment does not nest: it ends at the first `*/`, whatever it holds.
+        assert_eq!(names("select id /* see /* below */, :x from t", Dialect::Sqlite), ["x"]);
+        assert_eq!(names("select name from t where id = /* /* */ :id -- */", Dialect::Sqlite), ["id"]);
+        // One that no `*/` closes runs to the end of the text, as SQLite reads it.
+        assert_eq!(names("select :x /* :y", Dialect::Sqlite), ["x"]);
+        assert_eq!(lex("select 1 /* a", Dialect::Sqlite).unwrap().opaque, [(9, 13)]);
+        assert_eq!(lex("select 1 /*\n", Dialect::Sqlite).unwrap().opaque, [(9, 12)]);
+        // A `/*` with nothing after it is two operators to SQLite, which refuses them.
+        assert_eq!(lex("select 1; /*", Dialect::Sqlite).unwrap_err().offset, 10);
         assert_eq!(names("select json_extract(j, '$.a') = ? and x = :n", Dialect::Sqlite), ["1", "n"]);
         // SQLite's bracketed name is text, whatever it holds; elsewhere a `[` opens a subscript.
         assert_eq!(names("select [a'b] as x, :p as p, [c'd?] as y, [n:m] from t", Dialect::Sqlite), ["p"]);
         assert_eq!(lex("select [a from t", Dialect::Sqlite).unwrap_err().offset, 7);
         assert_eq!(names("select `a:b`, 'x' from t where a = :a", Dialect::Mysql), ["a"]);
+    }
+
+    #[test]
+    fn a_line_comment_ends_where_its_database_ends_it() {
+        // Postgres ends a `--` comment at a carriage return as at a line feed, so what follows a
+        // bare one is code there; MySQL, SQLite and ClickHouse read on to the line feed.
+        assert_eq!(names("select $1::int as a --note\r, $2::int as b", Dialect::Postgres), ["1", "2"]);
+        assert_eq!(names("select :a::int as a --note\r, :b::int as b", Dialect::Postgres), ["a", "b"]);
+        assert_eq!(names("select :a -- note\r, :b\n, :c", Dialect::Mysql), ["a", "c"]);
+        assert_eq!(names("select :a # note\r, :b\n, :c", Dialect::Mysql), ["a", "c"]);
+        assert_eq!(names("select :a -- note\r, :b\n, :c", Dialect::Sqlite), ["a", "c"]);
+        assert_eq!(names("SELECT {a:Int32} -- note\r, {b:Int32}\n, {c:Int32}", Dialect::Clickhouse), ["a", "c"]);
+        // A line that ends in `\r\n` reads the same either way.
+        let sql = "-- the user\r\nselect :id -- by id\r\n;\r\n-- done\r\n";
+        let l = lex(sql, Dialect::Postgres).unwrap();
+        assert_eq!(l.params, ["id"]);
+        assert_eq!(first_word(sql, &l), "select");
+        assert_eq!(one_statement(sql, &l, &["select"]), Ok(Statement::Query));
     }
 
     #[test]
@@ -1129,7 +1195,6 @@ mod tests {
         assert_eq!(at("select 1, E'abc", Dialect::Postgres), 10);
         assert_eq!(at("select 1, $x$abc", Dialect::Postgres), 10);
         assert_eq!(at("select 1, /* a /* b */", Dialect::Postgres), 10);
-        assert_eq!(at("select 1, /* a", Dialect::Sqlite), 10);
         assert_eq!(at("select 1, /* a", Dialect::Mysql), 10);
     }
 
@@ -1201,6 +1266,20 @@ mod tests {
         assert_eq!(names("select 'it''s :not', :yes", Dialect::Postgres), ["yes"]);
         // An upper-case `E''` string and a tagged dollar quote hide what is inside them.
         assert_eq!(names("select E'\\':nope', $tag$ :nope $tag$, :real", Dialect::Postgres), ["real"]);
+    }
+
+    #[test]
+    fn postgres_names_past_ascii() {
+        // Postgres reads every byte past ASCII as a letter, in a name and in a dollar quote's tag,
+        // and a `$` past a name's first character as the name's, so nothing opens inside a name.
+        for sql in ["select $本文$it's$本文$ as s", "select $本文$ $1 :x $本文$ as s", "select 1 as é$1", "select 1 as a$t$", "select 1 as é$$9", "select 1::a$t$ as d"] {
+            assert_eq!(lex(sql, Dialect::Postgres).map(|l| l.params), Ok(Vec::new()), "{sql}");
+        }
+        // A colon after such a name is a slice's, as after any other.
+        assert_eq!(names("select x[café:fin], café[:n] from t where id = :id", Dialect::Postgres), ["id"]);
+        // A parameter's name is ASCII still, and SQLite ends a name before a colon.
+        assert!(names("select :été", Dialect::Postgres).is_empty());
+        assert_eq!(names("select é:a", Dialect::Sqlite), ["a"]);
     }
 
     #[test]

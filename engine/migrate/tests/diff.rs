@@ -3,16 +3,23 @@
 //! one to the other, runs the plan on the first as a deploy runs its files, and requires its catalog to equal the second's
 //! and every table both have to keep its own rows, value for value (a partitioned table's are its partitions'); `server.sql`, where a case has one, makes what it
 //! needs of the server itself (a role), and `check.sql` runs after the plan, so a case can require
-//! what no catalog shows (an identity that gives an unused value next). Planned again after it, the
-//! database needs nothing more; and each case goes back too, from v2 without rows to v1, unless its
-//! `one-way.txt` says why it can't. The plan is kept beside the case as `plan.sql`,
+//! what no catalog shows (an identity that gives an unused value next); `renames.txt` states
+//! renames as `reylo migrate new --rename` does, one `<old id> -> <new id>` to a line, which the way
+//! back states the other way round. Planned again after it, the
+//! database needs nothing more. Then the same database goes back to v1, with its rows, as a rewind
+//! takes it, and up to v2 again, unless the case's `one-way.txt` says why it can't: each leg must
+//! reach the other side's catalog, keep every row and the values of each column both sides have, and
+//! leave nothing for a second plan. Where the way back can't hold those rows, `back-fails.txt` names
+//! the error it must fail with, and the round trip runs without them. The plan is kept beside the case as `plan.sql`,
 //! compared like the oracle's expected output: `REYLO_BLESS=1` writes it. Postgres's cases run
 //! against the server `REYLO_TEST_PG` names, and are skipped where it is not set.
 
 use reylo_migrate::catalog::{catalog, difference};
 use reylo_migrate::db::{with_database, Db};
 use reylo_migrate::{diff, locks, sql::runs_alone, Dialect};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 fn cases(dialect: &str) -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/diff").join(dialect);
@@ -26,6 +33,7 @@ fn cases(dialect: &str) -> Vec<PathBuf> {
 
 /// A table's rows, column by column, as text, sorted: `columns` are `(name before the plan, type
 /// before it)`.
+#[derive(PartialEq)]
 struct Rows {
     table: String,
     columns: Vec<(String, String)>,
@@ -66,12 +74,14 @@ async fn values(db: &mut Db, before: Option<&[Rows]>, renamed: &std::collections
         if columns.is_empty() {
             continue;
         }
-        // A value the plan made an array holds it as its one element, and a null stays null.
+        // A value the plan made an array holds it as its one element, and one it took out of an
+        // array of one is read as that array; a null stays null.
         let select = columns
             .iter()
             .enumerate()
             .map(|(k, ((_, ty), now))| match here.iter().find(|(n, _)| n == now) {
                 Some((_, is)) if is.ends_with("[]") && !ty.ends_with("[]") => format!("case when {now} is null then null when array_length({now}, 1) = 1 and {now}[1] is not null then ({now}[1]::{ty})::text else 'array ' || {now}::text end as v{k}"),
+                Some((_, is)) if ty.ends_with("[]") && !is.ends_with("[]") => format!("case when {now} is null then null else (array[{now}]::{ty})::text end as v{k}"),
                 _ => format!("({now}::{ty})::text as v{k}"),
             })
             .collect::<Vec<_>>()
@@ -101,15 +111,96 @@ fn kept(before: &Rows, after: &Rows) -> Vec<Vec<String>> {
     rows
 }
 
+/// Every table's row count.
+async fn counts(db: &mut Db) -> Vec<(String, String)> {
+    let tables = db.rows("select format('%I.%I', schemaname, tablename) as t from pg_tables where schemaname not in ('pg_catalog', 'information_schema') order by 1").await.unwrap();
+    let mut out = Vec::new();
+    for t in tables {
+        let n = db.rows(&format!("select count(*) as n from only {}", t.text("t"))).await.unwrap();
+        out.push((t.text("t").to_string(), n[0].text("n").to_string()));
+    }
+    out
+}
+
+/// The names a plan gave: each table it moved to another schema (`moved`) or renamed, and each
+/// column it renamed, as `schema.table.column` under the table's new name, mapped from the old
+/// name to the new.
+fn renames(moved: Vec<(String, String)>, statements: &[String]) -> BTreeMap<String, String> {
+    static TABLE_RENAME: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r#"(?i)^alter table (\S+) rename to (\S+)$"#).unwrap());
+    static COLUMN_RENAME: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r#"(?i)^alter table (\S+) rename column (\S+) to (\S+)$"#).unwrap());
+    let mut renamed: BTreeMap<String, String> = moved.into_iter().collect();
+    for statement in statements.iter().map(|s| s.trim().trim_end_matches(';')) {
+        // The plan names a table of the public schema as the search path finds it.
+        let qualified = |name: &str| if name.contains('.') { name.to_string() } else { format!("public.{name}") };
+        if let Some(c) = TABLE_RENAME.captures(statement) {
+            let old = qualified(&c[1]);
+            let schema = old.rsplit_once('.').map(|(s, _)| s.to_string()).unwrap_or_default();
+            renamed.insert(old, format!("{schema}.{}", &c[2]));
+        } else if let Some(c) = COLUMN_RENAME.captures(statement) {
+            let old = qualified(&c[1]);
+            let table = renamed.get(&old).cloned().unwrap_or(old);
+            renamed.insert(format!("{table}.{}", &c[2]), c[3].to_string());
+        }
+    }
+    renamed
+}
+
+/// What a plan did to the rows it was given, by the names it gave: each table whose row count
+/// changed, and each whose values changed in the columns it kept.
+fn row_problems(before: &[(String, String)], after: &[(String, String)], rows_before: &[Rows], rows_after: &[Rows], renamed: &BTreeMap<String, String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let lost: Vec<String> = before
+        .iter()
+        .filter(|(t, n)| {
+            let now = renamed.get(t).unwrap_or(t);
+            after.iter().any(|(u, m)| u == now && m != n)
+        })
+        .map(|(t, n)| format!("{t}: {n} rows before"))
+        .collect();
+    if !lost.is_empty() {
+        out.push(format!("rows lost: {}", lost.join(", ")));
+    }
+    let changed: Vec<String> = rows_before
+        .iter()
+        .filter_map(|b| {
+            let now = renamed.get(&b.table).unwrap_or(&b.table);
+            let a = rows_after.iter().find(|a| &a.table == now)?;
+            let was = kept(b, a);
+            (was != a.rows).then(|| format!("{now}: {was:?} before, {:?} after", a.rows))
+        })
+        .collect();
+    if !changed.is_empty() {
+        out.push(format!("values changed: {}", changed.join("; ")));
+    }
+    out
+}
+
+/// Deletes every table's rows.
+async fn empty(db: &mut Db) {
+    let tables = db.rows("select string_agg(format('%I.%I', schemaname, tablename), ', ') as list from pg_tables where schemaname not in ('pg_catalog', 'information_schema')").await.unwrap();
+    if let Some(list) = tables[0].get("list") {
+        db.exec(&format!("truncate table {list}")).await.unwrap();
+    }
+}
+
+/// The lines two databases differ in: the comparator's, and what it does not read.
+async fn differences(a: &mut Db, b: &mut Db) -> (Vec<String>, Vec<String>) {
+    let (mut only_a, mut only_b) = difference(&catalog(a).await.unwrap(), &catalog(b).await.unwrap());
+    let (pa, pb) = (unread(a).await, unread(b).await);
+    only_a.extend(pa.iter().filter(|l| !pb.contains(l)).cloned());
+    only_b.extend(pb.iter().filter(|l| !pa.contains(l)).cloned());
+    (only_a, only_b)
+}
+
 /// What the comparator does not read: the privileges of schemas and functions, each with its
-/// default where it has none of its own, and every object's comment but an identity's sequence's,
-/// which it reads by its column.
+/// default where it has none of its own, as a set (the server keeps them in the order they were
+/// given), and every object's comment but an identity's sequence's, which it reads by its column.
 async fn unread(db: &mut Db) -> Vec<String> {
     let user = r"n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\_%'";
     let member = "exists (select 1 from pg_depend d where d.objid = {}.oid and d.deptype = 'e')";
     let sql = format!(
-        "select format('schema %I %s', n.nspname, coalesce(n.nspacl, acldefault('n', n.nspowner))) as line from pg_namespace n where {user} and not {}
-        union all select format('function %s %s', p.oid::regprocedure, coalesce(p.proacl, acldefault('f', p.proowner))) from pg_proc p join pg_namespace n on n.oid = p.pronamespace where {user} and not {}
+        "select format('schema %I %s', n.nspname, (select string_agg(a::text, ',' order by a::text) from unnest(coalesce(n.nspacl, acldefault('n', n.nspowner))) a)) as line from pg_namespace n where {user} and not {}
+        union all select format('function %s %s', p.oid::regprocedure, (select string_agg(a::text, ',' order by a::text) from unnest(coalesce(p.proacl, acldefault('f', p.proowner))) a)) from pg_proc p join pg_namespace n on n.oid = p.pronamespace where {user} and not {}
         union all select format('comment on %s: %s', pg_describe_object(d.classoid, d.objoid, d.objsubid), d.description) from pg_description d
           where d.objoid >= 16384 and not exists (select 1 from pg_depend e where e.classid = d.classoid and e.objid = d.objoid and e.deptype = 'e')
             and not exists (select 1 from pg_depend e join pg_class s on s.oid = e.objid where e.classid = d.classoid and e.objid = d.objoid and e.deptype = 'i' and s.relkind = 'S')
@@ -125,9 +216,11 @@ fn read(path: &Path) -> String {
 }
 
 /// Takes `db` to `target` as the corpus's forward leg does: a moved table first, then the plan in
-/// schema.sql's style, as its files. Gives the statements and the one that failed.
-async fn apply(db: &mut Db, target: &diff::Schema, alterer: &diff::postgres::PostgresAlterer) -> (Vec<String>, Option<String>) {
+/// schema.sql's style, as its files. Gives the statements, the tables moved to another schema, and
+/// the statement that failed.
+async fn apply(db: &mut Db, target: &diff::Schema, alterer: &diff::postgres::PostgresAlterer, stated: &[(String, String)]) -> (Vec<String>, Vec<(String, String)>, Option<String>) {
     let current = diff::postgres::read(db).await.unwrap();
+    let moved = diff::postgres::moved(&current, target);
     let mut moves = diff::postgres::moves(&current, target);
     diff::postgres::style_statements(db, &mut moves, &target.verbatim).await.unwrap();
     let mut failed = None;
@@ -136,18 +229,40 @@ async fn apply(db: &mut Db, target: &diff::Schema, alterer: &diff::postgres::Pos
             failed = Some(format!("{s}: {e}"));
         }
     }
-    let mut plan = diff::plan(&diff::postgres::read(db).await.unwrap(), target, alterer);
+    let mut plan = diff::plan_with(&diff::postgres::read(db).await.unwrap(), target, alterer, stated, &Default::default());
     diff::postgres::style(db, &mut plan, &target.verbatim).await.unwrap();
-    let existing = locks::existing_tables(db).await.unwrap();
+    let existing = locks::existing(db).await.unwrap();
     if failed.is_none() {
         failed = run_files(db, &files_of(&plan, &existing)).await;
     }
-    (moves.into_iter().chain(plan.statements).collect(), failed)
+    (moves.into_iter().chain(plan.statements).collect(), moved, failed)
+}
+
+/// Takes `db`, with its rows, to `target` as `apply` does, and says how it fell short of `like`, a
+/// database built as `target`: the statement that failed, each line the two differ in, the rows and
+/// values it changed, and what a second plan would still run. Empty where it reached it.
+async fn leg(db: &mut Db, target: &diff::Schema, like: &mut Db, alterer: &diff::postgres::PostgresAlterer, skip: &[String], stated: &[(String, String)]) -> Vec<String> {
+    let before = counts(db).await;
+    let rows_before = values(db, None, &Default::default(), skip).await;
+    let (statements, moved, failed) = apply(db, target, alterer, stated).await;
+    let mut lines: Vec<String> = failed.iter().map(|f| format!("the plan failed at {f}")).collect();
+    let (only_a, only_b) = differences(db, like).await;
+    lines.extend(only_a.iter().map(|l| format!("- {l}")).chain(only_b.iter().map(|l| format!("+ {l}"))));
+    let renamed = renames(moved, &statements);
+    let rows_after = values(db, Some(&rows_before), &renamed, skip).await;
+    lines.extend(row_problems(&before, &counts(db).await, &rows_before, &rows_after, &renamed));
+    if failed.is_none() && only_a.is_empty() && only_b.is_empty() {
+        lines.extend(again(db, target, alterer).await.into_iter().map(|s| format!("again: {s}")));
+    }
+    if !lines.is_empty() {
+        lines.push(format!("plan:\n{}", statements.iter().map(|s| format!("  {s}")).collect::<Vec<_>>().join("\n")));
+    }
+    lines
 }
 
 /// The plan as the files `reylo migrate new` writes: one, or several in the lock-safe shape or
 /// where the plan commits partway.
-fn files_of(plan: &diff::Plan, existing: &std::collections::BTreeSet<String>) -> Vec<String> {
+fn files_of(plan: &diff::Plan, existing: &locks::Existing) -> Vec<String> {
     match locks::lock_safe(plan, existing) {
         Some(files) => locks::file_texts(plan, &files),
         None => vec![plan.runnable().map(|s| format!("{};", s.trim_end())).collect::<Vec<_>>().join("\n")],
@@ -200,16 +315,7 @@ async fn postgres() {
         from.exec(&read(&case.join("v1.sql"))).await.unwrap_or_else(|e| panic!("{name}: v1.sql: {e}"));
         from.exec(&read(&case.join("seed.sql"))).await.unwrap_or_else(|e| panic!("{name}: seed.sql: {e}"));
         to.exec(&read(&case.join("v2.sql"))).await.unwrap_or_else(|e| panic!("{name}: v2.sql: {e}"));
-        let counts = async |db: &mut Db| -> Vec<(String, String)> {
-            let tables = db.rows("select format('%I.%I', schemaname, tablename) as t from pg_tables where schemaname not in ('pg_catalog', 'information_schema') order by 1").await.unwrap();
-            let mut out = Vec::new();
-            for t in tables {
-                let n = db.rows(&format!("select count(*) as n from only {}", t.text("t"))).await.unwrap();
-                out.push((t.text("t").to_string(), n[0].text("n").to_string()));
-            }
-            out
-        };
-        let mut before = counts(&mut from).await;
+        let before = counts(&mut from).await;
         // A column whose values the change itself rewrites (a composite type given an attribute
         // prints each value with one more field), as `table.column`, one to a line.
         let skip: Vec<String> = read(&case.join("changes.txt")).lines().filter_map(|l| l.split_whitespace().next()).map(String::from).collect();
@@ -223,23 +329,20 @@ async fn postgres() {
         let current = diff::postgres::read(&mut from).await.unwrap();
         let mut moves = diff::postgres::moves(&current, &target);
         diff::postgres::style_statements(&mut from, &mut moves, &target.verbatim).await.unwrap();
-        for (old, new) in diff::postgres::moved(&current, &target) {
-            for (t, _) in before.iter_mut().filter(|(t, _)| *t == old) {
-                *t = new.clone();
-            }
-        }
         let mut failed = None;
         for s in &moves {
             if let Err(e) = from.exec(s).await {
                 failed = Some(format!("{s}: {e}"));
             }
         }
-        let mut plan = diff::plan(&diff::postgres::read(&mut from).await.unwrap(), &target, &alterer);
+        let stated: Vec<(String, String)> = read(&case.join("renames.txt")).lines().filter_map(|l| l.split_once(" -> ")).map(|(a, b)| (a.trim().to_string(), b.trim().to_string())).collect();
+        let back_stated: Vec<(String, String)> = stated.iter().map(|(a, b)| (b.clone(), a.clone())).collect();
+        let mut plan = diff::plan_with(&diff::postgres::read(&mut from).await.unwrap(), &target, &alterer, &stated, &Default::default());
         // Written as `create` writes it, in schema.sql's style and in the lock-safe shape where a
         // statement would block writes to a table with rows while it reads them all, and run as
         // written: each file in a transaction of its own, but an index built concurrently.
         diff::postgres::style(&mut from, &mut plan, &target.verbatim).await.unwrap();
-        let existing = locks::existing_tables(&mut from).await.unwrap();
+        let existing = locks::existing(&mut from).await.unwrap();
         let files = files_of(&plan, &existing);
         if failed.is_none() {
             failed = run_files(&mut from, &files).await;
@@ -258,41 +361,13 @@ async fn postgres() {
         } else {
             plan.sql()
         };
-        let (mut only_a, mut only_b) = difference(&catalog(&mut from).await.unwrap(), &catalog(&mut to).await.unwrap());
-        let (pa, pb) = (unread(&mut from).await, unread(&mut to).await);
-        only_a.extend(pa.iter().filter(|l| !pb.contains(l)).cloned());
-        only_b.extend(pb.iter().filter(|l| !pa.contains(l)).cloned());
-        let after = counts(&mut from).await;
-        let lost: Vec<String> = before.iter().filter(|(t, n)| after.iter().any(|(u, m)| u == t && m != n)).map(|(t, n)| format!("{t}: {n} rows before")).collect();
+        let (only_a, only_b) = differences(&mut from, &mut to).await;
         // Each table's values, under the names the plan gave it and its columns, as their types were.
-        static TABLE_RENAME: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)^alter table (\S+) rename to (\S+)$"#).unwrap());
-        static COLUMN_RENAME: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)^alter table (\S+) rename column (\S+) to (\S+)$"#).unwrap());
-        let mut renamed: std::collections::BTreeMap<String, String> = diff::postgres::moved(&current, &target).into_iter().collect();
-        for statement in plan.statements.iter().map(|s| s.trim().trim_end_matches(';')) {
-            // The plan names a table of the public schema as the search path finds it.
-            let qualified = |name: &str| if name.contains('.') { name.to_string() } else { format!("public.{name}") };
-            if let Some(c) = TABLE_RENAME.captures(statement) {
-                let old = qualified(&c[1]);
-                let schema = old.rsplit_once('.').map(|(s, _)| s.to_string()).unwrap_or_default();
-                renamed.insert(old, format!("{schema}.{}", &c[2]));
-            } else if let Some(c) = COLUMN_RENAME.captures(statement) {
-                let old = qualified(&c[1]);
-                let table = renamed.get(&old).cloned().unwrap_or(old);
-                renamed.insert(format!("{table}.{}", &c[2]), c[3].to_string());
-            }
-        }
+        let renamed = renames(diff::postgres::moved(&current, &target), &plan.statements);
         let rows_after = values(&mut from, Some(&rows_before), &renamed, &skip).await;
+        let rows = row_problems(&before, &counts(&mut from).await, &rows_before, &rows_after, &renamed);
         let check = read(&case.join("check.sql"));
         let checked = if failed.is_none() && !check.is_empty() { from.exec(&check).await.err() } else { None };
-        let changed: Vec<String> = rows_before
-            .iter()
-            .filter_map(|b| {
-                let now = renamed.get(&b.table).unwrap_or(&b.table);
-                let a = rows_after.iter().find(|a| &a.table == now)?;
-                let was = kept(b, a);
-                (was != a.rows).then(|| format!("{now}: {was:?} before, {:?} after", a.rows))
-            })
-            .collect();
         let expected = case.join("plan.sql");
         if bless {
             std::fs::write(&expected, &text).unwrap();
@@ -304,12 +379,7 @@ async fn postgres() {
         if !only_a.is_empty() || !only_b.is_empty() {
             problems.push(format!("after the plan the database differs from v2:\n{}", only_a.iter().map(|l| format!("  - {l}")).chain(only_b.iter().map(|l| format!("  + {l}"))).collect::<Vec<_>>().join("\n")));
         }
-        if !lost.is_empty() {
-            problems.push(format!("rows lost: {}", lost.join(", ")));
-        }
-        if !changed.is_empty() {
-            problems.push(format!("values changed: {}", changed.join("; ")));
-        }
+        problems.extend(rows);
         if let Some(e) = checked {
             problems.push(format!("check.sql failed after the plan: {e}"));
         }
@@ -317,40 +387,54 @@ async fn postgres() {
             problems.push(format!("the plan is not plan.sql's (REYLO_BLESS=1 writes it):\n{text}"));
         }
         // Planned again, a database the plan took to the target needs nothing more.
-        if failed.is_none() && only_a.is_empty() && only_b.is_empty() {
+        let reached = failed.is_none() && only_a.is_empty() && only_b.is_empty();
+        if reached {
             let more = again(&mut from, &target, &alterer).await;
             if !more.is_empty() {
                 problems.push(format!("after the plan, the plan again is not empty:\n{}", more.join(";\n")));
             }
         }
-        // And back: v2 (without rows) to v1, which takes the opposite path through each change,
-        // unless the case says why it goes one way only.
-        let (c, d) = (format!("diff_{}_{n}_c", std::process::id()), format!("diff_{}_{n}_d", std::process::id()));
-        if read(&case.join("one-way.txt")).trim().is_empty() {
-            for db in [&c, &d] {
-                admin.exec(&format!("drop database if exists {db} with (force)")).await.unwrap();
-                admin.exec(&format!("create database {db}")).await.unwrap();
-            }
-            let mut back = Db::connect(&with_database(&base, &c), &here).await.unwrap();
-            let mut first = Db::connect(&with_database(&base, &d), &here).await.unwrap();
-            back.exec(&read(&case.join("v2.sql"))).await.unwrap_or_else(|e| panic!("{name}: v2.sql: {e}"));
+        // Then back to v1 with the rows the plan kept, as a rewind takes a database back, which
+        // takes the opposite path through each change, and up to v2 again, unless the case says
+        // why it goes one way only.
+        let c = format!("diff_{}_{n}_c", std::process::id());
+        if reached && read(&case.join("one-way.txt")).trim().is_empty() {
+            admin.exec(&format!("drop database if exists {c} with (force)")).await.unwrap();
+            admin.exec(&format!("create database {c}")).await.unwrap();
+            let mut first = Db::connect(&with_database(&base, &c), &here).await.unwrap();
             first.exec(&read(&case.join("v1.sql"))).await.unwrap_or_else(|e| panic!("{name}: v1.sql: {e}"));
             let mut origin = diff::postgres::read(&mut first).await.unwrap();
             diff::postgres::declare(&mut first, &mut origin, &read(&case.join("v1.sql"))).await.unwrap();
-            let (statements, failed) = apply(&mut back, &origin, &alterer).await;
-            let (only_c, only_d) = difference(&catalog(&mut back).await.unwrap(), &catalog(&mut first).await.unwrap());
-            let mut lines = Vec::new();
-            if let Some(f) = &failed {
-                lines.push(format!("the plan failed at {f}"));
+            // A case whose way back can't hold the rows the plan left (a not-null column made again
+            // with no value for them) names the error in `back-fails.txt`: the way back must fail
+            // with it and change nothing, and the round trip then runs without the rows.
+            let back_fails = read(&case.join("back-fails.txt")).trim().to_string();
+            let mut ready = true;
+            if !back_fails.is_empty() {
+                let (held, valued) = (counts(&mut from).await, values(&mut from, None, &Default::default(), &skip).await);
+                let (_, _, failed) = apply(&mut from, &origin, &alterer, &back_stated).await;
+                let (only_a, only_b) = differences(&mut from, &mut to).await;
+                let refused = match failed {
+                    Some(f) if f.contains(&back_fails) => None,
+                    Some(f) => Some(format!("the way back failed otherwise than back-fails.txt says: {f}")),
+                    None => Some(format!("the way back ran, where back-fails.txt says it fails with {back_fails}")),
+                };
+                let same = only_a.is_empty() && only_b.is_empty() && counts(&mut from).await == held && values(&mut from, None, &Default::default(), &skip).await == valued;
+                let changed = (!same).then(|| "the way back that failed changed the database or its rows".to_string());
+                ready = refused.is_none() && changed.is_none();
+                problems.extend(refused.into_iter().chain(changed));
+                empty(&mut from).await;
             }
-            lines.extend(only_c.iter().map(|l| format!("  - {l}")).chain(only_d.iter().map(|l| format!("  + {l}"))));
-            if failed.is_none() && lines.is_empty() {
-                lines.extend(again(&mut back, &origin, &alterer).await.into_iter().map(|s| format!("  again: {s}")));
+            let indent = |lines: Vec<String>| lines.iter().map(|l| format!("  {}", l.replace('\n', "\n  "))).collect::<Vec<_>>().join("\n");
+            let back = if ready { leg(&mut from, &origin, &mut first, &alterer, &skip, &back_stated).await } else { vec![] };
+            if !back.is_empty() {
+                problems.push(format!("back from v2 to v1:\n{}", indent(back)));
+            } else if ready {
+                let up = leg(&mut from, &target, &mut to, &alterer, &skip, &stated).await;
+                if !up.is_empty() {
+                    problems.push(format!("up from v1 to v2 again:\n{}", indent(up)));
+                }
             }
-            if !lines.is_empty() {
-                problems.push(format!("back from v2 to v1:\n{}\n  plan:\n{}", lines.join("\n"), statements.iter().map(|s| format!("    {s}")).collect::<Vec<_>>().join("\n")));
-            }
-            back.close().await;
             first.close().await;
         }
         if !problems.is_empty() {
@@ -358,7 +442,7 @@ async fn postgres() {
         }
         from.close().await;
         to.close().await;
-        for db in [&a, &b, &c, &d] {
+        for db in [&a, &b, &c] {
             admin.exec(&format!("drop database if exists {db} with (force)")).await.unwrap();
         }
     }

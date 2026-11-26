@@ -753,7 +753,7 @@ fn elements(text: &str) -> Vec<String> {
 /// expression): escaped as a string's contents, and its bytes of UTF-8 read one character each.
 /// `show create table` renders the same expressions with every character beyond three bytes of
 /// UTF-8 replaced by `?`, so these are read from here and decoded.
-fn stored_text(text: &str) -> String {
+pub(crate) fn stored_text(text: &str) -> String {
     let mut unescaped = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {

@@ -42,6 +42,10 @@ pub struct Project {
     env: HashMap<String, String>,
 }
 
+/// The variable `reylo migrate deploy --dry-run -- <command>` names its shadow database in, for the
+/// command's analyses alone (`reylo_migrate::commands::ANALYSIS_URL`).
+pub const ANALYSIS_URL: &str = "REYLO_ANALYSIS_URL";
+
 /// Whether `dir` is the home directory, `HOME` (`USERPROFILE` on Windows), as written or with its links resolved, since the working directory has them resolved.
 pub fn is_home(dir: &Path, env: &HashMap<String, String>) -> bool {
     let home = env.get(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).filter(|h| !h.is_empty()).map(PathBuf::from);
@@ -291,10 +295,22 @@ impl Project {
         }
     }
 
+    /// The database an analysis reads: the shadow that `reylo migrate deploy --dry-run -- <command>`
+    /// runs its command on, which it names in `REYLO_ANALYSIS_URL` in the command's environment, else
+    /// [`Project::type_check_url`]. The migrations' commands read `type_check_url` alone, so a deploy
+    /// run inside that command still reaches the project's database.
+    pub fn analysis_url(&self) -> Result<Option<(String, String)>, String> {
+        match self.env.get(ANALYSIS_URL).filter(|url| !url.is_empty()) {
+            Some(url) => Ok(Some((url.clone(), "the shadow database of reylo migrate deploy --dry-run".into()))),
+            None => self.type_check_url(),
+        }
+    }
+
     /// Whether `direct_url` runs a command, which [`Project::type_check_url`] runs again when the
-    /// database refuses the login, as a short-lived token's command must.
+    /// database refuses the login, as a short-lived token's command must; never where an analysis reads
+    /// a dry run's shadow.
     pub fn url_runs_command(&self) -> bool {
-        self.config.direct_url.as_deref().is_some_and(|u| url_parts(u).is_ok_and(|parts| parts.iter().any(|p| matches!(p, Part::Command(_)))))
+        !self.env.get(ANALYSIS_URL).is_some_and(|url| !url.is_empty()) && self.config.direct_url.as_deref().is_some_and(|u| url_parts(u).is_ok_and(|parts| parts.iter().any(|p| matches!(p, Part::Command(_)))))
     }
 
     /// A variable from the environment, else the first env file that sets it, and where it was set,
@@ -765,6 +781,25 @@ mod tests {
         std::fs::write(dir.join(".reylo.yaml"), "direct_url: postgres://u:$(kill -TERM $$)@h/app\n").unwrap();
         let p = Project::resolve(&dir, HashMap::new()).unwrap();
         assert_eq!(p.type_check_url().unwrap_err(), ".reylo.yaml: \"direct_url\" runs `kill -TERM $$`, which ended on SIGTERM.");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_analysis_inside_a_dry_runs_command_reads_its_shadow() {
+        let dir = std::env::temp_dir().join(format!("reylo-analysis-url-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".reylo.yaml"), "direct_url: postgres://u:$(exit 3)@prod/app\n").unwrap();
+        let shadow = "postgres://u@prod/reylo_shadow_0123456789";
+        // The command in direct_url never runs: it would fail the analysis.
+        let p = Project::resolve(&dir, HashMap::from([(ANALYSIS_URL.to_string(), shadow.to_string())])).unwrap();
+        assert_eq!(p.analysis_url().unwrap().map(|(url, _)| url).as_deref(), Some(shadow));
+        assert!(!p.url_runs_command());
+        // The migrations' commands read the project's own database.
+        assert!(p.type_check_url().is_err());
+        // Empty is unset.
+        let p = Project::resolve(&dir, HashMap::from([(ANALYSIS_URL.to_string(), String::new())])).unwrap();
+        assert!(p.analysis_url().is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

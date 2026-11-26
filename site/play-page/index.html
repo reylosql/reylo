@@ -4,6 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Reylo playground</title>
+    <!-- The Latin files of the text and code faces (app/fonts.css), preloaded as the docs preload them (app/root.tsx): both are `font-display: optional`, so a face that misses the first paint is never drawn. -->
+    <link rel="preload" href="../assets/fonts/ibm-plex-sans-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="../assets/fonts/geist-mono-latin.woff2" as="font" type="font/woff2" crossorigin />
     <!-- The theme before the first paint: the one last chosen here, else the system's. -->
     <script>
       document.documentElement.classList.add(localStorage.getItem('reylo-play-theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'));

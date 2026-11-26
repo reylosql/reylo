@@ -46,11 +46,13 @@ impl SchemaOptions {
     }
 }
 
-/// The schema admitting null as well: a bare `type` becomes the two-member list, anything else
-/// an `anyOf` with null; the empty schema already admits everything.
+/// The schema admitting null as well: a bare `type` becomes the two-member list, unless it is
+/// `null` already, and anything else an `anyOf` with null; the empty schema already admits
+/// everything.
 pub fn nullable(schema: Value) -> Value {
     match schema {
         Value::Object(map) if map.len() == 1 && map.contains_key("type") => match &map["type"] {
+            Value::String(t) if t == "null" => Value::Object(map),
             Value::String(t) => json!({"type": [t, "null"]}),
             _ => json!({"anyOf": [Value::Object(map), {"type": "null"}]}),
         },
@@ -155,7 +157,7 @@ impl Type {
                         _ => Value::String(v.into()),
                     }
                 };
-                let values: Vec<Value> = e.values.iter().map(|v| as_json(v)).collect();
+                let values: Vec<Value> = e.texts().map(as_json).collect();
                 if let Value::Object(map) = &mut base {
                     map.insert("enum".into(), Value::Array(values));
                     base
@@ -494,6 +496,9 @@ mod tests {
         assert_eq!(list.json_schema(WIRE), json!({"type": "array", "items": {"anyOf": [{"anyOf": [{"type": "number", "format": "decimal"}, {"enum": ["NaN", "Infinity", "-Infinity"]}]}, {"type": "null"}]}}));
         let posts = Type::json_of(Slot::non_null(Type::array(Slot::non_null(post))));
         assert_eq!(posts.json_schema(WIRE), json!({"type": "array", "items": expected}));
+        // A key that is always null admits null alone, which `type` names once.
+        let none = Type::json_of(Slot::non_null(Type::structure(vec![field("a", Type::null(), true)])));
+        assert_eq!(none.json_schema(WIRE)["properties"]["a"], json!({"type": "null"}));
     }
 
     #[test]

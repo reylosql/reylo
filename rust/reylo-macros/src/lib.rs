@@ -65,12 +65,14 @@ fn expand(sql: &LitStr, module: ItemMod) -> TokenStream2 {
         quote!(#error #stand_ins)
     });
     let tracked = tracked();
+    let key = analysis_key();
     quote! {
         #(#attrs)*
         #vis mod #ident {
             #[allow(unused_imports)]
             use super::*;
             #(const _: &str = ::core::include_str!(#tracked);)*
+            #key
             #body
             #(#own)*
         }
@@ -319,12 +321,24 @@ pub fn reflect(attr: TokenStream, item: TokenStream) -> TokenStream {
         return quote!(#item #error).into();
     };
     match expand_enum(&name, item.clone()) {
-        Ok(tokens) => tokens.into(),
+        Ok(tokens) => {
+            let key = analysis_key();
+            quote!(#tokens #key).into()
+        }
         Err(e) => {
             let error = e.to_compile_error();
             quote!(#item #error).into()
         }
     }
+}
+
+/// An item that reads `REYLO_ANALYSIS_KEY`, which `reylo migrate deploy --dry-run -- <command>` sets
+/// anew for each run's shadow, so that rustc compiles the crate again, and the macro reads the
+/// database again, when a build moves onto a shadow, off one, or onto another. Cargo tracks no
+/// variable a macro reads itself; it tracks one the expanded code names. The key holds no URL, so
+/// no credential reaches Cargo's records.
+fn analysis_key() -> TokenStream2 {
+    quote!(const _: ::core::option::Option<&str> = ::core::option_env!("REYLO_ANALYSIS_KEY");)
 }
 
 /// What the database says of a statement written to read what a `reflect` names.
@@ -378,7 +392,7 @@ fn expand_enum(at: &LitStr, mut item: ItemEnum) -> syn::Result<TokenStream2> {
         }
     };
     let ty = &analysis["columns"][0]["type"];
-    let values: Vec<String> = ty["values"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect();
+    let values: Vec<String> = ty["values"].as_array().into_iter().flatten().filter_map(|v| v["value"].as_str().map(String::from)).collect();
     let label = ty["label"].as_str().unwrap_or_default();
     let domains = analysis.get("domains").and_then(|d| d.as_object());
     let is_type = dialect == Dialect::Postgres && label.contains('.') && !domains.is_some_and(|d| d.contains_key(label));

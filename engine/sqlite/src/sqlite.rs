@@ -1239,7 +1239,14 @@ fn nulls_with(n: &Node, extras: &Extras) -> HashSet<(i64, String)> {
         "column" => n.column.clone().map(|c| HashSet::from([(n.cursor, c)])).unwrap_or_default(),
         "+" | "-" | "*" | "/" | "%" | "||" => n.left.iter().chain(n.right.iter()).flat_map(|x| nulls_with(x, extras)).collect(),
         "neg" | "pos" | "cast" | "collate" => n.left.as_deref().map(|x| nulls_with(x, extras)).unwrap_or_default(),
-        "function" if !n.agg && !n.window && n.name.as_deref().is_some_and(|f| STRICT.contains(&f) && extras.function(f, n.args.len()).is_none()) => n.args.iter().flat_map(|x| nulls_with(x, extras)).collect(),
+        // `replace(X, '', Z)` is X whatever Z is: NULL for a NULL in its first two arguments, and in Z only behind a pattern that is a text literal other than ''.
+        "function" if !n.agg && !n.window && n.name.as_deref().is_some_and(|f| STRICT.contains(&f) && extras.function(f, n.args.len()).is_none()) => {
+            let strict = match n.name.as_deref() {
+                Some("replace") if !n.args.get(1).and_then(literal_text).is_some_and(|p| !p.is_empty()) => 2,
+                _ => n.args.len(),
+            };
+            n.args.iter().take(strict).flat_map(|x| nulls_with(x, extras)).collect()
+        }
         _ => HashSet::new(),
     }
 }
@@ -3946,12 +3953,26 @@ mod tests {
         // recursion, the reading of its tree and the walks over it run on the engine's stack.
         let ddl = vec!["create table users (id integer primary key, name text not null, nick text)".to_string()];
         let small = |sql: String| std::thread::scope(|s| std::thread::Builder::new().stack_size(256 << 10).spawn_scoped(s, || analyze_ddl(&sql, &ddl, &Extras::default()).analysis).unwrap().join().unwrap());
-        // SQLite's own bound is 1,000; the engine's SQLite takes 350 (`csrc/reylo_sqlite.c`).
-        for (shape, n) in [("sum", 350), ("and_or", 348), ("case", 348), ("coalesce", 349), ("subquery", 23)] {
+        // The engine's SQLite reads as deep as SQLite's own bound, 1,000 (`csrc/reylo_sqlite.c`), in
+        // this unoptimized build too: the deepest statement of each shape it reads, and one past it.
+        let reads = |shape: &str, n: usize| small(crate::stack::nested(shape, n)).diagnostics.is_empty();
+        let deepest = |shape: &str| {
+            let (mut read, mut refused) = (1, 2_000);
+            while refused - read > 1 {
+                let mid = (read + refused) / 2;
+                if reads(shape, mid) { read = mid } else { refused = mid }
+            }
+            read
+        };
+        let found: Vec<(&str, usize)> = ["sum", "and_or", "case", "coalesce", "subquery"].into_iter().map(|shape| (shape, deepest(shape))).collect();
+        assert_eq!(found, vec![("sum", 1_000), ("and_or", 830), ("case", 623), ("coalesce", 830), ("subquery", 42)]);
+        for (shape, n) in found {
             let at = small(crate::stack::nested(shape, n));
             assert!(at.diagnostics.is_empty() && at.kind == Some(StatementKind::Select), "{shape} at {n}: {:?}", at.diagnostics);
             let past = small(crate::stack::nested(shape, n + 1));
-            assert_eq!(past.diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>(), ["Expression tree is too large (maximum depth 350)"], "{shape} at {}", n + 1);
+            // SQLite's bound on an expression's height, or its parser's stack, whichever the shape reaches first.
+            let refused: Vec<&str> = past.diagnostics.iter().map(|d| d.message.as_str()).collect();
+            assert!(matches!(refused[..], ["Expression tree is too large (maximum depth 1000)" | "Recursion limit"]), "{shape} at {}: {refused:?}", n + 1);
         }
         // A list does not nest: SQLite's OR is a tree, which its bound counts; an IN list is not.
         let list = (0..5_000).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");

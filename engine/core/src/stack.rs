@@ -27,12 +27,11 @@ use std::cell::Cell;
 /// recursion runs on the JavaScript engine's own stack, about 1 MB in Node and shared with the
 /// host's frames, and the deepest statement of each shape leaves the host 45% of it
 /// (`tests/depth.test.ts`). The
-/// other parsers spend more a level, so each has a bound of its own, set where the deepest
-/// statement needs no more of Node's stack than that: the MySQL engine bounds its tree's nesting
-/// to a fifth of this, 200 levels (198 nested function calls or `CASE`s, 98 subqueries), and a
-/// statement's operators to half (`engine/mysql/src/mysql.rs`); the embedded
-/// SQLite reads an expression at most 350 deep, where its own bound is 1,000
-/// (`engine/sqlite/csrc/reylo_sqlite.c`).
+/// MySQL and SQLite engines run natively alone, on [`STACK_BYTES`], so their bounds are set by what
+/// an unoptimized build reads there: the MySQL engine bounds its tree's nesting to 200 levels (198
+/// nested function calls or `CASE`s, 98 subqueries) and a chain of operators to 2,000
+/// (`engine/mysql/src/mysql.rs`), and the embedded SQLite reads an expression as deep as its own
+/// bound, 1,000 (`engine/sqlite/csrc/reylo_sqlite.c`).
 pub const MAX_DEPTH: usize = 1_000;
 
 /// The stack an analysis runs on natively, with room for [`MAX_DEPTH`] in an unoptimized build.

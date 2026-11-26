@@ -549,7 +549,7 @@ function divide(v: number | bigint, per: number): [number, number] {
 }
 
 const two = (n: number) => (n < 10 ? `0${n}` : String(n));
-const fraction = (us: number) => (us === 0 ? "" : `.${String(us).padStart(6, "0")}`);
+const fraction = (us: number) => (us === 0 ? "" : `.${String(us).padStart(6, "0").replace(/0+$/, "")}`);
 const clock = (seconds: number, us: number) => `${two(Math.floor(seconds / 3600))}:${two(Math.floor(seconds / 60) % 60)}:${two(seconds % 60)}${fraction(us)}`;
 
 /** A time, microseconds since midnight, as Postgres writes it: `12:00:01.5`, up to `24:00:00`. */

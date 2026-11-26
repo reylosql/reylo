@@ -12,6 +12,7 @@ import type { Codecs } from "./codecs.ts";
 import { Session } from "./analyze.ts";
 import { docComment, leadingComment, statementAfter } from "./doc-comment.ts";
 import { reportDiagnostics, type MapperDiagnostic } from "./mapper-diagnostics.ts";
+import { trimmedStatement } from "./loader.ts";
 
 type Project = {
   strictParams: boolean;
@@ -180,7 +181,7 @@ export function mapperHandlers(): MapperHandlers {
       }
       // The compiled statement, without the comment naming its file, which the run time adds where
       // it sends the statement (src/sqlcommenter.ts).
-      return emit(analysis.rewritten.sql.trimEnd(), types.params, types.row, types.cardinality, types.names, types.queryError, types.columns, analysis.ordered === true);
+      return emit(trimmedStatement(analysis.rewritten.sql), types.params, types.row, types.cardinality, types.names, types.queryError, types.columns, analysis.ordered === true);
     },
     async closeProject(params) {
       const handle = (params as { projectHandle: string }).projectHandle;

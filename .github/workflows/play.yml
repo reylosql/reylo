@@ -1,0 +1,47 @@
+# .github/workflows/play.yml
+
+name: play
+
+# `reylo play`'s page, built as the package build builds it (scripts/build.ts) with the docs site's toolchain, on a
+# pull request that changes the site. Such a pull request runs no test.yml when it changes nothing else, and the page
+# reads code that Vercel's build of the site bundles with other plugins and aliases (site/vite.play.config.ts beside
+# site/vite.config.ts), so a change that breaks only the page fails here rather than in main's package build.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - site/**
+      - .github/workflows/play.yml
+
+permissions:
+  contents: read
+
+# A pull request's new commit cancels the run of its last one.
+concurrency:
+  group: play-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  play:
+    if: ${{ !github.event.repository.private }}
+    name: Build reylo play's page
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: nubjs/setup-nub@c7b970ec04655a2f0a111cd436cc182a3b660e7a # v0.6.0
+        with:
+          nub-version: "0.9.6"
+          node-version: "24"
+      # The page imports the run time's code from src/, which resolves the root's packages.
+      - run: nub install --frozen-lockfile
+      - run: nub install --frozen-lockfile
+        working-directory: site
+      - name: Build the page
+        working-directory: site
+        run: |
+          REYLO_PLAY_OUT="$RUNNER_TEMP/play" nub run build:play
+          test -f "$RUNNER_TEMP/play/index.html"

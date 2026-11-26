@@ -121,7 +121,7 @@ fn views_through_derived(item: &mut TableWithJoins, views: &HashSet<String>) -> 
 
 /// `(SELECT * FROM t) AS t`, as the parser reads it.
 fn derived_template() -> Option<TableFactor> {
-    let mut statements = syntax::mysql::parse("SELECT * FROM (SELECT * FROM t) AS t", syntax::mysql::Options::default(), syntax::mysql::Bounds { depth: 10, operators: 0 }).ok()?;
+    let mut statements = syntax::mysql::parse("SELECT * FROM (SELECT * FROM t) AS t", syntax::mysql::Options::default(), syntax::mysql::Bounds { depth: 10, chain: 0 }).ok()?;
     let Some(syntax::mysql::ast::Statement::Query(q)) = statements.pop() else { return None };
     let SetExpr::Select(select) = *q.body else { return None };
     select.from.into_iter().next().map(|item| item.relation)

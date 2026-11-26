@@ -32,6 +32,11 @@ test("comments are read as the dialect reads them", () => {
   assert.deepEqual(read("--1\nselect 1", "mysql"), ["", "--1\nselect 1"]);
   assert.deepEqual(read("/*!40101 set names utf8 */", "mysql"), ["", "/*!40101 set names utf8 */"]);
   assert.deepEqual(read("# One.\nselect 1", "postgres"), ["", "# One.\nselect 1"]);
+  // Postgres ends a `--` comment at a carriage return as at a line feed; SQLite reads on to the line feed.
+  assert.deepEqual(read("-- One user,\r--   by id.\rselect 1", "postgres"), ["One user,\n  by id.", "select 1"]);
+  assert.deepEqual(read("-- a\r\r-- b\rselect 1", "postgres"), ["a\n\nb", "select 1"]);
+  assert.deepEqual(read("-- a\r\n-- b\r\n\r\n-- c\r\nselect 1", "postgres"), ["a\nb\n\nc", "select 1"]);
+  assert.deepEqual(read("-- a\rselect 1\nselect 2", "sqlite"), ["a\rselect 1", "select 2"]);
   // On ClickHouse `#` starts a comment before a space or a `!`, and a block comment nests.
   assert.deepEqual(read("# One.\n# Two.\nSELECT 1", "clickhouse"), ["One.\nTwo.", "SELECT 1"]);
   assert.deepEqual(read("#! One.\nSELECT 1", "clickhouse"), ["! One.", "SELECT 1"]);

@@ -1,3 +1,4 @@
+-- loses data: t2.b
 create type ty as (
   a integer,
   b text

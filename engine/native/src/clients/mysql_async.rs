@@ -13,6 +13,9 @@ use std::future::Future;
 /// The error a server answers a lock waited for until `lock_wait_timeout` with.
 const LOCK_WAIT_TIMEOUT: u16 = 1205;
 
+/// The error a server answers a statement `KILL QUERY` interrupted with.
+const QUERY_INTERRUPTED: u16 = 1317;
+
 /// What a MySQL describe is answered with.
 pub type Describe = <Mysql as Database>::Describe;
 
@@ -41,6 +44,10 @@ impl AsyncAnswerer<Describe> for Answers<'_> {
                 // `lock_wait_timeout` (ER_LOCK_WAIT_TIMEOUT): not the statement's answer, so nothing is
                 // kept as its error, and the next analysis asks again.
                 Err(::mysql_async::Error::Server(e)) if e.code == LOCK_WAIT_TIMEOUT => Err(HostError("A table this statement names is locked by another session, and the analysis stopped waiting for it at lock_wait_timeout. Run it again once the lock is released: SHOW PROCESSLIST lists the session that holds it".to_string())),
+                // A prepare interrupted (ER_QUERY_INTERRUPTED), as by `KILL QUERY` while it waited on
+                // such a lock: a prepare runs nothing, so the interruption says nothing of the
+                // statement either, and nothing is kept as its error.
+                Err(::mysql_async::Error::Server(e)) if e.code == QUERY_INTERRUPTED => Err(HostError(format!("The server interrupted the analysis of this statement: {} ({})", e.message, e.code))),
                 // The server's error number, which the engine names in its message.
                 Err(::mysql_async::Error::Server(e)) => Ok(Err(DbError { message: e.message, code: Some(e.code.to_string()), position: None })),
                 Err(e) => Err(HostError(format!("the prepare did not reach the server: {e}"))),

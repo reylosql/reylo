@@ -1,3 +1,4 @@
+-- loses data: h.id
 alter table h no inherit p;
 alter table h drop column if exists id;
 alter type e rename to e__old;

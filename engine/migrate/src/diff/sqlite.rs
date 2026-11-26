@@ -846,7 +846,7 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
         .iter()
         .flat_map(|text| {
             let tokens = tokenize(text, Dialect::Sqlite);
-            (0..tokens.len()).filter(|&k| tokens[k].upper() == "REFERENCES").filter_map(|k| tokens.get(k + 1).and_then(name_of)).collect::<Vec<_>>()
+            (0..tokens.len()).filter(|&k| tokens[k].upper() == "REFERENCES").filter_map(|k| tokens.get(k + 1).and_then(qualifier)).collect::<Vec<_>>()
         })
         .filter(|table| family.iter().any(|(x, _)| fold(&x.name) == *table))
         .collect();
@@ -969,8 +969,10 @@ fn alter_table(from: &Object, to: &Object, decided: Option<Vec<(String, String)>
             if k == at {
                 return Some(scratch_of(own));
             }
+            // A table a foreign key names, as a string too (`references 'users'`), which SQLite reads
+            // as the name.
             if references.contains(&k) {
-                return scratches.get(&name_of(t)?).map(|(_, q)| q.clone());
+                return scratches.get(&qualifier(t)?).map(|(_, q)| q.clone());
             }
             None
         }))
@@ -1282,7 +1284,15 @@ fn whole_columns(list: &[Token], columns: &BTreeSet<String>) -> bool {
 /// Whether a table's text names a column by the table's own name, as `"users"."age"`.
 fn names_itself(sql: &str, table: &str) -> bool {
     let tokens = tokenize(sql, Dialect::Sqlite);
-    (0..tokens.len()).any(|k| tokens.get(k + 1).is_some_and(|n| n.text == ".") && (k == 0 || tokens[k - 1].text != ".") && name_of(&tokens[k]).is_some_and(|n| fold(&n) == fold(table)))
+    // The table's name before a dot, after its schema's (`main.users.age`) or not.
+    let first = |k: usize| k == 0 || tokens[k - 1].text != "." || (k >= 2 && qualifier(&tokens[k - 2]).is_some() && (k < 3 || tokens[k - 3].text != "."));
+    (0..tokens.len()).any(|k| tokens.get(k + 1).is_some_and(|n| n.text == ".") && first(k) && qualifier(&tokens[k]).is_some_and(|n| n == fold(table)))
+}
+
+/// The name a qualifier before a dot says, folded: a word, a quoted name, or a string, which
+/// SQLite reads as a name there (`'users'.age`).
+fn qualifier(t: &Token) -> Option<String> {
+    matches!(t.kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Str).then(|| fold(&unquote(t)))
 }
 
 /// The tables of `from` that reference the table `id`, at any depth, and still do in `to`, each with
@@ -1344,17 +1354,28 @@ fn copy_rows(out: &mut Vec<String>, a: &Info, b: &Info, scratch: &str, mut copie
 }
 
 /// A table's text with each column the planner renames written by its old name, as the table is
-/// until the rename runs: in the column list, but not where a foreign key names another table's
-/// columns, nor a function.
+/// until the rename runs: in the column list, where a check names it by the table's own name
+/// (`t.new`), and in a foreign key to the table itself, but not where a foreign key names another
+/// table's columns, nor a function.
 fn before_renames(sql: &str, renamed: &BTreeMap<String, String>, written_as: &BTreeMap<String, String>) -> String {
     if renamed.is_empty() {
         return sql.to_string();
     }
     let tokens = tokenize(sql, Dialect::Sqlite);
     let open = tokens.iter().position(|t| t.text == "(").unwrap_or(tokens.len());
+    let own = name_at(&tokens).and_then(|at| qualifier(&tokens[at]));
+    // A name after a dot that isn't the table's own is no column of it, and a name before one
+    // is a table's or a schema's.
+    let qualified_elsewhere = |k: usize| tokens.get(k.wrapping_sub(1)).is_some_and(|p| p.text == ".") && tokens.get(k.wrapping_sub(2)).and_then(qualifier) != own;
+    let qualifies = |k: usize| tokens.get(k + 1).is_some_and(|n| n.text == ".");
     let mut skip = BTreeSet::new();
     for (k, t) in tokens.iter().enumerate() {
+        // The table a foreign key names is no column.
         if t.upper() == "REFERENCES" {
+            skip.insert(k + 1);
+        }
+        // Another table's columns, but not those of a foreign key to the table itself.
+        if t.upper() == "REFERENCES" && tokens.get(k + 1).and_then(qualifier) != own {
             let mut j = k + 2;
             if tokens.get(j).is_some_and(|t| t.text == "(") {
                 while j < tokens.len() && tokens[j].text != ")" {
@@ -1365,10 +1386,12 @@ fn before_renames(sql: &str, renamed: &BTreeMap<String, String>, written_as: &BT
         }
     }
     rewrite(sql, &tokens, |k, t| {
-        if k <= open || skip.contains(&k) || tokens.get(k + 1).is_some_and(|n| n.text == "(") || tokens.get(k.wrapping_sub(1)).is_some_and(|p| p.text == ".") {
+        if k <= open || skip.contains(&k) || tokens.get(k + 1).is_some_and(|n| n.text == "(") || qualified_elsewhere(k) || qualifies(k) {
             return None;
         }
-        let old = renamed.get(&name_of(t)?)?;
+        // After the table's own name and a dot, a string names a column too (`t.'new'`).
+        let after_dot = tokens.get(k.wrapping_sub(1)).is_some_and(|p| p.text == ".");
+        let old = renamed.get(&(if after_dot { qualifier(t) } else { name_of(t) })?)?;
         Some(written_as.get(old).cloned().unwrap_or_else(|| quote(old)))
     })
 }
@@ -1408,6 +1431,13 @@ mod tests {
         let written_as = BTreeMap::from([("full_name".to_string(), "full_name".to_string())]);
         let sql = "CREATE TABLE name (id integer primary key, name text check (length(name) > 0), boss text references people (name))";
         assert_eq!(before_renames(sql, &renamed, &written_as), "CREATE TABLE name (id integer primary key, full_name text check (length(full_name) > 0), boss text references people (name))");
+        let sql = "CREATE TABLE t (name text, boss text references t (name), check (t.name <> ''), check (main.\"T\".name <> ''), check ('t'.name <> ''))";
+        assert_eq!(before_renames(sql, &renamed, &written_as), "CREATE TABLE t (full_name text, boss text references t (full_name), check (t.full_name <> ''), check (main.\"T\".full_name <> ''), check ('t'.full_name <> ''))");
+        // A column renamed to the table's name leaves the qualifier be.
+        let to_t = BTreeMap::from([("t".to_string(), "old".to_string())]);
+        assert_eq!(before_renames("CREATE TABLE t (t integer, check (t.t > 0))", &to_t, &BTreeMap::new()), "CREATE TABLE t (old integer, check (t.old > 0))");
+        assert_eq!(before_renames("CREATE TABLE t (t integer primary key, p integer references t, check (t.'t' > 0 and p <> 't'))", &to_t, &BTreeMap::new()), "CREATE TABLE t (old integer primary key, p integer references t, check (t.old > 0 and p <> 't'))");
+        assert!(names_itself("create table u (old integer check (main.u.old > 0))", "u") && names_itself("create table u (x check ('u'.x))", "u") && !names_itself("create table u (x check (main.x > 0))", "u"));
     }
 
     #[test]

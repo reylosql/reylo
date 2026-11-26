@@ -79,7 +79,7 @@ fn columns_named(node: &Node) -> BTreeSet<String> {
 
 /// A name Postgres makes from parts (`makeObjectName`): `name1_name2_label`, the longer part
 /// shortened first until it fits in 63 bytes.
-fn object_name(name1: &str, name2: Option<&str>, label: &str) -> String {
+pub(super) fn object_name(name1: &str, name2: Option<&str>, label: &str) -> String {
     let overhead = label.len() + 1 + usize::from(name2.is_some());
     let avail = 63usize.saturating_sub(overhead);
     let (mut a, mut b) = (name1.len(), name2.map_or(0, str::len));
