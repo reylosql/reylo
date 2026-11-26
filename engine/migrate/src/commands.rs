@@ -8511,7 +8511,8 @@ async fn stated_grants(server: &mut Server, opts: &Options, files: &[Migration],
 }
 
 /// Each object's privileges the Data API's roles hold, by object (as a grant names it, with its
-/// schema: `table public.notes`, `function public.ping()`), role, its privileges (lowercase and
+/// schema, and a routine each of its arguments' types with theirs: `table public.notes`, `function
+/// public.shout(pg_catalog.text)`), role, its privileges (lowercase and
 /// sorted, each with whether it carries the grant option) and all those its kind has, comma-joined.
 /// Not in a schema the platform makes for itself, which no migration writes to, nor a session's own
 /// temporary schema.
@@ -8530,7 +8531,11 @@ async fn api_grants(db: &mut Db) -> Result<Vec<(String, String, Vec<(String, boo
                from pg_class c join pg_namespace n on n.oid = c.relnamespace
                where c.relkind in ('r', 'p', 'v', 'm', 'f', 'S') and {schemas} and c.relacl is not null
                union all
-               select format('%s %s', case p.prokind when 'p' then 'procedure' else 'function' end, p.oid::regprocedure), p.proacl, p.proowner, 'f'::\"char\"
+               select format('%s %I.%I(%s)', case p.prokind when 'p' then 'procedure' else 'function' end, n.nspname, p.proname,
+                   (select coalesce(string_agg(case when t.typcategory = 'A' and t.typelem <> 0 then format('%I.%I[]', en.nspname, e.typname) else format('%I.%I', tn.nspname, t.typname) end, ', ' order by x.ord), '')
+                    from unnest(p.proargtypes::oid[]) with ordinality x(typ, ord) join pg_type t on t.oid = x.typ join pg_namespace tn on tn.oid = t.typnamespace
+                    left join pg_type e on e.oid = t.typelem left join pg_namespace en on en.oid = e.typnamespace)),
+                 p.proacl, p.proowner, 'f'::\"char\"
                from pg_proc p join pg_namespace n on n.oid = p.pronamespace
                where {schemas} and p.proacl is not null
              ) o, aclexplode(o.acl) a join pg_roles r on r.oid = a.grantee

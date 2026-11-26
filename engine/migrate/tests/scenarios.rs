@@ -8897,22 +8897,24 @@ create trigger kids_note after insert on kids begin update parents set name = na
     }
 
     /// A stated grant names its table with its schema, so it reaches the table schema.sql names
-    /// whatever search_path a migration leaves the session with; it keeps the grant option the
+    /// whatever search_path a migration leaves the session with, and a routine each argument's type
+    /// with its schema; it keeps the grant option the
     /// development database's default privileges also give; and a grant on a temporary table
     /// schema.sql makes for itself writes nothing.
     pub async fn a_stated_grant_keeps_its_table_and_its_option(mut p: P) {
         as_supabase_makes_it(&p, true).await;
         p.exec("alter default privileges for role postgres in schema public grant select on tables to authenticated with grant option").await;
-        let tables = "create schema private;\n\ncreate table private.notes (id int primary key);\n\ncreate table public.notes (id int primary key);\n";
+        let tables = "create schema private;\n\ncreate table private.notes (id int primary key);\n\ncreate table public.notes (id int primary key);\n\ncreate domain private.text as pg_catalog.text;\n\ncreate function public.shout(pg_catalog.text) returns int language sql as 'select 1';\n\ncreate function public.shout(private.text) returns int language sql as 'select 2';\n";
         p.file("20261125000000_notes.sql", &format!("{tables}\nset search_path = private, public;\n"));
         p.schema(tables);
         assert_eq!(p.dev().await, 0, "{}", p.peek());
-        p.schema(&format!("{tables}\ngrant select on table public.notes to anon;\n\ngrant select on table public.notes to authenticated with grant option;\n\ncreate temporary table notes (id int);\n\ngrant insert on table notes to service_role;\n"));
+        p.schema(&format!("{tables}\ngrant select on table public.notes to anon;\n\ngrant select on table public.notes to authenticated with grant option;\n\ngrant execute on function public.shout(pg_catalog.text) to anon;\n\ncreate temporary table notes (id int);\n\ngrant insert on table notes to service_role;\n"));
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "readers", &Default::default(), log).await).await, 0, "{}", p.peek());
         let readers = std::fs::read_to_string(p.dir.join("migrations").join(p.files().last().unwrap())).unwrap();
         assert_has!(readers.clone(), r"grant select on table public\.notes to anon;");
         assert_has!(readers.clone(), r"grant select on table public\.notes to authenticated with grant option;");
-        assert!(!readers.contains("service_role"), "{readers}");
+        assert_has!(readers.clone(), r"grant execute on function public\.shout\(pg_catalog\.text\) to anon;");
+        assert!(!readers.contains("service_role") && !readers.contains("private.text"), "{readers}");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         let q = P::new(p.d).await.unwrap();
         as_supabase_makes_it(&q, false).await;
