@@ -748,13 +748,16 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
     await own.db.query(`alter table ${shadow}.t modify c varchar(10)`);
     assert.notEqual(await fingerprint(shadow), before);
   } finally {
-    await own.db.query(`drop database if exists ${shadow}`);
-    await own.db.query(`select release_lock('${shadow}')`);
-    await own.db.query(`drop user if exists '${user}'@'%'`);
     try {
-      await other?.drop();
+      await own.db.query(`drop database if exists ${shadow}`);
+      await own.db.query(`select release_lock('${shadow}')`);
+      await own.db.query(`drop user if exists '${user}'@'%'`);
     } finally {
-      await own.drop();
+      try {
+        await other?.drop();
+      } finally {
+        await own.drop();
+      }
     }
   }
 });
