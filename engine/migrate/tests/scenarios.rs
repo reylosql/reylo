@@ -4744,7 +4744,9 @@ async fn a_dry_run_says_which_constraints_it_cant_check() {
 
 /// On Postgres: an update of a partition key may move a row out of the partition a check reads, an
 /// insert may fill a column with a default whose function writes to another table, and a column added
-/// with a default that is null fills no row, so the dry run says it can't check what follows them.
+/// with a default that is null fills no row, so the dry run says it can't check what follows them;
+/// but the partitioned table written keeps the rows it moves, and an insert that gives that column a
+/// value runs no default.
 #[tokio::test(flavor = "current_thread")]
 async fn a_dry_run_leaves_unchecked_what_moved_rows_and_defaults_reach() {
     let Some(mut p) = P::new(Dialect::Postgres).await else { return };
@@ -4767,6 +4769,18 @@ async fn a_dry_run_leaves_unchecked_what_moved_rows_and_defaults_reach() {
     assert_has!(&out, r"_users_plan\.sql\n(      ! [^\n]*\n)*      ! It holds rows to users_plan, which can't be checked here: \d+_audit_row\.sql changes data first, which may reach them; 1 row breaks it as they stand\n");
     assert_has!(&out, r"_payload\.sql\n(      ! [^\n]*\n)*      ! It holds rows to events_old_payload, which can't be checked here: \d+_move\.sql changes those rows first; 1 row breaks it as they stand\n");
     assert_has!(&out, r"_plan_required\.sql\n(      ! [^\n]*\n)*      ! It holds rows to the NOT NULL on members\.plan, which can't be checked here: a pending migration adds a column it reads\n");
+
+    // An insert that gives the column a value runs no default, and the partitioned table the update
+    // writes holds every row it moves: their checks are read on this database's rows.
+    p.file("20261027110004_audit_row.sql", "insert into audit (id, at) values (1, 0);");
+    p.file("20261027110006_events_id.sql", "alter table events add constraint events_id check (id > 1);");
+    p.schema(&format!("{base}\nalter table users add constraint users_plan check (plan in ('free', 'pro'));\nalter table events_old add constraint events_old_payload check (payload > 0);\nalter table members add column plan text not null;\nalter table events add constraint events_id check (id > 1);\n"));
+    p.output();
+    assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+    let out = p.output();
+    assert_has!(&out, r"_users_plan\.sql\n(      [^\n]*\n)*?      ✗ It fails on this database: 1 row breaks users_plan\n");
+    assert_has!(&out, r"_events_id\.sql\n(      [^\n]*\n)*?      ✗ It fails on this database: 1 row breaks events_id\n");
+    assert_has!(&out, r"_payload\.sql\n(      ! [^\n]*\n)*      ! It holds rows to events_old_payload, which can't be checked here: \d+_move\.sql changes those rows first; 1 row breaks it as they stand\n");
 }
 
 /// A check beside a drop of another column of its table, in one migration on Postgres and in two
