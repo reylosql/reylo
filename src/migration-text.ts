@@ -13,7 +13,6 @@ export function normalized(sql: string): string {
 // Spacing is ASCII's alone, as Rust's `is_ascii_whitespace`: the databases read a U+3000 or a
 // U+00A0 outside quotes and comments as part of a name.
 const SPACING = /^[ \t\n\f\r]$/;
-const ASCII_CONTROL = /^[\x00-\x1f\x7f]$/;
 // A character of a dollar quote's tag, as Postgres reads one: any past ASCII.
 const TAG = /^[A-Za-z0-9_]$|^[^\x00-\x7f]$/u;
 
@@ -38,10 +37,10 @@ export function canonical(sql: string): string {
   while (k < b.length) {
     const c = b[k]!;
     if (c === "-" && b[k + 1] === "-") {
-      // MySQL reads `--` as a comment only where a space or an ASCII control character follows it,
-      // Postgres and SQLite everywhere: where the two differ, the rest is kept as written.
+      // MySQL reads `--` as a comment only where a space or a control character follows it, Postgres
+      // and SQLite everywhere: where the two differ, the rest is kept as written.
       const next = b[k + 2];
-      if (next !== undefined && next !== " " && !ASCII_CONTROL.test(next)) {
+      if (next !== undefined && next.codePointAt(0)! > 0x20) {
         push(rest(k));
         k = b.length;
         continue;

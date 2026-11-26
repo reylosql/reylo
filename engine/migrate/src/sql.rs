@@ -148,9 +148,9 @@ fn lex_on(sql: &str, dialect: Dialect, server: Option<u64>) -> (Vec<Token>, Vec<
             i = text;
             continue;
         }
-        // Comments. MySQL reads `--` as a comment only before a space or an ASCII control character
-        // (DEL included), and Postgres ends one at a carriage return as at a line feed.
-        if ch == b'-' && next == Some(b'-') && !(mysql && i + 2 < n && b[i + 2] > 32 && b[i + 2] != 0x7f) {
+        // Comments. MySQL reads `--` as a comment only before whitespace or a control character, and
+        // Postgres ends one at a carriage return as at a line feed.
+        if ch == b'-' && next == Some(b'-') && !(mysql && i + 2 < n && b[i + 2] > 32) {
             i = sql[i..].find(|c| c == '\n' || (postgres && c == '\r')).map_or(n, |e| i + e + 1);
             continue;
         }
@@ -910,9 +910,8 @@ mod tests {
     }
 
     #[test]
-    fn mysql_reads_dash_dash_as_a_comment_only_before_a_space_or_an_ascii_control() {
+    fn mysql_reads_dash_dash_before_a_space_beyond_ascii_as_code() {
         let m = Dialect::Mysql;
-        assert_eq!(texts("select 1 --\u{7f}; drop table users;", m), ["select 1 --\u{7f}; drop table users;"]);
         assert_eq!(texts("select 1 --\u{3000}; drop table users;", m), ["select 1 --\u{3000}", "drop table users"]);
         // A U+3000 is part of a name there, so a statement keeps one at its end.
         assert_eq!(texts("create view v as select 1 as x\u{3000};", m), ["create view v as select 1 as x\u{3000}"]);

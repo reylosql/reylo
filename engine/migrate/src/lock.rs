@@ -137,10 +137,11 @@ pub fn checksum(prev: &str, name: &str, sql: &str) -> String {
     digest(&[prev, "\n", name, "\n", &canonical(sql)])
 }
 
-/// The checksum of schema.sql's SQL, as `canonical` writes it, with the last entry's checksum the
+/// The checksum of schema.sql's SQL, as `canonical` writes it with its `\r\n` line endings as
+/// `\n`, so that a checkout that writes them matches, with the last entry's checksum the
 /// migrations it was proven against end with: a stamp that no longer holds once they change.
 pub fn schema_sum(last: &str, sql: &str) -> String {
-    digest(&["schema\n", last, "\n", &canonical(sql)])
+    digest(&["schema\n", last, "\n", &canonical(&sql.replace("\r\n", "\n"))])
 }
 
 /// SQL without its comments, its whitespace runs as one space, as any of the three databases reads
@@ -166,10 +167,11 @@ pub fn canonical(sql: &str) -> String {
     while k < b.len() {
         let c = b[k];
         if c == '-' && b.get(k + 1) == Some(&'-') {
-            // MySQL reads `--` as a comment only where a space or an ASCII control character follows
-            // it (`n--1` is `n - -1` there, and so is `--` before a U+3000), Postgres and SQLite
-            // everywhere: where the two differ, the rest is kept as written.
-            if b.get(k + 2).is_some_and(|n| *n != ' ' && !n.is_ascii_control()) {
+            // MySQL reads `--` as a comment only where a space or a control character follows it
+            // (`n--1` is `n - -1` there, and so is `--` before a U+3000), Postgres and SQLite
+            // everywhere: where the two differ, the rest is kept as written. The statements
+            // `sql.rs` splits for MySQL end a comment's `--` at the same characters, up to the space.
+            if b.get(k + 2).is_some_and(|n| *n > ' ') {
                 push(&mut out, &mut space, &b[k..].iter().collect::<String>());
                 k = b.len();
                 continue;
@@ -491,17 +493,23 @@ mod tests {
         assert_ne!(canonical("create view v as select 1 as x\u{3000}, 2 as y;"), canonical("create view v as select 1 as x , 2 as y;"));
         assert_ne!(canonical("create table t (a\u{a0}int)"), canonical("create table t (a int)"));
         assert_eq!(canonical("select  'a\u{3000}b' -- x\n"), "select 'a\u{3000}b'");
-        // MySQL reads `--` before one as `- -` and runs the rest of the line, a `;` and what follows
-        // it included, so the rest is kept as written; before DEL it is a comment there too.
+        // MySQL reads `--` before one, or before DEL as the statements are split for it, as `- -`
+        // and runs the rest of the line, a `;` and what follows it included, so the rest is kept.
         assert_ne!(canonical("select 1 --\u{3000}x"), canonical("select 1 --\u{3000}; drop table users;"));
         assert_ne!(canonical("select 1 --\u{a0}x"), canonical("select 1 --\u{a0}; drop table users;"));
-        assert_eq!(canonical("select 1 --\u{7f}x\n"), "select 1");
+        assert_ne!(canonical("select 1 --\u{7f}x"), canonical("select 1 --\u{7f}; drop table users;"));
         // A lone carriage return ends a `--` comment on Postgres alone, and is spacing elsewhere.
         assert_ne!(canonical("-- note\rdrop table users;"), canonical("-- note\ndrop table users;"));
         assert_eq!(canonical("select 1 -- a\r\n,\r2"), "select 1 , 2");
         // Postgres takes any character past ASCII in a dollar quote's tag, and none after a name's `$`.
         assert_ne!(canonical("select $\u{3000}$--\nx$\u{3000}$"), canonical("select $\u{3000}$ x$\u{3000}$"));
         assert_ne!(canonical("select x$$a$, '$a$ -- b'"), canonical("select x$$a$, '$a$ -- c'"));
+    }
+
+    #[test]
+    fn a_schema_checked_out_with_crlf_keeps_its_stamp() {
+        let lf = "create function f() returns int as $$\n  select 1\n$$ language sql;\n# made by hand\n";
+        assert_eq!(schema_sum("a", &lf.replace('\n', "\r\n")), schema_sum("a", lf));
     }
 
     #[test]

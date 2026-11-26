@@ -43,7 +43,7 @@ test("a space beyond ASCII is part of a name, as the databases read it", () => {
   assert.equal(canonical("select  'a\u3000b' -- x\n"), "select 'a\u3000b'");
   assert.ok(!sameMigration("select 1 --\u3000x", "select 1 --\u3000; drop table users;"));
   assert.ok(!sameMigration("select 1 --\u00a0x", "select 1 --\u00a0; drop table users;"));
-  assert.equal(canonical("select 1 --\u007fx\n"), "select 1");
+  assert.ok(!sameMigration("select 1 --\u007fx", "select 1 --\u007f; drop table users;"));
 });
 
 test("a lone carriage return and a dollar quote's tag read as Postgres reads them", () => {
