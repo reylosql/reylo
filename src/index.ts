@@ -2,7 +2,7 @@
 // Types come from the content mapper; values come from the runtime loader.
 import { compile, execute, executeSync, type ClientFor, type Dialect, type Inputs, type Marks, type QueryModule, type Runtime, type SyncClientFor } from "./execute.ts";
 import type { SqlMode } from "./engine-core.ts";
-import type { Libraries, Plan } from "./codecs.ts";
+import type { CodecRuntime, Libraries, Plan } from "./codecs.ts";
 import type { StandardJSONSchemaV1, StandardTypedV1 } from "./standard.ts";
 import { standardQuery, type StandardQueryV1 } from "./standard-query.ts";
 import type { Structured } from "./rows.ts";
@@ -21,6 +21,7 @@ export type { ClickhouseClient, ClientFor, Dialect, Inputs, MysqlClient, Postgre
 export type { QueryTrace } from "./trace.ts";
 export type { StandardQueryV1 } from "./standard-query.ts";
 export { checks } from "./checks.ts";
+export { codecRuntime } from "./codecs.ts";
 export { migrate, type MigrationStorage } from "./migrate.ts";
 export type { MigrateOptions } from "./build-time.ts";
 export type { AnalyzeInput } from "./build-time.ts";
@@ -194,6 +195,8 @@ export type QueryDefinition = {
   codecs?: Readonly<Record<string, Plan>>;
   /** The classes the codecs build values with (`decimal`, the class of `js.codecs.decimal`'s library), which a build step's module imports from the app's install where a codec needs one. */
   libraries?: Libraries;
+  /** `js.codecs` at run time, `codecRuntime` from "reylo": a build step passes it where `codecs` or a parameter names a codec, so that an app none of whose statements holds such a value bundles none of it. */
+  codecRuntime?: CodecRuntime;
   /** Each structured parameter in a MySQL insert, with the lists of `text` the run time writes again for the keys a call carries (a Postgres or SQLite insert copies its defaults instead). */
   structured?: readonly Structured[];
   /** The `.sql` file, relative to the project's root and written with `/`: the query's `source`. Every build step puts it in the module. */
@@ -279,6 +282,7 @@ function define<Params, Row, C extends Cardinality, D extends Dialect>(runtime: 
     value: def.value,
     codecs: def.codecs,
     libraries: def.libraries,
+    codecRuntime: def.codecRuntime,
     structured: def.structured,
     source: def.source,
     sqlcommenter: def.sqlcommenter,

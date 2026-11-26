@@ -30,6 +30,13 @@
     "./next": "./src/next.ts",
     "./jest": "./src/jest.ts"
   },
+  "sideEffects": [
+    "./src/cli.ts",
+    "./src/d1-proxy.ts",
+    "./src/mapper.ts",
+    "./src/register.ts",
+    "./src/register-worker.ts"
+  ],
   "typescript": {
     "contentMapper": {
       "exec": [

@@ -17,7 +17,7 @@ import { array, field, lite, my, pg, record } from "./descriptors.ts";
 import { decodeCodec, decodeCodecs, decodePlan, encodeCodec, encodePlan, leafCodec, planLibraries, planOf, type Codecs, type DecimalClass } from "../src/codecs.ts";
 import { execute, executeSync, type QueryModule } from "./run.ts";
 import { postgresJsSql } from "./stand-ins.ts";
-import { defineQuery } from "../src/index.ts";
+import { codecRuntime, defineQuery } from "../src/index.ts";
 import { moduleTypes, standardColumnsType } from "../src/module-types.ts";
 import { renderParamType, renderType } from "../src/render.ts";
 import { querySchemas, typeSchema } from "../src/schema.ts";
@@ -265,7 +265,7 @@ test("run gives a codec's columns their type and binds its parameters, on a real
 });
 
 test("a Standard Query gives a codec's columns the same type as run, by decode and by each column's decoder", () => {
-  const q = defineQuery<{}, { at: unknown; n: unknown }, "many", "postgres">({ dialect: "postgres", sql: "select at, n from t", params: [], cardinality: "many", columns: [["at", "timestamptz"], ["n", "decimal"]], codecs: { at: "instant", n: "decimal:number" } })["~standard"].query;
+  const q = defineQuery<{}, { at: unknown; n: unknown }, "many", "postgres">({ dialect: "postgres", sql: "select at, n from t", params: [], cardinality: "many", columns: [["at", "timestamptz"], ["n", "decimal"]], codecs: { at: "instant", n: "decimal:number" }, codecRuntime })["~standard"].query;
   const [row] = q.decode([["2026-10-20 10:00:00+02", "19.50"]]) as { at: unknown; n: unknown }[];
   assert.ok(row!.at instanceof Temporal.Instant);
   assert.equal(String(row!.at), "2026-10-20T08:00:00Z");
@@ -273,6 +273,11 @@ test("a Standard Query gives a codec's columns the same type as run, by decode a
   assert.ok(q.columns![0]!.decode("2026-10-20 10:00:00+02") instanceof Temporal.Instant);
   assert.equal(q.columns![1]!.decode("19.50"), 19.5);
   assert.equal(standardColumnsType([{ name: "at", type: pg("timestamptz"), nullable: false }] as any, "postgres", every), `readonly [{ readonly name: "at"; decode(value: string): Temporal.Instant }]`);
+});
+
+test("a query defined by hand whose columns name a codec is refused without the codecs' run time", () => {
+  const q = defineQuery<{}, { at: unknown }, "many", "postgres">({ dialect: "postgres", sql: "select at from t", params: [], cardinality: "many", columns: [["at", "timestamptz"]], codecs: { at: "instant" }, source: "at.sql" });
+  assert.throws(() => q["~standard"].query.decode([["2026-10-20 10:00:00+02"]]), { name: "TypeError", message: /^at\.sql: This statement holds a value js\.codecs gives another type, which the run time converts with Reylo's codecRuntime; a query defined by hand passes it: defineQuery\(\{ …, codecRuntime \}\)/ });
 });
 
 test("decodeCodecs leaves the columns it names no plan for as they are", () => {
@@ -303,6 +308,9 @@ test("a project's js.codecs reach the module a build writes and the types it dec
     assert.match(types.params, /id: number \| bigint/);
     const { code } = await sqlModule(file, sql);
     assert.match(code, /, codecs: \{"at":"datetime","data":"bytes:string"\}/);
+    // The module passes the codecs' run time, which it alone imports.
+    assert.match(code, /^import \{ defineSqliteQuery, codecRuntime \} from "reylo";$/m);
+    assert.match(code, /, codecRuntime,/);
     // The JSON Schema names the JSON form a codec's value writes.
     assert.match(code, /"at":\{"type":"string","description":"a date and time without a time zone/);
   } finally {

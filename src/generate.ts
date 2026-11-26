@@ -167,7 +167,7 @@ async function queryOf(name: string, file: string, base: string): Promise<Query 
   const types = moduleTypes(sql, input.analysis, input.dialect, lexed, project.strictParams, projectFile, project.codecs, project.allowNestedArrays && input.dialect === "postgres");
   if (types.diagnostics.length) return types.diagnostics.map((d) => `${where}:${place(sql, d.start)}: ${d.message}`);
   const { imports } = moduleImports(input);
-  const definition = moduleDefinition(input, { raw: JSON.stringify(input.raw), sql: JSON.stringify(compiledText(input)), params: JSON.stringify(input.params), checks: "reylo.checks" }, true);
+  const definition = moduleDefinition(input, { raw: JSON.stringify(input.raw), sql: JSON.stringify(compiledText(input)), params: JSON.stringify(input.params), checks: "reylo.checks", codecRuntime: "reylo.codecRuntime" }, true);
   const standard = [types.columns === undefined ? "" : `readonly columns: ${types.columns}`, input.analysis.ordered ? "readonly ordered: true" : ""].filter(Boolean);
   // The literal types go in the Query type directly rather than through the namespace's aliases,
   // so a hover shows the row's shape, as the content mapper declares it.

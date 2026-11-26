@@ -18,7 +18,7 @@ import type { SqlMode } from "./engine-core.ts";
 import type { Checks } from "./checks.ts";
 import type { Members, Structured } from "./rows.ts";
 import type { RowBuilder } from "./row.ts";
-import { decodeCodecs, encodePlan, type Libraries, type Plan } from "./codecs.ts";
+import type { CodecRuntime, Libraries, Plan } from "./codecs.ts";
 
 export type Dialect = "postgres" | "mysql" | "sqlite" | "clickhouse";
 
@@ -218,6 +218,8 @@ export type QueryModule<D extends Dialect = Dialect> = {
   readonly codecs?: Readonly<Record<string, Plan>> | undefined;
   /** The classes the codecs build values with, which the module imports from the app's install (src/codecs.ts). */
   readonly libraries?: Libraries | undefined;
+  /** `js.codecs` at run time (src/codecs.ts), which a build step passes where the statement holds a value a codec gives another type. */
+  readonly codecRuntime?: CodecRuntime | undefined;
   /** Each structured parameter in insert position, with the lists of `text` the run time writes again for the keys a call carries. */
   readonly structured?: readonly Structured[] | undefined;
   /** The `.sql` file the module was built from, relative to the project's root, for messages. */
@@ -313,7 +315,14 @@ export function execute<D extends Dialect>(
 function withCodecs(query: QueryModule, rows: unknown[] | Promise<unknown[]>): unknown[] | Promise<unknown[]> {
   const codecs = query.codecs;
   if (codecs === undefined || Object.keys(codecs).length === 0) return rows;
-  return Array.isArray(rows) ? decodeCodecs(rows, codecs, query.libraries) : rows.then((r) => decodeCodecs(r, codecs, query.libraries));
+  const run = codecsOf(query);
+  return Array.isArray(rows) ? run.decodeCodecs(rows, codecs, query.libraries) : rows.then((r) => run.decodeCodecs(r, codecs, query.libraries));
+}
+
+/** `js.codecs` at run time (src/codecs.ts): every build step passes it where the statement holds a value a codec gives another type. */
+export function codecsOf(query: QueryModule): CodecRuntime {
+  if (query.codecRuntime) return query.codecRuntime;
+  throw new TypeError(`${query.source ? `${query.source}: ` : ""}This statement holds a value js.codecs gives another type, which the run time converts with Reylo's codecRuntime; a query defined by hand passes it: defineQuery({ …, codecRuntime }) with codecRuntime from "reylo".`);
 }
 
 /**
@@ -552,7 +561,7 @@ function statement(query: QueryModule, params: ParamsInput) {
     // A value of a family the project file's `js.codecs` gives another type takes that type alone,
     // wherever it stands in the parameter, a structured parameter's members among them, and is
     // bound as the text or the bytes its type reads (src/codecs.ts).
-    if (input?.codec !== undefined) bound.values[i] = encodePlan(input.codec, bound.values[i], name, query.dialect, query.libraries);
+    if (input?.codec !== undefined) bound.values[i] = codecsOf(query).encodePlan(input.codec, bound.values[i], name, query.dialect, query.libraries);
     // A structured parameter is checked against its column list and written as the JSON the
     // statement reads; in an insert, its lists name only the keys the call carries. It refuses
     // null itself, saying what to pass.

@@ -77,6 +77,8 @@ const built = {
   // publish and warns that the script "was invalid and removed", which it was not (0.0.1's stage).
   bin: Object.fromEntries(Object.entries(bin as Record<string, string>).map(([name, path]) => [name, js(path).replace(/^\.\//, "")])),
   exports: Object.fromEntries(Object.entries(exports as Record<string, string>).map(([key, path]) => [key, { types: path.replace(/\.ts$/, ".d.ts"), default: js(path) }])),
+  // The modules that do something when they are imported, so that a bundler drops every other one an app's code does not use.
+  sideEffects: (pkg.sideEffects as string[]).map(js),
   typescript: { ...typescript, contentMapper: { ...typescript.contentMapper, exec: (typescript.contentMapper.exec as string[]).map(js) } },
   // Every platform's engine at reylo's own version: reylo refuses a binary of another.
   optionalDependencies: Object.fromEntries(PLATFORMS.map((p) => [`@reylosql/engine-${p.platform}`, pkg.version])),

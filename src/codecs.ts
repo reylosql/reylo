@@ -638,6 +638,14 @@ function pastMicroseconds(codec: Codec, v: unknown): boolean {
   return codec === "duration" && t.nanoseconds! % 1000 !== 0;
 }
 
+/**
+ * `js.codecs` at run time, `codecRuntime` from "reylo": a build step's module passes it to its
+ * define function where its statement holds a value a codec gives another type, so that an app none
+ * of whose statements has one bundles none of this module.
+ */
+export const codecRuntime = { decodePlan, decodeCodecs, encodePlan };
+export type CodecRuntime = typeof codecRuntime;
+
 /** A parameter's value with its plan's codecs written as the driver binds them, wherever they stand in it. */
 export function encodePlan(plan: Plan, v: unknown, name: string, dialect: Dialect, libraries?: Libraries): unknown {
   if (v === null || v === undefined) return v;

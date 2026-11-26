@@ -150,17 +150,17 @@ export function moduleLibraries(m: ModuleInput): Set<Library> {
 
 /** The text of a statement's module: its imports, its exports, and the definition of its query, field by field. */
 export function moduleCode(m: ModuleInput): string {
-  const { checked, imports } = moduleImports(m);
+  const { checked, coded, imports } = moduleImports(m);
   const define = DEFINE[m.dialect];
   return [
-    `import { ${define}${checked ? ", checks" : ""} } from "reylo";`,
+    `import { ${define}${checked ? ", checks" : ""}${coded ? ", codecRuntime" : ""} } from "reylo";`,
     ...imports,
     // `sql` is the compiled statement and `raw` the file as written. The comment naming the file
     // (src/sqlcommenter.ts) is added where the statement is sent, so `sql` leaves it out.
     `export const sql = ${JSON.stringify(compiledText(m))};`,
     `export const raw = ${JSON.stringify(m.raw)};`,
     `export const params = ${JSON.stringify(m.params)};`,
-    `export default ${define}(${moduleDefinition(m, { raw: "raw", sql: "sql", params: "params", checks: "checks" })});`,
+    `export default ${define}(${moduleDefinition(m, { raw: "raw", sql: "sql", params: "params", checks: "checks", codecRuntime: "codecRuntime" })});`,
     ``,
   ].join("\n");
 }
@@ -178,10 +178,10 @@ export function trimmedStatement(sql: string): string {
 
 /**
  * What a statement's module imports besides its dialect's define function: whether it needs
- * reylo's `checks`, and each library a codec builds its values with, by the names the module's
- * definition calls them (`ReyloDecimal`, `ReyloIpAddress`).
+ * reylo's `checks` and its `codecRuntime`, and each library a codec builds its values with, by the
+ * names the module's definition calls them (`ReyloDecimal`, `ReyloIpAddress`).
  */
-export function moduleImports(m: ModuleInput): { checked: boolean; imports: string[] } {
+export function moduleImports(m: ModuleInput): { checked: boolean; coded: boolean; imports: string[] } {
   const { analysis } = m;
   // A decimal library's class by a default import, which every version gives as its class, and
   // ip-address whole.
@@ -193,17 +193,20 @@ export function moduleImports(m: ModuleInput): { checked: boolean; imports: stri
   // (src/checks.ts). A non-null JSON parameter whose type alone carries a schema needs them too,
   // to learn whether that schema allows null.
   const checked = analysis.params.some((p) => p.schema !== undefined || p.cast !== undefined || p.members !== undefined || (p.type.kind === "json" && p.type.schema !== undefined && !p.nullable));
-  return { checked, imports };
+  // A value a codec gives another type is converted with reylo's `codecRuntime`, imported only where
+  // the statement holds one, so that an app none of whose statements does bundles none of it.
+  const coded = Object.keys(moduleCodecs(m)).length > 0 || Object.values(moduleInputs(m)).some((i) => i.codec !== undefined);
+  return { checked, coded, imports };
 }
 
 /**
  * The object a statement's module passes its dialect's define function, field by field, as source
  * text. `names` are the sources of the values a module holds apart from the definition: the
- * statement as written (`raw`), the compiled one (`sql`), the parameters' names and reylo's
- * `checks`. A field whose source is its own name is written as a shorthand. `multiline` puts each
+ * statement as written (`raw`), the compiled one (`sql`), the parameters' names, and reylo's
+ * `checks` and `codecRuntime`. A field whose source is its own name is written as a shorthand. `multiline` puts each
  * field on a line of its own, for a file that is read and diffed.
  */
-export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: string; params: string; checks: string }, multiline = false): string {
+export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: string; params: string; checks: string; codecRuntime: string }, multiline = false): string {
   const { analysis, dialect } = m;
   const inputs = moduleInputs(m);
   // Each output column's name and kind, from the table the declared types come from: what the run
@@ -223,7 +226,7 @@ export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: stri
   const libraries = moduleLibraries(m);
   const library = [...libraries].find((l) => l !== "ip-address");
   const handed = [...(library === undefined ? [] : ["decimal: ReyloDecimal"]), ...(libraries.has("ip-address") ? ["inet: ReyloIpAddress"] : [])];
-  const { checked } = moduleImports(m);
+  const { checked, coded } = moduleImports(m);
   const text = compiledText(m);
   // A structured parameter's lists, at JavaScript's offsets into the statement (the engine's are
   // UTF-8 bytes).
@@ -245,6 +248,7 @@ export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: stri
     ["columns", JSON.stringify(columns)],
     ["codecs", Object.keys(codecs).length ? JSON.stringify(codecs) : undefined],
     ["libraries", handed.length ? `{ ${handed.join(", ")} }` : undefined],
+    ["codecRuntime", coded ? names.codecRuntime : undefined],
     ["row", columns.length ? rowSource(columns.map(([name]) => name as string)) : undefined],
     ["nonFinite", nonFinite.some((at) => at !== null) ? JSON.stringify(nonFinite) : undefined],
     ["key", analysis.key && JSON.stringify(analysis.key)],

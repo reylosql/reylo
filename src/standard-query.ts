@@ -13,8 +13,7 @@
 // mysql2's binary protocol drops trailing zeros (`.000`) that `.run()` writes back from the
 // column's metadata. A ClickHouse query alone maps no values: it binds none in a list and reads
 // none raw, so its `encode`, `decode` and `output` throw and it has no `columns` (`standardQuery`).
-import { decodePlan } from "./codecs.ts";
-import { compile, rawStatement, sentText, type Dialect, type QueryModule } from "./execute.ts";
+import { codecsOf, compile, rawStatement, sentText, type Dialect, type QueryModule } from "./execute.ts";
 import type { StandardTypedV1 } from "./standard.ts";
 import { rowOf, type RowBuilder } from "./row.ts";
 import { DecodeError } from "./values.ts";
@@ -162,7 +161,7 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
     const decode = module.runtime.decoder(name, kind, delim, module.nonFinite?.[i] ?? undefined, module.nestedArrays);
     // A family the project file's `js.codecs` gives another type takes it here too, as in `.run()` (src/codecs.ts).
     const plan = module.codecs?.[name];
-    return plan === undefined ? decode : (v) => decodePlan(plan, decode(v), name, module.libraries);
+    return plan === undefined ? decode : (v) => codecsOf(module).decodePlan(plan, decode(v), name, module.libraries);
   });
   const columns = decoders && module.columns?.map(([name], i) => Object.freeze({ name, decode: decoders[i]! }) as StandardQueryV1.Column<D>);
   // A closure, not `this`: a driver may take `encode` off the object.
