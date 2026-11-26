@@ -598,16 +598,13 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
  * since the engine reads it undecoded. A value is kept as written too, since its readers decode
  * it each their own way (libpq reads a `+` as a plus, ClickHouse and the engine's MySQL socket as
  * a space), so that a database written two ways is at most analyzed again under a name of its
- * own. They are sorted by name alone, since the hosts are tried in order.
+ * own. They keep the URL's order, which decides the host tried first and which of `socket` and
+ * `socketPath` the engine opens.
  */
 function choosing(url: string, dialect: Dialect): string {
   const at = url.indexOf("?");
-  const pairs = at < 0 ? [] : url.slice(at + 1).split("&").map((pair): [string, string] => {
-    const eq = pair.indexOf("=");
-    return eq < 0 ? [pair, ""] : [pair.slice(0, eq), pair.slice(eq + 1)];
-  });
-  const chosen = pairs.filter(([key]) => CHOOSING[dialect].includes(decoded(key))).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return chosen.length ? `?${chosen.map(([key, value]) => `${key}=${value}`).join("&")}` : "";
+  const chosen = at < 0 ? [] : url.slice(at + 1).split("&").filter((pair) => CHOOSING[dialect].includes(decoded(pair.split("=")[0]!)));
+  return chosen.length ? `?${chosen.join("&")}` : "";
 }
 
 /** A URL parameter's name decoded, or as written where it does not decode. */

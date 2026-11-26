@@ -561,8 +561,8 @@ fn statement_key(dialect: Dialect, sql: &str) -> Option<String> {
 /// it (both are held to entry-name-cases.json). A name is matched decoded, as the loader's bridge
 /// to a Unix socket reads it, and kept as written, since the engine reads it undecoded. A value is
 /// kept as written too, since each reader of the URL decodes it its own way, so that a database
-/// written two ways is at most analyzed again under a name of its own. They are sorted by name
-/// alone, since the hosts are tried in order.
+/// written two ways is at most analyzed again under a name of its own. They keep the URL's order,
+/// which decides the host tried first and which of `socket` and `socketPath` the engine opens.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 fn server(url: &str) -> String {
     let (base, query) = url.split_once('?').unwrap_or((url, ""));
@@ -575,9 +575,7 @@ fn server(url: &str) -> String {
         Ok(Dialect::Mysql) => &["socket", "socketPath"],
         _ => &[],
     };
-    let mut chosen: Vec<(&str, &str)> = query.split('&').map(|pair| pair.split_once('=').unwrap_or((pair, ""))).filter(|(key, _)| choosing.contains(&decoded(key).as_str())).collect();
-    chosen.sort_by_key(|(key, _)| *key);
-    let chosen: Vec<String> = chosen.iter().map(|(key, value)| format!("{key}={value}")).collect();
+    let chosen: Vec<&str> = query.split('&').filter(|pair| choosing.contains(&decoded(pair.split('=').next().unwrap_or_default()).as_str())).collect();
     let query = if chosen.is_empty() { String::new() } else { format!("?{}", chosen.join("&")) };
     format!("{scheme}://{user}@{host}{path}{query}")
 }
