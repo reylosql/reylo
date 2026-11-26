@@ -543,6 +543,8 @@ test("PGHOST names the socket's directory where the URL names no host, as libpq 
   assert.ok(bridged.bridge);
   assert.match(bridged.url, /^postgres:\/\/u@127\.0\.0\.1:\d+\/d$/);
   bridged.close();
+  // A `port=` the URL names, even empty, takes no PGPORT, as libpq reads it: the empty one is 5432.
+  await assert.rejects(hostUrl("postgres://u@/d?host=/var/run/postgresql&port=", { PGPORT: "5433" }, "win32"), (e: Error) => /\.s\.PGSQL\.5432,/.test(e.message));
   // A host in the URL, or a TCP host in PGHOST, is no socket.
   assert.equal((await hostUrl("postgres://u@db/d", { PGHOST: "/var/run/postgresql" })).bridge, undefined);
   assert.equal((await hostUrl("postgres://u@/d", { PGHOST: "db.internal" })).bridge, undefined);

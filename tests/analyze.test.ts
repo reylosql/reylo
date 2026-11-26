@@ -368,6 +368,26 @@ test("an entry is named by its server and the URL's parameters that choose the d
   }
 });
 
+test("a session names its entries by libpq's variables as it started, as its connection reads them", async () => {
+  const root = mkdtempSync(join(tmpdir(), "reylo-entry-environment-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const saved = process.env.PGDATABASE;
+  process.env.PGDATABASE = "first";
+  const session = await Session.open(root, { DATABASE_URL: "postgres://app@db.internal/" });
+  try {
+    const before = session.entryFile("select 1");
+    process.env.PGDATABASE = "second";
+    assert.equal(session.entryFile("select 1"), before);
+    const later = await Session.open(root, { DATABASE_URL: "postgres://app@db.internal/" });
+    assert.notEqual(later.entryFile("select 1"), before);
+    await later.close();
+  } finally {
+    if (saved === undefined) delete process.env.PGDATABASE;
+    else process.env.PGDATABASE = saved;
+    await session.close();
+  }
+});
+
 test("on a server, a URL that fails reads that server's own entry and no other's, and a build says once that it reads reylo/.cache/ unchecked", { skip: live }, async (t) => {
   const { url, sql, drop } = await postgresDatabase("reylo_offline", "create table users (id int primary key, email text not null)");
   // Another database on the same server, whose users differ.

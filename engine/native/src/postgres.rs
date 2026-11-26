@@ -653,7 +653,8 @@ fn authority(base: &str) -> (String, Vec<String>, Option<String>) {
             Some((host, rest)) => (host, rest.strip_prefix(':')),
             None => chunk.split_once(':').map_or((chunk, None), |(host, port)| (host, Some(port))),
         };
-        hosts.push(host.to_string());
+        // An `&` in a host is escaped, since the host moves into the query.
+        hosts.push(host.replace('&', "%26"));
         ports.push(port.unwrap_or(""));
     }
     let ports = (hosts.len() > 1 || ports.iter().any(|p| !p.is_empty())).then(|| ports.join(","));
@@ -906,6 +907,8 @@ mod tests {
         // A repeated parameter is its last, and a parameter's name is read decoded.
         assert_eq!(hosts("postgres://u@/d?host=a&port=1&host=b&dbname=x&%64bname=y", &no_env), (vec![tcp("b")], vec![1], Some("y".to_string())));
         assert_eq!(hosts("postgres://u@/d?%68ost=c", &no_env).0, vec![tcp("c")]);
+        #[cfg(unix)]
+        assert_eq!(hosts("postgres://u@%2Ftmp%2Fpg&dev/d", &no_env).0, vec![Host::Unix("/tmp/pg&dev".into())]);
         let Parsed { config, .. } = parse("postgres://u@h/d?%73slmode=disable", &no_env).unwrap();
         assert_eq!(config.get_ssl_mode(), SslMode::Disable);
     }

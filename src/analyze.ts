@@ -100,6 +100,8 @@ export class Session {
   /** Where the project was resolved from, and with what environment, for `#reread`. */
   readonly #dir: string;
   readonly #env: Record<string, string | undefined>;
+  /** The variables of `ENVIRONMENT` as the session started, which its connection reads too: its entries keep one name however the process's environment changes after. */
+  readonly #libpq = libpqEnvironment();
   #io: Promise<Io> | undefined;
   /** The URL the connection opens: the project's, until a command in `direct_url` gives a fresh one. */
   #url: string | undefined;
@@ -147,7 +149,8 @@ export class Session {
     const { project, engine } = await openProject(dir, env);
     // A setting the build step reads (`sqlcommenter`, `allow_nested_arrays`, and `dir`, which places the cache) is part of
     // the key, so a change to it in the project file reaches a running watch process.
-    const key = JSON.stringify([project.root, project.url ?? null, project.error ?? null, project.sqlcommenter, project.allowNestedArrays, project.cache, engine instanceof MissingEngine ? engine.message : null]);
+    // So are libpq's variables, which choose the database the connection reaches and name its entries.
+    const key = JSON.stringify([project.root, project.url ?? null, project.error ?? null, project.sqlcommenter, project.allowNestedArrays, project.cache, engine instanceof MissingEngine ? engine.message : null, libpqEnvironment()]);
     let session = sessions.get(key);
     if (!session) sessions.set(key, (session = new Session(engine, project, BUILD_IDLE, dir, env)));
     return session;
@@ -470,7 +473,7 @@ export class Session {
     const { dialect, url, root } = this.project;
     if (!url) return "";
     if (dialect === "sqlite") return sqlitePath(url, root);
-    return serverName(url, dialect, process.env);
+    return serverName(url, dialect, this.#libpq);
   }
 
   /** The database as a person names it: host, port and database, or the SQLite file. */
@@ -660,6 +663,11 @@ function serverName(url: string, dialect: Dialect, env: Record<string, string | 
  * on every machine it is copied to, so that a cache built in CI is still read on a laptop.
  */
 const ENVIRONMENT = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"] as const;
+
+/** The variables of `ENVIRONMENT` this process has, as the engine's connection reads them when it opens (src/engine.ts). */
+function libpqEnvironment(): Record<string, string> {
+  return Object.fromEntries(ENVIRONMENT.flatMap((name) => (process.env[name] ? [[name, process.env[name]]] : [])));
+}
 
 /**
  * A URL parameter's name as `CHOOSING` lists it: decoded, or as written where it does not decode,
