@@ -40,5 +40,8 @@ test("a space beyond ASCII is part of a name, as the databases read it", () => {
   assert.ok(!sameMigration("create view v as select 1 as x\u3000, 2 as y;", "create view v as select 1 as x , 2 as y;"));
   assert.ok(!sameMigration("create table t (a\u00a0int)", "create table t (a int)"));
   assert.ok(!sameMigration("select 1 as x\u3000", "select 1 as x"));
-  assert.equal(canonical("select  'a\u3000b' --\u3000x\n"), "select 'a\u3000b'");
+  assert.equal(canonical("select  'a\u3000b' -- x\n"), "select 'a\u3000b'");
+  assert.ok(!sameMigration("select 1 --\u3000x", "select 1 --\u3000; drop table users;"));
+  assert.ok(!sameMigration("select 1 --\u00a0x", "select 1 --\u00a0; drop table users;"));
+  assert.equal(canonical("select 1 --\u007fx\n"), "select 1");
 });

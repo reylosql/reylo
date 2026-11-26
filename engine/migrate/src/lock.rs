@@ -166,10 +166,10 @@ pub fn canonical(sql: &str) -> String {
     while k < b.len() {
         let c = b[k];
         if c == '-' && b.get(k + 1) == Some(&'-') {
-            // MySQL reads `--` as a comment only where a space or a control character follows it
-            // (`n--1` is `n - -1` there), Postgres and SQLite everywhere: where the two differ, the
-            // rest is kept as written.
-            if b.get(k + 2).is_some_and(|n| !n.is_whitespace() && !n.is_control()) {
+            // MySQL reads `--` as a comment only where a space or an ASCII control character follows
+            // it (`n--1` is `n - -1` there, and so is `--` before a U+3000), Postgres and SQLite
+            // everywhere: where the two differ, the rest is kept as written.
+            if b.get(k + 2).is_some_and(|n| *n != ' ' && !n.is_ascii_control()) {
                 push(&mut out, &mut space, &b[k..].iter().collect::<String>());
                 k = b.len();
                 continue;
@@ -479,7 +479,12 @@ mod tests {
         // name, so turning one into a space renames a column: an edit.
         assert_ne!(canonical("create view v as select 1 as x\u{3000}, 2 as y;"), canonical("create view v as select 1 as x , 2 as y;"));
         assert_ne!(canonical("create table t (a\u{a0}int)"), canonical("create table t (a int)"));
-        assert_eq!(canonical("select  'a\u{3000}b' --\u{3000}x\n"), "select 'a\u{3000}b'");
+        assert_eq!(canonical("select  'a\u{3000}b' -- x\n"), "select 'a\u{3000}b'");
+        // MySQL reads `--` before one as `- -` and runs the rest of the line, a `;` and what follows
+        // it included, so the rest is kept as written; before DEL it is a comment there too.
+        assert_ne!(canonical("select 1 --\u{3000}x"), canonical("select 1 --\u{3000}; drop table users;"));
+        assert_ne!(canonical("select 1 --\u{a0}x"), canonical("select 1 --\u{a0}; drop table users;"));
+        assert_eq!(canonical("select 1 --\u{7f}x\n"), "select 1");
     }
 
     #[test]

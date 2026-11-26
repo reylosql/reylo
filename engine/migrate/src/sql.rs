@@ -148,9 +148,9 @@ fn lex_on(sql: &str, dialect: Dialect, server: Option<u64>) -> (Vec<Token>, Vec<
             i = text;
             continue;
         }
-        // Comments. MySQL reads `--` as a comment only before whitespace or a control character, and
-        // Postgres ends one at a carriage return as at a line feed.
-        if ch == b'-' && next == Some(b'-') && !(mysql && i + 2 < n && b[i + 2] > 32) {
+        // Comments. MySQL reads `--` as a comment only before a space or an ASCII control character
+        // (DEL included), and Postgres ends one at a carriage return as at a line feed.
+        if ch == b'-' && next == Some(b'-') && !(mysql && i + 2 < n && b[i + 2] > 32 && b[i + 2] != 0x7f) {
             i = sql[i..].find(|c| c == '\n' || (postgres && c == '\r')).map_or(n, |e| i + e + 1);
             continue;
         }
@@ -327,7 +327,7 @@ fn split(sql: &str, dialect: Dialect, tokens: &[Token], openings: &[(usize, usiz
     let mut current: Vec<Token> = Vec::new();
     let flush = |current: &mut Vec<Token>, from: usize, end: usize, statements: &mut Vec<Statement>| {
         if !current.is_empty() {
-            statements.push(Statement { text: sql[from..end].trim().to_string(), tokens: std::mem::take(current) });
+            statements.push(Statement { text: sql[from..end].trim_matches(|c: char| c.is_ascii_whitespace()).to_string(), tokens: std::mem::take(current) });
         }
     };
     for k in 0..tokens.len() {
@@ -907,6 +907,15 @@ mod tests {
         assert!(atomicity_problem(body, m).unwrap().contains("several statements on others"));
         // A statement that changes data on any server is data.
         assert!(changes_data(&split_statements("/*!99999 CREATE TABLE x (id int) */ DELETE FROM t", m)[0], m));
+    }
+
+    #[test]
+    fn mysql_reads_dash_dash_as_a_comment_only_before_a_space_or_an_ascii_control() {
+        let m = Dialect::Mysql;
+        assert_eq!(texts("select 1 --\u{7f}; drop table users;", m), ["select 1 --\u{7f}; drop table users;"]);
+        assert_eq!(texts("select 1 --\u{3000}; drop table users;", m), ["select 1 --\u{3000}", "drop table users"]);
+        // A U+3000 is part of a name there, so a statement keeps one at its end.
+        assert_eq!(texts("create view v as select 1 as x\u{3000};", m), ["create view v as select 1 as x\u{3000}"]);
     }
 
     #[test]
