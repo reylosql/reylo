@@ -1,5 +1,5 @@
 {
- "at": "2026-11-26T06:43:16.437Z",
+ "at": "2026-11-26T20:45:18.597Z",
  "tools": {
   "reylo": {
    "name": "Reylo",
@@ -67,15 +67,32 @@
   },
   "sqlc": {
    "name": "sqlc",
-   "version": "v1.31.1",
+   "version": "v1.31.1, sqlc-gen-typescript 0.1.3",
    "cells": {
     "no-codegen": {
      "state": "n",
-     "note": "A run leaves new files to commit: `db/db.go`, `db/models.go`, `db/query.sql.go`."
+     "note": "A run leaves new files to commit: `db/query_sql.ts`."
     },
     "from-the-database": {
      "state": "p",
-     "note": "By default it reads your schema files and never connects. A `database:` setting asks Postgres for types, but not for nullability."
+     "example": {
+      "sql": "select add_one(id) as v from users",
+      "schema": "create type role as enum ('admin', 'member');\ncreate table users (id int primary key, email text not null unique, name text not null, nickname text, external_id uuid, role role not null default 'member');\ncreate function add_one(n int) returns int language sql immutable as 'select n + 1';",
+      "params": [],
+      "columns": [
+       {
+        "name": "v",
+        "type": "string",
+        "wrong": true
+       }
+      ],
+      "reylo": {
+       "params": "Record<never, never>",
+       "row": "{ v: number }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
     },
     "outer-joins": {
      "state": "p",
@@ -89,7 +106,7 @@
        },
        {
         "name": "title",
-        "type": "sql.NullString",
+        "type": "string | null",
         "wrong": true
        }
       ],
@@ -104,18 +121,18 @@
     "expression-nullability": {
      "state": "p",
      "example": {
-      "sql": "select upper(name) as v from users",
+      "sql": "select nickname is null as v from users",
       "params": [],
       "columns": [
        {
         "name": "v",
-        "type": "interface{}",
+        "type": "string | null",
         "wrong": true
        }
       ],
       "reylo": {
        "params": "Record<never, never>",
-       "row": "{ v: string }",
+       "row": "{ v: boolean }",
        "cardinality": "many",
        "rows": "many rows"
       },
@@ -123,7 +140,28 @@
      }
     },
     "parameter-types": {
-     "state": "y"
+     "state": "p",
+     "example": {
+      "sql": "select id from users limit $1",
+      "params": [
+       {
+        "type": "string",
+        "wrong": true
+       }
+      ],
+      "columns": [
+       {
+        "name": "id",
+        "type": "number"
+       }
+      ],
+      "reylo": {
+       "params": "{ p1: number }",
+       "row": "{ id: number }",
+       "cardinality": "many",
+       "rows": "many rows"
+      }
+     }
     },
     "parameter-nullability": {
      "state": "p",
@@ -131,14 +169,14 @@
       "sql": "select id from users where nickname = $1",
       "params": [
        {
-        "type": "sql.NullString",
+        "type": "string | null",
         "wrong": true
        }
       ],
       "columns": [
        {
         "name": "id",
-        "type": "int32"
+        "type": "number"
        }
       ],
       "reylo": {
@@ -151,7 +189,7 @@
     },
     "cardinality": {
      "state": "n",
-     "note": "Declared by hand on each query: `:one`, `:many` or `:exec`. The annotation decides the method's return type, and sqlc accepts any of them."
+     "note": "Declared by hand on each query: `:one`, `:many` or `:exec`. The annotation decides the function's return type, and sqlc accepts any of them."
     },
     "json-shapes": {
      "state": "n",
@@ -165,7 +203,7 @@
        },
        {
         "name": "v",
-        "type": "json.RawMessage",
+        "type": "any",
         "wrong": true
        }
       ],
@@ -187,7 +225,7 @@
       "columns": [
        {
         "name": "payload",
-        "type": "json.RawMessage",
+        "type": "any",
         "wrong": true
        }
       ],
@@ -206,7 +244,8 @@
      "state": "y"
     },
     "sqlite": {
-     "state": "y"
+     "state": "n",
+     "note": "It is not available for SQLite."
     }
    }
   },
