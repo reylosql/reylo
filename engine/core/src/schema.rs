@@ -143,11 +143,13 @@ macro_rules! document_time { () => { concat!(clock!(), "[+-](([0-9]{2}|1[0-5][0-
 /// A year that RFC 3339's four digits do not write, as a date's (`DATE_PAST`) or an instant's
 /// (`INSTANT_PAST`) text has it: ISO 8601's extended year where the caller decodes the value, and
 /// inside a document Postgres's own, five digits or more, or four with BC after the value
-/// (`12345-01-01`, `0002-06-01 BC`). The same in src/schema.ts.
+/// (`12345-01-01`, `0002-06-01 BC`). Inside a document an instant of a year from 1 to 9999 takes
+/// Postgres's offset too, which the format refuses (`1849-12-31T19:03:58-04:56:02`). The same in
+/// src/schema.ts.
 const DATE_PAST: [&str; 2] = [concat!("^", extended_year!(), month_day!(), "$"), concat!("^([1-9][0-9]{4,}", month_day!(), "|", year!(), month_day!(), " BC)$")];
 const INSTANT_PAST: [&str; 2] = [
     concat!("^", extended_year!(), month_day!(), clock!(), "(Z|", offset!(), ")$"),
-    concat!("^([1-9][0-9]{4,}", month_day!(), document_time!(), "|", year!(), month_day!(), document_time!(), " BC)$"),
+    concat!("^([1-9][0-9]{4,}", month_day!(), document_time!(), "|", year!(), month_day!(), document_time!(), "( BC)?)$"),
 ];
 
 /// The text of a year outside 0000–9999, which a bound with a sign says the type reaches, of
@@ -457,7 +459,7 @@ mod tests {
             assert_eq!(instant.json_schema(opts), forms("date-time", "^([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3}))-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$"));
         }
         assert_eq!(date.json_schema(IN_JSON), forms("date", "^([1-9][0-9]{4,}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])|(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]) BC)$"));
-        assert_eq!(instant.json_schema(IN_JSON), forms("date-time", "^([1-9][0-9]{4,}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-](([0-9]{2}|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00)|(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-](([0-9]{2}|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00) BC)$"));
+        assert_eq!(instant.json_schema(IN_JSON), forms("date-time", "^([1-9][0-9]{4,}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-](([0-9]{2}|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00)|(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-](([0-9]{2}|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00)( BC)?)$"));
         let mysql = Type::new(Kind::Date(DateType { bounds: Bounds { min: Some("0000-01-01".into()), ..Bounds::default() }, infinity: false })).named("date");
         assert_eq!(mysql.json_schema(WIRE), json!({"type": "string", "format": "date"}));
     }
