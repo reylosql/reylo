@@ -682,9 +682,12 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
 });
 
 test("the MySQL fingerprint holds while nothing changes, and moves with a column's length, precision and scale, fractional seconds and character set, which its type carries, with a CHECK's expression and whether it is enforced, and with a stored function's arguments", { skip: mysqlLive }, async () => {
-  const own = await mysqlDatabase("reylo_fingerprint", "create table m (v varchar(20), n decimal(10,2), at datetime(3), body text character set latin1)");
-  await own.db.query(`create table docs (j json not null, constraint j_shape check (json_schema_valid('{"type":"object","properties":{"a":{"type":"integer"}}}', j)))`);
-  await own.db.query("create function f(x int) returns int deterministic return x");
+  const own = await mysqlDatabase(
+    "reylo_fingerprint",
+    `create table m (v varchar(20), n decimal(10,2), at datetime(3), body text character set latin1);
+    create table docs (j json not null, constraint j_shape check (json_schema_valid('{"type":"object","properties":{"a":{"type":"integer"}}}', j)));
+    create function f(x int) returns int deterministic return x`,
+  );
   const root = mkdtempSync(join(tmpdir(), "reylo-fingerprint-"));
   writeFileSync(join(root, "package.json"), "{}");
   mkdirSync(join(root, "node_modules"));
