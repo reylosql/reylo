@@ -9,7 +9,7 @@
 import type { EngineType, JsonSchema } from "./engine-type.ts";
 import type { Marks } from "./execute.ts";
 import { validate, withDefaults } from "./json-schema.ts";
-import { columnKind, describe, given, hstoreText, ParameterError, postgresInterval, postgresLiteral, postgresYear, zoned } from "./values.ts";
+import { columnKind, describe, given, hstoreText, ParameterError, postgresInterval, postgresLiteral, postgresYear, vectorText, zoned } from "./values.ts";
 
 export { describe, zoned } from "./values.ts";
 
@@ -182,7 +182,9 @@ function integerRange(type: EngineType, dialect: Dialect): readonly [bigint, big
 function scalar(type: EngineType, written: string, v: unknown, dialect: Dialect, fail: (message: string) => never): unknown {
   // A union is either, where the database decides by the value.
   if (type.kind === "union") {
-    for (const member of type.members) {
+    // -0 tries a float member first, which keeps its sign, where an integer member would write 0.
+    const members = Object.is(v, -0) ? [...type.members].sort((a, b) => Number(b.kind === "float") - Number(a.kind === "float")) : type.members;
+    for (const member of members) {
       try {
         return scalar(member, written, v, dialect, (message) => {
           throw new TypeError(message);
@@ -233,11 +235,8 @@ function scalar(type: EngineType, written: string, v: unknown, dialect: Dialect,
       return v;
     }
     case "vector":
-      // pgvector's vector, as `.run()` returns it, written as the text its input reads: JSON's, but
-      // where an element is -0, whose sign JSON.stringify drops, each element as Postgres reads it.
-      if (type.kind === "array" && Array.isArray(v) && v.length > 0 && v.every((e) => typeof e === "number" && Number.isFinite(e))) {
-        return v.some((e) => Object.is(e, -0)) ? `[${v.map((e) => postgresLiteral(type.element.type, e, fail)).join(",")}]` : JSON.stringify(v);
-      }
+      // pgvector's vector, as `.run()` returns it, written as the text its input reads.
+      if (Array.isArray(v) && v.length > 0 && v.every((e) => typeof e === "number" && Number.isFinite(e))) return vectorText(v);
       if (typeof v === "string") return v;
       return fail(`is ${written}, an array of finite numbers with one at least; got ${describe(v)}.`);
     case "hstore":

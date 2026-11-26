@@ -86,7 +86,8 @@ test("NaN, an infinity and -0, which JSON has no number for, go in where the mem
   const decimals = structured(false, [["a", my("decimal"), "decimal(12,2)", false, false]]).rows;
   for (const a of [NaN, "NaN", Infinity, "-Infinity"]) assert.throws(() => prepareRows("z", decimals, [{ a }], "mysql", true), /"a" is decimal\(12,2\), which holds no (NaN|infinity); got (NaN|Infinity|-Infinity)\./);
   const reals = structured(false, [["x", lite("real"), "real", false, false], ["n", lite("numeric"), "numeric", true, true]]).rows;
-  assert.equal(prepareRows("t", reals, [{ x: Infinity, n: -Infinity }, { x: -Infinity }, { x: -0 }], "sqlite", false).value, `[{"x":9e999,"n":-9e999},{"x":-9e999},{"x":-0e0}]`);
+  // A NUMERIC takes -0 as its float, which keeps the sign its integer would drop.
+  assert.equal(prepareRows("t", reals, [{ x: Infinity, n: -Infinity }, { x: -Infinity }, { x: -0, n: -0 }, { x: 1, n: 2 }], "sqlite", false).value, `[{"x":9e999,"n":-9e999},{"x":-9e999},{"x":-0e0,"n":-0e0},{"x":1,"n":2}]`);
   assert.throws(() => prepareRows("t", reals, [{ x: NaN }], "sqlite", false), /"x" is real, a number other than NaN; got NaN\./);
 });
 
@@ -147,6 +148,8 @@ test("a pgvector vector member takes an array of finite numbers, written as the 
   assert.deepEqual(prepareRows("items", items, [{ embedding: [1, 2.5, 3], history: [[0.5], null] }], "postgres", true).value, [{ embedding: "[1,2.5,3]", history: ["[0.5]", null] }]);
   // pgvector keeps -0, which JSON.stringify writes as 0.
   assert.deepEqual(prepareRows("items", items, [{ embedding: [-0, 1, 2] }], "postgres", true).value, [{ embedding: "[-0,1,2]" }]);
+  const docs = structured(false, [["doc", record([field("embedding", pg("vector"))], "doc"), "doc", false, false]]).rows;
+  assert.deepEqual(prepareRows("docs", docs, [{ doc: { embedding: [-0, 1] } }], "postgres", true).value, [{ doc: '("[-0,1]")' }]);
   for (const embedding of [[], [1, NaN], ["1"], "x".length]) assert.throws(() => prepareRows("items", items, [{ embedding }], "postgres", true), /embedding.* is vector\(3\), an array of finite numbers with one at least/);
 });
 

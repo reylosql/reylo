@@ -108,6 +108,8 @@ test("SQLite: a real member takes the infinities `.run()` returns and -0, and re
     // A REAL column stores -0 as 0, as it does a bound -0, but the rows keep it.
     const echo = await built(root, url, "echo", "select x.v from :p::rows(v real not null) as x");
     assert.ok(Object.is((await echo.run(db, { p: [{ v: -0 }] }))[0].v, -0));
+    const echoNumeric = await built(root, url, "echo_numeric", "select x.v from :p::rows(v numeric not null) as x");
+    assert.ok(Object.is((await echoNumeric.run(db, { p: [{ v: -0 }] }))[0].v, -0));
     await assert.rejects(insert.run(db, { t: [{ id: 3, x: NaN }] }), /"x" is real, a number other than NaN; got NaN/);
   } finally {
     db.close();
