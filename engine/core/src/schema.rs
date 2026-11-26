@@ -9,7 +9,7 @@
 //! field of an `Object` or item of a `List`) takes the database's: `int8` and `numeric` as JSON
 //! numbers, `bytea` as its own `\x…` hex.
 
-use crate::types::{Field, JsonType, Kind, Slot, StructType, Type, UuidType};
+use crate::types::{Bounds, Field, JsonType, Kind, Slot, StructType, Type, UuidType};
 use serde_json::{json, Map, Value};
 
 /// Where a value stands and how the caller encodes what it decodes itself.
@@ -123,10 +123,34 @@ fn slot_schema(s: &Slot, opts: SchemaOptions) -> Value {
     if s.nullable { nullable(schema) } else { schema }
 }
 
-/// A date or a timestamp that may be infinite, which Postgres writes as the text `infinity` or
-/// `-infinity`, which no date format admits.
-fn infinite(schema: Value, infinity: bool) -> Value {
-    if infinity { json!({"anyOf": [schema, {"enum": ["infinity", "-infinity"]}]}) } else { schema }
+/// A year that RFC 3339's four digits do not write, as a date's (`DATE_PAST`) or an instant's
+/// (`INSTANT_PAST`) text has it: ISO 8601's extended year, a sign and six digits or more, where the
+/// caller decodes the value, and inside a document Postgres's own, five digits or more, or four with
+/// BC after the value (`12345-01-01`, `0002-06-01 BC`), an instant before its zone's first
+/// standard time with its offset to the second. The same in src/schema.ts.
+const DATE_PAST: [&str; 2] = ["^[+-][0-9]{6,}-[0-9]{2}-[0-9]{2}$", "^([0-9]{5,}-[0-9]{2}-[0-9]{2}|[0-9]{4}-[0-9]{2}-[0-9]{2} BC)$"];
+const INSTANT_PAST: [&str; 2] = [
+    "^[+-][0-9]{6,}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
+    "^([0-9]{5,}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?[+-][0-9]{2}:[0-9]{2}(:[0-9]{2})?|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?[+-][0-9]{2}:[0-9]{2}(:[0-9]{2})? BC)$",
+];
+
+/// The text of a year outside 0000–9999, which a bound with a sign says the type reaches, of
+/// `past`'s two: where the caller decodes the value, or inside a document.
+fn past_years(bounds: &Bounds, past: [&'static str; 2], opts: SchemaOptions) -> Option<&'static str> {
+    let signed = [&bounds.min, &bounds.max, &bounds.exclusive_min, &bounds.exclusive_max].into_iter().flatten().any(|b| b.starts_with(['+', '-']));
+    signed.then_some(past[usize::from(opts.in_json)])
+}
+
+/// A date's or a timestamp's format and, beside it, the text of each value it refuses: a year
+/// outside 0000–9999 (`past_years`), and infinity, which Postgres writes as the text `infinity` or
+/// `-infinity`.
+fn beside_format(format: &str, past: Option<&str>, infinity: bool) -> Value {
+    let mut forms = vec![json!({"type": "string", "format": format})];
+    forms.extend(past.map(|pattern| json!({"type": "string", "pattern": pattern})));
+    if infinity {
+        forms.push(json!({"enum": ["infinity", "-infinity"]}));
+    }
+    if forms.len() == 1 { forms.remove(0) } else { json!({"anyOf": forms}) }
 }
 
 /// The values JSON writes as text when a float or a decimal holds them.
@@ -197,11 +221,11 @@ impl Type {
             // JSON Schema's `date-time` and `time` are RFC 3339's, which need a UTC offset: a value
             // that keeps one takes the format, and a wall-clock value, which is no instant, does not.
             // A time that reaches 24:00:00, as Postgres's do, is past RFC 3339's too.
-            Kind::Instant(i) => infinite(json!({"type": "string", "format": "date-time"}), i.infinity),
-            Kind::ZonedDateTime(z) if z.offset_only => infinite(json!({"type": "string", "format": "date-time"}), z.infinity),
+            Kind::Instant(i) => beside_format("date-time", past_years(&i.bounds, INSTANT_PAST, opts), i.infinity),
+            Kind::ZonedDateTime(z) if z.offset_only => beside_format("date-time", None, z.infinity),
             Kind::ZonedDateTime(_) => json!({"type": "string", "description": "a date and time with its time zone, a region or an offset"}),
             Kind::DateTime(_) => json!({"type": "string", "description": "a date and time without a time zone, as the database wrote it (2026-10-20T10:00:00.123456)"}),
-            Kind::Date(d) => infinite(json!({"type": "string", "format": "date"}), d.infinity),
+            Kind::Date(d) => beside_format("date", past_years(&d.bounds, DATE_PAST, opts), d.infinity),
             Kind::Time(t) if t.offset && t.bounds.max.as_deref() != Some("24:00:00") => json!({"type": "string", "format": "time"}),
             Kind::Time(t) if t.offset => text_of(self),
             Kind::Time(_) => json!({"type": "string", "description": "a time of day without a time zone (10:00:00.5)"}),
