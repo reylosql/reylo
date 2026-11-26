@@ -168,6 +168,64 @@ test("a session that still trusts its fingerprint takes another process's newer 
   }
 });
 
+// A migration, then its revert, on a database the session has read the fingerprint of; and a second
+// database built by the same migrations, which has not run it.
+async function migratedUnderASession(open: (root: string, env: Record<string, string>) => Promise<Session>, a: { url: string; run: (sql: string) => Promise<unknown> }, b: { url: string }, migrate: string, revert: string) {
+  const root = mkdtempSync(join(tmpdir(), "reylo-migrated-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const session = await open(root, { DATABASE_URL: a.url });
+  try {
+    assert.ok((await session.analyze("select b from u")).ok);
+    // The connection of a build step's session closes when it idles; its fingerprint is still trusted.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await a.run(migrate);
+    const during = await session.analyze("select a from t");
+    assert.ok(during.ok);
+    assert.equal(during.source, "database");
+    assert.ok(!during.analysis.columns[0]!.nullable);
+  } finally {
+    await session.close();
+  }
+  // Neither the database that has not run the migration nor the one that reverted it is served its analysis.
+  const unmigrated = await analyze(root, { DATABASE_URL: b.url }, "select a from t");
+  assert.ok(unmigrated.ok);
+  assert.ok(unmigrated.analysis.columns[0]!.nullable);
+  await a.run(revert);
+  const reverted = await analyze(root, { DATABASE_URL: a.url }, "select a from t");
+  assert.ok(reverted.ok);
+  assert.ok(reverted.analysis.columns[0]!.nullable);
+}
+
+test("an analysis made after a migration, by a session that still trusts the fingerprint from before it, is written under the migrated schema's", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "reylo-migrated-db-"));
+  // SQLite changes a column by building its table again; t is made so too, so that the revert gives back the same schema.
+  const rebuild = (a: string) => `create table t2 (a ${a}); insert into t2 select a from t; drop table t; alter table t2 rename to t;`;
+  const database = (name: string) => {
+    const exec = (sql: string) => {
+      const db = new DatabaseSync(join(dir, name));
+      db.exec(sql);
+      db.close();
+    };
+    exec("create table u (b int); create table t2 (a int); alter table t2 rename to t;");
+    return { url: `file:${join(dir, name)}`, run: async (sql: string) => exec(sql) };
+  };
+  // A session whose connection closes after 10 ms idle, as a build step's does after its last file.
+  await migratedUnderASession((root, env) => Session.open(root, env, 10), database("a.db"), database("b.db"), rebuild("int not null"), rebuild("int"));
+});
+
+test("on Postgres, an analysis made after a migration, by a session that still trusts the fingerprint from before it, is written under the migrated schema's", { skip: live }, async () => {
+  const setup = "create table u (b int); create table t (a int);";
+  const a = await postgresDatabase("reylo_migrated_a", setup);
+  const b = await postgresDatabase("reylo_migrated_b", setup);
+  try {
+    // The type check's session, which keeps its connection.
+    await migratedUnderASession((root, env) => Session.open(root, env), { url: a.url, run: (sql) => a.sql.unsafe(sql) }, b, "alter table t alter a set not null", "alter table t alter a drop not null");
+  } finally {
+    await a.drop();
+    await b.drop();
+  }
+});
+
 test("without the database, reylo/.cache/ answers as it is, and a statement it lacks is an error that says where to fill it", async () => {
   const { root, env } = project();
   assert.ok((await analyze(root, env, SELECT)).ok);
