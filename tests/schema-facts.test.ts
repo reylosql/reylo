@@ -187,10 +187,11 @@ test("Postgres: a date or a timestamptz outside 0000–9999 holds to its query's
     const fourDigits = await built("four-digits", "select jsonb_build_object('at', at, 'lmt', timestamptz '1850-01-01 00:00:00+00') as o, json_build_array(at, timestamptz '1850-01-01 00:00:00+00') as a from e where id = 2");
     await own.sql.unsafe("set time zone 'America/New_York'");
     const localMean = await fourDigits.run(own.sql);
-    assert.deepEqual(localMean[0].a, ["2025-12-31T19:00:00-05:00", "1849-12-31T19:03:58-04:56:02"]);
+    // One row by its key, which `.run()` gives alone.
+    assert.deepEqual(localMean.a, ["2025-12-31T19:00:00-05:00", "1849-12-31T19:03:58-04:56:02"]);
     await own.sql.unsafe("set time zone 'XXX-30'");
     const posixFour = await fourDigits.run(own.sql);
-    assert.deepEqual(posixFour[0].o, { at: "2026-01-02T06:00:00+30:00", lmt: "1850-01-02T06:00:00+30:00" });
+    assert.deepEqual(posixFour.o, { at: "2026-01-02T06:00:00+30:00", lmt: "1850-01-02T06:00:00+30:00" });
     const ajv = new Ajv2020({ strict: false, validateFormats: false, logger: false });
     for (const [query, result] of [[columns, rows], [document, documents], [document, posix], [document, furthest], [fourDigits, localMean], [fourDigits, posixFour]]) {
       const json = JSON.parse(JSON.stringify(result));
