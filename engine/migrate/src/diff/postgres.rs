@@ -274,15 +274,16 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
     let project_relation = |c: &str, n: &str| if platform.is_some() { "true".to_string() } else { project_relation(c, n) };
     let project_extension = |x: &str, n: &str| if platform.is_some() { "false".to_string() } else { project_extension(x, n) };
     let database_wide = |owner: &str| if platform.is_some() { "false".to_string() } else { not_platform(owner) };
+    // The history tables, and what comes with them, are left out: `c` or `t` the `pg_class` row. A
+    // table of the platform's is read whatever its name, a history table's (`auth.schema_migrations`).
+    let kept = |condition: String| if platform.is_some() { "true".to_string() } else { condition };
+    let (kept_c, kept_t, kept_rel) = (kept(pg_not_history("c")), kept(pg_not_history("t")), kept(not_history("c.relname")));
+    let pg_not_history_schema = |n: &str| kept(pg_not_history_schema(n));
     // A trigger's function, `f`: in the platform's schemas, where they are read.
     let trigger_function = match &named {
         Some(list) => format!("(select fn.nspname from pg_namespace fn where fn.oid = f.pronamespace) = any({list})"),
         None => "true".to_string(),
     };
-    // The history tables, and what comes with them, are left out: `c` or `t` the `pg_class` row.
-    let kept_c = pg_not_history("c");
-    let kept_t = pg_not_history("t");
-    let kept_rel = not_history("c.relname");
 
     for r in db
         .rows(&format!(

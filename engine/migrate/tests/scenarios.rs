@@ -6533,11 +6533,13 @@ mod adversarial {
         p.exec("do $$ begin create role supabase_auth_admin; exception when duplicate_object or unique_violation then null; end $$").await;
         p.exec(
             "create schema auth authorization supabase_auth_admin; set role supabase_auth_admin;
-            create table auth.users (id uuid primary key); create function auth.uid() returns uuid language sql as 'select null::uuid';
+            create table auth.users (id uuid primary key); create table auth.schema_migrations (version text primary key);
+            create function auth.uid() returns uuid language sql as 'select null::uuid';
             create function auth.touch() returns trigger language plpgsql as $$ begin return new; end $$;
             create trigger touch before update on auth.users for each row execute function auth.touch(); reset role;
             create function public.on_signup() returns trigger language plpgsql as $$ begin return new; end $$;
             create trigger on_signup after insert on auth.users for each row execute function public.on_signup();
+            create trigger unchanged before update on auth.users for each row execute function pg_catalog.suppress_redundant_updates_trigger();
             create policy own on auth.users using (id = auth.uid()); comment on table auth.users is 'the platform''s';",
         )
         .await;
@@ -6546,9 +6548,9 @@ mod adversarial {
         let mut shadow = server.shadow().await.unwrap();
         // Made as a role of the platform's, which every comparison leaves out: not the role connected.
         let made = shadow.db.rows("select string_agg(c.relname, ', ' order by c.relname) as r, bool_and(c.relowner <> (select oid from pg_roles where rolname = current_user))::text as theirs from pg_class c where c.relnamespace = 'auth'::regnamespace").await.unwrap();
-        assert_eq!((made[0].text("r"), made[0].text("theirs")), ("users, users_pkey", "true"));
+        assert_eq!((made[0].text("r"), made[0].text("theirs")), ("schema_migrations, schema_migrations_pkey, users, users_pkey", "true"));
         let triggers = shadow.db.rows("select string_agg(tgname, ', ' order by tgname) as t from pg_trigger where tgrelid = 'auth.users'::regclass").await.unwrap();
-        assert_eq!(triggers[0].text("t"), "touch", "the platform's trigger alone");
+        assert_eq!(triggers[0].text("t"), "touch", "the platform's trigger alone, not the project's, whose functions are outside its schemas");
         assert!(shadow.db.rows("select 1 from pg_policy").await.unwrap().is_empty(), "no policy");
         assert!(shadow.db.rows("select 1 from pg_proc where proname = 'on_signup'").await.unwrap().is_empty(), "nothing outside the platform's schemas");
         assert!(shadow.db.rows("select 1 from pg_description where objoid = 'auth.users'::regclass").await.unwrap().is_empty(), "no comment");

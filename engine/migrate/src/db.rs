@@ -1025,9 +1025,12 @@ fn without_password(url: &str) -> (String, Option<String>) {
 /// platform's schemas (`on_auth_user_created`, calling `public.handle_new_user()`).
 #[cfg(feature = "cli")]
 async fn platform_ddl(target: &mut Db, schemas: &[String]) -> Result<Vec<String>, Error> {
-    let platform = crate::diff::postgres::read_platform(target, schemas).await?;
-    let alterer = crate::diff::alterer(target).await?;
-    let plan = crate::diff::plan(&crate::diff::Schema::default(), &platform, alterer.as_ref());
+    let read = async {
+        let platform = crate::diff::postgres::read_platform(target, schemas).await?;
+        let alterer = crate::diff::alterer(target).await?;
+        Ok::<_, Error>(crate::diff::plan(&crate::diff::Schema::default(), &platform, alterer.as_ref()))
+    };
+    let plan = read.await.map_err(|e| Error(format!("reading the platform's schemas {} for shadow databases: {e}", schemas.join(", "))))?;
     Ok(plan.statements.into_iter().filter(|s| !s.trim_start().starts_with("--")).collect())
 }
 
@@ -1131,13 +1134,13 @@ async fn owned_by_platform(target: &mut Db, admin: &tokio_postgres::Client) -> R
     let mut owners: Vec<String> = rows.iter().map(|r| r.text("owner").to_string()).collect();
     owners.sort();
     owners.dedup();
-    let mut statements = if schemas.is_empty() { vec![] } else { platform_ddl(target, &schemas).await? };
-    statements.extend(schema_grants(target, &schemas).await?);
-    statements.extend(of("f").map(|r| r.text("a").to_string()));
     let extensions = of("x").map(|r| (r.text("a").to_string(), r.text("b").to_string())).collect();
     let role = SHADOW_PLATFORM_ROLE;
     let may = format!("select pg_has_role(current_user, oid, case when current_setting('server_version_num')::int >= 160000 then 'SET' else 'MEMBER' end)::text as may from pg_roles where rolname = {}", literal(role));
     if pg_rows(admin, &may).await?.first().is_some_and(|r| r.text("may") == "true") {
+        let mut statements = if schemas.is_empty() { vec![] } else { platform_ddl(target, &schemas).await? };
+        statements.extend(schema_grants(target, &schemas).await?);
+        statements.extend(of("f").map(|r| r.text("a").to_string()));
         return Ok(Owned { statements, extensions, role: Some(role.to_string()), note: None });
     }
     // The role the shadows are made as, which takes on the role to make it: `shadow_url`'s, else
@@ -1496,8 +1499,10 @@ impl Server {
                     .map(|r| (r.text("name").to_string(), r.text("schema").to_string()))
                     .collect();
                 let roles = crate::catalog::PLATFORM_ROLES.iter().map(|r| literal(r)).collect::<Vec<_>>().join(", ");
+                // Not `public`, which Postgres 14 and older made the bootstrap superuser's, a platform's
+                // role on Supabase.
                 let platform: Vec<String> = target
-                    .rows(&format!("select nspname as n from pg_namespace where pg_get_userbyid(nspowner) in ({roles}) and nspname not like 'pg\\_%' and nspname <> 'information_schema' order by 1"))
+                    .rows(&format!("select nspname as n from pg_namespace where pg_get_userbyid(nspowner) in ({roles}) and nspname not like 'pg\\_%' and nspname <> 'information_schema' and nspname <> 'public' order by 1"))
                     .await?
                     .iter()
                     .map(|r| r.text("n").to_string())
@@ -1689,13 +1694,13 @@ impl Server {
             }
             let owned_extensions: Vec<&(String, String)> = owned.extensions.iter().filter(|(e, _)| !leave.contains(&e.to_lowercase())).collect();
             if let Some(role) = owned.role.as_deref() {
-                // Its extensions after its schemas, which they may be in, and before its routines,
+                // Its extensions after its schemas, which they may be in, and before the rest of it,
                 // which may use them; one no role but a superuser may make, made by a superuser
                 // connected and given to the role.
-                let routines = owned.statements.iter().position(|st| st.starts_with("CREATE OR REPLACE ")).unwrap_or(owned.statements.len());
-                let mut statements = owned.statements[..routines].to_vec();
+                let after = owned.statements.iter().position(|st| !st.starts_with("create schema ")).unwrap_or(owned.statements.len());
+                let mut statements = owned.statements[..after].to_vec();
                 statements.extend(owned_extensions.iter().map(|(e, s)| format!("create extension if not exists {} with schema {}", ident(e), ident(s))));
-                statements.extend(owned.statements[routines..].iter().cloned());
+                statements.extend(owned.statements[after..].iter().cloned());
                 make_as(admin, &mut db, &name, role, &statements, &["USAGE", "CREATE"]).await;
                 let superuser = db.rows("select rolsuper::text as s from pg_roles where rolname = current_user").await.ok().is_some_and(|r| r.first().is_some_and(|r| r.text("s") == "true"));
                 for (extension, schema) in owned_extensions.iter().filter(|_| superuser) {
