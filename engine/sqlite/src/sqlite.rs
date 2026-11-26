@@ -3872,10 +3872,11 @@ mod tests {
 
     #[test]
     fn each_select_is_proved_once_however_deep_it_nests() {
-        let nest = |root: &str, wrap: &dyn Fn(&str) -> String| (0..40).fold(root.to_string(), |q, _| wrap(&q));
+        // Without the cache, 12 levels cost thousands of proofs, where the bound below allows 26.
+        let nest = |root: &str, wrap: &dyn Fn(&str) -> String| (0..12).fold(root.to_string(), |q, _| wrap(&q));
         let derived = |q: &str| format!("select * from ({q}) t");
         let left_join = |q: &str| format!("select b.* from (select 1 as one) a left join ({q}) b on true");
-        let with = (1..=40).fold("with c0 as (select count(*) as n from users)".to_string(), |q, i| format!("{q}, c{i} as (select n from c{})", i - 1)) + " select n from c40";
+        let with = (1..=12).fold("with c0 as (select count(*) as n from users)".to_string(), |q, i| format!("{q}, c{i} as (select n from c{})", i - 1)) + " select n from c12";
         for (sql, cardinality) in [
             (nest("select count(*) as n from users", &derived), "one"),
             (nest("select id from users where id = :id", &derived), "at_most_one"),
@@ -3885,10 +3886,14 @@ mod tests {
             (nest("select id from users where id = :id", &left_join), "one"),
             (nest("select id from users", &left_join), "many"),
         ] {
-            PROOFS.set(0);
-            assert_eq!(analysis(&sql).cardinality, cardinality, "{sql}");
+            // The analysis runs on the engine's thread, whose counter is its own: read it there.
+            let (found, proofs) = crate::stack::run(|| {
+                PROOFS.set(0);
+                (analysis(&sql).cardinality, PROOFS.get())
+            });
+            assert_eq!(found, cardinality, "{sql}");
             // Each SELECT is proved once to return exactly one row and once to return one at most.
-            assert!(PROOFS.get() <= 2 * sql.matches("select").count(), "{} proofs: {sql}", PROOFS.get());
+            assert!(proofs > 0 && proofs <= 2 * sql.matches("select").count(), "{proofs} proofs: {sql}");
         }
     }
 
