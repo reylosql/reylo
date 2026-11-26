@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { connect, createServer, type AddressInfo } from "node:net";
@@ -13,6 +14,7 @@ import { reportedDiagnostics, type Reported } from "../src/mapper-diagnostics.ts
 import { mysqlStandIn } from "./mysql-stand-in.ts";
 import { refusedLogin, Unreachable } from "../src/connection.ts";
 import { defineQuery } from "../src/index.ts";
+import { nativeBinary } from "../src/native.ts";
 import { DRIVERS, PG, mysqlDatabase, mysqlLive, postgresDatabase } from "./helpers.ts";
 
 // A throwaway Postgres server for the tests that need one, never a database anyone uses: each such
@@ -329,6 +331,54 @@ test("Postgres: the DateStyle error is no part of another style's entry, so it g
     // The order of a date's fields (ISO, DMY and ISO, MDY) is no part of how one is written.
     await sql.unsafe(`alter database ${database} reset datestyle`);
     assert.deepEqual(await checked(), ["cache", []]);
+  } finally {
+    await drop();
+  }
+});
+
+test("Postgres: under another DateStyle, reylo generate rust-sqlx and the type check write one entry, and each reads the other's as its own", { skip: live }, async () => {
+  const { url, sql, drop } = await postgresDatabase("reylo_datestyle_rust", "create table orders (id int primary key, ships_on date not null)");
+  const statement = "select id, ships_on from orders where id = :id\n";
+  // A crate whose reylo reads dates as chrono's, and a package, in one directory, which share reylo/.cache/.
+  const crate = () => {
+    const root = mkdtempSync(join(tmpdir(), "reylo-datestyle-rust-"));
+    writeFileSync(join(root, ".reylo.yaml"), `direct_url: ${JSON.stringify(url)}\n`);
+    writeFileSync(join(root, "package.json"), "{}");
+    writeFileSync(join(root, "Cargo.toml"), '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nreylo = { version = "0.9", features = ["chrono"] }\n');
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "lib.rs"), "");
+    writeFileSync(join(root, "q.sql"), statement);
+    return root;
+  };
+  const generated = (root: string) => {
+    const run = spawnSync(nativeBinary(), ["generate", "rust-sqlx", "q.sql", "--out", "queries.rs"], { cwd: root, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr + run.stdout);
+    return readFileSync(join(root, "queries.rs"), "utf8");
+  };
+  const checked = async (root: string) => {
+    const outcome = await analyze(root, {}, statement);
+    assert.ok(outcome.ok);
+    return [outcome.source, outcome.analysis.diagnostics.map((d) => d.code)];
+  };
+  const entry = (root: string) => {
+    const queries = join(root, "reylo", ".cache", "queries");
+    const [file] = readdirSync(queries);
+    return JSON.parse(readFileSync(join(queries, file!), "utf8")).analysis;
+  };
+  try {
+    await sql.unsafe(`alter database ${new URL(url).pathname.slice(1)} set datestyle = 'SQL, DMY'`);
+    // The generator first: it writes the module, since sqlx reads a date in the binary format, which
+    // no DateStyle changes, and the type check reads its entry with the error of its own, as .run()
+    // reads a date's text.
+    const first = crate();
+    const module = generated(first);
+    assert.match(module, /pub ships_on: [^,\n]*\bNaiveDate\b/);
+    assert.deepEqual(await checked(first), ["cache", [24]]);
+    // The type check first: the generator reads its entry, and writes the module it writes with none.
+    const second = crate();
+    assert.deepEqual(await checked(second), ["database", [24]]);
+    assert.deepEqual(entry(second), entry(first));
+    assert.equal(generated(second), module);
   } finally {
     await drop();
   }
