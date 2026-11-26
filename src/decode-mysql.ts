@@ -27,7 +27,7 @@ import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, coerce, columnKind, DecodeError, describe, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
 import { BUN_MYSQL, bunRows } from "./decode.ts";
 import { readMysqlError } from "./query-error.ts";
-import { vectorParameter, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { vectorParameter, wrappers, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { bareName, isMysqlSet, type EngineType } from "./engine-type.ts";
 import type { SqlMode } from "./engine-core.ts";
 
@@ -593,6 +593,7 @@ function mysqlValue(type: EngineType, v: unknown, name: string): unknown {
 export const mysql: Runtime<"mysql"> = {
   dialect: "mysql",
   run: runMysql,
+  wrappers,
   readError: readMysqlError,
   decoder: mysqlDecoder,
   encode: mysqlValue,

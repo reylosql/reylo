@@ -29,7 +29,7 @@
 import { civilFromDays, coerce, coercePostgres, columnKind, instantOfDate, DecodeError, describe, elementKind, hstoreText, isArrayValued, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresLiteral, postgresYear, rowMasks, scalarKind, textDecoder, utf8, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
 import { bareName, type EngineType } from "./engine-type.ts";
 import { lastOfEach, rowOf, type RowBuilder } from "./row.ts";
-import { arrayLiteral, asByteaHex, isJsonValue, isTime, jsonText, jsonValue, postgresText, vectorParameter, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { arrayLiteral, asByteaHex, isJsonValue, isTime, wrappers, jsonText, jsonValue, postgresText, vectorParameter, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
 
 type AnyClient = Record<string, any>;
@@ -1121,6 +1121,7 @@ function postgresRows(query: QueryModule<"postgres">, rows: unknown[]): unknown[
 export const postgres: Runtime<"postgres"> = {
   dialect: "postgres",
   run: runPostgres,
+  wrappers,
   before: checkMoneyLocale,
   after: postgresRows,
   readError: readPostgresError,

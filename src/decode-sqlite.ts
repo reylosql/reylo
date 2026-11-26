@@ -37,7 +37,7 @@
 //   only be one; a BIGINT's number within 2^53, or libSQL's BigInt or digits, is its BigInt.
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, coerce, columnKind, DecodeError, exactInteger, ParameterError, refuseTruth, truth, type Columns, type Kind } from "./values.ts";
-import { isDurableObjectSql, type AnyClient as Client, type Bound, type QueryModule, type Runtime } from "./execute.ts";
+import { executeSync, isDurableObjectSql, wrappers, type AnyClient as Client, type Bound, type QueryModule, type Runtime } from "./execute.ts";
 import { readSqliteError } from "./query-error.ts";
 import type { EngineType } from "./engine-type.ts";
 
@@ -506,6 +506,8 @@ export const sqlite: Runtime<"sqlite"> = {
   dialect: "sqlite",
   run: runSqlite,
   runSync: runSqliteSync,
+  executeSync,
+  wrappers,
   answersAtOnce: (c) => isSyncSqlite(c) || isDurableObjectSql(c),
   readError: readSqliteError,
   readErrorSync: readSqliteError,

@@ -1,6 +1,6 @@
 // The runtime query object behind `import query from "./file.sql"`.
 // Types come from the content mapper; values come from the runtime loader.
-import { compile, execute, executeSync, type ClientFor, type Dialect, type Inputs, type Marks, type QueryModule, type Runtime, type SyncClientFor } from "./execute.ts";
+import { compile, execute, refuseSync, type ClientFor, type Dialect, type Inputs, type Marks, type QueryModule, type Runtime, type SyncClientFor } from "./execute.ts";
 import type { SqlMode } from "./engine-core.ts";
 import type { CodecRuntime, Libraries, Plan } from "./codecs.ts";
 import type { StandardJSONSchemaV1, StandardTypedV1 } from "./standard.ts";
@@ -318,7 +318,8 @@ function define<Params, Row, C extends Cardinality, D extends Dialect>(runtime: 
       const values = (params ?? {}) as Record<string, unknown>;
       const runOnce = () => {
         try {
-          return materialize(executeSync(client, module, values) as Row[]);
+          if (!runtime.executeSync) throw refuseSync(`a ${dialect} statement has none`);
+          return materialize(runtime.executeSync(client, module, values) as Row[]);
         } catch (error) {
           throw named(error);
         }

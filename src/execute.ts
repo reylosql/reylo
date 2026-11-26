@@ -250,6 +250,10 @@ export type Runtime<D extends Dialect = Dialect> = {
   runSync?(c: AnyClient, query: QueryModule<D>, bound: Bound): unknown[] | Promise<unknown[]>;
   /** Whether `c` is one of the clients `runSync` takes, which `.run()` hands to it too. */
   answersAtOnce?(c: AnyClient): boolean;
+  /** `.runSync()`'s whole path (`executeSync`), for the database whose clients answer at once: any other database's refuses (`refuseSync`). */
+  executeSync?(client: SyncClientFor<D>, query: QueryModule<D>, params: ParamsInput): unknown[];
+  /** The clients Drizzle and Knex wrap, for the databases they run on (`wrappers`). */
+  readonly wrappers?: Wrappers;
   /** What `.run()` checks on the client before the statement runs (Postgres's `lc_monetary`, for a `money` parameter). */
   before?(c: AnyClient, query: QueryModule<D>): Promise<void>;
   /** The rows of an asynchronous client as `.run()` returns them, where the driver's need more (Postgres's numbers inside JSON, and its arrays' dimensions). */
@@ -305,9 +309,10 @@ export function execute<D extends Dialect>(
   query: QueryModule<D>,
   params: ParamsInput = {},
 ): unknown[] | Promise<unknown[]> {
-  const c = underneath(client as AnyClient);
-  if (isKnex(c)) return onKnexConnection(c, query.dialect, (connection) => execute(connection as ClientFor<D>, query, params));
   const { runtime } = query;
+  const c = runtime.wrappers?.underneath(client as AnyClient) ?? (client as AnyClient);
+  const lent = runtime.wrappers?.knex(c, query.dialect, (connection) => execute(connection as ClientFor<D>, query, params));
+  if (lent) return lent;
   if (runtime.answersAtOnce?.(c)) return withCodecs(query, syncRows(c, query, params));
   const rows = executeAsync(c, query, params);
   const after = runtime.after;
@@ -377,16 +382,29 @@ async function onKnexConnection(knex: AnyClient, dialect: Dialect, run: (connect
   }
 }
 
+/** A Drizzle database's client and a Knex instance's connections, for the databases Drizzle and Knex run on (`Runtime`), so that a bundle of another holds neither. */
+export type Wrappers = {
+  /** The driver's client a Drizzle database runs on (`underneath`), else `c` itself. */
+  underneath(c: AnyClient): AnyClient;
+  /** The rows of `run` on a connection a Knex instance lends, or undefined where `c` is none. */
+  knex(c: AnyClient, dialect: Dialect, run: (connection: AnyClient) => unknown[] | Promise<unknown[]>): Promise<unknown[]> | undefined;
+};
+export const wrappers: Wrappers = { underneath, knex: (c, dialect, run) => (isKnex(c) ? onKnexConnection(c, dialect, run) : undefined) };
+
 /** The synchronous path alone, for `runSync`: any other client is refused before anything runs. */
 export function executeSync<D extends Dialect>(client: SyncClientFor<D>, query: QueryModule<D>, params: ParamsInput = {}): unknown[] {
-  const c = underneath(client as unknown as AnyClient);
-  const refuse = (why: string) => new TypeError(`runSync takes a synchronous SQLite client (better-sqlite3, node:sqlite, bun:sqlite, the Database of @tursodatabase/database/compat, an oo1 Database of @sqlite.org/sqlite-wasm, sql.js's Database or a Durable Object's ctx.storage.sql); ${why}. run takes every client.`);
-  if (!query.runtime.runSync) throw refuse(`a ${query.dialect} statement has none`);
-  if (!query.runtime.answersAtOnce?.(c)) throw refuse("this client answers through a promise");
+  const c = query.runtime.wrappers?.underneath(client as unknown as AnyClient) ?? (client as unknown as AnyClient);
+  if (!query.runtime.runSync) throw refuseSync(`a ${query.dialect} statement has none`);
+  if (!query.runtime.answersAtOnce?.(c)) throw refuseSync("this client answers through a promise");
   const rows = syncRows(c, query, params);
   if (Array.isArray(rows)) return withCodecs(query, rows) as unknown[];
   rows.catch(() => {});
-  throw refuse("this client's statement answered with a promise");
+  throw refuseSync("this client's statement answered with a promise");
+}
+
+/** `.runSync()` on a client that does not answer at once, or a statement of a database that has none. */
+export function refuseSync(why: string): TypeError {
+  return new TypeError(`runSync takes a synchronous SQLite client (better-sqlite3, node:sqlite, bun:sqlite, the Database of @tursodatabase/database/compat, an oo1 Database of @sqlite.org/sqlite-wasm, sql.js's Database or a Durable Object's ctx.storage.sql); ${why}. run takes every client.`);
 }
 
 /** The rows of a client that answers at once (`Runtime`, `answersAtOnce`). */
