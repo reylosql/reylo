@@ -6222,14 +6222,15 @@ async fn reach(db: &mut Db, tables: &[(String, Option<Vec<String>>)], changes_ro
             Some(set) => rows.iter().filter(|r| r.flag("below") && (r.flag("keyed_by_expression") || r.get("keys").is_some_and(|k| k.split('\u{1f}').any(|k| set.iter().any(|c| c == k))))).map(|r| r.text("o")).collect(),
             None => vec![],
         };
-        let parent_of = |o: &str| rows.iter().find(|r| r.text("o") == o).filter(|r| r.flag("below")).map(|r| r.text("parent"));
+        // Each partition's parent, of those at or below the one written.
+        let parents: std::collections::HashMap<&str, &str> = if routes.is_empty() { Default::default() } else { rows.iter().filter(|r| r.flag("below")).map(|r| (r.text("o"), r.text("parent"))).collect() };
         let moved = |r: &crate::db::Row| {
-            let mut at = parent_of(r.text("o"));
+            let mut at = parents.get(r.text("o"));
             while let Some(p) = at.filter(|p| !p.is_empty()) {
-                if routes.contains(&p) {
+                if routes.contains(p) {
                     return true;
                 }
-                at = parent_of(p);
+                at = parents.get(p);
             }
             false
         };
