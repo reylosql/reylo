@@ -156,9 +156,11 @@ fn nests_any_deep(t: &Value) -> bool {
     t.get(NESTS).is_some()
 }
 
-/// A Postgres array type, by its name, at its innermost level.
+/// A Postgres array type, by its name, at its innermost level: its element is no Postgres array
+/// type, though it may be one the format structures as an array (`bit`, `vector`, `lseg`).
 fn postgres_array(t: &Value) -> bool {
-    kind(t) == "array" && bare_name(t).starts_with('_') && kind(&t["element"]["type"]) != "array"
+    let named = |t: &Value| kind(t) == "array" && bare_name(t).starts_with('_');
+    named(t) && !named(&t["element"]["type"])
 }
 
 fn mark_nesting(t: &Value) -> Value {
