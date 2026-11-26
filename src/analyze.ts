@@ -94,6 +94,8 @@ export class Session {
   /** What `reylo/.cache/queries` held when this session first looked. */
   #listing: string[] | undefined;
   #schema: { value: string | null; at: number; error?: string; fatal?: boolean } | undefined;
+  /** The fingerprint read last, which a spell offline leaves in place: the engine's answers are of that schema. */
+  #known: string | undefined;
 
   private constructor(engine: Engine | MissingEngine, project: ResolvedProject, idle: number, dir: string, env: Record<string, string | undefined>) {
     this.root = project.root;
@@ -375,8 +377,9 @@ export class Session {
     try {
       const rows = await io.query(FINGERPRINT[this.project.dialect], []);
       const value = createHash("sha256").update(JSON.stringify(rows)).digest("hex").slice(0, 16);
-      // The engine's answers describe the old schema too.
-      if (this.#schema?.value && this.#schema.value !== value) await io.forget().catch(() => {});
+      // The engine's answers describe the old schema too, and outlast a spell offline.
+      if (this.#known !== undefined && this.#known !== value) await io.forget().catch(() => {});
+      this.#known = value;
       this.#schema = { value, at: now };
     } catch (e) {
       if (e instanceof Unreachable) {

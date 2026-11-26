@@ -176,13 +176,15 @@ async function migratedUnderASession(open: (root: string, env: Record<string, st
   const session = await open(root, { DATABASE_URL: a.url });
   try {
     assert.ok((await session.analyze("select b from u")).ok);
-    // The connection of a build step's session closes when it idles; its fingerprint is still trusted.
+    // A build step's session closes its connection when it idles, and still trusts its fingerprint.
     await new Promise((resolve) => setTimeout(resolve, 50));
     await a.run(migrate);
     const during = await session.analyze("select a from t");
     assert.ok(during.ok);
     assert.equal(during.source, "database");
     assert.ok(!during.analysis.columns[0]!.nullable);
+    // Written, under the migrated schema's fingerprint.
+    assert.equal((JSON.parse(readFileSync(during.entry, "utf8")) as { schema: string }).schema, (await session.schema()).value);
   } finally {
     await session.close();
   }

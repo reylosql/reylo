@@ -733,7 +733,7 @@ mod tests {
         super::analyze(&dir, "select b from u").unwrap();
         run(&url, "alter table t alter a set not null");
         let (_, analysis) = super::analyze(&dir, "select a from t").unwrap();
-        assert_ne!(analysis["columns"][0]["nullable"].as_bool(), Some(true));
+        assert_eq!((analysis["columns"][0]["name"].as_str(), analysis["columns"][0]["nullable"].as_bool()), (Some("a"), None));
         let mut labels: Vec<String> = std::fs::read_dir(dir.join("reylo/.cache/queries")).unwrap().map(|e| serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(e.unwrap().path()).unwrap()).unwrap()["schema"].as_str().unwrap().to_string()).collect();
         labels.dedup();
         assert_eq!(labels.len(), 2, "both entries are labelled with the fingerprint from before the migration");
