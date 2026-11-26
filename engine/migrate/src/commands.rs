@@ -269,7 +269,7 @@ fn then(line: impl AsRef<str>, what: &[(&str, &[&str])]) -> String {
 }
 
 fn normalized(sql: &str) -> String {
-    sql.replace("\r\n", "\n").replace('\r', "\n").trim_end_matches(|c: char| c.is_ascii_whitespace()).to_string()
+    sql.replace("\r\n", "\n").trim_end_matches(|c: char| c.is_ascii_whitespace()).to_string()
 }
 
 /// A path as the person running the command reads it: relative to where they are.

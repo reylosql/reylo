@@ -5,16 +5,17 @@
 // that an edit to a comment, to spacing or to line endings is no edit there either. It runs inside
 // a Durable Object, so it imports nothing.
 
-/** The text with its line endings as `\n` and no trailing ASCII spacing. */
+/** The text with its `\r\n` line endings as `\n` and no trailing ASCII spacing. */
 export function normalized(sql: string): string {
-  return sql.replace(/\r\n?/g, "\n").replace(/[ \t\n\f\r]+$/, "");
+  return sql.replace(/\r\n/g, "\n").replace(/[ \t\n\f\r]+$/, "");
 }
 
 // Spacing is ASCII's alone, as Rust's `is_ascii_whitespace`: the databases read a U+3000 or a
 // U+00A0 outside quotes and comments as part of a name.
 const SPACING = /^[ \t\n\f\r]$/;
 const ASCII_CONTROL = /^[\x00-\x1f\x7f]$/;
-const WORD = /^[\p{Alphabetic}\p{N}_]$/u;
+// A character of a dollar quote's tag, as Postgres reads one: any past ASCII.
+const TAG = /^[A-Za-z0-9_]$|^[^\x00-\x7f]$/u;
 
 /**
  * SQL without its comments, its whitespace runs as one space, as any of the three databases reads
@@ -45,7 +46,15 @@ export function canonical(sql: string): string {
         k = b.length;
         continue;
       }
-      while (k < b.length && b[k] !== "\n") k++;
+      // Postgres ends one at a lone carriage return too, MySQL and SQLite only at a line feed.
+      let end = k;
+      while (end < b.length && b[end] !== "\n") end++;
+      if (b.slice(k, end).some((ch, j) => ch === "\r" && b[k + j + 1] !== "\n")) {
+        push(rest(k));
+        k = b.length;
+        continue;
+      }
+      k = end;
       space = true;
     } else if (c === "#") {
       // MySQL reads `#` as a line comment, Postgres as an operator: the rest is kept as written.
@@ -97,10 +106,10 @@ export function canonical(sql: string): string {
       const end = c === "`" || quotedEnd(b, k, c, true) === standard ? standard : b.length;
       push(rest(k, end));
       k = end;
-    } else if (c === "$" && (k === 0 || !WORD.test(b[k - 1]!))) {
-      // A dollar-quoted string: $tag$ … $tag$.
+    } else if (c === "$" && (k === 0 || !(TAG.test(b[k - 1]!) || b[k - 1] === "$"))) {
+      // A dollar-quoted string: $tag$ … $tag$. A `$` inside a name, as `x$$a$`, opens none.
       let tagEnd = k + 1;
-      while (tagEnd < b.length && WORD.test(b[tagEnd]!)) tagEnd++;
+      while (tagEnd < b.length && TAG.test(b[tagEnd]!)) tagEnd++;
       if (tagEnd < b.length && b[tagEnd] === "$") {
         const tag = rest(k, tagEnd + 1);
         const body = rest(tagEnd + 1);

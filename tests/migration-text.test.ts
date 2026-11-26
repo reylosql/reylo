@@ -30,7 +30,7 @@ test("comments and spacing are no edit, as the lock reads them", () => {
 });
 
 test("line endings and trailing whitespace are no edit, and a statement's change is one", () => {
-  assert.equal(normalized("a\r\nb\rc  \n\n"), "a\nb\nc");
+  assert.equal(normalized("a\r\nb\rc  \n\n"), "a\nb\rc");
   assert.ok(sameMigration("create table t (\r\n  a int -- the key\r\n);\r\n", "create table t (\n  a int\n);"));
   assert.ok(sameMigration("insert into t values ('a\r\nb');", "insert into t values ('a\nb');"));
   assert.ok(!sameMigration("create table t (a int);", "create table t (a bigint);"));
@@ -44,4 +44,12 @@ test("a space beyond ASCII is part of a name, as the databases read it", () => {
   assert.ok(!sameMigration("select 1 --\u3000x", "select 1 --\u3000; drop table users;"));
   assert.ok(!sameMigration("select 1 --\u00a0x", "select 1 --\u00a0; drop table users;"));
   assert.equal(canonical("select 1 --\u007fx\n"), "select 1");
+});
+
+test("a lone carriage return and a dollar quote's tag read as Postgres reads them", () => {
+  assert.ok(!sameMigration("-- note\rdrop table users;", "-- note\ndrop table users;"));
+  assert.ok(!sameMigration("insert into t values ('a\rb');", "insert into t values ('a\nb');"));
+  assert.equal(canonical("select 1 -- a\r\n,\r2"), "select 1 , 2");
+  assert.notEqual(canonical("select $\u3000$--\nx$\u3000$"), canonical("select $\u3000$ x$\u3000$"));
+  assert.notEqual(canonical("select x$$a$, '$a$ -- b'"), canonical("select x$$a$, '$a$ -- c'"));
 });

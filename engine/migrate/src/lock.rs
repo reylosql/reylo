@@ -174,9 +174,14 @@ pub fn canonical(sql: &str) -> String {
                 k = b.len();
                 continue;
             }
-            while k < b.len() && b[k] != '\n' {
-                k += 1;
+            // Postgres ends one at a lone carriage return too, MySQL and SQLite only at a line feed.
+            let end = (k..b.len()).find(|&j| b[j] == '\n').unwrap_or(b.len());
+            if (k..end).any(|j| b[j] == '\r' && b.get(j + 1) != Some(&'\n')) {
+                push(&mut out, &mut space, &b[k..].iter().collect::<String>());
+                k = b.len();
+                continue;
             }
+            k = end;
             space = true;
         } else if c == '#' {
             // MySQL reads `#` as a line comment, Postgres as an operator (`#`, `#>`, `#>>`): the rest
@@ -232,9 +237,10 @@ pub fn canonical(sql: &str) -> String {
             let end = if c == '`' || quoted_end(&b, k, c, true) == standard { standard } else { b.len() };
             push(&mut out, &mut space, &b[k..end].iter().collect::<String>());
             k = end;
-        } else if c == '$' && (k == 0 || !(b[k - 1].is_alphanumeric() || b[k - 1] == '_')) {
-            // A dollar-quoted string: $tag$ … $tag$.
-            let tag_end = (k + 1..b.len()).find(|&j| !(b[j].is_alphanumeric() || b[j] == '_'));
+        } else if c == '$' && (k == 0 || !(tag_char(b[k - 1]) || b[k - 1] == '$')) {
+            // A dollar-quoted string: $tag$ … $tag$. Postgres takes any character past ASCII in a
+            // tag or a name, and a `$` inside a name, as `x$$a$`, opens none.
+            let tag_end = (k + 1..b.len()).find(|&j| !tag_char(b[j]));
             match tag_end.filter(|&j| b[j] == '$') {
                 Some(j) => {
                     let tag: String = b[k..=j].iter().collect();
@@ -255,6 +261,11 @@ pub fn canonical(sql: &str) -> String {
         }
     }
     out
+}
+
+/// A character of a dollar quote's tag, as Postgres reads one.
+fn tag_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || !c.is_ascii()
 }
 
 /// Where the string or identifier quoted by `q` at `start` ends: after its closing quote (a doubled
@@ -485,6 +496,12 @@ mod tests {
         assert_ne!(canonical("select 1 --\u{3000}x"), canonical("select 1 --\u{3000}; drop table users;"));
         assert_ne!(canonical("select 1 --\u{a0}x"), canonical("select 1 --\u{a0}; drop table users;"));
         assert_eq!(canonical("select 1 --\u{7f}x\n"), "select 1");
+        // A lone carriage return ends a `--` comment on Postgres alone, and is spacing elsewhere.
+        assert_ne!(canonical("-- note\rdrop table users;"), canonical("-- note\ndrop table users;"));
+        assert_eq!(canonical("select 1 -- a\r\n,\r2"), "select 1 , 2");
+        // Postgres takes any character past ASCII in a dollar quote's tag, and none after a name's `$`.
+        assert_ne!(canonical("select $\u{3000}$--\nx$\u{3000}$"), canonical("select $\u{3000}$ x$\u{3000}$"));
+        assert_ne!(canonical("select x$$a$, '$a$ -- b'"), canonical("select x$$a$, '$a$ -- c'"));
     }
 
     #[test]
