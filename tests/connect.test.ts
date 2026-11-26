@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { connect, createServer, type AddressInfo, type Server } from "node:net";
 import { Session } from "../src/analyze.ts";
-import { engine, reason, Unreachable } from "../src/engine.ts";
+import { engine, reason, Unreachable, withVariables } from "../src/engine.ts";
 import { hostUrl } from "../src/host-url.ts";
 import { nativeBinary } from "../src/native.ts";
 import { mysqlStandIn } from "./mysql-stand-in.ts";
@@ -535,6 +535,12 @@ test("the bridge opens the MySQL socket mysql2 would, socketPath before socket, 
   ]) {
     await assert.rejects((await engine("mysql")).open(`mysql://root@localhost/app?${query}`), (e: Error) => e instanceof Unreachable && e.message.startsWith(`cannot open the socket ${path}: connect ENOENT`), query);
   }
+});
+
+test("a session's variables stand in for the process's, in every case of a name on Windows", () => {
+  const env = { pgdatabase: "other", PGHOST: "h", PATH: "/bin" };
+  assert.deepEqual(withVariables(env, { PGDATABASE: undefined, PGHOST: "db" }, "win32"), { PGHOST: "db", PATH: "/bin" });
+  assert.deepEqual(withVariables(env, { PGDATABASE: undefined, PGHOST: "db" }, "linux"), { pgdatabase: "other", PGHOST: "db", PATH: "/bin" });
 });
 
 test("PGHOST names the socket's directory where the URL names no host, as libpq reads it", async () => {

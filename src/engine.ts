@@ -328,12 +328,12 @@ function engineEnv(variables: Record<string, string | undefined> = {}): NodeJS.P
   return env;
 }
 
-/** `env` with `variables` in place of its own, one left undefined unset. */
-function withVariables(env: NodeJS.ProcessEnv, variables: Record<string, string | undefined>): NodeJS.ProcessEnv {
+/** `env` with `variables` in place of its own, one left undefined unset, in every case of its name on Windows, which reads a variable's name in any case. */
+export function withVariables(env: NodeJS.ProcessEnv, variables: Record<string, string | undefined>, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
   const out = { ...env };
   for (const [name, value] of Object.entries(variables)) {
-    if (value === undefined) delete out[name];
-    else out[name] = value;
+    for (const key of Object.keys(out)) if (key === name || (platform === "win32" && key.toUpperCase() === name.toUpperCase())) delete out[key];
+    if (value !== undefined) out[name] = value;
   }
   return out;
 }
