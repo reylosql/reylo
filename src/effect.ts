@@ -36,7 +36,7 @@ type Connection = { readonly executeUnprepared: (sql: string, params: ReadonlyAr
 type MysqlConnection = Connection & { readonly conn?: { promise?: unknown; threadId?: number; destroy?: () => void }; readonly permit?: Semaphore.Semaphore };
 
 /** The few members of a mysql2 connection the kill below calls. */
-type KillConnection = { on(event: "error", listener: () => void): unknown; query(sql: string, values: unknown[], callback: () => void): unknown; destroy(): void };
+type KillConnection = { on(event: "error", listener: () => void): unknown; query(sql: string, callback: () => void): unknown; destroy(): void };
 
 /** Each Effect SQL client's `driver`, by the dialect whose statements it runs. */
 const DRIVERS: { readonly [D in Dialect]: readonly string[] } = {
@@ -161,13 +161,16 @@ function onMysql<A>(sql: SqlClient.SqlClient, conn: Required<MysqlConnection>, r
         const end = finish;
         // A kill that fails, or a connection that cannot be made, is ignored.
         finish = () => {
-          kill?.destroy();
+          try {
+            kill?.destroy();
+          } catch {}
           end();
         };
         try {
           kill = killConnection(conn.conn);
           kill.on("error", () => {});
-          kill.query("KILL QUERY ?", [conn.conn.threadId], onKilled);
+          // The thread's number in the text, with no values, which an app's queryFormat would rewrite.
+          kill.query(`KILL QUERY ${Number(conn.conn.threadId)}`, onKilled);
         } catch {
           onKilled();
         }
