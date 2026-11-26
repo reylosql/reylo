@@ -3,7 +3,7 @@ import { symlinkSync, writeFileSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import ts from "typescript";
 import type { Db, Kind } from "../probes.ts";
-import { failed, rewrite, type Answer, type Statement, type Tool, type TypedValue, type Urls } from "./lib.ts";
+import { failed, rewrite, type Answer, type FieldShape, type Statement, type Tool, type TypedValue, type Urls } from "./lib.ts";
 
 export const root = resolve(import.meta.dirname, "..");
 export const versionOf = (pkg: string): string => JSON.parse(readFileSync(join(root, "node_modules", pkg, "package.json"), "utf8")).version;
@@ -90,11 +90,26 @@ function compile(dir: string, file: string, options: ts.CompilerOptions) {
 function readType(checker: ts.TypeChecker, type: ts.Type, readFields = true): TypedValue {
   const kinds = new Set<Kind>();
   const fields = new Set<string>();
-  const fieldTypes: Record<string, { kind: Kind; nullable: boolean }> = {};
+  const fieldTypes: FieldShape = {};
+  const elements: (FieldShape | null)[] = [];
   const labels = new Set<string>();
   let nullable = false;
   let hasArray = false;
   let hasNonArray = false;
+  const collectElement = (t: ts.Type): void => {
+    if (!readFields) return;
+    if (t.isUnion()) return t.types.forEach(collectElement);
+    if (t.flags & (ts.TypeFlags.Object) && !checker.isArrayType(t) && !checker.isTupleType(t) && ((t.aliasSymbol ?? t.getSymbol())?.getName() ?? "") !== "Date") {
+      const shape: FieldShape = {};
+      for (const p of checker.getPropertiesOfType(t)) {
+        const ft = readType(checker, checker.getTypeOfSymbol(p), false);
+        shape[p.getName()] = { kind: ft.kind, nullable: ft.nullable || !!(p.flags & ts.SymbolFlags.Optional) };
+      }
+      elements.push(shape);
+      return;
+    }
+    elements.push(null);
+  };
   const visit = (t: ts.Type, top: boolean, depth: number): void => {
     if (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) { if (top) { nullable = true; hasNonArray = true; } kinds.add("any"); return; }
     if (t.isUnion()) return t.types.forEach((x) => visit(x, top, depth));
@@ -106,7 +121,15 @@ function readType(checker: ts.TypeChecker, type: ts.Type, readFields = true): Ty
     const name = (t.aliasSymbol ?? t.getSymbol())?.getName() ?? "";
     if (name === "Date") { if (top) hasNonArray = true; return void kinds.add("time"); }
     if (/Decimal$/.test(name)) { if (top) hasNonArray = true; return void kinds.add("num"); }
-    if (checker.isArrayType(t) || checker.isTupleType(t)) { if (top) hasArray = true; kinds.add("json"); const el = checker.getTypeArguments(t as ts.TypeReference)[0]; if (el && depth < 3) visit(el, false, depth + 1); return; }
+    if (checker.isArrayType(t) || checker.isTupleType(t)) {
+      if (top) hasArray = true;
+      kinds.add("json");
+      const args = checker.getTypeArguments(t as ts.TypeReference);
+      if (top) args.forEach(collectElement);
+      const el = args[0];
+      if (el && depth < 3) visit(el, false, depth + 1);
+      return;
+    }
     if (t.flags & ts.TypeFlags.Object) {
       if (top) hasNonArray = true;
       kinds.add("json");
@@ -125,7 +148,7 @@ function readType(checker: ts.TypeChecker, type: ts.Type, readFields = true): Ty
   visit(type, true, 0);
   const kind: Kind = kinds.has("any") ? "any" : kinds.has("json") ? "json" : kinds.values().next().value ?? "any";
   const text = checker.typeToString(type, undefined, ts.TypeFormatFlags.NoTruncation | ts.TypeFormatFlags.InTypeAlias);
-  return { type: text, kind, nullable, ...(hasArray && !hasNonArray ? { array: true } : {}), fields: fields.size ? [...fields] : undefined, ...(Object.keys(fieldTypes).length ? { fieldTypes } : {}), labels: labels.size ? [...labels] : undefined };
+  return { type: text, kind, nullable, ...(hasArray && !hasNonArray ? { array: true } : {}), fields: fields.size ? [...fields] : undefined, ...(Object.keys(fieldTypes).length ? { fieldTypes } : {}), ...(elements.length ? { elements } : {}), labels: labels.size ? [...labels] : undefined };
 }
 const untyped = (t: ts.Type) => !!(t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown));
 

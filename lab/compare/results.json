@@ -86,7 +86,10 @@
           "type": "number[] | null",
           "kind": "json",
           "nullable": true,
-          "array": true
+          "array": true,
+          "elements": [
+           null
+          ]
          }
         ],
         "cardinality": "one",
@@ -3916,7 +3919,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": "one",
@@ -3961,7 +3976,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": "many",
@@ -4021,7 +4048,31 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author_id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "created_at": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": "many",
@@ -4098,7 +4149,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": "one",
@@ -4143,7 +4206,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": "many",
@@ -4220,7 +4295,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": "one",
@@ -4265,7 +4352,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": "many",
@@ -5182,7 +5281,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": "one",
@@ -5407,7 +5518,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": "one",
@@ -5632,7 +5755,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": "one",
@@ -32192,7 +32327,7 @@
    ],
    "connects": "no",
    "wrote": [
-    "?? db/0000_flawless_wolfpack.sql",
+    "?? db/0000_fluffy_bucky.sql",
     "?? db/meta/0000_snapshot.json",
     "?? db/meta/_journal.json",
     "?? db/relations.ts",
@@ -32203,7 +32338,7 @@
      "state": "n",
      "right": 0,
      "total": 1,
-     "note": "A run leaves new files to commit: `db/0000_flawless_wolfpack.sql`, `db/meta/0000_snapshot.json`, `db/meta/_journal.json`.",
+     "note": "A run leaves new files to commit: `db/0000_fluffy_bucky.sql`, `db/meta/0000_snapshot.json`, `db/meta/_journal.json`.",
      "results": []
     },
     "from-the-database": {
@@ -34752,7 +34887,95 @@
             "kind": "num",
             "nullable": true
            }
-          }
+          },
+          "elements": [
+           {
+            "constructor": {
+             "kind": "json",
+             "nullable": false
+            },
+            "catalog": {
+             "kind": "text",
+             "nullable": false
+            },
+            "charsetNr": {
+             "kind": "num",
+             "nullable": true
+            },
+            "db": {
+             "kind": "text",
+             "nullable": true
+            },
+            "schema": {
+             "kind": "text",
+             "nullable": true
+            },
+            "characterSet": {
+             "kind": "num",
+             "nullable": true
+            },
+            "decimals": {
+             "kind": "num",
+             "nullable": false
+            },
+            "default": {
+             "kind": "any",
+             "nullable": true
+            },
+            "flags": {
+             "kind": "json",
+             "nullable": false
+            },
+            "length": {
+             "kind": "num",
+             "nullable": true
+            },
+            "name": {
+             "kind": "text",
+             "nullable": false
+            },
+            "orgName": {
+             "kind": "text",
+             "nullable": false
+            },
+            "orgTable": {
+             "kind": "text",
+             "nullable": false
+            },
+            "protocol41": {
+             "kind": "bool",
+             "nullable": true
+            },
+            "table": {
+             "kind": "text",
+             "nullable": false
+            },
+            "type": {
+             "kind": "num",
+             "nullable": true
+            },
+            "columnType": {
+             "kind": "num",
+             "nullable": true
+            },
+            "zerofill": {
+             "kind": "bool",
+             "nullable": true
+            },
+            "typeName": {
+             "kind": "text",
+             "nullable": true
+            },
+            "encoding": {
+             "kind": "text",
+             "nullable": true
+            },
+            "columnLength": {
+             "kind": "num",
+             "nullable": true
+            }
+           }
+          ]
          },
          {
           "name": "length",
@@ -35683,7 +35906,95 @@
             "kind": "num",
             "nullable": true
            }
-          }
+          },
+          "elements": [
+           {
+            "constructor": {
+             "kind": "json",
+             "nullable": false
+            },
+            "catalog": {
+             "kind": "text",
+             "nullable": false
+            },
+            "charsetNr": {
+             "kind": "num",
+             "nullable": true
+            },
+            "db": {
+             "kind": "text",
+             "nullable": true
+            },
+            "schema": {
+             "kind": "text",
+             "nullable": true
+            },
+            "characterSet": {
+             "kind": "num",
+             "nullable": true
+            },
+            "decimals": {
+             "kind": "num",
+             "nullable": false
+            },
+            "default": {
+             "kind": "any",
+             "nullable": true
+            },
+            "flags": {
+             "kind": "json",
+             "nullable": false
+            },
+            "length": {
+             "kind": "num",
+             "nullable": true
+            },
+            "name": {
+             "kind": "text",
+             "nullable": false
+            },
+            "orgName": {
+             "kind": "text",
+             "nullable": false
+            },
+            "orgTable": {
+             "kind": "text",
+             "nullable": false
+            },
+            "protocol41": {
+             "kind": "bool",
+             "nullable": true
+            },
+            "table": {
+             "kind": "text",
+             "nullable": false
+            },
+            "type": {
+             "kind": "num",
+             "nullable": true
+            },
+            "columnType": {
+             "kind": "num",
+             "nullable": true
+            },
+            "zerofill": {
+             "kind": "bool",
+             "nullable": true
+            },
+            "typeName": {
+             "kind": "text",
+             "nullable": true
+            },
+            "encoding": {
+             "kind": "text",
+             "nullable": true
+            },
+            "columnLength": {
+             "kind": "num",
+             "nullable": true
+            }
+           }
+          ]
          },
          {
           "name": "length",
@@ -36266,7 +36577,95 @@
             "kind": "num",
             "nullable": true
            }
-          }
+          },
+          "elements": [
+           {
+            "constructor": {
+             "kind": "json",
+             "nullable": false
+            },
+            "catalog": {
+             "kind": "text",
+             "nullable": false
+            },
+            "charsetNr": {
+             "kind": "num",
+             "nullable": true
+            },
+            "db": {
+             "kind": "text",
+             "nullable": true
+            },
+            "schema": {
+             "kind": "text",
+             "nullable": true
+            },
+            "characterSet": {
+             "kind": "num",
+             "nullable": true
+            },
+            "decimals": {
+             "kind": "num",
+             "nullable": false
+            },
+            "default": {
+             "kind": "any",
+             "nullable": true
+            },
+            "flags": {
+             "kind": "json",
+             "nullable": false
+            },
+            "length": {
+             "kind": "num",
+             "nullable": true
+            },
+            "name": {
+             "kind": "text",
+             "nullable": false
+            },
+            "orgName": {
+             "kind": "text",
+             "nullable": false
+            },
+            "orgTable": {
+             "kind": "text",
+             "nullable": false
+            },
+            "protocol41": {
+             "kind": "bool",
+             "nullable": true
+            },
+            "table": {
+             "kind": "text",
+             "nullable": false
+            },
+            "type": {
+             "kind": "num",
+             "nullable": true
+            },
+            "columnType": {
+             "kind": "num",
+             "nullable": true
+            },
+            "zerofill": {
+             "kind": "bool",
+             "nullable": true
+            },
+            "typeName": {
+             "kind": "text",
+             "nullable": true
+            },
+            "encoding": {
+             "kind": "text",
+             "nullable": true
+            },
+            "columnLength": {
+             "kind": "num",
+             "nullable": true
+            }
+           }
+          ]
          },
          {
           "name": "length",
@@ -37451,7 +37850,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -37590,7 +38001,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -37695,7 +38118,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -44059,7 +44494,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -44101,7 +44548,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -44158,7 +44617,31 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author_id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "created_at": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -44229,7 +44712,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -44334,7 +44829,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": true
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -44402,7 +44909,16 @@
           "name": "payload",
           "type": "JsonArray | JsonObject | JsonPrimitive",
           "kind": "json",
-          "nullable": true
+          "nullable": true,
+          "elements": [
+           null,
+           null,
+           null,
+           null,
+           null,
+           null,
+           {}
+          ]
          }
         ],
         "cardinality": null,
@@ -45344,7 +45860,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -45560,7 +46088,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -45780,7 +46320,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": true
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -50451,7 +51003,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -50562,7 +51126,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -50653,7 +51229,19 @@
             "kind": "text",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -54930,7 +55518,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -55033,7 +55649,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -55080,14 +55724,20 @@
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          },
          {
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          },
          {
           "name": "raw",
@@ -55196,7 +55846,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -55299,7 +55977,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -55402,7 +56108,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -55596,7 +56330,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -55693,7 +56455,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -55740,14 +56530,20 @@
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          },
          {
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          },
          {
           "name": "raw",
@@ -55850,7 +56646,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -55947,7 +56771,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -56034,7 +56886,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -56121,7 +57001,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -56168,14 +57076,20 @@
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          },
          {
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          },
          {
           "name": "raw",
@@ -56268,7 +57182,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -56355,7 +57297,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -56409,14 +57379,20 @@
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          },
          {
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          },
          {
           "name": "raw",
@@ -56469,7 +57445,10 @@
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          }
         ],
         "cardinality": null,
@@ -56572,7 +57551,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -56675,7 +57682,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -56722,14 +57757,20 @@
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          },
          {
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          },
          {
           "name": "raw",
@@ -56782,7 +57823,10 @@
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          }
         ],
         "cardinality": null,
@@ -56879,7 +57923,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -56976,7 +58048,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -57023,14 +58123,20 @@
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          },
          {
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          },
          {
           "name": "raw",
@@ -57083,7 +58189,10 @@
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          }
         ],
         "cardinality": null,
@@ -57170,7 +58279,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -57257,7 +58394,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -57920,7 +59085,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -58071,7 +59264,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -58197,7 +59418,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -58298,14 +59547,20 @@
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          },
          {
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
           "nullable": false,
-          "array": true
+          "array": true,
+          "elements": [
+           {}
+          ]
          },
          {
           "name": "raw",
@@ -59065,7 +60320,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -59275,7 +60558,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -59455,7 +60766,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -60134,7 +61473,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -60321,7 +61688,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -60513,7 +61908,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -60526,12 +61949,10 @@
        "sql": "update users set nickname = 'anon' where id = $1 returning nickname",
        "ok": false,
        "problems": [
-        "`nickname` is typed `any`"
+        "it types each row as `any`"
        ],
        "at": [
-        {
-         "column": "nickname"
-        }
+        {}
        ],
        "answer": {
         "params": [
@@ -60543,17 +61964,11 @@
           "wrongValuePasses": "boolean"
          }
         ],
-        "columns": [
-         {
-          "name": "nickname",
-          "type": "any",
-          "kind": "any",
-          "nullable": true
-         }
-        ],
+        "columns": null,
         "cardinality": null,
-        "code": "ds.createQueryBuilder().update(User).set({ nickname: 'anon' }).where('id = :id', { id: $1 }).returning(['nickname']).execute()",
-        "raw": true
+        "code": "ds.query(\"update users set nickname = 'anon' where id = $1 returning nickname\", [])",
+        "raw": true,
+        "untyped": "any"
        }
       },
       {
@@ -60684,7 +62099,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -60787,7 +62230,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -60950,7 +62421,35 @@
             "kind": "time",
             "nullable": false
            }
-          }
+          },
+          "elements": [
+           {
+            "id": {
+             "kind": "num",
+             "nullable": false
+            },
+            "authorId": {
+             "kind": "num",
+             "nullable": false
+            },
+            "author": {
+             "kind": "json",
+             "nullable": false
+            },
+            "title": {
+             "kind": "text",
+             "nullable": false
+            },
+            "score": {
+             "kind": "num",
+             "nullable": true
+            },
+            "createdAt": {
+             "kind": "time",
+             "nullable": false
+            }
+           }
+          ]
          }
         ],
         "cardinality": null,
@@ -61040,5 +62539,5 @@
    }
   }
  },
- "at": "2026-11-26T06:13:26.154Z"
+ "at": "2026-11-26T06:29:32.771Z"
 }

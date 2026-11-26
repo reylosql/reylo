@@ -8,7 +8,8 @@ import type { Card, Db, Kind, Probe } from "../probes.ts";
 
 // `checksValues`: the tool types no parameter, and checks the value at each call instead; `wrongValuePasses` names a wrong value it let through.
 // `labels`: the string literals the type allows, as an enum's values.
-export interface TypedValue { type: string; kind: Kind; nullable: boolean; array?: boolean; fields?: string[]; fieldTypes?: Record<string, { kind: Kind; nullable: boolean }>; checksValues?: boolean; wrongValuePasses?: string; labels?: string[] }
+export type FieldShape = Record<string, { kind: Kind; nullable: boolean }>;
+export interface TypedValue { type: string; kind: Kind; nullable: boolean; array?: boolean; fields?: string[]; fieldTypes?: FieldShape; elements?: (FieldShape | null)[]; checksValues?: boolean; wrongValuePasses?: string; labels?: string[] }
 // `shown`: the parameters and row as the tool writes them in TypeScript, for a tool whose types the docs show whole. `code`: the query as an ORM's user writes it. `untyped`: what an ORM types the whole row as, when it reads nothing of the query. `raw`: the ORM's query is its raw SQL, not its typed API.
 export interface Answer { ok: boolean; error?: string; params: TypedValue[] | null; columns: (TypedValue & { name: string })[] | null; cardinality: Card | null; shown?: { params: string; row: string }; code?: string; untyped?: string; raw?: boolean }
 export interface Statement { key: string; probe: Probe; sql: string }
@@ -68,16 +69,47 @@ export type Declarations = Record<string, { name: string; optional: boolean; typ
 export function readTsType(text: string, decls: Declarations = {}, readFields = true): TypedValue {
   const src = ts.createSourceFile("t.ts", `type T = ${text};`, ts.ScriptTarget.Latest, true);
   const fields = new Set<string>();
-  const fieldTypes: Record<string, { kind: Kind; nullable: boolean }> = {};
+  const fieldTypes: FieldShape = {};
+  const elements: (FieldShape | null)[] = [];
   let nullable = false;
   let hasArray = false;
   let hasNonArray = false;
   const kinds = new Set<Kind>();
+  const readField = (typeText: string, optional: boolean) => {
+    const ft = readTsType(typeText, decls, false);
+    return { kind: ft.kind, nullable: ft.nullable || optional };
+  };
   const recordField = (name: string, typeText: string, optional: boolean) => {
     fields.add(name);
+    if (readFields) fieldTypes[name] = readField(typeText, optional);
+  };
+  const collectElement = (n: ts.TypeNode, seen: Set<string>): void => {
     if (!readFields) return;
-    const ft = readTsType(typeText, decls, false);
-    fieldTypes[name] = { kind: ft.kind, nullable: ft.nullable || optional };
+    if (ts.isParenthesizedTypeNode(n)) return collectElement(n.type, seen);
+    if (ts.isTypeOperatorNode(n)) return collectElement(n.type, seen);
+    if (ts.isUnionTypeNode(n)) return n.types.forEach((t) => collectElement(t, seen));
+    if (ts.isTypeLiteralNode(n)) {
+      const shape: FieldShape = {};
+      for (const m of n.members) if (ts.isPropertySignature(m) && m.name) shape[m.name.getText().replace(/['"]/g, "")] = readField(m.type?.getText() ?? "any", !!m.questionToken);
+      elements.push(shape);
+      return;
+    }
+    if (ts.isTypeReferenceNode(n)) {
+      const name = n.typeName.getText();
+      const d = decls[name];
+      if (d !== undefined && !seen.has(name)) {
+        const next = new Set(seen).add(name);
+        if (typeof d === "string") {
+          const s = ts.createSourceFile("t.ts", `type T = ${d};`, ts.ScriptTarget.Latest, true);
+          return collectElement((s.statements[0] as ts.TypeAliasDeclaration).type, next);
+        }
+        const shape: FieldShape = {};
+        for (const m of d) shape[m.name] = readField(m.type, m.optional);
+        elements.push(shape);
+        return;
+      }
+    }
+    elements.push(null);
   };
   const visitText = (t: string, top: boolean, seen: Set<string>) => {
     const s = ts.createSourceFile("t.ts", `type T = ${t};`, ts.ScriptTarget.Latest, true);
@@ -87,11 +119,11 @@ export function readTsType(text: string, decls: Declarations = {}, readFields = 
     if (ts.isParenthesizedTypeNode(n)) return visit(n.type, top, seen);
     if (ts.isTypeOperatorNode(n)) return visit(n.type, top, seen);
     if (ts.isUnionTypeNode(n)) return n.types.forEach((t) => visit(t, top, seen));
-    if (ts.isArrayTypeNode(n)) { if (top) hasArray = true; kinds.add("json"); return visit(n.elementType, false, seen); }
-    if (ts.isTupleTypeNode(n)) { if (top) hasArray = true; kinds.add("json"); return; }
+    if (ts.isArrayTypeNode(n)) { if (top) { hasArray = true; collectElement(n.elementType, seen); } kinds.add("json"); return visit(n.elementType, false, seen); }
+    if (ts.isTupleTypeNode(n)) { if (top) { hasArray = true; n.elements.forEach((e) => collectElement(ts.isNamedTupleMember(e) ? e.type : e, seen)); } kinds.add("json"); return; }
     if (ts.isTypeReferenceNode(n)) {
       const name = n.typeName.getText();
-      if (/^(Readonly)?Array$|^PgArray$/.test(name) && n.typeArguments) { if (top) hasArray = true; kinds.add("json"); return visit(n.typeArguments[0], false, seen); }
+      if (/^(Readonly)?Array$|^PgArray$/.test(name) && n.typeArguments) { if (top) { hasArray = true; collectElement(n.typeArguments[0], seen); } kinds.add("json"); return visit(n.typeArguments[0], false, seen); }
       const d = decls[name];
       if (d !== undefined && !seen.has(name)) {
         const next = new Set(seen).add(name);
@@ -132,7 +164,7 @@ export function readTsType(text: string, decls: Declarations = {}, readFields = 
   };
   visit((src.statements[0] as ts.TypeAliasDeclaration).type, true, new Set());
   const kind: Kind = kinds.has("any") ? "any" : kinds.has("json") ? "json" : kinds.values().next().value ?? "any";
-  return { type: text.replace(/\s+/g, " ").trim(), kind, nullable, ...(hasArray && !hasNonArray ? { array: true } : {}), fields: fields.size ? [...fields] : undefined, ...(Object.keys(fieldTypes).length ? { fieldTypes } : {}) };
+  return { type: text.replace(/\s+/g, " ").trim(), kind, nullable, ...(hasArray && !hasNonArray ? { array: true } : {}), fields: fields.size ? [...fields] : undefined, ...(Object.keys(fieldTypes).length ? { fieldTypes } : {}), ...(elements.length ? { elements } : {}) };
 }
 
 // The members of every interface and object type alias in a TypeScript file, by declared name.

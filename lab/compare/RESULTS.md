@@ -658,7 +658,7 @@ Written by `./run.sh` on 2026-11-26. Each mark comes from what the tool answered
 
 ## Drizzle 0.45.4
 
-**No codegen**: no. A run leaves new files to commit: `db/0000_flawless_wolfpack.sql`, `db/meta/0000_snapshot.json`, `db/meta/_journal.json`.
+**No codegen**: no. A run leaves new files to commit: `db/0000_fluffy_bucky.sql`, `db/meta/0000_snapshot.json`, `db/meta/_journal.json`.
 
 **Live database**: no. It types each query from the schema kept in your code, and never asks the database.
 
@@ -1390,7 +1390,7 @@ Written by `./run.sh` on 2026-11-26. Each mark comes from what the tool answered
 
 - postgres: `update users set nickname = 'anon' where id = $1 returning nickname`: `nickname` is typed `any`
 - postgres: `delete from posts where id = $1 returning title`: `title` is typed `any`
-- sqlite: `update users set nickname = 'anon' where id = $1 returning nickname`: `nickname` is typed `any`
+- sqlite: `update users set nickname = 'anon' where id = $1 returning nickname`: it types each row as `any`
 - sqlite: `delete from posts where id = $1 returning title`: `title` is typed `any`
 
 **Enums**: partly, 2 of 8

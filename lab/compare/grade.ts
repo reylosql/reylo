@@ -1,6 +1,6 @@
 // Turns each tool's answers into the comparison's marks: a mark is computed from what the tool answered and nothing else.
 import { DBS, ORM_GROUPS, CARDINALITY, EXPRESSIONS, FROM_THE_DATABASE, FROM_THE_DATABASE_KINDS, JSON_SCHEMA, JSON_SHAPES, OUTER_JOINS, PARAMETER_NULLABILITY, PARAMETER_TYPES, sqlFor, type Db, type Probe } from "./probes.ts";
-import type { Answer, TypedValue } from "./tools/lib.ts";
+import type { Answer, FieldShape, TypedValue } from "./tools/lib.ts";
 
 export type State = "y" | "p" | "n";
 // `at`: what each problem is about, a column by name, a parameter by its position, or the row count, so the docs can mark that line of the answer. `answer`: everything the tool answered, right or wrong.
@@ -50,14 +50,13 @@ function checkTyped(p: Probe, a: Answer, db: Db): Problem[] {
     if (want.array && !got.array) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, not an array`, column });
     if (want.shape && !want.shape.every((f) => got.fields?.includes(f))) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, without its fields`, column });
     if (want.shapeFields) {
-      const bad = Object.entries(want.shapeFields).some(([f, spec]) => {
-        const ft = got.fieldTypes?.[f];
-        if (!ft) return true;
-        if (spec.kind && ft.kind !== spec.kind) return true;
-        if (spec.nullable !== undefined && ft.nullable !== spec.nullable) return true;
-        return false;
+      const specs = Object.entries(want.shapeFields);
+      const okShape = (shape: FieldShape | null | undefined) => !!shape && specs.every(([f, spec]) => {
+        const ft = shape[f];
+        return !!ft && (!spec.kind || ft.kind === spec.kind) && (spec.nullable === undefined || ft.nullable === spec.nullable);
       });
-      if (bad) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, with the wrong nested field types`, column });
+      const valid = want.array ? !!got.elements?.length && got.elements.every(okShape) : okShape(got.fieldTypes);
+      if (!valid) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, with the wrong nested field types`, column });
     }
     if (want.notLiteral && /^-?\d+(?:\.\d+)?$/.test(got.type.trim())) out.push({ text: `\`${want.name}\` is typed literal \`${got.type}\`, not a number`, column });
     const named = (l: string) => got.labels?.includes(l) || new RegExp(`["']${l}["']`).test(got.type);
