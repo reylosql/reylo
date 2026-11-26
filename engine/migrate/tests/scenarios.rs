@@ -412,25 +412,44 @@ macro_rules! assert_has {
     }};
 }
 
+/// Runs a scenario on a thread of its own with the 8 MiB of stack the `reylo` binary's main thread
+/// has, where it runs every command: a debug build's poll frames through the planner come within a
+/// few percent of the 2 MiB a test's own thread has. The thread takes the test's name, which its
+/// panic names.
+fn on_a_main_threads_stack<F, Fut>(scenario: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut thread = std::thread::Builder::new().stack_size(8 << 20);
+    if let Some(name) = std::thread::current().name() {
+        thread = thread.name(name.to_string());
+    }
+    let ran = thread.spawn(move || tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(scenario())).unwrap().join();
+    if let Err(panic) = ran {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 /// One test per dialect for each scenario, `<scenario>::postgres` and so on.
 macro_rules! for_each_dialect {
     ($($scenario:ident),* $(,)?) => {$(
         mod $scenario {
-            #[tokio::test(flavor = "current_thread")]
-            async fn postgres() {
-                if let Some(p) = super::P::new(super::Dialect::Postgres).await { let url = p.url.clone(); super::$scenario(p).await; super::forget(&url).await }
+            #[test]
+            fn postgres() {
+                super::on_a_main_threads_stack(|| async { if let Some(p) = super::P::new(super::Dialect::Postgres).await { let url = p.url.clone(); super::$scenario(p).await; super::forget(&url).await } });
             }
-            #[tokio::test(flavor = "current_thread")]
-            async fn mysql() {
-                if let Some(p) = super::P::new(super::Dialect::Mysql).await { super::$scenario(p).await }
+            #[test]
+            fn mysql() {
+                super::on_a_main_threads_stack(|| async { if let Some(p) = super::P::new(super::Dialect::Mysql).await { super::$scenario(p).await } });
             }
-            #[tokio::test(flavor = "current_thread")]
-            async fn sqlite() {
-                if let Some(p) = super::P::new(super::Dialect::Sqlite).await { super::$scenario(p).await }
+            #[test]
+            fn sqlite() {
+                super::on_a_main_threads_stack(|| async { if let Some(p) = super::P::new(super::Dialect::Sqlite).await { super::$scenario(p).await } });
             }
-            #[tokio::test(flavor = "current_thread")]
-            async fn turso() {
-                if let Some(p) = super::P::turso().await { super::$scenario(p).await }
+            #[test]
+            fn turso() {
+                super::on_a_main_threads_stack(|| async { if let Some(p) = super::P::turso().await { super::$scenario(p).await } });
             }
         }
     )*};
@@ -4022,15 +4041,15 @@ async fn create_drafts_one_migration_cached_or_not(mut p: P) {
 
 macro_rules! on {
     (Turso, $($scenario:ident),* $(,)?) => {$(
-        #[tokio::test(flavor = "current_thread")]
-        async fn $scenario() {
-            if let Some(p) = P::turso().await { adversarial::$scenario(p).await }
+        #[test]
+        fn $scenario() {
+            on_a_main_threads_stack(|| async { if let Some(p) = P::turso().await { adversarial::$scenario(p).await } });
         }
     )*};
     ($dialect:ident, $($scenario:ident),* $(,)?) => {$(
-        #[tokio::test(flavor = "current_thread")]
-        async fn $scenario() {
-            if let Some(p) = P::new(Dialect::$dialect).await { let url = p.url.clone(); adversarial::$scenario(p).await; forget(&url).await }
+        #[test]
+        fn $scenario() {
+            on_a_main_threads_stack(|| async { if let Some(p) = P::new(Dialect::$dialect).await { let url = p.url.clone(); adversarial::$scenario(p).await; forget(&url).await } });
         }
     )*};
 }
