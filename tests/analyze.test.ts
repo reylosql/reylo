@@ -766,7 +766,7 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
   }
 });
 
-test("the MySQL fingerprint holds while nothing changes, and moves with a column's length, precision and scale, fractional seconds and character set, which its type carries, with a CHECK's expression and whether it is enforced, with a stored function's arguments, and with what another database holds, but for Reylo Migrate's shadows other than the URL's own", { skip: mysqlLive }, async () => {
+test("the MySQL fingerprint holds while nothing changes, and moves with a column's length, precision and scale, fractional seconds and character set, which its type carries, with a CHECK's expression and whether it is enforced, with a stored function's arguments, and with what another database holds, but for Reylo Migrate's shadows other than the URL's own, and with the account's TRIGGER privileges", { skip: mysqlLive }, async () => {
   const own = await mysqlDatabase(
     "reylo_fingerprint",
     `create table m (v varchar(20), n decimal(10,2), at datetime(3), body text character set latin1);
@@ -802,7 +802,8 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
     await own.db.query(`drop user if exists '${user}'@'%'`);
     await own.db.query(`create user '${user}'@'%'`);
     // A `_` in a granted database's name matches any character, unless escaped.
-    for (const database of [ownName, otherName, shadow]) await own.db.query(`grant all on \`${database.replaceAll("_", "\\_")}\`.* to '${user}'@'%'`);
+    const granted = (database: string) => `\`${database.replaceAll("_", "\\_")}\`.*`;
+    for (const database of [ownName, otherName, shadow]) await own.db.query(`grant all on ${granted(database)} to '${user}'@'%'`);
     let last = await fingerprint();
     assert.match(last ?? "", /^[0-9a-f]{16}$/);
     assert.equal(await fingerprint(), last);
@@ -814,7 +815,9 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
     // A statement may read another database's table or call its function, and the engine takes a
     // column of a table for a view's wherever any database has a view of that name.
     const elsewhere = [`alter table ${otherName}.t modify c varchar(10) null`, `create view ${otherName}.m as select 1 as v`, [`drop function ${otherName}.g`, `create function ${otherName}.g(x varchar(10)) returns int deterministic return x`]];
-    for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks, ...signatures, ...elsewhere]) {
+    // Without the TRIGGER privilege, a written table's triggers are hidden from the account.
+    const privileges = [`revoke trigger on ${granted(ownName)} from '${user}'@'%'`];
+    for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks, ...signatures, ...elsewhere, ...privileges]) {
       const statements = [change].flat();
       for (const statement of statements) await own.db.query(statement);
       const next = await fingerprint();

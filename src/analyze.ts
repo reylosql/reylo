@@ -715,14 +715,17 @@ const CLICKHOUSE_FINGERPRINT = `SELECT concat(version(), ' ', toString(count()),
 /**
  * MySQL: a statement may read a table, a view or a function of any database on the server
  * (`other.t`, `other.f()`), so each database's are in it but the server's own and Reylo Migrate's
- * shadows (`reylo_shadow_…`, made and dropped by each check, which no statement names), unless it
- * is the URL's, as a dry run's shadow is for its type check: the URL's with no database's name, so that a
+ * shadows (`reylo_shadow_…`, each made and dropped by one check under a name of its own, which a
+ * project's statements don't read), unless it is the URL's, as a dry run's shadow is for its type
+ * check: the URL's with no database's name, so that a
  * database built the same way under another name, beside the same others, has the same
  * fingerprint, and any other's with its own. `information_schema` lists only what the session's
- * account may reach, so an account granted only the databases its statements read sees no other.
+ * account may reach, so an account granted only the databases its statements read sees no other;
+ * and the account's TRIGGER privileges, without which a written table's triggers are hidden from it.
  */
 const MYSQL_OWN = (schema: string) => `(${schema} = database() or ${schema} not in ('mysql', 'sys', 'information_schema', 'performance_schema') and left(${schema}, 13) <> 'reylo_shadow_')`;
 const MYSQL_IN = (schema: string) => `if(${schema} = database(), '', ${schema})`;
+const MYSQL_GRANTEE = "concat('''', substring_index(current_user(), '@', 1), '''@''', substring_index(current_user(), '@', -1), '''')";
 const MYSQL_FINGERPRINT = `select concat_ws(' ', @@version, @@sql_mode, count(*), sum(crc32(x)), bit_xor(crc32(x))) from (
     select concat_ws(' ', 'c', ${MYSQL_IN("table_schema")}, table_name, column_name, ordinal_position, column_type, coalesce(character_set_name, ''), is_nullable, column_key, extra, coalesce(generation_expression, ''), sha2(column_comment, 256)) as x from information_schema.columns where ${MYSQL_OWN("table_schema")}
     union all select concat_ws(' ', 's', ${MYSQL_IN("table_schema")}, table_name, index_name, non_unique, seq_in_index, column_name) from information_schema.statistics where ${MYSQL_OWN("table_schema")}
@@ -733,6 +736,9 @@ const MYSQL_FINGERPRINT = `select concat_ws(' ', @@version, @@sql_mode, count(*)
     union all select concat_ws(' ', 'f', ${MYSQL_IN("constraint_schema")}, table_name, constraint_name, referenced_table_name, update_rule, delete_rule) from information_schema.referential_constraints where ${MYSQL_OWN("constraint_schema")}
     union all select concat_ws(' ', 'k', ${MYSQL_IN("table_schema")}, table_name, constraint_name, constraint_type, enforced) from information_schema.table_constraints where ${MYSQL_OWN("table_schema")}
     union all select concat_ws(' ', 'h', ${MYSQL_IN("constraint_schema")}, constraint_name, sha2(check_clause, 256)) from information_schema.check_constraints where ${MYSQL_OWN("constraint_schema")}
+    union all select concat_ws(' ', 'u', privilege_type) from information_schema.user_privileges where grantee = ${MYSQL_GRANTEE} and privilege_type = 'TRIGGER'
+    union all select concat_ws(' ', 'u', ${MYSQL_IN("table_schema")}, privilege_type) from information_schema.schema_privileges where grantee = ${MYSQL_GRANTEE} and privilege_type = 'TRIGGER' and ${MYSQL_OWN("table_schema")}
+    union all select concat_ws(' ', 'u', ${MYSQL_IN("table_schema")}, table_name, privilege_type) from information_schema.table_privileges where grantee = ${MYSQL_GRANTEE} and privilege_type = 'TRIGGER' and ${MYSQL_OWN("table_schema")}
   ) t`;
 /** Each dialect's schema fingerprint query. The Rust crate keeps copies (rust/reylo-build/src/fingerprint-*.sql), which tests/rust-fingerprints.test.ts holds to these. */
 export const FINGERPRINT: Record<ResolvedProject["dialect"], string> = {
