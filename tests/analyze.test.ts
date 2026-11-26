@@ -681,20 +681,33 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
   }
 });
 
-test("the MySQL fingerprint holds while nothing changes, and moves with a column's length, precision and scale, fractional seconds and character set, which its type carries, with a CHECK's expression and whether it is enforced, and with a stored function's arguments", { skip: mysqlLive }, async () => {
+test("the MySQL fingerprint holds while nothing changes, and moves with a column's length, precision and scale, fractional seconds and character set, which its type carries, with a CHECK's expression and whether it is enforced, with a stored function's arguments, and with what another database holds, but for Reylo Migrate's shadows", { skip: mysqlLive }, async () => {
   const own = await mysqlDatabase(
     "reylo_fingerprint",
     `create table m (v varchar(20), n decimal(10,2), at datetime(3), body text character set latin1);
     create table docs (j json not null, constraint j_shape check (json_schema_valid('{"type":"object","properties":{"a":{"type":"integer"}}}', j)));
     create function f(x int) returns int deterministic return x`,
   );
+  const other = await mysqlDatabase("reylo_fingerprint_other", "create table t (c int not null); create function g(x int) returns int deterministic return x");
+  const otherName = new URL(other.url).pathname.slice(1);
+  const shadow = `reylo_shadow_fingerprint_${process.pid}`;
+  // The fingerprint reads every database the account may reach, so the session's account is granted
+  // only this test's: the databases other tests make and drop meanwhile are out of its sight. A `_`
+  // in a granted database's name matches any character, unless escaped.
+  const user = `reylo_fp_${process.pid}`;
+  const grant = (database: string) => own.db.query(`grant all on \`${database.replaceAll("_", "\\_")}\`.* to '${user}'@'%'`);
+  await own.db.query(`drop user if exists '${user}'@'%'`);
+  await own.db.query(`create user '${user}'@'%'`);
+  const url = new URL(own.url);
+  url.username = user;
+  url.password = "";
   const root = mkdtempSync(join(tmpdir(), "reylo-fingerprint-"));
   writeFileSync(join(root, "package.json"), "{}");
   mkdirSync(join(root, "node_modules"));
   symlinkSync(join(DRIVERS, "mysql2"), join(root, "node_modules", "mysql2"));
   // A session per call, as a process of its own, so that none answers from a fingerprint it took.
   const fingerprint = async () => {
-    const session = await Session.open(root, { DATABASE_URL: own.url });
+    const session = await Session.open(root, { DATABASE_URL: url.href });
     try {
       return (await session.schema()).value;
     } finally {
@@ -702,6 +715,7 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
     }
   };
   try {
+    for (const database of [new URL(own.url).pathname.slice(1), otherName, shadow]) await grant(database);
     let last = await fingerprint();
     assert.match(last ?? "", /^[0-9a-f]{16}$/);
     assert.equal(await fingerprint(), last);
@@ -710,7 +724,10 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
     const checks = [`alter table docs drop check j_shape, add constraint j_shape check (json_schema_valid('{"type":"object","properties":{"a":{"type":"string"}}}', j))`, "alter table docs alter check j_shape not enforced"];
     // A parameter is typed as the argument it is passed for, and a call checked against their count.
     const signatures = ["f(x varchar(10))", "f(x varchar(10), y int)"].map((signature) => ["drop function f", `create function ${signature} returns int deterministic return x`]);
-    for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks, ...signatures]) {
+    // A statement may read another database's table or call its function, and the engine takes a
+    // column of a table for a view's wherever any database has a view of that name.
+    const elsewhere = [`alter table ${otherName}.t modify c varchar(10) null`, `create view ${otherName}.m as select 1 as v`, [`drop function ${otherName}.g`, `create function ${otherName}.g(x varchar(10)) returns int deterministic return x`]];
+    for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks, ...signatures, ...elsewhere]) {
       const statements = [change].flat();
       for (const statement of statements) await own.db.query(statement);
       const next = await fingerprint();
@@ -718,7 +735,14 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
       assert.equal(await fingerprint(), next, statements.join("; "));
       last = next;
     }
+    // A shadow database, which each check of the migrations makes and drops, and no statement reads.
+    await own.db.query(`create database ${shadow}`);
+    await own.db.query(`create table ${shadow}.t (c int)`);
+    assert.equal(await fingerprint(), last);
   } finally {
+    await own.db.query(`drop database if exists ${shadow}`);
+    await own.db.query(`drop user if exists '${user}'@'%'`);
+    await other.drop();
     await own.drop();
   }
 });

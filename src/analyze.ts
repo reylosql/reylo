@@ -636,7 +636,7 @@ function writeEntry(cache: string, file: string, entry: Entry): void {
  * kind and variadic argument, user operators and casts (the trust check reads them), view
  * definitions and column comments (a field's doc comment), and the server settings that change a statement's types;
  * and what the errors a statement may raise are read from: defaults (a domain's too), generated columns, policies and
- * operator classes on Postgres, and triggers, foreign keys, checks with their expressions and whether each is enforced, stored routines with their arguments, and the names of every other schema's stored functions on MySQL. SQLite's whole schema is
+ * operator classes on Postgres, and triggers, foreign keys, checks with their expressions and whether each is enforced, and stored routines with their arguments on MySQL. SQLite's whole schema is
  * its `sqlite_schema` table, and the functions of the SQLite that opened it are part of what an
  * analysis reads: another Node has another SQLite. A `"char"` column is cast to text:
  * `text || "char"` is ambiguous, and a query the server refuses leaves every entry unverified.
@@ -707,22 +707,32 @@ const CLICKHOUSE_FINGERPRINT = `SELECT concat(version(), ' ', toString(count()),
     UNION ALL SELECT cityHash64('f', name, create_query) FROM system.functions WHERE origin = 'SQLUserDefined'
     UNION ALL SELECT cityHash64('s', name, value) FROM system.settings WHERE changed
   )`;
+/**
+ * MySQL: a statement may read a table, a view or a function of any database on the server
+ * (`other.t`, `other.f()`), so each database's are in it but the server's own and Reylo Migrate's
+ * shadows (`reylo_shadow_…`, which no statement reads, made and dropped by each check): the URL's
+ * with no database's name, so that a database built the same way under another name has the same
+ * fingerprint, and any other's with its own. `information_schema` lists only what the session's
+ * account may reach, so an account granted only the databases its statements read sees no other.
+ */
+const MYSQL_OWN = (schema: string) => `${schema} not in ('mysql', 'sys', 'information_schema', 'performance_schema') and left(${schema}, 13) <> 'reylo_shadow_'`;
+const MYSQL_IN = (schema: string) => `if(${schema} = database(), '', ${schema})`;
+const MYSQL_FINGERPRINT = `select concat_ws(' ', @@version, @@sql_mode, count(*), sum(crc32(x)), bit_xor(crc32(x))) from (
+    select concat_ws(' ', 'c', ${MYSQL_IN("table_schema")}, table_name, column_name, ordinal_position, column_type, coalesce(character_set_name, ''), is_nullable, column_key, extra, coalesce(generation_expression, ''), sha2(column_comment, 256)) as x from information_schema.columns where ${MYSQL_OWN("table_schema")}
+    union all select concat_ws(' ', 's', ${MYSQL_IN("table_schema")}, table_name, index_name, non_unique, seq_in_index, column_name) from information_schema.statistics where ${MYSQL_OWN("table_schema")}
+    union all select concat_ws(' ', 'v', ${MYSQL_IN("table_schema")}, table_name, sha2(view_definition, 256)) from information_schema.views where ${MYSQL_OWN("table_schema")}
+    union all select concat_ws(' ', 'r', ${MYSQL_IN("routine_schema")}, routine_name, routine_type, coalesce(dtd_identifier, ''), sha2(coalesce(routine_definition, ''), 256)) from information_schema.routines where ${MYSQL_OWN("routine_schema")}
+    union all select concat_ws(' ', 'a', ${MYSQL_IN("specific_schema")}, specific_name, routine_type, ordinal_position, coalesce(parameter_mode, ''), coalesce(parameter_name, ''), dtd_identifier, coalesce(character_set_name, '')) from information_schema.parameters where ${MYSQL_OWN("specific_schema")} and ordinal_position > 0
+    union all select concat_ws(' ', 'g', ${MYSQL_IN("event_object_schema")}, event_object_table, trigger_name, event_manipulation, action_timing) from information_schema.triggers where ${MYSQL_OWN("event_object_schema")}
+    union all select concat_ws(' ', 'f', ${MYSQL_IN("constraint_schema")}, table_name, constraint_name, referenced_table_name, update_rule, delete_rule) from information_schema.referential_constraints where ${MYSQL_OWN("constraint_schema")}
+    union all select concat_ws(' ', 'k', ${MYSQL_IN("table_schema")}, table_name, constraint_name, constraint_type, enforced) from information_schema.table_constraints where ${MYSQL_OWN("table_schema")}
+    union all select concat_ws(' ', 'h', ${MYSQL_IN("constraint_schema")}, constraint_name, sha2(check_clause, 256)) from information_schema.check_constraints where ${MYSQL_OWN("constraint_schema")}
+  ) t`;
 /** Each dialect's schema fingerprint query. The Rust crate keeps copies (rust/reylo-build/src/fingerprint-*.sql), which tests/rust-fingerprints.test.ts holds to these. */
 export const FINGERPRINT: Record<ResolvedProject["dialect"], string> = {
   postgres: POSTGRES_FINGERPRINT,
   clickhouse: CLICKHOUSE_FINGERPRINT,
-  mysql: `select concat_ws(' ', @@version, @@sql_mode, count(*), sum(crc32(x)), bit_xor(crc32(x))) from (
-    select concat_ws(' ', 'c', table_name, column_name, ordinal_position, column_type, coalesce(character_set_name, ''), is_nullable, column_key, extra, coalesce(generation_expression, ''), sha2(column_comment, 256)) as x from information_schema.columns where table_schema = database()
-    union all select concat_ws(' ', 's', table_name, index_name, non_unique, seq_in_index, column_name) from information_schema.statistics where table_schema = database()
-    union all select concat_ws(' ', 'v', table_name, sha2(view_definition, 256)) from information_schema.views where table_schema = database()
-    union all select concat_ws(' ', 'r', routine_name, routine_type, coalesce(dtd_identifier, ''), sha2(coalesce(routine_definition, ''), 256)) from information_schema.routines where routine_schema = database()
-    union all select concat_ws(' ', 'a', specific_name, routine_type, ordinal_position, coalesce(parameter_mode, ''), coalesce(parameter_name, ''), dtd_identifier, coalesce(character_set_name, '')) from information_schema.parameters where specific_schema = database() and ordinal_position > 0
-    union all select concat_ws(' ', 'p', routine_schema, routine_name) from information_schema.routines where routine_schema <> database() and routine_type = 'FUNCTION'
-    union all select concat_ws(' ', 'g', event_object_table, trigger_name, event_manipulation, action_timing) from information_schema.triggers where event_object_schema = database()
-    union all select concat_ws(' ', 'f', table_name, constraint_name, referenced_table_name, update_rule, delete_rule) from information_schema.referential_constraints where constraint_schema = database()
-    union all select concat_ws(' ', 'k', table_name, constraint_name, constraint_type, enforced) from information_schema.table_constraints where table_schema = database()
-    union all select concat_ws(' ', 'h', constraint_name, sha2(check_clause, 256)) from information_schema.check_constraints where constraint_schema = database()
-  ) t`,
+  mysql: MYSQL_FINGERPRINT,
   sqlite: `select type, name, tbl_name, coalesce(sql, '') from sqlite_schema
     union all select 'function', name, type, narg from pragma_function_list order by 1, 2, 3, 4`,
 };
