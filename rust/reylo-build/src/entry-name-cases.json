@@ -20,6 +20,8 @@
   { "case": "several hosts with no port take 5432 each, never PGPORT", "env": { "PGPORT": "6543" }, "url": "postgres://app@a,b/shop", "server": "postgres://app@a,b/shop" },
   { "case": "one host with no port takes PGPORT", "env": { "PGPORT": "6543" }, "url": "postgres://app@a/shop", "server": "postgres://app@a/shop?PGPORT=6543" },
   { "case": "PGOPTIONS where the URL sets no options, which may set the search path", "env": { "PGOPTIONS": "-c search_path=tenant_1" }, "url": "postgres://app@a:5432/shop", "server": "postgres://app@a:5432/shop?PGOPTIONS=-c%20search_path%3Dtenant_1" },
+  { "case": "the scheme as the URL writes it", "url": "POSTGRES://app@db.internal/shop?DBNAME=other&dbname=shop", "server": "POSTGRES://app@db.internal/shop?dbname=shop" },
+  { "case": "a fragment, which tokio-postgres reads into the database's name", "url": "postgres://app@db.internal/shop#x", "server": "postgres://app@db.internal/shop#x" },
   { "case": "a MySQL URL reads none of libpq's variables", "env": { "PGDATABASE": "other" }, "url": "mysql://root@127.0.0.1:3306/app", "server": "mysql://root@127.0.0.1:3306/app" },
   { "case": "a MySQL socket", "url": "mysql://root@127.0.0.1:3306/app?socketPath=/tmp/mysql.sock&ssl=true", "server": "mysql://root@127.0.0.1:3306/app?socketPath=/tmp/mysql.sock" },
   { "case": "a MySQL socket's name, escaped", "url": "mysql://root@localhost/app?%73ocketPath=/tmp/a.sock", "server": "mysql://root@localhost/app?%73ocketPath=/tmp/a.sock" },
