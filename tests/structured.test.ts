@@ -93,6 +93,28 @@ test("SQLite: an insert's rows are checked and written in their order, a key lef
   }
 });
 
+test("SQLite: a real member takes the infinities `.run()` returns and -0, and refuses NaN, which SQLite stores as NULL", async () => {
+  const root = project();
+  const db = new DatabaseSync(join(root, "app.db"));
+  db.exec("create table t (id integer primary key, x real not null); insert into t values (1, 9e999), (2, -9e999)");
+  const url = "file:./app.db";
+  try {
+    const read = await built(root, url, "read_t", "select id, x from t order by id");
+    const rows = await read.run(db);
+    assert.deepEqual(plain(rows), [{ id: 1, x: Infinity }, { id: 2, x: -Infinity }]);
+    const insert = await built(root, url, "insert_t", "insert into t :t::rows(id integer not null, x real not null)");
+    await insert.run(db, { t: rows.map((r: { id: number; x: number }) => ({ ...r, id: r.id + 10 })) });
+    assert.deepEqual(db.prepare("select id, x, typeof(x) as t from t where id > 10 order by id").all().map((r) => ({ ...r })), [{ id: 11, x: Infinity, t: "real" }, { id: 12, x: -Infinity, t: "real" }]);
+    // A REAL column stores -0 as 0, as it does a bound -0, but the rows keep it.
+    const echo = await built(root, url, "echo", "select x.v from :p::rows(v real not null) as x");
+    assert.ok(Object.is((await echo.run(db, { p: [{ v: -0 }] }))[0].v, -0));
+    await assert.rejects(insert.run(db, { t: [{ id: 3, x: NaN }] }), /"x" is real, a number other than NaN; got NaN/);
+  } finally {
+    db.close();
+    await closeSessions();
+  }
+});
+
 test("SQLite: rows that leave out different keys go in one insert, each such row with its column's default copied from the catalog", async () => {
   const root = project();
   const db = new DatabaseSync(join(root, "app.db"));
@@ -294,6 +316,43 @@ returning email, name`);
   }
 });
 
+test("Postgres: NaN, the infinities and -0, as `.run()` returns them in a float or a numeric, go back in through rows on each driver and each reader", { skip: pgLive }, async () => {
+  const own = await postgresDatabase("reylo_structured_special");
+  const url = new URL(own.url);
+  const sql = own.sql;
+  const root = project("postgres");
+  const pg = driver("pg");
+  const client = new pg.Client(url.href);
+  await client.connect();
+  try {
+    await sql.unsafe(`create type pair as (a float8, b numeric);
+      create table m (id int4 primary key, f float8, r float4, n numeric, fs float8[], ns numeric[], p pair, tag text not null default 'x');
+      insert into m values (1, 'NaN', '-Infinity', 'Infinity', '{NaN,-0,NULL}', '{-Infinity,NaN}', '(Infinity,NaN)'), (2, '-0', '-0', '-Infinity', null, null, '(-0,1)')`);
+    const rows = await (await built(root, url.href, "read_m", "select id, f, r, n, fs, ns, p from m order by id")).run(sql);
+    const members = "id int4 not null, f float8, r float4, n numeric, fs float8[], ns numeric[], p pair";
+    // json_to_recordset reads the rows, and jsonb_to_record where a key left out takes its default.
+    const json = await built(root, url.href, "insert_m", `insert into m :m::rows(${members})`);
+    const jsonb = await built(root, url.href, "insert_m_tag", `insert into m :m::rows(${members}, tag? text not null)`);
+    let at = 0;
+    for (const q of [json, jsonb]) {
+      for (const db of [sql, client]) {
+        at += 10;
+        await q.run(db, { m: rows.map((r: { id: number }) => ({ ...r, id: at + r.id })) });
+      }
+    }
+    const text = await sql.unsafe("select id, f::text, r::text, n::text, fs::text, ns::text, p::text from m order by id");
+    const want = [
+      { f: "NaN", r: "-Infinity", n: "Infinity", fs: "{NaN,-0,NULL}", ns: "{-Infinity,NaN}", p: "(Infinity,NaN)" },
+      { f: "-0", r: "-0", n: "-Infinity", fs: null, ns: null, p: "(-0,1)" },
+    ];
+    assert.deepEqual(plain(text), [0, 10, 20, 30, 40].flatMap((at) => want.map((w, i) => ({ id: at + i + 1, ...w }))));
+  } finally {
+    await client.end();
+    await closeSessions();
+    await own.drop();
+  }
+});
+
 test("Postgres: rows that leave out different keys go in one insert, each such row with its column's default copied from the catalog, a sequence advancing only for those rows", { skip: pgLive }, async () => {
   const postgres = driver("postgres");
   const admin = postgres(PG, { max: 1, onnotice: () => {} });
@@ -417,6 +476,24 @@ test("MySQL: a rows insert reads each column with ERROR ON ERROR, keeps a 64-bit
     await db.end();
     await admin.query(`drop database if exists ${name}`);
     await admin.end();
+  }
+});
+
+test("MySQL: a float member keeps the -0 `.run()` returns, and refuses NaN and the infinities, which MySQL holds none of", { skip: mysqlLive }, async () => {
+  const my = await mysqlDatabase("reylo_structured_zero");
+  const root = project("mysql2");
+  try {
+    await my.db.query("create table z (id int primary key, d double not null, f float not null)");
+    await my.db.query("insert into z values (1, -0e0, -0e0)");
+    const row = await (await built(root, my.url, "read_z", "select d, f from z where id = 1")).run(my.db);
+    assert.ok(Object.is(row.d, -0) && Object.is(row.f, -0), JSON.stringify(row));
+    const insert = await built(root, my.url, "insert_z", "insert into z :z::rows(id int not null, d double not null, f float not null)");
+    await insert.run(my.db, { z: [{ id: 2, ...row }] });
+    assert.deepEqual(await my.rows("select cast(d as char) as d, cast(f as char) as f from z order by id"), [{ d: "-0", f: "-0" }, { d: "-0", f: "-0" }]);
+    for (const d of [NaN, Infinity, -Infinity]) await assert.rejects(insert.run(my.db, { z: [{ id: 3, d, f: 1 }] }), new RegExp(`"d" is double, a finite number; got ${d}\\.`));
+  } finally {
+    await closeSessions();
+    await my.drop();
   }
 });
 
