@@ -400,6 +400,26 @@ mod tests {
         }
     }
 
+    /// A year outside 0000–9999, which a bound with a sign says Postgres's date and timestamptz
+    /// reach, is none of RFC 3339's four digits: its own text stands beside the format, ISO 8601's
+    /// extended year where the caller decodes the value, and Postgres's inside a document (five
+    /// digits, or BC after the value). A date that stays within those years keeps the format alone.
+    #[test]
+    fn a_year_outside_four_digits_stands_beside_the_format() {
+        use crate::types::{Bounds, DateType, InstantType, MICROSECOND};
+        let date = Type::new(Kind::Date(DateType { bounds: Bounds::between("-4713-11-24", "+5874897-12-31"), infinity: true })).named("date");
+        let instant = Type::new(Kind::Instant(InstantType { tick: MICROSECOND.to_string(), bounds: Bounds::between("-4713-11-24T00:00:00Z", "+294276-12-31T23:59:59.999999Z"), infinity: true })).named("timestamptz");
+        let forms = |format: &str, pattern: &str| json!({"anyOf": [{"type": "string", "format": format}, {"type": "string", "pattern": pattern}, {"enum": ["infinity", "-infinity"]}]});
+        for opts in [WIRE, WIRE.as_input()] {
+            assert_eq!(date.json_schema(opts), forms("date", "^[+-][0-9]{6,}-[0-9]{2}-[0-9]{2}$"));
+            assert_eq!(instant.json_schema(opts), forms("date-time", "^[+-][0-9]{6,}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"));
+        }
+        assert_eq!(date.json_schema(IN_JSON), forms("date", "^([0-9]{5,}-[0-9]{2}-[0-9]{2}|[0-9]{4}-[0-9]{2}-[0-9]{2} BC)$"));
+        assert_eq!(instant.json_schema(IN_JSON), forms("date-time", "^([0-9]{5,}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?[+-][0-9]{2}:[0-9]{2}(:[0-9]{2})?|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?[+-][0-9]{2}:[0-9]{2}(:[0-9]{2})? BC)$"));
+        let mysql = Type::new(Kind::Date(DateType { bounds: Bounds { min: Some("0000-01-01".into()), ..Bounds::default() }, infinity: false })).named("date");
+        assert_eq!(mysql.json_schema(WIRE), json!({"type": "string", "format": "date"}));
+    }
+
     #[test]
     fn int8_as_number_changes_only_int8_where_the_caller_decodes() {
         assert_eq!(Type::integer(64).json_schema(INT8N), json!({"type": "integer", "format": "int64"}));

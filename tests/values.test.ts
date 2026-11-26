@@ -569,15 +569,32 @@ test("the kinds: a BIGINT is a BigInt, and an integer a temporary table may wide
   assert.equal(renderType(pg("int8"), true), "number", "inside a JSON document, as the database writes it");
   assert.deepEqual(typeSchema(pg("int8"), "postgres"), { type: "integer", format: "int64" });
   assert.deepEqual(typeSchema(pg("int8"), "postgres", true), { type: ["integer", "string"], format: "int64" }, "a parameter, as every driver binds it");
-  // `.run()` gives an infinite date or timestamp as the text Postgres writes for it, which no date format admits.
+  // `.run()` gives an infinite date or timestamp as the text Postgres writes for it, which no date format admits,
+  // and a year outside 0000–9999 as ISO 8601 extends it, a sign and six digits or more, which RFC 3339's four
+  // digits do not write; inside a document Postgres writes such a year its own way (five digits, or BC after it).
   assert.deepEqual(typeSchema({ kind: "instant", tick: "1/1000000", label: "timestamptz" } as EngineType, "postgres"), { type: "string", format: "date-time" });
+  const past = {
+    date: ["^[+-][0-9]{6,}-[0-9]{2}-[0-9]{2}$", "^([0-9]{5,}-[0-9]{2}-[0-9]{2}|[0-9]{4}-[0-9]{2}-[0-9]{2} BC)$"],
+    "date-time": [
+      "^[+-][0-9]{6,}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$",
+      "^([0-9]{5,}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?[+-][0-9]{2}:[0-9]{2}(:[0-9]{2})?|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?[+-][0-9]{2}:[0-9]{2}(:[0-9]{2})? BC)$",
+    ],
+  };
+  const years = {
+    date: [["-000001-06-01", "+012345-01-01", "+5874897-12-31"], ["0002-06-01 BC", "12345-01-01"]],
+    "date-time": [["-004712-01-01T00:00:00.000000Z", "+012345-01-01T00:00:00.000000Z"], ["12344-12-31T19:00:00.5-05:00", "0002-05-31T19:03:58-04:56:02 BC"]],
+  };
   for (const [t, format] of [[pg("timestamptz"), "date-time"], [pg("date"), "date"]] as const) {
-    for (const [input, inJson] of [[false, false], [true, false], [false, true]]) {
-      const schema = typeSchema(t as EngineType, "postgres", input, inJson);
-      assert.deepEqual(schema, { anyOf: [{ type: "string", format }, { enum: ["infinity", "-infinity"] }] });
-      for (const v of ["infinity", "-infinity", format === "date" ? "2026-11-22" : "2026-11-22T10:00:00Z"]) assert.equal(validate(schema as JsonSchema, v), undefined, v);
+    for (const [input, inJson] of [[false, false], [true, false], [false, true]] as const) {
+      const schema = typeSchema(t as EngineType, "postgres", input, inJson) as JsonSchema;
+      assert.deepEqual(schema, { anyOf: [{ type: "string", format }, { type: "string", pattern: past[format][+inJson] }, { enum: ["infinity", "-infinity"] }] });
+      // The year 0000, 1 BC, has four digits, which the format takes.
+      for (const v of ["infinity", "-infinity", ...(format === "date" ? ["2026-11-22", "0000-06-01"] : ["2026-11-22T10:00:00Z"]), ...years[format][+inJson]!]) assert.equal(validate(schema, v), undefined, v);
+      for (const v of years[format][+!inJson]!) assert.notEqual(validate(schema, v), undefined, v);
     }
   }
+  // A date of a database that stays within 0000–9999, MySQL's, keeps the format alone.
+  assert.deepEqual(typeSchema(my("date"), "mysql"), { type: "string", format: "date" });
   // RFC 3339's date-time, which JSON Schema's format names, needs an offset, which a wall-clock value has none of, as a result or as the parameter's text.
   const wallClock = { type: "string", description: "a date and time without a time zone, as the database wrote it (2026-10-20T10:00:00.123456)" };
   for (const input of [false, true]) {
