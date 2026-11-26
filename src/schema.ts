@@ -134,16 +134,21 @@ function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean
 }
 
 // The fields of a date's and an instant's text, each within its range: a year from 0001 to 9999, a
-// month and a day, a time of day, and an offset from UTC within RFC 3339's 23:59. The same in
-// engine/core.
+// month and a day, a time of day, and an offset from UTC within RFC 3339's 23:59 where the value
+// stands on its own. The same in engine/core.
 const YEAR = "(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})";
 const MONTH_DAY = "-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])";
 const CLOCK = "T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?";
 const OFFSET = "[+-]([01][0-9]|2[0-3]):[0-5][0-9]";
 /** ISO 8601's extended year of a value outside 0000–9999, as `isoYear` writes it: a sign and six digits or more, never `-000000`. */
 const EXTENDED_YEAR = `([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00${YEAR})`;
-/** An instant's time as Postgres writes it inside a document, its offset to the second before the zone's first standard time. */
-const DOCUMENT_TIME = `${CLOCK}${OFFSET}(:[0-5][0-9])?`;
+/**
+ * An instant's time as Postgres writes it inside a document, in the session's zone: its offset to the
+ * second before the zone's first standard time, and as far as 169 hours under a POSIX zone
+ * (`XXX-167:59:60YYY` in its summer), whose offset Postgres reads up to 168 hours and summer time
+ * moves one more; the hours in two digits below 100, as Postgres pads them.
+ */
+const DOCUMENT_TIME = `${CLOCK}[+-](([0-9]{2}|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00)`;
 
 /**
  * A year that RFC 3339's four digits do not write, as a date's or an instant's text has it: ISO

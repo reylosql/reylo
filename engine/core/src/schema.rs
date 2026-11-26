@@ -124,8 +124,9 @@ fn slot_schema(s: &Slot, opts: SchemaOptions) -> Value {
 }
 
 // The fields of a date's and an instant's text, each within its range: a year from 0001 to 9999, a
-// month and a day, a time of day, and an offset from UTC within RFC 3339's 23:59. Macros, so that
-// `concat!` joins them into the patterns below; the same in src/schema.ts.
+// month and a day, a time of day, and an offset from UTC within RFC 3339's 23:59 where the value
+// stands on its own. Macros, so that `concat!` joins them into the patterns below; the same in
+// src/schema.ts.
 macro_rules! year { () => { "(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})" }; }
 macro_rules! month_day { () => { "-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])" }; }
 macro_rules! clock { () => { "T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?" }; }
@@ -133,9 +134,11 @@ macro_rules! offset { () => { "[+-]([01][0-9]|2[0-3]):[0-5][0-9]" }; }
 // ISO 8601's extended year of a value outside 0000–9999, as the run time writes it: a sign and six
 // digits or more, never `-000000`.
 macro_rules! extended_year { () => { concat!("([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00", year!(), ")") }; }
-// An instant's time as Postgres writes it inside a document, its offset to the second before the
-// zone's first standard time.
-macro_rules! document_time { () => { concat!(clock!(), offset!(), "(:[0-5][0-9])?") }; }
+// An instant's time as Postgres writes it inside a document, in the session's zone: its offset to the
+// second before the zone's first standard time, and as far as 169 hours under a POSIX zone
+// (`XXX-167:59:60YYY` in its summer), whose offset Postgres reads up to 168 hours and summer time
+// moves one more; the hours in two digits below 100, as Postgres pads them.
+macro_rules! document_time { () => { concat!(clock!(), "[+-](([0-9]{2}|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00)") }; }
 
 /// A year that RFC 3339's four digits do not write, as a date's (`DATE_PAST`) or an instant's
 /// (`INSTANT_PAST`) text has it: ISO 8601's extended year where the caller decodes the value, and
@@ -454,7 +457,7 @@ mod tests {
             assert_eq!(instant.json_schema(opts), forms("date-time", "^([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3}))-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$"));
         }
         assert_eq!(date.json_schema(IN_JSON), forms("date", "^([1-9][0-9]{4,}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])|(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]) BC)$"));
-        assert_eq!(instant.json_schema(IN_JSON), forms("date-time", "^([1-9][0-9]{4,}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-]([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?|(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-]([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])? BC)$"));
+        assert_eq!(instant.json_schema(IN_JSON), forms("date-time", "^([1-9][0-9]{4,}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-](([0-9]{2}|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00)|(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-](([0-9]{2}|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00) BC)$"));
         let mysql = Type::new(Kind::Date(DateType { bounds: Bounds { min: Some("0000-01-01".into()), ..Bounds::default() }, infinity: false })).named("date");
         assert_eq!(mysql.json_schema(WIRE), json!({"type": "string", "format": "date"}));
     }

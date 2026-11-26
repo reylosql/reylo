@@ -175,8 +175,16 @@ test("Postgres: a date or a timestamptz outside 0000–9999 holds to its query's
     await own.sql.unsafe("set time zone 'America/New_York'");
     const documents = await document.run(own.sql);
     assert.deepEqual(documents[0], { o: { d: "0002-06-01 BC", at: "4714-12-31T19:03:58-04:56:02 BC" }, a: ["0002-06-01 BC", "4714-12-31T19:03:58-04:56:02 BC"] });
+    // A POSIX session zone takes the offset there past RFC 3339's 23:59, as far as 169 hours: the 168 Postgres reads, and
+    // an hour of summer time, which the second zone keeps in January.
+    await own.sql.unsafe("set time zone 'XXX-30'");
+    const posix = await document.run(own.sql);
+    assert.deepEqual(posix[0].a, ["0002-06-01 BC", "4713-01-02T06:00:00+30:00 BC"]);
+    await own.sql.unsafe("set time zone 'XXX-167:59:60YYY,M10.1.0,M3.3.0'");
+    const furthest = await document.run(own.sql);
+    assert.deepEqual(furthest[0].o, { d: "0002-06-01 BC", at: "4713-01-08T01:00:00+169:00 BC" });
     const ajv = new Ajv2020({ strict: false, validateFormats: false, logger: false });
-    for (const [query, result] of [[columns, rows], [document, documents]]) {
+    for (const [query, result] of [[columns, rows], [document, documents], [document, posix], [document, furthest]]) {
       const json = JSON.parse(JSON.stringify(result));
       assert.equal(validate(query.outputSchema, json), undefined);
       assert.ok(ajv.validate(query.outputSchema, json), ajv.errorsText());
