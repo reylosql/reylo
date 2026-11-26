@@ -93,13 +93,21 @@ const learnedOf = (key: object): Learned => {
   return l;
 };
 
+/**
+ * Whether a column's kind, as its module gives it, outranks what a client learned of its oid: a row
+ * value's, whose oid says nothing of its fields, and an array of whole arrays', which the catalog
+ * reads as text where a domain is over an array of a type the database created.
+ */
+const byModule = (kind: Kind) => isRowKind(kind) || wholeArrayKind(elementKind(kind)) !== undefined;
+
 /** Rows as arrays of text, from a query that reads the catalog. */
 type Load = (sql: string) => Promise<(string | null)[][]>;
 
 // Every type among `oids`, and every array type's element, with its base type through any number
 // of domains and that base type's name (an array of a type whose own output is an array stays
-// text), a row type's fields as a JSON array of each one's name and type, and a range's or a
-// multirange's subtype. An oid goes out as int8, since one above 2^31 would wrap as int4.
+// text, unless it is a domain over a built-in array), a row type's fields as a JSON array of each
+// one's name and type, and a range's or a multirange's subtype. An oid goes out as int8, since one
+// above 2^31 would wrap as int4.
 const catalogSql = (oids: number[]) => {
   const list = `'{${oids.map((o) => Math.trunc(o)).join(",")}}'::pg_catalog.oid[]`;
   return `with recursive d(oid, base) as (
@@ -143,12 +151,15 @@ async function learn(key: object, oids: Iterable<number>, load: Load): Promise<v
   for (const [array, base, isText, delim, oid, name] of rows) {
     const fields = rowTypes.get(Number(base));
     const range = subtypes.get(Number(base));
-    const element = fields !== undefined ? rowKind(fields) : range !== undefined ? `${range.range}:${(builtin(range.subtype) ?? known.get(range.subtype))?.kind ?? "text"}` : isText === "true" ? undefined : (builtin(Number(base))?.kind ?? (name ? scalarKind(name) : "text"));
+    // A domain over an array is a whole array as an element of one (src/values.ts, `{k}`), where
+    // its base is a built-in array whose elements a comma separates; any other stays text.
+    const whole = isText === "true" && fields === undefined ? builtin(Number(base)) : undefined;
+    const element = fields !== undefined ? rowKind(fields) : range !== undefined ? `${range.range}:${(builtin(range.subtype) ?? known.get(range.subtype))?.kind ?? "text"}` : whole?.kind.endsWith("[]") && whole.delim === "," ? `{${whole.kind}}` : isText === "true" ? undefined : (builtin(Number(base))?.kind ?? (name ? scalarKind(name) : "text"));
     if (missing.has(Number(array))) {
       arrays.add(Number(array));
       known.set(Number(array), element === undefined || element.endsWith("[]") ? { kind: "text", delim: "," } : { kind: `${element}[]`, delim: delim ?? "," });
     }
-    if (missing.has(Number(oid)) && !arrays.has(Number(oid))) known.set(Number(oid), { kind: element ?? "text", delim: "," });
+    if (missing.has(Number(oid)) && !arrays.has(Number(oid))) known.set(Number(oid), { kind: wholeArrayKind(element ?? "") ?? element ?? "text", delim: "," });
   }
   for (const oid of missing) if (!known.has(oid)) known.set(oid, { kind: "text", delim: "," });
 }
@@ -166,7 +177,7 @@ async function fieldDecoders(fields: Field[], columns: Columns | undefined, key:
   else if (created.length) await learn(key, created.map((f) => f.oid), load);
   return fields.map((f, i) => {
     const column = byColumn?.[i];
-    if (column && isRowKind(column[1])) return textDecoder(column[1], column[2]);
+    if (column && byModule(column[1])) return textDecoder(column[1], column[2]);
     const b = builtinDecoder(f.oid);
     if (b) return b;
     const k = known.get(f.oid) ?? { kind: "text", delim: "," };
@@ -237,10 +248,11 @@ async function pgFamily(key: object, run: (types: object) => Promise<PgResult>, 
   const result = await run(types.table);
   const rows = Array.isArray(result) ? (result as Record<string, unknown>[]) : result.rows;
   if (types.sawBinary()) throw refuseBinary();
-  // The table goes by oid, which says nothing of a built-in row's fields, so those are still text.
-  const rowColumns = columns?.filter(([, kind]) => isRowKind(kind));
-  if (rowColumns?.length) {
-    const decoders = rowColumns.map(([name, kind, delim]) => [name, textDecoder(kind, delim)] as const);
+  // The table goes by oid, which says nothing of a built-in row's fields, so those are still text,
+  // as an array of whole arrays may be.
+  const moduleColumns = columns?.filter(([, kind]) => byModule(kind));
+  if (moduleColumns?.length) {
+    const decoders = moduleColumns.map(([name, kind, delim]) => [name, textDecoder(kind, delim)] as const);
     for (const row of rows) {
       for (const [name, decode] of decoders) {
         const v = row[name];
@@ -1014,7 +1026,7 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
 function postgresDecoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined): (v: string) => unknown {
   const decode = textDecoder(kind, delim);
   const numbers = nonFinite === undefined ? decode : (v: string) => numbersInJson(decode(v), nonFinite, name);
-  return kind.endsWith("[]") && !nestedArrays ? (v) => withinDimensions(numbers(v), kind, name, v) : numbers;
+  return kind.endsWith("[]") && !nestedArrays ? (v) => withinDimensions(numbers(v), kind, name) : numbers;
 }
 
 /** Postgres's half of the run time (src/execute.ts, `Runtime`), which `definePostgresQuery` passes. */

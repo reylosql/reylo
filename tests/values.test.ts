@@ -940,9 +940,17 @@ test("Postgres: an array of a domain over an array type holds each element as a 
     assert.deepEqual(decode(text), value, text);
     assert.deepEqual(coerce(kind, text, "x"), value, text);
   }
-  assert.deepEqual(withinDimensions(decode('{"{1,2}",NULL,"{}"}'), kind, "x", '{"{1,2}",NULL,"{}"}'), [[1, 2], null, []]);
-  // Two dimensions of the array, or of one of its elements, are refused, though both read [[[1, 2]]].
-  for (const text of ['{{"{1,2}"}}', '{"{{1,2}}"}', '{{"{1,2}"},{NULL}}']) assert.throws(() => withinDimensions(decode(text), kind, "x", text), /Column "x" holds an array of 2 dimensions, and its type has one/, text);
+  assert.deepEqual(withinDimensions(decode('{"{1,2}",NULL,"{}"}'), kind, "x"), [[1, 2], null, []]);
+  // Two dimensions of the array, or of one of its elements, are refused, though both read [[[1, 2]]],
+  // and so are two of NULL elements, which read as one element holding NULL.
+  for (const text of ['{{"{1,2}"}}', '{"{{1,2}}"}', "{{NULL},{NULL}}"]) {
+    for (const value of [decode(text), coerce(kind, text, "x")]) assert.throws(() => withinDimensions(value, kind, "x"), /Column "x" holds an array of 2 dimensions, and its type has one/, text);
+  }
+  // A domain over an array of that domain holds whole arrays at each of its levels.
+  const deeper = withBases(array(array(array(pg("int4"), true, "public.ints"), true, "public.intss"), true, "public._intss"), { "public.ints": "_int4", "public.intss": "public._ints" });
+  assert.equal(columnKind(deeper, "postgres"), "{{int[]}[]}[]");
+  assert.deepEqual(withinDimensions(textDecoder("{{int[]}[]}[]")('{"{\\"{1}\\",NULL}"}'), "{{int[]}[]}[]", "x"), [[[1], null]]);
+  assert.throws(() => withinDimensions(textDecoder("{{int[]}[]}[]")('{"{{NULL}}"}'), "{{int[]}[]}[]", "x"), /holds an array of 2 dimensions/);
   // As a parameter, each element is the text of its array.
   const calls: unknown[][] = [];
   const client = pgPool(async (_text: string, bound: unknown[]) => (calls.push(bound), { rows: [], rowCount: 0 }));

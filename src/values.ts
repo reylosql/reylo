@@ -769,10 +769,22 @@ export const RANGE_BOUNDS = ["[)", "[]", "(]", "()"] as const;
 /** A range's kind, `range:<subtype's kind>`, and a multirange's, `multirange:<subtype's kind>`. */
 export const isRangeKind = (kind: Kind): boolean => kind.startsWith("range:");
 export const isMultirangeKind = (kind: Kind): boolean => kind.startsWith("multirange:");
-/** Whether one value of `kind` is itself a JavaScript array (a vector, a segment, a polygon, a multirange, a whole array), so that an array of them is no deeper dimension. */
-export const isArrayValued = (kind: Kind): boolean => kind === "vector" || kind === "lseg" || kind === "polygon" || isMultirangeKind(kind) || wholeArrayKind(kind) !== undefined;
+/** Whether one value of `kind` is itself a JavaScript array (a vector, a segment, a polygon, a multirange), so that an array of them is no deeper dimension. */
+export const isArrayValued = (kind: Kind): boolean => kind === "vector" || kind === "lseg" || kind === "polygon" || isMultirangeKind(kind);
 /** The kind of a whole array standing as an element, `int[]` of `{int[]}`; undefined for any other kind. */
 export const wholeArrayKind = (kind: Kind): Kind | undefined => (kind.startsWith("{") && kind.endsWith("}") ? kind.slice(1, -1) : undefined);
+
+/**
+ * The dimensions of each array of whole arrays decoded from its text, a `{` for each before its
+ * first element (after any bounds, `[0:1]=`): its value alone can't tell its own levels from its
+ * elements' (`[[null]]` is one level of an element `{NULL}`, or two of NULL elements), which
+ * `withinDimensions` reads here.
+ */
+const wholeDepths = new WeakMap<unknown[], number>();
+function recordDepth(text: string, v: unknown[]): unknown[] {
+  wholeDepths.set(v, /^(?:\[[^=]*=)?(\{*)/.exec(text)![1]!.length);
+  return v;
+}
 const subtypeKind = (kind: Kind): Kind => kind.slice(kind.indexOf(":") + 1);
 
 /** A range from its text, each bound by `bound`. */
@@ -1075,17 +1087,17 @@ export function parseArray(text: string, element: (text: string) => unknown, del
  * An element that is an array itself (a vector, a segment, a polygon, a multirange) is one level
  * more; a JSON element may be one at any depth, which its type holds whatever the dimensions around it.
  * A whole array standing as an element (`{k}`) is held to its own kind's, and the array around it to
- * its own by `text`, the array's text, where the value came from one.
+ * its own by the dimensions its text had (`recordDepth`).
  */
-export function withinDimensions(v: unknown, kind: Kind, column: string, text?: string): unknown {
+export function withinDimensions(v: unknown, kind: Kind, column: string): unknown {
   const element = elementKind(kind);
   if (!Array.isArray(v) || element === "json") return v;
   const declared = (kind.length - element.length) / 2;
   const whole = wholeArrayKind(element);
   if (whole !== undefined) {
-    // An array of whole arrays: only its text tells its own levels from its elements', a `{` for
-    // each of its dimensions before the first element; each element is held to its own.
-    const depth = text === undefined ? declared : /^(?:\[[^=]*=)?(\{*)/.exec(text)![1]!.length;
+    // An array of whole arrays: only its text told its own levels from its elements' (a driver's
+    // own arrays are taken at the levels declared); each element is held to its own.
+    const depth = wholeDepths.get(v) ?? declared;
     if (depth > declared) throw tooDeep(column, depth, declared);
     const each = (level: unknown[], at: number): void => {
       for (const e of level) if (Array.isArray(e)) at > 1 ? each(e, at - 1) : withinDimensions(e, whole, column);
@@ -1158,6 +1170,7 @@ export function textDecoder(kind: Kind, delim = ","): Decoder {
   if (whole !== undefined) return textDecoder(whole);
   if (kind.endsWith("[]")) {
     const element = textDecoder(elementKind(kind), delim);
+    if (wholeArrayKind(elementKind(kind)) !== undefined) return (x) => recordDepth(x, parseArray(x, element, delim));
     return isRowKind(elementKind(kind)) && delim === "," ? rowsDecoder(element) : (x) => parseArray(x, element, delim);
   }
   if (isRowKind(kind)) return rowDecoder(kind);
@@ -1338,7 +1351,10 @@ export function coerce(kind: Kind, v: unknown, column: string, delim = ",", post
   if (whole !== undefined) return coerce(whole, v, column, ",", postgres);
   if (kind.endsWith("[]")) {
     const element = elementKind(kind);
-    if (typeof v === "string") return parseArray(v, (s) => coerce(element, s, column, ",", postgres), delim);
+    if (typeof v === "string") {
+      const parsed = parseArray(v, (s) => coerce(element, s, column, ",", postgres), delim);
+      return wholeArrayKind(element) === undefined ? parsed : recordDepth(v, parsed);
+    }
     if (Array.isArray(v)) return v.map((e) => (Array.isArray(e) && wholeArrayKind(element) === undefined ? coerce(kind, e, column, delim, postgres) : coerce(element, e, column, ",", postgres)));
     // A MySQL VECTOR's bytes: no driver gives any other array of floats as bytes.
     if (element === "float" && isBytes(v)) return float32s(v, column);

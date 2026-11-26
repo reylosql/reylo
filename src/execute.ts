@@ -726,7 +726,7 @@ export const isTime = (type: EngineType | undefined, dialect: Dialect) => type !
 function checkTime(type: EngineType | undefined, name: string, v: unknown, dialect: Dialect): void {
   if (type === undefined || v == null) return;
   if (type.kind === "array") {
-    if (Array.isArray(v)) for (const e of v) checkTime(Array.isArray(e) ? type : type.element.type, name, e, dialect);
+    if (Array.isArray(v)) for (const e of v) checkTime(Array.isArray(e) && !holdsWholeArrays(type) ? type : type.element.type, name, e, dialect);
     return;
   }
   const kind = columnKind(type, dialect);
@@ -750,7 +750,7 @@ function checkTime(type: EngineType | undefined, name: string, v: unknown, diale
 function checkBinary(type: EngineType | undefined, name: string, v: unknown, dialect: Dialect): void {
   if (type === undefined || v == null) return;
   if (type.kind === "array" && columnKind(type, dialect).endsWith("[]")) {
-    if (Array.isArray(v)) for (const e of v) checkBinary(Array.isArray(e) ? type : type.element.type, name, e, dialect);
+    if (Array.isArray(v)) for (const e of v) checkBinary(Array.isArray(e) && !holdsWholeArrays(type) ? type : type.element.type, name, e, dialect);
     return;
   }
   if (columnKind(type, dialect) !== "bytes" || v instanceof Uint8Array) return;
