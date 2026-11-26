@@ -1361,10 +1361,9 @@ export function float32s(bytes: Uint8Array, column: string): number[] {
 export function coerce(kind: Kind, v: unknown, column: string, delim = ",", postgres = false): unknown {
   if (v === null || v === undefined) return null;
   const whole = wholeArrayKind(kind);
-  if (whole !== undefined) {
-    const out = coerce(whole, v, column, ",", postgres);
-    return typeof v === "string" ? recordDepth(v, out) : out;
-  }
+  // A whole array still in its text is the server's text, which a driver that parsed the array
+  // around it left as it was.
+  if (whole !== undefined) return typeof v === "string" ? textDecoder(kind)(v) : coerce(whole, v, column, ",", postgres);
   if (kind.endsWith("[]")) {
     const element = elementKind(kind);
     if (typeof v === "string") {

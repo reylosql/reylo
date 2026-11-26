@@ -951,6 +951,10 @@ test("Postgres: an array of a domain over an array type holds each element as a 
   }
   // An array a driver parsed, as PGlite's own parser does, holds each element's text: its arrays are its levels.
   assert.deepEqual(withinDimensions(coerce(kind, ["{1,2}", null], "x"), kind, "x"), [[1, 2], null]);
+  // Each element's text reads as the server's, as it does unparsed.
+  const floats = withBases(array(array(pg("float8"), true, "public.floats"), true, "public._floats"), { "public.floats": "_float8" });
+  assert.deepEqual(coerce(columnKind(floats, "postgres"), ["{NaN,1}"], "x"), textDecoder(columnKind(floats, "postgres"))('{"{NaN,1}"}'));
+  assert.deepEqual(coerce(columnKind(floats, "postgres"), ["{NaN,1}"], "x"), [[NaN, 1]]);
   for (const parsed of [[["{1,2}"]], [[null]]]) assert.throws(() => withinDimensions(coerce(kind, parsed, "x"), kind, "x"), /holds an array of 2 dimensions/, JSON.stringify(parsed));
   // Each element is held to its own dimensions by its text, whatever its elements are: segments, or JSON.
   for (const [base, ok, deep] of [["lseg", '{"{\\"[(1,2),(3,4)]\\"}"}', '{"{{NULL}}"}'], ["jsonb", '{"{\\"[1,2]\\"}"}', '{"{{\\"[1]\\"}}"}']] as const) {
