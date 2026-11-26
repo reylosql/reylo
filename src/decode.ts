@@ -352,6 +352,7 @@ const isPglite = (c: AnyClient) => typeof c.query === "function" && typeof c.exe
 /** The oids each statement's result had on its earlier runs, by the statement's text: PGlite's per-query table names only those. */
 const pgliteOids = new Map<string, Set<number>>();
 const PGLITE_STATEMENTS = 2000;
+const BYTEA = 17;
 // Listed on PGlite's first statement, so that a bundle of another database's queries holds neither table.
 let builtinOids: number[] | undefined;
 const keepText = (x: string) => x;
@@ -364,7 +365,12 @@ async function pglite(db: AnyClient, text: string, values: unknown[], columns: C
   const oids = named ?? new Set([...builtinOids, ...Object.keys(db.parsers ?? {}).map(Number)]);
   const parsers: Record<number, Decoder> = {};
   for (const oid of oids) parsers[oid] = builtinDecoder(oid) ?? keepText;
-  const result = await db.query(text, values, { rowMode: "object", parsers });
+  // PGlite picks each parameter's serializer by the oid the server describes, which for a domain
+  // over bytea is the domain's own, with no serializer: a Uint8Array went as its toString(),
+  // `222,173`, and was stored as the bytes of that text (electric-sql/pglite#1244). Its parameter
+  // is declared bytea, which PGlite writes as the bytes and the server coerces to the domain.
+  const paramTypes = values.some((v) => v instanceof Uint8Array) ? values.map((v) => (v instanceof Uint8Array ? BYTEA : 0)) : undefined;
+  const result = await db.query(text, values, { rowMode: "object", parsers, ...(paramTypes && { paramTypes }) });
   const rows: Record<string, unknown>[] = result.rows;
   const fields: Field[] = (result.fields ?? []).map((f: { name: string; dataTypeID: number }) => ({ name: f.name, oid: f.dataTypeID }));
   // Created types, which the table kept as text, an oid the table did not name, which went through
