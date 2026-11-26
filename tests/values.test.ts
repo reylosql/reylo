@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { execute, type QueryModule } from "./run.ts";
 import { renderParamType, renderType } from "../src/render.ts";
 import { typeSchema } from "../src/schema.ts";
-import { coerce, columnKind, DecodeError, duration, hstore, hstoreText, instant, kindType, money, numbersInJson, parseRow, postgresInterval, postgresLiteral, postgresYear, rowMasks, scalarKind, textDecoder, withinDimensions } from "../src/values.ts";
+import { coerce, coercePostgres, columnKind, DecodeError, duration, hstore, hstoreText, instant, kindType, money, numbersInJson, parseRow, postgresInterval, postgresLiteral, postgresYear, rowMasks, scalarKind, textDecoder, withinDimensions } from "../src/values.ts";
 import type { EngineType, JsonSchema } from "../src/engine-type.ts";
 import { validate } from "../src/json-schema.ts";
 import { array, field, lite, my, oneOf, pg, record } from "./descriptors.ts";
@@ -76,7 +76,7 @@ test("a geometric type is an object of its fields, declared and decoded alike, a
     const kind = columnKind(t, "postgres");
     assert.equal(kind, name);
     assert.deepEqual(textDecoder(kind)(text), value, name);
-    assert.deepEqual(coerce(kind, text, "c"), value, `${name}: from the text a driver gave`);
+    assert.deepEqual(coercePostgres(kind, text, "c"), value, `${name}: from the text a driver gave`);
     assert.equal(postgresLiteral(t, value, (m) => assert.fail(m)), text.replace("1e+300", "1e+300"), `${name}: back as its text`);
     // The type the module declares, the parameter's and the JSON Schema of the JSON form all say the same object.
     const declared = renderType(t, false, "postgres");
@@ -138,7 +138,7 @@ test("a range is an object of its bounds and their brackets, each bound in its s
     const t = pg(name);
     const kind = columnKind(t, "postgres");
     assert.deepEqual(textDecoder(kind)(text), value, `${name} ${text}`);
-    assert.deepEqual(coerce(kind, text, "c"), value, `${name} ${text}: from the text a driver gave`);
+    assert.deepEqual(coercePostgres(kind, text, "c"), value, `${name} ${text}: from the text a driver gave`);
     assert.equal(postgresLiteral(t, value, (m) => assert.fail(m)), literal, `${name} ${text}: back as text`);
   }
   // A parameter that leaves its brackets out takes Postgres's constructors' `[)`.
@@ -237,7 +237,7 @@ test("interval: an ISO 8601 duration with its sign in front, which Temporal read
   assert.equal(postgresInterval("-1 days"), "-1 days");
   assert.equal(postgresInterval("+P1D"), "P1D");
   assert.deepEqual(textDecoder("interval[]")('{"1 day",NULL,-00:00:03}'), ["P1D", null, "-PT3S"]);
-  assert.equal(coerce("interval", "-1 days", "span"), "-P1D", "a driver's text, as Bun.sql gives it");
+  assert.equal(coercePostgres("interval", "-1 days", "span"), "-P1D", "a driver's text, as Bun.sql gives it");
 });
 
 test("date and timestamp: a year outside 0000 to 9999 in ISO 8601's extended form, as timestamptz's, which Temporal reads and a parameter takes back", () => {
@@ -520,19 +520,19 @@ test("coerce: a value a driver decoded, given its kind; an integer a number cann
   // day, one after 13 September 275760, and before 1.4.4 one before 1 AD) as an Invalid Date (its
   // infinities are ±Infinity): refused, never read as infinity.
   for (const kind of ["date", "timestamp", "timestamptz", "timestamp|timestamptz"]) {
-    assert.throws(() => coerce(kind, new Date(Number.NaN), "born"), (e: Error) => e instanceof DecodeError && /^Column "born": the driver returned an Invalid Date/.test(e.message), kind);
+    assert.throws(() => coercePostgres(kind, new Date(Number.NaN), "born"), (e: Error) => e instanceof DecodeError && /^Column "born": the driver returned an Invalid Date/.test(e.message), kind);
   }
-  assert.equal(coerce("timestamptz", Infinity, "c"), "infinity");
-  assert.equal(coerce("timestamptz", -Infinity, "c"), "-infinity");
+  assert.equal(coercePostgres("timestamptz", Infinity, "c"), "infinity");
+  assert.equal(coercePostgres("timestamptz", -Infinity, "c"), "-infinity");
   assert.equal(coerce("timestamp", new Date("2026-10-20T10:00:00.500Z"), "c"), "2026-10-20T10:00:00.5");
-  assert.equal(coerce("timestamptz", new Date("2026-10-20T10:00:00.500Z"), "c"), "2026-10-20T10:00:00.500000Z", "Bun.sql's Date, to its millisecond");
-  assert.equal(coerce("timestamptz", new Date("2026-10-20T10:00:00Z"), "c"), "2026-10-20T10:00:00.000000Z");
+  assert.equal(coercePostgres("timestamptz", new Date("2026-10-20T10:00:00.500Z"), "c"), "2026-10-20T10:00:00.500000Z", "Bun.sql's Date, to its millisecond");
+  assert.equal(coercePostgres("timestamptz", new Date("2026-10-20T10:00:00Z"), "c"), "2026-10-20T10:00:00.000000Z");
   // A Postgres timestamp from a Date takes six digits too; a MySQL DATETIME keeps the driver's.
-  assert.equal(coerce("timestamp", new Date("2026-10-20T10:00:00.500Z"), "c", ",", true), "2026-10-20T10:00:00.500000");
-  assert.equal(coerce("timestamptz", "2026-10-20 10:00:00.123456+02", "c"), "2026-10-20T08:00:00.123456Z");
-  assert.equal(coerce("timestamptz", -Infinity, "c"), "-infinity");
+  assert.equal(coerce("timestamp", new Date("2026-10-20T10:00:00.500Z"), "c", true), "2026-10-20T10:00:00.500000");
+  assert.equal(coercePostgres("timestamptz", "2026-10-20 10:00:00.123456+02", "c"), "2026-10-20T08:00:00.123456Z");
+  assert.equal(coercePostgres("timestamptz", -Infinity, "c"), "-infinity");
   assert.deepEqual(coerce("int[]", Int32Array.of(1, 2), "c"), [1, 2]);
-  assert.deepEqual(coerce("text[]", "{a,NULL}", "c"), ["a", null]);
+  assert.deepEqual(coercePostgres("text[]", "{a,NULL}", "c"), ["a", null]);
   assert.equal(coerce("text", ["x", "z"], "c"), "x,z", "mariadb's SET");
   assert.deepEqual(coerce("bytes", true, "c"), Uint8Array.of(1), "Bun.sql's and mariadb's BIT(1) where it is no boolean (a view's)");
   assert.deepEqual(coerce("bytes", [1, 2], "c"), Uint8Array.of(1, 2), "D1's BLOB");
@@ -882,8 +882,8 @@ test("an hstore's text is an object of its keys, and an object goes back in as t
   // An array of hstores, as Postgres quotes each element.
   assert.deepEqual(textDecoder("hstore[]")(String.raw`{"\"a\"=>\"1\"","\"k\"=>NULL",NULL}`), [{ a: "1" }, { k: null }, null]);
   // Bun.sql hands the text over; an object a driver parsed stays as it is.
-  assert.deepEqual(coerce("hstore", String.raw`"a"=>"1"`, "h"), { a: "1" });
-  assert.deepEqual(coerce("hstore", { a: "1" }, "h"), { a: "1" });
+  assert.deepEqual(coercePostgres("hstore", String.raw`"a"=>"1"`, "h"), { a: "1" });
+  assert.deepEqual(coercePostgres("hstore", { a: "1" }, "h"), { a: "1" });
   const fail = (message: string): never => {
     throw new TypeError(message);
   };
@@ -926,7 +926,7 @@ test("a row converts each name's last column by that column's own mask, by posit
 test("an array of arrays decodes its innermost elements by their kind, from text or a driver's arrays", () => {
   // The kind of array_agg over an int8[] column: two levels, whose text nests them itself.
   assert.deepEqual(textDecoder("int8[][]")("{{1,2},{3,NULL}}"), [[1n, 2n], [3n, null]]);
-  assert.deepEqual(coerce("int8[][]", "{{1,2}}", "c"), [[1n, 2n]]);
+  assert.deepEqual(coercePostgres("int8[][]", "{{1,2}}", "c"), [[1n, 2n]]);
   assert.deepEqual(coerce("int8[][]", [["1", "2"], ["3", null]], "c"), [[1n, 2n], [3n, null]]);
 });
 
@@ -958,7 +958,7 @@ test("a Postgres money is its exact decimal text, read from the C locale's, and 
   for (const [text, decimal] of [["$1.50", "1.50"], ["-$1,234.56", "-1234.56"], ["$92,233,720,368,547,758.07", "92233720368547758.07"], ["$0.00", "0.00"], ["$12", "12"]] as const) {
     assert.equal(money(text), decimal, text);
     assert.equal(textDecoder("money")(text), decimal, text);
-    assert.equal(coerce("money", text, "fee"), decimal, text);
+    assert.equal(coercePostgres("money", text, "fee"), decimal, text);
   }
   assert.deepEqual(textDecoder("money[]")('{"$1.50",NULL,"-$1,000.00"}'), ["1.50", null, "-1000.00"]);
   for (const text of ["1.234,56 €", "€1,234.56", "1234.56", "$1,23.45", "($1.50)"]) assert.throws(() => money(text), (e: Error) => e instanceof DecodeError && e.message.startsWith(`The database wrote a money value as ${JSON.stringify(text)}, which is not the C locale's form ($1,234.56)`), text);

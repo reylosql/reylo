@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { execute, type QueryModule } from "./run.ts";
-import { bunRows, parseArray } from "../src/decode.ts";
+import { BUN_MYSQL, BUN_POSTGRES, bunRows, parseArray } from "../src/decode.ts";
 import type { Columns } from "../src/values.ts";
 
 // Fakes of the Postgres drivers that decode as the real ones do (checked against
@@ -164,7 +164,7 @@ const lateProbe: QueryModule<"postgres"> = { dialect: "postgres", sql: "select *
 test("Bun.sql: a row value, a geometric type, a range and a MySQL SET are their text, which Reylo reads by the module's kinds", () => {
   const row = { pair: "(1,x)", pt: "(1.5,-2)", boxes: "{(3,4),(1,2)}", seats: "[1,5)", many: "{[1,3)}", tags: "a,c", name: "(not,a,row)" };
   const kinds: Columns = [["pair", '(["a","int"],["b","text"])'], ["pt", "point"], ["boxes", "box[]", ";"], ["seats", "range:int"], ["many", "multirange:int8"], ["tags", "set"], ["name", "text"]];
-  assert.deepEqual(bunRows([row], kinds), [{
+  assert.deepEqual(bunRows([row], kinds, BUN_POSTGRES), [{
     pair: { a: 1, b: "x" },
     pt: { x: 1.5, y: -2 },
     boxes: [{ high: { x: 3, y: 4 }, low: { x: 1, y: 2 } }],
@@ -189,9 +189,9 @@ test("Bun.sql on MySQL: the result's column type tells a BIGINT's digits from a 
     { name: "at0", type: 12, table: "", length: 19, flags: 128 },
     { name: "zero", type: 12, table: "", length: 26, flags: 128 },
   ];
-  assert.deepEqual(bunRows(bunResult([row()], columns), kinds), [{ n: 12n, d: "12", at: "2026-01-02T03:04:05.500000", at3: "2026-01-02T03:04:05.000", at0: "2026-01-02T03:04:05", zero: "2026-01-02T03:04:05.000000" }]);
+  assert.deepEqual(bunRows(bunResult([row()], columns), kinds, BUN_MYSQL), [{ n: 12n, d: "12", at: "2026-01-02T03:04:05.500000", at3: "2026-01-02T03:04:05.000", at0: "2026-01-02T03:04:05", zero: "2026-01-02T03:04:05.000000" }]);
   // Before Bun 1.4.4, which describes no columns: digits without a point are a BIGINT's, and the fraction is what the Date kept.
-  assert.deepEqual(bunRows(bunResult([row()]), kinds), [{ n: 12n, d: 12n, at: "2026-01-02T03:04:05.5", at3: "2026-01-02T03:04:05", at0: "2026-01-02T03:04:05", zero: "2026-01-02T03:04:05" }]);
+  assert.deepEqual(bunRows(bunResult([row()]), kinds, BUN_MYSQL), [{ n: 12n, d: 12n, at: "2026-01-02T03:04:05.5", at3: "2026-01-02T03:04:05", at0: "2026-01-02T03:04:05", zero: "2026-01-02T03:04:05" }]);
 });
 
 test("Bun.sql: a query defined by hand reads each column by the type the result describes, as on the other drivers", () => {
@@ -207,7 +207,7 @@ test("Bun.sql: a query defined by hand reads each column by the type the result 
       { name: "mood", type: 16500, table: 0, number: 0 },
     ],
   );
-  assert.deepEqual(bunRows(pg, undefined, true), [{ big: 9007199254740993n, day: "2026-01-02", wall: "2026-01-02T03:04:05.500000", at: "2026-01-02T03:04:05.500000Z", ids: [1, 2], price: "1.5", mood: "2026-01-02T00:00:00.000000Z" }]);
+  assert.deepEqual(bunRows(pg, undefined, BUN_POSTGRES), [{ big: 9007199254740993n, day: "2026-01-02", wall: "2026-01-02T03:04:05.500000", at: "2026-01-02T03:04:05.500000Z", ids: [1, 2], price: "1.5", mood: "2026-01-02T00:00:00.000000Z" }]);
   const mysql = bunResult(
     [{ big: "9007199254740993", day: new Date("2026-01-02T00:00:00Z"), at: new Date("2026-01-02T03:04:05Z"), price: "12", n: 3 }],
     [
@@ -218,9 +218,9 @@ test("Bun.sql: a query defined by hand reads each column by the type the result 
       { name: "n", type: 3, table: "t", length: 11, flags: 0 },
     ],
   );
-  assert.deepEqual(bunRows(mysql, undefined), [{ big: 9007199254740993n, day: "2026-01-02", at: "2026-01-02T03:04:05.000000", price: "12", n: 3 }]);
+  assert.deepEqual(bunRows(mysql, undefined, BUN_MYSQL), [{ big: 9007199254740993n, day: "2026-01-02", at: "2026-01-02T03:04:05.000000", price: "12", n: 3 }]);
   // Before Bun 1.4.4: a Date is taken for an instant, and every other value is kept.
-  assert.deepEqual(bunRows(bunResult([{ big: "1", day: new Date("2026-01-02T00:00:00Z") }]), undefined, true), [{ big: "1", day: "2026-01-02T00:00:00.000000Z" }]);
+  assert.deepEqual(bunRows(bunResult([{ big: "1", day: new Date("2026-01-02T00:00:00Z") }]), undefined, BUN_POSTGRES), [{ big: "1", day: "2026-01-02T00:00:00.000000Z" }]);
 });
 
 test("parseArray: quoting, escapes, NULL, nesting, bounds and box's delimiter", () => {

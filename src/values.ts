@@ -103,8 +103,6 @@ export function numbersInJson(v: unknown, at: JsonNumbers, column = ""): unknown
   return v;
 }
 
-const POINT = "{ x: number; y: number }";
-
 /** The TypeScript type of each scalar kind: what a value of that kind is at run time. */
 export const TS_TYPE: Readonly<Record<ScalarKind, string>> = {
   bool: "boolean",
@@ -124,13 +122,13 @@ export const TS_TYPE: Readonly<Record<ScalarKind, string>> = {
   vector: "number[]",
   hstore: "Record<string, string | null>",
   // The geometric types' fields, as the type descriptor names them (engine/postgres pgtypes.rs).
-  point: POINT,
+  point: "{ x: number; y: number }",
   line: "{ a: number; b: number; c: number }",
-  lseg: `${POINT}[]`,
-  box: `{ high: ${POINT}; low: ${POINT} }`,
-  path: `{ closed: boolean; points: ${POINT}[] }`,
-  polygon: `${POINT}[]`,
-  circle: `{ center: ${POINT}; radius: number }`,
+  lseg: "{ x: number; y: number }[]",
+  box: "{ high: { x: number; y: number }; low: { x: number; y: number } }",
+  path: "{ closed: boolean; points: { x: number; y: number }[] }",
+  polygon: "{ x: number; y: number }[]",
+  circle: "{ center: { x: number; y: number }; radius: number }",
   // A MySQL ENUM's label, whose union its descriptor says (src/render.ts).
   enum: "string",
   // A MySQL SET's members, which MySQL keeps once each, in the order the column declares them.
@@ -610,11 +608,11 @@ const NodeBuffer = (globalThis as { Buffer?: BufferClass }).Buffer;
 // TextDecoder is a global in every runtime Reylo supports; it is typed here rather than through
 // the DOM lib or Node's, which a project that type-checks Reylo's sources need not have.
 const Utf8 = (globalThis as unknown as { TextDecoder: new (label?: string) => { decode(bytes: Uint8Array): string } }).TextDecoder;
-const utf8Decoder = new Utf8("utf-8");
+let utf8Decoder: { decode(bytes: Uint8Array): string } | undefined;
 
 /** UTF-8 bytes as text: a Buffer's own toString where the bytes are one. */
 export function utf8(bytes: Uint8Array): string {
-  return NodeBuffer?.isBuffer(bytes) ? (bytes as Uint8Array & { toString(encoding: string): string }).toString("utf8") : utf8Decoder.decode(bytes);
+  return NodeBuffer?.isBuffer(bytes) ? (bytes as Uint8Array & { toString(encoding: string): string }).toString("utf8") : (utf8Decoder ??= new Utf8("utf-8")).decode(bytes);
 }
 const fromHex = (Uint8Array as unknown as { fromHex?: (hex: string) => Uint8Array }).fromHex;
 
@@ -697,21 +695,6 @@ export function hstoreText(v: object, fail: (message: string) => never): string 
 type Point = { x: number; y: number };
 const POINTS = /\(([^,()]+),([^,()]+)\)/g;
 const points = (x: string): Point[] => Array.from(x.matchAll(POINTS), (m) => ({ x: +m[1]!, y: +m[2]! }));
-const GEOMETRIC_DECODERS: Readonly<Record<Geometric, Decoder>> = {
-  point: (x) => points(x)[0],
-  line: (x) => {
-    const [a, b, c] = x.slice(1, -1).split(",").map(Number);
-    return { a, b, c };
-  },
-  lseg: points,
-  box: (x) => {
-    const [high, low] = points(x);
-    return { high, low };
-  },
-  path: (x) => ({ closed: x[0] === "(", points: points(x) }),
-  polygon: points,
-  circle: (x) => ({ center: points(x)[0], radius: +x.slice(x.lastIndexOf(",") + 1, -1) }),
-};
 
 /**
  * The text of each field of a Postgres row value, `(1,"a b",,"x""y")` (record_out), null where a
@@ -1015,7 +998,19 @@ const TEXT_DECODERS: Readonly<Record<ScalarKind, Decoder>> = {
   // pgvector prints the shortest text of each float, `[1,2.5,1e-07]`, which JSON reads exactly.
   vector: (x) => JSON.parse(x),
   hstore,
-  ...GEOMETRIC_DECODERS,
+  point: (x) => points(x)[0],
+  line: (x) => {
+    const [a, b, c] = x.slice(1, -1).split(",").map(Number);
+    return { a, b, c };
+  },
+  lseg: points,
+  box: (x) => {
+    const [high, low] = points(x);
+    return { high, low };
+  },
+  path: (x) => ({ closed: x[0] === "(", points: points(x) }),
+  polygon: points,
+  circle: (x) => ({ center: points(x)[0], radius: +x.slice(x.lastIndexOf(",") + 1, -1) }),
   enum: identity,
   set: (x) => members(x),
   geometry: identity,
@@ -1174,8 +1169,6 @@ export function describe(v: unknown): string {
   return String(v);
 }
 
-const MAX_SAFE = Number.MAX_SAFE_INTEGER;
-
 /** An integer as a number, refused where a number cannot hold it exactly. */
 export function exactInteger(v: number | bigint, column: string): number {
   if (typeof v === "bigint") {
@@ -1184,10 +1177,10 @@ export function exactInteger(v: number | bigint, column: string): number {
     // row with a SQLite BIGINT, beside which better-sqlite3 reads every integer as a BigInt, from
     // 3.3 to 5.2 ms per 10,000 rows.
     const n = Number(v);
-    if (n > MAX_SAFE || n < -MAX_SAFE) throw outOfRange(String(v), column);
+    if (n > Number.MAX_SAFE_INTEGER || n < -Number.MAX_SAFE_INTEGER) throw outOfRange(String(v), column);
     return n;
   }
-  if (v > MAX_SAFE || v < -MAX_SAFE) throw outOfRange(String(v), column, true);
+  if (v > Number.MAX_SAFE_INTEGER || v < -Number.MAX_SAFE_INTEGER) throw outOfRange(String(v), column, true);
   return v;
 }
 
@@ -1298,26 +1291,15 @@ export function float32s(bytes: Uint8Array, column: string): number[] {
 }
 
 /**
- * `v` as a value of `kind`, from the form a driver decoded it to; `column` names it in an error. A
- * number past ±(2^53 - 1) in an integer column is one the driver already rounded, and is refused.
- * `delim` is an array's, where its text is what the driver gave; `postgres` says the value is a
- * Postgres one, whose `timestamp` takes six fraction digits.
+ * `v` as a value of `kind`, from the form a MySQL or SQLite driver decoded it to; `column` names it
+ * in an error. A number past ±(2^53 - 1) in an integer column is one the driver already rounded, and
+ * is refused. `postgres` says the value is a Postgres one, whose `timestamp` takes six fraction
+ * digits: a kind only Postgres has goes through `coercePostgres`, so that no other database's
+ * bundle holds its readers.
  */
-export function coerce(kind: Kind, v: unknown, column: string, delim = ",", postgres = false): unknown {
+export function coerce(kind: Kind, v: unknown, column: string, postgres = false): unknown {
   if (v === null || v === undefined) return null;
-  if (kind.endsWith("[]")) {
-    const element = elementKind(kind);
-    if (typeof v === "string") return parseArray(v, (s) => coerce(element, s, column, ",", postgres), delim);
-    if (Array.isArray(v)) return v.map((e) => (Array.isArray(e) ? coerce(kind, e, column, delim, postgres) : coerce(element, e, column, ",", postgres)));
-    // A MySQL VECTOR's bytes: no driver gives any other array of floats as bytes.
-    if (element === "float" && isBytes(v)) return float32s(v, column);
-    // Bun.sql's int4[] and float4[] are typed arrays.
-    if (ArrayBuffer.isView(v) && !(v instanceof DataView)) return Array.from(v as unknown as ArrayLike<unknown>, (e) => coerce(element, e, column));
-    return v;
-  }
-  // A row value, and a geometric type, are their text where no driver parses them.
-  if (isRowKind(kind) || isRangeKind(kind) || isMultirangeKind(kind)) return typeof v === "string" ? textDecoder(kind)(v) : v;
-  if (GEOMETRIC.has(kind)) return typeof v === "string" ? GEOMETRIC_DECODERS[kind as Geometric](v) : v;
+  if (kind.endsWith("[]")) return coerceArray(kind, v, column, (k, e) => coerce(k, e, column, postgres));
   if (kind.includes("|")) return coerceEither(kind, v, column);
   switch (kind as ScalarKind) {
     case "bool":
@@ -1334,27 +1316,15 @@ export function coerce(kind: Kind, v: unknown, column: string, delim = ",", post
     case "decimal":
       if (typeof v === "bigint" || typeof v === "number") return String(v);
       return v;
-    case "money":
-      return typeof v === "string" ? money(v) : v;
     case "date":
     case "timestamp":
       if (v instanceof Date) return utcText(v, kind as "date" | "timestamp", column, postgres);
       // Bun.sql's `infinity`.
       if (v === Infinity || v === -Infinity) return v > 0 ? "infinity" : "-infinity";
       return v;
-    case "timestamptz":
-      if (typeof v === "string") return instant(v);
-      if (v instanceof Date) return instantOfDate(v, column);
-      // Bun.sql's `infinity`.
-      if (v === Infinity || v === -Infinity) return v > 0 ? "infinity" : "-infinity";
-      return v;
-    case "interval":
-      return typeof v === "string" ? duration(v) : v;
     case "json":
     case "vector":
       return typeof v === "string" ? JSON.parse(v) : v;
-    case "hstore":
-      return typeof v === "string" ? hstore(v) : v;
     case "bytes":
       if (isBytes(v)) return v;
       if (v instanceof ArrayBuffer) return new Uint8Array(v);
@@ -1381,6 +1351,45 @@ export function coerce(kind: Kind, v: unknown, column: string, delim = ",", post
       return v;
     default:
       return v;
+  }
+}
+
+/** An array's elements as values of its element kind, `each` reading each one; a nested array is a level of the same array. */
+function coerceArray(kind: Kind, v: unknown, column: string, each: (kind: Kind, v: unknown) => unknown): unknown {
+  const element = elementKind(kind);
+  if (Array.isArray(v)) return v.map((e) => (Array.isArray(e) ? coerceArray(kind, e, column, each) : each(element, e)));
+  // A MySQL VECTOR's bytes: no driver gives any other array of floats as bytes.
+  if (element === "float" && isBytes(v)) return float32s(v, column);
+  // Bun.sql's int4[] and float4[] are typed arrays.
+  if (ArrayBuffer.isView(v) && !(v instanceof DataView)) return Array.from(v as unknown as ArrayLike<unknown>, (e) => each(element, e));
+  return v;
+}
+
+/**
+ * `v` as a Postgres value of `kind`, from the form a driver decoded it to (`coerce`): the kinds only
+ * Postgres has, and an array's text, which `delim` separates.
+ */
+export function coercePostgres(kind: Kind, v: unknown, column: string, delim = ","): unknown {
+  if (v === null || v === undefined) return null;
+  if (kind.endsWith("[]")) return typeof v === "string" ? parseArray(v, (s) => coercePostgres(elementKind(kind), s, column), delim) : coerceArray(kind, v, column, (k, e) => coercePostgres(k, e, column));
+  // A row value, a range and a geometric type are their text where no driver parses them.
+  if (isRowKind(kind) || isRangeKind(kind) || isMultirangeKind(kind)) return typeof v === "string" ? textDecoder(kind)(v) : v;
+  if (GEOMETRIC.has(kind)) return typeof v === "string" ? TEXT_DECODERS[kind as Geometric](v) : v;
+  switch (kind) {
+    case "money":
+      return typeof v === "string" ? money(v) : v;
+    case "timestamptz":
+      if (typeof v === "string") return instant(v);
+      if (v instanceof Date) return instantOfDate(v, column);
+      // Bun.sql's `infinity`.
+      if (v === Infinity || v === -Infinity) return v > 0 ? "infinity" : "-infinity";
+      return v;
+    case "interval":
+      return typeof v === "string" ? duration(v) : v;
+    case "hstore":
+      return typeof v === "string" ? hstore(v) : v;
+    default:
+      return coerce(kind, v, column, true);
   }
 }
 

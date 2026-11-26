@@ -25,7 +25,7 @@
 // other than 0 or 1 refused (`truth`).
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, coerce, columnKind, DecodeError, describe, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
-import { bunRows } from "./decode.ts";
+import { BUN_MYSQL, bunRows } from "./decode.ts";
 import { readMysqlError } from "./query-error.ts";
 import { vectorParameter, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { bareName, isMysqlSet, type EngineType } from "./engine-type.ts";
@@ -542,7 +542,7 @@ function signedZeros(query: QueryModule<"mysql">, { text, values, names, marks }
 /** A MySQL statement's rows on each MySQL driver's client, or undefined on any other client. */
 async function runMysql(c: Client, query: QueryModule<"mysql">, bound: Bound): Promise<unknown[] | undefined> {
   const { text, values, marks } = bound;
-  if (typeof c.unsafe === "function") return bunRows(await c.unsafe(text, values), query.columns);
+  if (typeof c.unsafe === "function") return bunRows(await c.unsafe(text, values), query.columns, BUN_MYSQL);
   // mariadb, checked before execute() because it has one too (returning rows, not a pair).
   // Its callback API (mariadb/callback) answers through the callback and returns a command
   // object; its promise API returns a promise and ignores the callback.
@@ -565,15 +565,15 @@ async function runMysql(c: Client, query: QueryModule<"mysql">, bound: Bound): P
 function mysqlDecoder(name: string, kind: Kind, delim: string | undefined): (v: unknown) => unknown {
   // A MySQL DATETIME's text takes a T between the date and the time, as `.run()` writes it, a
   // column that may be one included (`mariadb`).
-  if (kind.split("|").includes("timestamp")) return (v) => (typeof v === "string" ? v.replace(" ", "T") : coerce(kind, v, name, delim));
+  if (kind.split("|").includes("timestamp")) return (v) => (typeof v === "string" ? v.replace(" ", "T") : coerce(kind, v, name));
   // A MySQL GEOMETRY's raw value is its bytes, as `.run()` gives it. An object is a driver's own
   // reading of one (mysql2's `{ x, y }`, mariadb's GeoJSON), which the bytes cannot be had back from.
   if (kind.split("|").includes("geometry"))
     return (v) => {
       if (typeof v === "object" && v !== null && !(v instanceof Uint8Array)) throw new DecodeError(`Column "${name}" holds ${describe(v)}, which is no raw MySQL value: a GEOMETRY's raw value is its bytes, which a driver parses into an object unless its conversions are off (mysql2's typeCast returning \`field.buffer()\`).`);
-      return coerce(kind, v, name, delim);
+      return coerce(kind, v, name);
     };
-  return (v) => coerce(kind, v, name, delim);
+  return (v) => coerce(kind, v, name);
 }
 
 // A SET goes as its members joined by commas, in the order its column declares them: MySQL stores a
