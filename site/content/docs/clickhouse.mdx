@@ -16,7 +16,7 @@ ClickHouse support is in preview. Its types and parameter syntax may still chang
 | | |
 | --- | --- |
 | ClickHouse versions | 25.11 or later |
-| Connection | A `clickhouse+http://` or `clickhouse+https://` URL, the server's HTTP interface, in `DATABASE_URL` or [`direct_url`](/configuration#direct_url) |
+| Connection | A `clickhouse+http://` or `clickhouse+https://` URL, the server's HTTP interface, in `DATABASE_URL` or [`direct_url`](/docs/configuration#direct_url) |
 | Client | `@clickhouse/client` or `@clickhouse/client-web` ([Client](#client)) |
 | Type checking | Reylo's engine asks ClickHouse itself, over HTTP, so your project needs no client for it |
 | Example | [clickhouse](https://github.com/reylosql/reylo/tree/main/examples/clickhouse), a Node project on `@clickhouse/client` with a lookup, a join, an insert and a delete |
@@ -460,7 +460,7 @@ An `INSERT … FORMAT` takes its rows from the request's body, which a typed que
 
 ## Database errors
 
-With [`.try()`](/typescript#try), an error ClickHouse raised comes back as `{ error }`:
+With [`.try()`](/docs/typescript#try), an error ClickHouse raised comes back as `{ error }`:
 
 | Field | What it holds |
 | --- | --- |
@@ -504,7 +504,7 @@ How Reylo uses your client:
 
 ## Migrations
 
-[Reylo Migrate](/migrate/docs) doesn't support ClickHouse yet. Keep your schema with the tool you use today: the type check reads whatever the database holds.
+[Reylo Migrate](/docs/migrate) doesn't support ClickHouse yet. Keep your schema with the tool you use today: the type check reads whatever the database holds.
 
 ## Limits
 

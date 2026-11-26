@@ -111,7 +111,7 @@ To make `.sql` imports work at run time too, load Reylo where your code runs. On
 node --env-file=.env --import reylo/register main.ts
 ```
 
-For Bun, Nub, Vite, Next.js, esbuild, Rolldown, Rollup, webpack, Rspack, Cloudflare Workers and Jest, add [the plugin for your setup](https://reylo.dev/typescript#plugins), or copy its complete [example project](https://github.com/reylosql/reylo/tree/main/examples). To see the types as you type, set up [your editor](https://reylo.dev/typescript#editors).
+For Bun, Nub, Vite, Next.js, esbuild, Rolldown, Rollup, webpack, Rspack, Cloudflare Workers and Jest, add [the plugin for your setup](https://reylo.dev/docs/typescript#plugins), or copy its complete [example project](https://github.com/reylosql/reylo/tree/main/examples). To see the types as you type, set up [your editor](https://reylo.dev/docs/typescript#editors).
 
 To give your coding agent Reylo's rules for writing and running queries, install its skill:
 
@@ -146,7 +146,7 @@ It resolves to the rows, shaped by how many the query can return:
 | An `insert`, `update` or `delete` without `returning` | `void` |
 | Anything else | `Row[]` |
 
-An imported query also has `.runSync()`, `.try()`, `.readOnly`, `.with()`, `.sql`, `.raw` and `.source` ([Usage](https://reylo.dev/typescript#usage)). Every query Reylo runs is published on Node's tracing channel `reylo:query`, for a tracer or a logger to subscribe to ([Observability](https://reylo.dev/typescript#observability)).
+An imported query also has `.runSync()`, `.try()`, `.readOnly`, `.with()`, `.sql`, `.raw` and `.source` ([Usage](https://reylo.dev/docs/typescript#usage)). Every query Reylo runs is published on Node's tracing channel `reylo:query`, for a tracer or a logger to subscribe to ([Observability](https://reylo.dev/docs/typescript#observability)).
 
 ## What Reylo infers
 
@@ -157,7 +157,7 @@ To type a query, Reylo has your dev database prepare it, without running it, and
 - **Unions** — an enum, or a column whose check constraint lists its values, is a union of them.
 - **JSON** — JSON the query builds, and a JSON column with a JSON Schema check, keep their shape.
 
-Each has examples in [Inference](https://reylo.dev/inference).
+Each has examples in [Inference](https://reylo.dev/docs/inference).
 
 ## Supported drivers
 
@@ -170,7 +170,7 @@ Reylo is bring-your-own-driver. Pass `.run()` a client from any of these, or a D
 
 ## Documentation
 
-[reylo.dev/docs](https://reylo.dev/docs) covers the rest: every plugin and editor, configuration, errors, each database's data types and edge cases, and [Reylo Migrate](https://reylo.dev/migrate/docs) for SQL-first schema migrations. Agents can read it all as Markdown at [reylo.dev/llms.txt](https://reylo.dev/llms.txt), or fetch any page with `Accept: text/markdown`. To move a Prisma project's queries to Reylo, see [Migrating from Prisma](https://reylo.dev/prisma).
+[reylo.dev/docs](https://reylo.dev/docs) covers the rest: every plugin and editor, configuration, errors, each database's data types and edge cases, and [Reylo Migrate](https://reylo.dev/docs/migrate) for SQL-first schema migrations. Agents can read it all as Markdown at [reylo.dev/llms.txt](https://reylo.dev/llms.txt), or fetch any page with `Accept: text/markdown`. To move a Prisma project's queries to Reylo, see [Migrating from Prisma](https://reylo.dev/docs/prisma).
 
 ## License
 

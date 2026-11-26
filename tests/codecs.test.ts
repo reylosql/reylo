@@ -572,6 +572,10 @@ test("a vector's typed array holds the floats the server stores, and a parameter
   const many = decodePlan({ array: "vector:float32" }, [[1, 2], null, [3, 4]], "embeddings") as (Float32Array | null)[];
   assert.ok(many[0] instanceof Float32Array && many[1] === null && many[2] instanceof Float32Array);
   assert.deepEqual(encodePlan({ array: "vector:float32" }, many, "embeddings", "postgres"), [[1, 2], null, [3, 4]]);
+  // A level of a deeper array may hold only nulls, which stay null rather than read as a vector of zeros.
+  const deep = decodePlan({ array: "vector:float32" }, [[null, null], [[1, 2], null]], "embeddings") as [[null, null], [Float32Array, null]];
+  assert.deepEqual(deep[0], [null, null]);
+  assert.ok(deep[1][0] instanceof Float32Array && deep[1][1] === null);
   // A number[] or another typed array is refused, as TypeScript refuses it.
   for (const [codec, v, expected] of [["vector:float32", [1, 2], "Float32Array"], ["vector:float32", new Float64Array([1]), "Float32Array"], ["vector:float16", new Float32Array([1]), "Float16Array"]] as const) {
     assert.throws(() => encodeCodec(codec, v, "embedding", "postgres"), (e: Error) => e instanceof ParameterError && e.message.startsWith(`Parameter "embedding" takes a ${expected}, as js.codecs.vector in the project file says`), expected);

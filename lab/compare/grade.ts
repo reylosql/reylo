@@ -1,6 +1,6 @@
 // Turns each tool's answers into the comparison's marks: a mark is computed from what the tool answered and nothing else.
 import { DBS, ORM_GROUPS, CARDINALITY, EXPRESSIONS, FROM_THE_DATABASE, FROM_THE_DATABASE_KINDS, JSON_SCHEMA, JSON_SHAPES, OUTER_JOINS, PARAMETER_NULLABILITY, PARAMETER_TYPES, sqlFor, type Db, type Probe } from "./probes.ts";
-import type { Answer, TypedValue } from "./tools/lib.ts";
+import type { Answer, FieldShape, TypedValue } from "./tools/lib.ts";
 
 export type State = "y" | "p" | "n";
 // `at`: what each problem is about, a column by name, a parameter by its position, or the row count, so the docs can mark that line of the answer. `answer`: everything the tool answered, right or wrong.
@@ -18,6 +18,7 @@ function checkColumns(p: Probe, a: Answer, checkNull: boolean, db: Db): Problem[
     const got = a.columns?.find((c) => c.name.toLowerCase() === want.name.toLowerCase()) ?? a.columns?.[i];
     const column = want.name;
     if (!got) return void out.push({ text: `\`${want.name}\` is missing`, column });
+    if (got.kind === "any") return void out.push({ text: `\`${want.name}\` is typed \`${got.type}\``, column });
     if (checkNull && want.nullable !== undefined && !want.anyNullOn?.includes(db) && got.nullable !== want.nullable) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, but ${want.nullable ? "it can be null" : "it is never null"}`, column });
     if (want.shape && !want.shape.every((f) => got.fields?.includes(f))) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, without its fields`, column });
   });
@@ -46,6 +47,18 @@ function checkTyped(p: Probe, a: Answer, db: Db): Problem[] {
     if (!got) return void out.push({ text: `\`${want.name}\` is missing`, column });
     if (got.kind === "any") return void out.push({ text: `\`${want.name}\` is typed \`${got.type}\``, column });
     if (want.nullable !== undefined && !want.anyNullOn?.includes(db) && got.nullable !== want.nullable) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, but ${want.nullable ? "it can be null" : "it is never null"}`, column });
+    if (want.array && !got.array) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, not an array`, column });
+    if (want.shape && !want.shape.every((f) => got.fields?.includes(f))) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, without its fields`, column });
+    if (want.shapeFields) {
+      const specs = Object.entries(want.shapeFields);
+      const okShape = (shape: FieldShape | null | undefined) => !!shape && specs.every(([f, spec]) => {
+        const ft = shape[f];
+        return !!ft && (!spec.kind || ft.kind === spec.kind) && (spec.nullable === undefined || ft.nullable === spec.nullable);
+      });
+      const valid = want.array ? !!got.elements?.length && got.elements.every(okShape) : okShape(got.fieldTypes);
+      if (!valid) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, with the wrong nested field types`, column });
+    }
+    if (want.notLiteral && /^-?\d+(?:\.\d+)?$/.test(got.type.trim())) out.push({ text: `\`${want.name}\` is typed literal \`${got.type}\`, not a number`, column });
     const named = (l: string) => got.labels?.includes(l) || new RegExp(`["']${l}["']`).test(got.type);
     if (want.labels && !want.labels.every(named)) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, without its values`, column });
   });
@@ -90,7 +103,9 @@ export function gradeTool(answers: Answers, dbs: Db[], facts: { wrote: string[];
   cells["from-the-database"] = { state: facts.connects === "yes" && liveRight === live.length ? "y" : facts.connects === "no" ? "n" : "p", right: liveRight, total: live.length, note: facts.connects === "no" ? facts.noConnectNote ?? "It never connects to a database." : facts.connects === "opt-in" ? facts.optInNote : liveRight < live.length ? "It connects, but types some expressions itself." : undefined, results: live };
 
   const joins = run(answers, dbs, "outer-joins", OUTER_JOINS, (p, a, db) => checkColumns(p, a, true, db));
-  cells["outer-joins"] = cell(joins);
+  // A tool that misses every nullable outer join only passes `left-narrowed` by never marking joined columns nullable at all.
+  const joinNullableRight = joins.filter((r) => r.ok && OUTER_JOINS.find((p) => p.id === r.probe)?.columns?.some((c) => c.nullable)).length;
+  cells["outer-joins"] = cell(joins, joinNullableRight === 0);
 
   const exprResults = run(answers, dbs, "expressions", EXPRESSIONS, (p, a, db) => checkColumns(p, a, true, db));
   const exprConstant = dbs.every((db) => constantOn(EXPRESSIONS.filter((p) => sqlFor(p, db)).map((p) => !!answers[key(db, "expressions", p)]?.columns?.[0]?.nullable)));
@@ -109,7 +124,7 @@ export function gradeTool(answers: Answers, dbs: Db[], facts: { wrote: string[];
   const noCard = CARDINALITY.every((p) => dbs.every((db) => { const a = answers[key(db, "cardinality", p)]; return !a || a.cardinality === null; }));
   cells["cardinality"] = cell(cardResults, noCard, noCard ? facts.cardinalityNote : undefined);
 
-  cells["json-shapes"] = cell(run(answers, dbs, "json-shapes", JSON_SHAPES, (p, a, db) => checkColumns(p, a, false, db)));
+  cells["json-shapes"] = cell(run(answers, dbs, "json-shapes", JSON_SHAPES, (p, a, db) => checkColumns(p, a, true, db)));
 
   const schema = run(answers, dbs.includes("postgres") ? ["postgres"] : [], "json-schema", JSON_SCHEMA, (p, a, db) => [...checkColumns(p, a, false, db), ...checkParams(p, a, db)]);
   cells["json-schema"] = cell(schema);

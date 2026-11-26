@@ -66,7 +66,10 @@ test("SQLite: a cast is SQLite's own, a date's to TEXT, JSON's through json(), a
     assert.deepEqual({ ...(await doc.query.run(db, { doc: { a: 5 }, inner: [1], text: "[1]" })) }, { a: 5, d: { d: [1], s: "[1]" } });
     const short = await built(root, url, "short", "select :s::varchar(3) as s, :x::real * 2 as x");
     await assert.rejects(short.query.run(db, { s: "abcd", x: 1 }), /Parameter "s" is varchar\(3\), at most 3 characters; got 4/);
-    await assert.rejects(short.query.run(db, { s: "abc", x: "2" }), /Parameter "x" is real, a finite number; got "2"/);
+    await assert.rejects(short.query.run(db, { s: "abc", x: "2" }), /Parameter "x" is real, a number other than NaN; got "2"/);
+    // A REAL holds the infinities, and SQLite stores NaN as NULL.
+    assert.deepEqual({ ...(await short.query.run(db, { s: "abc", x: -Infinity })) }, { s: "abc", x: -Infinity });
+    await assert.rejects(short.query.run(db, { s: "abc", x: NaN }), /Parameter "x" is real, a number other than NaN; got NaN/);
     assert.deepEqual({ ...(await short.query.run(db, { s: "abc", x: 1.25 })) }, { s: "abc", x: 2.5 });
     await assert.rejects(built(root, url, "flag", "select :b::boolean as b"), /SQLite has no boolean type/);
   } finally {

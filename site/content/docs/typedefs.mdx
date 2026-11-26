@@ -5,7 +5,7 @@ description: A format for types, which says what values a column, a parameter or
 
 A format for types.
 
-Reylo writes the type of every parameter and column it [analyzes](/inference) in it. A type says which values a slot can hold. That's enough to pick a representation in any language.
+Reylo writes the type of every parameter and column it [analyzes](/docs/inference) in it. A type says which values a slot can hold. That's enough to pick a representation in any language.
 
 ## Types
 
@@ -668,7 +668,7 @@ Its `label` is all the format says. A program that meets a kind it doesn't know 
 
 Nothing is known about the values.
 
-A parameter nothing in the statement types is one, where [`allow_untyped_params`](/configuration#allow_untyped_params) lets it through.
+A parameter nothing in the statement types is one, where [`allow_untyped_params`](/docs/configuration#allow_untyped_params) lets it through.
 
 <TypeDef types={{"sqlite": ["any column in a strict table"]}}>
 

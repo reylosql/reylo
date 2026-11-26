@@ -28,7 +28,7 @@ Fly recommends the cluster's direct connection for migrations. Set it as a secre
 $ fly secrets set DIRECT_DATABASE_URL="postgresql://…@direct.<cluster-id>.flympg.net/…"
 ```
 
-Then point [`direct_url`](/configuration#direct_url) at it:
+Then point [`direct_url`](/docs/configuration#direct_url) at it:
 
 ```yaml title=".reylo.yaml"
 direct_url: ${DIRECT_DATABASE_URL:-${DATABASE_URL}}

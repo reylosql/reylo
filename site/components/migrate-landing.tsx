@@ -10,7 +10,7 @@ import { githubUrl, migrateCompareUrl, migrateDocsUrl } from '@/lib/layout.share
  * Reylo Migrate's landing page, at /migrate (app/routes/migrate.tsx): a hero split in half, the
  * words on the left and the first edit playing on the right, then one row per feature, its words on one side and a terminal or an editor playing it
  * on the other, the sides alternating. Every line a terminal prints is the docs' own
- * (content/docs/migrate.mdx), and the docs are a page of their own, at /migrate/docs. The players
+ * (content/docs/migrate.mdx), and the docs are a page of their own, at /docs/migrate. The players
  * run on timers from the moment the page loads; nothing here reads the scroll position.
  */
 export function MigrateLanding({ stars, agentPrompt }: { stars?: number; agentPrompt?: string }) {
@@ -59,7 +59,7 @@ export function MigrateLanding({ stars, agentPrompt }: { stars?: number; agentPr
         </a>
         <div className="ml-foot-links">
           <a href={migrateDocsUrl}>Docs</a>
-          <a href={'/migrate/cli'}>CLI</a>
+          <a href="/docs/migrate/cli">CLI</a>
           <a href={migrateCompareUrl}>Comparison</a>
           <a href="/">Reylo</a>
           <a href={githubUrl}>GitHub</a>

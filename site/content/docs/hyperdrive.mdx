@@ -5,13 +5,13 @@ description: How to use Reylo with Postgres or MySQL in a Cloudflare Worker thro
 
 <p className="dk-subheader">Reylo on Postgres and MySQL through Hyperdrive</p>
 
-Reylo runs in a Worker on Postgres and MySQL through Hyperdrive, Cloudflare's connection pool. Everything on the [Postgres](/postgres) and [MySQL](/mysql) pages holds through it. Set up the Vite plugin as on [Cloudflare D1](/d1#setup).
+Reylo runs in a Worker on Postgres and MySQL through Hyperdrive, Cloudflare's connection pool. Everything on the [Postgres](/docs/postgres) and [MySQL](/docs/mysql) pages holds through it. Set up the Vite plugin as on [Cloudflare D1](/docs/d1#setup).
 
 | | |
 | --- | --- |
 | Postgres | `pg`, postgres.js or Drizzle Postgres, with the binding's connection string, and Drizzle over `pg` |
 | MySQL | `mysql2` or `mariadb`, with the binding's `host`, `port`, `user`, `password` and `database` |
-| The type check reads | Your development database, through [`direct_url`](/configuration#direct_url), never Hyperdrive |
+| The type check reads | Your development database, through [`direct_url`](/docs/configuration#direct_url), never Hyperdrive |
 | Node's APIs | `pg`, postgres.js, Drizzle Postgres, `mysql2` and `mariadb` need a compatibility date from 2026-08-04 on, or the `nodejs_compat` flag |
 
 ## Postgres
@@ -49,7 +49,7 @@ export default {
 
 ## MySQL
 
-Hyperdrive refuses prepared statements. Reylo runs [`mysql2`](/mysql#mysql2) through `query()` with values written into the statement, and runs [`mariadb`](/mysql#mariadb) without prepared statements everywhere:
+Hyperdrive refuses prepared statements. Reylo runs [`mysql2`](/docs/mysql#mysql2) through `query()` with values written into the statement, and runs [`mariadb`](/docs/mysql#mariadb) without prepared statements everywhere:
 
 ```ts tab="mysql2"
 import mysql from "mysql2/promise";

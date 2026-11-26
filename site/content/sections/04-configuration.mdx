@@ -109,9 +109,9 @@ DATABASE_URL="postgres://app:pa#ss@localhost:5432/app" # the dev database
 
 ## `allow_untyped_params`
 
-Whether a [parameter whose type cannot be inferred](/inference#a-parameter-nothing-types) may stay `unknown`.
+Whether a [parameter whose type cannot be inferred](/docs/inference#a-parameter-nothing-types) may stay `unknown`.
 
-By default it's an error that says to [cast it](/inference#casts).
+By default it's an error that says to [cast it](/docs/inference#casts).
 
 ```yaml title=".reylo.yaml"
 # the default is false
@@ -138,7 +138,7 @@ Reylo appends a [sqlcommenter](https://google.github.io/sqlcommenter/) comment n
 sqlcommenter: false
 ```
 
-On SQLite, the comment opens the query instead. The query's [`.sql`](/typescript#sql) property leaves the comment out. By default, Postgres receives:
+On SQLite, the comment opens the query instead. The query's [`.sql`](/docs/typescript#sql) property leaves the comment out. By default, Postgres receives:
 
 ```sql title="What Postgres receives for queries/get_user.sql, by default"
 select id, name, email from users where id = $1::int /*file='queries%2Fget_user.sql'*/
@@ -146,7 +146,7 @@ select id, name, email from users where id = $1::int /*file='queries%2Fget_user.
 
 ## `dir`
 
-The directory beside `.reylo.yaml` that holds Reylo's files. You commit its [migrations](/migrate/docs), and its `.cache/` keeps itself out of git.
+The directory beside `.reylo.yaml` that holds Reylo's files. You commit its [migrations](/docs/migrate), and its `.cache/` keeps itself out of git.
 
 ```yaml title=".reylo.yaml"
 # the default is reylo
@@ -155,7 +155,7 @@ dir: db
 
 ## `shadow_url`
 
-The server where [migrations](/migrate/docs) build their shadow databases, for a database whose own server refuses `create database`:
+The server where [migrations](/docs/migrate) build their shadow databases, for a database whose own server refuses `create database`:
 
 ```yaml title=".reylo.yaml"
 # the default is the database's own server

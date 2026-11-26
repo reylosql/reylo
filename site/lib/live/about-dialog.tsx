@@ -52,7 +52,7 @@ export function AboutDialog({ about, open, onClose }: { about: About; open: bool
         <section>
           <h3>Next</h3>
           <p>
-            Use it from TypeScript with the <a href="https://reylo.dev/#setup">setup guide</a>, or from any language, script or agent through <a href="https://reylo.dev/play/api.md">the API</a>. <a href="https://reylo.dev">The docs</a> cover the rest.
+            Use it from TypeScript with the <a href="https://reylo.dev/docs/typescript#setup">setup guide</a>, or from any language, script or agent through <a href="https://reylo.dev/play/api.md">the API</a>. <a href="https://reylo.dev/docs">The docs</a> cover the rest.
           </p>
         </section>
       </div>
