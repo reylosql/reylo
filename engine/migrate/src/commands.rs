@@ -269,7 +269,12 @@ fn then(line: impl AsRef<str>, what: &[(&str, &[&str])]) -> String {
 }
 
 fn normalized(sql: &str) -> String {
-    sql.replace("\r\n", "\n").replace('\r', "\n").trim_end().to_string()
+    line_feeds(sql).trim_end().to_string()
+}
+
+/// The text with each of its line endings a line feed, as the lock reads them.
+fn line_feeds(sql: &str) -> String {
+    sql.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 /// A path as the person running the command reads it: relative to where they are.
@@ -1834,13 +1839,14 @@ impl Plan {
 }
 
 /// Whether two texts are the same statements, comments and whitespace aside; on MySQL, an executable
-/// comment's version too, which says whether its text runs. Line endings are read as the lock reads
-/// them ([`normalized`]), inside a string too, so that a migration checked out with CRLF is still
-/// the one a database ran with LF, and the other way round.
+/// comment's version too, which says whether its text runs. Each text is read as its database reads
+/// it, so that a comment ends where that database ends it (MySQL and SQLite run a `--` comment on
+/// past a bare carriage return), and only then are the line endings inside each token read as the
+/// lock reads them ([`line_feeds`]): a migration checked out with CRLF is still the one a database
+/// ran with LF, and the other way round, even where a string in it spans lines.
 fn same_statements(a: &str, b: &str, d: Dialect) -> bool {
-    let (a, b) = (normalized(a), normalized(b));
-    let tokens = |sql: &str| split_statements(sql, d).into_iter().map(|s| s.tokens.into_iter().map(|t| t.text).collect::<Vec<_>>()).collect::<Vec<_>>();
-    tokens(&a) == tokens(&b) && crate::sql::gates(&a, d) == crate::sql::gates(&b, d)
+    let tokens = |sql: &str| split_statements(sql, d).into_iter().map(|s| s.tokens.into_iter().map(|t| line_feeds(&t.text)).collect::<Vec<_>>()).collect::<Vec<_>>();
+    tokens(a) == tokens(b) && crate::sql::gates(a, d) == crate::sql::gates(b, d)
 }
 
 /// The statements of a migration that change data, as their first words: such a migration always

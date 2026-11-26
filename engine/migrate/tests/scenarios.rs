@@ -464,6 +464,7 @@ for_each_dialect!(
     refuses_drift,
     an_edited_migration_is_refused,
     line_endings_inside_a_string_are_no_edit,
+    a_carriage_return_ends_a_comment_only_where_the_database_ends_it,
     history_pull_takes_back_what_the_lock_refuses,
     ddl_run_by_hand_then_written_is_recorded,
     a_change_by_hand_with_schema_sql_is_told_to_write_the_migration,
@@ -1159,6 +1160,33 @@ async fn line_endings_inside_a_string_are_no_edit(mut p: P) {
     assert_eq!(p.status().await, 1);
     assert_has!(p.output(), r"20261027110000_rows\.sql  applied [^\n]+, and edited since");
     assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), r"Migration 20261027110000_rows\.sql changed after this database applied it");
+}
+
+/// A `--` comment ends at a bare carriage return on Postgres, and runs on to the next line feed on
+/// MySQL and SQLite: there, the same text with a line feed in its place runs one more statement, so
+/// it is an edit, whatever the lock makes of the two.
+async fn a_carriage_return_ends_a_comment_only_where_the_database_ends_it(mut p: P) {
+    let (d, text) = (p.d, p.t.text);
+    p.linear();
+    p.schema(&format!("create table t (a {text});"));
+    p.file("20261027100000_t.sql", &format!("create table t (a {text});"));
+    let rows = |end: &str| format!("insert into t values ('zero'); -- seed{end}insert into t values ('one');\n");
+    p.file("20261027110000_rows.sql", &rows("\r"));
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    p.output();
+    let ran = if d == Dialect::Postgres { vec!["zero", "one"] } else { vec!["zero"] };
+    assert_eq!(p.rows("select a from t order by a desc").await.iter().map(|r| r.text("a").to_string()).collect::<Vec<_>>(), ran);
+    p.file("20261027110000_rows.sql", &rows("\n"));
+    if d == Dialect::Postgres {
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_has!(p.output(), "Up to date");
+        return;
+    }
+    assert_eq!(p.status().await, 1, "{}", p.peek());
+    assert_has!(p.output(), r"20261027110000_rows\.sql  applied [^\n]+, and edited since");
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
     assert_has!(p.output(), r"Migration 20261027110000_rows\.sql changed after this database applied it");
 }
 
