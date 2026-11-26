@@ -11,7 +11,9 @@
   { "case": "a Unix socket's directory, escaped", "url": "postgres:///shop?host=%2Fvar%2Frun%2Fpostgresql", "server": "postgres://@/shop?host=%2Fvar%2Frun%2Fpostgresql" },
   { "case": "several hosts and ports, and the role", "url": "postgres:///shop?host=a,b&port=5432,5433&user=app", "server": "postgres://@/shop?host=a%2Cb&port=5432%2C5433&user=app" },
   { "case": "a repeated parameter keeps its order, which picks the host tried first", "url": "postgres:///shop?host=b&dbname=x&host=a", "server": "postgres://@/shop?dbname=x&host=b&host=a" },
+  { "case": "a name is matched decoded, as the bridge to a Unix socket reads it, and kept as written", "url": "postgres:///app?%68ost=%2Ftmp%2Fpg-a", "server": "postgres://@/app?%68ost=%2Ftmp%2Fpg-a" },
   { "case": "options, which may set the search path", "url": "postgres://app@db.internal/shop?options=-c%20search_path%3Dtenant_1", "server": "postgres://app@db.internal/shop?options=-c%20search_path%3Dtenant_1" },
   { "case": "a MySQL socket", "url": "mysql://root@127.0.0.1:3306/app?socketPath=/tmp/mysql.sock&ssl=true", "server": "mysql://root@127.0.0.1:3306/app?socketPath=%2Ftmp%2Fmysql.sock" },
+  { "case": "a MySQL socket's name, escaped", "url": "mysql://root@localhost/app?%73ocketPath=/tmp/a.sock", "server": "mysql://root@localhost/app?%73ocketPath=%2Ftmp%2Fa.sock" },
   { "case": "a parameter MySQL does not read", "url": "mysql://root@127.0.0.1:3306/app?dbname=other", "server": "mysql://root@127.0.0.1:3306/app" }
 ]

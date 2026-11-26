@@ -558,10 +558,11 @@ fn statement_key(dialect: Dialect, sql: &str) -> Option<String> {
 
 /// The server, without credentials: the scheme, the user, the host and port, the database, and the
 /// URL's parameters that choose the server or the database, as `#server` in `src/analyze.ts` names
-/// it (both are held to entry-name-cases.json). A parameter is read off the URL as written, as the
-/// engine reads it, a `+` being a plus; its value is decoded and encoded again, so that a database
-/// has one name however its URL spells it. They are sorted by name alone, since the hosts are tried
-/// in order.
+/// it (both are held to entry-name-cases.json). A name is matched decoded, as the loader's bridge
+/// to a Unix socket reads it, and kept as written, since the engine reads it undecoded. A value is
+/// read off the URL as written, a `+` being a plus; it is decoded and encoded again, so that a
+/// database has one name however its URL spells it. They are sorted by name alone, since the hosts
+/// are tried in order.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 fn server(url: &str) -> String {
     let (base, query) = url.split_once('?').unwrap_or((url, ""));
@@ -574,15 +575,15 @@ fn server(url: &str) -> String {
         Ok(Dialect::Mysql) => &["socket", "socketPath"],
         _ => &[],
     };
-    let mut chosen: Vec<(&str, &str)> = query.split('&').map(|pair| pair.split_once('=').unwrap_or((pair, ""))).filter(|(key, _)| choosing.contains(key)).collect();
+    let mut chosen: Vec<(&str, &str)> = query.split('&').map(|pair| pair.split_once('=').unwrap_or((pair, ""))).filter(|(key, _)| choosing.contains(&decoded(key).as_str())).collect();
     chosen.sort_by_key(|(key, _)| *key);
     let chosen: Vec<String> = chosen.iter().map(|(key, value)| format!("{key}={}", encoded(&decoded(value)))).collect();
     let query = if chosen.is_empty() { String::new() } else { format!("?{}", chosen.join("&")) };
     format!("{scheme}://{user}@{host}{path}{query}")
 }
 
-/// A URL parameter's value decoded as `decodeURIComponent` decodes it, or as written where that
-/// throws: a `%` that starts no escape, or escapes that are no UTF-8.
+/// A URL parameter's name or value decoded as `decodeURIComponent` decodes it, or as written where
+/// that throws: a `%` that starts no escape, or escapes that are no UTF-8.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 fn decoded(value: &str) -> String {
     let hex = |at: usize| value.as_bytes().get(at).and_then(|b| char::from(*b).to_digit(16));
