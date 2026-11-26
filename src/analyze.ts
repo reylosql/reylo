@@ -63,14 +63,14 @@ const BUILD_IDLE = 250;
  * The URL parameters that choose the server or the database a session reads, beside the URL's
  * host and path, as each dialect's engine reads them (engine/native/src/): libpq's, among them
  * `user`, which names the role as the URL's user part does, and `options`, which may set the
- * search path a name is read through; mysql2's socket; and ClickHouse's database and the path in
- * front of its interface. They name a session's entries with its server (`#server`), as `server`
- * in rust/reylo-build/src/analysis.rs names them.
+ * search path a name is read through; mysql2's socket; and ClickHouse's database, the header that
+ * names it, and the path in front of its interface. They name a session's entries with its server
+ * (`#server`), as `server` in rust/reylo-build/src/analysis.rs names them.
  */
 const CHOOSING: Record<Dialect, readonly string[]> = {
   postgres: ["dbname", "host", "hostaddr", "options", "port", "user"],
   mysql: ["socket", "socketPath"],
-  clickhouse: ["ch_database", "clickhouse_setting_database", "pathname"],
+  clickhouse: ["ch_database", "clickhouse_setting_database", "http_header_x-clickhouse-database", "pathname"],
   sqlite: [],
 };
 
@@ -594,26 +594,30 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 /**
  * The parameters of `url` that choose its server or database (`CHOOSING`), as `?name=value&…`,
  * or nothing where it has none, which keeps the name its entries were written under. A name is
- * matched decoded, as the bridge to a Unix socket reads it (src/host-url.ts), and kept as written,
- * since the engine reads it undecoded. A value is kept as written too, since its readers decode
- * it each their own way (libpq reads a `+` as a plus, ClickHouse and the engine's MySQL socket as
- * a space), so that a database written two ways is at most analyzed again under a name of its
- * own. They keep the URL's order, which decides the host tried first and which of `socket` and
- * `socketPath` the engine opens.
+ * matched decoded, as the bridge to a Unix socket reads it (src/host-url.ts), and a header's in
+ * any case, as HTTP compares header names; it is kept as written, since the engine reads a name
+ * undecoded. A value is kept as written too, since its readers decode it each their own way
+ * (libpq reads a `+` as a plus, ClickHouse and the engine's MySQL socket as a space), so that a
+ * database written two ways is at most analyzed again under a name of its own. They keep the
+ * URL's order, which decides the host tried first and which of `socket` and `socketPath` the
+ * engine opens.
  */
 function choosing(url: string, dialect: Dialect): string {
   const at = url.indexOf("?");
-  const chosen = at < 0 ? [] : url.slice(at + 1).split("&").filter((pair) => CHOOSING[dialect].includes(decoded(pair.split("=")[0]!)));
+  const chosen = at < 0 ? [] : url.slice(at + 1).split("&").filter((pair) => CHOOSING[dialect].includes(listed(pair)));
   return chosen.length ? `?${chosen.join("&")}` : "";
 }
 
-/** A URL parameter's name decoded, or as written where it does not decode. */
-function decoded(value: string): string {
+/**
+ * A URL parameter's name as `CHOOSING` lists it: decoded, or as written where it does not decode,
+ * and a header's in lower case.
+ */
+function listed(pair: string): string {
+  let name = pair.split("=")[0]!;
   try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
+    name = decodeURIComponent(name);
+  } catch {}
+  return name.startsWith("http_header_") ? name.toLowerCase() : name;
 }
 
 function readEntry(file: string): Entry | undefined {
