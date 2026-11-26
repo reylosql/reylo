@@ -205,19 +205,20 @@ function exactNumber(text: string, whole: boolean): number | undefined {
  */
 function exactDivisor(text: string, whole: boolean): number | undefined {
   const value = exactNumber(text, whole);
+  if (value === undefined || value === 0) return undefined;
   const written = decimal(text);
-  return value !== undefined && value !== 0 && written !== undefined && decimal(String(value)) === written ? value : undefined;
+  return written !== undefined && decimal(String(value)) === written ? value : undefined;
 }
 
 /** A decimal's text as its digits and power of ten, with no zero to spare, as `1.50` and `15e-1` both read `15e-1`. */
 function decimal(text: string): string | undefined {
   const m = /^[+-]?(\d*)(?:\.(\d*))?(?:e([+-]?\d+))?$/i.exec(text.trim());
-  if (m === null || (m[1] === "" && (m[2] ?? "") === "")) return undefined;
-  let digits = BigInt((m[1] || "0") + (m[2] ?? ""));
-  let exponent = Number(m[3] ?? 0) - (m[2] ?? "").length;
-  if (digits === 0n) return "0";
-  while (digits % 10n === 0n) (digits /= 10n), exponent++;
-  return `${digits}e${exponent}`;
+  const fraction = m?.[2] ?? "";
+  if (m === null || m[1]! + fraction === "") return undefined;
+  const all = (m[1]! + fraction).replace(/^0+/, "");
+  const digits = all.replace(/0+$/, "");
+  if (digits === "") return "0";
+  return `${digits}e${Number(m[3] ?? 0) - fraction.length + all.length - digits.length}`;
 }
 
 /**
