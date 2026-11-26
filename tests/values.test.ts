@@ -58,6 +58,32 @@ test("every Postgres type's decoded value is the type the module declares for it
   }
 });
 
+// Each Postgres type's values at the edges of what it holds, as the server writes them.
+const EDGES: Record<string, string[]> = {
+  int2: ["-32768", "32767"], int4: ["-2147483648", "2147483647"], int8: ["-9223372036854775808", "9223372036854775807"], oid: ["0", "4294967295"],
+  float4: ["-0", "3.4028235e+38", "1e-45"], float8: ["-0", "1.7976931348623157e+308", "5e-324"],
+  numeric: ["NaN", "Infinity", "-Infinity", "-0.000000001", "1000000000000000000000000000000"], money: ["-$92,233,720,368,547,758.08", "$92,233,720,368,547,758.07"],
+  date: ["4714-11-24 BC", "0001-01-01 BC", "9999-12-31", "10000-01-01", "5874897-12-31", "infinity", "-infinity"],
+  timestamp: ["4714-11-24 00:00:00 BC", "294276-12-31 23:59:59.999999", "infinity", "-infinity"],
+  timestamptz: ["4714-11-24 00:00:00+00 BC", "294276-12-31 23:59:59.999999+00", "1849-12-31 19:03:58-04:56:02", "2026-01-02 06:00:00+30", "12345-01-05 04:00:00+100", "12344-12-25 00:00:00-168", "infinity", "-infinity"],
+  time: ["00:00:00", "23:59:59.999999", "24:00:00"], timetz: ["00:00:00+15:59", "24:00:00-15:59"],
+  interval: ["-178000000 years", "178000000 years", "-00:00:00.000001", "infinity", "-infinity"],
+  bytea: ["\\x"], text: [""], uuid: ["00000000-0000-0000-0000-000000000000"],
+};
+
+test("every Postgres type's values at its edges hold to its JSON Schema, as `.run()` gives them", () => {
+  for (const [name, texts] of Object.entries(EDGES)) {
+    const t = pg(name);
+    const schema = typeSchema(t, "postgres") as JsonSchema;
+    for (const text of texts) {
+      const value = textDecoder(columnKind(t, "postgres"))(text);
+      // As JSON writes it: a BigInt the integer it is, bytes their base64.
+      const json = JSON.parse(JSON.stringify(value instanceof Uint8Array ? Buffer.from(value).toString("base64") : value, (_, x) => (typeof x === "bigint" ? (JSON as unknown as { rawJSON(text: string): unknown }).rawJSON(String(x)) : x)));
+      assert.equal(validate(schema, json), undefined, `${name} ${text}: ${JSON.stringify(json)}`);
+    }
+  }
+});
+
 // Postgres's geometric types, each as the server writes it and as the object `.run()` gives it.
 const SHAPES: [name: string, text: string, value: unknown][] = [
   ["point", "(1.5,-2)", { x: 1.5, y: -2 }],
@@ -314,6 +340,10 @@ test("timestamptz: the instant's ISO 8601 text in UTC, the fraction in six digit
     ["12345-01-01 00:00:00+05:30", "+012344-12-31T18:30:00.000000Z"],
     ["2000-02-29 12:00:00+00", "2000-02-29T12:00:00.000000Z"],
     ["1900-03-01 00:00:00+01", "1900-02-28T23:00:00.000000Z"],
+    // A POSIX zone's offset, to three digits of hours (`XXX-100`, `XXX+167:59:60`, a summer of `XXX-167:59:60YYY`).
+    ["12345-01-05 04:00:00+100", "+012345-01-01T00:00:00.000000Z"],
+    ["12344-12-25 00:00:00-168", "+012345-01-01T00:00:00.000000Z"],
+    ["4712-01-08 01:00:00+169 BC", "-004711-01-01T00:00:00.000000Z"],
   ] as const) {
     assert.equal(instant(text), iso, text);
     // Temporal reads each back to the same text: an ISO 8601 instant, the year extended outside 0000 to 9999.
@@ -333,7 +363,7 @@ test("timestamptz: the instant's ISO 8601 text in UTC, the fraction in six digit
 
 test("timestamptz: the text read by position is the pattern's, for every server text and for text that is not one", () => {
   // The reading by pattern alone, as `instant` was before it read the usual text by position.
-  const TSTZ = /^(\d{4,})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(\.\d{1,6})?([+-])(\d\d)(?::(\d\d))?(?::(\d\d))?( BC)?$/;
+  const TSTZ = /^(\d{4,})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(\.\d{1,6})?([+-])(\d\d|1\d\d)(?::(\d\d))?(?::(\d\d))?( BC)?$/;
   const pad = (n: number, width = 2) => String(n).padStart(width, "0");
   const isoYear = (y: number) => (y >= 0 && y <= 9999 ? pad(y, 4) : `${y < 0 ? "-" : "+"}${pad(Math.abs(y), 6)}`);
   const daysFromCivil = (y: number, m: number, d: number) => {
