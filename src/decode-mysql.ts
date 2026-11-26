@@ -24,7 +24,7 @@
 // and a column whose kind is `bool` (src/values.ts) is made a boolean after the driver, a value
 // other than 0 or 1 refused (`truth`).
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
-import { bigInteger, coerce, DecodeError, describe, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
+import { bigInteger, coerce, columnKind, DecodeError, describe, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
 import { bunRows } from "./decode.ts";
 import { readMysqlError } from "./query-error.ts";
 import type { AnyClient as Client, Bound, Marks, QueryModule, Runtime } from "./execute.ts";
@@ -510,18 +510,52 @@ function asBuffer(v: unknown) {
   return v instanceof Uint8Array && NodeBuffer !== undefined && !NodeBuffer.isBuffer(v) ? NodeBuffer.from(v.buffer, v.byteOffset, v.byteLength) : v;
 }
 
+/**
+ * The statement and its values for mariadb and PlanetScale, which write each value into the text
+ * themselves, a number as `String` writes it, so -0 as the integer `0`. A DOUBLE's or a FLOAT's -0
+ * goes in at its mark as MySQL's float literal `-0e0`, the DOUBLE mysql2 binds, and the driver
+ * writes the rest: the text `'-0'` would be a string wherever the place's type follows its value's,
+ * as in `coalesce(:d, d)`. The literal goes in parentheses, since mariadb 2 reads `--` as a comment's
+ * start with nothing after it, so `1-?` would hide every placeholder after it. Without marks, or
+ * where the module carries the sql_mode its build read
+ * the statement's strings under, a mark need not be a placeholder of the session's, and the number
+ * goes as it is.
+ */
+function signedZeros(query: QueryModule<"mysql">, { text, values, names, marks }: Bound): { text: string; values: unknown[] } {
+  if (marks?.length !== values.length || query.sqlMode !== undefined) return { text, values };
+  const zero = (v: unknown, i: number) => {
+    const type = query.inputs?.[names[i]!]?.type;
+    return Object.is(v, -0) && type !== undefined && columnKind(type, "mysql") === "float" && text.slice(...marks[i]!) === "?";
+  };
+  let written = "";
+  let at = 0;
+  const kept: unknown[] = [];
+  values.forEach((v, i) => {
+    if (!zero(v, i)) return void kept.push(v);
+    written += text.slice(at, marks[i]![0]) + "(-0e0)";
+    at = marks[i]![1];
+  });
+  return { text: written + text.slice(at), values: kept };
+}
+
 /** A MySQL statement's rows on each MySQL driver's client, or undefined on any other client. */
-async function runMysql(c: Client, query: QueryModule<"mysql">, { text, values, marks }: Bound): Promise<unknown[] | undefined> {
+async function runMysql(c: Client, query: QueryModule<"mysql">, bound: Bound): Promise<unknown[] | undefined> {
+  const { text, values, marks } = bound;
   if (typeof c.unsafe === "function") return bunRows(await c.unsafe(text, values), query.columns);
   // mariadb, checked before execute() because it has one too (returning rows, not a pair).
   // Its callback API (mariadb/callback) answers through the callback and returns a command
   // object; its promise API returns a promise and ignores the callback.
-  if (typeof c.batch === "function" && typeof c.query === "function") return await mariadb(c, text, values.map(asBuffer), query.columns);
+  if (typeof c.batch === "function" && typeof c.query === "function") {
+    const signed = signedZeros(query, bound);
+    return await mariadb(c, signed.text, signed.values.map(asBuffer), query.columns);
+  }
   // mysql2's callback API: the promise() wrapper runs on the same connection.
   const m = typeof c.promise === "function" ? c.promise() : c;
   if (typeof m.execute === "function") {
     // mysql2 has query() beside execute(); PlanetScale's Connection, Client and transaction do not.
-    return typeof m.query === "function" ? await mysql2(m, text, values, query.columns, marks, query.sqlMode) : await planetscale(m, text, values, query.columns);
+    if (typeof m.query === "function") return await mysql2(m, text, values, query.columns, marks, query.sqlMode);
+    const signed = signedZeros(query, bound);
+    return await planetscale(m, signed.text, signed.values, query.columns);
   }
   return undefined;
 }

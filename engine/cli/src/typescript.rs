@@ -157,10 +157,18 @@ fn nests_any_deep(t: &Value) -> bool {
 }
 
 /// A Postgres array type, by its name, at its innermost level: its element is no Postgres array
-/// type, though it may be one the format structures as an array (`bit`, `vector`, `lseg`).
+/// type, though it may be one the format structures as an array (`bit`, `vector`, `lseg`), or it is
+/// an array of whole arrays.
 fn postgres_array(t: &Value) -> bool {
     let named = |t: &Value| kind(t) == "array" && bare_name(t).starts_with('_');
-    named(t) && !named(&t["element"]["type"])
+    named(t) && (!named(&t["element"]["type"]) || holds_whole_arrays(t))
+}
+
+/// Whether a Postgres array's elements are each a whole array of their own, as an array of a
+/// domain over an array type is (src/engine-type.ts, `holdsWholeArrays`).
+fn holds_whole_arrays(t: &Value) -> bool {
+    let named = |t: &Value| kind(t) == "array" && bare_name(t).starts_with('_');
+    named(t) && named(&t["element"]["type"]) && label(&t["element"]["type"]) != label(t)
 }
 
 fn mark_nesting(t: &Value) -> Value {
@@ -315,6 +323,10 @@ fn column_kind(t: &Value, dialect: &str) -> String {
                 let element = &t["element"]["type"];
                 if kind(element) == "opaque" && bare_name(element) == "record" {
                     return "text".into();
+                }
+                if holds_whole_arrays(t) {
+                    let inner = column_kind(element, dialect);
+                    return if inner.ends_with("[]") && delimiter_of(&element["element"]["type"]).is_none() { format!("{{{inner}}}[]") } else { "text".into() };
                 }
             }
             if dialect == "mysql" && name == "bit" {
@@ -1616,6 +1628,18 @@ mod tests {
         assert_eq!(printed(&a, "postgres", &Value::Null, false).returns, "{\n  /** The user's id */\n  identifier: number;\n  email_address: string;\n}[]");
         assert_eq!(format_type("{ a: string; b: number }", 10), "{\n  a: string;\n  b: number;\n}");
         assert_eq!(format_type(r#"import("geojson").Point & { srid: number }"#, 10), r#"import("geojson").Point & { srid: number }"#);
+    }
+
+    #[test]
+    fn an_array_of_a_domain_over_an_array_type_holds_whole_arrays_at_each_level() {
+        // `create domain ints as int4[]; create table d (x ints[] not null)`.
+        let int4 = json!({ "kind": "integer", "bits": 32, "label": "int4" });
+        let ints = json!({ "kind": "array", "label": "public._ints", "element": { "nullable": true, "type": { "kind": "array", "label": "public.ints", "element": { "nullable": true, "type": int4 } } } });
+        let mut a = analysis(json!([{ "name": "x", "type": ints }]), json!([]), "many");
+        a["domains"] = json!({ "public.ints": "_int4" });
+        assert_eq!(column_kind(&with_bases(&ints, a["domains"].as_object().unwrap()), "postgres"), "{int[]}[]");
+        assert_eq!(printed(&a, "postgres", &Value::Null, false).returns, "{ x: ((number | null)[] | null)[] }[]");
+        assert_eq!(printed(&a, "postgres", &Value::Null, true).returns, "{ x: NestedArray<NestedArray<number | null> | null> }[]");
     }
 
     #[test]

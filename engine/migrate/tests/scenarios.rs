@@ -194,7 +194,10 @@ impl P {
         }
         let opts = self.opts();
         let mut lines = std::mem::take(&mut self.lines);
-        let code = f(&opts, &mut |l: &str| lines.push(l.to_string())).await.unwrap_or_else(|e| panic!("refused to start: {e}"));
+        // The command's future is boxed: unboxed, it would be part of every caller's, and a debug
+        // build gives each await of it in a scenario a stack slot of its own, so a long scenario's
+        // frame outgrew the test thread's 2 MiB.
+        let code = Box::pin(f(&opts, &mut |l: &str| lines.push(l.to_string()))).await.unwrap_or_else(|e| panic!("refused to start: {e}"));
         self.lines = lines;
         code
     }
@@ -412,25 +415,44 @@ macro_rules! assert_has {
     }};
 }
 
+/// Runs a scenario on a thread of its own with a fixed 8 MiB of stack, the main thread's usual
+/// default on Linux and macOS, where the `reylo` binary runs every command: a debug build's poll
+/// frames through the planner come within a few percent of the 2 MiB a test's own thread has. The
+/// thread takes the test's name, which its panic names.
+fn on_a_main_threads_stack<F, Fut>(scenario: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut thread = std::thread::Builder::new().stack_size(8 << 20);
+    if let Some(name) = std::thread::current().name() {
+        thread = thread.name(name.to_string());
+    }
+    let ran = thread.spawn(move || tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(scenario())).unwrap().join();
+    if let Err(panic) = ran {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 /// One test per dialect for each scenario, `<scenario>::postgres` and so on.
 macro_rules! for_each_dialect {
     ($($scenario:ident),* $(,)?) => {$(
         mod $scenario {
-            #[tokio::test(flavor = "current_thread")]
-            async fn postgres() {
-                if let Some(p) = super::P::new(super::Dialect::Postgres).await { let url = p.url.clone(); super::$scenario(p).await; super::forget(&url).await }
+            #[test]
+            fn postgres() {
+                super::on_a_main_threads_stack(|| async { if let Some(p) = super::P::new(super::Dialect::Postgres).await { let url = p.url.clone(); super::$scenario(p).await; super::forget(&url).await } });
             }
-            #[tokio::test(flavor = "current_thread")]
-            async fn mysql() {
-                if let Some(p) = super::P::new(super::Dialect::Mysql).await { super::$scenario(p).await }
+            #[test]
+            fn mysql() {
+                super::on_a_main_threads_stack(|| async { if let Some(p) = super::P::new(super::Dialect::Mysql).await { super::$scenario(p).await } });
             }
-            #[tokio::test(flavor = "current_thread")]
-            async fn sqlite() {
-                if let Some(p) = super::P::new(super::Dialect::Sqlite).await { super::$scenario(p).await }
+            #[test]
+            fn sqlite() {
+                super::on_a_main_threads_stack(|| async { if let Some(p) = super::P::new(super::Dialect::Sqlite).await { super::$scenario(p).await } });
             }
-            #[tokio::test(flavor = "current_thread")]
-            async fn turso() {
-                if let Some(p) = super::P::turso().await { super::$scenario(p).await }
+            #[test]
+            fn turso() {
+                super::on_a_main_threads_stack(|| async { if let Some(p) = super::P::turso().await { super::$scenario(p).await } });
             }
         }
     )*};
@@ -463,6 +485,8 @@ for_each_dialect!(
     column_order_is_not_compared,
     refuses_drift,
     an_edited_migration_is_refused,
+    line_endings_inside_a_string_are_no_edit,
+    a_carriage_return_ends_a_comment_only_where_the_database_ends_it,
     history_pull_takes_back_what_the_lock_refuses,
     ddl_run_by_hand_then_written_is_recorded,
     a_change_by_hand_with_schema_sql_is_told_to_write_the_migration,
@@ -1125,6 +1149,73 @@ async fn an_edited_migration_is_refused(mut p: P) {
     assert_eq!(std::fs::read_to_string(p.dir.join("migrations").join("20261027100000_users.sql")).unwrap(), original);
     assert_eq!(p.run(async |o, log| reylo_migrate::history_pull(o, log).await).await, 0, "{}", p.peek());
     assert_has!(p.output(), r"^✓ Every migration this database ran is in \S*migrations, as it ran it\n");
+}
+
+/// A migration run with CRLF line endings, then checked out with LF, as git does on another
+/// machine, is the one the database ran: the lock reads line endings as no edit, inside a string or
+/// a dollar quote too, and so do status, deploy and dev.
+async fn line_endings_inside_a_string_are_no_edit(mut p: P) {
+    let (d, text) = (p.d, p.t.text);
+    p.linear();
+    p.schema(&format!("create table t (a {text});"));
+    p.file("20261027100000_t.sql", &format!("create table t (a {text});"));
+    // A string over two lines, on Postgres in a `$$` body.
+    let rows = move |line: &str| match d {
+        Dialect::Postgres => format!("do $$\nbegin\n  insert into t values ('first line\n{line}');\nend\n$$;\n"),
+        _ => format!("insert into t values ('first line\n{line}');\n"),
+    };
+    p.file("20261027110000_rows.sql", &rows("second line").replace('\n', "\r\n"));
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    p.output();
+    p.file("20261027110000_rows.sql", &rows("second line"));
+    assert_eq!(p.status().await, 0, "{}", p.peek());
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_has!(p.output(), "Up to date");
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    let out = p.output();
+    assert!(!out.contains("rewound"), "{out}");
+    // Nothing ran again: the row is the one the CRLF text wrote.
+    assert_eq!(p.rows("select a from t").await.iter().map(|r| r.text("a").to_string()).collect::<Vec<_>>(), ["first line\r\nsecond line"]);
+    // A letter changed in the same string is an edit.
+    p.file("20261027110000_rows.sql", &rows("second lime"));
+    assert_eq!(p.status().await, 1);
+    assert_has!(p.output(), r"20261027110000_rows\.sql  applied [^\n]+, and edited since");
+    assert_eq!(p.migrate().await, 1);
+    assert_has!(p.output(), r"Migration 20261027110000_rows\.sql changed after this database applied it");
+}
+
+/// A `--` comment ends at a bare carriage return on Postgres, and runs on to the next line feed on
+/// MySQL and SQLite: there, the same text with a line feed in its place runs one more statement, so
+/// it is an edit, whatever the lock makes of the two, and history pull writes back what ran.
+async fn a_carriage_return_ends_a_comment_only_where_the_database_ends_it(mut p: P) {
+    let (d, text) = (p.d, p.t.text);
+    p.linear();
+    p.schema(&format!("create table t (a {text});"));
+    p.file("20261027100000_t.sql", &format!("create table t (a {text});"));
+    let rows = |end: &str| format!("insert into t values ('zero'); -- seed{end}insert into t values ('one');\n");
+    p.file("20261027110000_rows.sql", &rows("\r"));
+    assert_eq!(p.dev().await, 0, "{}", p.peek());
+    p.output();
+    let ran = if d == Dialect::Postgres { vec!["zero", "one"] } else { vec!["zero"] };
+    assert_eq!(p.rows("select a from t order by a desc").await.iter().map(|r| r.text("a").to_string()).collect::<Vec<_>>(), ran);
+    p.file("20261027110000_rows.sql", &rows("\n"));
+    if d == Dialect::Postgres {
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_has!(p.output(), "Up to date");
+        return;
+    }
+    assert_eq!(p.status().await, 1, "{}", p.peek());
+    assert_has!(p.output(), r"20261027110000_rows\.sql  applied [^\n]+, and edited since");
+    assert_eq!(p.migrate().await, 1, "{}", p.peek());
+    assert_has!(p.output(), r"Migration 20261027110000_rows\.sql changed after this database applied it");
+    assert_eq!(p.run(async |o, log| reylo_migrate::history_pull(o, log).await).await, 0, "{}", p.peek());
+    assert_has!(p.output(), "written over");
+    assert_eq!(std::fs::read_to_string(p.dir.join("migrations").join("20261027110000_rows.sql")).unwrap(), rows("\r"));
+    assert_eq!(p.status().await, 0, "{}", p.peek());
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_has!(p.output(), "Up to date");
 }
 
 async fn history_pull_takes_back_what_the_lock_refuses(mut p: P) {
@@ -4022,15 +4113,15 @@ async fn create_drafts_one_migration_cached_or_not(mut p: P) {
 
 macro_rules! on {
     (Turso, $($scenario:ident),* $(,)?) => {$(
-        #[tokio::test(flavor = "current_thread")]
-        async fn $scenario() {
-            if let Some(p) = P::turso().await { adversarial::$scenario(p).await }
+        #[test]
+        fn $scenario() {
+            on_a_main_threads_stack(|| async { if let Some(p) = P::turso().await { adversarial::$scenario(p).await } });
         }
     )*};
     ($dialect:ident, $($scenario:ident),* $(,)?) => {$(
-        #[tokio::test(flavor = "current_thread")]
-        async fn $scenario() {
-            if let Some(p) = P::new(Dialect::$dialect).await { let url = p.url.clone(); adversarial::$scenario(p).await; forget(&url).await }
+        #[test]
+        fn $scenario() {
+            on_a_main_threads_stack(|| async { if let Some(p) = P::new(Dialect::$dialect).await { let url = p.url.clone(); adversarial::$scenario(p).await; forget(&url).await } });
         }
     )*};
 }

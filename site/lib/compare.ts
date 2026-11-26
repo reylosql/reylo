@@ -12,7 +12,7 @@ export const compareResults = results as unknown as { at: string; tools: Record<
 
 /** The tools beside Reylo, in an order that keeps the longer names from sitting side by side. */
 export const compareTools = [
-  { id: 'sqlc', name: 'sqlc', sub: 'Go', href: 'https://sqlc.dev' },
+  { id: 'sqlc', name: 'sqlc', sub: 'TypeScript', href: 'https://sqlc.dev' },
   { id: 'pgtyped', name: 'PgTyped', sub: 'TypeScript', href: 'https://pgtyped.dev' },
   { id: 'sqlx', name: 'sqlx', sub: 'Rust', href: 'https://github.com/transact-rs/sqlx' },
   { id: 'typedsql', name: 'TypedSQL', sub: 'Prisma', href: 'https://www.prisma.io/docs/orm/prisma-client/using-raw-sql/typedsql' },
