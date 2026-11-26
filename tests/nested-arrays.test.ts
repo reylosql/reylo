@@ -31,6 +31,31 @@ test("a Postgres array column is typed with one dimension by default, and at any
   assert.equal(reyloImport(nested.row), `import type { NestedArray, Query } from "reylo";`);
 });
 
+test("an array of a type the format structures as an array, such as bit or lseg, is typed at any depth under allow_nested_arrays", () => {
+  const float8 = { kind: "float", exponent_bits: 11, mantissa_bits: 52, label: "float8" };
+  const bit = { kind: "array", size: { exact: 3 }, element: { type: { kind: "boolean" } }, label: "bit" };
+  const lseg = { kind: "array", size: { exact: 2 }, element: { type: { kind: "struct", fields: [{ name: "x", type: float8 }, { name: "y", type: float8 }], label: "point" } }, label: "lseg" };
+  const vector = { kind: "array", element: { type: { kind: "float", exponent_bits: 8, mantissa_bits: 23 } }, label: "public.vector" };
+  const arrayOf = (label: string, type: object) => ({ kind: "array", label, element: { nullable: true, type } });
+  const columns = [
+    { name: "flags", nullable: false, type: arrayOf("_bit", bit) },
+    { name: "segments", nullable: false, type: arrayOf("_lseg", lseg) },
+    { name: "embeddings", nullable: false, type: arrayOf("public._vector", vector) },
+    { name: "doc", nullable: false, type: { kind: "json", label: "jsonb", content: { type: { kind: "struct", fields: [{ name: "flags", type: arrayOf("_bit", bit) }] } } } },
+    // `array[flags, flags]`: a level the statement builds over the column's array.
+    { name: "stacked", nullable: false, type: { kind: "array", label: "_bit", element: { type: arrayOf("_bit", bit) } } },
+  ];
+  const whole = { ...analysis, columns } as unknown as Analysis;
+  const nested = moduleTypes("", whole, "postgres", undefined, true, ".reylo.yaml", {}, true);
+  assert.match(nested.row, /flags: NestedArray<string \| null>;/);
+  assert.match(nested.row, /segments: NestedArray<\{ x: number; y: number \}\[\] \| null>;/);
+  assert.match(nested.row, /embeddings: NestedArray<number\[\] \| null>;/);
+  assert.match(nested.row, /doc: \{ flags: NestedArray<string \| null> \}/);
+  assert.match(nested.row, /stacked: NestedArray<string \| null>\[\] \}/);
+  const items = (a: Analysis) => (querySchemas(a, "postgres").output as { items: { properties: { segments: { items: unknown } } } }).items.properties.segments.items;
+  assert.deepEqual(items(analysisWithNestedArrays(whole)), { anyOf: [items(whole), { type: "array" }] });
+});
+
 test("reylo play types an array column as the type check does under allow_nested_arrays", () => {
   assert.match(playResult("", "postgres", { analysis }).element ?? "", /cells: \(number \| null\)\[\]/);
   assert.match(playResult("", "postgres", { analysis }, { allowNestedArrays: true }).element ?? "", /cells: NestedArray<number \| null>/);

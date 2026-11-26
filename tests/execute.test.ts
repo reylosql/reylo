@@ -361,6 +361,9 @@ test("postgres: a pgvector vector parameter takes an array of finite numbers, wr
   };
   await execute(client as never, nearest, { q: [1, 2.5, -3, 1e-7], qs: [[1, 2], [3]], h: [0.5] });
   assert.deepEqual(seen, [["[1,2.5,-3,1e-7]", '{"[1,2]","[3]"}', "[0.5]"]]);
+  // pgvector keeps -0, which JSON.stringify writes as 0.
+  await execute(client as never, nearest, { q: [-0, 1], qs: [[-0]], h: [-0] });
+  assert.deepEqual(seen.at(-1), ["[-0,1]", '{"[-0]"}', "[-0]"]);
   // The text pgvector itself prints passes as it is.
   await execute(client as never, nearest, { q: "[1,2]", qs: [], h: null });
   assert.deepEqual(seen.at(-1), ["[1,2]", "{}", null]);

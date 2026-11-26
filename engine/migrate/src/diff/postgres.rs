@@ -223,8 +223,47 @@ fn table_word(kind: &str) -> &'static str {
 
 /// The schema of the database `db` is connected to.
 pub async fn read(db: &mut Db) -> Result<Schema, Error> {
+    read_in(db, None).await
+}
+
+/// The platform's schemas `schemas` of the database `db` is connected to, alone, and all they hold,
+/// whoever owns it: what a shadow database is given of its target's platform, so that a migration
+/// that uses it replays (`references auth.users`). Without what no shadow takes from the platform:
+/// extensions, which a shadow makes itself; privileges, owners and comments; policies, which are
+/// the project's; and a trigger whose function is outside `schemas`, which the project made on the
+/// platform's table (`on_auth_user_created`, calling `public.handle_new_user()`) and its own SQL
+/// makes again.
+pub async fn read_platform(db: &mut Db, schemas: &[String]) -> Result<Schema, Error> {
+    let mut schema = read_in(db, Some(schemas)).await?;
+    schema.objects.retain(|_, o| !matches!(o.kind, Some(Kind::Grant | Kind::Comment | Kind::Policy)));
+    Ok(schema)
+}
+
+/// What the platform's schemas `schemas` hold that [`read_platform`] makes nothing of, each as
+/// `pg_identify_object` names it (`text search configuration auth.search`): the kinds no reading
+/// of Reylo's defines, which a plan can't make.
+pub async fn platform_unread(db: &mut Db, schemas: &[String]) -> Result<Vec<String>, Error> {
+    let named = schemas.iter().map(|n| literal(n)).collect::<Vec<_>>().join(", ");
+    let rows = db
+        .rows(&format!(
+            "select o.type || ' ' || o.identity as what from (
+               select 'pg_ts_config'::regclass as classid, x.oid as objid, x.cfgnamespace as ns from pg_ts_config x
+               union all select 'pg_ts_dict'::regclass, x.oid, x.dictnamespace from pg_ts_dict x
+               union all select 'pg_ts_parser'::regclass, x.oid, x.prsnamespace from pg_ts_parser x
+               union all select 'pg_ts_template'::regclass, x.oid, x.tmplnamespace from pg_ts_template x
+               union all select 'pg_conversion'::regclass, x.oid, x.connamespace from pg_conversion x
+             ) k join pg_namespace n on n.oid = k.ns, lateral pg_identify_object(k.classid, k.objid, 0) o
+             where n.nspname = any(array[{named}]::name[])
+               and not exists (select 1 from pg_depend e where e.classid = k.classid and e.objid = k.objid and e.deptype = 'e')
+             order by 1"
+        ))
+        .await?;
+    Ok(rows.iter().map(|r| r.text("what").to_string()).collect())
+}
+
+async fn read_in(db: &mut Db, platform: Option<&[String]>) -> Result<Schema, Error> {
     db.exec("set search_path = ''").await?;
-    let result = read_objects(db).await;
+    let result = read_objects(db, platform).await;
     db.exec("reset search_path").await?;
     // Every rendering as it reads back, as the catalog compares them: a database made from another's
     // rendering then reads as the same.
@@ -240,14 +279,33 @@ pub async fn read(db: &mut Db) -> Result<Schema, Error> {
     })
 }
 
-async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
+/// The objects of the project's, or with `platform`, those in the platform's schemas it names.
+async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema, Error> {
     let mut s = Schema::default();
     let mut ids = Ids::default();
-    let ns = PG_USER_NS;
-    // The history tables, and what comes with them, are left out: `c` or `t` the `pg_class` row.
-    let kept_c = pg_not_history("c");
-    let kept_t = pg_not_history("t");
-    let kept_rel = not_history("c.relname");
+    // Reading the platform's schemas, what is in one of them is read whoever owns it, and nothing
+    // in no schema (an extension, a cast, a publication, an event trigger, a foreign server) is.
+    let named = platform.map(|list| format!("array[{}]::name[]", list.iter().map(|n| literal(n)).collect::<Vec<_>>().join(", ")));
+    let ns = match &named {
+        Some(list) => format!("{PG_USER_NS} and n.nspname = any({list})"),
+        None => PG_USER_NS.to_string(),
+    };
+    let ns = ns.as_str();
+    let not_platform = |owner: &str| if platform.is_some() { "true".to_string() } else { not_platform(owner) };
+    let not_platform_schema = |n: &str| if platform.is_some() { "true".to_string() } else { not_platform_schema(n) };
+    let project_relation = |c: &str, n: &str| if platform.is_some() { "true".to_string() } else { project_relation(c, n) };
+    let project_extension = |x: &str, n: &str| if platform.is_some() { "false".to_string() } else { project_extension(x, n) };
+    let database_wide = |owner: &str| if platform.is_some() { "false".to_string() } else { not_platform(owner) };
+    // The history tables, and what comes with them, are left out: `c` or `t` the `pg_class` row. A
+    // table of the platform's is read whatever its name, a history table's (`auth.schema_migrations`).
+    let kept = |condition: String| if platform.is_some() { "true".to_string() } else { condition };
+    let (kept_c, kept_t, kept_rel) = (kept(pg_not_history("c")), kept(pg_not_history("t")), kept(not_history("c.relname")));
+    let pg_not_history_schema = |n: &str| kept(pg_not_history_schema(n));
+    // A trigger's function, `f`: in the platform's schemas, where they are read.
+    let trigger_function = match &named {
+        Some(list) => format!("(select fn.nspname from pg_namespace fn where fn.oid = f.pronamespace) = any({list})"),
+        None => "true".to_string(),
+    };
 
     for r in db
         .rows(&format!(
@@ -1552,7 +1610,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         .rows(&format!(
             "select tg.oid, format('%I', tg.tgname) as name, format('%I.%I', n.nspname, c.relname) as rel, c.oid as reloid, pg_get_triggerdef(tg.oid, false) as def, tg.tgenabled as enabled
             from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace join pg_proc f on f.oid = tg.tgfoid
-            where not tg.tgisinternal and tg.tgparentid = 0 and {ns} and {} and {} and {kept_rel}",
+            where not tg.tgisinternal and tg.tgparentid = 0 and {ns} and {} and {} and {trigger_function} and {kept_rel}",
             not_extension("pg_class", "c"),
             not_platform("f.proowner")
         ))
@@ -1856,9 +1914,10 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
         .rows(&format!(
             "select c.oid, format_type(c.castsource, null) as src, format_type(c.casttarget, null) as tgt, case when c.castfunc <> 0 then format('%s', c.castfunc::regprocedure) end as func,
               c.castcontext as context, c.castmethod as method
-            from pg_cast c where c.oid >= 16384 and {} and not {}",
+            from pg_cast c where c.oid >= 16384 and {} and not {} and {}",
             not_extension("pg_cast", "c"),
-            made_with("pg_cast", "c")
+            made_with("pg_cast", "c"),
+            if platform.is_some() { "false" } else { "true" }
         ))
         .await?
     {
@@ -1888,7 +1947,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             option_pairs("w.fdwoptions"),
             acl("w.fdwacl", 'F', "w.fdwowner"),
             crate::catalog::not_extension("pg_foreign_data_wrapper", "w"),
-            not_platform("w.fdwowner")
+            database_wide("w.fdwowner")
         ))
         .await?
     {
@@ -1922,7 +1981,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
               (select string_agg(format('%I %L', split_part(o, '=', 1), substr(o, strpos(o, '=') + 1)), ', ') from unnest(s.srvoptions) o) as options, {} as acl
             from pg_foreign_server s join pg_foreign_data_wrapper w on w.oid = s.srvfdw where {}",
             acl("s.srvacl", 'S', "s.srvowner"),
-            not_platform("s.srvowner")
+            database_wide("s.srvowner")
         ))
         .await?
     {
@@ -1947,7 +2006,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
               (select string_agg(quote_literal(t), ', ' order by t) from unnest(et.evttags) t) as tags
             from pg_event_trigger et where {} and {}",
             crate::catalog::not_extension("pg_event_trigger", "et"),
-            not_platform("et.evtowner")
+            database_wide("et.evtowner")
         ))
         .await?
     {
@@ -1994,7 +2053,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
               format('%s', (select json_agg(json_build_array(format('%I.%I', n.nspname, c.relname), format('%I.%I', n.nspname, c.relname) || {columns}, {listed}) order by format('%I.%I', n.nspname, c.relname)) from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid)) as tables,
               format('%s', {schemas}) as schemas
             from pg_publication p where {}",
-            not_platform("p.pubowner")
+            database_wide("p.pubowner")
         ))
         .await?
     {
