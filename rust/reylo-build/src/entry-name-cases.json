@@ -1,0 +1,17 @@
+[
+  { "case": "a URL with no parameter that chooses the database keeps the name its entries had", "url": "postgres://app:secret@db.internal:5432/shop?sslmode=require&application_name=web", "server": "postgres://app@db.internal:5432/shop" },
+  { "case": "dbname chooses the database", "url": "postgres://postgres@127.0.0.1:5432/?dbname=a", "server": "postgres://postgres@127.0.0.1:5432/?dbname=a" },
+  { "case": "an escape is the character it stands for", "url": "postgres://postgres@127.0.0.1:5432/?dbname=%61", "server": "postgres://postgres@127.0.0.1:5432/?dbname=a" },
+  { "case": "a query with no path before it", "url": "postgres://app@db.internal?sslmode=require", "server": "postgres://app@db.internal" },
+  { "case": "in order of name, whatever order the URL writes them in, and never a password or a key file", "url": "postgres://app:secret@db.internal/?sslkey=/keys/app.key&port=5433&sslpassword=hunter2&dbname=shop", "server": "postgres://app@db.internal/?dbname=shop&port=5433" },
+  { "case": "a + is a plus, as libpq reads it", "url": "postgres://db.internal/?dbname=a+b", "server": "postgres://@db.internal/?dbname=a%2Bb" },
+  { "case": "a % that starts no escape keeps the value as written", "url": "postgres://db.internal/?dbname=50%zz", "server": "postgres://@db.internal/?dbname=50%25zz" },
+  { "case": "escapes that are no UTF-8 keep the value as written", "url": "postgres://db.internal/?dbname=%ff", "server": "postgres://@db.internal/?dbname=%25ff" },
+  { "case": "a Unix socket's directory", "url": "postgres:///shop?host=/var/run/postgresql", "server": "postgres://@/shop?host=%2Fvar%2Frun%2Fpostgresql" },
+  { "case": "a Unix socket's directory, escaped", "url": "postgres:///shop?host=%2Fvar%2Frun%2Fpostgresql", "server": "postgres://@/shop?host=%2Fvar%2Frun%2Fpostgresql" },
+  { "case": "several hosts and ports, and the role", "url": "postgres:///shop?host=a,b&port=5432,5433&user=app", "server": "postgres://@/shop?host=a%2Cb&port=5432%2C5433&user=app" },
+  { "case": "a repeated parameter keeps its order, which picks the host tried first", "url": "postgres:///shop?host=b&dbname=x&host=a", "server": "postgres://@/shop?dbname=x&host=b&host=a" },
+  { "case": "options, which may set the search path", "url": "postgres://app@db.internal/shop?options=-c%20search_path%3Dtenant_1", "server": "postgres://app@db.internal/shop?options=-c%20search_path%3Dtenant_1" },
+  { "case": "a MySQL socket", "url": "mysql://root@127.0.0.1:3306/app?socketPath=/tmp/mysql.sock&ssl=true", "server": "mysql://root@127.0.0.1:3306/app?socketPath=%2Ftmp%2Fmysql.sock" },
+  { "case": "a parameter MySQL does not read", "url": "mysql://root@127.0.0.1:3306/app?dbname=other", "server": "mysql://root@127.0.0.1:3306/app" }
+]

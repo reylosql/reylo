@@ -631,6 +631,16 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
+    fn an_entry_is_named_by_the_parameters_that_choose_the_database() {
+        // The loader names its entries by the same cases (tests/analyze.test.ts).
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("entry-name-cases.json")).unwrap();
+        for case in cases {
+            assert_eq!(super::server(case["url"].as_str().unwrap()), case["server"].as_str().unwrap(), "{}", case["case"]);
+        }
+    }
+
+    #[test]
     fn a_build_from_the_cache_says_so_in_the_loaders_words() {
         assert_eq!(utc_day(0), "1970-01-01");
         assert_eq!(utc_day(951_782_400_000), "2000-02-29");
