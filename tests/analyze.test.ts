@@ -6,7 +6,7 @@ import { connect, createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Session } from "../src/analyze.ts";
+import { FINGERPRINT, Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
 import { mapperHandlers } from "../src/mapper-server.ts";
 import { reportedDiagnostics, type Reported } from "../src/mapper-diagnostics.ts";
@@ -165,6 +165,95 @@ test("a session that still trusts its fingerprint takes another process's newer 
     assert.equal((JSON.parse(readFileSync(after.entry, "utf8")) as { analysis: { cardinality: string } }).analysis.cardinality, "at_most_one");
   } finally {
     await build.close();
+  }
+});
+
+// A migration, then its revert, on a database the session has read the fingerprint of; and a second
+// database built by the same migrations, which has not run it.
+async function migratedUnderASession(open: (root: string, env: Record<string, string>) => Promise<Session>, a: { url: string; run: (sql: string) => Promise<unknown> }, b: { url: string }, migrate: string, revert: string) {
+  const root = mkdtempSync(join(tmpdir(), "reylo-migrated-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const session = await open(root, { DATABASE_URL: a.url });
+  try {
+    assert.ok((await session.analyze("select b from u")).ok);
+    // A build step's session closes its connection when it idles, and still trusts its fingerprint.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await a.run(migrate);
+    const during = await session.analyze("select a from t");
+    assert.ok(during.ok);
+    assert.equal(during.source, "database");
+    assert.ok(!during.analysis.columns[0]!.nullable);
+    // Written, under the migrated schema's fingerprint.
+    assert.equal((JSON.parse(readFileSync(during.entry, "utf8")) as { schema: string }).schema, (await session.schema()).value);
+  } finally {
+    await session.close();
+  }
+  // Neither the database that has not run the migration nor the one that reverted it is served its analysis.
+  const unmigrated = await analyze(root, { DATABASE_URL: b.url }, "select a from t");
+  assert.ok(unmigrated.ok);
+  assert.ok(unmigrated.analysis.columns[0]!.nullable);
+  await a.run(revert);
+  const reverted = await analyze(root, { DATABASE_URL: a.url }, "select a from t");
+  assert.ok(reverted.ok);
+  assert.ok(reverted.analysis.columns[0]!.nullable);
+}
+
+test("an analysis made after a migration, by a session that still trusts the fingerprint from before it, is written under the migrated schema's", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "reylo-migrated-db-"));
+  // SQLite changes a column by building its table again; t is made so too, so that the revert gives back the same schema.
+  const rebuild = (a: string) => `create table t2 (a ${a}); insert into t2 select a from t; drop table t; alter table t2 rename to t;`;
+  const database = (name: string) => {
+    const exec = (sql: string) => {
+      const db = new DatabaseSync(join(dir, name));
+      db.exec(sql);
+      db.close();
+    };
+    exec("create table u (b int); create table t2 (a int); alter table t2 rename to t;");
+    return { url: `file:${join(dir, name)}`, run: async (sql: string) => exec(sql) };
+  };
+  // A session whose connection closes after 10 ms idle, as a build step's does after its last file.
+  await migratedUnderASession((root, env) => Session.open(root, env, 10), database("a.db"), database("b.db"), rebuild("int not null"), rebuild("int"));
+});
+
+test("on Postgres, an analysis made after a migration, by a session that still trusts the fingerprint from before it, is written under the migrated schema's", { skip: live }, async () => {
+  const setup = "create table u (b int); create table t (a int);";
+  const a = await postgresDatabase("reylo_migrated_a", setup);
+  const b = await postgresDatabase("reylo_migrated_b", setup);
+  try {
+    // The type check's session, which keeps its connection.
+    await migratedUnderASession((root, env) => Session.open(root, env), { url: a.url, run: (sql) => a.sql.unsafe(sql) }, b, "alter table t alter a set not null", "alter table t alter a drop not null");
+  } finally {
+    await a.drop();
+    await b.drop();
+  }
+});
+
+test("the engine's answers from while the fingerprint query failed are dropped once it runs again", async () => {
+  const root = mkdtempSync(join(tmpdir(), "reylo-unverified-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const exec = (sql: string) => {
+    const db = new DatabaseSync(join(root, "app.db"));
+    db.exec(sql);
+    db.close();
+  };
+  exec("create table t (a int)");
+  const session = await Session.open(root, { DATABASE_URL: "file:./app.db" });
+  const fingerprint = FINGERPRINT.sqlite;
+  try {
+    // A query the server refuses: the session's fingerprint is its own, unverified value.
+    FINGERPRINT.sqlite = "select * from reylo_no_such_table";
+    const before = await session.analyze("select * from t");
+    assert.ok(before.ok);
+    assert.deepEqual(before.analysis.columns.map((c) => c.name), ["a"]);
+    FINGERPRINT.sqlite = fingerprint;
+    exec("alter table t add column b int");
+    await session.recheck();
+    const after = await session.analyze("select * from t");
+    assert.ok(after.ok);
+    assert.deepEqual(after.analysis.columns.map((c) => c.name), ["a", "b"]);
+  } finally {
+    FINGERPRINT.sqlite = fingerprint;
+    await session.close();
   }
 });
 

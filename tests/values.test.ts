@@ -157,7 +157,7 @@ test("a range is an object of its bounds and their brackets, each bound in its s
 });
 
 test("a MySQL ENUM of known labels is refused the '' MySQL stores for any other value, unless it lists one", () => {
-  const labelled = (...labels: string[]) => ({ kind: "enum", type: { kind: "text" }, values: labels, label: "enum" }) as EngineType;
+  const labelled = (...labels: string[]) => ({ kind: "enum", type: { kind: "text" }, values: labels.map((value) => ({ value })), label: "enum" }) as EngineType;
   assert.equal(columnKind(labelled("a", "b"), "mysql"), "enum");
   assert.equal(renderType(labelled("a", "b"), false, "mysql"), '"a" | "b"');
   assert.equal(coerce("enum", "a", "kind"), "a");
@@ -166,7 +166,7 @@ test("a MySQL ENUM of known labels is refused the '' MySQL stores for any other 
   assert.equal(columnKind(labelled("", "a"), "mysql"), "text");
   assert.equal(columnKind({ kind: "text", label: "enum" }, "mysql"), "text");
   // Postgres enforces an enum's labels itself.
-  assert.equal(columnKind({ kind: "enum", type: { kind: "text" }, values: ["a"], label: "public.mood" }, "postgres"), "text");
+  assert.equal(columnKind({ kind: "enum", type: { kind: "text" }, values: [{ value: "a" }], label: "public.mood" }, "postgres"), "text");
 });
 
 test("a MySQL SET is a Set of its members, declared and decoded alike, and is its text inside JSON", () => {
@@ -860,6 +860,9 @@ test("MySQL: a VECTOR is an array of its floats on every driver that reads one, 
   await execute({ execute: async (_: string, v: unknown[]) => (seen.push(v), { rows: [] }) } as never, w, { v: floats });
   await execute({ batch: async () => ({}), query: async (_: string, v: unknown) => (seen.push(v as unknown[]), []) } as never, w, { v: null });
   assert.deepEqual(seen, [...Array(4).fill(["[1,2.5,-3,0.10000000149011612]"]), [null]]);
+  // A VECTOR keeps -0, which JSON.stringify writes as 0.
+  await execute({ query: async () => [[], []] as [unknown, unknown], execute: async (_: unknown, v?: unknown[]) => (seen.push(v!), [[], []] as [unknown, unknown]) } as never, w, { v: [-0, 1] });
+  assert.deepEqual(seen.at(-1), ["[-0,1]"]);
   const fake = { query: async () => [[], []], execute: async () => [[], []] } as never;
   await assert.rejects(execute(fake, w, { v: [1, "2"] }) as Promise<unknown>, /^TypeError: Parameter "v" is a VECTOR, an array of finite numbers, and the element at \[1\] is "2"\.$/);
   await assert.rejects(execute(fake, w, { v: [1, NaN] }) as Promise<unknown>, /the element at \[1\] is NaN/);

@@ -6,10 +6,10 @@
 @import './typedefs.css';
 
 /* The page's three faces (app/fonts.css, which app/root.tsx links: the files next/font served
-   before the site left Next.js), as the variables docs-kit's stylesheet reads: IBM Plex Sans for text, behind it its size-adjusted Arial;
-   Geist Mono for code, behind it the system's monospace; Caveat for the "Leave a star!" note. */
+   before the site left Next.js), as the variables docs-kit's stylesheet reads: IBM Plex Sans for text, behind it its size-adjusted Arial,
+   then the system's sans-serif where there is no Arial; Geist Mono for code, behind it the system's monospace; Caveat for the "Leave a star!" note. */
 :root {
-  --font-text: 'IBM Plex Sans', 'IBM Plex Sans Fallback';
+  --font-text: 'IBM Plex Sans', 'IBM Plex Sans Fallback', sans-serif;
   --font-code: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
   --font-hand: 'Caveat', 'Caveat Fallback';
 }

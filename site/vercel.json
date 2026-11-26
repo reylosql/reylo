@@ -111,7 +111,7 @@
       }
     },
     {
-      "src": "^/(?:docs)?$",
+      "src": "^/(?:docs/?)?$",
       "has": [
         {
           "type": "header",
@@ -119,14 +119,14 @@
           "value": "^(?:(?!(?:^|,)\\s*text/html(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$))).)*(?:^|,)\\s*text/(?:x-)?markdown(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$)).*$"
         }
       ],
-      "dest": "/index.md",
+      "dest": "/docs.md",
       "headers": {
         "Content-Type": "text/markdown; charset=utf-8",
         "Vary": "Accept"
       }
     },
     {
-      "src": "^/(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs)$",
+      "src": "^/docs/(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|vercel|render|kubernetes|railway|fly|nextjs|deployment|prisma|typedefs|migrate)/?$",
       "has": [
         {
           "type": "header",
@@ -134,14 +134,14 @@
           "value": "^(?:(?!(?:^|,)\\s*text/html(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$))).)*(?:^|,)\\s*text/(?:x-)?markdown(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$)).*$"
         }
       ],
-      "dest": "/$1.md",
+      "dest": "/docs/$1.md",
       "headers": {
         "Content-Type": "text/markdown; charset=utf-8",
         "Vary": "Accept"
       }
     },
     {
-      "src": "^/migrate(?:/docs)?$",
+      "src": "^/docs/migrate/(usage|cli|compare)/?$",
       "has": [
         {
           "type": "header",
@@ -149,14 +149,14 @@
           "value": "^(?:(?!(?:^|,)\\s*text/html(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$))).)*(?:^|,)\\s*text/(?:x-)?markdown(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$)).*$"
         }
       ],
-      "dest": "/migrate.md",
+      "dest": "/docs/migrate/$1.md",
       "headers": {
         "Content-Type": "text/markdown; charset=utf-8",
         "Vary": "Accept"
       }
     },
     {
-      "src": "^/migrate/(usage|cli|compare)$",
+      "src": "^/migrate/?$",
       "has": [
         {
           "type": "header",
@@ -164,14 +164,14 @@
           "value": "^(?:(?!(?:^|,)\\s*text/html(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$))).)*(?:^|,)\\s*text/(?:x-)?markdown(?![^,]*;\\s*[qQ]\\s*=\\s*0(?:\\.0*)?(?=\\s*(?:;|,|$)))(?=\\s*(?:;|,|$)).*$"
         }
       ],
-      "dest": "/migrate-$1.md",
+      "dest": "/docs/migrate.md",
       "headers": {
         "Content-Type": "text/markdown; charset=utf-8",
         "Vary": "Accept"
       }
     },
     {
-      "src": "^/blog$",
+      "src": "^/blog/?$",
       "has": [
         {
           "type": "header",
@@ -186,7 +186,7 @@
       }
     },
     {
-      "src": "^/blog/([a-z0-9-]+)$",
+      "src": "^/blog/([a-z0-9-]+)/?$",
       "has": [
         {
           "type": "header",
@@ -199,9 +199,221 @@
         "Content-Type": "text/markdown; charset=utf-8",
         "Vary": "Accept"
       }
+    },
+    {
+      "src": "^/(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|vercel|render|kubernetes|railway|fly|nextjs|deployment|prisma|typedefs)(?:/|/index\\.html)$",
+      "status": 308,
+      "headers": {
+        "Location": "/docs/$1"
+      }
+    },
+    {
+      "src": "^/migrate/docs(?:/|/index\\.html)$",
+      "status": 308,
+      "headers": {
+        "Location": "/docs/migrate"
+      }
+    },
+    {
+      "src": "^/migrate/(usage|cli|compare)(?:/|/index\\.html)$",
+      "status": 308,
+      "headers": {
+        "Location": "/docs/migrate/$1"
+      }
+    },
+    {
+      "src": "^/index\\.md/$",
+      "status": 308,
+      "headers": {
+        "Location": "/docs.md"
+      }
+    },
+    {
+      "src": "^/migrate-(usage|cli|compare)\\.md/$",
+      "status": 308,
+      "headers": {
+        "Location": "/docs/migrate/$1.md"
+      }
+    },
+    {
+      "src": "^/(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|vercel|render|kubernetes|railway|fly|nextjs|deployment|prisma|typedefs|migrate)\\.md/$",
+      "status": 308,
+      "headers": {
+        "Location": "/docs/$1.md"
+      }
     }
   ],
   "redirects": [
+    {
+      "source": "/typescript",
+      "destination": "/docs/typescript",
+      "permanent": true
+    },
+    {
+      "source": "/rust",
+      "destination": "/docs/rust",
+      "permanent": true
+    },
+    {
+      "source": "/inference",
+      "destination": "/docs/inference",
+      "permanent": true
+    },
+    {
+      "source": "/compare",
+      "destination": "/docs/compare",
+      "permanent": true
+    },
+    {
+      "source": "/faq",
+      "destination": "/docs/faq",
+      "permanent": true
+    },
+    {
+      "source": "/migrate/docs",
+      "destination": "/docs/migrate",
+      "permanent": true
+    },
+    {
+      "source": "/migrate/usage",
+      "destination": "/docs/migrate/usage",
+      "permanent": true
+    },
+    {
+      "source": "/migrate/cli",
+      "destination": "/docs/migrate/cli",
+      "permanent": true
+    },
+    {
+      "source": "/migrate/compare",
+      "destination": "/docs/migrate/compare",
+      "permanent": true
+    },
+    {
+      "source": "/neon",
+      "destination": "/docs/neon",
+      "permanent": true
+    },
+    {
+      "source": "/supabase",
+      "destination": "/docs/supabase",
+      "permanent": true
+    },
+    {
+      "source": "/durable-objects",
+      "destination": "/docs/durable-objects",
+      "permanent": true
+    },
+    {
+      "source": "/planetscale",
+      "destination": "/docs/planetscale",
+      "permanent": true
+    },
+    {
+      "source": "/d1",
+      "destination": "/docs/d1",
+      "permanent": true
+    },
+    {
+      "source": "/turso",
+      "destination": "/docs/turso",
+      "permanent": true
+    },
+    {
+      "source": "/hyperdrive",
+      "destination": "/docs/hyperdrive",
+      "permanent": true
+    },
+    {
+      "source": "/vercel",
+      "destination": "/docs/vercel",
+      "permanent": true
+    },
+    {
+      "source": "/render",
+      "destination": "/docs/render",
+      "permanent": true
+    },
+    {
+      "source": "/kubernetes",
+      "destination": "/docs/kubernetes",
+      "permanent": true
+    },
+    {
+      "source": "/railway",
+      "destination": "/docs/railway",
+      "permanent": true
+    },
+    {
+      "source": "/fly",
+      "destination": "/docs/fly",
+      "permanent": true
+    },
+    {
+      "source": "/nextjs",
+      "destination": "/docs/nextjs",
+      "permanent": true
+    },
+    {
+      "source": "/deployment",
+      "destination": "/docs/deployment",
+      "permanent": true
+    },
+    {
+      "source": "/configuration",
+      "destination": "/docs/configuration",
+      "permanent": true
+    },
+    {
+      "source": "/cli",
+      "destination": "/docs/cli",
+      "permanent": true
+    },
+    {
+      "source": "/postgres",
+      "destination": "/docs/postgres",
+      "permanent": true
+    },
+    {
+      "source": "/mysql",
+      "destination": "/docs/mysql",
+      "permanent": true
+    },
+    {
+      "source": "/sqlite",
+      "destination": "/docs/sqlite",
+      "permanent": true
+    },
+    {
+      "source": "/clickhouse",
+      "destination": "/docs/clickhouse",
+      "permanent": true
+    },
+    {
+      "source": "/prisma",
+      "destination": "/docs/prisma",
+      "permanent": true
+    },
+    {
+      "source": "/typedefs",
+      "destination": "/docs/typedefs",
+      "permanent": true
+    },
+    {
+      "source": "/index.md",
+      "destination": "/docs.md",
+      "permanent": true
+    },
+    {
+      "source": "/migrate-:sub(usage|cli|compare).md",
+      "destination": "/docs/migrate/:sub.md",
+      "permanent": true
+    },
+    {
+      "source": "/:page(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|vercel|render|kubernetes|railway|fly|nextjs|deployment|prisma|typedefs|migrate).md",
+      "destination": "/docs/:page.md",
+      "permanent": true
+    },
     {
       "source": "/duckdb",
       "destination": "/",
@@ -209,27 +421,27 @@
     },
     {
       "source": "/schema-changes",
-      "destination": "/typescript#when-the-schema-changes",
+      "destination": "/docs/typescript",
       "permanent": true
     },
     {
       "source": "/migrations",
-      "destination": "/migrate/docs",
+      "destination": "/docs/migrate",
       "permanent": true
     },
     {
       "source": "/cloudflare",
-      "destination": "/d1",
+      "destination": "/docs/d1",
       "permanent": true
     },
     {
       "source": "/usage",
-      "destination": "/typescript",
+      "destination": "/docs/typescript",
       "permanent": true
     },
     {
       "source": "/observability",
-      "destination": "/typescript#observability",
+      "destination": "/docs/typescript#observability",
       "permanent": true
     },
     {
@@ -239,28 +451,28 @@
     },
     {
       "source": "/ci",
-      "destination": "/deployment",
+      "destination": "/docs/deployment",
       "permanent": true
     },
     {
       "source": "/hosted",
-      "destination": "/neon",
+      "destination": "/docs/neon",
       "permanent": true
     },
     {
       "source": "/rtd",
-      "destination": "/typedefs",
+      "destination": "/docs/typedefs",
       "permanent": true
     },
     {
       "source": "/details",
-      "destination": "/configuration",
+      "destination": "/docs/configuration",
       "permanent": true
     }
   ],
   "headers": [
     {
-      "source": "/:page(|docs|typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs|migrate|blog|play)",
+      "source": "/:page(|docs|migrate|blog|play)",
       "headers": [
         {
           "key": "Vary",
@@ -269,7 +481,43 @@
       ]
     },
     {
-      "source": "/migrate/:sub(docs|usage|cli|compare)",
+      "source": "/:page(docs|migrate|blog)/",
+      "headers": [
+        {
+          "key": "Vary",
+          "value": "Accept"
+        }
+      ]
+    },
+    {
+      "source": "/docs/:page(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|vercel|render|kubernetes|railway|fly|nextjs|deployment|prisma|typedefs|migrate)",
+      "headers": [
+        {
+          "key": "Vary",
+          "value": "Accept"
+        }
+      ]
+    },
+    {
+      "source": "/docs/:page(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|vercel|render|kubernetes|railway|fly|nextjs|deployment|prisma|typedefs|migrate)/",
+      "headers": [
+        {
+          "key": "Vary",
+          "value": "Accept"
+        }
+      ]
+    },
+    {
+      "source": "/docs/migrate/:sub(usage|cli|compare)",
+      "headers": [
+        {
+          "key": "Vary",
+          "value": "Accept"
+        }
+      ]
+    },
+    {
+      "source": "/docs/migrate/:sub(usage|cli|compare)/",
       "headers": [
         {
           "key": "Vary",
@@ -279,6 +527,15 @@
     },
     {
       "source": "/blog/:slug",
+      "headers": [
+        {
+          "key": "Vary",
+          "value": "Accept"
+        }
+      ]
+    },
+    {
+      "source": "/blog/:slug/",
       "headers": [
         {
           "key": "Vary",

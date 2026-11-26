@@ -1,6 +1,6 @@
 # Reylo example: Rolldown
 
-A small HTTP server on `node:http` that Rolldown bundles, with `reylo/rolldown`, into one ES module, `dist/server.mjs`, which runs with plain `node`: no preload, no TypeScript and no `node_modules`. Its queries run on Postgres through postgres.js, and the bundle carries the driver, Reylo's run time and each query's analysis. It is the setup of [Rolldown](https://reylo.dev/typescript#setup-vite) in the docs.
+A small HTTP server on `node:http` that Rolldown bundles, with `reylo/rolldown`, into one ES module, `dist/server.mjs`, which runs with plain `node`: no preload, no TypeScript and no `node_modules`. Its queries run on Postgres through postgres.js, and the bundle carries the driver, Reylo's run time and each query's analysis. It is the setup of [Rolldown](https://reylo.dev/docs/typescript#setup-vite) in the docs.
 
 ## Run it
 
@@ -49,7 +49,7 @@ Misspell a column in `queries/get_user.sql` and run `nub run typecheck` again: t
 - In `tsconfig.json`, `contentMappers` names `reylo`, whose package lists the extensions it takes: `.sql`, which types each import from the database, and the project file, `.reylo.yaml` or `.reylo.yml`. The `include` option is `src`, `rolldown.config.ts` and `setup.ts`, so `setup.sql`, a script rather than one query, stays out of the type check.
 - The `.env` file sets `DATABASE_URL`, which Reylo reads for its analysis (the type check, the editor, the plugin and the preload) and the server reads through `--env-file-if-exists`.
 - The `queries/*.sql` files hold one statement per file, with `:name` parameters, imported from `src/server.ts` with a relative path. The query `get_user.sql` resolves to a row or `null`, `list_posts.sql` to an array, and `create_post.sql`, an insert with `returning`, to the row it wrote.
-- In `.vscode/settings.json` and `.vscode/extensions.json`, the TypeScript 7 extension is pointed at this project's TypeScript, so the editor shows the queries' types and errors ([Editors](https://reylo.dev/typescript#editors)). In Zed, `.zed/settings.json` does the same.
+- In `.vscode/settings.json` and `.vscode/extensions.json`, the TypeScript 7 extension is pointed at this project's TypeScript, so the editor shows the queries' types and errors ([Editors](https://reylo.dev/docs/typescript#editors)). In Zed, `.zed/settings.json` does the same.
 
 ## In your own project
 

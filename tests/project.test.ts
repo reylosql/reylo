@@ -55,6 +55,19 @@ test("without a project file, DATABASE_URL comes from the environment, then .env
   assert.equal(resolveProject(e, tree({ "package.json": "{}", ".reylo.yaml": "direct_url: file:./x.db\nsqlcommenter: false\n" }), {}).sqlcommenter, false);
 });
 
+test("inside a dry run's command, the analyses read its shadow, over direct_url and DATABASE_URL", async () => {
+  const e = await engine("postgres");
+  const root = tree({ "package.json": "{}", ".reylo.yaml": "direct_url: postgres://u:$(exit 3)@prod/app\n", ".env": "DATABASE_URL=postgres://prod/app\n" });
+  const shadow = "postgres://u@prod/reylo_shadow_0123456789";
+  const inside = resolveProject(e, root, { REYLO_ANALYSIS_URL: shadow });
+  // The command in direct_url never runs: it would fail the project.
+  assert.deepEqual([inside.url, inside.urlSource, inside.error, inside.refreshUrl], [shadow, "the shadow database of reylo migrate deploy --dry-run", undefined, undefined]);
+  // A URL the caller names wins, as everywhere.
+  assert.equal(resolveProject(e, root, { REYLO_ANALYSIS_URL: shadow }, { urlGiven: true }).url, undefined);
+  // Empty is unset.
+  assert.match(resolveProject(e, root, { REYLO_ANALYSIS_URL: "" }).error ?? "", /runs `exit 3`/);
+});
+
 test("the project file sits beside package.json, and its direct_url, env files and allow_ flags apply", async () => {
   const e = await engine("postgres");
   const root = tree({

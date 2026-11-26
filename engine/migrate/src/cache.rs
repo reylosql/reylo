@@ -33,8 +33,9 @@ pub(crate) type Hash = [u8; 32];
 pub(crate) const CACHE_PREFIX: &str = "reylo_cache_";
 
 /// The database caches kept for each target: the newest by use. A check uses up to three (the
-/// prefix it starts from, the prefix it ends at, `schema.sql`'s).
-const KEEP: usize = 3;
+/// prefix it starts from, the prefix it ends at, `schema.sql`'s), and a draft on Supabase two more
+/// (`schema.sql`'s and the migrations' on shadows that take no default privileges).
+const KEEP: usize = 5;
 /// The database caches kept on one server, whatever their targets.
 const KEEP_ON_SERVER: usize = 32;
 /// The lines kept in a project, and its SQLite databases.
@@ -79,7 +80,7 @@ pub(crate) fn hex(h: &[u8]) -> String {
 /// reader reads, or how it writes a line, changes, so that a release that leaves the reading alone
 /// leaves every stored fingerprint comparable. A test holds each edit to the reader's code to that
 /// choice.
-const READER: u32 = 9;
+const READER: u32 = 12;
 
 /// The catalog reader's part of a fingerprint.
 pub(crate) fn reader_id() -> String {
@@ -442,7 +443,7 @@ impl Cache {
 #[cfg(feature = "cli")]
 async fn server_state(server: &mut Server) -> Result<String, Error> {
     match server {
-        Server::Postgres { admin, create, settings, privileges, copy_privileges, extensions, leave, environment, environment_role, owned, schema_grants, copy_schema_grants, .. } => {
+        Server::Postgres { admin, create, settings, privileges, copy_privileges, extensions, leave, environment, environment_role, owned, schema_grants, copy_schema_grants, platform_privileges, platform_schema_grants, publication, began_extensions, .. } => {
             // The server and its settings as a session sees them, the roles a grant may name, the
             // extensions a migration may create, and template1, which a new shadow is a copy of: a
             // change to it moves its counters of rows written.
@@ -462,6 +463,7 @@ async fn server_state(server: &mut Server) -> Result<String, Error> {
             let copied: Vec<String> = extensions.iter().filter(|(e, _)| !leave.contains(&e.to_lowercase())).map(|(e, s)| format!("{e} {s}")).collect();
             out.push_str(&format!("\n\x1fextensions {}\n\x1fschema grants {copy_schema_grants} {}\n\x1fenvironment {} {}", copied.join("\n"), schema_grants.join("\n"), environment_role.as_deref().unwrap_or_default(), environment.join("\n")));
             out.push_str(&format!("\n\x1fowned {}\n{}", owned.key(), owned.statements.join("\n")));
+            out.push_str(&format!("\n\x1fplatform {publication} {began_extensions:?}\n{}\n{}", platform_privileges.join("\n"), platform_schema_grants.join("\n")));
             Ok(out)
         }
         Server::Mysql { admin, defaults, .. } => {
@@ -567,7 +569,7 @@ pub(crate) async fn snapshot(db: &mut Db) -> Result<String, Error> {
 
 /// Copies the main database of `from` over that of `to`, page by page, as SQLite's backup API does.
 #[cfg(feature = "cli")]
-fn sqlite_backup(from: &rusqlite::Connection, to: &rusqlite::Connection) -> Result<(), Error> {
+pub(crate) fn sqlite_backup(from: &rusqlite::Connection, to: &rusqlite::Connection) -> Result<(), Error> {
     use rusqlite::ffi;
     // SAFETY: both handles are open connections that outlive the backup, which is finished before
     // this returns; neither is used by another thread meanwhile.
@@ -790,7 +792,7 @@ mod tests {
     }
 
     /// The digest of the catalog reader's code when `READER` was last set.
-    const READER_CODE: &str = "a7a89de1cb65";
+    const READER_CODE: &str = "bd991ba754e3";
 
     #[test]
     fn the_catalog_reader_keeps_its_version() {

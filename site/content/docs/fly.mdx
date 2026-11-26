@@ -1,0 +1,71 @@
+---
+title: Fly.io
+description: How to run Reylo Migrate on Fly.io. The release command that migrates your database before each deploy goes live, the connection it needs, and other images.
+---
+
+<p className="dk-subheader">Reylo Migrate on Fly.io</p>
+
+Run your migrations as Fly's release command:
+
+```toml title="fly.toml"
+[deploy]
+  release_command = "npx reylo migrate deploy"
+```
+
+It runs once per deploy, on a temporary Machine with the new image. A migration that fails stops the deploy.
+
+## Database
+
+Attaching a Managed Postgres cluster sets `DATABASE_URL` on your app:
+
+```terminal
+$ fly mpg attach <cluster-id>
+```
+
+Fly recommends the cluster's direct connection for migrations. Set it as a secret of its own:
+
+```terminal
+$ fly secrets set DIRECT_DATABASE_URL="postgresql://…@direct.<cluster-id>.flympg.net/…"
+```
+
+Then point [`direct_url`](/docs/configuration#direct_url) at it:
+
+```yaml title=".reylo.yaml"
+direct_url: ${DIRECT_DATABASE_URL:-${DATABASE_URL}}
+```
+
+## Builds
+
+Run your build on a dry run of the deploy. Its type check then reads the schema the release command leaves.
+
+Fly sets your secrets only when your app runs, not while it builds. So pass the direct connection as a [build secret](https://fly.io/docs/apps/build-secrets/):
+
+```dockerfile title="Dockerfile"
+RUN --mount=type=secret,id=DIRECT_DATABASE_URL \
+  DIRECT_DATABASE_URL="$(cat /run/secrets/DIRECT_DATABASE_URL)" npx reylo migrate deploy --dry-run -- npm run build
+```
+
+The build connects to the cluster over Fly's private network, which Depot's builders can't reach. So deploy from your shell on Fly's own builder:
+
+```terminal
+$ fly deploy --remote-only --depot=false --build-secret DIRECT_DATABASE_URL="postgresql://…@direct.<cluster-id>.flympg.net/…"
+```
+
+## Other images
+
+A Next.js standalone build, or any image without your `node_modules`, has no `reylo` command. Copy it from Reylo's image, with your `reylo` directory and `.reylo.yaml`:
+
+```dockerfile title="Dockerfile"
+COPY --from=ghcr.io/reylosql/reylo:0.8.3 /usr/local/bin/reylo /usr/local/bin/reylo
+COPY reylo/ reylo/
+COPY .reylo.yaml ./
+```
+
+Then run it directly:
+
+```toml title="fly.toml"
+[deploy]
+  release_command = "reylo migrate deploy"
+```
+
+The release command replaces your image's `CMD`, and its `ENTRYPOINT` still runs. So start your app from `CMD`.

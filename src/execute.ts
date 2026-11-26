@@ -10,7 +10,7 @@
 // the databases its queries are written for.
 
 import type { QueryError } from "./query-error.ts";
-import { columnKind, describe, given, hstoreText, isArrayValued, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresLiteral, postgresYear, rowMasks, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
+import { columnKind, describe, given, hstoreText, isArrayValued, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresLiteral, postgresYear, rowMasks, vectorText, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
 import { bareName, isMysqlSet, schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
@@ -487,6 +487,10 @@ export function isTurso(c: AnyClient): boolean {
 
 async function executeAsync(c: AnyClient | null | undefined, query: QueryModule, params: ParamsInput): Promise<unknown[]> {
   if (c == null || (typeof c !== "object" && typeof c !== "function")) throw unsupported(c, query.dialect);
+  // Effect SQL's client has an unsafe() whose statement is an Effect, which an await never runs:
+  // taken for Bun.sql's on SQLite, a read gave no rows and a write ran nothing. Effect 4 brands
+  // the client with a string, Effect 3's @effect/sql with a symbol.
+  if ("~effect/sql/SqlClient" in c || Symbol.for("@effect/sql/SqlClient") in c) throw new TypeError(`reylo cannot run a statement on an Effect SQL client: .run() takes a driver's own client, and Effect SQL's statements are Effects, which only Effect's runtime runs.`);
   checkParams(query, params);
   if (query.dialect === "postgres") await checkMoneyLocale(c, query);
   const rows = await query.runtime.run(c, query, statement(query, params));
@@ -802,10 +806,10 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
     // A SET goes as its members joined by commas, in the order its column declares them: MySQL
     // stores a SET in that order, and compares one with a parameter's text as it is written.
     if (type.kind === "array" && isMysqlSet(type) && v instanceof Set) {
-      const labels = type.element.type.kind === "enum" ? type.element.type.values : undefined;
+      const labels = type.element.type.kind === "enum" ? type.element.type.values.map((l) => l.value) : undefined;
       return (labels === undefined ? [...v] : [...v].sort((a, b) => labels.indexOf(a as string) - labels.indexOf(b as string))).join(",");
     }
-    return type.kind === "array" && bareName(type) === "vector" && Array.isArray(v) ? vectorText(v, name, "a VECTOR") : v;
+    return type.kind === "array" && bareName(type) === "vector" && Array.isArray(v) ? vectorParameter(v, name, "a VECTOR") : v;
   }
   const kind = columnKind(type, dialect);
   // A row value, a geometric type and a range go as the text Postgres reads, from the object
@@ -816,7 +820,7 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
   if (type.kind === "array" && kind.endsWith("[]")) return Array.isArray(v) ? v.map((e) => encode(Array.isArray(e) && !isArrayValued(columnKind(type.element.type, dialect)) ? type : type.element.type, e, dialect, name)) : v;
   if (kind === "vector" && Array.isArray(v)) {
     if (!v.length) throw new ParameterError(`Parameter "${name}" is a pgvector ${bareName(type)}, which has one dimension at least; got an empty array.`);
-    return vectorText(v, name, `a pgvector ${bareName(type)}`);
+    return vectorParameter(v, name, `a pgvector ${bareName(type)}`);
   }
   if (kind === "hstore" && typeof v === "object") return hstoreText(v, (message) => {
     throw new ParameterError(`Parameter "${name}" ${message}`);
@@ -832,14 +836,14 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
 /** Postgres's geometric types' kinds (src/values.ts). */
 const GEOMETRIC_KINDS: ReadonlySet<string> = new Set(["point", "line", "lseg", "box", "path", "polygon", "circle"]);
 
-/** A vector's floats as the text a VECTOR's `to_vector` and pgvector's input read; JSON's, which would write NaN and ±Infinity as null, so those are refused. */
-function vectorText(v: readonly unknown[], name: string, what: string): string {
+/** A vector's floats as the text a VECTOR's `to_vector` and pgvector's input read (src/values.ts), which hold no NaN or infinity, so those are refused. */
+function vectorParameter(v: readonly unknown[], name: string, what: string): string {
   v.forEach((e, i) => {
     if (typeof e !== "number" || !Number.isFinite(e)) {
       throw new ParameterError(`Parameter "${name}" is ${what}, an array of finite numbers, and the element at [${i}] is ${typeof e === "string" ? JSON.stringify(e) : typeof e === "number" ? e : typeof e}.`);
     }
   });
-  return JSON.stringify(v);
+  return vectorText(v as readonly number[]);
 }
 
 /** Binary data as Postgres's hex form, `\x0102ff`: Neon's neon() before 0.10 sends a Buffer as JSON, and 0.10 and later send one as this form themselves. */

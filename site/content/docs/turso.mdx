@@ -5,7 +5,7 @@ description: Use Reylo with Turso. Covers libSQL client queries, local SQLite ty
 
 <p className="dk-subheader">Reylo on Turso Cloud and Turso's own engine</p>
 
-Turso Cloud runs libSQL, a fork of SQLite, so everything on the [SQLite](/sqlite) page holds for it.
+Turso Cloud runs libSQL, a fork of SQLite, so everything on the [SQLite](/docs/sqlite) page holds for it.
 
 | | |
 | --- | --- |
@@ -13,7 +13,7 @@ Turso Cloud runs libSQL, a fork of SQLite, so everything on the [SQLite](/sqlite
 | The type check reads | A local SQLite file with your schema, never a `libsql://` URL |
 | Turso Cloud | `@libsql/client`, with `.run()` |
 | Turso's own engine | `@tursodatabase/database`, with `.run()`, and `.runSync()` on its compat `Database` |
-| Migrations | [`reylo migrate`](/migrate/docs), on Turso Cloud through its `libsql://` URL |
+| Migrations | [`reylo migrate`](/docs/migrate), on Turso Cloud through its `libsql://` URL |
 | SQLite versions | Reylo's 3.53, and the SQLite of each driver your `package.json` lists: 3.45.1 for `@libsql/client` |
 | libSQL's own SQL | Vector columns and indexes, the vector functions, `vector_top_k` and `alter table … alter column` ([Vectors](#vectors)) |
 | Extensions | The functions of the sqlean extensions Turso Cloud loads ([Extensions](#extensions)) |
@@ -76,7 +76,7 @@ About the client:
 
 - The client answers through a promise, so use `.run()`, not `.runSync()`.
 - With the default `intMode`, libSQL throws a `RangeError` on an integer past 2^53. Set `intMode: "bigint"` to get it exact.
-- A Drizzle connection over `@libsql/client` works too ([Drizzle](/sqlite#drizzle)).
+- A Drizzle connection over `@libsql/client` works too ([Drizzle](/docs/sqlite#drizzle)).
 
 ## Local database
 
@@ -93,7 +93,7 @@ Or run your migrations into a new file:
 for file in migrations/*.sql; do sqlite3 dev.db < "$file"; done
 ```
 
-Point [`direct_url`](/configuration#direct_url) at it:
+Point [`direct_url`](/docs/configuration#direct_url) at it:
 
 ```yaml title=".reylo.yaml"
 # the path starts at package.json
@@ -104,11 +104,11 @@ Why a local file:
 
 - A `DATABASE_URL` that holds your `libsql://` URL fails the type check, which reads a `sqlite:` URL for SQLite. A `direct_url` wins over it.
 - In development, your app can open the same file: `createClient({ url: "file:dev.db" })` needs no auth token.
-- In CI, [run your migrations into the file](/deployment#sqlite) before the type check. The job needs no Turso token.
+- In CI, [run your migrations into the file](/docs/deployment#sqlite) before the type check. The job needs no Turso token.
 
 ## Migrations
 
-Run [Reylo Migrate](/migrate/docs) on Turso Cloud with your database's URL, its auth token in `authToken`:
+Run [Reylo Migrate](/docs/migrate) on Turso Cloud with your database's URL, its auth token in `authToken`:
 
 ```sh
 npx reylo migrate deploy --url "libsql://app-acme.turso.io?authToken=$TURSO_AUTH_TOKEN"
@@ -128,7 +128,7 @@ steps:
 Migrations on Turso:
 
 - Every `reylo migrate` and `reylo db` command runs on Turso Cloud and on any libSQL server. It takes the same URLs as `@libsql/client`. Add `?tls=0` to a `libsql://` URL for a server without TLS.
-- From code, pass the same URL: `migrate({ url })` ([API](/migrate/usage#api)).
+- From code, pass the same URL: `migrate({ url })` ([API](/docs/migrate/usage#api)).
 - Shadow databases are in memory, on libSQL's own engine as Turso Cloud runs it. That includes Turso Cloud's extra functions, such as `uuid4` and `regexp_like`.
 - Migrations can use libSQL's own SQL, such as a vector index or `alter table … alter column`. Then every command opens your local file on libSQL's engine too.
 - Tables named `__turso_internal_…` belong to Turso's engine. Reylo leaves them out of `schema.sql` and every plan, and keeps them in step when a table changes.
@@ -152,7 +152,7 @@ A query it refuses is a type error, with its own message:
 queries/user_settings.sql(1,12): error reylo6: @libsql/client runs SQLite 3.45.1, which refuses this statement: no such function: json_pretty
 ```
 
-It refuses [newer functions](/sqlite#functions), such as `json_pretty` and two-argument `iif`.
+It refuses [newer functions](/docs/sqlite#functions), such as `json_pretty` and two-argument `iif`.
 
 ## Vectors
 
@@ -248,5 +248,5 @@ About the compat driver:
 - The `Database` of `@tursodatabase/database/compat` is synchronous, so `.runSync()` works on it, inside its `db.transaction(fn)` as well.
 - The type check reads the same file, through `direct_url` as above.
 - With `@tursodatabase/database` in your `package.json`, the type check also runs each query on Turso's engine. It skips a schema with an FTS5 table or a vector index, which the engine can't open.
-- From 0.8 on, its errors carry no code. With [`.try()`](/typescript#try), `code` is `undefined` and only `message` names the failure.
+- From 0.8 on, its errors carry no code. With [`.try()`](/docs/typescript#try), `code` is `undefined` and only `message` names the failure.
 - An integer past 2^53 comes back exact.

@@ -148,9 +148,10 @@ fn lex_on(sql: &str, dialect: Dialect, server: Option<u64>) -> (Vec<Token>, Vec<
             i = text;
             continue;
         }
-        // Comments. MySQL reads `--` as a comment only before whitespace or a control character.
+        // Comments. MySQL reads `--` as a comment only before whitespace or a control character, and
+        // Postgres ends one at a carriage return as at a line feed.
         if ch == b'-' && next == Some(b'-') && !(mysql && i + 2 < n && b[i + 2] > 32) {
-            i = sql[i..].find('\n').map_or(n, |e| i + e + 1);
+            i = sql[i..].find(|c| c == '\n' || (postgres && c == '\r')).map_or(n, |e| i + e + 1);
             continue;
         }
         if ch == b'#' && mysql {
@@ -850,6 +851,14 @@ mod tests {
         assert_eq!(texts("/* a /* nested */ ; */ select 1", Dialect::Postgres), ["select 1"]);
         assert_eq!(texts("select 'it''s'; # comment ;\nselect \"a;b\"", Dialect::Mysql), ["select 'it''s'", "select \"a;b\""]);
         assert!(is_blank("-- nothing\n/* at all */", Dialect::Sqlite));
+        // Postgres ends a `--` comment at a carriage return as at a line feed, so a file written with
+        // carriage returns alone holds its statements there; MySQL and SQLite read on to the line feed.
+        let cr = "select 1; -- one\rselect 2;\nselect 3";
+        assert_eq!(texts(cr, Dialect::Postgres), ["select 1", "select 2", "select 3"]);
+        assert_eq!(texts(cr, Dialect::Mysql), ["select 1", "select 3"]);
+        assert_eq!(texts(cr, Dialect::Sqlite), ["select 1", "select 3"]);
+        assert!(runs_alone("-- by handle\rcreate index concurrently users_h on users (handle);\r", Dialect::Postgres));
+        assert_eq!(texts("select 1; -- one\r\nselect 2", Dialect::Postgres), ["select 1", "select 2"]);
     }
 
     #[test]

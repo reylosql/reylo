@@ -5,7 +5,7 @@ description: How to use Reylo with PlanetScale. The drivers that run your querie
 
 <p className="dk-subheader">Reylo on PlanetScale's MySQL and Postgres databases</p>
 
-A PlanetScale MySQL database is MySQL, so everything on the [MySQL](/mysql) page holds for it.
+A PlanetScale MySQL database is MySQL, so everything on the [MySQL](/docs/mysql) page holds for it.
 
 | | |
 | --- | --- |
@@ -56,8 +56,8 @@ where id = :id
 About the driver:
 
 - Version 2.0 isn't supported, since it can't bind parameters.
-- The driver sends each query over HTTP, so it runs where there are no TCP sockets, as in [Cloudflare Workers](/d1#setup).
-- It rounds a `FLOAT` to its shorter text, such as `1.1`. The `mysql2` driver returns its [exact value](/mysql#decimals).
+- The driver sends each query over HTTP, so it runs where there are no TCP sockets, as in [Cloudflare Workers](/docs/d1#setup).
+- It rounds a `FLOAT` to its shorter text, such as `1.1`. The `mysql2` driver returns its [exact value](/docs/mysql#decimals).
 
 ### `mysql2`
 
@@ -147,7 +147,7 @@ docker run -d -p 3306:3306 -e MYSQL_DATABASE=app \
   -e MYSQL_ALLOW_EMPTY_PASSWORD=yes mysql:8.4
 ```
 
-Point [`direct_url`](/configuration#direct_url) at it:
+Point [`direct_url`](/docs/configuration#direct_url) at it:
 
 ```yaml title=".reylo.yaml"
 # local mysql, migrations applied
@@ -171,13 +171,13 @@ done
 
 With other tools:
 
-- With Prisma or Drizzle Kit, run its [migrate command](/deployment#schema) against the local server.
-- In CI, [start MySQL as a service](/deployment#mysql) and apply the same migrations before the type check.
-- A host that builds before it migrates, such as Vercel, needs [a MySQL server of its own](/deployment#build-before-migrate) for the build.
+- With Prisma or Drizzle Kit, run its [migrate command](/docs/deployment#schema) against the local server.
+- In CI, [start MySQL as a service](/docs/deployment#mysql) and apply the same migrations before the type check.
+- A host that builds before it migrates, such as Vercel, needs [a MySQL server of its own](/docs/deployment#build-before-migrate) for the build.
 
 ## Insights
 
-Each query Reylo sends ends with a [sqlcommenter](/configuration#sqlcommenter) comment that names its file. PlanetScale's Insights reads it as the query's `file` tag:
+Each query Reylo sends ends with a [sqlcommenter](/docs/configuration#sqlcommenter) comment that names its file. PlanetScale's Insights reads it as the query's `file` tag:
 
 ```sql title="What Reylo sends for queries/get_user.sql, by default"
 select id, name, email from users where id = ? /*file='queries%2Fget_user.sql'*/
@@ -200,4 +200,4 @@ Then point Reylo at the direct connection:
 direct_url: ${DIRECT_DATABASE_URL}
 ```
 
-Run your queries with any [Postgres driver](/postgres#drivers).
+Run your queries with any [Postgres driver](/docs/postgres#drivers).

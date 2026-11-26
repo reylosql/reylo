@@ -1,0 +1,13 @@
+set check_function_bodies = off;
+drop function nothing();
+drop function post_key(posts);
+alter type status rename to status__old;
+create type status as enum ('draft', 'live');
+alter type q alter attribute m type status;
+alter table posts alter column status drop default;
+alter table posts alter column status type status using status::text::status;
+alter table posts alter column status set default 'draft'::status;
+drop type status__old;
+create function nothing() returns q language sql immutable return null::q;
+create function post_key(p posts) returns text language sql stable return 'post-' || p.id;
+reset check_function_bodies;

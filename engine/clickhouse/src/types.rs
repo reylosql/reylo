@@ -870,7 +870,7 @@ mod tests {
         assert_eq!(typed("DateTime64(3, 'UTC')"), json!({"type": {"kind": "instant", "tick": "1/1000", "label": "DateTime64"}}));
         assert_eq!(typed("DateTime('Asia/Tokyo')"), json!({"type": {"kind": "instant", "tick": "1", "min": "1970-01-01T00:00:00Z", "max": "2106-02-07T06:28:15Z", "label": "DateTime"}}));
         assert_eq!(typed("Date"), json!({"type": {"kind": "date", "min": "1970-01-01", "max": "2149-06-06", "label": "Date"}}));
-        assert_eq!(typed("Enum8('admin' = 1, 'member' = 2)"), json!({"type": {"kind": "enum", "type": {"kind": "text"}, "values": ["admin", "member"], "label": "Enum8"}}));
+        assert_eq!(typed("Enum8('admin' = 1, 'member' = 2)"), json!({"type": {"kind": "enum", "type": {"kind": "text"}, "values": [{"value": "admin"}, {"value": "member"}], "label": "Enum8"}}));
         assert_eq!(typed("Array(Nullable(UInt8))"), json!({"type": {"kind": "array", "element": {"type": {"kind": "integer", "bits": 8, "unsigned": true, "label": "UInt8"}, "nullable": true}}}));
         assert_eq!(typed("Tuple(UInt8, Nullable(String))")["type"]["elements"][1]["nullable"], json!(true));
         assert_eq!(typed("Tuple(n UInt8, s String)")["type"]["fields"][1]["name"], json!("s"));

@@ -9,6 +9,7 @@
 
 use regex::Regex;
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 /// The column the types are laid out within.
@@ -155,9 +156,11 @@ fn nests_any_deep(t: &Value) -> bool {
     t.get(NESTS).is_some()
 }
 
-/// A Postgres array type, by its name, at its innermost level.
+/// A Postgres array type, by its name, at its innermost level: its element is no Postgres array
+/// type, though it may be one the format structures as an array (`bit`, `vector`, `lseg`).
 fn postgres_array(t: &Value) -> bool {
-    kind(t) == "array" && bare_name(t).starts_with('_') && kind(&t["element"]["type"]) != "array"
+    let named = |t: &Value| kind(t) == "array" && bare_name(t).starts_with('_');
+    named(t) && !named(&t["element"]["type"])
 }
 
 fn mark_nesting(t: &Value) -> Value {
@@ -360,7 +363,7 @@ fn column_kind(t: &Value, dialect: &str) -> String {
         "text" => "text".into(),
         "enum" => {
             let labels = items(&t["values"]);
-            if dialect == "mysql" && name == "enum" && kind(&t["type"]) == "text" && !labels.iter().any(|v| v.as_str() == Some("")) {
+            if dialect == "mysql" && name == "enum" && kind(&t["type"]) == "text" && !labels.iter().any(|v| v["value"].as_str() == Some("")) {
                 "enum".into()
             } else {
                 column_kind(&t["type"], dialect)
@@ -677,8 +680,8 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
                 if fields.is_empty() {
                     return "Record<never, never>".into();
                 }
-                let each: Vec<String> = fields
-                    .iter()
+                let each: Vec<String> = last_of_each_name(fields)
+                    .into_iter()
                     .map(|f| {
                         let ty = render_type(&f["type"], false, dialect, codecs);
                         format!("{}: {}", ident(f["name"].as_str().unwrap_or_default()), if is_true(&f["nullable"]) { or_null(&ty) } else { ty })
@@ -863,7 +866,7 @@ fn union(parts: Vec<String>) -> String {
 
 /// An enum's values as TypeScript's literal types, where its base renders as the primitive they are values of.
 fn enum_literal(t: &Value, base: &str) -> String {
-    let values: Vec<&str> = items(&t["values"]).iter().map(|v| v.as_str().unwrap_or_default()).collect();
+    let values: Vec<&str> = items(&t["values"]).iter().map(|v| v["value"].as_str().unwrap_or_default()).collect();
     match (kind(&t["type"]), base) {
         ("boolean", "boolean") | ("integer", "number") | ("float", "number") => values.join(" | "),
         ("integer", "bigint") => values.iter().map(|v| format!("{v}n")).collect::<Vec<_>>().join(" | "),
@@ -917,7 +920,8 @@ fn grouped(ts: &str) -> String {
 
 /// The last of each name, as an object keeps the last of two keys of one name.
 fn last_of_each_name(items: &[Value]) -> Vec<&Value> {
-    items.iter().enumerate().filter(|(i, item)| !items[i + 1..].iter().any(|later| later["name"] == item["name"])).map(|(_, item)| item).collect()
+    let last: HashMap<String, usize> = items.iter().enumerate().map(|(i, item)| (item["name"].to_string(), i)).collect();
+    items.iter().enumerate().filter(|(i, item)| last[&item["name"].to_string()] == *i).map(|(_, item)| item).collect()
 }
 
 /// An object type of JSON-encoded fields, each nullable as the engine says.
@@ -970,7 +974,7 @@ fn render_param_type(t: &Value, dialect: &str, in_row: bool, members: Option<&Va
                 if fields.is_empty() {
                     return "Record<never, never>".into();
                 }
-                let each: Vec<String> = fields.iter().map(|f| format!("{}: {}", ident(f["name"].as_str().unwrap_or_default()), slot(f))).collect();
+                let each: Vec<String> = last_of_each_name(fields).into_iter().map(|f| format!("{}: {}", ident(f["name"].as_str().unwrap_or_default()), slot(f))).collect();
                 return format!("{{ {} }}", each.join("; "));
             }
             "tuple" => return format!("[{}]", items(&t["elements"]).iter().map(slot).collect::<Vec<_>>().join(", ")),
@@ -1016,8 +1020,8 @@ fn render_param_type(t: &Value, dialect: &str, in_row: bool, members: Option<&Va
         if fields.is_empty() {
             return "Record<never, never>".into();
         }
-        let each: Vec<String> = fields
-            .iter()
+        let each: Vec<String> = last_of_each_name(fields)
+            .into_iter()
             .map(|f| {
                 let ty = render_param_type(&f["type"], dialect, true, None, codecs);
                 format!("{}: {}", ident(f["name"].as_str().unwrap_or_default()), if is_true(&f["nullable"]) { or_null(&ty) } else { ty })
@@ -1574,6 +1578,29 @@ mod tests {
         let codecs = json!({ "decimal": "number", "instant": "Temporal.Instant" });
         assert_eq!(printed(&a, "postgres", &codecs, false).text(), "type Returns = { price: number; at: Temporal.Instant }[];\n");
         assert_eq!(printed(&a, "postgres", &Value::Null, false).text(), "type Returns = { price: string; at: string }[];\n");
+    }
+
+    #[test]
+    fn an_array_of_a_type_structured_as_an_array_nests_at_any_depth() {
+        let bit = json!({ "kind": "array", "size": { "exact": 3 }, "element": { "type": { "kind": "boolean" } }, "label": "bit" });
+        let float8 = json!({ "kind": "float", "exponent_bits": 11, "mantissa_bits": 52, "label": "float8" });
+        let point = json!({ "kind": "struct", "fields": [{ "name": "x", "type": float8 }, { "name": "y", "type": float8 }], "label": "point" });
+        let lseg = json!({ "kind": "array", "size": { "exact": 2 }, "element": { "type": point }, "label": "lseg" });
+        let array_of = |label: &str, ty: &Value| json!({ "kind": "array", "label": label, "element": { "nullable": true, "type": ty } });
+        let a = analysis(
+            json!([
+                { "name": "flags", "type": array_of("_bit", &bit) },
+                { "name": "segments", "type": array_of("_lseg", &lseg) },
+                // `array[flags, flags]`: a level the statement builds over the column's array.
+                { "name": "stacked", "type": { "kind": "array", "label": "_bit", "element": { "type": array_of("_bit", &bit) } } },
+            ]),
+            json!([]),
+            "many",
+        );
+        assert_eq!(
+            printed(&a, "postgres", &Value::Null, true).text(),
+            "type Returns = {\n  flags: NestedArray<string | null>;\n  segments: NestedArray<{ x: number; y: number }[] | null>;\n  stacked: NestedArray<string | null>[];\n}[];\n"
+        );
     }
 
     #[test]

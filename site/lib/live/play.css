@@ -223,8 +223,10 @@ html:not(.dark) #nd-page.play .play-theme-dark {
   color: var(--color-fd-headings);
 }
 
+/* The icon lifted onto the label's cap band: centred on the line box, it sat 0.63px low beside IBM Plex Sans at this size (measured from the pixels, 2026-11-24). */
 #nd-page.play .play-button svg {
   color: var(--color-fd-muted-foreground);
+  translate: 0 -0.625px;
 }
 
 /* The examples: the trigger and its menu one width; the current example a check, not a fill. */

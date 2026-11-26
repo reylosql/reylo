@@ -79,8 +79,15 @@ test("SQLite: `sql` is the compiled statement and `raw` the file, at run time an
     assert.equal(json.default.sql, "select json_extract(json(?), '$.a') as a, ? as tags");
     assert.equal(json.default.raw, doc);
     assert.deepEqual({ ...((await json.default.run(db, { doc: { a: 5 }, tags: ["x"] })) as object) }, { a: 5, tags: '["x"]' });
+    // A block comment left open runs to the end of the text, which SQLite reads so only when
+    // something follows its `/*`: `sql` keeps one character of what the file has after it.
+    const open = "select 1 as n /*\n\n";
+    const opened = await built(root, "open", open);
+    assert.equal(opened.default.sql, "select 1 as n /*\n");
+    assert.deepEqual({ ...((await opened.default.run(db, {})) as object) }, { n: 1 });
     await closeSessions();
-    const declared = await declarations(root, { "get_user.sql": GET_USER, "doc.sql": doc });
+    const declared = await declarations(root, { "get_user.sql": GET_USER, "doc.sql": doc, "open.sql": open });
+    assert.equal(texts(declared["open.sql"]!)[0], `export declare const sql: "select 1 as n /*\\n";`);
     assert.deepEqual(texts(declared["get_user.sql"]!), [
       `export declare const sql: "select id, name, email from users where id = ?";`,
       `export declare const raw: "select id, name, email from users where id = :id\\n";`,

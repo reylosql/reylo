@@ -1,3 +1,5 @@
+-- loses data: d.b
+-- loses data: d.c
 alter table c add column b integer default 2;
 alter table c add column c integer;
 alter table c inherit p2;

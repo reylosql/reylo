@@ -49,7 +49,7 @@ const nextConfig: NextConfig = {
 export default withReylo(nextConfig);
 ```
 
-Add Reylo to `tsconfig.json` as a content mapper, as in [Setup](/typescript#typescript):
+Add Reylo to `tsconfig.json` as a content mapper, as in [Setup](/docs/typescript#typescript):
 
 ```jsonc title="tsconfig.json"
 {
@@ -171,4 +171,4 @@ How the build checks types:
 
 - Next.js's own check runs without `--runExternalCode`, so `withReylo` turns it off and runs Reylo's instead. The build still prints "Skipping validation of types" for Next.js's check.
 - Setting `typescript.ignoreBuildErrors` in your config turns Reylo's check off too.
-- The build needs your dev database, as the type check does. In CI, start it and [apply your migrations](/deployment) first. A host that builds before it migrates, such as Vercel, can [build against a database of its own](/deployment#build-before-migrate).
+- The build needs your dev database, as the type check does. In CI, start it and [apply your migrations](/docs/deployment) first. A host that builds before it migrates, such as Vercel, can [run the build on a dry run of the deploy](/docs/deployment#build-before-migrate).

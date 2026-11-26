@@ -1,0 +1,2 @@
+create table m (id int, ts date, ts_day int, old_payload integer) partition by range (ts, ts_day);
+create table m_1 partition of m for values from ('2025-01-01', 0) to ('2026-01-01', 0);

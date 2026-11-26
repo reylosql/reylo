@@ -1,0 +1,2 @@
+public.t0."N0"  a composite value prints without the attribute dropped from its type
+public.h0."N0"  a composite value prints without the attribute dropped from its type

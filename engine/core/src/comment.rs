@@ -19,9 +19,10 @@ pub fn prose(sql: &str, dialect: Dialect) -> Option<String> {
 
 /// The `--` lines and `/* … */` blocks before the statement's first token, markers stripped and
 /// lines kept: a blank line between two comments, or a change from one form to the other, starts a
-/// paragraph. Read as the dialect reads comments: Postgres nests block comments, MySQL's
-/// `--` is one only before a space or a control character and `#` starts one too, and MySQL's
-/// `/*!` and `/*+` are code to the server, so they end the prose.
+/// paragraph. Read as the dialect reads comments: Postgres nests block comments and ends a `--`
+/// one at a carriage return as at a line feed, MySQL's `--` is one only before a space or a
+/// control character and `#` starts one too, and MySQL's `/*!` and `/*+` are code to the server,
+/// so they end the prose.
 pub fn leading(sql: &str, dialect: Dialect) -> Leading {
     let bytes = sql.as_bytes();
     let mut paragraphs: Vec<Vec<String>> = Vec::new();
@@ -30,7 +31,10 @@ pub fn leading(sql: &str, dialect: Dialect) -> Leading {
     let mut end = 0;
     loop {
         let ws = sql[i..].len() - sql[i..].trim_start().len();
-        let blank_before = sql[i..i + ws].matches('\n').count() > 1;
+        // Postgres ends a line at a bare carriage return too, and `\r\n` is one line end.
+        let gap = &sql[i..i + ws];
+        let breaks = if dialect == Dialect::Postgres { gap.matches('\n').count() + gap.matches('\r').count() - gap.matches("\r\n").count() } else { gap.matches('\n').count() };
+        let blank_before = breaks > 1;
         let at = i + ws;
         let (ch, next) = (bytes.get(at).copied(), bytes.get(at + 1).copied());
         let mysql = dialect == Dialect::Mysql;
@@ -38,7 +42,7 @@ pub fn leading(sql: &str, dialect: Dialect) -> Leading {
         // ClickHouse's `#` starts a comment before a space or a `!`.
         let hash = ch == Some(b'#') && (mysql || (dialect == Dialect::Clickhouse && matches!(next, Some(b' ' | b'!'))));
         if dash || hash {
-            let stop = sql[at..].find('\n').map_or(sql.len(), |n| at + n);
+            let stop = sql[at..].find(|c| c == '\n' || (dialect == Dialect::Postgres && c == '\r')).map_or(sql.len(), |n| at + n);
             let text = &sql[at + if ch == Some(b'#') { 1 } else { 2 }..stop];
             if last != Some(true) || blank_before || paragraphs.is_empty() {
                 paragraphs.push(Vec::new());
@@ -128,6 +132,12 @@ mod tests {
         assert_eq!(prose("-- a\n/* b */ select 1", Dialect::Postgres), "a\n\nb");
         assert_eq!(prose("select 1 -- not before", Dialect::Postgres), "");
         assert_eq!(leading("-- a\nselect 1", Dialect::Postgres).end, 4);
+        // Postgres ends a `--` comment at a carriage return as at a line feed.
+        assert_eq!(prose("-- One user,\r--   by id.\rselect 1", Dialect::Postgres), "One user,\n  by id.");
+        assert_eq!(leading("-- a\rselect 1", Dialect::Postgres).end, 4);
+        assert_eq!(prose("-- a\r\n\r\n-- b\r\nselect 1", Dialect::Postgres), "a\n\nb");
+        assert_eq!(prose("-- a\r\r-- b\rselect 1", Dialect::Postgres), "a\n\nb");
+        assert_eq!(prose("-- a\r\n-- b\r\nselect 1", Dialect::Postgres), "a\nb");
     }
 
     #[test]

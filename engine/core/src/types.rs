@@ -249,12 +249,34 @@ pub struct UuidType {
     pub versions: Option<Vec<u8>>,
 }
 
-/// One of `values`, each a value of `ty` in its canonical text; one value is a literal.
+/// One of `values`, each a value of `ty`; one value is a literal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnumType {
     #[serde(rename = "type")]
     pub ty: Box<Type>,
-    pub values: Vec<String>,
+    pub values: Vec<EnumValue>,
+}
+
+/// One value of an enum: its canonical text, and the name generated code gives it where the
+/// source names it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EnumValue {
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl From<String> for EnumValue {
+    fn from(value: String) -> EnumValue {
+        EnumValue { value, name: None }
+    }
+}
+
+impl EnumType {
+    /// Each value's canonical text, in order.
+    pub fn texts(&self) -> impl Iterator<Item = &str> {
+        self.values.iter().map(|v| v.value.as_str())
+    }
 }
 
 /// A sequence of elements, each in the one `element` slot; flat, an element of an array kind
@@ -969,7 +991,7 @@ impl Type {
         if values.is_empty() {
             return ty;
         }
-        Kind::Enum(EnumType { ty: Box::new(ty), values }).into()
+        Kind::Enum(EnumType { ty: Box::new(ty), values: values.into_iter().map(EnumValue::from).collect() }).into()
     }
 
     /// Text that is one of `values`.
@@ -1227,7 +1249,7 @@ impl Type {
             Kind::Uuid(u) => with(u.versions.iter().flatten().map(|v| format!("v{v}")).collect()),
             Kind::Enum(e) => {
                 let quoted = matches!(e.ty.kind, Kind::Text(_));
-                let values = e.values.iter().map(|v| if quoted { quote(v) } else { v.clone() }).collect::<Vec<_>>().join(" | ");
+                let values = e.texts().map(|v| if quoted { quote(v) } else { v.to_string() }).collect::<Vec<_>>().join(" | ");
                 let base = e.ty.short();
                 let base = match &self.label {
                     // The enum's own name stands for its base's.
@@ -1508,12 +1530,13 @@ impl Type {
                 if e.values.is_empty() {
                     return fail("an enum lists at least one value".into());
                 }
-                if let Some((i, v)) = e.values.iter().enumerate().find(|(i, v)| e.values[..*i].contains(v)) {
+                let texts: Vec<&str> = e.texts().collect();
+                if let Some((i, v)) = texts.iter().enumerate().find(|(i, v)| texts[..*i].contains(v)) {
                     return fail(format!("value {v:?} is listed twice, at {i}"));
                 }
                 if matches!(e.ty.kind, Kind::Boolean(_)) {
-                    if e.values.iter().any(|v| v != "true" && v != "false") {
-                        return fail(format!("a boolean's values are true and false, not {:?}", e.values));
+                    if texts.iter().any(|v| *v != "true" && *v != "false") {
+                        return fail(format!("a boolean's values are true and false, not {texts:?}"));
                     }
                     if e.values.len() == 2 {
                         return fail("an enum of both booleans is a boolean".into());
@@ -1818,7 +1841,7 @@ mod tests {
         round_trip(json!({"kind": "duration", "max": "PT838H59M59S", "tick": "1/1000000", "label": "time"}));
         round_trip(json!({"kind": "duration", "max": "P1199M"}));
         round_trip(json!({"kind": "duration", "max": "PT0.5S", "tick": "1/1000"}));
-        assert_eq!(round_trip(json!({"kind": "array", "size": {"max": 2}, "label": "set", "distinct": true, "element": {"type": {"kind": "enum", "type": {"kind": "text"}, "values": ["a", "b"]}}})).short(), "set{text('a' | 'b')}");
+        assert_eq!(round_trip(json!({"kind": "array", "size": {"max": 2}, "label": "set", "distinct": true, "element": {"type": {"kind": "enum", "type": {"kind": "text"}, "values": [{"value": "a"}, {"value": "b"}]}}})).short(), "set{text('a' | 'b')}");
         assert_eq!(round_trip(json!({"kind": "tuple", "elements": [{"type": {"kind": "integer", "bits": 32}}], "optional_elements": [{"nullable": true, "type": {"kind": "text"}}], "rest": {"type": {"kind": "boolean"}}})).short(), "(int32, text?=, ...boolean)");
         assert_eq!(round_trip(json!({"kind": "struct", "fields": [{"name": "id", "type": {"kind": "integer", "bits": 32}}, {"name": "tag", "optional": true, "default": "none", "comment": "What it is", "type": {"kind": "text"}}], "extra": {"type": {"kind": "text"}}})).short(), "{ id: int32, tag?: text, *: text }");
         round_trip(json!({"kind": "struct", "title": "User", "fields": [{"name": "id", "title": "Id", "type": {"kind": "uuid"}}, {"name": "password", "type": {"kind": "text", "format": "password"}}]}));
@@ -1826,11 +1849,13 @@ mod tests {
         assert_eq!(round_trip(json!({"kind": "text", "size": {"max": 255}, "media_type": "text/plain", "format": "email", "label": "varchar"})).short(), "varchar(≤255, text/plain, email)");
         assert_eq!(round_trip(json!({"kind": "map", "key": {"type": {"kind": "text"}}, "value": {"type": {"kind": "integer", "bits": 32}}, "size": {"max": 64}})).short(), "map(text => int32, ≤64)");
         assert_eq!(round_trip(json!({"kind": "map", "label": "hstore", "key": {"type": {"kind": "text"}}, "value": {"nullable": true, "type": {"kind": "text"}}})).short(), "hstore(text => text?)");
-        assert_eq!(round_trip(json!({"kind": "enum", "type": {"kind": "boolean"}, "values": ["true"]})).short(), "boolean(true)");
-        assert_eq!(round_trip(json!({"kind": "enum", "type": {"kind": "integer", "bits": 32, "label": "int4"}, "values": ["1", "2"]})).short(), "int4(1 | 2)");
-        assert_eq!(round_trip(json!({"kind": "enum", "type": {"kind": "text", "size": {"max": 20}, "label": "varchar"}, "values": ["a", "b"]})).short(), "varchar(≤20, 'a' | 'b')");
-        assert_eq!(round_trip(json!({"kind": "enum", "type": {"kind": "text"}, "values": ["sad", "ok"], "label": "public.mood"})).short(), "public.mood('sad' | 'ok')");
-        round_trip(json!({"kind": "enum", "type": {"kind": "float", "exponent_bits": 11, "mantissa_bits": 52, "label": "float8"}, "values": ["0.5"]}));
+        assert_eq!(round_trip(json!({"kind": "enum", "type": {"kind": "boolean"}, "values": [{"value": "true"}]})).short(), "boolean(true)");
+        assert_eq!(round_trip(json!({"kind": "enum", "type": {"kind": "integer", "bits": 32, "label": "int4"}, "values": [{"value": "1"}, {"value": "2"}]})).short(), "int4(1 | 2)");
+        assert_eq!(round_trip(json!({"kind": "enum", "type": {"kind": "text", "size": {"max": 20}, "label": "varchar"}, "values": [{"value": "a"}, {"value": "b"}]})).short(), "varchar(≤20, 'a' | 'b')");
+        assert_eq!(round_trip(json!({"kind": "enum", "type": {"kind": "text"}, "values": [{"value": "sad"}, {"value": "ok"}], "label": "public.mood"})).short(), "public.mood('sad' | 'ok')");
+        round_trip(json!({"kind": "enum", "type": {"kind": "float", "exponent_bits": 11, "mantissa_bits": 52, "label": "float8"}, "values": [{"value": "0.5"}]}));
+        // A value may carry the name generated code gives it.
+        assert_eq!(round_trip(json!({"kind": "enum", "type": {"kind": "text"}, "values": [{"value": "active", "name": "Active"}, {"value": "archived"}]})).short(), "text('active' | 'archived')");
         round_trip(json!({"kind": "map", "label": "hstore", "key": {"type": {"kind": "text"}}, "value": {"nullable": true, "type": {"kind": "text"}}}));
         round_trip(json!({"kind": "map", "key": {"nullable": true, "type": {"kind": "text"}}, "value": {"type": {"kind": "integer", "bits": 32}}}));
         assert_eq!(round_trip(json!({"kind": "intersection", "members": [{"kind": "struct", "fields": []}, {"kind": "opaque", "label": "row"}]})).short(), "{  } & row");
@@ -1903,11 +1928,12 @@ mod tests {
         refused(json!({"kind": "opaque"}));
         refused(json!({"kind": "array", "element": {"type": {"kind": "float", "exponent_bits": 0, "mantissa_bits": 3}}}));
         // An enum: of a kind written as text, values once each, not of both booleans.
-        refused(json!({"kind": "enum", "type": {"kind": "struct", "fields": []}, "values": ["x"]}));
-        refused(json!({"kind": "enum", "type": {"kind": "enum", "type": {"kind": "text"}, "values": ["a"]}, "values": ["a"]}));
-        refused(json!({"kind": "enum", "type": {"kind": "text"}, "values": ["a", "a"]}));
-        refused(json!({"kind": "enum", "type": {"kind": "boolean"}, "values": ["true", "false"]}));
-        refused(json!({"kind": "enum", "type": {"kind": "boolean"}, "values": ["yes"]}));
+        refused(json!({"kind": "enum", "type": {"kind": "struct", "fields": []}, "values": [{"value": "x"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "enum", "type": {"kind": "text"}, "values": [{"value": "a"}]}, "values": [{"value": "a"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "text"}, "values": [{"value": "a"}, {"value": "a"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "text"}, "values": [{"value": "a", "name": "A"}, {"value": "a", "name": "Alias"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "boolean"}, "values": [{"value": "true"}, {"value": "false"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "boolean"}, "values": [{"value": "yes"}]}));
         // Unions and intersections: two members at least, null never one, and no intersection one struct writes.
         refused(json!({"kind": "union", "members": [{"kind": "text"}]}));
         refused(json!({"kind": "union", "members": [{"kind": "text"}, {"kind": "null"}]}));
@@ -1985,7 +2011,7 @@ mod tests {
                     "bits" | "exponent_bits" | "mantissa_bits" => json!(32),
                     "tick" => json!("1"),
                     "max" => json!("P1D"),
-                    "values" => json!(["a"]),
+                    "values" => json!([{"value": "a"}]),
                     "type" | "subtype" => text["type"].clone(),
                     "element" | "key" | "value" => text.clone(),
                     "elements" | "fields" | "columns" | "members" | "alternatives" => json!([]),
