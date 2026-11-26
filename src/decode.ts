@@ -1138,7 +1138,7 @@ function postgresValue(type: EngineType, v: unknown, name: string): unknown {
  * project lets it nest.
  */
 function postgresRows(query: QueryModule<"postgres">, rows: unknown[]): unknown[] {
-  const nonFinite = query.nonFinite !== undefined && query.columns !== undefined ? postgresTypesFor("json").rowMasks(query.columns, query.nonFinite) : [];
+  const nonFinite = query.nonFinite?.some((at) => at !== null) && query.columns !== undefined ? postgresTypesFor("json").rowMasks(query.columns, query.nonFinite) : [];
   const arrays = query.nestedArrays ? [] : (query.columns ?? []).filter(([, kind]) => kind.endsWith("[]"));
   if (!nonFinite.length && !arrays.length) return rows;
   const numbers = nonFinite.length ? postgresTypesFor("json").numbersInJson : undefined;

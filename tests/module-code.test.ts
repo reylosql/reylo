@@ -32,6 +32,10 @@ test("a Postgres module imports its rarer types where a column or a parameter ho
   const ints = withBases(array(array(pg("int4"), true, "public.ints"), true, "public._ints"), { "public.ints": "_int4" });
   assert.equal(typed([ints]), false);
   assert.equal(typed([], [{ type: ints }]), true);
+  // One over box[], whose elements a semicolon separates, is read as text, and still written as each element's literal.
+  const boxes = withBases(array(array(pg("box"), true, "public.boxes"), true, "public._boxes"), { "public.boxes": "_box" });
+  assert.equal(typed([boxes]), false);
+  assert.equal(typed([], [{ type: boxes }]), true);
   // A structured parameter is written by checks, but its money is checked against the session's locale first.
   const rows = (type: EngineType) => [{ type: array(record([field("amount", type)])), members: [{ written: "amount" }] }];
   assert.equal(typed([], rows(pg("money"))), true);

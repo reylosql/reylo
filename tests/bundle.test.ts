@@ -6,6 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { DEFINE } from "../src/loader.ts";
 import type { Dialect } from "../src/execute.ts";
@@ -94,7 +95,7 @@ test("a kind needs Postgres's rarer types exactly where the module a build step 
     ["{int[]}[]", '{"{1,2}",NULL}'],
     ['(["a","int"])', "(1)"], ['(["a","int"])[]', '{"(1)"}'], ['(["p","text"],["q","int[]"])', '(x,"{1}")'],
   ];
-  const values_ts = JSON.stringify(join(ROOT, "src", "values.ts"));
+  const values_ts = JSON.stringify(pathToFileURL(join(ROOT, "src", "values.ts")).href);
   const out = fresh(`const { holdsRareKind, textDecoder } = await import(${values_ts});
 for (const [kind, text] of ${JSON.stringify(values)}) {
   let needs = false;
@@ -108,9 +109,11 @@ for (const [kind, text] of ${JSON.stringify(values)}) {
 test("PGlite reads a statement of plain columns in a process where nothing installed Postgres's rarer types, and refuses one of them before it runs", async () => {
   const run = async (module: string) => {
     const { outputFiles } = await build({ stdin: { contents: `${module}\nexport { q };\n`, resolveDir: ROOT }, bundle: true, platform: "node", format: "esm", write: false, alias: { reylo: join(ROOT, "src", "index.ts") }, logLevel: "silent" });
-    const pglite = JSON.stringify(join(DRIVERS, "@electric-sql", "pglite", "dist", "index.js"));
+    const pglite = JSON.stringify(pathToFileURL(join(DRIVERS, "@electric-sql", "pglite", "dist", "index.js")).href);
     return fresh(`${outputFiles[0]!.text}\nconst { PGlite } = await import(${pglite});\nconst db = new PGlite();\ntry { console.log(JSON.stringify(await q.run(db))); } catch (e) { console.log(e.message); }`);
   };
   assert.equal(await run(`import { definePostgresQuery } from "reylo";\nconst q = definePostgresQuery({ sql: "select 1::int as n, 'x' as t", params: [], cardinality: "one", columns: [["n", "int"], ["t", "text"]] });`), '{"n":1,"t":"x"}');
+  // A JSON mask that holds no work asks for no rarer type.
+  assert.equal(await run(`import { definePostgresQuery } from "reylo";\nconst q = definePostgresQuery({ sql: "select 1::int as n", params: [], cardinality: "one", columns: [["n", "int"]], nonFinite: [null] });`), '{"n":1}');
   assert.match(await run(`import { definePostgresQuery } from "reylo";\nconst q = definePostgresQuery({ sql: "insert into nowhere default values returning point(1, 2) as p", params: [], cardinality: "one", columns: [["p", "point"]], source: "p.sql" });`), /^p\.sql: Reylo reads and writes a Postgres point with Reylo's postgresTypes/);
 });
