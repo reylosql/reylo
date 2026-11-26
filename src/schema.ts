@@ -149,18 +149,20 @@ const EXTENDED_YEAR = `([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00${YEAR})`;
  * moves one more; the hours in two digits below 100, as Postgres pads them.
  */
 const DOCUMENT_TIME = `${CLOCK}[+-](([0-9]{2}|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00)`;
+/** Of those offsets, the ones RFC 3339's refuses: to the second, or 24 hours or more. A four-digit year with any other is the format's, which checks the calendar too. */
+const ODD_OFFSET = "[+-](([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]|(2[4-9]|[3-9][0-9]|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00)";
 
 /**
  * A year that RFC 3339's four digits do not write, as a date's or an instant's text has it: ISO
  * 8601's extended year where the run time writes the value (`isoYear`, and a Temporal value's
  * JSON), and inside a document Postgres's own, five digits or more, or four with BC after the
  * value (`12345-01-01`, `0002-06-01 BC`). Inside a document an instant of a year from 1 to 9999
- * takes Postgres's offset too, which the format refuses (`1849-12-31T19:03:58-04:56:02`). The same
- * in engine/core.
+ * takes Postgres's offset too where the format refuses it (`1849-12-31T19:03:58-04:56:02`,
+ * `ODD_OFFSET`). The same in engine/core.
  */
 const PAST_YEARS = {
   date: [`^${EXTENDED_YEAR}${MONTH_DAY}$`, `^([1-9][0-9]{4,}${MONTH_DAY}|${YEAR}${MONTH_DAY} BC)$`],
-  instant: [`^${EXTENDED_YEAR}${MONTH_DAY}${CLOCK}(Z|${OFFSET})$`, `^([1-9][0-9]{4,}${MONTH_DAY}${DOCUMENT_TIME}|${YEAR}${MONTH_DAY}${DOCUMENT_TIME}( BC)?)$`],
+  instant: [`^${EXTENDED_YEAR}${MONTH_DAY}${CLOCK}(Z|${OFFSET})$`, `^([1-9][0-9]{4,}${MONTH_DAY}${DOCUMENT_TIME}|${YEAR}${MONTH_DAY}${DOCUMENT_TIME} BC|${YEAR}${MONTH_DAY}${CLOCK}${ODD_OFFSET})$`],
 } as const;
 
 /** The text of a year outside 0000–9999, which a bound with a sign says a date or an instant of `t` reaches, standing where `inJson` says. */
