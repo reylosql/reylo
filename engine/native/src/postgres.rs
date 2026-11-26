@@ -626,14 +626,16 @@ struct Parsed {
 /// comma list in the hosts' order, as a query's `port` takes them. As libpq reads them, a port the
 /// URL leaves out of one of several hosts is empty, which tokio-postgres reads as 5432, and the
 /// ports are none where the URL writes one host and no port, which `PGPORT` then gives. An `@` in
-/// the login is escaped, since tokio-postgres would end the login at the first, where libpq and
-/// node-postgres end it at the last.
+/// the login or the path is escaped, since tokio-postgres would end the login at the first, where
+/// libpq and node-postgres end it at the last.
 fn authority(base: &str) -> (String, Vec<String>, Option<String>) {
     let Some((scheme, rest)) = base.split_once("://") else { return (base.to_string(), Vec::new(), None) };
     let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
     let (login, list) = authority.rsplit_once('@').map_or(("", authority), |(login, list)| (login, list));
+    let at = if authority.contains('@') { "@" } else { "" };
+    let base = format!("{scheme}://{}{at}{}", login.replace('@', "%40"), path.replace('@', "%40"));
     if list.is_empty() {
-        return (base.to_string(), Vec::new(), None);
+        return (base, Vec::new(), None);
     }
     let (mut hosts, mut ports) = (Vec::new(), Vec::new());
     for chunk in list.split(',') {
@@ -645,9 +647,8 @@ fn authority(base: &str) -> (String, Vec<String>, Option<String>) {
         hosts.push(host.to_string());
         ports.push(port.unwrap_or(""));
     }
-    let at = if login.is_empty() { "" } else { "@" };
     let ports = (hosts.len() > 1 || ports.iter().any(|p| !p.is_empty())).then(|| ports.join(","));
-    (format!("{scheme}://{}{at}{path}", login.replace('@', "%40")), hosts, ports)
+    (base, hosts, ports)
 }
 
 /// A libpq URL as tokio-postgres's configuration, what it leaves out read from the environment as
@@ -666,6 +667,7 @@ fn parse(url: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<Parsed, Stri
     // before `PGPORT`. Each host is a `host` of its own, since tokio-postgres reads a query's
     // `host=a,b` as one host named `a,b`, where libpq reads two.
     let (base, hosts, ports) = authority(base);
+    let named_user = named.iter().any(|(name, _)| *name == "user");
     let (mut mode, mut flag, mut root, mut binding, mut cert, mut key_file, mut password) = (None, None, None, None, None, None, false);
     let mut kept = Vec::new();
     if !named.iter().any(|(name, _)| *name == "host") {
@@ -690,7 +692,8 @@ fn parse(url: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<Parsed, Stri
                 binding = Some(crate::decode(value));
                 kept.push(pair);
             }
-            "host" => kept.extend(value.split(',').map(|host| format!("host={}", host.replace('@', "%40")))),
+            // libpq splits the decoded value, an escaped comma included.
+            "host" => kept.extend(value.replace("%2C", ",").replace("%2c", ",").split(',').map(|host| format!("host={}", host.replace('@', "%40")))),
             name if KNOWN.contains(&name) => kept.push(pair),
             _ => {}
         }
@@ -739,9 +742,11 @@ fn parse(url: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<Parsed, Stri
             config.port(port.parse().map_err(|_| format!("PGPORT={port} is not a port"))?);
         }
     }
-    // An empty user is none, as libpq reads `postgres://:secret@h/d`.
+    // An empty user is none, as libpq reads `postgres://:secret@h/d`; an empty `user=` is the
+    // system's, as libpq reads it too.
     if config.get_user().is_none_or(str::is_empty) {
-        if let Some(user) = env("PGUSER").or_else(|| env("USER")).or_else(|| env("USERNAME")) {
+        let given = if named_user { None } else { env("PGUSER") };
+        if let Some(user) = given.or_else(|| env("USER")).or_else(|| env("USERNAME")) {
             config.user(user);
         }
     }
@@ -881,6 +886,11 @@ mod tests {
         // Several hosts from the query, each its own; several from the URL with no port keep 5432 under PGPORT, as libpq's do.
         assert_eq!(hosts("postgres://u@/d?host=a,b&port=1,2", &no_env).0, vec![tcp("a"), tcp("b")]);
         assert_eq!(hosts("postgres://u@a,b/d", &env).1, vec![5432, 5432]);
+        // An `@` in the password without a host, or in the database's name, and an escaped comma in a host's list.
+        let Parsed { config, .. } = parse("postgres://u:p@ss@/my@db?host=%2Fa%2C%2Fb", &no_env).unwrap();
+        assert_eq!((config.get_password(), config.get_dbname(), config.get_hosts().len()), (Some(&b"p@ss"[..]), Some("my@db"), 2));
+        // An empty `user=` is the system's user, never PGUSER's.
+        assert_eq!(parse("postgres://h/d?user=", &|key| match key { "PGUSER" => Some("ci".to_string()), "USER" => Some("me".to_string()), _ => None }).unwrap().config.get_user(), Some("me"));
         // An `@` in the password or in a value, written unescaped.
         let Parsed { config, .. } = parse("postgres://u:p@ss@h/d?user=me@tenant", &no_env).unwrap();
         assert_eq!((config.get_hosts(), config.get_password(), config.get_user()), (&[tcp("h")][..], Some(&b"p@ss"[..]), Some("me@tenant")));
