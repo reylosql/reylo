@@ -13,6 +13,7 @@ const queries: Record<string, Entry> = {
   "outer-joins:left": raw,
   "outer-joins:left-sorted": raw,
   "outer-joins:left-where": raw,
+  "outer-joins:left-narrowed": raw,
   "outer-joins:left-subquery": raw,
   "outer-joins:right": raw,
   "outer-joins:full": raw,
@@ -55,6 +56,8 @@ const queries: Record<string, Entry> = {
   // Rows nested in a row are a relation's `select`.
   "json-shapes:object": "prisma.posts.findMany({ select: { users: { select: { id: true, name: true } } } })",
   "json-shapes:aggregate": "prisma.users.findMany({ select: { posts: { select: { id: true, title: true } } } })",
+  "json-shapes:grouped-aggregate": raw,
+  "json-shapes:correlated-rows": raw,
 
   "json-schema:column": "prisma.events.findMany({ select: { payload: true } })",
   "json-schema:parameter": "prisma.events.create({ data: { id: $1, payload: $2 } })",
@@ -72,6 +75,8 @@ const queries: Record<string, Entry> = {
   "windows:lag": raw,
 
   // A relation's row count is `_count`; there is no other column a subquery can compute.
+  "subqueries:dashboard": raw,
+  "subqueries:lateral-latest": raw,
   "subqueries:scalar-count": { code: "prisma.users.findMany({ select: { name: true, _count: { select: { posts: true } } } })", paths: { name: "name", v: "_count.posts" } },
   "subqueries:scalar-max": raw,
   "subqueries:exists": raw,
@@ -84,15 +89,19 @@ const queries: Record<string, Entry> = {
 
   "set-operations:union": raw,
   "set-operations:union-nullable": raw,
+  "set-operations:union-widening": raw,
   "set-operations:except": raw,
 
   "returning:insert": "prisma.posts.create({ data: { id: $1, author_id: $2, title: $3 }, select: { id: true, score: true } })",
   "returning:update": "prisma.users.update({ where: { id: $2 }, data: { nickname: $1 }, select: { name: true, nickname: true } })",
+  "returning:update-narrowed": "prisma.users.update({ where: { id: $1 }, data: { nickname: 'anon' }, select: { nickname: true } })",
   "returning:delete": "prisma.posts.delete({ where: { id: $1 }, select: { title: true } })",
   "returning:upsert": "prisma.users.upsert({ where: { id: $1 }, create: { id: $1, email: $2, name: $3 }, update: { name: $3 }, select: { id: true, nickname: true } })",
 
   "enums:column": "prisma.users.findMany({ select: { role: true } })",
   "enums:derived": raw,
+  "enums:check-union": "prisma.tickets.findMany({ select: { status: true } })",
+  "enums:literal-union": raw,
 
   "smoke:smoke": "prisma.users.findMany({ select: { id: true, name: true } })",
 };

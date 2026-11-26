@@ -32,6 +32,12 @@ export class Event {
   @PrimaryColumn() id!: number;
   @Column({ type: "jsonb" }) payload!: object;
 }
+
+@Entity("tickets")
+export class Ticket {
+  @PrimaryColumn() id!: number;
+  @Column() status!: string;
+}
 ` : ""}`;
 
 // The probe's own SQL through `query()`, each parameter in the driver's placeholder.
@@ -44,6 +50,7 @@ const queries: Record<string, Entry> = {
   "outer-joins:left": `${LEFT}.getRawMany()`,
   "outer-joins:left-sorted": `${LEFT}.orderBy('p.title').getRawMany()`,
   "outer-joins:left-where": `${LEFT}.where('u.id = :id', { id: $1 }).getRawMany()`,
+  "outer-joins:left-narrowed": `${LEFT}.where('p.score > 0').getRawMany()`,
   "outer-joins:left-subquery": `${users}.createQueryBuilder('u').leftJoin((qb) => qb.select(['author_id', 'title']).from(Post, 'posts'), 'x', 'x.author_id = u.id').select(['u.name', 'x.title']).getRawMany()`,
   // The query builder has no right or full join.
   "outer-joins:right": raw,
@@ -85,6 +92,8 @@ const queries: Record<string, Entry> = {
   // Rows nested in a row are a relation the `find` loads.
   "json-shapes:object": { code: `${posts}.find({ relations: { author: true }, select: { author: { id: true, name: true } } })`, pick: "author" },
   "json-shapes:aggregate": { code: `${users}.find({ relations: { posts: true }, select: { posts: { id: true, title: true } } })`, pick: "posts" },
+  "json-shapes:grouped-aggregate": raw,
+  "json-shapes:correlated-rows": raw,
 
   "json-schema:column": `ds.getRepository(Event).find({ select: { payload: true } })`,
   "json-schema:parameter": `ds.getRepository(Event).insert({ id: $1, payload: $2 })`,
@@ -101,6 +110,8 @@ const queries: Record<string, Entry> = {
   "windows:running-sum": raw,
   "windows:lag": raw,
 
+  "subqueries:dashboard": raw,
+  "subqueries:lateral-latest": raw,
   "subqueries:scalar-count": `${users}.createQueryBuilder('u').select('u.name', 'name').addSelect((qb) => qb.select('count(*)').from(Post, 'p').where('p.author_id = u.id'), 'v').getRawMany()`,
   "subqueries:scalar-max": `${users}.createQueryBuilder('u').select('u.name', 'name').addSelect((qb) => qb.select('max(p.title)').from(Post, 'p').where('p.author_id = u.id'), 'v').getRawMany()`,
   "subqueries:exists": raw,
@@ -113,16 +124,20 @@ const queries: Record<string, Entry> = {
 
   "set-operations:union": raw,
   "set-operations:union-nullable": raw,
+  "set-operations:union-widening": raw,
   "set-operations:except": raw,
 
   // \`save\` inserts or updates by primary key and returns the entity, which is TypeORM's way to get a written row back.
   "returning:insert": `${posts}.save({ id: $1, authorId: $2, title: $3 })`,
   "returning:update": `${users}.save({ id: $2, nickname: $1 })`,
+  "returning:update-narrowed": `${users}.save({ id: $1, nickname: 'anon' })`,
   "returning:delete": { code: `ds.createQueryBuilder().delete().from(Post).where('id = :id', { id: $1 }).returning(['title']).execute()`, paths: { title: "raw" } },
   "returning:upsert": `${users}.save({ id: $1, email: $2, name: $3 })`,
 
   "enums:column": `${users}.find({ select: { role: true } })`,
   "enums:derived": raw,
+  "enums:check-union": `ds.getRepository(Ticket).find({ select: { status: true } })`,
+  "enums:literal-union": raw,
 
   "smoke:smoke": `${users}.find({ select: { id: true, name: true } })`,
 };
@@ -143,7 +158,7 @@ export const typeorm = ormTool({
     gitInit(dir);
     const prelude = [
       `import { DataSource, Like, MoreThan } from "typeorm";`,
-      `import { User, Post${db === "postgres" ? ", Event" : ""} } from "./entities";`,
+      `import { User, Post${db === "postgres" ? ", Event, Ticket" : ""} } from "./entities";`,
       `declare const ds: DataSource;`,
     ].join("\n");
     return { dir, prelude, wrote: gitDelta(dir) };

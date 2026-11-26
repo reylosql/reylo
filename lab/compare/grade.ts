@@ -18,6 +18,7 @@ function checkColumns(p: Probe, a: Answer, checkNull: boolean, db: Db): Problem[
     const got = a.columns?.find((c) => c.name.toLowerCase() === want.name.toLowerCase()) ?? a.columns?.[i];
     const column = want.name;
     if (!got) return void out.push({ text: `\`${want.name}\` is missing`, column });
+    if (got.kind === "any") return void out.push({ text: `\`${want.name}\` is typed \`${got.type}\``, column });
     if (checkNull && want.nullable !== undefined && !want.anyNullOn?.includes(db) && got.nullable !== want.nullable) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, but ${want.nullable ? "it can be null" : "it is never null"}`, column });
     if (want.shape && !want.shape.every((f) => got.fields?.includes(f))) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, without its fields`, column });
   });
@@ -46,6 +47,8 @@ function checkTyped(p: Probe, a: Answer, db: Db): Problem[] {
     if (!got) return void out.push({ text: `\`${want.name}\` is missing`, column });
     if (got.kind === "any") return void out.push({ text: `\`${want.name}\` is typed \`${got.type}\``, column });
     if (want.nullable !== undefined && !want.anyNullOn?.includes(db) && got.nullable !== want.nullable) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, but ${want.nullable ? "it can be null" : "it is never null"}`, column });
+    if (want.shape && !want.shape.every((f) => got.fields?.includes(f))) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, without its fields`, column });
+    if (want.notLiteral && /^-?\d+(?:\.\d+)?$/.test(got.type.trim())) out.push({ text: `\`${want.name}\` is typed literal \`${got.type}\`, not a number`, column });
     const named = (l: string) => got.labels?.includes(l) || new RegExp(`["']${l}["']`).test(got.type);
     if (want.labels && !want.labels.every(named)) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, without its values`, column });
   });
@@ -90,7 +93,9 @@ export function gradeTool(answers: Answers, dbs: Db[], facts: { wrote: string[];
   cells["from-the-database"] = { state: facts.connects === "yes" && liveRight === live.length ? "y" : facts.connects === "no" ? "n" : "p", right: liveRight, total: live.length, note: facts.connects === "no" ? facts.noConnectNote ?? "It never connects to a database." : facts.connects === "opt-in" ? facts.optInNote : liveRight < live.length ? "It connects, but types some expressions itself." : undefined, results: live };
 
   const joins = run(answers, dbs, "outer-joins", OUTER_JOINS, (p, a, db) => checkColumns(p, a, true, db));
-  cells["outer-joins"] = cell(joins);
+  // A tool that misses every nullable outer join only passes `left-narrowed` by never marking joined columns nullable at all.
+  const joinNullableRight = joins.filter((r) => r.ok && OUTER_JOINS.find((p) => p.id === r.probe)?.columns?.some((c) => c.nullable)).length;
+  cells["outer-joins"] = cell(joins, joinNullableRight === 0);
 
   const exprResults = run(answers, dbs, "expressions", EXPRESSIONS, (p, a, db) => checkColumns(p, a, true, db));
   const exprConstant = dbs.every((db) => constantOn(EXPRESSIONS.filter((p) => sqlFor(p, db)).map((p) => !!answers[key(db, "expressions", p)]?.columns?.[0]?.nullable)));
@@ -109,7 +114,7 @@ export function gradeTool(answers: Answers, dbs: Db[], facts: { wrote: string[];
   const noCard = CARDINALITY.every((p) => dbs.every((db) => { const a = answers[key(db, "cardinality", p)]; return !a || a.cardinality === null; }));
   cells["cardinality"] = cell(cardResults, noCard, noCard ? facts.cardinalityNote : undefined);
 
-  cells["json-shapes"] = cell(run(answers, dbs, "json-shapes", JSON_SHAPES, (p, a, db) => checkColumns(p, a, false, db)));
+  cells["json-shapes"] = cell(run(answers, dbs, "json-shapes", JSON_SHAPES, (p, a, db) => checkColumns(p, a, true, db)));
 
   const schema = run(answers, dbs.includes("postgres") ? ["postgres"] : [], "json-schema", JSON_SCHEMA, (p, a, db) => [...checkColumns(p, a, false, db), ...checkParams(p, a, db)]);
   cells["json-schema"] = cell(schema);

@@ -13,6 +13,7 @@ const queries: Record<string, Entry> = {
   "outer-joins:left": `${LEFT}.execute()`,
   "outer-joins:left-sorted": `${LEFT}.orderBy('p.title').execute()`,
   "outer-joins:left-where": `${LEFT}.where('u.id', '=', $1).execute()`,
+  "outer-joins:left-narrowed": `${LEFT}.where('p.score', '>', 0).execute()`,
   "outer-joins:left-subquery": "db.selectFrom('users as u').leftJoin(db.selectFrom('posts').select(['author_id', 'title']).as('x'), 'x.author_id', 'u.id').select(['u.name', 'x.title']).execute()",
   "outer-joins:right": "db.selectFrom('posts as p').rightJoin('users as u', 'u.id', 'p.author_id').select(['u.name', 'p.title']).execute()",
   "outer-joins:full": "db.selectFrom('users as u').fullJoin('posts as p', 'p.author_id', 'u.id').select(['u.name', 'p.title']).execute()",
@@ -52,6 +53,12 @@ const queries: Record<string, Entry> = {
 
   "json-shapes:object": one("jsonBuildObject({ id: eb.ref('id'), name: eb.ref('name') })"),
   "json-shapes:aggregate": noFrom("jsonArrayFrom(eb.selectFrom('posts').select(['id', 'title']))"),
+  "json-shapes:grouped-aggregate": {
+    postgres: "db.selectFrom('users as u').innerJoin('posts as p', 'p.author_id', 'u.id').select((eb) => ['u.name', eb.fn.jsonAgg(jsonBuildObject({ id: eb.ref('p.id'), title: eb.ref('p.title') })).as('v')]).groupBy('u.id').execute()",
+    mysql: "db.selectFrom('users as u').innerJoin('posts as p', 'p.author_id', 'u.id').select((eb) => ['u.name', eb.fn('json_arrayagg', [jsonBuildObject({ id: eb.ref('p.id'), title: eb.ref('p.title') })]).as('v')]).groupBy(['u.id', 'u.name']).execute()",
+    sqlite: "db.selectFrom('users as u').innerJoin('posts as p', 'p.author_id', 'u.id').select((eb) => ['u.name', eb.fn('json_group_array', [jsonBuildObject({ id: eb.ref('p.id'), title: eb.ref('p.title') })]).as('v')]).groupBy('u.id').execute()",
+  },
+  "json-shapes:correlated-rows": "db.selectFrom('users as u').select((eb) => ['u.name', eb.selectFrom('posts as p').select((sub) => sub.fn.jsonAgg('p').as('a')).whereRef('p.author_id', '=', 'u.id').as('v')]).execute()",
 
   "json-schema:column": "db.selectFrom('events').select('payload').execute()",
   "json-schema:parameter": "db.insertInto('events').values({ id: $1, payload: $2 }).execute()",
@@ -67,6 +74,8 @@ const queries: Record<string, Entry> = {
   "windows:running-sum": "db.selectFrom('posts').select((eb) => ['id', eb.fn.sum('score').over((ob) => ob.partitionBy('author_id').orderBy('id')).as('v')]).execute()",
   "windows:lag": "db.selectFrom('posts').select((eb) => ['id', eb.fn.agg('lag', ['title']).over((ob) => ob.orderBy('id')).as('v')]).execute()",
 
+  "subqueries:dashboard": "db.with('recent', (db) => db.selectFrom('posts').select(['id', 'title']).orderBy('id', 'desc').limit(5)).selectNoFrom((eb) => [eb.selectFrom('users').select(eb.fn.countAll().as('c')).as('user_count'), jsonArrayFrom(eb.selectFrom('recent').select(['id', 'title'])).as('recent_posts')]).execute()",
+  "subqueries:lateral-latest": "db.selectFrom('users as u').leftJoinLateral((eb) => eb.selectFrom('posts').select(['title', 'score']).whereRef('author_id', '=', 'u.id').orderBy('created_at', 'desc').limit(1).as('p'), (join) => join.onTrue()).select(['u.name', 'p.title', 'p.score']).execute()",
   "subqueries:scalar-count": "db.selectFrom('users as u').select((eb) => ['u.name', eb.selectFrom('posts as p').select(eb.fn.countAll().as('c')).whereRef('p.author_id', '=', 'u.id').as('v')]).execute()",
   "subqueries:scalar-max": "db.selectFrom('users as u').select((eb) => ['u.name', eb.selectFrom('posts as p').select((sub) => sub.fn.max('p.title').as('m')).whereRef('p.author_id', '=', 'u.id').as('v')]).execute()",
   "subqueries:exists": "db.selectFrom('users as u').select((eb) => ['u.name', eb.exists(eb.selectFrom('posts as p').select(eb.lit(1).as('one')).whereRef('p.author_id', '=', 'u.id')).as('v')]).execute()",
@@ -79,15 +88,19 @@ const queries: Record<string, Entry> = {
 
   "set-operations:union": "db.selectFrom('users').select('name as v').union(db.selectFrom('posts').select('title as v')).execute()",
   "set-operations:union-nullable": "db.selectFrom('users').select('nickname as v').unionAll(db.selectFrom('posts').select('title as v')).execute()",
+  "set-operations:union-widening": "db.selectFrom('users').select('id as v').unionAll(db.selectFrom('posts').select('score as v')).execute()",
   "set-operations:except": "db.selectFrom('users').select('id as v').except(db.selectFrom('posts').select('author_id as v')).execute()",
 
   "returning:insert": "db.insertInto('posts').values({ id: $1, author_id: $2, title: $3 }).returning(['id', 'score']).execute()",
   "returning:update": "db.updateTable('users').set({ nickname: $1 }).where('id', '=', $2).returning(['name', 'nickname']).execute()",
+  "returning:update-narrowed": "db.updateTable('users').set({ nickname: 'anon' }).where('id', '=', $1).returning('nickname').execute()",
   "returning:delete": "db.deleteFrom('posts').where('id', '=', $1).returning('title').execute()",
   "returning:upsert": "db.insertInto('users').values({ id: $1, email: $2, name: $3 }).onConflict((oc) => oc.column('id').doUpdateSet((eb) => ({ name: eb.ref('excluded.name') }))).returning(['id', 'nickname']).execute()",
 
   "enums:column": "db.selectFrom('users').select('role').execute()",
   "enums:derived": "db.selectFrom(db.selectFrom('users').select('role as r').as('x')).select('x.r').execute()",
+  "enums:check-union": "db.selectFrom('tickets').select('status').execute()",
+  "enums:literal-union": "db.selectFrom('users').select((eb) => [eb.lit('user').as('kind'), 'name as label']).unionAll(db.selectFrom('posts').select((eb) => [eb.lit('post').as('kind'), 'title as label'])).execute()",
 
   "smoke:smoke": "db.selectFrom('users').select(['id', 'name']).execute()",
 };
