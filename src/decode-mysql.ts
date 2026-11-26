@@ -24,7 +24,7 @@
 // and a column whose kind is `bool` (src/values.ts) is made a boolean after the driver, a value
 // other than 0 or 1 refused (`truth`).
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
-import { bigInteger, coerce, DecodeError, describe, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
+import { bigInteger, coerce, columnKind, DecodeError, describe, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
 import { bunRows } from "./decode.ts";
 import { readMysqlError } from "./query-error.ts";
 import type { AnyClient as Client, Bound, Marks, QueryModule, Runtime } from "./execute.ts";
@@ -515,19 +515,24 @@ function asBuffer(v: unknown) {
  * themselves, a number as `String` writes it, so -0 as the integer `0`. A DOUBLE's or a FLOAT's -0
  * goes in at its mark as MySQL's float literal `-0e0`, the DOUBLE mysql2 binds, and the driver
  * writes the rest: the text `'-0'` would be a string wherever the place's type follows its value's,
- * as in `coalesce(:d, d)`. Without marks, or where the module carries the sql_mode its build read
+ * as in `coalesce(:d, d)`. The literal goes in parentheses, since mariadb 2 reads `--` as a comment's
+ * start with nothing after it, so `1-?` would hide every placeholder after it. Without marks, or
+ * where the module carries the sql_mode its build read
  * the statement's strings under, a mark need not be a placeholder of the session's, and the number
  * goes as it is.
  */
 function signedZeros(query: QueryModule<"mysql">, { text, values, names, marks }: Bound): { text: string; values: unknown[] } {
   if (marks?.length !== values.length || query.sqlMode !== undefined) return { text, values };
-  const zero = (v: unknown, i: number) => Object.is(v, -0) && query.inputs?.[names[i]!]?.type.kind === "float" && text.slice(...marks[i]!) === "?";
+  const zero = (v: unknown, i: number) => {
+    const type = query.inputs?.[names[i]!]?.type;
+    return Object.is(v, -0) && type !== undefined && columnKind(type, "mysql") === "float" && text.slice(...marks[i]!) === "?";
+  };
   let written = "";
   let at = 0;
   const kept: unknown[] = [];
   values.forEach((v, i) => {
     if (!zero(v, i)) return void kept.push(v);
-    written += text.slice(at, marks[i]![0]) + "-0e0";
+    written += text.slice(at, marks[i]![0]) + "(-0e0)";
     at = marks[i]![1];
   });
   return { text: written + text.slice(at), values: kept };

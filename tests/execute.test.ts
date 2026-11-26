@@ -849,7 +849,7 @@ test("mysql: mariadb, which writes a value that is not a Buffer as JSON, gets a 
   }
 });
 
-test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which write a number into the statement and -0 as 0, written in at each of its places as the float -0e0, the rest left to the driver; mysql2 gets the number, which it binds as a DOUBLE", async () => {
+test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which write a number into the statement and -0 as 0, written in at each of its places as the float (-0e0), the rest left to the driver; mysql2 gets the number, which it binds as a DOUBLE", async () => {
   // A query defined by hand may name a parameter twice, which a build refuses; the first place types it.
   const text = "update r set d = ?, f = ?, i = ? + ?, payload = json_array(?)";
   const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "update r set d = :d, f = :f, i = :i + :u, payload = json_array(:d)", params: ["d", "f", "i", "u"], text, order: ["d", "f", "i", "u", "d"], marks: [[17, 18], [24, 25], [31, 32], [35, 36], [59, 60]], inputs: { d: { type: myType("double") }, f: { type: myType("float") }, i: { type: myType("int") }, u: { type: oneOf(myType("bigint"), myType("double")) } } };
@@ -858,13 +858,18 @@ test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which writ
   const planetscale = { execute: async (sql: string, values: unknown[] | null) => (seen.push([sql, values]), { rows: [] }) };
   const mysql2 = { query: async () => [[], []], execute: async (options: { sql: string }, values: unknown[]) => (seen.push([options.sql, values]), [[], []]) };
   for (const client of [mariadb, planetscale, mysql2]) await execute(client as never, q, { d: -0, f: -0, i: -0, u: -0 });
-  const written = "update r set d = -0e0, f = -0e0, i = ? + ?, payload = json_array(-0e0)";
+  const written = "update r set d = (-0e0), f = (-0e0), i = ? + ?, payload = json_array((-0e0))";
   assert.deepEqual(seen, [[written, [-0, -0]], [written, [-0, -0]], [text, [-0, -0, -0, -0, -0]]]);
   // A -0 alone leaves no value for the driver to write.
   const alone: QueryModule<"mysql"> = { dialect: "mysql", sql: "select coalesce(:d, d) as x from r", params: ["d"], text: "select coalesce(?, d) as x from r", order: ["d"], marks: [[16, 17]], inputs: { d: { type: myType("double") } } };
   seen.length = 0;
   for (const client of [mariadb, planetscale]) await execute(client as never, alone, { d: -0 });
-  assert.deepEqual(seen, [["select coalesce(-0e0, d) as x from r", []], ["select coalesce(-0e0, d) as x from r", null]]);
+  assert.deepEqual(seen, [["select coalesce((-0e0), d) as x from r", []], ["select coalesce((-0e0), d) as x from r", null]]);
+  // After a minus, the parentheses keep `--`, which mariadb 2 reads as a comment, out of the text.
+  const minus: QueryModule<"mysql"> = { dialect: "mysql", sql: "select 1-:d as a, :e as b", params: ["d", "e"], text: "select 1-? as a, ? as b", order: ["d", "e"], marks: [[9, 10], [17, 18]], inputs: { d: { type: myType("double") }, e: { type: myType("double") } } };
+  seen.length = 0;
+  await execute(mariadb as never, minus, { d: -0, e: 1 });
+  assert.deepEqual(seen, [["select 1-(-0e0) as a, ? as b", [1]]]);
   // Without inputs or marks, as defined by hand, or with the sql_mode its build read its strings
   // under, every value goes as it is.
   const { inputs: _, ...untyped } = q;
