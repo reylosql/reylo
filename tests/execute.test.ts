@@ -840,35 +840,40 @@ test("postgres: Neon's neon() before 0.10, which sends a Buffer as JSON, gets a 
   assert.deepEqual(seen[0], ["\\x0102ff", "\\x0102ff", "\\x0010ab", "\\x", 1]);
 });
 
-test("postgres: PGlite, which picks a parameter's serializer by the oid the server describes, gets a binary parameter declared bytea, so a domain over bytea stores the bytes", { skip: !existsSync(join(DRIVERS, "@electric-sql", "pglite")) && "lab/drivers is not installed" }, async () => {
+test("postgres: PGlite, which picks a parameter's serializer by the oid the server describes, gets binary data as bytea's hex text, so a domain over bytea stores the bytes and keeps its own operators", { skip: !existsSync(join(DRIVERS, "@electric-sql", "pglite")) && "lab/drivers is not installed" }, async () => {
   const { PGlite } = driver("@electric-sql/pglite");
   const lite = new PGlite();
   await lite.exec(`create domain blob as bytea; create domain small_blob as blob check (length(value) < 8);
     create table b (id int primary key, v blob, s small_blob, raw bytea);
-    create function hex_of(x blob) returns text language sql as 'select encode(x, ''hex'')'`);
-  // A domain's array has a serializer only once PGlite reads the array types again.
-  await lite.refreshArrayTypes();
+    create function hex_of(x blob) returns text language sql as 'select encode(x, ''hex'')';
+    create function pick(anyelement, anyelement) returns anyelement language sql as 'select coalesce($1, $2)';
+    create domain digest as bytea;
+    create function same_prefix(digest, digest) returns boolean language sql immutable as 'select substring($1 from 1 for 2) = substring($2 from 1 for 2)';
+    create operator = (leftarg = digest, rightarg = digest, function = same_prefix);
+    create table d (x digest); insert into d values ('\\xdead0000'), ('\\xbeef')`);
   // 00 and 5c, which the domain refused as text, between bytes that are no UTF-8.
   const bytes = new Uint8Array([0xde, 0xad, 0x00, 0x5c, 0xbe, 0xef]);
   const hex = "dead005cbeef";
   const by = { type: pgType("bytea") };
   const insert: QueryModule<"postgres"> = { dialect: "postgres", sql: "insert into b (id, v, s, raw) values (:id::int, :v, :s, :raw)", params: ["id", "v", "s", "raw"], inputs: { v: by, s: by, raw: by } };
-  const stored = async (id: number) => ((await lite.query("select encode(v, 'hex') as v, encode(s, 'hex') as s, encode(raw, 'hex') as raw from b where id = $1", [id])).rows[0]);
+  const stored = async (id: number) => (await lite.query("select encode(v, 'hex') as v, encode(s, 'hex') as s, encode(raw, 'hex') as raw from b where id = $1", [id])).rows[0];
   try {
     await execute(lite, insert, { id: 1, v: bytes, s: bytes, raw: bytes });
     assert.deepEqual(await stored(1), { v: hex, s: hex, raw: hex }, "a Uint8Array");
-    await lite.transaction((tx: unknown) => execute(tx as never, insert, { id: 2, v: Buffer.from(bytes), s: Buffer.from(bytes), raw: Buffer.from(bytes) }));
-    assert.deepEqual(await stored(2), { v: hex, s: hex, raw: hex }, "a Buffer, in a transaction");
+    await lite.transaction((tx: unknown) => execute(tx as never, insert, { id: 2, v: Buffer.from(bytes), s: null, raw: Buffer.from(bytes) }));
+    assert.deepEqual(await stored(2), { v: hex, s: null, raw: hex }, "a Buffer beside a null, in a transaction");
     // A row read back goes in again as it came out.
     const [row] = (await execute(lite, { dialect: "postgres", sql: "select v, s, raw from b where id = :id", params: ["id"] }, { id: 1 })) as Record<string, Uint8Array>[];
     await execute(lite, insert, { id: 3, ...row! });
     assert.deepEqual(await stored(3), { v: hex, s: hex, raw: hex }, "the row read back");
     await assert.rejects(async () => execute(lite, insert, { id: 4, v: bytes, s: new Uint8Array(8), raw: bytes }), /violates check constraint "small_blob_check"/);
-    const one = async (sql: string, params: Record<string, unknown>, inputs: QueryModule<"postgres">["inputs"]) => ((await execute(lite, { dialect: "postgres", sql, params: Object.keys(params), inputs }, params)) as Record<string, unknown>[])[0];
-    assert.deepEqual(await one("select encode((:p::small_blob)::bytea, 'hex') as h", { p: bytes }, { p: by }), { h: hex }, "a cast");
-    assert.deepEqual(await one("select hex_of(:p) as h", { p: bytes }, { p: by }), { h: hex }, "a function's argument");
-    assert.deepEqual(await one("select count(*)::int as n from b where v = :p", { p: bytes }, { p: by }), { n: 3 }, "a comparison");
-    assert.deepEqual(await one("select encode((:a::blob[])[1], 'hex') as h, :t::text as t", { a: [bytes], t: "text" }, { a: { type: array(by.type) }, t: { type: pgType("text") } }), { h: hex, t: "text" }, "an array of the domain, beside a text");
+    const one = async (sql: string, params: Record<string, unknown>) => ((await execute(lite, { dialect: "postgres", sql, params: Object.keys(params), inputs: Object.fromEntries(Object.keys(params).map((k) => [k, by])) }, params)) as Record<string, unknown>[])[0];
+    assert.deepEqual(await one("select encode((:p::small_blob)::bytea, 'hex') as h", { p: bytes }), { h: hex }, "a cast");
+    assert.deepEqual(await one("select hex_of(:p) as h", { p: bytes }), { h: hex }, "a function's argument");
+    assert.deepEqual(await one("select count(*)::int as n from b where v = :p", { p: bytes }), { n: 3 }, "a comparison");
+    // The parameter's type stays the server's to infer, as on every other driver: the domain's.
+    assert.deepEqual(await one("select encode(pick(v, :p), 'hex') as h from b where id = 1", { p: new Uint8Array([1]) }), { h: hex }, "an anyelement function, given the domain twice");
+    assert.deepEqual(await one("select count(*)::int as n from d where x = :p", { p: new Uint8Array([0xde, 0xad, 0x11]) }), { n: 1 }, "the domain's own operator");
   } finally {
     await lite.close();
   }
