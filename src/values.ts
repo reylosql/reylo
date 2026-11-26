@@ -1199,7 +1199,8 @@ export function installPostgresTypes(types: PostgresTypes): void {
 /** Postgres's rarer types, which a value of `kind` needs (`json` for a non-finite number inside JSON); refused where no query installed them, naming the query's file where it is known. */
 export function postgresTypesFor(kind: Kind, source?: string): PostgresTypes {
   if (installed) return installed;
-  throw new TypeError(`${source ? `${source}: ` : ""}Reylo reads and writes ${kind === "json" ? "a non-finite number inside Postgres JSON" : `a Postgres ${isRowKind(kind) ? "row value" : isRangeKind(kind) ? "range" : isMultirangeKind(kind) ? "multirange" : kind}`} with Reylo's postgresTypes, which a module a build step writes passes where its statement holds one: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by definePostgresQuery by hand passes it too: definePostgresQuery({ …, postgresTypes }) with postgresTypes from "reylo".`);
+  const base = kind.replace(/(?:\[\])+$/, "");
+  throw new TypeError(`${source ? `${source}: ` : ""}Reylo reads and writes ${kind === "json" ? "a non-finite number inside Postgres JSON" : `a Postgres ${isRowKind(base) ? "row value" : isRangeKind(base) ? "range" : isMultirangeKind(base) ? "multirange" : base}`} with Reylo's postgresTypes, which a module a build step writes passes where its statement holds one: build a module an earlier reylo wrote again (reylo generate typescript writes the files it wrote). A query defined by definePostgresQuery by hand passes it too: definePostgresQuery({ …, postgresTypes }) with postgresTypes from "reylo".`);
 }
 
 // ---------------------------------------------------------------------------------------------
