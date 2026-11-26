@@ -26,7 +26,7 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, DecodeError, elementKind, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
+import { civilFromDays, coerce, DecodeError, elementKind, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
 import { lastOfEach, rowOf, type RowBuilder } from "./row.ts";
 import { arrayLiteral, asByteaHex, isJsonValue, jsonText, jsonValue, postgresText, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
@@ -93,13 +93,21 @@ const learnedOf = (key: object): Learned => {
   return l;
 };
 
+/**
+ * Whether a column's kind, as its module gives it, outranks what a client learned of its oid: a row
+ * value's, whose oid says nothing of its fields, and an array of whole arrays', which the catalog
+ * reads as text where a domain is over an array of a type the database created.
+ */
+const byModule = (kind: Kind) => isRowKind(kind) || wholeArrayKind(elementKind(kind)) !== undefined;
+
 /** Rows as arrays of text, from a query that reads the catalog. */
 type Load = (sql: string) => Promise<(string | null)[][]>;
 
 // Every type among `oids`, and every array type's element, with its base type through any number
 // of domains and that base type's name (an array of a type whose own output is an array stays
-// text), a row type's fields as a JSON array of each one's name and type, and a range's or a
-// multirange's subtype. An oid goes out as int8, since one above 2^31 would wrap as int4.
+// text, unless it is a domain over a built-in array), a row type's fields as a JSON array of each
+// one's name and type, and a range's or a multirange's subtype. An oid goes out as int8, since one
+// above 2^31 would wrap as int4.
 const catalogSql = (oids: number[]) => {
   const list = `'{${oids.map((o) => Math.trunc(o)).join(",")}}'::pg_catalog.oid[]`;
   return `with recursive d(oid, base) as (
@@ -143,12 +151,15 @@ async function learn(key: object, oids: Iterable<number>, load: Load): Promise<v
   for (const [array, base, isText, delim, oid, name] of rows) {
     const fields = rowTypes.get(Number(base));
     const range = subtypes.get(Number(base));
-    const element = fields !== undefined ? rowKind(fields) : range !== undefined ? `${range.range}:${(builtin(range.subtype) ?? known.get(range.subtype))?.kind ?? "text"}` : isText === "true" ? undefined : (builtin(Number(base))?.kind ?? (name ? scalarKind(name) : "text"));
+    // A domain over an array is a whole array as an element of one (src/values.ts, `{k}`), where
+    // its base is a built-in array whose elements a comma separates; any other stays text.
+    const whole = isText === "true" && fields === undefined ? builtin(Number(base)) : undefined;
+    const element = fields !== undefined ? rowKind(fields) : range !== undefined ? `${range.range}:${(builtin(range.subtype) ?? known.get(range.subtype))?.kind ?? "text"}` : whole?.kind.endsWith("[]") && whole.delim === "," ? `{${whole.kind}}` : isText === "true" ? undefined : (builtin(Number(base))?.kind ?? (name ? scalarKind(name) : "text"));
     if (missing.has(Number(array))) {
       arrays.add(Number(array));
       known.set(Number(array), element === undefined || element.endsWith("[]") ? { kind: "text", delim: "," } : { kind: `${element}[]`, delim: delim ?? "," });
     }
-    if (missing.has(Number(oid)) && !arrays.has(Number(oid))) known.set(Number(oid), { kind: element ?? "text", delim: "," });
+    if (missing.has(Number(oid)) && !arrays.has(Number(oid))) known.set(Number(oid), { kind: wholeArrayKind(element ?? "") ?? element ?? "text", delim: "," });
   }
   for (const oid of missing) if (!known.has(oid)) known.set(oid, { kind: "text", delim: "," });
 }
@@ -166,7 +177,7 @@ async function fieldDecoders(fields: Field[], columns: Columns | undefined, key:
   else if (created.length) await learn(key, created.map((f) => f.oid), load);
   return fields.map((f, i) => {
     const column = byColumn?.[i];
-    if (column && isRowKind(column[1])) return textDecoder(column[1], column[2]);
+    if (column && byModule(column[1])) return textDecoder(column[1], column[2]);
     const b = builtinDecoder(f.oid);
     if (b) return b;
     const k = known.get(f.oid) ?? { kind: "text", delim: "," };
@@ -237,10 +248,11 @@ async function pgFamily(key: object, run: (types: object) => Promise<PgResult>, 
   const result = await run(types.table);
   const rows = Array.isArray(result) ? (result as Record<string, unknown>[]) : result.rows;
   if (types.sawBinary()) throw refuseBinary();
-  // The table goes by oid, which says nothing of a built-in row's fields, so those are still text.
-  const rowColumns = columns?.filter(([, kind]) => isRowKind(kind));
-  if (rowColumns?.length) {
-    const decoders = rowColumns.map(([name, kind, delim]) => [name, textDecoder(kind, delim)] as const);
+  // The table goes by oid, which says nothing of a built-in row's fields, so those are still text,
+  // as an array of whole arrays may be.
+  const moduleColumns = columns && lastOfEach(columns).filter(([, kind]) => byModule(kind));
+  if (moduleColumns?.length) {
+    const decoders = moduleColumns.map(([name, kind, delim]) => [name, textDecoder(kind, delim)] as const);
     for (const row of rows) {
       for (const [name, decode] of decoders) {
         const v = row[name];
@@ -356,6 +368,22 @@ const PGLITE_STATEMENTS = 2000;
 let builtinOids: number[] | undefined;
 const keepText = (x: string) => x;
 
+// PGlite picks each parameter's serializer by the oid the server describes, which for a domain
+// over bytea is the domain's own, with no serializer: a Uint8Array went as its toString(),
+// `222,173`, and was stored as the bytes of that text (electric-sql/pglite#1244). Binary data goes
+// as a view whose toString() is bytea's hex text, which the server reads with the domain's base
+// type; a serializer for the oid, bytea's own or one the app maps the domain to, still gets a
+// Uint8Array. Declaring the parameter bytea instead would change the statement: an operator
+// defined on the domain would no longer apply.
+function hexOnToString(v: unknown): unknown {
+  if (!(v instanceof Uint8Array)) return v;
+  const view = v.subarray(0);
+  // A Buffer's toString("hex") and its other encodings are left as they are.
+  const own = view.toString;
+  Object.defineProperty(view, "toString", { value: (...args: unknown[]) => (args.length ? own.apply(view, args as []) : asByteaHex(view)) });
+  return view;
+}
+
 async function pglite(db: AnyClient, text: string, values: unknown[], columns: Columns | undefined): Promise<unknown[]> {
   // A statement met for the first time names every built-in type Reylo decodes, and every oid the
   // instance has a parser for (its arrays, and the app's); a transaction has no table to read.
@@ -364,13 +392,15 @@ async function pglite(db: AnyClient, text: string, values: unknown[], columns: C
   const oids = named ?? new Set([...builtinOids, ...Object.keys(db.parsers ?? {}).map(Number)]);
   const parsers: Record<number, Decoder> = {};
   for (const oid of oids) parsers[oid] = builtinDecoder(oid) ?? keepText;
-  const result = await db.query(text, values, { rowMode: "object", parsers });
+  const result = await db.query(text, values.map(hexOnToString), { rowMode: "object", parsers });
   const rows: Record<string, unknown>[] = result.rows;
   const fields: Field[] = (result.fields ?? []).map((f: { name: string; dataTypeID: number }) => ({ name: f.name, oid: f.dataTypeID }));
   // Created types, which the table kept as text, an oid the table did not name, which went through
   // the instance's parser, and a row value, whose oid says nothing of its fields.
   const byColumn = columns && columns.length === fields.length ? columns : undefined;
-  const after = fields.map((f, i) => [f, i] as const).filter(([f, i]) => f.oid >= FIRST_USER_OID || !oids.has(f.oid) || (byColumn !== undefined && isRowKind(byColumn[i]![1])));
+  // A row holds the last column of each name, which only that column's kind decodes.
+  const last = new Map(fields.map((f, i) => [f.name, i]));
+  const after = fields.map((f, i) => [f, i] as const).filter(([f, i]) => last.get(f.name) === i && (f.oid >= FIRST_USER_OID || !oids.has(f.oid) || (byColumn !== undefined && isRowKind(byColumn[i]![1]))));
   if (after.length) {
     const load: Load = async (sql) => (await db.query(sql, [], { rowMode: "array", parsers: { 25: keepText } })).rows;
     const decoders = await fieldDecoders(fields, columns, db, load);
@@ -903,6 +933,7 @@ function slonikValue(kind: Kind, v: unknown, name: string, delim?: string): unkn
   if (typeof v === "string") return textDecoder(kind, delim)(v);
   // pg parses an array's text into an array, each element by the element type's parser, which
   // Reylo's tag passes through for the types it names.
+  if (Array.isArray(v) && wholeArrayKind(elementKind(kind)) !== undefined) return coerce(kind, v, name, delim, true);
   if (Array.isArray(v) && kind.endsWith("[]")) return v.map((e) => (Array.isArray(e) ? slonikValue(kind, e, name, delim) : slonikValue(elementKind(kind), e, name, delim)));
   if (SLONIK_STRICT.test(kind)) {
     throw new DecodeError(`Column "${name}" reached Reylo already converted by Slonik's driver (${v instanceof Date ? "a Date" : typeof v}), which ignored the query's type parsers, as a custom driverFactory may: Reylo refuses it rather than return a value that may have been rounded.`);

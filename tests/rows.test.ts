@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { EngineType } from "../src/engine.ts";
 import { renderParamType } from "../src/render.ts";
 import { prepareRows, rowsOf, variant, type Members, type RowsType } from "../src/rows.ts";
-import { array, checked, field, pg, record } from "./descriptors.ts";
+import { array, checked, field, lite, my, pg, record } from "./descriptors.ts";
 
 /** A structured parameter as the engine gives it: its type (one record, or an array of them) and its column list as written. */
 function structured(one: boolean, members: [name: string, type: EngineType, written: string, nullable: boolean, optional: boolean, schema?: object][]): { type: EngineType; members: Members; rows: RowsType } {
@@ -61,6 +61,36 @@ test("a value is checked against its column list, and written as the JSON the st
   assert.throws(() => prepareRows("user", { ...events, one: true }, [], "postgres", true), /each row is an object/);
 });
 
+test("NaN, an infinity and -0, which JSON has no number for, go in where the member's type holds them, in the form its database reads", () => {
+  // Postgres's floats and numeric hold all three, and their inputs read each from its text; a
+  // sized numeric holds NaN alone.
+  const sized: EngineType = { kind: "decimal", precision: 12, min_scale: 2, max_scale: 2, nan: true, label: "numeric" };
+  const m = structured(false, [
+    ["f", pg("float8"), "float8", true, true],
+    ["n", pg("numeric"), "numeric", true, true],
+    ["p", sized, "numeric(12,2)", true, true],
+    ["fs", array(pg("float4")), "float4[]", true, true],
+  ]).rows;
+  assert.deepEqual(prepareRows("m", m, [{ f: NaN, n: Infinity, p: NaN, fs: [Infinity, -Infinity, -0, null, 1.5] }, { f: -0, n: "-Infinity", p: "NaN" }, { f: 1.5, n: "NaN" }], "postgres", false).value, [
+    { f: "NaN", n: "Infinity", p: "NaN", fs: ["Infinity", "-Infinity", "-0", null, 1.5] },
+    { f: "-0", n: "-Infinity", p: "NaN" },
+    { f: 1.5, n: "NaN" },
+  ]);
+  assert.throws(() => prepareRows("m", m, [{ p: Infinity }], "postgres", false), /row 1: "p" is numeric\(12,2\), which holds no infinity; got Infinity\./);
+  // MySQL's floats hold -0 alone of the three, which its JSON reader takes from `-0e0`, and its
+  // DECIMAL none; SQLite's REAL holds the infinities too, which its reader takes from `9e999`, as
+  // SQLite writes one.
+  const doubles = structured(false, [["d", my("double"), "double", false, false]]).rows;
+  assert.equal(prepareRows("z", doubles, [{ d: -0 }, { d: 1.5 }], "mysql", true).value, `[{"d":-0e0},{"d":1.5}]`);
+  for (const d of [NaN, Infinity, -Infinity]) assert.throws(() => prepareRows("z", doubles, [{ d }], "mysql", true), new RegExp(`"d" is double, a finite number; got ${d}\\.`));
+  const decimals = structured(false, [["a", my("decimal"), "decimal(12,2)", false, false]]).rows;
+  for (const a of [NaN, "NaN", Infinity, "-Infinity"]) assert.throws(() => prepareRows("z", decimals, [{ a }], "mysql", true), /"a" is decimal\(12,2\), which holds no (NaN|infinity); got (NaN|Infinity|-Infinity)\./);
+  const reals = structured(false, [["x", lite("real"), "real", false, false], ["n", lite("numeric"), "numeric", true, true]]).rows;
+  // A NUMERIC takes -0 as its float, which keeps the sign its integer would drop.
+  assert.equal(prepareRows("t", reals, [{ x: Infinity, n: -Infinity }, { x: -Infinity }, { x: -0, n: -0 }, { x: 1, n: 2 }], "sqlite", false).value, `[{"x":9e999,"n":-9e999},{"x":-9e999},{"x":-0e0,"n":-0e0},{"x":1,"n":2}]`);
+  assert.throws(() => prepareRows("t", reals, [{ x: NaN }], "sqlite", false), /"x" is real, a number other than NaN; got NaN\./);
+});
+
 test("a member is read from the row's own keys: a column named after a member of every object is left out when the row leaves it out, and a JSON member is written as JSON.stringify writes it", () => {
   const named = structured(false, [
     ["name", pg("text"), "text", false, false],
@@ -116,6 +146,10 @@ test("a pgvector vector member takes an array of finite numbers, written as the 
   const items = itemsOf.rows;
   assert.equal(renderParamType(itemsOf.type, "postgres", false, itemsOf.members), "readonly { embedding: number[]; history?: (number[] | null)[] | null }[]");
   assert.deepEqual(prepareRows("items", items, [{ embedding: [1, 2.5, 3], history: [[0.5], null] }], "postgres", true).value, [{ embedding: "[1,2.5,3]", history: ["[0.5]", null] }]);
+  // pgvector keeps -0, which JSON.stringify writes as 0.
+  assert.deepEqual(prepareRows("items", items, [{ embedding: [-0, 1, 2] }], "postgres", true).value, [{ embedding: "[-0,1,2]" }]);
+  const docs = structured(false, [["doc", record([field("embedding", pg("vector"))], "doc"), "doc", false, false]]).rows;
+  assert.deepEqual(prepareRows("docs", docs, [{ doc: { embedding: [-0, 1] } }], "postgres", true).value, [{ doc: '("[-0,1]")' }]);
   for (const embedding of [[], [1, NaN], ["1"], "x".length]) assert.throws(() => prepareRows("items", items, [{ embedding }], "postgres", true), /embedding.* is vector\(3\), an array of finite numbers with one at least/);
 });
 

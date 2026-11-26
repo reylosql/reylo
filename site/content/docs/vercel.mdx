@@ -31,6 +31,6 @@ A migration needs your database's direct connection string. Neon's Vercel integr
 direct_url: ${DATABASE_URL_UNPOOLED:-${DATABASE_URL}}
 ```
 
-The dry run makes its shadow on that database's server. Where its role can't create databases, set [`shadow_url`](/configuration#shadow_url).
+The dry run makes its shadow on that database's server. Where its role can't create databases, set [`shadow_url`](/docs/configuration#shadow_url).
 
 Pages the build prerenders still query production, before it's migrated. Render a page that reads a new column on each request.

@@ -51,6 +51,8 @@ const ENTRY_VERSION = 1;
 // in a running dev server or editor within seconds. Once the database is found unreachable, the
 // session stays offline for a minute instead of paying the connect timeout per file.
 const SCHEMA_TTL = 5_000;
+/** How many times a statement is analyzed while the schema moves under its analysis, before the last analysis is given and written nowhere. */
+const ANALYSES = 3;
 /** How many databases' entries a statement keeps. */
 const ENTRIES_KEPT = 4;
 const OFFLINE_TTL = 60_000;
@@ -106,6 +108,8 @@ export class Session {
   /** What `reylo/.cache/queries` held when this session first looked. */
   #listing: string[] | undefined;
   #schema: { value: string | null; at: number; error?: string; fatal?: boolean } | undefined;
+  /** The fingerprint read last, or the unverified value that stood in for one, which a spell offline leaves in place: the engine's answers are of that schema. */
+  #known: string | undefined;
 
   private constructor(engine: Engine | MissingEngine, project: ResolvedProject, idle: number, dir: string, env: Record<string, string | undefined>) {
     this.root = project.root;
@@ -326,25 +330,44 @@ export class Session {
     const shared = options.force || options.store === false ? undefined : this.#sameSchema(sql, schema.value);
     if (shared) return { ok: true, analysis: shared.entry.analysis, source: "cache", entry: shared.file };
     let analysis: Analysis;
-    const io = this.#connection();
-    try {
-      analysis = await (await io).analyze(sql);
-    } catch (e) {
-      // A dead connection is reopened by the next call; a server error is reported.
-      if (e instanceof Unreachable) {
-        this.#drop(io);
-        this.#schema = { value: null, at: Date.now(), error: reason(e) };
-        return { ok: false, message: this.cannotConnect(reason(e)), code: DIAGNOSTIC.unreachable };
+    let label: string = schema.value;
+    for (let tries = 1; ; tries++) {
+      const io = this.#connection();
+      try {
+        analysis = await (await io).analyze(sql);
+      } catch (e) {
+        // A dead connection is reopened by the next call; a server error is reported.
+        if (e instanceof Unreachable) {
+          this.#drop(io);
+          this.#schema = { value: null, at: Date.now(), error: reason(e) };
+          return { ok: false, message: this.cannotConnect(reason(e)), code: DIAGNOSTIC.unreachable };
+        }
+        if (e instanceof NotMysql) {
+          this.#drop(io);
+          this.#schema = { value: null, at: Date.now(), error: this.notMysql(e), fatal: true };
+          return { ok: false, message: this.#schema.error!, code: DIAGNOSTIC.unreachable };
+        }
+        return { ok: false, message: (e as Error).message, code: DIAGNOSTIC.unreachable };
       }
-      if (e instanceof NotMysql) {
-        this.#drop(io);
-        this.#schema = { value: null, at: Date.now(), error: this.notMysql(e), fatal: true };
-        return { ok: false, message: this.#schema.error!, code: DIAGNOSTIC.unreachable };
-      }
-      return { ok: false, message: (e as Error).message, code: DIAGNOSTIC.unreachable };
+      // A fingerprint the server refused to compute is this session's own, and labels nothing another reads.
+      if (options.store === false || label.startsWith("unverified ")) break;
+      // The fingerprint was read before the analysis, as long as SCHEMA_TTL ago, and the analysis is of
+      // the schema as it was while it ran, with the answers the engine kept since the fingerprint last
+      // moved. An entry labelled with a fingerprint that a migration has since moved would be served to
+      // a database that still has the old schema, or has gone back to it, so the fingerprint is read
+      // again now, and the entry written only where it has not moved. Where it has, the engine's
+      // answers are dropped (`schema()`) and the statement analyzed again.
+      await this.recheck();
+      const read = await this.schema();
+      const now = read.value;
+      if (now === label) break;
+      // A read that found the database gone leaves the next statement to try it again, rather than a minute offline.
+      if (now === null && !read.fatal) this.#schema = undefined;
+      if (now === null || now.startsWith("unverified ") || tries === ANALYSES) return { ok: true, analysis, source: "database", entry: file };
+      label = now;
     }
     if (options.store !== false) {
-      writeEntry(this.project.cache, file, { version: ENTRY_VERSION, dialect: this.project.dialect, schema: schema.value, analysis, at: Date.now() });
+      writeEntry(this.project.cache, file, { version: ENTRY_VERSION, dialect: this.project.dialect, schema: label, analysis, at: Date.now() });
       this.#prune(sql, file);
     }
     return { ok: true, analysis, source: "database", entry: file };
@@ -371,17 +394,21 @@ export class Session {
     try {
       const rows = await io.query(FINGERPRINT[this.project.dialect], []);
       const value = createHash("sha256").update(JSON.stringify(rows)).digest("hex").slice(0, 16);
-      // The engine's answers describe the old schema too.
-      if (this.#schema?.value && this.#schema.value !== value) await io.forget().catch(() => {});
+      // The engine's answers describe the old schema too, and outlast a spell offline.
+      if (this.#known !== undefined && this.#known !== value) await io.forget().catch(() => {});
+      this.#known = value;
       this.#schema = { value, at: now };
     } catch (e) {
       if (e instanceof Unreachable) {
         this.#drop(pending);
         this.#schema = { value: null, at: now, error: reason(e) };
       } else {
-        // With no fingerprint to tell a change by, the engine's answers last as long as this value.
+        // With no fingerprint to tell a change by, the engine's answers last as long as this value, and
+        // are dropped once a fingerprint is read again.
         await io.forget().catch(() => {});
-        this.#schema = { value: `unverified ${process.pid} ${now}`, at: now };
+        const value = `unverified ${process.pid} ${now}`;
+        this.#schema = { value, at: now };
+        this.#known = value;
       }
     }
     return this.#schema;

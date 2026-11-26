@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
@@ -7,13 +8,14 @@ import { connect, createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Session } from "../src/analyze.ts";
+import { FINGERPRINT, Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
 import { mapperHandlers } from "../src/mapper-server.ts";
 import { reportedDiagnostics, type Reported } from "../src/mapper-diagnostics.ts";
 import { mysqlStandIn } from "./mysql-stand-in.ts";
 import { refusedLogin, Unreachable } from "../src/connection.ts";
 import { defineQuery } from "../src/index.ts";
+import { nativeBinary } from "../src/native.ts";
 import { DRIVERS, PG, mysqlDatabase, mysqlLive, postgresDatabase } from "./helpers.ts";
 
 // A throwaway Postgres server for the tests that need one, never a database anyone uses: each such
@@ -166,6 +168,95 @@ test("a session that still trusts its fingerprint takes another process's newer 
     assert.equal((JSON.parse(readFileSync(after.entry, "utf8")) as { analysis: { cardinality: string } }).analysis.cardinality, "at_most_one");
   } finally {
     await build.close();
+  }
+});
+
+// A migration, then its revert, on a database the session has read the fingerprint of; and a second
+// database built by the same migrations, which has not run it.
+async function migratedUnderASession(open: (root: string, env: Record<string, string>) => Promise<Session>, a: { url: string; run: (sql: string) => Promise<unknown> }, b: { url: string }, migrate: string, revert: string) {
+  const root = mkdtempSync(join(tmpdir(), "reylo-migrated-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const session = await open(root, { DATABASE_URL: a.url });
+  try {
+    assert.ok((await session.analyze("select b from u")).ok);
+    // A build step's session closes its connection when it idles, and still trusts its fingerprint.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await a.run(migrate);
+    const during = await session.analyze("select a from t");
+    assert.ok(during.ok);
+    assert.equal(during.source, "database");
+    assert.ok(!during.analysis.columns[0]!.nullable);
+    // Written, under the migrated schema's fingerprint.
+    assert.equal((JSON.parse(readFileSync(during.entry, "utf8")) as { schema: string }).schema, (await session.schema()).value);
+  } finally {
+    await session.close();
+  }
+  // Neither the database that has not run the migration nor the one that reverted it is served its analysis.
+  const unmigrated = await analyze(root, { DATABASE_URL: b.url }, "select a from t");
+  assert.ok(unmigrated.ok);
+  assert.ok(unmigrated.analysis.columns[0]!.nullable);
+  await a.run(revert);
+  const reverted = await analyze(root, { DATABASE_URL: a.url }, "select a from t");
+  assert.ok(reverted.ok);
+  assert.ok(reverted.analysis.columns[0]!.nullable);
+}
+
+test("an analysis made after a migration, by a session that still trusts the fingerprint from before it, is written under the migrated schema's", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "reylo-migrated-db-"));
+  // SQLite changes a column by building its table again; t is made so too, so that the revert gives back the same schema.
+  const rebuild = (a: string) => `create table t2 (a ${a}); insert into t2 select a from t; drop table t; alter table t2 rename to t;`;
+  const database = (name: string) => {
+    const exec = (sql: string) => {
+      const db = new DatabaseSync(join(dir, name));
+      db.exec(sql);
+      db.close();
+    };
+    exec("create table u (b int); create table t2 (a int); alter table t2 rename to t;");
+    return { url: `file:${join(dir, name)}`, run: async (sql: string) => exec(sql) };
+  };
+  // A session whose connection closes after 10 ms idle, as a build step's does after its last file.
+  await migratedUnderASession((root, env) => Session.open(root, env, 10), database("a.db"), database("b.db"), rebuild("int not null"), rebuild("int"));
+});
+
+test("on Postgres, an analysis made after a migration, by a session that still trusts the fingerprint from before it, is written under the migrated schema's", { skip: live }, async () => {
+  const setup = "create table u (b int); create table t (a int);";
+  const a = await postgresDatabase("reylo_migrated_a", setup);
+  const b = await postgresDatabase("reylo_migrated_b", setup);
+  try {
+    // The type check's session, which keeps its connection.
+    await migratedUnderASession((root, env) => Session.open(root, env), { url: a.url, run: (sql) => a.sql.unsafe(sql) }, b, "alter table t alter a set not null", "alter table t alter a drop not null");
+  } finally {
+    await a.drop();
+    await b.drop();
+  }
+});
+
+test("the engine's answers from while the fingerprint query failed are dropped once it runs again", async () => {
+  const root = mkdtempSync(join(tmpdir(), "reylo-unverified-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const exec = (sql: string) => {
+    const db = new DatabaseSync(join(root, "app.db"));
+    db.exec(sql);
+    db.close();
+  };
+  exec("create table t (a int)");
+  const session = await Session.open(root, { DATABASE_URL: "file:./app.db" });
+  const fingerprint = FINGERPRINT.sqlite;
+  try {
+    // A query the server refuses: the session's fingerprint is its own, unverified value.
+    FINGERPRINT.sqlite = "select * from reylo_no_such_table";
+    const before = await session.analyze("select * from t");
+    assert.ok(before.ok);
+    assert.deepEqual(before.analysis.columns.map((c) => c.name), ["a"]);
+    FINGERPRINT.sqlite = fingerprint;
+    exec("alter table t add column b int");
+    await session.recheck();
+    const after = await session.analyze("select * from t");
+    assert.ok(after.ok);
+    assert.deepEqual(after.analysis.columns.map((c) => c.name), ["a", "b"]);
+  } finally {
+    FINGERPRINT.sqlite = fingerprint;
+    await session.close();
   }
 });
 
@@ -387,6 +478,62 @@ test("Postgres: the DateStyle error is no part of another style's entry, so it g
     // The order of a date's fields (ISO, DMY and ISO, MDY) is no part of how one is written.
     await sql.unsafe(`alter database ${database} reset datestyle`);
     assert.deepEqual(await checked(), ["cache", []]);
+  } finally {
+    await drop();
+  }
+});
+
+test("Postgres: under another DateStyle, reylo generate rust-sqlx and the type check write one entry, and each reads the other's as its own", { skip: live }, async () => {
+  const { url, sql, drop } = await postgresDatabase("reylo_datestyle_rust", "create table orders (id int primary key, ships_on date not null)");
+  const statement = "select id, ships_on from orders where id = :id\n";
+  // A crate whose reylo reads dates as chrono's, and a package, in one directory, which share reylo/.cache/.
+  const crate = () => {
+    const root = mkdtempSync(join(tmpdir(), "reylo-datestyle-rust-"));
+    writeFileSync(join(root, ".reylo.yaml"), `direct_url: ${JSON.stringify(url)}\n`);
+    writeFileSync(join(root, "package.json"), "{}");
+    writeFileSync(join(root, "Cargo.toml"), '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nreylo = { version = "0.9", features = ["chrono"] }\n');
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "lib.rs"), "");
+    writeFileSync(join(root, "q.sql"), statement);
+    return root;
+  };
+  const generated = (root: string) => {
+    const run = spawnSync(nativeBinary(), ["generate", "rust-sqlx", "q.sql", "--out", "queries.rs"], { cwd: root, encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr + run.stdout);
+    return readFileSync(join(root, "queries.rs"), "utf8");
+  };
+  const checked = async (root: string) => {
+    const outcome = await analyze(root, {}, statement);
+    assert.ok(outcome.ok);
+    return [outcome.source, outcome.analysis.diagnostics.map((d) => d.code)];
+  };
+  // The cache's one entry as it stands: its file's name and its whole text, `at` included, which a
+  // writer that analysed the statement again would change.
+  const entry = (root: string) => {
+    const queries = join(root, "reylo", ".cache", "queries");
+    const files = readdirSync(queries);
+    assert.equal(files.length, 1, files.join(", "));
+    return { file: files[0]!, text: readFileSync(join(queries, files[0]!), "utf8") };
+  };
+  const analysis = (written: { text: string }) => JSON.parse(written.text).analysis;
+  try {
+    await sql.unsafe(`alter database ${new URL(url).pathname.slice(1)} set datestyle = 'SQL, DMY'`);
+    // The generator first: it writes the module, since sqlx reads a date in the binary format, which
+    // no DateStyle changes, and the type check reads its entry with the error of its own, as .run()
+    // reads a date's text.
+    const first = crate();
+    const module = generated(first);
+    assert.match(module, /pub ships_on: [^,\n]*\bNaiveDate\b/);
+    const generators = entry(first);
+    assert.deepEqual(await checked(first), ["cache", [24]]);
+    assert.deepEqual(entry(first), generators);
+    // The type check first: the generator reads its entry, and writes the module it writes with none.
+    const second = crate();
+    assert.deepEqual(await checked(second), ["database", [24]]);
+    const checks = entry(second);
+    assert.deepEqual(analysis(checks), analysis(generators));
+    assert.equal(generated(second), module);
+    assert.deepEqual(entry(second), checks);
   } finally {
     await drop();
   }

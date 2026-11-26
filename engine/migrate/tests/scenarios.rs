@@ -412,25 +412,44 @@ macro_rules! assert_has {
     }};
 }
 
+/// Runs a scenario on a thread of its own with a fixed 8 MiB of stack, the main thread's usual
+/// default on Linux and macOS, where the `reylo` binary runs every command: a debug build's poll
+/// frames through the planner come within a few percent of the 2 MiB a test's own thread has. The
+/// thread takes the test's name, which its panic names.
+fn on_a_main_threads_stack<F, Fut>(scenario: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut thread = std::thread::Builder::new().stack_size(8 << 20);
+    if let Some(name) = std::thread::current().name() {
+        thread = thread.name(name.to_string());
+    }
+    let ran = thread.spawn(move || tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(scenario())).unwrap().join();
+    if let Err(panic) = ran {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 /// One test per dialect for each scenario, `<scenario>::postgres` and so on.
 macro_rules! for_each_dialect {
     ($($scenario:ident),* $(,)?) => {$(
         mod $scenario {
-            #[tokio::test(flavor = "current_thread")]
-            async fn postgres() {
-                if let Some(p) = super::P::new(super::Dialect::Postgres).await { let url = p.url.clone(); super::$scenario(p).await; super::forget(&url).await }
+            #[test]
+            fn postgres() {
+                super::on_a_main_threads_stack(|| async { if let Some(p) = super::P::new(super::Dialect::Postgres).await { let url = p.url.clone(); super::$scenario(p).await; super::forget(&url).await } });
             }
-            #[tokio::test(flavor = "current_thread")]
-            async fn mysql() {
-                if let Some(p) = super::P::new(super::Dialect::Mysql).await { super::$scenario(p).await }
+            #[test]
+            fn mysql() {
+                super::on_a_main_threads_stack(|| async { if let Some(p) = super::P::new(super::Dialect::Mysql).await { super::$scenario(p).await } });
             }
-            #[tokio::test(flavor = "current_thread")]
-            async fn sqlite() {
-                if let Some(p) = super::P::new(super::Dialect::Sqlite).await { super::$scenario(p).await }
+            #[test]
+            fn sqlite() {
+                super::on_a_main_threads_stack(|| async { if let Some(p) = super::P::new(super::Dialect::Sqlite).await { super::$scenario(p).await } });
             }
-            #[tokio::test(flavor = "current_thread")]
-            async fn turso() {
-                if let Some(p) = super::P::turso().await { super::$scenario(p).await }
+            #[test]
+            fn turso() {
+                super::on_a_main_threads_stack(|| async { if let Some(p) = super::P::turso().await { super::$scenario(p).await } });
             }
         }
     )*};
@@ -4022,15 +4041,15 @@ async fn create_drafts_one_migration_cached_or_not(mut p: P) {
 
 macro_rules! on {
     (Turso, $($scenario:ident),* $(,)?) => {$(
-        #[tokio::test(flavor = "current_thread")]
-        async fn $scenario() {
-            if let Some(p) = P::turso().await { adversarial::$scenario(p).await }
+        #[test]
+        fn $scenario() {
+            on_a_main_threads_stack(|| async { if let Some(p) = P::turso().await { adversarial::$scenario(p).await } });
         }
     )*};
     ($dialect:ident, $($scenario:ident),* $(,)?) => {$(
-        #[tokio::test(flavor = "current_thread")]
-        async fn $scenario() {
-            if let Some(p) = P::new(Dialect::$dialect).await { let url = p.url.clone(); adversarial::$scenario(p).await; forget(&url).await }
+        #[test]
+        fn $scenario() {
+            on_a_main_threads_stack(|| async { if let Some(p) = P::new(Dialect::$dialect).await { let url = p.url.clone(); adversarial::$scenario(p).await; forget(&url).await } });
         }
     )*};
 }
@@ -4068,6 +4087,8 @@ on!(
     init_locks_a_schema_that_uses_a_hash_operator,
     init_locks_a_schema_with_a_carriage_return_in_a_string,
     a_platforms_schemas_and_extensions_are_in_every_shadow,
+    a_shadow_holds_the_platforms_schemas_alone,
+    what_reylo_cant_make_of_a_platform_is_dumped_or_named,
     a_platforms_extension_in_pg_catalog_is_not_the_projects,
     a_role_that_is_no_superuser_runs_every_command,
     a_platform_roles_default_privileges_are_the_platforms,
@@ -4153,6 +4174,8 @@ on!(
     a_supabase_extension_kept_elsewhere_stays_the_environments,
     a_supabase_extension_a_migration_moved_begins_where_it_was,
     a_supabase_database_adopted_after_moving_or_updating_an_extension_replays_it,
+    a_stated_grant_supabase_also_gives_by_default_is_written,
+    a_stated_grant_keeps_its_table_and_its_option,
     a_migration_that_makes_supabases_publication_again_runs,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
@@ -6105,6 +6128,7 @@ mod adversarial {
     /// `reylo_platform`, a role the server's administrator made and the role connected may become:
     /// the migration replays, and no command reports them.
     pub async fn the_platforms_objects_are_in_every_shadow_as_a_role_of_its_own(mut p: P) {
+        reylo_migrate::db::set_pg_dump_dirs(Some(vec![]));
         p.exec("do $$ begin create role madv_tigeradmin login createdb; exception when duplicate_object or unique_violation then null; end $$").await;
         p.exec("do $$ begin create role reylo_platform nologin; exception when duplicate_object or unique_violation then null; end $$").await;
         p.exec("grant reylo_platform to madv_tigeradmin").await;
@@ -6126,6 +6150,7 @@ mod adversarial {
         let said = p.output();
         assert!(!said.contains("leave out"), "{said}");
         assert_eq!(p.rows("select h, p from v").await[0].text("p"), "2");
+        reylo_migrate::db::set_pg_dump_dirs(None);
     }
 
     /// A trusted extension a role that is no superuser put in `pg_catalog` itself is the project's:
@@ -6475,16 +6500,39 @@ mod adversarial {
         assert_has!(p.output(), r"This database was changed outside its migrations[\s\S]*policy own on auth\.users");
     }
 
+    /// With no pg_dump anywhere, as on a build machine: the platform's schemas are read and planned as
+    /// a migration is, and made in every shadow as a role of the platform's.
     pub async fn a_platforms_schemas_and_extensions_are_in_every_shadow(mut p: P) {
-        // As Supabase makes a project: a schema a platform's role owns, with the table a project's
-        // key and trigger name, and an extension in a schema of the project's role.
+        reylo_migrate::db::set_pg_dump_dirs(Some(vec![]));
+        // As Supabase makes a project: schemas its roles own, with what a project's key, trigger,
+        // policy, column and view use, and an extension in a schema of the project's role.
         p.exec("do $$ begin create role supabase_auth_admin; exception when duplicate_object or unique_violation then null; end $$").await;
-        p.exec("create schema auth authorization supabase_auth_admin; create table auth.users (id uuid primary key); alter table auth.users owner to supabase_auth_admin").await;
+        p.exec("do $$ begin create role supabase_storage_admin; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec(
+            "create schema auth authorization supabase_auth_admin; create schema storage authorization supabase_storage_admin;
+            set role supabase_auth_admin;
+            create type auth.aal_level as enum ('aal1', 'aal2');
+            create table auth.users (id uuid primary key, email text, aal auth.aal_level default 'aal1', created_at timestamptz default now(), confirmed_at timestamptz generated always as (created_at) stored);
+            create index users_email on auth.users (email) where email is not null;
+            create table auth.refresh_tokens (id bigserial primary key, user_id uuid references auth.users on delete cascade);
+            create function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
+            create function auth.touch() returns trigger language plpgsql as $$ begin return new; end $$;
+            create trigger touch before update on auth.users for each row execute function auth.touch();
+            create view auth.emails as select id, email from auth.users;
+            alter table auth.users enable row level security;
+            grant usage on schema auth to supabase_storage_admin; grant references on auth.users to supabase_storage_admin;
+            set role supabase_storage_admin;
+            create table storage.objects (id uuid primary key, owner uuid references auth.users, name text);
+            reset role;",
+        )
+        .await;
         p.exec("create schema extensions; create extension pgcrypto with schema extensions").await;
         p.schema(
-            "create table profiles (id uuid primary key references auth.users on delete cascade, token text default encode(extensions.gen_random_bytes(8), 'hex'));
+            "create table profiles (id uuid primary key references auth.users on delete cascade, aal auth.aal_level, token text default encode(extensions.gen_random_bytes(8), 'hex'));
             create function handle_new_user() returns trigger language plpgsql as $$ begin insert into public.profiles (id) values (new.id); return new; end $$;
-            create trigger on_auth_user_created after insert on auth.users for each row execute function handle_new_user();",
+            create trigger on_auth_user_created after insert on auth.users for each row execute function handle_new_user();
+            create policy own on auth.users using (id = auth.uid());
+            create view profile_emails as select p.id, e.email from profiles p join auth.emails e on e.id = p.id;",
         );
         assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "profiles", &Default::default(), log).await).await, 0, "{}", p.peek());
         let written = std::fs::read_to_string(p.dir.join("migrations").join(&p.files()[0])).unwrap();
@@ -6492,9 +6540,80 @@ mod adversarial {
         assert!(!written.contains("create schema auth") && !written.contains("create table auth.users") && !written.contains("create extension"), "{written}");
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        p.strict = true;
+        assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(p.rows("select 1 from pg_extension where extname = 'pgcrypto'").await.len(), 1, "the platform's extension stays");
-        p.exec("insert into auth.users values ('00000000-0000-0000-0000-000000000001')").await;
+        p.exec("insert into auth.users (id) values ('00000000-0000-0000-0000-000000000001')").await;
         assert_eq!(p.rows("select token from profiles").await.len(), 1, "the trigger and the default ran");
+        reylo_migrate::db::set_pg_dump_dirs(None);
+    }
+
+    /// What a shadow is given of the platform's schemas: what they hold, made as the platform's role,
+    /// and none of what the project made on them or what lies outside them.
+    pub async fn a_shadow_holds_the_platforms_schemas_alone(p: P) {
+        reylo_migrate::db::set_pg_dump_dirs(Some(vec![]));
+        p.exec("do $$ begin create role supabase_auth_admin; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec(
+            "create schema auth authorization supabase_auth_admin; set role supabase_auth_admin;
+            create table auth.users (id uuid primary key); create table auth.schema_migrations (version text primary key);
+            create function auth.uid() returns uuid language sql as 'select null::uuid';
+            create function auth.touch() returns trigger language plpgsql as $$ begin return new; end $$;
+            create trigger touch before update on auth.users for each row execute function auth.touch(); reset role;
+            create function public.on_signup() returns trigger language plpgsql as $$ begin return new; end $$;
+            create trigger on_signup after insert on auth.users for each row execute function public.on_signup();
+            create trigger unchanged before update on auth.users for each row execute function pg_catalog.suppress_redundant_updates_trigger();
+            create policy own on auth.users using (id = auth.uid()); comment on table auth.users is 'the platform''s';",
+        )
+        .await;
+        let mut target = Db::connect(&p.url, &p.dir).await.unwrap();
+        let mut server = Server::open(&mut target, &p.url, None).await.unwrap();
+        let mut shadow = server.shadow().await.unwrap();
+        // Made as a role of the platform's, which every comparison leaves out: not the role connected.
+        let made = shadow.db.rows("select string_agg(c.relname, ', ' order by c.relname) as r, bool_and(c.relowner <> (select oid from pg_roles where rolname = current_user))::text as theirs from pg_class c where c.relnamespace = 'auth'::regnamespace").await.unwrap();
+        assert_eq!((made[0].text("r"), made[0].text("theirs")), ("schema_migrations, schema_migrations_pkey, users, users_pkey", "true"));
+        let triggers = shadow.db.rows("select string_agg(tgname, ', ' order by tgname) as t from pg_trigger where tgrelid = 'auth.users'::regclass").await.unwrap();
+        assert_eq!(triggers[0].text("t"), "touch", "the platform's trigger alone, not the project's, whose functions are outside its schemas");
+        assert!(shadow.db.rows("select 1 from pg_policy").await.unwrap().is_empty(), "no policy");
+        assert!(shadow.db.rows("select 1 from pg_proc where proname = 'on_signup'").await.unwrap().is_empty(), "nothing outside the platform's schemas");
+        assert!(shadow.db.rows("select 1 from pg_description where objoid = 'auth.users'::regclass").await.unwrap().is_empty(), "no comment");
+        assert_eq!(shadow.db.rows("select 1 from pg_proc where proname = 'uid' and pronamespace = 'auth'::regnamespace").await.unwrap().len(), 1);
+        server.drop_shadow(shadow).await;
+        server.close().await;
+        target.close().await;
+        reylo_migrate::db::set_pg_dump_dirs(None);
+    }
+
+    /// A platform's schema holding what Reylo can't make (a text search configuration) is copied by
+    /// pg_dump where there is one; with none, every shadow leaves it out, and the command says so.
+    pub async fn what_reylo_cant_make_of_a_platform_is_dumped_or_named(mut p: P) {
+        p.exec("do $$ begin create role supabase_auth_admin; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec(
+            "create schema auth authorization supabase_auth_admin; set role supabase_auth_admin;
+            create text search configuration auth.search (copy = pg_catalog.english);
+            create table auth.documents (id int primary key, title text, search tsvector generated always as (to_tsvector('auth.search'::regconfig, title)) stored);
+            reset role;",
+        )
+        .await;
+        p.schema("create table notes (id int primary key, document int references auth.documents);");
+        p.file("20261125100000_notes.sql", "create table notes (id int primary key, document int references auth.documents);");
+        assert_eq!(p.dry_run().await, 0, "pg_dump copies the platform's schema whole:\n{}", p.peek());
+        reylo_migrate::db::set_pg_dump_dirs(Some(vec![]));
+        p.output();
+        assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+        assert_has!(p.output(), r"Shadow databases leave out text search configuration auth\.search, the platform's, which Reylo can't make, so a migration that uses it fails in them: pg_dump \d+ or newer, where it's installed, makes it");
+        // A pg_dump that is there and fails says why, rather than to install one.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let bin = p.dir.join("failing-bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("pg_dump"), "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'pg_dump (PostgreSQL) 99.0'; exit 0; fi\necho 'pg_dump: error: permission denied for table documents' >&2\nexit 1\n").unwrap();
+            std::fs::set_permissions(bin.join("pg_dump"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            reylo_migrate::db::set_pg_dump_dirs(Some(vec![bin]));
+            assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+            assert_has!(p.output(), r"which Reylo can't make, so a migration that uses it fails in them: pg_dump couldn't read this schema: permission denied for table documents");
+        }
+        reylo_migrate::db::set_pg_dump_dirs(None);
     }
 
     /// As Azure makes its `postgres` database: an extension its superuser made in `pg_catalog`
@@ -8851,6 +8970,78 @@ create trigger kids_note after insert on kids begin update parents set name = na
             assert_eq!(db.history().await.len(), 2);
             assert_eq!(db.dry_run().await, 0, "{}", db.peek());
         }
+    }
+
+    /// A grant to the Data API's roles that schema.sql states is written into the migration even where
+    /// the development database's default privileges give it too, as a Supabase database that
+    /// exposes new tables to the API does: a database that exposes none, as a new project does, gets
+    /// it from the migration. A grant added later, which changes nothing on the development
+    /// database, is a migration of its own, in a file apart from an index built concurrently; and a
+    /// schema.sql that names everything with its schema, as a dump does, asks for nothing more once
+    /// the migrations make it.
+    pub async fn a_stated_grant_supabase_also_gives_by_default_is_written(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        let head = "select pg_catalog.set_config('search_path', '', false);\n\ncreate table public.notes (id int primary key, title text);\n\n";
+        let rest = "grant all on table public.notes to service_role;\n\ncreate sequence public.counter;\n\ngrant usage on sequence public.counter to authenticated;\n\ncreate function public.ping() returns int language sql as 'select 1';\n\ngrant execute on function public.ping() to anon;\n";
+        p.schema(&format!("{head}grant select on table public.notes to anon;\n\n{rest}"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "notes", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let read = |p: &P| p.files().into_iter().map(|f| std::fs::read_to_string(p.dir.join("migrations").join(f)).unwrap()).collect::<Vec<_>>();
+        let notes = read(&p).concat();
+        assert_has!(notes.clone(), r"grant select on table public\.notes to anon;");
+        assert_has!(notes.clone(), r"grant all on table public\.notes to service_role;");
+        assert_has!(notes.clone(), r"grant usage on sequence public\.counter to authenticated;");
+        assert_has!(notes, r"grant execute on function public\.ping\(\) to anon;");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.schema(&format!("{head}create index notes_title on public.notes (title);\n\ngrant select on table public.notes to anon, authenticated;\n\n{rest}"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "readers", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let files = read(&p);
+        assert!(files.iter().any(|f| f.contains("grant select on table public.notes to authenticated;")), "{files:?}");
+        assert!(!files.iter().any(|f| f.contains("concurrently") && f.contains("grant ")), "{files:?}");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "again", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let again = read(&p);
+        assert_eq!(again.len(), files.len() + 1);
+        assert!(!again.last().unwrap().contains("grant "), "{}", again.last().unwrap());
+        let q = P::new(p.d).await.unwrap();
+        as_supabase_makes_it(&q, false).await;
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        assert_eq!(holds(&q, "notes", "anon", "SELECT").await, "1");
+        assert_eq!(holds(&q, "notes", "authenticated", "SELECT").await, "1");
+        assert_eq!(holds(&q, "notes", "anon", "INSERT").await, "0");
+        assert_eq!(holds(&q, "notes", "service_role", "DELETE").await, "1");
+        assert_eq!(q.rows("select has_sequence_privilege('authenticated', 'counter', 'USAGE')::text as n").await[0].text("n"), "true");
+    }
+
+    /// A stated grant names its table with its schema, so it reaches the table schema.sql names
+    /// whatever search_path a migration leaves the session with, and a routine each argument's type
+    /// with its schema; it keeps the grant option the
+    /// development database's default privileges also give; and a grant on a temporary table
+    /// schema.sql makes for itself writes nothing.
+    pub async fn a_stated_grant_keeps_its_table_and_its_option(mut p: P) {
+        as_supabase_makes_it(&p, true).await;
+        p.exec("alter default privileges for role postgres in schema public grant select on tables to authenticated with grant option").await;
+        let tables = "create schema private;\n\ncreate table private.notes (id int primary key);\n\ncreate table public.notes (id int primary key);\n\ncreate domain private.text as pg_catalog.text;\n\ncreate function public.shout(pg_catalog.text) returns int language sql as 'select 1';\n\ncreate function public.shout(private.text) returns int language sql as 'select 2';\n\ncreate function public.ids(pg_catalog.oidvector) returns int language sql as 'select 1';\n\ncreate function public.ids(pg_catalog.oid[]) returns int language sql as 'select 2';\n";
+        p.file("20261125000000_notes.sql", &format!("{tables}\nset search_path = private, public;\n"));
+        p.schema(tables);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        p.schema(&format!("{tables}\ngrant select on table public.notes to anon;\n\ngrant select on table public.notes to authenticated with grant option;\n\ngrant execute on function public.shout(pg_catalog.text) to anon;\n\ngrant execute on function public.ids(pg_catalog.oidvector) to authenticated;\n\ncreate temporary table notes (id int);\n\ngrant insert on table notes to service_role;\n"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "readers", &Default::default(), log).await).await, 0, "{}", p.peek());
+        let readers = std::fs::read_to_string(p.dir.join("migrations").join(p.files().last().unwrap())).unwrap();
+        assert_has!(readers.clone(), r"grant select on table public\.notes to anon;");
+        assert_has!(readers.clone(), r"grant select on table public\.notes to authenticated with grant option;");
+        assert_has!(readers.clone(), r"grant execute on function public\.shout\(pg_catalog\.text\) to anon;");
+        assert_has!(readers.clone(), r"grant execute on function public\.ids\(pg_catalog\.oidvector\) to authenticated;");
+        assert!(!readers.contains("service_role") && !readers.contains("private.text") && !readers.contains("oid[]"), "{readers}");
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let q = P::new(p.d).await.unwrap();
+        as_supabase_makes_it(&q, false).await;
+        p.url = q.url.clone();
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        let granted = |schema: &str, role: &str, grantable: &str| format!("select count(*)::text as n from information_schema.role_table_grants where table_schema = '{schema}' and table_name = 'notes' and grantee = '{role}' and privilege_type = 'SELECT' and is_grantable = '{grantable}'");
+        assert_eq!(q.rows(&granted("public", "anon", "NO")).await[0].text("n"), "1");
+        assert_eq!(q.rows(&granted("private", "anon", "NO")).await[0].text("n"), "0");
+        assert_eq!(q.rows(&granted("public", "authenticated", "YES")).await[0].text("n"), "1");
     }
 
     /// A Supabase database that began without one of Supabase's extensions replays its migrations from

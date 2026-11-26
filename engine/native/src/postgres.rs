@@ -8,7 +8,7 @@
 use crate::tls::{self, Check};
 use crate::{Failure, Program};
 use crate::clients::tokio_postgres::{self as answers, Describe, Prepared};
-use crate::{AnswerCache, AsyncAnswerer, ReplayError};
+use crate::{AnswerCache, AsyncAnswerer, HostError, ReplayError};
 use reylo_engine_core::api::Analysis;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -58,12 +58,29 @@ pub struct Postgres {
 pub struct Driven {
     client: Client,
     driver: tokio::task::AbortHandle,
+    /// The session's `DateStyle` as the server reported it when the connection started, from its
+    /// role, its database or the server's own setting.
+    date_style: String,
 }
 
 impl Driven {
     /// Closes the connection now. Every request still on it fails, and the client is closed.
     pub fn retire(&self) {
         self.driver.abort();
+    }
+
+    /// The analysis of `sql` over the session, as `reylo/.cache/` keeps it whichever host writes
+    /// the entry, this program for the type check or a Rust build (reylo-build), so that each reads
+    /// the other's: the engine's, with the error of a session that writes dates in another style
+    /// than ISO's ([`held_to_iso`]). With `prepared`, each catalog query is prepared once over
+    /// this client.
+    pub async fn analyze(&self, prepared: Option<&Prepared>, sql: &str, cache: &mut AnswerCache<Describe>) -> Result<Analysis, ReplayError<HostError>> {
+        let mut analysis = match prepared {
+            Some(prepared) => answers::analyze_prepared(self, prepared, sql, cache).await,
+            None => answers::analyze(self, sql, cache).await,
+        }?;
+        held_to_iso(&mut analysis, sql, &self.date_style);
+        Ok(analysis)
     }
 }
 
@@ -83,9 +100,6 @@ struct Connection {
     answers: AnswerCache<Describe>,
     /// The catalog queries prepared over `client`, each once, emptied with `answers` and when `client` is opened again.
     prepared: Prepared,
-    /// The session's `DateStyle` as the server reported it when the connection started, from its
-    /// role, its database or the server's own setting.
-    date_style: String,
     /// What a session of this connection runs under, set again on a connection that replaces it.
     setup: Option<String>,
     /// Whether the session is given up on, after a lock timeout left describes queued on it behind
@@ -103,7 +117,7 @@ impl Connection {
             client.batch_execute(setup).await.map_err(|e| json!({ "status": "unreachable", "message": e.to_string() }))?;
         }
         let _ = client.batch_execute(DISCONNECT_CHECK).await;
-        (self.client, self.date_style, self.prepared) = (Driven { client, driver }, date_style, Prepared::default());
+        (self.client, self.prepared) = (Driven { client, driver, date_style }, Prepared::default());
         Ok(())
     }
 
@@ -129,10 +143,10 @@ impl Connection {
     /// closed it; a failure is the answer the program gives for it.
     async fn analyze(&mut self, sql: &str) -> Result<Analysis, Value> {
         self.ready().await?;
-        let mut result = answers::analyze_prepared(&self.client, &self.prepared, sql, &mut self.answers).await;
+        let mut result = self.client.analyze(Some(&self.prepared), sql, &mut self.answers).await;
         if matches!(&result, Err(ReplayError::Host(e)) if self.client.is_closed() || e.0.starts_with(answers::ENDED)) {
             self.reopen().await?;
-            result = answers::analyze_prepared(&self.client, &self.prepared, sql, &mut self.answers).await;
+            result = self.client.analyze(Some(&self.prepared), sql, &mut self.answers).await;
         }
         // A lock timeout leaves the statement's other describes queued on the session behind the
         // same lock: it is reported now, and the next request opens a session of its own rather
@@ -142,10 +156,7 @@ impl Connection {
             self.retired = true;
         }
         match result {
-            Ok(mut analysis) => {
-                held_to_iso(&mut analysis, sql, &self.date_style);
-                Ok(analysis)
-            }
+            Ok(analysis) => Ok(analysis),
             // The connection went while the engine asked: the database cannot be reached.
             Err(ReplayError::Host(e)) if self.client.is_closed() || e.0.starts_with("the describe did not reach the server") || e.0.starts_with(answers::ENDED) => Err(lost(&e.0)),
             Err(e) => Err(json!({ "status": "error", "message": e.to_string() })),
@@ -183,8 +194,8 @@ pub async fn open(url: &str) -> Result<(Client, String), Failure> {
 
 /// As [`open`], for a caller that may give up on a session with requests still on it ([`Driven::retire`]).
 pub async fn open_driven(url: &str) -> Result<(Driven, String), Failure> {
-    let Started { client, driver, version, .. } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
-    Ok((Driven { client, driver }, server_version(&version)))
+    let Started { client, driver, version, date_style } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
+    Ok((Driven { client, driver, date_style }, server_version(&version)))
 }
 
 /// The error a server refuses a connection with when the role, the database or the server is at its
@@ -202,7 +213,7 @@ pub async fn open_replacement(url: &str) -> Result<(Driven, String), Failure> {
     let mut tries = 0;
     loop {
         match connect(url, None).await {
-            Ok(Started { client, driver, version, .. }) => return Ok((Driven { client, driver }, server_version(&version))),
+            Ok(Started { client, driver, version, date_style }) => return Ok((Driven { client, driver, date_style }, server_version(&version))),
             Err(answer) if answer["code"] == TOO_MANY_CONNECTIONS && tries < REPLACEMENT_TRIES => {
                 tries += 1;
                 tokio::time::sleep(REPLACEMENT_WAIT).await;
@@ -222,7 +233,8 @@ pub const DATE_STYLE: u32 = 24;
 /// here, before it runs. JSON is written in ISO's style whatever the setting. Nothing is added to
 /// a statement that has an error already. The loader keeps an analysis by its schema's
 /// fingerprint, which the session's DateStyle is part of (src/analyze.ts), so the error goes when
-/// the style does.
+/// the style does. A Rust build keeps the same entry and reads past the error, since sqlx reads
+/// every value in the binary format, which no DateStyle changes (rust/reylo-build/src/analysis.rs).
 fn held_to_iso(analysis: &mut Analysis, sql: &str, date_style: &str) {
     let style = date_style.split(',').next().unwrap_or_default().trim();
     if style.is_empty() || style.eq_ignore_ascii_case("iso") || !analysis.diagnostics.is_empty() {
@@ -273,7 +285,7 @@ impl Session {
         }
         let Started { client, driver, version, date_style } = connect(url, None).await.map_err(|answer| Failure::of(&answer))?;
         let setup = lock_wait(&client).await;
-        Ok(Session { connection: Connection { client: Driven { client, driver }, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup, retired: false }, version: server_version(&version) })
+        Ok(Session { connection: Connection { client: Driven { client, driver, date_style }, url: url.to_string(), bridge: None, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), setup, retired: false }, version: server_version(&version) })
     }
 
     /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
@@ -314,7 +326,7 @@ impl Program for Postgres {
                     Ok(Started { client, driver, version, date_style }) => {
                         let setup = lock_wait(&client).await;
                         self.next += 1;
-                        self.connections.insert(self.next, Connection { client: Driven { client, driver }, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), date_style, setup, retired: false });
+                        self.connections.insert(self.next, Connection { client: Driven { client, driver, date_style }, url: url.to_string(), bridge, answers: AnswerCache::until_cleared(), prepared: Prepared::default(), setup, retired: false });
                         json!({ "status": "opened", "conn": self.next, "version": server_version(&version) })
                     }
                     Err(failure) => failure,

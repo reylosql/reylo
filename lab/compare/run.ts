@@ -93,15 +93,23 @@ const ERROR_WORDS = (p: string) => (/invalid SQL/.test(p) ? "It marks this query
 const ORM_WORDS = (a: any) => (a.untyped ? `It types each row as ${a.untyped}.` : "Its type check refuses this query.");
 // The queries a reader can judge from the text alone come first, so a popover opens on a mistake that needs no explaining.
 const CLEAREST: Record<string, string[]> = {
-  "outer-joins": ["left", "left-where", "left-sorted", "left-subquery", "right", "full"],
-  "expression-nullability": ["count", "coalesce", "exists", "is-null", "subquery-count", "row-number", "sum", "max", "nullif", "case-no-else", "lag"],
+  "outer-joins": ["left", "left-narrowed", "left-where", "left-sorted", "left-subquery", "right", "full"],
+  "expression-nullability": ["coalesce", "upper", "add", "is-null", "exists", "case-no-else", "max", "sum", "count", "union", "row-number", "nullif", "lag", "subquery-count"],
   "parameter-types": ["limit", "like"],
   "parameter-nullability": ["eq-key", "eq-nullable", "update", "insert"],
   cardinality: ["count", "insert-returning", "limit-1", "all", "delete", "primary-key"],
+  "json-shapes": ["grouped-aggregate", "correlated-rows", "aggregate", "object"],
+  aggregates: ["grouped-count", "count-distinct", "having", "avg", "grouped-min"],
+  windows: ["row-number", "lag", "rank", "running-sum"],
+  subqueries: ["dashboard", "lateral-latest", "scalar-max", "derived", "exists", "scalar-count", "in"],
+  "with-queries": ["recursive", "left-join", "join"],
+  "set-operations": ["union-widening", "union", "union-nullable", "except"],
+  returning: ["delete", "update-narrowed", "insert", "update", "upsert"],
+  enums: ["check-union", "literal-union", "derived", "column"],
 };
 const rank = (row: string, probe: string) => { const at = CLEAREST[row]?.indexOf(probe) ?? -1; return at < 0 ? CLEAREST[row]?.length ?? 0 : at; };
 // A mistake only the schema shows carries the statements that define what the query names.
-const NEEDS_SCHEMA = new Set(["enums:column", "enums:derived", "json-schema:column", "json-schema:parameter", "from-the-database:function", "parameter-types:uuid", "parameter-types:timestamp", "parameter-types:insert"]);
+const NEEDS_SCHEMA = new Set(["enums:column", "enums:derived", "enums:check-union", "json-schema:column", "json-schema:parameter", "from-the-database:function", "parameter-types:uuid", "parameter-types:timestamp", "parameter-types:insert"]);
 const schemaStatements = readFileSync(resolve(here, "schema/postgres.sql"), "utf8").split(/;\n/).map((s) => s.trim()).filter((s) => /^create (table|function|type)/.test(s));
 const schemaFor = (sql: string) => { const named = schemaStatements.filter((s) => new RegExp(`\\b${/^create (?:table|function|type) (\w+)/.exec(s)![1]}\\b`).test(sql)); const types = schemaStatements.filter((s) => s.startsWith("create type") && named.some((n) => new RegExp(`\\b${/^create type (\w+)/.exec(s)![1]}\\b`).test(n))); return [...new Set([...types, ...named])].map((s) => `${s};`).join("\n"); };
 const site: any = { at: results.at, tools: {} };
@@ -113,16 +121,18 @@ for (const i of ids) {
     // The clearest query the tool got wrong, with every database it is wrong on.
     // A card marks a line of the answer, so a query whose mistake is on no line of it (a column the tool left out) comes after every other.
     const drawn = (r: any) => !!r.answer.error || !!r.answer.untyped || r.at.some((at: any) => (at.cardinality && r.answer.cardinality) || (at.param && r.answer.params?.[at.param - 1]) || (at.column && r.answer.columns?.some((c: any) => c.name.toLowerCase() === at.column.toLowerCase())));
-    // An ORM's wrong type in its typed API comes first, then an `unknown` from it, then a refusal of its type check, then the raw SQL it leaves untyped.
+    // For an ORM, prefer failures that show it cannot type the query at all (unknown/any, compile refusal, or dropping to raw SQL), then unsound non-null types (runtime crash bugs), then over-broad nullability (`T | null` when `T`).
     const vague = (r: any) => r.at.length > 0 && r.at.every((at: any) => r.answer.columns?.find((c: any) => c.name.toLowerCase() === String(at.column).toLowerCase())?.kind === "any");
-    const raw = (r: any) => (!r.answer.code ? 0 : r.answer.raw ? 3 : r.answer.error ? 2 : vague(r) ? 1 : 0);
-    const first = [...wrong].sort((x: any, y: any) => Number(drawn(y)) - Number(drawn(x)) || raw(x) - raw(y) || rank(row, x.probe) - rank(row, y.probe))[0];
+    const overBroadNull = (r: any) => r.problems.length > 0 && r.problems.every((p: string) => p.includes("it is never null"));
+    const severity = (r: any) => (!r.answer.code ? 0 : (r.answer.untyped || r.answer.error || vague(r) || r.answer.raw) ? 0 : overBroadNull(r) ? 2 : 1);
+    const reyloFor = (r: any) => results.tools.reylo?.cells[row]?.results.find((x: any) => x.db === r.db && x.probe === r.probe)?.answer;
+    const first = [...wrong].filter((r: any) => !!reyloFor(r)?.shown).sort((x: any, y: any) => Number(drawn(y)) - Number(drawn(x)) || severity(x) - severity(y) || rank(row, x.probe) - rank(row, y.probe))[0];
     let example: any;
     if (first) {
       const same = (r: any) => r.sql === first.sql && r.problems.join() === first.problems.join();
       const dbs = wrong.filter(same).map((r: any) => DB_NAME[r.db]);
       const dbsRun = new Set(c.results.map((r: any) => r.db)).size;
-      const reylo = results.tools.reylo?.cells[row]?.results.find((x: any) => x.db === first.db && x.probe === first.probe)?.answer;
+      const reylo = reyloFor(first);
       const a = first.answer;
       // A column is named as the query names it, which is Reylo's name for it; an adapter may name a lone column `v`, or a Go field `ID`.
       const names = reylo?.columns?.length === a.columns?.length ? reylo.columns.map((x: any) => x.name) : (a.columns ?? []).map((x: any) => x.name);

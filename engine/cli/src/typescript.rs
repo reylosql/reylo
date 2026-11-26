@@ -156,9 +156,19 @@ fn nests_any_deep(t: &Value) -> bool {
     t.get(NESTS).is_some()
 }
 
-/// A Postgres array type, by its name, at its innermost level.
+/// A Postgres array type, by its name, at its innermost level: its element is no Postgres array
+/// type, though it may be one the format structures as an array (`bit`, `vector`, `lseg`), or it is
+/// an array of whole arrays.
 fn postgres_array(t: &Value) -> bool {
-    kind(t) == "array" && bare_name(t).starts_with('_') && kind(&t["element"]["type"]) != "array"
+    let named = |t: &Value| kind(t) == "array" && bare_name(t).starts_with('_');
+    named(t) && (!named(&t["element"]["type"]) || holds_whole_arrays(t))
+}
+
+/// Whether a Postgres array's elements are each a whole array of their own, as an array of a
+/// domain over an array type is (src/engine-type.ts, `holdsWholeArrays`).
+fn holds_whole_arrays(t: &Value) -> bool {
+    let named = |t: &Value| kind(t) == "array" && bare_name(t).starts_with('_');
+    named(t) && named(&t["element"]["type"]) && label(&t["element"]["type"]) != label(t)
 }
 
 fn mark_nesting(t: &Value) -> Value {
@@ -313,6 +323,10 @@ fn column_kind(t: &Value, dialect: &str) -> String {
                 let element = &t["element"]["type"];
                 if kind(element) == "opaque" && bare_name(element) == "record" {
                     return "text".into();
+                }
+                if holds_whole_arrays(t) {
+                    let inner = column_kind(element, dialect);
+                    return if inner.ends_with("[]") && delimiter_of(&element["element"]["type"]).is_none() { format!("{{{inner}}}[]") } else { "text".into() };
                 }
             }
             if dialect == "mysql" && name == "bit" {
@@ -1579,6 +1593,29 @@ mod tests {
     }
 
     #[test]
+    fn an_array_of_a_type_structured_as_an_array_nests_at_any_depth() {
+        let bit = json!({ "kind": "array", "size": { "exact": 3 }, "element": { "type": { "kind": "boolean" } }, "label": "bit" });
+        let float8 = json!({ "kind": "float", "exponent_bits": 11, "mantissa_bits": 52, "label": "float8" });
+        let point = json!({ "kind": "struct", "fields": [{ "name": "x", "type": float8 }, { "name": "y", "type": float8 }], "label": "point" });
+        let lseg = json!({ "kind": "array", "size": { "exact": 2 }, "element": { "type": point }, "label": "lseg" });
+        let array_of = |label: &str, ty: &Value| json!({ "kind": "array", "label": label, "element": { "nullable": true, "type": ty } });
+        let a = analysis(
+            json!([
+                { "name": "flags", "type": array_of("_bit", &bit) },
+                { "name": "segments", "type": array_of("_lseg", &lseg) },
+                // `array[flags, flags]`: a level the statement builds over the column's array.
+                { "name": "stacked", "type": { "kind": "array", "label": "_bit", "element": { "type": array_of("_bit", &bit) } } },
+            ]),
+            json!([]),
+            "many",
+        );
+        assert_eq!(
+            printed(&a, "postgres", &Value::Null, true).text(),
+            "type Returns = {\n  flags: NestedArray<string | null>;\n  segments: NestedArray<{ x: number; y: number }[] | null>;\n  stacked: NestedArray<string | null>[];\n}[];\n"
+        );
+    }
+
+    #[test]
     fn a_wide_type_breaks_over_lines_and_a_comment_documents_its_field() {
         let a = analysis(
             json!([
@@ -1591,6 +1628,18 @@ mod tests {
         assert_eq!(printed(&a, "postgres", &Value::Null, false).returns, "{\n  /** The user's id */\n  identifier: number;\n  email_address: string;\n}[]");
         assert_eq!(format_type("{ a: string; b: number }", 10), "{\n  a: string;\n  b: number;\n}");
         assert_eq!(format_type(r#"import("geojson").Point & { srid: number }"#, 10), r#"import("geojson").Point & { srid: number }"#);
+    }
+
+    #[test]
+    fn an_array_of_a_domain_over_an_array_type_holds_whole_arrays_at_each_level() {
+        // `create domain ints as int4[]; create table d (x ints[] not null)`.
+        let int4 = json!({ "kind": "integer", "bits": 32, "label": "int4" });
+        let ints = json!({ "kind": "array", "label": "public._ints", "element": { "nullable": true, "type": { "kind": "array", "label": "public.ints", "element": { "nullable": true, "type": int4 } } } });
+        let mut a = analysis(json!([{ "name": "x", "type": ints }]), json!([]), "many");
+        a["domains"] = json!({ "public.ints": "_int4" });
+        assert_eq!(column_kind(&with_bases(&ints, a["domains"].as_object().unwrap()), "postgres"), "{int[]}[]");
+        assert_eq!(printed(&a, "postgres", &Value::Null, false).returns, "{ x: ((number | null)[] | null)[] }[]");
+        assert_eq!(printed(&a, "postgres", &Value::Null, true).returns, "{ x: NestedArray<NestedArray<number | null> | null> }[]");
     }
 
     #[test]

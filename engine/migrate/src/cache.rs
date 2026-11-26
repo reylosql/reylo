@@ -33,8 +33,9 @@ pub(crate) type Hash = [u8; 32];
 pub(crate) const CACHE_PREFIX: &str = "reylo_cache_";
 
 /// The database caches kept for each target: the newest by use. A check uses up to three (the
-/// prefix it starts from, the prefix it ends at, `schema.sql`'s).
-const KEEP: usize = 3;
+/// prefix it starts from, the prefix it ends at, `schema.sql`'s), and a draft on Supabase two more
+/// (`schema.sql`'s and the migrations' on shadows that take no default privileges).
+const KEEP: usize = 5;
 /// The database caches kept on one server, whatever their targets.
 const KEEP_ON_SERVER: usize = 32;
 /// The lines kept in a project, and its SQLite databases.

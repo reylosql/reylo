@@ -34,6 +34,9 @@ const ENTRY_VERSION: u64 = 1;
 /// `src/analyze.ts`): the statements of one compile are checked against one fingerprint, and a
 /// migration shows up in an editor's next expansion within seconds.
 const SCHEMA_TTL: Duration = Duration::from_secs(5);
+/// How many times a statement is analyzed while the schema moves under its analysis, before the
+/// last analysis is given and written nowhere (`ANALYSES` in `src/analyze.ts`).
+const ANALYSES: u32 = 3;
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 /// Once the database is found unreachable, statements are read from `reylo/.cache/` for a minute
 /// instead of each paying the connect timeout (`OFFLINE_TTL` in `src/analyze.ts`).
@@ -164,8 +167,22 @@ impl Dialect {
 
 /// The analysis of `sql` and the database it is for, or the message a build shows for it. The
 /// project is the one `dir` is in: the crate's directory for the macro and a build script, the
-/// `.sql` file's for the generator.
+/// `.sql` file's for the generator. An entry holds the error the type check gives a Postgres
+/// session whose DateStyle is not ISO's, for `.run()` in TypeScript, which reads a date as the
+/// text the session writes; sqlx reads it in the binary format, which no DateStyle changes, so a
+/// build leaves that error out.
 pub fn analyze(dir: &Path, sql: &str) -> Result<(Dialect, Value), String> {
+    #[cfg_attr(not(feature = "postgres"), allow(unused_mut))]
+    let (dialect, mut analysis) = recorded(dir, sql)?;
+    #[cfg(feature = "postgres")]
+    if let Some(diagnostics) = analysis["diagnostics"].as_array_mut() {
+        diagnostics.retain(|d| d["code"].as_u64() != Some(reylo_engine::postgres::DATE_STYLE.into()));
+    }
+    Ok((dialect, analysis))
+}
+
+/// The analysis of `sql` as `reylo/.cache/` records it, and the database it is for.
+fn recorded(dir: &Path, sql: &str) -> Result<(Dialect, Value), String> {
     let located = locate(dir)?;
     let queries = located.cache.join("queries");
     let Some(url) = located.url.clone() else {
@@ -281,22 +298,10 @@ async fn postgres(located: &Located, queries: &Path, sql: &str, session: &mut Se
     let server = server(&session.url);
     let schema = match session.fresh() {
         Some(schema) => schema,
-        None => {
-            let schema = match postgres_client(&mut session.conn, &mut session.retired, &session.url).await {
-                Ok(client) => {
-                    let rows = client.query(POSTGRES_FINGERPRINT, &[]).await.map_err(|e| format!("the schema fingerprint failed: {}", e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().to_string())))?;
-                    Ok(fingerprint(&rows.iter().map(|row| vec![row.get::<_, Option<String>>(0).map_or(Value::Null, Value::from)]).collect::<Vec<_>>()))
-                }
-                // Out of reach: the cache answers. A refused login or a URL's bad TLS settings is the build's error.
-                Err(Failure::Unreachable(why)) => Err(why),
-                Err(other) => return Err(other.to_string()),
-            };
-            session.learned(schema.clone());
-            schema
-        }
+        None => postgres_schema(session).await?,
     };
     // Out of reach: the entries are used as they are.
-    let schema = match schema {
+    let mut schema = match schema {
         Ok(schema) => schema,
         Err(why) => return offline(located, queries, &statement, &server, false, &located.cannot_connect(&session.url, &why)),
     };
@@ -304,20 +309,52 @@ async fn postgres(located: &Located, queries: &Path, sql: &str, session: &mut Se
     if let Some(entry) = current(&own, &schema) {
         return Ok(entry);
     }
-    let client = match postgres_client(&mut session.conn, &mut session.retired, &session.url).await {
-        Ok(client) => client,
-        Err(Failure::Unreachable(why)) => return offline(located, queries, &statement, &server, false, &located.cannot_connect(&session.url, &why)),
+    for tries in 1.. {
+        let client = match postgres_client(&mut session.conn, &mut session.retired, &session.url).await {
+            Ok(client) => client,
+            Err(Failure::Unreachable(why)) => return offline(located, queries, &statement, &server, false, &located.cannot_connect(&session.url, &why)),
+            Err(other) => return Err(other.to_string()),
+        };
+        let analysis = client.analyze(None, sql, &mut session.answers).await;
+        // A lock timeout leaves the statement's other describes queued on the connection behind the same
+        // lock: the next statement opens a new one rather than wait behind them.
+        if matches!(&analysis, Err(reylo_engine::ReplayError::Host(e)) if e.0.starts_with(reylo_engine::clients::tokio_postgres::LOCKED)) {
+            client.retire();
+            session.conn = None;
+            session.retired = true;
+        }
+        let analysis = analysis.map_err(|e| e.to_string())?;
+        let now = postgres_schema(session).await;
+        if matches!(now, Ok(Err(_))) {
+            // The database gone: the next statement tries it again, rather than a minute offline, with
+            // none of the engine's answers, since nothing will tell it whether the schema moved meanwhile.
+            session.schema = None;
+            session.answers.clear();
+        }
+        match moved(&schema, now, tries) {
+            Moved::No => return remember(&located.cache, &own, Dialect::Postgres, Some(&schema), &analysis),
+            Moved::To(now) => schema = now,
+            Moved::Unknown => return remember(&located.cache, &own, Dialect::Postgres, None, &analysis),
+        }
+    }
+    unreachable!("the loop returns")
+}
+
+/// The schema's fingerprint read now, which the session learns, or why the database could not be
+/// reached; the outer error is the build's (a refused login, a URL's bad TLS settings, a failed query).
+#[cfg(feature = "postgres")]
+async fn postgres_schema(session: &mut Session<Driven, reylo_engine::clients::tokio_postgres::Describe>) -> Result<Result<String, String>, String> {
+    let schema = match postgres_client(&mut session.conn, &mut session.retired, &session.url).await {
+        Ok(client) => {
+            let rows = client.query(POSTGRES_FINGERPRINT, &[]).await.map_err(|e| format!("the schema fingerprint failed: {}", e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().to_string())))?;
+            Ok(fingerprint(&rows.iter().map(|row| vec![row.get::<_, Option<String>>(0).map_or(Value::Null, Value::from)]).collect::<Vec<_>>()))
+        }
+        // Out of reach: the cache answers.
+        Err(Failure::Unreachable(why)) => Err(why),
         Err(other) => return Err(other.to_string()),
     };
-    let analysis = reylo_engine::clients::tokio_postgres::analyze(client, sql, &mut session.answers).await;
-    // A lock timeout leaves the statement's other describes queued on the connection behind the same
-    // lock: the next statement opens a new one rather than wait behind them.
-    if matches!(&analysis, Err(reylo_engine::ReplayError::Host(e)) if e.0.starts_with(reylo_engine::clients::tokio_postgres::LOCKED)) {
-        client.retire();
-        session.conn = None;
-        session.retired = true;
-    }
-    remember(&located.cache, &own, Dialect::Postgres, &schema, &analysis.map_err(|e| e.to_string())?)
+    session.learned(schema.clone());
+    Ok(schema)
 }
 
 /// The session's client, connected again where the server closed it, or where a lock timeout retired it.
@@ -342,25 +379,9 @@ async fn mysql(located: &Located, queries: &Path, sql: &str, session: &mut Sessi
     let server = server(&session.url);
     let schema = match session.fresh() {
         Some(schema) => schema,
-        None => {
-            // A kept connection the server has since dropped fails the fingerprint: once more on a new one.
-            let kept = session.conn.is_some();
-            let mut rows = mysql_fingerprint(&mut session.conn, &session.url).await;
-            if kept && matches!(rows, Ok(Err(_))) {
-                session.conn = None;
-                rows = mysql_fingerprint(&mut session.conn, &session.url).await;
-            }
-            let schema = match rows {
-                Ok(Ok(rows)) => Ok(fingerprint(&rows)),
-                Ok(Err(e)) => return Err(format!("the schema fingerprint failed: {e}")),
-                Err(Failure::Unreachable(why)) => Err(why),
-                Err(other) => return Err(other.to_string()),
-            };
-            session.learned(schema.clone());
-            schema
-        }
+        None => mysql_schema(session).await?,
     };
-    let schema = match schema {
+    let mut schema = match schema {
         Ok(schema) => schema,
         Err(why) => return offline(located, queries, &statement, &server, false, &located.cannot_connect(&session.url, &why)),
     };
@@ -368,17 +389,53 @@ async fn mysql(located: &Located, queries: &Path, sql: &str, session: &mut Sessi
     if let Some(entry) = current(&own, &schema) {
         return Ok(entry);
     }
-    let conn = match mysql_conn(&mut session.conn, &session.url).await {
-        Ok(conn) => conn,
-        Err(Failure::Unreachable(why)) => return offline(located, queries, &statement, &server, false, &located.cannot_connect(&session.url, &why)),
+    for tries in 1.. {
+        let conn = match mysql_conn(&mut session.conn, &session.url).await {
+            Ok(conn) => conn,
+            Err(Failure::Unreachable(why)) => return offline(located, queries, &statement, &server, false, &located.cannot_connect(&session.url, &why)),
+            Err(other) => return Err(other.to_string()),
+        };
+        let analysis = reylo_engine::clients::mysql_async::analyze(conn, sql, &mut session.answers).await;
+        if analysis.is_err() {
+            // The connection may be what failed: the next statement opens a new one.
+            session.conn = None;
+        }
+        let analysis = analysis.map_err(|e| e.to_string())?;
+        let now = mysql_schema(session).await;
+        if matches!(now, Ok(Err(_))) {
+            // The database gone: the next statement tries it again, rather than a minute offline, with
+            // none of the engine's answers, since nothing will tell it whether the schema moved meanwhile.
+            session.schema = None;
+            session.answers.clear();
+        }
+        match moved(&schema, now, tries) {
+            Moved::No => return remember(&located.cache, &own, Dialect::Mysql, Some(&schema), &analysis),
+            Moved::To(now) => schema = now,
+            Moved::Unknown => return remember(&located.cache, &own, Dialect::Mysql, None, &analysis),
+        }
+    }
+    unreachable!("the loop returns")
+}
+
+/// The schema's fingerprint read now, which the session learns, or why the database could not be
+/// reached; the outer error is the build's.
+#[cfg(feature = "mysql")]
+async fn mysql_schema(session: &mut Session<mysql_async::Conn, reylo_engine::clients::mysql_async::Describe>) -> Result<Result<String, String>, String> {
+    // A kept connection the server has since dropped fails the fingerprint: once more on a new one.
+    let kept = session.conn.is_some();
+    let mut rows = mysql_fingerprint(&mut session.conn, &session.url).await;
+    if kept && matches!(rows, Ok(Err(_))) {
+        session.conn = None;
+        rows = mysql_fingerprint(&mut session.conn, &session.url).await;
+    }
+    let schema = match rows {
+        Ok(Ok(rows)) => Ok(fingerprint(&rows)),
+        Ok(Err(e)) => return Err(format!("the schema fingerprint failed: {e}")),
+        Err(Failure::Unreachable(why)) => Err(why),
         Err(other) => return Err(other.to_string()),
     };
-    let analysis = reylo_engine::clients::mysql_async::analyze(conn, sql, &mut session.answers).await;
-    if analysis.is_err() {
-        // The connection may be what failed: the next statement opens a new one.
-        session.conn = None;
-    }
-    remember(&located.cache, &own, Dialect::Mysql, &schema, &analysis.map_err(|e| e.to_string())?)
+    session.learned(schema.clone());
+    Ok(schema)
 }
 
 /// The fingerprint's rows as the loader reads them, each value as mysql2 decodes it; the outer
@@ -421,30 +478,40 @@ fn sqlite(located: &Located, queries: &Path, url: &str, sql: &str) -> Result<Val
         return offline(located, queries, &statement, &server, true, &located.cannot_connect(url, "it does not exist"));
     }
     let conn = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-    let rows = {
-        let mut stmt = conn.prepare(SQLITE_FINGERPRINT).map_err(|e| format!("the schema fingerprint failed: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((0..4)
-                    .map(|i| match row.get_ref(i) {
-                        Ok(rusqlite::types::ValueRef::Integer(n)) => json!(n),
-                        Ok(rusqlite::types::ValueRef::Text(t)) => json!(String::from_utf8_lossy(t)),
-                        _ => Value::Null,
-                    })
-                    .collect::<Vec<Value>>())
-            })
-            .map_err(|e| format!("the schema fingerprint failed: {e}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("the schema fingerprint failed: {e}"))?;
-        rows
-    };
-    let schema = fingerprint(&rows);
+    let mut schema = sqlite_schema(&conn)?;
     let own = queries.join(format!("{statement}-{}.json", &sha256(&server)[..16]));
     if let Some(entry) = current(&own, &schema) {
         return Ok(entry);
     }
-    let analysis = reylo_engine::clients::rusqlite::analyze(&conn, sql, &mut AnswerCache::default()).map_err(|e| e.to_string())?;
-    remember(&located.cache, &own, Dialect::Sqlite, &schema, &analysis)
+    for tries in 1.. {
+        let analysis = reylo_engine::clients::rusqlite::analyze(&conn, sql, &mut AnswerCache::default()).map_err(|e| e.to_string())?;
+        match moved(&schema, sqlite_schema(&conn).map(Ok), tries) {
+            Moved::No => return remember(&located.cache, &own, Dialect::Sqlite, Some(&schema), &analysis),
+            Moved::To(now) => schema = now,
+            Moved::Unknown => return remember(&located.cache, &own, Dialect::Sqlite, None, &analysis),
+        }
+    }
+    unreachable!("the loop returns")
+}
+
+/// The schema's fingerprint, read now.
+#[cfg(feature = "sqlite")]
+fn sqlite_schema(conn: &rusqlite::Connection) -> Result<String, String> {
+    let mut stmt = conn.prepare(SQLITE_FINGERPRINT).map_err(|e| format!("the schema fingerprint failed: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((0..4)
+                .map(|i| match row.get_ref(i) {
+                    Ok(rusqlite::types::ValueRef::Integer(n)) => json!(n),
+                    Ok(rusqlite::types::ValueRef::Text(t)) => json!(String::from_utf8_lossy(t)),
+                    _ => Value::Null,
+                })
+                .collect::<Vec<Value>>())
+        })
+        .map_err(|e| format!("the schema fingerprint failed: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("the schema fingerprint failed: {e}"))?;
+    Ok(fingerprint(&rows))
 }
 
 /// Where the database cannot be reached (`found` says which, and why): this server's entry for the
@@ -543,10 +610,34 @@ fn current(file: &Path, schema: &str) -> Option<Value> {
     (entry["schema"].as_str() == Some(schema)).then(|| entry["analysis"].clone())
 }
 
-fn remember(cache: &Path, file: &Path, dialect: Dialect, schema: &str, analysis: &reylo_engine::Analysis) -> Result<Value, String> {
+/// Whether the schema's fingerprint moved during an analysis made under `schema`, read again once it
+/// ended (`#analyze` in `src/analyze.ts`). The fingerprint read before it may be as old as
+/// `SCHEMA_TTL`, and an entry labelled with one a migration has since moved would be served to a
+/// database that still has the old schema, or has gone back to it.
+enum Moved {
+    /// The entry is written under it.
+    No,
+    /// The statement is analyzed again, on the schema as it is now (the session dropped the engine's answers).
+    To(String),
+    /// The database could not be read, or the schema kept moving: the analysis is given, and written nowhere.
+    Unknown,
+}
+
+fn moved(schema: &str, now: Result<Result<String, String>, String>, tries: u32) -> Moved {
+    match now {
+        Ok(Ok(now)) if now == schema => Moved::No,
+        Ok(Ok(now)) if tries < ANALYSES => Moved::To(now),
+        _ => Moved::Unknown,
+    }
+}
+
+/// The analysis as the build reads it, and written to `file` under `schema` where there is one.
+fn remember(cache: &Path, file: &Path, dialect: Dialect, schema: Option<&str>, analysis: &reylo_engine::Analysis) -> Result<Value, String> {
     let analysis = serde_json::to_value(analysis).map_err(|e| e.to_string())?;
-    let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-    write_entry(cache, file, &json!({ "version": ENTRY_VERSION, "dialect": dialect.name(), "schema": schema, "analysis": analysis, "at": at }));
+    if let Some(schema) = schema {
+        let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        write_entry(cache, file, &json!({ "version": ENTRY_VERSION, "dialect": dialect.name(), "schema": schema, "analysis": analysis, "at": at }));
+    }
     Ok(analysis)
 }
 
@@ -732,6 +823,39 @@ mod tests {
         assert_eq!(place("mysql://root@127.0.0.1:3306"), "127.0.0.1:3306");
         assert_eq!(place("postgres:///shop?host=/var/run/postgresql"), "/var/run/postgresql/shop");
         assert_eq!(place("postgres:///shop"), "localhost/shop");
+    }
+
+    /// The same as the loader's test of it (`tests/analyze.test.ts`): the session read the fingerprint
+    /// before the migration, and still trusts it when it analyzes the next statement.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn an_analysis_made_after_a_migration_is_written_under_the_migrated_schemas_fingerprint() {
+        let Ok(server) = std::env::var("REYLO_TEST_PG") else { return };
+        let name = format!("reylo_build_migrated_{}", std::process::id());
+        let url = format!("{}/{name}", server.rsplit_once('/').unwrap().0);
+        let run = |url: &str, sql: &str| {
+            super::runtime().unwrap().block_on(async {
+                let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls).await.unwrap();
+                tokio::spawn(connection);
+                client.batch_execute(sql).await.unwrap();
+            })
+        };
+        run(&server, &format!("drop database if exists {name} with (force)"));
+        run(&server, &format!("create database {name}"));
+        run(&url, "create table u (b int); create table t (a int)");
+        let dir = std::env::temp_dir().join(&name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".reylo.yaml"), format!("direct_url: {url}\n")).unwrap();
+        super::analyze(&dir, "select b from u").unwrap();
+        run(&url, "alter table t alter a set not null");
+        let (_, analysis) = super::analyze(&dir, "select a from t").unwrap();
+        assert_eq!((analysis["columns"][0]["name"].as_str(), analysis["columns"][0]["nullable"].as_bool()), (Some("a"), None));
+        let mut labels: Vec<String> = std::fs::read_dir(dir.join("reylo/.cache/queries")).unwrap().map(|e| serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(e.unwrap().path()).unwrap()).unwrap()["schema"].as_str().unwrap().to_string()).collect();
+        labels.dedup();
+        assert_eq!(labels.len(), 2, "both entries are labelled with the fingerprint from before the migration");
+        run(&server, &format!("drop database {name} with (force)"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -6,7 +6,7 @@ import { arrayLiteral } from "../src/execute.ts";
 import { execute, executeSync, type QueryModule } from "./run.ts";
 import { checks, defineQuery } from "../src/index.ts";
 import type { EngineType, JsonSchema } from "../src/engine-type.ts";
-import { array, checked, lite as liteType, my as myType, oneOf, pg as pgType, record } from "./descriptors.ts";
+import { array, checked, field, lite as liteType, my as myType, oneOf, pg as pgType, record } from "./descriptors.ts";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -361,6 +361,9 @@ test("postgres: a pgvector vector parameter takes an array of finite numbers, wr
   };
   await execute(client as never, nearest, { q: [1, 2.5, -3, 1e-7], qs: [[1, 2], [3]], h: [0.5] });
   assert.deepEqual(seen, [["[1,2.5,-3,1e-7]", '{"[1,2]","[3]"}', "[0.5]"]]);
+  // pgvector keeps -0, which JSON.stringify writes as 0.
+  await execute(client as never, nearest, { q: [-0, 1], qs: [[-0]], h: [-0] });
+  assert.deepEqual(seen.at(-1), ["[-0,1]", '{"[-0]"}', "[-0]"]);
   // The text pgvector itself prints passes as it is.
   await execute(client as never, nearest, { q: "[1,2]", qs: [], h: null });
   assert.deepEqual(seen.at(-1), ["[1,2]", "{}", null]);
@@ -369,6 +372,21 @@ test("postgres: a pgvector vector parameter takes an array of finite numbers, wr
     await assert.rejects(execute(client as never, nearest, { q, qs: [], h: null }) as Promise<unknown>, why);
   }
   await assert.rejects(execute(client as never, nearest, { q: [1], qs: [[1], [NaN]], h: null }) as Promise<unknown>, /element at \[0\] is NaN/);
+});
+
+test("postgres: a float of -0 goes as the text -0, which pg, postgres.js, PGlite and Neon would write as 0, alone and inside an array, a vector or a row value; every other float as the number it is", async () => {
+  const seen: unknown[][] = [];
+  const client = { query: async (config: { values: unknown[] }) => (seen.push(config.values), { rows: [], fields: [] }), getTypeParser: () => String };
+  const floats: QueryModule<"postgres"> = {
+    dialect: "postgres",
+    sql: "select :f8::float8, :f4::float4, :a::float8[], :v::vector, :vs::vector[], :e::embedding, :n::int",
+    params: ["f8", "f4", "a", "v", "vs", "e", "n"],
+    inputs: { f8: { type: pgType("float8") }, f4: { type: pgType("float4") }, a: { type: array(pgType("float8")) }, v: { type: pgType("vector") }, vs: { type: array(pgType("vector")) }, e: { type: record([field("v", pgType("vector"))], "public.embedding") }, n: { type: pgType("int4") } },
+  };
+  await execute(client as never, floats, { f8: -0, f4: -0, a: [[-0, 1.5], [0, -0]], v: [1, -0], vs: [[-0]], e: { v: [-0, 2] }, n: -0 });
+  assert.deepEqual(seen, [["-0", "-0", '{{"-0","1.5"},{"0","-0"}}', "[1,-0]", '{"[-0]"}', '("[-0,2]")', -0]]);
+  await execute(client as never, floats, { f8: 1.5, f4: 0, a: [2.5, 0], v: [0.5, 0], vs: [[1e-7]], e: { v: [3] }, n: 0 });
+  assert.deepEqual(seen.at(-1), [1.5, 0, '{"2.5","0"}', "[0.5,0]", '{"[1e-7]"}', '("[3]")', 0]);
 });
 
 test("postgres: an hstore parameter takes an object of its keys, written as the text hstore reads; an array of them as an array of those texts", async () => {
@@ -777,6 +795,59 @@ test("mysql: through a server that refuses prepared statements, a built statemen
   }
 });
 
+test("postgres: an array of a domain over an array type comes back as whole arrays on pg, postgres.js and PGlite, too deep at either level refused, and goes back in as it came out", { skip: pgLive }, async () => {
+  const setup = `create domain ints as int4[]; create table d (id int primary key, x ints[]);
+    insert into d values (1, '{"{1,2}",NULL,"{}"}'), (2, '{{"{1,2}"},{"{3,4}"}}'), (3, '{"{{1,2},{3,4}}"}'), (4, null), (5, '{{NULL},{NULL}}');
+    create domain stamps as timestamptz[]; create table s (x stamps[]);
+    create table n (x ints[]); insert into n values ('{NULL}'), ('{NULL}');
+    create type mood as enum ('ok', 'sad'); create domain moods as mood[]; create table m (x moods[]); insert into m values ('{"{ok,sad}"}')`;
+  const own = await postgresDatabase("reylo_execute_domain_arrays", setup);
+  const pg = driver("pg");
+  const client = new pg.Client(own.url);
+  await client.connect();
+  const { PGlite } = driver("@electric-sql/pglite");
+  const lite = new PGlite();
+  await lite.exec(setup);
+  try {
+    const select = await builtModule(own.url, "domain_arrays", "select x from d where id = :id\n");
+    const insert = await builtModule(own.url, "insert_domain_arrays", "insert into d (id, x) values (:id, :x) returning x\n");
+    const stamps = await builtModule(own.url, "insert_stamps", "insert into s values (:x)\n");
+    // array_agg over the arrays' rows: one more dimension, which the type does not show.
+    const gathered = await builtModule(own.url, "gathered_domain_arrays", "select array_agg(x) as xs from n\n");
+    // A query defined by hand reads the type from the catalog first, which a module on the same client then shares.
+    const byHand = defineQuery({ dialect: "postgres", sql: "select x from d where id = 1", params: [], cardinality: "many" });
+    // The catalog reads a domain over an enum's array as text, which the module's kind outranks.
+    const moodsByHand = defineQuery({ dialect: "postgres", sql: "select x from m", params: [], cardinality: "many" });
+    const moods = await builtModule(own.url, "domain_enum_arrays", "select x from m\n");
+    // Of two columns of one name, the row holds the last one's value, which only its own kind decodes.
+    const twice = await builtModule(own.url, "domain_arrays_twice", "select x as item, 'hello'::text as item from d where id = 1\n");
+    // PGlite parses an array of a type it learned by refreshArrayTypes() itself on a statement's first run in a transaction, where Reylo names no parsers.
+    const cold = [await builtModule(own.url, "domain_arrays_cold", "select x from d where id = :id and true\n"), await builtModule(own.url, "domain_arrays_cold_nulls", "select x from d where id = :id and 1 = 1\n")];
+    await lite.refreshArrayTypes();
+    await lite.transaction(async (tx: never) => {
+      for (const [q, id] of [[cold[0], 2], [cold[1], 5]] as const) await assert.rejects(async () => q.run(tx, { id }), /Column "x" holds an array of 2 dimensions, and its type has one/, `PGlite, a transaction's first run, row ${id}`);
+      assert.deepEqual({ ...(await cold[0].run(tx, { id: 1 })) }, { x: [[1, 2], null, []] }, "PGlite, a transaction's next run");
+    });
+    for (const [name, c] of [["pg", client], ["postgres.js", own.sql], ["PGlite", lite]] as const) {
+      assert.deepEqual(plain((await byHand.run(c)) as object[]), [{ x: [[1, 2], null, []] }], `${name}, by hand`);
+      await moodsByHand.run(c);
+      assert.deepEqual(plain(await moods.run(c)), [{ x: [["ok", "sad"]] }], `${name}, a domain over an enum's array`);
+      assert.deepEqual({ ...(await twice.run(c)) }, { item: "hello" }, `${name}, two columns of one name`);
+      assert.deepEqual({ ...(await select.run(c, { id: 1 })) }, { x: [[1, 2], null, []] }, name);
+      assert.deepEqual({ ...(await select.run(c, { id: 4 })) }, { x: null }, name);
+      for (const id of [2, 3, 5]) await assert.rejects(async () => select.run(c, { id }), /Column "x" holds an array of 2 dimensions, and its type has one/, `${name}, row ${id}`);
+      await assert.rejects(async () => gathered.run(c), /Column "xs" holds an array of 2 dimensions, and its type has one/, name);
+      await assert.rejects(async () => stamps.run(c, { x: [["2026-10-12 19:06:48"]] }), /Parameter "x" is a timestamptz, an instant, so a string for it names its zone/, name);
+      const id = { pg: 6, "postgres.js": 7, PGlite: 8 }[name];
+      assert.deepEqual({ ...(await insert.run(c, { id, x: [[7, 8], [], [9]] })) }, { x: [[7, 8], [], [9]] }, name);
+    }
+  } finally {
+    await client.end();
+    await lite.close();
+    await own.drop();
+  }
+});
+
 test("mysql: PlanetScale's execute() → { rows }", async () => {
   const conn = { execute: async () => ({ rows: [row], statement: "select", headers: ["id"], insertId: "0" }) };
   assert.deepEqual(await execute(conn, my, { id: 1, name: "ada" }), [row]);
@@ -831,6 +902,63 @@ test("mysql: mariadb, which writes a value that is not a Buffer as JSON, gets a 
   }
 });
 
+test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which write a number into the statement and -0 as 0, written in at each of its places as the float (-0e0), the rest left to the driver; mysql2 gets the number, which it binds as a DOUBLE", async () => {
+  // A query defined by hand may name a parameter twice, which a build refuses; the first place types it.
+  const text = "update r set d = ?, f = ?, i = ? + ?, payload = json_array(?)";
+  const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "update r set d = :d, f = :f, i = :i + :u, payload = json_array(:d)", params: ["d", "f", "i", "u"], text, order: ["d", "f", "i", "u", "d"], marks: [[17, 18], [24, 25], [31, 32], [35, 36], [59, 60]], inputs: { d: { type: myType("double") }, f: { type: myType("float") }, i: { type: myType("int") }, u: { type: oneOf(myType("bigint"), myType("double")) } } };
+  const seen: unknown[][] = [];
+  const mariadb = { batch: async () => ({}), query: async (options: { sql: string }, values: unknown[]) => (seen.push([options.sql, values]), []) };
+  const planetscale = { execute: async (sql: string, values: unknown[] | null) => (seen.push([sql, values]), { rows: [] }) };
+  const mysql2 = { query: async () => [[], []], execute: async (options: { sql: string }, values: unknown[]) => (seen.push([options.sql, values]), [[], []]) };
+  for (const client of [mariadb, planetscale, mysql2]) await execute(client as never, q, { d: -0, f: -0, i: -0, u: -0 });
+  const written = "update r set d = (-0e0), f = (-0e0), i = ? + ?, payload = json_array((-0e0))";
+  assert.deepEqual(seen, [[written, [-0, -0]], [written, [-0, -0]], [text, [-0, -0, -0, -0, -0]]]);
+  // A -0 alone leaves no value for the driver to write.
+  const alone: QueryModule<"mysql"> = { dialect: "mysql", sql: "select coalesce(:d, d) as x from r", params: ["d"], text: "select coalesce(?, d) as x from r", order: ["d"], marks: [[16, 17]], inputs: { d: { type: myType("double") } } };
+  seen.length = 0;
+  for (const client of [mariadb, planetscale]) await execute(client as never, alone, { d: -0 });
+  assert.deepEqual(seen, [["select coalesce((-0e0), d) as x from r", []], ["select coalesce((-0e0), d) as x from r", null]]);
+  // After a minus, the parentheses keep `--`, which mariadb 2 reads as a comment, out of the text.
+  const minus: QueryModule<"mysql"> = { dialect: "mysql", sql: "select 1-:d as a, :e as b", params: ["d", "e"], text: "select 1-? as a, ? as b", order: ["d", "e"], marks: [[9, 10], [17, 18]], inputs: { d: { type: myType("double") }, e: { type: myType("double") } } };
+  seen.length = 0;
+  await execute(mariadb as never, minus, { d: -0, e: 1 });
+  assert.deepEqual(seen, [["select 1-(-0e0) as a, ? as b", [1]]]);
+  // Without inputs or marks, as defined by hand, or with the sql_mode its build read its strings
+  // under, every value goes as it is.
+  const { inputs: _, ...untyped } = q;
+  const { marks: __, ...unmarked } = q;
+  seen.length = 0;
+  for (const query of [untyped, unmarked, { ...q, sqlMode: { backslashEscapes: false, ansiQuotes: false } }]) await execute(mariadb as never, query, { d: -0, f: -0, i: -0, u: -0 });
+  assert.deepEqual(seen, Array(3).fill([text, [-0, -0, -0, -0, -0]]));
+  seen.length = 0;
+  for (const client of [mariadb, planetscale]) await execute(client as never, q, { d: 1.5, f: 0, i: 0, u: 2 });
+  assert.deepEqual(seen, Array(2).fill([text, [1.5, 0, 0, 2, 1.5]]));
+});
+
+test("mysql: a DOUBLE of -0 is stored as -0 through mariadb as through mysql2, at each of its places, each keeping the type it has there", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_signed_zero", "create table readings (id int primary key, d double, payload json); insert into readings values (1, 7, '[]')");
+  const u = new URL(MYSQL!);
+  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1), connectionLimit: 1 };
+  const twice: QueryModule<"mysql"> = { dialect: "mysql", ...handWritten("update readings set d = :d, payload = json_array(:d)", "mysql"), inputs: { d: { type: myType("double") } } };
+  try {
+    const coalesced = await builtModule(own.url, "coalesced", "select coalesce(:d, d) as x from readings\n");
+    for (const open of [() => driver("mysql2/promise").createPool(connection), () => driver("mariadb").createPool(connection)]) {
+      const client = open();
+      try {
+        await own.db.query("update readings set d = 7, payload = '[]'");
+        await execute(client, twice, { d: -0 });
+        assert.deepEqual(await own.rows("select cast(d as char) as d, cast(payload as char) as payload from readings"), [{ d: "-0", payload: "[-0.0]" }]);
+        const [{ x }] = await coalesced.run(client, { d: -0 });
+        assert.ok(Object.is(x, -0), `coalesce(:d, d) returned ${typeof x} ${String(x)}`);
+      } finally {
+        await client.end();
+      }
+    }
+  } finally {
+    await own.drop();
+  }
+});
+
 test("postgres: Neon's neon() before 0.10, which sends a Buffer as JSON, gets a binary value in Postgres's hex form", async () => {
   const { plain, view } = binary();
   const seen: unknown[][] = [];
@@ -838,6 +966,54 @@ test("postgres: Neon's neon() before 0.10, which sends a Buffer as JSON, gets a 
   const q: QueryModule<"postgres"> = { dialect: "postgres", sql: "select :plain::bytea, :view::bytea, :buf::bytea, :empty::bytea, :n", params: ["plain", "view", "buf", "empty", "n"] };
   await execute(sql, q, { plain, view, buf: Buffer.from([0, 16, 171]), empty: new Uint8Array(0), n: 1 });
   assert.deepEqual(seen[0], ["\\x0102ff", "\\x0102ff", "\\x0010ab", "\\x", 1]);
+});
+
+test("postgres: PGlite, which picks a parameter's serializer by the oid the server describes, gets binary data whose toString() is bytea's hex text, so a domain over bytea stores the bytes and keeps its own operators", { skip: !existsSync(join(DRIVERS, "@electric-sql", "pglite")) && "lab/drivers is not installed" }, async () => {
+  const { PGlite } = driver("@electric-sql/pglite");
+  const lite = new PGlite();
+  await lite.exec(`create domain blob as bytea; create domain small_blob as blob check (length(value) < 8);
+    create table b (id int primary key, v blob, s small_blob, raw bytea);
+    create function hex_of(x blob) returns text language sql as 'select encode(x, ''hex'')';
+    create function pick(anyelement, anyelement) returns anyelement language sql as 'select coalesce($1, $2)';
+    create domain digest as bytea;
+    create function same_prefix(digest, digest) returns boolean language sql immutable as 'select substring($1 from 1 for 2) = substring($2 from 1 for 2)';
+    create operator = (leftarg = digest, rightarg = digest, function = same_prefix);
+    create table d (x digest); insert into d values ('\\xdead0000'), ('\\xbeef');
+    create domain mapped as bytea; create domain hexed as bytea; create table m (x mapped, y hexed)`);
+  // 00 and 5c, which the domain refused as text, between bytes that are no UTF-8.
+  const bytes = new Uint8Array([0xde, 0xad, 0x00, 0x5c, 0xbe, 0xef]);
+  const hex = "dead005cbeef";
+  const by = { type: pgType("bytea") };
+  const insert: QueryModule<"postgres"> = { dialect: "postgres", sql: "insert into b (id, v, s, raw) values (:id::int, :v, :s, :raw)", params: ["id", "v", "s", "raw"], inputs: { v: by, s: by, raw: by } };
+  const stored = async (id: number) => (await lite.query("select encode(v, 'hex') as v, encode(s, 'hex') as s, encode(raw, 'hex') as raw from b where id = $1", [id])).rows[0];
+  try {
+    await execute(lite, insert, { id: 1, v: bytes, s: bytes, raw: bytes });
+    assert.deepEqual(await stored(1), { v: hex, s: hex, raw: hex }, "a Uint8Array");
+    await lite.transaction((tx: unknown) => execute(tx as never, insert, { id: 2, v: Buffer.from(bytes), s: null, raw: Buffer.from(bytes) }));
+    assert.deepEqual(await stored(2), { v: hex, s: null, raw: hex }, "a Buffer beside a null, in a transaction");
+    // A row read back goes in again as it came out.
+    const [row] = (await execute(lite, { dialect: "postgres", sql: "select v, s, raw from b where id = :id", params: ["id"] }, { id: 1 })) as Record<string, Uint8Array>[];
+    await execute(lite, insert, { id: 3, ...row! });
+    assert.deepEqual(await stored(3), { v: hex, s: hex, raw: hex }, "the row read back");
+    await assert.rejects(async () => execute(lite, insert, { id: 4, v: bytes, s: new Uint8Array(8), raw: bytes }), /violates check constraint "small_blob_check"/);
+    const one = async (sql: string, params: Record<string, unknown>) => ((await execute(lite, { dialect: "postgres", sql, params: Object.keys(params), inputs: Object.fromEntries(Object.keys(params).map((k) => [k, by])) }, params)) as Record<string, unknown>[])[0];
+    assert.deepEqual(await one("select encode((:p::small_blob)::bytea, 'hex') as h", { p: bytes }), { h: hex }, "a cast");
+    assert.deepEqual(await one("select hex_of(:p) as h", { p: bytes }), { h: hex }, "a function's argument");
+    assert.deepEqual(await one("select count(*)::int as n from b where v = :p", { p: bytes }), { n: 3 }, "a comparison");
+    // The parameter's type stays the server's to infer, as on every other driver: the domain's.
+    assert.deepEqual(await one("select encode(pick(v, :p), 'hex') as h from b where id = 1", { p: new Uint8Array([1]) }), { h: hex }, "an anyelement function, given the domain twice");
+    assert.deepEqual(await one("select count(*)::int as n from d where x = :p", { p: new Uint8Array([0xde, 0xad, 0x11]) }), { n: 1 }, "the domain's own operator");
+    // A domain the app gave bytea's serializer still gets the bytes through it.
+    const oid = async (name: string) => (await lite.query(`select '${name}'::regtype::oid as oid`)).rows[0].oid;
+    lite.serializers[await oid("mapped")] = lite.serializers[17];
+    // A serializer of the app's own that writes a Buffer with toString("hex").
+    lite.serializers[await oid("hexed")] = (b: Buffer) => `\\x${b.toString("hex")}`;
+    await execute(lite, { dialect: "postgres", sql: "insert into m values (:x, :y)", params: ["x", "y"], inputs: { x: by, y: by } }, { x: bytes, y: Buffer.from(bytes) });
+    assert.deepEqual((await lite.query("select encode(x, 'hex') as x, encode(y, 'hex') as y from m")).rows, [{ x: hex, y: hex }], "a domain mapped to bytea's serializer, and one to a serializer that calls toString('hex')");
+    assert.equal(bytes.toString(), "222,173,0,92,190,239", "the app's own value is left as it is");
+  } finally {
+    await lite.close();
+  }
 });
 
 test("every other driver gets a binary value as it is, pg-promise included, since it binds a { text, values } object", async () => {
