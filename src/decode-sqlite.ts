@@ -37,7 +37,7 @@
 //   only be one; a BIGINT's number within 2^53, or libSQL's BigInt or digits, is its BigInt.
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, coerce, columnKind, DecodeError, exactInteger, ParameterError, refuseTruth, truth, type Columns, type Kind } from "./values.ts";
-import { isDurableObjectSql, isSqlJs, isSqliteWasm, isTurso, type AnyClient as Client, type Bound, type QueryModule, type Runtime } from "./execute.ts";
+import { isDurableObjectSql, type AnyClient as Client, type Bound, type QueryModule, type Runtime } from "./execute.ts";
 import { readSqliteError } from "./query-error.ts";
 import type { EngineType } from "./engine-type.ts";
 
@@ -422,8 +422,75 @@ function sqliteWasmValues(names: readonly string[], values: unknown[]): unknown[
   return values;
 }
 
+// SQLite Wasm's oo1 Database: prepare() and selectObjects(), which no other driver has. Its
+// statement has no all(), so it would otherwise be taken for better-sqlite3's.
+function isSqliteWasm(c: Client | null | undefined): boolean {
+  return c != null && typeof c.prepare === "function" && typeof c.selectObjects === "function";
+}
+
+// sql.js's Database, which getRowsModified() tells apart, answers at once as better-sqlite3's does.
+// Its statement has no all(), so it would otherwise be taken for better-sqlite3's.
+function isSqlJs(c: Client | null | undefined): boolean {
+  return c != null && typeof c.prepare === "function" && typeof c.getRowsModified === "function";
+}
+
+/** The first sql.js that binds a BigInt as an INTEGER and gives each SQLite error its code. */
+const SQLJS_MIN = "1.17.0";
+const sqlJsChecked = new WeakMap<object, boolean>();
+
+// Before SQLJS_MIN, sql.js bound a BigInt as its text, which an INTEGER compares unequal to, and
+// threw SQLite's errors with their message alone. Each database is asked once which its sql.js does:
+// a BigInt bound to typeof(?), and the code of a statement that does not parse.
+function sqlJsCurrent(db: Client): boolean {
+  let current = sqlJsChecked.get(db);
+  if (current !== undefined) return current;
+  const st = db.prepare("select typeof(?)");
+  try {
+    st.bind([BigInt(0)]);
+    st.step();
+    current = st.get()[0] === "integer";
+  } finally {
+    st.free();
+  }
+  if (current) {
+    try {
+      db.prepare("select from").free();
+    } catch (e) {
+      current = (e as { code?: unknown }).code === "SQLITE_ERROR";
+    }
+  }
+  sqlJsChecked.set(db, current);
+  return current;
+}
+
+// A SQLite client with prepare() whose statements answer at once. D1 (batch()), sqlite3 and
+// sqlite (all() on the database), libSQL (execute()), Bun.sql (unsafe()) and Turso's promise API
+// are asynchronous. Turso's compat Database has batch() as D1 does, and answers at once; its
+// maxWriteReplicationIndex(), which every Database of Turso's has, tells it from D1's.
+function isSyncSqlite(c: Client | null | undefined): boolean {
+  return (
+    c != null &&
+    typeof c.prepare === "function" &&
+    (typeof c.batch !== "function" || typeof c.maxWriteReplicationIndex === "function") &&
+    typeof c.all !== "function" &&
+    typeof c.execute !== "function" &&
+    typeof c.unsafe !== "function" &&
+    !isTurso(c)
+  );
+}
+
+// Turso's promise API (@tursodatabase/database): a Database has connect() and
+// maxWriteReplicationIndex() in every release from 0.4 (0.4 has no all(), so it looked synchronous,
+// and from 0.6 its all() took it for sqlite3's, whose callback it never calls); the Transaction
+// that transactionAsync() hands its callback (0.7 and later) has all() beside batch(), which
+// sqlite3's database lacks. The compat Database has no connect().
+function isTurso(c: Client): boolean {
+  return typeof c.prepare === "function" && ((typeof c.connect === "function" && typeof c.maxWriteReplicationIndex === "function") || (typeof c.all === "function" && typeof c.batch === "function"));
+}
+
 /** The rows of a synchronous client: a Durable Object's SQL storage, whose exec() refuses a BigInt ("Cannot convert a BigInt value to a number"), SQLite Wasm's oo1 Database (`runSqliteWasm`), sql.js's Database (`runSqlJs`), or a database with prepare() (`runSyncSqlite`). */
 function runSqliteSync(c: Client, query: QueryModule<"sqlite">, { text, values, names }: Bound): unknown[] | Promise<unknown[]> {
+  if (isSqlJs(c) && !sqlJsCurrent(c)) throw new TypeError(`This sql.js binds a BigInt as its text and throws SQLite's errors with no code, which .try() could not tell apart: reylo takes sql.js ${SQLJS_MIN} or later.`);
   // Every Database of Turso's has maxWriteReplicationIndex(), and its compat Database has no sync()
   // (nor batch() before 0.7); the libsql package's Database has both of the first two, and binds
   // 2^63 as a REAL.
@@ -435,4 +502,17 @@ function runSqliteSync(c: Client, query: QueryModule<"sqlite">, { text, values, 
 }
 
 /** SQLite's half of the run time (src/execute.ts, `Runtime`), which `defineSqliteQuery` passes. */
-export const sqlite: Runtime<"sqlite"> = { dialect: "sqlite", run: runSqlite, runSync: runSqliteSync, readError: readSqliteError, readErrorSync: readSqliteError, decoder: sqliteDecoder };
+export const sqlite: Runtime<"sqlite"> = {
+  dialect: "sqlite",
+  run: runSqlite,
+  runSync: runSqliteSync,
+  answersAtOnce: (c) => isSyncSqlite(c) || isDurableObjectSql(c),
+  readError: readSqliteError,
+  readErrorSync: readSqliteError,
+  decoder: sqliteDecoder,
+  // A truth value, which a BOOLEAN column returns, goes as 1 or 0: better-sqlite3 refuses a boolean
+  // ("SQLite3 can only bind numbers, strings, bigints, buffers, and null") and libSQL binds `true` as
+  // the REAL 1.0. A query without `inputs` gets neither.
+  encode: (_type, v) => (typeof v === "boolean" ? (v ? 1 : 0) : v),
+  clients: "prepare(sql) as on better-sqlite3, node:sqlite, bun:sqlite, Turso's @tursodatabase/database, Cloudflare D1, the oo1 Database of @sqlite.org/sqlite-wasm and sql.js; exec(sql, ...values) as on a Durable Object's ctx.storage.sql; execute({ sql, args }) as on @libsql/client; all(sql, params) as on sqlite3 and sqlite; unsafe(text, values) as on Bun.sql; or a Drizzle database or Knex instance over one of them",
+};

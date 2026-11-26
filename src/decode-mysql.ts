@@ -27,7 +27,8 @@ import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, coerce, columnKind, DecodeError, describe, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
 import { bunRows } from "./decode.ts";
 import { readMysqlError } from "./query-error.ts";
-import type { AnyClient as Client, Bound, Marks, QueryModule, Runtime } from "./execute.ts";
+import { vectorParameter, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { bareName, isMysqlSet, type EngineType } from "./engine-type.ts";
 import type { SqlMode } from "./engine-core.ts";
 
 type AnyClient = Record<string, any>;
@@ -575,5 +576,25 @@ function mysqlDecoder(name: string, kind: Kind, delim: string | undefined): (v: 
   return (v) => coerce(kind, v, name, delim);
 }
 
+// A SET goes as its members joined by commas, in the order its column declares them: MySQL stores a
+// SET in that order, and compares one with a parameter's text as it is written. A VECTOR, MySQL's one
+// array, goes as the text of its floats, `[1,2.5]`, which the engine's `to_vector(?)` reads: drivers
+// left to themselves sent an array as the text "1,2,3" (mysql2's execute() before 3.24) or expanded
+// it into a list of values (mysql2's query(), mariadb).
+function mysqlValue(type: EngineType, v: unknown, name: string): unknown {
+  if (type.kind === "array" && isMysqlSet(type) && v instanceof Set) {
+    const labels = type.element.type.kind === "enum" ? type.element.type.values.map((l) => l.value) : undefined;
+    return (labels === undefined ? [...v] : [...v].sort((a, b) => labels.indexOf(a as string) - labels.indexOf(b as string))).join(",");
+  }
+  return type.kind === "array" && bareName(type) === "vector" && Array.isArray(v) ? vectorParameter(v, name, "a VECTOR") : v;
+}
+
 /** MySQL's half of the run time (src/execute.ts, `Runtime`), which `defineMysqlQuery` passes. */
-export const mysql: Runtime<"mysql"> = { dialect: "mysql", run: runMysql, readError: readMysqlError, decoder: mysqlDecoder };
+export const mysql: Runtime<"mysql"> = {
+  dialect: "mysql",
+  run: runMysql,
+  readError: readMysqlError,
+  decoder: mysqlDecoder,
+  encode: mysqlValue,
+  clients: "execute(text, values) as on mysql2 and PlanetScale; query(text, values) as on mariadb's pool or connection, from its promise or callback API; unsafe(text, values) as on Bun.sql; a mysql2 callback pool or connection; or a Drizzle database or Knex instance over one of them",
+};
