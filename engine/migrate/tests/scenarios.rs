@@ -4742,6 +4742,33 @@ async fn a_dry_run_says_which_constraints_it_cant_check() {
     assert!(!out.contains("logs_pkey") && !out.contains("journal"), "{out}");
 }
 
+/// On Postgres: an update of a partition key may move a row out of the partition a check reads, an
+/// insert may fill a column with a default whose function writes to another table, and a column added
+/// with a default that is null fills no row, so the dry run says it can't check what follows them.
+#[tokio::test(flavor = "current_thread")]
+async fn a_dry_run_leaves_unchecked_what_moved_rows_and_defaults_reach() {
+    let Some(mut p) = P::new(Dialect::Postgres).await else { return };
+    let base = "create table users (id int primary key, plan text);\ncreate function fix_plans() returns int language plpgsql as $$ begin update users set plan = 'free' where plan not in ('free', 'pro'); return 1; end $$;\ncreate table audit (id int primary key, at int default fix_plans());\ncreate table events (id int, bucket int, payload int) partition by list (bucket);\ncreate table events_old partition of events for values in (1);\ncreate table events_new partition of events for values in (2);\ncreate table members (id int primary key);";
+    p.file("20261027100000_base.sql", base);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("insert into users values (1, 'gold'); insert into events values (1, 1, -1); insert into members values (1)").await;
+    p.file("20261027110000_move.sql", "update events set bucket = 2 where bucket = 1;");
+    p.file("20261027110001_payload.sql", "alter table events_old add constraint events_old_payload check (payload > 0);");
+    p.file("20261027110002_add_plan.sql", "alter table members add column plan text default (null::text);");
+    p.file("20261027110003_plan_required.sql", "alter table members alter column plan set not null;");
+    // Last, since a write no reading can follow reaches every check after it.
+    p.file("20261027110004_audit_row.sql", "insert into audit (id) values (1);");
+    p.file("20261027110005_users_plan.sql", "alter table users add constraint users_plan check (plan in ('free', 'pro'));");
+    p.schema(&format!("{base}\nalter table users add constraint users_plan check (plan in ('free', 'pro'));\nalter table events_old add constraint events_old_payload check (payload > 0);\nalter table members add column plan text not null;\n"));
+    p.output();
+    assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+    let out = p.output();
+    assert!(!out.contains("✗"), "{out}");
+    assert_has!(&out, r"_users_plan\.sql\n(      ! [^\n]*\n)*      ! It holds rows to users_plan, which can't be checked here: \d+_audit_row\.sql changes data first, which may reach them; 1 row breaks it as they stand\n");
+    assert_has!(&out, r"_payload\.sql\n(      ! [^\n]*\n)*      ! It holds rows to events_old_payload, which can't be checked here: \d+_move\.sql changes those rows first; 1 row breaks it as they stand\n");
+    assert_has!(&out, r"_plan_required\.sql\n(      ! [^\n]*\n)*      ! It holds rows to the NOT NULL on members\.plan, which can't be checked here: a pending migration adds a column it reads\n");
+}
+
 /// A check beside a drop of another column of its table, in one migration on Postgres and in two
 /// on MySQL, is checked against the target's rows: the column it reads is as the target has it.
 #[tokio::test(flavor = "current_thread")]

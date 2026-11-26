@@ -5238,7 +5238,7 @@ fn drops_of(sql: &str, d: Dialect) -> (Vec<Named>, Vec<(Named, String)>) {
 
 /// The columns a migration's statements add (`alter table … add [column]`), each by its table's last
 /// name part and its own name as a check compares them, and whether the statement that adds it fills
-/// every row it already has: with a default that isn't null or an identity on Postgres (a `serial`
+/// every row it already has: with a default that can't be null or an identity on Postgres (a `serial`
 /// among them), and on MySQL with any of those or `not null`, which fills the type's own default.
 #[cfg(feature = "cli")]
 fn columns_added(sql: &str, d: Dialect) -> Vec<((String, String), bool)> {
@@ -5290,6 +5290,7 @@ fn columns_added(sql: &str, d: Dialect) -> Vec<((String, String), bool)> {
             // Its own words, not a `check (…)`'s or a key's `on delete set default`.
             let mut depth = 0i32;
             let mut words: Vec<&str> = Vec::new();
+            let mut defaults: Vec<usize> = Vec::new();
             for j in c + 1..end.min(up.len()) {
                 if symbol(j, "(") {
                     depth += 1;
@@ -5297,10 +5298,37 @@ fn columns_added(sql: &str, d: Dialect) -> Vec<((String, String), bool)> {
                     depth -= 1;
                 } else if depth == 0 && !(up[j] == "DEFAULT" && j > 0 && up[j - 1] == "SET") {
                     words.push(up[j].as_str());
+                    if up[j] == "DEFAULT" {
+                        defaults.push(j);
+                    }
                 }
             }
             let has = |pair: [&str; 2]| words.windows(2).any(|p| p == pair);
-            let defaulted = words.iter().enumerate().any(|(i, w)| *w == "DEFAULT" && words.get(i + 1) != Some(&"NULL"));
+            // A default fills the rows unless what it is may be null: its first term, with what a
+            // parenthesis or a call after it holds, names no `null` or `nullif`.
+            let nullable = |j: usize| {
+                let mut k = j + 1;
+                if !symbol(k, "(") && symbol(k + 1, "(") {
+                    k += 1;
+                }
+                let mut terms = vec![j + 1];
+                if symbol(k, "(") {
+                    let mut depth = 0i32;
+                    for i in k..end.min(up.len()) {
+                        terms.push(i);
+                        if symbol(i, "(") {
+                            depth += 1;
+                        } else if symbol(i, ")") {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                terms.iter().any(|&i| matches!(up.get(i).map(String::as_str), Some("NULL" | "NULLIF") | None))
+            };
+            let defaulted = defaults.iter().any(|&j| !nullable(j));
             let filled = defaulted
                 || words.iter().any(|w| matches!(*w, "IDENTITY" | "SERIAL" | "BIGSERIAL" | "SMALLSERIAL" | "SERIAL4" | "SERIAL8" | "SERIAL2" | "AUTO_INCREMENT"))
                 || (d == Dialect::Mysql && has(["NOT", "NULL"]));
@@ -5843,6 +5871,8 @@ struct Written {
     calls: Vec<String>,
     changes_rows: bool,
     reads: bool,
+    /// Whether it may fill a column with its default: an insert, or an update that sets one `default`.
+    defaults: bool,
 }
 
 #[cfg(feature = "cli")]
@@ -5973,7 +6003,8 @@ fn written(s: &crate::sql::Statement, d: Dialect) -> Option<Written> {
         _ => true,
     };
     let reads = up.iter().any(|w| matches!(w.as_str(), "FROM" | "JOIN" | "USING" | "TABLE"));
-    Some(Written { tables, calls, changes_rows, reads })
+    let defaults = matches!(word(0), "INSERT" | "REPLACE") || (word(0) == "UPDATE" && up.iter().any(|w| w == "DEFAULT"));
+    Some(Written { tables, calls, changes_rows, reads, defaults })
 }
 
 /// What a pending migration's statements that change data write, read on the shadow it just ran on:
@@ -5994,7 +6025,7 @@ async fn data_writes(db: &mut Db, m: &Migration, d: Dialect) -> Vec<Write> {
     for s in statements {
         // A table made from a query holds the rows it reads.
         if let Some(table) = made_from_query(&s) {
-            match reach(db, &[(table, None)], false).await {
+            match reach(db, &[(table, None)], false, false).await {
                 Some(tables) => out.extend(tables.into_iter().map(|(table, oid, columns)| Write { by: m.name.clone(), table: Some(table), oid, columns, retyped: false, reads: true })),
                 None => out.push(Write { by: m.name.clone(), table: None, oid: None, columns: None, retyped: false, reads: true }),
             }
@@ -6004,7 +6035,7 @@ async fn data_writes(db: &mut Db, m: &Migration, d: Dialect) -> Vec<Write> {
             continue;
         }
         let (tables, reads) = match written(&s, d) {
-            Some(w) if !fluid && !may_write(db, &w.calls).await => (reach(db, &w.tables, w.changes_rows).await, w.reads),
+            Some(w) if !fluid && !may_write(db, &w.calls).await => (reach(db, &w.tables, w.changes_rows, w.defaults).await, w.reads),
             _ => (None, true),
         };
         match tables {
@@ -6093,9 +6124,12 @@ fn mysql_literal(text: &str) -> String {
 /// names [`table_identities`] gives them: on Postgres each with its partitions and children, and the
 /// tables it is a partition or child of, whose checks read its rows. None where one is no table, or
 /// has a trigger or a rule, or (for a write that `changes_rows`) a foreign key that cascades from it
-/// to another, whose writes no reading of the statement can follow.
+/// to another, or (for a write that fills `defaults`) a default that calls a function that may write,
+/// whose writes no reading of the statement can follow (an extension's own, such as
+/// `uuid_generate_v4`, is taken to write nothing). An update that sets a column a partitioned
+/// table's key reads may move rows from one partition to another, so it reaches every column of each.
 #[cfg(feature = "cli")]
-async fn reach(db: &mut Db, tables: &[(String, Option<Vec<String>>)], changes_rows: bool) -> Option<Vec<(String, Option<String>, Option<Vec<String>>)>> {
+async fn reach(db: &mut Db, tables: &[(String, Option<Vec<String>>)], changes_rows: bool, defaults: bool) -> Option<Vec<(String, Option<String>, Option<Vec<String>>)>> {
     let d = db.dialect();
     let mut out = Vec::new();
     for (name, columns) in tables {
@@ -6108,7 +6142,14 @@ async fn reach(db: &mut Db, tables: &[(String, Option<Vec<String>>)], changes_ro
                      exists (select 1 from pg_trigger g where g.tgrelid = c.oid and (not g.tgisinternal or (g.tgparentid <> 0 and g.tgconstraint = 0)))
                        or exists (select 1 from pg_rewrite w where w.ev_class = c.oid and w.rulename <> '_RETURN') as hidden,
                      exists (select 1 from pg_constraint f where f.contype = 'f' and f.confrelid = c.oid and (f.confdeltype not in ('a', 'r') or f.confupdtype not in ('a', 'r'))) as cascades,
-                     (select string_agg(a.attname, chr(31)) from pg_attribute a where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped and a.attgenerated <> '') as derived
+                     (select string_agg(a.attname, chr(31)) from pg_attribute a where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped and a.attgenerated <> '') as derived,
+                     exists (select 1 from pg_depend dp join pg_proc p on p.oid = dp.refobjid join pg_namespace n on n.oid = p.pronamespace
+                       where dp.refclassid = 'pg_proc'::regclass and p.provolatile = 'v' and n.nspname not in ('pg_catalog', 'information_schema')
+                         and not exists (select 1 from pg_depend e where e.classid = 'pg_proc'::regclass and e.objid = p.oid and e.deptype = 'e')
+                         and ((dp.classid = 'pg_attrdef'::regclass and dp.objid in (select ad.oid from pg_attrdef ad where ad.adrelid = c.oid))
+                           or (dp.classid = 'pg_type'::regclass and dp.objid in (select a.atttypid from pg_attribute a where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped)))) as defaults,
+                     (select string_agg(a.attname, chr(31)) from pg_partitioned_table pt join pg_attribute a on a.attrelid = pt.partrelid and a.attnum = any(pt.partattrs::int2[]) where pt.partrelid = c.oid) as keys,
+                     exists (select 1 from pg_partitioned_table pt where pt.partrelid = c.oid and pt.partexprs is not null) as keyed_by_expression
                    from tree join pg_class c on c.oid = tree.oid",
                 crate::db::literal(name)
             ),
@@ -6125,12 +6166,13 @@ async fn reach(db: &mut Db, tables: &[(String, Option<Vec<String>>)], changes_ro
             Dialect::Sqlite => return None,
         };
         let rows = db.rows(&sql).await.ok()?;
-        if rows.is_empty() || rows.iter().any(|r| !r.flag("plain") || r.flag("hidden") || (changes_rows && r.flag("cascades"))) {
+        if rows.is_empty() || rows.iter().any(|r| !r.flag("plain") || r.flag("hidden") || (changes_rows && r.flag("cascades")) || (defaults && r.flag("defaults"))) {
             return None;
         }
+        let moves = columns.as_ref().is_some_and(|set| rows.iter().any(|r| r.flag("keyed_by_expression") || r.get("keys").is_some_and(|k| k.split('\u{1f}').any(|k| set.iter().any(|c| c == k)))));
         for r in &rows {
             // An update writes the generated columns of what it sets too, and on MySQL those set `on update`.
-            let columns = columns.as_ref().map(|c| c.iter().cloned().chain(r.get("derived").into_iter().flat_map(|g| g.split('\u{1f}').map(String::from))).collect());
+            let columns = columns.as_ref().filter(|_| !moves).map(|c| c.iter().cloned().chain(r.get("derived").into_iter().flat_map(|g| g.split('\u{1f}').map(String::from))).collect());
             out.push((r.text("t").to_string(), r.get("o").map(String::from), columns));
         }
     }
@@ -11621,6 +11663,13 @@ mod tests {
         assert_eq!(tables("select setval('s', 1)", p), Some(vec![]));
         assert_eq!(tables("select * into temp users_new from users", p), Some(rows(&["users_new"])));
         assert_eq!(written(&split_statements("select setval('s', 1)", p)[0], p).unwrap().calls, ["setval"]);
+        // What may fill a column with its default.
+        let defaults = |sql: &str| written(&split_statements(sql, p)[0], p).unwrap().defaults;
+        assert!(defaults("insert into audit default values") && defaults("update t set n = default") && !defaults("update t set n = 0") && !defaults("delete from t"));
+        // A column added with a default fills every row only where the default can't be null.
+        let fills = |sql: &str| super::columns_added(sql, p).into_iter().map(|(_, f)| f).collect::<Vec<_>>();
+        assert_eq!(fills("alter table u add column a text default 'x', add column b text default (null::text), add column c text default cast(null as text), add column d text default null"), [true, false, false, false]);
+        assert_eq!(fills("alter table u add column a timestamptz default now(), add column b int default nullif(1, 1), add column c int default (1), add column d int references t on delete set default"), [true, false, true, false]);
         let made = |sql: &str, d| super::made_from_query(&split_statements(sql, d)[0]);
         assert_eq!(made("create table if not exists s.copy as select * from users", p).as_deref(), Some("s.copy"));
         assert_eq!(made("create table copy (id int) select id from users", m).as_deref(), Some("copy"));
