@@ -366,7 +366,9 @@ const keepText = (x: string) => x;
 function hexOnToString(v: unknown): unknown {
   if (!(v instanceof Uint8Array)) return v;
   const view = v.subarray(0);
-  Object.defineProperty(view, "toString", { value: () => asByteaHex(view) });
+  // A Buffer's toString("hex") and its other encodings are left as they are.
+  const own = view.toString;
+  Object.defineProperty(view, "toString", { value: (...args: unknown[]) => (args.length ? own.apply(view, args as []) : asByteaHex(view)) });
   return view;
 }
 
