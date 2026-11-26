@@ -125,13 +125,14 @@ for (const i of ids) {
     const vague = (r: any) => r.at.length > 0 && r.at.every((at: any) => r.answer.columns?.find((c: any) => c.name.toLowerCase() === String(at.column).toLowerCase())?.kind === "any");
     const overBroadNull = (r: any) => r.problems.length > 0 && r.problems.every((p: string) => p.includes("it is never null"));
     const severity = (r: any) => (!r.answer.code ? 0 : (r.answer.untyped || r.answer.error || vague(r) || r.answer.raw) ? 0 : overBroadNull(r) ? 2 : 1);
-    const first = [...wrong].sort((x: any, y: any) => Number(drawn(y)) - Number(drawn(x)) || severity(x) - severity(y) || rank(row, x.probe) - rank(row, y.probe))[0];
+    const reyloFor = (r: any) => results.tools.reylo?.cells[row]?.results.find((x: any) => x.db === r.db && x.probe === r.probe)?.answer;
+    const first = [...wrong].filter((r: any) => !!reyloFor(r)?.shown).sort((x: any, y: any) => Number(drawn(y)) - Number(drawn(x)) || severity(x) - severity(y) || rank(row, x.probe) - rank(row, y.probe))[0];
     let example: any;
     if (first) {
       const same = (r: any) => r.sql === first.sql && r.problems.join() === first.problems.join();
       const dbs = wrong.filter(same).map((r: any) => DB_NAME[r.db]);
       const dbsRun = new Set(c.results.map((r: any) => r.db)).size;
-      const reylo = results.tools.reylo?.cells[row]?.results.find((x: any) => x.db === first.db && x.probe === first.probe)?.answer;
+      const reylo = reyloFor(first);
       const a = first.answer;
       // A column is named as the query names it, which is Reylo's name for it; an adapter may name a lone column `v`, or a Go field `ID`.
       const names = reylo?.columns?.length === a.columns?.length ? reylo.columns.map((x: any) => x.name) : (a.columns ?? []).map((x: any) => x.name);

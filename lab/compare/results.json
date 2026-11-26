@@ -85,7 +85,8 @@
           "name": "v",
           "type": "number[] | null",
           "kind": "json",
-          "nullable": true
+          "nullable": true,
+          "array": true
          }
         ],
         "cardinality": "one",
@@ -3866,7 +3867,17 @@
           "fields": [
            "id",
            "name"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": "many",
@@ -3891,10 +3902,21 @@
           "type": "{ id: number; title: string }[] | null",
           "kind": "json",
           "nullable": true,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": "one",
@@ -3925,10 +3947,21 @@
           "type": "{ id: number; title: string }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": "many",
@@ -3959,13 +3992,36 @@
           "type": "({ id: number; author_id: number; title: string; score: number | null; created_at: string })[] | null",
           "kind": "json",
           "nullable": true,
+          "array": true,
           "fields": [
            "id",
            "author_id",
            "title",
            "score",
            "created_at"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author_id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "created_at": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": "many",
@@ -3993,7 +4049,17 @@
           "fields": [
            "id",
            "name"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": "many",
@@ -4018,10 +4084,21 @@
           "type": "{ id: number; title: string }[] | null",
           "kind": "json",
           "nullable": true,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": "one",
@@ -4052,10 +4129,21 @@
           "type": "{ id: number; title: string }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": "many",
@@ -4083,7 +4171,17 @@
           "fields": [
            "id",
            "name"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": "many",
@@ -4108,10 +4206,21 @@
           "type": "{ id: number; title: string }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": "one",
@@ -4142,10 +4251,21 @@
           "type": "{ id: number; title: string }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": "many",
@@ -4179,7 +4299,13 @@
           "nullable": false,
           "fields": [
            "x"
-          ]
+          ],
+          "fieldTypes": {
+           "x": {
+            "kind": "num",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": "many",
@@ -4209,7 +4335,13 @@
           "nullable": false,
           "fields": [
            "x"
-          ]
+          ],
+          "fieldTypes": {
+           "x": {
+            "kind": "num",
+            "nullable": false
+           }
+          }
          }
         ],
         "columns": [],
@@ -5036,10 +5168,21 @@
           "type": "{ id: number; title: string }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": "one",
@@ -5250,10 +5393,21 @@
           "type": "{ id: number; title: string }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": "one",
@@ -5464,10 +5618,21 @@
           "type": "{ id: number; title: string }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": "one",
@@ -32027,7 +32192,7 @@
    ],
    "connects": "no",
    "wrote": [
-    "?? db/0000_legal_microchip.sql",
+    "?? db/0000_flawless_wolfpack.sql",
     "?? db/meta/0000_snapshot.json",
     "?? db/meta/_journal.json",
     "?? db/relations.ts",
@@ -32038,7 +32203,7 @@
      "state": "n",
      "right": 0,
      "total": 1,
-     "note": "A run leaves new files to commit: `db/0000_legal_microchip.sql`, `db/meta/0000_snapshot.json`, `db/meta/_journal.json`.",
+     "note": "A run leaves new files to commit: `db/0000_flawless_wolfpack.sql`, `db/meta/0000_snapshot.json`, `db/meta/_journal.json`.",
      "results": []
     },
     "from-the-database": {
@@ -34437,13 +34602,48 @@
            "serverStatus",
            "warningStatus",
            "changedRows"
-          ]
+          ],
+          "fieldTypes": {
+           "constructor": {
+            "kind": "json",
+            "nullable": false
+           },
+           "affectedRows": {
+            "kind": "num",
+            "nullable": false
+           },
+           "fieldCount": {
+            "kind": "num",
+            "nullable": false
+           },
+           "info": {
+            "kind": "text",
+            "nullable": false
+           },
+           "insertId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "serverStatus": {
+            "kind": "num",
+            "nullable": false
+           },
+           "warningStatus": {
+            "kind": "num",
+            "nullable": false
+           },
+           "changedRows": {
+            "kind": "num",
+            "nullable": false
+           }
+          }
          },
          {
           "name": "1",
           "type": "FieldPacket[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "constructor",
            "catalog",
@@ -34466,7 +34666,93 @@
            "typeName",
            "encoding",
            "columnLength"
-          ]
+          ],
+          "fieldTypes": {
+           "constructor": {
+            "kind": "json",
+            "nullable": false
+           },
+           "catalog": {
+            "kind": "text",
+            "nullable": false
+           },
+           "charsetNr": {
+            "kind": "num",
+            "nullable": true
+           },
+           "db": {
+            "kind": "text",
+            "nullable": true
+           },
+           "schema": {
+            "kind": "text",
+            "nullable": true
+           },
+           "characterSet": {
+            "kind": "num",
+            "nullable": true
+           },
+           "decimals": {
+            "kind": "num",
+            "nullable": false
+           },
+           "default": {
+            "kind": "any",
+            "nullable": true
+           },
+           "flags": {
+            "kind": "json",
+            "nullable": false
+           },
+           "length": {
+            "kind": "num",
+            "nullable": true
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           },
+           "orgName": {
+            "kind": "text",
+            "nullable": false
+           },
+           "orgTable": {
+            "kind": "text",
+            "nullable": false
+           },
+           "protocol41": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "table": {
+            "kind": "text",
+            "nullable": false
+           },
+           "type": {
+            "kind": "num",
+            "nullable": true
+           },
+           "columnType": {
+            "kind": "num",
+            "nullable": true
+           },
+           "zerofill": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "typeName": {
+            "kind": "text",
+            "nullable": true
+           },
+           "encoding": {
+            "kind": "text",
+            "nullable": true
+           },
+           "columnLength": {
+            "kind": "num",
+            "nullable": true
+           }
+          }
          },
          {
           "name": "length",
@@ -34667,13 +34953,13 @@
           "nullable": false
          },
          {
-          "name": "__@iterator@26315",
+          "name": "__@iterator@26686",
           "type": "() => ArrayIterator<ResultSetHeader | FieldPacket[]>",
           "kind": "json",
           "nullable": false
          },
          {
-          "name": "__@unscopables@26378",
+          "name": "__@unscopables@26749",
           "type": "{ [x: number]: boolean | undefined; length?: boolean | undefined; toString?: boolean | undefined; toLocaleString?: boolean | undefined; pop?: boolean | undefined; push?: boolean | undefined; concat?: boolean | undefined; join?: boolean | undefined; reverse?: boolean | undefined; shift?: boolean | undefined; slice?: boolean | undefined; sort?: boolean | undefined; splice?: boolean | undefined; unshift?: boolean | undefined; indexOf?: boolean | undefined; lastIndexOf?: boolean | undefined; every?: boolean | undefined; some?: boolean | undefined; forEach?: boolean | undefined; map?: boolean | undefined; filter?: boolean | undefined; reduce?: boolean | undefined; reduceRight?: boolean | undefined; find?: boolean | undefined; findIndex?: boolean | undefined; fill?: boolean | undefined; copyWithin?: boolean | undefined; entries?: boolean | undefined; keys?: boolean | undefined; values?: boolean | undefined; includes?: boolean | undefined; flatMap?: boolean | undefined; flat?: boolean | undefined; at?: boolean | undefined; [Symbol.iterator]?: boolean | undefined; readonly [Symbol.unscopables]?: boolean | undefined; }",
           "kind": "json",
           "nullable": false,
@@ -34711,9 +34997,151 @@
            "flatMap",
            "flat",
            "at",
-           "__@iterator@26315",
-           "__@unscopables@26378"
-          ]
+           "__@iterator@26686",
+           "__@unscopables@26749"
+          ],
+          "fieldTypes": {
+           "length": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "toString": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "toLocaleString": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "pop": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "push": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "concat": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "join": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "reverse": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "shift": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "slice": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "sort": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "splice": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "unshift": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "indexOf": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "lastIndexOf": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "every": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "some": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "forEach": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "map": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "filter": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "reduce": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "reduceRight": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "find": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "findIndex": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "fill": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "copyWithin": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "entries": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "keys": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "values": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "includes": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "flatMap": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "flat": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "at": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "__@iterator@26686": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "__@unscopables@26749": {
+            "kind": "bool",
+            "nullable": true
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -35105,13 +35533,48 @@
            "serverStatus",
            "warningStatus",
            "changedRows"
-          ]
+          ],
+          "fieldTypes": {
+           "constructor": {
+            "kind": "json",
+            "nullable": false
+           },
+           "affectedRows": {
+            "kind": "num",
+            "nullable": false
+           },
+           "fieldCount": {
+            "kind": "num",
+            "nullable": false
+           },
+           "info": {
+            "kind": "text",
+            "nullable": false
+           },
+           "insertId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "serverStatus": {
+            "kind": "num",
+            "nullable": false
+           },
+           "warningStatus": {
+            "kind": "num",
+            "nullable": false
+           },
+           "changedRows": {
+            "kind": "num",
+            "nullable": false
+           }
+          }
          },
          {
           "name": "1",
           "type": "FieldPacket[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "constructor",
            "catalog",
@@ -35134,7 +35597,93 @@
            "typeName",
            "encoding",
            "columnLength"
-          ]
+          ],
+          "fieldTypes": {
+           "constructor": {
+            "kind": "json",
+            "nullable": false
+           },
+           "catalog": {
+            "kind": "text",
+            "nullable": false
+           },
+           "charsetNr": {
+            "kind": "num",
+            "nullable": true
+           },
+           "db": {
+            "kind": "text",
+            "nullable": true
+           },
+           "schema": {
+            "kind": "text",
+            "nullable": true
+           },
+           "characterSet": {
+            "kind": "num",
+            "nullable": true
+           },
+           "decimals": {
+            "kind": "num",
+            "nullable": false
+           },
+           "default": {
+            "kind": "any",
+            "nullable": true
+           },
+           "flags": {
+            "kind": "json",
+            "nullable": false
+           },
+           "length": {
+            "kind": "num",
+            "nullable": true
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           },
+           "orgName": {
+            "kind": "text",
+            "nullable": false
+           },
+           "orgTable": {
+            "kind": "text",
+            "nullable": false
+           },
+           "protocol41": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "table": {
+            "kind": "text",
+            "nullable": false
+           },
+           "type": {
+            "kind": "num",
+            "nullable": true
+           },
+           "columnType": {
+            "kind": "num",
+            "nullable": true
+           },
+           "zerofill": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "typeName": {
+            "kind": "text",
+            "nullable": true
+           },
+           "encoding": {
+            "kind": "text",
+            "nullable": true
+           },
+           "columnLength": {
+            "kind": "num",
+            "nullable": true
+           }
+          }
          },
          {
           "name": "length",
@@ -35335,13 +35884,13 @@
           "nullable": false
          },
          {
-          "name": "__@iterator@26315",
+          "name": "__@iterator@26686",
           "type": "() => ArrayIterator<ResultSetHeader | FieldPacket[]>",
           "kind": "json",
           "nullable": false
          },
          {
-          "name": "__@unscopables@26378",
+          "name": "__@unscopables@26749",
           "type": "{ [x: number]: boolean | undefined; length?: boolean | undefined; toString?: boolean | undefined; toLocaleString?: boolean | undefined; pop?: boolean | undefined; push?: boolean | undefined; concat?: boolean | undefined; join?: boolean | undefined; reverse?: boolean | undefined; shift?: boolean | undefined; slice?: boolean | undefined; sort?: boolean | undefined; splice?: boolean | undefined; unshift?: boolean | undefined; indexOf?: boolean | undefined; lastIndexOf?: boolean | undefined; every?: boolean | undefined; some?: boolean | undefined; forEach?: boolean | undefined; map?: boolean | undefined; filter?: boolean | undefined; reduce?: boolean | undefined; reduceRight?: boolean | undefined; find?: boolean | undefined; findIndex?: boolean | undefined; fill?: boolean | undefined; copyWithin?: boolean | undefined; entries?: boolean | undefined; keys?: boolean | undefined; values?: boolean | undefined; includes?: boolean | undefined; flatMap?: boolean | undefined; flat?: boolean | undefined; at?: boolean | undefined; [Symbol.iterator]?: boolean | undefined; readonly [Symbol.unscopables]?: boolean | undefined; }",
           "kind": "json",
           "nullable": false,
@@ -35379,9 +35928,151 @@
            "flatMap",
            "flat",
            "at",
-           "__@iterator@26315",
-           "__@unscopables@26378"
-          ]
+           "__@iterator@26686",
+           "__@unscopables@26749"
+          ],
+          "fieldTypes": {
+           "length": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "toString": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "toLocaleString": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "pop": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "push": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "concat": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "join": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "reverse": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "shift": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "slice": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "sort": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "splice": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "unshift": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "indexOf": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "lastIndexOf": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "every": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "some": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "forEach": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "map": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "filter": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "reduce": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "reduceRight": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "find": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "findIndex": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "fill": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "copyWithin": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "entries": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "keys": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "values": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "includes": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "flatMap": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "flat": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "at": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "__@iterator@26686": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "__@unscopables@26749": {
+            "kind": "bool",
+            "nullable": true
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -35425,13 +36116,48 @@
            "serverStatus",
            "warningStatus",
            "changedRows"
-          ]
+          ],
+          "fieldTypes": {
+           "constructor": {
+            "kind": "json",
+            "nullable": false
+           },
+           "affectedRows": {
+            "kind": "num",
+            "nullable": false
+           },
+           "fieldCount": {
+            "kind": "num",
+            "nullable": false
+           },
+           "info": {
+            "kind": "text",
+            "nullable": false
+           },
+           "insertId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "serverStatus": {
+            "kind": "num",
+            "nullable": false
+           },
+           "warningStatus": {
+            "kind": "num",
+            "nullable": false
+           },
+           "changedRows": {
+            "kind": "num",
+            "nullable": false
+           }
+          }
          },
          {
           "name": "1",
           "type": "FieldPacket[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "constructor",
            "catalog",
@@ -35454,7 +36180,93 @@
            "typeName",
            "encoding",
            "columnLength"
-          ]
+          ],
+          "fieldTypes": {
+           "constructor": {
+            "kind": "json",
+            "nullable": false
+           },
+           "catalog": {
+            "kind": "text",
+            "nullable": false
+           },
+           "charsetNr": {
+            "kind": "num",
+            "nullable": true
+           },
+           "db": {
+            "kind": "text",
+            "nullable": true
+           },
+           "schema": {
+            "kind": "text",
+            "nullable": true
+           },
+           "characterSet": {
+            "kind": "num",
+            "nullable": true
+           },
+           "decimals": {
+            "kind": "num",
+            "nullable": false
+           },
+           "default": {
+            "kind": "any",
+            "nullable": true
+           },
+           "flags": {
+            "kind": "json",
+            "nullable": false
+           },
+           "length": {
+            "kind": "num",
+            "nullable": true
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           },
+           "orgName": {
+            "kind": "text",
+            "nullable": false
+           },
+           "orgTable": {
+            "kind": "text",
+            "nullable": false
+           },
+           "protocol41": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "table": {
+            "kind": "text",
+            "nullable": false
+           },
+           "type": {
+            "kind": "num",
+            "nullable": true
+           },
+           "columnType": {
+            "kind": "num",
+            "nullable": true
+           },
+           "zerofill": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "typeName": {
+            "kind": "text",
+            "nullable": true
+           },
+           "encoding": {
+            "kind": "text",
+            "nullable": true
+           },
+           "columnLength": {
+            "kind": "num",
+            "nullable": true
+           }
+          }
          },
          {
           "name": "length",
@@ -35655,13 +36467,13 @@
           "nullable": false
          },
          {
-          "name": "__@iterator@26315",
+          "name": "__@iterator@26686",
           "type": "() => ArrayIterator<ResultSetHeader | FieldPacket[]>",
           "kind": "json",
           "nullable": false
          },
          {
-          "name": "__@unscopables@26378",
+          "name": "__@unscopables@26749",
           "type": "{ [x: number]: boolean | undefined; length?: boolean | undefined; toString?: boolean | undefined; toLocaleString?: boolean | undefined; pop?: boolean | undefined; push?: boolean | undefined; concat?: boolean | undefined; join?: boolean | undefined; reverse?: boolean | undefined; shift?: boolean | undefined; slice?: boolean | undefined; sort?: boolean | undefined; splice?: boolean | undefined; unshift?: boolean | undefined; indexOf?: boolean | undefined; lastIndexOf?: boolean | undefined; every?: boolean | undefined; some?: boolean | undefined; forEach?: boolean | undefined; map?: boolean | undefined; filter?: boolean | undefined; reduce?: boolean | undefined; reduceRight?: boolean | undefined; find?: boolean | undefined; findIndex?: boolean | undefined; fill?: boolean | undefined; copyWithin?: boolean | undefined; entries?: boolean | undefined; keys?: boolean | undefined; values?: boolean | undefined; includes?: boolean | undefined; flatMap?: boolean | undefined; flat?: boolean | undefined; at?: boolean | undefined; [Symbol.iterator]?: boolean | undefined; readonly [Symbol.unscopables]?: boolean | undefined; }",
           "kind": "json",
           "nullable": false,
@@ -35699,9 +36511,151 @@
            "flatMap",
            "flat",
            "at",
-           "__@iterator@26315",
-           "__@unscopables@26378"
-          ]
+           "__@iterator@26686",
+           "__@unscopables@26749"
+          ],
+          "fieldTypes": {
+           "length": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "toString": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "toLocaleString": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "pop": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "push": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "concat": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "join": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "reverse": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "shift": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "slice": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "sort": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "splice": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "unshift": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "indexOf": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "lastIndexOf": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "every": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "some": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "forEach": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "map": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "filter": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "reduce": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "reduceRight": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "find": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "findIndex": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "fill": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "copyWithin": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "entries": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "keys": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "values": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "includes": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "flatMap": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "flat": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "at": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "__@iterator@26686": {
+            "kind": "bool",
+            "nullable": true
+           },
+           "__@unscopables@26749": {
+            "kind": "bool",
+            "nullable": true
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -36451,7 +37405,17 @@
           "fields": [
            "id",
            "name"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -36473,10 +37437,21 @@
           "type": "{ id: number; title: string; }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -36569,7 +37544,17 @@
           "fields": [
            "id",
            "name"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -36591,10 +37576,21 @@
           "type": "{ id: number; title: string; }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -36653,7 +37649,17 @@
           "fields": [
            "id",
            "name"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -36675,10 +37681,21 @@
           "type": "{ id: number; title: string; }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -37600,7 +38617,7 @@
     },
     "subqueries": {
      "state": "p",
-     "right": 10,
+     "right": 11,
      "total": 20,
      "results": [
       {
@@ -37633,7 +38650,7 @@
          }
         ],
         "cardinality": null,
-        "code": "{ const recent = db.$with('recent').as(db.select({ id: posts.id, title: posts.title }).from(posts).orderBy(posts.id).limit(5)); return db.with(recent).select({ user_count: db.$count(users), recent_posts: sql`(select coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'title', r.title)), '[]') from ${recent} r)` }).from(sql`(select 1) as _`); }",
+        "code": "{ const recent = db.$with('recent').as(db.select({ id: posts.id, title: posts.title }).from(posts).orderBy(desc(posts.id)).limit(5)); return db.with(recent).select({ user_count: db.$count(users), recent_posts: sql`(select coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'title', r.title)), '[]') from ${recent} r)` }).from(sql`(select 1) as _`); }",
         "raw": true
        }
       },
@@ -37667,7 +38684,7 @@
          }
         ],
         "cardinality": null,
-        "code": "{ const p = db.select({ title: posts.title, score: posts.score }).from(posts).where(eq(posts.authorId, users.id)).orderBy(posts.createdAt).limit(1).as('p'); return db.select({ name: users.name, title: p.title, score: p.score }).from(users).leftJoinLateral(p, sql`true`); }",
+        "code": "{ const p = db.select({ title: posts.title, score: posts.score }).from(posts).where(eq(posts.authorId, users.id)).orderBy(desc(posts.createdAt)).limit(1).as('p'); return db.select({ name: users.name, title: p.title, score: p.score }).from(users).leftJoinLateral(p, sql`true`); }",
         "raw": true
        }
       },
@@ -37844,7 +38861,7 @@
          }
         ],
         "cardinality": null,
-        "code": "{ const recent = db.$with('recent').as(db.select({ id: posts.id, title: posts.title }).from(posts).orderBy(posts.id).limit(5)); return db.with(recent).select({ user_count: db.$count(users), recent_posts: sql`(select coalesce(json_arrayagg(json_object('id', r.id, 'title', r.title)), json_array()) from ${recent} r)` }).from(sql`(select 1) as _`); }",
+        "code": "{ const recent = db.$with('recent').as(db.select({ id: posts.id, title: posts.title }).from(posts).orderBy(desc(posts.id)).limit(5)); return db.with(recent).select({ user_count: db.$count(users), recent_posts: sql`(select coalesce(json_arrayagg(json_object('id', r.id, 'title', r.title)), json_array()) from ${recent} r)` }).from(sql`(select 1) as _`); }",
         "raw": true
        }
       },
@@ -37852,19 +38869,9 @@
        "db": "mysql",
        "probe": "lateral-latest",
        "sql": "select u.name, p.title, p.score from users u left join lateral (select title, score from posts where author_id = u.id order by created_at desc limit 1) p on true",
-       "ok": false,
-       "problems": [
-        "`title` is typed `unknown`",
-        "`score` is typed `unknown`"
-       ],
-       "at": [
-        {
-         "column": "title"
-        },
-        {
-         "column": "score"
-        }
-       ],
+       "ok": true,
+       "problems": [],
+       "at": [],
        "answer": {
         "params": [],
         "columns": [
@@ -37876,19 +38883,19 @@
          },
          {
           "name": "title",
-          "type": "unknown",
-          "kind": "any",
+          "type": "string | null",
+          "kind": "text",
           "nullable": true
          },
          {
           "name": "score",
-          "type": "unknown",
-          "kind": "any",
+          "type": "number | null",
+          "kind": "num",
           "nullable": true
          }
         ],
         "cardinality": null,
-        "code": "db.select({ name: users.name, title: sql`p.title`, score: sql`p.score` }).from(users).leftJoin(sql`lateral (select title, score from ${posts} where author_id = ${users.id} order by created_at desc limit 1) p`, sql`true`)",
+        "code": "{ const p = db.select({ title: posts.title, score: posts.score }).from(posts).where(eq(posts.authorId, users.id)).orderBy(desc(posts.createdAt)).limit(1).as('p'); return db.select({ name: users.name, title: p.title, score: p.score }).from(users).leftJoinLateral(p, sql`true`); }",
         "raw": true
        }
       },
@@ -38065,7 +39072,7 @@
          }
         ],
         "cardinality": null,
-        "code": "{ const recent = db.$with('recent').as(db.select({ id: posts.id, title: posts.title }).from(posts).orderBy(posts.id).limit(5)); return db.with(recent).select({ user_count: db.$count(users), recent_posts: sql`(select json_group_array(json_object('id', r.id, 'title', r.title)) from ${recent} r)` }).from(sql`(select 1) as _`); }",
+        "code": "{ const recent = db.$with('recent').as(db.select({ id: posts.id, title: posts.title }).from(posts).orderBy(desc(posts.id)).limit(5)); return db.with(recent).select({ user_count: db.$count(users), recent_posts: sql`(select json_group_array(json_object('id', r.id, 'title', r.title)) from ${recent} r)` }).from(sql`(select 1) as _`); }",
         "raw": true
        }
       },
@@ -43006,7 +44013,17 @@
           "fields": [
            "id",
            "name"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -43028,10 +44045,21 @@
           "type": "{ id: number; title: string; }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -43059,10 +44087,21 @@
           "type": "{ id: number; title: string; }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -43090,13 +44129,36 @@
           "type": "{ id: number; author_id: number; created_at: string; score: number | null; title: string; }[] | null",
           "kind": "json",
           "nullable": true,
+          "array": true,
           "fields": [
            "id",
            "author_id",
            "created_at",
            "score",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author_id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "created_at": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -43121,7 +44183,17 @@
           "fields": [
            "id",
            "name"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -43143,10 +44215,21 @@
           "type": "{ id: number; title: string; }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -43205,7 +44288,17 @@
           "fields": [
            "id",
            "name"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": true
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -43227,10 +44320,21 @@
           "type": "{ id: number | null; title: string; }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": true
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -44226,10 +45330,21 @@
           "type": "{ id: number; title: string; }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -44431,10 +45546,21 @@
           "type": "{ id: number; title: string; }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -44615,11 +45741,15 @@
        "sql": "with recent as (select id, title from posts order by id desc limit 5) select (select count(*) from users) as user_count, (select json_group_array(json_object('id', r.id, 'title', r.title)) from recent r) as recent_posts",
        "ok": false,
        "problems": [
-        "`user_count` is typed `string | number | bigint | null`, but it is never null"
+        "`user_count` is typed `string | number | bigint | null`, but it is never null",
+        "`recent_posts` is typed `{ id: number | null; title: string; }[]`, with the wrong nested field types"
        ],
        "at": [
         {
          "column": "user_count"
+        },
+        {
+         "column": "recent_posts"
         }
        ],
        "answer": {
@@ -44636,10 +45766,21 @@
           "type": "{ id: number | null; title: string; }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": true
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -45789,17 +46930,31 @@
        "sql": "select 'user' as kind, name as label from users union all select 'post', title from posts",
        "ok": false,
        "problems": [
-        "it reports an error: Argument of type '\"user\"' is not assignable to parameter of type 'number | boolean | null'.; Argument of type '\"post\"' is not assignable to parameter of type 'number | boolean | null'."
+        "`kind` is typed `string`, without its values"
        ],
        "at": [
-        {}
+        {
+         "column": "kind"
+        }
        ],
        "answer": {
-        "error": "Argument of type '\"user\"' is not assignable to parameter of type 'number | boolean | null'.; Argument of type '\"post\"' is not assignable to parameter of type 'number | boolean | null'.",
-        "params": null,
-        "columns": null,
+        "params": [],
+        "columns": [
+         {
+          "name": "label",
+          "type": "string",
+          "kind": "text",
+          "nullable": false
+         },
+         {
+          "name": "kind",
+          "type": "string",
+          "kind": "text",
+          "nullable": false
+         }
+        ],
         "cardinality": null,
-        "code": "db.selectFrom('users').select((eb) => [eb.lit('user').as('kind'), 'name as label']).unionAll(db.selectFrom('posts').select((eb) => [eb.lit('post').as('kind'), 'title as label'])).execute()"
+        "code": "db.selectFrom('users').select(['name as label', sql.lit('user').as('kind')]).unionAll(db.selectFrom('posts').select(['title as label', sql.lit('post').as('kind')])).execute()"
        }
       },
       {
@@ -45858,17 +47013,31 @@
        "sql": "select 'user' as kind, name as label from users union all select 'post', title from posts",
        "ok": false,
        "problems": [
-        "it reports an error: Argument of type '\"user\"' is not assignable to parameter of type 'number | boolean | null'.; Argument of type '\"post\"' is not assignable to parameter of type 'number | boolean | null'."
+        "`kind` is typed `string`, without its values"
        ],
        "at": [
-        {}
+        {
+         "column": "kind"
+        }
        ],
        "answer": {
-        "error": "Argument of type '\"user\"' is not assignable to parameter of type 'number | boolean | null'.; Argument of type '\"post\"' is not assignable to parameter of type 'number | boolean | null'.",
-        "params": null,
-        "columns": null,
+        "params": [],
+        "columns": [
+         {
+          "name": "label",
+          "type": "string",
+          "kind": "text",
+          "nullable": false
+         },
+         {
+          "name": "kind",
+          "type": "string",
+          "kind": "text",
+          "nullable": false
+         }
+        ],
         "cardinality": null,
-        "code": "db.selectFrom('users').select((eb) => [eb.lit('user').as('kind'), 'name as label']).unionAll(db.selectFrom('posts').select((eb) => [eb.lit('post').as('kind'), 'title as label'])).execute()"
+        "code": "db.selectFrom('users').select(['name as label', sql.lit('user').as('kind')]).unionAll(db.selectFrom('posts').select(['title as label', sql.lit('post').as('kind')])).execute()"
        }
       },
       {
@@ -45877,17 +47046,31 @@
        "sql": "select 'user' as kind, name as label from users union all select 'post', title from posts",
        "ok": false,
        "problems": [
-        "it reports an error: Argument of type '\"user\"' is not assignable to parameter of type 'number | boolean | null'.; Argument of type '\"post\"' is not assignable to parameter of type 'number | boolean | null'."
+        "`kind` is typed `string`, without its values"
        ],
        "at": [
-        {}
+        {
+         "column": "kind"
+        }
        ],
        "answer": {
-        "error": "Argument of type '\"user\"' is not assignable to parameter of type 'number | boolean | null'.; Argument of type '\"post\"' is not assignable to parameter of type 'number | boolean | null'.",
-        "params": null,
-        "columns": null,
+        "params": [],
+        "columns": [
+         {
+          "name": "label",
+          "type": "string",
+          "kind": "text",
+          "nullable": false
+         },
+         {
+          "name": "kind",
+          "type": "string",
+          "kind": "text",
+          "nullable": false
+         }
+        ],
         "cardinality": null,
-        "code": "db.selectFrom('users').select((eb) => [eb.lit('user').as('kind'), 'name as label']).unionAll(db.selectFrom('posts').select((eb) => [eb.lit('post').as('kind'), 'title as label'])).execute()"
+        "code": "db.selectFrom('users').select(['name as label', sql.lit('user').as('kind')]).unionAll(db.selectFrom('posts').select(['title as label', sql.lit('post').as('kind')])).execute()"
        }
       }
      ]
@@ -49222,7 +50405,17 @@
           "fields": [
            "id",
            "name"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -49244,10 +50437,21 @@
           "type": "{ id: number; title: string; }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -49312,7 +50516,17 @@
           "fields": [
            "id",
            "name"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -49334,10 +50548,21 @@
           "type": "{ id: number; title: string; }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -49382,7 +50607,17 @@
           "fields": [
            "id",
            "name"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -49404,10 +50639,21 @@
           "type": "{ id: number; title: string; }[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "title"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -49498,7 +50744,149 @@
            "at",
            "__@iterator@152",
            "__@unscopables@154"
-          ]
+          ],
+          "fieldTypes": {
+           "length": {
+            "kind": "num",
+            "nullable": false
+           },
+           "toString": {
+            "kind": "json",
+            "nullable": false
+           },
+           "toLocaleString": {
+            "kind": "json",
+            "nullable": false
+           },
+           "pop": {
+            "kind": "json",
+            "nullable": false
+           },
+           "push": {
+            "kind": "json",
+            "nullable": false
+           },
+           "concat": {
+            "kind": "json",
+            "nullable": false
+           },
+           "join": {
+            "kind": "json",
+            "nullable": false
+           },
+           "reverse": {
+            "kind": "json",
+            "nullable": false
+           },
+           "shift": {
+            "kind": "json",
+            "nullable": false
+           },
+           "slice": {
+            "kind": "json",
+            "nullable": false
+           },
+           "sort": {
+            "kind": "json",
+            "nullable": false
+           },
+           "splice": {
+            "kind": "json",
+            "nullable": false
+           },
+           "unshift": {
+            "kind": "json",
+            "nullable": false
+           },
+           "indexOf": {
+            "kind": "json",
+            "nullable": false
+           },
+           "lastIndexOf": {
+            "kind": "json",
+            "nullable": false
+           },
+           "every": {
+            "kind": "json",
+            "nullable": false
+           },
+           "some": {
+            "kind": "json",
+            "nullable": false
+           },
+           "forEach": {
+            "kind": "json",
+            "nullable": false
+           },
+           "map": {
+            "kind": "json",
+            "nullable": false
+           },
+           "filter": {
+            "kind": "json",
+            "nullable": false
+           },
+           "reduce": {
+            "kind": "json",
+            "nullable": false
+           },
+           "reduceRight": {
+            "kind": "json",
+            "nullable": false
+           },
+           "find": {
+            "kind": "json",
+            "nullable": false
+           },
+           "findIndex": {
+            "kind": "json",
+            "nullable": false
+           },
+           "fill": {
+            "kind": "json",
+            "nullable": false
+           },
+           "copyWithin": {
+            "kind": "json",
+            "nullable": false
+           },
+           "entries": {
+            "kind": "json",
+            "nullable": false
+           },
+           "keys": {
+            "kind": "json",
+            "nullable": false
+           },
+           "values": {
+            "kind": "json",
+            "nullable": false
+           },
+           "includes": {
+            "kind": "json",
+            "nullable": false
+           },
+           "flatMap": {
+            "kind": "json",
+            "nullable": false
+           },
+           "flat": {
+            "kind": "json",
+            "nullable": false
+           },
+           "at": {
+            "kind": "json",
+            "nullable": false
+           },
+           "__@iterator@152": {
+            "kind": "json",
+            "nullable": false
+           },
+           "__@unscopables@154": {
+            "kind": "json",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -49582,7 +50970,149 @@
            "at",
            "__@iterator@152",
            "__@unscopables@154"
-          ]
+          ],
+          "fieldTypes": {
+           "length": {
+            "kind": "num",
+            "nullable": false
+           },
+           "toString": {
+            "kind": "json",
+            "nullable": false
+           },
+           "toLocaleString": {
+            "kind": "json",
+            "nullable": false
+           },
+           "pop": {
+            "kind": "json",
+            "nullable": false
+           },
+           "push": {
+            "kind": "json",
+            "nullable": false
+           },
+           "concat": {
+            "kind": "json",
+            "nullable": false
+           },
+           "join": {
+            "kind": "json",
+            "nullable": false
+           },
+           "reverse": {
+            "kind": "json",
+            "nullable": false
+           },
+           "shift": {
+            "kind": "json",
+            "nullable": false
+           },
+           "slice": {
+            "kind": "json",
+            "nullable": false
+           },
+           "sort": {
+            "kind": "json",
+            "nullable": false
+           },
+           "splice": {
+            "kind": "json",
+            "nullable": false
+           },
+           "unshift": {
+            "kind": "json",
+            "nullable": false
+           },
+           "indexOf": {
+            "kind": "json",
+            "nullable": false
+           },
+           "lastIndexOf": {
+            "kind": "json",
+            "nullable": false
+           },
+           "every": {
+            "kind": "json",
+            "nullable": false
+           },
+           "some": {
+            "kind": "json",
+            "nullable": false
+           },
+           "forEach": {
+            "kind": "json",
+            "nullable": false
+           },
+           "map": {
+            "kind": "json",
+            "nullable": false
+           },
+           "filter": {
+            "kind": "json",
+            "nullable": false
+           },
+           "reduce": {
+            "kind": "json",
+            "nullable": false
+           },
+           "reduceRight": {
+            "kind": "json",
+            "nullable": false
+           },
+           "find": {
+            "kind": "json",
+            "nullable": false
+           },
+           "findIndex": {
+            "kind": "json",
+            "nullable": false
+           },
+           "fill": {
+            "kind": "json",
+            "nullable": false
+           },
+           "copyWithin": {
+            "kind": "json",
+            "nullable": false
+           },
+           "entries": {
+            "kind": "json",
+            "nullable": false
+           },
+           "keys": {
+            "kind": "json",
+            "nullable": false
+           },
+           "values": {
+            "kind": "json",
+            "nullable": false
+           },
+           "includes": {
+            "kind": "json",
+            "nullable": false
+           },
+           "flatMap": {
+            "kind": "json",
+            "nullable": false
+           },
+           "flat": {
+            "kind": "json",
+            "nullable": false
+           },
+           "at": {
+            "kind": "json",
+            "nullable": false
+           },
+           "__@iterator@152": {
+            "kind": "json",
+            "nullable": false
+           },
+           "__@unscopables@154": {
+            "kind": "json",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -53366,6 +54896,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -53373,7 +54904,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -53442,6 +54999,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -53449,7 +55007,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -53495,13 +55079,15 @@
           "name": "identifiers",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          },
          {
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          },
          {
           "name": "raw",
@@ -53576,6 +55162,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -53583,7 +55170,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -53652,6 +55265,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -53659,7 +55273,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -53728,6 +55368,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -53735,7 +55376,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -53784,7 +55451,37 @@
            "externalId",
            "role",
            "posts"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "email": {
+            "kind": "text",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           },
+           "nickname": {
+            "kind": "text",
+            "nullable": true
+           },
+           "externalId": {
+            "kind": "text",
+            "nullable": true
+           },
+           "role": {
+            "kind": "text",
+            "nullable": false
+           },
+           "posts": {
+            "kind": "json",
+            "nullable": false
+           }
+          }
          },
          {
           "name": "title",
@@ -53865,6 +55562,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -53872,7 +55570,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -53935,6 +55659,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -53942,7 +55667,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -53988,13 +55739,15 @@
           "name": "identifiers",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          },
          {
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          },
          {
           "name": "raw",
@@ -54063,6 +55816,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -54070,7 +55824,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -54133,6 +55913,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -54140,7 +55921,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -54193,6 +56000,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -54200,7 +56008,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -54253,6 +56087,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -54260,7 +56095,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -54306,13 +56167,15 @@
           "name": "identifiers",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          },
          {
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          },
          {
           "name": "raw",
@@ -54371,6 +56234,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -54378,7 +56242,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -54431,6 +56321,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -54438,7 +56329,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -54491,13 +56408,15 @@
           "name": "identifiers",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          },
          {
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          },
          {
           "name": "raw",
@@ -54549,7 +56468,8 @@
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          }
         ],
         "cardinality": null,
@@ -54618,6 +56538,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -54625,7 +56546,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -54694,6 +56641,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -54701,7 +56649,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -54747,13 +56721,15 @@
           "name": "identifiers",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          },
          {
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          },
          {
           "name": "raw",
@@ -54805,7 +56781,8 @@
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          }
         ],
         "cardinality": null,
@@ -54868,6 +56845,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -54875,7 +56853,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -54938,6 +56942,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -54945,7 +56950,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -54991,13 +57022,15 @@
           "name": "identifiers",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          },
          {
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          },
          {
           "name": "raw",
@@ -55049,7 +57082,8 @@
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          }
         ],
         "cardinality": null,
@@ -55102,6 +57136,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -55109,7 +57144,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -55162,6 +57223,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -55169,7 +57231,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -55746,7 +57834,37 @@
            "externalId",
            "role",
            "posts"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "email": {
+            "kind": "text",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           },
+           "nickname": {
+            "kind": "text",
+            "nullable": true
+           },
+           "externalId": {
+            "kind": "text",
+            "nullable": true
+           },
+           "role": {
+            "kind": "text",
+            "nullable": false
+           },
+           "posts": {
+            "kind": "json",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -55768,6 +57886,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -55775,7 +57894,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -55844,7 +57989,33 @@
            "nickname",
            "role",
            "posts"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "email": {
+            "kind": "text",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           },
+           "nickname": {
+            "kind": "text",
+            "nullable": true
+           },
+           "role": {
+            "kind": "text",
+            "nullable": false
+           },
+           "posts": {
+            "kind": "json",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -55866,6 +58037,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -55873,7 +58045,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -55921,7 +58119,29 @@
            "name",
            "nickname",
            "posts"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "email": {
+            "kind": "text",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           },
+           "nickname": {
+            "kind": "text",
+            "nullable": true
+           },
+           "posts": {
+            "kind": "json",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -55943,6 +58163,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -55950,7 +58171,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -56050,13 +58297,15 @@
           "name": "identifiers",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          },
          {
           "name": "generatedMaps",
           "type": "ObjectLiteral[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true
          },
          {
           "name": "raw",
@@ -56782,6 +59031,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -56789,7 +59039,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -56965,6 +59241,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -56972,7 +59249,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -57118,6 +59421,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -57125,7 +59429,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -57590,7 +59920,7 @@
     },
     "returning": {
      "state": "p",
-     "right": 8,
+     "right": 6,
      "total": 10,
      "results": [
       {
@@ -57653,7 +59983,37 @@
            "externalId",
            "role",
            "posts"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "email": {
+            "kind": "text",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           },
+           "nickname": {
+            "kind": "text",
+            "nullable": true
+           },
+           "externalId": {
+            "kind": "text",
+            "nullable": true
+           },
+           "role": {
+            "kind": "text",
+            "nullable": false
+           },
+           "posts": {
+            "kind": "json",
+            "nullable": false
+           }
+          }
          },
          {
           "name": "score",
@@ -57740,6 +60100,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -57747,7 +60108,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -57758,76 +60145,36 @@
        "db": "postgres",
        "probe": "update-narrowed",
        "sql": "update users set nickname = 'anon' where id = $1 returning nickname",
-       "ok": true,
-       "problems": [],
-       "at": [],
+       "ok": false,
+       "problems": [
+        "`nickname` is typed `any`"
+       ],
+       "at": [
+        {
+         "column": "nickname"
+        }
+       ],
        "answer": {
         "params": [
          {
           "type": "number",
-          "kind": "num",
-          "nullable": false,
-          "checksValues": true
+          "kind": "any",
+          "nullable": true,
+          "checksValues": true,
+          "wrongValuePasses": "boolean"
          }
         ],
         "columns": [
          {
-          "name": "id",
-          "type": "number",
-          "kind": "num",
-          "nullable": false
-         },
-         {
           "name": "nickname",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "name": "email",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "name": "name",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "name": "externalId",
-          "type": "string | null",
-          "kind": "text",
+          "type": "any",
+          "kind": "any",
           "nullable": true
-         },
-         {
-          "name": "role",
-          "type": "\"admin\" | \"member\"",
-          "kind": "text",
-          "nullable": false,
-          "labels": [
-           "admin",
-           "member"
-          ]
-         },
-         {
-          "name": "posts",
-          "type": "Post[]",
-          "kind": "json",
-          "nullable": false,
-          "fields": [
-           "id",
-           "authorId",
-           "author",
-           "title",
-           "score",
-           "createdAt"
-          ]
          }
         ],
         "cardinality": null,
-        "code": "ds.getRepository(User).save({ id: $1, nickname: 'anon' })"
+        "code": "ds.createQueryBuilder().update(User).set({ nickname: 'anon' }).where('id = :id', { id: $1 }).returning(['nickname']).execute()",
+        "raw": true
        }
       },
       {
@@ -57940,6 +60287,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -57947,7 +60295,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -58012,7 +60386,29 @@
            "name",
            "nickname",
            "posts"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "email": {
+            "kind": "text",
+            "nullable": false
+           },
+           "name": {
+            "kind": "text",
+            "nullable": false
+           },
+           "nickname": {
+            "kind": "text",
+            "nullable": true
+           },
+           "posts": {
+            "kind": "json",
+            "nullable": false
+           }
+          }
          },
          {
           "name": "score",
@@ -58083,6 +60479,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -58090,7 +60487,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -58101,60 +60524,36 @@
        "db": "sqlite",
        "probe": "update-narrowed",
        "sql": "update users set nickname = 'anon' where id = $1 returning nickname",
-       "ok": true,
-       "problems": [],
-       "at": [],
+       "ok": false,
+       "problems": [
+        "`nickname` is typed `any`"
+       ],
+       "at": [
+        {
+         "column": "nickname"
+        }
+       ],
        "answer": {
         "params": [
          {
           "type": "number",
-          "kind": "num",
-          "nullable": false,
-          "checksValues": true
+          "kind": "any",
+          "nullable": true,
+          "checksValues": true,
+          "wrongValuePasses": "boolean"
          }
         ],
         "columns": [
          {
-          "name": "id",
-          "type": "number",
-          "kind": "num",
-          "nullable": false
-         },
-         {
           "name": "nickname",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "name": "email",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "name": "name",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "name": "posts",
-          "type": "Post[]",
-          "kind": "json",
-          "nullable": false,
-          "fields": [
-           "id",
-           "authorId",
-           "author",
-           "title",
-           "score",
-           "createdAt"
-          ]
+          "type": "any",
+          "kind": "any",
+          "nullable": true
          }
         ],
         "cardinality": null,
-        "code": "ds.getRepository(User).save({ id: $1, nickname: 'anon' })"
+        "code": "ds.createQueryBuilder().update(User).set({ nickname: 'anon' }).where('id = :id', { id: $1 }).returning(['nickname']).execute()",
+        "raw": true
        }
       },
       {
@@ -58251,6 +60650,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -58258,7 +60658,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -58327,6 +60753,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -58334,7 +60761,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -58463,6 +60916,7 @@
           "type": "Post[]",
           "kind": "json",
           "nullable": false,
+          "array": true,
           "fields": [
            "id",
            "authorId",
@@ -58470,7 +60924,33 @@
            "title",
            "score",
            "createdAt"
-          ]
+          ],
+          "fieldTypes": {
+           "id": {
+            "kind": "num",
+            "nullable": false
+           },
+           "authorId": {
+            "kind": "num",
+            "nullable": false
+           },
+           "author": {
+            "kind": "json",
+            "nullable": false
+           },
+           "title": {
+            "kind": "text",
+            "nullable": false
+           },
+           "score": {
+            "kind": "num",
+            "nullable": true
+           },
+           "createdAt": {
+            "kind": "time",
+            "nullable": false
+           }
+          }
          }
         ],
         "cardinality": null,
@@ -58560,5 +61040,5 @@
    }
   }
  },
- "at": "2026-11-26T06:02:35.359Z"
+ "at": "2026-11-26T06:13:26.154Z"
 }

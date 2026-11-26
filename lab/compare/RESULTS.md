@@ -16,10 +16,10 @@ Written by `./run.sh` on 2026-11-26. Each mark comes from what the tool answered
 | JSON Schema types | yes (2/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) |
 | Aggregates | yes (15/15) | no | no | no | no | no | no | no | no | partly (12/15) | partly (9/15) | partly (9/15) | no (0/15) |
 | Window functions | yes (12/12) | no | no | no | no | no | no | no | no | no (0/12) | no (0/12) | no (0/12) | no (0/12) |
-| Subqueries | yes (20/20) | no | no | no | no | no | no | no | no | partly (10/20) | partly (14/20) | partly (6/20) | partly (3/20) |
+| Subqueries | yes (20/20) | no | no | no | no | no | no | no | no | partly (11/20) | partly (14/20) | partly (6/20) | partly (3/20) |
 | WITH queries | yes (9/9) | no | no | no | no | no | no | no | no | partly (3/9) | partly (6/9) | no (0/9) | no (0/9) |
 | Set operations | yes (12/12) | no | no | no | no | no | no | no | no | partly (9/12) | partly (9/12) | no (0/12) | no (0/12) |
-| Returning rows | yes (10/10) | no | no | no | no | no | no | no | no | partly (8/10) | partly (6/10) | partly (8/10) | partly (8/10) |
+| Returning rows | yes (10/10) | no | no | no | no | no | no | no | no | partly (8/10) | partly (6/10) | partly (8/10) | partly (6/10) |
 | Enums | yes (8/8) | no | no | no | no | no | no | no | no | partly (4/8) | partly (4/8) | partly (2/8) | partly (2/8) |
 | Postgres | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
 | MySQL | yes | yes | no | yes | yes | no | yes | yes | no | yes | yes | yes | yes |
@@ -658,7 +658,7 @@ Written by `./run.sh` on 2026-11-26. Each mark comes from what the tool answered
 
 ## Drizzle 0.45.4
 
-**No codegen**: no. A run leaves new files to commit: `db/0000_legal_microchip.sql`, `db/meta/0000_snapshot.json`, `db/meta/_journal.json`.
+**No codegen**: no. A run leaves new files to commit: `db/0000_flawless_wolfpack.sql`, `db/meta/0000_snapshot.json`, `db/meta/_journal.json`.
 
 **Live database**: no. It types each query from the schema kept in your code, and never asks the database.
 
@@ -780,13 +780,12 @@ Written by `./run.sh` on 2026-11-26. Each mark comes from what the tool answered
 - sqlite: `select id, sum(score) over (partition by author_id order by id) as v from posts`: `v` is typed `unknown`
 - sqlite: `select id, lag(title) over (order by id) as v from posts`: `v` is typed `unknown`
 
-**Subqueries**: partly, 10 of 20
+**Subqueries**: partly, 11 of 20
 
 - postgres: `with recent as (select id, title from posts order by id desc limit 5) select (select count(*)::int from users) as user_count, (select coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'title', r.title)), '[]') from recent r) as recent_posts`: `recent_posts` is typed `unknown`
 - postgres: `select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u`: `v` is typed `unknown`
 - postgres: `select u.name, exists (select 1 from posts p where p.author_id = u.id) as v from users u`: `v` is typed `unknown`
 - mysql: `with recent as (select id, title from posts order by id desc limit 5) select (select count(*) from users) as user_count, (select coalesce(json_arrayagg(json_object('id', r.id, 'title', r.title)), json_array()) from recent r) as recent_posts`: `recent_posts` is typed `unknown`
-- mysql: `select u.name, p.title, p.score from users u left join lateral (select title, score from posts where author_id = u.id order by created_at desc limit 1) p on true`: `title` is typed `unknown`; `score` is typed `unknown`
 - mysql: `select u.name, (select max(p.title) from posts p where p.author_id = u.id) as v from users u`: `v` is typed `unknown`
 - mysql: `select u.name, exists (select 1 from posts p where p.author_id = u.id) as v from users u`: `v` is typed `unknown`
 - sqlite: `with recent as (select id, title from posts order by id desc limit 5) select (select count(*) from users) as user_count, (select json_group_array(json_object('id', r.id, 'title', r.title)) from recent r) as recent_posts`: `recent_posts` is typed `unknown`
@@ -947,7 +946,7 @@ Written by `./run.sh` on 2026-11-26. Each mark comes from what the tool answered
 - postgres: `select u.name, (select count(*) from posts p where p.author_id = u.id) as v from users u`: `v` is typed `string | number | bigint | null`, but it is never null
 - mysql: `with recent as (select id, title from posts order by id desc limit 5) select (select count(*) from users) as user_count, (select coalesce(json_arrayagg(json_object('id', r.id, 'title', r.title)), json_array()) from recent r) as recent_posts`: `user_count` is typed `string | number | bigint | null`, but it is never null
 - mysql: `select u.name, (select count(*) from posts p where p.author_id = u.id) as v from users u`: `v` is typed `string | number | bigint | null`, but it is never null
-- sqlite: `with recent as (select id, title from posts order by id desc limit 5) select (select count(*) from users) as user_count, (select json_group_array(json_object('id', r.id, 'title', r.title)) from recent r) as recent_posts`: `user_count` is typed `string | number | bigint | null`, but it is never null
+- sqlite: `with recent as (select id, title from posts order by id desc limit 5) select (select count(*) from users) as user_count, (select json_group_array(json_object('id', r.id, 'title', r.title)) from recent r) as recent_posts`: `user_count` is typed `string | number | bigint | null`, but it is never null; `recent_posts` is typed `{ id: number | null; title: string; }[]`, with the wrong nested field types
 - sqlite: `select u.name, (select count(*) from posts p where p.author_id = u.id) as v from users u`: `v` is typed `string | number | bigint | null`, but it is never null
 
 **WITH queries**: partly, 6 of 9
@@ -972,9 +971,9 @@ Written by `./run.sh` on 2026-11-26. Each mark comes from what the tool answered
 **Enums**: partly, 4 of 8
 
 - postgres: `select status from tickets`: `status` is typed `string`, without its values
-- postgres: `select 'user' as kind, name as label from users union all select 'post', title from posts`: it reports an error: Argument of type '"user"' is not assignable to parameter of type 'number | boolean | null'.; Argument of type '"post"' is not assignable to parameter of type 'number | boolean | null'.
-- mysql: `select 'user' as kind, name as label from users union all select 'post', title from posts`: it reports an error: Argument of type '"user"' is not assignable to parameter of type 'number | boolean | null'.; Argument of type '"post"' is not assignable to parameter of type 'number | boolean | null'.
-- sqlite: `select 'user' as kind, name as label from users union all select 'post', title from posts`: it reports an error: Argument of type '"user"' is not assignable to parameter of type 'number | boolean | null'.; Argument of type '"post"' is not assignable to parameter of type 'number | boolean | null'.
+- postgres: `select 'user' as kind, name as label from users union all select 'post', title from posts`: `kind` is typed `string`, without its values
+- mysql: `select 'user' as kind, name as label from users union all select 'post', title from posts`: `kind` is typed `string`, without its values
+- sqlite: `select 'user' as kind, name as label from users union all select 'post', title from posts`: `kind` is typed `string`, without its values
 
 ## Prisma 7.10.1
 
@@ -1387,9 +1386,11 @@ Written by `./run.sh` on 2026-11-26. Each mark comes from what the tool answered
 - sqlite: `select id as v from users union all select score from posts`: it types each row as `any`
 - sqlite: `select id as v from users except select author_id from posts`: it types each row as `any`
 
-**Returning rows**: partly, 8 of 10
+**Returning rows**: partly, 6 of 10
 
+- postgres: `update users set nickname = 'anon' where id = $1 returning nickname`: `nickname` is typed `any`
 - postgres: `delete from posts where id = $1 returning title`: `title` is typed `any`
+- sqlite: `update users set nickname = 'anon' where id = $1 returning nickname`: `nickname` is typed `any`
 - sqlite: `delete from posts where id = $1 returning title`: `title` is typed `any`
 
 **Enums**: partly, 2 of 8

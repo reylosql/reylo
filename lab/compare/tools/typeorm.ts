@@ -130,7 +130,7 @@ const queries: Record<string, Entry> = {
   // \`save\` inserts or updates by primary key and returns the entity, which is TypeORM's way to get a written row back.
   "returning:insert": `${posts}.save({ id: $1, authorId: $2, title: $3 })`,
   "returning:update": `${users}.save({ id: $2, nickname: $1 })`,
-  "returning:update-narrowed": `${users}.save({ id: $1, nickname: 'anon' })`,
+  "returning:update-narrowed": { code: `ds.createQueryBuilder().update(User).set({ nickname: 'anon' }).where('id = :id', { id: $1 }).returning(['nickname']).execute()`, paths: { nickname: "raw" } },
   "returning:delete": { code: `ds.createQueryBuilder().delete().from(Post).where('id = :id', { id: $1 }).returning(['title']).execute()`, paths: { title: "raw" } },
   "returning:upsert": `${users}.save({ id: $1, email: $2, name: $3 })`,
 

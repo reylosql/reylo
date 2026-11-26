@@ -47,7 +47,18 @@ function checkTyped(p: Probe, a: Answer, db: Db): Problem[] {
     if (!got) return void out.push({ text: `\`${want.name}\` is missing`, column });
     if (got.kind === "any") return void out.push({ text: `\`${want.name}\` is typed \`${got.type}\``, column });
     if (want.nullable !== undefined && !want.anyNullOn?.includes(db) && got.nullable !== want.nullable) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, but ${want.nullable ? "it can be null" : "it is never null"}`, column });
+    if (want.array && !got.array) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, not an array`, column });
     if (want.shape && !want.shape.every((f) => got.fields?.includes(f))) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, without its fields`, column });
+    if (want.shapeFields) {
+      const bad = Object.entries(want.shapeFields).some(([f, spec]) => {
+        const ft = got.fieldTypes?.[f];
+        if (!ft) return true;
+        if (spec.kind && ft.kind !== spec.kind) return true;
+        if (spec.nullable !== undefined && ft.nullable !== spec.nullable) return true;
+        return false;
+      });
+      if (bad) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, with the wrong nested field types`, column });
+    }
     if (want.notLiteral && /^-?\d+(?:\.\d+)?$/.test(got.type.trim())) out.push({ text: `\`${want.name}\` is typed literal \`${got.type}\`, not a number`, column });
     const named = (l: string) => got.labels?.includes(l) || new RegExp(`["']${l}["']`).test(got.type);
     if (want.labels && !want.labels.every(named)) out.push({ text: `\`${want.name}\` is typed \`${got.type}\`, without its values`, column });

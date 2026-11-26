@@ -87,30 +87,45 @@ function compile(dir: string, file: string, options: ts.CompilerOptions) {
 }
 
 // A type as the lab reads every tool's: its kind, whether it admits null, and the fields of the object it holds.
-function readType(checker: ts.TypeChecker, type: ts.Type): TypedValue {
+function readType(checker: ts.TypeChecker, type: ts.Type, readFields = true): TypedValue {
   const kinds = new Set<Kind>();
   const fields = new Set<string>();
+  const fieldTypes: Record<string, { kind: Kind; nullable: boolean }> = {};
   const labels = new Set<string>();
   let nullable = false;
+  let hasArray = false;
+  let hasNonArray = false;
   const visit = (t: ts.Type, top: boolean, depth: number): void => {
-    if (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) { if (top) nullable = true; kinds.add("any"); return; }
+    if (t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) { if (top) { nullable = true; hasNonArray = true; } kinds.add("any"); return; }
     if (t.isUnion()) return t.types.forEach((x) => visit(x, top, depth));
     if (t.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) { if (top) nullable = true; return; }
-    if (t.flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.BigIntLike)) return void kinds.add("num");
-    if (t.isStringLiteral()) { if (top) labels.add(t.value); return void kinds.add("text"); }
-    if (t.flags & ts.TypeFlags.StringLike) return void kinds.add("text");
-    if (t.flags & ts.TypeFlags.BooleanLike) return void kinds.add("bool");
+    if (t.flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.BigIntLike)) { if (top) hasNonArray = true; return void kinds.add("num"); }
+    if (t.isStringLiteral()) { if (top) { labels.add(t.value); hasNonArray = true; } return void kinds.add("text"); }
+    if (t.flags & ts.TypeFlags.StringLike) { if (top) hasNonArray = true; return void kinds.add("text"); }
+    if (t.flags & ts.TypeFlags.BooleanLike) { if (top) hasNonArray = true; return void kinds.add("bool"); }
     const name = (t.aliasSymbol ?? t.getSymbol())?.getName() ?? "";
-    if (name === "Date") return void kinds.add("time");
-    if (/Decimal$/.test(name)) return void kinds.add("num");
-    if (checker.isArrayType(t) || checker.isTupleType(t)) { kinds.add("json"); const el = checker.getTypeArguments(t as ts.TypeReference)[0]; if (el && depth < 3) visit(el, false, depth + 1); return; }
-    if (t.flags & ts.TypeFlags.Object) { kinds.add("json"); for (const p of checker.getPropertiesOfType(t)) fields.add(p.getName()); return; }
+    if (name === "Date") { if (top) hasNonArray = true; return void kinds.add("time"); }
+    if (/Decimal$/.test(name)) { if (top) hasNonArray = true; return void kinds.add("num"); }
+    if (checker.isArrayType(t) || checker.isTupleType(t)) { if (top) hasArray = true; kinds.add("json"); const el = checker.getTypeArguments(t as ts.TypeReference)[0]; if (el && depth < 3) visit(el, false, depth + 1); return; }
+    if (t.flags & ts.TypeFlags.Object) {
+      if (top) hasNonArray = true;
+      kinds.add("json");
+      for (const p of checker.getPropertiesOfType(t)) {
+        fields.add(p.getName());
+        if (readFields && depth <= 1) {
+          const ft = readType(checker, checker.getTypeOfSymbol(p), false);
+          fieldTypes[p.getName()] = { kind: ft.kind, nullable: ft.nullable || !!(p.flags & ts.SymbolFlags.Optional) };
+        }
+      }
+      return;
+    }
+    if (top) hasNonArray = true;
     kinds.add("any");
   };
   visit(type, true, 0);
   const kind: Kind = kinds.has("any") ? "any" : kinds.has("json") ? "json" : kinds.values().next().value ?? "any";
   const text = checker.typeToString(type, undefined, ts.TypeFormatFlags.NoTruncation | ts.TypeFormatFlags.InTypeAlias);
-  return { type: text, kind, nullable, fields: fields.size ? [...fields] : undefined, labels: labels.size ? [...labels] : undefined };
+  return { type: text, kind, nullable, ...(hasArray && !hasNonArray ? { array: true } : {}), fields: fields.size ? [...fields] : undefined, ...(Object.keys(fieldTypes).length ? { fieldTypes } : {}), labels: labels.size ? [...labels] : undefined };
 }
 const untyped = (t: ts.Type) => !!(t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown));
 

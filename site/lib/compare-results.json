@@ -1,5 +1,5 @@
 {
- "at": "2026-11-26T06:02:35.359Z",
+ "at": "2026-11-26T06:13:26.154Z",
  "tools": {
   "reylo": {
    "name": "Reylo",
@@ -1314,7 +1314,7 @@
    "cells": {
     "no-codegen": {
      "state": "n",
-     "note": "A run leaves new files to commit: `db/0000_legal_microchip.sql`, `db/meta/0000_snapshot.json`, `db/meta/_journal.json`."
+     "note": "A run leaves new files to commit: `db/0000_flawless_wolfpack.sql`, `db/meta/0000_snapshot.json`, `db/meta/_journal.json`."
     },
     "from-the-database": {
      "state": "n",
@@ -1478,7 +1478,7 @@
      "state": "p",
      "example": {
       "sql": "with recent as (select id, title from posts order by id desc limit 5) select (select count(*)::int from users) as user_count, (select coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'title', r.title)), '[]') from recent r) as recent_posts",
-      "code": "{ const recent = db.$with('recent').as(db.select({ id: posts.id, title: posts.title }).from(posts).orderBy(posts.id).limit(5)); return db.with(recent).select({ user_count: db.$count(users), recent_posts: sql`(select coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'title', r.title)), '[]') from ${recent} r)` }).from(sql`(select 1) as _`); }",
+      "code": "{ const recent = db.$with('recent').as(db.select({ id: posts.id, title: posts.title }).from(posts).orderBy(desc(posts.id)).limit(5)); return db.with(recent).select({ user_count: db.$count(users), recent_posts: sql`(select coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'title', r.title)), '[]') from ${recent} r)` }).from(sql`(select 1) as _`); }",
       "params": [],
       "columns": [
        {
@@ -1792,7 +1792,7 @@
     "subqueries": {
      "state": "p",
      "example": {
-      "sql": "with recent as (select id, title from posts order by id desc limit 5) select (select count(*)::int from users) as user_count, (select coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'title', r.title)), '[]') from recent r) as recent_posts",
+      "sql": "with recent as (select id, title from posts order by id desc limit 5) select (select count(*) from users) as user_count, (select json_group_array(json_object('id', r.id, 'title', r.title)) from recent r) as recent_posts",
       "code": "db.with('recent', (db) => db.selectFrom('posts').select(['id', 'title']).orderBy('id', 'desc').limit(5)).selectNoFrom((eb) => [eb.selectFrom('users').select(eb.fn.countAll().as('c')).as('user_count'), jsonArrayFrom(eb.selectFrom('recent').select(['id', 'title'])).as('recent_posts')]).execute()",
       "params": [],
       "columns": [
@@ -1803,7 +1803,8 @@
        },
        {
         "name": "recent_posts",
-        "type": "{ id: number; title: string; }[]"
+        "type": "{ id: number | null; title: string; }[]",
+        "wrong": true
        }
       ],
       "reylo": {
@@ -1812,7 +1813,7 @@
        "cardinality": "one",
        "rows": "exactly one row"
       },
-      "on": "Postgres"
+      "on": "SQLite"
      }
     },
     "with-queries": {
@@ -1881,17 +1882,24 @@
     "enums": {
      "state": "p",
      "example": {
-      "sql": "select 'user' as kind, name as label from users union all select 'post', title from posts",
-      "code": "db.selectFrom('users').select((eb) => [eb.lit('user').as('kind'), 'name as label']).unionAll(db.selectFrom('posts').select((eb) => [eb.lit('post').as('kind'), 'title as label'])).execute()",
-      "error": "Its type check refuses this query.",
+      "sql": "select status from tickets",
+      "schema": "create table tickets (id int primary key, status text not null check (status in ('open', 'closed')));",
+      "code": "db.selectFrom('tickets').select('status').execute()",
       "params": [],
-      "columns": [],
+      "columns": [
+       {
+        "name": "status",
+        "type": "string",
+        "wrong": true
+       }
+      ],
       "reylo": {
        "params": "Record<never, never>",
-       "row": "{ kind: \"user\" | \"post\"; label: string }",
+       "row": "{ status: \"open\" | \"closed\" }",
        "cardinality": "many",
        "rows": "many rows"
-      }
+      },
+      "on": "Postgres"
      }
     },
     "postgres": {

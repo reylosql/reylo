@@ -78,14 +78,11 @@ const queries: Record<string, Entry> = {
   "windows:lag": "db.select({ id: posts.id, v: sql`lag(${posts.title}) over (order by ${posts.id})` }).from(posts)",
 
   "subqueries:dashboard": {
-    postgres: "{ const recent = db.$with('recent').as(db.select({ id: posts.id, title: posts.title }).from(posts).orderBy(posts.id).limit(5)); return db.with(recent).select({ user_count: db.$count(users), recent_posts: sql`(select coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'title', r.title)), '[]') from ${recent} r)` }).from(sql`(select 1) as _`); }",
-    mysql: "{ const recent = db.$with('recent').as(db.select({ id: posts.id, title: posts.title }).from(posts).orderBy(posts.id).limit(5)); return db.with(recent).select({ user_count: db.$count(users), recent_posts: sql`(select coalesce(json_arrayagg(json_object('id', r.id, 'title', r.title)), json_array()) from ${recent} r)` }).from(sql`(select 1) as _`); }",
-    sqlite: "{ const recent = db.$with('recent').as(db.select({ id: posts.id, title: posts.title }).from(posts).orderBy(posts.id).limit(5)); return db.with(recent).select({ user_count: db.$count(users), recent_posts: sql`(select json_group_array(json_object('id', r.id, 'title', r.title)) from ${recent} r)` }).from(sql`(select 1) as _`); }",
+    postgres: "{ const recent = db.$with('recent').as(db.select({ id: posts.id, title: posts.title }).from(posts).orderBy(desc(posts.id)).limit(5)); return db.with(recent).select({ user_count: db.$count(users), recent_posts: sql`(select coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'title', r.title)), '[]') from ${recent} r)` }).from(sql`(select 1) as _`); }",
+    mysql: "{ const recent = db.$with('recent').as(db.select({ id: posts.id, title: posts.title }).from(posts).orderBy(desc(posts.id)).limit(5)); return db.with(recent).select({ user_count: db.$count(users), recent_posts: sql`(select coalesce(json_arrayagg(json_object('id', r.id, 'title', r.title)), json_array()) from ${recent} r)` }).from(sql`(select 1) as _`); }",
+    sqlite: "{ const recent = db.$with('recent').as(db.select({ id: posts.id, title: posts.title }).from(posts).orderBy(desc(posts.id)).limit(5)); return db.with(recent).select({ user_count: db.$count(users), recent_posts: sql`(select json_group_array(json_object('id', r.id, 'title', r.title)) from ${recent} r)` }).from(sql`(select 1) as _`); }",
   },
-  "subqueries:lateral-latest": {
-    postgres: "{ const p = db.select({ title: posts.title, score: posts.score }).from(posts).where(eq(posts.authorId, users.id)).orderBy(posts.createdAt).limit(1).as('p'); return db.select({ name: users.name, title: p.title, score: p.score }).from(users).leftJoinLateral(p, sql`true`); }",
-    mysql: "db.select({ name: users.name, title: sql`p.title`, score: sql`p.score` }).from(users).leftJoin(sql`lateral (select title, score from ${posts} where author_id = ${users.id} order by created_at desc limit 1) p`, sql`true`)",
-  },
+  "subqueries:lateral-latest": "{ const p = db.select({ title: posts.title, score: posts.score }).from(posts).where(eq(posts.authorId, users.id)).orderBy(desc(posts.createdAt)).limit(1).as('p'); return db.select({ name: users.name, title: p.title, score: p.score }).from(users).leftJoinLateral(p, sql`true`); }",
   "subqueries:scalar-count": "db.select({ name: users.name, v: db.$count(posts, eq(posts.authorId, users.id)) }).from(users)",
   "subqueries:scalar-max": "db.select({ name: users.name, v: sql`(select max(${posts.title}) from ${posts} where ${posts.authorId} = ${users.id})` }).from(users)",
   "subqueries:exists": "db.select({ name: users.name, v: exists(db.select({ one: sql`1` }).from(posts).where(eq(posts.authorId, users.id))) }).from(users)",
@@ -136,7 +133,7 @@ export const drizzle = ormTool({
     const [type, from] = CLIENT[db];
     const tables = db === "postgres" ? "users, posts, events, tickets" : "users, posts";
     const prelude = [
-      `import { eq, gt, like, isNull, exists, inArray, count, countDistinct, max, min, sum, avg, sql } from "drizzle-orm";`,
+      `import { eq, gt, desc, like, isNull, exists, inArray, count, countDistinct, max, min, sum, avg, sql } from "drizzle-orm";`,
       `import type { ${type} } from "${from}";`,
       `import * as schema from "./db/schema";`,
       `import * as relations from "./db/relations";`,

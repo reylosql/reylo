@@ -8,7 +8,7 @@ import type { Card, Db, Kind, Probe } from "../probes.ts";
 
 // `checksValues`: the tool types no parameter, and checks the value at each call instead; `wrongValuePasses` names a wrong value it let through.
 // `labels`: the string literals the type allows, as an enum's values.
-export interface TypedValue { type: string; kind: Kind; nullable: boolean; fields?: string[]; checksValues?: boolean; wrongValuePasses?: string; labels?: string[] }
+export interface TypedValue { type: string; kind: Kind; nullable: boolean; array?: boolean; fields?: string[]; fieldTypes?: Record<string, { kind: Kind; nullable: boolean }>; checksValues?: boolean; wrongValuePasses?: string; labels?: string[] }
 // `shown`: the parameters and row as the tool writes them in TypeScript, for a tool whose types the docs show whole. `code`: the query as an ORM's user writes it. `untyped`: what an ORM types the whole row as, when it reads nothing of the query. `raw`: the ORM's query is its raw SQL, not its typed API.
 export interface Answer { ok: boolean; error?: string; params: TypedValue[] | null; columns: (TypedValue & { name: string })[] | null; cardinality: Card | null; shown?: { params: string; row: string }; code?: string; untyped?: string; raw?: boolean }
 export interface Statement { key: string; probe: Probe; sql: string }
@@ -65,11 +65,20 @@ export const paramCount = (sql: string) => new Set([...sql.matchAll(/\$(\d+)/g)]
 export type Declarations = Record<string, { name: string; optional: boolean; type: string }[] | string>;
 
 // Reads a TypeScript type as text: its kind, whether it admits null, and the field names of the object it holds. A name the file declares (`decls`) is followed to its declaration.
-export function readTsType(text: string, decls: Declarations = {}): TypedValue {
+export function readTsType(text: string, decls: Declarations = {}, readFields = true): TypedValue {
   const src = ts.createSourceFile("t.ts", `type T = ${text};`, ts.ScriptTarget.Latest, true);
   const fields = new Set<string>();
+  const fieldTypes: Record<string, { kind: Kind; nullable: boolean }> = {};
   let nullable = false;
+  let hasArray = false;
+  let hasNonArray = false;
   const kinds = new Set<Kind>();
+  const recordField = (name: string, typeText: string, optional: boolean) => {
+    fields.add(name);
+    if (!readFields) return;
+    const ft = readTsType(typeText, decls, false);
+    fieldTypes[name] = { kind: ft.kind, nullable: ft.nullable || optional };
+  };
   const visitText = (t: string, top: boolean, seen: Set<string>) => {
     const s = ts.createSourceFile("t.ts", `type T = ${t};`, ts.ScriptTarget.Latest, true);
     visit((s.statements[0] as ts.TypeAliasDeclaration).type, top, seen);
@@ -78,48 +87,52 @@ export function readTsType(text: string, decls: Declarations = {}): TypedValue {
     if (ts.isParenthesizedTypeNode(n)) return visit(n.type, top, seen);
     if (ts.isTypeOperatorNode(n)) return visit(n.type, top, seen);
     if (ts.isUnionTypeNode(n)) return n.types.forEach((t) => visit(t, top, seen));
-    if (ts.isArrayTypeNode(n)) { kinds.add("json"); return visit(n.elementType, false, seen); }
-    if (ts.isTupleTypeNode(n)) { kinds.add("json"); return; }
+    if (ts.isArrayTypeNode(n)) { if (top) hasArray = true; kinds.add("json"); return visit(n.elementType, false, seen); }
+    if (ts.isTupleTypeNode(n)) { if (top) hasArray = true; kinds.add("json"); return; }
     if (ts.isTypeReferenceNode(n)) {
       const name = n.typeName.getText();
-      if (/^(Readonly)?Array$|^PgArray$/.test(name) && n.typeArguments) { kinds.add("json"); return visit(n.typeArguments[0], false, seen); }
-      if (name === "Date") return void kinds.add("time");
-      if (/(^|\.)Decimal$/.test(name)) return void kinds.add("num");
-      if (/^Pg\w*String$/.test(name)) return void kinds.add("text");
+      if (/^(Readonly)?Array$|^PgArray$/.test(name) && n.typeArguments) { if (top) hasArray = true; kinds.add("json"); return visit(n.typeArguments[0], false, seen); }
       const d = decls[name];
       if (d !== undefined && !seen.has(name)) {
         const next = new Set(seen).add(name);
         if (typeof d === "string") return visitText(d, top, next);
+        if (top) hasNonArray = true;
         kinds.add("json");
-        for (const m of d) fields.add(m.name);
+        for (const m of d) recordField(m.name, m.type, m.optional);
         return;
       }
+      if (top) hasNonArray = true;
+      if (name === "Date") return void kinds.add("time");
+      if (/(^|\.)Decimal$/.test(name)) return void kinds.add("num");
+      if (/^Pg\w*String$/.test(name)) return void kinds.add("text");
       return void kinds.add("any");
     }
     if (ts.isTypeLiteralNode(n)) {
+      if (top) hasNonArray = true;
       kinds.add("json");
-      for (const m of n.members) if (m.name) fields.add(m.name.getText().replace(/['"]/g, ""));
+      for (const m of n.members) if (ts.isPropertySignature(m) && m.name) recordField(m.name.getText().replace(/['"]/g, ""), m.type?.getText() ?? "any", !!m.questionToken);
       return;
     }
     if (ts.isLiteralTypeNode(n)) {
       if (n.literal.kind === ts.SyntaxKind.NullKeyword) { if (top) nullable = true; return; }
+      if (top) hasNonArray = true;
       if (ts.isStringLiteral(n.literal)) return void kinds.add("text");
       if (ts.isNumericLiteral(n.literal)) return void kinds.add("num");
       return void kinds.add("bool");
     }
     switch (n.kind) {
-      case ts.SyntaxKind.NumberKeyword: case ts.SyntaxKind.BigIntKeyword: return void kinds.add("num");
-      case ts.SyntaxKind.StringKeyword: return void kinds.add("text");
-      case ts.SyntaxKind.BooleanKeyword: return void kinds.add("bool");
+      case ts.SyntaxKind.NumberKeyword: case ts.SyntaxKind.BigIntKeyword: if (top) hasNonArray = true; return void kinds.add("num");
+      case ts.SyntaxKind.StringKeyword: if (top) hasNonArray = true; return void kinds.add("text");
+      case ts.SyntaxKind.BooleanKeyword: if (top) hasNonArray = true; return void kinds.add("bool");
       case ts.SyntaxKind.UndefinedKeyword: case ts.SyntaxKind.VoidKeyword: if (top) nullable = true; return;
       // Any value at all, null among them.
-      case ts.SyntaxKind.AnyKeyword: case ts.SyntaxKind.UnknownKeyword: if (top) nullable = true; return void kinds.add("any");
-      default: return void kinds.add("any");
+      case ts.SyntaxKind.AnyKeyword: case ts.SyntaxKind.UnknownKeyword: if (top) { nullable = true; hasNonArray = true; } return void kinds.add("any");
+      default: if (top) hasNonArray = true; return void kinds.add("any");
     }
   };
   visit((src.statements[0] as ts.TypeAliasDeclaration).type, true, new Set());
   const kind: Kind = kinds.has("any") ? "any" : kinds.has("json") ? "json" : kinds.values().next().value ?? "any";
-  return { type: text.replace(/\s+/g, " ").trim(), kind, nullable, fields: fields.size ? [...fields] : undefined };
+  return { type: text.replace(/\s+/g, " ").trim(), kind, nullable, ...(hasArray && !hasNonArray ? { array: true } : {}), fields: fields.size ? [...fields] : undefined, ...(Object.keys(fieldTypes).length ? { fieldTypes } : {}) };
 }
 
 // The members of every interface and object type alias in a TypeScript file, by declared name.

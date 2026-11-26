@@ -100,7 +100,7 @@ const queries: Record<string, Entry> = {
   "enums:column": "db.selectFrom('users').select('role').execute()",
   "enums:derived": "db.selectFrom(db.selectFrom('users').select('role as r').as('x')).select('x.r').execute()",
   "enums:check-union": "db.selectFrom('tickets').select('status').execute()",
-  "enums:literal-union": "db.selectFrom('users').select((eb) => [eb.lit('user').as('kind'), 'name as label']).unionAll(db.selectFrom('posts').select((eb) => [eb.lit('post').as('kind'), 'title as label'])).execute()",
+  "enums:literal-union": "db.selectFrom('users').select(['name as label', sql.lit('user').as('kind')]).unionAll(db.selectFrom('posts').select(['title as label', sql.lit('post').as('kind')])).execute()",
 
   "smoke:smoke": "db.selectFrom('users').select(['id', 'name']).execute()",
 };
