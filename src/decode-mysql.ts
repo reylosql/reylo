@@ -510,18 +510,27 @@ function asBuffer(v: unknown) {
   return v instanceof Uint8Array && NodeBuffer !== undefined && !NodeBuffer.isBuffer(v) ? NodeBuffer.from(v.buffer, v.byteOffset, v.byteLength) : v;
 }
 
+/**
+ * The values for mariadb and PlanetScale, which write a number into the statement with `String`: a
+ * DOUBLE's or a FLOAT's -0, which `String` writes as the integer `0`, goes as the text `-0`, which
+ * MySQL reads as that float.
+ */
+function signedZeros(query: QueryModule<"mysql">, names: readonly string[], values: unknown[]): unknown[] {
+  return values.map((v, i) => (Object.is(v, -0) && query.inputs?.[names[i]!]?.type.kind === "float" ? "-0" : v));
+}
+
 /** A MySQL statement's rows on each MySQL driver's client, or undefined on any other client. */
-async function runMysql(c: Client, query: QueryModule<"mysql">, { text, values, marks }: Bound): Promise<unknown[] | undefined> {
+async function runMysql(c: Client, query: QueryModule<"mysql">, { text, values, names, marks }: Bound): Promise<unknown[] | undefined> {
   if (typeof c.unsafe === "function") return bunRows(await c.unsafe(text, values), query.columns);
   // mariadb, checked before execute() because it has one too (returning rows, not a pair).
   // Its callback API (mariadb/callback) answers through the callback and returns a command
   // object; its promise API returns a promise and ignores the callback.
-  if (typeof c.batch === "function" && typeof c.query === "function") return await mariadb(c, text, values.map(asBuffer), query.columns);
+  if (typeof c.batch === "function" && typeof c.query === "function") return await mariadb(c, text, signedZeros(query, names, values).map(asBuffer), query.columns);
   // mysql2's callback API: the promise() wrapper runs on the same connection.
   const m = typeof c.promise === "function" ? c.promise() : c;
   if (typeof m.execute === "function") {
     // mysql2 has query() beside execute(); PlanetScale's Connection, Client and transaction do not.
-    return typeof m.query === "function" ? await mysql2(m, text, values, query.columns, marks, query.sqlMode) : await planetscale(m, text, values, query.columns);
+    return typeof m.query === "function" ? await mysql2(m, text, values, query.columns, marks, query.sqlMode) : await planetscale(m, text, signedZeros(query, names, values), query.columns);
   }
   return undefined;
 }

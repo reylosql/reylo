@@ -10,7 +10,7 @@
 // the databases its queries are written for.
 
 import type { QueryError } from "./query-error.ts";
-import { columnKind, describe, given, hstoreText, isArrayValued, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresLiteral, postgresYear, rowMasks, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
+import { columnKind, describe, given, hstoreText, isArrayValued, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, pgvectorText, postgresInterval, postgresLiteral, postgresYear, rowMasks, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
 import { bareName, isMysqlSet, schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
@@ -760,14 +760,15 @@ function checkBinary(type: EngineType | undefined, name: string, v: unknown, dia
 // What `run` returns goes back in as the database reads it (the round-trip rule, src/render.ts):
 // on Postgres a date or time with an extended or BC year in Postgres's own form, which refuses
 // `+010000` and `0000`, and a negative interval with each part signed (`-P1D` as `P-1D`), since
-// Postgres refuses a sign before the `P`; on SQLite a truth value, which a BOOLEAN column returns, as 1 or 0, since
+// Postgres refuses a sign before the `P`, and a float of -0 as the text `-0`, since pg's family,
+// postgres.js, PGlite, Neon and Drizzle's driver write that number as `0`; on SQLite a truth value, which a BOOLEAN column returns, as 1 or 0, since
 // better-sqlite3 refuses a boolean ("SQLite3 can only bind numbers, strings, bigints, buffers, and
 // null") and libSQL binds `true` as the REAL 1.0. A query without `inputs` gets neither. On MySQL
 // a VECTOR, MySQL's one array, as the text of its floats, `[1,2.5]`, which the engine's
 // `to_vector(?)` reads: drivers left to themselves sent an array as the text "1,2,3" (mysql2's
 // execute() before 3.24) or expanded it into a list of values (mysql2's query(), mariadb). On Postgres a
-// pgvector vector the same way, as the text its input reads, and an array of vectors as an array
-// of those texts.
+// pgvector vector the same way, as the text its input reads, each float with its sign, and an
+// array of vectors as an array of those texts.
 function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name: string): unknown {
   if (type === undefined || v == null) return v;
   // A ClickHouse value is written as its type's text where the statement runs (src/decode-clickhouse.ts).
@@ -791,7 +792,7 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
   if (type.kind === "array" && kind.endsWith("[]")) return Array.isArray(v) ? v.map((e) => encode(Array.isArray(e) && !isArrayValued(columnKind(type.element.type, dialect)) ? type : type.element.type, e, dialect, name)) : v;
   if (kind === "vector" && Array.isArray(v)) {
     if (!v.length) throw new ParameterError(`Parameter "${name}" is a pgvector ${bareName(type)}, which has one dimension at least; got an empty array.`);
-    return vectorText(v, name, `a pgvector ${bareName(type)}`);
+    return vectorText(v, name, `a pgvector ${bareName(type)}`, pgvectorText);
   }
   if (kind === "hstore" && typeof v === "object") return hstoreText(v, (message) => {
     throw new ParameterError(`Parameter "${name}" ${message}`);
@@ -799,6 +800,7 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
   // A money holds cents in the C locale Reylo reads it in, and Postgres rounds a value past them
   // without an error.
   if (kind === "money" && (typeof v !== "string" || !/^-?\d+(?:\.\d{1,2}0*)?$/.test(v))) throw new ParameterError(`Parameter "${name}" is a Postgres money, which holds cents: pass its decimal text, with two digits after the point at most (1234.56); got ${describe(v)}.`);
+  if (kind === "float" && Object.is(v, -0)) return "-0";
   if (typeof v !== "string") return v;
   if (isTime(type, dialect)) return postgresYear(v);
   return kind === "interval" ? postgresInterval(v) : v;
@@ -807,14 +809,14 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
 /** Postgres's geometric types' kinds (src/values.ts). */
 const GEOMETRIC_KINDS: ReadonlySet<string> = new Set(["point", "line", "lseg", "box", "path", "polygon", "circle"]);
 
-/** A vector's floats as the text a VECTOR's `to_vector` and pgvector's input read; JSON's, which would write NaN and ±Infinity as null, so those are refused. */
-function vectorText(v: readonly unknown[], name: string, what: string): string {
+/** A vector's floats as the text a VECTOR's `to_vector` and pgvector's input read, written by `text`, JSON's unless given; JSON would write NaN and ±Infinity as null, so those are refused. */
+function vectorText(v: readonly unknown[], name: string, what: string, text: (v: readonly number[]) => string = JSON.stringify): string {
   v.forEach((e, i) => {
     if (typeof e !== "number" || !Number.isFinite(e)) {
       throw new ParameterError(`Parameter "${name}" is ${what}, an array of finite numbers, and the element at [${i}] is ${typeof e === "string" ? JSON.stringify(e) : typeof e === "number" ? e : typeof e}.`);
     }
   });
-  return JSON.stringify(v);
+  return text(v as readonly number[]);
 }
 
 /** Binary data as Postgres's hex form, `\x0102ff`: Neon's neon() before 0.10 sends a Buffer as JSON, and 0.10 and later send one as this form themselves. */
