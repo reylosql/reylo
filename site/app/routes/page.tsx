@@ -11,7 +11,7 @@ import { HeroActions } from '@/components/hero';
 import { loadPage } from '@/lib/content';
 import { agentPromptFiles, readAgentPrompt } from '@/lib/agent-prompt';
 import { migrateMovedAnchorsScript } from '@/lib/moved-anchors';
-import { compareTitle, docsTitle, docsUrl, githubUrl, introUrl, migrateDocsUrl, markdownPath, pageGroups, pageLinks, pageTitle, siteUrl } from '@/lib/layout.shared';
+import { compareTitle, docsTitle, docsUrl, githubUrl, introUrl, markdownPath, pageGroups, pageLinks, pageTitle, siteUrl } from '@/lib/layout.shared';
 import { ogAlt, ogSize } from '@/lib/og';
 import { unlistedPage } from '@/lib/rust-content';
 import { source } from '@/lib/source';
@@ -38,10 +38,12 @@ const CENTERED: Record<string, string> = {
  * a change to the card changes the URL and the caches of X and Slack fetch the new card.
  */
 export async function loader({ params, request }: Route.LoaderArgs) {
-  // The intro and Reylo Migrate's docs have addresses of their own, /docs and /migrate/docs
-  // (app/routes.ts); a prerender asks for each page's data at its address with `.data` after it.
+  // All docs live under /docs (app/routes.ts): /docs is index.mdx, /docs/migrate/<name> is
+  // migrate-<name>.mdx, and /docs/<slug> is <slug>.mdx; a prerender asks for each page's data at
+  // its address with `.data` after it.
+  if (params.slug?.startsWith('migrate-')) throw new Response('Not found', { status: 404 });
   const pathname = new URL(request.url).pathname.replace(/\.data$/, '').replace(/\/$/, '');
-  const slug = params.slug ?? (pathname === migrateDocsUrl ? 'migrate' : pathname.startsWith('/migrate/') ? `migrate-${pathname.slice('/migrate/'.length)}` : pathname === introUrl ? '' : undefined);
+  const slug = params.slug ?? (pathname.startsWith('/docs/migrate/') ? `migrate-${pathname.slice('/docs/migrate/'.length)}` : pathname === introUrl ? '' : undefined);
   if (slug === undefined) throw new Response('Not found', { status: 404 });
   const page = source.getPage(slug ? [slug] : []);
   if (!page) throw new Response('Not found', { status: 404 });

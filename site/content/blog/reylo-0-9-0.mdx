@@ -1,0 +1,132 @@
+---
+title: "Reylo v0.9.0"
+description: "ClickHouse in preview, one generated TypeScript module, and faster Reylo Migrate deploys with dry runs that check the target's rows."
+date: 2026-11-25
+release: v0.9.0
+---
+
+Reylo v0.9.0 types ClickHouse queries in preview, generates one TypeScript module from a project's queries, and deploys long migration histories several times faster.
+
+Several changes can surface in an existing project, listed in [Upgrading from v0.8.3](#upgrading-from-v083).
+
+## ClickHouse, in preview
+
+Reylo now types queries on [ClickHouse](https://reylo.dev/docs/clickhouse) 25.11 and later, in preview: its types and parameter syntax may still change ([#344](https://github.com/reylosql/reylo/pull/344)).
+
+```sql
+SELECT id, name, email
+FROM users
+WHERE id = {id:UInt64}
+LIMIT 1
+```
+
+The query runs on the official client:
+
+```ts
+import { createClient } from "@clickhouse/client";
+import getUser from "./get_user.sql";
+
+const db = createClient({ url: process.env.CLICKHOUSE_URL });
+const user = await getUser.run(db, { id: 1 });
+// { id: bigint; name: string; email: string | null } | null
+```
+
+What it covers:
+
+- **Connection:** a `clickhouse+http://` or `clickhouse+https://` URL to the server's HTTP interface, requiring no client for the type check
+- **Types:** inferred from ClickHouse's own `DESCRIBE`, including arrays, tuples, maps and enums, and nullable only where the type is `Nullable` or `Variant`
+- **Parameters:** written as ClickHouse writes them, `{id:UInt64}`, or as `:id::UInt64`
+- **Cardinality:** from the server's query tree, so `LIMIT 1` returns at most one row and an aggregate with no `GROUP BY` returns one
+- **Clients:** `@clickhouse/client` and `@clickhouse/client-web`
+- **Writes:** `INSERT`, `UPDATE`, `DELETE` and `ALTER TABLE … UPDATE` or `DELETE`, checked without running and refused when a parameterized write doesn't fit its column ([#344](https://github.com/reylosql/reylo/pull/344), [#447](https://github.com/reylosql/reylo/pull/447))
+- **Not yet:** Reylo Migrate, which has no migrations for ClickHouse
+
+## TypeScript codegen
+
+The `reylo generate typescript` command writes every query into one TypeScript module ([#437](https://github.com/reylosql/reylo/pull/437)).
+
+```sh
+npx reylo generate typescript 'src/queries/**/*.sql' --out src/queries.ts
+```
+
+Each file becomes a camelCase export named after it:
+
+```ts
+import { getUser } from "./queries.ts";
+
+const user: getUser.Row | null = await getUser.run(db, { id: 1 });
+```
+
+What it covers:
+
+- **Setup:** runs from the `reylo` npm package, with no content mapper, bundler plugin or preload on TypeScript 5.9, 7.1 or Node's type stripping
+- **Types:** `Params`, `Row` and `QueryError` on a namespace of each export's name
+- **Errors:** any error the type check would report, or two files mapping to the same export name, fails the run and writes nothing
+
+## Reylo Migrate
+
+On Postgres and SQLite, transactional deploys now read the schema once at the end instead of after every migration ([#436](https://github.com/reylosql/reylo/pull/436)). From an empty Postgres 18 database on the same machine:
+
+| Case | Before | After | Speedup |
+| --- | --- | --- | --- |
+| 150 one-table migrations | 8.1 s | 1.0 s | **8.1×** |
+| 140 migrations of a production app | 11.3 s | 1.0 s | **11.3×** |
+| 150 one-table migrations, 10 ms round trip | 115.7 s | 16.1 s | **7.2×** |
+
+What else changed:
+
+- **Builds before a deploy:** `reylo migrate deploy --dry-run -- next build` types your build against a shadow of the post-deploy schema, for hosts that build before migrating ([#480](https://github.com/reylosql/reylo/pull/480)).
+- **Dry runs:** `reylo migrate deploy --dry-run` reports what each pending migration drops or narrows. On Postgres and MySQL, it also fails if existing rows break new or validated constraints and prints a query to list them ([#479](https://github.com/reylosql/reylo/pull/479)).
+- **Supabase:** a project started with `reylo migrate init` on Supabase now deploys to a fresh database, branch or reset stack. Previously `deploy` refused it as changed outside its migrations ([#478](https://github.com/reylosql/reylo/pull/478)).
+- **Existing databases:** `reylo migrate init` and `reylo db introspect` write a Postgres database's default privileges and schema grants, where `init.sql` held only their revokes. The `init` command also names the roles those grants need ([#431](https://github.com/reylosql/reylo/pull/431)).
+- **Moving from another tool:** history tables from Prisma Migrate, Drizzle Kit, Knex, Flyway and other tools are ignored instead of written into `schema.sql` ([#434](https://github.com/reylosql/reylo/pull/434)).
+- **Short stamps:** a migration whose name starts with a shorter stamp, as Prisma accepts, is told to pad it in place rather than prepend today's time ([#433](https://github.com/reylosql/reylo/pull/433)).
+- **Postgres indexes and keys:** changed indexes and keys now build concurrently before replacing the old one, instead of dropping it a migration earlier. New primary keys, `nulls not distinct` or `include` unique keys, and materialized view indexes build concurrently without `--blocking`. Renamed indexes rename in place ([#439](https://github.com/reylosql/reylo/pull/439)).
+- **Renames and refusals:** suggested commands include `--blocking` when a migration rewrites a table, and multiple lossy column changes share one combined command. Renamed Postgres columns keep their keys, indexes, checks, views, policies and partition key in place instead of dropping and rebuilding them ([#430](https://github.com/reylosql/reylo/pull/430), [#439](https://github.com/reylosql/reylo/pull/439), [#451](https://github.com/reylosql/reylo/pull/451), [#481](https://github.com/reylosql/reylo/pull/481), [#484](https://github.com/reylosql/reylo/pull/484)).
+- **Rows a deploy stops on:** a deploy blocked by existing rows names the constraint, what already ran and a query for those rows instead of saying to fix the file. The `reylo migrate status` command reports partial multi-file changes, and `migrate()` includes each refusal's detail in its error ([#432](https://github.com/reylosql/reylo/pull/432)).
+- **MySQL safety:** a migration's `alter table` runs in strict mode regardless of `sql_mode`, failing on values its new type can't hold instead of rewriting them. Table-copying changes now require `--blocking`, matching Postgres ([#438](https://github.com/reylosql/reylo/pull/438)).
+- **MySQL partitions and triggers:** appended range or list partitions use `add partition` in place, and removed partitions drop their rows with `--drop <table>.<partition>`. Changed triggers now swap in one migration under `lock tables` instead of two ([#438](https://github.com/reylosql/reylo/pull/438)).
+- **Identity starts:** a changed `start with` moves a Postgres identity or sequence forward to the new start or past existing rows, where a migrated database kept counting from where it was ([#440](https://github.com/reylosql/reylo/pull/440)).
+- **Partitioning a table:** changing a Postgres table between plain and partitioned, or changing its partition key, now prints the statements to copy and restore its rows. Previously it gave a generic drop refusal ([#440](https://github.com/reylosql/reylo/pull/440)).
+- **Skipped migrations:** `reylo migrate history push` records a database that skipped one migration and moves that migration last in the lock, where it previously refused. On Postgres, a newly created history table also revokes default-privilege grants to other roles ([#441](https://github.com/reylosql/reylo/pull/441)).
+- **SQLite full-text indexes:** creating or changing an external-content FTS4 or FTS5 table, or rebuilding its content table, now rebuilds the index from existing rows. Changing such an index no longer requires `--drop` ([#442](https://github.com/reylosql/reylo/pull/442)).
+
+## Query analysis
+
+The Postgres unique-key catalog query now reads `pg_attribute` through its index instead of scanning every column in the database ([#446](https://github.com/reylosql/reylo/pull/446)). Over two tables with four unique indexes each on Postgres 18:
+
+| Schema size | Before | After | Speedup |
+| --- | --- | --- | --- |
+| 300 tables | 53 ms | 1.8 ms | **29×** |
+| 3,000 tables | 1,160 ms | 1.9 ms | **611×** |
+
+What else changed:
+
+- **Higher parse limits:** MySQL's 500-operator cap becomes 2,000 per operator chain with no limit on wide statements. SQLite's expression depth rises from 350 to 1,000, and nested subqueries from 23 to 42 ([#486](https://github.com/reylosql/reylo/pull/486)).
+- **Depth fallback notes:** Postgres and MySQL statements nested past the parse bound now note on hover and in `reylo generate` that they fell back to the server's describe ([#459](https://github.com/reylosql/reylo/pull/459)).
+- **Lock timeouts:** Postgres and MySQL analysis connections now time out after 10 s on a locked table instead of waiting indefinitely ([#443](https://github.com/reylosql/reylo/pull/443)).
+
+## Upgrading from v0.8.3
+
+Each change below can surface in a project that upgrades from v0.8.3.
+
+### Every dialect
+
+- **Each enum value in a type descriptor is now an object, `{ "value": "active" }`, where it was the string `"active"`.** Read `.value` where code reads what `reylo analyze` prints or `analyze()` returns. The types `.sql` modules get are unchanged ([#420](https://github.com/reylosql/reylo/pull/420)).
+- **Migrations and `schema.sql` files with statements a shadow database can't replay are now refused by `reylo migrate deploy`, `new`, `lock` and `history push`.** Previously `deploy` ran them and `new` executed them on the shadow server. Move role or account changes, role grants and revokes, server settings, cross-database MySQL names and SQLite `ATTACH`/`DETACH` statements to your server setup ([#435](https://github.com/reylosql/reylo/pull/435), [#487](https://github.com/reylosql/reylo/pull/487)).
+- **Running `reylo db introspect` with a `shadow_url` that can't create a shadow database now fails instead of printing the database's dump and exiting 0.** Fix `shadow_url` so its role can create databases, or leave it unset to fall back to the dump with a note on stderr ([#482](https://github.com/reylosql/reylo/pull/482)).
+- **Running `reylo migrate deploy --dry-run` on Postgres or MySQL now exits 1 when existing rows break a new or validated constraint (previously exit 0).** Fix the rows listed by the dry run's query before deploying ([#479](https://github.com/reylosql/reylo/pull/479)).
+- **Analysis connections on Postgres and MySQL now time out after 10 s on a locked table instead of waiting indefinitely**, keeping any shorter session timeout. Re-run once the session holding the lock finishes ([#443](https://github.com/reylosql/reylo/pull/443)).
+- **Passing an Effect SQL client to `.run()` now throws a `TypeError` instead of resolving without running on SQLite.** Pass the underlying driver's own client instead ([#494](https://github.com/reylosql/reylo/pull/494)).
+
+### Postgres
+
+- **A Supabase project started with v0.8 or earlier is refused on a database that already has `supabase_realtime`, because its `init.sql` creates that publication.** Start the migrations again with the commands the refusal prints, record them on other databases with `reylo migrate history push`, and move any seed rows into a new migration. The `reylo migrate init` command also now refuses a `supabase_realtime` publication declared `for all tables` and lists the tables to publish instead ([#478](https://github.com/reylosql/reylo/pull/478)).
+- **Changing an identity or sequence `start with` now requires `--blocking` in `reylo migrate new` when no btree index leads with its column.** Moving the sequence past existing rows scans the table while blocking writes, so add an index or pass `--blocking` ([#440](https://github.com/reylosql/reylo/pull/440)).
+
+### MySQL
+
+- **A migration's `alter table` now runs in strict mode regardless of `sql_mode`, failing on values its new type can't hold instead of rewriting them.** Fix those rows before deploying ([#438](https://github.com/reylosql/reylo/pull/438)).
+- **Changes that copy a table while blocking writes are now refused by `reylo migrate new` until `--blocking` is passed**, matching Postgres. Pass `--blocking` for small tables, or migrate in online steps ([#438](https://github.com/reylosql/reylo/pull/438)).
+- **Removing a partition from a range or list table now drops its rows with `drop partition` and requires `--drop <table>.<partition>`.** Previously its rows moved into another partition with no flag asked. Changing a column to `char` or `binary` now also requires `--drop` ([#438](https://github.com/reylosql/reylo/pull/438)).
+- **Running `reylo migrate init` or `reylo migrate new` without `schema.sql` now fails when no shadow database can be created, instead of writing the dump first.** Grant `CREATE` on shadow databases or set `shadow_url` in `.reylo.yaml` ([#482](https://github.com/reylosql/reylo/pull/482)).

@@ -123,7 +123,7 @@ Writes the next migration, from your change to `schema.sql`.
 
 - It replays your migrations on a shadow database and writes the difference to `schema.sql`. It never reads your database's schema.
 - It first checks that your development database ran each migration as it now reads. An edited or deleted one, such as another branch's, is refused until `reylo migrate dev` settles it.
-- With no `schema.sql`, it writes what your development database has that your migrations don't. That's [schemaless mode](/migrate/usage#schemaless-mode).
+- With no `schema.sql`, it writes what your development database has that your migrations don't. That's [schemaless mode](/docs/migrate/usage#schemaless-mode).
 - Edit the file freely, and add any data changes.
 - On Postgres, new constraints and indexes never block writes, and a table rewrite needs `--blocking`. A statement gives up a busy lock after half a second, and its migration runs again from the start.
 - On Postgres, a changed index or key is built beside the old one, then takes its place.
@@ -133,7 +133,7 @@ Writes the next migration, from your change to `schema.sql`.
 - On MySQL, a partition added at the end of a range or list table is added in place. No row is copied.
 - On MySQL, a partition taken out of a table drops its rows, as on Postgres. It's refused until `--drop` names it, as `--drop measurements.p2026`.
 
-A change it could read two ways is refused until you answer with a flag ([Disambiguation](/migrate/usage#disambiguation)):
+A change it could read two ways is refused until you answer with a flag ([Disambiguation](/docs/migrate/usage#disambiguation)):
 
 ```terminal
 $ reylo migrate new drop_bio --drop users.bio
@@ -368,7 +368,7 @@ In CI, run it after a deploy. Before one, run `reylo migrate deploy --dry-run`.
 
 ### `lock`
 
-Writes the lock from your database's history. Use it to [turn the lock back on](/migrate/usage#lock-free-mode) or replace a lost one. It refuses where a lock exists:
+Writes the lock from your database's history. Use it to [turn the lock back on](/docs/migrate/usage#lock-free-mode) or replace a lost one. It refuses where a lock exists:
 
 ```terminal
 $ reylo migrate lock
@@ -586,7 +586,7 @@ direct_url: ${DATABASE_URL}
 shadow_url: null
 ```
 
-To migrate another database, pass `--url`. On [Turso Cloud](/turso#migrations), that's its `libsql://` URL with your auth token:
+To migrate another database, pass `--url`. On [Turso Cloud](/docs/turso#migrations), that's its `libsql://` URL with your auth token:
 
 ```terminal
 $ reylo migrate status --url $PROD_URL
@@ -611,7 +611,7 @@ Each database makes them its own way:
 
 - **Postgres:** on your database's server, with `create database`, so your role needs `CREATEDB`. A local superuser has it, and so do Neon's and Supabase's roles. Reylo Migrate keeps up to 32 as a cache, so a run replays only new migrations. On Azure, list each extension your migrations create in the server's `azure.extensions` parameter. Timescale Cloud refuses `create database`, so point `shadow_url` at the `timescale/timescaledb-ha` image. On Supabase, each shadow gets Supabase's schemas too, so a migration can reference `auth.users`, and what every new Supabase database has, such as the `supabase_realtime` publication.
 - **MySQL:** on your database's server, with `create database`, so your user needs the `CREATE` privilege on every database. PlanetScale refuses `create database`, so point `shadow_url` at a plain MySQL 8.4 server.
-- **SQLite:** in memory. There's nothing to grant. A [Turso](/turso#migrations) database's shadows run on libSQL's own engine.
+- **SQLite:** in memory. There's nothing to grant. A [Turso](/docs/turso#migrations) database's shadows run on libSQL's own engine.
 
 Every command refuses a migration that would reach past its shadow, `deploy` and `status` included. A `schema.sql` that would is refused by `status` and by every command that loads it into a shadow. That's one with a statement that:
 
@@ -627,4 +627,4 @@ Where your role can't create a database, point `shadow_url` at a server that can
 shadow_url: postgres://localhost:5433/postgres
 ```
 
-Every setting, for migrations and the rest of Reylo, is in the [`.reylo.yaml` reference](/configuration).
+Every setting, for migrations and the rest of Reylo, is in the [`.reylo.yaml` reference](/docs/configuration).

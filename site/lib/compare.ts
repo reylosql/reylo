@@ -2,7 +2,7 @@ import results from '@/lib/compare-results.json';
 import migrateResultsJson from '@/lib/migrate-compare-results.json';
 
 /**
- * The docs' comparison, /compare: which tools and rows it shows. Every mark comes from
+ * The docs' comparison, /docs/compare: which tools and rows it shows. Every mark comes from
  * lib/compare-results.json, which lab/compare writes from real runs of each tool.
  */
 /** A tool's mark in a row; `pro` is a yes only in the tool's paid build, which `note` says. */
@@ -21,7 +21,7 @@ export const compareTools = [
   { id: 'postgrestypedsql', name: 'Typed SQL', sub: 'Postgres', href: 'https://github.com/fli/postgres-typed-sql' },
 ];
 
-/** The ORMs and query builders, in the second table. */
+/** The ORMs and query builders, in the first table. */
 export const compareOrms = [
   { id: 'prisma', name: 'Prisma', sub: 'ORM', href: 'https://www.prisma.io/orm' },
   { id: 'drizzle', name: 'Drizzle', sub: 'ORM', href: 'https://orm.drizzle.team' },
@@ -53,11 +53,11 @@ export const compareOrmRows: { id: string; label: string; asks?: string }[] = [
   row('expression-nullability'),
   { id: 'aggregates', label: 'Aggregates', asks: 'Each column of a `group by` query is typed, with the null each aggregate can return.' },
   { id: 'windows', label: 'Window functions', asks: 'A window function is typed, as `row_number() over (…)` and `lag(…)`.' },
-  { id: 'subqueries', label: 'Subqueries', asks: 'A scalar subquery, an `exists` and a derived table are typed by what they return.' },
+  { id: 'subqueries', label: 'Subqueries', asks: 'A scalar subquery, a lateral join, an `exists` and a derived table are typed by what they return.' },
   { id: 'with-queries', label: 'WITH queries', asks: 'The columns of a `with` query are typed where the main query reads them, recursive ones included.' },
   { id: 'set-operations', label: 'Set operations', asks: 'A `union` or an `except` is typed by both its sides.' },
   { id: 'returning', label: 'Returning rows', asks: 'The row an `insert`, `update`, `delete` or upsert returns is typed.' },
-  { id: 'enums', label: 'Enums', asks: 'An enum column is typed as the union of its values.' },
+  { id: 'enums', label: 'Enums', asks: 'An enum, `CHECK` constraint or literal union is typed as the union of its values.' },
   row('parameter-types'),
   row('parameter-nullability'),
   row('cardinality'),
@@ -66,7 +66,7 @@ export const compareOrmRows: { id: string; label: string; asks?: string }[] = [
 ];
 
 /**
- * The migration tools beside Reylo Migrate, on /migrate/compare and in its launch post, in an order
+ * The migration tools beside Reylo Migrate, on /docs/migrate/compare and in its launch post, in an order
  * that keeps the longer subtitles from sitting side by side. Every mark
  * comes from lib/migrate-compare-results.json, written from real runs of each tool on Postgres 18,
  * MySQL 8.4 and SQLite, but Atlas's, which are Atlas Pro's documented behavior, since its free
@@ -127,7 +127,7 @@ export function compareCell(tool: string, row: string, set?: CompareSetName): Co
   return cell ?? (set === 'migrate' ? undefined : { state: 'n' });
 }
 
-/** The page's `<CompareTable />`s as Markdown, for /compare.md, /migrate-compare.md and /llms.txt. */
+/** The page's `<CompareTable />`s as Markdown, for /docs/compare.md, /docs/migrate/compare.md and /llms.txt. */
 export function expandCompare(text: string): string {
   const word = { y: 'yes', p: 'partly', n: 'no' };
   const said = (cell?: CompareCell) => (cell ? word[cell.state] : '');

@@ -63,7 +63,7 @@ function expandTypeDefs(text: string): string {
  * A page of content/docs as Markdown, by its slug ('' for the main page): its files in order (a
  * page's sections are lib/page-sections.ts'), read as each heading's copy button reads its section, under
  * its title and description, with each link made absolute (docs-kit's pageMarkdown). Each page's
- * is written to build/client/<slug>.md (index.md for the main page) by app/routes/markdown.ts, which
+ * is written to build/client/docs.md (or build/client/docs/<slug>.md) by app/routes/markdown.ts, which
  * vercel.json serves at the page's own address to an agent that asks for Markdown, and
  * /llms.txt is all of them (app/routes/llms.ts). Each file is read as the site builds it, its Rust
  * content left out while the docs leave Rust out (lib/rust-content.ts).

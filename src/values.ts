@@ -861,8 +861,8 @@ function setKey(row: Record<string, unknown>, name: string, v: unknown): void {
 
 /** A number as float8's input reads it: `Infinity`, `-Infinity` and `NaN` as JavaScript writes them, and -0 with its sign. */
 const floatText = (n: number): string => (Object.is(n, -0) ? "-0" : String(n));
-/** A pgvector vector's text from its floats, each as float8's input reads it, so -0 keeps the sign JSON's text would drop. */
-export const pgvectorText = (v: readonly number[]): string => `[${v.map(floatText).join(",")}]`;
+/** A vector's finite floats as the text pgvector's input and a MySQL VECTOR's `to_vector` read: JSON's, but -0 as `-0`, whose sign JSON.stringify drops and both keep. */
+export const vectorText = (v: readonly number[]): string => (v.some((n) => Object.is(n, -0)) ? `[${v.map(floatText).join(",")}]` : JSON.stringify(v));
 const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v) && !(v instanceof Uint8Array);
 /** Whether `v` is an object of exactly the keys `keys`. */
 const hasKeys = (v: unknown, keys: readonly string[]): v is Record<string, unknown> => isObject(v) && Object.keys(v).length === keys.length && keys.every((k) => k in v);
@@ -975,7 +975,7 @@ export function postgresLiteral(t: EngineType, v: unknown, fail: (message: strin
   }
   if (t.kind === "json") return JSON.stringify(v);
   if (kind === "hstore" && isObject(v)) return hstoreText(v, (message) => fail(message.replace(/^is /, "")));
-  if (kind === "vector" && Array.isArray(v) && v.every((n) => typeof n === "number" && Number.isFinite(n))) return pgvectorText(v);
+  if (kind === "vector" && Array.isArray(v) && v.every((n) => typeof n === "number" && Number.isFinite(n))) return vectorText(v);
   if (v instanceof Uint8Array) {
     let hex = "\\x";
     for (const byte of v) hex += (byte < 16 ? "0" : "") + byte.toString(16);

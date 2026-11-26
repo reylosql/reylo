@@ -90,9 +90,11 @@ export function nestsAnyDeep(t: Type): boolean {
 /**
  * A Postgres array type, by its name (`_int4`, `public._mood`), at its innermost level: the one a
  * column holds, which Postgres lets hold any number of dimensions, where the format writes it flat.
+ * A level a statement builds over it (`array_agg(tags)`) bears the same name; an element the format
+ * structures as an array but Postgres keeps whole (`bit`, `vector`, `lseg`) bears its own.
  */
 export function postgresArray(t: Type): boolean {
-  return t.kind === "array" && bareName(t).startsWith("_") && t.element.type.kind !== "array";
+  return t.kind === "array" && bareName(t).startsWith("_") && !(t.element.type.kind === "array" && bareName(t.element.type).startsWith("_"));
 }
 
 function markNesting(t: Type): Type {

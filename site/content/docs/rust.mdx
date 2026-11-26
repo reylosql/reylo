@@ -90,7 +90,7 @@ The `reylo` command runs your migrations and writes modules to files. Install it
 cargo binstall reylo-cli
 ```
 
-Other install methods (Homebrew, Scoop, mise and shell scripts) are on the [CLI](/cli) page. In a Rust project, `reylo` automatically runs the version pinned for the `reylo` crate in `Cargo.lock`. Missing versions download once and are verified against release checksums.
+Other install methods (Homebrew, Scoop, mise and shell scripts) are on the [CLI](/docs/cli) page. In a Rust project, `reylo` automatically runs the version pinned for the `reylo` crate in `Cargo.lock`. Missing versions download once and are verified against release checksums.
 
 <Details summary="Run it through cargo, with nothing installed">
 
@@ -184,7 +184,7 @@ What `.run()` returns follows the statement's cardinality:
 | Any number | `Vec<Row>` |
 | None: a write with no `returning` | `u64`, the number of rows it changed |
 
-Each column of `Row` is its [Rust type](/inference#primitives), in an `Option` where it may be null. The struct derives `Debug`, `Clone` and `PartialEq`, and serde's `Serialize` where every field's type has it. A second row where the cardinality allows one is an error, `reylo::UnexpectedRow`.
+Each column of `Row` is its [Rust type](/docs/inference#primitives), in an `Option` where it may be null. The struct derives `Debug`, `Clone` and `PartialEq`, and serde's `Serialize` where every field's type has it. A second row where the cardinality allows one is an error, `reylo::UnexpectedRow`.
 
 To read rows into a struct of your own, name it `Row` in the module. Each field takes its column through `Into`, and an enum field through `.cast()`, so its enum needs `#[reylo::reflect]` ([Enums](#enums)):
 

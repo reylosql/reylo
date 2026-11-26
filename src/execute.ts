@@ -10,7 +10,7 @@
 // the databases its queries are written for.
 
 import type { QueryError } from "./query-error.ts";
-import { columnKind, describe, given, hstoreText, isArrayValued, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, pgvectorText, postgresInterval, postgresLiteral, postgresYear, rowMasks, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
+import { columnKind, describe, given, hstoreText, isArrayValued, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresLiteral, postgresYear, rowMasks, vectorText, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
 import { bareName, isMysqlSet, schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
@@ -767,8 +767,8 @@ function checkBinary(type: EngineType | undefined, name: string, v: unknown, dia
 // a VECTOR, MySQL's one array, as the text of its floats, `[1,2.5]`, which the engine's
 // `to_vector(?)` reads: drivers left to themselves sent an array as the text "1,2,3" (mysql2's
 // execute() before 3.24) or expanded it into a list of values (mysql2's query(), mariadb). On Postgres a
-// pgvector vector the same way, as the text its input reads, each float with its sign, and an
-// array of vectors as an array of those texts.
+// pgvector vector the same way, as the text its input reads, and an array of vectors as an array
+// of those texts.
 function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name: string): unknown {
   if (type === undefined || v == null) return v;
   // A ClickHouse value is written as its type's text where the statement runs (src/decode-clickhouse.ts).
@@ -781,7 +781,7 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
       const labels = type.element.type.kind === "enum" ? type.element.type.values.map((l) => l.value) : undefined;
       return (labels === undefined ? [...v] : [...v].sort((a, b) => labels.indexOf(a as string) - labels.indexOf(b as string))).join(",");
     }
-    return type.kind === "array" && bareName(type) === "vector" && Array.isArray(v) ? vectorText(v, name, "a VECTOR") : v;
+    return type.kind === "array" && bareName(type) === "vector" && Array.isArray(v) ? vectorParameter(v, name, "a VECTOR") : v;
   }
   const kind = columnKind(type, dialect);
   // A row value, a geometric type and a range go as the text Postgres reads, from the object
@@ -792,7 +792,7 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
   if (type.kind === "array" && kind.endsWith("[]")) return Array.isArray(v) ? v.map((e) => encode(Array.isArray(e) && !isArrayValued(columnKind(type.element.type, dialect)) ? type : type.element.type, e, dialect, name)) : v;
   if (kind === "vector" && Array.isArray(v)) {
     if (!v.length) throw new ParameterError(`Parameter "${name}" is a pgvector ${bareName(type)}, which has one dimension at least; got an empty array.`);
-    return vectorText(v, name, `a pgvector ${bareName(type)}`, pgvectorText);
+    return vectorParameter(v, name, `a pgvector ${bareName(type)}`);
   }
   if (kind === "hstore" && typeof v === "object") return hstoreText(v, (message) => {
     throw new ParameterError(`Parameter "${name}" ${message}`);
@@ -809,14 +809,14 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
 /** Postgres's geometric types' kinds (src/values.ts). */
 const GEOMETRIC_KINDS: ReadonlySet<string> = new Set(["point", "line", "lseg", "box", "path", "polygon", "circle"]);
 
-/** A vector's floats as the text a VECTOR's `to_vector` and pgvector's input read, written by `text`, JSON's unless given; JSON would write NaN and ±Infinity as null, so those are refused. */
-function vectorText(v: readonly unknown[], name: string, what: string, text: (v: readonly number[]) => string = JSON.stringify): string {
+/** A vector's floats as the text a VECTOR's `to_vector` and pgvector's input read (src/values.ts), which hold no NaN or infinity, so those are refused. */
+function vectorParameter(v: readonly unknown[], name: string, what: string): string {
   v.forEach((e, i) => {
     if (typeof e !== "number" || !Number.isFinite(e)) {
       throw new ParameterError(`Parameter "${name}" is ${what}, an array of finite numbers, and the element at [${i}] is ${typeof e === "string" ? JSON.stringify(e) : typeof e === "number" ? e : typeof e}.`);
     }
   });
-  return text(v as readonly number[]);
+  return vectorText(v as readonly number[]);
 }
 
 /** Binary data as Postgres's hex form, `\x0102ff`: Neon's neon() before 0.10 sends a Buffer as JSON, and 0.10 and later send one as this form themselves. */

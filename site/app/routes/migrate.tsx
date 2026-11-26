@@ -6,7 +6,7 @@ import { agentPromptFiles, readAgentPrompt } from '@/lib/agent-prompt';
 import { siteUrl } from '@/lib/layout.shared';
 import { migrateOgAlt, ogSize } from '@/lib/og';
 
-// Reylo Migrate's landing page (components/migrate-landing.tsx); its docs are at /migrate/docs. Its link
+// Reylo Migrate's landing page (components/migrate-landing.tsx); its docs are at /docs/migrate. Its link
 // preview is app/routes/migrate-opengraph-image.tsx.
 export const meta: Route.MetaFunction = ({ loaderData }) => {
   const title = 'Reylo Migrate — SQL-first schema modeling and migrations for people who ship';
@@ -17,7 +17,7 @@ export const meta: Route.MetaFunction = ({ loaderData }) => {
     { title },
     { name: 'description', content: description },
     { tagName: 'link', rel: 'canonical', href: url },
-    { tagName: 'link', rel: 'alternate', type: 'text/markdown', href: `${siteUrl}/migrate.md` },
+    { tagName: 'link', rel: 'alternate', type: 'text/markdown', href: `${siteUrl}/docs/migrate.md` },
     { property: 'og:title', content: title },
     { property: 'og:description', content: description },
     { property: 'og:url', content: url },

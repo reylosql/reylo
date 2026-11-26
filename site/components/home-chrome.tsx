@@ -132,7 +132,7 @@ export function Foot() {
       </a>
       <div className="ml-foot-links">
         <a href={introUrl}>Docs</a>
-        <a href="/inference">Inference</a>
+        <a href="/docs/inference">Inference</a>
         <a href="/play">Playground</a>
         <a href="/#migrate">Migrate</a>
         <a href="/blog">Blog</a>

@@ -156,9 +156,11 @@ fn nests_any_deep(t: &Value) -> bool {
     t.get(NESTS).is_some()
 }
 
-/// A Postgres array type, by its name, at its innermost level.
+/// A Postgres array type, by its name, at its innermost level: its element is no Postgres array
+/// type, though it may be one the format structures as an array (`bit`, `vector`, `lseg`).
 fn postgres_array(t: &Value) -> bool {
-    kind(t) == "array" && bare_name(t).starts_with('_') && kind(&t["element"]["type"]) != "array"
+    let named = |t: &Value| kind(t) == "array" && bare_name(t).starts_with('_');
+    named(t) && !named(&t["element"]["type"])
 }
 
 fn mark_nesting(t: &Value) -> Value {
@@ -1576,6 +1578,29 @@ mod tests {
         let codecs = json!({ "decimal": "number", "instant": "Temporal.Instant" });
         assert_eq!(printed(&a, "postgres", &codecs, false).text(), "type Returns = { price: number; at: Temporal.Instant }[];\n");
         assert_eq!(printed(&a, "postgres", &Value::Null, false).text(), "type Returns = { price: string; at: string }[];\n");
+    }
+
+    #[test]
+    fn an_array_of_a_type_structured_as_an_array_nests_at_any_depth() {
+        let bit = json!({ "kind": "array", "size": { "exact": 3 }, "element": { "type": { "kind": "boolean" } }, "label": "bit" });
+        let float8 = json!({ "kind": "float", "exponent_bits": 11, "mantissa_bits": 52, "label": "float8" });
+        let point = json!({ "kind": "struct", "fields": [{ "name": "x", "type": float8 }, { "name": "y", "type": float8 }], "label": "point" });
+        let lseg = json!({ "kind": "array", "size": { "exact": 2 }, "element": { "type": point }, "label": "lseg" });
+        let array_of = |label: &str, ty: &Value| json!({ "kind": "array", "label": label, "element": { "nullable": true, "type": ty } });
+        let a = analysis(
+            json!([
+                { "name": "flags", "type": array_of("_bit", &bit) },
+                { "name": "segments", "type": array_of("_lseg", &lseg) },
+                // `array[flags, flags]`: a level the statement builds over the column's array.
+                { "name": "stacked", "type": { "kind": "array", "label": "_bit", "element": { "type": array_of("_bit", &bit) } } },
+            ]),
+            json!([]),
+            "many",
+        );
+        assert_eq!(
+            printed(&a, "postgres", &Value::Null, true).text(),
+            "type Returns = {\n  flags: NestedArray<string | null>;\n  segments: NestedArray<{ x: number; y: number }[] | null>;\n  stacked: NestedArray<string | null>[];\n}[];\n"
+        );
     }
 
     #[test]

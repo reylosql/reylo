@@ -33,7 +33,7 @@ import getUser from "./get_user.sql";
 getUser.sql; // "select id, name, email from users where id = $1::int"
 ```
 
-To get the file's contents as written, before Reylo compiles its [parameters](/inference#naming), use `.raw`. Its path in your project is `.source`, for your [logs and traces](/typescript#observability).
+To get the file's contents as written, before Reylo compiles its [parameters](/docs/inference#naming), use `.raw`. Its path in your project is `.source`, for your [logs and traces](/docs/typescript#observability).
 
 ### `.run()`
 
@@ -354,7 +354,7 @@ const user = await getUser.run(db, { id: 1 });
 await createUser.run(db, { id: 2, name: "Ada" });
 ```
 
-The web client, `@clickhouse/client-web`, takes the same queries ([ClickHouse](/clickhouse#client)).
+The web client, `@clickhouse/client-web`, takes the same queries ([ClickHouse](/docs/clickhouse#client)).
 
 #### Transactions
 
@@ -929,7 +929,7 @@ Reylo also narrows each error to the names it can carry. A unique violation name
 
 - Each driver's error is read into the same fields, and the driver's own error is the `cause`. Any other error, such as a refused connection, still throws.
 - The file exports the error's type as `QueryError`. On a synchronous SQLite driver, `.trySync()` returns the result itself.
-- On Postgres, any error aborts its transaction, even one `.try()` returned. Every later statement in it fails, and the transaction rolls back. MySQL and SQLite keep it open after most errors. On Postgres, [a savepoint](/postgres#database-errors) lets a transaction carry on after one.
+- On Postgres, any error aborts its transaction, even one `.try()` returned. Every later statement in it fails, and the transaction rolls back. MySQL and SQLite keep it open after most errors. On Postgres, [a savepoint](/docs/postgres#database-errors) lets a transaction carry on after one.
 
 ### `.readOnly`
 

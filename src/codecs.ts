@@ -401,8 +401,9 @@ const SHAPE: Partial<Record<Codec, RegExp>> = {
 export function decodeCodec(codec: Codec, v: unknown, column: string, libraries?: Libraries): unknown {
   if (v === null || v === undefined) return v;
   // A vector is an array of numbers itself, its float32 or float16 values as the server stores
-  // them, which its typed array holds exactly; an array of arrays is an array of vectors.
-  if (VECTOR_CLASS[codec] !== undefined && Array.isArray(v)) return v.some(Array.isArray) ? v.map((e) => decodeCodec(codec, e, column, libraries)) : vectorClass(codec, column, "Column").from(v as number[]);
+  // them, which its typed array holds exactly; any other array is a level of vectors, which in a
+  // Postgres array of any depth may hold only nulls.
+  if (VECTOR_CLASS[codec] !== undefined && Array.isArray(v)) return v.every((e) => typeof e === "number") ? vectorClass(codec, column, "Column").from(v as number[]) : v.map((e) => decodeCodec(codec, e, column, libraries));
   if (Array.isArray(v)) return v.map((e) => decodeCodec(codec, e, column, libraries));
   switch (codec) {
     case "set:array":
