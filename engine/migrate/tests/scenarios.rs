@@ -412,10 +412,10 @@ macro_rules! assert_has {
     }};
 }
 
-/// Runs a scenario on a thread of its own with the 8 MiB of stack the `reylo` binary's main thread
-/// has, where it runs every command: a debug build's poll frames through the planner come within a
-/// few percent of the 2 MiB a test's own thread has. The thread takes the test's name, which its
-/// panic names.
+/// Runs a scenario on a thread of its own with a fixed 8 MiB of stack, the main thread's usual
+/// default on Linux and macOS, where the `reylo` binary runs every command: a debug build's poll
+/// frames through the planner come within a few percent of the 2 MiB a test's own thread has. The
+/// thread takes the test's name, which its panic names.
 fn on_a_main_threads_stack<F, Fut>(scenario: F)
 where
     F: FnOnce() -> Fut + Send + 'static,
