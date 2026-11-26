@@ -681,9 +681,10 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
   }
 });
 
-test("the MySQL fingerprint holds while nothing changes, and moves with a column's length, precision and scale, fractional seconds and character set, which its type carries, and with a CHECK's expression and whether it is enforced", { skip: mysqlLive }, async () => {
+test("the MySQL fingerprint holds while nothing changes, and moves with a column's length, precision and scale, fractional seconds and character set, which its type carries, with a CHECK's expression and whether it is enforced, and with a stored function's arguments", { skip: mysqlLive }, async () => {
   const own = await mysqlDatabase("reylo_fingerprint", "create table m (v varchar(20), n decimal(10,2), at datetime(3), body text character set latin1)");
   await own.db.query(`create table docs (j json not null, constraint j_shape check (json_schema_valid('{"type":"object","properties":{"a":{"type":"integer"}}}', j)))`);
+  await own.db.query("create function f(x int) returns int deterministic return x");
   const root = mkdtempSync(join(tmpdir(), "reylo-fingerprint-"));
   writeFileSync(join(root, "package.json"), "{}");
   mkdirSync(join(root, "node_modules"));
@@ -704,11 +705,14 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
     // A TEXT's character set decides whether its size counts the bytes a client receives.
     // A JSON column is typed by the schema its CHECK holds it to, while the CHECK is enforced.
     const checks = [`alter table docs drop check j_shape, add constraint j_shape check (json_schema_valid('{"type":"object","properties":{"a":{"type":"string"}}}', j))`, "alter table docs alter check j_shape not enforced"];
-    for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks]) {
-      await own.db.query(change);
+    // A parameter is typed as the argument it is passed for, and a call checked against their count.
+    const signatures = ["f(x varchar(10))", "f(x varchar(10), y int)"].map((signature) => ["drop function f", `create function ${signature} returns int deterministic return x`]);
+    for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks, ...signatures]) {
+      const statements = [change].flat();
+      for (const statement of statements) await own.db.query(statement);
       const next = await fingerprint();
-      assert.notEqual(next, last, change);
-      assert.equal(await fingerprint(), next, change);
+      assert.notEqual(next, last, statements.join("; "));
+      assert.equal(await fingerprint(), next, statements.join("; "));
       last = next;
     }
   } finally {
