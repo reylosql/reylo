@@ -61966,7 +61966,7 @@
         ],
         "columns": null,
         "cardinality": null,
-        "code": "ds.query(\"update users set nickname = 'anon' where id = $1 returning nickname\", [])",
+        "code": "ds.query(\"update users set nickname = 'anon' where id = ? returning nickname\", [$1])",
         "raw": true,
         "untyped": "any"
        }
@@ -62539,5 +62539,5 @@
    }
   }
  },
- "at": "2026-11-26T06:29:32.771Z"
+ "at": "2026-11-26T06:43:16.437Z"
 }

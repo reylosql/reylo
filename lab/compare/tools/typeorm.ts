@@ -132,7 +132,7 @@ const queries: Record<string, Entry> = {
   "returning:update": `${users}.save({ id: $2, nickname: $1 })`,
   "returning:update-narrowed": {
     postgres: { code: `ds.createQueryBuilder().update(User).set({ nickname: 'anon' }).where('id = :id', { id: $1 }).returning(['nickname']).execute()`, paths: { nickname: "raw" } },
-    sqlite: raw,
+    sqlite: `ds.query("update users set nickname = 'anon' where id = ? returning nickname", [$1])`,
   },
   "returning:delete": { code: `ds.createQueryBuilder().delete().from(Post).where('id = :id', { id: $1 }).returning(['title']).execute()`, paths: { title: "raw" } },
   "returning:upsert": `${users}.save({ id: $1, email: $2, name: $3 })`,
