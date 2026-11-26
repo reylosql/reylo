@@ -710,12 +710,13 @@ const CLICKHOUSE_FINGERPRINT = `SELECT concat(version(), ' ', toString(count()),
 /**
  * MySQL: a statement may read a table, a view or a function of any database on the server
  * (`other.t`, `other.f()`), so each database's are in it but the server's own and Reylo Migrate's
- * shadows (`reylo_shadow_…`, which no statement reads, made and dropped by each check): the URL's
- * with no database's name, so that a database built the same way under another name has the same
+ * shadows (`reylo_shadow_…`, made and dropped by each check, which no statement names), unless the
+ * shadow is the URL's, as a dry run's type check is: the URL's with no database's name, so that a
+ * database built the same way under another name, beside the same others, has the same
  * fingerprint, and any other's with its own. `information_schema` lists only what the session's
  * account may reach, so an account granted only the databases its statements read sees no other.
  */
-const MYSQL_OWN = (schema: string) => `${schema} not in ('mysql', 'sys', 'information_schema', 'performance_schema') and left(${schema}, 13) <> 'reylo_shadow_'`;
+const MYSQL_OWN = (schema: string) => `${schema} not in ('mysql', 'sys', 'information_schema', 'performance_schema') and (${schema} = database() or left(${schema}, 13) <> 'reylo_shadow_')`;
 const MYSQL_IN = (schema: string) => `if(${schema} = database(), '', ${schema})`;
 const MYSQL_FINGERPRINT = `select concat_ws(' ', @@version, @@sql_mode, count(*), sum(crc32(x)), bit_xor(crc32(x))) from (
     select concat_ws(' ', 'c', ${MYSQL_IN("table_schema")}, table_name, column_name, ordinal_position, column_type, coalesce(character_set_name, ''), is_nullable, column_key, extra, coalesce(generation_expression, ''), sha2(column_comment, 256)) as x from information_schema.columns where ${MYSQL_OWN("table_schema")}
