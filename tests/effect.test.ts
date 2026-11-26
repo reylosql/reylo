@@ -137,7 +137,7 @@ test(".run() refuses an Effect SQL client, whose unsafe() hands back an Effect r
       return yield* Effect.promise(() => q.run(sql as never).then(() => undefined, (error: unknown) => error));
     }).pipe(Effect.provide(sqliteLayer())),
   );
-  assert.match(String((rejected as Error).message), /with \.run\(\), which takes a driver's own client: inside an Effect, run the query with effect\(query, params\) from reylo\/effect/);
+  assert.match(String((rejected as Error).message), /an Effect SQL client: \.run\(\) takes a driver's own client\. Inside an Effect, run the query with effect\(query, params\) from reylo\/effect, on Effect 4\.1\.6 or later\./);
 });
 
 
@@ -245,17 +245,9 @@ test("Effect's pg client gives the driver matrix's typed row as .run() gives it 
         )
         .pipe(Effect.flip);
       const duplicate = yield* Effect.flip(effect(insert, { k: 1 }));
-      return { rows, same, inside, after: yield* effect(count), duplicate, queryTextValues: "queryTextValues" in sql };
+      return { rows, same, inside, after: yield* effect(count), duplicate };
     });
-    const exit = await Effect.runPromise(Effect.exit(program).pipe(Effect.provide(PgClient.layer({ url: Redacted.make(database.url) }))));
-    const client = await Effect.runPromise(SqlClient.SqlClient.pipe(Effect.provide(PgClient.layer({ url: Redacted.make(database.url) }))));
-    if (!("queryTextValues" in client)) {
-      // A release of @effect/sql-pg before queryTextValues(): its own codecs decode every value, which Reylo cannot read back.
-      assert.match(String((defect(exit) as Error).message), /this version of @effect\/sql-pg has none\. Update @effect\/sql-pg/);
-      return;
-    }
-    assert.ok(Exit.isSuccess(exit), String(Exit.isFailure(exit) && exit.cause));
-    const { rows, same, inside, after, duplicate } = exit.value;
+    const { rows, same, inside, after, duplicate } = await Effect.runPromise(program.pipe(Effect.provide(PgClient.layer({ url: Redacted.make(database.url) }))));
     assert.deepStrictEqual(rows, direct);
     assert.deepStrictEqual({ ...rows[0] }, { id: 1, big: 9007199254740993n, amount: "12345678901234567890.123456789", day: "2026-10-20", at: "2026-10-20T10:00:00.123000", stamp: "2026-10-20T08:00:00.123000Z", doc: { a: [1, 2] }, docb: { b: true }, raw: Buffer.from([1, 2, 255]), flag: true, f8: 2.5, tags: ["a", null, "NULL", "b,c"], ints: [1, 2, 3], moods: ["ok", "sad"], span: "P1DT2H", uid: "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", pr: { a: 1, b: "x,y" }, pt: { x: 1.5, y: -2 }, bxs: [{ high: { x: 3, y: 4 }, low: { x: 1, y: 2 } }, { high: { x: 1, y: 1 }, low: { x: 0, y: 0 } }], seats: { lower: 1, upper: 5, bounds: "[)" }, many: [{ lower: 1n, upper: 3n, bounds: "[)" }, { lower: 5n, upper: 7n, bounds: "[)" }] });
     assert.equal((rows[1] as Record<string, unknown>).stamp, "infinity");

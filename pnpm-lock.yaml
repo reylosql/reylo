@@ -12,17 +12,17 @@ importers:
         specifier: 1.39.0
         version: 1.39.0(@oxc-parser/binding-wasm32-wasi@0.76.0)
       '@effect/sql-libsql':
-        specifier: 4.1.5
-        version: 4.1.5(effect@4.1.5)
+        specifier: 4.1.6
+        version: 4.1.6(effect@4.1.6)
       '@effect/sql-mysql2':
-        specifier: 4.1.5
-        version: 4.1.5(@types/node@26.6.6)(effect@4.1.5)
+        specifier: 4.1.6
+        version: 4.1.6(@types/node@26.6.6)(effect@4.1.6)
       '@effect/sql-pg':
-        specifier: 4.1.5
-        version: 4.1.5(effect@4.1.5)
+        specifier: 4.1.6
+        version: 4.1.6(effect@4.1.6)
       '@effect/sql-sqlite-node':
-        specifier: 4.1.5
-        version: 4.1.5(effect@4.1.5)
+        specifier: 4.1.6
+        version: 4.1.6(effect@4.1.6)
       '@types/big.js':
         specifier: 7.0.0
         version: 7.0.0
@@ -45,8 +45,8 @@ importers:
         specifier: 10.6.0
         version: 10.6.0
       effect:
-        specifier: 4.1.5
-        version: 4.1.5
+        specifier: 4.1.6
+        version: 4.1.6
       esbuild:
         specifier: ^0.28.2
         version: 0.28.2
@@ -247,25 +247,25 @@ packages:
     engines: {node: '>=16'}
     hasBin: true
 
-  '@effect/sql-libsql@4.1.5':
-    resolution: {integrity: sha512-aImqE/iGOF626D2E4nTI9zSkfg6Er0UbUPgAyz3sKZqBEYrc4RsO69ai1eHlAYaj5I7kCF3XWdsR2nYR2+MOCQ==}
+  '@effect/sql-libsql@4.1.6':
+    resolution: {integrity: sha512-lsV6tMmdvK9Y8RDzN+i1BRh5c4I+5+/FSQfzrgy7Bpbr9UP3wjCWf/rqSeM/QNzOmLJWwSRCHKhcsMNpoHbBlg==}
     peerDependencies:
-      effect: ^4.1.5
+      effect: ^4.1.6
 
-  '@effect/sql-mysql2@4.1.5':
-    resolution: {integrity: sha512-fLjPQ5HiPT/6ZoNhEmJ5bDbOL9PAHq2ak+X7sDjHi6MqanOoNrGubHNSFbQJP+tZTu2IZZrK8KEEzqAUK/MX2g==}
+  '@effect/sql-mysql2@4.1.6':
+    resolution: {integrity: sha512-SL36qnm1Cgv72rRsHoh64dWUyInNOwTVPdidTsLVDzdvF92ma+1NPA1mwMKNynWSRnKjYFJeRrqiuXaVWDda8A==}
     peerDependencies:
-      effect: ^4.1.5
+      effect: ^4.1.6
 
-  '@effect/sql-pg@4.1.5':
-    resolution: {integrity: sha512-Fs/5EmXykN4vKzWES54aRSLts0jBiQn65Y2jnGq//IX8Qj2McB7+WGYwaGNwxXUq4mXvagGWZPNMO0GefwDpQw==}
+  '@effect/sql-pg@4.1.6':
+    resolution: {integrity: sha512-+mLjay2zQ73rQsD9uotTcbb6E/XRnWnCaP7MZvHtb7SRpHfkw9E5QzF6YPYVoTBvXpCUmuE42Oe0nXyLB/Iq4g==}
     peerDependencies:
-      effect: ^4.1.5
+      effect: ^4.1.6
 
-  '@effect/sql-sqlite-node@4.1.5':
-    resolution: {integrity: sha512-eo+1W3lX/2cT3ATzjqhya/WvnhEByjG7DWfmWSPcENG04jjywV5p0eZ+COr+4nsXTMSoA9H2TdaqYWTnXNM9Qw==}
+  '@effect/sql-sqlite-node@4.1.6':
+    resolution: {integrity: sha512-HS64cfwY5x5A+xMuePZiEkadCBGw6BYZkEfblU1JOnOBndxRrPdcmaEDGk1MHd5i0d7GqhxrPsbdTTZON08Y2Q==}
     peerDependencies:
-      effect: ^4.1.5
+      effect: ^4.1.6
 
   '@emnapi/core@1.11.3':
     resolution: {integrity: sha512-zLpS5asjEb7lq8jYLq37N6XKaE41DIexlY1rF/z4/tIl3wo13Sqm28fRyfIsKZD+NZ8mM5RoKkpW/rBcuoSZSg==}
@@ -1243,8 +1243,8 @@ packages:
     resolution: {integrity: sha512-UX6sGumvvqSaXgdKGUsgZWqcUyIXZ/vZTrlRT/iobiKhGL0zL4d3osHj3uqllWJK+i+sixDS/3COVEOFbupFyw==}
     engines: {node: '>=8'}
 
-  effect@4.1.5:
-    resolution: {integrity: sha512-xyR20KhQI0vg2gD8ILUSQRTTESEYJ0JKdP+QD8J37xbwPTqXRxFM/l0+vUVD9fuSvoYruoTqyt33C4FZv1s4TQ==}
+  effect@4.1.6:
+    resolution: {integrity: sha512-P3CxMsdcSCle/7/FnPILd9GJkNqGtduKam2LX9Xsb8LoOjmeQ9Kmsuh16JwtIthaxLyiTCOzUUt+PZsXIohl+A==}
 
   es-module-lexer@1.7.0:
     resolution: {integrity: sha512-jEQoCwk8hyb2AZziIOLhDqpm5+2ww5uIE6lkO/6jcOCusfk6LhMHpXXfBLXTZ7Ydyt0j4VoUQv6uGNYbdW+kBA==}
@@ -1829,26 +1829,26 @@ snapshots:
       '@bytecodealliance/wizer-linux-x64': 10.0.0
       '@bytecodealliance/wizer-win32-x64': 10.0.0
 
-  '@effect/sql-libsql@4.1.5(effect@4.1.5)':
+  '@effect/sql-libsql@4.1.6(effect@4.1.6)':
     dependencies:
       '@libsql/client': 0.18.0
-      effect: 4.1.5
+      effect: 4.1.6
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@effect/sql-mysql2@4.1.5(@types/node@26.6.6)(effect@4.1.5)':
+  '@effect/sql-mysql2@4.1.6(@types/node@26.6.6)(effect@4.1.6)':
     dependencies:
-      effect: 4.1.5
+      effect: 4.1.6
       mysql2: 3.24.6(@types/node@26.6.6)
 
-  '@effect/sql-pg@4.1.5(effect@4.1.5)':
+  '@effect/sql-pg@4.1.6(effect@4.1.6)':
     dependencies:
-      effect: 4.1.5
+      effect: 4.1.6
 
-  '@effect/sql-sqlite-node@4.1.5(effect@4.1.5)':
+  '@effect/sql-sqlite-node@4.1.6(effect@4.1.6)':
     dependencies:
-      effect: 4.1.5
+      effect: 4.1.6
 
   '@emnapi/core@1.11.3(@emnapi/runtime@1.11.3)':
     dependencies:
@@ -2481,7 +2481,7 @@ snapshots:
 
   detect-libc@2.0.2: {}
 
-  effect@4.1.5: {}
+  effect@4.1.6: {}
 
   es-module-lexer@1.7.0: {}
 

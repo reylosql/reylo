@@ -319,8 +319,6 @@ export function execute<D extends Dialect>(
   params: ParamsInput = {},
 ): unknown[] | Promise<unknown[]> {
   const c = underneath(client as AnyClient);
-  // Effect SQL's client has an unsafe() whose statement is an Effect, which no await runs.
-  if (c != null && (typeof c === "object" || typeof c === "function") && "~effect/sql/SqlClient" in c) throw new TypeError(`reylo cannot run a statement on an Effect SQL client with .run(), which takes a driver's own client: inside an Effect, run the query with effect(query, params) from reylo/effect.`);
   if (isKnex(c)) return onKnexConnection(c, query.dialect, (connection) => execute(connection as ClientFor<D>, query, params));
   const runSync = query.runtime.runSync;
   if (runSync && (isSyncSqlite(c) || isDurableObjectSql(c))) return withCodecs(query, executeSyncSqlite(c, query, params, runSync));
@@ -490,7 +488,7 @@ async function executeAsync(c: AnyClient | null | undefined, query: QueryModule,
   // Effect SQL's client has an unsafe() whose statement is an Effect, which an await never runs:
   // taken for Bun.sql's on SQLite, a read gave no rows and a write ran nothing. Effect 4 brands
   // the client with a string, Effect 3's @effect/sql with a symbol.
-  if ("~effect/sql/SqlClient" in c || Symbol.for("@effect/sql/SqlClient") in c) throw new TypeError(`reylo cannot run a statement on an Effect SQL client: .run() takes a driver's own client, and Effect SQL's statements are Effects, which only Effect's runtime runs.`);
+  if ("~effect/sql/SqlClient" in c || Symbol.for("@effect/sql/SqlClient") in c) throw new TypeError(`reylo cannot run a statement on an Effect SQL client: .run() takes a driver's own client. Inside an Effect, run the query with effect(query, params) from reylo/effect, on Effect 4.1.6 or later.`);
   checkParams(query, params);
   if (query.dialect === "postgres") await checkMoneyLocale(c, query);
   const rows = await query.runtime.run(c, query, statement(query, params));
