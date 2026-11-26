@@ -6,7 +6,7 @@ import { arrayLiteral } from "../src/execute.ts";
 import { execute, executeSync, type QueryModule } from "./run.ts";
 import { checks, defineQuery } from "../src/index.ts";
 import type { EngineType, JsonSchema } from "../src/engine-type.ts";
-import { array, checked, lite as liteType, my as myType, oneOf, pg as pgType, record } from "./descriptors.ts";
+import { array, checked, field, lite as liteType, my as myType, oneOf, pg as pgType, record } from "./descriptors.ts";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -369,6 +369,21 @@ test("postgres: a pgvector vector parameter takes an array of finite numbers, wr
     await assert.rejects(execute(client as never, nearest, { q, qs: [], h: null }) as Promise<unknown>, why);
   }
   await assert.rejects(execute(client as never, nearest, { q: [1], qs: [[1], [NaN]], h: null }) as Promise<unknown>, /element at \[0\] is NaN/);
+});
+
+test("postgres: a float of -0 goes as the text -0, which pg, postgres.js, PGlite and Neon would write as 0, alone and inside an array, a vector or a row value; every other float as the number it is", async () => {
+  const seen: unknown[][] = [];
+  const client = { query: async (config: { values: unknown[] }) => (seen.push(config.values), { rows: [], fields: [] }), getTypeParser: () => String };
+  const floats: QueryModule<"postgres"> = {
+    dialect: "postgres",
+    sql: "select :f8::float8, :f4::float4, :a::float8[], :v::vector, :vs::vector[], :e::embedding, :n::int",
+    params: ["f8", "f4", "a", "v", "vs", "e", "n"],
+    inputs: { f8: { type: pgType("float8") }, f4: { type: pgType("float4") }, a: { type: array(pgType("float8")) }, v: { type: pgType("vector") }, vs: { type: array(pgType("vector")) }, e: { type: record([field("v", pgType("vector"))], "public.embedding") }, n: { type: pgType("int4") } },
+  };
+  await execute(client as never, floats, { f8: -0, f4: -0, a: [[-0, 1.5], [0, -0]], v: [1, -0], vs: [[-0]], e: { v: [-0, 2] }, n: -0 });
+  assert.deepEqual(seen, [["-0", "-0", '{{"-0","1.5"},{"0","-0"}}', "[1,-0]", '{"[-0]"}', '("[-0,2]")', -0]]);
+  await execute(client as never, floats, { f8: 1.5, f4: 0, a: [2.5, 0], v: [0.5, 0], vs: [[1e-7]], e: { v: [3] }, n: 0 });
+  assert.deepEqual(seen.at(-1), [1.5, 0, '{"2.5","0"}', "[0.5,0]", '{"[1e-7]"}', '("[3]")', 0]);
 });
 
 test("postgres: an hstore parameter takes an object of its keys, written as the text hstore reads; an array of them as an array of those texts", async () => {
@@ -829,6 +844,24 @@ test("mysql: mariadb, which writes a value that is not a Buffer as JSON, gets a 
     assert.equal(c, buf);
     assert.equal(n, 1);
   }
+});
+
+test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which write a number into the statement and -0 as 0, as the text -0; mysql2 gets the number, which it binds as a DOUBLE", async () => {
+  const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into r (d, f, i) values (:d, :f, :i + :u)", params: ["d", "f", "i", "u"], inputs: { d: { type: myType("double") }, f: { type: myType("float") }, i: { type: myType("int") }, u: { type: oneOf(myType("bigint"), myType("double")) } } };
+  const seen: unknown[][] = [];
+  const mariadb = { batch: async () => ({}), query: async (_: unknown, values: unknown[]) => (seen.push(values), []) };
+  const planetscale = { execute: async (_: string, values: unknown[]) => (seen.push(values), { rows: [] }) };
+  const mysql2 = { query: async () => [[], []], execute: async (_: unknown, values: unknown[]) => (seen.push(values), [[], []]) };
+  for (const client of [mariadb, planetscale, mysql2]) await execute(client as never, q, { d: -0, f: -0, i: -0, u: -0 });
+  assert.deepEqual(seen, [["-0", "-0", -0, -0], ["-0", "-0", -0, -0], [-0, -0, -0, -0]]);
+  // Without inputs, as defined by hand, every value goes as it is.
+  const { inputs: _, ...bare } = q;
+  seen.length = 0;
+  await execute(mariadb as never, bare, { d: -0, f: -0, i: -0, u: -0 });
+  assert.deepEqual(seen, [[-0, -0, -0, -0]]);
+  seen.length = 0;
+  for (const client of [mariadb, planetscale]) await execute(client as never, q, { d: 1.5, f: 0, i: 0, u: 2 });
+  assert.deepEqual(seen, [[1.5, 0, 0, 2], [1.5, 0, 0, 2]]);
 });
 
 test("postgres: Neon's neon() before 0.10, which sends a Buffer as JSON, gets a binary value in Postgres's hex form", async () => {
