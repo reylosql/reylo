@@ -194,7 +194,10 @@ impl P {
         }
         let opts = self.opts();
         let mut lines = std::mem::take(&mut self.lines);
-        let code = f(&opts, &mut |l: &str| lines.push(l.to_string())).await.unwrap_or_else(|e| panic!("refused to start: {e}"));
+        // The command's future is boxed: unboxed, it would be part of every caller's, and a debug
+        // build gives each await of it in a scenario a stack slot of its own, so a long scenario's
+        // frame outgrew the test thread's 2 MiB.
+        let code = Box::pin(f(&opts, &mut |l: &str| lines.push(l.to_string()))).await.unwrap_or_else(|e| panic!("refused to start: {e}"));
         self.lines = lines;
         code
     }
