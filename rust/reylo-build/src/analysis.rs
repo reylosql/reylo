@@ -560,9 +560,9 @@ fn statement_key(dialect: Dialect, sql: &str) -> Option<String> {
 /// URL's parameters that choose the server or the database, as `#server` in `src/analyze.ts` names
 /// it (both are held to entry-name-cases.json). A name is matched decoded, as the loader's bridge
 /// to a Unix socket reads it, and kept as written, since the engine reads it undecoded. A value is
-/// read off the URL as written, a `+` being a plus; it is decoded and encoded again, so that a
-/// database has one name however its URL spells it. They are sorted by name alone, since the hosts
-/// are tried in order.
+/// kept as written too, since each reader of the URL decodes it its own way, so that a database
+/// written two ways is at most analyzed again under a name of its own. They are sorted by name
+/// alone, since the hosts are tried in order.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 fn server(url: &str) -> String {
     let (base, query) = url.split_once('?').unwrap_or((url, ""));
@@ -577,13 +577,13 @@ fn server(url: &str) -> String {
     };
     let mut chosen: Vec<(&str, &str)> = query.split('&').map(|pair| pair.split_once('=').unwrap_or((pair, ""))).filter(|(key, _)| choosing.contains(&decoded(key).as_str())).collect();
     chosen.sort_by_key(|(key, _)| *key);
-    let chosen: Vec<String> = chosen.iter().map(|(key, value)| format!("{key}={}", encoded(&decoded(value)))).collect();
+    let chosen: Vec<String> = chosen.iter().map(|(key, value)| format!("{key}={value}")).collect();
     let query = if chosen.is_empty() { String::new() } else { format!("?{}", chosen.join("&")) };
     format!("{scheme}://{user}@{host}{path}{query}")
 }
 
-/// A URL parameter's name or value decoded as `decodeURIComponent` decodes it, or as written where
-/// that throws: a `%` that starts no escape, or escapes that are no UTF-8.
+/// A URL parameter's name decoded as `decodeURIComponent` decodes it, or as written where that
+/// throws: a `%` that starts no escape, or escapes that are no UTF-8.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 fn decoded(value: &str) -> String {
     let hex = |at: usize| value.as_bytes().get(at).and_then(|b| char::from(*b).to_digit(16));
@@ -600,12 +600,6 @@ fn decoded(value: &str) -> String {
         at += 3;
     }
     String::from_utf8(bytes).unwrap_or_else(|_| value.to_string())
-}
-
-/// A URL parameter's value as `encodeURIComponent` writes it.
-#[cfg(any(feature = "postgres", feature = "mysql"))]
-fn encoded(value: &str) -> String {
-    value.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) { char::from(b).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
 fn sha256(text: &str) -> String {
@@ -679,7 +673,12 @@ mod tests {
         // The loader names its entries by the same cases (tests/analyze.test.ts).
         let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("entry-name-cases.json")).unwrap();
         for case in cases {
-            assert_eq!(super::server(case["url"].as_str().unwrap()), case["server"].as_str().unwrap(), "{}", case["case"]);
+            let url = case["url"].as_str().unwrap();
+            // ClickHouse's are the loader's alone: the crate reads no ClickHouse.
+            if super::Dialect::of(url).is_err() {
+                continue;
+            }
+            assert_eq!(super::server(url), case["server"].as_str().unwrap(), "{}", case["case"]);
         }
     }
 

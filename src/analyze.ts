@@ -595,10 +595,10 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
  * The parameters of `url` that choose its server or database (`CHOOSING`), as `?name=value&…`,
  * or nothing where it has none, which keeps the name its entries were written under. A name is
  * matched decoded, as the bridge to a Unix socket reads it (src/host-url.ts), and kept as written,
- * since the engine reads it undecoded. Each value is read off the URL as written, a `+` being a
- * plus; it is decoded, or kept as written where it does not decode, and encoded again, so that a
- * database has one name however its URL spells it. They are sorted by name alone, since the hosts
- * are tried in order.
+ * since the engine reads it undecoded. A value is kept as written too, since its readers decode
+ * it each their own way (libpq reads a `+` as a plus, ClickHouse and the engine's MySQL socket as
+ * a space), so that a database written two ways is at most analyzed again under a name of its
+ * own. They are sorted by name alone, since the hosts are tried in order.
  */
 function choosing(url: string, dialect: Dialect): string {
   const at = url.indexOf("?");
@@ -607,10 +607,10 @@ function choosing(url: string, dialect: Dialect): string {
     return eq < 0 ? [pair, ""] : [pair.slice(0, eq), pair.slice(eq + 1)];
   });
   const chosen = pairs.filter(([key]) => CHOOSING[dialect].includes(decoded(key))).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return chosen.length ? `?${chosen.map(([key, value]) => `${key}=${encodeURIComponent(decoded(value))}`).join("&")}` : "";
+  return chosen.length ? `?${chosen.map(([key, value]) => `${key}=${value}`).join("&")}` : "";
 }
 
-/** A URL parameter's name or value decoded, or as written where it does not decode. */
+/** A URL parameter's name decoded, or as written where it does not decode. */
 function decoded(value: string): string {
   try {
     return decodeURIComponent(value);

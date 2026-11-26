@@ -242,11 +242,9 @@ test("a build that cannot reach the database reads reylo/.cache/ with another UR
   assert.ok(moved.entry.startsWith(join(copy, "reylo", ".cache")));
 });
 
-test("an entry is named by its server and the URL's parameters that choose the database, each in one spelling, as reylo-build names it", async () => {
-  // reylo-build names its entries by the same cases (rust/reylo-build/src/analysis.rs), so that the two share reylo/.cache/.
+test("an entry is named by its server and the URL's parameters that choose the database as the URL writes them, as reylo-build names it", async () => {
+  // reylo-build names its entries by the same cases but ClickHouse's (rust/reylo-build/src/analysis.rs), so that the two share reylo/.cache/.
   const cases: { case: string; url: string; server: string }[] = JSON.parse(readFileSync(new URL("../rust/reylo-build/src/entry-name-cases.json", import.meta.url), "utf8"));
-  // ClickHouse, which the Rust crate does not read: the database, and the path in front of the interface.
-  cases.push({ case: "ClickHouse's database and path", url: "clickhouse+http://default:reylo@127.0.0.1:8123/?ch_join_use_nulls=1&pathname=/proxy&ch_database=a", server: "clickhouse+http://default@127.0.0.1:8123/?ch_database=a&pathname=%2Fproxy" });
   const root = mkdtempSync(join(tmpdir(), "reylo-entry-names-"));
   writeFileSync(join(root, "package.json"), "{}");
   for (const c of cases) {
