@@ -92,7 +92,19 @@ export function nestsAnyDeep(t: Type): boolean {
  * column holds, which Postgres lets hold any number of dimensions, where the format writes it flat.
  */
 export function postgresArray(t: Type): boolean {
-  return t.kind === "array" && bareName(t).startsWith("_") && t.element.type.kind !== "array";
+  return t.kind === "array" && bareName(t).startsWith("_") && (t.element.type.kind !== "array" || holdsWholeArrays(t));
+}
+
+/**
+ * Whether a Postgres array's elements are each a whole array of their own, as an array of a
+ * domain over an array type is (`ints[]`, of `create domain ints as int4[]`): with each domain
+ * written as its base ([`withBases`]), its element is an array type of another name, where a level
+ * a statement builds over an array (`array_agg(tags)`) bears that array's own name. Postgres writes
+ * each such element as its own quoted text (`{"{1,2}","{3}"}`), with dimensions of its own.
+ */
+export function holdsWholeArrays(t: Type): boolean {
+  const named = (x: Type) => x.kind === "array" && bareName(x).startsWith("_");
+  return t.kind === "array" && named(t.element.type) && bareName(t).startsWith("_") && (t.element.type as { label?: string }).label !== t.label;
 }
 
 function markNesting(t: Type): Type {

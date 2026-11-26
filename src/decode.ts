@@ -26,7 +26,7 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, DecodeError, elementKind, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
+import { civilFromDays, coerce, DecodeError, elementKind, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
 import { lastOfEach, rowOf, type RowBuilder } from "./row.ts";
 import { arrayLiteral, asByteaHex, isJsonValue, jsonText, jsonValue, postgresText, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
@@ -919,7 +919,7 @@ function slonikValue(kind: Kind, v: unknown, name: string, delim?: string): unkn
   if (typeof v === "string") return textDecoder(kind, delim)(v);
   // pg parses an array's text into an array, each element by the element type's parser, which
   // Reylo's tag passes through for the types it names.
-  if (Array.isArray(v) && kind.endsWith("[]")) return v.map((e) => (Array.isArray(e) ? slonikValue(kind, e, name, delim) : slonikValue(elementKind(kind), e, name, delim)));
+  if (Array.isArray(v) && kind.endsWith("[]")) return v.map((e) => (Array.isArray(e) && wholeArrayKind(elementKind(kind)) === undefined ? slonikValue(kind, e, name, delim) : slonikValue(elementKind(kind), e, name, delim)));
   if (SLONIK_STRICT.test(kind)) {
     throw new DecodeError(`Column "${name}" reached Reylo already converted by Slonik's driver (${v instanceof Date ? "a Date" : typeof v}), which ignored the query's type parsers, as a custom driverFactory may: Reylo refuses it rather than return a value that may have been rounded.`);
   }
@@ -1014,7 +1014,7 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
 function postgresDecoder(name: string, kind: Kind, delim: string | undefined, nonFinite: JsonNumbers | undefined, nestedArrays: boolean | undefined): (v: string) => unknown {
   const decode = textDecoder(kind, delim);
   const numbers = nonFinite === undefined ? decode : (v: string) => numbersInJson(decode(v), nonFinite, name);
-  return kind.endsWith("[]") && !nestedArrays ? (v) => withinDimensions(numbers(v), kind, name) : numbers;
+  return kind.endsWith("[]") && !nestedArrays ? (v) => withinDimensions(numbers(v), kind, name, v) : numbers;
 }
 
 /** Postgres's half of the run time (src/execute.ts, `Runtime`), which `definePostgresQuery` passes. */

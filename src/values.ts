@@ -20,13 +20,15 @@
 // `line`, `lseg`, `box`, `path`, `polygon` and `circle` Postgres's geometric types as objects of
 // their fields, as the type descriptor gives them; and `range:k` and `multirange:k` a range of `k`
 // as an object of its bounds and a multirange as an array of them. `k[]` is an array of `k`, a NULL
-// element `null`, and `a|b` either (a MySQL expression whose type the bound value decides). No kind
+// element `null`; `{k}` one whole array of kind `k` standing as an element of another, which
+// Postgres writes as its own quoted text (an array of a domain over an array type, `{int[]}[]`);
+// and `a|b` either (a MySQL expression whose type the bound value decides). No kind
 // is a JavaScript Date. An array's text separates its elements with a comma, or with its element
 // type's own delimiter (`:` for PostGIS's `geometry`), which a column carries beside its kind.
 //
 // This module runs in every generated module's process, so it names no Node type: a Buffer is
 // reached through `globalThis` where one exists.
-import { bareName, isMysqlSet, type EngineType } from "./engine-type.ts";
+import { bareName, holdsWholeArrays, isMysqlSet, type EngineType } from "./engine-type.ts";
 
 export type Dialect = "postgres" | "mysql" | "sqlite" | "clickhouse";
 
@@ -45,7 +47,7 @@ export function given(from: Record<string, unknown>, name: string): unknown {
   return v !== undefined && (typeof v === "function" || name === "__proto__") && !Object.hasOwn(from, name) ? undefined : v;
 }
 
-/** A column's kind as a module carries it: a scalar kind, `k[]` for an array of `k`, `a|b` for either, `(…)` for a Postgres row value of the fields it lists, `range:k` and `multirange:k` for a range of `k` and a multirange. */
+/** A column's kind as a module carries it: a scalar kind, `k[]` for an array of `k`, `{k}` for a whole array of kind `k` standing as an element, `a|b` for either, `(…)` for a Postgres row value of the fields it lists, `range:k` and `multirange:k` for a range of `k` and a multirange. */
 export type Kind = string;
 /** The output columns a module carries, in the statement's order; an array's `delimiter` where it is not a comma, or on ClickHouse, which has none, the column's type as the server names it. */
 export type Columns = readonly (readonly [name: string, kind: Kind, delimiter?: string])[];
@@ -282,6 +284,12 @@ export function columnKind(t: EngineType, dialect: Dialect): Kind {
         // An array of row values whose fields are not known is the text Postgres prints.
         const element = t.element.type;
         if (element.kind === "opaque" && bareName(element) === "record") return "text";
+        // An array of whole arrays holds each as its own; one whose elements' elements another
+        // delimiter separates (a domain over `box[]`) is the text Postgres prints.
+        if (holdsWholeArrays(t)) {
+          const inner = columnKind(element, dialect);
+          return inner.endsWith("[]") && element.kind === "array" && delimiterOf(element.element.type) === undefined ? `{${inner}}[]` : "text";
+        }
       }
       if (dialect === "mysql" && name === "bit") return t.size?.exact === 1 ? "bool" : "bytes";
       return `${columnKind(t.element.type, dialect)}[]`;
@@ -761,8 +769,10 @@ export const RANGE_BOUNDS = ["[)", "[]", "(]", "()"] as const;
 /** A range's kind, `range:<subtype's kind>`, and a multirange's, `multirange:<subtype's kind>`. */
 export const isRangeKind = (kind: Kind): boolean => kind.startsWith("range:");
 export const isMultirangeKind = (kind: Kind): boolean => kind.startsWith("multirange:");
-/** Whether one value of `kind` is itself a JavaScript array (a vector, a segment, a polygon, a multirange), so that an array of them is no deeper dimension. */
-export const isArrayValued = (kind: Kind): boolean => kind === "vector" || kind === "lseg" || kind === "polygon" || isMultirangeKind(kind);
+/** Whether one value of `kind` is itself a JavaScript array (a vector, a segment, a polygon, a multirange, a whole array), so that an array of them is no deeper dimension. */
+export const isArrayValued = (kind: Kind): boolean => kind === "vector" || kind === "lseg" || kind === "polygon" || isMultirangeKind(kind) || wholeArrayKind(kind) !== undefined;
+/** The kind of a whole array standing as an element, `int[]` of `{int[]}`; undefined for any other kind. */
+export const wholeArrayKind = (kind: Kind): Kind | undefined => (kind.startsWith("{") && kind.endsWith("}") ? kind.slice(1, -1) : undefined);
 const subtypeKind = (kind: Kind): Kind => kind.slice(kind.indexOf(":") + 1);
 
 /** A range from its text, each bound by `bound`. */
@@ -967,7 +977,7 @@ export function postgresLiteral(t: EngineType, v: unknown, fail: (message: strin
     const delim = delimiterOf(element) ?? ",";
     const write = (a: unknown): string => {
       if (!Array.isArray(a)) return fail(`an array; got ${describe(a)}.`);
-      return `{${a.map((e) => (e === null || e === undefined ? "NULL" : Array.isArray(e) && !arrayValued(element) ? write(e) : quoted(postgresLiteral(element, e, fail)))).join(delim)}}`;
+      return `{${a.map((e) => (e === null || e === undefined ? "NULL" : Array.isArray(e) && !arrayValued(element) && !holdsWholeArrays(t) ? write(e) : quoted(postgresLiteral(element, e, fail)))).join(delim)}}`;
     };
     return write(v);
   }
@@ -1064,16 +1074,35 @@ export function parseArray(text: string, element: (text: string) => unknown, del
  * Postgres's arrays are rectangular, so the depth of the first element at each level is every one's.
  * An element that is an array itself (a vector, a segment, a polygon, a multirange) is one level
  * more; a JSON element may be one at any depth, which its type holds whatever the dimensions around it.
+ * A whole array standing as an element (`{k}`) is held to its own kind's, and the array around it to
+ * its own by `text`, the array's text, where the value came from one.
  */
-export function withinDimensions(v: unknown, kind: Kind, column: string): unknown {
+export function withinDimensions(v: unknown, kind: Kind, column: string, text?: string): unknown {
   const element = elementKind(kind);
   if (!Array.isArray(v) || element === "json") return v;
   const declared = (kind.length - element.length) / 2;
+  const whole = wholeArrayKind(element);
+  if (whole !== undefined) {
+    // An array of whole arrays: only its text tells its own levels from its elements', a `{` for
+    // each of its dimensions before the first element; each element is held to its own.
+    const depth = text === undefined ? declared : /^(?:\[[^=]*=)?(\{*)/.exec(text)![1]!.length;
+    if (depth > declared) throw tooDeep(column, depth, declared);
+    const each = (level: unknown[], at: number): void => {
+      for (const e of level) if (Array.isArray(e)) at > 1 ? each(e, at - 1) : withinDimensions(e, whole, column);
+    };
+    each(v, declared);
+    return v;
+  }
   let depth = isArrayValued(element) ? -1 : 0;
   for (let level: unknown = v; Array.isArray(level); level = level.find((e) => e !== null)) depth++;
   if (depth <= declared) return v;
+  throw tooDeep(column, depth, declared);
+}
+
+/** Why a Postgres array is refused: it holds `depth` dimensions, and its type `declared`. */
+function tooDeep(column: string, depth: number, declared: number): DecodeError {
   // An array built of arrays is too deep only where an array column it collects is.
-  throw new DecodeError(
+  return new DecodeError(
     declared === 1
       ? `Column "${column}" holds an array of ${depth} dimensions, and its type has one: Reylo types a Postgres array column with one dimension, which Postgres doesn't enforce. Select to_jsonb(${column}) to read it as JSON, or set allow_nested_arrays: true in .reylo.yaml to type it at any depth.`
       : `Column "${column}" holds an array of ${depth} dimensions, and its type has ${declared}: an array column it collects holds more than one dimension, which Postgres doesn't enforce. Collect to_jsonb(<that column>) instead to read it as JSON.`,
@@ -1125,6 +1154,8 @@ function rowsDecoder(element: Decoder): Decoder {
 
 /** The decoder of a Postgres value of `kind` from its text; `delim` is an array's (`;` for `box[]`). */
 export function textDecoder(kind: Kind, delim = ","): Decoder {
+  const whole = wholeArrayKind(kind);
+  if (whole !== undefined) return textDecoder(whole);
   if (kind.endsWith("[]")) {
     const element = textDecoder(elementKind(kind), delim);
     return isRowKind(elementKind(kind)) && delim === "," ? rowsDecoder(element) : (x) => parseArray(x, element, delim);
@@ -1303,10 +1334,12 @@ export function float32s(bytes: Uint8Array, column: string): number[] {
  */
 export function coerce(kind: Kind, v: unknown, column: string, delim = ",", postgres = false): unknown {
   if (v === null || v === undefined) return null;
+  const whole = wholeArrayKind(kind);
+  if (whole !== undefined) return coerce(whole, v, column, ",", postgres);
   if (kind.endsWith("[]")) {
     const element = elementKind(kind);
     if (typeof v === "string") return parseArray(v, (s) => coerce(element, s, column, ",", postgres), delim);
-    if (Array.isArray(v)) return v.map((e) => (Array.isArray(e) ? coerce(kind, e, column, delim, postgres) : coerce(element, e, column, ",", postgres)));
+    if (Array.isArray(v)) return v.map((e) => (Array.isArray(e) && wholeArrayKind(element) === undefined ? coerce(kind, e, column, delim, postgres) : coerce(element, e, column, ",", postgres)));
     // A MySQL VECTOR's bytes: no driver gives any other array of floats as bytes.
     if (element === "float" && isBytes(v)) return float32s(v, column);
     // Bun.sql's int4[] and float4[] are typed arrays.
