@@ -5,7 +5,7 @@ import { execute, type QueryModule } from "./run.ts";
 import { renderParamType, renderType } from "../src/render.ts";
 import { typeSchema } from "../src/schema.ts";
 import { coerce, columnKind, DecodeError, duration, hstore, hstoreText, instant, kindType, money, numbersInJson, parseRow, postgresInterval, postgresLiteral, postgresYear, rowMasks, scalarKind, textDecoder, withinDimensions } from "../src/values.ts";
-import type { EngineType, JsonSchema } from "../src/engine-type.ts";
+import { withBases, type EngineType, type JsonSchema } from "../src/engine-type.ts";
 import { validate } from "../src/json-schema.ts";
 import { array, field, lite, my, oneOf, pg, record } from "./descriptors.ts";
 import type { Columns } from "../src/values.ts";
@@ -918,6 +918,38 @@ test("a row converts each name's last column by that column's own mask, by posit
   // The first `x` has a mask and the last none; the first `y` none and the last one.
   assert.deepEqual(rowMasks(columns, [n, null, null, n, null, n, null]), [["y", n], ["__proto__", n]]);
   assert.deepEqual(rowMasks(columns, []), []);
+});
+
+test("Postgres: an array of a domain over an array type holds each element as a whole array, decoded from its quoted text, each level held to one dimension, and goes back as that text", async () => {
+  // `create domain ints as int4[]; create table d (x ints[])`, with the domain written as its base,
+  // beside `array_agg` over an int4[] column, whose level bears its element's own name.
+  const ints = withBases(array(array(pg("int4"), true, "public.ints"), true, "public._ints"), { "public.ints": "_int4" });
+  const built = array(array(pg("int4"), true, "_int4"), false, "_int4");
+  const kind = columnKind(ints, "postgres");
+  assert.equal(kind, "{int[]}[]");
+  assert.equal(columnKind(built, "postgres"), "int[][]");
+  // A domain over box[], whose elements a semicolon separates, is the text Postgres prints.
+  assert.equal(columnKind(withBases(array(array(pg("box"), true, "public.boxes"), true, "public._boxes"), { "public.boxes": "_box" }), "postgres"), "text");
+  const decode = textDecoder(kind);
+  for (const [text, value] of [
+    ['{"{1,2}",NULL,"{}"}', [[1, 2], null, []]],
+    ['{{"{1,2}"},{"{3,4}"}}', [[[1, 2]], [[3, 4]]]],
+    ['{"{{1,2},{3,4}}"}', [[[1, 2], [3, 4]]]],
+    ['[0:0]={"[2:3]={1,2}"}', [[1, 2]]],
+  ] as const) {
+    assert.deepEqual(decode(text), value, text);
+    assert.deepEqual(coerce(kind, text, "x"), value, text);
+  }
+  assert.deepEqual(withinDimensions(decode('{"{1,2}",NULL,"{}"}'), kind, "x", '{"{1,2}",NULL,"{}"}'), [[1, 2], null, []]);
+  // Two dimensions of the array, or of one of its elements, are refused, though both read [[[1, 2]]].
+  for (const text of ['{{"{1,2}"}}', '{"{{1,2}}"}', '{{"{1,2}"},{NULL}}']) assert.throws(() => withinDimensions(decode(text), kind, "x", text), /Column "x" holds an array of 2 dimensions, and its type has one/, text);
+  // As a parameter, each element is the text of its array.
+  const calls: unknown[][] = [];
+  const client = pgPool(async (_text: string, bound: unknown[]) => (calls.push(bound), { rows: [], rowCount: 0 }));
+  const q: QueryModule<"postgres"> = { dialect: "postgres", sql: "select :x", params: ["x"], inputs: { x: { type: ints, nullable: false } } };
+  await execute(client, q, { x: [[1, 2], [], [3]] });
+  assert.deepEqual(calls, [['{"{\\"1\\",\\"2\\"}","{}","{\\"3\\"}"}']]);
+  await assert.rejects(async () => execute(client, q, { x: [[1], 2] }), /Parameter "x" is an array of arrays, each element an array; got 2\./);
 });
 
 test("an array of arrays decodes its innermost elements by their kind, from text or a driver's arrays", () => {

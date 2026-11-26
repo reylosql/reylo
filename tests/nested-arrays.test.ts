@@ -48,3 +48,12 @@ test("an array column inside JSON a statement builds is typed at any depth under
   assert.match(nested.row, /cells: NestedArray<number \| null>/);
   assert.equal(reyloImport(nested.row), `import type { NestedArray, Query } from "reylo";`);
 });
+
+test("an array of a domain over an array type holds whole arrays: one dimension at each level by default, any depth at both under allow_nested_arrays", () => {
+  // `create domain ints as int4[]; create table d (x ints[] not null)`.
+  const int4 = { kind: "integer", bits: 32, label: "int4" };
+  const ints = { kind: "array", label: "public._ints", element: { nullable: true, type: { kind: "array", label: "public.ints", element: { nullable: true, type: int4 } } } };
+  const whole = { ...analysis, columns: [{ name: "x", nullable: false, type: ints }], domains: { "public.ints": "_int4" } } as unknown as Analysis;
+  assert.match(moduleTypes("", whole, "postgres", undefined, true).row, /x: \(\(number \| null\)\[\] \| null\)\[\]/);
+  assert.match(moduleTypes("", whole, "postgres", undefined, true, ".reylo.yaml", {}, true).row, /x: NestedArray<NestedArray<number \| null> \| null>/);
+});

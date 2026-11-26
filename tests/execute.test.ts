@@ -777,6 +777,33 @@ test("mysql: through a server that refuses prepared statements, a built statemen
   }
 });
 
+test("postgres: an array of a domain over an array type comes back as whole arrays on pg, postgres.js and PGlite, too deep at either level refused, and goes back in as it came out", { skip: pgLive }, async () => {
+  const setup = `create domain ints as int4[]; create table d (id int primary key, x ints[]);
+    insert into d values (1, '{"{1,2}",NULL,"{}"}'), (2, '{{"{1,2}"},{"{3,4}"}}'), (3, '{"{{1,2},{3,4}}"}'), (4, null)`;
+  const own = await postgresDatabase("reylo_execute_domain_arrays", setup);
+  const pg = driver("pg");
+  const client = new pg.Client(own.url);
+  await client.connect();
+  const { PGlite } = driver("@electric-sql/pglite");
+  const lite = new PGlite();
+  await lite.exec(setup);
+  try {
+    const select = await builtModule(own.url, "domain_arrays", "select x from d where id = :id\n");
+    const insert = await builtModule(own.url, "insert_domain_arrays", "insert into d (id, x) values (:id, :x) returning x\n");
+    for (const [name, c] of [["pg", client], ["postgres.js", own.sql], ["PGlite", lite]] as const) {
+      assert.deepEqual({ ...(await select.run(c, { id: 1 })) }, { x: [[1, 2], null, []] }, name);
+      assert.deepEqual({ ...(await select.run(c, { id: 4 })) }, { x: null }, name);
+      for (const id of [2, 3]) await assert.rejects(async () => select.run(c, { id }), /Column "x" holds an array of 2 dimensions, and its type has one/, `${name}, row ${id}`);
+      const id = { pg: 5, "postgres.js": 6, PGlite: 7 }[name];
+      assert.deepEqual({ ...(await insert.run(c, { id, x: [[7, 8], [], [9]] })) }, { x: [[7, 8], [], [9]] }, name);
+    }
+  } finally {
+    await client.end();
+    await lite.close();
+    await own.drop();
+  }
+});
+
 test("mysql: PlanetScale's execute() → { rows }", async () => {
   const conn = { execute: async () => ({ rows: [row], statement: "select", headers: ["id"], insertId: "0" }) };
   assert.deepEqual(await execute(conn, my, { id: 1, name: "ada" }), [row]);
