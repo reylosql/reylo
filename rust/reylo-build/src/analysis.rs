@@ -312,8 +312,10 @@ async fn postgres(located: &Located, queries: &Path, sql: &str, session: &mut Se
         let analysis = analysis.map_err(|e| e.to_string())?;
         let now = postgres_schema(session).await;
         if matches!(now, Ok(Err(_))) {
-            // The database gone: the next statement tries it again, rather than a minute offline.
+            // The database gone: the next statement tries it again, rather than a minute offline, with
+            // none of the engine's answers, since nothing will tell it whether the schema moved meanwhile.
             session.schema = None;
+            session.answers.clear();
         }
         match moved(&schema, now, tries) {
             Moved::No => return remember(&located.cache, &own, Dialect::Postgres, Some(&schema), &analysis),
@@ -387,8 +389,10 @@ async fn mysql(located: &Located, queries: &Path, sql: &str, session: &mut Sessi
         let analysis = analysis.map_err(|e| e.to_string())?;
         let now = mysql_schema(session).await;
         if matches!(now, Ok(Err(_))) {
-            // The database gone: the next statement tries it again, rather than a minute offline.
+            // The database gone: the next statement tries it again, rather than a minute offline, with
+            // none of the engine's answers, since nothing will tell it whether the schema moved meanwhile.
             session.schema = None;
+            session.answers.clear();
         }
         match moved(&schema, now, tries) {
             Moved::No => return remember(&located.cache, &own, Dialect::Mysql, Some(&schema), &analysis),
