@@ -144,7 +144,9 @@ pub fn schema_sum(last: &str, sql: &str) -> String {
 }
 
 /// SQL without its comments, its whitespace runs as one space, as any of the three databases reads
-/// it: what a lock's checksum covers, so an edit to a comment or to spacing is no edit. Quoted text
+/// it: what a lock's checksum covers, so an edit to a comment or to spacing is no edit. Spacing is
+/// ASCII's alone, as `sql.rs` reads it: the databases read a U+3000 or a U+00A0 outside quotes and
+/// comments as part of a name, so it is kept as written. Quoted text
 /// (`'…'`, `"…"`, `` `…` ``, and Postgres's `$tag$…$tag$`) and MySQL's `/*! … */` are kept as
 /// written, and so is everything after a string, a comment, a `--` or a `#` that the databases
 /// read differently, or a comment that never ends, so that text one of them runs is never dropped
@@ -217,7 +219,7 @@ pub fn canonical(sql: &str) -> String {
                     space = true;
                 }
             }
-        } else if c.is_whitespace() {
+        } else if c.is_ascii_whitespace() {
             space = true;
             k += 1;
         } else if c == '\'' || c == '"' || c == '`' {
@@ -469,6 +471,15 @@ mod tests {
         // A backslash both readings agree on changes nothing.
         assert_eq!(canonical("select 'a\\n' -- x\n,  'b\\\\'"), "select 'a\\n' , 'b\\\\'");
         assert_ne!(checksum("", "a.sql", "create table a (id int)"), checksum("", "a.sql", "create table a (id bigint)"));
+    }
+
+    #[test]
+    fn a_space_beyond_ascii_is_part_of_a_name() {
+        // Postgres, MySQL and SQLite read U+3000 and U+00A0 outside quotes and comments as part of a
+        // name, so turning one into a space renames a column: an edit.
+        assert_ne!(canonical("create view v as select 1 as x\u{3000}, 2 as y;"), canonical("create view v as select 1 as x , 2 as y;"));
+        assert_ne!(canonical("create table t (a\u{a0}int)"), canonical("create table t (a int)"));
+        assert_eq!(canonical("select  'a\u{3000}b' --\u{3000}x\n"), "select 'a\u{3000}b'");
     }
 
     #[test]

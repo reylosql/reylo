@@ -5,11 +5,14 @@
 // that an edit to a comment, to spacing or to line endings is no edit there either. It runs inside
 // a Durable Object, so it imports nothing.
 
-/** The text with its line endings as `\n` and no trailing whitespace. */
+/** The text with its line endings as `\n` and no trailing ASCII spacing. */
 export function normalized(sql: string): string {
-  return sql.replace(/\r\n?/g, "\n").replace(/\p{White_Space}+$/u, "");
+  return sql.replace(/\r\n?/g, "\n").replace(/[ \t\n\f\r]+$/, "");
 }
 
+// Spacing is ASCII's alone, as Rust's `is_ascii_whitespace`: the databases read a U+3000 or a
+// U+00A0 outside quotes and comments as part of a name.
+const SPACING = /^[ \t\n\f\r]$/;
 const WHITESPACE = /^\p{White_Space}$/u;
 const CONTROL = /^\p{Cc}$/u;
 const WORD = /^[\p{Alphabetic}\p{N}_]$/u;
@@ -84,7 +87,7 @@ export function canonical(sql: string): string {
         k = flat;
         space = true;
       }
-    } else if (WHITESPACE.test(c)) {
+    } else if (SPACING.test(c)) {
       space = true;
       k++;
     } else if (c === "'" || c === '"' || c === "`") {

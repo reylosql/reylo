@@ -35,3 +35,10 @@ test("line endings and trailing whitespace are no edit, and a statement's change
   assert.ok(sameMigration("insert into t values ('a\r\nb');", "insert into t values ('a\nb');"));
   assert.ok(!sameMigration("create table t (a int);", "create table t (a bigint);"));
 });
+
+test("a space beyond ASCII is part of a name, as the databases read it", () => {
+  assert.ok(!sameMigration("create view v as select 1 as x\u3000, 2 as y;", "create view v as select 1 as x , 2 as y;"));
+  assert.ok(!sameMigration("create table t (a\u00a0int)", "create table t (a int)"));
+  assert.ok(!sameMigration("select 1 as x\u3000", "select 1 as x"));
+  assert.equal(canonical("select  'a\u3000b' --\u3000x\n"), "select 'a\u3000b'");
+});

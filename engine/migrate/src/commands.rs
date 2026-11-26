@@ -269,7 +269,7 @@ fn then(line: impl AsRef<str>, what: &[(&str, &[&str])]) -> String {
 }
 
 fn normalized(sql: &str) -> String {
-    sql.replace("\r\n", "\n").replace('\r', "\n").trim_end().to_string()
+    sql.replace("\r\n", "\n").replace('\r', "\n").trim_end_matches(|c: char| c.is_ascii_whitespace()).to_string()
 }
 
 /// A path as the person running the command reads it: relative to where they are.
@@ -11124,6 +11124,12 @@ fn table_lines(table: &crate::db::Table) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_space_beyond_ascii_ending_a_file_is_kept() {
+        assert_eq!(super::normalized("select 1 as x\u{3000}\r\n \n"), "select 1 as x\u{3000}");
+        assert_eq!(super::normalized("select 1 as x\u{a0}"), "select 1 as x\u{a0}");
+    }
+
     #[cfg(feature = "cli")]
     #[test]
     fn renames_are_read_from_each_form_of_the_statement() {
