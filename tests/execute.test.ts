@@ -882,8 +882,8 @@ test("mysql: a DOUBLE of -0 is stored as -0 through mariadb as through mysql2, a
   const u = new URL(MYSQL!);
   const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1), connectionLimit: 1 };
   const twice: QueryModule<"mysql"> = { dialect: "mysql", ...handWritten("update readings set d = :d, payload = json_array(:d)", "mysql"), inputs: { d: { type: myType("double") } } };
-  const coalesced = await builtModule(own.url, "coalesced", "select coalesce(:d, d) as x from readings\n");
   try {
+    const coalesced = await builtModule(own.url, "coalesced", "select coalesce(:d, d) as x from readings\n");
     for (const open of [() => driver("mysql2/promise").createPool(connection), () => driver("mariadb").createPool(connection)]) {
       const client = open();
       try {
