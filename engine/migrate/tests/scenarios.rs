@@ -1165,7 +1165,7 @@ async fn line_endings_inside_a_string_are_no_edit(mut p: P) {
 
 /// A `--` comment ends at a bare carriage return on Postgres, and runs on to the next line feed on
 /// MySQL and SQLite: there, the same text with a line feed in its place runs one more statement, so
-/// it is an edit, whatever the lock makes of the two.
+/// it is an edit, whatever the lock makes of the two, and history pull writes back what ran.
 async fn a_carriage_return_ends_a_comment_only_where_the_database_ends_it(mut p: P) {
     let (d, text) = (p.d, p.t.text);
     p.linear();
@@ -1188,6 +1188,12 @@ async fn a_carriage_return_ends_a_comment_only_where_the_database_ends_it(mut p:
     assert_has!(p.output(), r"20261027110000_rows\.sql  applied [^\n]+, and edited since");
     assert_eq!(p.migrate().await, 1, "{}", p.peek());
     assert_has!(p.output(), r"Migration 20261027110000_rows\.sql changed after this database applied it");
+    assert_eq!(p.run(async |o, log| reylo_migrate::history_pull(o, log).await).await, 0, "{}", p.peek());
+    assert_has!(p.output(), "written over");
+    assert_eq!(std::fs::read_to_string(p.dir.join("migrations").join("20261027110000_rows.sql")).unwrap(), rows("\r"));
+    assert_eq!(p.status().await, 0, "{}", p.peek());
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    assert_has!(p.output(), "Up to date");
 }
 
 async fn history_pull_takes_back_what_the_lock_refuses(mut p: P) {
