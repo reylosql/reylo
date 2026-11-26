@@ -64,13 +64,14 @@ const BUILD_IDLE = 250;
  * host and path, as each dialect's engine reads them (engine/native/src/): libpq's, among them
  * `user`, which names the role as the URL's user part does, and `options`, which may set the
  * search path a name is read through; mysql2's socket; and ClickHouse's database, the header that
- * names it, and the path in front of its interface. They name a session's entries with its server
- * (`#server`), as `server` in rust/reylo-build/src/analysis.rs names them.
+ * names it, the path in front of its interface, and the bearer token, which drops the X-ClickHouse-
+ * headers before it (engine/native/src/clients/clickhouse.rs). They name a session's entries with
+ * its server (`#server`), as `server` in rust/reylo-build/src/analysis.rs names them.
  */
 const CHOOSING: Record<Dialect, readonly string[]> = {
   postgres: ["dbname", "host", "hostaddr", "options", "port", "user"],
   mysql: ["socket", "socketPath"],
-  clickhouse: ["ch_database", "clickhouse_setting_database", "http_header_x-clickhouse-database", "pathname"],
+  clickhouse: ["access_token", "ch_database", "clickhouse_setting_database", "http_header_x-clickhouse-database", "pathname"],
   sqlite: [],
 };
 
@@ -599,13 +600,16 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
  * undecoded. A value is kept as written too, since its readers decode it each their own way
  * (libpq reads a `+` as a plus, ClickHouse and the engine's MySQL socket as a space), so that a
  * database written two ways is at most analyzed again under a name of its own. They keep the
- * URL's order, which decides the host tried first and which of `socket` and `socketPath` the
- * engine opens.
+ * URL's order, which decides the host tried first, which of `socket` and `socketPath` the
+ * engine opens, and which ClickHouse headers a bearer token drops. A token is kept by its place
+ * alone, its value never, and alone it changes no name, since it then drops no header that
+ * chooses the database.
  */
 function choosing(url: string, dialect: Dialect): string {
   const at = url.indexOf("?");
   const chosen = at < 0 ? [] : url.slice(at + 1).split("&").filter((pair) => CHOOSING[dialect].includes(listed(pair)));
-  return chosen.length ? `?${chosen.join("&")}` : "";
+  const named = chosen.map((pair) => (listed(pair) === "access_token" ? `${pair.split("=")[0]}=` : pair));
+  return chosen.some((pair) => listed(pair) !== "access_token") ? `?${named.join("&")}` : "";
 }
 
 /**
