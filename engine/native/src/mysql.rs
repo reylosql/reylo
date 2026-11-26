@@ -258,6 +258,14 @@ fn mariadb(version: &str) -> Option<String> {
     Some(if number.is_empty() { "MariaDB".to_string() } else { format!("MariaDB {number}") })
 }
 
+/// Where a MySQL URL connects, as this engine reads it: the socket, the host and port, the user and
+/// the database, which a test holds the names of a cache's entries to, as [`super::postgres::target`].
+#[doc(hidden)]
+pub fn target(url: &str) -> Result<String, String> {
+    let opts = parse(url)?;
+    Ok(format!("{:?} {} {} {:?} {:?}", opts.socket(), opts.ip_or_hostname(), opts.tcp_port(), opts.user(), opts.db_name()))
+}
+
 /// The URL as mysql_async's options. The TLS settings mysql2 projects write are read here: mysql2's
 /// `ssl` (`true`, or JSON with `rejectUnauthorized`, `ca`, `cert` and `key`, each certificate and
 /// key as PEM text), MySQL's own `ssl-mode`, and `sslaccept`; mysql2's `socketPath` is the socket.

@@ -811,6 +811,37 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
+    fn urls_named_alike_reach_one_database_as_the_engine_reads_them() {
+        // Every case under its own variables, under none and under all of them: a name two of these
+        // share is one database to the engine, so that a build that cannot reach it never reads
+        // another database's entry.
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("entry-name-cases.json")).unwrap();
+        let every = serde_json::json!({ "PGHOST": "elsewhere", "PGPORT": "7777", "PGUSER": "ci", "PGDATABASE": "other", "PGOPTIONS": "-c search_path=other" });
+        let mut reached: Vec<(String, String, String)> = Vec::new();
+        for (case, variables) in cases.iter().flat_map(|case| [(case, case["env"].clone()), (case, serde_json::Value::Null), (case, every.clone())]) {
+            let url = case["url"].as_str().unwrap();
+            let env = |name: &str| variables[name].as_str().map(String::from);
+            let target = match super::Dialect::of(url) {
+                #[cfg(feature = "postgres")]
+                Ok(super::Dialect::Postgres) => reylo_engine::postgres::target(url, &env),
+                #[cfg(feature = "mysql")]
+                Ok(super::Dialect::Mysql) => reylo_engine::mysql::target(url),
+                _ => continue,
+            };
+            // A URL the engine refuses reaches nothing.
+            let Ok(target) = target else { continue };
+            let name = super::server_in(url, &env);
+            for (other, reaches, said) in &reached {
+                if *other == name {
+                    assert_eq!(*reaches, target, "{} and {} share the name {name}", case["case"], said);
+                }
+            }
+            reached.push((name, target, format!("{} under {variables}", case["case"])));
+        }
+    }
+
+    #[test]
     fn a_build_from_the_cache_says_so_in_the_loaders_words() {
         assert_eq!(utc_day(0), "1970-01-01");
         assert_eq!(utc_day(951_782_400_000), "2000-02-29");

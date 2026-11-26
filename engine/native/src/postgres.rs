@@ -184,6 +184,15 @@ pub fn transaction_pooler(url: &str) -> Option<String> {
     })
 }
 
+/// Where a libpq URL connects, as this engine reads it with the variables `env` gives: its hosts,
+/// host addresses, ports, user, database and options. A test holds the names of a cache's entries
+/// to it (rust/reylo-build/src/analysis.rs), so that two URLs named alike reach one database.
+#[doc(hidden)]
+pub fn target(url: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
+    let Parsed { config, .. } = parse(url, env)?;
+    Ok(format!("{:?} {:?} {:?} {:?} {:?} {:?}", config.get_hosts(), config.get_hostaddrs(), config.get_ports(), config.get_user(), config.get_dbname(), config.get_options()))
+}
+
 /// A connection to the database a libpq URL names, as the program opens one, and the server's
 /// version as it reports it when the connection starts (`server_version`), which costs no round
 /// trip: its number alone, `18.1` of `18.1 (Homebrew)`.
