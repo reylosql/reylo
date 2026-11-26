@@ -35,6 +35,9 @@ type Connection = { readonly executeUnprepared: (sql: string, params: ReadonlyAr
 /** @effect/sql-mysql2's connection: mysql2's PoolConnection on `conn`, and the permit every statement on it holds. */
 type MysqlConnection = Connection & { readonly conn?: { promise?: unknown; threadId?: number; destroy?: () => void }; readonly permit?: Semaphore.Semaphore };
 
+/** The few members of a mysql2 connection the kill below calls. */
+type KillConnection = { on(event: "error", listener: () => void): unknown; query(sql: string, values: unknown[], callback: () => void): unknown; destroy(): void };
+
 /** Each Effect SQL client's `driver`, by the dialect whose statements it runs. */
 const DRIVERS: { readonly [D in Dialect]: readonly string[] } = {
   postgres: ["pg"],
@@ -111,9 +114,10 @@ const MYSQL_CANCEL_MS = 5000;
  * Reylo's statement on the mysql2 connection Effect lent it, as @effect/sql-mysql2 runs its own: it
  * holds the connection's permit from before its first command until it has settled, so a
  * transaction's statements run one at a time and a `KILL QUERY` reaches only the one interrupted.
- * Interrupted, it sends `KILL QUERY` for the connection's thread over another connection of the
- * pool, then waits for the statement to end before the connection is given back, or destroys the
- * connection after `MYSQL_CANCEL_MS`. A database or driver error fails it with `SqlError`.
+ * Interrupted, it sends `KILL QUERY` for the connection's thread over a connection of its own,
+ * outside the pool, which may have no free slot, then waits for the statement to end before the
+ * connection is given back, or destroys the connection after `MYSQL_CANCEL_MS`. A database or
+ * driver error fails it with `SqlError`.
  */
 function onMysql<A>(sql: SqlClient.SqlClient, conn: Required<MysqlConnection>, run: () => Promise<A>): Effect.Effect<A, SqlError.SqlError> {
   const statement = Effect.callback<A, SqlError.SqlError>((resume) => {
@@ -138,7 +142,7 @@ function onMysql<A>(sql: SqlClient.SqlClient, conn: Required<MysqlConnection>, r
       return Effect.callback<void>((done) => {
         let finished = false;
         let killed = false;
-        const finish = () => {
+        let finish = () => {
           if (finished) return;
           finished = true;
           clearTimeout(timer);
@@ -149,23 +153,39 @@ function onMysql<A>(sql: SqlClient.SqlClient, conn: Required<MysqlConnection>, r
           finish();
         }, MYSQL_CANCEL_MS);
         onSettled = () => killed && finish();
-        // A connection of the pool's own, outside any transaction; a kill that fails is ignored.
-        const kill = Effect.scoped(Effect.flatMap(sql.reserve as unknown as Effect.Effect<Connection, SqlError.SqlError, Scope.Scope>, (other) => other.executeUnprepared(`KILL QUERY ${Number(conn.conn.threadId)}`, [], undefined)));
-        Effect.runFork(
-          kill.pipe(
-            Effect.ignore,
-            Effect.ensuring(
-              Effect.sync(() => {
-                killed = true;
-                if (settled) finish();
-              }),
-            ),
-          ),
-        );
+        const onKilled = () => {
+          killed = true;
+          if (settled) finish();
+        };
+        let kill: KillConnection | undefined;
+        const end = finish;
+        // A kill that fails, or a connection that cannot be made, is ignored.
+        finish = () => {
+          kill?.destroy();
+          end();
+        };
+        try {
+          kill = killConnection(conn.conn);
+          kill.on("error", () => {});
+          kill.query("KILL QUERY ?", [conn.conn.threadId], onKilled);
+        } catch {
+          onKilled();
+        }
       });
     });
   });
   return conn.permit.withPermit(statement);
+}
+
+/**
+ * A connection of its own to the server a pool connection of mysql2's reaches, as the pool would
+ * make one: mysql2's `Connection`, which `PoolConnection` extends, on a copy of the pool's config.
+ */
+function killConnection(pooled: unknown): KillConnection {
+  const c = pooled as { constructor: Function; config: object; _pool?: { _createConnectionConfig?: () => object } };
+  const Connection = Object.getPrototypeOf(c.constructor) as new (options: { config: object }) => KillConnection;
+  const config = c._pool?._createConnectionConfig?.() ?? Object.create(Object.getPrototypeOf(c.config), Object.getOwnPropertyDescriptors(c.config));
+  return new Connection({ config });
 }
 
 // mysql2's error numbers as @effect/sql-mysql2 classifies them, so that an error reads the same
@@ -176,9 +196,10 @@ const MYSQL_AUTHORIZATION = new Set([1044, 1142, 1143, 1227]);
 const MYSQL_SYNTAX = new Set([1054, 1064, 1146]);
 const MYSQL_CONSTRAINT = new Set([1022, 1048, 1169, 1216, 1217, 1451, 1452, 1557]);
 
-/** An error mysql2 raised, the database's or its own (a lost connection, a reset socket), which has a code; Reylo's own errors have none. */
+/** An error mysql2 raised, the database's or its own (a lost connection, a reset socket, a closed connection), which has a code, a number or `fatal`; Reylo's own errors have none. */
 function isMysqlError(error: unknown): error is Error & { errno?: unknown; code?: unknown; sqlMessage?: unknown } {
-  return error instanceof Error && !(error instanceof TypeError) && (typeof (error as { code?: unknown }).code === "string" || typeof (error as { errno?: unknown }).errno === "number");
+  const e = error as { code?: unknown; errno?: unknown; fatal?: unknown };
+  return error instanceof Error && !(error instanceof TypeError) && (typeof e.code === "string" || typeof e.errno === "number" || e.fatal === true);
 }
 
 /** The key a duplicate entry names, as @effect/sql-mysql2 reads it from mysql2's message. */

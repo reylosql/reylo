@@ -275,17 +275,32 @@ test("Effect's pg client gives the driver matrix's typed row as .run() gives it 
   }
 });
 
-test("an interrupted MySQL statement is stopped with KILL QUERY before its connection goes back, and a lost connection fails as SqlError", { skip: mysqlLive }, async () => {
+test("an interrupted MySQL statement is stopped with KILL QUERY before its connection goes back, even with the pool's one connection busy", { skip: mysqlLive }, async () => {
   const database = await mysqlDatabase("reylo_effect_kill");
   try {
     const slow = mysql<{}, unknown, "one">("select sleep(5) as slept", [["slept", "int"]], "one");
     const running = mysql<{}, bigint, "one">("select count(*) from information_schema.processlist where info = 'select sleep(5) as slept'", [["count(*)", "int8"]], "one", true);
     const program = Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      // Interrupted by its timeout, the statement is killed, and has ended by the time the Effect has.
+      const started = Date.now();
       const timedOut = yield* Effect.exit(effect(slow).pipe(Effect.timeout("300 millis")));
-      const left = yield* effect(running);
-      // The server ends the statement's connection: mysql2's own error, which has no number, fails it as SqlError.
+      // The kill goes over a connection of its own, so the statement has ended by the time the Effect has.
+      return { timedOut, left: yield* effect(running), elapsed: Date.now() - started };
+    });
+    const { timedOut, left, elapsed } = await Effect.runPromise(program.pipe(Effect.provide(MysqlClient.layer({ url: Redacted.make(database.url), maxConnections: 1 }))));
+    assert.ok(Exit.isFailure(timedOut));
+    assert.equal(left, 0n);
+    assert.ok(elapsed < 3000, `${elapsed} ms`);
+  } finally {
+    await database.drop();
+  }
+});
+
+test("a MySQL statement whose connection the server ends fails as SqlError, as Effect's own statements do", { skip: mysqlLive }, async () => {
+  const database = await mysqlDatabase("reylo_effect_lost");
+  try {
+    const slow = mysql<{}, unknown, "one">("select sleep(5) as slept", [["slept", "int"]], "one");
+    const program = Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
       const fiber = yield* Effect.forkChild(Effect.flip(effect(slow)));
       let thread: unknown;
       for (let i = 0; i < 50 && thread === undefined; i++) {
@@ -293,11 +308,9 @@ test("an interrupted MySQL statement is stopped with KILL QUERY before its conne
         thread = ((yield* sql.unsafe("select id from information_schema.processlist where info = 'select sleep(5) as slept'")) as { id?: unknown }[])[0]?.id;
       }
       yield* sql.unsafe(`kill ${Number(thread)}`);
-      return { timedOut, left, lost: yield* Fiber.join(fiber) };
+      return yield* Fiber.join(fiber);
     });
-    const { timedOut, left, lost } = await Effect.runPromise(program.pipe(Effect.provide(MysqlClient.layer({ url: Redacted.make(database.url), maxConnections: 4 }))));
-    assert.ok(Exit.isFailure(timedOut));
-    assert.equal(left, 0n);
+    const lost = await Effect.runPromise(program.pipe(Effect.provide(MysqlClient.layer({ url: Redacted.make(database.url), maxConnections: 4 }))));
     assert.ok(SqlError.isSqlError(lost), String(lost));
   } finally {
     await database.drop();
