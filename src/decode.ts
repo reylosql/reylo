@@ -250,7 +250,7 @@ async function pgFamily(key: object, run: (types: object) => Promise<PgResult>, 
   if (types.sawBinary()) throw refuseBinary();
   // The table goes by oid, which says nothing of a built-in row's fields, so those are still text,
   // as an array of whole arrays may be.
-  const moduleColumns = columns?.filter(([, kind]) => byModule(kind));
+  const moduleColumns = columns && lastOfEach(columns).filter(([, kind]) => byModule(kind));
   if (moduleColumns?.length) {
     const decoders = moduleColumns.map(([name, kind, delim]) => [name, textDecoder(kind, delim)] as const);
     for (const row of rows) {
@@ -398,7 +398,9 @@ async function pglite(db: AnyClient, text: string, values: unknown[], columns: C
   // Created types, which the table kept as text, an oid the table did not name, which went through
   // the instance's parser, and a row value, whose oid says nothing of its fields.
   const byColumn = columns && columns.length === fields.length ? columns : undefined;
-  const after = fields.map((f, i) => [f, i] as const).filter(([f, i]) => f.oid >= FIRST_USER_OID || !oids.has(f.oid) || (byColumn !== undefined && isRowKind(byColumn[i]![1])));
+  // A row holds the last column of each name, which only that column's kind decodes.
+  const last = new Map(fields.map((f, i) => [f.name, i]));
+  const after = fields.map((f, i) => [f, i] as const).filter(([f, i]) => last.get(f.name) === i && (f.oid >= FIRST_USER_OID || !oids.has(f.oid) || (byColumn !== undefined && isRowKind(byColumn[i]![1]))));
   if (after.length) {
     const load: Load = async (sql) => (await db.query(sql, [], { rowMode: "array", parsers: { 25: keepText } })).rows;
     const decoders = await fieldDecoders(fields, columns, db, load);
@@ -931,7 +933,8 @@ function slonikValue(kind: Kind, v: unknown, name: string, delim?: string): unkn
   if (typeof v === "string") return textDecoder(kind, delim)(v);
   // pg parses an array's text into an array, each element by the element type's parser, which
   // Reylo's tag passes through for the types it names.
-  if (Array.isArray(v) && kind.endsWith("[]")) return v.map((e) => (Array.isArray(e) && wholeArrayKind(elementKind(kind)) === undefined ? slonikValue(kind, e, name, delim) : slonikValue(elementKind(kind), e, name, delim)));
+  if (Array.isArray(v) && wholeArrayKind(elementKind(kind)) !== undefined) return coerce(kind, v, name, delim, true);
+  if (Array.isArray(v) && kind.endsWith("[]")) return v.map((e) => (Array.isArray(e) ? slonikValue(kind, e, name, delim) : slonikValue(elementKind(kind), e, name, delim)));
   if (SLONIK_STRICT.test(kind)) {
     throw new DecodeError(`Column "${name}" reached Reylo already converted by Slonik's driver (${v instanceof Date ? "a Date" : typeof v}), which ignored the query's type parsers, as a custom driverFactory may: Reylo refuses it rather than return a value that may have been rounded.`);
   }

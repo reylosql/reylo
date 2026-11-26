@@ -775,14 +775,15 @@ export const isArrayValued = (kind: Kind): boolean => kind === "vector" || kind 
 export const wholeArrayKind = (kind: Kind): Kind | undefined => (kind.startsWith("{") && kind.endsWith("}") ? kind.slice(1, -1) : undefined);
 
 /**
- * The dimensions of each array of whole arrays decoded from its text, a `{` for each before its
- * first element (after any bounds, `[0:1]=`): its value alone can't tell its own levels from its
- * elements' (`[[null]]` is one level of an element `{NULL}`, or two of NULL elements), which
+ * The dimensions of each array of whole arrays, and of each whole array in it, as its text had them,
+ * a `{` for each before its first element (after any bounds, `[0:1]=`), or as a driver's own arrays
+ * of each element's text nest: its value alone can't tell its own levels from its elements'
+ * (`[[null]]` is one level of an element `{NULL}`, or two of NULL elements), which
  * `withinDimensions` reads here.
  */
 const wholeDepths = new WeakMap<unknown[], number>();
-function recordDepth(text: string, v: unknown[]): unknown[] {
-  wholeDepths.set(v, /^(?:\[[^=]*=)?(\{*)/.exec(text)![1]!.length);
+function recordDepth(text: string, v: unknown): unknown {
+  if (Array.isArray(v)) wholeDepths.set(v, /^(?:\[[^=]*=)?(\{*)/.exec(text)![1]!.length);
   return v;
 }
 const subtypeKind = (kind: Kind): Kind => kind.slice(kind.indexOf(":") + 1);
@@ -1092,14 +1093,21 @@ export function parseArray(text: string, element: (text: string) => unknown, del
  * its own by the dimensions its text had (`recordDepth`).
  */
 export function withinDimensions(v: unknown, kind: Kind, column: string): unknown {
+  if (!Array.isArray(v)) return v;
   const element = elementKind(kind);
-  if (!Array.isArray(v) || element === "json") return v;
   const declared = (kind.length - element.length) / 2;
   const whole = wholeArrayKind(element);
+  // A whole array's own dimensions, from its text, whatever its elements are.
+  const recorded = wholeDepths.get(v);
+  if (recorded !== undefined && whole === undefined) {
+    if (recorded > declared) throw tooDeep(column, recorded, declared);
+    return v;
+  }
+  if (element === "json") return v;
   if (whole !== undefined) {
     // An array of whole arrays: only its text told its own levels from its elements' (a driver's
     // own arrays are taken at the levels declared); each element is held to its own.
-    const depth = wholeDepths.get(v) ?? declared;
+    const depth = recorded ?? declared;
     if (depth > declared) throw tooDeep(column, depth, declared);
     const each = (level: unknown[], at: number): void => {
       for (const e of level) if (Array.isArray(e)) at > 1 ? each(e, at - 1) : withinDimensions(e, whole, column);
@@ -1169,7 +1177,10 @@ function rowsDecoder(element: Decoder): Decoder {
 /** The decoder of a Postgres value of `kind` from its text; `delim` is an array's (`;` for `box[]`). */
 export function textDecoder(kind: Kind, delim = ","): Decoder {
   const whole = wholeArrayKind(kind);
-  if (whole !== undefined) return textDecoder(whole);
+  if (whole !== undefined) {
+    const inner = textDecoder(whole);
+    return (x) => recordDepth(x, inner(x));
+  }
   if (kind.endsWith("[]")) {
     const element = textDecoder(elementKind(kind), delim);
     if (wholeArrayKind(elementKind(kind)) !== undefined) return (x) => recordDepth(x, parseArray(x, element, delim));
@@ -1350,14 +1361,27 @@ export function float32s(bytes: Uint8Array, column: string): number[] {
 export function coerce(kind: Kind, v: unknown, column: string, delim = ",", postgres = false): unknown {
   if (v === null || v === undefined) return null;
   const whole = wholeArrayKind(kind);
-  if (whole !== undefined) return coerce(whole, v, column, ",", postgres);
+  if (whole !== undefined) {
+    const out = coerce(whole, v, column, ",", postgres);
+    return typeof v === "string" ? recordDepth(v, out) : out;
+  }
   if (kind.endsWith("[]")) {
     const element = elementKind(kind);
     if (typeof v === "string") {
       const parsed = parseArray(v, (s) => coerce(element, s, column, ",", postgres), delim);
       return wholeArrayKind(element) === undefined ? parsed : recordDepth(v, parsed);
     }
-    if (Array.isArray(v)) return v.map((e) => (Array.isArray(e) && wholeArrayKind(element) === undefined ? coerce(kind, e, column, delim, postgres) : coerce(element, e, column, ",", postgres)));
+    if (Array.isArray(v)) {
+      // A driver's own array, as PGlite's parser gives one, whose arrays are its levels: each whole
+      // array in it is still its text.
+      const out = v.map((e) => (Array.isArray(e) ? coerce(kind, e, column, delim, postgres) : coerce(element, e, column, ",", postgres)));
+      if (wholeArrayKind(element) !== undefined) {
+        let depth = 0;
+        for (let level: unknown = v; Array.isArray(level); level = level.find((e) => e !== null)) depth++;
+        wholeDepths.set(out, depth);
+      }
+      return out;
+    }
     // A MySQL VECTOR's bytes: no driver gives any other array of floats as bytes.
     if (element === "float" && isBytes(v)) return float32s(v, column);
     // Bun.sql's int4[] and float4[] are typed arrays.

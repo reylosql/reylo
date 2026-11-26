@@ -949,6 +949,16 @@ test("Postgres: an array of a domain over an array type holds each element as a 
   for (const text of ['{{"{1,2}"}}', '{"{{1,2}}"}', "{{NULL},{NULL}}"]) {
     for (const value of [decode(text), coerce(kind, text, "x")]) assert.throws(() => withinDimensions(value, kind, "x"), /Column "x" holds an array of 2 dimensions, and its type has one/, text);
   }
+  // An array a driver parsed, as PGlite's own parser does, holds each element's text: its arrays are its levels.
+  assert.deepEqual(withinDimensions(coerce(kind, ["{1,2}", null], "x"), kind, "x"), [[1, 2], null]);
+  for (const parsed of [[["{1,2}"]], [[null]]]) assert.throws(() => withinDimensions(coerce(kind, parsed, "x"), kind, "x"), /holds an array of 2 dimensions/, JSON.stringify(parsed));
+  // Each element is held to its own dimensions by its text, whatever its elements are: segments, or JSON.
+  for (const [base, ok, deep] of [["lseg", '{"{\\"[(1,2),(3,4)]\\"}"}', '{"{{NULL}}"}'], ["jsonb", '{"{\\"[1,2]\\"}"}', '{"{{\\"[1]\\"}}"}']] as const) {
+    const t = withBases(array(array(pg(base), true, `public.${base}s`), true, `public._${base}s`), { [`public.${base}s`]: `_${base}` });
+    const k = columnKind(t, "postgres");
+    assert.doesNotThrow(() => withinDimensions(textDecoder(k)(ok), k, "x"), ok);
+    assert.throws(() => withinDimensions(textDecoder(k)(deep), k, "x"), /holds an array of 2 dimensions/, deep);
+  }
   // A domain over an array of that domain holds whole arrays at each of its levels.
   const deeper = withBases(array(array(array(pg("int4"), true, "public.ints"), true, "public.intss"), true, "public._intss"), { "public.ints": "_int4", "public.intss": "public._ints" });
   assert.equal(columnKind(deeper, "postgres"), "{{int[]}[]}[]");
