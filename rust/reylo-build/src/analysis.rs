@@ -229,7 +229,7 @@ fn locate(manifest: &Path) -> Result<Located, String> {
         return Ok(located.clone());
     }
     let project = reylo_engine::project::Project::resolve(manifest, std::env::vars().collect())?;
-    let (url, source) = project.type_check_url()?.map_or((None, String::new()), |(url, source)| (Some(url), source));
+    let (url, source) = project.analysis_url()?.map_or((None, String::new()), |(url, source)| (Some(url), source));
     let cache = project.root.join(project.config.dir.as_deref().unwrap_or("reylo")).join(".cache");
     let located = Located { root: project.root.clone(), cache, url, source, missing: project.missing_url() };
     held.retain(|(m, _, _)| m != manifest);

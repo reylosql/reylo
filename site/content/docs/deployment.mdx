@@ -13,7 +13,7 @@ Reylo's type check runs in CI as it does on your machine, against a database the
 | Schema | Your migrations or a schema file, applied before the type check |
 | Connection | `DATABASE_URL` in the job's environment, or [`direct_url`](/docs/configuration#direct_url) |
 | Commands | The type check, then your build and your tests |
-| Build-before-migrate hosts | Build against a throwaway database ([below](#build-before-migrate)) |
+| Build-before-migrate hosts | A shadow of the schema the deploy leaves ([below](#build-before-migrate)) |
 
 ## GitHub Actions
 
@@ -184,13 +184,28 @@ The type check reads the local SQLite file named by [`direct_url`](/docs/d1#loca
 
 ## Build-before-migrate hosts [#build-before-migrate]
 
-A host that builds before it migrates, such as Vercel, starts with no database that has your schema. Build against a database of its own:
+A host that builds before it migrates, such as Vercel, would type your build against production's old schema. With Reylo Migrate, run the build on a dry run of the deploy, then deploy:
+
+```sh
+reylo migrate deploy --dry-run -- next build
+reylo migrate deploy
+```
+
+The dry run replays your database's migrations and the pending ones into a shadow database. The build's type check and Reylo's plugins read that shadow, and it's dropped when the build exits. A deploy the dry run refuses fails the build before it starts.
+
+Where your database's role can't create databases, set [`shadow_url`](/docs/configuration#shadow_url).
+
+With another migration tool, build against a database of your own:
 
 1. Create an empty database.
 2. Run your migrations into it, which also tries each one before it reaches production.
 3. Run the build with [`direct_url`](/docs/configuration#direct_url) pointed at that database.
 4. Drop it.
 5. Migrate your deployment's own database.
+
+[Vercel](/docs/vercel), [Render](/docs/render), [Railway](/docs/railway) and [Fly.io](/docs/fly) all build first.
+
+Pages the build prerenders still query production, before it's migrated. Render a page that reads a new column on each request.
 
 ## Errors
 

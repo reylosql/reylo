@@ -111,6 +111,28 @@ supabase migration up
 supabase db reset
 ```
 
+To use [Reylo Migrate](/docs/migrate) instead, start it from that database. Its migrations run on each new Supabase database:
+
+```sh
+reylo migrate init
+# on a new database: the local one after supabase db reset, a branch, a project
+reylo migrate deploy
+```
+
+A project begun with Reylo v0.8 or earlier creates `supabase_realtime` in its `init.sql`, which every Supabase database has already. Start its migrations again from your development database, then record them on each other database:
+
+```sh
+mv reylo reylo-old
+reylo migrate init
+reylo migrate history push --url <url>
+```
+
+The new `init.sql` makes the schema alone. Insert the rows a new database needs in a new migration, skipping rows already there:
+
+```sql
+insert into plans (id, name) values (1, 'free') on conflict do nothing;
+```
+
 About the local database:
 
 - The local database has Supabase's own schemas, such as `auth` and `storage`. A query that reads `auth.users` is typed as it is on your project.

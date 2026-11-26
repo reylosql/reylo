@@ -25,6 +25,16 @@ test("a composite is an object of its fields, each as a column of its type is, a
   assert.equal(renderType(pg("record"), false, "postgres"), "string");
 });
 
+test("a row value with two fields of one name is an object of the last, as .run() returns it, and a parameter takes the same object", () => {
+  // `select s from (select 1 as a, 'x'::text as a) s` returns `{ s: { a: "x" } }`.
+  const twice = record([field("a", pg("int4")), field("a", pg("text"))]);
+  assert.equal(renderType(twice, false, "postgres"), "{ a: string }");
+  assert.equal(renderParamType(twice, "postgres"), "{ a: string }");
+  const tuple = record([field("a", { kind: "integer", bits: 32 }), field("a", { kind: "text" })]);
+  assert.equal(renderType(tuple, false, "clickhouse"), "{ a: string }");
+  assert.equal(renderParamType(tuple, "clickhouse"), "{ a: string }");
+});
+
 test("inside a JSON document Postgres 19's oid8 and regdatabase are their text, as Postgres writes them", () => {
   assert.equal(renderType(pg("oid8"), true, "postgres"), "string");
   assert.equal(renderType(pg("regdatabase"), true, "postgres"), "string");

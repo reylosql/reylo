@@ -171,6 +171,8 @@ impl Generator {
                 println!("cargo:rerun-if-changed={}", file.display());
             }
             println!("cargo:rerun-if-env-changed=DATABASE_URL");
+            // A key for each dry run's shadow, never its URL: Cargo keeps a variable's value in its records.
+            println!("cargo:rerun-if-env-changed=REYLO_ANALYSIS_KEY");
             return Ok(vec![written]);
         }
         let out = base.join(out);

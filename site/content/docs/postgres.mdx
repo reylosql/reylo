@@ -585,6 +585,8 @@ from orders o
 join users u on u.id = o.user_id
 ```
 
+A subquery's row may hold two fields of one name. Then `.run()` returns the last one's value, and the type shows that field.
+
 An array of whole rows comes back as an array of objects, with each field read as a column is. It reads the fields of a subquery, which Postgres itself types only as `record`, and it nests to any depth:
 
 ```ts twoslash tab="main.ts"

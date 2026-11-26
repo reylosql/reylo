@@ -512,18 +512,22 @@ impl Call {
     /// The fact of the call, with its arguments' facts, where the check holds.
     fn fact(&self, leaves: Option<&[DescribedColumn]>) -> Option<(Fact, Vec<Fact>)> {
         let facts: Vec<Fact> = self.args.iter().map(|a| resolve(a, leaves)).collect();
-        let result = self.check.resolve(&facts, leaves)?;
-        let fact = match &self.claim {
+        Some((self.over(&facts, leaves)?, facts))
+    }
+
+    /// The fact of the call over its arguments' facts, where the check holds.
+    fn over(&self, facts: &[Fact], leaves: Option<&[DescribedColumn]>) -> Option<Fact> {
+        let result = self.check.resolve(facts, leaves)?;
+        Some(match &self.claim {
             Claim::Every(first, ty) => {
                 let read = &facts[..first.unwrap_or(facts.len()).min(facts.len())];
-                Fact { non_null: !read.is_empty() && read.iter().all(|f| f.non_null), type_oid: result.or(ty.of(&facts)) }
+                Fact { non_null: !read.is_empty() && read.iter().all(|f| f.non_null), type_oid: result.or(ty.of(facts)) }
             }
             Claim::NonNull(ty) => Fact { non_null: true, type_oid: ty.or(result) },
             Claim::Array(non_null) => Fact { non_null: *non_null, type_oid: None },
             Claim::Removed(_) => Fact { non_null: facts.first().is_some_and(|f| f.non_null), type_oid: result },
-            Claim::Nullable(ty) => Fact { non_null: false, type_oid: result.or(ty.of(&facts)) },
-        };
-        Some((fact, facts))
+            Claim::Nullable(ty) => Fact { non_null: false, type_oid: result.or(ty.of(facts)) },
+        })
     }
 }
 
@@ -1035,49 +1039,75 @@ impl Plan {
 
 /// One expression's answer, given the leaf probe's described columns.
 pub fn resolve(expr: &Expr, leaves: Option<&[DescribedColumn]>) -> Fact {
+    resolve_jsonb(expr, leaves).0
+}
+
+/// One expression's answer, and whether it may hold a `jsonb` value, which [`Expr::NotJsonb`]
+/// asks of its operand: its type is `jsonb`, or one a database defined, which may be a domain
+/// over it; or the rules name no type for it and one of the values it is made of may hold one. A
+/// parameter under a cast takes the cast's type, and a function the rules read without a type
+/// returns none that is `jsonb` ([`POSTGRES_JSONB`] names the ones that do). Both come of one
+/// walk: asked apart, each cast in a chain of casts would walk the chain below it twice.
+fn resolve_jsonb(expr: &Expr, leaves: Option<&[DescribedColumn]>) -> (Fact, bool) {
     const NOTHING: Fact = Fact { non_null: false, type_oid: None };
-    match expr {
-        Expr::NonNull(type_oid) => Fact { non_null: true, type_oid: *type_oid },
-        Expr::Unknown | Expr::Unread(_) => NOTHING,
-        Expr::Nullable(inner) => Fact { non_null: false, ..resolve(inner, leaves) },
+    // The fact, and whether the value may be `jsonb` where the rules name no type for it.
+    let (fact, untyped) = match expr {
+        Expr::NonNull(type_oid) => (Fact { non_null: true, type_oid: *type_oid }, false),
+        Expr::Unknown | Expr::Unread(_) => (NOTHING, true),
+        Expr::Nullable(inner) => {
+            let (fact, jsonb) = resolve_jsonb(inner, leaves);
+            (Fact { non_null: false, ..fact }, jsonb)
+        }
         Expr::Leaf(i) => match leaves.and_then(|l| l.get(*i)) {
-            Some(col) => Fact { non_null: !col.nullable, type_oid: (col.type_oid != oid::UNKNOWN).then_some(col.type_oid) },
-            None => NOTHING,
+            Some(col) => (Fact { non_null: !col.nullable, type_oid: (col.type_oid != oid::UNKNOWN).then_some(col.type_oid) }, true),
+            None => (NOTHING, true),
         },
         Expr::Row(i, _) => match leaves.and_then(|l| l.get(*i)) {
-            Some(col) => Fact { non_null: !col.nullable || col.own_row, type_oid: (col.type_oid != oid::UNKNOWN).then_some(col.type_oid) },
-            None => NOTHING,
+            Some(col) => (Fact { non_null: !col.nullable || col.own_row, type_oid: (col.type_oid != oid::UNKNOWN).then_some(col.type_oid) }, true),
+            None => (NOTHING, true),
         },
         Expr::Every(operands, ty) => {
-            let facts: Vec<Fact> = operands.iter().map(|o| resolve(o, leaves)).collect();
-            Fact { non_null: !facts.is_empty() && facts.iter().all(|f| f.non_null), type_oid: ty.of(&facts) }
+            let (facts, jsonb): (Vec<Fact>, Vec<bool>) = operands.iter().map(|o| resolve_jsonb(o, leaves)).unzip();
+            (Fact { non_null: !facts.is_empty() && facts.iter().all(|f| f.non_null), type_oid: ty.of(&facts) }, jsonb.contains(&true))
         }
         Expr::Any(operands, ty) => {
-            let facts: Vec<Fact> = operands.iter().map(|o| resolve(o, leaves)).collect();
-            Fact { non_null: facts.iter().any(|f| f.non_null), type_oid: ty.of(&facts) }
+            let (facts, jsonb): (Vec<Fact>, Vec<bool>) = operands.iter().map(|o| resolve_jsonb(o, leaves)).unzip();
+            (Fact { non_null: facts.iter().any(|f| f.non_null), type_oid: ty.of(&facts) }, jsonb.contains(&true))
         }
         Expr::Guarded(inner, types) => {
-            let fact = resolve(inner, leaves);
-            Fact { non_null: fact.non_null && fact.type_oid.is_some_and(|t| types.contains(&t)), ..fact }
+            let (fact, jsonb) = resolve_jsonb(inner, leaves);
+            (Fact { non_null: fact.non_null && fact.type_oid.is_some_and(|t| types.contains(&t)), ..fact }, jsonb)
         }
-        Expr::Array { non_null, .. } => Fact { non_null: *non_null, type_oid: None },
+        Expr::Array { non_null, .. } => (Fact { non_null: *non_null, type_oid: None }, false),
         Expr::NotJsonb(inner) => {
-            let fact = resolve(inner, leaves);
-            Fact { non_null: fact.non_null && !may_be_jsonb(inner, leaves), ..fact }
+            let (fact, jsonb) = resolve_jsonb(inner, leaves);
+            (Fact { non_null: fact.non_null && !jsonb, ..fact }, jsonb)
         }
-        Expr::Narrowed(inner) => Fact { non_null: true, ..resolve(inner, leaves) },
-        Expr::NotJsonbItems(inner) => resolve(inner, leaves),
-        Expr::JsonPath { .. } => match json_read(expr, leaves) {
-            Some(read) => Fact { non_null: read.non_null, type_oid: Some(read.type_oid) },
-            None => NOTHING,
+        Expr::Narrowed(inner) => {
+            let (fact, jsonb) = resolve_jsonb(inner, leaves);
+            (Fact { non_null: true, ..fact }, jsonb)
+        }
+        Expr::NotJsonbItems(inner) => resolve_jsonb(inner, leaves),
+        // `->` and `#>` give the column's own JSON; `->>` and `#>>` text.
+        Expr::JsonPath { text, .. } => match json_read(expr, leaves) {
+            Some(read) => (Fact { non_null: read.non_null, type_oid: Some(read.type_oid) }, !text),
+            None => (NOTHING, !text),
         },
-        Expr::Call(call) => call.fact(leaves).map_or(NOTHING, |(fact, _)| fact),
-        Expr::Trusted(t) => resolve(if t.holds(leaves) { &t.then } else { &t.otherwise }, leaves),
-        Expr::NotRow(inner, overloads) => {
-            let fact = resolve(inner, leaves);
-            Fact { non_null: fact.non_null && fact.type_oid.is_some_and(|t| is_scalar(t, overloads.as_ref())), ..fact }
+        Expr::Call(call) => {
+            let (facts, jsonb): (Vec<Fact>, Vec<bool>) = call.args.iter().map(|a| resolve_jsonb(a, leaves)).unzip();
+            match call.over(&facts, leaves) {
+                Some(fact) => (fact, matches!(call.claim, Claim::Every(..) | Claim::Nullable(_)) && jsonb.contains(&true)),
+                // A user's overload may return anything.
+                None => (NOTHING, true),
+            }
         }
-    }
+        Expr::Trusted(t) => resolve_jsonb(if t.holds(leaves) { &t.then } else { &t.otherwise }, leaves),
+        Expr::NotRow(inner, overloads) => {
+            let (fact, jsonb) = resolve_jsonb(inner, leaves);
+            (Fact { non_null: fact.non_null && fact.type_oid.is_some_and(|t| is_scalar(t, overloads.as_ref())), ..fact }, jsonb)
+        }
+    };
+    (fact, fact.type_oid.map_or(untyped, |ty| ty == oid::JSONB || ty >= FIRST_USER_OID))
 }
 
 /// The row types below `FirstGenbkiObjectId`, the same on PostgreSQL 14 to 18: `pg_type`,
@@ -1182,32 +1212,6 @@ pub fn json_read(expr: &Expr, leaves: Option<&[DescribedColumn]>) -> Option<Json
     let (schema, found) = crate::schema_type::at_path(col.document.as_ref()?, &keys, *indexes)?;
     let non_null = (narrowed || !col.nullable) && found && !(*text && crate::schema_type::admits(&schema, &serde_json::Value::Null));
     Some(JsonRead { schema, non_null, type_oid: if *text { oid::TEXT } else { col.type_oid }, text: *text })
-}
-
-/// Whether an expression may hold a `jsonb` value: its type is `jsonb`, or one a database
-/// defined, which may be a domain over it; or the rules name no type for it and one of the values
-/// it is made of may hold one. A parameter under a cast takes the cast's type, and a function
-/// the rules read without a type returns none that is `jsonb` ([`POSTGRES_JSONB`] names the ones
-/// that do).
-fn may_be_jsonb(expr: &Expr, leaves: Option<&[DescribedColumn]>) -> bool {
-    match resolve(expr, leaves).type_oid {
-        Some(ty) => ty == oid::JSONB || ty >= FIRST_USER_OID,
-        None => match expr {
-            Expr::NonNull(_) | Expr::Array { .. } => false,
-            Expr::Unknown | Expr::Unread(_) | Expr::Leaf(_) | Expr::Row(..) => true,
-            Expr::Nullable(inner) | Expr::Guarded(inner, _) | Expr::NotJsonb(inner) | Expr::NotJsonbItems(inner) | Expr::Narrowed(inner) | Expr::NotRow(inner, _) => may_be_jsonb(inner, leaves),
-            Expr::Every(operands, _) | Expr::Any(operands, _) => operands.iter().any(|o| may_be_jsonb(o, leaves)),
-            // `->` and `#>` give the column's own JSON; `->>` and `#>>` text.
-            Expr::JsonPath { text, .. } => !text,
-            // A user's overload may return anything.
-            Expr::Call(call) => match (call.fact(leaves), &call.claim) {
-                (None, _) => true,
-                (Some(_), Claim::Every(..) | Claim::Nullable(_)) => call.args.iter().any(|a| may_be_jsonb(a, leaves)),
-                (Some(_), Claim::NonNull(_) | Claim::Array(_) | Claim::Removed(_)) => false,
-            },
-            Expr::Trusted(t) => may_be_jsonb(if t.holds(leaves) { &t.then } else { &t.otherwise }, leaves),
-        },
-    }
 }
 
 /// What the statement says about an array expression's elements, given the leaf probe and which

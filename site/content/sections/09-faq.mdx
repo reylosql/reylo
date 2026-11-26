@@ -46,7 +46,7 @@ Cached types match the schema from that run, so later migrations won't show unti
 - With a server's URL set, a build reads only entries analyzed on that database.
 - With none, or on SQLite, it reads the newest analysis available.
 - A query missing from `reylo/.cache/` fails the build.
-- A host that builds before it migrates, such as Vercel, has no cache: [build against a database of its own](/docs/deployment#build-before-migrate) there.
+- A host that builds before it migrates, such as Vercel, has no cache: [run the build on a dry run of the deploy](/docs/deployment#build-before-migrate) there.
 
 </Accordion>
 <Accordion title="Why are dates strings, and 64-bit integers bigints?" id="faq-value-types">

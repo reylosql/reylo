@@ -22,10 +22,10 @@ type Analysis = {
   value?: boolean;
 };
 
-/** The schema admitting null as well: a bare `type` gets `"null"` beside it, anything else an `anyOf` with null. */
+/** The schema admitting null as well: a bare `type` gets `"null"` beside it, unless it is `"null"` already, and anything else an `anyOf` with null. */
 function nullable(schema: Schema | JsonSchema): Schema | JsonSchema {
   if (schema === true || (typeof schema === "object" && Object.keys(schema).length === 0)) return schema;
-  if (typeof schema === "object" && Object.keys(schema).length === 1 && typeof schema.type === "string") return { type: [schema.type, "null"] };
+  if (typeof schema === "object" && Object.keys(schema).length === 1 && typeof schema.type === "string") return schema.type === "null" ? schema : { type: [schema.type, "null"] };
   return { anyOf: [schema, { type: "null" }] };
 }
 
@@ -90,6 +90,9 @@ function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean
       const text = [...(t.nan ? ["NaN"] : []), ...(t.infinity ? ["Infinity", "-Infinity"] : [])];
       return dialect === "postgres" && inUnion && text.length ? { anyOf: [number, { enum: text }] } : number;
     }
+    // MySQL writes a BIT inside a document as its bytes in base64 (`base64:type16:AQ==`), at any
+    // width: no truth value for a BIT(1), and no hex for a wider one (src/render.ts).
+    if (dialect === "mysql" && name === "bit") return { type: "string" };
     if (kind === "bytes") return { type: "string", format: "hex" };
     // Postgres's own interval text: the run time converts a column's interval, never one inside a document.
     if (t.kind === "duration" && dialect === "postgres") return { type: "string", description: "pg type interval" };

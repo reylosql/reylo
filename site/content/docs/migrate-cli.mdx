@@ -32,6 +32,7 @@ Commands:
   dev                      Apply pending migrations, rewinding if needed (may drop data), and write the lockfile
   deploy                   Run what the lock lists, with no shadow database
     --dry-run              Try it on a shadow database, running nothing here
+      -- <command>         Then run the command, such as your build, typed against that shadow
   status                   Check that this database and the files are in step
   lock                     Write the lock from this database's history
   history push             Record the migrations this database's schema has
@@ -95,6 +96,27 @@ It leaves out the history tables of other migration tools, as it leaves out its 
 | Entity Framework Core | `__EFMigrationsHistory` |
 | Atlas | `atlas_schema_revisions`, in its schema of that name on Postgres |
 
+On Supabase, it leaves out what every new Supabase database has, such as the `supabase_realtime` publication. It writes your changes to it, and each table's own grants:
+
+```sql title="reylo/schema.sql"
+alter default privileges in schema public revoke select on tables from anon;
+
+create table profiles (
+  id uuid not null,
+  username text,
+  constraint profiles_pkey primary key (id),
+  constraint profiles_username_key unique (username)
+);
+
+alter table profiles add constraint profiles_id_fkey foreign key (id) references auth.users(id) on delete cascade;
+
+alter publication supabase_realtime set table only profiles;
+
+grant all on table profiles to authenticated, service_role;
+
+grant delete, insert, maintain, references, trigger, truncate, update on table profiles to anon;
+```
+
 ### `new`
 
 Writes the next migration, from your change to `schema.sql`.
@@ -104,6 +126,7 @@ Writes the next migration, from your change to `schema.sql`.
 - With no `schema.sql`, it writes what your development database has that your migrations don't. That's [schemaless mode](/docs/migrate/usage#schemaless-mode).
 - Edit the file freely, and add any data changes.
 - On Postgres, new constraints and indexes never block writes, and a table rewrite needs `--blocking`. A statement gives up a busy lock after half a second, and its migration runs again from the start.
+- On Postgres, a changed index or key is built beside the old one, then takes its place.
 - On Postgres, a new enum value the change also uses gets a migration of its own, before its first use. Postgres can't use a value in the transaction that adds it.
 - On MySQL, a change that copies its table while it blocks writes needs `--blocking`. That's most column type changes, a removed enum value and a table partitioned anew.
 - On MySQL, a trigger that changes is dropped and made again in one migration, under `lock tables`. No write to its table runs without it.
@@ -166,9 +189,7 @@ It refuses a change made outside `schema.sql` and your migrations:
 ```terminal
 $ reylo migrate dev
 ✗ This database was changed outside reylo/schema.sql and its migrations
-
     alter table users add column hotfix bigint;
-
   To keep it, add it to reylo/schema.sql, then write its migration:
     reylo migrate new <name>
   To undo it:
@@ -204,9 +225,7 @@ The refusal shows the change:
 ```terminal
 $ reylo migrate deploy
 ✗ This database was changed outside its migrations
-
   + column users.hotfix bigint
-
   If a migration makes this change, record it here, running nothing:
     reylo migrate history push
   If none does, write one and run it in development, then record it here:
@@ -229,6 +248,38 @@ $ reylo migrate deploy --dry-run
     · 20261104140347_add_bio.sql
 ```
 
+It says what each pending migration blocks and drops, written by hand or not. A constraint your rows already break fails it:
+
+```sql title="20261124235900_tidy_users.sql"
+alter table users drop column bio;
+alter table users add constraint users_plan_check check (plan in ('free', 'pro'));
+```
+
+Try it on production:
+
+```terminal
+$ reylo migrate deploy --dry-run --url $PROD_URL
+✓ This database is as its migrations left it
+✓ The migrations match reylo/schema.sql
+✓ Tried the pending migration on a shadow database:
+    · 20261124235900_tidy_users.sql
+      ! It checks every row of users while it blocks reads and writes to it
+      ! It drops users.bio, which holds a value in 1403 rows on this database
+      ✗ It fails on this database: 8 rows break users_plan_check
+        List them:
+          select * from users where not (plan = ANY (ARRAY['free'::text, 'pro'::text]));
+
+✗ The deploy would fail on rows this database holds
+  Fix the rows, or the migration where no database has run it yet, then try again:
+    reylo migrate deploy --dry-run
+```
+
+To type your build against the schema the deploy leaves, put it after `--`. It runs on the dry run's shadow database, which is dropped when it exits:
+
+```sh
+reylo migrate deploy --dry-run -- next build
+```
+
 A failed migration rolls back and records nothing. Fix the file, run `reylo migrate dev`, and deploy again. Where a database already ran the old version, write a new migration instead.
 
 A migration can also fail on rows the database already holds. The refusal gives a query that lists them, to fix before you deploy again:
@@ -243,7 +294,6 @@ Applying to postgres://db.example.com/app
   check constraint "users_plan_check" of relation "users" is violated by some row
   The migration before it, 20261123211603_drop_team_plan.sql, added users_plan_check without checking the rows already in users: rows written from now on are held to it, and those aren't.
   Nothing was recorded, so the next deploy runs it again.
-
   List the rows that break it:
     select * from users where not (plan = ANY (ARRAY['free'::text, 'pro'::text]));
   Fix them here, then deploy again:
@@ -307,7 +357,6 @@ Migrations on postgres://localhost:5432/app
 
 ✗ The schema changed since the lock was written
   The lock holds a checksum of reylo/schema.sql from when the migrations last matched it.
-
   If the schema changed, write its migration and run it:
     reylo migrate new <name>
     reylo migrate dev
@@ -433,7 +482,6 @@ The push is refused:
 ```terminal
 $ reylo db push
 ✗ This push drops the column users.nick and its data
-
   To drop it:
     reylo db push --drop users.nick
   To accept every destructive change:
@@ -561,11 +609,11 @@ Most commands use shadow databases: throwaway databases where Reylo Migrate repl
 
 Each database makes them its own way:
 
-- **Postgres:** on your database's server, with `create database`, so your role needs `CREATEDB`. A local superuser has it, and so do Neon's and Supabase's roles. Reylo Migrate keeps up to 32 as a cache, so a run replays only new migrations. On Azure, list each extension your migrations create in the server's `azure.extensions` parameter. Timescale Cloud refuses `create database`, so point `shadow_url` at the `timescale/timescaledb-ha` image. On Supabase, each shadow gets Supabase's schemas too, so a migration can reference `auth.users`.
+- **Postgres:** on your database's server, with `create database`, so your role needs `CREATEDB`. A local superuser has it, and so do Neon's and Supabase's roles. Reylo Migrate keeps up to 32 as a cache, so a run replays only new migrations. On Azure, list each extension your migrations create in the server's `azure.extensions` parameter. Timescale Cloud refuses `create database`, so point `shadow_url` at the `timescale/timescaledb-ha` image. On Supabase, each shadow gets Supabase's schemas too, so a migration can reference `auth.users`, and what every new Supabase database has, such as the `supabase_realtime` publication.
 - **MySQL:** on your database's server, with `create database`, so your user needs the `CREATE` privilege on every database. PlanetScale refuses `create database`, so point `shadow_url` at a plain MySQL 8.4 server.
 - **SQLite:** in memory. There's nothing to grant. A [Turso](/docs/turso#migrations) database's shadows run on libSQL's own engine.
 
-A migration that would reach past its shadow is refused by every command, `deploy` and `status` included. That's one that:
+Every command refuses a migration that would reach past its shadow, `deploy` and `status` included. A `schema.sql` that would is refused by `status` and by every command that loads it into a shadow. That's one with a statement that:
 
 - changes a role, a database, a tablespace or a server setting
 - on MySQL, names a database, as in `app.users`

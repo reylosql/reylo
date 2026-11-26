@@ -126,7 +126,7 @@
       }
     },
     {
-      "src": "^/docs/(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs|migrate)/?$",
+      "src": "^/docs/(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|vercel|render|kubernetes|railway|fly|nextjs|deployment|prisma|typedefs|migrate)/?$",
       "has": [
         {
           "type": "header",
@@ -201,7 +201,7 @@
       }
     },
     {
-      "src": "^/(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs)(?:/|/index\\.html)$",
+      "src": "^/(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|vercel|render|kubernetes|railway|fly|nextjs|deployment|prisma|typedefs)(?:/|/index\\.html)$",
       "status": 308,
       "headers": {
         "Location": "/docs/$1"
@@ -236,7 +236,7 @@
       }
     },
     {
-      "src": "^/(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs|migrate)\\.md/$",
+      "src": "^/(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|vercel|render|kubernetes|railway|fly|nextjs|deployment|prisma|typedefs|migrate)\\.md/$",
       "status": 308,
       "headers": {
         "Location": "/docs/$1.md"
@@ -325,6 +325,31 @@
       "permanent": true
     },
     {
+      "source": "/vercel",
+      "destination": "/docs/vercel",
+      "permanent": true
+    },
+    {
+      "source": "/render",
+      "destination": "/docs/render",
+      "permanent": true
+    },
+    {
+      "source": "/kubernetes",
+      "destination": "/docs/kubernetes",
+      "permanent": true
+    },
+    {
+      "source": "/railway",
+      "destination": "/docs/railway",
+      "permanent": true
+    },
+    {
+      "source": "/fly",
+      "destination": "/docs/fly",
+      "permanent": true
+    },
+    {
       "source": "/nextjs",
       "destination": "/docs/nextjs",
       "permanent": true
@@ -385,7 +410,7 @@
       "permanent": true
     },
     {
-      "source": "/:page(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs|migrate).md",
+      "source": "/:page(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|vercel|render|kubernetes|railway|fly|nextjs|deployment|prisma|typedefs|migrate).md",
       "destination": "/docs/:page.md",
       "permanent": true
     },
@@ -465,7 +490,7 @@
       ]
     },
     {
-      "source": "/docs/:page(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs|migrate)",
+      "source": "/docs/:page(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|vercel|render|kubernetes|railway|fly|nextjs|deployment|prisma|typedefs|migrate)",
       "headers": [
         {
           "key": "Vary",
@@ -474,7 +499,7 @@
       ]
     },
     {
-      "source": "/docs/:page(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|nextjs|deployment|prisma|typedefs|migrate)/",
+      "source": "/docs/:page(typescript|rust|inference|configuration|compare|faq|cli|postgres|mysql|sqlite|clickhouse|neon|supabase|durable-objects|planetscale|d1|turso|hyperdrive|vercel|render|kubernetes|railway|fly|nextjs|deployment|prisma|typedefs|migrate)/",
       "headers": [
         {
           "key": "Vary",

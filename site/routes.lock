@@ -4,6 +4,7 @@
 /blog/reylo-0-8-1
 /blog/reylo-0-8-2
 /blog/reylo-0-8-3
+/blog/reylo-0-9-0
 /blog/reylo-migrate
 /ci
 /cli
@@ -23,8 +24,10 @@
 /docs/deployment
 /docs/durable-objects
 /docs/faq
+/docs/fly
 /docs/hyperdrive
 /docs/inference
+/docs/kubernetes
 /docs/migrate
 /docs/migrate/cli
 /docs/migrate/compare
@@ -35,19 +38,24 @@
 /docs/planetscale
 /docs/postgres
 /docs/prisma
+/docs/railway
+/docs/render
 /docs/rust
 /docs/sqlite
 /docs/supabase
 /docs/turso
 /docs/typedefs
 /docs/typescript
+/docs/vercel
 /duckdb
 /durable-objects
 /faq
+/fly
 /hosted
 /hyperdrive
 /index.md
 /inference
+/kubernetes
 /migrate
 /migrate/cli
 /migrate/compare
@@ -63,6 +71,8 @@
 /play
 /postgres
 /prisma
+/railway
+/render
 /rtd
 /rust
 /schema-changes
@@ -72,3 +82,4 @@
 /typedefs
 /typescript
 /usage
+/vercel

@@ -478,6 +478,7 @@ test("Bun.sql 1.4.4 on Postgres: .raw()'s binary and text forms give the same ro
     ["bounded", 1007, "00000001000000010000001700000002000000000000000400000001ffffffff", "[0:1]={1,NULL}"],
     ["grid", 1021, "0000000200000000000002bc00000002000000010000000200000001000000043fc00000000000044000000000000004404000000000000440800000", "{{1.5,2},{3,4}}"],
     ["midnight", 1083, "000000141dd76000", "24:00:00"],
+    ["noon", 1083, "0000000a0eec7350", "12:00:00.05"],
     ["price", 1700, "0002000040000001000c1388", "-12.5"],
     ["nan", 1700, "00000000c0000000", "NaN"],
     ["small", 1700, "0001fffe0000000604b0", "0.000012"],
@@ -525,7 +526,7 @@ test("Bun.sql 1.4.4 on Postgres: .raw()'s binary and text forms give the same ro
     const nineText = { ...client(false), unsafe: () => query(async () => Object.assign([[Buffer.from("1.13657604e+33")]], { columns: [{ name: "r", type: 700, table: 0, number: 0 }] })) };
     assert.deepEqual(await execute(nine, probe, { id: 1 }), await execute(nineText, probe, { id: 1 }));
     assert.deepEqual(fromBinary, [{
-      n: 1234, ok: true, f8: 1.5, f4: 1.1, bytes: Buffer.of(1, 255), bounded: [1, null], grid: [[1.5, 2], [3, 4]], midnight: "24:00:00",
+      n: 1234, ok: true, f8: 1.5, f4: 1.1, bytes: Buffer.of(1, 255), bounded: [1, null], grid: [[1.5, 2], [3, 4]], midnight: "24:00:00", noon: "12:00:00.05",
       price: "-12.5", nan: "NaN", small: "0.000012", far: "+010000-01-01T00:00:00.000000", bc: "-000001-06-01T12:00:00.000000", at: "2026-01-02T03:04:05.123456Z", forever: "infinity",
     }]);
     // A value whose length is not its type's binary form is refused, not misread.

@@ -16,6 +16,7 @@ test("the engine's lexer answers alike through its long-lived child and its one-
     ["select E'it\\'s :not', $$costs $2 or :more$$, $q$:no$q$ as note, :id::int as id", "postgres", ["id"]],
     ["select 'C:\\', ?3, `:w`, ? -- :v\n /* :u */", "sqlite", ["3", "4"]],
     ["select 'C:\\', :x, \"\\\", :y -- :v\n", "sqlite", ["x", "y"]],
+    ["select id /* see /* below */, :x -- */", "sqlite", ["x"]],
     ["select [a'b] as x, :p as p, [c'd?] as y, [n:m] from t where z = :z", "sqlite", ["p", "z"]],
     ["SELECT {id:UInt64}, { since : DateTime64(3, 'UTC') }, {e:Enum8('}' = 1, 'it\\'s' = 2)}, c ? a :b, doc.a.:Int64, m[:k], {x}, {1:UInt8}, {id:UInt64} FROM t", "clickhouse", ["id", "since", "e"]],
     ["SELECT :id::UInt64, x::String FROM t WHERE n IN :ns::Array(UInt8) AND s = :s::String AND :bare", "clickhouse", ["id", "ns", "s"]],

@@ -44,9 +44,11 @@ const EXPECTED = [
   "string.sql(1,8): error reylo1: unterminated string literal",
 ];
 
-test("SQLite: an unterminated string, quoted name or comment is an error at its start, in a typed module", () => {
+// SQLite reads a block comment that no `*/` closes as a comment to the end of the text, so that
+// statement is typed with no error there.
+test("SQLite: an unterminated string or quoted name is an error at its start, in a typed module", () => {
   const out = check("file:./app.db", "sqlite", (root) => new DatabaseSync(join(root, "app.db")).close());
-  assert.deepEqual(out.split("\n").sort(), EXPECTED, out);
+  assert.deepEqual(out.split("\n").sort(), EXPECTED.filter((line) => !line.startsWith("comment.sql")), out);
 });
 
 test("Postgres: an unterminated string, quoted name or comment is an error at its start, in a typed module", { skip: pgLive }, () => {
