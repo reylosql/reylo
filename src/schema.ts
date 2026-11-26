@@ -216,7 +216,9 @@ function decimal(text: string): string | undefined {
   const fraction = m?.[2] ?? "";
   if (m === null || m[1]! + fraction === "") return undefined;
   const all = (m[1]! + fraction).replace(/^0+/, "");
-  const digits = all.replace(/0+$/, "");
+  let end = all.length;
+  while (end > 0 && all[end - 1] === "0") end--;
+  const digits = all.slice(0, end);
   if (digits === "") return "0";
   return `${digits}e${Number(m[3] ?? 0) - fraction.length + all.length - digits.length}`;
 }
