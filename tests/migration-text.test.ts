@@ -52,4 +52,8 @@ test("a lone carriage return and a dollar quote's tag read as Postgres reads the
   assert.equal(canonical("select 1 -- a\r\n,\r2"), "select 1 , 2");
   assert.notEqual(canonical("select $\u3000$--\nx$\u3000$"), canonical("select $\u3000$ x$\u3000$"));
   assert.notEqual(canonical("select x$$a$, '$a$ -- b'"), canonical("select x$$a$, '$a$ -- c'"));
+  const sqliteDefault = (word: string) => `create table t ([$\u3000$] text default 'a $\u3000$ -- ${word}');`;
+  assert.ok(!sameMigration(sqliteDefault("one"), sqliteDefault("two")));
+  assert.ok(!sameMigration("create table t ([a'b] text default 'x -- y')", "create table t ([a'b] text default 'x -- z')"));
+  assert.equal(canonical("select data['key'],  arr[1] -- c\nfrom t"), "select data['key'], arr[1] from t");
 });

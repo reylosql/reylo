@@ -164,8 +164,19 @@ pub fn canonical(sql: &str) -> String {
         *space = false;
         out.push_str(text);
     };
+    // SQLite reads `[…]` as a name, up to its first `]`, and Postgres as a subscript: where a quote
+    // or a comment that opens inside one ends past that `]`, the two read what follows differently,
+    // so the rest is kept as written.
+    let mut bracket: Option<usize> = None;
     while k < b.len() {
         let c = b[k];
+        let (start, written, spaced) = (k, out.len(), space);
+        if bracket.is_some_and(|e| k > e) {
+            bracket = None;
+        }
+        if c == '[' && bracket.is_none() {
+            bracket = (k + 1..b.len()).find(|&j| b[j] == ']');
+        }
         if c == '-' && b.get(k + 1) == Some(&'-') {
             // MySQL reads `--` as a comment only where a space or a control character follows it
             // (`n--1` is `n - -1` there, and so is `--` before a U+3000), Postgres and SQLite
@@ -260,6 +271,12 @@ pub fn canonical(sql: &str) -> String {
         } else {
             push(&mut out, &mut space, &c.to_string());
             k += 1;
+        }
+        if bracket.is_some_and(|e| start < e && k > e) {
+            out.truncate(written);
+            space = spaced;
+            push(&mut out, &mut space, &b[start..].iter().collect::<String>());
+            break;
         }
     }
     out
@@ -504,6 +521,11 @@ mod tests {
         // Postgres takes any character past ASCII in a dollar quote's tag, and none after a name's `$`.
         assert_ne!(canonical("select $\u{3000}$--\nx$\u{3000}$"), canonical("select $\u{3000}$ x$\u{3000}$"));
         assert_ne!(canonical("select x$$a$, '$a$ -- b'"), canonical("select x$$a$, '$a$ -- c'"));
+        // SQLite's `[…]` is a name: a quote or a dollar sign inside one opens nothing there.
+        let default = |word: &str| canonical(&format!("create table t ([$\u{3000}$] text default 'a $\u{3000}$ -- {word}');"));
+        assert_ne!(default("one"), default("two"));
+        assert_ne!(canonical("create table t ([a'b] text default 'x -- y')"), canonical("create table t ([a'b] text default 'x -- z')"));
+        assert_eq!(canonical("select data['key'],  arr[1] -- c\nfrom t"), "select data['key'], arr[1] from t");
     }
 
     #[test]

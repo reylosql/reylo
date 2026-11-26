@@ -34,8 +34,17 @@ export function canonical(sql: string): string {
     out += text;
   };
   const rest = (from: number, to = b.length) => b.slice(from, to).join("");
+  // SQLite reads `[…]` as a name, up to its first `]`, and Postgres as a subscript: where a quote or
+  // a comment that opens inside one ends past that `]`, the rest is kept as written.
+  let bracket: number | undefined;
   while (k < b.length) {
     const c = b[k]!;
+    const [start, written, spaced] = [k, out.length, space];
+    if (bracket !== undefined && k > bracket) bracket = undefined;
+    if (c === "[" && bracket === undefined) {
+      const e = b.indexOf("]", k + 1);
+      bracket = e < 0 ? undefined : e;
+    }
     if (c === "-" && b[k + 1] === "-") {
       // MySQL reads `--` as a comment only where a space or a control character follows it, Postgres
       // and SQLite everywhere: where the two differ, the rest is kept as written.
@@ -123,6 +132,12 @@ export function canonical(sql: string): string {
     } else {
       push(c);
       k++;
+    }
+    if (bracket !== undefined && start < bracket && k > bracket) {
+      out = out.slice(0, written);
+      space = spaced;
+      push(rest(start));
+      break;
     }
   }
   return out;
