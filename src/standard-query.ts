@@ -156,14 +156,17 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
   // the driver read. SQLite's is `.run()`'s own reading, its refusals of a storage class the
   // column's type does not allow included. Its default suits a driver whose integer mode is
   // unknown: a BigInt is read exact, and a number past 2^53 in an INTEGER column is refused as a
-  // rounded one.
-  const decoders = (mapped ? module.columns : undefined)?.map(([name, kind, delim], i): ((v: never) => unknown) => {
-    const decode = module.runtime.decoder(name, kind, delim, module.nonFinite?.[i] ?? undefined, module.nestedArrays);
-    // A family the project file's `js.codecs` gives another type takes it here too, as in `.run()` (src/codecs.ts).
-    const plan = module.codecs?.[name];
-    return plan === undefined ? decode : (v) => codecsOf(module).decodePlan(plan, decode(v), name, module.libraries);
-  });
-  const columns = decoders && module.columns?.map(([name], i) => Object.freeze({ name, decode: decoders[i]! }) as StandardQueryV1.Column<D>);
+  // rounded one. They are built on first use, not when the query is defined, so that defining one
+  // costs nothing and refuses nothing.
+  let decoders: ((v: never) => unknown)[] | undefined;
+  const decodersOf = () =>
+    (decoders ??= module.columns!.map(([name, kind, delim], i): ((v: never) => unknown) => {
+      const decode = module.runtime.decoder(name, kind, delim, module.nonFinite?.[i] ?? undefined, module.nestedArrays);
+      // A family the project file's `js.codecs` gives another type takes it here too, as in `.run()` (src/codecs.ts).
+      const plan = module.codecs?.[name];
+      return plan === undefined ? decode : (v) => codecsOf(module).decodePlan(plan, decode(v), name, module.libraries);
+    }));
+  const columns = mapped ? module.columns?.map(([name], i) => Object.freeze({ name, decode: (v: never) => decodersOf()[i]!(v) }) as StandardQueryV1.Column<D>) : undefined;
   // A closure, not `this`: a driver may take `encode` off the object.
   // The statement as Reylo sends it, the comment naming its file included, as `.run()` sends it.
   const statementText = () => (text ??= sentText(module, compile(module).text));
@@ -188,9 +191,9 @@ export function standardQuery<D extends Dialect, Output>(module: QueryModule<D>,
     decode(rows) {
       if (!mapped) unmapped();
       const names = module.columns;
-      if (names === undefined || decoders === undefined) throw new TypeError("A query defined by hand without its columns cannot map rows to its output: a module a build step writes carries them.");
+      if (names === undefined) throw new TypeError("A query defined by hand without its columns cannot map rows to its output: a module a build step writes carries them.");
       const n = names.length;
-      const fns = decoders as ((v: unknown) => unknown)[];
+      const fns = decodersOf() as ((v: unknown) => unknown)[];
       // Each row's values, decoded into one array the builder copies from.
       const values = new Array<unknown>(n);
       build ??= module.row ?? rowOf(names.map(([name]) => name));

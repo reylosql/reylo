@@ -195,21 +195,29 @@ function pgTypes(key: object) {
   const known = learnedOf(key);
   let binary = false;
   let pending = false;
+  let refused: unknown;
   const table = {
     getTypeParser(oid: number, format?: string): Decoder {
       if (format !== undefined && format !== "text") {
         binary = true;
         return () => BINARY;
       }
-      const b = builtinDecoder(oid);
-      if (b) return b;
-      const k = known.get(oid);
-      if (k) return textDecoder(k.kind, k.delim);
+      try {
+        const b = builtinDecoder(oid);
+        if (b) return b;
+        const k = known.get(oid);
+        if (k) return textDecoder(k.kind, k.delim);
+      } catch (error) {
+        // pg asks for a parser where it catches no error, so a type whose decoder Reylo refuses
+        // (Postgres's rarer types, which no query installed) is refused once the statement has run.
+        refused ??= error;
+        return (text) => text;
+      }
       pending = true;
       return (text) => new Pending(oid, text);
     },
   };
-  return { table, sawBinary: () => binary, sawPending: () => pending };
+  return { table, sawBinary: () => binary, sawPending: () => pending, refused: () => refused };
 }
 
 const refuseBinary = () =>
@@ -238,6 +246,7 @@ async function pgFamily(key: object, run: (types: object) => Promise<PgResult>, 
   const result = await run(types.table);
   const rows = Array.isArray(result) ? (result as Record<string, unknown>[]) : result.rows;
   if (types.sawBinary()) throw refuseBinary();
+  if (types.refused() !== undefined) throw types.refused();
   // The table goes by oid, which says nothing of a built-in row's fields, so those are still text.
   const rowColumns = columns?.filter(([, kind]) => isRowKind(kind));
   if (rowColumns?.length) {

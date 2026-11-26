@@ -1184,10 +1184,10 @@ export function installPostgresTypes(types: PostgresTypes): void {
   installed = types;
 }
 
-/** Postgres's rarer types, which a value of `kind` needs; refused where no query installed them. */
+/** Postgres's rarer types, which a value of `kind` needs (`json` for a non-finite number inside JSON); refused where no query installed them. */
 export function postgresTypesFor(kind: Kind): PostgresTypes {
   if (installed) return installed;
-  throw new TypeError(`Reylo reads and writes a Postgres ${isRowKind(kind) ? "row value" : isRangeKind(kind) ? "range" : isMultirangeKind(kind) ? "multirange" : kind} with Reylo's postgresTypes, which a module a build step writes passes where its statement holds one; a query defined by definePostgresQuery by hand passes it too: definePostgresQuery({ …, postgresTypes }) with postgresTypes from "reylo".`);
+  throw new TypeError(`Reylo reads and writes ${kind === "json" ? "a non-finite number inside Postgres JSON" : `a Postgres ${isRowKind(kind) ? "row value" : isRangeKind(kind) ? "range" : isMultirangeKind(kind) ? "multirange" : kind}`} with Reylo's postgresTypes, which a module a build step writes passes where its statement holds one; a query defined by definePostgresQuery by hand passes it too: definePostgresQuery({ …, postgresTypes }) with postgresTypes from "reylo".`);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1424,7 +1424,6 @@ function coerceArray(kind: Kind, v: unknown, column: string, each: (kind: Kind, 
 export function coercePostgres(kind: Kind, v: unknown, column: string, delim = ","): unknown {
   if (v === null || v === undefined) return null;
   if (kind.endsWith("[]")) return typeof v === "string" ? parseArray(v, (s) => coercePostgres(elementKind(kind), s, column), delim) : coerceArray(kind, v, column, (k, e) => coercePostgres(k, e, column));
-  // A row value, a range and a geometric type are their text where no driver parses them.
   // A row value, a range, a geometric type, an hstore and a money are their text where no driver parses them.
   if (isRareKind(kind)) return typeof v === "string" ? textDecoder(kind)(v) : v;
   switch (kind) {

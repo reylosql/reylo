@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 import { DEFINE } from "../src/loader.ts";
 import type { Dialect } from "../src/execute.ts";
@@ -62,4 +63,15 @@ test("a bundle holds js.codecs and Postgres's rarer types where a module passes 
   const typed = await bundle(`import { definePostgresQuery, postgresTypes } from "reylo";\nconst q = definePostgresQuery({ sql: "select point(1, 2) as p", params: [], columns: [["p", "point"]], postgresTypes });`);
   assert.ok(typed.files.includes("src/postgres-types.ts"));
   assert.match(typed.text, /lc_monetary/);
+});
+
+test("a query of Postgres's rarer types reads them with the postgresTypes its module passes, in a process of its own, and refuses them without", async () => {
+  const decode = `export const go = () => JSON.stringify(q["~standard"].query.decode([["(1.5,-2)"]]));`;
+  const run = async (module: string) => {
+    const { outputFiles } = await build({ stdin: { contents: `${module}\n${decode}\n`, resolveDir: ROOT }, bundle: true, platform: "node", format: "esm", write: false, alias: { reylo: join(ROOT, "src", "index.ts") }, logLevel: "silent" });
+    const script = `${outputFiles[0]!.text}\ntry { console.log(go()); } catch (e) { console.log(e.message); }`;
+    return spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8" }).stdout.trim();
+  };
+  assert.equal(await run(`import { definePostgresQuery, postgresTypes } from "reylo";\nconst q = definePostgresQuery({ sql: "select p from t", params: [], cardinality: "one", columns: [["p", "point"]], postgresTypes });`), '{"p":{"x":1.5,"y":-2}}');
+  assert.match(await run(`import { definePostgresQuery } from "reylo";\nconst q = definePostgresQuery({ sql: "select p from t", params: [], cardinality: "one", columns: [["p", "point"]] });`), /^Reylo reads and writes a Postgres point with Reylo's postgresTypes, which a module a build step writes passes where its statement holds one/);
 });
