@@ -846,22 +846,56 @@ test("mysql: mariadb, which writes a value that is not a Buffer as JSON, gets a 
   }
 });
 
-test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which write a number into the statement and -0 as 0, as the text -0; mysql2 gets the number, which it binds as a DOUBLE", async () => {
-  const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into r (d, f, i) values (:d, :f, :i + :u)", params: ["d", "f", "i", "u"], inputs: { d: { type: myType("double") }, f: { type: myType("float") }, i: { type: myType("int") }, u: { type: oneOf(myType("bigint"), myType("double")) } } };
+test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which write a number into the statement and -0 as 0, written in at each of its places as the float -0e0, the rest left to the driver; mysql2 gets the number, which it binds as a DOUBLE", async () => {
+  // A query defined by hand may name a parameter twice, which a build refuses; the first place types it.
+  const text = "update r set d = ?, f = ?, i = ? + ?, payload = json_array(?)";
+  const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "update r set d = :d, f = :f, i = :i + :u, payload = json_array(:d)", params: ["d", "f", "i", "u"], text, order: ["d", "f", "i", "u", "d"], marks: [[17, 18], [24, 25], [31, 32], [35, 36], [59, 60]], inputs: { d: { type: myType("double") }, f: { type: myType("float") }, i: { type: myType("int") }, u: { type: oneOf(myType("bigint"), myType("double")) } } };
   const seen: unknown[][] = [];
-  const mariadb = { batch: async () => ({}), query: async (_: unknown, values: unknown[]) => (seen.push(values), []) };
-  const planetscale = { execute: async (_: string, values: unknown[]) => (seen.push(values), { rows: [] }) };
-  const mysql2 = { query: async () => [[], []], execute: async (_: unknown, values: unknown[]) => (seen.push(values), [[], []]) };
+  const mariadb = { batch: async () => ({}), query: async (options: { sql: string }, values: unknown[]) => (seen.push([options.sql, values]), []) };
+  const planetscale = { execute: async (sql: string, values: unknown[] | null) => (seen.push([sql, values]), { rows: [] }) };
+  const mysql2 = { query: async () => [[], []], execute: async (options: { sql: string }, values: unknown[]) => (seen.push([options.sql, values]), [[], []]) };
   for (const client of [mariadb, planetscale, mysql2]) await execute(client as never, q, { d: -0, f: -0, i: -0, u: -0 });
-  assert.deepEqual(seen, [["-0", "-0", -0, -0], ["-0", "-0", -0, -0], [-0, -0, -0, -0]]);
-  // Without inputs, as defined by hand, every value goes as it is.
-  const { inputs: _, ...bare } = q;
+  const written = "update r set d = -0e0, f = -0e0, i = ? + ?, payload = json_array(-0e0)";
+  assert.deepEqual(seen, [[written, [-0, -0]], [written, [-0, -0]], [text, [-0, -0, -0, -0, -0]]]);
+  // A -0 alone leaves no value for the driver to write.
+  const alone: QueryModule<"mysql"> = { dialect: "mysql", sql: "select coalesce(:d, d) as x from r", params: ["d"], text: "select coalesce(?, d) as x from r", order: ["d"], marks: [[16, 17]], inputs: { d: { type: myType("double") } } };
   seen.length = 0;
-  await execute(mariadb as never, bare, { d: -0, f: -0, i: -0, u: -0 });
-  assert.deepEqual(seen, [[-0, -0, -0, -0]]);
+  for (const client of [mariadb, planetscale]) await execute(client as never, alone, { d: -0 });
+  assert.deepEqual(seen, [["select coalesce(-0e0, d) as x from r", []], ["select coalesce(-0e0, d) as x from r", null]]);
+  // Without inputs or marks, as defined by hand, or with the sql_mode its build read its strings
+  // under, every value goes as it is.
+  const { inputs: _, ...untyped } = q;
+  const { marks: __, ...unmarked } = q;
+  seen.length = 0;
+  for (const query of [untyped, unmarked, { ...q, sqlMode: { backslashEscapes: false, ansiQuotes: false } }]) await execute(mariadb as never, query, { d: -0, f: -0, i: -0, u: -0 });
+  assert.deepEqual(seen, Array(3).fill([text, [-0, -0, -0, -0, -0]]));
   seen.length = 0;
   for (const client of [mariadb, planetscale]) await execute(client as never, q, { d: 1.5, f: 0, i: 0, u: 2 });
-  assert.deepEqual(seen, [[1.5, 0, 0, 2], [1.5, 0, 0, 2]]);
+  assert.deepEqual(seen, Array(2).fill([text, [1.5, 0, 0, 2, 1.5]]));
+});
+
+test("mysql: a DOUBLE of -0 is stored as -0 through mariadb as through mysql2, at each of its places, each keeping the type it has there", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_signed_zero", "create table readings (id int primary key, d double, payload json); insert into readings values (1, 7, '[]')");
+  const u = new URL(MYSQL!);
+  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1), connectionLimit: 1 };
+  const twice: QueryModule<"mysql"> = { dialect: "mysql", ...handWritten("update readings set d = :d, payload = json_array(:d)", "mysql"), inputs: { d: { type: myType("double") } } };
+  const coalesced = await builtModule(own.url, "coalesced", "select coalesce(:d, d) as x from readings\n");
+  try {
+    for (const open of [() => driver("mysql2/promise").createPool(connection), () => driver("mariadb").createPool(connection)]) {
+      const client = open();
+      try {
+        await own.db.query("update readings set d = 7, payload = '[]'");
+        await execute(client, twice, { d: -0 });
+        assert.deepEqual(await own.rows("select cast(d as char) as d, cast(payload as char) as payload from readings"), [{ d: "-0", payload: "[-0.0]" }]);
+        const [{ x }] = await coalesced.run(client, { d: -0 });
+        assert.ok(Object.is(x, -0), `coalesce(:d, d) returned ${typeof x} ${String(x)}`);
+      } finally {
+        await client.end();
+      }
+    }
+  } finally {
+    await own.drop();
+  }
 });
 
 test("postgres: Neon's neon() before 0.10, which sends a Buffer as JSON, gets a binary value in Postgres's hex form", async () => {
