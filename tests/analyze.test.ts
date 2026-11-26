@@ -245,11 +245,11 @@ test("a build that cannot reach the database reads reylo/.cache/ with another UR
 test("an entry is named by its server and the URL's parameters that choose the database as the URL writes them, as reylo-build names it", async () => {
   // reylo-build names its entries by the same cases but ClickHouse's (rust/reylo-build/src/analysis.rs), so that the two share reylo/.cache/.
   const cases: { case: string; url: string; server: string }[] = JSON.parse(readFileSync(new URL("../rust/reylo-build/src/entry-name-cases.json", import.meta.url), "utf8"));
-  // A ClickHouse bearer token, which reylo-build reads no URL with: the engine drops the X-ClickHouse- headers before it, so its place among them names the entry, and its value never does.
+  // A ClickHouse bearer token, which reylo-build reads no URL with: the engine sends the database header beside it in either order, so it names no entry, and its value never reaches a name.
   cases.push(
-    { case: "a ClickHouse database header before a bearer token, which drops it", url: "clickhouse+http://127.0.0.1:8123/?http_header_X-ClickHouse-Database=analytics&access_token=secret", server: "clickhouse+http://@127.0.0.1:8123/?http_header_X-ClickHouse-Database=analytics&access_token=" },
-    { case: "a ClickHouse database header after a bearer token, which keeps it", url: "clickhouse+http://127.0.0.1:8123/?access_token=secret&http_header_X-ClickHouse-Database=analytics", server: "clickhouse+http://@127.0.0.1:8123/?access_token=&http_header_X-ClickHouse-Database=analytics" },
-    { case: "a bearer token alone keeps the name its entries had", url: "clickhouse+http://127.0.0.1:8123/?access_token=secret", server: "clickhouse+http://@127.0.0.1:8123/" },
+    { case: "a ClickHouse database header before a bearer token", url: "clickhouse+http://127.0.0.1:8123/?http_header_X-ClickHouse-Database=analytics&access_token=secret", server: "clickhouse+http://@127.0.0.1:8123/?http_header_X-ClickHouse-Database=analytics" },
+    { case: "a ClickHouse database header after a bearer token", url: "clickhouse+http://127.0.0.1:8123/?access_token=secret&http_header_X-ClickHouse-Database=analytics", server: "clickhouse+http://@127.0.0.1:8123/?http_header_X-ClickHouse-Database=analytics" },
+    { case: "a bearer token alone", url: "clickhouse+http://127.0.0.1:8123/?access_token=secret", server: "clickhouse+http://@127.0.0.1:8123/" },
   );
   const root = mkdtempSync(join(tmpdir(), "reylo-entry-names-"));
   writeFileSync(join(root, "package.json"), "{}");
