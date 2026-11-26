@@ -815,8 +815,9 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
     // A statement may read another database's table or call its function, and the engine takes a
     // column of a table for a view's wherever any database has a view of that name.
     const elsewhere = [`alter table ${otherName}.t modify c varchar(10) null`, `create view ${otherName}.m as select 1 as v`, [`drop function ${otherName}.g`, `create function ${otherName}.g(x varchar(10)) returns int deterministic return x`]];
-    // Without the TRIGGER privilege, a written table's triggers are hidden from the account.
-    const privileges = [`revoke trigger on ${granted(ownName)} from '${user}'@'%'`];
+    // Without the TRIGGER privilege, a written table's triggers are hidden from the account. A grant
+    // on a database's pattern names the pattern, which the engine does not read as the database.
+    const privileges = [`grant trigger on \`${ownName}\`.m to '${user}'@'%'`];
     for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks, ...signatures, ...elsewhere, ...privileges]) {
       const statements = [change].flat();
       for (const statement of statements) await own.db.query(statement);
@@ -846,6 +847,41 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
       } finally {
         await own.drop();
       }
+    }
+  }
+});
+
+test("on MySQL, a view in another check's shadow leaves the analysis of a table of the same name as it was", { skip: mysqlLive }, async () => {
+  const own = await mysqlDatabase("reylo_view_base", "create table base (n int not null)");
+  const shadow = `reylo_shadow_view_${process.pid}`;
+  const root = mkdtempSync(join(tmpdir(), "reylo-shadow-view-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  mkdirSync(join(root, "node_modules"));
+  symlinkSync(join(DRIVERS, "mysql2"), join(root, "node_modules", "mysql2"));
+  // A fresh analysis in a session of its own, which holds no answer from before.
+  const columns = async () => {
+    const session = await Session.open(root, { DATABASE_URL: own.url });
+    try {
+      const outcome = await session.analyze("select n from base", { force: true, store: false });
+      assert.ok(outcome.ok);
+      return JSON.stringify(outcome.analysis.columns);
+    } finally {
+      await session.close();
+    }
+  };
+  try {
+    const before = await columns();
+    // Under the lock that keeps another check from dropping it as a leftover.
+    await own.db.query(`select get_lock('${shadow}', 0)`);
+    await own.db.query(`create database ${shadow}`);
+    await own.db.query(`create view ${shadow}.base as select 1 as n`);
+    assert.equal(await columns(), before);
+  } finally {
+    try {
+      await own.db.query(`drop database if exists ${shadow}`);
+      await own.db.query(`select release_lock('${shadow}')`);
+    } finally {
+      await own.drop();
     }
   }
 });
