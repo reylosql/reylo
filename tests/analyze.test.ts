@@ -449,11 +449,15 @@ test("Postgres: under another DateStyle, reylo generate rust-sqlx and the type c
     assert.ok(outcome.ok);
     return [outcome.source, outcome.analysis.diagnostics.map((d) => d.code)];
   };
+  // The cache's one entry as it stands: its file's name and its whole text, `at` included, which a
+  // writer that analysed the statement again would change.
   const entry = (root: string) => {
     const queries = join(root, "reylo", ".cache", "queries");
-    const [file] = readdirSync(queries);
-    return JSON.parse(readFileSync(join(queries, file!), "utf8")).analysis;
+    const files = readdirSync(queries);
+    assert.equal(files.length, 1, files.join(", "));
+    return { file: files[0]!, text: readFileSync(join(queries, files[0]!), "utf8") };
   };
+  const analysis = (written: { text: string }) => JSON.parse(written.text).analysis;
   try {
     await sql.unsafe(`alter database ${new URL(url).pathname.slice(1)} set datestyle = 'SQL, DMY'`);
     // The generator first: it writes the module, since sqlx reads a date in the binary format, which
@@ -462,12 +466,16 @@ test("Postgres: under another DateStyle, reylo generate rust-sqlx and the type c
     const first = crate();
     const module = generated(first);
     assert.match(module, /pub ships_on: [^,\n]*\bNaiveDate\b/);
+    const generators = entry(first);
     assert.deepEqual(await checked(first), ["cache", [24]]);
+    assert.deepEqual(entry(first), generators);
     // The type check first: the generator reads its entry, and writes the module it writes with none.
     const second = crate();
     assert.deepEqual(await checked(second), ["database", [24]]);
-    assert.deepEqual(entry(second), entry(first));
+    const checks = entry(second);
+    assert.deepEqual(analysis(checks), analysis(generators));
     assert.equal(generated(second), module);
+    assert.deepEqual(entry(second), checks);
   } finally {
     await drop();
   }
