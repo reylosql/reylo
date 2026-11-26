@@ -1022,16 +1022,58 @@ fn without_password(url: &str) -> (String, Option<String>) {
 /// privileges or comments, and without the extensions, which a shadow makes itself. What the
 /// project made on the platform's tables is left to the project's own SQL, which makes it again: a
 /// policy (Reylo takes every policy for the project's), and a trigger whose function is outside the
-/// platform's schemas (`on_auth_user_created`, calling `public.handle_new_user()`).
+/// platform's schemas (`on_auth_user_created`, calling `public.handle_new_user()`). Where they hold
+/// what Reylo can't make (a text search configuration), pg_dump makes them, where there is one;
+/// where there is none, the rest, and the note that says what every shadow leaves out.
 #[cfg(feature = "cli")]
-async fn platform_ddl(target: &mut Db, schemas: &[String]) -> Result<Vec<String>, Error> {
+async fn platform_ddl(target: &mut Db, url: &str, version: i64, schemas: &[String]) -> Result<(Vec<String>, Option<String>), Error> {
     let read = async {
+        let unread = crate::diff::postgres::platform_unread(target, schemas).await?;
         let platform = crate::diff::postgres::read_platform(target, schemas).await?;
         let alterer = crate::diff::alterer(target).await?;
-        Ok::<_, Error>(crate::diff::plan(&crate::diff::Schema::default(), &platform, alterer.as_ref()))
+        Ok::<_, Error>((unread, crate::diff::plan(&crate::diff::Schema::default(), &platform, alterer.as_ref())))
     };
-    let plan = read.await.map_err(|e| Error(format!("reading the platform's schemas {} for shadow databases: {e}", schemas.join(", "))))?;
-    Ok(plan.statements.into_iter().filter(|s| !s.trim_start().starts_with("--")).collect())
+    let (unread, plan) = read.await.map_err(|e| Error(format!("reading the platform's schemas {} for shadow databases: {e}", schemas.join(", "))))?;
+    if !unread.is_empty() {
+        if let Ok(dumped) = platform_dump(url, version / 10000, schemas) {
+            return Ok((dumped, None));
+        }
+    }
+    let note = (!unread.is_empty()).then(|| {
+        format!(
+            "· {LEFT_OUT} {}, the platform's, which Reylo can't make, so a migration that uses it fails in them: pg_dump {} or newer, where it's installed, makes it",
+            unread.join(", "),
+            version / 10000
+        )
+    });
+    Ok((plan.statements.into_iter().filter(|s| !s.trim_start().starts_with("--")).collect(), note))
+}
+
+/// The platform's schemas `schemas` as pg_dump makes them, with what [`platform_ddl`] says it leaves
+/// out left out.
+fn platform_dump(url: &str, major: i64, schemas: &[String]) -> Result<Vec<String>, Error> {
+    let mut args: Vec<String> = ["--schema-only", "--no-owner", "--no-privileges", "--no-comments", "--no-publications", "--no-subscriptions", "--no-security-labels", "--no-tablespaces"].map(String::from).to_vec();
+    for s in schemas {
+        args.push("--schema".into());
+        args.push(s.clone());
+    }
+    let text = pg_dump(url, major, &args)?;
+    let kept: Vec<&str> = text.lines().filter(|l| !l.starts_with('\\') && !l.starts_with("SET ") && !l.starts_with("SELECT pg_catalog.set_config") && !l.starts_with("--")).collect();
+    Ok(crate::sql::split_statements(&kept.join("\n"), Dialect::Postgres)
+        .into_iter()
+        .map(|s| s.text)
+        .filter(|t| {
+            let head = t.trim_start().to_ascii_uppercase();
+            if head.starts_with("CREATE EXTENSION") || head.starts_with("COMMENT ON EXTENSION") || head.starts_with("CREATE POLICY") {
+                return false;
+            }
+            if head.starts_with("CREATE TRIGGER") || head.starts_with("CREATE CONSTRAINT TRIGGER") {
+                static FUNCTION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)\bexecute\s+(?:function|procedure)\s+"?([^".(\s]+)"?\."#).expect("a valid pattern"));
+                return FUNCTION.captures(t).is_some_and(|c| schemas.iter().any(|s| s.eq_ignore_ascii_case(&c[1])));
+            }
+            true
+        })
+        .collect())
 }
 
 /// How the note opens that says what every shadow leaves out of the target.
@@ -1103,7 +1145,7 @@ impl Owned {
 /// Reylo makes no role itself: a role is the whole server's, and outlives every run, so the shadows'
 /// server, often the target's own, is given one only by whoever runs it.
 #[cfg(feature = "cli")]
-async fn owned_by_platform(target: &mut Db, admin: &tokio_postgres::Client) -> Result<Owned, Error> {
+async fn owned_by_platform(target: &mut Db, admin: &tokio_postgres::Client, url: &str, version: i64) -> Result<Owned, Error> {
     use crate::catalog::{beyond_reach, in_project_schema, not_extension, not_platform_schema, PG_USER_NS, PLATFORM_ROLES, SHADOW_PLATFORM_ROLE};
     let named = PLATFORM_ROLES.iter().map(|r| literal(r)).collect::<Vec<_>>().join(", ");
     let theirs = |owner: &str| format!("{} and pg_get_userbyid({owner}) <> all (array[{named}])", beyond_reach(owner));
@@ -1138,10 +1180,10 @@ async fn owned_by_platform(target: &mut Db, admin: &tokio_postgres::Client) -> R
     let role = SHADOW_PLATFORM_ROLE;
     let may = format!("select pg_has_role(current_user, oid, case when current_setting('server_version_num')::int >= 160000 then 'SET' else 'MEMBER' end)::text as may from pg_roles where rolname = {}", literal(role));
     if pg_rows(admin, &may).await?.first().is_some_and(|r| r.text("may") == "true") {
-        let mut statements = if schemas.is_empty() { vec![] } else { platform_ddl(target, &schemas).await? };
+        let (mut statements, note) = if schemas.is_empty() { (vec![], None) } else { platform_ddl(target, url, version, &schemas).await? };
         statements.extend(schema_grants(target, &schemas).await?);
         statements.extend(of("f").map(|r| r.text("a").to_string()));
-        return Ok(Owned { statements, extensions, role: Some(role.to_string()), note: None });
+        return Ok(Owned { statements, extensions, role: Some(role.to_string()), note });
     }
     // The role the shadows are made as, which takes on the role to make it: `shadow_url`'s, else
     // the target's.
@@ -1515,10 +1557,12 @@ impl Server {
                     target.rows(&format!("select rolname as r from pg_roles where rolname in ({roles}) and pg_has_role(current_user, oid, '{can}') order by rolname limit 1")).await?.first().map(|r| r.text("r").to_string())
                 };
                 // Made where the shadows may become one of the platform's roles.
-                let environment = if environment_role.is_some() { platform_ddl(target, &platform).await? } else { vec![] };
+                let (environment, left_out) = if environment_role.is_some() { platform_ddl(target, url, version, &platform).await? } else { (vec![], None) };
                 let schemas: Vec<String> = std::iter::once("public".to_string()).chain(extensions.iter().map(|(_, s)| s.clone())).filter(|s| !platform.contains(s)).collect();
                 let schema_grants = schema_grants(target, &schemas).await?;
-                let owned = owned_by_platform(target, &admin).await?;
+                let mut owned = owned_by_platform(target, &admin, url, version).await?;
+                // What every shadow leaves out, said once.
+                owned.note = [left_out, owned.note.take()].into_iter().flatten().reduce(|a, b| format!("{a}\n{b}"));
                 // On Supabase, the default privileges its Data API's roles have, the target's own,
                 // which Supabase sets for every project as it chooses; and its publication.
                 let platform_privileges = if names { platform_defaults(api_settings(&api_privileges(&privileges), &[])).0 } else { vec![] };
@@ -1697,7 +1741,7 @@ impl Server {
                 // Its extensions after its schemas, which they may be in, and before the rest of it,
                 // which may use them; one no role but a superuser may make, made by a superuser
                 // connected and given to the role.
-                let after = owned.statements.iter().position(|st| !st.starts_with("create schema ")).unwrap_or(owned.statements.len());
+                let after = owned.statements.iter().position(|st| !st.to_ascii_lowercase().starts_with("create schema ")).unwrap_or(owned.statements.len());
                 let mut statements = owned.statements[..after].to_vec();
                 statements.extend(owned_extensions.iter().map(|(e, s)| format!("create extension if not exists {} with schema {}", ident(e), ident(s))));
                 statements.extend(owned.statements[after..].iter().cloned());

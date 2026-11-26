@@ -239,6 +239,28 @@ pub async fn read_platform(db: &mut Db, schemas: &[String]) -> Result<Schema, Er
     Ok(schema)
 }
 
+/// What the platform's schemas `schemas` hold that [`read_platform`] makes nothing of, each as
+/// `pg_identify_object` names it (`text search configuration auth.search`): the kinds no reading
+/// of Reylo's defines, which a plan can't make.
+pub async fn platform_unread(db: &mut Db, schemas: &[String]) -> Result<Vec<String>, Error> {
+    let named = schemas.iter().map(|n| literal(n)).collect::<Vec<_>>().join(", ");
+    let rows = db
+        .rows(&format!(
+            "select o.type || ' ' || o.identity as what from (
+               select 'pg_ts_config'::regclass as classid, x.oid as objid, x.cfgnamespace as ns from pg_ts_config x
+               union all select 'pg_ts_dict'::regclass, x.oid, x.dictnamespace from pg_ts_dict x
+               union all select 'pg_ts_parser'::regclass, x.oid, x.prsnamespace from pg_ts_parser x
+               union all select 'pg_ts_template'::regclass, x.oid, x.tmplnamespace from pg_ts_template x
+               union all select 'pg_conversion'::regclass, x.oid, x.connamespace from pg_conversion x
+             ) k join pg_namespace n on n.oid = k.ns, lateral pg_identify_object(k.classid, k.objid, 0) o
+             where n.nspname = any(array[{named}]::name[])
+               and not exists (select 1 from pg_depend e where e.classid = k.classid and e.objid = k.objid and e.deptype = 'e')
+             order by 1"
+        ))
+        .await?;
+    Ok(rows.iter().map(|r| r.text("what").to_string()).collect())
+}
+
 async fn read_in(db: &mut Db, platform: Option<&[String]>) -> Result<Schema, Error> {
     db.exec("set search_path = ''").await?;
     let result = read_objects(db, platform).await;

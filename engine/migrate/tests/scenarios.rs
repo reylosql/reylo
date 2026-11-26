@@ -4069,6 +4069,7 @@ on!(
     init_locks_a_schema_with_a_carriage_return_in_a_string,
     a_platforms_schemas_and_extensions_are_in_every_shadow,
     a_shadow_holds_the_platforms_schemas_alone,
+    what_reylo_cant_make_of_a_platform_is_dumped_or_named,
     a_platforms_extension_in_pg_catalog_is_not_the_projects,
     a_role_that_is_no_superuser_runs_every_command,
     a_platform_roles_default_privileges_are_the_platforms,
@@ -6558,6 +6559,27 @@ mod adversarial {
         server.drop_shadow(shadow).await;
         server.close().await;
         target.close().await;
+        reylo_migrate::db::set_pg_dump_dirs(None);
+    }
+
+    /// A platform's schema holding what Reylo can't make (a text search configuration) is copied by
+    /// pg_dump where there is one; with none, every shadow leaves it out, and the command says so.
+    pub async fn what_reylo_cant_make_of_a_platform_is_dumped_or_named(mut p: P) {
+        p.exec("do $$ begin create role supabase_auth_admin; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec(
+            "create schema auth authorization supabase_auth_admin; set role supabase_auth_admin;
+            create text search configuration auth.search (copy = pg_catalog.english);
+            create table auth.documents (id int primary key, title text, search tsvector generated always as (to_tsvector('auth.search'::regconfig, title)) stored);
+            reset role;",
+        )
+        .await;
+        p.schema("create table notes (id int primary key, document int references auth.documents);");
+        p.file("20261125100000_notes.sql", "create table notes (id int primary key, document int references auth.documents);");
+        assert_eq!(p.dry_run().await, 0, "pg_dump copies the platform's schema whole:\n{}", p.peek());
+        reylo_migrate::db::set_pg_dump_dirs(Some(vec![]));
+        p.output();
+        assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+        assert_has!(p.output(), r"Shadow databases leave out text search configuration auth\.search, the platform's, which Reylo can't make, so a migration that uses it fails in them: pg_dump \d+ or newer, where it's installed, makes it");
         reylo_migrate::db::set_pg_dump_dirs(None);
     }
 
