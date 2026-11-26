@@ -305,7 +305,7 @@ fn run(sql: &str, lexed: &Lexed, ddl: &[String], extras: &Extras, marked: &[Stri
     }
     // The parameters cast to `nullable(…)`, by the `?n` the tree names each by.
     let nullable_params: HashSet<String> = lexed.params.iter().enumerate().filter(|(_, name)| marked.contains(name)).map(|(k, _)| format!("?{}", k + 1)).collect();
-    let a = Analyzer { tree: &t, extras, skipping: &skipping, nullable_values: nullable_params.clone(), nullable_params, written: std::cell::RefCell::new(HashSet::new()), level: std::cell::RefCell::new(Level::default()), shapes: std::cell::RefCell::new(HashMap::new()), recursion: std::cell::RefCell::new(Vec::new()), settled: std::cell::RefCell::new(HashMap::new()) };
+    let a = Analyzer { tree: &t, extras, skipping: &skipping, nullable_values: nullable_params.clone(), nullable_params, written: std::cell::RefCell::new(HashSet::new()), level: std::cell::RefCell::new(Level::default()), shapes: std::cell::RefCell::new(HashMap::new()), recursion: std::cell::RefCell::new(Vec::new()), settled: std::cell::RefCell::new(HashMap::new()), proofs: std::cell::RefCell::new(HashMap::new()), keys: std::cell::RefCell::new(HashMap::new()) };
     let a = Analyzer { nullable_values: a.bare_nullable().into_iter().chain(a.nullable_params.iter().cloned()).collect(), ..a };
     // A command (DDL, a PRAGMA, a transaction's control) has no tree to read: SQLite's prepare
     // says what it takes and returns, and nothing says where a column comes from, so each is of
@@ -1125,6 +1125,12 @@ struct Analyzer<'a> {
     recursion: std::cell::RefCell<Vec<(String, Vec<Fact>)>>,
     /// Each recursive WITH query's settled columns, by its node.
     settled: std::cell::RefCell<HashMap<usize, Vec<Fact>>>,
+    /// What [`Analyzer::exactly_one`] (`true`) and [`Analyzer::at_most_one`] (`false`) found of each
+    /// SELECT, by its node. A FROM asks both of a subquery, and more than once, so without them each
+    /// level of nesting would ask every level below it again.
+    proofs: std::cell::RefCell<HashMap<(usize, bool), Result<(), String>>>,
+    /// Each SELECT's [`Analyzer::output_keys`], by its node.
+    keys: std::cell::RefCell<HashMap<usize, Vec<Vec<i64>>>>,
 }
 
 /// What one SELECT arm's WHERE and grouping prove of the expressions in its select list.
@@ -2999,6 +3005,24 @@ impl Analyzer<'_> {
     }
 
     fn exactly_one(&self, sel: &Sel) -> Result<(), String> {
+        self.proved(sel, true, || self.prove_exactly_one(sel))
+    }
+
+    /// [`Self::exactly_one`] or [`Self::at_most_one`] of `sel`, proved once and then read from
+    /// `proofs`: neither reads anything but the statement and the schema.
+    fn proved(&self, sel: &Sel, exact: bool, prove: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+        let key = (sel as *const Sel as usize, exact);
+        if let Some(found) = self.proofs.borrow().get(&key) {
+            return found.clone();
+        }
+        #[cfg(test)]
+        tests::PROOFS.set(tests::PROOFS.get() + 1);
+        let found = prove();
+        self.proofs.borrow_mut().insert(key, found.clone());
+        found
+    }
+
+    fn prove_exactly_one(&self, sel: &Sel) -> Result<(), String> {
         // A constant LIMIT of a row or more keeps the one row, and so does an OFFSET of 0; a
         // parameter may be 0.
         let keeps = |n: &Node, least: i64| integer(n).is_some_and(|n| n >= least);
@@ -3057,6 +3081,10 @@ impl Analyzer<'_> {
     }
 
     fn at_most_one(&self, sel: &Sel) -> Result<(), String> {
+        self.proved(sel, false, || self.prove_at_most_one(sel))
+    }
+
+    fn prove_at_most_one(&self, sel: &Sel) -> Result<(), String> {
         if sel.limit.as_ref().and_then(integer).is_some_and(|n| (0..=1).contains(&n)) {
             return Ok(());
         }
@@ -3217,6 +3245,16 @@ impl Analyzer<'_> {
     ///
     /// None for a set operation or a VALUES list, which may repeat a row.
     fn output_keys(&self, sel: &Sel) -> Vec<Vec<i64>> {
+        let key = sel as *const Sel as usize;
+        if let Some(found) = self.keys.borrow().get(&key) {
+            return found.clone();
+        }
+        let found = self.read_output_keys(sel);
+        self.keys.borrow_mut().insert(key, found.clone());
+        found
+    }
+
+    fn read_output_keys(&self, sel: &Sel) -> Vec<Vec<i64>> {
         if let Some(prior) = &sel.prior {
             return self.compound_keys(sel, prior);
         }
@@ -3826,6 +3864,33 @@ enum Position {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    std::thread_local! {
+        /// How many times [`Analyzer::exactly_one`] and [`Analyzer::at_most_one`] ran their proof.
+        pub(super) static PROOFS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn each_select_is_proved_once_however_deep_it_nests() {
+        let nest = |root: &str, wrap: &dyn Fn(&str) -> String| (0..40).fold(root.to_string(), |q, _| wrap(&q));
+        let derived = |q: &str| format!("select * from ({q}) t");
+        let left_join = |q: &str| format!("select b.* from (select 1 as one) a left join ({q}) b on true");
+        let with = (1..=40).fold("with c0 as (select count(*) as n from users)".to_string(), |q, i| format!("{q}, c{i} as (select n from c{})", i - 1)) + " select n from c40";
+        for (sql, cardinality) in [
+            (nest("select count(*) as n from users", &derived), "one"),
+            (nest("select id from users where id = :id", &derived), "at_most_one"),
+            (nest("select id from users", &derived), "many"),
+            (with, "one"),
+            (nest("select count(*) as n from users", &left_join), "one"),
+            (nest("select id from users where id = :id", &left_join), "one"),
+            (nest("select id from users", &left_join), "many"),
+        ] {
+            PROOFS.set(0);
+            assert_eq!(analysis(&sql).cardinality, cardinality, "{sql}");
+            // Each SELECT is proved once to return exactly one row and once to return one at most.
+            assert!(PROOFS.get() <= 2 * sql.matches("select").count(), "{} proofs: {sql}", PROOFS.get());
+        }
+    }
 
     #[test]
     fn a_row_assigned_fewer_values_than_columns_is_the_database_s_error() {
