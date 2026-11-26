@@ -6,7 +6,7 @@ import { connect, createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Session } from "../src/analyze.ts";
+import { FINGERPRINT, Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
 import { mapperHandlers } from "../src/mapper-server.ts";
 import { reportedDiagnostics, type Reported } from "../src/mapper-diagnostics.ts";
@@ -225,6 +225,35 @@ test("on Postgres, an analysis made after a migration, by a session that still t
   } finally {
     await a.drop();
     await b.drop();
+  }
+});
+
+test("the engine's answers from while the fingerprint query failed are dropped once it runs again", async () => {
+  const root = mkdtempSync(join(tmpdir(), "reylo-unverified-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const exec = (sql: string) => {
+    const db = new DatabaseSync(join(root, "app.db"));
+    db.exec(sql);
+    db.close();
+  };
+  exec("create table t (a int)");
+  const session = await Session.open(root, { DATABASE_URL: "file:./app.db" });
+  const fingerprint = FINGERPRINT.sqlite;
+  try {
+    // A query the server refuses: the session's fingerprint is its own, unverified value.
+    FINGERPRINT.sqlite = "select * from reylo_no_such_table";
+    const before = await session.analyze("select * from t");
+    assert.ok(before.ok);
+    assert.deepEqual(before.analysis.columns.map((c) => c.name), ["a"]);
+    FINGERPRINT.sqlite = fingerprint;
+    exec("alter table t add column b int");
+    await session.recheck();
+    const after = await session.analyze("select * from t");
+    assert.ok(after.ok);
+    assert.deepEqual(after.analysis.columns.map((c) => c.name), ["a", "b"]);
+  } finally {
+    FINGERPRINT.sqlite = fingerprint;
+    await session.close();
   }
 });
 

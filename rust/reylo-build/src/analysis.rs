@@ -310,7 +310,12 @@ async fn postgres(located: &Located, queries: &Path, sql: &str, session: &mut Se
             session.retired = true;
         }
         let analysis = analysis.map_err(|e| e.to_string())?;
-        match moved(&schema, postgres_schema(session).await, tries) {
+        let now = postgres_schema(session).await;
+        if matches!(now, Ok(Err(_))) {
+            // The database gone: the next statement tries it again, rather than a minute offline.
+            session.schema = None;
+        }
+        match moved(&schema, now, tries) {
             Moved::No => return remember(&located.cache, &own, Dialect::Postgres, Some(&schema), &analysis),
             Moved::To(now) => schema = now,
             Moved::Unknown => return remember(&located.cache, &own, Dialect::Postgres, None, &analysis),
@@ -380,7 +385,12 @@ async fn mysql(located: &Located, queries: &Path, sql: &str, session: &mut Sessi
             session.conn = None;
         }
         let analysis = analysis.map_err(|e| e.to_string())?;
-        match moved(&schema, mysql_schema(session).await, tries) {
+        let now = mysql_schema(session).await;
+        if matches!(now, Ok(Err(_))) {
+            // The database gone: the next statement tries it again, rather than a minute offline.
+            session.schema = None;
+        }
+        match moved(&schema, now, tries) {
             Moved::No => return remember(&located.cache, &own, Dialect::Mysql, Some(&schema), &analysis),
             Moved::To(now) => schema = now,
             Moved::Unknown => return remember(&located.cache, &own, Dialect::Mysql, None, &analysis),

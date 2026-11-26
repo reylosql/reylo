@@ -94,7 +94,7 @@ export class Session {
   /** What `reylo/.cache/queries` held when this session first looked. */
   #listing: string[] | undefined;
   #schema: { value: string | null; at: number; error?: string; fatal?: boolean } | undefined;
-  /** The fingerprint read last, which a spell offline leaves in place: the engine's answers are of that schema. */
+  /** The fingerprint read last, or the unverified value that stood in for one, which a spell offline leaves in place: the engine's answers are of that schema. */
   #known: string | undefined;
 
   private constructor(engine: Engine | MissingEngine, project: ResolvedProject, idle: number, dir: string, env: Record<string, string | undefined>) {
@@ -344,8 +344,11 @@ export class Session {
       // again now, and the entry written only where it has not moved. Where it has, the engine's
       // answers are dropped (`schema()`) and the statement analyzed again.
       await this.recheck();
-      const now = (await this.schema()).value;
+      const read = await this.schema();
+      const now = read.value;
       if (now === label) break;
+      // A read that found the database gone leaves the next statement to try it again, rather than a minute offline.
+      if (now === null && !read.fatal) this.#schema = undefined;
       if (now === null || now.startsWith("unverified ") || tries === ANALYSES) return { ok: true, analysis, source: "database", entry: file };
       label = now;
     }
@@ -386,9 +389,12 @@ export class Session {
         this.#drop(pending);
         this.#schema = { value: null, at: now, error: reason(e) };
       } else {
-        // With no fingerprint to tell a change by, the engine's answers last as long as this value.
+        // With no fingerprint to tell a change by, the engine's answers last as long as this value, and
+        // are dropped once a fingerprint is read again.
         await io.forget().catch(() => {});
-        this.#schema = { value: `unverified ${process.pid} ${now}`, at: now };
+        const value = `unverified ${process.pid} ${now}`;
+        this.#schema = { value, at: now };
+        this.#known = value;
       }
     }
     return this.#schema;
