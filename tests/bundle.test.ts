@@ -91,6 +91,7 @@ test("a kind needs Postgres's rarer types exactly where the module a build step 
     ["date", "2026-01-02"], ["timestamp", "2026-01-02 03:04:05"], ["timestamptz", "2026-01-02 03:04:05+00"], ["interval", "1 day"], ["int[]", "{1,2}"], ["text[][]", "{{a}}"],
     ["point", "(1,2)"], ["line", "{1,-1,0}"], ["lseg", "[(0,0),(1,1)]"], ["box", "(3,4),(1,2)"], ["path", "((0,0),(1,1))"], ["polygon", "((0,0),(1,1))"], ["circle", "<(1,2),3>"],
     ["box[]", "{(3,4),(1,2)}"], ["hstore", '"a"=>"1"'], ["money", "$1.00"], ["money[]", '{"$1.00"}'], ["range:int", "[1,5)"], ["multirange:int8", "{[1,3)}"], ["range:timestamptz[]", '{"[2026-01-01 00:00:00+00,)"}'],
+    ["{int[]}[]", '{"{1,2}",NULL}'],
     ['(["a","int"])', "(1)"], ['(["a","int"])[]', '{"(1)"}'], ['(["p","text"],["q","int[]"])', '(x,"{1}")'],
   ];
   const values_ts = JSON.stringify(join(ROOT, "src", "values.ts"));

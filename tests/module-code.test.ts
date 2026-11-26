@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { moduleCode, moduleImports, type ModuleInput } from "../src/loader.ts";
-import type { EngineType } from "../src/engine-type.ts";
+import { withBases, type EngineType } from "../src/engine-type.ts";
 import { array, field, pg, record } from "./descriptors.ts";
 
 // Statements' analyses as the engine gave them, each with the project's settings, and the module a
@@ -28,6 +28,10 @@ test("a Postgres module imports its rarer types where a column or a parameter ho
   }
   assert.equal(typed([record([field("a", pg("int4"))])]), true, "a row value");
   for (const name of ["int4", "text", "timestamptz", "interval", "jsonb", "bytea", "uuid", "numeric"]) assert.equal(typed([pg(name)], [{ type: pg(name) }]), false, name);
+  // An array of a domain over an array type is read without them, and written as each element's literal with them.
+  const ints = withBases(array(array(pg("int4"), true, "public.ints"), true, "public._ints"), { "public.ints": "_int4" });
+  assert.equal(typed([ints]), false);
+  assert.equal(typed([], [{ type: ints }]), true);
   // A structured parameter is written by checks, but its money is checked against the session's locale first.
   const rows = (type: EngineType) => [{ type: array(record([field("amount", type)])), members: [{ written: "amount" }] }];
   assert.equal(typed([], rows(pg("money"))), true);

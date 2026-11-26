@@ -11,7 +11,7 @@
 
 import type { QueryError } from "./query-error.ts";
 import { columnKind, describe, given, ParameterError, vectorText, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
-import { schemaOf, type EngineType } from "./engine-type.ts";
+import { holdsWholeArrays, schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
 import type { SqlMode } from "./engine-core.ts";
@@ -292,6 +292,32 @@ export type Inputs = Readonly<Record<string, { readonly type: EngineType; readon
 
 export type AnyClient = Record<string, any> & ((...args: any[]) => any);
 
+/** Where the client `effect` from `reylo/effect` passes to `.run()` for a SQLite or Postgres statement keeps the Effect SQL client it reads through (src/effect.ts). */
+export const EFFECT_SQL: unique symbol = Symbol.for("reylo.effectSql");
+
+/**
+ * A statement's run on an Effect SQL client (src/effect.ts), each rejecting with the `SqlError`
+ * Effect's client raised. On SQLite, `driver` is the client's own name for its driver
+ * (`sqlite-node`, `d1`, …), `exact` whether it reads every INTEGER as a BigInt, and `raw` the
+ * statement's result as the driver returned it. On Postgres, `text` runs the statement with
+ * every column in the text format, each value the server's text, and `key` is the client, under
+ * which Reylo keeps what it learned of the database's own types.
+ */
+export type EffectSql = {
+  readonly [EFFECT_SQL]:
+    | {
+        readonly dialect: "sqlite";
+        readonly driver: string;
+        readonly exact: boolean;
+        raw(text: string, values: unknown[]): Promise<unknown>;
+      }
+    | {
+        readonly dialect: "postgres";
+        readonly key: object;
+        text(text: string, values: (string | null)[]): Promise<{ readonly fields: readonly { readonly name: string; readonly dataTypeId: number }[]; readonly values: readonly (readonly (string | null)[])[] }>;
+      };
+};
+
 /**
  * The parameters: an object keyed by name, or by number for positional placeholders (`$1` and
  * `?` give `{ 1: ..., 2: ... }`, and `params` is `["1", "2"]`). An array is refused, since
@@ -423,7 +449,7 @@ async function executeAsync(c: AnyClient | null | undefined, query: QueryModule,
   // Effect SQL's client has an unsafe() whose statement is an Effect, which an await never runs:
   // taken for Bun.sql's on SQLite, a read gave no rows and a write ran nothing. Effect 4 brands
   // the client with a string, Effect 3's @effect/sql with a symbol.
-  if ("~effect/sql/SqlClient" in c || Symbol.for("@effect/sql/SqlClient") in c) throw new TypeError(`reylo cannot run a statement on an Effect SQL client: .run() takes a driver's own client, and Effect SQL's statements are Effects, which only Effect's runtime runs.`);
+  if ("~effect/sql/SqlClient" in c || Symbol.for("@effect/sql/SqlClient") in c) throw new TypeError(`reylo cannot run a statement on an Effect SQL client: .run() takes a driver's own client. Inside an Effect, run the query with effect(query, params) from reylo/effect.`);
   checkParams(query, params);
   await query.runtime.before?.(c, query);
   const rows = await query.runtime.run(c, query, statement(query, params));
@@ -653,7 +679,7 @@ export const isTime = (type: EngineType | undefined, dialect: Dialect) => type !
 function checkTime(type: EngineType | undefined, name: string, v: unknown, dialect: Dialect): void {
   if (type === undefined || v == null) return;
   if (type.kind === "array") {
-    if (Array.isArray(v)) for (const e of v) checkTime(Array.isArray(e) ? type : type.element.type, name, e, dialect);
+    if (Array.isArray(v)) for (const e of v) checkTime(Array.isArray(e) && !holdsWholeArrays(type) ? type : type.element.type, name, e, dialect);
     return;
   }
   const kind = columnKind(type, dialect);
@@ -677,7 +703,7 @@ function checkTime(type: EngineType | undefined, name: string, v: unknown, diale
 function checkBinary(type: EngineType | undefined, name: string, v: unknown, dialect: Dialect): void {
   if (type === undefined || v == null) return;
   if (type.kind === "array" && columnKind(type, dialect).endsWith("[]")) {
-    if (Array.isArray(v)) for (const e of v) checkBinary(Array.isArray(e) ? type : type.element.type, name, e, dialect);
+    if (Array.isArray(v)) for (const e of v) checkBinary(Array.isArray(e) && !holdsWholeArrays(type) ? type : type.element.type, name, e, dialect);
     return;
   }
   if (columnKind(type, dialect) !== "bytes" || v instanceof Uint8Array) return;

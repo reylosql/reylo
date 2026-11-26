@@ -37,7 +37,7 @@
 //   only be one; a BIGINT's number within 2^53, or libSQL's BigInt or digits, is its BigInt.
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, coerce, columnKind, DecodeError, exactInteger, ParameterError, refuseTruth, truth, type Columns, type Kind } from "./values.ts";
-import { executeSync, isDurableObjectSql, wrappers, type AnyClient as Client, type Bound, type QueryModule, type Runtime } from "./execute.ts";
+import { EFFECT_SQL, executeSync, isDurableObjectSql, wrappers, type AnyClient as Client, type Bound, type EffectSql, type QueryModule, type Runtime } from "./execute.ts";
 import { readSqliteError } from "./query-error.ts";
 import type { EngineType } from "./engine-type.ts";
 
@@ -377,9 +377,23 @@ function numberOrDigits(v: unknown, type: EngineType | undefined, driver: "sqlit
 
 /** A SQLite statement's rows on each SQLite driver's client that answers through a promise, each value given its kind, or undefined on any other client. */
 async function runSqlite(c: Client, query: QueryModule<"sqlite">, { text, values, names }: Bound): Promise<unknown[] | undefined> {
-  if (isTurso(c)) tursoValues(names, values);
   const type = (i: number) => query.inputs?.[names[i]!]?.type;
   const columns = query.columns;
+  const effect = (c as Partial<EffectSql>)[EFFECT_SQL];
+  if (effect?.dialect === "sqlite") {
+    // D1 and a Durable Object refuse a BigInt, through Effect as on their own clients.
+    const driver = effect.driver;
+    const bound = driver === "d1" || driver === "sqlite-do" ? values.map((v, i) => numberOrDigits(v, type(i), driver === "d1" ? "d1" : "durable-object")) : values;
+    const options = { exact: effect.exact, d1: driver === "d1" };
+    // Effect's raw result is the driver's own, read by the driver's column names as `.run()` reads
+    // it: rows on node:sqlite, bun:sqlite and a Durable Object, libSQL's ResultSet, D1's result, and
+    // a write's count on node:sqlite.
+    const raw = (await effect.raw(text, bound)) as unknown[] | { rows?: unknown; columns?: unknown; results?: unknown } | null;
+    if (Array.isArray(raw)) return normalize(raw, columns, options);
+    if (Array.isArray(raw?.rows)) return normalize(libsqlRows(raw.rows, columns, Array.isArray(raw.columns) ? raw.columns : undefined), columns, options);
+    return normalize(Array.isArray(raw?.results) ? raw.results : [], columns, options);
+  }
+  if (isTurso(c)) tursoValues(names, values);
   if (typeof c.unsafe === "function") return normalize(await c.unsafe(text, values), columns);
   if (typeof c.execute === "function") {
     const result = await c.execute({ sql: text, args: values });

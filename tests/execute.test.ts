@@ -795,6 +795,59 @@ test("mysql: through a server that refuses prepared statements, a built statemen
   }
 });
 
+test("postgres: an array of a domain over an array type comes back as whole arrays on pg, postgres.js and PGlite, too deep at either level refused, and goes back in as it came out", { skip: pgLive }, async () => {
+  const setup = `create domain ints as int4[]; create table d (id int primary key, x ints[]);
+    insert into d values (1, '{"{1,2}",NULL,"{}"}'), (2, '{{"{1,2}"},{"{3,4}"}}'), (3, '{"{{1,2},{3,4}}"}'), (4, null), (5, '{{NULL},{NULL}}');
+    create domain stamps as timestamptz[]; create table s (x stamps[]);
+    create table n (x ints[]); insert into n values ('{NULL}'), ('{NULL}');
+    create type mood as enum ('ok', 'sad'); create domain moods as mood[]; create table m (x moods[]); insert into m values ('{"{ok,sad}"}')`;
+  const own = await postgresDatabase("reylo_execute_domain_arrays", setup);
+  const pg = driver("pg");
+  const client = new pg.Client(own.url);
+  await client.connect();
+  const { PGlite } = driver("@electric-sql/pglite");
+  const lite = new PGlite();
+  await lite.exec(setup);
+  try {
+    const select = await builtModule(own.url, "domain_arrays", "select x from d where id = :id\n");
+    const insert = await builtModule(own.url, "insert_domain_arrays", "insert into d (id, x) values (:id, :x) returning x\n");
+    const stamps = await builtModule(own.url, "insert_stamps", "insert into s values (:x)\n");
+    // array_agg over the arrays' rows: one more dimension, which the type does not show.
+    const gathered = await builtModule(own.url, "gathered_domain_arrays", "select array_agg(x) as xs from n\n");
+    // A query defined by hand reads the type from the catalog first, which a module on the same client then shares.
+    const byHand = defineQuery({ dialect: "postgres", sql: "select x from d where id = 1", params: [], cardinality: "many" });
+    // The catalog reads a domain over an enum's array as text, which the module's kind outranks.
+    const moodsByHand = defineQuery({ dialect: "postgres", sql: "select x from m", params: [], cardinality: "many" });
+    const moods = await builtModule(own.url, "domain_enum_arrays", "select x from m\n");
+    // Of two columns of one name, the row holds the last one's value, which only its own kind decodes.
+    const twice = await builtModule(own.url, "domain_arrays_twice", "select x as item, 'hello'::text as item from d where id = 1\n");
+    // PGlite parses an array of a type it learned by refreshArrayTypes() itself on a statement's first run in a transaction, where Reylo names no parsers.
+    const cold = [await builtModule(own.url, "domain_arrays_cold", "select x from d where id = :id and true\n"), await builtModule(own.url, "domain_arrays_cold_nulls", "select x from d where id = :id and 1 = 1\n")];
+    await lite.refreshArrayTypes();
+    await lite.transaction(async (tx: never) => {
+      for (const [q, id] of [[cold[0], 2], [cold[1], 5]] as const) await assert.rejects(async () => q.run(tx, { id }), /Column "x" holds an array of 2 dimensions, and its type has one/, `PGlite, a transaction's first run, row ${id}`);
+      assert.deepEqual({ ...(await cold[0].run(tx, { id: 1 })) }, { x: [[1, 2], null, []] }, "PGlite, a transaction's next run");
+    });
+    for (const [name, c] of [["pg", client], ["postgres.js", own.sql], ["PGlite", lite]] as const) {
+      assert.deepEqual(plain((await byHand.run(c)) as object[]), [{ x: [[1, 2], null, []] }], `${name}, by hand`);
+      await moodsByHand.run(c);
+      assert.deepEqual(plain(await moods.run(c)), [{ x: [["ok", "sad"]] }], `${name}, a domain over an enum's array`);
+      assert.deepEqual({ ...(await twice.run(c)) }, { item: "hello" }, `${name}, two columns of one name`);
+      assert.deepEqual({ ...(await select.run(c, { id: 1 })) }, { x: [[1, 2], null, []] }, name);
+      assert.deepEqual({ ...(await select.run(c, { id: 4 })) }, { x: null }, name);
+      for (const id of [2, 3, 5]) await assert.rejects(async () => select.run(c, { id }), /Column "x" holds an array of 2 dimensions, and its type has one/, `${name}, row ${id}`);
+      await assert.rejects(async () => gathered.run(c), /Column "xs" holds an array of 2 dimensions, and its type has one/, name);
+      await assert.rejects(async () => stamps.run(c, { x: [["2026-10-12 19:06:48"]] }), /Parameter "x" is a timestamptz, an instant, so a string for it names its zone/, name);
+      const id = { pg: 6, "postgres.js": 7, PGlite: 8 }[name];
+      assert.deepEqual({ ...(await insert.run(c, { id, x: [[7, 8], [], [9]] })) }, { x: [[7, 8], [], [9]] }, name);
+    }
+  } finally {
+    await client.end();
+    await lite.close();
+    await own.drop();
+  }
+});
+
 test("mysql: PlanetScale's execute() → { rows }", async () => {
   const conn = { execute: async () => ({ rows: [row], statement: "select", headers: ["id"], insertId: "0" }) };
   assert.deepEqual(await execute(conn, my, { id: 1, name: "ada" }), [row]);

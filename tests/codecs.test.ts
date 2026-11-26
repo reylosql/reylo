@@ -21,6 +21,7 @@ import { codecRuntime, definePostgresQuery, defineQuery } from "../src/index.ts"
 import { moduleTypes, standardColumnsType } from "../src/module-types.ts";
 import { renderParamType, renderType } from "../src/render.ts";
 import { querySchemas, typeSchema } from "../src/schema.ts";
+import { validate } from "../src/json-schema.ts";
 import { DecodeError, ParameterError } from "../src/values.ts";
 import type { EngineType } from "../src/engine-type.ts";
 
@@ -114,10 +115,13 @@ test("a codec position is declared its codec's type, through every part Reylo de
   assert.match(types.params, /since: Temporal\.Instant/);
   const plain = moduleTypes("select …", analysis, "postgres", { params: ["since"], placeholders: [] }, true);
   assert.match(plain.row, /id: bigint;[\s\S]*price: string;[\s\S]*at: string/);
-  // The JSON Schema names the JSON form the codec's value writes.
+  // The JSON Schema names the JSON form the codec's value writes: a Temporal.Instant's, with a year
+  // outside 0000–9999 as ISO 8601 extends it.
   const schemas = querySchemas(analysis, "postgres", every);
   const row = (schemas.output as any).items.properties;
   assert.deepEqual([row.id, row.price, row.total, row.took], [{ type: "integer", format: "int64" }, { type: "number" }, { type: ["number", "null"] }, { type: "string", description: "an ISO 8601 duration with its sign in front (P1Y2M3DT4H5M6.789S, -P1D)" }]);
+  assert.deepEqual(row.at, { anyOf: [{ type: "string", format: "date-time" }, { type: "string", pattern: "^([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3}))-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$" }] });
+  assert.equal(validate(row.at, JSON.parse(JSON.stringify(Temporal.Instant.from("+012345-01-01T00:00:00Z")))), undefined);
 });
 
 test("a codec gives each value its type exactly, or refuses it naming the column and the value", () => {

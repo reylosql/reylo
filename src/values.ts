@@ -20,13 +20,15 @@
 // `line`, `lseg`, `box`, `path`, `polygon` and `circle` Postgres's geometric types as objects of
 // their fields, as the type descriptor gives them; and `range:k` and `multirange:k` a range of `k`
 // as an object of its bounds and a multirange as an array of them. `k[]` is an array of `k`, a NULL
-// element `null`, and `a|b` either (a MySQL expression whose type the bound value decides). No kind
+// element `null`; `{k}` one whole array of kind `k` standing as an element of another, which
+// Postgres writes as its own quoted text (an array of a domain over an array type, `{int[]}[]`);
+// and `a|b` either (a MySQL expression whose type the bound value decides). No kind
 // is a JavaScript Date. An array's text separates its elements with a comma, or with its element
 // type's own delimiter (`:` for PostGIS's `geometry`), which a column carries beside its kind.
 //
 // This module runs in every generated module's process, so it names no Node type: a Buffer is
 // reached through `globalThis` where one exists.
-import { bareName, isMysqlSet, type EngineType } from "./engine-type.ts";
+import { bareName, holdsWholeArrays, isMysqlSet, type EngineType } from "./engine-type.ts";
 import type { AnyClient, QueryModule } from "./execute.ts";
 
 export type Dialect = "postgres" | "mysql" | "sqlite" | "clickhouse";
@@ -46,7 +48,7 @@ export function given(from: Record<string, unknown>, name: string): unknown {
   return v !== undefined && (typeof v === "function" || name === "__proto__") && !Object.hasOwn(from, name) ? undefined : v;
 }
 
-/** A column's kind as a module carries it: a scalar kind, `k[]` for an array of `k`, `a|b` for either, `(…)` for a Postgres row value of the fields it lists, `range:k` and `multirange:k` for a range of `k` and a multirange. */
+/** A column's kind as a module carries it: a scalar kind, `k[]` for an array of `k`, `{k}` for a whole array of kind `k` standing as an element, `a|b` for either, `(…)` for a Postgres row value of the fields it lists, `range:k` and `multirange:k` for a range of `k` and a multirange. */
 export type Kind = string;
 /** The output columns a module carries, in the statement's order; an array's `delimiter` where it is not a comma, or on ClickHouse, which has none, the column's type as the server names it. */
 export type Columns = readonly (readonly [name: string, kind: Kind, delimiter?: string])[];
@@ -281,6 +283,12 @@ export function columnKind(t: EngineType, dialect: Dialect): Kind {
         // An array of row values whose fields are not known is the text Postgres prints.
         const element = t.element.type;
         if (element.kind === "opaque" && bareName(element) === "record") return "text";
+        // An array of whole arrays holds each as its own; one whose elements' elements another
+        // delimiter separates (a domain over `box[]`) is the text Postgres prints.
+        if (holdsWholeArrays(t)) {
+          const inner = columnKind(element, dialect);
+          return inner.endsWith("[]") && element.kind === "array" && delimiterOf(element.element.type) === undefined ? `{${inner}}[]` : "text";
+        }
       }
       if (dialect === "mysql" && name === "bit") return t.size?.exact === 1 ? "bool" : "bytes";
       return `${columnKind(t.element.type, dialect)}[]`;
@@ -420,12 +428,13 @@ export function sixDigits(x: string): string {
 const micros = (fraction: string) => (fraction === "" ? ".000000" : fraction.padEnd(7, "0"));
 
 // timestamptz in DateStyle ISO: `2026-10-20 03:03:00.123456-07`, offsets with seconds before
-// standard time (`-07:52:58`), years past 9999, ` BC`. `new Date(text)`, which postgres.js and
+// standard time (`-07:52:58`), of three digits of hours under a POSIX zone (`XXX-100` writes
+// `+100`), years past 9999, ` BC`. `new Date(text)`, which postgres.js and
 // PGlite use, returns Invalid Date for the last three and reads year 0001 as 2001
 // (wiki/driver-decoding/spike/postgres.md); and a Date holds milliseconds, not the server's
 // microseconds. So Reylo moves the wall-clock time to UTC itself, in whole seconds on a day count,
 // and keeps the fraction as the server wrote it.
-const TSTZ = /^(\d{4,})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(\.\d{1,6})?([+-])(\d\d)(?::(\d\d))?(?::(\d\d))?( BC)?$/;
+const TSTZ = /^(\d{4,})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(\.\d{1,6})?([+-])(\d\d|1\d\d)(?::(\d\d))?(?::(\d\d))?( BC)?$/;
 
 /** Days from 1970-01-01 to a date of the proleptic Gregorian calendar, year 0 being 1 BC (Howard Hinnant's days_from_civil). */
 function daysFromCivil(y: number, m: number, d: number): number {
@@ -747,6 +756,21 @@ export const isRangeKind = (kind: Kind): boolean => kind.startsWith("range:");
 export const isMultirangeKind = (kind: Kind): boolean => kind.startsWith("multirange:");
 /** Whether one value of `kind` is itself a JavaScript array (a vector, a segment, a polygon, a multirange), so that an array of them is no deeper dimension. */
 export const isArrayValued = (kind: Kind): boolean => kind === "vector" || kind === "lseg" || kind === "polygon" || isMultirangeKind(kind);
+/** The kind of a whole array standing as an element, `int[]` of `{int[]}`; undefined for any other kind. */
+export const wholeArrayKind = (kind: Kind): Kind | undefined => (kind.startsWith("{") && kind.endsWith("}") ? kind.slice(1, -1) : undefined);
+
+/**
+ * The dimensions of each array of whole arrays, and of each whole array in it, as its text had them,
+ * a `{` for each before its first element (after any bounds, `[0:1]=`), or as a driver's own arrays
+ * of each element's text nest: its value alone can't tell its own levels from its elements'
+ * (`[[null]]` is one level of an element `{NULL}`, or two of NULL elements), which
+ * `withinDimensions` reads here.
+ */
+const wholeDepths = new WeakMap<unknown[], number>();
+function recordDepth(text: string, v: unknown): unknown {
+  if (Array.isArray(v)) wholeDepths.set(v, /^(?:\[[^=]*=)?(\{*)/.exec(text)![1]!.length);
+  return v;
+}
 const subtypeKind = (kind: Kind): Kind => kind.slice(kind.indexOf(":") + 1);
 
 /** A range from its text, each bound by `bound`. */
@@ -953,7 +977,7 @@ export function postgresLiteral(t: EngineType, v: unknown, fail: (message: strin
     const delim = delimiterOf(element) ?? ",";
     const write = (a: unknown): string => {
       if (!Array.isArray(a)) return fail(`an array; got ${describe(a)}.`);
-      return `{${a.map((e) => (e === null || e === undefined ? "NULL" : Array.isArray(e) && !arrayValued(element) ? write(e) : quoted(postgresLiteral(element, e, fail)))).join(delim)}}`;
+      return `{${a.map((e) => (e === null || e === undefined ? "NULL" : Array.isArray(e) && !arrayValued(element) && !holdsWholeArrays(t) ? write(e) : quoted(postgresLiteral(element, e, fail)))).join(delim)}}`;
     };
     return write(v);
   }
@@ -1067,16 +1091,42 @@ export function parseArray(text: string, element: (text: string) => unknown, del
  * Postgres's arrays are rectangular, so the depth of the first element at each level is every one's.
  * An element that is an array itself (a vector, a segment, a polygon, a multirange) is one level
  * more; a JSON element may be one at any depth, which its type holds whatever the dimensions around it.
+ * A whole array standing as an element (`{k}`) is held to its own kind's, and the array around it to
+ * its own by the dimensions its text had (`recordDepth`).
  */
 export function withinDimensions(v: unknown, kind: Kind, column: string): unknown {
+  if (!Array.isArray(v)) return v;
   const element = elementKind(kind);
-  if (!Array.isArray(v) || element === "json") return v;
   const declared = (kind.length - element.length) / 2;
+  const whole = wholeArrayKind(element);
+  // A whole array's own dimensions, from its text, whatever its elements are.
+  const recorded = wholeDepths.get(v);
+  if (recorded !== undefined && whole === undefined) {
+    if (recorded > declared) throw tooDeep(column, recorded, declared);
+    return v;
+  }
+  if (element === "json") return v;
+  if (whole !== undefined) {
+    // An array of whole arrays: only its text told its own levels from its elements' (a driver's
+    // own arrays are taken at the levels declared); each element is held to its own.
+    const depth = recorded ?? declared;
+    if (depth > declared) throw tooDeep(column, depth, declared);
+    const each = (level: unknown[], at: number): void => {
+      for (const e of level) if (Array.isArray(e)) at > 1 ? each(e, at - 1) : withinDimensions(e, whole, column);
+    };
+    each(v, declared);
+    return v;
+  }
   let depth = isArrayValued(element) ? -1 : 0;
   for (let level: unknown = v; Array.isArray(level); level = level.find((e) => e !== null)) depth++;
   if (depth <= declared) return v;
+  throw tooDeep(column, depth, declared);
+}
+
+/** Why a Postgres array is refused: it holds `depth` dimensions, and its type `declared`. */
+function tooDeep(column: string, depth: number, declared: number): DecodeError {
   // An array built of arrays is too deep only where an array column it collects is.
-  throw new DecodeError(
+  return new DecodeError(
     declared === 1
       ? `Column "${column}" holds an array of ${depth} dimensions, and its type has one: Reylo types a Postgres array column with one dimension, which Postgres doesn't enforce. Select to_jsonb(${column}) to read it as JSON, or set allow_nested_arrays: true in .reylo.yaml to type it at any depth.`
       : `Column "${column}" holds an array of ${depth} dimensions, and its type has ${declared}: an array column it collects holds more than one dimension, which Postgres doesn't enforce. Collect to_jsonb(<that column>) instead to read it as JSON.`,
@@ -1128,8 +1178,14 @@ export function rowsDecoder(element: Decoder): Decoder {
 
 /** The decoder of a Postgres value of `kind` from its text; `delim` is an array's (`;` for `box[]`). */
 export function textDecoder(kind: Kind, delim = ","): Decoder {
+  const whole = wholeArrayKind(kind);
+  if (whole !== undefined) {
+    const inner = textDecoder(whole);
+    return (x) => recordDepth(x, inner(x));
+  }
   if (kind.endsWith("[]")) {
     const element = textDecoder(elementKind(kind), delim);
+    if (wholeArrayKind(elementKind(kind)) !== undefined) return (x) => recordDepth(x, parseArray(x, element, delim));
     return isRowKind(elementKind(kind)) && delim === "," ? rare(kind, (types) => types.rowsDecoder(element)) : (x) => parseArray(x, element, delim);
   }
   if (isRareKind(kind)) return rare(kind, (types) => types.decoder(kind));
@@ -1436,7 +1492,27 @@ function coerceArray(kind: Kind, v: unknown, column: string, each: (kind: Kind, 
  */
 export function coercePostgres(kind: Kind, v: unknown, column: string, delim = ","): unknown {
   if (v === null || v === undefined) return null;
-  if (kind.endsWith("[]")) return typeof v === "string" ? parseArray(v, (s) => coercePostgres(elementKind(kind), s, column), delim) : coerceArray(kind, v, column, (k, e) => coercePostgres(k, e, column));
+  const whole = wholeArrayKind(kind);
+  // A whole array still in its text is the server's text, which a driver that parsed the array
+  // around it left as it was.
+  if (whole !== undefined) return typeof v === "string" ? textDecoder(kind)(v) : coercePostgres(whole, v, column);
+  if (kind.endsWith("[]")) {
+    const element = elementKind(kind);
+    if (typeof v === "string") {
+      const parsed = parseArray(v, (s) => coercePostgres(element, s, column), delim);
+      return wholeArrayKind(element) === undefined ? parsed : recordDepth(v, parsed);
+    }
+    if (Array.isArray(v) && wholeArrayKind(element) !== undefined) {
+      // A driver's own array, as PGlite's parser gives one, whose arrays are its levels: each whole
+      // array in it is still its text.
+      const out = v.map((e) => (Array.isArray(e) ? coercePostgres(kind, e, column, delim) : coercePostgres(element, e, column)));
+      let depth = 0;
+      for (let level: unknown = v; Array.isArray(level); level = level.find((e) => e !== null)) depth++;
+      wholeDepths.set(out, depth);
+      return out;
+    }
+    return coerceArray(kind, v, column, (k, e) => coercePostgres(k, e, column));
+  }
   // A row value, a range, a geometric type, an hstore and a money are their text where no driver parses them.
   if (isRareKind(kind)) return typeof v === "string" ? textDecoder(kind)(v) : v;
   switch (kind) {

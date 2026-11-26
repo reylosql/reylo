@@ -167,8 +167,22 @@ impl Dialect {
 
 /// The analysis of `sql` and the database it is for, or the message a build shows for it. The
 /// project is the one `dir` is in: the crate's directory for the macro and a build script, the
-/// `.sql` file's for the generator.
+/// `.sql` file's for the generator. An entry holds the error the type check gives a Postgres
+/// session whose DateStyle is not ISO's, for `.run()` in TypeScript, which reads a date as the
+/// text the session writes; sqlx reads it in the binary format, which no DateStyle changes, so a
+/// build leaves that error out.
 pub fn analyze(dir: &Path, sql: &str) -> Result<(Dialect, Value), String> {
+    #[cfg_attr(not(feature = "postgres"), allow(unused_mut))]
+    let (dialect, mut analysis) = recorded(dir, sql)?;
+    #[cfg(feature = "postgres")]
+    if let Some(diagnostics) = analysis["diagnostics"].as_array_mut() {
+        diagnostics.retain(|d| d["code"].as_u64() != Some(reylo_engine::postgres::DATE_STYLE.into()));
+    }
+    Ok((dialect, analysis))
+}
+
+/// The analysis of `sql` as `reylo/.cache/` records it, and the database it is for.
+fn recorded(dir: &Path, sql: &str) -> Result<(Dialect, Value), String> {
     let located = locate(dir)?;
     let queries = located.cache.join("queries");
     let Some(url) = located.url.clone() else {
@@ -301,7 +315,7 @@ async fn postgres(located: &Located, queries: &Path, sql: &str, session: &mut Se
             Err(Failure::Unreachable(why)) => return offline(located, queries, &statement, &server, false, &located.cannot_connect(&session.url, &why)),
             Err(other) => return Err(other.to_string()),
         };
-        let analysis = reylo_engine::clients::tokio_postgres::analyze(client, sql, &mut session.answers).await;
+        let analysis = client.analyze(None, sql, &mut session.answers).await;
         // A lock timeout leaves the statement's other describes queued on the connection behind the same
         // lock: the next statement opens a new one rather than wait behind them.
         if matches!(&analysis, Err(reylo_engine::ReplayError::Host(e)) if e.0.starts_with(reylo_engine::clients::tokio_postgres::LOCKED)) {

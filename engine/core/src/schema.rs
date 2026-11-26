@@ -9,7 +9,7 @@
 //! field of an `Object` or item of a `List`) takes the database's: `int8` and `numeric` as JSON
 //! numbers, `bytea` as its own `\x…` hex.
 
-use crate::types::{Field, JsonType, Kind, Slot, StructType, Type, UuidType};
+use crate::types::{Bounds, Field, JsonType, Kind, Slot, StructType, Type, UuidType};
 use serde_json::{json, Map, Value};
 
 /// Where a value stands and how the caller encodes what it decodes itself.
@@ -123,10 +123,55 @@ fn slot_schema(s: &Slot, opts: SchemaOptions) -> Value {
     if s.nullable { nullable(schema) } else { schema }
 }
 
-/// A date or a timestamp that may be infinite, which Postgres writes as the text `infinity` or
-/// `-infinity`, which no date format admits.
-fn infinite(schema: Value, infinity: bool) -> Value {
-    if infinity { json!({"anyOf": [schema, {"enum": ["infinity", "-infinity"]}]}) } else { schema }
+// The fields of a date's and an instant's text, each within its range: a year from 0001 to 9999, a
+// month and a day, a time of day, and an offset from UTC within RFC 3339's 23:59 where the value
+// stands on its own. Macros, so that `concat!` joins them into the patterns below; the same in
+// src/schema.ts.
+macro_rules! year { () => { "(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})" }; }
+macro_rules! month_day { () => { "-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])" }; }
+macro_rules! clock { () => { "T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?" }; }
+macro_rules! offset { () => { "[+-]([01][0-9]|2[0-3]):[0-5][0-9]" }; }
+// ISO 8601's extended year of a value outside 0000–9999, as the run time writes it: a sign and six
+// digits or more, never `-000000`.
+macro_rules! extended_year { () => { concat!("([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00", year!(), ")") }; }
+// An instant's time as Postgres writes it inside a document, in the session's zone: its offset to the
+// second before the zone's first standard time, and as far as 169 hours under a POSIX zone
+// (`XXX-167:59:60YYY` in its summer), whose offset Postgres reads up to 168 hours and summer time
+// moves one more; the hours in two digits below 100, as Postgres pads them.
+macro_rules! document_time { () => { concat!(clock!(), "[+-](([0-9]{2}|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00)") }; }
+// Of those offsets, the ones RFC 3339's refuses: to the second, or 24 hours or more. A four-digit
+// year with any other is the format's, which checks the calendar too.
+macro_rules! odd_offset { () => { "[+-](([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]|(2[4-9]|[3-9][0-9]|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00)" }; }
+
+/// A year that RFC 3339's four digits do not write, as a date's (`DATE_PAST`) or an instant's
+/// (`INSTANT_PAST`) text has it: ISO 8601's extended year where the caller decodes the value, and
+/// inside a document Postgres's own, five digits or more, or four with BC after the value
+/// (`12345-01-01`, `0002-06-01 BC`). Inside a document an instant of a year from 1 to 9999 takes
+/// Postgres's offset too where the format refuses it (`1849-12-31T19:03:58-04:56:02`,
+/// `odd_offset`). The same in src/schema.ts.
+const DATE_PAST: [&str; 2] = [concat!("^", extended_year!(), month_day!(), "$"), concat!("^([1-9][0-9]{4,}", month_day!(), "|", year!(), month_day!(), " BC)$")];
+const INSTANT_PAST: [&str; 2] = [
+    concat!("^", extended_year!(), month_day!(), clock!(), "(Z|", offset!(), ")$"),
+    concat!("^([1-9][0-9]{4,}", month_day!(), document_time!(), "|", year!(), month_day!(), document_time!(), " BC|", year!(), month_day!(), clock!(), odd_offset!(), ")$"),
+];
+
+/// The text of a year outside 0000–9999, which a bound with a sign says the type reaches, of
+/// `past`'s two: where the caller decodes the value, or inside a document.
+fn past_years(bounds: &Bounds, past: [&'static str; 2], opts: SchemaOptions) -> Option<&'static str> {
+    let signed = [&bounds.min, &bounds.max, &bounds.exclusive_min, &bounds.exclusive_max].into_iter().flatten().any(|b| b.starts_with(['+', '-']));
+    signed.then_some(past[usize::from(opts.in_json)])
+}
+
+/// A date's or a timestamp's format and, beside it, the text of each value it refuses: a year
+/// outside 0000–9999 (`past_years`), and infinity, which Postgres writes as the text `infinity` or
+/// `-infinity`.
+fn beside_format(format: &str, past: Option<&str>, infinity: bool) -> Value {
+    let mut forms = vec![json!({"type": "string", "format": format})];
+    forms.extend(past.map(|pattern| json!({"type": "string", "pattern": pattern})));
+    if infinity {
+        forms.push(json!({"enum": ["infinity", "-infinity"]}));
+    }
+    if forms.len() == 1 { forms.remove(0) } else { json!({"anyOf": forms}) }
 }
 
 /// The values JSON writes as text when a float or a decimal holds them.
@@ -197,11 +242,11 @@ impl Type {
             // JSON Schema's `date-time` and `time` are RFC 3339's, which need a UTC offset: a value
             // that keeps one takes the format, and a wall-clock value, which is no instant, does not.
             // A time that reaches 24:00:00, as Postgres's do, is past RFC 3339's too.
-            Kind::Instant(i) => infinite(json!({"type": "string", "format": "date-time"}), i.infinity),
-            Kind::ZonedDateTime(z) if z.offset_only => infinite(json!({"type": "string", "format": "date-time"}), z.infinity),
+            Kind::Instant(i) => beside_format("date-time", past_years(&i.bounds, INSTANT_PAST, opts), i.infinity),
+            Kind::ZonedDateTime(z) if z.offset_only => beside_format("date-time", None, z.infinity),
             Kind::ZonedDateTime(_) => json!({"type": "string", "description": "a date and time with its time zone, a region or an offset"}),
             Kind::DateTime(_) => json!({"type": "string", "description": "a date and time without a time zone, as the database wrote it (2026-10-20T10:00:00.123456)"}),
-            Kind::Date(d) => infinite(json!({"type": "string", "format": "date"}), d.infinity),
+            Kind::Date(d) => beside_format("date", past_years(&d.bounds, DATE_PAST, opts), d.infinity),
             Kind::Time(t) if t.offset && t.bounds.max.as_deref() != Some("24:00:00") => json!({"type": "string", "format": "time"}),
             Kind::Time(t) if t.offset => text_of(self),
             Kind::Time(_) => json!({"type": "string", "description": "a time of day without a time zone (10:00:00.5)"}),
@@ -398,6 +443,28 @@ mod tests {
             assert_eq!(time(true, Some("24:00:00")).named("timetz").json_schema(opts), json!({"type": "string", "description": "pg type timetz"}));
             assert_eq!(time(true, None).json_schema(opts), json!({"type": "string", "format": "time"}));
         }
+    }
+
+    /// A year outside 0000–9999, which a bound with a sign says Postgres's date and timestamptz
+    /// reach, is none of RFC 3339's four digits: its own text stands beside the format, ISO 8601's
+    /// extended year where the caller decodes the value (a sign on such a year alone, never
+    /// `-000000`), and Postgres's inside a document (five digits, or BC after the value), each field
+    /// within its range. tests/values.test.ts holds values to the same strings. A date that stays
+    /// within those years keeps the format alone.
+    #[test]
+    fn a_year_outside_four_digits_stands_beside_the_format() {
+        use crate::types::{Bounds, DateType, InstantType, MICROSECOND};
+        let date = Type::new(Kind::Date(DateType { bounds: Bounds::between("-4713-11-24", "+5874897-12-31"), infinity: true })).named("date");
+        let instant = Type::new(Kind::Instant(InstantType { tick: MICROSECOND.to_string(), bounds: Bounds::between("-4713-11-24T00:00:00Z", "+294276-12-31T23:59:59.999999Z"), infinity: true })).named("timestamptz");
+        let forms = |format: &str, pattern: &str| json!({"anyOf": [{"type": "string", "format": format}, {"type": "string", "pattern": pattern}, {"enum": ["infinity", "-infinity"]}]});
+        for opts in [WIRE, WIRE.as_input()] {
+            assert_eq!(date.json_schema(opts), forms("date", "^([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3}))-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$"));
+            assert_eq!(instant.json_schema(opts), forms("date-time", "^([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3}))-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$"));
+        }
+        assert_eq!(date.json_schema(IN_JSON), forms("date", "^([1-9][0-9]{4,}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])|(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01]) BC)$"));
+        assert_eq!(instant.json_schema(IN_JSON), forms("date-time", "^([1-9][0-9]{4,}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-](([0-9]{2}|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00)|(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-](([0-9]{2}|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00) BC|(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-](([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]|(2[4-9]|[3-9][0-9]|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00))$"));
+        let mysql = Type::new(Kind::Date(DateType { bounds: Bounds { min: Some("0000-01-01".into()), ..Bounds::default() }, infinity: false })).named("date");
+        assert_eq!(mysql.json_schema(WIRE), json!({"type": "string", "format": "date"}));
     }
 
     #[test]

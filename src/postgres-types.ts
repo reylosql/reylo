@@ -4,7 +4,7 @@
 // statement reads or binds one (src/loader.ts), which installs them (src/values.ts,
 // `installPostgresTypes`), so that an app none of whose statements holds one bundles none of this.
 import { hstoreText, numbersInJson, ParameterError, postgresLiteral, rareDecoder, rowMasks, rowsDecoder, type PostgresTypes } from "./values.ts";
-import type { AnyClient, QueryModule } from "./execute.ts";
+import { EFFECT_SQL, type AnyClient, type EffectSql, type QueryModule } from "./execute.ts";
 
 /** The clients whose session writes a `money` in the C locale's form, which `checkMoney` has seen. */
 const moneyLocales = new WeakSet<object>();
@@ -20,7 +20,10 @@ const MONEY_CHECK = "select 1234.50::numeric::money::text as m";
  * one, by the text its session writes for 1234.50; a client whose check fails to run is not held up.
  */
 async function checkMoney(c: AnyClient, query: QueryModule<"postgres">, name: string): Promise<void> {
-  if (moneyLocales.has(c as object)) return;
+  // A client effect() passes (src/effect.ts) is made for one call, and checks under the client it reads through.
+  const effect = (c as Partial<EffectSql>)[EFFECT_SQL];
+  const key = effect?.dialect === "postgres" ? effect.key : (c as object);
+  if (moneyLocales.has(key)) return;
   let written: unknown;
   try {
     const rows = await query.runtime.run(c, { dialect: "postgres", runtime: query.runtime, sql: MONEY_CHECK, params: [], text: MONEY_CHECK, order: [], marks: [], columns: [["m", "text"]] }, { text: MONEY_CHECK, values: [], names: [], marks: [] });
@@ -30,7 +33,7 @@ async function checkMoney(c: AnyClient, query: QueryModule<"postgres">, name: st
   } catch {
     return;
   }
-  if (written === "$1,234.50") return void moneyLocales.add(c as object);
+  if (written === "$1,234.50") return void moneyLocales.add(key);
   throw new ParameterError(`Parameter "${name}" is a Postgres money, which Postgres reads in the session's lc_monetary, and this session writes 1234.50 as ${JSON.stringify(written)}, not the C locale's "$1,234.50", so it could store the parameter as another amount. Set lc_monetary = 'C' on the session, the role or the database, or cast the parameter to numeric in the statement (:${name}::numeric).`);
 }
 

@@ -28,7 +28,8 @@
     "./webpack": "./src/webpack.ts",
     "./turbopack": "./src/turbopack.ts",
     "./next": "./src/next.ts",
-    "./jest": "./src/jest.ts"
+    "./jest": "./src/jest.ts",
+    "./effect": "./src/effect.ts"
   },
   "sideEffects": [
     "./src/cli.ts",
@@ -56,6 +57,10 @@
   },
   "devDependencies": {
     "@bytecodealliance/jco": "1.39.0",
+    "@effect/sql-libsql": "4.1.6",
+    "@effect/sql-mysql2": "4.1.6",
+    "@effect/sql-pg": "4.1.6",
+    "@effect/sql-sqlite-node": "4.1.6",
     "@types/big.js": "7.0.0",
     "@types/geojson": "7946.0.16",
     "@types/node": "^26.6.1",
@@ -63,15 +68,18 @@
     "big.js": "7.0.1",
     "bignumber.js": "11.1.5",
     "decimal.js": "10.6.0",
+    "effect": "4.1.6",
     "esbuild": "^0.28.2",
     "ip-address": "10.7.6",
     "slonik": "49.12.0",
     "typescript": "^7.1.0-dev.20261118.1"
   },
   "peerDependencies": {
+    "effect": "^4.1.6",
     "slonik": ">=49.12.0"
   },
   "peerDependenciesMeta": {
+    "effect": { "optional": true },
     "slonik": { "optional": true }
   }
 }

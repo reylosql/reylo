@@ -269,7 +269,12 @@ fn then(line: impl AsRef<str>, what: &[(&str, &[&str])]) -> String {
 }
 
 fn normalized(sql: &str) -> String {
-    sql.replace("\r\n", "\n").replace('\r', "\n").trim_end().to_string()
+    line_feeds(sql).trim_end().to_string()
+}
+
+/// The text with each of its line endings a line feed, as the lock reads them.
+fn line_feeds(sql: &str) -> String {
+    sql.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 /// A path as the person running the command reads it: relative to where they are.
@@ -1834,9 +1839,20 @@ impl Plan {
 }
 
 /// Whether two texts are the same statements, comments and whitespace aside; on MySQL, an executable
-/// comment's version too, which says whether its text runs.
+/// comment's version too, which says whether its text runs. Each text is read as its database reads
+/// it, so that a comment ends where that database ends it (MySQL and SQLite run a `--` comment on
+/// past a bare carriage return), and only then are the line endings inside each token read as the
+/// lock reads them ([`line_feeds`]): a migration checked out with CRLF is still the one a database
+/// ran with LF, and the other way round, even where a string in it spans lines. A quoted name keeps
+/// its line endings, since CRLF in it names another table than LF; so does SQLite's `"…"`, which
+/// SQLite reads as a string only where it names no column, so that a name is never read as another.
 fn same_statements(a: &str, b: &str, d: Dialect) -> bool {
-    let tokens = |sql: &str| split_statements(sql, d).into_iter().map(|s| s.tokens.into_iter().map(|t| t.text).collect::<Vec<_>>()).collect::<Vec<_>>();
+    use crate::sql::TokenKind;
+    let text = |t: crate::sql::Token| match t.kind {
+        TokenKind::Quoted => t.text,
+        _ => line_feeds(&t.text),
+    };
+    let tokens = |sql: &str| split_statements(sql, d).into_iter().map(|s| s.tokens.into_iter().map(text).collect::<Vec<_>>()).collect::<Vec<_>>();
     tokens(a) == tokens(b) && crate::sql::gates(a, d) == crate::sql::gates(b, d)
 }
 
@@ -6010,7 +6026,7 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
 
 /// `reylo migrate history pull`: writes each migration the database ran into its file, as it ran
 /// it, from the history table, which keeps every applied migration's text: a file deleted is written
-/// again, and one that reads differently to the lock is written over. A file that differs in comments
+/// again, and one that reads differently to the lock or to deploy is written over. A file that differs in comments
 /// alone is left as it is, and so is a file the database hasn't run. The lock then lists what it ran,
 /// in its order, before what the lock already listed that it hasn't run: a lock lost or merged wrong
 /// is written again, and a deploy still to reach this database stays locked. Changes no database, and
@@ -6028,6 +6044,7 @@ pub async fn history_pull(opts: &Options, log: Log<'_>) -> Result<i32, Error> {
         Err(code) => return Ok(code),
     };
     swept_note(&server, swept, log);
+    let d = db.dialect();
     let result = history_as_it_stands(&mut db, &mut server, opts).await;
     db.close().await;
     server.close().await;
@@ -6042,8 +6059,8 @@ pub async fn history_pull(opts: &Options, log: Log<'_>) -> Result<i32, Error> {
         let path = opts.dir.join(&r.name);
         let what = match files.iter().find(|f| f.name == r.name) {
             None => "written: it wasn't here",
-            // By the lock's own reading, so that what the lock refuses as edited is written back.
-            Some(f) if lock::canonical(&normalized(&f.sql)) != lock::canonical(&normalized(&r.sql)) => "written over: it differed from what ran",
+            // By the lock's own reading and by deploy's, so that what either refuses as edited is written back.
+            Some(f) if lock::canonical(&normalized(&f.sql)) != lock::canonical(&normalized(&r.sql)) || !same_statements(&f.sql, &r.sql, d) => "written over: it differed from what ran",
             Some(_) => continue,
         };
         std::fs::create_dir_all(&opts.dir)?;
@@ -11878,5 +11895,19 @@ mod tests {
         let mut names = vec!["20261109120000_b.sql", "init.sql", "20261108120000_a.sql"];
         names.sort_by(|a, b| name_order(a).cmp(&name_order(b)));
         assert_eq!(names, ["init.sql", "20261108120000_a.sql", "20261109120000_b.sql"]);
+    }
+
+    #[test]
+    fn a_quoted_name_keeps_its_line_endings() {
+        let (p, m, s) = (Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite);
+        for d in [p, m, s] {
+            assert!(same_statements("insert into t values ('a\r\nb');\r\n", "insert into t values ('a\nb');\n", d), "{d:?}");
+        }
+        assert!(!same_statements("insert into \"a\r\nb\" values (1);", "insert into \"a\nb\" values (1);", p));
+        assert!(!same_statements("insert into `a\r\nb` values (1);", "insert into `a\nb` values (1);", m));
+        assert!(!same_statements("insert into [a\r\nb] values (1);", "insert into [a\nb] values (1);", s));
+        assert!(!same_statements("insert into `a\r\nb` values (1);", "insert into `a\nb` values (1);", s));
+        // SQLite reads `"…"` as a string only where it names no column: it may name one.
+        assert!(!same_statements("insert into \"a\r\nb\" values (1);", "insert into \"a\nb\" values (1);", s));
     }
 }

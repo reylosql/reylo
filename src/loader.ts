@@ -10,7 +10,7 @@ import { Session } from "./analyze.ts";
 import { libraryProblem, sourceName } from "./project.ts";
 import { rowSource } from "./row.ts";
 import { querySchemas } from "./schema.ts";
-import { columnKind, holdsRareKind } from "./values.ts";
+import { columnKind, elementKind, holdsRareKind, wholeArrayKind } from "./values.ts";
 import { jsonNumbers } from "./render.ts";
 import { analysisWithBases, analysisWithNestedArrays, type EngineType } from "./engine-type.ts";
 import { planLibraries, planOf, type Codecs, type Library, type Plan } from "./codecs.ts";
@@ -205,9 +205,10 @@ export function moduleImports(m: ModuleInput): { checked: boolean; coded: boolea
   // one: a row value, a range, a geometric type, an hstore or a money, anywhere in a column's or a
   // parameter's value, or a non-finite number inside its JSON. A structured parameter is written by
   // `checks` (src/rows.ts), but a `money` anywhere in it is checked against the session's locale
-  // first (src/decode.ts, `beforePostgres`).
+  // first (src/decode.ts, `beforePostgres`). An array of whole arrays is written as each one's
+  // literal (`postgresValue`).
   const kind = (t: EngineType) => columnKind(t, "postgres");
-  const typed = m.dialect === "postgres" && (moduleNonFinite(m).some((at) => at !== null) || analysis.columns.some((c) => holdsRareKind(kind(c.type))) || analysis.params.some((p) => (p.members === undefined ? holdsRareKind(kind(p.type)) : /\bmoney\b/.test(kind(p.type)))));
+  const typed = m.dialect === "postgres" && (moduleNonFinite(m).some((at) => at !== null) || analysis.columns.some((c) => holdsRareKind(kind(c.type))) || analysis.params.some((p) => (p.members === undefined ? holdsRareKind(kind(p.type)) || wholeArrayKind(elementKind(kind(p.type))) !== undefined : /\bmoney\b/.test(kind(p.type)))));
   return { checked, coded, typed, imports };
 }
 
