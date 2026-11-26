@@ -6580,6 +6580,18 @@ mod adversarial {
         p.output();
         assert_eq!(p.dry_run().await, 1, "{}", p.peek());
         assert_has!(p.output(), r"Shadow databases leave out text search configuration auth\.search, the platform's, which Reylo can't make, so a migration that uses it fails in them: pg_dump \d+ or newer, where it's installed, makes it");
+        // A pg_dump that is there and fails says why, rather than to install one.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let bin = p.dir.join("failing-bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("pg_dump"), "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'pg_dump (PostgreSQL) 99.0'; exit 0; fi\necho 'pg_dump: error: permission denied for table documents' >&2\nexit 1\n").unwrap();
+            std::fs::set_permissions(bin.join("pg_dump"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            reylo_migrate::db::set_pg_dump_dirs(Some(vec![bin]));
+            assert_eq!(p.dry_run().await, 1, "{}", p.peek());
+            assert_has!(p.output(), r"which Reylo can't make, so a migration that uses it fails in them: pg_dump couldn't read this schema: permission denied for table documents");
+        }
         reylo_migrate::db::set_pg_dump_dirs(None);
     }
 

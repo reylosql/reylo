@@ -1034,18 +1034,18 @@ async fn platform_ddl(target: &mut Db, url: &str, version: i64, schemas: &[Strin
         Ok::<_, Error>((unread, crate::diff::plan(&crate::diff::Schema::default(), &platform, alterer.as_ref())))
     };
     let (unread, plan) = read.await.map_err(|e| Error(format!("reading the platform's schemas {} for shadow databases: {e}", schemas.join(", "))))?;
+    let mut note = None;
     if !unread.is_empty() {
-        if let Ok(dumped) = platform_dump(url, version / 10000, schemas) {
-            return Ok((dumped, None));
-        }
+        let major = version / 10000;
+        let fix = match find_pg_dump(major) {
+            Err(_) => format!("pg_dump {major} or newer, where it's installed, makes it"),
+            Ok(_) => match platform_dump(url, major, schemas) {
+                Ok(dumped) => return Ok((dumped, None)),
+                Err(e) => e.0,
+            },
+        };
+        note = Some(format!("· {LEFT_OUT} {}, the platform's, which Reylo can't make, so a migration that uses it fails in them: {fix}", unread.join(", ")));
     }
-    let note = (!unread.is_empty()).then(|| {
-        format!(
-            "· {LEFT_OUT} {}, the platform's, which Reylo can't make, so a migration that uses it fails in them: pg_dump {} or newer, where it's installed, makes it",
-            unread.join(", "),
-            version / 10000
-        )
-    });
     Ok((plan.statements.into_iter().filter(|s| !s.trim_start().starts_with("--")).collect(), note))
 }
 
