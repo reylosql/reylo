@@ -4,3 +4,4 @@
 -- of NULLs inside.
 create table t3 (k int not null);
 create table t4 (k int not null, x int not null);
+create table tu (id int primary key, x int not null);

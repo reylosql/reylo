@@ -436,9 +436,15 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
         _ => Proven { flags: raw.columns.iter().map(|c| c.flags & 1 != 0).collect(), ..Proven::default() },
     };
     // The unique keys, columns and views of the tables the query reads, which its cardinality
-    // reads, and whose views' own calls the flags below may miss.
+    // reads, and whose views' own calls the flags below may miss. Where MySQL reads a WITH query
+    // otherwise where it is read, no unique key is followed ([`crate::mysql_derived::with_rebound`]).
     let keys = match &parsed {
-        Some(Statement::Query(q)) if !assigns(q) => catalog(host, q),
+        Some(Statement::Query(q)) if !assigns(q) => catalog(host, q).map(|mut keys| {
+            if crate::mysql_derived::with_rebound(q) {
+                keys.of.clear();
+            }
+            keys
+        }),
         _ => None,
     };
     let mut never_null = proven.never_null(&raw.columns);
