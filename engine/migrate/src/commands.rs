@@ -9998,6 +9998,17 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             };
             // Whether a publication publishes its tables' stored generated columns is Postgres 18's.
             let generated = if version >= 180000 { "case when p.pubgencols = 's' then ', publish_generated_columns = stored' else '' end" } else { "''" };
+            // All sequences, and the tables all tables leave out, are Postgres 19's, written as pg_dump 19 writes them.
+            let (all, listed_only) = if version >= 190000 {
+                (
+                    "case when p.puballtables then 'ALL TABLES' || coalesce(' EXCEPT (' || (select string_agg(format('TABLE ONLY %I.%I', n.nspname, c.relname), ', ' order by n.nspname, c.relname)
+                        from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid and pr.prexcept) || ')', '')
+                        || case when p.puballsequences then ', ALL SEQUENCES' else '' end when p.puballsequences then 'ALL SEQUENCES' end",
+                    " and not pr.prexcept",
+                )
+            } else {
+                ("case when p.puballtables then 'ALL TABLES' end", "")
+            };
             for r in db
                 .rows(&format!(
                     "select 0 as k, et.evtname::text as name, format('CREATE EVENT TRIGGER %I ON %s', et.evtname, et.evtevent)
@@ -10010,10 +10021,10 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
                     from pg_event_trigger et join pg_proc f on f.oid = et.evtfoid join pg_namespace fn on fn.oid = f.pronamespace where {} and {}
                     union all
                     select 1, p.pubname::text, format('CREATE PUBLICATION %I', p.pubname)
-                        || coalesce(' FOR ' || case when p.puballtables then 'ALL TABLES' else nullif(concat_ws(', ',
+                        || coalesce(' FOR ' || coalesce({all}, nullif(concat_ws(', ',
                           (select string_agg(format('TABLE %I.%I', n.nspname, c.relname) || {columns}, ', ' order by n.nspname, c.relname)
-                            from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid),
-                          {schemas}), '') end, '')
+                            from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid{listed_only}),
+                          {schemas}), '')), '')
                         || format(' WITH (publish = %L%s%s)', concat_ws(', ', case when p.pubinsert then 'insert' end, case when p.pubupdate then 'update' end,
                           case when p.pubdelete then 'delete' end, case when p.pubtruncate then 'truncate' end), case when p.pubviaroot then ', publish_via_partition_root = true' else '' end, {generated}),
                       null,

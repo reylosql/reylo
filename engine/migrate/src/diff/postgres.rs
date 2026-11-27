@@ -2046,11 +2046,17 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
     };
     // Postgres 18 publishes a table's stored generated columns where a publication says so.
     let generated = if version >= 180000 { "p.pubgencols = 's'" } else { "false" };
+    // Postgres 19 publishes all sequences, and all tables but those an EXCEPT names, which it keeps among the publication's tables, marked.
+    let (all_sequences, listed_only, excepted) = if version >= 190000 {
+        ("p.puballsequences", "and not pr.prexcept", "format('%s', (select json_agg(format('%I.%I', n.nspname, c.relname) order by format('%I.%I', n.nspname, c.relname)) from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid and pr.prexcept))")
+    } else {
+        ("false", "", "'null'")
+    };
     for r in db
         .rows(&format!(
-            "select p.oid, format('%I', p.pubname) as name, p.puballtables as all_tables, p.pubviaroot as via_root, {generated} as generated,
+            "select p.oid, format('%I', p.pubname) as name, p.puballtables as all_tables, {all_sequences} as all_sequences, {excepted} as excepted, p.pubviaroot as via_root, {generated} as generated,
               concat_ws(', ', case when p.pubinsert then 'insert' end, case when p.pubupdate then 'update' end, case when p.pubdelete then 'delete' end, case when p.pubtruncate then 'truncate' end) as publish,
-              format('%s', (select json_agg(json_build_array(format('%I.%I', n.nspname, c.relname), format('%I.%I', n.nspname, c.relname) || {columns}, {listed}) order by format('%I.%I', n.nspname, c.relname)) from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid)) as tables,
+              format('%s', (select json_agg(json_build_array(format('%I.%I', n.nspname, c.relname), format('%I.%I', n.nspname, c.relname) || {columns}, {listed}) order by format('%I.%I', n.nspname, c.relname)) from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid {listed_only})) as tables,
               format('%s', {schemas}) as schemas
             from pg_publication p where {}",
             database_wide("p.pubowner")
@@ -2060,9 +2066,13 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
         let name = r.text("name");
         let tables: Vec<(String, String, Vec<String>)> = serde_json::from_str(r.text("tables")).unwrap_or_default();
         let in_schemas: Vec<String> = serde_json::from_str(r.text("schemas")).unwrap_or_default();
+        let excepted: Vec<String> = serde_json::from_str(r.text("excepted")).unwrap_or_default();
         let mut what = Vec::new();
         if r.flag("all_tables") {
-            what.push("all tables".to_string());
+            what.push(if excepted.is_empty() { "all tables".to_string() } else { format!("all tables except (table {})", excepted.iter().map(|t| format!("only {t}")).collect::<Vec<_>>().join(", ")) });
+        }
+        if r.flag("all_sequences") {
+            what.push("all sequences".to_string());
         }
         // Each table it holds as itself alone: Postgres lists a table's inheriting children as tables
         // of their own where a publication takes them, so a table named without `only` would bring
@@ -2092,10 +2102,13 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
             .iter()
             .flat_map(|(t, _, listed)| std::iter::once(format!("table {t}")).chain(listed.iter().map(move |c| format!("column {t}.{c}"))))
             .chain(in_schemas.iter().map(|n| format!("schema {n}")))
+            .chain(excepted.iter().map(|t| format!("table {t}")))
             .collect();
         let mut objects: Vec<String> = tables.iter().map(|(_, t, _)| format!("table only {t}")).collect();
         objects.extend(in_schemas.iter().map(|n| format!("tables in schema {n}")));
-        let extra = vec![format!("all {}", r.flag("all_tables")), format!("objects {}", objects.join(", ")), format!("with {}", with.join(", ")), format!("publish {}", r.text("publish"))];
+        // What `all` covers changes only by making the publication again.
+        let all = format!("{} {} except {}", r.flag("all_tables"), r.flag("all_sequences"), excepted.join(", "));
+        let extra = vec![format!("all {all}"), format!("objects {}", objects.join(", ")), format!("with {}", with.join(", ")), format!("publish {}", r.text("publish"))];
         ids.publications.insert(oid(&r, "oid"), format!("publication {name}"));
         // After the tables it names, among the last objects made.
         s.add(Object {
