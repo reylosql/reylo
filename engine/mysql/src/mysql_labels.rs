@@ -20,6 +20,7 @@
 
 use crate::api::{MysqlColumn, MysqlDescribe, Scope};
 use crate::host::{as_str, Host, Lazy};
+use crate::mysql_names::Reads;
 use crate::types::Type;
 use syntax::mysql::ast::{Cte, Expr, ObjectNamePart, Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SetOperator, TableFactor, TableWithJoins, With};
 
@@ -236,17 +237,18 @@ fn items(q: &Query, select: &Select) -> Vec<(String, Item)> {
                     out.push((qualifier, Item::Unknown));
                     return;
                 }
-                match ctes.iter().rposition(|c| c.alias.name.value.eq_ignore_ascii_case(table)) {
-                    // A recursive WITH query, or one whose name is in another case, is not followed.
-                    Some(i) if q.with.as_ref().is_some_and(|w| w.recursive) || ctes[i].alias.name.value != *table => out.push((qualifier, Item::Unknown)),
-                    Some(i) => {
+                match crate::mysql_names::with_query(ctes.iter().map(|c| c.alias.name.value.as_str()), table) {
+                    // A recursive WITH query is not followed, nor a name the server may read otherwise.
+                    Reads::With(_) if q.with.as_ref().is_some_and(|w| w.recursive) => out.push((qualifier, Item::Unknown)),
+                    Reads::Unknown => out.push((qualifier, Item::Unknown)),
+                    Reads::With(i) => {
                         let earlier = q.with.as_ref().map(|w| With { cte_tables: ctes[..i].to_vec(), ..w.clone() }).filter(|w| !w.cte_tables.is_empty());
                         match crate::mysql_derived::standalone(&ctes[i].query, earlier.as_ref()) {
                             Some(alone) => out.push((qualifier, Item::Query(alone, ctes[i].alias.columns.iter().map(|c| c.name.value.clone()).collect()))),
                             None => out.push((qualifier, Item::Unknown)),
                         }
                     }
-                    None => out.push((qualifier, Item::Table(table.to_string()))),
+                    Reads::Table => out.push((qualifier, Item::Table(table.to_string()))),
                 }
             }
             TableFactor::Derived { lateral: false, subquery, alias: Some(alias), .. } => match crate::mysql_derived::standalone(subquery, q.with.as_ref()) {
@@ -254,6 +256,8 @@ fn items(q: &Query, select: &Select) -> Vec<(String, Item)> {
                 None => out.push((alias.name.value.clone(), Item::Unknown)),
             },
             TableFactor::NestedJoin { table_with_joins, .. } => from(q, table_with_joins, out),
+            // Not followed, but named: a qualifier this one may take is no other item's.
+            TableFactor::Derived { alias, .. } | TableFactor::JsonTable { alias, .. } | TableFactor::TableFunction { alias, .. } | TableFactor::Function { alias, .. } => out.push((alias.as_ref().map(|a| a.name.value.clone()).unwrap_or_default(), Item::Unknown)),
             _ => out.push((String::new(), Item::Unknown)),
         }
     }
@@ -301,13 +305,10 @@ fn select_column(q: &Query, select: &Select, position: usize, described: Option<
     };
     let items = items(q, select);
     let candidates: Vec<&(String, Item)> = match &qualifier {
-        Some(qualifier) => {
-            let named: Vec<_> = items.iter().filter(|(n, _)| n.eq_ignore_ascii_case(qualifier)).collect();
-            if named.len() != 1 {
-                return Some(None);
-            }
-            named
-        }
+        Some(qualifier) => match crate::mysql_names::item(items.iter().map(|(n, _)| n.as_str()), qualifier) {
+            Some(i) => vec![&items[i]],
+            None => return Some(None),
+        },
         None => items.iter().collect(),
     };
     let mut found = Vec::new();

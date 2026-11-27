@@ -74,11 +74,12 @@ fn strict_args(name: &str, count: usize) -> Option<Strict> {
 /// when no join changes.
 pub fn reduce(q: &Query) -> Option<Query> {
     let SetExpr::Select(select) = q.body.as_ref() else { return None };
-    let quals = select.selection.as_ref().map(qualifiers).unwrap_or_default();
+    let scope = from_names(&select.from);
+    let quals = select.selection.as_ref().map(|e| qualifiers(e, &scope)).unwrap_or_default();
     let mut from = select.from.clone();
     let mut changed = false;
     for item in &mut from {
-        changed |= reduce_joins(item, &quals);
+        changed |= reduce_joins(item, &quals, &scope);
     }
     if !changed {
         return None;
@@ -90,12 +91,13 @@ pub fn reduce(q: &Query) -> Option<Query> {
     Some(reduced)
 }
 
-/// The FROM items a test is strict in a column of, by the name that qualifies it.
-fn qualifiers(e: &Expr) -> Vec<String> {
+/// The FROM items a test is strict in a column of, by the name that qualifies it, where that name
+/// is one item's alone in `scope` ([`names_one`]).
+fn qualifiers(e: &Expr, scope: &[String]) -> Vec<String> {
     strict_in(e)
         .into_iter()
         .filter_map(|c| match c.as_slice() {
-            [q, _] => Some(q.clone()),
+            [q, _] if names_one(scope, q) => Some(q.clone()),
             _ => None,
         })
         .collect()
@@ -105,7 +107,7 @@ fn qualifiers(e: &Expr) -> Vec<String> {
 /// `quals` or in the ON clause of an inner join after it, inside a nested join too; whether any
 /// changed. The joins are read from the last, so a join made inner lends its ON clause to the
 /// ones before it.
-fn reduce_joins(item: &mut TableWithJoins, quals: &[String]) -> bool {
+fn reduce_joins(item: &mut TableWithJoins, quals: &[String], scope: &[String]) -> bool {
     let mut quals = quals.to_vec();
     let mut changed = false;
     for i in (0..item.joins.len()).rev() {
@@ -127,18 +129,35 @@ fn reduce_joins(item: &mut TableWithJoins, quals: &[String]) -> bool {
             }
         }
         if let JoinOperator::Join(JoinConstraint::On(on)) | JoinOperator::Inner(JoinConstraint::On(on)) | JoinOperator::StraightJoin(JoinConstraint::On(on)) = &item.joins[i].join_operator {
-            quals.extend(qualifiers(on));
+            quals.extend(qualifiers(on, scope));
         }
-        changed |= nested(&mut item.joins[i].relation, &quals);
+        changed |= nested(&mut item.joins[i].relation, &quals, scope);
     }
-    changed | nested(&mut item.relation, &quals)
+    changed | nested(&mut item.relation, &quals, scope)
 }
 
-fn nested(factor: &mut TableFactor, qualifiers: &[String]) -> bool {
+fn nested(factor: &mut TableFactor, qualifiers: &[String], scope: &[String]) -> bool {
     match factor {
-        TableFactor::NestedJoin { table_with_joins, .. } => reduce_joins(table_with_joins, qualifiers),
+        TableFactor::NestedJoin { table_with_joins, .. } => reduce_joins(table_with_joins, qualifiers, scope),
         _ => false,
     }
+}
+
+/// The names a SELECT's FROM items' columns are qualified with, in lower case.
+fn from_names(from: &[TableWithJoins]) -> Vec<String> {
+    let mut out = Vec::new();
+    for item in from {
+        out.extend(names(&item.relation));
+        for join in &item.joins {
+            out.extend(names(&join.relation));
+        }
+    }
+    out
+}
+
+/// Whether `name`, in lower case, reaches one of the FROM items `scope` names ([`crate::mysql_names::item`]).
+fn names_one(scope: &[String], name: &str) -> bool {
+    crate::mysql_names::item(scope.iter().map(String::as_str), name).is_some()
 }
 
 /// The names a FROM item's columns are qualified with, in lower case, through its nested joins.
@@ -176,18 +195,14 @@ pub fn tested(q: &Query) -> Vec<usize> {
     if strict.is_empty() {
         return Vec::new();
     }
-    let mut from_names = Vec::new();
+    let from_names = from_names(&select.from);
     let (mut using, mut natural) = (Vec::new(), false);
     for item in &select.from {
-        from_names.extend(names(&item.relation));
-        for join in &item.joins {
-            from_names.extend(names(&join.relation));
-        }
         merged(item, &mut using, &mut natural);
     }
     let same = |tested: &[String], read: &[String]| -> bool {
         if tested == read {
-            return true;
+            return tested.len() == 1 || names_one(&from_names, &tested[0]);
         }
         // A bare name resolves to exactly one FROM item's column, so that is the one, except a
         // name a USING or NATURAL join merges: the merged column is one side's under a LEFT or
@@ -199,7 +214,7 @@ pub fn tested(q: &Query) -> Vec<usize> {
             (2, 1) => (read, tested),
             _ => return false,
         };
-        bare[0] == qualified[1] && from_names.contains(&qualified[0])
+        bare[0] == qualified[1] && names_one(&from_names, &qualified[0])
     };
     select
         .projection

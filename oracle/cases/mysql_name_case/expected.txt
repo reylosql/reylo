@@ -1,0 +1,37 @@
+alias_own_test.sql: many () -> { c: int? }
+alias_reduced.sql: many () -> { c: int? }
+alias_tested.sql: many () -> { ac: int? }
+compared_alias.sql: many (v: varchar) -> { id: int }
+compared_derived.sql: many (v: varchar) -> { x: enum }
+compared_lateral.sql: many (v: varchar) -> { id: int }
+compared_nested_with.sql: many (v: varchar) -> { id: int }
+compared_wildcard.sql: many (v: varchar) -> { id: int }
+compared_with_names.sql: many (v: varchar) -> { id: int }
+compared_with_or_table.sql: many (v: varchar) -> { id: int }
+derived_aliases.sql: many () -> { w: int? }
+json_object_schema.sql: many () -> { o: json { d: json? } }
+json_schema.sql: many () -> { doc: json? }
+json_table_labels.sql: many () -> { x: enum? }
+key_keyless_lower.sql: many () -> { v: int? }
+key_keyless_lower_last.sql: many () -> { v: int? }
+key_keyless_upper.sql: many () -> { v: int? }
+lateral_inner_lower.sql: many () -> { v: int? }
+lateral_inner_upper.sql: many () -> { v: int? }
+lateral_labels.sql: many () -> { x: enum }
+lateral_outer_test.sql: many () -> { c: int? }
+schema_twin_qualifier.sql: many () -> { v: int? }
+schema_twin_table.sql: many () -> { v: int? }
+schema_twin_view.sql: many () -> { v: int | bigint? }
+table_labels.sql: many () -> { bx: enum('big1' | 'big2'), sx: enum('small1' | 'small2') }
+update_alias_target.sql: none (v: int32) -> {  }
+update_nullable_cast.sql: none (v: int32?) -> {  }
+update_target.sql: none (v: int32) -> {  }
+view_reads_keyless_twin.sql: many () -> { v: int | bigint? }
+view_twin_table.sql: many () -> { v: int | bigint? }
+view_twin_view_first.sql: many () -> { v: int | bigint? }
+wildcard_derived_first.sql: many () -> { kid: int }
+wildcard_table_first.sql: many () -> { kid: int }
+with_lower_table_upper.sql: many () -> { v: int? }
+with_names.sql: many () -> { w: bigint? }
+with_upper_table_lower.sql: many () -> { v: int? }
+with_upper_table_lower_pinned.sql: many () -> { v: int? }

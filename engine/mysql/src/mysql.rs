@@ -403,7 +403,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
         if column.is_empty() || !traced.as_ref()?.iter().any(|t| t.eq_ignore_ascii_case(table)) {
             return None;
         }
-        typed.columns.get(&(table.to_ascii_lowercase(), column.to_ascii_lowercase())).cloned()
+        typed.columns.get(&(table.to_string(), column.to_ascii_lowercase())).cloned()
     };
     // A result column that is an ENUM or a SET column itself has the labels its column declares.
     let labelled_of = |c: &crate::api::MysqlColumn| -> Option<Type> {
@@ -411,7 +411,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
         if column.is_empty() || !traced.as_ref()?.iter().any(|t| t.eq_ignore_ascii_case(table)) {
             return None;
         }
-        typed.labelled.get(&(table.to_ascii_lowercase(), column.to_ascii_lowercase())).cloned()
+        typed.labelled.get(&(table.to_string(), column.to_ascii_lowercase())).cloned()
     };
     // The character set a result column's table column stores its values in, by the same origin.
     let charset_of = |c: &crate::api::MysqlColumn| -> Option<String> {
@@ -2907,7 +2907,7 @@ fn documents(statement: Option<&Statement>, raw: &MysqlDescribe, host: &Host) ->
         .filter_map(|(i, c)| {
             let (table, column) = (c.org_table.as_deref()?, c.org_name.as_deref()?);
             let read = c.r#type == 245 && !column.is_empty() && tables.iter().any(|t| t.eq_ignore_ascii_case(table));
-            read.then(|| (i, table.to_ascii_lowercase(), column.to_ascii_lowercase()))
+            read.then(|| (i, table.to_string(), column.to_ascii_lowercase()))
         })
         .collect();
     if wanted.is_empty() {
@@ -2926,7 +2926,7 @@ fn documents(statement: Option<&Statement>, raw: &MysqlDescribe, host: &Host) ->
             if repeats_key(&schema) {
                 continue;
             }
-            schemas.entry((table.to_ascii_lowercase(), column.to_ascii_lowercase())).or_default().push((schema, &[&crate::schema_type::MYSQL]));
+            schemas.entry((table.to_string(), column.to_ascii_lowercase())).or_default().push((schema, &[&crate::schema_type::MYSQL]));
         }
     }
     let mut out = vec![None; raw.columns.len()];
@@ -3123,7 +3123,8 @@ fn check_documents(clause: &str) -> Vec<(String, String)> {
 fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
     let mut keys = Keys::default();
     let mut names = crate::mysql_keys::tables_anywhere(q, None);
-    let mut seen: HashSet<String> = names.iter().map(|n| n.to_ascii_lowercase()).collect();
+    // Each name as written: where the server keeps case, `K` and `k` are two tables, each fetched.
+    let mut seen: HashSet<String> = names.iter().cloned().collect();
     while !names.is_empty() {
         let found = unique_keys(host, &names);
         let columns = by_table(host, KEY_COLUMNS_QUERY, &names);
@@ -3131,11 +3132,15 @@ fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
         let (Some(found), Some(columns), Some(views)) = (found, columns, views) else { return None };
         keys.of.extend(found.of);
         keys.class.extend(found.class);
+        // A round answers for each table whole, and a table fetched again under another case, where
+        // the server folds names, answers again: its columns replace the ones it had.
+        let mut answered: HashMap<String, Vec<(String, Class)>> = HashMap::new();
         for row in columns.unwrap_or_default() {
             if let (Some(table), Some(column), Some(ty)) = (row.first().and_then(as_str), row.get(1).and_then(as_str), row.get(2).and_then(as_str)) {
-                keys.columns.entry(table.to_string()).or_default().push((column.to_ascii_lowercase(), class_of(ty)));
+                answered.entry(table.to_string()).or_default().push((column.to_ascii_lowercase(), class_of(ty)));
             }
         }
+        keys.columns.extend(answered);
         let mut next = Vec::new();
         for row in views.unwrap_or_default() {
             let (Some(name), Some(definition), Some(schema)) = (row.first().and_then(as_str), row.get(1).and_then(as_str), row.get(2).and_then(as_str)) else { continue };
@@ -3148,7 +3153,7 @@ fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
             let Some(Statement::Query(view)) = parsed.pop() else { continue };
             keys.schema = Some(schema.to_string());
             for table in crate::mysql_keys::tables_anywhere(&view, Some(schema)) {
-                if seen.insert(table.to_ascii_lowercase()) {
+                if seen.insert(table.clone()) {
                     next.push(table);
                 }
             }
@@ -3194,33 +3199,38 @@ fn keys_of(rows: Vec<Vec<Value>>) -> Keys {
 }
 
 impl Keys {
-    /// The server's name for the table a statement names. The catalog query compares names as
-    /// the server does, so a row under another case than the statement's came back because the
-    /// server holds the two for one table (`lower_case_table_names` 1 or 2); where it tells them
-    /// apart (0) only the exact name comes back, and `Users` never takes the keys of `users`.
+    /// The server's name for a table or a view the statement names in another case. The catalog
+    /// query compares names as the server does, so a row under another case than the statement's
+    /// came back because the server holds the two for one table (`lower_case_table_names` 1 or 2);
+    /// where it tells them apart (0) only the exact name comes back, and `Users` never takes the
+    /// keys of `users`. It is read off `columns`, which holds every table and view fetched, keyless
+    /// ones too: `of` and `views` leave some out, and a name alone there in another case may be
+    /// another table's.
     fn name(&self, table: &str) -> Option<&str> {
-        if let Some((name, _)) = self.of.get_key_value(table) {
-            return Some(name);
-        }
-        let mut same = self.of.keys().filter(|name| name.eq_ignore_ascii_case(table));
+        let mut same = self.columns.keys().filter(|name| name.eq_ignore_ascii_case(table));
         match (same.next(), same.next()) {
             (Some(name), None) => Some(name),
             _ => None,
         }
     }
 
-    pub(crate) fn keys(&self, table: &str) -> Option<&Vec<Vec<String>>> {
-        self.of.get(self.name(table)?).filter(|keys| !keys.is_empty())
+    /// The entry of `map` under the name the statement gives, else under the server's ([`Keys::name`]).
+    fn get<'m, T>(&self, map: &'m HashMap<String, T>, table: &str) -> Option<&'m T> {
+        map.get(table).or_else(|| map.get(self.name(table)?))
     }
 
-    /// The columns of a table or a view, in lower case, matched by name as [`Keys::name`] does.
+    pub(crate) fn keys(&self, table: &str) -> Option<&Vec<Vec<String>>> {
+        self.get(&self.of, table).filter(|keys| !keys.is_empty())
+    }
+
+    /// The columns of a table or a view, in lower case.
     pub(crate) fn columns(&self, table: &str) -> Option<&Vec<(String, Class)>> {
-        same_name(&self.columns, table)
+        self.get(&self.columns, table)
     }
 
     /// What a column of a table compares as.
     pub(crate) fn class_of(&self, table: &str, column: &str) -> Option<Class> {
-        if let Some(class) = self.name(table).and_then(|name| self.class.get(name)).and_then(|c| c.get(column)) {
+        if let Some(class) = self.get(&self.class, table).and_then(|c| c.get(column)) {
             return Some(*class);
         }
         self.columns(table)?.iter().find(|(c, _)| c == column).map(|(_, class)| *class)
@@ -3228,19 +3238,7 @@ impl Keys {
 
     /// A view's defining SELECT.
     pub(crate) fn view(&self, name: &str) -> Option<&Query> {
-        same_name(&self.views, name)
-    }
-}
-
-/// The entry of `map` under `name`, or under the one name that differs from it in case alone.
-fn same_name<'m, T>(map: &'m HashMap<String, T>, name: &str) -> Option<&'m T> {
-    if let Some(found) = map.get(name) {
-        return Some(found);
-    }
-    let mut same = map.iter().filter(|(n, _)| n.eq_ignore_ascii_case(name));
-    match (same.next(), same.next()) {
-        (Some((_, found)), None) => Some(found),
-        _ => None,
+        self.get(&self.views, name)
     }
 }
 

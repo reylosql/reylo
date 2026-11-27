@@ -24,11 +24,12 @@
 //! compared with a FLOAT or DOUBLE compares as a double.
 
 use crate::mysql::{compares_as_is, const_limit, deterministic, is_variable, one_before_limit, reads_column, select_of, value_class, Class, Keys};
+use crate::mysql_names::Reads;
 use syntax::mysql::ast::{self, Distinct, Expr, GroupByExpr, JoinConstraint, JoinOperator, ObjectNamePart, Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, TableFactor, TableWithJoins};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-/// One WITH query in scope: its name in lower case, its body (`None` for one of a RECURSIVE WITH),
+/// One WITH query in scope: its name as written, its body (`None` for one of a RECURSIVE WITH),
 /// how many of the entries before it its body sees, and the names its column list gives its
 /// columns, by position.
 pub(crate) type Cte<'a> = (String, Option<&'a Query>, usize, Vec<String>);
@@ -44,7 +45,7 @@ pub(crate) fn ctes_of<'a>(q: &'a Query, outer: &[Cte<'a>]) -> Ctes<'a> {
             let body = (!w.recursive).then_some(c.query.as_ref());
             // A WITH query's body sees the ones before it, and with RECURSIVE itself too.
             let sees = out.len();
-            out.push((c.alias.name.value.to_ascii_lowercase(), body, sees, c.alias.columns.iter().map(|c| c.name.value.to_ascii_lowercase()).collect()));
+            out.push((c.alias.name.value.clone(), body, sees, c.alias.columns.iter().map(|c| c.name.value.to_ascii_lowercase()).collect()));
         }
     }
     out
@@ -63,16 +64,17 @@ type Key = Vec<Part>;
 enum Source<'a> {
     /// A table, by the name the statement gives it.
     Table(String),
-    /// A derived table, a WITH query or a view, with the WITH queries its statement sees.
-    Query(&'a Query, Ctes<'a>),
-    /// A LATERAL derived table.
+    /// A derived table, a WITH query or a view, with the WITH queries its statement sees, and
+    /// whether that statement sees the FROM items of an enclosing query ([`From::enclosed`]).
+    Query(&'a Query, Ctes<'a>, bool),
+    /// A LATERAL derived table, which sees the FROM items of the query it is in.
     Lateral(&'a Query, Ctes<'a>),
     /// Anything the proof does not read: a table function, a recursive WITH query.
     Other,
 }
 
 struct Item<'a> {
-    /// The name its columns go by, in lower case.
+    /// The name its columns go by, as written.
     alias: String,
     source: Source<'a>,
     /// Whether an outer join can null-extend it.
@@ -107,12 +109,16 @@ struct From<'a> {
     /// Whether a USING or NATURAL join merges columns under one bare name.
     merged: bool,
     refused: Option<&'static str>,
+    /// Whether the SELECT sees the FROM items of an enclosing query, as a LATERAL derived table's
+    /// does and every query inside one: there a qualifier that matches one of its own items only in
+    /// another case is, on a server that keeps case, an enclosing item's spelled the same.
+    enclosed: bool,
     keys: &'a Keys,
 }
 
 impl<'a> From<'a> {
-    fn read(s: &'a Select, ctes: &[Cte<'a>], keys: &'a Keys) -> From<'a> {
-        let mut from = From { items: Vec::new(), conjuncts: Vec::new(), merged: false, refused: None, keys };
+    fn read(s: &'a Select, ctes: &[Cte<'a>], enclosed: bool, keys: &'a Keys) -> From<'a> {
+        let mut from = From { items: Vec::new(), conjuncts: Vec::new(), merged: false, refused: None, enclosed, keys };
         for twj in &s.from {
             from.flatten(twj, ctes, false);
         }
@@ -169,39 +175,46 @@ impl<'a> From<'a> {
     }
 
     fn factor(&mut self, factor: &'a TableFactor, ctes: &[Cte<'a>], nullable: bool) {
-        let named = |a: &ast::TableAlias| (a.name.value.to_ascii_lowercase(), !a.columns.is_empty());
+        let named = |a: &ast::TableAlias| (a.name.value.clone(), !a.columns.is_empty());
         match factor {
             TableFactor::Table { name, alias, args: None, .. } => {
                 let table = match name.0.as_slice() {
                     [ObjectNamePart::Identifier(t)] => Some(t.value.clone()),
-                    // A view's statement names each table with the view's own schema.
-                    [ObjectNamePart::Identifier(s), ObjectNamePart::Identifier(t)] if self.keys.schema.as_deref().is_some_and(|own| own.eq_ignore_ascii_case(&s.value)) => Some(t.value.clone()),
+                    // A view's statement names each table with the view's own schema, spelled as it
+                    // is: one that differs from it in case alone is another where the server keeps case.
+                    [ObjectNamePart::Identifier(s), ObjectNamePart::Identifier(t)] if self.keys.schema.as_deref() == Some(s.value.as_str()) => Some(t.value.clone()),
                     _ => None,
                 };
                 let Some(table) = table else {
-                    let alias = alias.as_ref().map(|a| a.name.value.to_ascii_lowercase()).unwrap_or_default();
+                    let alias = alias.as_ref().map(|a| a.name.value.clone()).unwrap_or_default();
                     self.items.push(Item { alias, source: Source::Other, nullable, renamed: true, columns: Vec::new() });
                     return;
                 };
                 let lower = table.to_ascii_lowercase();
                 let own: Vec<String> = alias.as_ref().map(|a| a.columns.iter().map(|c| c.name.value.to_ascii_lowercase()).collect()).unwrap_or_default();
-                let (alias, renamed) = alias.as_ref().map(named).unwrap_or_else(|| (lower.clone(), false));
+                let (alias, renamed) = alias.as_ref().map(named).unwrap_or_else(|| (table.clone(), false));
                 let unqualified = name.0.len() == 1;
-                let (source, columns) = match ctes.iter().rposition(|(n, _, _, _)| unqualified && *n == lower) {
-                    // A WITH query MySQL may read otherwise where it is read has no rows to follow.
-                    Some(_) if self.keys.rebound.has(&lower) => (Source::Other, Vec::new()),
-                    Some(at) => match ctes[at].1 {
-                        Some(body) => (Source::Query(body, ctes[..ctes[at].2].to_vec()), overlay(&ctes[at].3, &own)),
+                let reads = match unqualified {
+                    true => crate::mysql_names::with_query(ctes.iter().map(|(n, _, _, _)| n.as_str()), &table),
+                    false => Reads::Table,
+                };
+                let (source, columns) = match reads {
+                    // A WITH query MySQL may read otherwise where it is read has no rows to follow,
+                    // nor has a name one server reads as a WITH query and another as a table.
+                    Reads::With(_) if self.keys.rebound.has(&lower) => (Source::Other, Vec::new()),
+                    Reads::Unknown => (Source::Other, Vec::new()),
+                    Reads::With(at) => match ctes[at].1 {
+                        Some(body) => (Source::Query(body, ctes[..ctes[at].2].to_vec(), self.enclosed), overlay(&ctes[at].3, &own)),
                         None => (Source::Other, Vec::new()),
                     },
                     // A view's statement sees none of the WITH queries of the statement that reads it.
-                    None => match self.keys.view(&table) {
+                    Reads::Table => match self.keys.view(&table) {
                         // The stored definition leaves out a view's column list, which renames its
                         // columns by position: the view's own columns, in order, are their names.
                         Some(view) => {
                             let named: Option<Vec<String>> = self.keys.columns(&table).map(|c| c.iter().map(|(name, _)| name.clone()).collect());
-                            match (named, output_names(view, &[], self.keys)) {
-                                (Some(named), Some(defined)) if named.len() == defined.len() => (Source::Query(view, Vec::new()), overlay(if named == defined { &[] } else { &named }, &own)),
+                            match (named, output_names(view, &[], false, self.keys)) {
+                                (Some(named), Some(defined)) if named.len() == defined.len() => (Source::Query(view, Vec::new(), false), overlay(if named == defined { &[] } else { &named }, &own)),
                                 _ => (Source::Other, Vec::new()),
                             }
                         }
@@ -214,7 +227,7 @@ impl<'a> From<'a> {
             TableFactor::Derived { lateral, subquery, alias, .. } => {
                 let columns: Vec<String> = alias.as_ref().map(|a| a.columns.iter().map(|c| c.name.value.to_ascii_lowercase()).collect()).unwrap_or_default();
                 let (alias, renamed) = alias.as_ref().map(named).unwrap_or_default();
-                let item = if *lateral { Item { alias, source: Source::Lateral(subquery, ctes.to_vec()), nullable, renamed, columns: Vec::new() } } else { Item { alias, source: Source::Query(subquery, ctes.to_vec()), nullable, renamed: false, columns } };
+                let item = if *lateral { Item { alias, source: Source::Lateral(subquery, ctes.to_vec()), nullable, renamed, columns: Vec::new() } } else { Item { alias, source: Source::Query(subquery, ctes.to_vec(), self.enclosed), nullable, renamed: false, columns } };
                 self.items.push(item);
             }
             TableFactor::NestedJoin { table_with_joins, alias: None } => self.flatten(table_with_joins, ctes, nullable),
@@ -225,7 +238,7 @@ impl<'a> From<'a> {
                     _ => None,
                 };
                 match alias {
-                    Some(a) => self.items.push(Item { alias: a.name.value.to_ascii_lowercase(), source: Source::Other, nullable, renamed: true, columns: Vec::new() }),
+                    Some(a) => self.items.push(Item { alias: a.name.value.clone(), source: Source::Other, nullable, renamed: true, columns: Vec::new() }),
                     None => self.refused = Some("a FROM item the engine cannot name"),
                 }
             }
@@ -240,24 +253,34 @@ impl<'a> From<'a> {
         }
         match &item.source {
             Source::Table(t) => self.keys.columns(t).map(|c| c.iter().map(|(name, _)| name.clone()).collect()),
-            Source::Query(q, ctes) => renamed_names(output_names(q, ctes, self.keys)?, &item.columns),
-            Source::Lateral(q, ctes) => output_names(q, ctes, self.keys),
+            Source::Query(q, ctes, enclosed) => renamed_names(output_names(q, ctes, *enclosed, self.keys)?, &item.columns),
+            Source::Lateral(q, ctes) => output_names(q, ctes, true, self.keys),
             Source::Other => None,
         }
     }
 
+    /// The item a qualifier names ([`crate::mysql_names::item`]).
+    fn named(&self, qualifier: &str) -> Option<usize> {
+        crate::mysql_names::item(self.items.iter().map(|it| it.alias.as_str()), qualifier)
+    }
+
     /// The item a column reference reads.
     fn place(&self, parts: &[ast::Ident]) -> Placed {
-        let parts: Vec<String> = parts.iter().map(|p| p.value.to_ascii_lowercase()).collect();
-        let qualified = |q: &str, c: &str| match self.items.iter().position(|it| it.alias == q) {
-            Some(i) if self.items.iter().filter(|it| it.alias == q).count() == 1 && !self.items[i].renamed => Placed::Item(i, c.to_string()),
+        let qualified = |q: &ast::Ident, c: &ast::Ident| match self.named(&q.value) {
+            // Spelled otherwise than the item, it may be an enclosing item's ([`From::enclosed`]).
+            Some(i) if self.enclosed && self.items[i].alias != q.value => Placed::Unknown,
+            Some(i) if !self.items[i].renamed => Placed::Item(i, c.value.to_ascii_lowercase()),
             Some(_) => Placed::Unknown,
+            // Two items it matches without regard to case: either may be the one it reads.
+            None if self.items.iter().any(|it| it.alias.eq_ignore_ascii_case(&q.value)) => Placed::Unknown,
             None => Placed::Outside,
         };
-        match parts.as_slice() {
+        match parts {
             [q, c] => qualified(q, c),
-            [s, q, c] if self.keys.schema.as_deref().is_some_and(|own| own.eq_ignore_ascii_case(s)) => qualified(q, c),
+            // The view's own schema as it is spelled ([`From::factor`]).
+            [s, q, c] if self.keys.schema.as_deref() == Some(s.value.as_str()) => qualified(q, c),
             [c] if !self.merged => {
+                let c = &c.value.to_ascii_lowercase();
                 let mut known = true;
                 let mut having = Vec::new();
                 for i in 0..self.items.len() {
@@ -339,8 +362,8 @@ impl<'a> From<'a> {
     fn class(&self, i: usize, column: &str) -> Option<Class> {
         match &self.items[i].source {
             Source::Table(t) => self.keys.class_of(t, column),
-            Source::Query(q, ctes) => output_class(q, ctes, self.keys, &inner_name(column, &self.items[i].columns, || output_names(q, ctes, self.keys))?),
-            Source::Lateral(q, ctes) => output_class(q, ctes, self.keys, column),
+            Source::Query(q, ctes, enclosed) => output_class(q, ctes, *enclosed, self.keys, &inner_name(column, &self.items[i].columns, || output_names(q, ctes, *enclosed, self.keys))?),
+            Source::Lateral(q, ctes) => output_class(q, ctes, true, self.keys, column),
             Source::Other => None,
         }
     }
@@ -395,8 +418,8 @@ impl<'a> From<'a> {
                 .flatten()
                 .map(|key| key.iter().map(|c| Part { name: c.clone(), class: self.keys.class_of(t, c) }).collect())
                 .collect(),
-            Source::Query(q, ctes) => renamed_keys(output_keys(q, ctes, self.keys), &self.items[i].columns, || output_names(q, ctes, self.keys)),
-            Source::Lateral(q, ctes) => output_keys(q, ctes, self.keys),
+            Source::Query(q, ctes, enclosed) => renamed_keys(output_keys(q, ctes, *enclosed, self.keys), &self.items[i].columns, || output_names(q, ctes, *enclosed, self.keys)),
+            Source::Lateral(q, ctes) => output_keys(q, ctes, true, self.keys),
             Source::Other => Vec::new(),
         }
     }
@@ -419,8 +442,8 @@ impl<'a> From<'a> {
                 let pinned = match &item.source {
                     Source::Table(_) => self.key_pinned(i, &keys[i], &done, constant),
                     _ if constant && item.nullable => false,
-                    Source::Query(q, ctes) => at_most_one_in(q, ctes, self.keys).is_ok() || self.key_pinned(i, &keys[i], &done, constant),
-                    Source::Lateral(q, ctes) => rest() && (at_most_one_in(q, ctes, self.keys).is_ok() || self.key_pinned(i, &keys[i], &done, constant)),
+                    Source::Query(q, ctes, enclosed) => at_most_one_in(q, ctes, *enclosed, self.keys).is_ok() || self.key_pinned(i, &keys[i], &done, constant),
+                    Source::Lateral(q, ctes) => rest() && (at_most_one_in(q, ctes, true, self.keys).is_ok() || self.key_pinned(i, &keys[i], &done, constant)),
                     Source::Other => false,
                 };
                 if pinned {
@@ -488,7 +511,7 @@ impl<'a> From<'a> {
             },
             SelectItem::Wildcard(_) if !self.merged => Some(column.to_string()),
             SelectItem::QualifiedWildcard(SelectItemQualifiedWildcardKind::ObjectName(name), _) => match name.0.as_slice() {
-                [ObjectNamePart::Identifier(q)] if q.value.to_ascii_lowercase() == self.items[i].alias => Some(column.to_string()),
+                [ObjectNamePart::Identifier(q)] if self.named(&q.value) == Some(i) => Some(column.to_string()),
                 _ => None,
             },
             _ => None,
@@ -566,10 +589,10 @@ fn renamed_keys(keys: Vec<Key>, columns: &[String], names: impl FnOnce() -> Opti
 }
 
 /// The names of a query's output columns, in lower case, where the engine can tell them all.
-fn output_names(q: &Query, outer: &[Cte], keys: &Keys) -> Option<Vec<String>> {
+fn output_names(q: &Query, outer: &[Cte], enclosed: bool, keys: &Keys) -> Option<Vec<String>> {
     let s = plain(q)?;
     let ctes = ctes_of(q, outer);
-    let from = From::read(s, &ctes, keys);
+    let from = From::read(s, &ctes, enclosed, keys);
     let mut out = Vec::new();
     for item in &s.projection {
         match item {
@@ -583,7 +606,7 @@ fn output_names(q: &Query, outer: &[Cte], keys: &Keys) -> Option<Vec<String>> {
             }
             SelectItem::QualifiedWildcard(SelectItemQualifiedWildcardKind::ObjectName(name), _) => {
                 let [ObjectNamePart::Identifier(q)] = name.0.as_slice() else { return None };
-                let i = from.items.iter().position(|it| it.alias == q.value.to_ascii_lowercase())?;
+                let i = from.named(&q.value)?;
                 out.extend(from.columns(i)?);
             }
             _ => return None,
@@ -593,10 +616,10 @@ fn output_names(q: &Query, outer: &[Cte], keys: &Keys) -> Option<Vec<String>> {
 }
 
 /// What output column `name` of a query compares as: that of the column it passes through.
-fn output_class(q: &Query, outer: &[Cte], keys: &Keys, name: &str) -> Option<Class> {
+fn output_class(q: &Query, outer: &[Cte], enclosed: bool, keys: &Keys, name: &str) -> Option<Class> {
     let s = plain(q)?;
     let ctes = ctes_of(q, outer);
-    let from = From::read(s, &ctes, keys);
+    let from = From::read(s, &ctes, enclosed, keys);
     if from.refused.is_some() {
         return None;
     }
@@ -624,27 +647,29 @@ fn output_class(q: &Query, outer: &[Cte], keys: &Keys, name: &str) -> Option<Cla
 /// any side gives none.
 pub(crate) fn output_origins(q: &Query, outer: &[Cte], columns: &[String], name: &str) -> Vec<(String, String)> {
     let keys = Keys::default();
-    let Some(inner) = inner_name(name, columns, || output_names(q, outer, &keys)) else { return Vec::new() };
-    body_origins(&q.body, &ctes_of(q, outer), &keys, &inner).unwrap_or_default()
+    // Read as a statement's own query is: the callers do not say whether it sees an enclosing
+    // query's FROM items.
+    let Some(inner) = inner_name(name, columns, || output_names(q, outer, false, &keys)) else { return Vec::new() };
+    body_origins(&q.body, &ctes_of(q, outer), false, &keys, &inner).unwrap_or_default()
 }
 
-fn body_origins<'a>(body: &'a SetExpr, ctes: &[Cte<'a>], keys: &'a Keys, name: &str) -> Option<Vec<(String, String)>> {
+fn body_origins<'a>(body: &'a SetExpr, ctes: &[Cte<'a>], enclosed: bool, keys: &'a Keys, name: &str) -> Option<Vec<(String, String)>> {
     match body {
-        SetExpr::Select(s) => select_origins(s, ctes, keys, name),
-        SetExpr::Query(q) => body_origins(&q.body, &ctes_of(q, ctes), keys, name),
+        SetExpr::Select(s) => select_origins(s, ctes, enclosed, keys, name),
+        SetExpr::Query(q) => body_origins(&q.body, &ctes_of(q, ctes), enclosed, keys, name),
         SetExpr::SetOperation { left, right, .. } => {
-            let at = body_columns(left, ctes, keys)?.iter().position(|(n, _)| n == name)?;
-            let other = body_columns(right, ctes, keys)?.get(at)?.0.clone();
-            let mut out = body_origins(left, ctes, keys, name)?;
-            out.extend(body_origins(right, ctes, keys, &other)?);
+            let at = body_columns(left, ctes, enclosed, keys)?.iter().position(|(n, _)| n == name)?;
+            let other = body_columns(right, ctes, enclosed, keys)?.get(at)?.0.clone();
+            let mut out = body_origins(left, ctes, enclosed, keys, name)?;
+            out.extend(body_origins(right, ctes, enclosed, keys, &other)?);
             Some(out)
         }
         _ => None,
     }
 }
 
-fn select_origins<'a>(s: &'a Select, ctes: &[Cte<'a>], keys: &'a Keys, name: &str) -> Option<Vec<(String, String)>> {
-    let from = From::read(s, ctes, keys);
+fn select_origins<'a>(s: &'a Select, ctes: &[Cte<'a>], enclosed: bool, keys: &'a Keys, name: &str) -> Option<Vec<(String, String)>> {
+    let from = From::read(s, ctes, enclosed, keys);
     if from.refused.is_some() {
         return None;
     }
@@ -654,7 +679,7 @@ fn select_origins<'a>(s: &'a Select, ctes: &[Cte<'a>], keys: &'a Keys, name: &st
         }
         match &from.items[i].source {
             Source::Table(t) => Some(vec![(t.clone(), column.to_string())]),
-            Source::Query(q, ctes) => body_origins(&q.body, &ctes_of(q, ctes), keys, &inner_name(column, &from.items[i].columns, || output_names(q, ctes, keys))?),
+            Source::Query(q, ctes, enclosed) => body_origins(&q.body, &ctes_of(q, ctes), *enclosed, keys, &inner_name(column, &from.items[i].columns, || output_names(q, ctes, *enclosed, keys))?),
             _ => None,
         }
     };
@@ -669,7 +694,7 @@ fn select_origins<'a>(s: &'a Select, ctes: &[Cte<'a>], keys: &'a Keys, name: &st
         },
         SelectItem::Wildcard(_) if !from.merged && from.items.len() == 1 => through(0, name),
         SelectItem::QualifiedWildcard(SelectItemQualifiedWildcardKind::ObjectName(n), _) => match n.0.as_slice() {
-            [ObjectNamePart::Identifier(q)] => from.items.iter().position(|it| it.alias == q.value.to_ascii_lowercase()).and_then(|i| through(i, name)),
+            [ObjectNamePart::Identifier(q)] => from.named(&q.value).and_then(|i| through(i, name)),
             _ => None,
         },
         _ => None,
@@ -691,22 +716,22 @@ fn select_origins<'a>(s: &'a Select, ctes: &[Cte<'a>], keys: &'a Keys, name: &st
 /// - A set operation's ([`set_keys`]).
 ///
 /// None for a VALUES list.
-fn output_keys(q: &Query, outer: &[Cte], keys: &Keys) -> Vec<Key> {
-    found(|found| &mut found.keys, q, outer, || {
+fn output_keys(q: &Query, outer: &[Cte], enclosed: bool, keys: &Keys) -> Vec<Key> {
+    found(|found| &mut found.keys, q, outer, enclosed, || {
         let ctes = ctes_of(q, outer);
-        body_keys(&q.body, &ctes, keys)
+        body_keys(&q.body, &ctes, enclosed, keys)
     })
 }
 
 /// [`output_keys`] of a query's body, with the WITH queries it sees.
-fn body_keys<'a>(body: &'a SetExpr, ctes: &[Cte<'a>], keys: &'a Keys) -> Vec<Key> {
+fn body_keys<'a>(body: &'a SetExpr, ctes: &[Cte<'a>], enclosed: bool, keys: &'a Keys) -> Vec<Key> {
     let s = match body {
         SetExpr::Select(s) => s,
-        SetExpr::Query(q) => return output_keys(q, ctes, keys),
-        SetExpr::SetOperation { op, set_quantifier, left, right } => return set_keys(op, set_quantifier, left, right, ctes, keys),
+        SetExpr::Query(q) => return output_keys(q, ctes, enclosed, keys),
+        SetExpr::SetOperation { op, set_quantifier, left, right } => return set_keys(op, set_quantifier, left, right, ctes, enclosed, keys),
         _ => return Vec::new(),
     };
-    let from = From::read(s, ctes, keys);
+    let from = From::read(s, ctes, enclosed, keys);
     if from.refused.is_some() {
         return Vec::new();
     }
@@ -793,13 +818,13 @@ fn body_keys<'a>(body: &'a SetExpr, ctes: &[Cte<'a>], keys: &'a Keys) -> Vec<Key
 /// whole row is a key, where every column is an exact number on both sides, which compare alike
 /// however the server joins their types. INTERSECT returns only rows of its left side, and EXCEPT a
 /// subset of them, with ALL or without, so those keep its keys. UNION ALL has none.
-fn set_keys<'a>(op: &ast::SetOperator, quantifier: &ast::SetQuantifier, left: &'a SetExpr, right: &'a SetExpr, ctes: &[Cte<'a>], keys: &'a Keys) -> Vec<Key> {
+fn set_keys<'a>(op: &ast::SetOperator, quantifier: &ast::SetQuantifier, left: &'a SetExpr, right: &'a SetExpr, ctes: &[Cte<'a>], enclosed: bool, keys: &'a Keys) -> Vec<Key> {
     let mut out = Vec::new();
     if matches!(op, ast::SetOperator::Intersect | ast::SetOperator::Except) {
-        out.extend(body_keys(left, ctes, keys));
+        out.extend(body_keys(left, ctes, enclosed, keys));
     }
     if !matches!(quantifier, ast::SetQuantifier::All | ast::SetQuantifier::AllByName) {
-        if let (Some(l), Some(r)) = (body_columns(left, ctes, keys), body_columns(right, ctes, keys)) {
+        if let (Some(l), Some(r)) = (body_columns(left, ctes, enclosed, keys), body_columns(right, ctes, enclosed, keys)) {
             let exact = !l.is_empty() && l.len() == r.len() && l.iter().zip(&r).all(|((_, a), (_, b))| a.is_some_and(Class::exact) && b.is_some_and(Class::exact));
             if exact {
                 out.push(l.into_iter().map(|(name, class)| Part { name, class }).collect());
@@ -812,10 +837,10 @@ fn set_keys<'a>(op: &ast::SetOperator, quantifier: &ast::SetQuantifier, left: &'
 /// The output columns of a query's body by position, each with its name in lower case and what
 /// it compares as where it is a column; `None` where the engine cannot name them all. A set
 /// operation's are its left side's names, and a class both sides share.
-fn body_columns<'a>(body: &'a SetExpr, ctes: &[Cte<'a>], keys: &'a Keys) -> Option<Vec<(String, Option<Class>)>> {
+fn body_columns<'a>(body: &'a SetExpr, ctes: &[Cte<'a>], enclosed: bool, keys: &'a Keys) -> Option<Vec<(String, Option<Class>)>> {
     match body {
         SetExpr::Select(s) => {
-            let from = From::read(s, ctes, keys);
+            let from = From::read(s, ctes, enclosed, keys);
             if from.refused.is_some() {
                 return None;
             }
@@ -842,9 +867,9 @@ fn body_columns<'a>(body: &'a SetExpr, ctes: &[Cte<'a>], keys: &'a Keys) -> Opti
             }
             Some(out)
         }
-        SetExpr::Query(q) => body_columns(&q.body, &ctes_of(q, ctes), keys),
+        SetExpr::Query(q) => body_columns(&q.body, &ctes_of(q, ctes), enclosed, keys),
         SetExpr::SetOperation { left, right, .. } => {
-            let (l, r) = (body_columns(left, ctes, keys)?, body_columns(right, ctes, keys)?);
+            let (l, r) = (body_columns(left, ctes, enclosed, keys)?, body_columns(right, ctes, enclosed, keys)?);
             (l.len() == r.len()).then(|| l.into_iter().zip(r).map(|((name, a), (_, b))| (name, if a == b { a } else { None })).collect())
         }
         _ => None,
@@ -861,7 +886,7 @@ pub(crate) fn at_most_one(q: &Query, keys: &Keys) -> Result<(), String> {
         }
     }
     let _outer = Outer(FOUND.with(|found| found.borrow_mut().replace(Found::default())));
-    at_most_one_in(q, &[], keys)
+    at_most_one_in(q, &[], false, keys)
 }
 
 /// What [`at_most_one_in`] and [`output_keys`] found of each query while one [`at_most_one`] runs,
@@ -875,9 +900,9 @@ struct Found {
     keys: HashMap<Asked, Vec<Key>>,
 }
 
-/// A query, by its place, and the WITH queries it sees, each by its name, its body's place, how
-/// many before it its body sees, and its column list.
-type Asked = (usize, Vec<(String, Option<usize>, usize, Vec<String>)>);
+/// A query, by its place, whether it sees an enclosing query's FROM items, and the WITH queries it
+/// sees, each by its name, its body's place, how many before it its body sees, and its column list.
+type Asked = (usize, bool, Vec<(String, Option<usize>, usize, Vec<String>)>);
 
 thread_local! {
     static FOUND: RefCell<Option<Found>> = const { RefCell::new(None) };
@@ -891,12 +916,12 @@ thread_local! {
 
 /// What `find` answers for `q` under `outer`, found once while an [`at_most_one`] runs, and anew
 /// outside one. `table` is where the answers of `find`'s kind are kept.
-fn found<T: Clone>(table: fn(&mut Found) -> &mut HashMap<Asked, T>, q: &Query, outer: &[Cte], find: impl FnOnce() -> T) -> T {
+fn found<T: Clone>(table: fn(&mut Found) -> &mut HashMap<Asked, T>, q: &Query, outer: &[Cte], enclosed: bool, find: impl FnOnce() -> T) -> T {
     let running = FOUND.with(|found| found.borrow().is_some());
     if !running {
         return find();
     }
-    let asked: Asked = (q as *const Query as usize, outer.iter().map(|(name, body, sees, columns)| (name.clone(), body.map(|b| b as *const Query as usize), *sees, columns.clone())).collect());
+    let asked: Asked = (q as *const Query as usize, enclosed, outer.iter().map(|(name, body, sees, columns)| (name.clone(), body.map(|b| b as *const Query as usize), *sees, columns.clone())).collect());
     if let Some(answer) = FOUND.with(|found| found.borrow_mut().as_mut().and_then(|found| table(found).get(&asked).cloned())) {
         return answer;
     }
@@ -911,11 +936,11 @@ fn found<T: Clone>(table: fn(&mut Found) -> &mut HashMap<Asked, T>, q: &Query, o
     answer
 }
 
-fn at_most_one_in(q: &Query, outer: &[Cte], keys: &Keys) -> Result<(), String> {
-    found(|found| &mut found.at_most_one, q, outer, || at_most_one_anew(q, outer, keys))
+fn at_most_one_in(q: &Query, outer: &[Cte], enclosed: bool, keys: &Keys) -> Result<(), String> {
+    found(|found| &mut found.at_most_one, q, outer, enclosed, || at_most_one_anew(q, outer, enclosed, keys))
 }
 
-fn at_most_one_anew(q: &Query, outer: &[Cte], keys: &Keys) -> Result<(), String> {
+fn at_most_one_anew(q: &Query, outer: &[Cte], enclosed: bool, keys: &Keys) -> Result<(), String> {
     if matches!(const_limit(q), Some(Some(n)) if (0..=1).contains(&n)) {
         return Ok(());
     }
@@ -926,7 +951,7 @@ fn at_most_one_anew(q: &Query, outer: &[Cte], keys: &Keys) -> Result<(), String>
     }
     let s = select_of(q)?;
     let ctes = ctes_of(q, outer);
-    let from = From::read(s, &ctes, keys);
+    let from = From::read(s, &ctes, enclosed, keys);
     if let Some(why) = from.refused {
         return Err(why.into());
     }
@@ -982,13 +1007,14 @@ fn grouped_by<'a>(s: &'a Select, g: &'a Expr) -> Option<&'a Expr> {
     }
 }
 
-/// Every table a query reads anywhere in its FROM trees, as written, a WITH query's name never.
+/// Every table a query reads anywhere in its FROM trees, as written: every name but one that each
+/// server reads as a WITH query ([`crate::mysql_names::with_query`]).
 pub(crate) fn tables_anywhere(q: &Query, schema: Option<&str>) -> Vec<String> {
     fn query(q: &Query, ctes: &mut Vec<String>, schema: Option<&str>, out: &mut Vec<String>) {
         let depth = ctes.len();
         if let Some(w) = &q.with {
             for c in &w.cte_tables {
-                ctes.push(c.alias.name.value.to_ascii_lowercase());
+                ctes.push(c.alias.name.value.clone());
                 query(&c.query, ctes, schema, out);
             }
         }
@@ -1016,8 +1042,9 @@ pub(crate) fn tables_anywhere(q: &Query, schema: Option<&str>) -> Vec<String> {
     fn factor(f: &TableFactor, ctes: &mut Vec<String>, schema: Option<&str>, out: &mut Vec<String>) {
         match f {
             TableFactor::Table { name, args: None, .. } => match name.0.as_slice() {
-                [ObjectNamePart::Identifier(t)] if !ctes.contains(&t.value.to_ascii_lowercase()) => out.push(t.value.clone()),
-                [ObjectNamePart::Identifier(s), ObjectNamePart::Identifier(t)] if schema.is_some_and(|own| own.eq_ignore_ascii_case(&s.value)) => out.push(t.value.clone()),
+                [ObjectNamePart::Identifier(t)] if !matches!(crate::mysql_names::with_query(ctes.iter().map(String::as_str), &t.value), Reads::With(_)) => out.push(t.value.clone()),
+                // The view's own schema as it is spelled ([`From::factor`]).
+                [ObjectNamePart::Identifier(s), ObjectNamePart::Identifier(t)] if schema == Some(s.value.as_str()) => out.push(t.value.clone()),
                 _ => {}
             },
             TableFactor::Derived { subquery, .. } => query(subquery, ctes, schema, out),
