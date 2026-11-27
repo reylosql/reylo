@@ -482,7 +482,8 @@ To say a value is never null, write `coalesce(x, …)` or `where x is not null`.
 Reylo infers [how many rows](/docs/inference#unique-keys) a query returns. On SQLite:
 
 - **`integer primary key`** is a key, and so is a unique index. A partial index or one on an expression isn't.
-- **An insert of one row with `returning`** returns that row. It returns `null` where something can skip the row, such as `on conflict do nothing`.
+- **An insert with `returning`** returns a row per row it inserts. An `insert … select` inserts a row per row of its `select`. It returns `null` where something can skip the row, such as `on conflict do nothing`.
+- **An `update … from`** writes each row once, whatever it joins. So it returns a row or `null` where the join pins the updated table's key.
 - **A key matches exactly or not at all.** It doesn't count when a `TEXT` key is compared with a number, since `'1'` and `'01'` both match. Nor does it under another collation.
 - **An unnamed expression** among several columns is a type error where its text isn't an identifier, as with `count(*)`: SQLite names the column by that text, and leaves the name unspecified from one release to the next. Name it with `as`.
 

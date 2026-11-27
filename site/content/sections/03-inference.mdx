@@ -532,6 +532,7 @@ What counts as a key:
 Also a key match:
 
 - a join on the joined table's key
+- a key equal to a subquery's value, or `in` a subquery of one row
 - a unique index on an expression or with a `where`
 - a `distinct` or `group by` over values the `where` pins
 - a subquery, a `with` query or a view that keeps a key
@@ -542,6 +543,7 @@ Also a key match:
 Also a key match:
 
 - a join on the joined table's numeric key
+- a numeric key equal to a subquery's numeric value, or `in` a subquery of one row
 - a `distinct` or `group by` over values the `where` pins
 - a derived table, a `with` query or a view that keeps a key
 
@@ -553,6 +555,7 @@ A unique index on an expression gives `many`.
 Also a key match:
 
 - a join on the joined table's key
+- a key equal to a subquery's value, or `in` a subquery of one row
 - a `distinct` or `group by` over values the `where` pins
 - a subquery, a `with` query or a view that keeps a key
 
