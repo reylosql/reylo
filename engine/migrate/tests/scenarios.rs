@@ -9047,8 +9047,8 @@ create trigger kids_note after insert on kids begin update parents set name = na
 
     /// On a database whose search_path names, before `public`, a schema a migration makes, the history
     /// stays the one table Reylo made: later runs read what ran, and a change to a grant's option runs
-    /// as any change does. Of two tables of its name, as an earlier version made in that schema, the
-    /// history is the one that recorded the latest run, whichever schema it is in.
+    /// as any change does. Two tables of its name, as an earlier version made in that schema, are
+    /// refused with what each holds, until one is dropped.
     pub async fn the_history_stays_where_it_was_made_whatever_the_search_path(mut p: P) {
         p.exec("do $$ begin create role madv_readers; exception when duplicate_object or unique_violation then null; end $$").await;
         p.exec(&format!("alter database {} set search_path = private, public", p.name)).await;
@@ -9066,15 +9066,17 @@ create trigger kids_note after insert on kids begin update parents set name = na
         let ran = |schema: &str| format!("select count(*)::text as n from {schema}.__reylo_migrations where applied_at is not null");
         assert_eq!(p.rows(&ran("public")).await[0].text("n"), "2");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
-        // An empty second table is no history.
-        p.exec("create table private.__reylo_migrations (like public.__reylo_migrations)").await;
-        assert_eq!(p.status().await, 0, "{}", p.peek());
-        // One that recorded the later runs is, as a repair on an earlier version left it.
-        p.exec("insert into private.__reylo_migrations select * from public.__reylo_migrations; delete from public.__reylo_migrations where name like '%readers.sql'").await;
+        // A second table, as a repair on an earlier version left it: the later runs in it, the first
+        // in the one before.
+        p.exec("create table private.__reylo_migrations (like public.__reylo_migrations); insert into private.__reylo_migrations select * from public.__reylo_migrations; delete from public.__reylo_migrations where name like '%readers.sql'").await;
+        let refused = reylo_migrate::status(&p.opts(), &mut |_: &str| {}).await.unwrap_err().0;
+        assert_has!(refused.clone(), r"This database holds 2 of Reylo's history tables");
+        assert_has!(refused.clone(), r"In public\.__reylo_migrations, 1 migration ran, at ");
+        assert_has!(refused, r"In private\.__reylo_migrations, 2 migrations ran, the last at ");
+        p.exec("drop table public.__reylo_migrations").await;
         assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_eq!(p.rows(&ran("private")).await[0].text("n"), "2");
-        assert_eq!(p.rows(&ran("public")).await[0].text("n"), "1");
     }
 
     /// A Supabase database that began without one of Supabase's extensions replays its migrations from

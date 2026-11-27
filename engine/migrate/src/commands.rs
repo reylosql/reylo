@@ -326,34 +326,43 @@ fn migrations_of(dir: &Path, named: impl Iterator<Item = (String, Option<String>
 /// The history table as a statement names it. On Postgres with its schema: the one a database has
 /// it in, else the one `create table` would make it in now. Named without its schema, a migration
 /// that makes a schema the search_path reads before the table's would hide it behind a new, empty
-/// one, as an earlier version did: of two such tables, the history is the one that recorded the
-/// latest run, which a repair run on that version may have written to either.
+/// one, as an earlier version did. Where a database holds two, neither may be its whole history, and
+/// which one the next statement takes must not turn on what an earlier one emptied: refused, with
+/// what each holds.
 async fn history_table(db: &mut Db) -> Result<String, Error> {
     if db.dialect() != Dialect::Postgres {
         return Ok(HISTORY_TABLE.to_string());
     }
-    // Only one the session may read: a query of another would end the transaction it runs in.
-    let found = db
-        .rows(&format!(
-            "select format('%I.%I', n.nspname, c.relname) as t from pg_class c join pg_namespace n on n.oid = c.relnamespace
-             where c.relname = '{HISTORY_TABLE}' and c.relkind in ('r', 'p') and n.nspname not like 'pg\\_temp%'
-               and has_schema_privilege(n.oid, 'USAGE') and has_table_privilege(c.oid, 'SELECT')
-             order by c.oid"
-        ))
-        .await?;
+    let found = db.rows(&format!("select format('%I.%I', n.nspname, c.relname) as t from pg_class c join pg_namespace n on n.oid = c.relnamespace where {} order by c.oid", history_tables("c", "n"))).await?;
     let tables: Vec<String> = found.iter().map(|r| r.text("t").to_string()).collect();
-    let mut latest: Option<(f64, &String)> = None;
-    for table in &tables {
-        let at = if tables.len() == 1 { 0.0 } else { db.rows(&format!("select coalesce(extract(epoch from max(applied_at)), 0)::text as at from {table}")).await?.first().and_then(|r| r.text("at").parse().ok()).unwrap_or(0.0) };
-        if latest.is_none_or(|(best, _)| at > best) {
-            latest = Some((at, table));
+    match tables.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => {
+            let rows = db.rows(&format!("select coalesce(case when current_schema() is not null then format('%I.%I', current_schema(), '{HISTORY_TABLE}') end, '{HISTORY_TABLE}') as t")).await?;
+            Ok(rows.first().map(|r| r.text("t").to_string()).unwrap_or_else(|| HISTORY_TABLE.to_string()))
+        }
+        several => {
+            let mut lines = vec![format!("This database holds {} of Reylo's history tables, where it keeps one", several.len())];
+            for table in several {
+                let rows = db.rows(&format!("select count(applied_at)::text as n, coalesce(max(applied_at)::text, '') as at from {table}")).await?;
+                let (n, at) = rows.first().map(|r| (r.text("n").to_string(), r.text("at").to_string())).unwrap_or_default();
+                lines.push(match n.as_str() {
+                    "0" => format!("  In {table}, no migration ran"),
+                    "1" => format!("  In {table}, 1 migration ran, at {at}"),
+                    _ => format!("  In {table}, {n} migrations ran, the last at {at}"),
+                });
+            }
+            lines.push("  Drop the one that isn't its history, then see what it ran:".to_string());
+            lines.push("    reylo migrate status".to_string());
+            Err(Error(lines.join("\n")))
         }
     }
-    if let Some((_, table)) = latest {
-        return Ok(table.clone());
-    }
-    let rows = db.rows(&format!("select coalesce(case when current_schema() is not null then format('%I.%I', current_schema(), '{HISTORY_TABLE}') end, '{HISTORY_TABLE}') as t")).await?;
-    Ok(rows.first().map(|r| r.text("t").to_string()).unwrap_or_else(|| HISTORY_TABLE.to_string()))
+}
+
+/// Which `pg_class` row `c` in schema `n` is a history table of Reylo's the session may read: in a
+/// schema of its own, not a session's temporary one.
+fn history_tables(c: &str, n: &str) -> String {
+    format!("{c}.relname = '{HISTORY_TABLE}' and {c}.relkind in ('r', 'p') and {n}.nspname not like 'pg\\_temp%' and has_schema_privilege({n}.oid, 'USAGE') and has_table_privilege({c}.oid, 'SELECT')")
 }
 
 fn history_ddl(d: Dialect, history: &str) -> String {
@@ -385,7 +394,7 @@ fn sql_col(d: Dialect) -> &'static str {
 
 async fn has_history(db: &mut Db) -> Result<bool, Error> {
     let sql = match db.dialect() {
-        Dialect::Postgres => format!("select exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relname = '{HISTORY_TABLE}' and c.relkind in ('r', 'p') and n.nspname not like 'pg\\_temp%') as ok"),
+        Dialect::Postgres => format!("select exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace where {}) as ok", history_tables("c", "n")),
         Dialect::Mysql => format!("select count(*) > 0 as ok from information_schema.tables where table_schema = database() and table_name = '{HISTORY_TABLE}'"),
         Dialect::Sqlite => format!("select count(*) > 0 as ok from sqlite_schema where name = '{HISTORY_TABLE}'"),
     };
