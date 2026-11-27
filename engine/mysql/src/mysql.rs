@@ -33,19 +33,12 @@ const SQL_MODE_QUERY: &str = "select @@session.sql_mode";
 /// column of a table or a view ([`settle`]).
 const VIEWS_QUERY: &str = "select table_name from information_schema.views";
 
-/// The stored functions of the session's database, which answer a call of their name written
-/// without a schema wherever the server has no built-in of it. Asked once for a session
-/// ([`not_builtin`]).
-const FUNCTIONS_QUERY: &str = "select cast(routine_name as char) from information_schema.routines where routine_schema = database() and routine_type = 'FUNCTION'";
-
 /// The built-ins MySQL moved out of the server from the version given: 9.6 moved `md5`, `sha` and
 /// `sha1` into the classic_hashing component, which is not installed by default. There a call of
-/// one is a loadable function's or a stored function's, whatever either does with NULL.
+/// one is a loadable function's or a stored function's, whatever either does with NULL. Every
+/// other name a rule reads is a built-in on 8.0.46, 8.4.11, 9.7.2 and 26.7.0, where a stored
+/// function of its name answers no call written without a schema.
 const MOVED_OUT: &[((u32, u32), &[&str])] = &[((9, 6), &["md5", "sha", "sha1"])];
-
-/// The newest version the engine's rules were measured on: 8.0.46, 8.4.11, 9.7.2 and 26.7.0 have a
-/// built-in of every name a rule reads but [`MOVED_OUT`]'s.
-const MEASURED_THROUGH: (u32, u32) = (26, 7);
 
 thread_local! {
     /// The names a call written without a schema reaches no built-in of in the session of the
@@ -53,33 +46,22 @@ thread_local! {
     static NOT_BUILTIN: std::cell::RefCell<HashSet<String>> = std::cell::RefCell::new(HashSet::new());
 }
 
-/// The names, in lower case, that a call written without a schema reaches something other than
-/// the built-in of, by what [`FUNCTIONS_QUERY`] and [`crate::structured::MYSQL_SERVER_QUERY`]
-/// answered (`None` for one not answered). The server calls its built-in of the name where it has
-/// one, and where it has none, a loadable function of the name or else the stored function of the
-/// session's database. So each built-in the server's version moved out is here ([`MOVED_OUT`]).
-/// On a version past those measured ([`MEASURED_THROUGH`]), which may have moved more out, and on
-/// MariaDB, which lacks some of MySQL's, so is the name of each stored function, which where the
-/// server has the built-in only keeps the engine from claiming what that one does. A version not
-/// read as MySQL's or MariaDB's is taken as past the measured, with every move.
-fn not_builtin(functions: Option<&[Vec<Value>]>, server: Option<&[Vec<Value>]>) -> HashSet<String> {
-    let stored = || functions.unwrap_or_default().iter().filter_map(|row| row.first().and_then(as_str)).map(str::to_ascii_lowercase).collect::<HashSet<String>>();
+/// The names, in lower case, that a call written without a schema reaches no built-in of on the
+/// server whose version [`crate::structured::MYSQL_SERVER_QUERY`] answered (`None` where it has
+/// not): each built-in the version moved out ([`MOVED_OUT`]). Those are read only by rules that
+/// narrow a type, so reading one as no built-in where the component answers only claims less.
+/// MariaDB has all three, and a version not read takes every move.
+fn not_builtin(server: Option<&[Vec<Value>]>) -> HashSet<String> {
     let version = server.and_then(|rows| rows.first()).and_then(|row| row.first()).and_then(as_str).unwrap_or_default();
     if version.to_ascii_lowercase().contains("mariadb") {
-        return stored();
+        return HashSet::new();
     }
     let mut parts = version.split(|c: char| !c.is_ascii_digit());
     let at = match (parts.next().and_then(|p| p.parse().ok()), parts.next().and_then(|p| p.parse().ok())) {
         (Some(major), Some(minor)) => (major, minor),
         _ => (u32::MAX, u32::MAX),
     };
-    let mut names = if at > MEASURED_THROUGH { stored() } else { HashSet::new() };
-    for (from, moved) in MOVED_OUT {
-        if at >= *from {
-            names.extend(moved.iter().map(|n| n.to_string()));
-        }
-    }
-    names
+    MOVED_OUT.iter().filter(|(from, _)| at >= *from).flat_map(|(_, moved)| moved.iter().map(|n| n.to_string())).collect()
 }
 
 /// One row per column of every unique index of the named tables, in key order, with the column's
@@ -199,12 +181,11 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     // What the engine prints of the statement, for the probes it describes, writes its strings
     // as the session reads them back.
     syntax::mysql::ast::set_backslash_escapes(dialect.0.backslash_escapes);
-    // Which names a call reaches no built-in of, asked once a session: until both are answered,
-    // in the first round, the analysis only gathers what it needs.
-    let functions = host.query(FUNCTIONS_QUERY, Vec::new(), Scope::Session);
+    // Which names a call reaches no built-in of, by the server's version, asked once a session:
+    // until it is answered, in the first round, the analysis only gathers what it needs.
     let server = host.query(crate::structured::MYSQL_SERVER_QUERY, Vec::new(), Scope::Session);
-    let shadowed = not_builtin(functions.as_ref().map(|r| r.as_deref().unwrap_or_default()), server.as_ref().map(|r| r.as_deref().unwrap_or_default()));
-    NOT_BUILTIN.with(|names| *names.borrow_mut() = shadowed);
+    let moved = not_builtin(server.as_ref().map(|r| r.as_deref().unwrap_or_default()));
+    NOT_BUILTIN.with(|names| *names.borrow_mut() = moved);
     let statement = match lex::one_statement(sql, lexed, KINDS) {
         Ok(statement) => statement,
         Err(message) => return Some(crate::analysis::bare(sql, lexed, Dialect::Mysql, vec![Diagnostic { message, start: 0, length: sql.trim_end().len().max(1), code: 10, server_code: None }])),
@@ -271,7 +252,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
         crate::mysql_params::prefetch(statement, &names, host);
         crate::errors::prefetch(kind(Some(statement)), &crate::mysql_params::tables(statement), &rewritten.sql, host);
     }
-    let (raw, (misread, ignore_space), pipes, _, _) = (raw?, misread?, pipes?, functions?, server?);
+    let (raw, (misread, ignore_space), pipes, _) = (raw?, misread?, pipes?, server?);
     let misread = misread.or_else(|| pipes.clone().err());
     // The tree again where the session reads `||` or a spaced built-in otherwise than the default.
     let session = SessionDialect(dialect.0, !matches!(pipes, Ok(false)), ignore_space);
@@ -1712,7 +1693,7 @@ fn outer_flags(q: &Query, host: &Host) -> Lazy<Vec<usize>> {
 /// make NULL. `count` is how many columns the query has.
 fn through_derived(q: &Query, count: Option<usize>, views: &HashSet<String>, host: &Host, dialect: &SessionDialect, depth: usize) -> Lazy<Vec<usize>> {
     use crate::mysql_derived::{each_target, filler, standalone, wrapper};
-    if depth >= MAX_DERIVED_DEPTH || !crate::mysql_derived::is_materialized(q) || crate::mysql_derived::with_outlives_operand(q) {
+    if depth >= MAX_DERIVED_DEPTH || !crate::mysql_derived::is_materialized(q) || crate::mysql_derived::with_outlives_operand(q) || crate::mysql_derived::with_rebound(q) {
         return Some(Vec::new());
     }
     // A table read whole, as the copy reads each view, proves nothing of its own: it is no target
@@ -1799,7 +1780,7 @@ fn through_recursive(q: &Query, count: Option<usize>, views: &HashSet<String>, h
     use crate::mysql_derived::{filler, hypothesis, members, read_through, reads_through};
     let Some(with) = q.with.as_ref().filter(|w| w.recursive) else { return Some(Vec::new()) };
     // Each WITH query is proven by statements of its own, which may prove those it reads again.
-    if with.cte_tables.len() > MAX_DERIVED || depth >= MAX_DERIVED_DEPTH || !crate::mysql_derived::is_materialized(q) || crate::mysql_derived::with_outlives_operand(q) {
+    if with.cte_tables.len() > MAX_DERIVED || depth >= MAX_DERIVED_DEPTH || !crate::mysql_derived::is_materialized(q) || crate::mysql_derived::with_outlives_operand(q) || crate::mysql_derived::with_rebound(q) {
         return Some(Vec::new());
     }
     let query_of = |text: &str| match parse(dialect, text).ok().map(|mut v| (v.pop(), v.is_empty())) {
@@ -3586,8 +3567,8 @@ pub(crate) const AGGREGATES: &[&str] = &["count", "sum", "avg", "min", "max", "g
 /// with a schema or written in backticks: the first is a stored function, whatever built-in shares
 /// its name, and so is the second where the built-in is one the grammar names (`` `count`(x) ``,
 /// `` `coalesce`(x) ``). A plain unqualified name is the built-in's, but where the session's
-/// server may have none of it ([`not_builtin`]): then, as for the others, a function that returns
-/// the type it declares.
+/// server has none of it ([`not_builtin`]): then, as for the others, a function that returns the
+/// type it declares.
 /// Every rule the engine keeps of a built-in reads the name here, so none claims what one does of
 /// a function that is not it.
 pub(crate) fn builtin(f: &ast::Function) -> String {
@@ -4642,9 +4623,8 @@ mod tests {
 
     #[test]
     fn a_name_the_session_answers_with_a_function_of_its_own_is_no_built_in() {
-        let rows = |values: &[&str]| values.iter().map(|v| vec![json!(v)]).collect::<Vec<_>>();
         let moved = |version: &str| {
-            let names = not_builtin(Some(&[][..]), Some(rows(&[version]).as_slice()));
+            let names = not_builtin(Some(&[vec![json!(version)]][..]));
             assert_eq!(names.contains("sha"), names.contains("md5"));
             names.contains("md5") && names.contains("sha1")
         };
@@ -4653,14 +4633,7 @@ mod tests {
         assert!(!moved("8.0.46") && !moved("8.4.11-log") && !moved("9.5.0"));
         assert!(moved("9.6.0") && moved("9.7.2-commercial") && moved("26.7.0"));
         assert!(!moved("11.8.9-MariaDB") && moved("") && moved("x"));
-        assert!(not_builtin(None, None).contains("md5"));
-        // A stored function of the session's database hides its name, in any case, on a version
-        // past those measured, which may have moved more built-ins out, and on MariaDB.
-        let functions = rows(&["Lower", "my_fn"]);
-        let stored = |version: &str| not_builtin(Some(functions.as_slice()), Some(rows(&[version]).as_slice()));
-        assert!(stored("8.4.11").is_empty() && stored("26.7.0").len() == 3);
-        assert!(stored("26.10.0").contains("lower") && stored("27.1.0").contains("my_fn") && !stored("27.1.0").contains("count"));
-        assert!(stored("11.8.9-MariaDB").contains("lower") && !stored("11.8.9-MariaDB").contains("md5"));
+        assert!(not_builtin(None).contains("md5"));
         // Every rule of a built-in reads the name through `builtin`.
         let e = |text: &str| parse_expr(text).unwrap();
         assert!(deterministic(&e("md5('a')")) && value_class(&e("sha1('a')")) == Some(Class::Text));

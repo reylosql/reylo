@@ -211,6 +211,53 @@ pub fn with_outlives_operand(q: &Query) -> bool {
     q.with.as_ref().is_some_and(|w| w.cte_tables.iter().any(|c| with_outlives_operand(&c.query))) || body(&q.body)
 }
 
+/// Whether a WITH query of the statement names a name a WITH nested anywhere in it declares: in a
+/// derived table, a LATERAL one, a subquery or a WITH query's own query. MySQL reads a WITH
+/// query's names again where it is read (measured on 8.0.46, 8.4.11, 9.7.2 and 26.7.0), so read
+/// inside such a WITH, the name is that WITH's query, not what the WITH query reads on its own:
+/// `with z as (select x from t4) select d.x from (with t4 as (select null as x) select z.x from
+/// z) d` returns NULL. Nothing that follows a name to its WITH query reads such a statement. A
+/// declaration is found in the statement's text as a name before `AS (`, which also finds a named
+/// window, and so only claims less.
+pub fn with_rebound(q: &Query) -> bool {
+    let Some(with) = &q.with else { return false };
+    let mut rest = q.clone();
+    rest.with = None;
+    let texts: Vec<String> = with.cte_tables.iter().map(|c| c.query.to_string()).chain([rest.to_string()]).collect();
+    if texts.iter().any(|t| !t.is_ascii()) {
+        return true;
+    }
+    // A WITH of a WITH query's own query is that query's to read, which its own analysis does.
+    (0..with.cte_tables.len()).any(|i| {
+        let elsewhere: Vec<String> = texts.iter().enumerate().filter(|(k, _)| *k != i).flat_map(|(_, t)| declared(t)).collect();
+        elsewhere.iter().any(|name| names_word(&texts[i], name))
+    })
+}
+
+/// The names a text declares before `AS (`, in a WITH or a WINDOW, each with any column list.
+fn declared(text: &str) -> Vec<String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut out = Vec::new();
+    for (i, word) in words.iter().enumerate() {
+        if !word.eq_ignore_ascii_case("as") || !words.get(i + 1).is_some_and(|next| next.starts_with('(')) || i == 0 {
+            continue;
+        }
+        // The name, and before it a column list it may have: `x (a, b) AS (`.
+        let mut at = i - 1;
+        if words[at].ends_with(')') {
+            while at > 0 && !words[at].starts_with('(') {
+                at -= 1;
+            }
+            at = at.saturating_sub(1);
+        }
+        let name = words[at].trim_end_matches(|c: char| c == ',' || c == '(').trim_matches('`');
+        if !name.is_empty() {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
 /// A derived table or a WITH query whose columns the statement reads.
 pub struct Target<'a> {
     pub query: &'a mut Query,
@@ -302,8 +349,17 @@ pub fn standalone(q: &Query, scope: Option<&With>) -> Option<Query> {
 /// of the same name hides, which is what the query reads by that name. Both in one WITH would
 /// declare the name twice, which the server refuses. `None` where a WITH query reads the hidden
 /// one: one in scope written after it, or an own one written before the one that hides it or
-/// being it. Left out, the name would read a table instead.
+/// being it. Left out, the name would read a table instead. `None` too where a WITH query in
+/// scope names any of the query's own: MySQL reads a WITH query's names again where it is read
+/// (measured on 8.0.46, 8.4.11, 9.7.2 and 26.7.0), so read from the query, its name is the
+/// query's own, while merged in front of them it would be a table's.
 fn unhidden(scope: &[Cte], own: &[Cte]) -> Option<Vec<Cte>> {
+    if !own.iter().all(|o| plain_name(&o.alias.name.value)) || scope.iter().any(|c| {
+        let text = c.query.to_string();
+        !text.is_ascii() || own.iter().any(|o| names_word(&text, &o.alias.name.value))
+    }) {
+        return None;
+    }
     let mut visible = Vec::new();
     for (i, cte) in scope.iter().enumerate() {
         let name = &cte.alias.name.value;
@@ -613,6 +669,26 @@ mod tests {
     }
 
     #[test]
+    fn a_with_query_read_inside_a_with_of_a_name_it_reads_is_rebound() {
+        for sql in [
+            "with z as (select p.x from t3 left join t4 p on p.k = t3.k where p.k is not null) select d.x from (with t4 as (select k, null as x from t3) select z.x from z) d",
+            "with z as (select x from t4) select l.x from t3 join lateral (with t4 as (select 1 as x) select z.x from z) l on true",
+            "with z as (select x from t4) select (with t4 as (select 1 as x) select z.x from z limit 1) as x",
+            "with w as (select x from t4), t4 as (select 1 as x) select d.x from (with t4 (x) as (select 2) select w.x from w) d",
+            "with z as (select x from t4), y as (with t4 as (select 1 as x) select z.x from z) select x from y",
+        ] {
+            assert!(with_rebound(&query(sql)), "{sql}");
+        }
+        for sql in [
+            "with z as (select x from t4) select d.x from (with y as (select 1 as x) select z.x from z, y) d",
+            "with z as (with t4 as (select 1 as x) select x from t4) select x from z",
+            "select d.x from (with t4 as (select 1 as x) select x from t4) d",
+        ] {
+            assert!(!with_rebound(&query(sql)), "{sql}");
+        }
+    }
+
+    #[test]
     fn a_derived_query_stands_alone_with_the_with_queries_in_scope() {
         let alone = |sql: &str| {
             let mut q = query(sql);
@@ -633,6 +709,9 @@ mod tests {
         assert_eq!(alone("with x as (select 1 as a) select d.a from (with y as (select a from x), x as (select 2 as a) select a from y) d")[1], None);
         assert_eq!(alone("with x as (select 1 as a) select d.a from (with x as (select a + 1 as a from x) select a from x) d")[1], None);
         assert_eq!(alone("with x as (select 1 as a), z as (select a from x) select d.a from (with x as (select 2 as a) select a from x join z using (a)) d")[2], None);
+        // MySQL reads a WITH query's names again where it is read: inside the derived table, z's
+        // `t4` is the derived table's own.
+        assert_eq!(alone("with z as (select k from t4) select d.k from (with t4 as (select 1 as k) select z.k from z) d")[1], None);
     }
 
     #[test]
