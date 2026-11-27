@@ -738,6 +738,24 @@ mod tests {
     }
 
     #[test]
+    fn a_qualifier_two_from_items_answer_to_without_regard_to_case_proves_nothing() {
+        // Where the server keeps case, `A` and `a` are two items and a test of one says nothing of
+        // the other. Where it folds names, a table's alias stands beside a derived table's that
+        // differs from it in case alone, and `c.x` is the derived table's, which has the column.
+        for sql in [
+            "select a.c from t A left join t a on a.id = A.id + 100 where A.id > 0",
+            "select d.w from (select c as w from t) D left join (select c as w from t) d on d.w = D.w + 100 where D.w is not null",
+            "select c.id from (select 7 x) C left join t c on c.id = C.x + 100 where c.x > 0",
+        ] {
+            assert_eq!(reduced(sql), None, "{sql}");
+        }
+        assert_eq!(tested(&query("select a.c as ac from t A left join t a on a.id = A.id + 100 where A.c is not null")), Vec::<usize>::new());
+        // One item alone in another case is that item, as on a server that folds names.
+        assert!(reduced("select p.title from users U left join posts P on P.user_id = U.id where p.title like 'h%'").is_some());
+        assert_eq!(tested(&query("select P.title from users u left join posts p on p.user_id = u.id where p.title is not null")), vec![0]);
+    }
+
+    #[test]
     fn an_aggregate_under_a_plain_group_by_follows_its_argument() {
         let probe = |sql: &str| grouped_probe(&query(sql)).map(|(q, follows, always)| (q.to_string(), follows, always));
         // The arguments, read from the rows before they are grouped, and the JSON aggregates.

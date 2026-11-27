@@ -3826,15 +3826,55 @@ mod tests {
     #[test]
     fn a_table_takes_the_keys_the_server_holds_under_its_name() {
         let row = |t: &str, c: &str| vec![json!(t), json!("PRIMARY"), json!(c), json!("int")];
+        // The catalog answers with the columns of every table it holds, keyless ones too.
+        let catalog = |rows: Vec<Vec<Value>>, tables: &[&str]| {
+            let mut keys = keys_of(rows);
+            for table in tables {
+                keys.columns.insert(table.to_string(), vec![("id".to_string(), Class::Number), ("other".to_string(), Class::Number)]);
+            }
+            keys
+        };
         // The server holds `Users` and `users` for two tables (lower_case_table_names 0) and
         // answers with the one named; where it holds them for one it answers with its own name.
-        let exact = keys_of(vec![row("Users", "id")]);
+        let exact = catalog(vec![row("Users", "id")], &["Users"]);
         assert_eq!(exact.keys("Users"), Some(&vec![vec!["id".to_string()]]));
         assert_eq!(exact.keys("users"), Some(&vec![vec!["id".to_string()]]));
-        let both = keys_of(vec![row("Users", "id"), row("users", "other")]);
+        let both = catalog(vec![row("Users", "id"), row("users", "other")], &["Users", "users"]);
         assert_eq!(both.keys("users"), Some(&vec![vec!["other".to_string()]]));
         assert_eq!(both.keys("Users"), Some(&vec![vec!["id".to_string()]]));
         assert!(both.keys("USERS").is_none());
+        // A table with no key beside one that differs from it in case alone takes none of its keys,
+        // and a table beside a view whose name differs from its in case alone is no view.
+        let mut keyless = catalog(vec![row("Users", "id")], &["Users", "users", "V", "v"]);
+        assert!(keyless.keys("users").is_none());
+        let Some(Statement::Query(view)) = parse(&SessionDialect::default(), "select id, other from Users where id = 1").unwrap().pop() else { panic!("not a query") };
+        keyless.views.insert("V".to_string(), *view);
+        assert!(keyless.view("V").is_some());
+        assert!(keyless.view("v").is_none());
+        keyless.columns.remove("v");
+        assert!(keyless.view("v").is_some());
+    }
+
+    #[test]
+    fn a_qualifier_in_another_case_reaches_its_item_where_no_enclosing_query_may_hold_one_spelled_so() {
+        // With no enclosing query, `u` is `U` where the server folds names, and the server that
+        // keeps case refuses the statement; a qualifier spelled as its item is that item anywhere.
+        for sql in [
+            "select u.email from users U where u.id = ?",
+            "select d.email from (select X.email from users x where X.id = ?) d",
+            "with w as (select X.email from users x where X.id = ?) select email from w",
+            "select l.email from posts A, lateral (select a.email from users a where a.id = ?) l where A.id = ?",
+        ] {
+            assert_eq!(card(sql), "at_most_one", "{sql}");
+        }
+        // Inside a LATERAL derived table, `A` is the enclosing query's `A` where the server keeps
+        // case, and pins no row of `users a`.
+        for sql in [
+            "select l.email from posts A, lateral (select a.email from users a where A.id = ?) l where A.id = ?",
+            "select l.email from posts A, lateral (select d.email from (select a.email from users a where A.id = ?) d) l where A.id = ?",
+        ] {
+            assert_eq!(card(sql), "many", "{sql}");
+        }
     }
 
     /// Analyzes with a host that answers every prepare with `described`, the mode query with

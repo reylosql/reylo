@@ -1186,6 +1186,9 @@ mod tests {
         assert_eq!(tables("select u.id, (select count(*) from posts p where p.user_id = u.id) from `users` u where exists (select 1 from tags t where t.id = u.id)"), (names(&["posts", "tags", "users"]), vec![]));
         // A WITH query is no table, even one named like a table; a derived table's are read.
         assert_eq!(tables("with users as (select id from accounts) select id from users join (select user_id from posts) p on p.user_id = users.id"), (names(&["accounts", "posts"]), vec![]));
+        // A WITH query named in another case is the table of that name where the server keeps case,
+        // and counts as read.
+        assert_eq!(tables("with users as (select id from accounts) select id from Users"), (names(&["Users", "accounts"]), vec![]));
         // What an INSERT, an UPDATE and a DELETE write, and the tables they read.
         assert_eq!(tables("insert into audit (user_id) select id from users"), (names(&["users"]), names(&["audit"])));
         assert_eq!(tables("update users set name = (select max(title) from posts) where id = 1"), (names(&["posts", "users"]), names(&["users"])));
