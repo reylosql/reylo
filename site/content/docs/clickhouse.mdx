@@ -77,6 +77,8 @@ Your client takes the URL without the prefix, `http://` or `https://`.
 
 The type check sets the format it reads and the settings the URL names, and no other. A user who can only read is enough for a `SELECT`, a `DELETE` and an `UPDATE`. An `INSERT` needs a user who may insert, since ClickHouse builds one to check it.
 
+Behind a load balancer, the type check keeps an analysis only once every replica that answered it has shown the schema it was made for. It types faster where a connection stays on one replica, as with ClickHouse Cloud's [replica-aware routing](https://clickhouse.com/docs/products/cloud/features/infrastructure/replica-aware-routing), which its requests ask for.
+
 ## Where types come from [#sources]
 
 Reylo types each query from ClickHouse's own description of it.

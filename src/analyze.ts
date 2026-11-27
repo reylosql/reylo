@@ -382,7 +382,9 @@ export class Session {
       const read = await this.schema();
       const now = read.value;
       const moved = this.#schema?.stamp;
-      if (now === label && moved === stamp) break;
+      // One kept back for a replica that had not shown the schema yet, which the engine read
+      // after the analysis, is analyzed again while the schema stands.
+      if (now === label && moved === stamp && (replicas || tries === ANALYSES)) break;
       // A read that found the database gone leaves the next statement to try it again, rather than a minute offline.
       if (now === null && !read.fatal) this.#schema = undefined;
       if (now === null || now.startsWith("unverified ") || tries === ANALYSES) return { ok: true, analysis, source: "database", entry: file };
