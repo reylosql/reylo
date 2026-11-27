@@ -198,6 +198,9 @@ test("a ClickHouse type's name reads into its parts and writes back on one line"
   // As a describe writes a tuple with names, a member a line, and as a result's header writes it.
   assert.equal(canonical("Tuple(\n    x Float64,\n    y Tuple(\n        z String))"), "Tuple(x Float64, y Tuple(z String))");
   assert.equal(canonical("Decimal(18,4)"), "Decimal(18, 4)");
+  // A module built before member names with a dot were quoted holds them bare, and a result naming the same members is not changed.
+  assert.equal(canonical("Tuple(a.1 UInt8, a..b String, a. UInt8)"), canonical("Tuple(`a.1` UInt8, `a..b` String, `a.` UInt8)"));
+  assert.notEqual(canonical("Tuple(a.2 UInt8)"), canonical("Tuple(`a.1` UInt8)"));
   assert.equal(parseType("Array(String"), undefined);
   assert.equal(parseType("UInt64 extra"), undefined);
 });

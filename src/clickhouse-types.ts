@@ -148,11 +148,18 @@ class Parser {
     }
     let name = this.name();
     if (name === undefined) return undefined;
-    // A JSON type's path, which only ever names a member.
+    // A JSON type's path, which only ever names a member. A part may be empty or open with a digit,
+    // as in `a.1`, which a module built before member names with a dot were quoted still holds.
     let path = false;
     while (this.text[this.i] === ".") {
       this.i += 1;
-      const part = this.name();
+      const c = this.text[this.i];
+      let part: string | undefined;
+      if (c === "`" || c === '"') part = this.quoted(c);
+      else {
+        part = /^[A-Za-z0-9_]*/.exec(this.text.slice(this.i))![0];
+        this.i += part.length;
+      }
       if (part === undefined) return undefined;
       name = `${name}.${part}`;
       path = true;

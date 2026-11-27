@@ -196,11 +196,23 @@ impl Parser<'_> {
             c if c.is_ascii_digit() || c == b'-' => self.number().map(Arg::Number),
             _ => {
                 let mut name = self.name()?;
-                // A JSON type's path, which only ever names a member.
+                // A JSON type's path, which only ever names a member. A part may be empty or open
+                // with a digit, as in `a.1`, which a name written before member names with a dot
+                // were quoted still holds.
                 let mut path = false;
                 while self.b.get(self.i) == Some(&b'.') {
                     self.i += 1;
-                    name = format!("{name}.{}", self.name()?);
+                    let part = match self.b.get(self.i) {
+                        Some(&quote @ (b'`' | b'"')) => self.quoted(quote)?,
+                        _ => {
+                            let start = self.i;
+                            while self.b.get(self.i).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_') {
+                                self.i += 1;
+                            }
+                            self.text[start..self.i].to_string()
+                        }
+                    };
+                    name = format!("{name}.{part}");
                     path = true;
                 }
                 match self.peek() {
@@ -884,6 +896,8 @@ mod tests {
         assert_eq!(parse(""), None);
         assert_eq!(parse("Enum8('a' = 1)").unwrap().args, vec![Arg::Label("a".into(), 1)]);
         assert_eq!(parse("JSON(a.b UInt32)").unwrap().args, vec![Arg::Member("a.b".into(), parse("UInt32").unwrap())]);
+        // A member with a dot as it was written bare before such names were quoted, which reads as the same member.
+        assert_eq!(parse("Tuple(a.1 UInt8, a..b String, a. UInt8)").unwrap().to_string(), "Tuple(`a.1` UInt8, `a..b` String, `a.` UInt8)");
     }
 
     #[test]
