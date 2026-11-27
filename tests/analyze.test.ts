@@ -17,7 +17,7 @@ import { mysqlStandIn } from "./mysql-stand-in.ts";
 import { refusedLogin, Unreachable } from "../src/connection.ts";
 import { defineQuery } from "../src/index.ts";
 import { nativeBinary } from "../src/native.ts";
-import { DRIVERS, PG, clickhouseDatabase, clickhouseLive, mysqlDatabase, mysqlLive, postgresDatabase } from "./helpers.ts";
+import { DRIVERS, PG, clickhouseDatabase, clickhouseLive, mysqlAccount, mysqlDatabase, mysqlLive, postgresDatabase } from "./helpers.ts";
 
 // A throwaway Postgres server for the tests that need one, never a database anyone uses: each such
 // test makes a database of its own there and drops it after. The driver is the labs', never the
@@ -236,9 +236,16 @@ test("on MySQL, an analysis made after a migration, by a session that still trus
   const setup = "create table u (b int); create table t (a int)";
   const a = await mysqlDatabase("reylo_migrated_a", setup);
   const b = await mysqlDatabase("reylo_migrated_b", setup);
+  const name = (url: string) => new URL(url).pathname.slice(1);
+  // Each database is reached by an account granted it alone, so that the fingerprint, which reads
+  // every database the account may reach, holds still while other tests make and drop theirs.
+  const ofA = await mysqlAccount(a.db, `reylo_migrated_a_${process.pid}`, [name(a.url)]);
+  const ofB = await mysqlAccount(b.db, `reylo_migrated_b_${process.pid}`, [name(b.url)]);
   try {
-    await migratedUnderASession((root, env) => Session.open(root, env), { url: a.url, run: (sql) => a.db.query(sql) }, b, "alter table t modify a int not null", "alter table t modify a int null");
+    await migratedUnderASession((root, env) => Session.open(root, env), { url: ofA.url(name(a.url)), run: (sql) => a.db.query(sql) }, { url: ofB.url(name(b.url)) }, "alter table t modify a int not null", "alter table t modify a int null");
   } finally {
+    await ofA.drop();
+    await ofB.drop();
     await a.drop();
     await b.drop();
   }
@@ -1004,16 +1011,12 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
   );
   const ownName = new URL(own.url).pathname.slice(1);
   const shadow = `reylo_shadow_fingerprint_${process.pid}`;
-  // The fingerprint reads every database the account may reach, so the session's account is granted
-  // only this test's: the databases other tests make and drop meanwhile are out of its sight.
+  // The session's account is granted only this test's databases (`mysqlAccount`).
   const user = `reylo_fp_${process.pid}`;
+  let account: Awaited<ReturnType<typeof mysqlAccount>> | undefined;
   // A session per call, as a process of its own, so that none answers from a fingerprint it took.
   const fingerprint = async (database = ownName) => {
-    const url = new URL(own.url);
-    url.username = user;
-    url.password = "";
-    url.pathname = `/${database}`;
-    const session = await Session.open(root, { DATABASE_URL: url.href });
+    const session = await Session.open(root, { DATABASE_URL: account!.url(database) });
     try {
       return (await session.schema()).value;
     } finally {
@@ -1024,11 +1027,7 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
   try {
     other = await mysqlDatabase("reylo_fingerprint_other", "create table t (c int not null); create function g(x int) returns int deterministic return x");
     const otherName = new URL(other.url).pathname.slice(1);
-    await own.db.query(`drop user if exists '${user}'@'%'`);
-    await own.db.query(`create user '${user}'@'%'`);
-    // A `_` in a granted database's name matches any character, unless escaped.
-    const granted = (database: string) => `\`${database.replaceAll("_", "\\_")}\`.*`;
-    for (const database of [ownName, otherName, shadow]) await own.db.query(`grant all on ${granted(database)} to '${user}'@'%'`);
+    account = await mysqlAccount(own.db, user, [ownName, otherName, shadow]);
     let last = await fingerprint();
     assert.match(last ?? "", /^[0-9a-f]{16}$/);
     assert.equal(await fingerprint(), last);
@@ -1070,7 +1069,7 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
     try {
       await own.db.query(`drop database if exists ${shadow}`);
       await own.db.query(`select release_lock('${shadow}')`);
-      await own.db.query(`drop user if exists '${user}'@'%'`);
+      await account?.drop();
     } finally {
       try {
         await other?.drop();
