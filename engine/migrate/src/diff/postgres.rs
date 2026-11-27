@@ -1164,8 +1164,8 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
                         overrides.push(format!("{} {}", c.text("name"), said.join(" ")));
                     }
                 }
-                // A generation expression of its own, which a column made again on its table leaves
-                // the table's: set again after.
+                // A generation expression of its own, which a partition made, or a column made again
+                // on its table, leaves the table's: set again after.
                 let own_expression = r
                     .get("parent")
                     .and_then(|p| generations.get(&(p.to_string(), c.text("name").to_string())))
@@ -1180,6 +1180,7 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
                             dollar_block(&format!("begin raise exception using message = {}; end", literal(&why)))
                         }
                     });
+                later.extend(own_expression.clone());
                 s.add(Object {
                     id: col_id,
                     kind: Some(Kind::Column),
