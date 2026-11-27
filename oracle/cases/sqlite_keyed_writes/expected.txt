@@ -1,0 +1,30 @@
+delete_key_correlated.sql: many () -> { id: INTEGER }
+delete_key_filter_correlated.sql: many () -> { id: INTEGER }
+delete_key_in_limit.sql: at_most_one (u: int64) -> { id: INTEGER }
+delete_key_in_many.sql: many (u: int64) -> { id: INTEGER }
+delete_key_max.sql: at_most_one () -> { id: INTEGER }
+insert_select_aggregate.sql: one () -> { id: INTEGER }
+insert_select_conflict.sql: at_most_one (id: unknown) -> { id: INTEGER }
+insert_select_filtered.sql: at_most_one (id: unknown) -> { id: INTEGER }
+insert_select_ignore.sql: at_most_one (id: int64) -> { id: INTEGER }
+insert_select_joined.sql: at_most_one (id: int64, n: text(UTF-8, ill-formed)?, acct: int64) -> { id: INTEGER }
+insert_select_keyed.sql: at_most_one (id: int64) -> { id: INTEGER }
+insert_select_limit.sql: at_most_one () -> { id: INTEGER }
+insert_select_no_from.sql: one (id: int64) -> { id: INTEGER }
+insert_select_nothing.sql: at_most_one (id: unknown) -> { id: INTEGER }
+insert_select_table.sql: many () -> { id: INTEGER }
+insert_select_trigger.sql: at_most_one (id: int64, n: text(UTF-8, ill-formed)) -> { id: INTEGER }
+insert_select_union.sql: many (a: int64, b: int64) -> { id: INTEGER }
+insert_select_where.sql: at_most_one (id: int64, ok: int64) -> { id: INTEGER }
+insert_select_with.sql: one (id: unknown) -> { id: INTEGER }
+update_from_pinned_table.sql: at_most_one (id: unknown) -> { id: INTEGER }
+update_from_table_on_join.sql: many () -> { id: INTEGER }
+update_from_table_pinned.sql: at_most_one (id: unknown) -> { id: INTEGER }
+update_from_with.sql: at_most_one (id: unknown) -> { id: INTEGER }
+update_from_with_many.sql: many () -> { id: INTEGER }
+update_from_with_nonkey.sql: many (id: unknown) -> { id: INTEGER }
+update_from_with_two_keys.sql: at_most_one (id: unknown, name: unknown) -> { id: INTEGER }
+update_key_filter_correlated.sql: many () -> { id: INTEGER }
+update_key_in.sql: at_most_one (id: int64) -> { id: INTEGER }
+update_key_subquery.sql: at_most_one (id: int64) -> { id: INTEGER }
+update_key_with_subquery.sql: at_most_one (id: unknown) -> { id: INTEGER }

@@ -147,8 +147,8 @@ test("SQLite: rows that leave out different keys go in one insert, each such row
     assert.match(String(stored[0]!.at), /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
     // One row: the same.
     const one = await built(root, url, "insert_account", "insert into accounts :a::row(name text not null, role? text not null) returning role");
-    assert.deepEqual(plain(await one.run(db, { a: { name: "Mary" } })), [{ role: "member" }]);
-    assert.deepEqual(plain(await one.run(db, { a: { name: "Ken", role: "owner" } })), [{ role: "owner" }]);
+    assert.deepEqual({ ...(await one.run(db, { a: { name: "Mary" } })) }, { role: "member" });
+    assert.deepEqual({ ...(await one.run(db, { a: { name: "Ken", role: "owner" } })) }, { role: "owner" });
   } finally {
     db.close();
     await closeSessions();
