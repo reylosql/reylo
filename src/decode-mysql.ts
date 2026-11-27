@@ -500,11 +500,14 @@ async function asWritten<T>(c: AnyClient, values: unknown[], built: SqlMode | un
   const plain = !wide && !backslash && !quote && !other && !trailed && built === undefined;
   const pool = typeof c.getConnection === "function" && typeof c.release !== "function";
   return await inTurn(pool ? undefined : c, !plain, async (handed) => {
-    if (plain) return await handing(run(c), handed);
+    // Where the session needs no read, the statement goes to the driver before anything is awaited,
+    // so that a call made on the connection next, its own rollback() too, follows it.
+    if (plain || (!pool && !mustRead(c))) return await handing(run(c), handed);
     const pooled = pool ? await answer<AnyClient>((done) => c.getConnection(done)) : undefined;
     const conn = pooled ?? c;
     try {
-      return await handing(run(await readFor(conn)), handed);
+      if (mustRead(conn)) await readFor(conn);
+      return await handing(run(conn), handed);
     } finally {
       if (pooled) await answer((done) => pooled.release(done));
     }
@@ -528,9 +531,13 @@ async function asWritten<T>(c: AnyClient, values: unknown[], built: SqlMode | un
     return { escapes, slashed: backslash || (escapes && (quote || (other && told))) };
   }
 
-  /** `conn` once the session is found to read each value as the driver writes it. */
-  async function readFor(conn: AnyClient): Promise<AnyClient> {
-    if (!wide && !trailed && !writes(conn).slashed && built === undefined) return conn;
+  /** Whether the session must be read before the statement goes to the driver. */
+  function mustRead(conn: AnyClient) {
+    return wide || trailed || writes(conn).slashed || built !== undefined;
+  }
+
+  /** The session's read, which refuses a value the session would read otherwise than the driver writes it. */
+  async function readFor(conn: AnyClient): Promise<void> {
     // Where a value holds a character outside ASCII or such bytes, the read also has the driver
     // write 中, whose bytes show the charset it writes text in: the session's charset says how the
     // server reads text, not how the driver writes it, which a server that reports no change of
@@ -561,7 +568,6 @@ async function asWritten<T>(c: AnyClient, values: unknown[], built: SqlMode | un
     if (writing !== "other" && writing !== "utf8" && writing !== familyOf(reads) && values.some((v) => highBefore(v, [BACKSLASH]))) {
       throw new Error(`reylo cannot run a mysql statement through mariadb with bytes holding a backslash directly after a byte of 0x80 or above: on this connection mariadb writes text in ${writing}, which reads such a byte and the backslash as one character and so leaves the backslash as it is, and the session reads the text in ${reads}, which reads that backslash as an escape. Connect with utf8mb4.`);
     }
-    return conn;
   }
 }
 
@@ -770,11 +776,14 @@ function noLists(driver: string, { values, names }: Bound) {
 const GEO_TYPES = new Set(["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon", "GeometryCollection"]);
 
 /**
- * A value as mariadb writes it with none of the app's options: an object, which it writes as its
- * JSON text (but a GeoJSON geometry, and one with toSqlString()), as that text, since the app's permitSetMultiParamEntries would write it as `key` =
+ * A value as mariadb writes it with none of the app's options: a plain object, which it writes as
+ * its JSON text (but a GeoJSON geometry, and one with toSqlString()), as that text, since the app's permitSetMultiParamEntries would write it as `key` =
  * value pairs, which a per-query option does not turn off on mariadb 3.
  */
-const asMariadbValue = (v: unknown) => (v !== null && typeof v === "object" && !(v instanceof Uint8Array) && !(v instanceof Date) && typeof (v as { toSqlString?: unknown }).toSqlString !== "function" && !GEO_TYPES.has((v as { type?: unknown }).type as string) ? JSON.stringify(v) : v);
+const asMariadbValue = (v: unknown) => (isPlainObject(v) && typeof v.toSqlString !== "function" && !GEO_TYPES.has(v.type as string) ? JSON.stringify(v) : v);
+
+/** An object made as a literal or by JSON.parse, as a request's body is; a stream, a boxed string and a class's instance are the driver's to write. */
+const isPlainObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && [Object.prototype, null].includes(Object.getPrototypeOf(v));
 
 /** A MySQL statement's rows on each MySQL driver's client, or undefined on any other client. */
 async function runMysql(c: Client, query: QueryModule<"mysql">, bound: Bound): Promise<unknown[] | undefined> {

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { DatabaseSync } from "node:sqlite";
 import { arrayLiteral } from "../src/execute.ts";
 import { columnKind } from "../src/values.ts";
@@ -927,7 +928,33 @@ test("mysql: mariadb and PlanetScale, which write an array as a list of values, 
   const point = { type: "Point", coordinates: [1, 2] };
   await execute(recording as never, update, { name: { role: "admin" } });
   await execute(recording as never, update, { name: point });
-  assert.deepEqual(given, [['{"role":"admin"}'], [point]]);
+  // A stream and a boxed string are the driver's to write.
+  const stream = Readable.from(["hello"]);
+  const boxed = new String("hello");
+  await execute(recording as never, update, { name: stream });
+  await execute(recording as never, update, { name: boxed });
+  assert.deepEqual(given, [['{"role":"admin"}'], [point], [stream], [boxed]]);
+  assert.equal(given[2]![0], stream);
+});
+
+test("mysql: a run on mariadb whose session needs no read hands the driver its statement before anything is awaited, so the connection's own rollback() called next follows it", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_rollback", "create table t (id int primary key, s varchar(80))");
+  const u = new URL(MYSQL!);
+  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
+  const conn = await driver("mariadb").createConnection(connection);
+  try {
+    await conn.beginTransaction();
+    // A double quote, which the driver writes after a backslash, as the session reads it.
+    const wrote = execute(conn, ins, { id: 1, s: 'say "hello"' });
+    const rolledBack = conn.rollback();
+    await wrote;
+    await rolledBack;
+  } finally {
+    await conn.end();
+  }
+  assert.deepEqual(await own.rows("select id from t"), []);
+  await own.drop();
 });
 
 test("mysql: on mariadb, a query defined by hand whose text holds a backslash or a double quote runs only on a session that reads its strings as the driver's scan does", async () => {
