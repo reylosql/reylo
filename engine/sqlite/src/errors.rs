@@ -19,7 +19,7 @@ use serde_json::Value;
 /// key's columns as SQLite's message lists them, `a, b`. What a write reaches: the written tables,
 /// and, where `{cascades}`, the tables a foreign key's action writes in turn. A name is matched as
 /// SQLite matches it, whatever its case: a trigger and a foreign key spell a table as they please.
-const ERRORS_QUERY: &str = "with recursive w(t) as ( \
+pub(crate) const ERRORS_QUERY: &str = "with recursive w(t) as ( \
       select name from sqlite_schema where type in ('table', 'view') and name collate nocase in ({written}) \
       union select s.name from sqlite_schema s join pragma_foreign_key_list(s.name) f join w on f.\"table\" = w.t collate nocase \
         where s.type = 'table' and {cascades} and (f.on_delete in ('CASCADE', 'SET NULL', 'SET DEFAULT') or f.on_update in ('CASCADE', 'SET NULL', 'SET DEFAULT'))), \

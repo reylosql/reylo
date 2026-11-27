@@ -20,6 +20,7 @@ pub mod mysql_nulls;
 pub mod mysql_params;
 pub mod mysql_shape;
 pub mod mysql_types;
+pub mod schema_fingerprint;
 
 use reylo_engine_core::{analysis, dialect, fresh, lex, schema_type, shape, structured, types};
 #[cfg(test)]

@@ -7,7 +7,8 @@ import { connect, createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FINGERPRINT, Session } from "../src/analyze.ts";
+import { Session } from "../src/analyze.ts";
+import { engine, type Connection } from "../src/engine.ts";
 import { sqlModule } from "../src/loader.ts";
 import { mapperHandlers } from "../src/mapper-server.ts";
 import { reportedDiagnostics, type Reported } from "../src/mapper-diagnostics.ts";
@@ -15,7 +16,7 @@ import { mysqlStandIn } from "./mysql-stand-in.ts";
 import { refusedLogin, Unreachable } from "../src/connection.ts";
 import { defineQuery } from "../src/index.ts";
 import { nativeBinary } from "../src/native.ts";
-import { DRIVERS, PG, mysqlDatabase, mysqlLive, postgresDatabase } from "./helpers.ts";
+import { DRIVERS, PG, clickhouseDatabase, clickhouseLive, mysqlDatabase, mysqlLive, postgresDatabase } from "./helpers.ts";
 
 // A throwaway Postgres server for the tests that need one, never a database anyone uses: each such
 // test makes a database of its own there and drops it after. The driver is the labs', never the
@@ -230,6 +231,80 @@ test("on Postgres, an analysis made after a migration, by a session that still t
   }
 });
 
+test("on MySQL, an analysis made after a migration, by a session that still trusts the fingerprint from before it, is written under the migrated schema's", { skip: mysqlLive }, async () => {
+  const setup = "create table u (b int); create table t (a int)";
+  const a = await mysqlDatabase("reylo_migrated_a", setup);
+  const b = await mysqlDatabase("reylo_migrated_b", setup);
+  try {
+    await migratedUnderASession((root, env) => Session.open(root, env), { url: a.url, run: (sql) => a.db.query(sql) }, b, "alter table t modify a int not null", "alter table t modify a int null");
+  } finally {
+    await a.drop();
+    await b.drop();
+  }
+});
+
+test("on ClickHouse, an analysis made after a migration, by a session that still trusts the fingerprint from before it, is written under the migrated schema's", { skip: clickhouseLive, timeout: 120_000 }, async () => {
+  const setup = "CREATE TABLE u (b Int32) ENGINE = MergeTree ORDER BY tuple();\nCREATE TABLE t (a Nullable(Int32)) ENGINE = MergeTree ORDER BY tuple()";
+  const a = await clickhouseDatabase("reylo_migrated_a", setup);
+  const b = await clickhouseDatabase("reylo_migrated_b", setup);
+  try {
+    await migratedUnderASession((root, env) => Session.open(root, env), { url: a.url, run: (query) => a.client.command({ query }) }, b, "ALTER TABLE t MODIFY COLUMN a Int32 DEFAULT 0", "ALTER TABLE t MODIFY COLUMN a Nullable(Int32)");
+  } finally {
+    await a.drop();
+    await b.drop();
+  }
+});
+
+/**
+ * Runs `run` with each connection the engine of `dialect` opens changed by `change`, as a test
+ * stands in for what happens on the database while a session works.
+ */
+async function withConnections<T>(dialect: "sqlite", change: (c: Connection) => Connection, run: () => Promise<T>): Promise<T> {
+  const e = await engine(dialect);
+  const open = e.open;
+  e.open = async (url) => change(await open.call(e, url));
+  try {
+    return await run();
+  } finally {
+    e.open = open;
+  }
+}
+
+test("on SQLite, a schema changed and changed back while a statement is analyzed leaves no entry of the schema in between", async () => {
+  const { root, env } = project();
+  const exec = (sql: string) => {
+    const db = new DatabaseSync(join(root, "app.db"));
+    db.exec(sql);
+    db.close();
+  };
+  // SQLite changes a column by building its table again; users is made so for the revert too.
+  const rebuild = (name: string) => `create table users2 (id integer primary key, name ${name}); insert into users2 select * from users; drop table users; alter table users2 rename to users;`;
+  exec(rebuild("text not null"));
+  let analyses = 0;
+  const outcome = await withConnections(
+    "sqlite",
+    (c) => ({
+      ...c,
+      // The first analysis runs on a migration, which is reverted before it ends: the fingerprint
+      // after it is the one before it, and only the schema's stamp says it moved.
+      analyze: async (sql) => {
+        if (analyses++ > 0) return c.analyze(sql);
+        exec(rebuild("text"));
+        try {
+          return await c.analyze(sql);
+        } finally {
+          exec(rebuild("text not null"));
+        }
+      },
+    }),
+    () => analyze(root, env, "select name from users"),
+  );
+  assert.ok(outcome.ok);
+  assert.equal(analyses, 2);
+  assert.ok(!outcome.analysis.columns[0]!.nullable);
+  assert.ok(!(JSON.parse(readFileSync(outcome.entry, "utf8")) as { analysis: { columns: { nullable?: boolean }[] } }).analysis.columns[0]!.nullable);
+});
+
 test("the engine's answers from while the fingerprint query failed are dropped once it runs again", async () => {
   const root = mkdtempSync(join(tmpdir(), "reylo-unverified-"));
   writeFileSync(join(root, "package.json"), "{}");
@@ -239,24 +314,28 @@ test("the engine's answers from while the fingerprint query failed are dropped o
     db.close();
   };
   exec("create table t (a int)");
-  const session = await Session.open(root, { DATABASE_URL: "file:./app.db" });
-  const fingerprint = FINGERPRINT.sqlite;
-  try {
-    // A query the server refuses: the session's fingerprint is its own, unverified value.
-    FINGERPRINT.sqlite = "select * from reylo_no_such_table";
-    const before = await session.analyze("select * from t");
-    assert.ok(before.ok);
-    assert.deepEqual(before.analysis.columns.map((c) => c.name), ["a"]);
-    FINGERPRINT.sqlite = fingerprint;
-    exec("alter table t add column b int");
-    await session.recheck();
-    const after = await session.analyze("select * from t");
-    assert.ok(after.ok);
-    assert.deepEqual(after.analysis.columns.map((c) => c.name), ["a", "b"]);
-  } finally {
-    FINGERPRINT.sqlite = fingerprint;
-    await session.close();
-  }
+  let refused = true;
+  await withConnections(
+    "sqlite",
+    // A fingerprint the database refuses: the session's fingerprint is its own, unverified value.
+    (c) => ({ ...c, schema: () => (refused ? Promise.reject(new Error("no such table: reylo_no_such_table")) : c.schema()) }),
+    async () => {
+      const session = await Session.open(root, { DATABASE_URL: "file:./app.db" });
+      try {
+        const before = await session.analyze("select * from t");
+        assert.ok(before.ok);
+        assert.deepEqual(before.analysis.columns.map((c) => c.name), ["a"]);
+        refused = false;
+        exec("alter table t add column b int");
+        await session.recheck();
+        const after = await session.analyze("select * from t");
+        assert.ok(after.ok);
+        assert.deepEqual(after.analysis.columns.map((c) => c.name), ["a", "b"]);
+      } finally {
+        await session.close();
+      }
+    },
+  );
 });
 
 test("without the database, reylo/.cache/ answers as it is, and a statement it lacks is an error that says where to fill it", async () => {
@@ -670,6 +749,9 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
       await session.close();
     }
   };
+  // A base type of text's functions, with `options` beside them.
+  const baseType = (options: string) =>
+    `create type mt; create function mt_in(cstring) returns mt language internal immutable strict as 'textin'; create function mt_out(mt) returns cstring language internal immutable strict as 'textout'; create type mt (input = mt_in, output = mt_out, internallength = variable, storage = extended, ${options})`;
   // An aggregate that runs `step` and `done`, but for the options `swap` names.
   const total = (swap: Record<string, string> = {}) => {
     const options = { sfunc: "step", finalfunc: "done", combinefunc: "step", msfunc: "step", minvfunc: "step", mfinalfunc: "done", ...swap };
@@ -747,6 +829,37 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
       // one dropped and made again under its name keeps every column that names it as it was.
       "create collation folded (provider = icu, locale = 'und', deterministic = true)",
       "drop collation folded; create collation folded (provider = icu, locale = 'und', deterministic = false)",
+      // A function's language, which decides whether its body is read, and whether it runs as its
+      // owner or has a planner support function, either of which keeps its body unread.
+      "create function g() returns int language sql as 'select 1'",
+      "begin; set local check_function_bodies = off; create or replace function g() returns int language plpgsql as 'select 1'; commit",
+      "alter function g() security definer",
+      "alter function g() support pg_catalog.varchar_support",
+      // A function of an extension's in pg_catalog, read wherever it was made.
+      "alter function pg_catalog.citext_eq(citext, citext) volatile",
+      "alter function pg_catalog.citext_eq(citext, citext) called on null input",
+      // Whether a backslash in a string is an escape, which the CHECKs are read under, and whether
+      // one may escape a quote: a new session takes the database's setting.
+      `alter database ${url.pathname.slice(1)} set standard_conforming_strings = off`,
+      `alter database ${url.pathname.slice(1)} reset standard_conforming_strings`,
+      `alter database ${url.pathname.slice(1)} set backslash_quote = off`,
+      // An operator family's equality, which decides whether a unique key pins one row.
+      "create operator family fam using btree; alter operator family fam using btree add operator 3 = (int4, int4)",
+      "alter operator family fam using btree drop operator 3 (int4, int4)",
+      // The tables an extension owns, which its code may read.
+      "create table side (a int)",
+      "alter extension citext add table side",
+      "alter extension citext drop table side",
+      // A sequence a column owns, which an insert may advance.
+      "create sequence extra",
+      "alter sequence extra owned by a.x",
+      "alter sequence extra owned by none",
+      // A domain's collation, and a base type's category, preference and array delimiter, which
+      // none of its functions carries: each made again under its own name.
+      `create domain d as text collate "C"`,
+      `drop domain d; create domain d as text collate "POSIX"`,
+      baseType("delimiter = ',', category = 'U'"),
+      `drop type mt cascade; ${baseType("delimiter = ';', category = 'S', preferred = true")}`,
     ]) {
       await db.unsafe(change);
       const next = await fingerprint();

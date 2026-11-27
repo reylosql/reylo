@@ -80,7 +80,7 @@ export function engine(dialect: Dialect): Promise<Engine> {
         throw refuse(`reylo ${REYLO_VERSION} runs with its engine at ${REYLO_VERSION}, and ${binary} is ${ping.version}: install reylo again, point REYLO_ENGINE_PATH at the engine of reylo ${REYLO_VERSION}, or in a checkout of reylo's repository build it with cargo build --release -p reylo-cli`);
       }
       if (ping.database !== dialect) throw refuse(`${binary} serves ${ping.database ?? "no one database"}'s engine when asked for ${dialect}'s`);
-      return new Engine(binary, dialect, ping.fingerprint, core);
+      return new Engine(binary, dialect, ping.fingerprint, ping.cache, core);
     })();
     // A failure is not kept: the binary may be installed or rebuilt while the process runs.
     loading.catch(() => engines.delete(key));
@@ -103,13 +103,14 @@ export async function anyEngine(): Promise<Engine | MissingEngine> {
  * mysql.rs and sqlite.rs; `describe` on Postgres alone).
  */
 type Replies = {
-  ping: Extract<Response, { status: "ok" }>;
+  ping: Extract<Response, { status: "ok" }> & { cache: string };
   lex: Extract<Response, { status: "lexed" }>;
   analyze: Extract<Response, { status: "need" | "analysis" }>;
   config: Extract<Response, { status: "config" | "configError" }>;
   open: { status: "opened"; conn: number; version: string };
   run: { status: "analysis"; analysis: Analysis };
   query: { status: "rows"; rows: unknown[][] };
+  schema: { status: "schema" } & Schema;
   describe: { status: "described"; params: number[]; columns: Described["columns"] };
   forget: { status: "ok" };
   close: { status: "ok" };
@@ -136,13 +137,14 @@ const isObject = (v: unknown): v is object => v !== null && typeof v === "object
 
 /** Whether `reply` is a whole answer to `op`, with every field its caller reads, of its type. */
 const COMPLETE: { readonly [O in Op]: (reply: Record<string, unknown>) => boolean } = {
-  ping: (r) => r.status === "ok" && typeof r.version === "string" && typeof r.fingerprint === "string",
+  ping: (r) => r.status === "ok" && typeof r.version === "string" && typeof r.fingerprint === "string" && typeof r.cache === "string",
   lex: (r) => r.status === "lexed" && isObject(r.lexed),
   analyze: (r) => (r.status === "need" && Array.isArray(r.needs)) || (r.status === "analysis" && isObject(r.analysis)),
   config: (r) => (r.status === "config" && isObject(r.config)) || (r.status === "configError" && isObject(r.error)),
   open: (r) => r.status === "opened" && typeof r.conn === "number" && typeof r.version === "string",
   run: (r) => r.status === "analysis" && isObject(r.analysis),
   query: (r) => r.status === "rows" && Array.isArray(r.rows),
+  schema: (r) => r.status === "schema" && typeof r.fingerprint === "string" && (r.stamp === null || typeof r.stamp === "number"),
   describe: (r) => r.status === "described" && Array.isArray(r.params) && Array.isArray(r.columns),
   forget: (r) => r.status === "ok",
   close: (r) => r.status === "ok",
@@ -183,6 +185,14 @@ function answerTo<O extends Op>(op: O, reply: Reply): Replies[O] {
   return reply;
 }
 
+/**
+ * A database's schema as `reylo/.cache/` keeps analyses by it (engine/native's `Schema`): the
+ * fingerprint, which changes when anything an analysis reads changes and is the same for two
+ * databases built by the same migrations, and where the database keeps one, a stamp that moves
+ * with every change to its schema and never moves back (SQLite's `schema_version`).
+ */
+export type Schema = { fingerprint: string; stamp: number | null };
+
 /** What a session asks of a connection the engine holds. */
 export interface Connection {
   /** The server's version, as the engine read it when the connection opened: `18.1`, `8.4.11`, and on SQLite the engine's own SQLite's, `3.50.2`. */
@@ -190,6 +200,8 @@ export interface Connection {
   analyze(sql: string): Promise<Analysis>;
   /** A query, its parameters bound and its rows read as the engine's catalog queries are. */
   query(sql: string, params: unknown[]): Promise<unknown[][]>;
+  /** The schema as `reylo/.cache/` keeps analyses by it, read by the engine's own query, as every host reads it. */
+  schema(): Promise<Schema>;
   /** A statement described as the engine's own describe reads it, for a host that runs the engine's analysis itself (EngineCore's `analyze`); Postgres only. */
   describe(sql: string): Promise<Described>;
   /** The schema changed: the answers the engine keeps for this connection are stale. */
@@ -210,17 +222,25 @@ const KEPT_ANSWERS = 512;
 export class Engine extends EngineCore {
   readonly binary: string;
   readonly dialect: Dialect;
-  /** The engine's fingerprint, core's sources and its database's, which names the `reylo/.cache/` entries it writes. */
+  /** The engine's fingerprint: core's sources and its database's. */
   readonly fingerprint: string;
+  /**
+   * What names the analyses this engine gives in `reylo/.cache/`, beside the statement and the
+   * schema: the engine's fingerprint, the sources of the program around it, which every host's
+   * analysis goes through, and on SQLite the functions of the SQLite it reads a file with
+   * (engine/native's `Program::fingerprint`).
+   */
+  readonly cache: string;
   /** The child that answers this database's requests that need no database, started again where it stopped. */
   #core: Channel;
   readonly #kept = new Map<string, Response>();
 
-  constructor(binary: string, dialect: Dialect, fingerprint: string, core: Channel) {
+  constructor(binary: string, dialect: Dialect, fingerprint: string, cache: string, core: Channel) {
     super((request) => callSync(binary, dialect, request));
     this.binary = binary;
     this.dialect = dialect;
     this.fingerprint = fingerprint;
+    this.cache = cache;
     this.#core = core;
   }
 
@@ -282,6 +302,10 @@ export class Engine extends EngineCore {
       version,
       analyze: async (sql) => (await ask({ op: "run", conn, sql })).analysis,
       query: async (sql, params) => (await ask({ op: "query", conn, sql, params })).rows,
+      schema: async () => {
+        const { fingerprint, stamp } = await ask({ op: "schema", conn });
+        return { fingerprint, stamp };
+      },
       describe: async (sql) => {
         const d = await ask({ op: "describe", conn, sql });
         return { params: d.params.map((oid) => ({ oid })), columns: d.columns };

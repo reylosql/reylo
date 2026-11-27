@@ -65,6 +65,10 @@ impl Program for Clickhouse {
         reylo_engine_core::api::call::<crate::engines::clickhouse::Clickhouse>(request)
     }
 
+    fn fingerprint(&self) -> String {
+        crate::cache_fingerprint(crate::engines::clickhouse::FINGERPRINT, &[])
+    }
+
     async fn serve(&mut self, request: &Value) -> Option<Value> {
         let op = request["op"].as_str()?;
         let id = request["conn"].as_u64().unwrap_or(0);
@@ -85,12 +89,21 @@ impl Program for Clickhouse {
                     Err(failure) => failure,
                 },
             },
-            // A query the host runs itself (the schema's fingerprint), its rows as the server's JSON
+            // A query the host runs itself (a host's own catalog query), its rows as the server's JSON
             // writes them.
             "query" => match self.connections.get(&id) {
                 None => closed(id),
                 Some(c) => match c.server.ask(sql) {
                     Ok(Outcome::Rows(rows)) => json!({ "status": "rows", "rows": rows }),
+                    Ok(outcome) => failure(&c.server, outcome),
+                    Err(e) => json!({ "status": "unreachable", "message": e }),
+                },
+            },
+            // The schema's fingerprint ([`crate::engines::clickhouse::schema_fingerprint`]).
+            "schema" => match self.connections.get(&id) {
+                None => closed(id),
+                Some(c) => match c.server.ask(crate::engines::clickhouse::schema_fingerprint::QUERY) {
+                    Ok(Outcome::Rows(rows)) => crate::Schema::of(&rows, None).answer(),
                     Ok(outcome) => failure(&c.server, outcome),
                     Err(e) => json!({ "status": "unreachable", "message": e }),
                 },
