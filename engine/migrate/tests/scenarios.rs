@@ -4409,6 +4409,23 @@ fn a_project_with_pg_cron_replays_in_shadows() {
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
         assert_eq!(p.rows("select jobname from cron.job order by 1").await.iter().map(|r| r.text("jobname").to_string()).collect::<Vec<_>>(), ["hourly", "nightly"]);
         assert!(p.rows("select 1 from pg_database where datname = 'contrib_regression'").await.is_empty(), "a shadow kept pg_cron's name");
+
+        // A shadow a run cut off left under pg_cron's name is swept; a database of that name that is no
+        // shadow stays, and keeps every shadow from taking the name.
+        let base = std::env::var("REYLO_TEST_PG_CRON").unwrap();
+        let mut admin = Db::connect(&base, &p.dir).await.unwrap();
+        admin.exec("create database contrib_regression").await.unwrap();
+        admin.exec("comment on database contrib_regression is 'reylo shadow reylo_shadow_0000000000'").await.unwrap();
+        reylo_migrate::cache::set_enabled(Some(false));
+        assert_eq!(p.dry_run().await, 0, "{}", p.peek());
+        assert!(p.rows("select 1 from pg_database where datname = 'contrib_regression'").await.is_empty(), "a shadow left under pg_cron's name stayed");
+        admin.exec("create database contrib_regression").await.unwrap();
+        p.output();
+        assert_ne!(p.dry_run().await, 0, "{}", p.peek());
+        assert_has!(p.output(), r"named contrib_regression that is no shadow");
+        reylo_migrate::cache::set_enabled(None);
+        admin.exec("drop database contrib_regression").await.unwrap();
+        admin.close().await;
         forget(&p.url).await;
 
         // A pending migration that makes it, which deploy's dry run replays and then runs step by step.
@@ -4417,6 +4434,7 @@ fn a_project_with_pg_cron_replays_in_shadows() {
         q.schema(&format!("create extension pg_cron; create table runs (id {int});"));
         assert_eq!(q.dry_run().await, 0, "{}", q.peek());
         assert_eq!(q.migrate().await, 0, "{}", q.peek());
+        assert!(q.rows("select 1 from pg_database where datname = 'contrib_regression'").await.is_empty(), "a shadow kept pg_cron's name");
         forget(&q.url).await;
 
         // Made on the database by hand, it is the environment's, which every shadow is given.

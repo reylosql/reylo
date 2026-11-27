@@ -1571,8 +1571,10 @@ impl Server {
                 // On Supabase, the default privileges its Data API's roles have, the target's own,
                 // which Supabase sets for every project as it chooses; and its publication.
                 let platform_privileges = if names { platform_defaults(api_settings(&api_privileges(&privileges), &[])).0 } else { vec![] };
-                // pg_cron lets only a superuser and pg_read_all_settings read the setting: unread, it names no database.
-                let pg_cron_target = target.rows("select (current_setting('cron.database_name', true) = current_database())::text as on").await.ok().is_some_and(|r| r.first().is_some_and(|r| r.text("on") == "true"));
+                // pg_cron is only ever made in its database, so one that has it is that; otherwise the setting says,
+                // which pg_cron lets only a superuser and pg_read_all_settings read: unread, it names no database.
+                let pg_cron_target = !target.rows("select 1 from pg_extension where extname = 'pg_cron'").await?.is_empty()
+                    || target.rows("select (current_setting('cron.database_name', true) = current_database())::text as on").await.ok().is_some_and(|r| r.first().is_some_and(|r| r.text("on") == "true"));
                 let publication = names && !target.rows(&format!("select 1 from pg_publication where pubname = {}", literal(crate::catalog::PLATFORM_PUBLICATION))).await?.is_empty();
                 Ok(Server::Postgres {
                     admin,
@@ -1846,8 +1848,8 @@ impl Server {
     }
 
     /// Gives `shadow` the name pg_cron makes itself under ([`PG_CRON_NAME`]) where its own would be
-    /// refused: on a server that loads pg_cron, whose `cron.database_name` never names a shadow, for a
-    /// target that is the database pg_cron makes itself in, so that a shadow takes what a deploy will.
+    /// refused, which a shadow's always is, for a target that is the database pg_cron makes itself in,
+    /// so that a shadow takes what a deploy will.
     /// The answer says whether it was renamed, for [`Server::unname_for_pg_cron`] to name it back, or
     /// why it couldn't be, which pg_cron's refusal then goes on to show.
     pub(crate) async fn name_for_pg_cron(&mut self, mut shadow: Shadow) -> Result<(Shadow, Result<bool, String>), Error> {
@@ -1855,29 +1857,21 @@ impl Server {
         if !*pg_cron_target || shadow.name == PG_CRON_NAME {
             return Ok((shadow, Ok(false)));
         }
-        let named = pg_rows(admin, "select nullif(current_setting('cron.database_name', true), '') as n").await.unwrap_or_default();
-        if named.first().and_then(|r| r.get("n")).is_none_or(|n| n == shadow.name) || !shadow.db.rows("select 1 from pg_extension where extname = 'pg_cron'").await?.is_empty() {
+        if !shadow.db.rows("select 1 from pg_extension where extname = 'pg_cron'").await?.is_empty() {
             return Ok((shadow, Ok(false)));
         }
         if *pg_cron_stuck {
             return Ok((shadow, Err(format!("another shadow of this run kept the name {PG_CRON_NAME}"))));
         }
-        // One shadow at a time goes by the name, on the server; another run's holds it for a step.
-        let mut locked = false;
-        for _ in 0..240 {
-            if pg_rows(admin, &format!("select pg_try_advisory_lock(hashtextextended('{PG_CRON_NAME}', 0)) as ok")).await?.first().is_some_and(|r| r.flag("ok")) {
-                locked = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
-        if !locked {
-            return Ok((shadow, Err(format!("another run kept the name {PG_CRON_NAME} for a minute"))));
-        }
+        // One shadow at a time goes by the name, on the server: another run's holds it for a step, which
+        // this waits out, and a run that ends lets it go.
+        admin.batch_execute(&format!("select pg_advisory_lock(hashtextextended('{PG_CRON_NAME}', 0))")).await.map_err(pg_error)?;
         let unlock = format!("select pg_advisory_unlock(hashtextextended('{PG_CRON_NAME}', 0))");
         let ready: Result<Result<(), String>, Error> = async {
-            if !drop_left_pg_cron(admin).await? {
-                return Ok(Err(format!("a database named {PG_CRON_NAME} that is no shadow is already on the shadows' server: drop it to let a shadow take the name")));
+            match drop_left_pg_cron(admin).await? {
+                Left::None => {}
+                Left::Other => return Ok(Err(format!("a database named {PG_CRON_NAME} that is no shadow is already on the shadows' server: drop it to let a shadow take the name"))),
+                Left::Kept => return Ok(Err(format!("another run's shadow has the name {PG_CRON_NAME}"))),
             }
             // Marked first, so that a run cut off while the shadow goes by the name leaves it to the next run's sweep.
             admin.batch_execute(&format!("comment on database \"{}\" is {}", shadow.name, literal(&format!("{PG_CRON_NOTE}{}", shadow.name)))).await.map_err(pg_error)?;
@@ -1917,7 +1911,13 @@ impl Server {
     pub(crate) async fn unname_for_pg_cron(&mut self, shadow: Shadow) -> Result<Shadow, Error> {
         let Server::Postgres { admin, url, settings, pg_cron_stuck, .. } = self else { return Ok(shadow) };
         let Shadow { db, name } = shadow;
-        let (db, moved) = pg_move(admin, url, settings, db, PG_CRON_NAME, &name).await?;
+        let (db, moved) = match pg_move(admin, url, settings, db, PG_CRON_NAME, &name).await {
+            Ok(m) => m,
+            Err(e) => {
+                *pg_cron_stuck = true;
+                return Err(e);
+            }
+        };
         if moved.is_err() {
             *pg_cron_stuck = true;
             return Ok(Shadow { db, name: PG_CRON_NAME.into() });
@@ -2080,8 +2080,14 @@ impl Server {
         }
         // A shadow a run cut off while it went by pg_cron's name.
         if let Server::Postgres { admin, .. } = self {
-            if pg_rows(admin, &format!("select 1 from pg_database where datname = '{PG_CRON_NAME}'")).await?.first().is_some() && drop_left_pg_cron(admin).await? {
-                dropped += 1;
+            let name = format!("hashtextextended('{PG_CRON_NAME}', 0)");
+            if pg_rows(admin, &format!("select 1 from pg_database where datname = '{PG_CRON_NAME}'")).await?.first().is_some()
+                && pg_rows(admin, &format!("select pg_try_advisory_lock({name}) as ok")).await?.first().is_some_and(|r| r.flag("ok"))
+            {
+                if matches!(drop_left_pg_cron(admin).await, Ok(Left::None)) && pg_rows(admin, &format!("select 1 from pg_database where datname = '{PG_CRON_NAME}'")).await?.is_empty() {
+                    dropped += 1;
+                }
+                let _ = admin.batch_execute(&format!("select pg_advisory_unlock({name})")).await;
             }
         }
         // The replay caches no run will use, which are not counted: they are not a run's leftovers.
@@ -2104,21 +2110,29 @@ pub(crate) const PG_CRON_NAME: &str = "contrib_regression";
 #[cfg(feature = "cli")]
 const PG_CRON_NOTE: &str = "reylo shadow ";
 
-/// Whether the shadows' server has no database named [`PG_CRON_NAME`] once one a run cut off left
-/// there (marked as its shadow, whose lock is free) is dropped. Another, the server's own or a run's
-/// that holds it, stays.
+/// What is left on the shadows' server under [`PG_CRON_NAME`].
 #[cfg(feature = "cli")]
-async fn drop_left_pg_cron(admin: &tokio_postgres::Client) -> Result<bool, Error> {
+enum Left {
+    /// Nothing, or a shadow a run cut off left there (marked as its shadow, whose lock is free), now dropped.
+    None,
+    /// A database that is no shadow, which stays.
+    Other,
+    /// A shadow a live run holds, or one the role may not drop.
+    Kept,
+}
+
+#[cfg(feature = "cli")]
+async fn drop_left_pg_cron(admin: &tokio_postgres::Client) -> Result<Left, Error> {
     let left = pg_rows(admin, &format!("select shobj_description(oid, 'pg_database') as note from pg_database where datname = '{PG_CRON_NAME}'")).await?;
-    let Some(row) = left.first() else { return Ok(true) };
-    let Some(own) = row.get("note").and_then(|n| n.strip_prefix(PG_CRON_NOTE)).map(String::from) else { return Ok(false) };
+    let Some(row) = left.first() else { return Ok(Left::None) };
+    let Some(own) = row.get("note").and_then(|n| n.strip_prefix(PG_CRON_NOTE)).map(String::from) else { return Ok(Left::Other) };
     let lock = format!("hashtextextended({}, 0)", literal(&own));
     if !pg_rows(admin, &format!("select pg_try_advisory_lock({lock}) as free")).await?.first().is_some_and(|r| r.flag("free")) {
-        return Ok(false);
+        return Ok(Left::Kept);
     }
     let dropped = admin.batch_execute(&format!("drop database if exists \"{PG_CRON_NAME}\" with (force)")).await.is_ok();
     let _ = admin.batch_execute(&format!("select pg_advisory_unlock({lock})")).await;
-    Ok(dropped)
+    Ok(if dropped { Left::None } else { Left::Kept })
 }
 
 /// Renames the database `from`, whose session is `db`, to `to`, and answers a session on it under
