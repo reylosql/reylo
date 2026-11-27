@@ -1028,6 +1028,26 @@ test("on Postgres, a statement that names a schema the role may not use is refus
   }
 });
 
+test("on Postgres, a view over a schema the role may not use is typed for the role, which reads it through the view", { skip: live }, async () => {
+  const own = await postgresDatabase("reylo_usage_view", "create schema private; create table private.todos (id int primary key, title text not null); create schema api; create view api.todos as select id, title from private.todos");
+  const role = `reylo_usage_view_${process.pid}`;
+  const root = mkdtempSync(join(tmpdir(), "reylo-usage-view-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const url = new URL(own.url);
+  url.username = role;
+  try {
+    await own.sql.unsafe(`drop role if exists ${role}; create role ${role} login; grant usage on schema api to ${role}; grant select on api.todos to ${role}`);
+    // The view's definition names private.todos, whose lookups by name the role is refused.
+    const typed = await analyze(root, { DATABASE_URL: url.href }, "select id, title from api.todos where id = :id");
+    assert.ok(typed.ok);
+    assert.deepEqual(typed.analysis.diagnostics, []);
+    assert.deepEqual(typed.analysis.columns.map((c) => c.name), ["id", "title"]);
+  } finally {
+    await own.sql.unsafe(`drop owned by ${role}; drop role ${role}`).catch(() => {});
+    await own.drop();
+  }
+});
+
 test("the MySQL fingerprint holds while nothing changes, and moves with a column's length, precision and scale, fractional seconds and character set, which its type carries, with a CHECK's expression and whether it is enforced, with a stored function's arguments, and with what another database holds, but for Reylo Migrate's shadows other than the URL's own, and with the account's TRIGGER privileges", { skip: mysqlLive }, async () => {
   const root = mkdtempSync(join(tmpdir(), "reylo-fingerprint-"));
   writeFileSync(join(root, "package.json"), "{}");

@@ -458,26 +458,7 @@ pub const ARBITERS_QUERY: &str = concat!(
 /// expanded, and replayed through `host`. The direct entry for a host that links this crate
 /// (a server-side extension, which calls it from inside the server, so it never probes for the extension).
 pub fn analyze(sql: &str, host: &Host) -> Lazy<Analysis> {
-    host.on_engine_stack(|host| analyze_here(sql, host).map(|analysis| held_to_refusals(sql, analysis, host)))
-}
-
-/// The analysis, or where a catalog query was refused for a privilege the session's role lacks
-/// (SQLSTATE 42501, which the host answers with rather than failing), that error at the statement:
-/// the analysis read past the rows it never got. The statement's own describe is refused too where
-/// the statement names what the role may not use, as a table in a schema without USAGE, and then
-/// its error, at its place, is the analysis's already.
-fn held_to_refusals(sql: &str, analysis: Analysis, host: &Host) -> Analysis {
-    match host.refused() {
-        Some(error) if analysis.diagnostics.is_empty() && error.code.as_deref() == Some("42501") => {
-            let rewritten = analysis.rewritten.clone();
-            let lexed = match lexed(sql, Dialect::Postgres) {
-                Ok(lexed) => lexed,
-                Err(bare) => return bare,
-            };
-            bare(sql, &lexed, Dialect::Postgres, vec![db_diagnostic(sql, &rewritten, &error)])
-        }
-        _ => analysis,
-    }
+    host.on_engine_stack(|host| analyze_here(sql, host))
 }
 
 fn analyze_here(sql: &str, host: &Host) -> Lazy<Analysis> {

@@ -14,8 +14,6 @@ use std::cell::RefCell;
 pub struct Host<'a, D> {
     answers: &'a Answers<D>,
     needs: RefCell<Vec<Need>>,
-    /// The first error a catalog query was answered with ([`Host::refused`]).
-    refused: RefCell<Option<DbError>>,
 }
 
 /// `None` is "not answered yet"; the need is recorded.
@@ -23,23 +21,20 @@ pub type Lazy<T> = Option<T>;
 
 impl<'a, D: Describe> Host<'a, D> {
     pub fn new(answers: &'a Answers<D>) -> Host<'a, D> {
-        Host { answers, needs: RefCell::new(Vec::new()), refused: RefCell::new(None) }
+        Host { answers, needs: RefCell::new(Vec::new()) }
     }
 
     /// Run `f` over these answers on the engine's stack ([`crate::stack`]), with the needs it
     /// records recorded here.
     pub fn on_engine_stack<T: Send>(&self, f: impl FnOnce(&Host<'_, D>) -> T + Send) -> T {
         let answers = self.answers;
-        let (value, needs, refused) = crate::stack::run(move || {
+        let (value, needs) = crate::stack::run(move || {
             let host = Host::new(answers);
             let value = f(&host);
-            (value, host.needs.into_inner(), host.refused.into_inner())
+            (value, host.needs.into_inner())
         });
         for need in needs {
             self.record(need);
-        }
-        if let Some(error) = refused {
-            self.refuse(error);
         }
         value
     }
@@ -50,17 +45,6 @@ impl<'a, D: Describe> Host<'a, D> {
 
     pub fn pending(&self) -> bool {
         !self.needs.borrow().is_empty()
-    }
-
-    /// The first error a catalog query read over this host was answered with, where a host answers
-    /// with one (a privilege the session lacks): what read past it went on without the rows it asked
-    /// for, so an analysis that otherwise succeeds may rest on what the query would have said.
-    pub fn refused(&self) -> Option<DbError> {
-        self.refused.borrow().clone()
-    }
-
-    fn refuse(&self, error: DbError) {
-        self.refused.borrow_mut().get_or_insert(error);
     }
 
     fn record(&self, need: Need) {
@@ -88,10 +72,7 @@ impl<'a, D: Describe> Host<'a, D> {
         let id = format!("query:{sql}|{}", serde_json::to_string(&params).unwrap_or_default());
         match self.answers.get(&id) {
             Some(Answer::Rows { rows }) => Some(Ok(rows.clone())),
-            Some(Answer::Error { error }) => {
-                self.refuse(error.clone());
-                Some(Err(error.clone()))
-            }
+            Some(Answer::Error { error }) => Some(Err(error.clone())),
             Some(Answer::Describe { .. }) => Some(Err(DbError { message: "the host answered a query with a describe".into(), code: None, position: None })),
             None => {
                 self.record(Need::Query { id, sql: sql.to_string(), params, scope });
@@ -155,34 +136,5 @@ pub fn as_strings(v: &Value) -> Option<Vec<String>> {
         Value::Array(items) => items.iter().map(|i| i.as_str().map(String::from)).collect(),
         Value::Null => None,
         _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Host;
-    use crate::api::{Answer, Answers, DbError, NoDescribe, Scope};
-
-    /// A catalog query answered with an error is the host's refusal, which the host keeps, the first
-    /// of several, for an analysis to hold itself to; rows are no refusal.
-    #[test]
-    fn a_catalog_query_answered_with_an_error_is_kept_as_the_hosts_refusal() {
-        let refusal = |message: &str| DbError { message: message.into(), code: Some("42501".into()), position: None };
-        let mut answers: Answers<NoDescribe> = Answers::new();
-        answers.insert("query:a|[]".into(), Answer::Rows { rows: vec![] });
-        answers.insert("query:b|[]".into(), Answer::Error { error: refusal("first") });
-        answers.insert("query:c|[]".into(), Answer::Error { error: refusal("second") });
-        let host = Host::new(&answers);
-        assert!(matches!(host.query("a", vec![], Scope::Statement), Some(Ok(_))));
-        assert!(host.refused().is_none());
-        assert!(matches!(host.query("b", vec![], Scope::Statement), Some(Err(_))));
-        let _ = host.query("c", vec![], Scope::Statement);
-        assert_eq!(host.refused().map(|e| e.message), Some("first".to_string()));
-        // The same seen from inside the engine's own stack.
-        let outer = Host::new(&answers);
-        outer.on_engine_stack(|inner| {
-            let _ = inner.query("c", vec![], Scope::Statement);
-        });
-        assert_eq!(outer.refused().map(|e| e.message), Some("second".to_string()));
     }
 }

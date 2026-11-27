@@ -199,8 +199,10 @@ async fn describe(client: &Client, sql: &str) -> Result<Result<Describe, DbError
 
 /// The rows of a catalog query over `client`, its statement taken from `prepared` where there is one.
 /// A privilege the session's role lacks, as USAGE on a schema a name is looked up in, is an answer:
-/// the catalog as the role sees it, which the statement's own describe is refused by too, and says
-/// so at its place. Any other error fails the analysis.
+/// the catalog as the role sees it. A statement that names such a schema is refused by its own
+/// describe too, which says so at its place, and one that reaches it only through a view or a
+/// function body is analyzed without what the role may not read, as every reader of a refused
+/// catalog query takes it. Any other error fails the analysis.
 async fn query(client: &Client, prepared: Option<&Prepared>, sql: &str, params: &[Value]) -> Result<Result<Vec<Vec<Value>>, DbError>, HostError> {
     let failed = |what: &str, e: ::tokio_postgres::Error| HostError(if ended(&e) { format!("{ENDED}: {}", pg_message(&e)) } else if let Some(shared) = pooled(&e) { shared } else { format!("catalog query {what}: {}\n    {sql}", pg_message(&e)) });
     let refused = |e: &::tokio_postgres::Error| e.as_db_error().filter(|d| *d.code() == ::tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE).map(|d| DbError { message: d.message().to_string(), code: Some(d.code().code().to_string()), position: None });
