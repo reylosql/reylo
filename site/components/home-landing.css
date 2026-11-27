@@ -134,34 +134,13 @@
   padding-bottom: 0.25rem;
 }
 
-/* The docs' database switch (docs-kit's `.dk-variant-switch`). */
-.rh-switch {
+/* The docs' database switch (components/database-menu.tsx, `.reylo-db-*` in app/global.css), on the
+   Query label's line, the ink of its name ending where the code's padding does. */
+.rh-card .rh-switch {
   position: absolute;
-  top: 0.625rem;
-  right: 0.75rem;
+  top: 0.75rem;
+  right: 1.25rem;
   z-index: 1;
-  display: inline-flex;
-  gap: 1px;
-  padding: 2px;
-  border: 1px solid var(--color-fd-border);
-  border-radius: 7px;
-}
-
-.rh-switch button {
-  padding: 4px 7px;
-  border-radius: 5px;
-  font: 500 0.6875rem/1 var(--font-code);
-  color: var(--color-fd-muted-foreground);
-  white-space: nowrap;
-}
-
-.rh-switch button:hover {
-  color: var(--color-fd-foreground);
-}
-
-.rh-switch button[data-state='active'] {
-  color: var(--color-fd-primary);
-  background: color-mix(in oklab, var(--dk-accent) 14%, transparent);
 }
 
 /* A table's name in a statement: a dotted underline, as Twoslash marks what it can show; on hover or
