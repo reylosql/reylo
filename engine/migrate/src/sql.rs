@@ -392,7 +392,7 @@ macro_rules! re {
 }
 
 re!(TRANSACTION_CONTROL, r"^(BEGIN|START TRANSACTION|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE|ABORT|SET TRANSACTION)\b");
-re!(PG_ALONE, r"^(CREATE (UNIQUE )?INDEX CONCURRENTLY|DROP INDEX CONCURRENTLY|REINDEX\b.*\bCONCURRENTLY|VACUUM|ALTER SYSTEM|CREATE DATABASE|DROP DATABASE|CREATE TABLESPACE|DROP TABLESPACE|CLUSTER$|REINDEX (SYSTEM|DATABASE))");
+re!(PG_ALONE, r"^(CREATE (UNIQUE )?INDEX CONCURRENTLY|DROP INDEX CONCURRENTLY|REINDEX\b.*\bCONCURRENTLY|VACUUM|ALTER SYSTEM|CREATE DATABASE|DROP DATABASE|CREATE TABLESPACE|DROP TABLESPACE|CLUSTER( \([^)]*\))?$|REPACK( \([^)]*\))?$|REPACK \([^)]*\b(CONCURRENTLY|ANALYZE)\b|REINDEX (SYSTEM|DATABASE))");
 re!(SQLITE_ALONE, r"^(VACUUM|ATTACH|DETACH)\b");
 re!(PG_DETACH, r"^ALTER TABLE\b.*\bDETACH PARTITION\b.*\bCONCURRENTLY\b");
 re!(PG_BUILDS_INDEX, r"^CREATE (UNIQUE )?INDEX CONCURRENTLY\b");
@@ -835,6 +835,18 @@ mod tests {
             assert!(!builds_index_alone(sql, p), "{sql}");
         }
         assert!(!builds_index_alone("create index users_h on users (handle)", Dialect::Mysql));
+    }
+
+    #[test]
+    fn what_postgres_runs_only_outside_a_transaction_runs_alone() {
+        let kind = |sql: &str| kind_of(&split_statements(sql, Dialect::Postgres)[0], Dialect::Postgres);
+        // Postgres 19's REPACK of every table, or with CONCURRENTLY or ANALYZE, refuses a transaction block, as CLUSTER of every table does.
+        for sql in ["repack", "repack (verbose)", "repack (concurrently) t", "repack (analyze, verbose) t using index", "cluster", "cluster (verbose)", "vacuum t"] {
+            assert_eq!(kind(sql), Kind::Alone, "{sql}");
+        }
+        for sql in ["repack t", "repack (verbose) t using index t_pkey", "cluster t using t_pkey", "cluster (verbose) t"] {
+            assert_eq!(kind(sql), Kind::Transactional, "{sql}");
+        }
     }
 
     fn texts(sql: &str, d: Dialect) -> Vec<String> {
