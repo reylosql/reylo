@@ -1988,9 +1988,8 @@ fn run_sqlite_statement<D: SqliteDb + ?Sized>(db: &D, sql: &str, values: &[rusql
 
 /// The edge values of a declared SQLite type in a state, NULL first, by the affinity SQLite gives
 /// the name. The largest integer is in the edge state alone, and never in an AUTOINCREMENT key.
-/// Outside a STRICT table (`loose`) an INTEGER column also takes a REAL with a fraction, which it
-/// keeps as that REAL and `.run()` returns as the number it is; a 64-bit one's is refused at run
-/// time, which no BigInt holds, so it takes none.
+/// Outside a STRICT table an INTEGER column, a 64-bit one too, also takes a REAL with a fraction,
+/// which it keeps as that REAL.
 fn sqlite_pool(declared: &str, scenario: Scenario, autoincrement: bool, strict: bool) -> Vec<rusqlite::types::Value> {
     use rusqlite::types::Value::{Blob, Integer, Null, Real, Text};
     let t = declared.to_ascii_lowercase();
@@ -2024,7 +2023,7 @@ fn sqlite_pool(declared: &str, scenario: Scenario, autoincrement: bool, strict: 
     }
     if t.contains("int") {
         out.extend([Integer(1), Integer(2), Integer(0), Integer(-1)]);
-        if !strict && !autoincrement && !matches!(t.split('(').next().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ").as_str(), "bigint" | "int8" | "unsigned big int") {
+        if !strict && !autoincrement {
             out.push(Real(0.5));
         }
         if edges {
@@ -2346,10 +2345,10 @@ mod tests {
         assert!(!sqlite_pool("INTEGER", Scenario::Plain, false, true).contains(&Integer(i64::MAX)));
         assert!(sqlite_pool("REAL", Scenario::Edges, false, true).contains(&Real(1e308)));
         assert!(!sqlite_pool("REAL", Scenario::Plain, false, true).contains(&Real(1e308)));
-        // Outside a STRICT table an INTEGER column takes a REAL with a fraction; a 64-bit one takes none.
+        // Outside a STRICT table an INTEGER column takes a REAL with a fraction.
         assert!(sqlite_pool("INTEGER", Scenario::Plain, false, false).contains(&Real(0.5)));
+        assert!(sqlite_pool("BIGINT", Scenario::Plain, false, false).contains(&Real(0.5)));
         assert!(!sqlite_pool("INTEGER", Scenario::Plain, false, true).contains(&Real(0.5)));
-        assert!(!sqlite_pool("BIGINT", Scenario::Plain, false, false).contains(&Real(0.5)));
     }
 
     #[test]

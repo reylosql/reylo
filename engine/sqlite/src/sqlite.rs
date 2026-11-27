@@ -785,7 +785,8 @@ fn descriptor(ty: &Ty, declared: Option<&str>, computed: bool, exact: bool) -> T
             (Some(d), aff) => stored(if aff == "int8" { "integer" } else { aff }).named(d),
             (None, "integer") => int64(),
             (None, LAX) => stored("integer").named("INTEGER"),
-            (None, "int8") => int64().named("BIGINT"),
+            // A 64-bit column's value passed on holds what a read of the column does.
+            (None, "int8") => stored("integer").named("BIGINT"),
             (None, "real") => real(),
             (None, "text") => text(),
             (None, "blob") => Type::bytes(),
@@ -946,6 +947,9 @@ fn shared(facts: &[&Fact]) -> Ty {
     if let Some(ty) = same_json(&known) {
         return ty;
     }
+    if let Some(ty) = widened(&known).filter(is_built) {
+        return ty;
+    }
     let known: Vec<Ty> = known.iter().map(|t| textual(t)).collect();
     let known: Vec<&Ty> = known.iter().collect();
     let first = known[0];
@@ -995,6 +999,25 @@ fn is_built(t: &Ty) -> bool {
 /// A type as SQLite's storage class: built JSON is text.
 fn textual(t: &Ty) -> Ty {
     if is_built(t) { Ty::Scalar { name: "text".into() } } else { t.clone() }
+}
+
+/// The one type several are where they differ only in that one holds an INTEGER where another
+/// holds a [`LAX`], at any depth of a document: the [`LAX`].
+fn widened(types: &[&Ty]) -> Option<Ty> {
+    fn widen(a: &Ty, b: &Ty) -> Option<Ty> {
+        match (a, b) {
+            _ if a == b => Some(a.clone()),
+            (Ty::Scalar { name: x }, Ty::Scalar { name: y }) if matches!((x.as_str(), y.as_str()), ("integer", LAX) | (LAX, "integer")) => Some(Ty::Scalar { name: LAX.into() }),
+            (Ty::Object { fields: f }, Ty::Object { fields: g }) if f.len() == g.len() => {
+                let fields = f.iter().zip(g).map(|(f, g)| (f.name == g.name && f.nullable == g.nullable).then(|| widen(&f.ty, &g.ty).map(|ty| TyField { ty, ..f.clone() })).flatten()).collect::<Option<Vec<_>>>()?;
+                Some(Ty::Object { fields })
+            }
+            (Ty::List { of: x, nullable_items: n }, Ty::List { of: y, nullable_items: m }) if n == m => Some(Ty::List { of: Box::new(widen(x, y)?), nullable_items: *n }),
+            _ => None,
+        }
+    }
+    let (first, rest) = types.split_first()?;
+    rest.iter().try_fold((*first).clone(), |acc, t| widen(&acc, t))
 }
 
 /// The one JSON shape several types are, where they differ only in that one is an empty array
@@ -1073,7 +1096,9 @@ const PLAIN: &[&str] = &[
 /// `x'00'` null) or is an error, and a value of no known storage class may be one: any JSON.
 fn in_json(t: &Ty) -> Ty {
     match scalar_name(t) {
-        Some("integer" | "int8" | "real" | "text" | "numeric" | LAX) => t.clone(),
+        // Nothing refuses a 64-bit column's REAL inside a document.
+        Some("int8") => Ty::Scalar { name: LAX.into() },
+        Some("integer" | "real" | "text" | "numeric" | LAX) => t.clone(),
         _ => Ty::Unknown,
     }
 }
@@ -1098,7 +1123,8 @@ fn value_schema(t: &Ty, nullable: bool) -> serde_json::Value {
         Ty::Scalar { name } => match name.as_str() {
             "integer" | "int8" => json!({"type": "integer", "format": "int64"}),
             "real" => json!({"type": "number", "format": "double"}),
-            LAX => json!({"type": "number"}),
+            // An int64 or a REAL's double, so that a reader keeps the integer exact.
+            LAX => json!({"anyOf": [{"type": "integer", "format": "int64"}, {"type": "number", "format": "double"}]}),
             "text" => json!({"type": "string"}),
             "numeric" => json!({"type": ["number", "string"]}),
             _ => json!({}),
@@ -2346,7 +2372,7 @@ impl Analyzer<'_> {
             return Some(JsonFact { ty: Ty::Unknown, non_null, carry: Carry::Maybe });
         }
         let types: Vec<&Ty> = facts.iter().map(|f| &f.ty).collect();
-        let ty = if types.iter().all(|t| *t == types[0]) { types[0].clone() } else { same_json(&types).unwrap_or(Ty::Unknown) };
+        let ty = if types.iter().all(|t| *t == types[0]) { types[0].clone() } else { same_json(&types).or_else(|| widened(&types)).unwrap_or(Ty::Unknown) };
         Some(JsonFact { ty, non_null, carry: Carry::Yes })
     }
 
@@ -2655,7 +2681,8 @@ impl Analyzer<'_> {
                 // A parameter compared with built JSON is bound as the text it is compared with.
                 let fact = Fact { ty: unlax(textual(&fact.ty)), ..fact };
                 let nullable = fills.get(&numbered).copied().unwrap_or(false) || self.nullable_params.contains(&numbered);
-                Param { nullable, ..Param::new(name.clone(), descriptor(&fact.ty, None, false, false)) }
+                let ty = if scalar_name(&fact.ty) == Some("int8") { int64().named("BIGINT") } else { descriptor(&fact.ty, None, false, false) };
+                Param { nullable, ..Param::new(name.clone(), ty) }
             })
             .collect();
         (params, refused)
@@ -4521,9 +4548,13 @@ mod tests {
         assert_eq!(typed("select coalesce(n, 0), ifnull(n, 0), nullif(n, 7), iif(id > 0, n, 0), case when id > 0 then n else 0 end, max(n, 0), n + 1, -n, abs(n), n % 2 from loose"), [each; 10].join(", "));
         assert_eq!(typed("select sum(n), max(n), min(n) from loose"), [each; 3].join(", "));
         assert_eq!(typed("select lag(n) over (order by id), sum(n) over () from loose"), [each; 2].join(", "));
-        // A 64-bit column's value passed on is a BigInt, which the run time refuses a REAL as; what
-        // SQLite computes from it may be one.
-        assert_eq!(typed("select coalesce(big, 0), coalesce(big, n), big + 1 from loose"), "integer BIGINT, integer BIGINT, union INTEGER");
+        // A 64-bit column's value passed on holds what the column does, which the run time reads as
+        // a BigInt and refuses a REAL as; what SQLite computes from it may be one.
+        assert_eq!(typed("select coalesce(big, 0), iif(id > 0, n, big), big + 1 from loose"), "union BIGINT, union BIGINT, union INTEGER");
+        let inside = serde_json::to_string(&analyze_ddl("select json_object('b', big) as o from loose", &ddl, &Extras::default()).analysis.columns[0].ty).unwrap();
+        assert!(inside.contains(r#""label":"INTEGER""#), "{inside}");
+        let a = analyze_ddl("select id from loose where big = :b", &ddl, &Extras::default()).analysis;
+        assert_eq!(serde_json::to_value(&a.params[0].ty).unwrap()["label"], "BIGINT");
         // What holds no REAL: a STRICT column's computed value, a rowid's, a count, a cast.
         assert_eq!(typed("select n + 1, coalesce(n, 0) from s"), "integer -, integer -");
         assert_eq!(typed("select id + 1, count(n), length(n), cast(n as integer), total(n) from loose"), "integer -, integer -, integer -, integer -, float -");
@@ -4532,6 +4563,12 @@ mod tests {
         // Inside a document SQLite builds, the value is a JSON number of either kind.
         let built = serde_json::to_string(&analyze_ddl("select json_object('n', n) as o from loose", &ddl, &Extras::default()).analysis.columns[0].ty).unwrap();
         assert!(built.contains(r#""label":"INTEGER""#), "{built}");
+        // Arms that build one shape, but for an INTEGER beside such a value, build it with the value.
+        let arms = serde_json::to_string(&analyze_ddl("select case when id = 1 then json_object('n', n) else json_object('n', id) end as j from loose", &ddl, &Extras::default()).analysis.columns[0].ty).unwrap();
+        assert!(arms.contains(r#""kind":"json""#) && arms.contains(r#""label":"INTEGER""#), "{arms}");
+        // A map's values keep an integer exact: an int64, or a REAL's double.
+        let map = serde_json::to_string(&analyze_ddl("select json_group_object(cast(id as text), n) as j from loose", &ddl, &Extras::default()).analysis.columns[0].ty).unwrap();
+        assert!(map.contains(r#""anyOf":[{"format":"int64","type":"integer"},{"format":"double","type":"number"}]"#) || map.contains(r#""anyOf":[{"type":"integer","format":"int64"},{"type":"number","format":"double"}]"#), "{map}");
         // A parameter beside one is bound as an INTEGER.
         let a = analyze_ddl("select id from loose where n = :n and n + :d > 0", &ddl, &Extras::default()).analysis;
         assert_eq!(a.params.iter().map(|p| serde_json::to_value(&p.ty).unwrap()["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>(), ["integer", "integer"]);
@@ -5473,6 +5510,8 @@ mod tests {
             Kind::Text(_) => Some("text"),
             Kind::Bytes(_) => Some("blob"),
             Kind::Union(_) if is_boolean_declared(name) => Some("bool"),
+            Kind::Union(_) if affinity(name) == "integer" && is_int8_declared(name) => Some("int8"),
+            Kind::Union(_) if affinity(name) == "integer" => Some("integer"),
             Kind::Union(u) if u.members.len() == 2 => Some("text"),
             Kind::Union(u) if u.members.len() == 3 => Some("real"),
             Kind::Union(_) if affinity(name) == "integer" && is_int8_declared(name) => Some("int8"),

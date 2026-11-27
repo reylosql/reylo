@@ -631,6 +631,14 @@ impl Types {
         let mut members = Vec::new();
         let mut null = false;
         schema_members(schema, &mut members, &mut null);
+        // A SQLite INTEGER that may be a REAL, which the engine writes as an int64 or a double: the
+        // i64 its declared type names, as outside a document, where a REAL is an error when the row
+        // is read.
+        if let [SchemaMember::Kind("integer", i), SchemaMember::Kind("number", n)] = members.as_slice() {
+            if i.get("format").and_then(|f| f.as_str()) == Some("int64") && n.get("format").and_then(|f| f.as_str()) == Some("double") {
+                return Ok(Some((quote!(i64), null)));
+            }
+        }
         let [member] = members.as_slice() else { return Ok(None) };
         let ty = match member {
             SchemaMember::Any => None,
@@ -1307,6 +1315,10 @@ mod tests {
         types.column(&built, false, "c").unwrap();
         let items = types.items.iter().map(|i| i.to_string().replace(' ', "")).collect::<String>();
         assert!(items.contains("pubn:i64"), "{items}");
+        // So is each value of a map SQLite builds of one, which the engine writes as an int64 or a double.
+        let map = json!({ "type": "object", "additionalProperties": { "anyOf": [{ "type": "integer", "format": "int64" }, { "type": "number", "format": "double" }] } });
+        let (ty, _) = checked(map);
+        assert!(ty.contains("BTreeMap<::std::string::String,i64>"), "{ty}");
     }
 
     #[test]
