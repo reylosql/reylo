@@ -9,7 +9,7 @@
 //! field of an `Object` or item of a `List`) takes the database's: `int8` and `numeric` as JSON
 //! numbers, `bytea` as its own `\x…` hex.
 
-use crate::types::{Bounds, Field, JsonType, Kind, Slot, StructType, Type, UuidType};
+use crate::types::{Bounds, Field, IntegerType, JsonType, Kind, Slot, StructType, Type, UuidType};
 use serde_json::{json, Map, Value};
 
 /// Where a value stands and how the caller encodes what it decodes itself.
@@ -71,9 +71,63 @@ fn member_schema(ty: &Type, opts: SchemaOptions) -> Value {
     }
 }
 
+/// A built-in type's name, which is its label: a type of another schema has its schema in its label
+/// (`public.point`), so that a composite of the user's named so is no geometric type.
+fn builtin_name(ty: &Type) -> &str {
+    ty.label.as_deref().unwrap_or("")
+}
+
 /// The type's name without the schema that qualifies it: `hstore` of `public.hstore`.
 fn bare_name(ty: &Type) -> &str {
     ty.label.as_deref().map(|n| n.rsplit('.').next().unwrap_or(n)).unwrap_or("")
+}
+
+/// The Postgres types whose form inside a JSON document their kind does not say, and which Postgres
+/// writes there as their text, having no cast to JSON: types the format structures (a bit string, a
+/// vector, a geometric type, a network address) and built-in system types, and the extensions'
+/// on Neon and Supabase (PostGIS's others, cube, seg, isn, intarray, h3, hll, ip4r, pgx_ulid,
+/// prefix, rdkit, roaringbitmap, semver, unit, VectorChord). An extension's type named nowhere
+/// here may have a cast to JSON, so inside a document it is any JSON value. The same list in
+/// src/schema.ts, which tests/schema-facts.test.ts holds to this one.
+pub const POSTGRES_TEXT_IN_JSON: &[&str] = &[
+    "bit", "varbit", "vector", "halfvec", "sparsevec", "point", "line", "lseg", "box", "path", "polygon", "circle", "inet", "cidr", "money", "tsvector", "tsquery", "regclass", "regtype", "ltree", "lquery", "ltxtquery",
+    "oid", "pg_lsn", "jsonpath", "xid", "xid8", "oid8", "regdatabase", "regproc", "regprocedure", "regoper", "regoperator", "regnamespace", "regrole", "regcollation", "regconfig", "regdictionary",
+    "tid", "cid", "aclitem", "refcursor", "pg_snapshot", "txid_snapshot",
+    "geography", "box2d", "box3d", "spheroid", "raster", "cube", "seg", "ean13", "isbn", "isbn13", "ismn", "ismn13", "issn", "issn13", "upc", "query_int", "h3index", "hll", "hll_hashval",
+    "ip4", "ip4r", "ip6", "ip6r", "ipaddress", "iprange", "ulid", "prefix_range", "mol", "qmol", "xqmol", "reaction", "bfp", "sfp", "roaringbitmap", "s3vec",
+    "semver", "semverrange", "semvermultirange", "unit", "unitrange", "unitmultirange", "rabitq8", "rabitq4",
+];
+
+/// Whether Postgres writes a value of `ty` inside a JSON document as its text, where its kind would
+/// say a number, an array, an object or several: an oid, and each type `POSTGRES_TEXT_IN_JSON`
+/// names. A built-in structure (a geometric type, a bit string, a network address) is known by its
+/// own label, which a type of another schema never has, since the engine qualifies one: a composite
+/// of the user's named `public.point` is an object of its fields there. An extension's type is known
+/// by its name in whatever schema it was created in. The loader's in src/schema.ts, `postgresInJson`.
+pub fn postgres_text_in_json(ty: &Type) -> bool {
+    let name = bare_name(ty);
+    match &ty.kind {
+        Kind::Integer(_) => name == "oid",
+        Kind::Array(_) if matches!(name, "vector" | "halfvec" | "sparsevec") => true,
+        Kind::Array(_) | Kind::Struct(_) | Kind::Union(_) => POSTGRES_TEXT_IN_JSON.contains(&builtin_name(ty)),
+        Kind::Opaque | Kind::Geometry(_) | Kind::Map(_) | Kind::ZonedDateTime(_) => POSTGRES_TEXT_IN_JSON.contains(&name),
+        _ => false,
+    }
+}
+
+/// An integer's format: OpenAPI's `int32` or `int64` where its range fits one, an unsigned type
+/// needing a bit more, and none past 64 bits, as an unsigned 64-bit integer reaches.
+fn integer_format(i: &IntegerType) -> Option<&'static str> {
+    match i.bits + u32::from(i.unsigned) {
+        ..=32 => Some("int32"),
+        ..=64 => Some("int64"),
+        _ => None,
+    }
+}
+
+/// A schema no value meets: a union of no members, which JSON Schema 2020-12 has no empty `anyOf` for.
+fn nothing() -> Value {
+    json!({"not": {}})
 }
 
 /// A value the database writes as its text, where its own JSON form is a string too.
@@ -190,6 +244,9 @@ impl Type {
     /// The JSON Schema of a value of this type, standing where `opts` says.
     pub fn json_schema(&self, opts: SchemaOptions) -> Value {
         match &self.kind {
+            // Inside a document, a type Postgres writes as its text there, a geometric type among
+            // them, which it has no cast to JSON for.
+            _ if opts.in_json && postgres_text_in_json(self) => text_of(self),
             Kind::Boolean(_) => json!({"type": "boolean"}),
             // An enum's values as its base writes them: a boolean or a number as itself where its
             // schema is a JSON number or boolean, else as its text.
@@ -212,9 +269,16 @@ impl Type {
             }
             // An oid is not one of the numbers JSON has a number for: Postgres writes its text.
             Kind::Integer(_) if bare_name(self) == "oid" => text_of(self),
-            Kind::Integer(i) if i.bits <= 32 && !(i.bits == 32 && i.unsigned) => json!({"type": "integer", "format": "int32"}),
-            Kind::Integer(_) if opts.in_json || opts.int8_as_number => json!({"type": "integer", "format": "int64"}),
-            Kind::Integer(_) => json!({"type": "string", "format": "int64"}),
+            // A wide integer is its digits where the caller decodes it, unless `int8_as_number`.
+            Kind::Integer(i) => {
+                let format = integer_format(i);
+                let digits = format != Some("int32") && !opts.in_json && !opts.int8_as_number;
+                let mut schema = json!({"type": if digits { "string" } else { "integer" }});
+                if let Some(format) = format {
+                    schema["format"] = json!(format);
+                }
+                schema
+            }
             Kind::Float(f) => {
                 let number = json!({"type": "number", "format": if f.exponent_bits <= 8 { "float" } else { "double" }});
                 // JSON has no number for a non-finite value, so Postgres writes one inside a
@@ -257,9 +321,7 @@ impl Type {
             // spelling of the same base64, kept beside it for validators.
             Kind::Bytes(_) => json!({"type": "string", "format": "byte", "contentEncoding": "base64"}),
             // A bit string and pgvector's vectors are their text to a client.
-            Kind::Array(_) if matches!(bare_name(self), "bit" | "varbit" | "vector" | "halfvec" | "sparsevec") => text_of(self),
-            // Postgres has no cast of a geometric type to JSON, so a document holds its text.
-            Kind::Array(_) | Kind::Struct(_) if opts.in_json && matches!(bare_name(self), "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle") => text_of(self),
+            Kind::Array(_) if matches!(builtin_name(self), "bit" | "varbit") || matches!(bare_name(self), "vector" | "halfvec" | "sparsevec") => text_of(self),
             Kind::Array(a) => {
                 let items = a.element.ty.json_schema(opts);
                 // A parameter's elements are strict; a result's may be NULL unless the statement
@@ -309,26 +371,39 @@ impl Type {
             Kind::Tuple(t) => {
                 let items: Vec<Value> = t.elements.iter().chain(&t.optional_elements).map(|e| slot_schema(e, opts)).collect();
                 let rest = t.rest.as_ref().map_or(Value::Bool(false), |r| slot_schema(r, opts));
-                let mut schema = json!({"type": "array", "prefixItems": items, "items": rest, "minItems": t.elements.len()});
+                // JSON Schema 2020-12 refuses an empty `prefixItems`, so a tuple of none is `items` alone.
+                let mut schema = json!({"type": "array", "items": rest, "minItems": t.elements.len()});
+                if !items.is_empty() {
+                    schema["prefixItems"] = Value::Array(items);
+                }
                 if t.rest.is_none() {
                     schema["maxItems"] = json!(t.elements.len() + t.optional_elements.len());
                 }
                 schema
             }
             // A tagged union as a client returns one: its tag and its value, `{ tag, value }`.
+            Kind::TaggedUnion(t) if t.alternatives.is_empty() => nothing(),
             Kind::TaggedUnion(t) => json!({"anyOf": t.alternatives.iter().map(|a| {
                 let value = a.ty.json_schema(opts);
                 json!({"type": "object", "properties": {"tag": {"const": a.tag}, "value": if a.nullable { nullable(value) } else { value }}, "required": ["tag", "value"]})
             }).collect::<Vec<_>>()}),
-            Kind::Union(_) if matches!(bare_name(self), "inet" | "cidr") => text_of(self),
-            // One of several types, the execution's or each value's.
+            Kind::Union(_) if matches!(builtin_name(self), "inet" | "cidr") => text_of(self),
+            // One of several types, the execution's or each value's; of none, no value, and every
+            // value of an intersection of none.
+            Kind::Union(u) if u.members.is_empty() => nothing(),
             Kind::Union(u) => json!({"anyOf": u.members.iter().map(|m| m.json_schema(opts)).collect::<Vec<_>>()}),
+            Kind::Intersection(u) if u.members.is_empty() => json!({}),
             Kind::Intersection(u) => json!({"allOf": u.members.iter().map(|m| m.json_schema(opts)).collect::<Vec<_>>()}),
             // A row whose columns were not read (a subquery's) is an object of them inside a document.
             Kind::Opaque if bare_name(self) == "record" && opts.in_json => json!({"type": "object"}),
             // PostGIS writes a geometry inside a document through its cast to JSON, as GeoJSON.
             Kind::Geometry(_) if bare_name(self) == "geometry" && opts.in_json => {
                 json!({"type": "object", "properties": {"type": {"type": "string"}}, "required": ["type"], "description": "a GeoJSON geometry"})
+            }
+            // An extension's type of no form the engine knows, which may have a cast to JSON: any
+            // JSON value inside a document.
+            Kind::Opaque | Kind::Geometry(_) if opts.in_json && !postgres_text_in_json(self) => {
+                json!({"description": format!("pg type {}", self.label.as_deref().unwrap_or(self.kind.name()))})
             }
             // Every other type is a plain string, which is how Postgres prints it, named in the
             // description.
@@ -576,6 +651,44 @@ mod tests {
         assert_eq!(open.json_schema(WIRE)["additionalProperties"], json!({"type": "string"}));
         assert_eq!(ecma_pattern("a.b[.]\\."), "^(?:a[^\\n\\r]b[.]\\.)$");
         assert_eq!(ecma_pattern("$5[^a]"), "^(?:\\$5[^a])$");
+    }
+
+    /// OpenAPI's `int64` holds a signed 64-bit integer: an unsigned one of 64 bits, which MySQL's
+    /// BIGINT UNSIGNED and ClickHouse's UInt64 reach, takes no format, nor does a wider one.
+    #[test]
+    fn an_integer_past_a_signed_64_bits_takes_no_format() {
+        let unsigned = |bits: u32| Type::new(Kind::Integer(IntegerType { bits, unsigned: true, ..IntegerType::default() }));
+        assert_eq!(unsigned(32).json_schema(IN_JSON), json!({"type": "integer", "format": "int64"}));
+        assert_eq!(unsigned(64).json_schema(IN_JSON), json!({"type": "integer"}));
+        assert_eq!(unsigned(64).json_schema(WIRE), json!({"type": "string"}));
+        assert_eq!(unsigned(64).json_schema(INT8N), json!({"type": "integer"}));
+        assert_eq!(Type::integer(128).json_schema(IN_JSON), json!({"type": "integer"}));
+        assert_eq!(Type::integer(64).json_schema(IN_JSON), json!({"type": "integer", "format": "int64"}));
+    }
+
+    /// JSON Schema 2020-12 refuses an empty `prefixItems`, `anyOf` and `allOf`.
+    #[test]
+    fn a_container_of_nothing_is_a_schema_still() {
+        use crate::types::{TaggedUnionType, TupleType, UnionType};
+        let tuple = Type::new(Kind::Tuple(TupleType { elements: vec![], optional_elements: vec![], rest: None }));
+        assert_eq!(tuple.json_schema(IN_JSON), json!({"type": "array", "items": false, "minItems": 0, "maxItems": 0}));
+        assert_eq!(Type::new(Kind::Union(UnionType { members: vec![] })).json_schema(WIRE), json!({"not": {}}));
+        assert_eq!(Type::new(Kind::Intersection(UnionType { members: vec![] })).json_schema(WIRE), json!({}));
+        assert_eq!(Type::new(Kind::TaggedUnion(TaggedUnionType { alternatives: vec![] })).json_schema(WIRE), json!({"not": {}}));
+    }
+
+    /// Inside a document Postgres writes a type with no cast to JSON as its text; an extension's
+    /// type named nowhere may have a cast, so it is any JSON value there, and its text elsewhere.
+    #[test]
+    fn inside_json_a_type_of_no_known_form_is_any_json() {
+        assert_eq!(Type::opaque("ltree").json_schema(IN_JSON), json!({"type": "string", "description": "pg type ltree"}));
+        assert_eq!(Type::opaque("money").json_schema(IN_JSON), json!({"type": "string", "description": "pg type money"}));
+        assert_eq!(Type::opaque("public.unheard_of").json_schema(IN_JSON), json!({"description": "pg type public.unheard_of"}));
+        assert_eq!(Type::opaque("public.unheard_of").json_schema(WIRE), json!({"type": "string", "description": "pg type public.unheard_of"}));
+        // A built-in structure is known by its own label, which a composite of the user's, whose label is qualified, never has.
+        let point = |name: &str| Type::structure(vec![field("x", Type::double(), false)]).named(name);
+        assert_eq!(point("point").json_schema(IN_JSON), json!({"type": "string", "description": "pg type point"}));
+        assert_eq!(point("public.point").json_schema(IN_JSON)["type"], json!("object"));
     }
 
     #[test]

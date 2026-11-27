@@ -85,9 +85,17 @@ test("SQLite: `sql` is the compiled statement and `raw` the file, at run time an
     const opened = await built(root, "open", open);
     assert.equal(opened.default.sql, "select 1 as n /*\n");
     assert.deepEqual({ ...((await opened.default.run(db, {})) as object) }, { n: 1 });
+    // A no-break space a statement ends with is part of its last name, so `sql` keeps it, and the
+    // row's key is the one the type declares.
+    const spaced = "select 1 as x\u00a0\n";
+    const named = await built(root, "spaced", spaced);
+    assert.equal(named.default.sql, "select 1 as x\u00a0");
+    assert.deepEqual({ ...((await named.default.run(db, {})) as object) }, { "x\u00a0": 1 });
     await closeSessions();
-    const declared = await declarations(root, { "get_user.sql": GET_USER, "doc.sql": doc, "open.sql": open });
+    const declared = await declarations(root, { "get_user.sql": GET_USER, "doc.sql": doc, "open.sql": open, "spaced.sql": spaced });
     assert.equal(texts(declared["open.sql"]!)[0], `export declare const sql: "select 1 as n /*\\n";`);
+    assert.equal(texts(declared["spaced.sql"]!)[0], `export declare const sql: "select 1 as x\u00a0";`);
+    assert.ok(declared["spaced.sql"]!.includes(`export type Row = { "x\u00a0": 1 };`), declared["spaced.sql"]!);
     assert.deepEqual(texts(declared["get_user.sql"]!), [
       `export declare const sql: "select id, name, email from users where id = ?";`,
       `export declare const raw: "select id, name, email from users where id = :id\\n";`,

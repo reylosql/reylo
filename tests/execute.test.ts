@@ -148,6 +148,110 @@ test("postgres: a JSON parameter's value is a JavaScript value, which every driv
   for (const values of seen) assert.deepEqual(values, jsonTexts);
 });
 
+test("a JSON parameter's NaN, infinities and -0 go in as each database's JSON reads them, a json[] element's and a structured parameter's JSON member's too, on every driver, and are refused where the database holds none", async () => {
+  const json = { type: { kind: "json" } } as const;
+  const doc = { z: -0, n: [1.5, -0] };
+  // Postgres's `json` keeps -0 as written, and its JSON holds no number for NaN or an infinity.
+  const pq: QueryModule<"postgres"> = { dialect: "postgres", sql: "select :doc::jsonb, :docs::jsonb[]", params: ["doc", "docs"], inputs: { doc: json, docs: { type: array({ kind: "json" }) } } };
+  const pgText = `{"z":-0,"n":[1.5,-0]}`;
+  const seen: unknown[][] = [];
+  await execute(pgPool(async (_: string, values?: unknown[]) => (seen.push(values!), { rows: [] })), pq, { doc, docs: [doc, -0] });
+  const unwrap = (v: unknown) => (v !== null && typeof v === "object" ? (v as { value: unknown }).value : v);
+  await execute(postgresJsSql((_, values) => void seen.push(values.map(unwrap))), pq, { doc, docs: [doc, -0] });
+  // Bun.sql serializes a JSON parameter's value itself, so it gets one whose JSON is the text, -0 included.
+  const unsafe = async (_: string, values?: unknown[]) => (seen.push(values!.map((v) => (v !== null && typeof v === "object" ? JSON.stringify(v) : v))), []);
+  const bun = { unsafe, commitDistributed: async () => {} };
+  const unprepared = { unsafe, commitDistributed: async () => {}, options: { prepare: false } };
+  for (const client of [bun, unprepared]) await execute(client, pq, { doc, docs: [doc, -0] });
+  for (const values of seen) assert.deepEqual(values, [pgText, `{"${pgText.replace(/"/g, '\\"')}","-0"}`]);
+  // An integer past 2^53, written as it is with JSON.rawJSON, keeps its digits beside a -0 on Bun.sql.
+  seen.length = 0;
+  const { rawJSON } = JSON as unknown as { rawJSON(text: string): never };
+  await execute(bun, pq, { doc: { id: rawJSON("9007199254740993"), z: -0 }, docs: null });
+  assert.deepEqual([...seen], [[`{"id":9007199254740993,"z":-0}`, null]]);
+  // MySQL and SQLite read -0 from `-0e0`; SQLite an infinity from a number past a double's range.
+  const mq: QueryModule<"mysql"> = { dialect: "mysql", sql: "select cast(:doc as json)", params: ["doc"], inputs: { doc: json } };
+  const lq: QueryModule<"sqlite"> = { dialect: "sqlite", sql: "select json(:doc)", params: ["doc"], inputs: { doc: json } };
+  const mysql2 = { query: async () => [[], []] as [unknown, unknown], execute: async (_: unknown, v?: unknown[]) => (seen.push(v!), [[], []] as [unknown, unknown]) };
+  const libsql = { execute: async (q: { args: unknown[] }) => (seen.push(q.args), { rows: [] }), executeMultiple: async () => {} };
+  seen.length = 0;
+  await execute(mysql2, mq, { doc: { z: -0, n: [1.5, -0] } });
+  await execute(libsql, lq, { doc: { inf: Infinity, neg: -Infinity, z: -0 } });
+  assert.deepEqual(seen, [[`{"z":-0e0,"n":[1.5,-0e0]}`], [`{"inf":9e999,"neg":-9e999,"z":-0e0}`]]);
+  // Postgres's and MySQL's JSON hold no NaN or infinity, and SQLite no NaN: the parameter is refused before any client is called.
+  await assert.rejects(Promise.resolve().then(() => execute(pgPool(async () => ({ rows: [] })), pq, { doc: { n: NaN }, docs: null })), /^TypeError: Parameter "doc" at \/n is NaN, which JSON holds no number for: write null or a string in its place\.$/);
+  await assert.rejects(Promise.resolve().then(() => execute(bun, pq, { doc: null, docs: [{ n: -Infinity }] })), /^TypeError: Parameter "docs" at \[0\]\/n is -Infinity, which JSON holds no number for/);
+  await assert.rejects(Promise.resolve().then(() => execute(mysql2, mq, { doc: { a: [Infinity] } })), /^TypeError: Parameter "doc" at \/a\/0 is Infinity, which MySQL holds no value for: write null or a string in its place\.$/);
+  await assert.rejects(Promise.resolve().then(() => execute(libsql, lq, { doc: { nan: NaN } })), /^TypeError: Parameter "doc" at \/nan is NaN, which SQLite holds no value for/);
+  await assert.rejects(Promise.resolve().then(() => execute(pgPool(async () => ({ rows: [] })), pq, { doc: null, docs: [{ n: 1n }] })), /BigInt/);
+  assert.equal(seen.length, 2);
+});
+
+test("postgres: a json field of a row value holds -0 and refuses NaN and the infinities as a JSON parameter does, and a value of no type the run time knows keeps -0", async () => {
+  const seen: unknown[][] = [];
+  const client = pgPool(async (_: string, values?: unknown[]) => (seen.push(values!), { rows: [] }));
+  const q: QueryModule<"postgres"> = { dialect: "postgres", sql: "select :e::event, :u", params: ["e", "u"], inputs: { e: { type: record([field("id", pgType("int4")), field("meta", pgType("jsonb"))], "public.event") }, u: { type: { kind: "unknown" } } } };
+  await execute(client, q, { e: { id: 1, meta: { z: -0 } }, u: -0 });
+  assert.deepEqual(seen, [[String.raw`("1","{\"z\":-0}")`, "-0"]]);
+  await assert.rejects(Promise.resolve().then(() => execute(client, q, { e: { id: 1, meta: { score: Infinity } }, u: 0 })), /Infinity, which JSON holds no number for/);
+});
+
+test("NaN and the infinities go only where the database holds them: MySQL holds neither, SQLite no NaN, which its drivers bind as NULL, and a Postgres numeric with a precision no infinity", async () => {
+  const seen: unknown[][] = [];
+  const mysql2 = { query: async () => [[], []] as [unknown, unknown], execute: async (_: unknown, v?: unknown[]) => (seen.push(v!), [[], []] as [unknown, unknown]) };
+  const mq: QueryModule<"mysql"> = { dialect: "mysql", sql: "select :d, :n", params: ["d", "n"], inputs: { d: { type: myType("double") }, n: { type: myType("decimal") } } };
+  for (const v of [NaN, Infinity, -Infinity]) await assert.rejects(Promise.resolve().then(() => execute(mysql2, mq, { d: v, n: 1 })), new RegExp(`^TypeError: Parameter "d" is ${v}, which MySQL holds no value for\\.$`));
+  await assert.rejects(Promise.resolve().then(() => execute(mysql2, mq, { d: 1, n: NaN })), /Parameter "n" is NaN, which MySQL holds no value for/);
+  const db = new DatabaseSync(":memory:");
+  const lq: QueryModule<"sqlite"> = { dialect: "sqlite", ...handWritten("select :r as r, :u as u", "sqlite"), inputs: { r: { type: liteType("real") }, u: { type: { kind: "unknown" } } } };
+  assert.throws(() => execute(db, lq, { r: NaN, u: 1 }), /^TypeError: Parameter "r" is NaN, which SQLite holds no value for: it would be bound as NULL\.$/);
+  assert.throws(() => execute(db, lq, { r: 1, u: NaN }), /Parameter "u" is NaN/);
+  const pq: QueryModule<"postgres"> = { dialect: "postgres", sql: "select :f::float8, :n::numeric, :p::numeric(5,2)", params: ["f", "n", "p"], inputs: { f: { type: pgType("float8") }, n: { type: pgType("numeric") }, p: { type: { kind: "decimal", precision: 5, min_scale: 2, max_scale: 2, nan: true } } } };
+  const client = pgPool(async (_: string, values?: unknown[]) => (seen.push(values!), { rows: [] }));
+  await execute(client, pq, { f: NaN, n: -Infinity, p: NaN });
+  await execute(client, pq, { f: Infinity, n: NaN, p: 1.5 });
+  assert.deepEqual(seen, [[NaN, -Infinity, NaN], [Infinity, NaN, 1.5]]);
+  await assert.rejects(Promise.resolve().then(() => execute(client, pq, { f: 1, n: 1, p: Infinity })), /^TypeError: Parameter "p" is Infinity, which its type, a numeric with a precision, holds no value for\.$/);
+});
+
+test("sqlite: -0 for a float or a value of no declared type, and an infinity, go in at their marks as SQLite's literals, which sqlite3 and Turso's engine would bind as the INTEGER 0 and libSQL refuse; an integer's -0 goes as it is", async () => {
+  const seen: unknown[][] = [];
+  const libsql = { execute: async (q: { sql: string; args: unknown[] }) => (seen.push([q.sql, q.args]), { rows: [] }), executeMultiple: async () => {} };
+  const lq: QueryModule<"sqlite"> = { dialect: "sqlite", ...handWritten("select :r as r, :u as u, :i as i, :n as n, 1-:r as m", "sqlite"), inputs: { r: { type: liteType("real") }, u: { type: { kind: "unknown" } }, i: { type: liteType("integer") }, n: { type: liteType("numeric") } } };
+  await execute(libsql, lq, { r: -0, u: -0, i: -0, n: -0 });
+  await execute(libsql, lq, { r: Infinity, u: -Infinity, i: 1, n: 2.5 });
+  assert.deepEqual(seen, [
+    ["select (-0.0) as r, (-0.0) as u, ? as i, (-0.0) as n, 1-(-0.0) as m", [-0]],
+    ["select (9e999) as r, (-9e999) as u, ? as i, ? as n, 1-(9e999) as m", [1, 2.5]],
+  ]);
+  // Where the run time doesn't know a placeholder's place, a driver that would bind a float's -0 as
+  // 0 (sqlite3, Turso's engine, sql.js, SQLite Wasm, D1), or send an infinity as null (D1), refuses
+  // it; libSQL, which keeps -0, binds it as it is.
+  const unmarked: QueryModule<"sqlite"> = { dialect: "sqlite", sql: "select :r as r", params: ["r"], text: "select ? as r", order: ["r"], inputs: { r: { type: liteType("real") } } };
+  const sqlite3Like = { prepare: () => ({}), exec: () => {}, all: (_: string, v: unknown[], done: (e: null, rows: unknown[]) => void) => setImmediate(() => done(null, [{ r: v[0] }])) };
+  await assert.rejects(Promise.resolve().then(() => execute(sqlite3Like, unmarked, { r: -0 })), /^TypeError: Parameter "r" is -0, which sqlite3 binds as 0/);
+  const d1Like = { batch: async () => [], prepare: () => ({ first: async () => null, bind: (...v: unknown[]) => ({ all: async () => ({ results: [{ r: v[0] }] }) }) }) };
+  await assert.rejects(Promise.resolve().then(() => execute(d1Like, unmarked, { r: Infinity })), /^TypeError: Parameter "r" is Infinity, which D1 sends as null/);
+  await execute(libsql, unmarked, { r: -0 });
+  assert.ok(Object.is((seen.at(-1)![1] as unknown[])[0], -0));
+  // On the drivers themselves, each value comes back as it went in.
+  const read = (rows: unknown) => (rows as Record<string, number>[]).map((r) => ({ r: r.r, u: r.u, m: r.m, sign: Object.is(r.r, -0) && Object.is(r.u, -0) }));
+  const sqlite3 = driver("sqlite3");
+  const db3 = new sqlite3.Database(":memory:");
+  const client = driver("@libsql/client").createClient({ url: ":memory:" });
+  const turso = await driver("@tursodatabase/database").connect(":memory:");
+  try {
+    for (const db of [db3, client, turso, new DatabaseSync(":memory:")]) {
+      assert.deepEqual(read(await execute(db, lq, { r: -0, u: -0, i: 0, n: 0 })), [{ r: -0, u: -0, m: 1, sign: true }]);
+      assert.deepEqual(read(await execute(db, lq, { r: Infinity, u: -Infinity, i: 0, n: 0 })), [{ r: Infinity, u: -Infinity, m: -Infinity, sign: false }]);
+    }
+  } finally {
+    db3.close();
+    client.close();
+    await turso.close();
+  }
+});
+
 test("mysql and sqlite: every driver gets a JSON parameter as its JSON text, and null as NULL", async () => {
   const json = { type: { kind: "json" } } as const;
   const mq: QueryModule<"mysql"> = { dialect: "mysql", sql: "select cast(:a as json), cast(:b as json), :name, cast(:a as json), cast(:z as json)", params: ["a", "b", "name", "z"], inputs: { a: json, b: json, z: json, name: { type: myType("varchar") } } };
@@ -966,7 +1070,7 @@ test("mysql: mariadb, which writes a value that is not a Buffer as JSON, gets a 
   }
 });
 
-test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which write a number into the statement and -0 as 0, written in at each of its places as the float (-0e0), the rest left to the driver; mysql2 gets the number, which it binds as a DOUBLE", async () => {
+test("mysql: a DOUBLE or FLOAT of -0, and one of a type its value decides between that may be a DOUBLE, goes to mariadb and PlanetScale, which write a number into the statement and -0 as 0, written in at each of its places as the float (-0e0), the rest left to the driver; mysql2 gets the number, which it binds as a DOUBLE", async () => {
   // A query defined by hand may name a parameter twice, which a build refuses; the first place types it.
   const text = "update r set d = ?, f = ?, i = ? + ?, payload = json_array(?)";
   const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "update r set d = :d, f = :f, i = :i + :u, payload = json_array(:d)", params: ["d", "f", "i", "u"], text, order: ["d", "f", "i", "u", "d"], marks: [[17, 18], [24, 25], [31, 32], [35, 36], [59, 60]], inputs: { d: { type: myType("double") }, f: { type: myType("float") }, i: { type: myType("int") }, u: { type: oneOf(myType("bigint"), myType("double")) } } };
@@ -975,8 +1079,8 @@ test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which writ
   const planetscale = { execute: async (sql: string, values: unknown[] | null) => (seen.push([sql, values]), { rows: [] }) };
   const mysql2 = { query: async () => [[], []], execute: async (options: { sql: string }, values: unknown[]) => (seen.push([options.sql, values]), [[], []]) };
   for (const client of [mariadb, planetscale, mysql2]) await execute(client as never, q, { d: -0, f: -0, i: -0, u: -0 });
-  const written = "update r set d = (-0e0), f = (-0e0), i = ? + ?, payload = json_array((-0e0))";
-  assert.deepEqual(seen, [[written, [-0, -0]], [written, [-0, -0]], [text, [-0, -0, -0, -0, -0]]]);
+  const written = "update r set d = (-0e0), f = (-0e0), i = ? + (-0e0), payload = json_array((-0e0))";
+  assert.deepEqual(seen, [[written, [-0]], [written, [-0]], [text, [-0, -0, -0, -0, -0]]]);
   // A -0 alone leaves no value for the driver to write.
   const alone: QueryModule<"mysql"> = { dialect: "mysql", sql: "select coalesce(:d, d) as x from r", params: ["d"], text: "select coalesce(?, d) as x from r", order: ["d"], marks: [[16, 17]], inputs: { d: { type: myType("double") } } };
   seen.length = 0;
@@ -987,13 +1091,21 @@ test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which writ
   seen.length = 0;
   await execute(mariadb as never, minus, { d: -0, e: 1 });
   assert.deepEqual(seen, [["select 1-(-0e0) as a, ? as b", [1]]]);
-  // Without inputs or marks, as defined by hand, or with the sql_mode its build read its strings
-  // under, every value goes as it is.
+  // Without inputs, as defined by hand, every value goes as it is. Without marks, or with the
+  // sql_mode its build read its strings under, a float's -0 has no place to be written in, and the
+  // driver would write it as 0, so it is refused.
   const { inputs: _, ...untyped } = q;
   const { marks: __, ...unmarked } = q;
   seen.length = 0;
-  for (const query of [untyped, unmarked, { ...q, sqlMode: { backslashEscapes: false, ansiQuotes: false } }]) await execute(mariadb as never, query, { d: -0, f: -0, i: -0, u: -0 });
-  assert.deepEqual(seen, Array(3).fill([text, [-0, -0, -0, -0, -0]]));
+  await execute(mariadb as never, untyped, { d: -0, f: -0, i: -0, u: -0 });
+  assert.deepEqual(seen, [[text, [-0, -0, -0, -0, -0]]]);
+  for (const query of [unmarked, { ...q, sqlMode: { backslashEscapes: false, ansiQuotes: false } }]) {
+    for (const [client, name] of [[mariadb, "mariadb"], [planetscale, "PlanetScale"]] as const) {
+      await assert.rejects(Promise.resolve().then(() => execute(client as never, query, { d: -0, f: 1, i: 0, u: 1 })), new RegExp(`^TypeError: Parameter "d" is -0, which ${name} writes into the statement as 0`));
+    }
+    await execute(mariadb as never, query, { d: 1, f: 1, i: -0, u: 1 });
+  }
+  assert.deepEqual(seen.slice(1), Array(2).fill([text, [1, 1, -0, 1, 1]]));
   seen.length = 0;
   for (const client of [mariadb, planetscale]) await execute(client as never, q, { d: 1.5, f: 0, i: 0, u: 2 });
   assert.deepEqual(seen, Array(2).fill([text, [1.5, 0, 0, 2, 1.5]]));

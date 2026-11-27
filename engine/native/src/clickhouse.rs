@@ -21,11 +21,35 @@ pub struct Clickhouse {
 
 struct Connection {
     server: Server,
+    /// The server's `version()`, which the schema's fingerprint is written for.
+    version: String,
     /// The engine's answers, kept between statements as the loader's session keeps them.
     answers: AnswerCache<Describe>,
 }
 
 impl Connection {
+    /// The schema's fingerprint; a failure is the answer the program gives for it. An executable
+    /// function's result is the server's configuration's, which only a server of 26.2 or later
+    /// lists: where the configuration defines one and the server can't list it, there is no
+    /// fingerprint to keep an analysis by.
+    fn schema(&self) -> Result<crate::Schema, Value> {
+        use crate::engines::clickhouse::schema_fingerprint as fingerprint;
+        let rows = |sql: &str| match self.server.ask(sql) {
+            Ok(Outcome::Rows(rows)) => Ok(rows),
+            Ok(outcome) => Err(failure(&self.server, outcome)),
+            Err(e) => Err(json!({ "status": "unreachable", "message": e })),
+        };
+        let base = rows(&fingerprint::query(false))?;
+        let executable = base.first().and_then(|row| row.get(1)).and_then(|n| n.as_u64().or_else(|| n.as_str()?.parse().ok())).unwrap_or(0) > 0;
+        if !executable {
+            return Ok(crate::Schema::of(&base, None));
+        }
+        if !fingerprint::lists_signatures(&self.version) {
+            return Err(json!({ "status": "error", "message": format!("ClickHouse {} lists no executable function's arguments and result, which 26.2 and later do", self.version) }));
+        }
+        Ok(crate::Schema::of(&rows(&fingerprint::query(true))?, None))
+    }
+
     /// The analysis of one statement; a failure is the answer the program gives for it.
     fn analyze(&mut self, sql: &str) -> Result<Analysis, Value> {
         match answers::analyze(&self.server, sql, &mut self.answers) {
@@ -47,7 +71,7 @@ pub struct Session {
 impl Session {
     pub fn open(url: &str) -> Result<Session, Failure> {
         let (server, version) = connect(url).map_err(|answer| Failure::of(&answer))?;
-        Ok(Session { connection: Connection { server, answers: AnswerCache::until_cleared() }, version })
+        Ok(Session { connection: Connection { server, version: version.clone(), answers: AnswerCache::until_cleared() }, version })
     }
 
     /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
@@ -65,6 +89,10 @@ impl Program for Clickhouse {
         reylo_engine_core::api::call::<crate::engines::clickhouse::Clickhouse>(request)
     }
 
+    fn fingerprint(&self) -> String {
+        crate::cache_fingerprint(crate::engines::clickhouse::FINGERPRINT, &[])
+    }
+
     async fn serve(&mut self, request: &Value) -> Option<Value> {
         let op = request["op"].as_str()?;
         let id = request["conn"].as_u64().unwrap_or(0);
@@ -73,7 +101,7 @@ impl Program for Clickhouse {
             "open" => match connect(request["url"].as_str().unwrap_or_default()) {
                 Ok((server, version)) => {
                     self.next += 1;
-                    self.connections.insert(self.next, Connection { server, answers: AnswerCache::until_cleared() });
+                    self.connections.insert(self.next, Connection { server, version: version.clone(), answers: AnswerCache::until_cleared() });
                     json!({ "status": "opened", "conn": self.next, "version": version })
                 }
                 Err(failure) => failure,
@@ -85,7 +113,7 @@ impl Program for Clickhouse {
                     Err(failure) => failure,
                 },
             },
-            // A query the host runs itself (the schema's fingerprint), its rows as the server's JSON
+            // A query the host runs itself (a host's own catalog query), its rows as the server's JSON
             // writes them.
             "query" => match self.connections.get(&id) {
                 None => closed(id),
@@ -93,6 +121,14 @@ impl Program for Clickhouse {
                     Ok(Outcome::Rows(rows)) => json!({ "status": "rows", "rows": rows }),
                     Ok(outcome) => failure(&c.server, outcome),
                     Err(e) => json!({ "status": "unreachable", "message": e }),
+                },
+            },
+            // The schema's fingerprint ([`crate::engines::clickhouse::schema_fingerprint`]).
+            "schema" => match self.connections.get(&id) {
+                None => closed(id),
+                Some(c) => match c.schema() {
+                    Ok(schema) => schema.answer(),
+                    Err(failure) => failure,
                 },
             },
             // The schema changed: what the engine was told about the old one is stale.

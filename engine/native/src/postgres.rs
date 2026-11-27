@@ -139,6 +139,35 @@ impl Connection {
         Ok(())
     }
 
+    /// A query's rows over the connection, opened again once where the server closed it; a failure
+    /// is the answer the program gives for it.
+    async fn query(&mut self, sql: &str, params: &[Value]) -> Result<Vec<Vec<Value>>, Value> {
+        self.ready().await?;
+        let mut result = answers::PreparedAnswers(&self.client, &self.prepared).query(sql, params).await;
+        if matches!(&result, Err(e) if self.client.is_closed() || e.0.starts_with(answers::ENDED)) {
+            self.reopen().await?;
+            result = answers::PreparedAnswers(&self.client, &self.prepared).query(sql, params).await;
+        }
+        match result {
+            Ok(Ok(rows)) => Ok(rows),
+            Ok(Err(e)) => Err(json!({ "status": "error", "message": e.message, "code": e.code })),
+            Err(e) if self.client.is_closed() || e.0.starts_with(answers::ENDED) => Err(lost(&e.0)),
+            Err(e) => Err(json!({ "status": "error", "message": e.0 })),
+        }
+    }
+
+    /// The schema's fingerprint over the connection ([`schema`]), opened again once where the
+    /// server closed it; a failure is the answer the program gives for it.
+    async fn schema(&mut self) -> Result<crate::Schema, Value> {
+        self.ready().await?;
+        let mut result = schema(&self.client).await;
+        if result.is_err() && self.client.is_closed() {
+            self.reopen().await?;
+            result = schema(&self.client).await;
+        }
+        result.map_err(|e| if self.client.is_closed() { lost(&e.to_string()) } else { failure(&e) })
+    }
+
     /// The analysis of one statement over the connection, opened again once where the server
     /// closed it; a failure is the answer the program gives for it.
     async fn analyze(&mut self, sql: &str) -> Result<Analysis, Value> {
@@ -240,9 +269,9 @@ pub const DATE_STYLE: u32 = 24;
 /// the type check's own session has such a style, from its role, its database or the server, the
 /// application's is likely to as well, so a statement that returns one of those types is an error
 /// here, before it runs. JSON is written in ISO's style whatever the setting. Nothing is added to
-/// a statement that has an error already. The loader keeps an analysis by its schema's
-/// fingerprint, which the session's DateStyle is part of (src/analyze.ts), so the error goes when
-/// the style does. A Rust build keeps the same entry and reads past the error, since sqlx reads
+/// a statement that has an error already. `reylo/.cache/` keeps an analysis by its schema's
+/// fingerprint, which the session's DateStyle is part of
+/// ([`crate::engines::postgres::schema_fingerprint`]), so the error goes when the style does. A Rust build keeps the same entry and reads past the error, since sqlx reads
 /// every value in the binary format, which no DateStyle changes (rust/reylo-build/src/analysis.rs).
 fn held_to_iso(analysis: &mut Analysis, sql: &str, date_style: &str) {
     let style = date_style.split(',').next().unwrap_or_default().trim();
@@ -272,6 +301,21 @@ fn writes_dates(ty: &reylo_engine_core::types::Type) -> bool {
         Kind::Table(t) => t.columns.iter().any(|c| writes_dates(&c.ty)),
         _ => false,
     }
+}
+
+/// What names this program's analyses in `reylo/.cache/` beside the statement and the schema
+/// ([`Program::fingerprint`]), whichever host writes them: this program for the type check, or a Rust
+/// build (reylo-build).
+pub fn cache_fingerprint() -> String {
+    crate::cache_fingerprint(crate::engines::postgres::FINGERPRINT, &[])
+}
+
+/// The schema's fingerprint, read over `client` as every host reads it, so that each reads the
+/// entries the others write ([`crate::Schema`]): the answer of the engine's query
+/// ([`crate::engines::postgres::schema_fingerprint`]), one MD5.
+pub async fn schema(client: &Client) -> Result<crate::Schema, tokio_postgres::Error> {
+    let rows = client.query(crate::engines::postgres::schema_fingerprint::QUERY.as_str(), &[]).await?;
+    Ok(crate::Schema::of(&rows.iter().map(|row| vec![row.get::<_, Option<String>>(0).map_or(Value::Null, Value::from)]).collect::<Vec<_>>(), None))
 }
 
 /// The number of a `server_version`: `18.1` of `18.1 (Homebrew)`.
@@ -318,6 +362,10 @@ impl Session {
 impl Program for Postgres {
     fn call(&self, request: &str) -> String {
         reylo_engine_core::api::call::<crate::engines::postgres::Postgres>(request)
+    }
+
+    fn fingerprint(&self) -> String {
+        cache_fingerprint()
     }
 
     async fn serve(&mut self, request: &Value) -> Option<Value> {
@@ -374,28 +422,21 @@ impl Program for Postgres {
                 }
             },
             // A query on the connection, its parameters bound and its values read as the engine's
-            // catalog queries are (the schema's fingerprint, and a host's own catalog queries).
+            // catalog queries are (a host's own catalog queries).
             "query" => match self.connections.get_mut(&conn) {
                 None => closed(conn),
-                Some(c) => {
-                    if let Err(failure) = c.ready().await {
-                        return Some(failure);
-                    }
-                    let params = request["params"].as_array().cloned().unwrap_or_default();
-                    let mut result = answers::PreparedAnswers(&c.client, &c.prepared).query(sql, &params).await;
-                    if matches!(&result, Err(e) if c.client.is_closed() || e.0.starts_with(answers::ENDED)) {
-                        if let Err(failure) = c.reopen().await {
-                            return Some(failure);
-                        }
-                        result = answers::PreparedAnswers(&c.client, &c.prepared).query(sql, &params).await;
-                    }
-                    match result {
-                        Ok(Ok(rows)) => json!({ "status": "rows", "rows": rows }),
-                        Ok(Err(e)) => json!({ "status": "error", "message": e.message, "code": e.code }),
-                        Err(e) if c.client.is_closed() || e.0.starts_with(answers::ENDED) => lost(&e.0),
-                        Err(e) => json!({ "status": "error", "message": e.0 }),
-                    }
-                }
+                Some(c) => match c.query(sql, &request["params"].as_array().cloned().unwrap_or_default()).await {
+                    Ok(rows) => json!({ "status": "rows", "rows": rows }),
+                    Err(failure) => failure,
+                },
+            },
+            // The schema's fingerprint, as every host reads it ([`schema`]).
+            "schema" => match self.connections.get_mut(&conn) {
+                None => closed(conn),
+                Some(c) => match c.schema().await {
+                    Ok(schema) => schema.answer(),
+                    Err(failure) => failure,
+                },
             },
             // The schema changed: what the engine was told about the old one is stale.
             "forget" => match self.connections.get_mut(&conn) {
@@ -836,6 +877,13 @@ fn failure(e: &tokio_postgres::Error) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// The DateStyle error ([`super::held_to_iso`]) turns on the session's style, which the schema's
+    /// fingerprint reads, so an entry that holds the error goes when the style does.
+    #[test]
+    fn the_schema_fingerprint_reads_the_date_style_the_program_reports_on() {
+        assert!(crate::engines::postgres::schema_fingerprint::QUERY.contains("current_setting('DateStyle'"));
+    }
+
     use super::*;
 
     fn no_env(_: &str) -> Option<String> {

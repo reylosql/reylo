@@ -328,21 +328,99 @@ fn migrations_of(dir: &Path, named: impl Iterator<Item = (String, Option<String>
 // ---------------------------------------------------------------------------------------------
 // The history table.
 
-fn history_ddl(d: Dialect) -> String {
+/// The history table as a statement names it. On Postgres with its schema: the one a database has
+/// it in, else the one `create table` would make it in now. Named without its schema, a migration
+/// that makes a schema the search_path reads before the table's would hide it behind a new, empty
+/// one, as an earlier version did. Where a database holds two, each may hold migrations the other
+/// lacks, and which one the next statement takes must not turn on what an earlier one emptied:
+/// refused, with what each holds. One this role can't read is refused too, with what it lacks,
+/// rather than taken for none and made again beside it.
+async fn history_table(db: &mut Db) -> Result<String, Error> {
+    if db.dialect() != Dialect::Postgres {
+        return Ok(HISTORY_TABLE.to_string());
+    }
+    let found = db
+        .rows(&format!(
+            "select format('%I.%I', n.nspname, c.relname) as t, format('%I', n.nspname) as s,
+               has_schema_privilege(n.oid, 'USAGE')::text as usage, has_table_privilege(c.oid, 'SELECT')::text as reads
+             from pg_class c join pg_namespace n on n.oid = c.relnamespace where {} order by c.oid",
+            history_tables("c", "n")
+        ))
+        .await?;
+    let tables: Vec<(String, String, bool, bool)> = found.iter().map(|r| (r.text("t").to_string(), r.text("s").to_string(), r.text("usage") == "true", r.text("reads") == "true")).collect();
+    match tables.as_slice() {
+        [(one, _, true, true)] => Ok(one.clone()),
+        [(one, schema, usage, _)] => {
+            let role = db.rows("select quote_ident(current_user) as r").await?.first().map(|r| r.text("r").to_string()).unwrap_or_default();
+            let mut lines = vec![format!("This role can't read Reylo's history, {one}")];
+            if !usage {
+                lines.push("  Grant it the use of the schema, as the schema's owner:".to_string());
+                lines.push(format!("    grant usage on schema {schema} to {role}"));
+            }
+            lines.push("  Grant it the use of the table, as the table's owner:".to_string());
+            lines.push(format!("    grant select, insert, update, delete on table {one} to {role}"));
+            Err(Error(lines.join("\n")))
+        }
+        [] => {
+            let rows = db.rows(&format!("select coalesce(case when current_schema() is not null then format('%I.%I', current_schema(), '{HISTORY_TABLE}') end, '{HISTORY_TABLE}') as t")).await?;
+            Ok(rows.first().map(|r| r.text("t").to_string()).unwrap_or_else(|| HISTORY_TABLE.to_string()))
+        }
+        several => {
+            let mut lines = vec![format!("This database holds {} of Reylo's history tables, where it keeps one", several.len())];
+            for (table, _, usage, reads) in several {
+                if !(*usage && *reads) {
+                    lines.push(format!("  In {table}, which this role can't read"));
+                    continue;
+                }
+                let rows = db.rows(&format!("select count(applied_at)::text as n, (count(*) - count(applied_at))::text as started, coalesce(max(applied_at)::text, '') as at from {table}")).await?;
+                let (n, started, at) = rows.first().map(|r| (r.text("n").to_string(), r.text("started").to_string(), r.text("at").to_string())).unwrap_or_default();
+                let ran = match n.as_str() {
+                    "0" => "no migration ran".to_string(),
+                    "1" => format!("1 migration ran, at {at}"),
+                    _ => format!("{n} migrations ran, the last at {at}"),
+                };
+                let started = match started.as_str() {
+                    "0" => String::new(),
+                    "1" => ", and 1 started".to_string(),
+                    _ => format!(", and {started} started"),
+                };
+                lines.push(format!("  In {table}, {ran}{started}"));
+            }
+            lines.push("  Keep one table holding each migration's row from any of them, its run over its start, and drop the others".to_string());
+            lines.push("  Then see what it ran:".to_string());
+            lines.push("    reylo migrate status".to_string());
+            Err(Error(lines.join("\n")))
+        }
+    }
+}
+
+/// Which `pg_class` row `c` in schema `n` is a history table of Reylo's: in a schema of its own, not
+/// a session's temporary one.
+fn history_tables(c: &str, n: &str) -> String {
+    format!("{c}.relname = '{HISTORY_TABLE}' and {c}.relkind in ('r', 'p') and {n}.nspname not like 'pg\\_temp%'")
+}
+
+/// The history table's name as a string `to_regclass` reads, whatever `standard_conforming_strings`
+/// says of a backslash in it.
+fn history_text(history: &str) -> String {
+    format!("E'{}'", history.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+fn history_ddl(d: Dialect, history: &str) -> String {
     match d {
-        Dialect::Postgres => format!("create table if not exists {HISTORY_TABLE} (name text primary key, sql text not null, applied_at timestamptz, fingerprint text, catalog text)"),
-        Dialect::Mysql => format!("create table if not exists {HISTORY_TABLE} (name varchar(255) primary key, `sql` longtext not null, applied_at datetime(6) null, fingerprint text null, catalog longtext null) engine=InnoDB"),
-        Dialect::Sqlite => format!("create table if not exists {HISTORY_TABLE} (name text primary key, sql text not null, applied_at text, fingerprint text, catalog text)"),
+        Dialect::Postgres => format!("create table if not exists {history} (name text primary key, sql text not null, applied_at timestamptz, fingerprint text, catalog text)"),
+        Dialect::Mysql => format!("create table if not exists {history} (name varchar(255) primary key, `sql` longtext not null, applied_at datetime(6) null, fingerprint text null, catalog longtext null) engine=InnoDB"),
+        Dialect::Sqlite => format!("create table if not exists {history} (name text primary key, sql text not null, applied_at text, fingerprint text, catalog text)"),
     }
 }
 
 /// The time a row is applied at: now, and after every row already there, so that rows written in
 /// one run read back in the order they were written. On SQLite, whose clock has milliseconds, a tie
 /// is broken by the row's rowid instead ([`read_history`]).
-fn now_sql(d: Dialect) -> String {
+fn now_sql(d: Dialect, history: &str) -> String {
     match d {
-        Dialect::Postgres => format!("greatest(clock_timestamp(), (select max(applied_at) + interval '1 microsecond' from {HISTORY_TABLE}))"),
-        Dialect::Mysql => format!("greatest(now(6), coalesce((select max(h.applied_at) + interval 1 microsecond from (select applied_at from {HISTORY_TABLE}) h), now(6)))"),
+        Dialect::Postgres => format!("greatest(clock_timestamp(), (select max(applied_at) + interval '1 microsecond' from {history}))"),
+        Dialect::Mysql => format!("greatest(now(6), coalesce((select max(h.applied_at) + interval 1 microsecond from (select applied_at from {history}) h), now(6)))"),
         Dialect::Sqlite => "strftime('%Y-%m-%d %H:%M:%f', 'now')".into(),
     }
 }
@@ -357,7 +435,7 @@ fn sql_col(d: Dialect) -> &'static str {
 
 async fn has_history(db: &mut Db) -> Result<bool, Error> {
     let sql = match db.dialect() {
-        Dialect::Postgres => format!("select to_regclass('{HISTORY_TABLE}') is not null as ok"),
+        Dialect::Postgres => format!("select exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace where {}) as ok", history_tables("c", "n")),
         Dialect::Mysql => format!("select count(*) > 0 as ok from information_schema.tables where table_schema = database() and table_name = '{HISTORY_TABLE}'"),
         Dialect::Sqlite => format!("select count(*) > 0 as ok from sqlite_schema where name = '{HISTORY_TABLE}'"),
     };
@@ -375,9 +453,10 @@ async fn read_history(db: &mut Db) -> Result<Vec<HistoryRow>, Error> {
     let tie = if d == Dialect::Sqlite { "rowid, " } else { "" };
     // A table an earlier build made has no fingerprint column until the next run adds it.
     let fingerprint = if has_fingerprint(db).await? { "fingerprint" } else { "null as fingerprint" };
+    let history = history_table(db).await?;
     let rows = db
         .rows(&format!(
-            "select name, {} as body, {applied_at} as applied_at, {fingerprint} from {HISTORY_TABLE} order by applied_at is null, applied_at, {tie}case when name = '{INIT}' then '' else name end",
+            "select name, {} as body, {applied_at} as applied_at, {fingerprint} from {history} order by applied_at is null, applied_at, {tie}case when name = '{INIT}' then '' else name end",
             sql_col(d)
         ))
         .await?;
@@ -393,8 +472,9 @@ async fn has_fingerprint(db: &mut Db) -> Result<bool, Error> {
 
 /// Whether the history table has `column`, which a table an earlier build made may lack.
 async fn has_column(db: &mut Db, column: &str) -> Result<bool, Error> {
+    let history = history_text(&history_table(db).await?);
     let sql = match db.dialect() {
-        Dialect::Postgres => format!("select count(*) > 0 as ok from pg_attribute where attrelid = to_regclass('{HISTORY_TABLE}') and attname = '{column}' and not attisdropped"),
+        Dialect::Postgres => format!("select count(*) > 0 as ok from pg_attribute where attrelid = to_regclass({history}) and attname = '{column}' and not attisdropped"),
         Dialect::Mysql => format!("select count(*) > 0 as ok from information_schema.columns where table_schema = database() and table_name = '{HISTORY_TABLE}' and column_name = '{column}'"),
         Dialect::Sqlite => format!("select count(*) > 0 as ok from pragma_table_info('{HISTORY_TABLE}') where name = '{column}'"),
     };
@@ -408,17 +488,19 @@ async fn has_column(db: &mut Db, column: &str) -> Result<bool, Error> {
 /// grant made on it later, by hand, is kept.
 async fn ensure_history(db: &mut Db) -> Result<(), Error> {
     let d = db.dialect();
+    let history = history_table(db).await?;
     if d == Dialect::Postgres && !has_history(db).await? {
         db.exec("begin").await?;
         let made = async {
-            db.exec(&history_ddl(d)).await?;
+            db.exec(&history_ddl(d, &history)).await?;
             let granted = db
                 .rows(&format!(
-                    "select distinct case when a.grantee = 0 then 'public' else quote_ident(r.rolname) end as grantee from pg_class c cross join aclexplode(c.relacl) a left join pg_roles r on r.oid = a.grantee where c.oid = to_regclass('{HISTORY_TABLE}') and a.grantee <> c.relowner"
+                    "select distinct case when a.grantee = 0 then 'public' else quote_ident(r.rolname) end as grantee from pg_class c cross join aclexplode(c.relacl) a left join pg_roles r on r.oid = a.grantee where c.oid = to_regclass({}) and a.grantee <> c.relowner",
+                    history_text(&history)
                 ))
                 .await?;
             for r in granted {
-                db.exec(&format!("revoke all on table {HISTORY_TABLE} from {}", r.text("grantee"))).await?;
+                db.exec(&format!("revoke all on table {history} from {}", r.text("grantee"))).await?;
             }
             // On Supabase, how the database began, which its shadows begin as: it has run no
             // migration of Reylo's yet.
@@ -434,12 +516,12 @@ async fn ensure_history(db: &mut Db) -> Result<(), Error> {
         }
         made?;
     }
-    db.exec(&history_ddl(d)).await?;
+    db.exec(&history_ddl(d, &history)).await?;
     if !has_fingerprint(db).await? {
-        db.exec(&format!("alter table {HISTORY_TABLE} add column fingerprint text")).await?;
+        db.exec(&format!("alter table {history} add column fingerprint text")).await?;
     }
     if !has_column(db, "catalog").await? {
-        db.exec(&format!("alter table {HISTORY_TABLE} add column catalog {}", if d == Dialect::Mysql { "longtext null" } else { "text" })).await?;
+        db.exec(&format!("alter table {history} add column catalog {}", if d == Dialect::Mysql { "longtext null" } else { "text" })).await?;
     }
     Ok(())
 }
@@ -463,8 +545,9 @@ async fn store_catalog(db: &mut Db, name: &str, lines: &[String]) -> Result<(), 
     }
     // As a JSON array: a line may hold newlines of its own (a function's definition).
     let text = serde_json::to_string(&fingerprinted(lines, db.dialect())).unwrap_or_default();
-    db.exec_with(&format!("update {HISTORY_TABLE} set catalog = null where name <> {} and catalog is not null", db.param(1)), &[&name]).await?;
-    db.exec_with(&format!("update {HISTORY_TABLE} set catalog = {} where name = {}", db.param(1), db.param(2)), &[&text, &name]).await
+    let history = history_table(db).await?;
+    db.exec_with(&format!("update {history} set catalog = null where name <> {} and catalog is not null", db.param(1)), &[&name]).await?;
+    db.exec_with(&format!("update {history} set catalog = {} where name = {}", db.param(1), db.param(2)), &[&text, &name]).await
 }
 
 /// The lines stored with `name`'s fingerprint, where they were.
@@ -472,7 +555,8 @@ async fn stored_catalog(db: &mut Db, name: &str) -> Result<Option<Vec<String>>, 
     if !has_column(db, "catalog").await? {
         return Ok(None);
     }
-    let rows = db.rows(&format!("select catalog from {HISTORY_TABLE} where name = {}", crate::db::literal(name))).await?;
+    let history = history_table(db).await?;
+    let rows = db.rows(&format!("select catalog from {history} where name = {}", crate::db::literal(name))).await?;
     // A JSON array, or from a run before that, the lines joined by newlines.
     Ok(rows.first().and_then(|r| r.get("catalog")).map(|text| match serde_json::from_str::<Vec<String>>(text) {
         Ok(lines) => lines,
@@ -511,7 +595,8 @@ async fn fingerprint_of(db: &mut Db, lines: &[String]) -> Result<String, Error> 
 }
 
 async fn set_fingerprint(db: &mut Db, name: &str, value: &str) -> Result<(), Error> {
-    db.exec_with(&format!("update {HISTORY_TABLE} set fingerprint = {} where name = {}", db.param(1), db.param(2)), &[&value, &name]).await
+    let history = history_table(db).await?;
+    db.exec_with(&format!("update {history} set fingerprint = {} where name = {}", db.param(1), db.param(2)), &[&value, &name]).await
 }
 
 /// Waits until no other run of `reylo migrate` works on this database, so that two that start at
@@ -698,9 +783,10 @@ async fn unchanged_since_cut_off(db: &mut Db, stored: &str) -> bool {
 /// where its run reads the fingerprint.
 async fn insert_row(db: &mut Db, m: &Migration, applied: bool, mark: Option<&str>) -> Result<(), Error> {
     let d = db.dialect();
-    let at = if applied { now_sql(d) } else { "null".to_string() };
+    let history = history_table(db).await?;
+    let at = if applied { now_sql(d, &history) } else { "null".to_string() };
     let stamp = if mark.is_some() { db.param(3) } else { "null".to_string() };
-    let sql = format!("insert into {HISTORY_TABLE} (name, {}, applied_at, fingerprint) values ({}, {}, {at}, {stamp})", sql_col(d), db.param(1), db.param(2));
+    let sql = format!("insert into {history} (name, {}, applied_at, fingerprint) values ({}, {}, {at}, {stamp})", sql_col(d), db.param(1), db.param(2));
     match mark {
         Some(mark) => db.exec_with(&sql, &[&m.name, &m.sql, &mark]).await,
         None => db.exec_with(&sql, &[&m.name, &m.sql]).await,
@@ -897,7 +983,9 @@ async fn run_once(db: &mut Db, m: &Migration, record: Option<&SchemaStamp>) -> R
                 Err(_) => dropped = false,
             }
             if record.is_some() {
-                let _ = db.exec_with(&format!("delete from {HISTORY_TABLE} where name = {}", db.param(1)), &[&m.name]).await;
+                if let Ok(history) = history_table(db).await {
+                    let _ = db.exec_with(&format!("delete from {history} where name = {}", db.param(1)), &[&m.name]).await;
+                }
             }
             // A statement that gave up waiting for a lock changed nothing, and SQLite's run whole or
             // not at all; on Postgres, an index build leaves nothing once its invalid index is
@@ -918,7 +1006,8 @@ async fn run_once(db: &mut Db, m: &Migration, record: Option<&SchemaStamp>) -> R
             // Outside a transaction, a stamp that can't be read leaves a bare mark, which the next run
             // refuses until the fingerprint is stored.
             let mark = stamp.mark(db).await.unwrap_or_else(|_| PENDING.to_string());
-            db.exec_with(&format!("update {HISTORY_TABLE} set applied_at = {}, fingerprint = {} where name = {}", now_sql(d), db.param(1), db.param(2)), &[&mark, &m.name]).await.map_err(Ran::Partly)?;
+            let history = history_table(db).await.map_err(Ran::Partly)?;
+            db.exec_with(&format!("update {history} set applied_at = {}, fingerprint = {} where name = {}", now_sql(d, &history), db.param(1), db.param(2)), &[&mark, &m.name]).await.map_err(Ran::Partly)?;
         }
         return Ok(());
     }
@@ -3237,7 +3326,8 @@ async fn extensions_began(db: &mut Db) -> Result<Option<Vec<String>>, Error> {
         return Ok(None);
     }
     if has_history(db).await? {
-        let note = db.rows(&format!("select obj_description(to_regclass('{HISTORY_TABLE}'), 'pg_class') as note")).await?;
+        let history = history_text(&history_table(db).await?);
+        let note = db.rows(&format!("select obj_description(to_regclass({history}), 'pg_class') as note")).await?;
         if let Some(began) = note.first().and_then(|r| r.get("note")).and_then(crate::db::extensions_in_note) {
             return Ok(Some(began));
         }
@@ -3257,7 +3347,8 @@ async fn extensions_began_adopting(db: &mut Db, files: &[Migration]) -> Result<O
         return Ok(None);
     }
     if has_history(db).await? {
-        let note = db.rows(&format!("select obj_description(to_regclass('{HISTORY_TABLE}'), 'pg_class') as note")).await?;
+        let history = history_text(&history_table(db).await?);
+        let note = db.rows(&format!("select obj_description(to_regclass({history}), 'pg_class') as note")).await?;
         if let Some(began) = note.first().and_then(|r| r.get("note")).and_then(crate::db::extensions_in_note) {
             return Ok(Some(began));
         }
@@ -3291,7 +3382,8 @@ async fn api_began(db: &mut Db) -> Result<Option<[bool; 2]>, Error> {
         return Ok(None);
     }
     if has_history(db).await? {
-        let note = db.rows(&format!("select obj_description(to_regclass('{HISTORY_TABLE}'), 'pg_class') as note")).await?;
+        let history = history_text(&history_table(db).await?);
+        let note = db.rows(&format!("select obj_description(to_regclass({history}), 'pg_class') as note")).await?;
         if let Some(on) = note.first().and_then(|r| r.get("note")).and_then(crate::db::api_settings_in_note) {
             return Ok(Some(on));
         }
@@ -3307,7 +3399,8 @@ async fn api_began(db: &mut Db) -> Result<Option<[bool; 2]>, Error> {
 /// change all of. None off Supabase.
 async fn api_began_adopting(db: &mut Db, files: &[Migration]) -> Result<Vec<[bool; 2]>, Error> {
     let Some(noted) = api_began(db).await? else { return Ok(vec![]) };
-    if has_history(db).await? && db.rows(&format!("select obj_description(to_regclass('{HISTORY_TABLE}'), 'pg_class') as note")).await?.first().and_then(|r| r.get("note")).and_then(crate::db::api_settings_in_note).is_some() {
+    let history = history_text(&history_table(db).await?);
+    if has_history(db).await? && db.rows(&format!("select obj_description(to_regclass({history}), 'pg_class') as note")).await?.first().and_then(|r| r.get("note")).and_then(crate::db::api_settings_in_note).is_some() {
         return Ok(vec![noted]);
     }
     let changed: Vec<crate::db::ApiPrivilege> = files.iter().map(|f| f.sql.as_str()).chain(read_history(db).await?.iter().filter(|r| r.applied).map(|r| r.sql.as_str()).collect::<Vec<_>>()).flat_map(api_privileges_in).collect();
@@ -3368,7 +3461,8 @@ async fn api_began_replaying(server: &mut Server, opts: &Options, order: &[Migra
 
 /// Notes on the history table how a Supabase database began ([`crate::db::api_settings_note`]).
 async fn note_api_began(db: &mut Db, on: [bool; 2], extensions: &[String]) -> Result<(), Error> {
-    db.exec(&format!("comment on table {HISTORY_TABLE} is {}", crate::db::literal(&crate::db::api_settings_note(on, extensions)))).await
+    let history = history_table(db).await?;
+    db.exec(&format!("comment on table {history} is {}", crate::db::literal(&crate::db::api_settings_note(on, extensions)))).await
 }
 
 /// The default privileges in `public` a text grants or revokes Supabase's Data API roles, of those
@@ -3809,7 +3903,8 @@ async fn deploy_on(db: &mut Db, opts: &Options, log: Log<'_>) -> Result<i32, Err
     drop_leftovers(db, &plan.leftovers, log).await?;
     let started: Vec<&str> = history.iter().filter(|r| !r.applied).map(|r| r.name.as_str()).collect();
     // Rows marked started belong to pending migrations: they are written again below.
-    db.exec(&format!("delete from {HISTORY_TABLE} where applied_at is null")).await?;
+    let history_name = history_table(db).await?;
+    db.exec(&format!("delete from {history_name} where applied_at is null")).await?;
     let mut rows = Rows::new(format!("Applying to {}", shown_url(&opts.url)), plan.pending.iter().map(|m| m.name.as_str()));
     let d = db.dialect();
     let mut code = 0;
@@ -6661,13 +6756,14 @@ async fn history_push_on(db: &mut Db, server: &mut Server, opts: &Options, init:
     // The rows that stay as they are, with the time each ran: the history's start, as far as it
     // agrees with what is recorded, in its order. The rest is written again, in order, after them.
     let kept = before.iter().zip(recorded).take_while(|(r, f)| r.applied && r.name == f.name && same_statements(&r.sql, &f.sql, d)).count();
+    let history = history_table(db).await?;
     db.exec(if d == Dialect::Mysql { "start transaction" } else { "begin" }).await?;
     let written = async {
         let names: Vec<String> = recorded[..kept].iter().map(|f| crate::db::literal(&f.name)).collect();
         if names.is_empty() {
-            db.exec(&format!("delete from {HISTORY_TABLE}")).await?;
+            db.exec(&format!("delete from {history}")).await?;
         } else {
-            db.exec(&format!("delete from {HISTORY_TABLE} where name not in ({})", names.join(", "))).await?;
+            db.exec(&format!("delete from {history} where name not in ({})", names.join(", "))).await?;
         }
         for f in &recorded[kept..] {
             insert_row(db, f, true, None).await?;
@@ -7031,7 +7127,8 @@ async fn applied_times(db: &mut Db) -> Result<std::collections::HashMap<String, 
         Dialect::Mysql => "floor(unix_timestamp(applied_at))",
         Dialect::Sqlite => "cast(strftime('%s', applied_at) as integer)",
     };
-    let rows = db.rows(&format!("select name, {at} as at from {HISTORY_TABLE} where applied_at is not null")).await?;
+    let history = history_table(db).await?;
+    let rows = db.rows(&format!("select name, {at} as at from {history} where applied_at is not null")).await?;
     Ok(rows
         .iter()
         .filter_map(|r| {
@@ -7205,7 +7302,7 @@ async fn emptied(db: &mut Db, server: &mut Server, opts: &Options, log: Log<'_>)
     }
     let had_history = has_history(db).await? && !read_history(db).await?.is_empty();
     if has_history(db).await? {
-        let forget = format!("delete from {HISTORY_TABLE}");
+        let forget = format!("delete from {}", history_table(db).await?);
         if d == Dialect::Mysql {
             db.exec(&forget).await?;
         } else {
@@ -9347,6 +9444,14 @@ async fn with_referenced(db: &mut Db, schemas: &[String], log: Log<'_>) -> Resul
     }
     let project = crate::catalog::user_schemas(db).await?;
     let mut named = schemas.to_vec();
+    // A publication is in no schema, so its SQL is written whatever --schema names, and it names
+    // tables and schemas of its own, which have to be made before it.
+    let published: Vec<String> = published_schemas(db).await?.into_iter().filter(|s| project.contains(s) && !named.contains(s)).collect();
+    if !published.is_empty() {
+        log(&note(format!("Reading {} too, which a publication names", and_list(&published))));
+        named.extend(published);
+    }
+    let before = named.len();
     loop {
         let more: Vec<String> = referenced_schemas(db, &named).await?.into_iter().filter(|s| project.contains(s) && !named.contains(s)).collect();
         if more.is_empty() {
@@ -9354,10 +9459,32 @@ async fn with_referenced(db: &mut Db, schemas: &[String], log: Log<'_>) -> Resul
         }
         named.extend(more);
     }
-    if named.len() > schemas.len() {
-        log(&note(format!("Reading {} too, which {} refers to", and_list(&named[schemas.len()..]), and_list(schemas))));
+    if named.len() > before {
+        log(&note(format!("Reading {} too, which {} refers to", and_list(&named[before..]), and_list(&named[..before]))));
     }
     Ok(named)
+}
+
+/// The schemas the project's publications name: those of the tables each lists or leaves out of
+/// all tables, and each whose tables it publishes.
+#[cfg(feature = "cli")]
+async fn published_schemas(db: &mut Db) -> Result<Vec<String>, Error> {
+    let version: i64 = db.rows("select current_setting('server_version_num') as v").await?.first().and_then(|r| r.first()?.parse().ok()).unwrap_or(0);
+    // Postgres 15 publishes a schema's tables.
+    let in_schema = if version >= 150000 { "union select pn.pnnspid from pg_publication_namespace pn where pn.pnpubid = p.oid" } else { "" };
+    let rows = db
+        .rows(&format!(
+            "select distinct n.nspname as name from pg_publication p
+               cross join lateral (select c.relnamespace as ns from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid where pr.prpubid = p.oid {in_schema}) o
+               join pg_namespace n on n.oid = o.ns
+             where {} and not ({} and p.pubname = {})
+             order by 1",
+            crate::catalog::not_platform("p.pubowner"),
+            crate::catalog::platform_names(),
+            crate::db::literal(crate::catalog::PLATFORM_PUBLICATION)
+        ))
+        .await?;
+    Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
 }
 
 /// The schemas of the project's that --schema has to name for SQL of them to hold them: each that
@@ -9998,6 +10125,17 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             };
             // Whether a publication publishes its tables' stored generated columns is Postgres 18's.
             let generated = if version >= 180000 { "case when p.pubgencols = 's' then ', publish_generated_columns = stored' else '' end" } else { "''" };
+            // All sequences, and the tables all tables leave out, are Postgres 19's, written as pg_dump 19 writes them.
+            let (all, listed_only) = if version >= 190000 {
+                (
+                    "case when p.puballtables then 'ALL TABLES' || coalesce(' EXCEPT (' || (select string_agg(format('TABLE ONLY %I.%I', n.nspname, c.relname), ', ' order by n.nspname, c.relname)
+                        from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid and pr.prexcept) || ')', '')
+                        || case when p.puballsequences then ', ALL SEQUENCES' else '' end when p.puballsequences then 'ALL SEQUENCES' end",
+                    " and not pr.prexcept",
+                )
+            } else {
+                ("case when p.puballtables then 'ALL TABLES' end", "")
+            };
             for r in db
                 .rows(&format!(
                     "select 0 as k, et.evtname::text as name, format('CREATE EVENT TRIGGER %I ON %s', et.evtname, et.evtevent)
@@ -10010,10 +10148,10 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
                     from pg_event_trigger et join pg_proc f on f.oid = et.evtfoid join pg_namespace fn on fn.oid = f.pronamespace where {} and {}
                     union all
                     select 1, p.pubname::text, format('CREATE PUBLICATION %I', p.pubname)
-                        || coalesce(' FOR ' || case when p.puballtables then 'ALL TABLES' else nullif(concat_ws(', ',
+                        || coalesce(' FOR ' || coalesce({all}, nullif(concat_ws(', ',
                           (select string_agg(format('TABLE %I.%I', n.nspname, c.relname) || {columns}, ', ' order by n.nspname, c.relname)
-                            from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid),
-                          {schemas}), '') end, '')
+                            from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid{listed_only}),
+                          {schemas}), '')), '')
                         || format(' WITH (publish = %L%s%s)', concat_ws(', ', case when p.pubinsert then 'insert' end, case when p.pubupdate then 'update' end,
                           case when p.pubdelete then 'delete' end, case when p.pubtruncate then 'truncate' end), case when p.pubviaroot then ', publish_via_partition_root = true' else '' end, {generated}),
                       null,
@@ -10740,7 +10878,8 @@ async fn dev_on(db: &mut Db, server: &mut Server, swept: usize, opts: &Options, 
     drop_leftovers(db, &left, log).await?;
     if history.iter().any(|r| !r.applied) {
         // A row marked started is a pending migration's: written again when it runs, or is recorded.
-        db.exec(&format!("delete from {HISTORY_TABLE} where applied_at is null")).await?;
+        let history = history_table(db).await?;
+        db.exec(&format!("delete from {history} where applied_at is null")).await?;
     }
     let applied: Vec<&HistoryRow> = history.iter().filter(|r| r.applied).collect();
     // The history as far as it agrees with the files: each row's file there, where the lock puts it,
@@ -11240,7 +11379,8 @@ async fn dev_in_shadows(shadows: &mut Shadows<'_>, db: &mut Db, opts: &Options, 
     if !rewind_rows.is_empty() {
         ensure_history(db).await?;
         let quoted = |name: &str| format!("'{}'", name.replace('\'', "''"));
-        let mut forget: Vec<String> = rewind_rows.iter().map(|r| format!("delete from {HISTORY_TABLE} where name = {};", quoted(&r.name))).collect();
+        let history = history_table(db).await?;
+        let mut forget: Vec<String> = rewind_rows.iter().map(|r| format!("delete from {history} where name = {};", quoted(&r.name))).collect();
         if d == Dialect::Mysql {
             // MySQL commits each statement: the rows go first, so a rewind cut off leaves the
             // migrations it undid unrecorded, to run again, never recorded over a schema without them.

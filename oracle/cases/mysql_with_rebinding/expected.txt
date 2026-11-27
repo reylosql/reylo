@@ -1,0 +1,14 @@
+body.sql: many () -> { x: bigint }
+case.sql: many () -> { x: bigint }
+chain.sql: many () -> { x: bigint }
+control.sql: many () -> { x: int }
+derived.sql: many () -> { x: bigint? }
+exists.sql: at_most_one () -> { x: int }
+hidden.sql: many () -> { x: bigint? }
+independent.sql: at_most_one () -> { x: int }
+json.sql: one () -> { j: json int?[]? }
+keys.sql: many () -> { x: bigint }
+lateral.sql: many () -> { x: bigint? }
+recursive.sql: many () -> { x: bigint? }
+sibling.sql: many () -> { x: int }
+with_query.sql: many () -> { x: bigint? }

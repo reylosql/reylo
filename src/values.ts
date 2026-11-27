@@ -106,6 +106,96 @@ export function numbersInJson(v: unknown, at: JsonNumbers, column = ""): unknown
   return v;
 }
 
+/** JSON text the writer puts in as it is (src/rows.ts: a 64-bit integer's digits, a float's -0 or infinity). */
+export class RawJson {
+  readonly text: string;
+  constructor(text: string) {
+    this.text = text;
+  }
+}
+
+/**
+ * A value as the JSON text the database reads, written as JSON.stringify writes it (each value's
+ * `toJSON()` read, a key whose value is undefined left out) but for the numbers JSON.stringify
+ * writes as null or 0, the inverse of `numbersInJson`. -0 keeps its sign: `-0` on Postgres, which a
+ * `json` value keeps as written (`jsonb` holds no -0), and `-0e0` on MySQL and SQLite, whose JSON
+ * reads `-0` as the integer 0. An infinity goes in on SQLite as a number past a double's range, as
+ * SQLite writes one. NaN, and an infinity on Postgres and MySQL, whose JSON holds no number for
+ * one, are refused through `fail`, with the place in the value where each stands (`at /n`, after
+ * `at`), rather than stored as null.
+ */
+export function writeJson(v: unknown, dialect: Dialect, fail: (message: string) => never, at = ""): string | undefined {
+  const special = (n: unknown): n is number => typeof n === "number" && (!Number.isFinite(n) || Object.is(n, -0));
+  // One pass of JSON.stringify, each such number written as its own text with JSON.rawJSON, so that
+  // each value's `toJSON()` and getters are read once. The replacer sees a value after its
+  // `toJSON()` and before a boxed number is unboxed, and each object's place is kept for a refusal.
+  if (rawJson !== undefined) {
+    const places = new WeakMap<object, string>();
+    return JSON.stringify(v, function (this: object, key: string, x: unknown) {
+      const parent = places.get(this);
+      const place = parent === undefined ? at : `${parent}/${key.replace(/~/g, "~0").replace(/\//g, "~1")}`;
+      if (x !== null && typeof x === "object") places.set(x, place);
+      // JSON.rawJSON takes a primitive's text alone, so a document's is read back, each number and
+      // string as its own text.
+      if (x instanceof RawJson) return JSON.parse(x.text, (_k, y: unknown, context?: { source?: string }) => ((typeof y === "number" || typeof y === "string") && context?.source !== undefined ? rawJson(context.source) : typeof y === "number" ? rawJson(String(y)) : y));
+      const n = x instanceof Number ? Number(x) : x;
+      return special(n) ? rawJson(jsonNumber(n, place, dialect, fail)) : x;
+    });
+  }
+  // Without JSON.rawJSON, JSON.stringify's own text where no such number is in the value; else the
+  // value written again by its algorithm, which reads each `toJSON()` a second time.
+  let found = false;
+  const plain = JSON.stringify(v, (_key, x: unknown) => {
+    if (x instanceof RawJson || special(x instanceof Number ? Number(x) : x)) found = true;
+    return x;
+  });
+  return found ? jsonOf("", v, at, (n, place) => jsonNumber(n, place, dialect, fail)) : plain;
+}
+
+/** JSON.rawJSON, which JSON.stringify writes as its text, where the runtime has it (Node 21 and later, Bun, Deno, workerd). */
+const rawJson = (JSON as { rawJSON?: (text: string) => unknown }).rawJSON;
+
+/** A number inside a document as the database reads it (`writeJson`). */
+function jsonNumber(n: number, at: string, dialect: Dialect, fail: (message: string) => never): string {
+  if (Object.is(n, -0)) return dialect === "postgres" ? "-0" : "-0e0";
+  if (Number.isFinite(n)) return String(n);
+  if (dialect === "sqlite" && !Number.isNaN(n)) return n > 0 ? "9e999" : "-9e999";
+  return fail(`${at ? `at ${at} ` : ""}is ${n}, which ${dialect === "mysql" ? "MySQL holds no value" : dialect === "sqlite" ? "SQLite holds no value" : "JSON holds no number"} for: write null or a string in its place.`);
+}
+
+/**
+ * JSON.stringify's algorithm (SerializeJSONProperty), each number written by `number` and each
+ * place named by its JSON Pointer, `at`, for a runtime without JSON.rawJSON. It runs on a value
+ * JSON.stringify has written once already (`writeJson`), which has thrown on a BigInt or a cycle.
+ */
+function jsonOf(key: string, value: unknown, at: string, number: (n: number, at: string) => string): string | undefined {
+  if (value !== null && (typeof value === "object" || typeof value === "function")) {
+    const toJSON = (value as { toJSON?: unknown }).toJSON;
+    if (typeof toJSON === "function") value = toJSON.call(value, key);
+  }
+  if (value instanceof RawJson) return value.text;
+  if (value instanceof Number) value = Number(value);
+  else if (value instanceof String) value = String(value);
+  else if (value instanceof Boolean) value = value.valueOf();
+  else if (isRawJson(value)) return value.rawJSON;
+  if (typeof value === "number") return number(value, at);
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  const o = value as Record<string, unknown>;
+  if (Array.isArray(value)) return `[${Array.from({ length: value.length }, (_, i) => jsonOf(String(i), o[i], `${at}/${i}`, number) ?? "null").join(",")}]`;
+  return `{${Object.keys(o)
+    .flatMap((k) => {
+      const text = jsonOf(k, o[k], `${at}/${k.replace(/~/g, "~0").replace(/\//g, "~1")}`, number);
+      return text === undefined ? [] : [`${JSON.stringify(k)}:${text}`];
+    })
+    .join(",")}}`;
+}
+
+/** A value `JSON.rawJSON()` made, which JSON.stringify writes as its text. */
+function isRawJson(v: unknown): v is { rawJSON: string } {
+  const is = (JSON as { isRawJSON?: (v: unknown) => boolean }).isRawJSON;
+  return typeof is === "function" && is(v);
+}
+
 /** The TypeScript type of each scalar kind: what a value of that kind is at run time. */
 export const TS_TYPE: Readonly<Record<ScalarKind, string>> = {
   bool: "boolean",
@@ -308,7 +398,8 @@ export function columnKind(t: EngineType, dialect: Dialect): Kind {
     case "map":
       return dialect === "postgres" && name === "hstore" ? "hstore" : "unknown";
     case "union":
-      if (dialect === "sqlite") return "label" in t && t.label !== undefined ? sqliteDeclaredKind(t.label) : "unknown";
+      // SQLite: what a declared column stores, or a number SQLite computes as an INTEGER or a REAL.
+      if (dialect === "sqlite" && "label" in t && t.label !== undefined) return sqliteDeclaredKind(t.label);
       if (dialect === "postgres" && (name === "inet" || name === "cidr")) return "text";
       return either(t.members.map((m) => columnKind(m, dialect)));
     case "tagged_union":
@@ -992,7 +1083,7 @@ export function postgresLiteral(t: EngineType, v: unknown, fail: (message: strin
     };
     return write(v);
   }
-  if (t.kind === "json") return JSON.stringify(v);
+  if (t.kind === "json") return writeJson(v, "postgres", fail) as string;
   if (kind === "hstore" && isObject(v)) return hstoreText(v, (message) => fail(message.replace(/^is /, "")));
   if (kind === "vector" && Array.isArray(v) && v.every((n) => typeof n === "number" && Number.isFinite(n))) return vectorText(v);
   if (v instanceof Uint8Array) {
@@ -1441,7 +1532,7 @@ export function coerce(kind: Kind, v: unknown, column: string, postgres = false)
     case "float":
       if (typeof v === "number") return kind === "int" ? exactInteger(v, column) : v;
       if (typeof v === "bigint") return exactInteger(v, column);
-      if (typeof v === "string" && v !== "" && !Number.isNaN(+v)) return kind === "int" && /^[+-]?\d+$/.test(v) ? exactInteger(BigInt(v), column) : +v;
+      if (typeof v === "string" && v !== "" && (!Number.isNaN(+v) || (kind === "float" && v === "NaN"))) return kind === "int" && /^[+-]?\d+$/.test(v) ? exactInteger(BigInt(v), column) : +v;
       return v;
     case "int8":
       if (typeof v === "bigint" || typeof v === "number" || typeof v === "string") return bigInteger(v, column);

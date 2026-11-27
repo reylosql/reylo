@@ -3,7 +3,7 @@
 //! JSON (`default_format=JSONCompact`). Nothing else is set: a user whose profile is read-only may
 //! change no setting, and may still name a format.
 
-use crate::{AnswerCache, Analysis, Answerer, DbError, HostError, ReplayError};
+use crate::{server_errors, AnswerCache, Analysis, Answerer, DbError, HostError, ReplayError};
 use reylo_engine_clickhouse::Clickhouse;
 use reylo_engine_core::database::Database;
 use serde_json::Value;
@@ -44,7 +44,9 @@ pub enum Outcome {
     Rows(Vec<Vec<Value>>),
     /// The rows of the answer, with each column's name and type before them ([`Server::ask_typed`]).
     Typed(Vec<(String, String)>, Vec<Vec<Value>>),
-    /// The server's error, with the code it carries in `X-ClickHouse-Exception-Code`.
+    /// The server's error, with the code it carries in `X-ClickHouse-Exception-Code`, or where the
+    /// error was raised once the answer had begun, with no such header, the code its message opens
+    /// with (`Code: 241. DB::Exception: …`).
     Refused { message: String, code: Option<String>, status: u16 },
     /// An answer that is not one of ClickHouse's HTTP interface.
     Foreign(String),
@@ -154,6 +156,7 @@ impl Server {
     /// beside the connection's own: a statement's parameters (`param_<name>`) and settings, as the
     /// soundness oracle runs a statement.
     pub fn ask_typed(&self, sql: &str, fields: &[(String, String)]) -> Result<Outcome, String> {
+        use std::io::Read;
         let mut request = self.agent.post(self.endpoint.as_str()).query("default_format", "JSONCompact");
         for (name, value) in self.parameters.iter().chain(fields) {
             request = request.query(name.as_str(), value.as_str());
@@ -166,27 +169,68 @@ impl Server {
         let header = |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok()).map(String::from);
         let code = header("x-clickhouse-exception-code");
         let ours = code.is_some() || header("x-clickhouse-query-id").is_some() || header("x-clickhouse-summary").is_some();
-        let body = response.body_mut().with_config().limit(ANSWER_LIMIT).read_to_string().map_err(|e| e.to_string())?;
+        let tag = header("x-clickhouse-exception-tag");
+        let mut bytes = Vec::new();
+        if let Err(e) = response.body_mut().with_config().limit(ANSWER_LIMIT).reader().read_to_end(&mut bytes) {
+            // An error raised once the answer had begun: the server writes it after the rows it
+            // sent, in a block its tag marks, and breaks the answer's framing, so no client reads
+            // those rows as whole.
+            let text = String::from_utf8_lossy(&bytes);
+            return tag.as_deref().and_then(|tag| raised(&text, tag)).map(|message| refused(&message, code, status)).ok_or_else(|| e.to_string());
+        }
+        let body = String::from_utf8(bytes).map_err(|e| e.to_string())?;
+        // The same block, where something between the server and the client closed the answer's
+        // framing after it.
+        if let Some(message) = tag.as_deref().and_then(|tag| raised(&body, tag)) {
+            return Ok(refused(&message, code, status));
+        }
         if status != 200 {
-            return Ok(if ours { Outcome::Refused { message: body.trim().to_string(), code, status } } else { Outcome::Foreign(format!("HTTP {status}")) });
+            return Ok(if ours { refused(body.trim(), code, status) } else { Outcome::Foreign(format!("HTTP {status}")) });
         }
         if body.trim().is_empty() {
             return Ok(Outcome::Typed(Vec::new(), Vec::new()));
         }
         let answer: Value = match serde_json::from_str(&body) {
             Ok(answer) => answer,
-            Err(_) if ours => return Ok(Outcome::Refused { message: body.trim().to_string(), code, status }),
+            Err(_) if ours => return Ok(refused(body.trim(), code, status)),
             Err(_) => return Ok(Outcome::Foreign("an answer that is no JSON".to_string())),
         };
-        // An error raised once the answer had begun is written into it.
+        // An error raised once the answer had begun, written into it where the session sets
+        // `output_format_json_valid_output_on_exception`.
         if let Some(exception) = answer.get("exception").and_then(Value::as_str) {
-            return Ok(Outcome::Refused { message: exception.to_string(), code, status });
+            return Ok(refused(exception, code, status));
         }
         let text = |column: &Value, key: &str| column.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
         let columns = answer.get("meta").and_then(Value::as_array).map(|meta| meta.iter().map(|column| (text(column, "name"), text(column, "type"))).collect()).unwrap_or_default();
         let rows = answer.get("data").and_then(Value::as_array).map(|rows| rows.iter().map(|row| row.as_array().cloned().unwrap_or_default()).collect());
         Ok(rows.map_or_else(|| Outcome::Foreign("an answer with no rows in it".to_string()), |rows| Outcome::Typed(columns, rows)))
     }
+}
+
+/// The error an answer whose framing broke ends with, in the block ClickHouse writes it in:
+/// `__exception__`, the tag, the message and a line break, their length and the tag again, and
+/// `__exception__`. A block whose length is not its message's was cut, and is not read.
+fn raised(body: &str, tag: &str) -> Option<String> {
+    let opening = format!("__exception__\r\n{tag}\r\n");
+    let rest = &body[body.rfind(&opening)? + opening.len()..];
+    let block = &rest[..rest.rfind(&format!(" {tag}\r\n__exception__"))?];
+    let (message, length) = block.rsplit_once('\n')?;
+    (length.parse::<usize>().ok()? == message.len() + 1).then(|| message.trim().to_string())
+}
+
+/// A refusal, its code the header's or else the one its message opens with.
+fn refused(message: &str, code: Option<String>, status: u16) -> Outcome {
+    let opened = || message.strip_prefix("Code: ")?.split_once('.').map(|(n, _)| n).filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).map(String::from);
+    Outcome::Refused { message: message.to_string(), code: code.or_else(opened), status }
+}
+
+/// A server's error as a person reads it: without the code it opens with and the version it ends
+/// with, its name after its text, as the engine writes one into a diagnostic.
+fn plain(message: &str) -> &str {
+    let text = message.trim();
+    let text = text.strip_prefix("Code: ").and_then(|rest| rest.split_once(". ")).map_or(text, |(_, after)| after);
+    let text = text.strip_prefix("DB::Exception: ").unwrap_or(text);
+    text.rfind(" (version ").map_or(text, |at| &text[..at])
 }
 
 /// The engine's queries, answered by a server.
@@ -202,7 +246,12 @@ impl Answerer<Describe> for Answers<'_> {
     fn query(&mut self, sql: &str, _params: &[Value]) -> Result<Result<Vec<Vec<Value>>, DbError>, HostError> {
         match self.0.ask(sql) {
             Ok(Outcome::Rows(rows) | Outcome::Typed(_, rows)) => Ok(Ok(rows)),
-            Ok(Outcome::Refused { message, code, .. }) => Ok(Err(DbError { message, code, position: None })),
+            // The statement's error, or one a catalog query is refused with, which the engine reads.
+            Ok(Outcome::Refused { message, code: Some(code), .. }) if code.parse().is_ok_and(server_errors::clickhouse) => Ok(Err(DbError { message, code: Some(code), position: None })),
+            // Any other, as a query cancelled, a timeout, the server's memory or its limit on
+            // queries, or a remote source `s3()` reads unreachable: not the statement's, so nothing
+            // is kept as its error, and the next analysis asks again.
+            Ok(Outcome::Refused { message, .. }) => Err(HostError(format!("The server failed the analysis of this statement for a reason of its own, so run it again: {}", plain(&message)))),
             Ok(Outcome::Foreign(what)) => Err(HostError(format!("the server at {} answered with {what}, which ClickHouse's HTTP interface does not", self.0.place()))),
             Err(e) => Err(HostError(format!("the query did not reach the server: {e}"))),
         }
@@ -262,6 +311,84 @@ mod tests {
         redirecting.join().unwrap();
         assert!(matches!(&outcome, Outcome::Foreign(what) if what == "HTTP 302"));
         assert!(other.accept().is_err(), "the redirect's host was asked");
+    }
+
+    /// A stand-in for the HTTP interface that answers one request with `response`, and the URL it listens at.
+    fn answering(response: String) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let serving = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            // The request's head and its one line of SQL.
+            while !request.windows(8).any(|w| w == b"SELECT 1") {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        (url, serving)
+    }
+
+    /// `body` as the HTTP interface sends an error, with its code in a header where it has one.
+    fn error(status: u16, code: Option<u32>, body: &str) -> String {
+        let header = code.map_or(String::new(), |c| format!("X-ClickHouse-Exception-Code: {c}\r\n"));
+        format!("HTTP/1.1 {status} Error\r\n{header}X-ClickHouse-Query-Id: q\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    /// The tag a server marks an error block with, as `X-ClickHouse-Exception-Tag` names it.
+    const TAG: &str = "kxsaqfwvbmzkpwla";
+
+    /// `data` as one chunk of a chunked answer.
+    fn chunk(data: &str) -> String {
+        format!("{:x}\r\n{data}\r\n", data.len())
+    }
+
+    /// `message` in the block a server writes an error raised once its answer had begun in.
+    fn block(message: &str) -> String {
+        format!("\r\n__exception__\r\n{TAG}\r\n{message}\n{} {TAG}\r\n__exception__\r\n", message.len() + 1)
+    }
+
+    #[test]
+    fn an_error_block_is_read_only_whole() {
+        let whole = format!("[[1],{}", block("Code: 241. DB::Exception: Memory limit (total) exceeded. (MEMORY_LIMIT_EXCEEDED)"));
+        assert_eq!(raised(&whole, TAG).as_deref(), Some("Code: 241. DB::Exception: Memory limit (total) exceeded. (MEMORY_LIMIT_EXCEEDED)"));
+        // A message cut short, a block with no end, another tag's.
+        assert_eq!(raised(&whole.replace("(total) ", ""), TAG), None);
+        assert_eq!(raised(&whole[..whole.len() - 20], TAG), None);
+        assert_eq!(raised(&whole, "anotheranothertg"), None);
+    }
+
+    #[test]
+    fn only_the_statements_own_error_is_the_answer_and_any_other_fails_the_analysis() {
+        let cases = [
+            // A query cancelled, as by `KILL QUERY`, and a timeout: the server's, before its answer began.
+            (error(500, Some(394), "Code: 394. DB::Exception: Query was cancelled. (QUERY_WAS_CANCELLED)"), None),
+            (error(500, Some(159), "Code: 159. DB::Exception: Timeout exceeded: elapsed 1 seconds. (TIMEOUT_EXCEEDED)"), None),
+            // The server's memory, once its answer had begun: no header, the code in the answer, as
+            // `output_format_json_valid_output_on_exception` writes it.
+            (error(200, None, r#"{"exception": "Code: 241. DB::Exception: Memory limit (total) exceeded. (MEMORY_LIMIT_EXCEEDED)"}"#), None),
+            // And as the server writes it by default: after the rows it sent, in a block its tag
+            // marks, with no last chunk, so the answer's framing breaks.
+            (format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nX-ClickHouse-Query-Id: q\r\nX-ClickHouse-Exception-Tag: {TAG}\r\nConnection: close\r\n\r\n{}{}", chunk("{\"meta\": [{\"name\": \"n\", \"type\": \"UInt64\"}], \"data\": [[1],"), chunk(&block("Code: 241. DB::Exception: Memory limit (total) exceeded. (MEMORY_LIMIT_EXCEEDED) (version 26.8.48.11 (official build))"))), None),
+            // A name the statement gives that the schema lacks: the statement's.
+            (error(404, Some(47), "Code: 47. DB::Exception: Unknown expression identifier `nope`. (UNKNOWN_IDENTIFIER)"), Some("47")),
+        ];
+        for (response, statements) in cases {
+            let (url, serving) = answering(response);
+            let answered = Answers(&Server::of(&url).unwrap()).query("SELECT 1", &[]);
+            serving.join().unwrap();
+            match (answered, statements) {
+                (Ok(Err(e)), Some(code)) => assert_eq!(e.code.as_deref(), Some(code)),
+                (Err(HostError(message)), None) => assert!(message.starts_with("The server failed the analysis of this statement for a reason of its own, so run it again: ") && !message.contains("Code: ") && message.ends_with(')'), "{message}"),
+                (other, _) => panic!("{other:?}"),
+            }
+        }
     }
 
     #[test]

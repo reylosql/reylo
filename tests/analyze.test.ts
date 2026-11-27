@@ -8,7 +8,8 @@ import { connect, createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FINGERPRINT, Session } from "../src/analyze.ts";
+import { Session } from "../src/analyze.ts";
+import { engine, type Connection } from "../src/engine.ts";
 import { sqlModule } from "../src/loader.ts";
 import { mapperHandlers } from "../src/mapper-server.ts";
 import { reportedDiagnostics, type Reported } from "../src/mapper-diagnostics.ts";
@@ -16,7 +17,7 @@ import { mysqlStandIn } from "./mysql-stand-in.ts";
 import { refusedLogin, Unreachable } from "../src/connection.ts";
 import { defineQuery } from "../src/index.ts";
 import { nativeBinary } from "../src/native.ts";
-import { DRIVERS, PG, mysqlDatabase, mysqlLive, postgresDatabase } from "./helpers.ts";
+import { DRIVERS, PG, clickhouseDatabase, clickhouseLive, mysqlAccount, mysqlDatabase, mysqlLive, postgresDatabase } from "./helpers.ts";
 
 // A throwaway Postgres server for the tests that need one, never a database anyone uses: each such
 // test makes a database of its own there and drops it after. The driver is the labs', never the
@@ -231,6 +232,92 @@ test("on Postgres, an analysis made after a migration, by a session that still t
   }
 });
 
+test("on MySQL, an analysis made after a migration, by a session that still trusts the fingerprint from before it, is written under the migrated schema's", { skip: mysqlLive }, async () => {
+  const setup = "create table u (b int); create table t (a int)";
+  const a = await mysqlDatabase("reylo_migrated_a", setup);
+  const b = await mysqlDatabase("reylo_migrated_b", setup);
+  const name = (url: string) => new URL(url).pathname.slice(1);
+  // Each database is reached by an account granted it alone, so that the fingerprint, which reads
+  // every database the account may reach, holds still while other tests make and drop theirs.
+  let ofA: Awaited<ReturnType<typeof mysqlAccount>> | undefined;
+  let ofB: Awaited<ReturnType<typeof mysqlAccount>> | undefined;
+  try {
+    ofA = await mysqlAccount(a.db, `reylo_migrated_a_${process.pid}`, [name(a.url)]);
+    ofB = await mysqlAccount(b.db, `reylo_migrated_b_${process.pid}`, [name(b.url)]);
+    await migratedUnderASession((root, env) => Session.open(root, env), { url: ofA.url(name(a.url)), run: (sql) => a.db.query(sql) }, { url: ofB.url(name(b.url)) }, "alter table t modify a int not null", "alter table t modify a int null");
+  } finally {
+    try {
+      await ofA?.drop();
+      await ofB?.drop();
+    } finally {
+      await a.drop();
+      await b.drop();
+    }
+  }
+});
+
+test("on ClickHouse, an analysis made after a migration, by a session that still trusts the fingerprint from before it, is written under the migrated schema's", { skip: clickhouseLive, timeout: 120_000 }, async () => {
+  const setup = "CREATE TABLE u (b Int32) ENGINE = MergeTree ORDER BY tuple();\nCREATE TABLE t (a Nullable(Int32)) ENGINE = MergeTree ORDER BY tuple()";
+  const a = await clickhouseDatabase("reylo_migrated_a", setup);
+  const b = await clickhouseDatabase("reylo_migrated_b", setup);
+  try {
+    await migratedUnderASession((root, env) => Session.open(root, env), { url: a.url, run: (query) => a.client.command({ query }) }, b, "ALTER TABLE t MODIFY COLUMN a Int32 DEFAULT 0", "ALTER TABLE t MODIFY COLUMN a Nullable(Int32)");
+  } finally {
+    await a.drop();
+    await b.drop();
+  }
+});
+
+/**
+ * Runs `run` with each connection the engine of `dialect` opens changed by `change`, as a test
+ * stands in for what happens on the database while a session works.
+ */
+async function withConnections<T>(dialect: "sqlite", change: (c: Connection) => Connection, run: () => Promise<T>): Promise<T> {
+  const e = await engine(dialect);
+  const open = e.open;
+  e.open = async (url) => change(await open.call(e, url));
+  try {
+    return await run();
+  } finally {
+    e.open = open;
+  }
+}
+
+test("on SQLite, a schema changed and changed back while a statement is analyzed leaves no entry of the schema in between", async () => {
+  const { root, env } = project();
+  const exec = (sql: string) => {
+    const db = new DatabaseSync(join(root, "app.db"));
+    db.exec(sql);
+    db.close();
+  };
+  // SQLite changes a column by building its table again; users is made so for the revert too.
+  const rebuild = (name: string) => `create table users2 (id integer primary key, name ${name}); insert into users2 select * from users; drop table users; alter table users2 rename to users;`;
+  exec(rebuild("text not null"));
+  let analyses = 0;
+  const outcome = await withConnections(
+    "sqlite",
+    (c) => ({
+      ...c,
+      // The first analysis runs on a migration, which is reverted before it ends: the fingerprint
+      // after it is the one before it, and only the schema's stamp says it moved.
+      analyze: async (sql) => {
+        if (analyses++ > 0) return c.analyze(sql);
+        exec(rebuild("text"));
+        try {
+          return await c.analyze(sql);
+        } finally {
+          exec(rebuild("text not null"));
+        }
+      },
+    }),
+    () => analyze(root, env, "select name from users"),
+  );
+  assert.ok(outcome.ok);
+  assert.equal(analyses, 2);
+  assert.ok(!outcome.analysis.columns[0]!.nullable);
+  assert.ok(!(JSON.parse(readFileSync(outcome.entry, "utf8")) as { analysis: { columns: { nullable?: boolean }[] } }).analysis.columns[0]!.nullable);
+});
+
 test("the engine's answers from while the fingerprint query failed are dropped once it runs again", async () => {
   const root = mkdtempSync(join(tmpdir(), "reylo-unverified-"));
   writeFileSync(join(root, "package.json"), "{}");
@@ -240,24 +327,28 @@ test("the engine's answers from while the fingerprint query failed are dropped o
     db.close();
   };
   exec("create table t (a int)");
-  const session = await Session.open(root, { DATABASE_URL: "file:./app.db" });
-  const fingerprint = FINGERPRINT.sqlite;
-  try {
-    // A query the server refuses: the session's fingerprint is its own, unverified value.
-    FINGERPRINT.sqlite = "select * from reylo_no_such_table";
-    const before = await session.analyze("select * from t");
-    assert.ok(before.ok);
-    assert.deepEqual(before.analysis.columns.map((c) => c.name), ["a"]);
-    FINGERPRINT.sqlite = fingerprint;
-    exec("alter table t add column b int");
-    await session.recheck();
-    const after = await session.analyze("select * from t");
-    assert.ok(after.ok);
-    assert.deepEqual(after.analysis.columns.map((c) => c.name), ["a", "b"]);
-  } finally {
-    FINGERPRINT.sqlite = fingerprint;
-    await session.close();
-  }
+  let refused = true;
+  await withConnections(
+    "sqlite",
+    // A fingerprint the database refuses: the session's fingerprint is its own, unverified value.
+    (c) => ({ ...c, schema: () => (refused ? Promise.reject(new Error("no such table: reylo_no_such_table")) : c.schema()) }),
+    async () => {
+      const session = await Session.open(root, { DATABASE_URL: "file:./app.db" });
+      try {
+        const before = await session.analyze("select * from t");
+        assert.ok(before.ok);
+        assert.deepEqual(before.analysis.columns.map((c) => c.name), ["a"]);
+        refused = false;
+        exec("alter table t add column b int");
+        await session.recheck();
+        const after = await session.analyze("select * from t");
+        assert.ok(after.ok);
+        assert.deepEqual(after.analysis.columns.map((c) => c.name), ["a", "b"]);
+      } finally {
+        await session.close();
+      }
+    },
+  );
 });
 
 test("without the database, reylo/.cache/ answers as it is, and a statement it lacks is an error that says where to fill it", async () => {
@@ -606,7 +697,7 @@ test("the module a build step emits carries the analysis and reads nothing at ru
       `export const sql = "select id, name from users where id = ?";`,
       `export const raw = ${JSON.stringify(SELECT)};`,
       `export const params = ["id"];`,
-      `export default defineSqliteQuery({ sql: raw, params, cardinality: "maybeOne", readOnly: true, text: sql, order: ["id"], inputs: {"id":{"type":{"kind":"integer","bits":64},"nullable":false}}, columns: [["id","int"],["name","text"]], row: (v) => ({ "id": v[0], "name": v[1] }), source: "user.sql", sqlcommenter: true, jsonSchema: {"input":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"id":{"type":"integer","format":"int64"}},"required":["id"],"additionalProperties":false},"output":{"$schema":"https://json-schema.org/draft/2020-12/schema","anyOf":[{"type":"object","properties":{"id":{"type":"integer","format":"int64"},"name":{"type":"string"}},"required":["id","name"]},{"type":"null"}]}} });`,
+      `export default defineSqliteQuery({ sql: raw, params, cardinality: "maybeOne", readOnly: true, text: sql, order: ["id"], marks: [[38,39]], inputs: {"id":{"type":{"kind":"integer","bits":64},"nullable":false}}, columns: [["id","int"],["name","text"]], row: (v) => ({ "id": v[0], "name": v[1] }), source: "user.sql", sqlcommenter: true, jsonSchema: {"input":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"id":{"type":"integer","format":"int64"}},"required":["id"],"additionalProperties":false},"output":{"$schema":"https://json-schema.org/draft/2020-12/schema","anyOf":[{"type":"object","properties":{"id":{"type":"integer","format":"int64"},"name":{"type":"string"}},"required":["id","name"]},{"type":"null"}]}} });`,
       ``,
     ].join("\n"));
     // A statement in a directory carries its file written with `/`.
@@ -778,6 +869,9 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
       await session.close();
     }
   };
+  // A base type of text's functions, with `options` beside them.
+  const baseType = (options: string) =>
+    `create type mt; create function mt_in(cstring) returns mt language internal immutable strict as 'textin'; create function mt_out(mt) returns cstring language internal immutable strict as 'textout'; create type mt (input = mt_in, output = mt_out, internallength = variable, storage = extended, ${options})`;
   // An aggregate that runs `step` and `done`, but for the options `swap` names.
   const total = (swap: Record<string, string> = {}) => {
     const options = { sfunc: "step", finalfunc: "done", combinefunc: "step", msfunc: "step", minvfunc: "step", mfinalfunc: "done", ...swap };
@@ -793,6 +887,7 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
       create function done(int) returns int language sql as 'select $1';
       create function other_done(int) returns int language sql as 'select $1';
       ${total()}`);
+    const standardStringsOnly = Number((await db.unsafe("show server_version_num"))[0]!.server_version_num) >= 190000;
     // A query the server refuses gives "unverified <pid> <time>", a value no entry ever matches.
     const first = await fingerprint();
     assert.match(first ?? "", /^[0-9a-f]{16}$/);
@@ -855,6 +950,40 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
       // one dropped and made again under its name keeps every column that names it as it was.
       "create collation folded (provider = icu, locale = 'und', deterministic = true)",
       "drop collation folded; create collation folded (provider = icu, locale = 'und', deterministic = false)",
+      // A function's language, which decides whether its body is read, and whether it runs as its
+      // owner or has a planner support function, either of which keeps its body unread.
+      "create function g() returns int language sql as 'select 1'",
+      "begin; set local check_function_bodies = off; create or replace function g() returns int language plpgsql as 'select 1'; commit",
+      "alter function g() security definer",
+      "alter function g() support pg_catalog.varchar_support",
+      // A function of an extension's in pg_catalog, read wherever it was made.
+      "alter function pg_catalog.citext_eq(citext, citext) volatile",
+      "alter function pg_catalog.citext_eq(citext, citext) called on null input",
+      // Whether a backslash in a string is an escape, which the CHECKs are read under (Postgres 19
+      // has no other way), and whether one may escape a quote: a new session takes the database's
+      // setting.
+      ...(standardStringsOnly ? [] : [`alter database ${url.pathname.slice(1)} set standard_conforming_strings = off`, `alter database ${url.pathname.slice(1)} reset standard_conforming_strings`]),
+      `alter database ${url.pathname.slice(1)} set backslash_quote = off`,
+      // An operator family's equality, which decides whether a unique key pins one row.
+      "create operator family fam using btree; alter operator family fam using btree add operator 3 = (int4, int4)",
+      "alter operator family fam using btree drop operator 3 (int4, int4)",
+      // The tables an extension owns, which its code may read.
+      "create table side (a int)",
+      "alter extension citext add table side",
+      "alter extension citext drop table side",
+      // plpgsql, which every database has from the server, owns a table too.
+      "alter extension plpgsql add table side",
+      "alter extension plpgsql drop table side",
+      // A sequence a column owns, which an insert may advance.
+      "create sequence extra",
+      "alter sequence extra owned by a.x",
+      "alter sequence extra owned by none",
+      // A domain's collation, and a base type's category, preference and array delimiter, which
+      // none of its functions carries: each made again under its own name.
+      `create domain d as text collate "C"`,
+      `drop domain d; create domain d as text collate "POSIX"`,
+      baseType("delimiter = ',', category = 'U'"),
+      `drop type mt cascade; ${baseType("delimiter = ';', category = 'S', preferred = true")}`,
     ]) {
       await db.unsafe(change);
       const next = await fingerprint();
@@ -887,16 +1016,12 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
   );
   const ownName = new URL(own.url).pathname.slice(1);
   const shadow = `reylo_shadow_fingerprint_${process.pid}`;
-  // The fingerprint reads every database the account may reach, so the session's account is granted
-  // only this test's: the databases other tests make and drop meanwhile are out of its sight.
+  // The session's account is granted only this test's databases (`mysqlAccount`).
   const user = `reylo_fp_${process.pid}`;
+  let account: Awaited<ReturnType<typeof mysqlAccount>> | undefined;
   // A session per call, as a process of its own, so that none answers from a fingerprint it took.
   const fingerprint = async (database = ownName) => {
-    const url = new URL(own.url);
-    url.username = user;
-    url.password = "";
-    url.pathname = `/${database}`;
-    const session = await Session.open(root, { DATABASE_URL: url.href });
+    const session = await Session.open(root, { DATABASE_URL: account!.url(database) });
     try {
       return (await session.schema()).value;
     } finally {
@@ -907,11 +1032,7 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
   try {
     other = await mysqlDatabase("reylo_fingerprint_other", "create table t (c int not null); create function g(x int) returns int deterministic return x");
     const otherName = new URL(other.url).pathname.slice(1);
-    await own.db.query(`drop user if exists '${user}'@'%'`);
-    await own.db.query(`create user '${user}'@'%'`);
-    // A `_` in a granted database's name matches any character, unless escaped.
-    const granted = (database: string) => `\`${database.replaceAll("_", "\\_")}\`.*`;
-    for (const database of [ownName, otherName, shadow]) await own.db.query(`grant all on ${granted(database)} to '${user}'@'%'`);
+    account = await mysqlAccount(own.db, user, [ownName, otherName, shadow]);
     let last = await fingerprint();
     assert.match(last ?? "", /^[0-9a-f]{16}$/);
     assert.equal(await fingerprint(), last);
@@ -920,13 +1041,18 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
     const checks = [`alter table docs drop check j_shape, add constraint j_shape check (json_schema_valid('{"type":"object","properties":{"a":{"type":"string"}}}', j))`, "alter table docs alter check j_shape not enforced"];
     // A parameter is typed as the argument it is passed for, and a call checked against their count.
     const signatures = ["f(x varchar(10))", "f(x varchar(10), y int)"].map((signature) => ["drop function f", `create function ${signature} returns int deterministic return x`]);
+    // A structured parameter is expanded by the database's character set and collation.
+    const database = [`alter database ${ownName} character set latin1 collate latin1_swedish_ci`, `alter database ${ownName} collate latin1_bin`];
+    // Which keys a structured parameter's rows may leave out is read from each column's default.
+    const defaults = ["alter table m alter v set default 'x'", "alter table m alter v drop default"];
     // A statement may read another database's table or call its function, and the engine takes a
     // column of a table for a view's wherever any database has a view of that name.
     const elsewhere = [`alter table ${otherName}.t modify c varchar(10) null`, `create view ${otherName}.m as select 1 as v`, [`drop function ${otherName}.g`, `create function ${otherName}.g(x varchar(10)) returns int deterministic return x`]];
     // Without the TRIGGER privilege, a written table's triggers are hidden from the account. A grant
     // on a database's pattern names the pattern, which the engine does not read as the database.
-    const privileges = [`grant trigger on \`${ownName}\`.m to '${user}'@'%'`];
-    for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks, ...signatures, ...elsewhere, ...privileges]) {
+    // And a statement is prepared against the account's privileges, a column's included.
+    const privileges = [`grant trigger on \`${ownName}\`.m to '${user}'@'%'`, `grant select (v) on \`${ownName}\`.m to '${user}'@'%'`];
+    for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks, ...signatures, ...elsewhere, ...privileges, ...database, ...defaults]) {
       const statements = [change].flat();
       for (const statement of statements) await own.db.query(statement);
       const next = await fingerprint();
@@ -948,7 +1074,7 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
     try {
       await own.db.query(`drop database if exists ${shadow}`);
       await own.db.query(`select release_lock('${shadow}')`);
-      await own.db.query(`drop user if exists '${user}'@'%'`);
+      await account?.drop();
     } finally {
       try {
         await other?.drop();

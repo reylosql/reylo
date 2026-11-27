@@ -92,7 +92,7 @@ select id, name, email from users where id = :id
 D1 differs from SQLite in two ways:
 
 - D1 has no transaction a query can join. Its `batch()` takes D1's own prepared statements.
-- D1 rounds an integer past 2^53, so Reylo throws an error rather than return it, even for a `BIGINT` column.
+- D1 rounds an integer past 2^53, so Reylo throws an error rather than return it, even for a `BIGINT` column. A whole number from 2^53 to 2^63 in a column with no type throws too, since it may be such an integer.
 
 <Callout title="Blocked functions">
 

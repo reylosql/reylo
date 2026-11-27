@@ -199,6 +199,9 @@ test("a codec parameter takes its codec's type alone, bound as the text or bytes
   // A SET's array binds as the Set the run time writes as MySQL's text.
   assert.deepEqual(encodeCodec("set:array", ["a", "c"], "tags", "mysql"), new Set(["a", "c"]));
   assert.equal(encodeCodec("decimal:number", 19.5, "price", "postgres"), "19.5");
+  // A Postgres numeric holds NaN and the infinities; a MySQL DECIMAL none, and MySQL reads the text NaN as 0.
+  assert.equal(encodeCodec("decimal:number", NaN, "price", "postgres"), "NaN");
+  for (const v of [NaN, Infinity, -Infinity]) assert.throws(() => encodeCodec("decimal:number", v, "price", "mysql"), new RegExp(`^TypeError: Parameter "price" is ${v}, which MySQL holds no value for\\.$`));
   assert.equal(encodeCodec("instant", Temporal.Instant.from("2026-10-20T08:00:00.123456Z"), "at", "postgres"), "2026-10-20T08:00:00.123456Z");
   assert.equal(encodeCodec("datetime", Temporal.PlainDateTime.from("2026-10-20T10:00:00"), "at", "postgres"), "2026-10-20T10:00:00");
   // SQLite's date and time functions write a space before the time, and its text compares as text.
@@ -537,6 +540,8 @@ test("a vector is its typed array at every position outside JSON, and nothing bu
   assert.equal(renderParamType(pg("halfvec"), "postgres", false, undefined, codecs), "Float16Array");
   assert.equal(renderType(array(pg("vector")), false, "postgres", codecs), "(Float32Array | null)[]");
   assert.deepEqual(planOf(array(pg("vector")), "postgres", codecs), { array: "vector:float32" });
+  // As JSON a typed array is an array of its numbers, as a Set is one of its members (`AsJson`), where JSON.stringify writes an object by index.
+  for (const name of ["vector", "halfvec"]) assert.deepEqual(typeSchema(pg(name), "postgres", false, false, false, undefined, codecs), { type: "array", items: { type: "number" } });
 });
 
 test("ClickHouse: a codec reaches a tuple's elements, by name and by place, an array's and a map's pairs", () => {

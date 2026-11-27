@@ -3,8 +3,9 @@
 // family is a kind of the type descriptor format (spec/index.ts). A codec reaches every position
 // Reylo decodes itself: a row's columns, an array's elements, a Postgres row value's fields, a
 // ClickHouse tuple's elements, by name or by place, and a map's pairs, a tagged union's value, a
-// structured parameter's members. A value inside a JSON document the
-// statement builds is the document's, and keeps the type JSON gives it. Every codec is exact or
+// structured parameter's members. A ClickHouse Variant takes a codec only where every member is of
+// its family, since its decoded value no longer says which member it is. A value inside a JSON
+// document the statement builds is the document's, and keeps the type JSON gives it. Every codec is exact or
 // refuses a value it cannot hold: a number refuses a decimal a double does not hold, and a Temporal
 // class refuses what no Temporal value is (`infinity`, MySQL's zero date, Postgres's `24:00:00`, an
 // interval whose parts differ in sign). A 64-bit integer has no codec: a bigint is its one exact
@@ -485,9 +486,10 @@ export function decodePlan(plan: Plan, v: unknown, column: string, libraries?: L
   if ("elements" in plan) return Array.isArray(v) ? v.map((e, i) => (plan.elements[i] == null ? e : decodePlan(plan.elements[i], e, column, libraries))) : v;
   if (typeof v !== "object") return v;
   if ("fields" in plan) {
-    // A spread copies a field named `__proto__` as the own property it is.
+    // A spread copies a field named `__proto__` as the own property it is, which an assignment then
+    // reaches; a field the object lacks is left out, though `in` finds `__proto__` on every object.
     const o = { ...(v as Record<string, unknown>) };
-    for (const [name, p] of Object.entries(plan.fields)) if (name in o) o[name] = decodePlan(p, o[name], column, libraries);
+    for (const [name, p] of Object.entries(plan.fields)) if (Object.hasOwn(o, name)) o[name] = decodePlan(p, o[name], column, libraries);
     return o;
   }
   const u = v as { tag?: unknown; value: unknown };
@@ -501,7 +503,7 @@ export function decodeCodecs(rows: unknown[], plans: Readonly<Record<string, Pla
   for (const row of rows) {
     if (row === null || typeof row !== "object") continue;
     const r = row as Record<string, unknown>;
-    for (const [column, plan] of entries) if (column in r) r[column] = decodePlan(plan, r[column], column, libraries);
+    for (const [column, plan] of entries) if (Object.hasOwn(r, column)) r[column] = decodePlan(plan, r[column], column, libraries);
   }
   return rows;
 }
@@ -521,6 +523,12 @@ function mysqlTime(v: { sign: number; years: number; months: number; weeks: numb
   const fraction = String(Number(micros % BigInt(1000000))).padStart(6, "0").replace(/0+$/, "");
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${v.sign < 0 ? "-" : ""}${Math.floor(seconds / 3600)}:${pad(Math.floor(seconds / 60) % 60)}:${pad(seconds % 60)}${fraction && `.${fraction}`}`;
+}
+
+/** A decimal's text, which on MySQL may be no NaN or infinity: a DECIMAL holds neither, and MySQL reads the text `NaN` as 0 with a warning. */
+function decimalText(text: string, name: string, dialect: Dialect): string {
+  if (dialect === "mysql" && !/^[+-]?\d/.test(text)) throw new ParameterError(`Parameter "${name}" is ${text}, which MySQL holds no value for.`);
+  return text;
 }
 
 /**
@@ -550,7 +558,7 @@ export function encodeCodec(codec: Codec, v: unknown, name: string, dialect: Dia
   switch (codec) {
     case "decimal:number":
       if (typeof v !== "number") throw refuse("a number");
-      return String(v);
+      return decimalText(String(v), name, dialect);
     case "inet:ip-address": {
       // Its text as given, which Postgres reads with its prefix: a value of the module's copy of
       // ip-address, or another's, told by its fields.
@@ -566,7 +574,7 @@ export function encodeCodec(codec: Codec, v: unknown, name: string, dialect: Dia
       // `toFixed()` with no digits writes every digit with no exponent, whatever the library's
       // display settings, where `toString()` writes 1e+40.
       if (!isDecimalValue(codec, libraries?.decimal, v)) throw refuse(`a ${DECIMAL_LIBRARIES[libraryOf(codec)].type} from ${libraryOf(codec)}`);
-      return v.toFixed();
+      return decimalText(v.toFixed(), name, dialect);
     }
     case "bytes:string": {
       if (typeof v !== "string" || !/^[A-Za-z0-9+/]*={0,2}$/.test(v) || v.length % 4 === 1) throw refuse("binary data as its base64");

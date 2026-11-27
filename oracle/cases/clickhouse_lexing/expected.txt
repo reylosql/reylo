@@ -1,0 +1,5 @@
+hash_comment.sql: many (a: UInt8) -> { a: UInt8, c: UInt8 }
+heredoc.sql: many (b: UInt8) -> { s: String(UTF-8, ill-formed), b: UInt8 }
+nested_comment.sql: many (a: UInt8) -> { a: UInt8 }
+unicode_spaces.sql: many (a: UInt8) -> { x: UInt8 }
+vertical_tab.sql: many (a: UInt8) -> { x: UInt8 }

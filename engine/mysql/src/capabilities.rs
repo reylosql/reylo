@@ -49,6 +49,10 @@ pub fn capabilities(analysis: &Analysis, host: &Host) -> Lazy<Option<Capabilitie
     if analysis.capabilities.as_ref().is_some_and(Capabilities::tables_unknown) {
         return Some(analysis.capabilities.clone());
     }
+    // A statement the word scans may misread, where the session ends a string elsewhere.
+    if !crate::errors::scanned_as_read(sql, analysis.sql_mode) {
+        return Some(Some(by_schema()));
+    }
     let mut capabilities = Capabilities::default();
     match analysis.kind {
         Some(StatementKind::Select | StatementKind::Insert | StatementKind::Update | StatementKind::Delete) => reached(analysis, sql, host, &mut capabilities)?,
@@ -125,7 +129,7 @@ fn reached(analysis: &Analysis, sql: &str, host: &Host, capabilities: &mut Capab
 /// What a statement that is no query or write does, by its first keywords.
 fn command(sql: &str, capabilities: &mut Capabilities) {
     let lexed = lex::lex(sql, Dialect::Mysql).ok();
-    let word = lexed.as_ref().map(|l| lex::first_word(sql, l)).unwrap_or_default();
+    let word = lexed.as_ref().map(|l| lex::first_word(sql, l, Dialect::Mysql)).unwrap_or_default();
     let has = |words: &[&str]| has_word(sql, Dialect::Mysql, words);
     match word.as_str() {
         "start" | "begin" | "commit" | "rollback" | "savepoint" | "release" | "xa" => capabilities.transaction = true,

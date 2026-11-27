@@ -1,0 +1,5 @@
+distinct_40.sql: at_most_one (id: int4) -> { id: int4 }
+group_by_40.sql: at_most_one (id: int4) -> { id: int4 }
+join_40.sql: at_most_one (id: int4) -> { id: int4 }
+left_join_40.sql: many (id: int4) -> { id: int4 } key (id)
+with_40.sql: at_most_one (id: int4) -> { id: int4 }

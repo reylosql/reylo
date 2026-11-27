@@ -395,6 +395,81 @@ test("SQLite: one row on every driver, whatever its integer setting; an integer 
   wasm.close();
 });
 
+test("SQLite: an INTEGER past 2^53 that ceil or coalesce hands back, or a column with no type holds, is an error on every driver; a REAL from 2^53 to 2^63 there is refused only where the driver may round an INTEGER", { skip: drivers === true ? false : drivers, timeout: 60_000 }, async () => {
+  const Database = require("better-sqlite3");
+  const { createClient } = require("@libsql/client");
+  const sqlite3 = require("sqlite3");
+  const root = project();
+  const file = join(root, "app.db");
+  const setup = new DatabaseSync(file);
+  setup.exec(`create table w (id integer primary key, n integer not null, v);
+    insert into w values (1, 9007199254740993, 9007199254740993), (2, 5, 1e20), (3, 5, 1152921504606846976.0), (4, 5, 9223372036854775807), (5, 5, -9223372036854775808)`);
+  setup.close();
+  // SQLite hands back the INTEGER n from ceil, floor and trunc, and from coalesce beside a REAL.
+  const ceiled = await built(root, "file:./app.db", "ceiled", "select ceil(n) as n from w where id = 1");
+  const floored = await built(root, "file:./app.db", "floored", "select floor(n) as n from w where id = 1");
+  const coalesced = await built(root, "file:./app.db", "coalesced", "select coalesce(n, 1.5) as n from w where id = 1");
+  const untyped = await built(root, "file:./app.db", "untyped", "select v as n from w where id = 1");
+  // An INTEGER or a REAL, by the value: ceil of a column with no type, max of an INTEGER and a REAL.
+  const either = await built(root, "file:./app.db", "either", "select ceil(v) as n from w where id = 1");
+  const most = await built(root, "file:./app.db", "most", "select max(n, 1.5) as n from w where id = 1");
+  const real = await built(root, "file:./app.db", "untyped_real", "select v as n from w where id = 2");
+  const bigReal = await built(root, "file:./app.db", "big_real", "select max(n, 1e20) as n from w where id = 2");
+  // 2^60, a REAL no driver tells from an INTEGER rounded to it; 1e20 is past every INTEGER.
+  const midReal = await built(root, "file:./app.db", "mid_real", "select v as n from w where id = 3");
+  // The largest and least INTEGERs, which a driver that rounds hands over as ±2^63.
+  const largest = await built(root, "file:./app.db", "largest", "select v as n from w where id = 4");
+  const least = await built(root, "file:./app.db", "least", "select v as n from w where id = 5");
+  const integers = [ceiled, floored, coalesced, untyped, either, most];
+  const past = /Column "n" holds .*9007199254740992|Column "n" holds 9007199254740993/;
+  const wholeNumber = /Column "n" holds 9007199254740992, a whole number past .* may be an INTEGER the driver already rounded/;
+  const db = new Database(file);
+  for (const q of integers) assert.throws(() => q.runSync(db), past);
+  assert.deepEqual(plain(real.runSync(db)), { n: 1e20 }, "better-sqlite3: a REAL in a column with no type");
+  assert.deepEqual(plain(bigReal.runSync(db)), { n: 1e20 }, "better-sqlite3: a REAL max hands back");
+  assert.deepEqual(plain(midReal.runSync(db)), { n: 2 ** 60 }, "better-sqlite3: a REAL from 2^53 to 2^63 in a column with no type");
+  db.close();
+  const node = new DatabaseSync(file);
+  for (const q of integers) await assert.rejects(q.run(node), past);
+  assert.deepEqual(plain(await real.run(node)), { n: 1e20 }, "node:sqlite: a REAL in a column with no type");
+  assert.deepEqual(plain(await bigReal.run(node)), { n: 1e20 }, "node:sqlite: a REAL max hands back");
+  assert.deepEqual(plain(await midReal.run(node)), { n: 2 ** 60 }, "node:sqlite: a REAL from 2^53 to 2^63 in a column with no type");
+  node.close();
+  const turso = await import(pathToFileURL(require.resolve("@tursodatabase/database")).href);
+  const { Database: TursoCompat } = await import(pathToFileURL(require.resolve("@tursodatabase/database/compat")).href);
+  const tdb = await turso.connect(file);
+  for (const q of integers) await assert.rejects(q.run(tdb), past);
+  assert.deepEqual(plain(await real.run(tdb)), { n: 1e20 }, "Turso's engine: a REAL in a column with no type");
+  assert.deepEqual(plain(await bigReal.run(tdb)), { n: 1e20 }, "Turso's engine: a REAL max hands back");
+  assert.deepEqual(plain(await midReal.run(tdb)), { n: 2 ** 60 }, "Turso's engine: a REAL from 2^53 to 2^63 in a column with no type");
+  await tdb.close();
+  const compat = new TursoCompat(file);
+  for (const q of integers) assert.throws(() => q.runSync(compat), past);
+  compat.close();
+  // libSQL refuses an INTEGER past 2^53 itself under intMode "number".
+  for (const intMode of ["bigint", "string"]) {
+    const client = createClient({ url: `file:${file}`, intMode });
+    for (const q of [ceiled, floored, coalesced, either, most]) await assert.rejects(q.run(client), past);
+    client.close();
+  }
+  // sqlite3 rounds every INTEGER past 2^53, so a whole number past it may be one, and is refused, a REAL too.
+  const s3 = new sqlite3.Database(file);
+  for (const q of [ceiled, floored, coalesced]) await assert.rejects(q.run(s3), /Column "n" holds an integer past .* already rounded to 9007199254740992/);
+  for (const q of [untyped, either, most]) await assert.rejects(q.run(s3), wholeNumber);
+  assert.deepEqual(plain(await real.run(s3)), { n: 1e20 }, "sqlite3: a REAL past 2^63 in a column with no type");
+  assert.deepEqual(plain(await bigReal.run(s3)), { n: 1e20 }, "sqlite3: a REAL past 2^63 max hands back");
+  await assert.rejects(midReal.run(s3), /Column "n" holds 1152921504606847000, a whole number past .* or a REAL/);
+  await assert.rejects(largest.run(s3), /Column "n" holds 9223372036854776000, a whole number past .* or a REAL/);
+  await assert.rejects(least.run(s3), /Column "n" holds -9223372036854776000, a whole number past .* or a REAL/);
+  await new Promise((resolve) => s3.close(resolve));
+  const wasm = await sqliteWasmCopy(file);
+  for (const q of integers) assert.throws(() => q.runSync(wasm), past);
+  assert.deepEqual(plain(real.runSync(wasm)), { n: 1e20 }, "SQLite Wasm: a REAL in a column with no type");
+  assert.deepEqual(plain(bigReal.runSync(wasm)), { n: 1e20 }, "SQLite Wasm: a REAL max hands back");
+  assert.deepEqual(plain(midReal.runSync(wasm)), { n: 2 ** 60 }, "SQLite Wasm: a REAL from 2^53 to 2^63 in a column with no type");
+  wasm.close();
+});
+
 test("SQLite: libSQL's intMode \"string\" changes no value Reylo types a number or a NUMERIC's: an INTEGER is its number, exact up to 2^53 - 1 and refused past it; a column with no type keeps libSQL's digits", { skip: drivers === true ? false : drivers, timeout: 60_000 }, async () => {
   const { createClient } = require("@libsql/client");
   const root = project();
