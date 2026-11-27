@@ -703,6 +703,16 @@ impl Alterer for SqliteAlterer {
         self.decided.set(renames);
     }
 
+    /// A table's rebuild makes the tables that reference it, at any depth, again from the text each
+    /// has then: so each one's own change waits for it, as a direct reference already makes it wait,
+    /// rather than run first and be undone.
+    fn waits_for(&self, from: &Object, to: &Object) -> Vec<String> {
+        if to.kind != Some(Kind::Table) {
+            return Vec::new();
+        }
+        self.schemas.borrow().as_ref().map_or_else(Vec::new, |(f, t)| parents_of(f, t, &from.id))
+    }
+
     fn rename(&self, from: &Object, to: &Object) -> Option<Vec<String>> {
         let (table, old, new) = (from.extra.first()?, from.extra.get(1)?, to.extra.get(1)?);
         Some(vec![format!("alter table {table} rename column {old} to {new}")])
@@ -1332,6 +1342,25 @@ fn children_of<'a>(from: &'a Schema, to: &'a Schema, id: &str) -> (Vec<(&'a Obje
         ordered.push((o, &to.objects[&o.id]));
     }
     (ordered, cycle)
+}
+
+/// The tables whose rebuild makes table `id` again with them (`children_of`, the other way round): those
+/// it references at any depth, through tables that still reference the next in `to`.
+fn parents_of(from: &Schema, to: &Schema, id: &str) -> Vec<String> {
+    let table = |id: &str| from.objects.get(id).is_some_and(|o| o.kind == Some(Kind::Table) && !Info::of(o).virtual_table);
+    let mut seen: Vec<String> = vec![id.to_string()];
+    let mut k = 0;
+    while k < seen.len() {
+        let child = seen[k].clone();
+        k += 1;
+        let (Some(x), Some(y)) = (from.objects.get(&child), to.objects.get(&child)) else { continue };
+        for d in x.deps.iter().filter(|d| y.deps.contains(*d) && table(d)) {
+            if !seen.contains(d) {
+                seen.push(d.clone());
+            }
+        }
+    }
+    seen.split_off(1)
 }
 
 /// What copies a table's rows into its rebuild, named `scratch`: the columns `copied` names, its
