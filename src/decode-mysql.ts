@@ -178,6 +178,9 @@ const preparesKey = (m: AnyClient): object => m.pool ?? m.connection ?? m;
  * is read, up to its first quote: mariadb's message adds the statement, and a server's message
  * quotes values, as "Duplicate entry '…'" does.
  */
+/** MySQL's error for a statement it will not prepare, such as SHOW COUNT(*) WARNINGS. */
+const ER_UNSUPPORTED_PS = 1295;
+
 const isPrepareRefusal = (e: unknown) => e instanceof Error && /^[^'"]*\bCOM_STMT_PREPARE\b/.test(String((e as { sqlMessage?: unknown }).sqlMessage ?? e.message));
 
 /** The read of how a session reads a statement's text: its sql_mode, and character_set_client, the charset it reads the text in. */
@@ -497,7 +500,7 @@ function scansAsBuilt(driver: string, built: SqlMode | undefined) {
  * build did (`built`); a client without escape() is taken to write a quote after a backslash. A Pool
  * hands out a PoolConnection first, so that the read and the statement share one session.
  */
-async function asWritten<T>(c: AnyClient, values: unknown[], built: SqlMode | undefined, run: (conn: AnyClient) => Promise<T>): Promise<T> {
+async function asWritten<T>(c: AnyClient, values: unknown[], built: SqlMode | undefined, run: (conn: AnyClient) => Promise<T>, held = false): Promise<T> {
   const wide = values.some((v) => /[^\x00-\x7f]/.test(textOf(v) ?? ""));
   const backslash = values.some((v) => holds(v, BACKSLASH));
   const quote = values.some((v) => holds(v, QUOTE));
@@ -506,7 +509,7 @@ async function asWritten<T>(c: AnyClient, values: unknown[], built: SqlMode | un
   const trailed = values.some(leadsAnEscape);
   const plain = !wide && !backslash && !quote && !other && !trailed && built === undefined;
   const pool = typeof c.getConnection === "function" && typeof c.release !== "function";
-  return await inTurn(pool ? undefined : c, !plain, async (handed) => {
+  const body = async (handed: () => void) => {
     // Where the session needs no read, the statement goes to the driver before anything is awaited,
     // so that a call made on the connection next, its own rollback() too, follows it.
     if (plain || (!pool && !mustRead(c))) return await handing(run(c), handed);
@@ -518,7 +521,9 @@ async function asWritten<T>(c: AnyClient, values: unknown[], built: SqlMode | un
     } finally {
       if (pooled) await answer((done) => pooled.release(done));
     }
-  });
+  };
+  // Inside a turn its caller holds already (`held`), it takes none of its own.
+  return held ? await body(() => {}) : await inTurn(pool ? undefined : c, !plain, body);
 
   /**
    * How the driver writes a quote on this connection, after a backslash or doubled (which every
@@ -599,43 +604,51 @@ export async function mariadb(c: AnyClient, text: string, values: unknown[], col
   const options = { sql: text, ...MARIADB_OPTIONS, rowsAsArray: Boolean(columns?.length), ...(columns?.some(([, kind]) => kind === "unknown" || kind.split("|").includes("geometry")) ? { typeCast: mariadbGeometry } : {}) };
   // The promise API resolves to the rows with their `meta`; the callback API hands the meta over as a third argument.
   let callbackMeta: MariadbColumn[] | undefined;
-  const call = (conn: AnyClient, method: "execute" | "query") =>
+  const call = (conn: AnyClient, method: "execute" | "query", bound: unknown[]) =>
     new Promise((resolve, reject) => {
-      const returned = conn[method](options, values, (error: Error | null, rows: unknown, meta?: MariadbColumn[]) => (error ? reject(error) : ((callbackMeta = meta), resolve(rows))));
+      const returned = conn[method](options, bound, (error: Error | null, rows: unknown, meta?: MariadbColumn[]) => (error ? reject(error) : ((callbackMeta = meta), resolve(rows))));
       if (typeof returned?.then === "function") returned.then(resolve, reject);
     });
-  let result: unknown;
-  // A connection's refusal is remembered on its info, which every wrapper a pool hands out over it shares.
-  const key = (typeof c.info === "object" && c.info) || preparesKey(c);
-  let prepared = typeof c.execute === "function" && !refusesPrepares.has(key);
-  if (prepared) {
-    const pool = typeof c.getConnection === "function" && typeof c.release !== "function";
-    try {
-      // On a MySQL server the driver sends a statement's EXECUTE once its PREPARE answers, and at once
-      // where it has the statement prepared already, so one run could overtake another: each run on a
-      // connection waits for the one before it to answer.
-      result = await inTurn(pool ? undefined : c, true, async (handed) => {
-        try {
-          return await call(c, "execute");
-        } finally {
-          handed();
-        }
-      });
-    } catch (e) {
-      if (!isPrepareRefusal(e)) throw e;
-      refusesPrepares.add(key);
-      prepared = false;
-    }
-  }
-  if (!prepared) {
+  // query(), each value held to how the session reads it, in the turn its caller holds where it holds one.
+  const written = (held: boolean) => {
     // Without values the driver writes nothing into the text, so no place can be misread. A query
     // defined by hand carries no reading of its own: where its text holds a backslash or a double
     // quote, which the sql_mode can read otherwise, it runs only on a session that reads it as the
     // driver's scan does.
     const placed = !values.length ? undefined : (built ?? (marks === undefined && /["\\]/.test(text) ? SCANS : undefined));
     scansAsBuilt("mariadb", placed);
-    result = await asWritten(c, values, placed, (conn) => call(conn, "query"));
-  }
+    return asWritten(c, values, placed, (conn) => call(conn, "query", values), held);
+  };
+  // A connection's refusal is remembered on its info, which every wrapper a pool hands out over it shares.
+  const key = (typeof c.info === "object" && c.info) || preparesKey(c);
+  const pool = typeof c.getConnection === "function" && typeof c.release !== "function";
+  let prepared = false;
+  // On a MySQL server the driver sends a statement's EXECUTE once its PREPARE answers, and at once
+  // where it has the statement prepared already, so one run could overtake another: each run on a
+  // connection waits for the one before it to answer, and keeps its turn through a retry on query().
+  const result: unknown =
+    typeof c.execute === "function" && !refusesPrepares.has(key)
+      ? await inTurn(pool ? undefined : c, true, async (handed) => {
+          try {
+            // A run before this one may have found that the server refuses prepared statements.
+            if (!refusesPrepares.has(key)) {
+              try {
+                // A BigInt below -2^63 as its digits, as mysql2 sends one: execute() throws on one inside the driver.
+                const r = await call(c, "execute", values.map((v) => (typeof v === "bigint" && v < -(2n ** 63n) ? String(v) : v)));
+                prepared = true;
+                return r;
+              } catch (e) {
+                // A server that refuses every prepared statement takes query() from then on, and a statement MySQL will not prepare (ER_UNSUPPORTED_PS) takes it this once.
+                if (isPrepareRefusal(e)) refusesPrepares.add(key);
+                else if ((e as { errno?: unknown }).errno !== ER_UNSUPPORTED_PS) throw e;
+              }
+            }
+            return await written(true);
+          } finally {
+            handed();
+          }
+        })
+      : await written(false);
   if (!Array.isArray(result)) return [];
   if (!result.length) return result;
   const meta = () => ((result as { meta?: MariadbColumn[] }).meta ?? callbackMeta ?? []) as MariadbColumn[];
@@ -643,9 +656,12 @@ export async function mariadb(c: AnyClient, text: string, values: unknown[], col
   // 3.0 a DATETIME's or a TIMESTAMP's with none where they are all zero: each takes its column's own
   // count. A column with more than six (an expression's, which MySQL reports as 31) keeps the driver's text.
   if (prepared) {
-    const timed = meta().flatMap((m, i) => ((m.type === "TIME" || m.type === "DATETIME" || m.type === "TIMESTAMP") && (m.scale ?? 0) <= 6 ? [[i, typeof m.name === "function" ? m.name() : m.name, m.scale ?? 0, m.type === "TIME"] as const] : []));
+    const names = meta().map((m) => (typeof m.name === "function" ? m.name() : m.name));
+    const timed = meta().flatMap((m, i) => ((m.type === "TIME" || m.type === "DATETIME" || m.type === "TIMESTAMP") && (m.scale ?? 0) <= 6 ? [[i, names[i], m.scale ?? 0, m.type === "TIME"] as const] : []));
     for (const row of result as Record<string | number, unknown>[]) {
       for (const [i, name, scale, time] of timed) {
+        // A row of objects keeps the value of the last column of each name, so that column's type alone applies to it.
+        if (!Array.isArray(row) && names.lastIndexOf(name) !== i) continue;
         const at = Array.isArray(row) ? i : name;
         if (at !== undefined && typeof row[at] === "string") row[at] = time ? timeOfScale(row[at] as string, scale) : withFraction(row[at] as string, scale);
       }
@@ -841,8 +857,6 @@ const GEO_TYPES = new Set(["Point", "LineString", "Polygon", "MultiPoint", "Mult
  * one integer: mariadb 2 writes a Long as its integer, and mariadb 3 as any other object.
  */
 function asMariadbValue(v: unknown): unknown {
-  // A BigInt below -2^63 as its digits, as mysql2 sends one: mariadb's execute() throws on one inside the driver.
-  if (typeof v === "bigint") return v < -(2n ** 63n) ? String(v) : v;
   if (v === null || typeof v !== "object" || v instanceof Uint8Array) return v;
   // mariadb 3.5's execute() tells a Date and a boxed string by this realm's constructors, and binds one of another realm as quoted JSON.
   const tag = Object.prototype.toString.call(v);
