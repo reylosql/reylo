@@ -7,7 +7,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
-import { anyEngine, DIAGNOSTIC, engine, reason, MissingEngine, REYLO_VERSION, Unreachable, type Analysis, type Engine, type Lexed } from "./engine.ts";
+import { anyEngine, DIAGNOSTIC, engine, reason, MissingEngine, REYLO_VERSION, Unreachable, type Analysis, type Engine, type Lexed, type Schema } from "./engine.ts";
 import { packageDir, resolveProject, sqlitePath, type Dialect, type ResolvedProject } from "./project.ts";
 import { NotMysql, refusedLogin } from "./connection.ts";
 import { keptError } from "./server-errors.ts";
@@ -41,11 +41,12 @@ export type Outcome =
 
 /**
  * A connection the engine holds (src/engine.ts): `analyze` runs a statement's whole analysis over
- * it, `query` runs the schema's fingerprint, and `forget` drops the answers the engine keeps once
+ * it, `query` runs a catalog query of the caller's, `schema` reads the schema's fingerprint by the
+ * engine's own query, as every host reads it, and `forget` drops the answers the engine keeps once
  * the schema changes. On SQLite, `drivers` are the app's own, which each statement is prepared on
  * too (src/sqlite-drivers.ts).
  */
-type Io = { analyze(sql: string): Promise<Analysis>; query(sql: string, params: unknown[]): Promise<unknown[][]>; forget(): Promise<void>; close(): Promise<void>; drivers?: SqliteDriver[] };
+type Io = { analyze(sql: string): Promise<Analysis>; query(sql: string, params: unknown[]): Promise<unknown[][]>; schema(): Promise<Schema>; forget(): Promise<void>; close(): Promise<void>; drivers?: SqliteDriver[] };
 
 const ENTRY_VERSION = 1;
 // How long a schema fingerprint is trusted, as long as a statement answer: a migration shows up
@@ -110,8 +111,9 @@ export class Session {
   #timer: ReturnType<typeof setTimeout> | undefined;
   /** What `reylo/.cache/queries` held when this session first looked. */
   #listing: string[] | undefined;
-  #schema: { value: string | null; at: number; error?: string; fatal?: boolean } | undefined;
-  /** The fingerprint read last, or the unverified value that stood in for one, which a spell offline leaves in place: the engine's answers are of that schema. */
+  /** The schema's fingerprint read last, with its stamp where the database keeps one (`Schema`), and when. */
+  #schema: { value: string | null; stamp?: number | null; at: number; error?: string; fatal?: boolean } | undefined;
+  /** The fingerprint and stamp read last, or the unverified value that stood in for them, which a spell offline leaves in place: the engine's answers are of that schema. */
   #known: string | undefined;
 
   private constructor(engine: Engine | MissingEngine, project: ResolvedProject, idle: number, dir: string, env: Record<string, string | undefined>) {
@@ -126,7 +128,7 @@ export class Session {
     this.#engine = engine;
     this.project = project;
     this.#url = project.url;
-    this.#engineFingerprint = engine instanceof MissingEngine ? "unknown" : engine.fingerprint;
+    this.#engineFingerprint = engine instanceof MissingEngine ? "unknown" : engine.cache;
   }
 
   /**
@@ -342,6 +344,7 @@ export class Session {
     if (shared) return { ok: true, analysis: shared.entry.analysis, source: "cache", entry: shared.file };
     let analysis: Analysis;
     let label: string = schema.value;
+    let stamp = this.#schema?.stamp;
     for (let tries = 1; ; tries++) {
       const io = this.#connection();
       try {
@@ -367,15 +370,19 @@ export class Session {
       // moved. An entry labelled with a fingerprint that a migration has since moved would be served to
       // a database that still has the old schema, or has gone back to it, so the fingerprint is read
       // again now, and the entry written only where it has not moved. Where it has, the engine's
-      // answers are dropped (`schema()`) and the statement analyzed again.
+      // answers are dropped (`schema()`) and the statement analyzed again. Where the database keeps a
+      // stamp (SQLite), a stamp that moved is a schema that changed in between, even one changed
+      // back to the same fingerprint, so the statement is analyzed again then too.
       await this.recheck();
       const read = await this.schema();
       const now = read.value;
-      if (now === label) break;
+      const moved = this.#schema?.stamp;
+      if (now === label && moved === stamp) break;
       // A read that found the database gone leaves the next statement to try it again, rather than a minute offline.
       if (now === null && !read.fatal) this.#schema = undefined;
       if (now === null || now.startsWith("unverified ") || tries === ANALYSES) return { ok: true, analysis, source: "database", entry: file };
       label = now;
+      stamp = moved;
     }
     // An analysis that carries an error the server raised for a reason of its own rather than the
     // statement's, which the engine's host fails the analysis with and which would stand for the
@@ -415,12 +422,13 @@ export class Session {
       return this.#schema;
     }
     try {
-      const rows = await io.query(FINGERPRINT[this.project.dialect], []);
-      const value = createHash("sha256").update(JSON.stringify(rows)).digest("hex").slice(0, 16);
-      // The engine's answers describe the old schema too, and outlast a spell offline.
-      if (this.#known !== undefined && this.#known !== value) await io.forget().catch(() => {});
-      this.#known = value;
-      this.#schema = { value, at: now };
+      const { fingerprint: value, stamp } = await io.schema();
+      // The engine's answers describe the old schema too, and outlast a spell offline: a schema
+      // whose stamp moved may have been another in between, whatever its fingerprint is now.
+      const known = JSON.stringify([value, stamp]);
+      if (this.#known !== undefined && this.#known !== known) await io.forget().catch(() => {});
+      this.#known = known;
+      this.#schema = { value, stamp, at: now };
     } catch (e) {
       if (e instanceof Unreachable) {
         this.#drop(pending);
@@ -565,6 +573,7 @@ export class Session {
       return {
         analyze: (sql) => again((on) => on.analyze(sql)),
         query: (text, params) => again((on) => on.query(text, params)),
+        schema: () => again((on) => on.schema()),
         forget: () => again((on) => on.forget()),
         close: () => current.then((on) => on.close(), () => {}),
         ...(first.drivers && { drivers: first.drivers }),
@@ -620,6 +629,7 @@ export class Session {
     return {
       analyze: (sql) => c.analyze(sql),
       query: (text, params) => c.query(text, params),
+      schema: () => c.schema(),
       forget: () => c.forget(),
       close: async () => {
         await Promise.all((drivers ?? []).map((d) => d.close().catch(() => {})));
@@ -742,125 +752,3 @@ function writeEntry(cache: string, file: string, entry: Entry): void {
     rmSync(tmp, { force: true });
   }
 }
-
-/**
- * One query per dialect whose rows change when anything an analysis reads changes: relations and
- * their columns with their type modifiers (a `varchar(n)`'s size, a `numeric(p,s)`'s precision) and whether each is an identity or a generated one, inheritance, constraints, indexes, row triggers and rules (nullability and the row
- * count read them), enum labels, a user's collations with whether each is deterministic (a key's equality and a CHECK's narrowing read it), domains with their base type's modifier, functions with their arguments' names, their result columns, their defaults, volatility, strictness,
- * kind and variadic argument, the functions each aggregate runs with their volatility and language (whether a call may
- * write), user operators and casts (the trust check reads them), view
- * definitions and column comments (a field's doc comment), and the server settings that change a statement's types;
- * and what the errors a statement may raise are read from: defaults (a domain's too), generated columns, policies and
- * operator classes on Postgres, and triggers, foreign keys, checks with their expressions and whether each is enforced, and stored routines with their arguments on MySQL. SQLite's whole schema is
- * its `sqlite_schema` table, and the functions of the SQLite that opened it are part of what an
- * analysis reads: another Node has another SQLite. A `"char"` column is cast to text:
- * `text || "char"` is ambiguous, and a query the server refuses leaves every entry unverified.
- */
-// The Postgres query names every operator, function, type and table as pg_catalog's, and converts a
-// value to text only by a built-in cast (a name, a "char", a boolean) or by its type's output
-// function (`textin(oidout(…))`), as the engine's catalog queries do (engine/postgres/src/postgres.rs):
-// under a search path that puts a user's schema before pg_catalog, a user's `||` that answers NULL
-// would leave every row NULL, and the fingerprint would never move. Each row is the text the plain
-// `||` of each field makes. The server's own `pg_get_viewdef` and `pg_get_ruledef` read a rule
-// through a query of bare operators, which a user's `=` of oids answers too: a view's or a rule's
-// row is then NULL, and left out.
-// A temporary schema holds one session's objects, which another session's statement names only by
-// that session's number, and a TOAST schema none that a statement names.
-const NOT_TEMP = `n.nspname operator(pg_catalog.!~) '^pg_(toast|temp)'::pg_catalog.text`;
-const NS = `not (n.nspname operator(pg_catalog.=) any ('{pg_catalog,information_schema}'::pg_catalog.name[])) and ${NOT_TEMP}`;
-const cat = (...parts: string[]) => parts.join(" operator(pg_catalog.||) ");
-const lit = (s: string) => `'${s}'::pg_catalog.text`;
-const line = (tag: string, ...fields: string[]) => cat(lit(`${tag} `), ...fields.flatMap((f, i) => (i ? [lit(" "), f] : [f])));
-const out = (type: string, value: string) => `pg_catalog.textin(pg_catalog.${type}out(${value}))`;
-// An object by its name, which a database built by the same migrations shares, where its oid differs:
-// each reg type's output writes the name, schema-qualified where the search path does not reach it.
-const named = (type: string, oid: string) => out(type, `${oid}::pg_catalog.${type}`);
-const relation = (oid: string) => named("regclass", oid);
-const type = (oid: string) => named("regtype", oid);
-const txt = (value: string) => `${value}::pg_catalog.text`;
-const md5 = (value: string) => `pg_catalog.md5(${value})`;
-const or = (value: string) => `coalesce(${value}, ''::pg_catalog.text)`;
-const eq = (a: string, b: string) => `${a} operator(pg_catalog.=) ${b}`;
-const rel = (alias: string, column: string) => `join pg_catalog.pg_class c on ${eq("c.oid", `${alias}.${column}`)} join pg_catalog.pg_namespace n on ${eq("n.oid", "c.relnamespace")}`;
-const PG_CLASS = "'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid";
-const USER = "'16384'::pg_catalog.oid";
-// Its first line holds what the session itself adds to an analysis: the server's version, the
-// search path that resolves each name, and the style the session writes dates in (the first part
-// of DateStyle, `ISO` or another), which the engine's host reports an error for (engine/native).
-const POSTGRES_FINGERPRINT = `select pg_catalog.md5(coalesce(pg_catalog.string_agg(t.x, E'\\n'::pg_catalog.text order by t.x), ''::pg_catalog.text)) from (
-    select ${line("v", "pg_catalog.current_setting('server_version_num'::pg_catalog.text)", "pg_catalog.current_setting('search_path'::pg_catalog.text)", "pg_catalog.split_part(pg_catalog.current_setting('DateStyle'::pg_catalog.text), ','::pg_catalog.text, 1)")} as x
-    union all select ${line("r", cat(txt("n.nspname"), lit("."), txt("c.relname")), txt("c.relkind"))} from pg_catalog.pg_class c join pg_catalog.pg_namespace n on ${eq("n.oid", "c.relnamespace")} where ${NS}
-    union all select ${line("a", relation("a.attrelid"), out("int2", "a.attnum"), txt("a.attname"), type("a.atttypid"), out("int4", "a.atttypmod"), txt("a.attnotnull"), named("regcollation", "a.attcollation"), txt("a.attidentity"), txt("a.attgenerated"))} from pg_catalog.pg_attribute a ${rel("a", "attrelid")} where a.attnum operator(pg_catalog.>) 0 and not a.attisdropped and ${NS}
-    union all select ${line("h", relation("h.inhrelid"), relation("h.inhparent"), out("int4", "h.inhseqno"))} from pg_catalog.pg_inherits h ${rel("h", "inhrelid")} where ${NS}
-    union all select ${line("c", relation("o.conrelid"), type("o.contypid"), txt("o.conname"), "pg_catalog.pg_get_constraintdef(o.oid)")} from pg_catalog.pg_constraint o join pg_catalog.pg_namespace n on ${eq("n.oid", "o.connamespace")} where ${NS}
-    union all select ${line("i", relation("i.indexrelid"), txt("i.indisvalid"), "pg_catalog.pg_get_indexdef(i.indexrelid)")} from pg_catalog.pg_index i ${rel("i", "indrelid")} where ${NS}
-    union all select ${line("g", relation("g.tgrelid"), txt("g.tgname"), out("int2", "g.tgtype"), txt("g.tgenabled"), named("regprocedure", "g.tgfoid"))} from pg_catalog.pg_trigger g ${rel("g", "tgrelid")} where not g.tgisinternal and ${NS}
-    union all select ${line("u", relation("w.ev_class"), txt("w.rulename"), txt("w.ev_type"), txt("w.ev_enabled"), md5("pg_catalog.pg_get_ruledef(w.oid)"))} from pg_catalog.pg_rewrite w ${rel("w", "ev_class")} where w.rulename operator(pg_catalog.<>) '_RETURN'::pg_catalog.name and ${NS}
-    union all select ${line("o", named("regoperator", "o.oid"), named("regprocedure", "o.oprcode::pg_catalog.oid"))} from pg_catalog.pg_operator o where o.oid operator(pg_catalog.>=) ${USER}
-    union all select ${line("e", type("e.enumtypid"), out("float4", "e.enumsortorder"), txt("e.enumlabel"))} from pg_catalog.pg_enum e
-    union all select ${line("l", named("regcollation", "l.oid"), txt("l.collprovider"), txt("l.collisdeterministic"), or(txt("l.collcollate")))} from pg_catalog.pg_collation l where l.oid operator(pg_catalog.>=) ${USER}
-    union all select ${line("t", type("t.oid"), txt("t.typname"), txt("t.typtype"), type("t.typbasetype"), out("int4", "t.typtypmod"), txt("t.typnotnull"), md5(or("t.typdefault")))} from pg_catalog.pg_type t join pg_catalog.pg_namespace n on ${eq("n.oid", "t.typnamespace")} where ${NS}
-    union all select ${line("f", named("regprocedure", "p.oid"), type("p.prorettype"), txt("p.proretset"), md5(or("p.prosrc")), md5(or("pg_catalog.pg_get_function_sqlbody(p.oid)")), or(txt("p.proconfig")), md5(or("pg_catalog.pg_get_expr(p.proargdefaults, 0::pg_catalog.oid)")), txt("p.prokind"), txt("p.provolatile"), txt("p.proisstrict"), out("int2", "p.pronargdefaults"), type("p.provariadic"), or(txt("p.proargnames")), or(txt("p.proargmodes")), or(txt("p.proallargtypes::pg_catalog.regtype[]")))} from pg_catalog.pg_proc p join pg_catalog.pg_namespace n on ${eq("n.oid", "p.pronamespace")} where ${NS}
-    union all select ${line("s", named("regprocedure", "s.aggfnoid::pg_catalog.oid"), named("regprocedure", "f.oid"), txt("f.provolatile"), txt("l.lanname"))} from pg_catalog.pg_aggregate s join pg_catalog.pg_proc p on ${eq("p.oid", "s.aggfnoid::pg_catalog.oid")} join pg_catalog.pg_namespace n on ${eq("n.oid", "p.pronamespace")} join pg_catalog.pg_proc f on f.oid operator(pg_catalog.=) any (array[${["aggtransfn", "aggfinalfn", "aggcombinefn", "aggmtransfn", "aggminvtransfn", "aggmfinalfn"].map((fn) => `s.${fn}::pg_catalog.oid`).join(", ")}]) join pg_catalog.pg_language l on ${eq("l.oid", "f.prolang")} where (${NS} or (p.oid operator(pg_catalog.>=) ${USER} and ${NOT_TEMP}))
-    union all select ${line("k", type("k.castsource"), type("k.casttarget"), named("regprocedure", "k.castfunc"), txt("k.castcontext"), txt("k.castmethod"))} from pg_catalog.pg_cast k where k.oid operator(pg_catalog.>=) ${USER}
-    union all select ${line("w", relation("c.oid"), md5("pg_catalog.pg_get_viewdef(c.oid)"))} from pg_catalog.pg_class c join pg_catalog.pg_namespace n on ${eq("n.oid", "c.relnamespace")} where c.relkind operator(pg_catalog.=) any ('{v,m}'::pg_catalog."char"[]) and ${NS}
-    union all select ${line("x", relation("d.adrelid"), out("int2", "d.adnum"), md5("pg_catalog.pg_get_expr(d.adbin, d.adrelid)"))} from pg_catalog.pg_attrdef d ${rel("d", "adrelid")} where ${NS}
-    union all select ${line("p", relation("p.polrelid"), txt("p.polname"), txt("p.polcmd"), txt("p.polpermissive"), md5(cat(or("pg_catalog.pg_get_expr(p.polqual, p.polrelid)"), lit(" "), or("pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid)"))))} from pg_catalog.pg_policy p ${rel("p", "polrelid")} where ${NS}
-    union all select ${line("q", named("regnamespace", "q.opcnamespace"), txt("q.opcname"), txt("m.amname"), type("q.opcintype"))} from pg_catalog.pg_opclass q join pg_catalog.pg_am m on ${eq("m.oid", "q.opcmethod")} where q.oid operator(pg_catalog.>=) ${USER}
-    union all select ${line("d", relation("d.objoid"), out("int4", "d.objsubid"), md5("d.description"))} from pg_catalog.pg_description d ${rel("d", "objoid")} where ${eq("d.classoid", PG_CLASS)} and d.objsubid operator(pg_catalog.>) 0 and ${NS}
-  ) t`;
-/**
- * ClickHouse: every column, table (a view's query with it) and function a user made, each hashed
- * field by field, since a name may hold any character, a dot or a space included, and the server's
- * version and the settings the session changed with them, since one of those can change a
- * statement's types (`join_use_nulls`). A statement may read a table of any database, so each
- * database's are in it but the server's own: the connection's with no database's name, so that a
- * database built the same way under another name has the same fingerprint, and any other's with
- * its own.
- */
-const CLICKHOUSE_OWN = "database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')";
-const CLICKHOUSE_IN = "database = currentDatabase(), if(database = currentDatabase(), '', database)";
-const CLICKHOUSE_FINGERPRINT = `SELECT concat(version(), ' ', toString(count()), ' ', toString(sum(x)), ' ', toString(groupBitXor(x))) FROM (
-    SELECT cityHash64('c', ${CLICKHOUSE_IN}, table, name, position, type, default_kind, default_expression, comment) AS x FROM system.columns WHERE ${CLICKHOUSE_OWN}
-    UNION ALL SELECT cityHash64('t', ${CLICKHOUSE_IN}, name, engine, sorting_key, as_select) FROM system.tables WHERE ${CLICKHOUSE_OWN}
-    UNION ALL SELECT cityHash64('f', name, create_query) FROM system.functions WHERE origin = 'SQLUserDefined'
-    UNION ALL SELECT cityHash64('s', name, value) FROM system.settings WHERE changed
-  )`;
-/**
- * MySQL: a statement may read a table, a view or a function of any database on the server
- * (`other.t`, `other.f()`), so each database's are in it but the server's own and Reylo Migrate's
- * shadows (`reylo_shadow_…`, each made and dropped by one check under a name of its own, which a
- * project's statements don't read), unless it is the URL's, as a dry run's shadow is for its type
- * check: the URL's with no database's name, so that a
- * database built the same way under another name, beside the same others, has the same
- * fingerprint, and any other's with its own. `information_schema` lists only what the session's
- * account may reach, so an account granted only the databases its statements read sees no other;
- * and the account's TRIGGER privileges as the engine reads them, on the server, on the URL's
- * database by its own name (a grant on a pattern names the pattern) and on its tables, without which
- * a written table's triggers are hidden from it.
- */
-const MYSQL_OWN = (schema: string) => `(${schema} = database() or ${schema} not in ('mysql', 'sys', 'information_schema', 'performance_schema') and left(${schema}, 13) <> 'reylo_shadow_')`;
-const MYSQL_IN = (schema: string) => `if(${schema} = database(), '', ${schema})`;
-const MYSQL_GRANTEE = "concat('''', substring_index(current_user(), '@', 1), '''@''', substring_index(current_user(), '@', -1), '''')";
-const MYSQL_FINGERPRINT = `select concat_ws(' ', @@version, @@sql_mode, count(*), sum(crc32(x)), bit_xor(crc32(x))) from (
-    select concat_ws(' ', 'c', ${MYSQL_IN("table_schema")}, table_name, column_name, ordinal_position, column_type, coalesce(character_set_name, ''), is_nullable, column_key, extra, coalesce(generation_expression, ''), sha2(column_comment, 256)) as x from information_schema.columns where ${MYSQL_OWN("table_schema")}
-    union all select concat_ws(' ', 's', ${MYSQL_IN("table_schema")}, table_name, index_name, non_unique, seq_in_index, column_name) from information_schema.statistics where ${MYSQL_OWN("table_schema")}
-    union all select concat_ws(' ', 'v', ${MYSQL_IN("table_schema")}, table_name, sha2(view_definition, 256)) from information_schema.views where ${MYSQL_OWN("table_schema")}
-    union all select concat_ws(' ', 'r', ${MYSQL_IN("routine_schema")}, routine_name, routine_type, coalesce(dtd_identifier, ''), sha2(coalesce(routine_definition, ''), 256)) from information_schema.routines where ${MYSQL_OWN("routine_schema")}
-    union all select concat_ws(' ', 'a', ${MYSQL_IN("specific_schema")}, specific_name, routine_type, ordinal_position, coalesce(parameter_mode, ''), coalesce(parameter_name, ''), dtd_identifier, coalesce(character_set_name, '')) from information_schema.parameters where ${MYSQL_OWN("specific_schema")} and ordinal_position > 0
-    union all select concat_ws(' ', 'g', ${MYSQL_IN("event_object_schema")}, event_object_table, trigger_name, event_manipulation, action_timing) from information_schema.triggers where ${MYSQL_OWN("event_object_schema")}
-    union all select concat_ws(' ', 'f', ${MYSQL_IN("constraint_schema")}, table_name, constraint_name, referenced_table_name, update_rule, delete_rule) from information_schema.referential_constraints where ${MYSQL_OWN("constraint_schema")}
-    union all select concat_ws(' ', 'k', ${MYSQL_IN("table_schema")}, table_name, constraint_name, constraint_type, enforced) from information_schema.table_constraints where ${MYSQL_OWN("table_schema")}
-    union all select concat_ws(' ', 'h', ${MYSQL_IN("constraint_schema")}, constraint_name, sha2(check_clause, 256)) from information_schema.check_constraints where ${MYSQL_OWN("constraint_schema")}
-    union all select concat_ws(' ', 'u', privilege_type) from information_schema.user_privileges where grantee = ${MYSQL_GRANTEE} and privilege_type = 'TRIGGER'
-    union all select concat_ws(' ', 'u', '', privilege_type) from information_schema.schema_privileges where grantee = ${MYSQL_GRANTEE} and privilege_type = 'TRIGGER' and table_schema = database()
-    union all select concat_ws(' ', 'u', '', table_name, privilege_type) from information_schema.table_privileges where grantee = ${MYSQL_GRANTEE} and privilege_type = 'TRIGGER' and table_schema = database()
-  ) t`;
-/** Each dialect's schema fingerprint query. The Rust crate keeps copies (rust/reylo-build/src/fingerprint-*.sql), which tests/rust-fingerprints.test.ts holds to these. */
-export const FINGERPRINT: Record<ResolvedProject["dialect"], string> = {
-  postgres: POSTGRES_FINGERPRINT,
-  clickhouse: CLICKHOUSE_FINGERPRINT,
-  mysql: MYSQL_FINGERPRINT,
-  sqlite: `select type, name, tbl_name, coalesce(sql, '') from sqlite_schema
-    union all select 'function', name, type, narg from pragma_function_list order by 1, 2, 3, 4`,
-};

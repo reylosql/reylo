@@ -28,9 +28,11 @@
 //! the requests that need no database (`ping`, `lex`, `config`, and `analyze` with the host's own
 //! answers). A database's program also opens connections of its own (`open`, answered with the
 //! connection's number and the server's version, as `reylo analyze` reports it), analyzes a statement
-//! to its end over one (`run`), runs a query on one (`query`), describes a statement on one
-//! (`describe`, on Postgres), forgets the answers it keeps for one when the schema changes
-//! (`forget`), and closes it (`close`). Each database's WebAssembly component (engine/wasip2) is this
+//! to its end over one (`run`), runs a query on one (`query`), reads its schema's fingerprint on one
+//! (`schema`, [`Schema`]), describes a statement on one (`describe`, on Postgres), forgets the
+//! answers it keeps for one when the schema changes (`forget`), and closes it (`close`). Its `ping`
+//! answers with the engine's fingerprint and, as `cache`, the one that names the analyses it gives
+//! in `reylo/.cache/` ([`Program::fingerprint`]). Each database's WebAssembly component (engine/wasip2) is this
 //! program behind two exports, and each binary in `src/bin/` is it as a native executable.
 //!
 //! `<program> call` answers the one request on standard input and exits, for a host that must have
@@ -86,6 +88,54 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 /// which the migrations' cache keys its replays by.
 #[doc(hidden)]
 pub const SOURCE_HASH: &str = env!("REYLO_ENGINE_HASH");
+
+/// The hash of every source of this crate (`build.rs`). Every host's analysis goes through it (the
+/// answers to the engine's needs, and what a program adds, as Postgres's DateStyle error), so it is
+/// part of the name of each analysis in `reylo/.cache/` ([`Program::fingerprint`]).
+const OWN_HASH: u64 = reylo_engine_core::fingerprint::parse_hex(env!("REYLO_ENGINE_NATIVE_HASH"));
+
+/// What names a database's analyses in `reylo/.cache/`, beside the statement and the schema: its
+/// engine's fingerprint, this crate's sources, and `more` (on SQLite, the functions of the SQLite
+/// the host reads the file with), as 16 hex digits.
+#[cfg_attr(not(any(feature = "postgres", feature = "sqlite", feature = "mysql", feature = "clickhouse")), allow(dead_code))]
+fn cache_fingerprint(engine: &str, more: &[u64]) -> String {
+    let mut parts = vec![reylo_engine_core::fingerprint::parse_hex(engine), OWN_HASH];
+    parts.extend_from_slice(more);
+    String::from_utf8_lossy(&reylo_engine_core::fingerprint::combine(&parts)).into_owned()
+}
+
+/// A database's schema as `reylo/.cache/` keeps analyses by it: its fingerprint, the answer of its
+/// engine's fingerprint query (each engine's `schema_fingerprint`), which changes when anything an
+/// analysis reads changes and is the same for two databases built by the same migrations; and,
+/// where the database keeps one, a stamp that moves with every change to its schema and never moves
+/// back (SQLite's `schema_version`), so that a schema changed and changed back while a statement was
+/// analyzed is told from one that never changed. Every host reads it here, so that each reads the
+/// entries the others write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Schema {
+    pub fingerprint: String,
+    pub stamp: Option<i64>,
+}
+
+impl Schema {
+    /// The schema of a fingerprint query's rows, as 16 hex digits of FNV-1a over their JSON.
+    #[cfg_attr(not(any(feature = "postgres", feature = "sqlite", feature = "mysql", feature = "clickhouse")), allow(dead_code))]
+    fn of(rows: &[Vec<Value>], stamp: Option<i64>) -> Schema {
+        Schema { fingerprint: format!("{:016x}", fnv(serde_json::to_string(rows).unwrap_or_default().as_bytes())), stamp }
+    }
+
+    /// A program's answer to `schema`.
+    #[cfg_attr(not(any(feature = "postgres", feature = "sqlite", feature = "mysql", feature = "clickhouse")), allow(dead_code))]
+    fn answer(&self) -> Value {
+        json!({ "status": "schema", "fingerprint": self.fingerprint, "stamp": self.stamp })
+    }
+}
+
+/// FNV-1a, 64-bit.
+#[cfg_attr(not(any(feature = "postgres", feature = "sqlite", feature = "mysql", feature = "clickhouse")), allow(dead_code))]
+fn fnv(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325, |hash, b| (hash ^ u64::from(*b)).wrapping_mul(0x100000001b3))
+}
 
 /// The project file, `.reylo.yaml`, and the database it names, as every frontend reads them.
 pub mod project;
@@ -145,6 +195,10 @@ pub trait Program {
     fn call(&self, request: &str) -> String;
     /// The answer to a request the core does not know: `None` where this program does not know it either.
     fn serve(&mut self, request: &Value) -> impl Future<Output = Option<Value>>;
+    /// What names the program's analyses in `reylo/.cache/` beside the statement and the schema:
+    /// the engine's sources, this crate's, and anything else of the host's that an analysis reads.
+    /// A `ping` answers with it as `cache`.
+    fn fingerprint(&self) -> String;
 }
 
 pub fn main<P: Program>(program: P) {
@@ -156,7 +210,7 @@ pub fn serve<P: Program>(mut program: P, call: bool) {
     if call {
         let mut request = String::new();
         let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut request);
-        println!("{}", program.call(&request));
+        println!("{}", core_answer(&program, &serde_json::from_str(&request).unwrap_or(Value::Null), &request));
         return;
     }
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
@@ -183,12 +237,28 @@ pub async fn answer<P: Program>(program: &mut P, line: &str) -> String {
     };
     let mut answer = match program.serve(&request).await {
         Some(answer) => answer,
-        None => serde_json::from_str(&program.call(line)).unwrap_or_else(|e| json!({ "status": "error", "message": e.to_string() })),
+        None => serde_json::from_str(&core_answer(program, &request, line)).unwrap_or_else(|e| json!({ "status": "error", "message": e.to_string() })),
     };
     if let (Some(answer), Some(id)) = (answer.as_object_mut(), request.get("id")) {
         answer.insert("id".into(), id.clone());
     }
     answer.to_string()
+}
+
+/// The core's answer to a request, a `ping`'s with the fingerprint that names the program's
+/// analyses ([`Program::fingerprint`]) beside the engine's.
+fn core_answer<P: Program>(program: &P, request: &Value, line: &str) -> String {
+    let answer = program.call(line);
+    if request["op"] != "ping" {
+        return answer;
+    }
+    match serde_json::from_str::<Value>(&answer) {
+        Ok(mut ping) if ping["status"] == "ok" => {
+            ping["cache"] = json!(program.fingerprint());
+            ping.to_string()
+        }
+        _ => answer,
+    }
 }
 
 /// A URL parameter's value, percent-decoded.
@@ -214,4 +284,32 @@ pub(crate) fn decode(value: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    /// The hash that names each analysis in `reylo/.cache/` covers every file of the crate: one left
+    /// out would let an analysis the edited code shapes otherwise keep the name of one it shaped before.
+    #[test]
+    fn the_cache_fingerprint_hashes_every_source_of_the_crate() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let build = std::fs::read_to_string(root.join("build.rs")).unwrap();
+        let list = build.split("emit(\"REYLO_ENGINE_NATIVE_HASH\", &[").nth(1).and_then(|rest| rest.split(']').next()).expect("build.rs hashes the crate's sources");
+        let hashed: Vec<&str> = list.split(',').map(|entry| entry.trim().trim_matches('"')).filter(|entry| !entry.is_empty()).collect();
+        for entry in std::fs::read_dir(root).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name == "Cargo.toml" {
+                continue;
+            }
+            assert!(hashed.contains(&name.as_str()), "{name} is not in the cache fingerprint");
+        }
+    }
+
+    #[test]
+    fn a_schema_is_the_digest_of_its_rows() {
+        let a = super::Schema::of(&[vec![serde_json::json!("x")]], None);
+        assert_eq!(a.fingerprint.len(), 16);
+        assert_eq!(a, super::Schema::of(&[vec![serde_json::json!("x")]], None));
+        assert_ne!(a.fingerprint, super::Schema::of(&[vec![serde_json::json!("y")]], None).fingerprint);
+    }
 }

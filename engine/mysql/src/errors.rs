@@ -24,7 +24,7 @@ use serde_json::Value;
 /// one `('name', code, field, name)` for each name an error may carry.
 /// What a write reaches: the written tables, a view's tables, and, where `{cascades}`, the tables a
 /// foreign key's action writes in turn.
-const ERRORS_QUERY: &str = "with recursive w(t) as ( \
+pub(crate) const ERRORS_QUERY: &str = "with recursive w(t) as ( \
       select table_name from information_schema.tables where table_schema = database() and table_name in ({written}) \
       union select u.table_name from information_schema.view_table_usage u join w on u.view_name = w.t where u.view_schema = database() and u.table_schema = database() \
       union select r.table_name from information_schema.referential_constraints r join w on r.referenced_table_name = w.t \

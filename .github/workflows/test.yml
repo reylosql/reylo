@@ -80,7 +80,7 @@ jobs:
           # the docs claim.
           everything() {
             echo engine=true
-            echo 'tests=-p reylo-engine-core -p reylo-sql -p reylo-engine-postgres -p reylo-engine-sqlite -p reylo-engine-mysql -p reylo-engine-clickhouse -p reylo-engine -p reylo-migrate -p reylo-cli -p reylo-oracle -p reylo-build -p reylo --features reylo/mysql,reylo/sqlite'
+            echo 'tests=-p reylo-engine-core -p reylo-sql -p reylo-engine-postgres -p reylo-engine-sqlite -p reylo-engine-mysql -p reylo-engine-clickhouse -p reylo-engine -p reylo-migrate -p reylo-cli -p reylo-oracle -p reylo-build -p reylo --features reylo/mysql,reylo/sqlite,reylo-build/mysql,reylo-build/sqlite'
             echo "shards=[\"postgres\",\"sqlite\",\"mysql-1\",\"mysql-2\",\"mysql-slow\",\"clickhouse\"${1-}]"
             echo playground=true
           }
@@ -128,7 +128,7 @@ jobs:
           # The binary's own crates, the migrations and the command line, which link every database.
           $binary && tests="$tests -p reylo-migrate -p reylo-cli"
           # The Rust crate on each of its databases, whose own tests (tests/migrate.rs) run on all three.
-          $rust && tests="$tests -p reylo-build -p reylo --features reylo/mysql,reylo/sqlite"
+          $rust && tests="$tests -p reylo-build -p reylo --features reylo/mysql,reylo/sqlite,reylo-build/mysql,reylo-build/sqlite"
           if [ -z "$tests" ]; then
             { echo engine=false; echo tests=; echo 'shards=[]'; } >> "$GITHUB_OUTPUT"
           else

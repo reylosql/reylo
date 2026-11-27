@@ -26,14 +26,14 @@ use syntax::mysql::ast::{self, Expr, FunctionArg, FunctionArgExpr, GroupByExpr, 
 use std::collections::{HashMap, HashSet};
 
 /// The session's `sql_mode`, asked only for a statement whose reading turns on it.
-const SQL_MODE_QUERY: &str = "select @@session.sql_mode";
+pub(crate) const SQL_MODE_QUERY: &str = "select @@session.sql_mode";
 
 /// Every view the session sees, in any schema but Reylo Migrate's shadows (`reylo_shadow_…`), each
 /// named at random and dropped by the one check that made it, so no statement names one, and which
 /// the schema's fingerprint leaves out; the session's own counts, as a dry run's is. Asked once for
 /// a session, by a SELECT, which reads each one materialized ([`crate::mysql_derived`]), and by a
 /// statement that returns an integer column of a table or a view ([`settle`]).
-const VIEWS_QUERY: &str = "select table_name from information_schema.views where table_schema = database() or left(table_schema, 13) <> 'reylo_shadow_'";
+pub(crate) const VIEWS_QUERY: &str = "select table_name from information_schema.views where table_schema = database() or left(table_schema, 13) <> 'reylo_shadow_'";
 
 /// One row per column of every unique index of the named tables, in key order, with the column's
 /// type. `?` is the comma-joined table names, because MySQL binds no arrays. A key part over an
