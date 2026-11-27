@@ -1028,24 +1028,6 @@ test("on Postgres, a statement that names a schema the role may not use is refus
   }
 });
 
-test("on Postgres, a role refused a function of the catalog's fails the analysis, rather than going on without what the function would have said", { skip: live }, async () => {
-  const own = await postgresDatabase("reylo_catalog_grant", "create table items (id int primary key, title text not null)");
-  const role = `reylo_catalog_grant_${process.pid}`;
-  const root = mkdtempSync(join(tmpdir(), "reylo-catalog-grant-"));
-  writeFileSync(join(root, "package.json"), "{}");
-  const url = new URL(own.url);
-  url.username = role;
-  try {
-    await own.sql.unsafe(`drop role if exists ${role}; create role ${role} login; grant select on items to ${role}; revoke execute on function pg_catalog.to_regclass(text) from public`);
-    const failed = await analyze(root, { DATABASE_URL: url.href }, "select title from items where id = :id");
-    assert.ok(!failed.ok);
-    assert.match(failed.message, /permission denied for function to_regclass/);
-  } finally {
-    await own.sql.unsafe(`grant execute on function pg_catalog.to_regclass(text) to public; drop owned by ${role}; drop role ${role}`).catch(() => {});
-    await own.drop();
-  }
-});
-
 test("on Postgres, a view over a schema the role may not use is typed for the role, which reads it through the view", { skip: live }, async () => {
   const own = await postgresDatabase("reylo_usage_view", "create schema private; create table private.todos (id int primary key, title text not null); create schema api; create view api.todos as select id, title from private.todos");
   const role = `reylo_usage_view_${process.pid}`;
@@ -1055,13 +1037,36 @@ test("on Postgres, a view over a schema the role may not use is typed for the ro
   url.username = role;
   try {
     await own.sql.unsafe(`drop role if exists ${role}; create role ${role} login; grant usage on schema api to ${role}; grant select on api.todos to ${role}`);
-    // The view's definition names private.todos, whose lookups by name the role is refused.
+    // The view's definition names private.todos, whose lookups by name the role is refused: what
+    // they would have said of the errors and the tables the statement reaches is left unknown.
     const typed = await analyze(root, { DATABASE_URL: url.href }, "select id, title from api.todos where id = :id");
     assert.ok(typed.ok);
     assert.deepEqual(typed.analysis.diagnostics, []);
     assert.deepEqual(typed.analysis.columns.map((c) => c.name), ["id", "title"]);
   } finally {
     await own.sql.unsafe(`drop owned by ${role}; drop role ${role}`).catch(() => {});
+    await own.drop();
+  }
+});
+
+test("on Postgres, a role refused a function of the catalog's gets an error at the statement, rather than an analysis that went on without what the function would have said", { skip: live }, async () => {
+  const own = await postgresDatabase("reylo_catalog_grant", "create table items (id int primary key, title text not null)");
+  const role = `reylo_catalog_grant_${process.pid}`;
+  const root = mkdtempSync(join(tmpdir(), "reylo-catalog-grant-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const url = new URL(own.url);
+  url.username = role;
+  try {
+    await own.sql.unsafe(`drop role if exists ${role}; create role ${role} login; grant select on items to ${role}; revoke execute on function pg_catalog.to_regclass(text) from public`);
+    const refused = await analyze(root, { DATABASE_URL: url.href }, "select title from items where id = :id");
+    assert.ok(refused.ok);
+    assert.deepEqual(
+      refused.analysis.diagnostics.map((d) => d.message.replace(/: .* \(42501\)/, ": … (42501)")),
+      ["The type check's role may not read all of what this statement reaches in the catalog, so it cannot type it: … (42501). Run the type check as a role that may."],
+    );
+    assert.match(refused.analysis.diagnostics[0]!.message, /to_regclass/);
+  } finally {
+    await own.sql.unsafe(`grant execute on function pg_catalog.to_regclass(text) to public; drop owned by ${role}; drop role ${role}`).catch(() => {});
     await own.drop();
   }
 });
