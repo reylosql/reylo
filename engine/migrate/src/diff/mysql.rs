@@ -1433,8 +1433,8 @@ fn made_by_keys(from: &[String], to: &[String]) -> BTreeSet<String> {
 }
 
 /// MySQL's alterer. A plan's `alter table` runs under a strict sql_mode wherever the session's isn't
-/// (`db::strict_mode`), so a change to a type that can't hold one of a column's values fails on it,
-/// and loses nothing.
+/// (`db::table_change_mode`), so a change to a type that can't hold one of a column's values fails on
+/// it, and loses nothing, and a column made AUTO_INCREMENT keeps the 0s it holds.
 #[derive(Default)]
 pub struct MysqlAlterer {
     decided: super::Decided,

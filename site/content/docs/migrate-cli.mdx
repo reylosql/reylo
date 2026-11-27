@@ -213,7 +213,7 @@ Applying to postgres://db.example.com/app
 ✓ Applied 1 migration
 ```
 
-On MySQL, a table's change runs in strict mode, whatever the server's `sql_mode`. A value its new type can't hold fails the migration, and the row is kept.
+On MySQL, a table's change runs in strict mode, whatever the server's `sql_mode`. A value its new type can't hold fails the migration, and the row is kept. A column made `AUTO_INCREMENT` keeps the 0s it holds, rather than renumbering them.
 
 It needs no shadow database. It refuses to run:
 
