@@ -30,7 +30,7 @@ enum Tok {
     Open,
     Close,
     Comma,
-    /// A string, a quoted name or a comment, as the lexer reads them.
+    /// A string or a quoted name, as the lexer reads them; a comment is no token.
     Opaque,
     Other,
 }
@@ -53,7 +53,10 @@ fn tokens(sql: &str, opaque: &[(usize, usize)]) -> Vec<Token> {
         }
         if let Some(&&(start, end)) = next_opaque.peek() {
             if start <= i {
-                out.push(Token { tok: Tok::Opaque, start, end });
+                // A comment reads as a space.
+                if !crate::lex::is_comment(&sql[start..]) {
+                    out.push(Token { tok: Tok::Opaque, start, end });
+                }
                 i = end;
                 continue;
             }
@@ -121,9 +124,7 @@ pub fn erroring_columns(sql: &str, opaque: &[(usize, usize)]) -> Option<Vec<Stri
     for list in lists(&t, sql) {
         let (k, _) = list?;
         items(&t, sql, k, &mut |from, to| {
-            // A comment between the clause's words is a space.
-            let words: Vec<usize> = (from..to).filter(|&j| !(t[j].tok == Tok::Opaque && crate::lex::is_comment(&sql[t[j].start..]))).collect();
-            if !words.windows(3).any(|w| is(&t, sql, w[0], "error") && is(&t, sql, w[1], "on") && is(&t, sql, w[2], "error")) {
+            if !(from..to.saturating_sub(2)).any(|j| is(&t, sql, j, "error") && is(&t, sql, j + 1, "on") && is(&t, sql, j + 2, "error")) {
                 return;
             }
             // A name the scan splits (`a$b`) runs into the token after it, where a type follows a
@@ -319,10 +320,10 @@ mod tests {
             Some(vec!["A".to_string(), "c d".to_string()])
         );
         assert_eq!(named("select 'json_table(x, ''$'' columns (n int path ''$'' error on error))'"), Some(vec![]));
-        // A comment inside the clause, and a column named `nested`, beside a NESTED clause without PATH.
+        // Comments, which read as spaces, and a column named `nested` beside NESTED clauses.
         assert_eq!(
-            named("select * from json_table(?, '$' columns (a int path '$.a' error /* strict */ on -- here\n error, nested varchar(4) path '$.n' error on error, nested '$.m[*]' columns (m int path '$' error on error))) j"),
-            Some(vec!["a".to_string(), "nested".to_string(), "m".to_string()])
+            named("select * from json_table(?, '$' columns (a int path '$.a' error /* strict */ on -- here\n error, nested varchar(4) path '$.n' error on error, nested '$.m[*]' columns (m int path '$' error on error), nested /* kids */ path '$.k[*]' columns (k int path '$' error on error))) j, json_table /* c */ (?, '$' columns /* d */ (l int path '$' error on error)) l"),
+            Some(vec!["a".to_string(), "nested".to_string(), "m".to_string(), "k".to_string(), "l".to_string()])
         );
         assert_eq!(named("select * from json_table(?, '$') j"), None);
     }
