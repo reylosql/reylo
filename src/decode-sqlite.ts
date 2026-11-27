@@ -235,6 +235,9 @@ type Plan = {
   blob?: ((v: object) => never) | undefined;
 };
 
+/** 2^63: past this a number is no INTEGER rounded, since SQLite's largest INTEGER, 2^63 - 1, rounds to it. A literal, which a bundler drops where nothing reads it. */
+const ROUNDED = 9223372036854775808;
+
 /** An integer's digits, as libSQL under intMode "string" hands one over. */
 const DIGITS = /^[+-]?\d+$/;
 
@@ -262,7 +265,7 @@ function plan(name: string, kind: Kind, exact: boolean, rounds: boolean): Plan {
   // fraction is one either way, which no BigInt holds.
   if (kind === "int8") return { name, big: (v) => v, num: exact ? refuse : (v) => (Number.isInteger(v) ? bigInteger(v, name) : refuse(v)), str: (v) => (DIGITS.test(v) ? BigInt(v) : refuse(v)), blob };
   if (kind === "text") return { name, big: String, num: undefined, str: undefined, blob };
-  if (kind === "int") return { name, big: (v) => exactInteger(v, name), num: rounds ? (v) => exactInteger(v, name) : undefined, str: (v) => (DIGITS.test(v) ? exactInteger(BigInt(v), name) : refuse(v)), blob };
+  if (kind === "int") return { name, big: (v) => exactInteger(v, name), num: rounds ? (v) => (Math.abs(v) > ROUNDED ? v : exactInteger(v, name)) : undefined, str: (v) => (DIGITS.test(v) ? exactInteger(BigInt(v), name) : refuse(v)), blob };
   // libSQL under intMode "string" hands an INTEGER over as its digits, and says nothing of the storage
   // class or of its mode. Where the column is a REAL's, or a NUMERIC's, those digits can only be an
   // INTEGER's: SQLite stores text that reads as an integer as that integer in a column of REAL or
@@ -273,9 +276,9 @@ function plan(name: string, kind: Kind, exact: boolean, rounds: boolean): Plan {
   const digits = (v: string) => (DIGITS.test(v) ? exactInteger(BigInt(v), name) : texts ? v : refuse(v));
   const str = numericOnly(kinds) || (numbers && !texts) ? digits : texts ? undefined : refuse;
   // A value that may be an INTEGER or a REAL, a NUMERIC's, or of any storage class: where the driver
-  // may round an INTEGER, a whole number past 2^53 may be a rounded one, which is refused, a REAL
-  // that large with it.
-  if (rounds && (any || kinds.includes("int"))) return { name, big: (v) => exactInteger(v, name), num: (v) => (Number.isInteger(v) && Math.abs(v) > Number.MAX_SAFE_INTEGER ? mayBeRounded(v, name) : v), str, blob };
+  // may round an INTEGER, a whole number from 2^53 to 2^63 may be a rounded one, which is refused, a
+  // REAL there with it.
+  if (rounds && (any || kinds.includes("int"))) return { name, big: (v) => exactInteger(v, name), num: (v) => (Number.isInteger(v) && Math.abs(v) > Number.MAX_SAFE_INTEGER && Math.abs(v) <= ROUNDED ? mayBeRounded(v, name) : v), str, blob };
   // A REAL, or a value that may be an INTEGER where no driver rounds one: an integer is exact or
   // refused, a number is as it is. A BLOB's column holds no number.
   if (!numbers && !texts) return { name, big: refuse, num: refuse, str, blob };
