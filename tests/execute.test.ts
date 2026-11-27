@@ -159,8 +159,9 @@ test("a JSON parameter's NaN, infinities and -0 go in as each database's JSON re
   await execute(postgresJsSql((_, values) => void seen.push(values.map(unwrap))), pq, { doc, docs: [doc, -0] });
   // Bun.sql serializes a JSON parameter's value itself, so it gets one whose JSON is the text, -0 included.
   const unsafe = async (_: string, values?: unknown[]) => (seen.push(values!.map((v) => (v !== null && typeof v === "object" ? JSON.stringify(v) : v))), []);
-  await execute({ unsafe, commitDistributed: async () => {} }, pq, { doc, docs: [doc, -0] });
-  await execute({ unsafe, commitDistributed: async () => {}, options: { prepare: false } }, pq, { doc, docs: [doc, -0] });
+  const bun = { unsafe, commitDistributed: async () => {} };
+  const unprepared = { unsafe, commitDistributed: async () => {}, options: { prepare: false } };
+  for (const client of [bun, unprepared]) await execute(client, pq, { doc, docs: [doc, -0] });
   for (const values of seen) assert.deepEqual(values, [pgText, `{"${pgText.replace(/"/g, '\\"')}","-0"}`]);
   // MySQL and SQLite read -0 from `-0e0`; SQLite an infinity from a number past a double's range.
   const mq: QueryModule<"mysql"> = { dialect: "mysql", sql: "select cast(:doc as json)", params: ["doc"], inputs: { doc: json } };
