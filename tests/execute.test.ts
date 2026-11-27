@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { Readable } from "node:stream";
+import { runInNewContext } from "node:vm";
 import { DatabaseSync } from "node:sqlite";
 import { arrayLiteral } from "../src/execute.ts";
 import { columnKind } from "../src/values.ts";
@@ -938,7 +939,12 @@ test("mysql: mariadb and PlanetScale, which write an array as a list of values, 
     role = "admin";
   }
   await execute(recording as never, update, { name: new Role() });
-  assert.deepEqual(given, [['{"role":"admin"}'], [point], [stream], [boxed], ['{"role":"admin"}']]);
+  // A Date from another realm, and long.js's Long, which mariadb 2 writes as its integer, stay the driver's.
+  const date = runInNewContext("new Date(0)");
+  const long = { low: 1, high: 0, unsigned: false, __isLong__: true };
+  await execute(recording as never, update, { name: date });
+  await execute(recording as never, update, { name: long });
+  assert.deepEqual(given, [['{"role":"admin"}'], [point], [stream], [boxed], ['{"role":"admin"}'], [date], [long]]);
   assert.equal(given[2]![0], stream);
 });
 
