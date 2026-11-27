@@ -1797,6 +1797,11 @@ pub fn analyze<D: Describe>(sql: &str, dialect: Dialect, host: &Host<'_, D>, inn
         if probe.diagnostics.is_empty() {
             analysis.diagnostics.extend(check_table(f, sql, &fields, table, &probe.domains, dialect));
         }
+        // The domains the members' types name, with their bases, as a parameter's own are: the run
+        // time reads a member by its base (an array of a domain over an array holds whole arrays).
+        for (domain, base) in &probe.domains {
+            analysis.domains.entry(domain.clone()).or_insert_with(|| base.clone());
+        }
         if let Some(p) = analysis.params.iter_mut().find(|p| p.name == f.name) {
             p.members = f.members.iter().map(|m| crate::api::Member { written: m.ty.clone(), schema: m.schema.clone() }).collect();
             let row = Type::structure(fields);

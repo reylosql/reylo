@@ -165,7 +165,8 @@ test("an array member tells its levels from its elements as a parameter does, so
   // An array of whole arrays, a domain's over `int4[]`, takes each element whole.
   const ints: EngineType = { kind: "array", label: "public._ints", element: { nullable: true, type: { kind: "array", label: "_int4", element: { nullable: true, type: pg("int4") } } } } as EngineType;
   const tagged = structured(false, [["tags", ints, "ints[]", true, true]]);
-  assert.deepEqual(prepareRows("tagged", tagged.rows, [{ tags: [[1, 2], [[3]], null] }], "postgres", true).value, [{ tags: [[1, 2], [[3]], null] }]);
+  assert.deepEqual(prepareRows("tagged", tagged.rows, [{ tags: [[1, 2], [[3]], null] }], "postgres", true).value, [{ tags: ['{"1","2"}', '{{"3"}}', null] }]);
+  assert.throws(() => prepareRows("tagged", tagged.rows, [{ tags: [["x"]] }], "postgres", true), /"tags" element 1 element 1 /);
 });
 
 test("an hstore member takes an object of its keys, written as the text hstore reads", () => {

@@ -156,11 +156,16 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
         const element = written.replace(/\s*\[\s*\]\s*$/, "");
         // A level of a Postgres array is told from one element as a parameter tells it (src/values.ts).
         const kind = columnKind(type.element.type, dialect);
+        // Each element of an array of whole arrays (a domain's over an array type) is one, whatever
+        // it holds, and goes as its text, as a parameter of its own does: Postgres reads a JSON
+        // array inside a member as one more dimension.
+        const whole = dialect === "postgres" && holdsWholeArrays(type);
         return v.map((e, i) => {
           if (e === null) return null;
-          // Each element of an array of whole arrays (a domain's over an array type) is one, whatever it holds.
-          const level = dialect === "postgres" && Array.isArray(e) && !holdsWholeArrays(type) && isLevel(kind, e);
-          return check(level ? type : type.element.type, level ? written : element, e, dialect, (message) => fail(`element ${i + 1} ${message}`));
+          const at = (message: string) => fail(`element ${i + 1} ${message}`);
+          if (whole) return postgresLiteral(type.element.type, check(type.element.type, element, e, dialect, at), (message) => at(`is ${message}`));
+          const level = dialect === "postgres" && Array.isArray(e) && isLevel(kind, e);
+          return check(level ? type : type.element.type, level ? written : element, e, dialect, at);
         });
       }
       break;
