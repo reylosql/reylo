@@ -1,11 +1,16 @@
 //! How each dialect reads the text between and around its tokens: which characters are
 //! whitespace, where a comment starts and ends, whether block comments nest, which bytes make a
-//! name, which quotes escape with a backslash, and what a `$` opens. Every scanner of a statement's
-//! text reads these rules from here, so that a rule is written once: the placeholder lexer
-//! ([`crate::lex`]), the leading comment ([`crate::comment`]), the result list's items
-//! ([`crate::analysis::result_items`]), and the migrations' statement splitter and highlighter.
-//! The readers that can't share this code, in TypeScript and in `engine/syntax`, are held to the
-//! same readings by `tests/lexical.json`, which every reader's tests run ([`Corpus`]).
+//! name, which quotes escape with a backslash, and what a `$` opens, so that a rule is written
+//! once. The placeholder lexer ([`crate::lex`]) reads them, and the readers that skip text take
+//! its spans ([`crate::lex::Lexed::opaque`], [`crate::lex::is_comment`]): the result list's items,
+//! the error words, and the ClickHouse and MySQL engines'. The leading comment
+//! ([`crate::comment`]), the migrations' statement splitter and highlighter and the language
+//! server's comment check read the rules themselves. The readers that can't link this crate,
+//! `src/doc-comment.ts` and `engine/syntax`'s tolerant lexer, are held to the same readings by
+//! the corpus `engine/core/tests/lexical.json` ([`Corpus`]), which the
+//! lexer's, the leading comment's, the splitter's, the highlighter's and the TypeScript readers'
+//! tests run too. The lock's checksum reads a migration's text with no dialect, and keeps a
+//! reading of its own (`engine/migrate/src/lock.rs`).
 //!
 //! Each rule is the database's own: Postgres's `scan.l`, SQLite's `tokenize.c`, MySQL's
 //! `sql_lex.cc` and ClickHouse's `Lexer.cpp`.
@@ -256,15 +261,17 @@ fn unicode_space(b: &[u8]) -> usize {
     }
 }
 
-/// The inputs in `tests/lexical.json`, each with its reading on each dialect that the test lists:
+/// The inputs in `engine/core/tests/lexical.json`, each with its reading on each dialect that the test lists:
 /// the comments, the strings and quoted names, and the parameters, each in the order the text has
 /// them, and the prose of a leading comment. Every scanner's tests hold it to the readings it
 /// makes, so that the TypeScript readers and `engine/syntax`'s scanners agree with these rules.
+#[doc(hidden)]
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Corpus {
     pub cases: Vec<Case>,
 }
 
+#[doc(hidden)]
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Case {
     /// What the input shows.
@@ -274,6 +281,7 @@ pub struct Case {
     pub readings: std::collections::BTreeMap<String, Reading>,
 }
 
+#[doc(hidden)]
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reading {
@@ -297,6 +305,13 @@ impl Corpus {
     pub fn read(path: &str) -> Corpus {
         let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
+
+    /// The corpus beside a crate of the workspace, for its tests, from its manifest's directory:
+    /// `None` in a crate's packaged tarball, which holds none of the workspace.
+    pub fn beside(manifest_dir: &str) -> Option<Corpus> {
+        let core = std::path::Path::new(manifest_dir).join("../core");
+        core.join("Cargo.toml").exists().then(|| Corpus::read(&core.join("tests/lexical.json").to_string_lossy()))
     }
 
     /// This crate's copy, for its own tests.

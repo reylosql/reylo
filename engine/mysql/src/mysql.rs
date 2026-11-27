@@ -1864,7 +1864,7 @@ const SPACE_SENSITIVE: &[&str] = &[
 /// these; an optimizer hint that sets a variable for the statement leaves no mode to ask for.
 fn misread(sql: &str, lexed: &Lexed, host: &Host) -> Lazy<(Option<String>, bool)> {
     let text = |&(start, end): &(usize, usize)| &sql[start..end];
-    let is_comment = |span: &str| span.starts_with("--") || span.starts_with("/*") || span.starts_with('#');
+    let is_comment = lex::is_comment;
     if lexed.opaque.iter().map(text).any(|span| span.starts_with("/*+") && span.to_ascii_lowercase().contains("set_var")) {
         return Some((Some("an optimizer hint sets a variable for this statement (SET_VAR), which may change how the server reads it, so nothing bounds its rows".into()), false));
     }

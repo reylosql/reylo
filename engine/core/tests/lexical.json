@@ -359,6 +359,35 @@
           "prose": "a\nb"
         }
       }
+    },
+    {
+      "about": "Every Unicode space ClickHouse reads as whitespace, before a comment",
+      "text": "\u0085\u00a0\u180e\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b\u200c\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeff-- one\nSELECT 1",
+      "readings": {
+        "clickhouse": {
+          "comments": ["-- one"],
+          "prose": "one"
+        }
+      }
+    },
+    {
+      "about": "Every Unicode space ClickHouse reads as whitespace, inside a placeholder",
+      "text": "SELECT {\u0085\u00a0\u180e\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b\u200c\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeffa\u0085\u00a0\u180e\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b\u200c\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeff:\u0085\u00a0\u180e\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b\u200c\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeffUInt8} AS x",
+      "readings": {
+        "clickhouse": {
+          "params": ["a"]
+        }
+      }
+    },
+    {
+      "about": "Every Unicode space ClickHouse reads as whitespace, before a heredoc",
+      "text": "SELECT\u0085\u00a0\u180e\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b\u200c\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeff$h$a;b$h$ AS s",
+      "readings": {
+        "clickhouse": {
+          "strings": ["$h$a;b$h$"],
+          "params": []
+        }
+      }
     }
   ]
 }

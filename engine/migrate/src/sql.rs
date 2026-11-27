@@ -805,7 +805,7 @@ mod tests {
 
     #[test]
     fn the_corpus_strings_are_strings_and_its_comments_hold_no_token() {
-        let corpus = reylo_engine_core::lexical::Corpus::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../core/tests/lexical.json"));
+        let Some(corpus) = reylo_engine_core::lexical::Corpus::beside(env!("CARGO_MANIFEST_DIR")) else { return };
         for dialect in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
             for case in &corpus.cases {
                 let Some(reading) = case.readings.get(dialect.name()).filter(|r| r.error.is_none()) else { continue };

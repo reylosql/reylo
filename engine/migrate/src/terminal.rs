@@ -256,10 +256,13 @@ fn lex<'a>(sql: &'a str, dialect: Dialect, out: &mut Vec<(Token, &'a str)>) {
         } else if c == b'\'' || (c == b'"' && rules.double_quoted_strings) {
             // A backslash escapes in MySQL's strings and in Postgres's E'…' strings; the others
             // double a quote to escape it.
-            let escaped = rules.backslash_in_strings || (rules.escape_strings && i > 0 && matches!(b[i - 1], b'E' | b'e') && (i < 2 || !is_word(b[i - 2])));
+            let escaped = rules.backslash_in_strings || (rules.escape_strings && i > 0 && matches!(b[i - 1], b'E' | b'e') && (i < 2 || !rules.name_part(b[i - 2])));
             (Token::Literal, quoted(b, i, c, escaped))
         } else if c == b'"' || c == b'`' {
             (Token::Plain, quoted(b, i, c, false))
+        } else if c == b'[' && rules.bracketed_names {
+            // SQLite's `[name]`, to its first `]`.
+            (Token::Plain, b[i..].iter().position(|&x| x == b']').map_or(b.len(), |p| i + p + 1))
         } else if c == b'$' {
             match dollar_tag(sql, i, &rules) {
                 Some(tag) => {
@@ -462,12 +465,13 @@ mod tests {
         assert_eq!(kinds_on("# a\ncreate", Dialect::Mysql), vec![(Token::Comment, "# a".into()), (Token::Keyword, "create".into())]);
         assert_eq!(kinds("$本文$ x $本文$"), vec![(Token::Literal, "$本文$".into()), (Token::Literal, "$本文$".into())]);
         assert!(kinds_on("$t$ x $t$", Dialect::Sqlite).is_empty());
+        assert!(kinds_on("[a--b] x", Dialect::Sqlite).is_empty());
         assert_eq!(kinds_on(r"e'\' create '\'", Dialect::Sqlite), vec![(Token::Literal, r"'\'".into()), (Token::Keyword, "create".into()), (Token::Literal, r"'\'".into())]);
     }
 
     #[test]
     fn the_corpus_comments_are_comments() {
-        let corpus = reylo_engine_core::lexical::Corpus::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../core/tests/lexical.json"));
+        let Some(corpus) = reylo_engine_core::lexical::Corpus::beside(env!("CARGO_MANIFEST_DIR")) else { return };
         for dialect in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
             for case in &corpus.cases {
                 let Some(reading) = case.readings.get(dialect.name()).filter(|r| r.error.is_none()) else { continue };

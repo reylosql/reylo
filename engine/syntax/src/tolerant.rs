@@ -690,6 +690,10 @@ mod tests {
     /// token stands inside one of its comments.
     #[test]
     fn reads_the_corpus() {
+        // The corpus is the workspace's: a crate's packaged tarball holds none of it.
+        if !std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../core/Cargo.toml")).exists() {
+            return;
+        }
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../core/tests/lexical.json");
         let corpus: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).expect("the corpus")).expect("JSON");
         let texts = |reading: &serde_json::Value, key: &str| reading.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default();

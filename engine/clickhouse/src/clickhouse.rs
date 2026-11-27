@@ -59,6 +59,7 @@ use reylo_engine_core::analysis::{self, ResultTarget};
 use reylo_engine_core::api::DbError;
 use reylo_engine_core::dialect::Dialect;
 use reylo_engine_core::lex::{self, Lexed, Placeholder, Rewritten, Target};
+use reylo_engine_core::lexical::Rules;
 use reylo_engine_core::types::{Cardinality, StatementKind, Type};
 use serde_json::Value;
 
@@ -179,15 +180,19 @@ fn skipped(lexed: &Lexed, but: &Placeholder) -> Vec<(usize, usize)> {
 }
 
 fn is_comment(sql: &str, start: usize) -> bool {
-    sql[start..].starts_with("--") || sql[start..].starts_with("/*") || sql[start..].starts_with('#')
+    lex::is_comment(&sql[start..])
 }
+
+/// ClickHouse's rules for the text around its tokens: its whitespace takes the vertical tab and
+/// Unicode's spaces.
+const TEXT: Rules = Rules::of(Dialect::Clickhouse);
 
 /// The end of the code before `at`: past the whitespace and comments that stand between.
 fn code_before(sql: &str, lexed: &Lexed, mut at: usize) -> usize {
     let b = sql.as_bytes();
     loop {
-        while at > 0 && b[at - 1].is_ascii_whitespace() {
-            at -= 1;
+        while let Some(c) = sql[..at].chars().next_back().filter(|c| TEXT.space_at(b, at - c.len_utf8()) == c.len_utf8()) {
+            at -= c.len_utf8();
         }
         match lexed.opaque.iter().find(|&&(start, end)| end == at && is_comment(sql, start)) {
             Some(&(start, _)) => at = start,
@@ -200,9 +205,7 @@ fn code_before(sql: &str, lexed: &Lexed, mut at: usize) -> usize {
 fn code_after(sql: &str, lexed: &Lexed, mut at: usize) -> usize {
     let b = sql.as_bytes();
     loop {
-        while at < b.len() && b[at].is_ascii_whitespace() {
-            at += 1;
-        }
+        at = TEXT.skip_spaces(b, at);
         match lexed.opaque.iter().find(|&&(start, _)| start == at && is_comment(sql, start)) {
             Some(&(_, end)) => at = end,
             None => return at,
