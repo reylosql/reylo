@@ -10,8 +10,8 @@
 // the databases its queries are written for.
 
 import type { QueryError } from "./query-error.ts";
-import { columnKind, describe, given, hstoreText, isArrayValued, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresLiteral, postgresYear, rowMasks, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
-import { bareName, isMysqlSet, schemaOf, type EngineType } from "./engine-type.ts";
+import { columnKind, describe, given, hstoreText, isLevel, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresLiteral, postgresYear, rowMasks, vectorText, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
+import { bareName, holdsWholeArrays, isMysqlSet, schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
 import type { SqlMode } from "./engine-core.ts";
@@ -274,6 +274,32 @@ export type Inputs = Readonly<Record<string, { readonly type: EngineType; readon
 
 export type AnyClient = Record<string, any> & ((...args: any[]) => any);
 
+/** Where the client `effect` from `reylo/effect` passes to `.run()` for a SQLite or Postgres statement keeps the Effect SQL client it reads through (src/effect.ts). */
+export const EFFECT_SQL: unique symbol = Symbol.for("reylo.effectSql");
+
+/**
+ * A statement's run on an Effect SQL client (src/effect.ts), each rejecting with the `SqlError`
+ * Effect's client raised. On SQLite, `driver` is the client's own name for its driver
+ * (`sqlite-node`, `d1`, …), `exact` whether it reads every INTEGER as a BigInt, and `raw` the
+ * statement's result as the driver returned it. On Postgres, `text` runs the statement with
+ * every column in the text format, each value the server's text, and `key` is the client, under
+ * which Reylo keeps what it learned of the database's own types.
+ */
+export type EffectSql = {
+  readonly [EFFECT_SQL]:
+    | {
+        readonly dialect: "sqlite";
+        readonly driver: string;
+        readonly exact: boolean;
+        raw(text: string, values: unknown[]): Promise<unknown>;
+      }
+    | {
+        readonly dialect: "postgres";
+        readonly key: object;
+        text(text: string, values: (string | null)[]): Promise<{ readonly fields: readonly { readonly name: string; readonly dataTypeId: number }[]; readonly values: readonly (readonly (string | null)[])[] }>;
+      };
+};
+
 /**
  * The parameters: an object keyed by name, or by number for positional placeholders (`$1` and
  * `?` give `{ 1: ..., 2: ... }`, and `params` is `["1", "2"]`). An array is refused, since
@@ -461,7 +487,7 @@ async function executeAsync(c: AnyClient | null | undefined, query: QueryModule,
   // Effect SQL's client has an unsafe() whose statement is an Effect, which an await never runs:
   // taken for Bun.sql's on SQLite, a read gave no rows and a write ran nothing. Effect 4 brands
   // the client with a string, Effect 3's @effect/sql with a symbol.
-  if ("~effect/sql/SqlClient" in c || Symbol.for("@effect/sql/SqlClient") in c) throw new TypeError(`reylo cannot run a statement on an Effect SQL client: .run() takes a driver's own client, and Effect SQL's statements are Effects, which only Effect's runtime runs.`);
+  if ("~effect/sql/SqlClient" in c || Symbol.for("@effect/sql/SqlClient") in c) throw new TypeError(`reylo cannot run a statement on an Effect SQL client: .run() takes a driver's own client. Inside an Effect, run the query with effect(query, params) from reylo/effect.`);
   checkParams(query, params);
   if (query.dialect === "postgres") await checkMoneyLocale(c, query);
   const rows = await query.runtime.run(c, query, statement(query, params));
@@ -493,7 +519,10 @@ function holdsMoney(t: EngineType): boolean {
 async function checkMoneyLocale(c: AnyClient, query: QueryModule): Promise<void> {
   let name = moneyParams.get(query);
   if (name === undefined) moneyParams.set(query, (name = Object.entries(query.inputs ?? {}).find(([, input]) => holdsMoney(input.type))?.[0] ?? null));
-  if (name === null || moneyLocales.has(c as object)) return;
+  // A client effect() passes (src/effect.ts) is made for one call, and checks under the client it reads through.
+  const effect = (c as Partial<EffectSql>)[EFFECT_SQL];
+  const key = effect?.dialect === "postgres" ? effect.key : (c as object);
+  if (name === null || moneyLocales.has(key)) return;
   let written: unknown;
   try {
     const rows = await executeAsync(c, { dialect: "postgres", runtime: query.runtime, sql: MONEY_CHECK, params: [], text: MONEY_CHECK, order: [], marks: [], columns: [["m", "text"]] }, {});
@@ -501,7 +530,7 @@ async function checkMoneyLocale(c: AnyClient, query: QueryModule): Promise<void>
   } catch {
     return;
   }
-  if (written === "$1,234.50") return void moneyLocales.add(c as object);
+  if (written === "$1,234.50") return void moneyLocales.add(key);
   throw new ParameterError(`Parameter "${name}" is a Postgres money, which Postgres reads in the session's lc_monetary, and this session writes 1234.50 as ${JSON.stringify(written)}, not the C locale's "$1,234.50", so it could store the parameter as another amount. Set lc_monetary = 'C' on the session, the role or the database, or cast the parameter to numeric in the statement (:${name}::numeric).`);
 }
 
@@ -581,7 +610,8 @@ function statement(query: QueryModule, params: ParamsInput) {
     // structured parameter's member keeps its NULL elements (src/rows.ts).
     // A ClickHouse array's type says whether an element may be NULL, and its binder holds each to it.
     if (type?.kind === "array" && Array.isArray(bound.values[i]) && query.dialect !== "clickhouse") {
-      const at = nullElement(bound.values[i] as unknown[]);
+      const kind = columnKind(type, query.dialect);
+      const at = nullElement(bound.values[i] as unknown[], kind.endsWith("[]") ? columnKind(type.element.type, query.dialect) : undefined);
       if (at !== undefined) throw new ParameterError(`Parameter "${name}" is an array whose elements may not be null, and the element at ${at} is. Leave it out of the array.`);
     }
     // A `::type` written on MySQL or SQLite, whose cast turns a value it cannot read into 0 or
@@ -654,12 +684,13 @@ function checksFor(query: QueryModule, name: string): Checks {
 }
 
 /** Where an array, or an array inside it (a multidimensional one), holds null or undefined: `[2]`, `[1][0]`. */
-function nullElement(array: readonly unknown[], path = ""): string | undefined {
+function nullElement(array: readonly unknown[], element: Kind | undefined, path = ""): string | undefined {
   for (let i = 0; i < array.length; i++) {
     const e = array[i];
     if (e == null) return `${path}[${i}]`;
-    if (Array.isArray(e)) {
-      const inner = nullElement(e, `${path}[${i}]`);
+    // Only a level of the array is looked into (src/values.ts, `isLevel`): a JSON element's own null is its value's.
+    if (Array.isArray(e) && (element === undefined || isLevel(element, e))) {
+      const inner = nullElement(e, element, `${path}[${i}]`);
       if (inner !== undefined) return inner;
     }
   }
@@ -726,7 +757,7 @@ export const isTime = (type: EngineType | undefined, dialect: Dialect) => type !
 function checkTime(type: EngineType | undefined, name: string, v: unknown, dialect: Dialect): void {
   if (type === undefined || v == null) return;
   if (type.kind === "array") {
-    if (Array.isArray(v)) for (const e of v) checkTime(Array.isArray(e) ? type : type.element.type, name, e, dialect);
+    if (Array.isArray(v)) for (const e of v) checkTime(Array.isArray(e) && !holdsWholeArrays(type) ? type : type.element.type, name, e, dialect);
     return;
   }
   const kind = columnKind(type, dialect);
@@ -750,7 +781,7 @@ function checkTime(type: EngineType | undefined, name: string, v: unknown, diale
 function checkBinary(type: EngineType | undefined, name: string, v: unknown, dialect: Dialect): void {
   if (type === undefined || v == null) return;
   if (type.kind === "array" && columnKind(type, dialect).endsWith("[]")) {
-    if (Array.isArray(v)) for (const e of v) checkBinary(Array.isArray(e) ? type : type.element.type, name, e, dialect);
+    if (Array.isArray(v)) for (const e of v) checkBinary(Array.isArray(e) && !holdsWholeArrays(type) ? type : type.element.type, name, e, dialect);
     return;
   }
   if (columnKind(type, dialect) !== "bytes" || v instanceof Uint8Array) return;
@@ -760,7 +791,8 @@ function checkBinary(type: EngineType | undefined, name: string, v: unknown, dia
 // What `run` returns goes back in as the database reads it (the round-trip rule, src/render.ts):
 // on Postgres a date or time with an extended or BC year in Postgres's own form, which refuses
 // `+010000` and `0000`, and a negative interval with each part signed (`-P1D` as `P-1D`), since
-// Postgres refuses a sign before the `P`; on SQLite a truth value, which a BOOLEAN column returns, as 1 or 0, since
+// Postgres refuses a sign before the `P`, and a float of -0 as the text `-0`, since pg's family,
+// postgres.js, PGlite, Neon and Drizzle's driver write that number as `0`; on SQLite a truth value, which a BOOLEAN column returns, as 1 or 0, since
 // better-sqlite3 refuses a boolean ("SQLite3 can only bind numbers, strings, bigints, buffers, and
 // null") and libSQL binds `true` as the REAL 1.0. A query without `inputs` gets neither. On MySQL
 // a VECTOR, MySQL's one array, as the text of its floats, `[1,2.5]`, which the engine's
@@ -780,7 +812,7 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
       const labels = type.element.type.kind === "enum" ? type.element.type.values.map((l) => l.value) : undefined;
       return (labels === undefined ? [...v] : [...v].sort((a, b) => labels.indexOf(a as string) - labels.indexOf(b as string))).join(",");
     }
-    return type.kind === "array" && bareName(type) === "vector" && Array.isArray(v) ? vectorText(v, name, "a VECTOR") : v;
+    return type.kind === "array" && bareName(type) === "vector" && Array.isArray(v) ? vectorParameter(v, name, "a VECTOR") : v;
   }
   const kind = columnKind(type, dialect);
   // A row value, a geometric type and a range go as the text Postgres reads, from the object
@@ -788,10 +820,14 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
   if (!kind.endsWith("[]") && (isRowKind(kind) || GEOMETRIC_KINDS.has(kind) || isRangeKind(kind) || isMultirangeKind(kind))) return postgresLiteral(type, v, (message) => {
     throw new ParameterError(`Parameter "${name}" is ${message}`);
   });
-  if (type.kind === "array" && kind.endsWith("[]")) return Array.isArray(v) ? v.map((e) => encode(Array.isArray(e) && !isArrayValued(columnKind(type.element.type, dialect)) ? type : type.element.type, e, dialect, name)) : v;
+  // An array of whole arrays (of a domain over an array type) goes as an array of each one's text.
+  if (type.kind === "array" && holdsWholeArrays(type) && Array.isArray(v)) return v.map((e) => (e == null ? e : postgresLiteral(type.element.type, e, (message) => {
+    throw new ParameterError(`Parameter "${name}" is an array of arrays, each element ${message}`);
+  })));
+  if (type.kind === "array" && kind.endsWith("[]")) return Array.isArray(v) ? v.map((e) => encode(Array.isArray(e) && isLevel(columnKind(type.element.type, dialect), e) ? type : type.element.type, e, dialect, name)) : v;
   if (kind === "vector" && Array.isArray(v)) {
     if (!v.length) throw new ParameterError(`Parameter "${name}" is a pgvector ${bareName(type)}, which has one dimension at least; got an empty array.`);
-    return vectorText(v, name, `a pgvector ${bareName(type)}`);
+    return vectorParameter(v, name, `a pgvector ${bareName(type)}`);
   }
   if (kind === "hstore" && typeof v === "object") return hstoreText(v, (message) => {
     throw new ParameterError(`Parameter "${name}" ${message}`);
@@ -799,6 +835,7 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
   // A money holds cents in the C locale Reylo reads it in, and Postgres rounds a value past them
   // without an error.
   if (kind === "money" && (typeof v !== "string" || !/^-?\d+(?:\.\d{1,2}0*)?$/.test(v))) throw new ParameterError(`Parameter "${name}" is a Postgres money, which holds cents: pass its decimal text, with two digits after the point at most (1234.56); got ${describe(v)}.`);
+  if (kind === "float" && Object.is(v, -0)) return "-0";
   if (typeof v !== "string") return v;
   if (isTime(type, dialect)) return postgresYear(v);
   return kind === "interval" ? postgresInterval(v) : v;
@@ -807,14 +844,14 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
 /** Postgres's geometric types' kinds (src/values.ts). */
 const GEOMETRIC_KINDS: ReadonlySet<string> = new Set(["point", "line", "lseg", "box", "path", "polygon", "circle"]);
 
-/** A vector's floats as the text a VECTOR's `to_vector` and pgvector's input read; JSON's, which would write NaN and ±Infinity as null, so those are refused. */
-function vectorText(v: readonly unknown[], name: string, what: string): string {
+/** A vector's floats as the text a VECTOR's `to_vector` and pgvector's input read (src/values.ts), which hold no NaN or infinity, so those are refused. */
+function vectorParameter(v: readonly unknown[], name: string, what: string): string {
   v.forEach((e, i) => {
     if (typeof e !== "number" || !Number.isFinite(e)) {
       throw new ParameterError(`Parameter "${name}" is ${what}, an array of finite numbers, and the element at [${i}] is ${typeof e === "string" ? JSON.stringify(e) : typeof e === "number" ? e : typeof e}.`);
     }
   });
-  return JSON.stringify(v);
+  return vectorText(v as readonly number[]);
 }
 
 /** Binary data as Postgres's hex form, `\x0102ff`: Neon's neon() before 0.10 sends a Buffer as JSON, and 0.10 and later send one as this form themselves. */

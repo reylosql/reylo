@@ -5,11 +5,12 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { docs } from 'collections/server';
 import { loader } from 'fumadocs-core/source';
 import site from '@/docs.config';
-import { pageFiles, pageSlugs } from './mdx/page-files.ts';
+import { drawsCard, pageFiles, pageSlugs } from './mdx/page-files.ts';
 import { pageMarkdown } from './mdx/remark-sections.ts';
 import type { PageData } from './page';
 
@@ -37,17 +38,46 @@ export function markdownHref(slug: string): string {
   return pageSlugs().length > 1 ? `${site.url}/${slug || 'index'}.md` : `${site.url}/llms.txt`;
 }
 
+const hashOf = (...parts: (string | Buffer)[]) => {
+  const hash = createHash('sha256');
+  for (const part of parts) hash.update(part);
+  return hash.digest('hex').slice(0, 16);
+};
+
 /**
- * A page's link preview: its own image in `public/og/` (`<slug>.png`, or `index.png` for every page
- * without one), or else the image the site's `app/routes/opengraph-image.tsx` draws, whose address
- * carries a hash of that route, so that a preview cached under the old drawing is fetched again once
- * the drawing changes. None when the site has neither.
+ * The hash a drawn card's address carries (`?<hash>`): of what the card is drawn from, the page's
+ * title, the drawing (`docs-kit/og`) and the site's config, so that a preview cached under the old
+ * card is fetched again once the card changes. For a site's own route that draws a card too.
+ */
+export async function ogCardHash(title: string): Promise<string> {
+  const drawing = await readFile(createRequire(path.resolve('package.json')).resolve('docs-kit/og'));
+  const config = await Promise.all(['docs.config.ts', 'docs.config.tsx'].filter((file) => existsSync(file)).map((file) => readFile(file)));
+  return hashOf(title, '\0', drawing, ...config);
+}
+
+/**
+ * A page's link preview: its own image, `public/og/<slug>.png`; else the card Docs Kit draws for it
+ * (`drawsCard`), at `/og/<slug>.png?<ogCardHash>`; else the image the site's
+ * `app/routes/opengraph-image.tsx` draws, whose address carries a hash of that route. None when the
+ * site has no image for the page.
  */
 export async function ogImage(slug = ''): Promise<string | undefined> {
-  for (const card of [slug || 'index', 'index']) if (existsSync(`public/og/${card}.png`)) return `${site.url}/og/${card}.png`;
+  const name = slug || 'index';
+  if (existsSync(`public/og/${name}.png`)) return `${site.url}/og/${name}.png`;
+  if (drawsCard(slug)) {
+    const page = source.getPage(slug ? [slug] : []);
+    return page ? `${site.url}/og/${name}.png?${await ogCardHash(page.data.title ?? '')}` : undefined;
+  }
+  if (existsSync('public/og/index.png')) return `${site.url}/og/index.png`;
   if (!existsSync('app/routes/opengraph-image.tsx')) return undefined;
-  const hash = createHash('sha256').update(await readFile('app/routes/opengraph-image.tsx')).digest('hex').slice(0, 16);
-  return `${site.url}/opengraph-image.png?${hash}`;
+  return `${site.url}/opengraph-image.png?${hashOf(await readFile('app/routes/opengraph-image.tsx'))}`;
+}
+
+/** The alternative text of a page's link preview: for a card Docs Kit draws, the site's name and the page's title; else the site's `ogAlt`. */
+export function ogAltOf(slug = ''): string | undefined {
+  const page = source.getPage(slug ? [slug] : []);
+  if (!page || !drawsCard(slug)) return site.ogAlt;
+  return `${site.name}: ${page.data.title ?? ''}`;
 }
 
 /**
@@ -66,6 +96,7 @@ export async function pageLoader({ params }: { params: { slug?: string } }): Pro
     description: page.data.description ?? '',
     tree: source.getPageTree(),
     image: await ogImage(slug),
+    imageAlt: ogAltOf(slug),
     markdown: markdownHref(slug),
   };
 }

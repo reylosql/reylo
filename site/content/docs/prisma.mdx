@@ -1,16 +1,16 @@
 ---
 title: Migrating from Prisma
-description: Move a Prisma project's queries to Reylo. Covers schema updates, build setup, Prisma Client equivalents in SQL, return types and a migration checklist.
+description: Move a Prisma project to Reylo. Covers moving migrations to Reylo Migrate, schema updates, build setup, Prisma Client equivalents in SQL, return types and a migration checklist.
 ---
 
-<p className="dk-subheader">How to move a Prisma project's queries to Reylo</p>
+<p className="dk-subheader">How to move a Prisma project to Reylo</p>
 
 [Reylo](/) lets you import `.sql` files into TypeScript, with every query typed from your live database.
 
 | | |
 | --- | --- |
-| Stays | `schema.prisma` and Prisma Migrate |
 | Goes | Prisma Client, its generated types and `prisma generate` |
+| Recommended | Prisma Migrate to [Reylo Migrate](/docs/migrate), and `schema.prisma` to `schema.sql` ([Migrations](#migrations)) |
 | Needs | TypeScript 7.1 (in beta), and a migrated database wherever the type check or the build runs |
 | Examples | Postgres |
 
@@ -85,7 +85,8 @@ One production app migrated about 750 Prisma Client calls. A billing report went
 | Relations become N+1 queries | A relation is a subquery in the same statement, as above |
 | Queries can't be built at run time | Optional filters are one JSON parameter ([Dynamic filtering](/docs/inference#dynamic-filtering)), a sort order is a `case` ([Dynamic sorting](/docs/inference#dynamic-sorting)), and a patch object is one update ([Partial updates](#partial-updates)) |
 | Dates come back as strings | As ISO text in UTC, exact to the microsecond, where a `Date` keeps milliseconds and Prisma's `timestamp(3)` keeps no zone |
-| The build needs a database | Yes: a fresh one, migrated by the build itself ([Build and deploy](#build-and-deploy)) |
+| The build needs a database | Yes: a shadow database, made and migrated by the build itself ([Build and deploy](#build-and-deploy)) |
+| Prisma's migration history is lost | It stays in git. Reylo Migrate starts from the schema it made, and refuses a database without that schema ([Migrations](#migrations)) |
 | A migration can break a running deploy | A query keeps the types of the schema it was built against: a column retyped or made nullable under it can return values those types rule out, and one the database can no longer run fails with the database's error ([Build and deploy](#build-and-deploy)) |
 
 ## Before you start
@@ -109,68 +110,105 @@ export const db = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 db.on("error", (error) => console.warn(`database connection lost: ${error.message}`));
 ```
 
+## Migrations
+
+Reylo types your queries against any migrated database, so Prisma Migrate keeps working beside it. Reylo Migrate does more:
+
+- **Every schema change in SQL.** Triggers, checks, functions and row level security sit in `schema.sql` beside the tables. Prisma's schema has none of them, so they go into migrations by hand, and its drift check never sees them.
+- **A deploy that refuses a database changed by hand.** `prisma migrate deploy` runs on one without a word ([Comparison](/docs/migrate/compare)).
+- **A build typed against the deploy.** A dry run of the deploy runs your build on a shadow of the schema it leaves ([Build and deploy](#build-and-deploy)).
+
+### Moving to Reylo Migrate
+
+Move first, so each schema change below is a Reylo migration:
+
+```terminal
+# write schema.sql and init.sql from a database Prisma migrated
+$ reylo migrate init
+
+# record init.sql as run on production, running nothing
+$ reylo migrate history push --url $PROD_URL
+```
+
+Record it on every other database too, such as staging. Recording refuses a database whose schema differs from `init.sql`, and prints the difference.
+
+Then retire Prisma Migrate:
+
+- **Delete `prisma/migrations`**, and each `prisma migrate` command in CI and your deploy.
+- **Keep `schema.prisma` for Prisma Client** until its last call is converted. After each migration, refresh it with `prisma db pull`, then `prisma generate`.
+- **Drop the `_prisma_migrations` table** on each database once nothing reads it.
+
+### Keeping Prisma Migrate
+
+Keep `schema.prisma`, and run `prisma migrate deploy` wherever this page runs `reylo migrate deploy`. What changes:
+
+- **Each schema change below goes in `schema.prisma`.** A `timestamptz` is `@db.Timestamptz`. A generated id is `@default(dbgenerated("(gen_random_uuid())::text"))`, written as Postgres prints it, or Prisma's drift check fails.
+- **Triggers and checks go into migrations by hand.** Write each with `prisma migrate dev --create-only`, then add them to the file it writes.
+- **The timestamp migration** is written the same way, with `set time zone 'UTC';` added at its top.
+- **A `DateTime` added later** without `@db.Timestamptz` is a `timestamp(3)` again. A check in CI keeps new ones out:
+
+  ```sh
+  ! grep -nE '^[[:space:]]+[[:alnum:]_]+[[:space:]]+DateTime\??([[:space:]]|$)' prisma/schema.prisma | grep -v '@db.Timestamptz'
+  ```
+- **A host that builds before it deploys** builds against a fresh database. Create it, run `prisma migrate deploy` into it, and point [`direct_url`](/docs/configuration#direct_url) at it for the build. Drop it after, then migrate production.
+
 ## The schema
 
-Prisma Client did four things your database never saw. Move each into the database, in migrations of their own, before you convert a query:
+Prisma Client did four things your database never saw. Move each into the database, with a migration of its own, before you convert a query:
 
-| Prisma Client | In the database |
+| Prisma Client | In `schema.sql` |
 | --- | --- |
-| A `DateTime`, stored as `timestamp(3)` and read as UTC | `timestamptz`, which is `@db.Timestamptz` in `schema.prisma` |
-| `@default(cuid())` and `@default(uuid())` | `@default(dbgenerated("(gen_random_uuid())::text"))`, written as Postgres prints it, or Prisma's drift check fails |
-| `@updatedAt` | `@default(now())`, and a trigger that sets it on every update |
-| A `String[]`, and no `null` element in it, which Prisma Client refuses to read | `NOT NULL`, once its nulls are filled, and `check (array_position(tags, null) is null)` |
-
-Prisma's drift check ignores triggers and check constraints, and accepts `NOT NULL` on a `String[]`. None of these changes fails it.
+| A `DateTime`, stored as `timestamp(3)` and read as UTC | `timestamptz` |
+| `@default(cuid())` and `@default(uuid())` | `default gen_random_uuid()::text` |
+| `@updatedAt` | `default now()`, and a trigger that sets it on every update |
+| A `String[]`, and no `null` element in it, which Prisma Client refuses to read | `not null`, once its nulls are filled, and `check (array_position(tags, null) is null)` |
 
 ### Timestamps
 
 Prisma's `DateTime` is a `timestamp(3)`, a time with no zone. Prisma Client writes and reads it as UTC, but nothing in the column says so. Reylo returns it without a zone, as `"2026-10-30T09:00:00.123000"`. Then `new Date()` reads it in the machine's own zone, seven hours off in Los Angeles. A `timestamptz` comes back as `"…Z"`, which every reader reads the same. You can keep `timestamp(3)` if your server and code both use UTC.
 
-Retype every `timestamp(3)` column in UTC, one table per migration:
+Retype each `timestamp(3)` column in `schema.sql`, one table per migration:
 
-```sql
-set time zone 'UTC';
+```sql title="reylo/schema.sql"
+create table users (
+  -- ...
+  "createdAt" timestamp(3) without time zone default current_timestamp not null, -- [!code --]
+  "updatedAt" timestamp(3) without time zone not null, -- [!code --]
+  "createdAt" timestamptz default current_timestamp not null, -- [!code ++]
+  "updatedAt" timestamptz not null, -- [!code ++]
+  -- ...
+);
+```
 
-alter table "users"
-  alter column "createdAt" set data type timestamptz,
-  alter column "updatedAt" set data type timestamptz;
+Write its migration, accepting the lock it takes:
+
+```terminal
+$ reylo migrate new users_timestamptz --blocking
+```
+
+Then put the session in UTC at the top of the file it writes:
+
+```sql title="20261126052958_users_timestamptz.sql"
+set time zone 'UTC'; -- [!code ++]
+alter table users alter column "createdAt" drop default;
+alter table users alter column "createdAt" type timestamp with time zone;
+alter table users alter column "createdAt" set default current_timestamp;
+alter table users alter column "updatedAt" type timestamp with time zone;
 ```
 
 Why this migration is safe:
 
-- **In UTC, no value moves.** Postgres reads each `timestamp` in the session's zone as it converts it, and Prisma wrote them in UTC. In UTC, it also rewrites no rows.
+- **In UTC, no value moves.** Postgres reads each `timestamp` in the session's zone as it converts it, and Prisma wrote them in UTC.
+- **In UTC, no row is copied either.** Reylo Migrate warns that the migration rewrites the table, since it can't see the zone the migration runs in.
 - **Plain `timestamptz`**, not `timestamptz(3)`, which rewrites the table.
-- **One table per migration.** Prisma runs each migration in one transaction. A file that alters several tables holds them all until it ends, and can deadlock a live insert.
+- **One table per migration.** Reylo Migrate runs each migration in one transaction. A file that alters several tables holds them all until it ends, and can deadlock a live insert.
 - **Each index on the column is rebuilt**, and the table is locked while it is. On a 1 GB table that took 5 seconds, and `set maintenance_work_mem = '256MB'` before it cut that by 40%.
-
-To write those migrations, run this query once against your database: each row is one table's migration.
-
-```sql
-select format(
-  E'set time zone ''UTC'';\n\nalter table %I\n%s;\n',
-  c.relname,
-  string_agg(format('  alter column %I set data type timestamptz', a.attname), E',\n' order by a.attnum)
-) as migration
-from pg_attribute a
-join pg_class c on c.oid = a.attrelid
-join pg_namespace n on n.oid = c.relnamespace
-where n.nspname = 'public' and c.relkind = 'r'
-  and a.atttypid = 'timestamp'::regtype and a.attnum > 0 and not a.attisdropped
-group by c.relname
-order by c.relname;
-```
-
-Prisma writes `timestamp(3)` again for every `DateTime` added later without `@db.Timestamptz`, so a check in CI keeps new ones out:
-
-```sh
-! grep -nE '^[[:space:]]+[[:alnum:]_]+[[:space:]]+DateTime\??([[:space:]]|$)' prisma/schema.prisma | grep -v '@db.Timestamptz'
-```
 
 ### Update times
 
-Set `"updatedAt"` with a trigger on each table that has one:
+Set `"updatedAt"` with a trigger on each table that has one, in `schema.sql`:
 
-```sql
+```sql title="reylo/schema.sql"
 create function set_updated_at() returns trigger language plpgsql as $$
 begin
   if new."updatedAt" is not distinct from old."updatedAt" then
@@ -179,7 +217,7 @@ begin
   return new;
 end $$;
 
-create trigger set_updated_at before update on "users"
+create trigger set_updated_at before update on users
   for each row execute function set_updated_at();
 ```
 
@@ -187,7 +225,7 @@ How the trigger behaves:
 
 - **An update that sets `"updatedAt"` itself** keeps its value.
 - **Every `return` returns `new`**, so an upsert on the table still returns a row. A trigger that may return `null` can skip a row, and the upsert then returns a row or `null`.
-- **A new table needs its trigger** added to its migration by hand, since Prisma's schema has no triggers.
+- **Each new table needs a trigger of its own**, declared beside it.
 - **A rewrite that must not move `"updatedAt"`**, such as re-encrypting a column, needs a way past the trigger. Have the trigger return early when a session setting says so, and run `set local app.keep_updated_at = 'on'` before the rewrite:
 
   ```sql
@@ -199,21 +237,68 @@ How the trigger behaves:
 Prisma Client reads a `String[]` as never null, and throws on a `NULL` element. Postgres allows both:
 
 - **Count the nulls and the readers first.** One production app had 224,000 null lists and one reader. A `coalesce(tags, '{}')` in that reader beat a backfill that held the table for most of a minute.
-- **To add `NOT NULL`**, use four migrations: backfill, add `check (tags is not null) not valid`, validate it, then `set not null`.
 - **Elements stay `string | null`**, since a `NOT NULL` column can still hold a `NULL` element.
+
+To add `not null` and the check, start with an empty migration for the backfill:
+
+```terminal
+$ reylo migrate new fill_tags
+✓ Wrote reylo/migrations/20261126053028_fill_tags.sql
+» Empty: reylo/schema.sql has nothing new, so it's for a change to data
+```
+
+Write the backfill into it:
+
+```sql title="20261126053028_fill_tags.sql"
+update users set tags = coalesce(array_remove(tags, null), '{}')
+where tags is null or array_position(tags, null) is not null;
+```
+
+Then declare both in `schema.sql`:
+
+```sql title="reylo/schema.sql"
+create table users (
+  -- ...
+  tags text[], -- [!code --]
+  tags text[] not null, -- [!code ++]
+  constraint users_tags_no_nulls check (array_position(tags, null) is null), -- [!code ++]
+  -- ...
+);
+```
+
+Reylo Migrate splits their migration in two, so neither blocks writes while it checks every row:
+
+```terminal
+$ reylo migrate new tags_not_null
+✓ Wrote 2 migrations, so that none blocks writes to a table while it reads every row:
+    reylo/migrations/20261126053029_tags_not_null.sql
+    reylo/migrations/20261126053030_tags_not_null_2.sql
+  + column users.tags text[] not null
+  + constraint users_tags_no_nulls on users: check ((array_position(tags, null::text) is null))
+  - column users.tags text[]
+```
 
 ## Build and deploy
 
 Reylo types each query against a database with your migrations applied, so every place that type-checks or builds needs one:
 
-- **[In CI](/docs/faq#in-ci)**, start Postgres, run `prisma migrate deploy`, then the type check.
-- **On a host that migrates during the build**, such as Vercel, build against a fresh database. Create it, run `prisma migrate deploy` into it, and point [`direct_url`](/docs/configuration#direct_url) at it for the build. Drop it after, then migrate the deployment's own database. The build types against exactly the commit's schema, and no migration reaches production untested.
+- **[In CI](/docs/faq#in-ci)**, start Postgres, run `reylo migrate deploy`, then the type check.
+- **On a host that builds before it deploys**, such as Vercel, build on a dry run of the deploy. Then migrate production. The build types against exactly the commit's schema, and no migration reaches production untested.
 - **Each query keeps the types of the schema it was built against.** A retyped or newly nullable column can return values those types rule out. A dropped or renamed column fails with the database's error. A new column, default or `NOT NULL` changes nothing it reads. So add before you remove: the new column, then the code that uses it, then the drop.
 
-For the type check itself:
+On [Vercel](/docs/vercel), the build script does both:
+
+```json title="package.json"
+{
+  "scripts": {
+    "vercel-build": "reylo migrate deploy --dry-run -- next build && reylo migrate deploy"
+  }
+}
+```
+
+The type check and Reylo Migrate both read the database [`direct_url`](/docs/configuration#direct_url) names:
 
 ```yaml title=".reylo.yaml"
-# the type check's database; a build points it at a fresh, migrated one
 direct_url: ${DATABASE_URL_UNPOOLED}
 ```
 
@@ -347,5 +432,4 @@ Each of these caught something the type check can't see:
 - **Type-check every folder.** Run `tsc --noEmit --runExternalCode` against a database with the branch's migrations, and give any folder `tsconfig.json` skips a `tsconfig` of its own.
 - **Probe the risky statements.** Run each compare-and-set, partial update and cardinality guard against throwaway rows, and check what it reports.
 - **Compare with production.** Run every read-only report from the old code and the new, with `TZ=UTC`, and diff the JSON. In one production app, that found one real bug: a sort that had lost its `::text`.
-- **Compare the catalogs.** Dump each column's table, name, type, `NOT NULL` and default from production. Do the same on an empty database built by your old migrations. If they match, each query's types hold on production.
 - **Probe the locks.** Run your migrations against a production-sized copy while a client reads and writes every 50 ms. Record each operation's worst latency and errors.

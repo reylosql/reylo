@@ -21,6 +21,7 @@ pub mod fingerprint;
 pub mod fresh;
 pub mod host;
 pub mod lex;
+pub mod lexical;
 pub mod literal;
 pub mod pattern;
 pub mod replay;

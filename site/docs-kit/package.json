@@ -18,7 +18,8 @@
     "./site": "./src/site.ts",
     "./page": "./src/page.tsx",
     "./page.server": "./src/page.server.ts",
-    "./routes": "./src/routes.ts"
+    "./routes": "./src/routes.ts",
+    "./og": "./src/og.tsx"
   },
   "files": [
     "src",
@@ -28,6 +29,7 @@
     "@react-router/dev": "^8.5.0",
     "@shikijs/twoslash": "^4.4.3",
     "@tailwindcss/vite": "^4.1.0",
+    "@vercel/og": "^0.11.0",
     "fumadocs-core": "^16.15.1",
     "fumadocs-mdx": "^15.3.1",
     "fumadocs-twoslash": "3.3.1",

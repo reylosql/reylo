@@ -1,27 +1,36 @@
 import { defineSite } from 'docs-kit/site';
-import { ogAlt } from './lib/og.ts';
+import { ogLogo } from './components/og-logo';
+import { docsUrl, githubUrl, siteTitle, siteUrl } from './lib/layout.shared';
+import { ogAlt } from './lib/og';
 
-/**
- * The site, as docs-kit reads it: the 404 page, robots.txt, the manifest and the structured data
- * (docs-kit/src/site.ts). The site's own routes read its address, repository and title from here too
- * (lib/layout.shared.tsx).
- */
+// What Reylo's docs are, for Docs Kit (docs-kit/README.md, "A site's config"): the 404 page,
+// robots.txt, the manifest and the structured data come from it. The site routes its pages itself
+// (app/routes.ts), so this gives Docs Kit each page's address and the look of the link preview it
+// draws for every page but the intro, which keeps the homepage's card
+// (app/routes/opengraph-image.tsx): the site's dark page, Geist for the title and Geist Mono for the
+// address, as the homepage's card sets them.
 export default defineSite({
   name: 'Reylo',
-  /** reylo.dev, which every other Reylo domain redirects to (wiki/docs-site.md). */
-  url: 'https://reylo.dev',
-  repo: 'https://github.com/reylosql/reylo',
-  /**
-   * The title search results and link previews show: the name and what it does, in under 60
-   * characters so that Google does not cut it. The page's h1 stays the name alone.
-   */
-  title: 'Reylo — Import .sql files into TypeScript, fully typed',
+  url: siteUrl,
+  repo: githubUrl,
+  title: siteTitle,
   description: 'Import .sql files into TypeScript with full type inference.',
+  pageUrl: (slug) => `${siteUrl}${docsUrl(slug ? `/${slug}` : '/')}`,
   author: { name: 'Colin McDonnell', url: 'https://github.com/colinhacks' },
   x: { creator: '@colinhacks' },
   footer: 'Released under the MIT License. Copyright © 2026 Colin McDonnell.',
   /** The home-screen tile's background, the page's own (public/icon-*.png, written by brand/mark.ts). */
   color: '#0e0e0e',
   ogAlt,
+  og: {
+    logo: ogLogo,
+    fonts: [
+      { name: 'Geist', file: 'assets/fonts/Geist-600.ttf', weight: 600 },
+      { name: 'Geist Mono', file: 'assets/fonts/GeistMono-400.ttf', weight: 400 },
+    ],
+    titleFont: 'Geist',
+    addressFont: 'Geist Mono',
+    colors: { background: '#0e0e0e', title: '#fafafa', address: '#a1a1a1' },
+  },
   software: { language: ['TypeScript', 'SQL'], platform: 'Node.js', license: 'https://opensource.org/licenses/MIT' },
 });

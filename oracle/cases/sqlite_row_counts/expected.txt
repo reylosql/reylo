@@ -7,6 +7,7 @@ count_offset_1.sql: at_most_one () -> { n: int64 }
 cross_join.sql: one () -> { n: int64, m: int64 }
 cross_join_keyword.sql: one () -> { n: int64, m: int64 }
 derived_count.sql: one () -> { n: int64 }
+derived_deep.sql: one () -> { n: int64 }
 derived_key.sql: at_most_one (id: int64) -> { name: TEXT(text(UTF-8, ill-formed) | bytes) }
 derived_limit_param.sql: at_most_one (n: int64) -> { n: int64 }
 derived_named.sql: one () -> { n: int64 }
@@ -24,6 +25,7 @@ key_limit_comma.sql: at_most_one (id: int64) -> { id: INTEGER, name: TEXT(text(U
 key_limit_offset.sql: at_most_one (id: int64, n: int64, skip: int64) -> { id: INTEGER, name: TEXT(text(UTF-8, ill-formed) | bytes), email: TEXT(text(UTF-8, ill-formed) | bytes)? }
 key_limit_param.sql: at_most_one (id: int64, n: int64) -> { id: INTEGER, name: TEXT(text(UTF-8, ill-formed) | bytes), email: TEXT(text(UTF-8, ill-formed) | bytes)? }
 left_join.sql: one (id: int64) -> { n: int64, name: TEXT(text(UTF-8, ill-formed) | bytes)? }
+left_join_deep.sql: many () -> { id: INTEGER? }
 left_join_one_row.sql: at_most_one (id: int64) -> { n: int64?, name: TEXT(text(UTF-8, ill-formed) | bytes) }
 left_join_table_first.sql: at_most_one (id: int64) -> { n: int64?, name: TEXT(text(UTF-8, ill-formed) | bytes) }
 left_join_unpinned.sql: many (name: text(UTF-8, ill-formed)) -> { n: int64, name: TEXT(text(UTF-8, ill-formed) | bytes)? }
@@ -42,3 +44,4 @@ values.sql: many () -> { column1: int64 }
 values_joined.sql: many () -> { n: int64, column1: int64 }
 values_rows.sql: many () -> { column1: int64(1 | 2) } value
 with_count.sql: one () -> { n: int64 }
+with_deep.sql: one () -> { n: int64 }

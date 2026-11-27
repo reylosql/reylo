@@ -152,6 +152,21 @@ const db = knex({ client: "pg", connection: process.env.DATABASE_URL });
 const user = await getUser.run(db, { id: 1 });
 ```
 
+```ts twoslash tab="Effect" dialect="postgres"
+import { Effect, Redacted } from "effect";
+import { PgClient } from "@effect/sql-pg";
+import { effect } from "reylo/effect";
+import getUser from "./get_user.sql";
+
+const db = PgClient.layer({ url: Redacted.make(process.env.DATABASE_URL!) });
+
+const program = Effect.gen(function* () {
+  const user = yield* effect(getUser, { id: 1 });
+});
+
+await Effect.runPromise(program.pipe(Effect.provide(db)));
+```
+
 #### MySQL [#mysql-drivers]
 
 ```ts twoslash tab="mysql2" dialect="mysql" tab-group="mysql-driver"
@@ -208,6 +223,21 @@ import getUser from "./get_user.sql";
 const db = knex({ client: "mysql2", connection: process.env.DATABASE_URL });
 
 const user = await getUser.run(db, { id: 1 });
+```
+
+```ts twoslash tab="Effect" dialect="mysql"
+import { Effect, Redacted } from "effect";
+import { MysqlClient } from "@effect/sql-mysql2";
+import { effect } from "reylo/effect";
+import getUser from "./get_user.sql";
+
+const db = MysqlClient.layer({ url: Redacted.make(process.env.DATABASE_URL!) });
+
+const program = Effect.gen(function* () {
+  const user = yield* effect(getUser, { id: 1 });
+});
+
+await Effect.runPromise(program.pipe(Effect.provide(db)));
 ```
 
 #### SQLite [#sqlite-drivers]
@@ -337,6 +367,21 @@ import getUser from "./get_user.sql";
 const db = knex({ client: "better-sqlite3", connection: { filename: "app.db" } });
 
 const user = await getUser.run(db, { id: 1 });
+```
+
+```ts twoslash tab="Effect" dialect="sqlite"
+import { Effect } from "effect";
+import { SqliteClient } from "@effect/sql-sqlite-node";
+import { effect } from "reylo/effect";
+import getUser from "./get_user.sql";
+
+const db = SqliteClient.layer({ filename: "app.db" });
+
+const program = Effect.gen(function* () {
+  const user = yield* effect(getUser, { id: 1 });
+});
+
+await Effect.runPromise(program.pipe(Effect.provide(db)));
 ```
 
 #### ClickHouse [#clickhouse-drivers]
@@ -528,6 +573,29 @@ await db.transaction(async (trx) => {
 });
 ```
 
+```ts twoslash tab="Effect" dialect="postgres"
+import { Effect, Redacted } from "effect";
+import { PgClient } from "@effect/sql-pg";
+import { SqlClient } from "effect/sql";
+import { effect } from "reylo/effect";
+import createUser from "./create_user.sql";
+
+const db = PgClient.layer({ url: Redacted.make(process.env.DATABASE_URL!) });
+
+// two inserts in one transaction: both land, or neither
+const program = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql.withTransaction(
+    Effect.gen(function* () {
+      yield* effect(createUser, { name: "Ada" });
+      yield* effect(createUser, { name: "Grace" });
+    }),
+  );
+});
+
+await Effect.runPromise(program.pipe(Effect.provide(db)));
+```
+
 **MySQL**
 
 ```ts twoslash tab="mysql2" dialect="mysql" tab-group="mysql-driver"
@@ -624,6 +692,29 @@ await db.transaction(async (trx) => {
   await createUser.run(trx, { name: "Ada" });
   await createUser.run(trx, { name: "Grace" });
 });
+```
+
+```ts twoslash tab="Effect" dialect="mysql"
+import { Effect, Redacted } from "effect";
+import { MysqlClient } from "@effect/sql-mysql2";
+import { SqlClient } from "effect/sql";
+import { effect } from "reylo/effect";
+import createUser from "./create_user.sql";
+
+const db = MysqlClient.layer({ url: Redacted.make(process.env.DATABASE_URL!) });
+
+// two inserts in one transaction: both land, or neither
+const program = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql.withTransaction(
+    Effect.gen(function* () {
+      yield* effect(createUser, { name: "Ada" });
+      yield* effect(createUser, { name: "Grace" });
+    }),
+  );
+});
+
+await Effect.runPromise(program.pipe(Effect.provide(db)));
 ```
 
 **SQLite**
@@ -813,6 +904,29 @@ await db.transaction(async (trx) => {
   await createUser.run(trx, { name: "Ada" });
   await createUser.run(trx, { name: "Grace" });
 });
+```
+
+```ts twoslash tab="Effect" dialect="sqlite"
+import { Effect } from "effect";
+import { SqliteClient } from "@effect/sql-sqlite-node";
+import { SqlClient } from "effect/sql";
+import { effect } from "reylo/effect";
+import createUser from "./create_user.sql";
+
+const db = SqliteClient.layer({ filename: "app.db" });
+
+// two inserts in one transaction: both land, or neither
+const program = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql.withTransaction(
+    Effect.gen(function* () {
+      yield* effect(createUser, { name: "Ada" });
+      yield* effect(createUser, { name: "Grace" });
+    }),
+  );
+});
+
+await Effect.runPromise(program.pipe(Effect.provide(db)));
 ```
 
 ### `.runSync()`

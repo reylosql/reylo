@@ -1,0 +1,1 @@
+select json_object('k', ifnull((select json_arrayagg(i.id) from posts i having count(i.id) > 0), json_array())) as o, count(*) as n from posts group by ifnull((select json_arrayagg(i.id) from posts i having count(i.id) > 0), json_array()) with rollup

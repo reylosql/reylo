@@ -9,7 +9,7 @@
 //   ] satisfies RouteConfig;
 import { fileURLToPath } from 'node:url';
 import { route, type RouteConfigEntry } from '@react-router/dev/routes';
-import { pageSlugs } from './mdx/page-files.ts';
+import { ogSlugs, pageSlugs } from './mdx/page-files.ts';
 
 /** One of Docs Kit's route modules, by absolute path. */
 const own = (file: string) => fileURLToPath(new URL(`./routes/${file}`, import.meta.url));
@@ -30,11 +30,13 @@ export type DocsRoutesOptions = {
   sitemap?: Own;
   manifest?: Own;
   notFound?: Own;
+  /** Each page's link preview (`ogRoutes`). */
+  og?: Own;
 };
 
 /**
  * The routes every docs site has: its pages, `/404`, `/llms.txt`, `/robots.txt`, `/sitemap.xml`,
- * `/manifest.webmanifest`, and on a site of several pages each page's `.md`.
+ * `/manifest.webmanifest`, each page's link preview, and on a site of several pages each page's `.md`.
  */
 export function docsRoutes({ page = 'routes/page.tsx', ...options }: DocsRoutesOptions = {}): RouteConfigEntry[] {
   const pick = (name: keyof Omit<DocsRoutesOptions, 'page'>, file: string) => (options[name] === false ? undefined : options[name] ?? own(file));
@@ -52,7 +54,22 @@ export function docsRoutes({ page = 'routes/page.tsx', ...options }: DocsRoutesO
         ['manifest.webmanifest', pick('manifest', 'manifest.ts')],
       ] as const
     ).flatMap(([path, file]) => (file ? [route(path, file)] : [])),
+    ...(options.og === false ? [] : ogRoutes({ file: options.og })),
   ];
+}
+
+/**
+ * The link preview of each page whose card Docs Kit draws (`ogSlugs`), at `/og/<slug>.png` and
+ * `/og/index.png` for the first page: Docs Kit's route (`routes/og.ts`), or the site's `file`. A site
+ * that routes its pages itself spreads these beside its own, with the slugs of the pages it builds.
+ */
+export function ogRoutes({ file, pages }: { file?: string; pages?: readonly string[] } = {}): RouteConfigEntry[] {
+  return ogSlugs(pages).map((slug) => route(`og/${slug || 'index'}.png`, file ?? own('og.ts'), { id: `docs-kit/og/${slug || 'index'}` }));
+}
+
+/** The paths of `ogRoutes`, for `prerender`. */
+export function ogPrerender(pages?: readonly string[]): string[] {
+  return ogSlugs(pages).map((slug) => `/og/${slug || 'index'}.png`);
 }
 
 /**
@@ -69,5 +86,10 @@ export function docsPrerender(options: DocsRoutesOptions = {}): string[] {
     ['/sitemap.xml', options.sitemap],
     ['/manifest.webmanifest', options.manifest],
   ];
-  return [...(options.page === false ? [] : pages.map((slug) => `/${slug}`)), ...(several ? pages.map((slug) => `/${slug || 'index'}.md`) : []), ...files.filter(([, file]) => file !== false).map(([path]) => path)];
+  return [
+    ...(options.page === false ? [] : pages.map((slug) => `/${slug}`)),
+    ...(several ? pages.map((slug) => `/${slug || 'index'}.md`) : []),
+    ...files.filter(([, file]) => file !== false).map(([path]) => path),
+    ...(options.og === false ? [] : ogPrerender()),
+  ];
 }

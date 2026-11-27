@@ -44,8 +44,10 @@ function clauses(sql: string) {
   return out;
 }
 
-/** An ORM's query, each call of its chain on a line of its own. */
-function chain(code: string) {
+/** An ORM's query, each call of its chain on a line of its own. A `{ const …; return …; }` block is shown as the statements inside it. */
+function chain(code: string): string {
+  const block = /^\{\s*(.*?)\s*;\s*return\s+(.*?);?\s*\}$/s.exec(code.trim());
+  if (block) return `${chain(block[1]!)};\n${chain(block[2]!)}`;
   let depth = 0;
   let quote = '';
   let out = '';

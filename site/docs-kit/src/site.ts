@@ -3,6 +3,7 @@
 // import the config as `@/docs.config`: `@/` is the site's root in every site's Vite config and
 // tsconfig, as `collections/` is fumadocs-mdx's generated `.source/`. The browser loads it too (a
 // page's meta tags are made again there), so it imports nothing that only runs in Node.
+import type { OgOptions } from './og';
 
 /** A docs site. */
 export type Site = {
@@ -16,6 +17,8 @@ export type Site = {
   title: string;
   /** Every other page's `<title>`, made from its own; `<title> — <name>` when the site gives none. */
   pageTitle?: (title: string) => string;
+  /** A page's address, for a site that routes its pages itself (Reylo's `migrate-cli` at `/docs/migrate/cli`); `<url>/<slug>`, and `url` for the first page, when the site gives none. */
+  pageUrl?: (slug: string) => string;
   /** The site's pages in reading order, by slug (`''` for the first): `/llms.txt`, the sitemap and the prerendered paths follow it. Every page in `content/docs`, the first page first, when the site gives none. */
   pages?: readonly string[];
   /** One line on what the product does, for the web app manifest. */
@@ -28,8 +31,10 @@ export type Site = {
   footer?: string;
   /** The web app manifest's background and theme colour. */
   color?: string;
-  /** The link preview's alternative text. With it, the meta tags give the image's type and size too (a PNG, 1200 by 630). */
+  /** The site's own link preview's alternative text. With an alternative text, the meta tags give the image's type and size too (a PNG, 1200 by 630). */
   ogAlt?: string;
+  /** The logo, fonts and colours of the card Docs Kit draws for each page (README, "Link previews"). */
+  og?: OgOptions;
   /** The project as source code, for the first page's structured data (schema.org's SoftwareSourceCode); none for a product that is not a library. */
   software?: { language: string | readonly string[]; platform: string; license: string };
 };
@@ -45,8 +50,9 @@ export function titleOf(site: Site, slug: string, title: string): string {
   return site.pageTitle ? site.pageTitle(title) : `${title} — ${site.name}`;
 }
 
-/** A page's address: the site's own for the first page. */
+/** A page's address: the site's `pageUrl`, or else `<url>/<slug>` and the site's own for the first page. */
 export function urlOf(site: Site, slug: string): string {
+  if (site.pageUrl) return site.pageUrl(slug);
   return slug ? `${site.url}/${slug}` : site.url;
 }
 
@@ -54,18 +60,19 @@ export function urlOf(site: Site, slug: string): string {
  * A page's meta tags: its title and description, the page's own address as its canonical link and
  * the address of its Markdown, the link preview for Open Graph and X, and whether a search engine
  * may index it. A page `index: false` keeps out of search results (Motherload's showcase). With no
- * image, X shows the page as a small card.
+ * image, X shows the page as a small card. The image's alternative text is the site's `ogAlt` unless
+ * the page gives its own (`ogAltOf`, for a card Docs Kit drew).
  */
 export function siteMeta(
   site: Site,
-  { title, description, url, markdown, image, type = 'website', index = true }: { title: string; description: string; url: string; markdown: string; image?: string; type?: 'website' | 'article'; index?: boolean },
+  { title, description, url, markdown, image, imageAlt = site.ogAlt, type = 'website', index = true }: { title: string; description: string; url: string; markdown: string; image?: string; imageAlt?: string; type?: 'website' | 'article'; index?: boolean },
 ) {
-  const size = image && site.ogAlt
+  const size = image && imageAlt
     ? [
         { property: 'og:image:type', content: 'image/png' },
         { property: 'og:image:width', content: '1200' },
         { property: 'og:image:height', content: '630' },
-        { property: 'og:image:alt', content: site.ogAlt },
+        { property: 'og:image:alt', content: imageAlt },
       ]
     : [];
   return [
@@ -89,9 +96,9 @@ export function siteMeta(
     { name: 'twitter:title', content: title },
     { name: 'twitter:description', content: description },
     ...(image ? [{ name: 'twitter:image', content: image }] : []),
-    ...(image && site.ogAlt
+    ...(image && imageAlt
       ? [
-          { name: 'twitter:image:alt', content: site.ogAlt },
+          { name: 'twitter:image:alt', content: imageAlt },
           { name: 'twitter:image:type', content: 'image/png' },
           { name: 'twitter:image:width', content: '1200' },
           { name: 'twitter:image:height', content: '630' },

@@ -6,10 +6,10 @@
 // written again without the keys a call leaves out, so every row of a call gives the same keys.
 // Nothing here changes a value: a value the database would round, truncate or read in a zone
 // nobody chose is refused.
-import type { EngineType, JsonSchema } from "./engine-type.ts";
+import { holdsWholeArrays, type EngineType, type JsonSchema } from "./engine-type.ts";
 import type { Marks } from "./execute.ts";
 import { validate, withDefaults } from "./json-schema.ts";
-import { columnKind, describe, given, hstoreText, ParameterError, postgresInterval, postgresLiteral, postgresYear, zoned } from "./values.ts";
+import { columnKind, delimiterOf, describe, given, hstoreText, isLevel, ParameterError, postgresInterval, postgresLiteral, postgresYear, vectorText, zoned } from "./values.ts";
 
 export { describe, zoned } from "./values.ts";
 
@@ -130,6 +130,17 @@ function jsonMember(f: RowField, v: unknown, dialect: Dialect): unknown {
   return dialect !== "postgres" && f.type.kind === "json" ? new Raw(JSON.stringify(v)) : v;
 }
 
+/**
+ * A whole array's text, from the value `check` gave it: each element in its checked form, a row
+ * value, a range, a geometric type and a vector already its text, so that an array there is a level.
+ */
+function wholeText(t: EngineType & { kind: "array" }, v: readonly unknown[]): string {
+  const element = t.element.type;
+  const json = columnKind(element, "postgres") === "json";
+  const quote = (text: string) => `"${text.replace(/["\\]/g, "\\$&")}"`;
+  return `{${v.map((e) => (e === null || e === undefined ? "NULL" : json ? quote(JSON.stringify(e)) : Array.isArray(e) ? wholeText(t, e) : quote(Object.is(e, -0) ? "-0" : String(e)))).join(delimiterOf(element) ?? ",")}}`;
+}
+
 /** One value checked against its type, as the JSON the database reads; `fail` says why not. */
 function check(type: EngineType, written: string, v: unknown, dialect: Dialect, fail: (message: string) => never): unknown {
   switch (type.kind) {
@@ -154,7 +165,23 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
       if (columnKind(type, dialect).endsWith("[]")) {
         if (!Array.isArray(v)) return fail(`is ${written}, an array; got ${describe(v)}.`);
         const element = written.replace(/\s*\[\s*\]\s*$/, "");
-        return v.map((e, i) => (e === null ? null : check(type.element.type, element, e, dialect, (message) => fail(`element ${i + 1} ${message}`))));
+        // A level of a Postgres array is told from one element as a parameter tells it (src/values.ts).
+        const kind = columnKind(type.element.type, dialect);
+        // Each element of an array of whole arrays (a domain's over an array type) is one, whatever
+        // it holds, and goes as its text, as a parameter of its own does: Postgres reads a JSON
+        // array inside a member as one more dimension.
+        const whole = dialect === "postgres" && holdsWholeArrays(type);
+        return v.map((e, i) => {
+          if (e === null) return null;
+          const at = (message: string) => fail(`element ${i + 1} ${message}`);
+          if (whole) {
+            const checked = check(type.element.type, element, e, dialect, at);
+            const inner = type.element.type;
+            return Array.isArray(checked) && inner.kind === "array" ? wholeText(inner, checked) : checked;
+          }
+          const level = dialect === "postgres" && Array.isArray(e) && isLevel(kind, e);
+          return check(level ? type : type.element.type, level ? written : element, e, dialect, at);
+        });
       }
       break;
     case "struct":
@@ -182,7 +209,9 @@ function integerRange(type: EngineType, dialect: Dialect): readonly [bigint, big
 function scalar(type: EngineType, written: string, v: unknown, dialect: Dialect, fail: (message: string) => never): unknown {
   // A union is either, where the database decides by the value.
   if (type.kind === "union") {
-    for (const member of type.members) {
+    // -0 tries a float member first, which keeps its sign, where an integer member would write 0.
+    const members = Object.is(v, -0) ? [...type.members].sort((a, b) => Number(b.kind === "float") - Number(a.kind === "float")) : type.members;
+    for (const member of members) {
       try {
         return scalar(member, written, v, dialect, (message) => {
           throw new TypeError(message);
@@ -206,11 +235,21 @@ function scalar(type: EngineType, written: string, v: unknown, dialect: Dialect,
     return fail(`is ${written}, a UUID in hexadecimal; got ${describe(v)}.`);
   }
   switch (kind) {
-    case "float":
-      if (typeof v === "number" && Number.isFinite(v)) return v;
-      return fail(`is ${written}, a finite number; got ${describe(v)}.`);
+    case "float": {
+      const { nan, infinity }: { nan?: true; infinity?: true } = type.kind === "float" ? type : {};
+      if (typeof v !== "number" || (Number.isNaN(v) && !nan) || (Math.abs(v) === Infinity && !infinity)) {
+        return fail(`is ${written}, ${infinity ? (nan ? "a number" : "a number other than NaN") : nan ? "a finite number or NaN" : "a finite number"}; got ${describe(v)}.`);
+      }
+      if (Number.isFinite(v) && !Object.is(v, -0)) return v;
+      // JSON has no number for NaN, an infinity or -0 (JSON.stringify writes null, null and 0).
+      // Postgres's float input reads each from its text; MySQL's and SQLite's JSON readers read -0
+      // from `-0e0`, and SQLite's reads an infinity from a number past a double's range, as SQLite
+      // writes one.
+      if (dialect === "postgres") return postgresLiteral(type, v, fail);
+      return new Raw(Object.is(v, -0) ? "-0e0" : v > 0 ? "9e999" : "-9e999");
+    }
     case "decimal":
-      return decimal(written, v, fail);
+      return decimal(type, written, v, fail);
     case "bool":
       if (typeof v === "boolean") return v;
       return fail(`is ${written}, true or false; got ${describe(v)}.`);
@@ -224,7 +263,7 @@ function scalar(type: EngineType, written: string, v: unknown, dialect: Dialect,
     }
     case "vector":
       // pgvector's vector, as `.run()` returns it, written as the text its input reads.
-      if (Array.isArray(v) && v.length > 0 && v.every((e) => typeof e === "number" && Number.isFinite(e))) return JSON.stringify(v);
+      if (Array.isArray(v) && v.length > 0 && v.every((e) => typeof e === "number" && Number.isFinite(e))) return vectorText(v);
       if (typeof v === "string") return v;
       return fail(`is ${written}, an array of finite numbers with one at least; got ${describe(v)}.`);
     case "hstore":
@@ -354,14 +393,20 @@ function wallClock(base: string, written: string, v: unknown, fail: (message: st
 /**
  * A decimal, as a number or as its digits. `numeric(p,s)` keeps `s` digits after the point and
  * `p` in all: a value with more decimals would be rounded, so it is refused, and so is one with
- * more digits before the point than the column holds.
+ * more digits before the point than the column holds. NaN and the infinities go where the type
+ * holds them (Postgres's numeric; a sized one holds NaN alone) as the text `.run()` returns for
+ * them, which numeric's input reads, since JSON has no number for one.
  */
-function decimal(written: string, v: unknown, fail: (message: string) => never): unknown {
+function decimal(type: EngineType, written: string, v: unknown, fail: (message: string) => never): unknown {
+  const special = typeof v === "number" ? (Number.isFinite(v) ? undefined : String(v)) : typeof v === "string" && ["NaN", "Infinity", "-Infinity"].includes(v) ? v : undefined;
+  if (special !== undefined) {
+    const { nan, infinity }: { nan?: true; infinity?: true } = type.kind === "decimal" ? type : {};
+    if (!(special === "NaN" ? nan : infinity)) return fail(`is ${written}, which holds no ${special === "NaN" ? "NaN" : "infinity"}; got ${special}.`);
+    return special;
+  }
   let text: string;
-  if (typeof v === "number") {
-    if (!Number.isFinite(v)) return fail(`is ${written}, a finite decimal; got ${v}.`);
-    text = String(v);
-  } else if (typeof v === "string") text = v.trim();
+  if (typeof v === "number") text = String(v);
+  else if (typeof v === "string") text = v.trim();
   else if (typeof v === "bigint") text = v.toString();
   else return fail(`is ${written}, a decimal: a number or a string of its digits; got ${describe(v)}.`);
   const m = /^([+-]?)(\d*)(?:\.(\d*))?(?:e([+-]?\d+))?$/i.exec(text);
@@ -389,7 +434,7 @@ function decimal(written: string, v: unknown, fail: (message: string) => never):
   return typeof v === "bigint" ? v.toString() : v;
 }
 
-/** The checked rows as JSON text, a 64-bit integer as its digits. */
+/** The checked rows as JSON text, each `Raw` value (a 64-bit integer's digits, -0, an infinity) as it is. */
 function write(v: unknown): string {
   if (v instanceof Raw) return v.text;
   if (Array.isArray(v)) return `[${v.map(write).join(",")}]`;

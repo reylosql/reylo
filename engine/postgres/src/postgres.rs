@@ -649,7 +649,8 @@ pub fn trust(host: &Host) -> Lazy<Trust> {
     operators.extend(infer::POSTGRES_STRICT_OPERATORS.iter().filter(|o| !infer::POSTGRES_OPERATORS.contains(o)));
     let functions = infer::postgres_function_names();
     let rows = host.query(TRUST_QUERY, vec![json!(operators), json!(functions)], Scope::Session)?;
-    let mut trust = Trust { shadowed: HashSet::new(), cast_targets: Some(HashSet::new()), ..Default::default() };
+    let asked: HashSet<String> = operators.iter().chain(&functions).map(|n| n.to_string()).collect();
+    let mut trust = Trust { shadowed: HashSet::new(), asked: Some(std::sync::Arc::new(asked)), cast_targets: Some(HashSet::new()), ..Default::default() };
     match rows {
         Ok(rows) => {
             for row in &rows {
@@ -1093,7 +1094,7 @@ impl<'a> Engine<'a> {
             .collect();
 
         // Row count.
-        let (cardinality, reason) = self.cardinality(&rewritten.sql, &lex::first_word(sql, lexed), parsed.as_ref(), &described, &trust, &catalog);
+        let (cardinality, reason) = self.cardinality(&rewritten.sql, &lex::first_word(sql, lexed, Dialect::Postgres), parsed.as_ref(), &described, &trust, &catalog);
         let unique = result_keys(&rewritten.sql, parsed.as_ref(), &cardinality, &columns, &trust, &catalog);
         let key = shortest_key(&unique, &columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>());
         let order = result_order(&rewritten.sql, parsed.as_ref(), &cardinality, &columns, &trust, &catalog);
@@ -1201,7 +1202,7 @@ impl<'a> Engine<'a> {
         let mut oids = raw.params.clone();
         oids.extend(raw.columns.iter().map(|c| c.oid));
         self.types(&oids)?;
-        let kind = lex::first_word(sql, lexed);
+        let kind = lex::first_word(sql, lexed, Dialect::Postgres);
         // Postgres binds a parameter only in the commands it analyzes when it prepares them
         // (EXPLAIN, CALL, CREATE TABLE ... AS); in any other the server takes none, and a run that
         // passes one fails.
@@ -1249,7 +1250,7 @@ impl<'a> Engine<'a> {
 
     fn cardinality(&self, sql: &str, first_word: &str, parsed: Option<&Parsed>, described: &DescribedStatement, trust: &Trust, catalog: &Catalog) -> (Cardinality, Option<String>) {
         let Some(parsed) = parsed else {
-            // Syntax of a server newer than the parser. A command with no columns, such as `REPACK`, returns no rows; a query with none, such as `SELECT FROM t`, returns an empty row per row it reads, and one in parentheses has no first word.
+            // Syntax of a server newer than the parser, or a statement nested past its bound. A command with no columns returns no rows; a query with none, such as `SELECT FROM t`, returns an empty row per row it reads, and one in parentheses has no first word.
             let query = matches!(first_word, "" | "select" | "with" | "values" | "table");
             let rows = if described.columns.is_empty() && !query { Cardinality::None } else { Cardinality::Many };
             return (rows, Some("the statement did not parse locally".into()));
@@ -4561,6 +4562,11 @@ fn build_catalog(set_returning: &(HashSet<String>, HashSet<String>), rows: Catal
             if row.get(3).and_then(as_bool).unwrap_or(false) {
                 catalog.labelled.insert(name.to_string());
             }
+            // A host that answers without the fifth column reports no function's origin: every
+            // function is then taken as a user's, whose value may turn on its rows' order.
+            if row.get(4).and_then(as_bool).unwrap_or(true) {
+                catalog.user_functions.insert(name.to_string());
+            }
             catalog.functions.insert(name.to_string());
         }
     }
@@ -5796,15 +5802,23 @@ mod tests {
     }
 
     #[test]
-    fn syntax_past_the_parser_is_typed_from_the_describe() {
+    fn postgres_19_syntax_is_read_by_the_parser() {
+        let unparsed = Some("the statement did not parse locally");
         let repack = replay_users("REPACK users", &[]);
-        assert_eq!((repack.cardinality, repack.columns.len(), repack.cardinality_reason.as_deref()), (Cardinality::None, 0, Some("the statement did not parse locally")));
+        assert_eq!((repack.cardinality, repack.columns.len()), (Cardinality::None, 0));
+        assert_ne!(repack.cardinality_reason.as_deref(), unparsed);
         for query in ["SELECT FROM users ORDER BY first_value(id) IGNORE NULLS OVER ()", "(SELECT FROM users ORDER BY first_value(id) IGNORE NULLS OVER ())"] {
-            assert_eq!((replay_users(query, &[]).cardinality, replay_users(query, &[]).columns.len()), (Cardinality::Many, 0), "{query}");
+            let a = replay_users(query, &[]);
+            assert_eq!((a.cardinality, a.columns.len()), (Cardinality::Many, 0), "{query}");
+            assert_ne!(a.cardinality_reason.as_deref(), unparsed, "{query}");
         }
         let window = replay_users("SELECT first_value(id) IGNORE NULLS OVER (ORDER BY id) AS f FROM users", &["f"]);
-        assert_eq!((window.cardinality, window.cardinality_reason.as_deref()), (Cardinality::Many, Some("the statement did not parse locally")));
-        assert!(window.columns[0].nullable);
+        assert_eq!(window.cardinality, Cardinality::Many);
+        assert_ne!(window.cardinality_reason.as_deref(), unparsed);
+        // An alias an older Postgres reads with no `AS`.
+        let alias = replay_users("SELECT id ignore FROM users", &["ignore"]);
+        assert_eq!(alias.cardinality, Cardinality::Many);
+        assert_ne!(alias.cardinality_reason.as_deref(), unparsed);
     }
 
     #[test]

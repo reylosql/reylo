@@ -5,8 +5,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { connect, createServer, type AddressInfo, type Server } from "node:net";
-import { Session } from "../src/analyze.ts";
-import { engine, reason, Unreachable } from "../src/engine.ts";
+import { libpqEnvironment, Session } from "../src/analyze.ts";
+import { engine, reason, Unreachable, withVariables } from "../src/engine.ts";
 import { hostUrl } from "../src/host-url.ts";
 import { nativeBinary } from "../src/native.ts";
 import { mysqlStandIn } from "./mysql-stand-in.ts";
@@ -284,6 +284,39 @@ test("Postgres: an analysis whose describe is cancelled before another of its ro
   }
 });
 
+test("Postgres: an analysis whose describe is the deadlock victim of a session that locks the tables it joins in the other order fails, and nothing is kept as the statement's error", { skip: pgLive }, async () => {
+  const { url, sql, drop } = await postgresDatabase("reylo_deadlock", "create table t1 (id bigint primary key, a text not null); create table t2 (id bigint primary key, b text not null)");
+  const e = await engine("postgres");
+  const c = await e.open(url);
+  const watch = await e.open(url);
+  const statement = "select t1.a, t2.b from t1 join t2 on t2.id = t1.id where t1.id = :id";
+  try {
+    const session = Number(((await c.query("select pg_catalog.pg_backend_pid()", [])) as [[unknown]])[0][0]);
+    let analyzing: Promise<unknown> | undefined;
+    await sql.begin(async (tx: any) => {
+      // This session checks for a deadlock long after the analysis's does, at its default of 1 s, so the analysis is the one chosen to end it.
+      await tx.unsafe("set local deadlock_timeout = '30s'");
+      await tx.unsafe("lock table t2 in access exclusive mode");
+      // The describe holds t1, which it reads first, and waits for t2.
+      analyzing = c.analyze(statement).then(() => "answered", (err: Error) => err);
+      for (let tries = 0; ((await watch.query(`select pid from pg_catalog.pg_stat_activity where pid = ${session} and wait_event_type = 'Lock'`, [])) as unknown[]).length === 0; tries++) {
+        assert.ok(tries < 100, "the analysis never waited for t2's lock");
+        await new Promise((done) => setTimeout(done, 50));
+      }
+      // Waiting for t1 closes the cycle, and the lock is granted once the describe has ended.
+      await tx.unsafe("lock table t1 in access exclusive mode");
+    });
+    const failed = await analyzing;
+    assert.ok(failed instanceof Error && !(failed instanceof Unreachable), `the analysis ${String(failed)}`);
+    assert.equal(failed.message, "The server failed the analysis of this statement for a reason of its own, so run it again: deadlock detected (40P01)");
+    assert.deepEqual((await c.analyze(statement)).columns.map((col) => col.name), ["a", "b"]);
+  } finally {
+    await watch.close();
+    await c.close();
+    await drop();
+  }
+});
+
 test("Postgres: a session a lock timeout gives up on is closed, so a role allowed one connection analyzes the next statement while the lock is still held", { skip: pgLive }, async (t) => {
   const { url, sql, drop } = await postgresDatabase("reylo_lock_one", "create table users (id bigint primary key, name text not null); create table orders (id bigint primary key)");
   if (!(await sql.begin((tx: any) => tx.unsafe("set local client_connection_check_interval = '100ms'")).then(() => true, () => false))) {
@@ -396,8 +429,8 @@ test("MySQL: an analysis interrupted by KILL QUERY while it waits behind an alte
       assert.ok(tries < 100, "the analysis never waited for the table's metadata lock");
       await new Promise((done) => setTimeout(done, 50));
     }
-    await db.query(`kill query ${session}`);
-    await assert.rejects(analyzing, (err: Error) => !(err instanceof Unreachable) && err.message === "The server interrupted the analysis of this statement: Query execution was interrupted (1317)");
+    // Its rejection is handled from before the kill, so it is never unhandled for a moment.
+    await Promise.all([assert.rejects(analyzing, (err: Error) => !(err instanceof Unreachable) && err.message === "The server interrupted the analysis of this statement: Query execution was interrupted (1317)"), db.query(`kill query ${session}`)]);
     await db.query("commit");
     await altering;
     assert.deepEqual((await c.analyze(statement)).columns.map((col) => col.name), ["id", "name"]);
@@ -526,12 +559,37 @@ test("a socket the bridge cannot open is reported with its reason, a Unix socket
   await assert.rejects((await engine("mysql")).open(`mysql://root@localhost/app?socketPath=${encodeURIComponent(path)}`), (e: Error) => e instanceof Unreachable && e.message.startsWith(`cannot open the socket ${path}: connect ENOENT`));
 });
 
+test("the bridge opens the MySQL socket mysql2 would, socketPath before socket, a + in its path a space", { skip: process.platform === "win32" && "its paths are Unix sockets, which Windows names as pipes" }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "reylo-sock-"));
+  for (const [query, path] of [
+    [`socket=${dir}/a.sock&socketPath=${dir}/b.sock`, `${dir}/b.sock`],
+    [`socketPath=${dir}/b.sock&socket=${dir}/a.sock`, `${dir}/b.sock`],
+    [`socketPath=${dir}/a+b.sock`, `${dir}/a b.sock`],
+  ]) {
+    await assert.rejects((await engine("mysql")).open(`mysql://root@localhost/app?${query}`), (e: Error) => e instanceof Unreachable && e.message.startsWith(`cannot open the socket ${path}: connect ENOENT`), query);
+  }
+});
+
+test("a session's variables stand in for the process's, in every case of a name on Windows", () => {
+  const env = { pgdatabase: "other", PGHOST: "h", PATH: "/bin" };
+  assert.deepEqual(withVariables(env, { PGDATABASE: undefined, PGHOST: "db" }, "win32"), { PGHOST: "db", PATH: "/bin" });
+  assert.deepEqual(withVariables(env, { PGDATABASE: undefined, PGHOST: "db" }, "linux"), { pgdatabase: "other", PGHOST: "db", PATH: "/bin" });
+  // A worker thread's copy of the environment matches names exactly, so a session reads its variables in any case there.
+  assert.deepEqual(libpqEnvironment(env, "win32"), { PGHOST: "h", PGDATABASE: "other" });
+  assert.deepEqual(libpqEnvironment(env, "linux"), { PGHOST: "h" });
+  // Of two spellings, the first in order, whichever the environment lists first.
+  assert.deepEqual(libpqEnvironment({ pgdatabase: "local", pgDatabase: "reporting" }, "win32"), { PGDATABASE: "reporting" });
+  assert.deepEqual(libpqEnvironment({ pgDatabase: "reporting", pgdatabase: "local" }, "win32"), { PGDATABASE: "reporting" });
+});
+
 test("PGHOST names the socket's directory where the URL names no host, as libpq reads it", async () => {
   // As on a system with Unix sockets: the bridge itself is a TCP server, which every system opens.
   const bridged = await hostUrl("postgres://u@/d", { PGHOST: "/var/run/postgresql", PGPORT: "5433" }, "linux");
   assert.ok(bridged.bridge);
   assert.match(bridged.url, /^postgres:\/\/u@127\.0\.0\.1:\d+\/d$/);
   bridged.close();
+  // A `port=` the URL names, even empty, takes no PGPORT, as libpq reads it: the empty one is 5432.
+  await assert.rejects(hostUrl("postgres://u@/d?host=/var/run/postgresql&port=", { PGPORT: "5433" }, "win32"), (e: Error) => /\.s\.PGSQL\.5432,/.test(e.message));
   // A host in the URL, or a TCP host in PGHOST, is no socket.
   assert.equal((await hostUrl("postgres://u@db/d", { PGHOST: "/var/run/postgresql" })).bridge, undefined);
   assert.equal((await hostUrl("postgres://u@/d", { PGHOST: "db.internal" })).bridge, undefined);

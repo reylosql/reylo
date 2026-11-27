@@ -3,8 +3,9 @@
 // family is a kind of the type descriptor format (spec/index.ts). A codec reaches every position
 // Reylo decodes itself: a row's columns, an array's elements, a Postgres row value's fields, a
 // ClickHouse tuple's elements, by name or by place, and a map's pairs, a tagged union's value, a
-// structured parameter's members. A value inside a JSON document the
-// statement builds is the document's, and keeps the type JSON gives it. Every codec is exact or
+// structured parameter's members. A ClickHouse Variant takes a codec only where every member is of
+// its family, since its decoded value no longer says which member it is. A value inside a JSON
+// document the statement builds is the document's, and keeps the type JSON gives it. Every codec is exact or
 // refuses a value it cannot hold: a number refuses a decimal a double does not hold, and a Temporal
 // class refuses what no Temporal value is (`infinity`, MySQL's zero date, Postgres's `24:00:00`, an
 // interval whose parts differ in sign). A 64-bit integer has no codec: a bigint is its one exact
@@ -401,8 +402,9 @@ const SHAPE: Partial<Record<Codec, RegExp>> = {
 export function decodeCodec(codec: Codec, v: unknown, column: string, libraries?: Libraries): unknown {
   if (v === null || v === undefined) return v;
   // A vector is an array of numbers itself, its float32 or float16 values as the server stores
-  // them, which its typed array holds exactly; an array of arrays is an array of vectors.
-  if (VECTOR_CLASS[codec] !== undefined && Array.isArray(v)) return v.some(Array.isArray) ? v.map((e) => decodeCodec(codec, e, column, libraries)) : vectorClass(codec, column, "Column").from(v as number[]);
+  // them, which its typed array holds exactly; any other array is a level of vectors, which in a
+  // Postgres array of any depth may hold only nulls.
+  if (VECTOR_CLASS[codec] !== undefined && Array.isArray(v)) return v.every((e) => typeof e === "number") ? vectorClass(codec, column, "Column").from(v as number[]) : v.map((e) => decodeCodec(codec, e, column, libraries));
   if (Array.isArray(v)) return v.map((e) => decodeCodec(codec, e, column, libraries));
   switch (codec) {
     case "set:array":
@@ -484,9 +486,10 @@ export function decodePlan(plan: Plan, v: unknown, column: string, libraries?: L
   if ("elements" in plan) return Array.isArray(v) ? v.map((e, i) => (plan.elements[i] == null ? e : decodePlan(plan.elements[i], e, column, libraries))) : v;
   if (typeof v !== "object") return v;
   if ("fields" in plan) {
-    // A spread copies a field named `__proto__` as the own property it is.
+    // A spread copies a field named `__proto__` as the own property it is, which an assignment then
+    // reaches; a field the object lacks is left out, though `in` finds `__proto__` on every object.
     const o = { ...(v as Record<string, unknown>) };
-    for (const [name, p] of Object.entries(plan.fields)) if (name in o) o[name] = decodePlan(p, o[name], column, libraries);
+    for (const [name, p] of Object.entries(plan.fields)) if (Object.hasOwn(o, name)) o[name] = decodePlan(p, o[name], column, libraries);
     return o;
   }
   const u = v as { tag?: unknown; value: unknown };
@@ -500,7 +503,7 @@ export function decodeCodecs(rows: unknown[], plans: Readonly<Record<string, Pla
   for (const row of rows) {
     if (row === null || typeof row !== "object") continue;
     const r = row as Record<string, unknown>;
-    for (const [column, plan] of entries) if (column in r) r[column] = decodePlan(plan, r[column], column, libraries);
+    for (const [column, plan] of entries) if (Object.hasOwn(r, column)) r[column] = decodePlan(plan, r[column], column, libraries);
   }
   return rows;
 }
@@ -540,6 +543,8 @@ export function encodeCodec(codec: Codec, v: unknown, name: string, dialect: Dia
   // A vector takes its typed array alone, and binds as the numbers the driver writes as its text.
   const vector = VECTOR_CLASS[codec];
   if (vector !== undefined) {
+    // A vector is its typed array here, so an array of anything but numbers is a level of vectors, as `decodeCodec` reads one.
+    if (Array.isArray(v) && !v.every((e) => typeof e === "number")) return v.map((e) => encodeCodec(codec, e, name, dialect, libraries));
     if (tag(v) !== `[object ${vector}]`) throw refuse(`a ${vector}`);
     return Array.from(v as ArrayLike<number>);
   }

@@ -29,6 +29,8 @@ export type PageData = {
   tree: unknown;
   /** The link preview's address, when the site has one. */
   image?: string;
+  /** Its alternative text. */
+  imageAlt?: string;
   /** The address of the page's Markdown: its `.md` on a site of several pages, `/llms.txt` on a site of one. */
   markdown: string;
 };
@@ -65,8 +67,8 @@ export function loadPage(path: string): Promise<PageFile[]> {
 /** A page's meta tags (`siteMeta`), from what its loader gave. */
 export function pageMeta({ loaderData }: { loaderData?: PageData }) {
   if (!loaderData) return [];
-  const { slug, title, description, image, markdown } = loaderData;
-  return siteMeta(site, { title: titleOf(site, slug, title), description, url: urlOf(site, slug), markdown, image, type: slug ? 'article' : 'website' });
+  const { slug, title, description, image, imageAlt, markdown } = loaderData;
+  return siteMeta(site, { title: titleOf(site, slug, title), description, url: urlOf(site, slug), markdown, image, imageAlt, type: slug ? 'article' : 'website' });
 }
 
 type ShellProps = ComponentProps<typeof DocsShell>;

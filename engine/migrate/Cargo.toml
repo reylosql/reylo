@@ -24,6 +24,8 @@ default = ["cli"]
 cli = ["dep:reylo-engine", "dep:syntax", "dep:rusqlite", "dep:tokio-postgres", "dep:mysql_async", "dep:ureq", "dep:futures-util", "tokio/process", "tokio/signal", "tokio/macros"]
 
 [dependencies]
+# Each dialect's lexical rules (`lexical`), which the statement splitter and the highlighter read.
+reylo-engine-core.workspace = true
 reylo-engine = { workspace = true, features = ["postgres", "mysql", "sqlite"], optional = true }
 # Postgres 18's parser (`reylo-sql`), which reads `schema.sql` for the text each object
 # was declared with.

@@ -1,6 +1,6 @@
 import { readdirSync } from 'node:fs';
 import { index, route, type RouteConfig } from '@react-router/dev/routes';
-import { docsRoutes } from 'docs-kit/routes';
+import { docsRoutes, ogRoutes } from 'docs-kit/routes';
 import { builtPage } from '../lib/rust-content.ts';
 
 // The homepage at /, all docs pages under /docs (index.mdx at /docs, migrate-<name>.mdx at
@@ -12,9 +12,14 @@ const docFile = (name: string) => (name === 'index' ? 'docs.md' : name.startsWit
 const markdown = readdirSync('content/docs')
   .filter(builtPage)
   .map((name) => docFile(name.slice(0, -'.mdx'.length)));
-const blogMarkdown = readdirSync('content/blog')
+// Each docs page's slug, '' for the intro, for the link previews Docs Kit draws (docs.config.ts).
+const slugs = readdirSync('content/docs')
+  .filter(builtPage)
+  .map((name) => (name === 'index.mdx' ? '' : name.slice(0, -'.mdx'.length)));
+const blogPosts = readdirSync('content/blog')
   .filter((name) => name.endsWith('.mdx'))
-  .map((name) => `blog/${name.slice(0, -'.mdx'.length)}.md`);
+  .map((name) => name.slice(0, -'.mdx'.length));
+const blogMarkdown = blogPosts.map((name) => `blog/${name}.md`);
 
 export default [
   // Reylo's homepage (components/home-landing.tsx), and all docs pages under /docs.
@@ -41,8 +46,13 @@ export default [
   // The local playground (app/routes/playground.tsx), on the dev server only: it needs scratch databases.
   ...(process.env.NODE_ENV === 'production' ? [] : [route('playground', 'routes/playground.tsx')]),
   // docs-kit's page a missing address gets, robots.txt and the manifest, beside the site's own
-  // /llms.txt and sitemap; the pages and their Markdown are routed above, at their own addresses.
-  ...docsRoutes({ page: false, markdown: false, llms: 'routes/llms.ts', sitemap: 'routes/sitemap.ts' }),
+  // /llms.txt and sitemap; the pages, their Markdown and their link previews are routed here, at
+  // their own addresses.
+  ...docsRoutes({ page: false, markdown: false, llms: 'routes/llms.ts', sitemap: 'routes/sitemap.ts', og: false }),
   route('opengraph-image.png', 'routes/opengraph-image.tsx'),
   route('migrate/opengraph-image.png', 'routes/migrate-opengraph-image.tsx'),
+  // Each docs page's link preview, its title on Docs Kit's card (docs.config.ts), at
+  // /og/<slug>.png, and each post's, at /og/blog/<name>.png; the intro keeps the homepage's card.
+  ...ogRoutes({ pages: slugs }),
+  ...blogPosts.map((name) => route(`og/blog/${name}.png`, 'routes/blog-og.ts', { id: `og/blog/${name}` })),
 ] satisfies RouteConfig;

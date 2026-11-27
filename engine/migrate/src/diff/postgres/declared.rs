@@ -13,7 +13,7 @@
 
 use super::{bare, parse_column, render_column, AROUND, SEP};
 use crate::diff::{Kind, Schema};
-use syntax::postgres::protobuf::{self, node::Node as N, AlterTableType as At, ConstrType, ObjectType};
+use syntax::postgres::protobuf::{self, node::Node as N, AlterDomainType as Ad, AlterTableType as At, ConstrType, ObjectType};
 use syntax::postgres::Node;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -594,16 +594,16 @@ impl Reader<'_> {
                 // The domain's statement no longer declares it whole.
                 self.out.statements.remove(&domain);
                 let def = d.def.as_deref();
-                match d.subtype.as_str() {
-                    "T" => self.expression(format!("default {domain}"), def),
-                    "C" => {
+                match d.subtype() {
+                    Ad::AdAlterDefault => self.expression(format!("default {domain}"), def),
+                    Ad::AdAddConstraint => {
                         if let Some(N::Constraint(c)) = def.and_then(|d| d.node.as_ref()) {
                             if c.contype == ConstrType::ConstrCheck as i32 {
                                 self.domain_check(&domain, &bare, c);
                             }
                         }
                     }
-                    "X" => self.expression(format!("check {domain} {}", quote_ident(&d.name)), None),
+                    Ad::AdDropConstraint => self.expression(format!("check {domain} {}", quote_ident(&d.name)), None),
                     _ => {}
                 }
             }

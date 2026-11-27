@@ -8,21 +8,21 @@ import { getMDXComponents } from '@/components/mdx';
 import { blogUrl, posts } from '@/lib/blog';
 import { loadPost } from '@/lib/blog-content';
 import { blogMeta } from '@/lib/blog-meta';
-import { ogHash } from '@/lib/blog-og.server';
-import { docsTitle, githubUrl, pageGroups, pageLinks } from '@/lib/layout.shared';
+import { ogCardHash } from 'docs-kit/page.server';
+import { docsTitle, githubUrl, pageGroups, pageLinks, siteUrl } from '@/lib/layout.shared';
 import { source } from '@/lib/source';
 
-/** Run at build time, when each post is rendered to a file (react-router.config.ts): the post, without its content, which the component loads itself (lib/blog-content.ts). */
+/** Run at build time, when each post is rendered to a file (react-router.config.ts): the post, without its content, which the component loads itself (lib/blog-content.ts), and its link preview (app/routes/blog-og.ts), whose URL carries a hash of what the card is drawn from. */
 export async function loader({ params }: Route.LoaderArgs) {
   const post = posts.find((p) => p.slug === params.slug);
   if (!post) throw new Response('Not found', { status: 404 });
-  return { post, tree: source.getPageTree(), og: await ogHash() };
+  return { post, tree: source.getPageTree(), image: `${siteUrl}/og/blog/${post.slug}.png?${await ogCardHash(post.title)}` };
 }
 
 export function meta({ loaderData }: Route.MetaArgs): Route.MetaDescriptors {
   if (!loaderData) return [];
-  const { post, og } = loaderData;
-  return blogMeta({ title: docsTitle(post.title), description: post.description, path: `${blogUrl}/${post.slug}`, og, type: 'article' });
+  const { post, image } = loaderData;
+  return blogMeta({ title: docsTitle(post.title), description: post.description, path: `${blogUrl}/${post.slug}`, image, alt: `Reylo: ${post.title}`, type: 'article' });
 }
 
 /** A post is the same tree on every render of its route, as a docs page is (app/routes/page.tsx), so a jump to one of its headings is the browser's own. */

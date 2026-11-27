@@ -1,6 +1,6 @@
 # Reylo example: ClickHouse
 
-A Node project that imports `.sql` files as typed queries and runs them on ClickHouse through `@clickhouse/client`, with Reylo's preload loaded by `node --import reylo/register`. It is the setup of [Node](https://reylo.dev/#setup-node) in the docs, on the database of [ClickHouse](https://reylo.dev/clickhouse).
+A Node project that imports `.sql` files as typed queries and runs them on ClickHouse through `@clickhouse/client`, with Reylo's preload loaded by `node --import reylo/register`. It is the setup of [Node](https://reylo.dev/#setup-node) in the docs, on the database of [ClickHouse](https://reylo.dev/docs/clickhouse).
 
 ## Run it
 

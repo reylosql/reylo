@@ -185,6 +185,15 @@ mod tests {
     }
 
     #[test]
+    fn a_dash_comment_starts_before_a_control_character_as_mysql_reads_one() {
+        // `select 1 --\x01 2` is `select 1`: the rest is a comment, as it is before DEL.
+        for text in ["select 1 --\u{1}2 3", "select 1 --\u{7f}2 3", "select 1 --"] {
+            assert!(errors(text).is_empty(), "{text:?}: {:?}", errors(text));
+        }
+        assert!(errors("select 1 --2").is_empty());
+    }
+
+    #[test]
     fn refuses_in_mysql_words() {
         assert_eq!(errors("select from where"), ["You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'from where' at line 1"]);
         assert_eq!(errors("select 1;\nselect\n  2 2"), ["You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near '2' at line 2"]);

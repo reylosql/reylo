@@ -21,7 +21,7 @@
 //!   the proof through whatever reads the derived table, an outer join included.
 
 use crate::api::MysqlColumn;
-use syntax::mysql::ast::{Cte, JoinOperator, ObjectNamePart, OptimizerHint, OptimizerHintStyle, Query, Select, SelectItem, SetExpr, SetOperator, TableAlias, TableFactor, TableWithJoins, With};
+use syntax::mysql::ast::{Cte, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, JoinConstraint, JoinOperator, ObjectNamePart, OptimizerHint, OptimizerHintStyle, Query, Select, SelectItem, SetExpr, SetOperator, TableAlias, TableFactor, TableWithJoins, With};
 use std::collections::HashSet;
 
 /// The hint the copy's first query block carries: it holds for the whole statement.
@@ -211,6 +211,364 @@ pub fn with_outlives_operand(q: &Query) -> bool {
     q.with.as_ref().is_some_and(|w| w.cte_tables.iter().any(|c| with_outlives_operand(&c.query))) || body(&q.body)
 }
 
+/// Whether a WITH query of the statement, at any depth, may read another query than its own text
+/// does where the statement reads it. MySQL reads a WITH query's names again where it is read
+/// (measured on 8.0.46, 8.4.11, 9.7.2 and 26.7.0), so read inside a query of a WITH of its own,
+/// directly or through another WITH query, a name of that WITH is that WITH's query: `with z as
+/// (select x from t4) select d.x from (with t4 as (select null as x) select z.x from z) d`
+/// returns NULL. So it is where a query below one with a WITH has a WITH of its own, reads one
+/// of the outer WITH queries, and one of those it reaches names a name the inner WITH declares;
+/// and where a part the walk does not follow, an expression's subquery, holds a WITH. Nothing that
+/// follows a name to its WITH query reads such a statement.
+pub fn with_rebound(q: &Query) -> bool {
+    !matches!(rebound(q), Rebound::None)
+}
+
+/// The WITH queries of a statement that MySQL may read otherwise where they are read
+/// ([`with_rebound`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Rebound {
+    #[default]
+    None,
+    /// These, by name in lower case.
+    Named(HashSet<String>),
+    /// Any of them: a part the walk does not follow holds a WITH.
+    All,
+}
+
+impl Rebound {
+    /// Whether the WITH query named `name` may be one.
+    pub fn has(&self, name: &str) -> bool {
+        match self {
+            Rebound::None => false,
+            Rebound::Named(names) => names.contains(&name.to_ascii_lowercase()),
+            Rebound::All => true,
+        }
+    }
+}
+
+/// The WITH queries of `q` MySQL may read otherwise where they are read.
+pub fn rebound(q: &Query) -> Rebound {
+    let mut names = HashSet::new();
+    match rebound_in(q, &[], &mut names) {
+        None => Rebound::All,
+        Some(()) if names.is_empty() => Rebound::None,
+        Some(()) => Rebound::Named(names),
+    }
+}
+
+/// [`rebound`] for `q`, read inside the WITH queries of the queries around it (`scope`,
+/// outermost first): each of those it reads, itself or through the others, that names as a table
+/// a name its WITH declares, and those of each query inside it. `None` where a part the walk does
+/// not follow holds a WITH.
+fn rebound_in(q: &Query, scope: &[Cte], names: &mut HashSet<String>) -> Option<()> {
+    let mut inner = scope.to_vec();
+    if let Some(own) = &q.with {
+        // A name the query's own WITH declares is its own, but in an own WITH query written up to
+        // the one that declares it, where it is the one around.
+        let around: Vec<Cte> = scope
+            .iter()
+            // Only a name written the same way surely hides: names may compare as written.
+            .filter(|c| match own.cte_tables.iter().position(|o| o.alias.name.value == c.alias.name.value) {
+                Some(at) => own.cte_tables[..=at].iter().any(|o| reads_any(&o.query, std::slice::from_ref(c))),
+                None => true,
+            })
+            .cloned()
+            .collect();
+        for cte in reached(&around, &q.to_string()) {
+            if reads_any(&cte.query, &own.cte_tables) {
+                names.insert(cte.alias.name.value.to_ascii_lowercase());
+            }
+        }
+        inner.extend(own.cte_tables.iter().cloned());
+    }
+    let mut below = Vec::new();
+    children(q, &mut below)?;
+    for child in below {
+        rebound_in(child, &inner, names)?;
+    }
+    Some(())
+}
+
+/// The WITH queries of `ctes` that `text` reads, and those they read in turn, in any order, as
+/// MySQL reads a WITH query's names where it is read: every one where a name might be hidden from
+/// the words.
+fn reached<'c>(ctes: &'c [Cte], text: &str) -> Vec<&'c Cte> {
+    if !text.is_ascii() || ctes.iter().any(|c| !plain_name(&c.alias.name.value) || !c.query.to_string().is_ascii()) {
+        return ctes.iter().collect();
+    }
+    let mut text = text.to_string();
+    let mut read = vec![false; ctes.len()];
+    loop {
+        let mut grew = false;
+        for (i, cte) in ctes.iter().enumerate() {
+            if !read[i] && names_word(&text, &cte.alias.name.value) {
+                read[i] = true;
+                grew = true;
+                text.push(' ');
+                text.push_str(&cte.query.to_string());
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    ctes.iter().zip(read).filter(|(_, read)| *read).map(|(cte, _)| cte).collect()
+}
+
+/// The queries right below `q`: its WITH queries', its derived tables' (LATERAL ones' included),
+/// its parenthesized operands', and its expressions' subqueries. `None` where a part the walk
+/// does not follow holds a WITH.
+fn children<'a>(q: &'a Query, out: &mut Vec<&'a Query>) -> Option<()> {
+    if let Some(with) = &q.with {
+        out.extend(with.cte_tables.iter().map(|cte| cte.query.as_ref()));
+    }
+    fn body<'a>(b: &'a SetExpr, out: &mut Vec<&'a Query>) -> Option<()> {
+        match b {
+            SetExpr::Select(select) => {
+                for item in &select.from {
+                    from(item, out)?;
+                }
+                let items = select.projection.iter().filter_map(|i| match i {
+                    SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => Some(e),
+                    _ => None,
+                });
+                for e in items.chain(&select.selection).chain(&select.having) {
+                    expr_queries(e, out)?;
+                }
+                // The rest of the block.
+                let mut rest = select.as_ref().clone();
+                rest.from.clear();
+                rest.projection.retain(|i| !matches!(i, SelectItem::UnnamedExpr(_) | SelectItem::ExprWithAlias { .. }));
+                rest.selection = None;
+                rest.having = None;
+                (!with_in(&rest.to_string())).then_some(())
+            }
+            SetExpr::SetOperation { left, right, .. } => {
+                body(left, out)?;
+                body(right, out)
+            }
+            SetExpr::Query(q) => {
+                out.push(q);
+                Some(())
+            }
+            other => (!with_in(&other.to_string())).then_some(()),
+        }
+    }
+    fn from<'a>(item: &'a TableWithJoins, out: &mut Vec<&'a Query>) -> Option<()> {
+        factor(&item.relation, out)?;
+        for join in &item.joins {
+            factor(&join.relation, out)?;
+            match &join.join_operator {
+                JoinOperator::Join(c) | JoinOperator::Inner(c) | JoinOperator::Left(c) | JoinOperator::LeftOuter(c) | JoinOperator::Right(c) | JoinOperator::RightOuter(c) | JoinOperator::StraightJoin(c) | JoinOperator::CrossJoin(c) => {
+                    if let JoinConstraint::On(on) = c {
+                        expr_queries(on, out)?;
+                    }
+                }
+                // A join of another kind is read whole, its table included.
+                _ if with_in(&join.to_string()) => return None,
+                _ => {}
+            }
+        }
+        Some(())
+    }
+    fn factor<'a>(t: &'a TableFactor, out: &mut Vec<&'a Query>) -> Option<()> {
+        match t {
+            TableFactor::Derived { subquery, .. } => {
+                out.push(subquery);
+                Some(())
+            }
+            TableFactor::NestedJoin { table_with_joins, .. } => from(table_with_joins, out),
+            TableFactor::Table { .. } => Some(()),
+            other => (!with_in(&other.to_string())).then_some(()),
+        }
+    }
+    body(&q.body, out)?;
+    match q.order_by.as_ref().map(|o| &o.kind) {
+        Some(syntax::mysql::ast::OrderByKind::Expressions(exprs)) => {
+            for e in exprs {
+                expr_queries(&e.expr, out)?;
+            }
+        }
+        Some(_) if with_in(&q.order_by.as_ref().map(|o| o.to_string()).unwrap_or_default()) => return None,
+        _ => {}
+    }
+    let tail = format!("{} {}", q.limit_clause.as_ref().map(|l| l.to_string()).unwrap_or_default(), q.fetch.as_ref().map(|f| f.to_string()).unwrap_or_default());
+    (!with_in(&tail)).then_some(())
+}
+
+/// The subqueries an expression holds, through the operators, calls and forms the walk reads. `None` where a form it does not read
+/// holds a WITH.
+fn expr_queries<'a>(e: &'a Expr, out: &mut Vec<&'a Query>) -> Option<()> {
+    let all = |es: &mut dyn Iterator<Item = &'a Expr>, out: &mut Vec<&'a Query>| -> Option<()> {
+        for e in es {
+            expr_queries(e, out)?;
+        }
+        Some(())
+    };
+    match e {
+        Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => {
+            out.push(q);
+            Some(())
+        }
+        Expr::InSubquery { expr, subquery, .. } => {
+            expr_queries(expr, out)?;
+            out.push(subquery);
+            Some(())
+        }
+        Expr::BinaryOp { left, right, .. } => all(&mut [&**left, &**right].into_iter(), out),
+        Expr::Like { expr, pattern, escape_char, .. } | Expr::ILike { expr, pattern, escape_char, .. } | Expr::SimilarTo { expr, pattern, escape_char, .. } => all(&mut [&**expr, &**pattern].into_iter().chain(escape_char.as_deref()), out),
+        Expr::RLike { expr, pattern, .. } => all(&mut [&**expr, &**pattern].into_iter(), out),
+        Expr::Nested(inner) | Expr::UnaryOp { expr: inner, .. } | Expr::IsNull(inner) | Expr::IsNotNull(inner) | Expr::IsTrue(inner) | Expr::IsFalse(inner) | Expr::Cast { expr: inner, .. } => expr_queries(inner, out),
+        Expr::InList { expr, list, .. } => all(&mut std::iter::once(&**expr).chain(list), out),
+        Expr::Between { expr, low, high, .. } => all(&mut [&**expr, &**low, &**high].into_iter(), out),
+        Expr::Case { operand, conditions, else_result, .. } => {
+            let whens = conditions.iter().flat_map(|w| [&w.condition, &w.result]);
+            all(&mut operand.as_deref().into_iter().chain(whens).chain(else_result.as_deref()), out)
+        }
+        Expr::Function(f) => match &f.args {
+            FunctionArguments::Subquery(q) => {
+                out.push(q);
+                Some(())
+            }
+            FunctionArguments::List(list) if f.over.is_none() && f.filter.is_none() && f.within_group.is_empty() && list.clauses.is_empty() => {
+                for a in &list.args {
+                    match a {
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(x)) => expr_queries(x, out)?,
+                        other if with_in(&other.to_string()) => return None,
+                        _ => {}
+                    }
+                }
+                Some(())
+            }
+            _ => (!with_in(&e.to_string())).then_some(()),
+        },
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) => Some(()),
+        other => (!with_in(&other.to_string())).then_some(()),
+    }
+}
+
+/// Whether a text, outside the walk, may hold a WITH: the word outside quotes and comments, but in
+/// a ROLLUP's `WITH ROLLUP`. A string, a quoted name and an optimizer hint hold no keyword. Where a
+/// quoted one holds a backslash, which the session's mode decides the meaning of, or one never
+/// ends, the text counts as holding a WITH.
+fn with_in(text: &str) -> bool {
+    let mut bare = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            let mut last = ' ';
+            loop {
+                match chars.next() {
+                    None => return true,
+                    Some('/') if last == '*' => break,
+                    Some(next) => last = next,
+                }
+            }
+            bare.push(' ');
+            continue;
+        }
+        if !matches!(c, '\'' | '"' | '`') {
+            bare.push(c);
+            continue;
+        }
+        loop {
+            match chars.next() {
+                None | Some('\\') => return true,
+                Some(q) if q == c && chars.peek() == Some(&c) => {
+                    chars.next();
+                }
+                Some(q) if q == c => break,
+                Some(_) => {}
+            }
+        }
+        bare.push(' ');
+    }
+    let lower = bare.to_ascii_lowercase();
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
+    lower.match_indices("with").any(|(i, _)| {
+        if word(lower[..i].chars().next_back()) || word(lower[i + 4..].chars().next()) {
+            return false;
+        }
+        let after = lower[i + 4..].trim_start();
+        !(after.starts_with("rollup") && !word(after["rollup".len()..].chars().next()))
+    })
+}
+
+/// Whether a query reads, as a table of its FROM at any depth that no WITH inside it declares, a
+/// name one of `ctes` declares; where the walk cannot say, whether its text holds one of the names
+/// as a word.
+fn reads_any(q: &Query, ctes: &[Cte]) -> bool {
+    if !q.to_string().is_ascii() || ctes.iter().any(|c| !plain_name(&c.alias.name.value)) {
+        return true;
+    }
+    match free_tables(q) {
+        Some(free) => ctes.iter().any(|c| free.contains(&c.alias.name.value.to_ascii_lowercase())),
+        None => {
+            let text = q.to_string();
+            ctes.iter().any(|c| names_word(&text, &c.alias.name.value))
+        }
+    }
+}
+
+/// The names, in lower case, a query reads as tables of its FROMs at any depth, but those a WITH
+/// around the reading surely declares: one spelled as written there, since names may compare as
+/// written, a WITH query's name in the query's own body, and in a WITH query's, the names before
+/// it (and its own in a RECURSIVE WITH). `None` where a part the walk does not follow holds a
+/// WITH.
+fn free_tables(q: &Query) -> Option<HashSet<String>> {
+    fn tables(item: &TableWithJoins, bound: &HashSet<String>, out: &mut HashSet<String>) {
+        for factor in std::iter::once(&item.relation).chain(item.joins.iter().map(|j| &j.relation)) {
+            match factor {
+                TableFactor::Table { name, .. } => {
+                    if let [ObjectNamePart::Identifier(t)] = name.0.as_slice() {
+                        if !bound.contains(&t.value) {
+                            out.insert(t.value.to_ascii_lowercase());
+                        }
+                    }
+                }
+                TableFactor::NestedJoin { table_with_joins, .. } => tables(table_with_joins, bound, out),
+                _ => {}
+            }
+        }
+    }
+    fn blocks(b: &SetExpr, bound: &HashSet<String>, out: &mut HashSet<String>) {
+        match b {
+            SetExpr::Select(select) => select.from.iter().for_each(|item| tables(item, bound, out)),
+            SetExpr::SetOperation { left, right, .. } => {
+                blocks(left, bound, out);
+                blocks(right, bound, out);
+            }
+            _ => {}
+        }
+    }
+    fn walk(q: &Query, bound: &HashSet<String>, out: &mut HashSet<String>) -> Option<()> {
+        let mut inner = bound.clone();
+        let mut kids = Vec::new();
+        children(q, &mut kids)?;
+        let mut own = 0;
+        if let Some(with) = &q.with {
+            let names: Vec<String> = with.cte_tables.iter().map(|c| c.alias.name.value.clone()).collect();
+            for (i, cte) in with.cte_tables.iter().enumerate() {
+                let mut seen = bound.clone();
+                seen.extend(names[..if with.recursive { i + 1 } else { i }].iter().cloned());
+                walk(&cte.query, &seen, out)?;
+            }
+            inner.extend(names);
+            own = with.cte_tables.len();
+        }
+        blocks(&q.body, &inner, out);
+        for kid in kids.into_iter().skip(own) {
+            walk(kid, &inner, out)?;
+        }
+        Some(())
+    }
+    let mut out = HashSet::new();
+    walk(q, &HashSet::new(), &mut out)?;
+    Some(out)
+}
+
 /// A derived table or a WITH query whose columns the statement reads.
 pub struct Target<'a> {
     pub query: &'a mut Query,
@@ -279,8 +637,10 @@ pub fn reads_one_table(q: &Query) -> bool {
 
 /// A derived table's or a WITH query's query as a statement of its own: with the WITH queries in
 /// scope where it stands, which it may read. `None` where those and its own WITH queries do not
-/// make one WITH without changing what a name reads: where either is RECURSIVE.
+/// make one WITH without changing what a name reads: where either is RECURSIVE, or where its own
+/// hide one in scope that it still reads ([`unhidden`]).
 pub fn standalone(q: &Query, scope: Option<&With>) -> Option<Query> {
+    let text = q.to_string();
     let mut q = q.clone();
     match (scope, &mut q.with) {
         (None, _) => {}
@@ -289,12 +649,46 @@ pub fn standalone(q: &Query, scope: Option<&With>) -> Option<Query> {
             if scope.recursive || own.recursive {
                 return None;
             }
-            let mut ctes = scope.cte_tables.clone();
+            let mut ctes = unhidden(&scope.cte_tables, &own.cte_tables, &text)?;
             ctes.append(&mut own.cte_tables);
             own.cte_tables = ctes;
         }
     }
     Some(q)
+}
+
+/// The WITH queries in scope that a query's own (`own`) leave visible: each but those an own one
+/// of the same name hides, which is what the query reads by that name. Both in one WITH would
+/// declare the name twice, which the server refuses. `None` where a WITH query reads the hidden
+/// one: one in scope written after it, or an own one written before the one that hides it or
+/// being it. Left out, the name would read a table instead. `None` too where a WITH query in
+/// scope that the query (`text`) reads, itself or through another, names any of the query's own:
+/// MySQL reads a WITH query's names again where it is read ([`with_rebound`]), so read from the
+/// query, its name is the query's own, while merged in front of them it would be a table's.
+fn unhidden(scope: &[Cte], own: &[Cte], text: &str) -> Option<Vec<Cte>> {
+    if !own.iter().all(|o| plain_name(&o.alias.name.value)) {
+        return None;
+    }
+    if reached(scope, text).into_iter().any(|c| reads_any(&c.query, own)) {
+        return None;
+    }
+    let mut visible = Vec::new();
+    for (i, cte) in scope.iter().enumerate() {
+        let name = &cte.alias.name.value;
+        let Some(at) = own.iter().position(|o| o.alias.name.value == *name) else {
+            visible.push(cte.clone());
+            continue;
+        };
+        // A name is found in a text only where it is written the same way everywhere.
+        let reads = |o: &Cte| {
+            let text = o.query.to_string();
+            !text.is_ascii() || names_word(&text, name)
+        };
+        if !plain_name(name) || scope[i + 1..].iter().any(reads) || own[..=at].iter().any(reads) {
+            return None;
+        }
+    }
+    Some(visible)
 }
 
 /// A value of a column's type, which `coalesce(column, filler)` gives the server's flag NOT NULL
@@ -587,6 +981,71 @@ mod tests {
     }
 
     #[test]
+    fn a_with_outside_quotes_is_a_with() {
+        assert!(with_in("x in (with t as (select 1) select 1)") && with_in("WITH t AS (SELECT 1)"));
+        assert!(!with_in("x like 'with'") && !with_in("`with` = 1") && !with_in("'it''s with'") && !with_in("k with rollup"));
+        assert!(with_in("'a\\' with t as (select 1)") && with_in("'unterminated with"));
+        // A hint is no SQL, whatever quotes it holds.
+        assert!(with_in("(select /*+ QB_NAME(') */ (with t as (select 1) select 1))") && !with_in("/*+ with */ 1") && with_in("/*+ unterminated with"));
+    }
+
+    #[test]
+    fn only_the_with_queries_a_nested_with_reads_again_are_rebound() {
+        let sql = "with o as (select 1 as x), z as (select x from tu) select o.x from o where exists (with tu as (select 1 as x) select 1 from z)";
+        assert_eq!(rebound(&query(sql)), Rebound::Named(["z".to_string()].into_iter().collect()));
+        // Through a WITH between them, the one that reads the name.
+        let sql = "with z as (select x from tu) select d.x from (with y as (select x from z) select e.x from (with tu as (select 1 as x) select x from y) e) d";
+        assert_eq!(rebound(&query(sql)), Rebound::Named(["z".to_string()].into_iter().collect()));
+        assert_eq!(rebound(&query("with z as (select x from tu) select x from z")), Rebound::None);
+        assert_eq!(rebound(&query("with z as (select x from tu) select (select 1 from z where x in (select 1)) as k")), Rebound::None);
+    }
+
+    #[test]
+    fn a_with_query_read_inside_a_with_of_a_name_it_reads_is_rebound() {
+        for sql in [
+            "with z as (select p.x from t3 left join t4 p on p.k = t3.k where p.k is not null) select d.x from (with t4 as (select k, null as x from t3) select z.x from z) d",
+            "with z as (select x from t4) select l.x from t3 join lateral (with t4 as (select 1 as x) select z.x from z) l on true",
+            "with z as (select x from t4) select (with t4 as (select 1 as x) select z.x from z limit 1) as x",
+            "with w as (select x from t4), t4 as (select 1 as x) select d.x from (with t4 (x) as (select 2) select w.x from w) d",
+            "with z as (select x from t4), y as (with t4 as (select 1 as x) select z.x from z) select x from y",
+            "with z as (select x from t4) select t3.k from t3 join z on z.x in (with t4 as (select 1 as x) select z.x from z)",
+            "with z as (select x from t4) select (with t4 as (select 1 as x) select json_arrayagg(z.x) from z) as j",
+            "with z as (select x from t4) select 'a_' like 'a#_' escape (with t4 as (select '#' as x) select x from z) as matched",
+            // A name in another case, or declared after the WITH query in a RECURSIVE WITH, may be
+            // the one around.
+            "with z as (with T4 as (select 1 as x) select x from t4) select d.x from (with t4 as (select 2 as x) select x from z) d",
+            "with recursive z as (with recursive a as (select x from t4), t4 as (select 1 as x) select x from a) select d.x from (with t4 as (select 2 as x) select x from z) d",
+            "with z as (select x from t4) select d.x from (with rollupx as (select 1 as x), t4 as (select 2 as x) select z.x from z) d",
+            // Through a WITH between them: e reads y, y reads z, and z's t4 is e's own.
+            "with z as (select x from t4) select d.x from (with y as (select x from z) select e.x from (with t4 as (select 1 as x) select x from y) e) d",
+        ] {
+            assert!(with_rebound(&query(sql)), "{sql}");
+        }
+        for sql in [
+            "with z as (select x from t4) select d.x from (with y as (select 1 as x) select z.x from z, y) d",
+            "with z as (with t4 as (select 1 as x) select x from t4) select x from z",
+            "select d.x from (with t4 as (select 1 as x) select x from t4) d",
+            // A WITH query of a derived table's that reads another of its name, nested.
+            "select id from (with c as (select id from (with c as (select id from t4 where id = ?) select id from c) s) select id from c) s",
+            // A derived table's own WITH query that hides a recursive one of its name.
+            "with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 3) select d.n from (with nums (n) as (select 1) select n from nums) d",
+            // A WITH of a query that reads no outer WITH query, and a named window.
+            "with z as (select p.x from t4 p), y as (with p as (select 1 as x) select x from p) select z.x from z, y",
+            "with z as (select p.x from t4 p) select d.x from (select z.x, row_number() over w as n from z window w as (order by z.x)) d",
+            "with z as (select p.x from t4 p) select z.x, (select count(*) from t4 group by k with rollup limit 1) as n from z",
+            // A literal in an ORDER BY, a WITH in a subquery that reads no outer WITH query, and
+            // one named like a column.
+            "with z as (select x from tu where id = 1) select z.x from z order by concat(z.x, 'with é')",
+            "with o as (select 1 as x) select x from o order by x like 'with', `with` = 'it''s with'",
+            "with o as (select 'a_b' as x) select x from o order by x like 'a\\_b'",
+            "with z as (select x from tu where id = 1) select z.x from z where exists (with q as (select 1) select 1 from q)",
+            "with z as (select p.x from t4 p) select d.x from (with x as (select 1 as k) select z.x from z, x) d",
+        ] {
+            assert!(!with_rebound(&query(sql)), "{sql}");
+        }
+    }
+
+    #[test]
     fn a_derived_query_stands_alone_with_the_with_queries_in_scope() {
         let alone = |sql: &str| {
             let mut q = query(sql);
@@ -597,6 +1056,19 @@ mod tests {
         assert_eq!(alone("with a as (select 1 as x) select d.x from (select x from a) d")[1].as_deref(), Some("WITH a AS (SELECT 1 AS x) SELECT x FROM a"));
         assert_eq!(alone("with a as (select 1 as x) select d.x from (with b as (select x from a) select x from b) d")[1].as_deref(), Some("WITH a AS (SELECT 1 AS x), b AS (SELECT x FROM a) SELECT x FROM b"));
         assert_eq!(alone("with recursive a as (select 1 as x) select d.x from (with b as (select x from a) select x from b) d")[0], None);
+        // An inner WITH query hides an outer one of its name, which the merged WITH leaves out.
+        assert_eq!(
+            alone("with x as (select id from u) select d.b from (with x as (select name as b from u where name is not null) select b from x) d")[1].as_deref(),
+            Some("WITH x AS (SELECT name AS b FROM u WHERE name IS NOT NULL) SELECT b FROM x")
+        );
+        assert_eq!(alone("with x as (select 1 as a), z as (select 2 as c) select d.a from (with x as (select 3 as a) select a from x, z) d")[2].as_deref(), Some("WITH z AS (SELECT 2 AS c), x AS (SELECT 3 AS a) SELECT a FROM x, z"));
+        // Where a WITH query still reads the hidden one, the name would read a table instead.
+        assert_eq!(alone("with x as (select 1 as a) select d.a from (with y as (select a from x), x as (select 2 as a) select a from y) d")[1], None);
+        assert_eq!(alone("with x as (select 1 as a) select d.a from (with x as (select a + 1 as a from x) select a from x) d")[1], None);
+        assert_eq!(alone("with x as (select 1 as a), z as (select a from x) select d.a from (with x as (select 2 as a) select a from x join z using (a)) d")[2], None);
+        // MySQL reads a WITH query's names again where it is read: inside the derived table, z's
+        // `t4` is the derived table's own.
+        assert_eq!(alone("with z as (select k from t4) select d.k from (with t4 as (select 1 as k) select z.k from z) d")[1], None);
     }
 
     #[test]
