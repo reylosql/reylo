@@ -544,6 +544,9 @@ test("a session's variables stand in for the process's, in every case of a name 
   // A worker thread's copy of the environment matches names exactly, so a session reads its variables in any case there.
   assert.deepEqual(libpqEnvironment(env, "win32"), { PGHOST: "h", PGDATABASE: "other" });
   assert.deepEqual(libpqEnvironment(env, "linux"), { PGHOST: "h" });
+  // Of two spellings, the first in order, whichever the environment lists first.
+  assert.deepEqual(libpqEnvironment({ pgdatabase: "local", pgDatabase: "reporting" }, "win32"), { PGDATABASE: "reporting" });
+  assert.deepEqual(libpqEnvironment({ pgDatabase: "reporting", pgdatabase: "local" }, "win32"), { PGDATABASE: "reporting" });
 });
 
 test("PGHOST names the socket's directory where the URL names no host, as libpq reads it", async () => {

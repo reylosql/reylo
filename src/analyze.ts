@@ -668,10 +668,11 @@ const ENVIRONMENT = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"] as
 /**
  * The variables of `ENVIRONMENT` this process has, as the engine's connection reads them when it
  * opens (src/engine.ts): on Windows in any case of a name, as Windows reads one, since a worker
- * thread's copy of the environment, as the preload's, matches names exactly.
+ * thread's copy of the environment, as the preload's, matches names exactly, and of two spellings
+ * the first in order, as Node passes a child.
  */
 export function libpqEnvironment(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): Record<string, string> {
-  const value = (name: string) => env[name] ?? (platform === "win32" ? Object.entries(env).find(([key]) => key.toUpperCase() === name)?.[1] : undefined);
+  const value = (name: string) => (platform === "win32" ? env[Object.keys(env).filter((key) => key.toUpperCase() === name).sort()[0] ?? name] : env[name]);
   return Object.fromEntries(ENVIRONMENT.flatMap((name) => (value(name) ? [[name, value(name)!]] : [])));
 }
 
