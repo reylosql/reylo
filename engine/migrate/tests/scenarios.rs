@@ -9073,8 +9073,8 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_has!(refused.clone(), r"This database holds 2 of Reylo's history tables");
         assert_has!(refused.clone(), r"In public\.__reylo_migrations, 1 migration ran, at [^\n,]+\n");
         assert_has!(refused.clone(), r"In private\.__reylo_migrations, 1 migration ran, at [^\n]+, and 1 started");
-        assert_has!(refused, r"Keep one table holding every migration any of them records as run, and drop the others");
-        p.exec("insert into public.__reylo_migrations select * from private.__reylo_migrations where applied_at is not null on conflict (name) do nothing; drop table private.__reylo_migrations").await;
+        assert_has!(refused, r"Keep one table holding each migration's row from any of them, its run over its start, and drop the others");
+        p.exec("insert into public.__reylo_migrations select * from private.__reylo_migrations on conflict (name) do update set applied_at = coalesce(__reylo_migrations.applied_at, excluded.applied_at); drop table private.__reylo_migrations").await;
         assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_eq!(p.rows(&ran("public")).await[0].text("n"), "2");

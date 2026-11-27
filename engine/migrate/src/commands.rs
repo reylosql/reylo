@@ -347,10 +347,12 @@ async fn history_table(db: &mut Db) -> Result<String, Error> {
         [(one, _, true, true)] => Ok(one.clone()),
         [(one, schema, usage, _)] => {
             let role = db.rows("select quote_ident(current_user) as r").await?.first().map(|r| r.text("r").to_string()).unwrap_or_default();
-            let mut lines = vec![format!("This role can't read Reylo's history, {one}"), "  Grant it what Reylo needs, as the table's owner:".to_string()];
+            let mut lines = vec![format!("This role can't read Reylo's history, {one}")];
             if !usage {
+                lines.push("  Grant it the use of the schema, as the schema's owner:".to_string());
                 lines.push(format!("    grant usage on schema {schema} to {role}"));
             }
+            lines.push("  Grant it the use of the table, as the table's owner:".to_string());
             lines.push(format!("    grant select, insert, update, delete on table {one} to {role}"));
             Err(Error(lines.join("\n")))
         }
@@ -379,7 +381,7 @@ async fn history_table(db: &mut Db) -> Result<String, Error> {
                 };
                 lines.push(format!("  In {table}, {ran}{started}"));
             }
-            lines.push("  Keep one table holding every migration any of them records as run, and drop the others".to_string());
+            lines.push("  Keep one table holding each migration's row from any of them, its run over its start, and drop the others".to_string());
             lines.push("  Then see what it ran:".to_string());
             lines.push("    reylo migrate status".to_string());
             Err(Error(lines.join("\n")))
