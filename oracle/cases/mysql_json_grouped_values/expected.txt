@@ -95,7 +95,7 @@ rollup_top_arrayagg.sql: many () -> { o: json { t: varchar(≤20)?, a: int[]? } 
 rollup_ungrouped_arrayagg.sql: many () -> { id: int | bigint?, o: json { k: int?, a: int?[]? } }
 rollup_window_in_object.sql: many () -> { user_id: int | bigint?, o: json { w: int?[] } }
 rollup_window_items.sql: many () -> { user_id: int | bigint?, w: json int?[] }
-rollup_window_object.sql: many () -> { user_id: int | bigint?, w: json ({ u: int? })[] }
+rollup_window_object.sql: many () -> { user_id: int | bigint?, w: json ({ u: int? }?)[] }
 rowless_arrayagg_outer_item.sql: one () -> { n: bigint, o: json? }
 rowless_arrayagg_outer_top.sql: one () -> { o: json? }
 rowless_mid_one_row_sub.sql: one () -> { o: json { n: bigint, s: { c: bigint, k: varchar? }? } }

@@ -125,14 +125,12 @@ fn names_output(item: &Expr, projection: &[SelectItem]) -> bool {
     }
 }
 
-/// Whether a GROUP BY item is a column: one named, or an alias or a position of the select list's
-/// that is one, and each member of a ROLLUP alike. A bare name that may be an alias of anything
-/// else is none, though MySQL takes a column of the FROM first, which the planning cannot see; the
-/// server folds the letter case of names past ASCII too, so such a name may be any alias past it.
+/// Whether a GROUP BY item is surely a column: one named with its table, or a position of the
+/// select list's that is one, and each member of a ROLLUP alike. A bare name is none: MySQL may
+/// take it for an alias of any item, as it folds the letter case of names past ASCII, drops an
+/// alias's leading spaces and names an item with no alias by its text, which the planning cannot
+/// match.
 fn names_column(item: &Expr, projection: &[SelectItem]) -> bool {
-    fn may_name(alias: &str, name: &str) -> bool {
-        alias.eq_ignore_ascii_case(name) || !alias.is_ascii() || !name.is_ascii()
-    }
     fn column(e: &Expr) -> bool {
         match e {
             Expr::Nested(inner) => column(inner),
@@ -143,7 +141,6 @@ fn names_column(item: &Expr, projection: &[SelectItem]) -> bool {
     match item {
         Expr::Nested(inner) => names_column(inner, projection),
         Expr::Rollup(sets) | Expr::Cube(sets) | Expr::GroupingSets(sets) => sets.iter().flatten().all(|k| names_column(k, projection)),
-        Expr::Identifier(name) => !projection.iter().any(|i| matches!(i, SelectItem::ExprWithAlias { expr, alias } if may_name(&alias.value, &name.value) && !column(expr))),
         Expr::CompoundIdentifier(_) => true,
         Expr::Value(v) if !projection.iter().any(|i| matches!(i, SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..))) => match &v.value {
             Value::Number(n, _) => n.parse::<usize>().ok().and_then(|n| projection.get(n.checked_sub(1)?)).is_some_and(|i| matches!(i, SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } if column(e))),
@@ -632,8 +629,9 @@ impl Builder<'_> {
         // A value a query in scope may group by WITH ROLLUP is NULL in its super-aggregate rows,
         // whatever builds it: an object, a subquery, or a fallback that is never NULL itself
         // (`ifnull(…, json_array())`), as is one inside it ([`Builder::rolled_key`]). One that calls
-        // an aggregate of its own query is no GROUP BY item, which can hold none.
-        if self.rolled_key() && !crate::mysql::has_aggregate(e) { force_nullable(shape) } else { shape }
+        // an aggregate or a window function of its own query is no GROUP BY item, which can hold
+        // neither.
+        if self.rolled_key() && !crate::mysql::has_aggregate(e) && !calls_window(e) { force_nullable(shape) } else { shape }
     }
 
     fn build(&mut self, e: &Expr) -> Shape {
@@ -1262,6 +1260,16 @@ fn subqueries<'e>(e: &'e Expr, out: &mut Vec<&'e Query>) {
             }
         }
         _ => {}
+    }
+}
+
+/// Whether an expression calls a window function of its own query: not inside a subquery.
+fn calls_window(e: &Expr) -> bool {
+    match e {
+        Expr::Function(f) => f.over.is_some() || args(f).is_some_and(|a| a.into_iter().any(calls_window)),
+        Expr::Nested(inner) | Expr::UnaryOp { expr: inner, .. } | Expr::Cast { expr: inner, .. } | Expr::IsNull(inner) | Expr::IsNotNull(inner) => calls_window(inner),
+        Expr::BinaryOp { left, right, .. } => calls_window(left) || calls_window(right),
+        _ => false,
     }
 }
 
