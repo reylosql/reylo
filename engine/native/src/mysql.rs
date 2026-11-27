@@ -258,6 +258,14 @@ fn mariadb(version: &str) -> Option<String> {
     Some(if number.is_empty() { "MariaDB".to_string() } else { format!("MariaDB {number}") })
 }
 
+/// Where a MySQL URL connects, as this engine reads it: the socket, the host and port, the user and
+/// the database, which a test holds the names of a cache's entries to, as [`super::postgres::target`].
+#[doc(hidden)]
+pub fn target(url: &str) -> Result<String, String> {
+    let opts = parse(url)?;
+    Ok(format!("{:?} {} {} {:?} {:?}", opts.socket(), opts.ip_or_hostname(), opts.tcp_port(), opts.user(), opts.db_name()))
+}
+
 /// The URL as mysql_async's options. The TLS settings mysql2 projects write are read here: mysql2's
 /// `ssl` (`true`, or JSON with `rejectUnauthorized`, `ca`, `cert` and `key`, each certificate and
 /// key as PEM text), MySQL's own `ssl-mode`, and `sslaccept`; mysql2's `socketPath` is the socket.
@@ -276,8 +284,9 @@ fn parse(url: &str) -> Result<Opts, String> {
     let (mut roots, mut identity) = (Vec::new(), None::<ClientIdentity>);
     for pair in query.split('&').filter(|p| !p.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let value = crate::decode(value);
-        match key {
+        // A name is read decoded, as mysql2 reads the URL's parameters.
+        let (key, value) = (crate::decode(key), crate::decode(value));
+        match key.as_str() {
             "ssl" => {
                 tls = match value.trim() {
                     "" | "false" | "0" => None,
@@ -407,11 +416,15 @@ mod tests {
             "mysql://root@localhost/app?socket=/tmp/mysql.sock&ssl=true",
             "mysql://root@localhost/app?socketPath=%2Ftmp%2Fmysql.sock&ssl-mode=REQUIRED",
             r#"mysql://root@localhost/app?ssl={"rejectUnauthorized":true}&socketPath=/tmp/mysql.sock"#,
+            // A parameter's name read decoded, as mysql2 reads it.
+            "mysql://root@localhost/app?%73ocketPath=/tmp/mysql.sock",
         ] {
             let opts = parse(url).unwrap();
             assert_eq!(opts.socket(), Some("/tmp/mysql.sock"), "{url}");
             assert!(opts.ssl_opts().is_none(), "{url}");
         }
         assert!(parse("mysql://root@localhost/app?ssl=true").unwrap().ssl_opts().is_some());
+        // A + in the path is a space, as mysql2 reads a URL's parameters.
+        assert_eq!(parse("mysql://root@localhost/app?socketPath=/tmp/a+b.sock").unwrap().socket(), Some("/tmp/a b.sock"));
     }
 }

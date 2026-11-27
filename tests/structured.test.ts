@@ -355,6 +355,42 @@ test("Postgres: NaN, the infinities and -0, as `.run()` returns them in a float 
   }
 });
 
+test("Postgres: a rows member of an array of whole arrays, or of segments and ints at any depth, goes in as it comes back, on each driver", { skip: pgLive }, async () => {
+  const own = await postgresDatabase("reylo_structured_nested");
+  const url = new URL(own.url);
+  const sql = own.sql;
+  const root = project("postgres");
+  const pg = driver("pg");
+  const client = new pg.Client(url.href);
+  await client.connect();
+  try {
+    // Postgres reads a JSON array inside a member as one more dimension, so a whole array goes as its text.
+    await sql.unsafe(`create domain ints as int4[]; create type pair as (a int4, b text); create domain pairs as pair[]; create domain spans as int4range[]; create domain bigs as int8[];
+      create table g (id int4 primary key, tags ints[], duos pairs[], spans spans[], bigs bigs[], segs lseg[], cells int4[])`);
+    const insert = await built(root, url.href, "insert_g", "insert into g :g::rows(id int4 not null, tags ints[], duos pairs[], spans spans[], bigs bigs[], segs lseg[], cells int4[])");
+    const seg = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+    let id = 0;
+    for (const db of [sql, client]) {
+      await insert.run(db, {
+        g: [
+          { id: ++id, tags: [[1, 2], [[3]], null], duos: [[{ a: 1, b: "x,y" }]], spans: [[{ lower: 1, upper: 3, bounds: "[)" }, { empty: true }]], bigs: [["\u00a01\u00a0", 9007199254740993n]], segs: [[seg], [null]], cells: [[[1, 2]], [[3, null]]] },
+          { id: ++id, tags: [null, [4]], duos: null, spans: null, bigs: null, segs: [seg], cells: [5] },
+        ],
+      });
+    }
+    const text = await sql.unsafe("select id, tags::text, duos::text, spans::text, bigs::text, segs::text, cells::text from g order by id");
+    const want = [
+      { tags: '{"{1,2}","{{3}}",NULL}', duos: '{"{\\"(1,\\\\\\"x,y\\\\\\")\\"}"}', spans: '{"{\\"[1,3)\\",empty}"}', bigs: '{"{1,9007199254740993}"}', segs: '{{"[(0,0),(1,1)]"},{NULL}}', cells: "{{{1,2}},{{3,NULL}}}" },
+      { tags: '{NULL,"{4}"}', duos: null, spans: null, bigs: null, segs: '{"[(0,0),(1,1)]"}', cells: "{5}" },
+    ];
+    assert.deepEqual(plain(text), [1, 2, 3, 4].map((n) => ({ id: n, ...want[(n - 1) % 2]! })));
+  } finally {
+    await client.end();
+    await closeSessions();
+    await own.drop();
+  }
+});
+
 test("Postgres: rows that leave out different keys go in one insert, each such row with its column's default copied from the catalog, a sequence advancing only for those rows", { skip: pgLive }, async () => {
   const postgres = driver("postgres");
   const admin = postgres(PG, { max: 1, onnotice: () => {} });

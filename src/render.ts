@@ -558,6 +558,7 @@ export function renderParamType(t: EngineType, dialect: Dialect = "postgres", in
     if (dialect === "postgres" && kind === "text" && bareName(t.element.type) === "record") return "string | string[]";
     if (kind.endsWith("[]")) {
       const inner = inRow ? orNull(renderParamType(t.element.type, dialect, inRow, undefined, codecs)) : renderParamType(t.element.type, dialect, false, undefined, codecs);
+      if (nestsAnyDeep(t)) return `NestedArray<${inner}>`;
       return /[|&]/.test(inner) ? `(${inner})[]` : `${inner}[]`;
     }
   }
