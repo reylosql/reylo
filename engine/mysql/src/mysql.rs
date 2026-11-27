@@ -2837,8 +2837,8 @@ pub(crate) struct Keys {
     /// The WITH queries of the statement MySQL may read otherwise where they are read
     /// ([`crate::mysql_derived::rebound`]), whose rows are not followed.
     pub(crate) rebound: crate::mysql_derived::Rebound,
-    /// Every name the catalog was asked for, as written ([`Keys::name`]).
-    asked: HashSet<String>,
+    /// The names the catalog's rows of each name asked came back under ([`Keys::name`]).
+    answers: crate::mysql_names::Answers,
 }
 
 /// What a value compares as. MySQL compares a string with a number as two doubles, so `'01'`,
@@ -2881,6 +2881,41 @@ impl Class {
 /// statement naming it reads no more ([`Host::query_each`]).
 pub(crate) fn by_table(host: &Host, sql: &str, tables: &[String]) -> Lazy<Result<Vec<Vec<Value>>, reylo_engine_core::api::DbError>> {
     host.query_each(sql, tables.iter().map(|t| vec![json!(t)]), Scope::Statement)
+}
+
+/// [`by_table`], with the names each table's rows came back under, by their first column
+/// ([`crate::mysql_names::Answers`]).
+pub(crate) fn answered_by_table(host: &Host, sql: &str, tables: &[String]) -> Lazy<Result<(Vec<Vec<Value>>, crate::mysql_names::Answers), reylo_engine_core::api::DbError>> {
+    let (mut rows, mut answers, mut error, mut pending) = (Vec::new(), crate::mysql_names::Answers::default(), None, false);
+    for table in tables {
+        if answers.0.contains_key(table) {
+            continue;
+        }
+        match host.query(sql, vec![json!(table)], Scope::Statement) {
+            Some(Ok(found)) => {
+                let mut names: Vec<String> = Vec::new();
+                for name in found.iter().filter_map(|row| row.first().and_then(as_str)) {
+                    if !names.iter().any(|n| n == name) {
+                        names.push(name.to_string());
+                    }
+                }
+                answers.0.insert(table.clone(), names);
+                rows.extend(found);
+            }
+            Some(Err(e)) => {
+                answers.0.insert(table.clone(), Vec::new());
+                error = error.or(Some(e));
+            }
+            None => {
+                answers.0.insert(table.clone(), Vec::new());
+                pending = true;
+            }
+        }
+    }
+    if pending {
+        return None;
+    }
+    Some(error.map_or(Ok((rows, answers)), Err))
 }
 
 /// The columns of `tables`, each table by its name as given: a table the server has under
@@ -3130,7 +3165,7 @@ fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
     let mut seen: HashSet<String> = names.iter().cloned().collect();
     while !names.is_empty() {
         let found = unique_keys(host, &names);
-        let columns = by_table(host, KEY_COLUMNS_QUERY, &names);
+        let columns = answered_by_table(host, KEY_COLUMNS_QUERY, &names);
         let views = by_table(host, VIEW_DEFINITIONS_QUERY, &names);
         let (Some(found), Some(columns), Some(views)) = (found, columns, views) else { return None };
         keys.of.extend(found.of);
@@ -3138,7 +3173,9 @@ fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
         // A round answers for each table whole, and a table fetched again under another case, where
         // the server folds names, answers again: its columns replace the ones it had.
         let mut answered: HashMap<String, Vec<(String, Class)>> = HashMap::new();
-        for row in columns.unwrap_or_default() {
+        let (columns, answers) = columns.unwrap_or_default();
+        keys.answers.extend(answers);
+        for row in columns {
             if let (Some(table), Some(column), Some(ty)) = (row.first().and_then(as_str), row.get(1).and_then(as_str), row.get(2).and_then(as_str)) {
                 answered.entry(table.to_string()).or_default().push((column.to_ascii_lowercase(), class_of(ty)));
             }
@@ -3164,7 +3201,6 @@ fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
         }
         names = next;
     }
-    keys.asked = seen;
     Some(keys)
 }
 
@@ -3209,11 +3245,11 @@ impl Keys {
     /// where it tells them apart (0) only the exact name comes back, and `Users` never takes the
     /// keys of `users`. It is read off `columns`, which holds every table and view fetched, keyless
     /// ones too: `of` and `views` leave some out, and a name alone there in another case may be
-    /// another table's. Only a name the catalog was asked for has one, and only one it was not also
-    /// asked for itself: a row under a name never asked came back for this one, where a name asked
-    /// beside it, or never asked at all, may be another table that keeps case.
+    /// another table's. So it is the name the rows asked under the statement's own came back under
+    /// ([`crate::mysql_names::Answers`]), and none for a name the catalog was never asked for, as a
+    /// table a view's schema qualifies.
     fn name(&self, table: &str) -> Option<&str> {
-        crate::mysql_names::answered(self.columns.keys().map(String::as_str), |name| self.asked.contains(name), table)
+        self.answers.name(table)
     }
 
     /// The entry of `map` under the name the statement gives, else under the server's ([`Keys::name`]).
@@ -3826,42 +3862,44 @@ mod tests {
     #[test]
     fn a_table_takes_the_keys_the_server_holds_under_its_name() {
         let row = |t: &str, c: &str| vec![json!(t), json!("PRIMARY"), json!(c), json!("int")];
-        // The catalog answers with the columns of every table it holds, keyless ones too, for the
-        // names it was asked.
-        let catalog = |rows: Vec<Vec<Value>>, tables: &[&str], asked: &[&str]| {
+        // The catalog answers with the columns of every table it holds, keyless ones too, each
+        // name asked with the rows under the names it came back under.
+        let catalog = |rows: Vec<Vec<Value>>, tables: &[&str], answers: &[(&str, &str)]| {
             let mut keys = keys_of(rows);
             for table in tables {
                 keys.columns.insert(table.to_string(), vec![("id".to_string(), Class::Number), ("other".to_string(), Class::Number)]);
             }
-            keys.asked = asked.iter().map(|a| a.to_string()).collect();
+            keys.answers = crate::mysql_names::Answers(answers.iter().map(|(asked, under)| (asked.to_string(), vec![under.to_string()])).collect());
             keys
         };
         // The server holds `Users` and `users` for two tables (lower_case_table_names 0) and
         // answers with the one named; where it holds them for one it answers with its own name.
-        let folded = catalog(vec![row("Users", "id")], &["Users"], &["users"]);
+        let folded = catalog(vec![row("Users", "id")], &["Users"], &[("users", "Users")]);
         assert_eq!(folded.keys("Users"), Some(&vec![vec!["id".to_string()]]));
         assert_eq!(folded.keys("users"), Some(&vec![vec!["id".to_string()]]));
-        let both = catalog(vec![row("Users", "id"), row("users", "other")], &["Users", "users"], &["Users", "users"]);
+        let both = catalog(vec![row("Users", "id"), row("users", "other")], &["Users", "users"], &[("Users", "Users"), ("users", "users")]);
         assert_eq!(both.keys("users"), Some(&vec![vec!["other".to_string()]]));
         assert_eq!(both.keys("Users"), Some(&vec![vec!["id".to_string()]]));
         assert!(both.keys("USERS").is_none());
         // A table with no key beside one that differs from it in case alone takes none of its keys,
         // and a table beside a view whose name differs from its in case alone is no view.
-        let mut keyless = catalog(vec![row("Users", "id")], &["Users", "users", "V", "v"], &["Users", "users", "V", "v"]);
+        let mut keyless = catalog(vec![row("Users", "id")], &["Users", "users", "V", "v"], &[("Users", "Users"), ("users", "users"), ("V", "V"), ("v", "v")]);
         assert!(keyless.keys("users").is_none());
         let Some(Statement::Query(view)) = parse(&SessionDialect::default(), "select id, other from Users where id = 1").unwrap().pop() else { panic!("not a query") };
         keyless.views.insert("V".to_string(), *view.clone());
         assert!(keyless.view("V").is_some());
         assert!(keyless.view("v").is_none());
         // A view asked under another case than the server's own is that view.
-        let mut folded_view = catalog(Vec::new(), &["V"], &["v"]);
+        let mut folded_view = catalog(Vec::new(), &["V"], &[("v", "V")]);
         folded_view.views.insert("V".to_string(), *view);
         assert!(folded_view.view("v").is_some());
         // A name the catalog was never asked for, as a table a view's schema qualifies, takes no
         // keys of a table it was asked for under another case: the server that keeps case holds
-        // two.
-        let unasked = catalog(vec![row("K", "id")], &["K"], &["K"]);
+        // two. Where the server folds names, a name asked in each case takes the one table's.
+        let unasked = catalog(vec![row("K", "id")], &["K"], &[("K", "K")]);
         assert!(unasked.keys("k").is_none());
+        let asked_twice = catalog(vec![row("users", "id")], &["users"], &[("Users", "users"), ("users", "users")]);
+        assert_eq!(asked_twice.keys("Users"), Some(&vec![vec!["id".to_string()]]));
     }
 
     #[test]

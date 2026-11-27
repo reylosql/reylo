@@ -161,7 +161,10 @@ pub(crate) fn typed(statement: &Statement, names: &Names, host: &Host) -> Lazy<T
     if tables.is_empty() {
         return Some(Typed::default());
     }
-    let rows = by_table(host, TYPES_QUERY, &tables)?;
+    let (rows, answers) = match crate::mysql::answered_by_table(host, TYPES_QUERY, &tables)? {
+        Ok((rows, answers)) => (Ok(rows), answers),
+        Err(e) => (Err(e), Default::default()),
+    };
     let mut out = Typed::default();
     // Per table as the server names it: each column in lower case, its type, whether it is INVISIBLE, and its comment.
     let mut columns: HashMap<String, Vec<(String, Option<crate::types::Type>, bool, Option<String>)>> = HashMap::new();
@@ -198,8 +201,8 @@ pub(crate) fn typed(statement: &Statement, names: &Names, host: &Host) -> Lazy<T
         }
         columns.entry(table.to_string()).or_default().push((column.to_ascii_lowercase(), ty, invisible, comment));
     }
-    // The server's name for a table the statement names in another case ([`crate::mysql_names::answered`]).
-    let server_name = |table: &str| crate::mysql_names::answered(columns.keys().map(String::as_str), |name| tables.iter().any(|t| t == name), table).map(String::from);
+    // The server's name for a table the statement names in another case ([`crate::mysql_names::Answers`]).
+    let server_name = |table: &str| answers.name(table).map(String::from);
     let mut found: HashMap<String, Option<crate::types::Type>> = HashMap::new();
     let mut noted: HashMap<String, Option<String>> = HashMap::new();
     for (param, table, target) in targets {
@@ -463,8 +466,12 @@ pub(crate) fn nullable(statement: &Statement, names: &Names, host: &Host, marked
     }
     // Every table a parameter is written to whole, as `prefetch` asked.
     let tables = written(statement, names);
-    let (rows, checks) = (by_table(host, COLUMNS_QUERY, &tables), by_table(host, CHECKS_QUERY, &tables));
+    let (rows, checks) = (crate::mysql::answered_by_table(host, COLUMNS_QUERY, &tables), by_table(host, CHECKS_QUERY, &tables));
     let (rows, checks) = (rows?, checks?);
+    let (rows, answers) = match rows {
+        Ok((rows, answers)) => (Ok(rows), answers),
+        Err(e) => (Err(e), Default::default()),
+    };
     // Per table as the server names it, the CHECKs.
     let mut checked: HashMap<String, Vec<String>> = HashMap::new();
     for row in checks.unwrap_or_default() {
@@ -486,10 +493,10 @@ pub(crate) fn nullable(statement: &Statement, names: &Names, host: &Host, marked
     }
     // The column a target names, and whether it may hold NULL.
     let column_of = |table: &String, target: &Target| {
-        // The server's name for the table ([`crate::mysql_names::answered`]).
+        // The server's name for the table ([`crate::mysql_names::Answers`]).
         let known = match columns.get(table) {
             Some(known) => known,
-            None => columns.get(crate::mysql_names::answered(columns.keys().map(String::as_str), |name| tables.iter().any(|t| t == name), table)?)?,
+            None => columns.get(answers.name(table)?)?,
         };
         let (column, nullable, _) = match target {
             Target::Name(name) => known.iter().find(|(c, _, _)| c == name),
@@ -1108,6 +1115,36 @@ mod tests {
                         (id, columns.clone())
                     }
                     Need::Query { id, sql, .. } if sql == super::CHECKS_QUERY => (id, checks.clone()),
+                    Need::Query { id, .. } => (id, json!({ "rows": [] })),
+                };
+                answers.insert(id, serde_json::from_value(answer).unwrap());
+            }
+        }
+        panic!("the analysis never settled")
+    }
+
+    #[test]
+    fn a_table_named_in_two_cases_is_one_table_where_the_server_folds_names() {
+        // The server folds names: each case asked answers with the rows of the one table `users`.
+        let rows = [["users", "id", "NO", ""], ["users", "name", "NO", ""], ["users", "bio", "YES", ""]];
+        let sql = "update Users u join users v on u.id = 1 and v.id = 2 set u.name = :name::nullable(text), v.bio = :bio";
+        let mut answers: HashMap<String, Answer> = HashMap::new();
+        for _ in 0..8 {
+            let host = Host::new(&answers);
+            if let Some(analysis) = crate::mysql::analyze_text(sql, &host) {
+                assert!(analysis.diagnostics.iter().any(|d| d.message.contains(".name, which refuses null")), "{:?}", analysis.diagnostics);
+                return;
+            }
+            for need in host.needs() {
+                let (id, answer) = match need {
+                    Need::Describe { id, sql: text } => {
+                        let params: Vec<_> = text.matches('?').map(|_| json!({ "type": 253, "flags": 0, "charset": 255 })).collect();
+                        (id, json!({ "mysql": { "columns": [], "params": params } }))
+                    }
+                    Need::Query { id, sql, params, .. } if sql == super::COLUMNS_QUERY => {
+                        let asked = params.first().and_then(|p| p.as_str()).unwrap_or_default().to_string();
+                        (id, json!({ "rows": rows.iter().filter(|r| r[0].eq_ignore_ascii_case(&asked)).collect::<Vec<_>>() }))
+                    }
                     Need::Query { id, .. } => (id, json!({ "rows": [] })),
                 };
                 answers.insert(id, serde_json::from_value(answer).unwrap());

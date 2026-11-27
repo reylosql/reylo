@@ -42,20 +42,26 @@ pub(crate) fn item<'a>(names: impl IntoIterator<Item = &'a str>, name: &str) -> 
     }
 }
 
-/// The name the catalog's rows give the table a statement names `table`, where no row is under
-/// `table` itself: among the names the rows came back under, the one alone that differs from it in
-/// ASCII case alone and that the catalog was not `asked` for itself. The catalog compares names as
-/// the server does, so such a row came back for `table` on a server that folds names. A name asked
-/// beside it may be another table, on a server that keeps case, and so may any name where `table`
-/// was never asked for, or was asked and has no table in the catalog, as a TEMPORARY table has not.
-pub(crate) fn answered<'a>(names: impl IntoIterator<Item = &'a str>, asked: impl Fn(&str) -> bool, table: &str) -> Option<&'a str> {
-    if !asked(table) {
-        return None;
+/// Per name the catalog was asked for, as written, the names the rows it answered came back
+/// under. The catalog compares names as the server does, so a row under another case came back for
+/// the name asked on a server that folds names, and on one that keeps case only the name itself
+/// comes back.
+#[derive(Debug, Default)]
+pub(crate) struct Answers(pub(crate) std::collections::HashMap<String, Vec<String>>);
+
+impl Answers {
+    /// The server's name for the table a statement names `asked`: the one name its rows came back
+    /// under. `None` where the catalog was not asked for it, or answered with no row, as for a
+    /// TEMPORARY table, which `information_schema` does not list.
+    pub(crate) fn name(&self, asked: &str) -> Option<&str> {
+        match self.0.get(asked)?.as_slice() {
+            [one] => Some(one),
+            _ => None,
+        }
     }
-    let mut same = names.into_iter().filter(|name| name.eq_ignore_ascii_case(table) && !asked(name));
-    match (same.next(), same.next()) {
-        (Some(name), None) => Some(name),
-        _ => None,
+
+    pub(crate) fn extend(&mut self, other: Answers) {
+        self.0.extend(other.0);
     }
 }
 
@@ -107,10 +113,11 @@ mod tests {
         assert!(!may_match("ä", "äb"));
         assert!(may_match("\u{212A}ey", "key"));
         assert!(!may_match("ä", "a"));
-        // A row under another case answers for a name asked only where its own name was not asked.
-        let asked = |names: &'static [&'static str]| move |n: &str| names.contains(&n);
-        assert_eq!(answered(["Users"], asked(&["users"]), "users"), Some("Users"));
-        assert_eq!(answered(["Users"], asked(&["users", "Users"]), "users"), None);
-        assert_eq!(answered(["Users"], asked(&["Users"]), "users"), None);
+        // A name takes the one name its own rows came back under, and none where it has none.
+        let answers = Answers([("Users".to_string(), vec!["users".to_string()]), ("users".to_string(), vec!["users".to_string()]), ("t".to_string(), Vec::new())].into_iter().collect());
+        assert_eq!(answers.name("Users"), Some("users"));
+        assert_eq!(answers.name("users"), Some("users"));
+        assert_eq!(answers.name("t"), None);
+        assert_eq!(answers.name("USERS"), None);
     }
 }
