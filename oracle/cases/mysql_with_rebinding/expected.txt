@@ -1,6 +1,8 @@
 control.sql: many () -> { x: int }
 derived.sql: many () -> { x: bigint? }
+exists.sql: at_most_one () -> { x: int }
 hidden.sql: many () -> { x: bigint? }
+json.sql: one () -> { j: json int?[]? }
 keys.sql: many () -> { x: bigint }
 lateral.sql: many () -> { x: bigint? }
 sibling.sql: many () -> { x: int }

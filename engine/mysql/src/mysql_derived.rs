@@ -21,7 +21,7 @@
 //!   the proof through whatever reads the derived table, an outer join included.
 
 use crate::api::MysqlColumn;
-use syntax::mysql::ast::{Cte, JoinConstraint, JoinOperator, ObjectNamePart, OptimizerHint, OptimizerHintStyle, Query, Select, SelectItem, SetExpr, SetOperator, TableAlias, TableFactor, TableWithJoins, With};
+use syntax::mysql::ast::{Cte, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, JoinConstraint, JoinOperator, ObjectNamePart, OptimizerHint, OptimizerHintStyle, Query, Select, SelectItem, SetExpr, SetOperator, TableAlias, TableFactor, TableWithJoins, With};
 use std::collections::HashSet;
 
 /// The hint the copy's first query block carries: it holds for the whole statement.
@@ -233,10 +233,7 @@ pub fn with_rebound(q: &Query) -> bool {
         }
         inside.iter().any(|inner| {
             let Some(own) = &inner.with else { return false };
-            read_by(&with.cte_tables, &inner.to_string()).iter().any(|cte| {
-                let text = cte.query.to_string();
-                !text.is_ascii() || own.cte_tables.iter().any(|c| !plain_name(&c.alias.name.value) || names_word(&text, &c.alias.name.value))
-            })
+            read_by(&with.cte_tables, &inner.to_string()).iter().any(|cte| reads_any(&cte.query, &own.cte_tables))
         })
     })
 }
@@ -245,8 +242,7 @@ pub fn with_rebound(q: &Query) -> bool {
 /// included), its parenthesized operands' and theirs. `None` where an expression or a join's
 /// condition, which the walk does not follow, holds a WITH.
 fn queries_in<'a>(q: &'a Query, out: &mut Vec<&'a Query>) -> Option<()> {
-    // A ROLLUP is written `WITH ROLLUP`, which declares nothing.
-    let with_in = |text: String| !text.is_ascii() || names_word(&text.replace("WITH ROLLUP", ""), "with");
+    let with_in = |text: String| with_in(&text);
     if let Some(with) = &q.with {
         for cte in &with.cte_tables {
             out.push(&cte.query);
@@ -259,9 +255,19 @@ fn queries_in<'a>(q: &'a Query, out: &mut Vec<&'a Query>) -> Option<()> {
                 for item in &select.from {
                     from(item, out, with_in)?;
                 }
+                let items = select.projection.iter().filter_map(|i| match i {
+                    SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => Some(e),
+                    _ => None,
+                });
+                for e in items.chain(&select.selection).chain(&select.having) {
+                    expr_queries(e, out)?;
+                }
                 // The rest of the block.
                 let mut rest = select.as_ref().clone();
                 rest.from.clear();
+                rest.projection.retain(|i| !matches!(i, SelectItem::UnnamedExpr(_) | SelectItem::ExprWithAlias { .. }));
+                rest.selection = None;
+                rest.having = None;
                 (!with_in(rest.to_string())).then_some(())
             }
             SetExpr::SetOperation { left, right, .. } => {
@@ -281,7 +287,10 @@ fn queries_in<'a>(q: &'a Query, out: &mut Vec<&'a Query>) -> Option<()> {
             factor(&join.relation, out, with_in)?;
             let condition = match &join.join_operator {
                 JoinOperator::Join(c) | JoinOperator::Inner(c) | JoinOperator::Left(c) | JoinOperator::LeftOuter(c) | JoinOperator::Right(c) | JoinOperator::RightOuter(c) | JoinOperator::StraightJoin(c) | JoinOperator::CrossJoin(c) => match c {
-                    JoinConstraint::On(on) => on.to_string(),
+                    JoinConstraint::On(on) => {
+                        expr_queries(on, out)?;
+                        continue;
+                    }
                     _ => String::new(),
                 },
                 // A join of another kind is read whole, its table included.
@@ -307,6 +316,113 @@ fn queries_in<'a>(q: &'a Query, out: &mut Vec<&'a Query>) -> Option<()> {
     body(&q.body, out, &with_in)?;
     let tail = format!("{} {} {}", q.order_by.as_ref().map(|o| o.to_string()).unwrap_or_default(), q.limit_clause.as_ref().map(|l| l.to_string()).unwrap_or_default(), q.fetch.as_ref().map(|f| f.to_string()).unwrap_or_default());
     (!with_in(tail)).then_some(())
+}
+
+/// The queries an expression holds, at any depth, and theirs ([`queries_in`]): its subqueries,
+/// through the operators, calls and forms the walk reads. `None` where a form it does not read
+/// holds a WITH.
+fn expr_queries<'a>(e: &'a Expr, out: &mut Vec<&'a Query>) -> Option<()> {
+    let all = |es: &mut dyn Iterator<Item = &'a Expr>, out: &mut Vec<&'a Query>| -> Option<()> {
+        for e in es {
+            expr_queries(e, out)?;
+        }
+        Some(())
+    };
+    match e {
+        Expr::Subquery(q) | Expr::Exists { subquery: q, .. } => {
+            out.push(q);
+            queries_in(q, out)
+        }
+        Expr::InSubquery { expr, subquery, .. } => {
+            expr_queries(expr, out)?;
+            out.push(subquery);
+            queries_in(subquery, out)
+        }
+        Expr::BinaryOp { left, right, .. } => all(&mut [&**left, &**right].into_iter(), out),
+        Expr::Nested(inner) | Expr::UnaryOp { expr: inner, .. } | Expr::IsNull(inner) | Expr::IsNotNull(inner) | Expr::IsTrue(inner) | Expr::IsFalse(inner) | Expr::Cast { expr: inner, .. } => expr_queries(inner, out),
+        Expr::InList { expr, list, .. } => all(&mut std::iter::once(&**expr).chain(list), out),
+        Expr::Between { expr, low, high, .. } => all(&mut [&**expr, &**low, &**high].into_iter(), out),
+        Expr::Case { operand, conditions, else_result, .. } => {
+            let whens = conditions.iter().flat_map(|w| [&w.condition, &w.result]);
+            all(&mut operand.as_deref().into_iter().chain(whens).chain(else_result.as_deref()), out)
+        }
+        Expr::Function(f) => match &f.args {
+            FunctionArguments::Subquery(q) => {
+                out.push(q);
+                queries_in(q, out)
+            }
+            FunctionArguments::List(list) if f.over.is_none() && f.filter.is_none() && f.within_group.is_empty() && list.clauses.is_empty() => {
+                for a in &list.args {
+                    match a {
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(x)) => expr_queries(x, out)?,
+                        other if with_in(&other.to_string()) => return None,
+                        _ => {}
+                    }
+                }
+                Some(())
+            }
+            _ => (!with_in(&e.to_string())).then_some(()),
+        },
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) => Some(()),
+        other => (!with_in(&other.to_string())).then_some(()),
+    }
+}
+
+/// Whether a text, outside the walk, may hold a WITH: the word, but in a ROLLUP's `WITH ROLLUP`.
+fn with_in(text: &str) -> bool {
+    if !text.is_ascii() {
+        return true;
+    }
+    let lower = text.to_ascii_lowercase();
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
+    lower.match_indices("with").any(|(i, _)| {
+        if word(lower[..i].chars().next_back()) || word(lower[i + 4..].chars().next()) {
+            return false;
+        }
+        let after = lower[i + 4..].trim_start();
+        !(after.starts_with("rollup") && !word(after["rollup".len()..].chars().next()))
+    })
+}
+
+/// Whether a query reads, as a table of its FROM at any depth, a name one of `ctes` declares;
+/// where the walk cannot say, whether its text holds one of the names as a word.
+fn reads_any(q: &Query, ctes: &[Cte]) -> bool {
+    if !q.to_string().is_ascii() || ctes.iter().any(|c| !plain_name(&c.alias.name.value)) {
+        return true;
+    }
+    let mut queries = vec![q];
+    if queries_in(q, &mut queries).is_none() {
+        let text = q.to_string();
+        return ctes.iter().any(|c| names_word(&text, &c.alias.name.value));
+    }
+    fn tables(item: &TableWithJoins, out: &mut Vec<String>) {
+        for factor in std::iter::once(&item.relation).chain(item.joins.iter().map(|j| &j.relation)) {
+            match factor {
+                TableFactor::Table { name, .. } => {
+                    if let [ObjectNamePart::Identifier(t)] = name.0.as_slice() {
+                        out.push(t.value.to_ascii_lowercase());
+                    }
+                }
+                TableFactor::NestedJoin { table_with_joins, .. } => tables(table_with_joins, out),
+                _ => {}
+            }
+        }
+    }
+    fn blocks(b: &SetExpr, out: &mut Vec<String>) {
+        match b {
+            SetExpr::Select(select) => select.from.iter().for_each(|item| tables(item, out)),
+            SetExpr::SetOperation { left, right, .. } => {
+                blocks(left, out);
+                blocks(right, out);
+            }
+            _ => {}
+        }
+    }
+    let mut read = Vec::new();
+    for q in &queries {
+        blocks(&q.body, &mut read);
+    }
+    ctes.iter().any(|c| read.contains(&c.alias.name.value.to_ascii_lowercase()))
 }
 
 /// A derived table or a WITH query whose columns the statement reads.
@@ -409,10 +525,7 @@ fn unhidden(scope: &[Cte], own: &[Cte], text: &str) -> Option<Vec<Cte>> {
     if !own.iter().all(|o| plain_name(&o.alias.name.value)) {
         return None;
     }
-    if read_by(scope, text).iter().any(|c| {
-        let text = c.query.to_string();
-        !text.is_ascii() || own.iter().any(|o| names_word(&text, &o.alias.name.value))
-    }) {
+    if read_by(scope, text).iter().any(|c| reads_any(&c.query, own)) {
         return None;
     }
     let mut visible = Vec::new();
@@ -731,7 +844,9 @@ mod tests {
             "with z as (select x from t4) select (with t4 as (select 1 as x) select z.x from z limit 1) as x",
             "with w as (select x from t4), t4 as (select 1 as x) select d.x from (with t4 (x) as (select 2) select w.x from w) d",
             "with z as (select x from t4), y as (with t4 as (select 1 as x) select z.x from z) select x from y",
-            "with z as (select x from t4) select t3.k from t3 join z on z.x in (with t4 as (select 1 as x) select x from t4)",
+            "with z as (select x from t4) select t3.k from t3 join z on z.x in (with t4 as (select 1 as x) select z.x from z)",
+            "with z as (select x from t4) select (with t4 as (select 1 as x) select json_arrayagg(z.x) from z) as j",
+            "with z as (select x from t4) select d.x from (with rollupx as (select 1 as x), t4 as (select 2 as x) select z.x from z) d",
         ] {
             assert!(with_rebound(&query(sql)), "{sql}");
         }
@@ -743,6 +858,9 @@ mod tests {
             "with z as (select p.x from t4 p), y as (with p as (select 1 as x) select x from p) select z.x from z, y",
             "with z as (select p.x from t4 p) select d.x from (select z.x, row_number() over w as n from z window w as (order by z.x)) d",
             "with z as (select p.x from t4 p) select z.x, (select count(*) from t4 group by k with rollup limit 1) as n from z",
+            // A WITH in a subquery that reads no outer WITH query, and one named like a column.
+            "with z as (select x from tu where id = 1) select z.x from z where exists (with q as (select 1) select 1 from q)",
+            "with z as (select p.x from t4 p) select d.x from (with x as (select 1 as k) select z.x from z, x) d",
         ] {
             assert!(!with_rebound(&query(sql)), "{sql}");
         }
