@@ -1433,15 +1433,17 @@ fn json_admits(ty: &Type, json: &Value) -> bool {
 }
 
 /// Whether a text is a value of a date, time, timestamp or UUID kind as Postgres writes one inside
-/// a document (`JsonEncodeDateTime`, in XSD's style): a year of four digits or more, ` BC` after one
-/// before the year 1, the fraction of a second where it is not zero, a UTC offset in hours and
-/// minutes and its seconds where they are not zero, an infinity where the type holds one, and a
-/// UUID in lowercase.
+/// a document: a date or a timestamp in XSD's style (`JsonEncodeDateTime`), with a year of four
+/// digits or more, ` BC` after one before the year 1, the fraction of a second where it is not
+/// zero, a UTC offset in hours and minutes and its seconds where they are not zero, and an infinity
+/// where the type holds one; a time as its type's own text, whose offset is in hours, with its
+/// minutes and its seconds where they are not zero (`12:00:00+00`, `12:00:00-04:56:02`); and a UUID
+/// in lowercase.
 fn written_form(kind: &Kind, text: &str) -> bool {
     static FORMS: std::sync::OnceLock<[regex::Regex; 6]> = std::sync::OnceLock::new();
     let [date, time, time_offset, timestamp, timestamp_offset, uuid] = FORMS.get_or_init(|| {
-        let (date, time, offset) = (r"\d{4,}-\d{2}-\d{2}", r"\d{2}:\d{2}:\d{2}(\.\d+)?", r"[+-]\d{2}:\d{2}(:\d{2})?");
-        [format!("^{date}( BC)?$"), format!("^{time}$"), format!("^{time}{offset}$"), format!("^{date}T{time}( BC)?$"), format!("^{date}T{time}{offset}( BC)?$"), "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$".to_string()].map(|form| regex::Regex::new(&form).expect("a form is a valid expression"))
+        let (date, time, offset, text_offset) = (r"\d{4,}-\d{2}-\d{2}", r"\d{2}:\d{2}:\d{2}(\.\d+)?", r"[+-]\d{2}:\d{2}(:\d{2})?", r"[+-]\d{2}(:\d{2}(:\d{2})?)?");
+        [format!("^{date}( BC)?$"), format!("^{time}$"), format!("^{time}{text_offset}$"), format!("^{date}T{time}( BC)?$"), format!("^{date}T{time}{offset}( BC)?$"), "^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$".to_string()].map(|form| regex::Regex::new(&form).expect("a form is a valid expression"))
     });
     let infinite = matches!(text, "infinity" | "-infinity");
     match kind {
