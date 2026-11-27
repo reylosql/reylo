@@ -3400,11 +3400,20 @@ fn api_privileges_in(text: &str) -> Vec<crate::db::ApiPrivilege> {
     out
 }
 
-/// Whether a text drops pg_cron, matched as [`extensions_in`] matches what it creates.
+/// Whether a text drops pg_cron: a `drop extension` statement that names it among the extensions it drops.
 pub(crate) fn drops_pg_cron(text: &str) -> bool {
-    static DROP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\bdrop\s+extension\s+(?:if\s+exists\s+)?[^;]*\bpg_cron\b"#).expect("a valid pattern"));
-    let uncommented = crate::sql::tokenize(text, Dialect::Postgres).iter().map(|token| token.text.clone()).collect::<Vec<_>>().join(" ");
-    DROP.is_match(&uncommented)
+    use crate::sql::TokenKind;
+    crate::sql::split_statements(text, Dialect::Postgres).iter().any(|s| {
+        let t = &s.tokens;
+        t.len() > 2
+            && t[0].upper() == "DROP"
+            && t[1].upper() == "EXTENSION"
+            && t[2..].iter().any(|k| match k.kind {
+                TokenKind::Word => k.text.eq_ignore_ascii_case("pg_cron"),
+                TokenKind::Quoted => k.text.trim_matches('"') == "pg_cron",
+                _ => false,
+            })
+    })
 }
 
 /// The extensions a text creates.
