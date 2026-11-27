@@ -19,3 +19,28 @@ pub const QUERY: &str = "SELECT concat(version(), ' ', toString(count()), ' ', t
     UNION ALL SELECT cityHash64('y', database = currentDatabase(), if(database = currentDatabase(), '', database), name, toString(`key.names`), toString(`key.types`), toString(`attribute.names`), toString(`attribute.types`)) FROM system.dictionaries
     UNION ALL SELECT cityHash64('s', name, value) FROM system.settings WHERE changed
   )";
+
+#[cfg(test)]
+mod tests {
+    /// Every catalog a query of the engine's reads (`system.…`), the fingerprint reads too, or one
+    /// named here with why it need not.
+    #[test]
+    fn the_schema_fingerprint_reads_everything_the_engine_reads() {
+        const COVERED: &[(&str, &str)] = &[("one", "a constant table of one row")];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut missed = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(&root).unwrap().flatten() {
+            if entry.file_name() == "schema_fingerprint.rs" {
+                continue;
+            }
+            let source = std::fs::read_to_string(entry.path()).unwrap();
+            for (i, _) in source.match_indices("system.") {
+                let catalog: String = source[i + "system.".len()..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                if !catalog.is_empty() && !super::QUERY.contains(&format!("system.{catalog}")) && !COVERED.iter().any(|(c, _)| *c == catalog) {
+                    missed.insert(catalog);
+                }
+            }
+        }
+        assert!(missed.is_empty(), "the engine reads these, which the schema's fingerprint does not: {missed:?}");
+    }
+}
