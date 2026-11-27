@@ -447,12 +447,13 @@ pub fn makeJsonKeyValue(key: &V, value: &V) -> R {
     Ok(j)
 }
 #[allow(non_snake_case)]
-pub fn makeJsonIsPredicate(expr: &V, format: &V, item_type: &V, unique: &V, location: &V) -> R {
+pub fn makeJsonIsPredicate(expr: &V, format: &V, item_type: &V, unique: &V, base_type: &V, location: &V) -> R {
     let j = V::node(t::T_JsonIsPredicate);
     j.set(f::F_expr, expr.clone());
     j.set(f::F_format, format.clone());
     j.set(f::F_item_type, item_type.clone());
     j.set(f::F_unique_keys, unique.clone());
+    j.set(f::F_exprBaseType, base_type.clone());
     j.set(f::F_location, location.clone());
     Ok(j)
 }
@@ -936,6 +937,31 @@ pub fn preprocess_pubobj_list(list: &V, _: &V) -> R {
             }
         }
         previous = obj.get(f::F_pubobjtype).int();
+    }
+    Ok(V::Null)
+}
+
+/// `ALL TABLES` and `ALL SEQUENCES` in a publication's list: each at most once, and the tables an `EXCEPT` names go to its objects.
+pub fn preprocess_pub_all_objtype_list(list: &V, objects: &V, all_tables: &V, all_sequences: &V, _: &V) -> R {
+    if !list.truthy() {
+        return Ok(V::Null);
+    }
+    all_tables.store(V::Int(0));
+    all_sequences.store(V::Int(0));
+    for obj in list.items() {
+        let kind = obj.get(f::F_pubobjtype).int();
+        if kind == c::PUBLICATION_ALL_TABLES {
+            if all_tables.deref().truthy() {
+                return Err("invalid publication object list".to_string());
+            }
+            all_tables.store(V::Int(1));
+            objects.store(list_concat(&objects.deref(), &obj.get(f::F_except_tables))?);
+        } else if kind == c::PUBLICATION_ALL_SEQUENCES {
+            if all_sequences.deref().truthy() {
+                return Err("invalid publication object list".to_string());
+            }
+            all_sequences.store(V::Int(1));
+        }
     }
     Ok(V::Null)
 }
