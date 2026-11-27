@@ -1199,7 +1199,8 @@ export function parseArray(text: string, element: (text: string) => unknown, del
  */
 export function withinDimensions(v: unknown, kind: Kind, column: string, field?: string): unknown {
   if (!kind.endsWith("[]")) {
-    if (isRowKind(kind) && isObject(v)) for (const [name, inner] of rowFields(kind)) if (holdsArray(inner)) withinDimensions(v[name], inner, column, field === undefined ? name : `${field}.${name}`);
+    // Of two fields of one name the row holds the last one's value, and its type shows that field.
+    if (isRowKind(kind) && isObject(v)) for (const [name, inner] of lastOfEach(rowFields(kind))) if (holdsArray(inner)) withinDimensions(v[name], inner, column, field === undefined ? name : `${field}.${name}`);
     return v;
   }
   if (!Array.isArray(v)) return v;
@@ -1236,19 +1237,32 @@ export function withinDimensions(v: unknown, kind: Kind, column: string, field?:
   return v;
 }
 
+const holdsArrayCache = new Map<Kind, boolean>();
 /** Whether a value of `kind` is a Postgres array or holds one in a row value's field: what `withinDimensions` holds to its dimensions. */
 export function holdsArray(kind: Kind): boolean {
-  return kind.endsWith("[]") || (isRowKind(kind) && rowFields(kind).some(([, inner]) => holdsArray(inner)));
+  if (kind.endsWith("[]")) return true;
+  if (!isRowKind(kind)) return false;
+  let holds = holdsArrayCache.get(kind);
+  if (holds === undefined) holdsArrayCache.set(kind, (holds = rowFields(kind).some(([, inner]) => holdsArray(inner))));
+  return holds;
+}
+
+/** Each name's last entry of a row's fields or a statement's columns, which is the one a row object holds. */
+export function lastOfEach<C extends readonly [string, ...unknown[]]>(columns: readonly C[]): C[] {
+  return columns.filter((c, i) => !columns.slice(i + 1).some((later) => later[0] === c[0]));
 }
 
 /** Why a Postgres array is refused: it holds `depth` dimensions, and its type `declared`; `field` names the row value's field that holds it. */
 function tooDeep(column: string, depth: number, declared: number, field?: string): DecodeError {
   // An array built of arrays is too deep only where an array column it collects is.
-  const holds = field === undefined ? "holds" : `holds, in its row value's field ${JSON.stringify(field)},`;
+  if (field !== undefined) {
+    // The field read alone, a column expression, is typed as JSON through to_jsonb: the whole row's to_jsonb holds the field's array, which is held to its dimensions there too.
+    return new DecodeError(`Column "${column}" holds, in its row value's field ${JSON.stringify(field)}, an array of ${depth} dimensions, and its type has ${declared === 1 ? "one" : declared}: Reylo types a Postgres array with the dimensions its type declares, which Postgres doesn't enforce. Select to_jsonb((${column}).${field}) to read that field as JSON, or set allow_nested_arrays: true in .reylo.yaml to type it at any depth.`);
+  }
   return new DecodeError(
     declared === 1
-      ? `Column "${column}" ${holds} an array of ${depth} dimensions, and its type has one: Reylo types a Postgres array column with one dimension, which Postgres doesn't enforce. Select to_jsonb(${column}) to read it as JSON, or set allow_nested_arrays: true in .reylo.yaml to type it at any depth.`
-      : `Column "${column}" ${holds} an array of ${depth} dimensions, and its type has ${declared}: an array column it collects holds more than one dimension, which Postgres doesn't enforce. Collect to_jsonb(<that column>) instead to read it as JSON.`,
+      ? `Column "${column}" holds an array of ${depth} dimensions, and its type has one: Reylo types a Postgres array column with one dimension, which Postgres doesn't enforce. Select to_jsonb(${column}) to read it as JSON, or set allow_nested_arrays: true in .reylo.yaml to type it at any depth.`
+      : `Column "${column}" holds an array of ${depth} dimensions, and its type has ${declared}: an array column it collects holds more than one dimension, which Postgres doesn't enforce. Collect to_jsonb(<that column>) instead to read it as JSON.`,
   );
 }
 
