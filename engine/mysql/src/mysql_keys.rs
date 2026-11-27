@@ -675,20 +675,14 @@ const VIEW_DEPTH: usize = 4;
 /// its own text, in a WITH query in `ctes` it may read, or in a view it reads, `depth` deep. A
 /// WITH query of a RECURSIVE WITH, whose body the scope does not carry, may.
 fn query_varies(q: &Query, ctes: &[Cte], keys: &Keys, depth: usize) -> bool {
-    let text = q.to_string();
-    if calls_nondeterministic(&text) {
+    if calls_nondeterministic(&q.to_string()) {
         return true;
     }
-    let lower = text.to_ascii_lowercase();
-    let read = |name: &str| names(&lower, &name.to_ascii_lowercase());
-    let withs = ctes.iter().filter(|(name, ..)| read(name)).any(|(_, body, sees, _)| depth == 0 || body.is_none_or(|b| query_varies(b, &ctes[..(*sees).min(ctes.len())], keys, depth - 1)));
-    withs || tables_anywhere(q, keys.schema.as_deref()).iter().filter_map(|t| keys.view(t)).any(|view| depth == 0 || query_varies(view, &[], keys, depth - 1))
-}
-
-/// Whether `text` names `name` as a word, both in lower case.
-fn names(text: &str, name: &str) -> bool {
-    let word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
-    text.match_indices(name).any(|(at, _)| text[..at].chars().next_back().is_none_or(|c| !word(c)) && text[at + name.len()..].chars().next().is_none_or(|c| !word(c)))
+    // The names it reads as it parses them, a WITH query's around it among them, since it reads
+    // those as it reads a table.
+    let read = tables_anywhere(q, keys.schema.as_deref());
+    let withs = ctes.iter().filter(|(name, ..)| read.iter().any(|t| crate::mysql_names::may_match(t, name))).any(|(_, body, sees, _)| depth == 0 || body.is_none_or(|b| query_varies(b, &ctes[..(*sees).min(ctes.len())], keys, depth - 1)));
+    withs || read.iter().filter_map(|t| keys.view(t)).any(|view| depth == 0 || query_varies(view, &[], keys, depth - 1))
 }
 
 /// The terms of a condition's top-level `AND`.
