@@ -675,6 +675,9 @@ test("the kinds: a BIGINT is a BigInt, and an integer a temporary table may wide
   assert.deepEqual(typeSchema({ kind: "boolean" }, "mysql"), { type: "boolean" });
   assert.deepEqual(typeSchema(lite("bool"), "sqlite"), { type: "boolean" });
   assert.deepEqual(typeSchema(lite("integer"), "sqlite"), { type: "integer", format: "int64" });
+  // Outside a STRICT table an INTEGER column may hold a REAL, which `.run()` returns as the number it is; a BIGINT one refuses it, since no BigInt holds a fraction.
+  for (const declared of ["INTEGER", "INT", "TINYINT"]) assert.deepEqual(typeSchema({ ...lite("numeric"), label: declared } as EngineType, "sqlite"), { type: "number" }, declared);
+  assert.deepEqual(typeSchema({ ...lite("numeric"), label: "BIGINT" } as EngineType, "sqlite"), { type: "integer", format: "int64" });
   assert.deepEqual(typeSchema(lite("numeric"), "sqlite"), { type: ["number", "string"] });
   for (const kind of ["bool", "int", "float", "int8", "decimal", "text", "date", "timestamp", "timestamptz", "json", "bytes", "unknown"]) assert.notEqual(kindType(kind), "Date", kind);
 });

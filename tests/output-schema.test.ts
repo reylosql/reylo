@@ -295,6 +295,10 @@ test("MySQL: every type's values hold to the output schema, as a column and insi
 
 const SQLITE: readonly Case[] = [
   ["integer", "integer", ["-9007199254740991", "9007199254740991"]],
+  // Outside a STRICT table an INTEGER column keeps a REAL it cannot convert, one with a fraction or
+  // past 64 bits, and stores the text '1.5' as that REAL. Read as the column alone: a document
+  // SQLite builds of it is typed by the declared INTEGER.
+  ["integer holding a REAL", "integer", ["0.5", "'1.5'", "1e20"]],
   ["bigint", "bigint", ["-9223372036854775808", "9223372036854775807"]],
   ["real", "real", ["-1.7976931348623157e308", "5e-324", "-0.0"]],
   ["text", "text", ["''", "'hi'"]],
@@ -315,7 +319,7 @@ test("SQLite: every type's values hold to the output schema, as a column and ins
   const own = new DatabaseSync(join(dir, "app.db"));
   own.exec(tables(SQLITE, "integer primary key"));
   try {
-    const problems = await check(dir, SQLITE, (t, [, column]) => column === "blob" ? [`select c from ${t}`] : [
+    const problems = await check(dir, SQLITE, (t, [name, column]) => column === "blob" || name === "integer holding a REAL" ? [`select c from ${t}`] : [
       `select c, json_object('v', c) as o, json_array(c) as a, json_quote(c) as q from ${t}`,
       `select json_group_array(c) as a, json_group_object(cast(id as text), c) as o from ${t}`,
       ...(column === "integer" ? [`select c as "__proto__", json_object('__proto__', c) as o from ${t}`] : []),
