@@ -3,9 +3,16 @@ compound_loose.sql: many () -> { i: INT(int64 | float(11,52) | text(UTF-8, ill-f
 compound_strict.sql: many () -> { i: INT }
 compound_values.sql: many () -> { i: INT(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes) }
 computed.sql: many () -> { plus: int64, text_of: text(UTF-8, ill-formed), filled: int64, larger: int64 }
+computed_generated.sql: many () -> { plus: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, filled: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes) }
+computed_loose.sql: many () -> { plus: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, negated: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, absolute: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, filled: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes), ifnulled: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes), nulled: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, chosen: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, cased: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, larger: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, remainder: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, cast_back: int64?, len: int64? }
+computed_loose_bigint.sql: many () -> { plus: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, filled: BIGINT, mixed: BIGINT? }
 insert_returning.sql: one () -> { id: INTEGER, i: INT, t: TEXT(UTF-8, ill-formed), a: unknown? }
+loose_aggregates.sql: one () -> { summed: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, most: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, least: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, totalled: float(11,52), counted: int64 }
+loose_json.sql: many () -> { o: json { n: INTEGER(int64 | float(11,52))? }, a: json {"type":"array","items":false,"minItems":2,"prefixItems":[{"type":["number","null"]},{"type":["number","null"]}]}, g: json INTEGER(int64 | float(11,52))?[] }
+loose_parameter.sql: many (n: int64, d: int64) -> { id: INTEGER }
 loose_read.sql: many () -> { id: INTEGER, n: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, r: REAL(float(11,52) | text(UTF-8, ill-formed) | bytes)?, t: TEXT(text(UTF-8, ill-formed) | bytes)?, b: BLOB(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)? }
 loose_rowids.sql: many () -> { a: INTEGER, b: INTEGER, c: INTEGER }
+loose_window.sql: many () -> { most: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, before: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)?, running: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)? }
 no_alias_desc.sql: many () -> { a: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)? }
 no_alias_int.sql: many () -> { a: INT(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes)? }
 no_alias_without_rowid.sql: many () -> { a: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes), b: TEXT(text(UTF-8, ill-formed) | bytes)? }
