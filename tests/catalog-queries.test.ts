@@ -269,12 +269,10 @@ test("every catalog query answers the same rows under a search path that puts a 
           again = ownRows(again);
           expected = ownRows(expected);
         }
-        // The functions query says which names have a user's aggregate, as the hostile ones are.
+        // The functions query says which names have a function of a user's, as the hostile ones are.
         if (kind === "FUNCTIONS_QUERY") {
-          const hostile = new Set(["array_agg", "bool_or", "bool_and", "bit_or", "count"]);
-          assert.ok(again.every((r) => r[4] === hostile.has(r[0] as string)), `${kind} reports another name's aggregate, for ${JSON.stringify(params)}`);
-          again = again.map((r) => r.slice(0, 4));
-          expected = expected.map((r) => r.slice(0, 4));
+          const defined = new Set([...hostile().matchAll(/create (?:function|aggregate) \w+\.(\w+)\(/g)].map((m) => m[1]));
+          expected = expected.map((r) => [...r.slice(0, 4), r[4] === true || defined.has(r[0] as string)]);
         }
         const sorted = (rs: unknown[][]) => rs.map((r) => JSON.stringify(plain(r))).sort();
         assert.deepEqual(sorted(again), sorted(expected), `${kind} answers otherwise under the hostile path, for ${JSON.stringify(params)}`);

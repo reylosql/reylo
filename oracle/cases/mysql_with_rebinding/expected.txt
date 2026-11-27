@@ -1,3 +1,5 @@
+body.sql: many () -> { x: bigint }
+chain.sql: many () -> { x: bigint }
 control.sql: many () -> { x: int }
 derived.sql: many () -> { x: bigint? }
 exists.sql: at_most_one () -> { x: int }

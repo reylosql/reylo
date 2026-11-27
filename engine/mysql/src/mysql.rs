@@ -436,15 +436,9 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
         _ => Proven { flags: raw.columns.iter().map(|c| c.flags & 1 != 0).collect(), ..Proven::default() },
     };
     // The unique keys, columns and views of the tables the query reads, which its cardinality
-    // reads, and whose views' own calls the flags below may miss. Where MySQL reads a WITH query
-    // otherwise where it is read, no unique key is followed ([`crate::mysql_derived::with_rebound`]).
+    // reads, and whose views' own calls the flags below may miss.
     let keys = match &parsed {
-        Some(Statement::Query(q)) if !assigns(q) => catalog(host, q).map(|mut keys| {
-            if crate::mysql_derived::with_rebound(q) {
-                keys.of.clear();
-            }
-            keys
-        }),
+        Some(Statement::Query(q)) if !assigns(q) => catalog(host, q).map(|keys| Keys { rebound: crate::mysql_derived::with_rebound(q), ..keys }),
         _ => None,
     };
     let mut never_null = proven.never_null(&raw.columns);
@@ -2837,6 +2831,9 @@ pub(crate) struct Keys {
     unparsed: Vec<String>,
     /// The schema the views are in, which their statements qualify each name with.
     pub(crate) schema: Option<String>,
+    /// Whether MySQL may read a WITH query of the statement otherwise where it is read
+    /// ([`crate::mysql_derived::with_rebound`]): then no WITH query's rows are followed.
+    pub(crate) rebound: bool,
 }
 
 /// What a value compares as. MySQL compares a string with a number as two doubles, so `'01'`,

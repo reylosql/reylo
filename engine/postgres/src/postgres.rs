@@ -4562,10 +4562,10 @@ fn build_catalog(set_returning: &(HashSet<String>, HashSet<String>), rows: Catal
             if row.get(3).and_then(as_bool).unwrap_or(false) {
                 catalog.labelled.insert(name.to_string());
             }
-            // A host that answers without the fifth column reports no aggregates: every function
-            // is then taken as a user's aggregate, whose value may turn on its rows' order.
+            // A host that answers without the fifth column reports no function's origin: every
+            // function is then taken as a user's, whose value may turn on its rows' order.
             if row.get(4).and_then(as_bool).unwrap_or(true) {
-                catalog.user_aggregates.insert(name.to_string());
+                catalog.user_functions.insert(name.to_string());
             }
             catalog.functions.insert(name.to_string());
         }

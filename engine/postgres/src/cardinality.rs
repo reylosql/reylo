@@ -123,9 +123,10 @@ pub struct Catalog {
     /// Function names with a volatile overload (`provolatile = 'v'`). A volatile call is evaluated
     /// for each row, so `id = random_id()` is no value a key can be pinned to.
     pub volatile: HashSet<String>,
-    /// Function names with an aggregate of a user's or an extension's (`prokind = 'a'`), whose
-    /// value may turn on the order it reads its rows in.
-    pub user_aggregates: HashSet<String>,
+    /// Function names with an overload of a user's or an extension's, whose value the build
+    /// cannot vouch for: an aggregate's may turn on the order it reads its rows in, and so may a
+    /// function's whose body runs one.
+    pub user_functions: HashSet<String>,
     /// Whether the statement compares a value with a bare NULL by `=`, which `transform_null_equals`
     /// reads as `IS NULL`: `id = NULL` then pins no key ([`crate::infer::compares_with_null`]).
     pub null_equals: bool,
@@ -475,8 +476,8 @@ pub const COLUMNS_QUERY: &str = concat!(
 );
 
 /// `$1` is `text[]` of function names: `(proname, has a set-returning overload, has a volatile
-/// overload, has a user's or an extension's `language sql` overload not labelled volatile, has a
-/// user's or an extension's aggregate)`, an
+/// overload, has a user's or an extension's `language sql` overload not labelled volatile, has an
+/// overload of a user's or an extension's)`, an
 /// aggregate volatile where a function it runs is, whatever its own label, which Postgres writes as
 /// immutable for every aggregate. The label of a `language sql` function is only its author's word,
 /// which its body may belie ([`crate::bodies::belied_labels`]).
@@ -486,7 +487,7 @@ pub const FUNCTIONS_QUERY: &str = "SELECT p.proname::pg_catalog.text, pg_catalog
         WHERE a.aggfnoid::pg_catalog.oid OPERATOR(pg_catalog.=) p.oid AND f.provolatile OPERATOR(pg_catalog.=) 'v'::pg_catalog.\"char\")), \
     pg_catalog.bool_or(p.oid OPERATOR(pg_catalog.>=) '16384'::pg_catalog.oid AND p.provolatile OPERATOR(pg_catalog.<>) 'v'::pg_catalog.\"char\" \
       AND EXISTS (SELECT 1 FROM pg_catalog.pg_language l WHERE l.oid OPERATOR(pg_catalog.=) p.prolang AND l.lanname OPERATOR(pg_catalog.=) 'sql'::pg_catalog.name)), \
-    pg_catalog.bool_or(p.oid OPERATOR(pg_catalog.>=) '16384'::pg_catalog.oid AND p.prokind OPERATOR(pg_catalog.=) 'a'::pg_catalog.\"char\") \
+    pg_catalog.bool_or(p.oid OPERATOR(pg_catalog.>=) '16384'::pg_catalog.oid) \
     FROM pg_catalog.pg_proc p WHERE p.proname::pg_catalog.text OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.text[]) GROUP BY p.proname";
 
 /// Every operator some set-returning function implements.
@@ -2818,13 +2819,14 @@ fn stable_expression(from: &From, e: &protobuf::Node, trust: &Trust, catalog: &C
     if mentions_window(e) || mentions(e, "SubLink") || mentions(e, "JsonArrayQueryConstructor") || mentions(e, "JsonArrayAgg") || mentions(e, "JsonObjectAgg") || calls_volatile(e, catalog) {
         return false;
     }
-    // A user's aggregate of any name may turn on the order too, a user's overload of a built-in's
-    // name included: the catalog says which names have one.
+    // A user's function of any name may turn on the order too, an aggregate or one whose body
+    // runs one, a user's overload of a built-in's name included: the catalog says which names
+    // have one.
     fn calls(v: &Value, catalog: &Catalog) -> bool {
         match v {
             Value::Object(map) => map.iter().all(|(key, child)| {
                 let ok = match key.as_str() {
-                    "FuncCall" => last_name(child.get("funcname")).is_some_and(|n| !ORDER_SENSITIVE.contains(&n.as_str()) && !catalog.user_aggregates.contains(&n)),
+                    "FuncCall" => last_name(child.get("funcname")).is_some_and(|n| !ORDER_SENSITIVE.contains(&n.as_str()) && !catalog.user_functions.contains(&n)),
                     _ => true,
                 };
                 ok && calls(child, catalog)
@@ -5027,8 +5029,9 @@ mod tests {
     }
 
     #[test]
-    fn a_users_aggregate_is_no_stable_sort_key() {
-        // A user's aggregate may turn on the order it reads its rows in, whatever its name.
+    fn a_users_function_is_no_stable_sort_key() {
+        // A user's aggregate may turn on the order it reads its rows in, whatever its name, and so
+        // may a function of theirs whose body runs one.
         let sql = "select p.author_id, last_agg(p.id) as l from posts p group by p.author_id order by l, p.author_id";
         let columns: Vec<(String, bool)> = [("author_id", false), ("l", true)].iter().map(|(n, nullable)| (n.to_string(), *nullable)).collect();
         let ordered = |users: bool| {
@@ -5036,7 +5039,7 @@ mod tests {
             c.not_null.insert("posts".into(), ["id", "author_id"].iter().map(|c| c.to_string()).collect());
             c.functions.insert("last_agg".into());
             if users {
-                c.user_aggregates.insert("last_agg".into());
+                c.user_functions.insert("last_agg".into());
             }
             total_order(sql, &Trust::default(), &c, &columns, &[false, false])
         };
