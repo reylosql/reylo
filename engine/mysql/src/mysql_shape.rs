@@ -540,10 +540,10 @@ impl Builder<'_> {
                         // A WITH query hides a table of its name. Only the one named exactly as
                         // the reference names it is surely the one read: a name in another case
                         // may be a table where table names are compared as written.
-                        Some(t) => match self.ctes.iter().rev().find(|c| c.name.eq_ignore_ascii_case(t)) {
-                            Some(cte) if cte.name == *t && !self.rebound.has(t) => Source::Columns(cte.columns.clone()),
-                            Some(_) => Source::Unknown,
-                            None => Source::Catalog(t.clone()),
+                        Some(t) => match crate::mysql_names::with_query(self.ctes.iter().map(|c| c.name.as_str()), t) {
+                            crate::mysql_names::Reads::With(at) if !self.rebound.has(t) => Source::Columns(self.ctes[at].columns.clone()),
+                            crate::mysql_names::Reads::With(_) | crate::mysql_names::Reads::Unknown => Source::Unknown,
+                            crate::mysql_names::Reads::Table => Source::Catalog(t.clone()),
                         },
                         None => Source::Unknown,
                     };

@@ -31,6 +31,8 @@ create table cw (id int, v int);
 create table DW (id int, v int);
 create table KX (id int primary key);
 create table kx (kid int, u int unique);
+-- A view of `KN` gives no key to `kn` named with this schema, which the view's reading leaves unfetched.
+create view knv as select id, v from KN where id = 1;
 create table lo (id int primary key, v int);
 create table LI (id int primary key, v int);
 drop database if exists REYLO_ORACLE_MYSQL_NAME_CASE;

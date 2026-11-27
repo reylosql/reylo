@@ -761,6 +761,8 @@ mod tests {
             "select a.c from t A left join t a on a.id = A.id + 100 where A.id > 0",
             "select d.w from (select c as w from t) D left join (select c as w from t) d on d.w = D.w + 100 where D.w is not null",
             "select c.id from (select 7 x) C left join t c on c.id = C.x + 100 where c.x > 0",
+            // A server that folds names folds `Ä` to `ä` too.
+            "select ä.id from (select 7 as x) Ä left join t ä on false where ä.x > 0",
         ] {
             assert_eq!(reduced(sql), None, "{sql}");
         }

@@ -271,8 +271,8 @@ impl<'a> From<'a> {
             Some(i) if self.enclosed && self.items[i].alias != q.value => Placed::Unknown,
             Some(i) if !self.items[i].renamed => Placed::Item(i, c.value.to_ascii_lowercase()),
             Some(_) => Placed::Unknown,
-            // Two items it matches without regard to case: either may be the one it reads.
-            None if self.items.iter().any(|it| it.alias.eq_ignore_ascii_case(&q.value)) => Placed::Unknown,
+            // Two items it may match: either may be the one it reads.
+            None if self.items.iter().any(|it| crate::mysql_names::may_match(&it.alias, &q.value)) => Placed::Unknown,
             None => Placed::Outside,
         };
         match parts {
@@ -645,12 +645,11 @@ fn output_class(q: &Query, outer: &[Cte], enclosed: bool, keys: &Keys, name: &st
 /// (one column each). `columns` is a column list that renames the query's columns; `outer` are the
 /// WITH queries it sees ([`ctes_of`]), so that none of their names is read as a table. Empty where
 /// any side gives none.
-pub(crate) fn output_origins(q: &Query, outer: &[Cte], columns: &[String], name: &str) -> Vec<(String, String)> {
+/// `enclosed` where the query sees the FROM items of an enclosing query ([`From::enclosed`]).
+pub(crate) fn output_origins(q: &Query, outer: &[Cte], enclosed: bool, columns: &[String], name: &str) -> Vec<(String, String)> {
     let keys = Keys::default();
-    // Read as a statement's own query is: the callers do not say whether it sees an enclosing
-    // query's FROM items.
-    let Some(inner) = inner_name(name, columns, || output_names(q, outer, false, &keys)) else { return Vec::new() };
-    body_origins(&q.body, &ctes_of(q, outer), false, &keys, &inner).unwrap_or_default()
+    let Some(inner) = inner_name(name, columns, || output_names(q, outer, enclosed, &keys)) else { return Vec::new() };
+    body_origins(&q.body, &ctes_of(q, outer), enclosed, &keys, &inner).unwrap_or_default()
 }
 
 fn body_origins<'a>(body: &'a SetExpr, ctes: &[Cte<'a>], enclosed: bool, keys: &'a Keys, name: &str) -> Option<Vec<(String, String)>> {

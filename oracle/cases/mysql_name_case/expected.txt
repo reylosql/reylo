@@ -4,6 +4,7 @@ alias_tested.sql: many () -> { ac: int? }
 compared_alias.sql: many (v: varchar) -> { id: int }
 compared_derived.sql: many (v: varchar) -> { x: enum }
 compared_lateral.sql: many (v: varchar) -> { id: int }
+compared_lateral_derived.sql: many (v: varchar) -> { x: enum }
 compared_nested_with.sql: many (v: varchar) -> { id: int }
 compared_wildcard.sql: many (v: varchar) -> { id: int }
 compared_with_names.sql: many (v: varchar) -> { id: int }
@@ -15,6 +16,7 @@ json_table_labels.sql: many () -> { x: enum? }
 key_keyless_lower.sql: many () -> { v: int? }
 key_keyless_lower_last.sql: many () -> { v: int? }
 key_keyless_upper.sql: many () -> { v: int? }
+key_unasked_schema.sql: many () -> { v: int? }
 lateral_inner_lower.sql: many () -> { v: int? }
 lateral_inner_upper.sql: many () -> { v: int? }
 lateral_labels.sql: many () -> { x: enum }

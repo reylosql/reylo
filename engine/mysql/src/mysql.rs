@@ -89,10 +89,11 @@ const VIEW_DEFINITIONS_QUERY: &str = "select v.table_name, v.view_definition, v.
 const TABLE_COLUMNS_QUERY: &str = "select c.table_name, c.column_name from information_schema.columns c \
     where c.table_schema = database() and find_in_set(c.table_name, ?) order by c.table_name, c.ordinal_position";
 
-/// One row per enforced CHECK of the named tables of the current database: the table, and the
-/// CHECK as `information_schema` prints it ([`check_clause`]). `?` is the comma-joined table
-/// names. A server before 8.0.16 has neither table, and its error is no CHECK.
-const CHECKS_QUERY: &str = "select tc.table_name, cc.check_clause from information_schema.table_constraints tc \
+/// One row per enforced CHECK of the named tables of the current database: the table, named as a
+/// column's origin in the prepare names it ([`crate::mysql_params::TYPES_QUERY`]), and the CHECK as
+/// `information_schema` prints it ([`check_clause`]). `?` is the comma-joined table names. A server
+/// before 8.0.16 has neither table, and its error is no CHECK.
+const CHECKS_QUERY: &str = "select if(@@lower_case_table_names = 2, lower(tc.table_name), tc.table_name), cc.check_clause from information_schema.table_constraints tc \
     join information_schema.check_constraints cc on cc.constraint_schema = tc.constraint_schema and cc.constraint_name = tc.constraint_name \
     where tc.table_schema = database() and tc.constraint_type = 'CHECK' and tc.enforced = 'YES' and find_in_set(tc.table_name, ?) \
     order by tc.table_name, tc.constraint_name";
@@ -1311,10 +1312,10 @@ impl Owners<'_> {
                     // A WITH query hides a table of its name; only one named exactly as the
                     // reference names it is surely the one read.
                     let known = match name.0.as_slice() {
-                        [ast::ObjectNamePart::Identifier(t)] if alias.as_ref().is_none_or(|a| a.columns.is_empty()) => match self.ctes.iter().rev().find(|(cte, _)| cte.eq_ignore_ascii_case(&t.value)) {
-                            Some((cte, columns)) if *cte == t.value => Some(columns.clone()),
-                            Some(_) => None,
-                            None => match self.columns.get(&t.value) {
+                        [ast::ObjectNamePart::Identifier(t)] if alias.as_ref().is_none_or(|a| a.columns.is_empty()) => match crate::mysql_names::with_query(self.ctes.iter().map(|(cte, _)| cte.as_str()), &t.value) {
+                            crate::mysql_names::Reads::With(at) => Some(self.ctes[at].1.clone()),
+                            crate::mysql_names::Reads::Unknown => None,
+                            crate::mysql_names::Reads::Table => match self.columns.get(&t.value) {
                                 Some(columns) => Some(columns.clone()),
                                 None => {
                                     self.wanted.push(t.value.clone());
@@ -2836,6 +2837,8 @@ pub(crate) struct Keys {
     /// The WITH queries of the statement MySQL may read otherwise where they are read
     /// ([`crate::mysql_derived::rebound`]), whose rows are not followed.
     pub(crate) rebound: crate::mysql_derived::Rebound,
+    /// Every name the catalog was asked for, as written ([`Keys::name`]).
+    asked: HashSet<String>,
 }
 
 /// What a value compares as. MySQL compares a string with a number as two doubles, so `'01'`,
@@ -3161,6 +3164,7 @@ fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
         }
         names = next;
     }
+    keys.asked = seen;
     Some(keys)
 }
 
@@ -3205,13 +3209,11 @@ impl Keys {
     /// where it tells them apart (0) only the exact name comes back, and `Users` never takes the
     /// keys of `users`. It is read off `columns`, which holds every table and view fetched, keyless
     /// ones too: `of` and `views` leave some out, and a name alone there in another case may be
-    /// another table's.
+    /// another table's. Only a name the catalog was asked for has one, and only one it was not also
+    /// asked for itself: a row under a name never asked came back for this one, where a name asked
+    /// beside it, or never asked at all, may be another table that keeps case.
     fn name(&self, table: &str) -> Option<&str> {
-        let mut same = self.columns.keys().filter(|name| name.eq_ignore_ascii_case(table));
-        match (same.next(), same.next()) {
-            (Some(name), None) => Some(name),
-            _ => None,
-        }
+        crate::mysql_names::answered(self.columns.keys().map(String::as_str), |name| self.asked.contains(name), table)
     }
 
     /// The entry of `map` under the name the statement gives, else under the server's ([`Keys::name`]).
@@ -3824,33 +3826,42 @@ mod tests {
     #[test]
     fn a_table_takes_the_keys_the_server_holds_under_its_name() {
         let row = |t: &str, c: &str| vec![json!(t), json!("PRIMARY"), json!(c), json!("int")];
-        // The catalog answers with the columns of every table it holds, keyless ones too.
-        let catalog = |rows: Vec<Vec<Value>>, tables: &[&str]| {
+        // The catalog answers with the columns of every table it holds, keyless ones too, for the
+        // names it was asked.
+        let catalog = |rows: Vec<Vec<Value>>, tables: &[&str], asked: &[&str]| {
             let mut keys = keys_of(rows);
             for table in tables {
                 keys.columns.insert(table.to_string(), vec![("id".to_string(), Class::Number), ("other".to_string(), Class::Number)]);
             }
+            keys.asked = asked.iter().map(|a| a.to_string()).collect();
             keys
         };
         // The server holds `Users` and `users` for two tables (lower_case_table_names 0) and
         // answers with the one named; where it holds them for one it answers with its own name.
-        let exact = catalog(vec![row("Users", "id")], &["Users"]);
-        assert_eq!(exact.keys("Users"), Some(&vec![vec!["id".to_string()]]));
-        assert_eq!(exact.keys("users"), Some(&vec![vec!["id".to_string()]]));
-        let both = catalog(vec![row("Users", "id"), row("users", "other")], &["Users", "users"]);
+        let folded = catalog(vec![row("Users", "id")], &["Users"], &["users"]);
+        assert_eq!(folded.keys("Users"), Some(&vec![vec!["id".to_string()]]));
+        assert_eq!(folded.keys("users"), Some(&vec![vec!["id".to_string()]]));
+        let both = catalog(vec![row("Users", "id"), row("users", "other")], &["Users", "users"], &["Users", "users"]);
         assert_eq!(both.keys("users"), Some(&vec![vec!["other".to_string()]]));
         assert_eq!(both.keys("Users"), Some(&vec![vec!["id".to_string()]]));
         assert!(both.keys("USERS").is_none());
         // A table with no key beside one that differs from it in case alone takes none of its keys,
         // and a table beside a view whose name differs from its in case alone is no view.
-        let mut keyless = catalog(vec![row("Users", "id")], &["Users", "users", "V", "v"]);
+        let mut keyless = catalog(vec![row("Users", "id")], &["Users", "users", "V", "v"], &["Users", "users", "V", "v"]);
         assert!(keyless.keys("users").is_none());
         let Some(Statement::Query(view)) = parse(&SessionDialect::default(), "select id, other from Users where id = 1").unwrap().pop() else { panic!("not a query") };
-        keyless.views.insert("V".to_string(), *view);
+        keyless.views.insert("V".to_string(), *view.clone());
         assert!(keyless.view("V").is_some());
         assert!(keyless.view("v").is_none());
-        keyless.columns.remove("v");
-        assert!(keyless.view("v").is_some());
+        // A view asked under another case than the server's own is that view.
+        let mut folded_view = catalog(Vec::new(), &["V"], &["v"]);
+        folded_view.views.insert("V".to_string(), *view);
+        assert!(folded_view.view("v").is_some());
+        // A name the catalog was never asked for, as a table a view's schema qualifies, takes no
+        // keys of a table it was asked for under another case: the server that keeps case holds
+        // two.
+        let unasked = catalog(vec![row("K", "id")], &["K"], &["K"]);
+        assert!(unasked.keys("k").is_none());
     }
 
     #[test]
