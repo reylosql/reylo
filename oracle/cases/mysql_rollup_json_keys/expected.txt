@@ -2,6 +2,7 @@ aggregate_text.sql: many () -> { o: json { count(: varchar(≤20)? }?, n: bigint
 alias_in_key.sql: many () -> { o: json { t: varchar(≤20)? }?, p: json { t: varchar(≤20)? }?, n: bigint }
 alias_leading_space.sql: many () -> { o: json { k: { t: varchar(≤20)? }? }?, x: json?, n: bigint }
 alias_letter_case.sql: many () -> { o: json { k: { t: varchar(≤20)? }? }?, X: json { t: varchar(≤20)? }?, n: bigint }
+alias_nul.sql: many () -> { o: json { k: { t: varchar(≤20)? }? }?, x: json?, n: bigint }
 alias_past_ascii.sql: many () -> { É: json { t: varchar(≤20)? }?, n: bigint }
 coalesce.sql: many () -> { o: json?, n: bigint }
 correlated.sql: many () -> { o: json { k: { t: varchar(≤20)? }? }?, n: bigint }

@@ -127,10 +127,15 @@ fn names_output(item: &Expr, projection: &[SelectItem]) -> bool {
 
 /// Whether a GROUP BY item is surely a column: one named with its table, or a position of the
 /// select list's that is one, and each member of a ROLLUP alike. A bare name may be an alias of
-/// another item, as MySQL drops an alias's leading spaces, folds the letter case of names past
-/// ASCII and names an item with no alias by its text: one is a column only where it is unquoted
-/// and ASCII, and no other item's alias may be it.
+/// another item, as MySQL drops an alias's leading spaces, ends it at a NUL, folds the letter case
+/// of names past ASCII and names an item with no alias by its text: one is a column only where it
+/// is unquoted and ASCII, and every other item's alias is a plain name, letters, digits, `_` and
+/// `$` alone, that is not it.
 fn names_column(item: &Expr, projection: &[SelectItem]) -> bool {
+    fn may_name(alias: &str, name: &str) -> bool {
+        let alias = alias.trim();
+        !alias.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$') || alias.eq_ignore_ascii_case(name)
+    }
     fn column(e: &Expr) -> bool {
         match e {
             Expr::Nested(inner) => column(inner),
@@ -142,7 +147,7 @@ fn names_column(item: &Expr, projection: &[SelectItem]) -> bool {
         Expr::Nested(inner) => names_column(inner, projection),
         Expr::Rollup(sets) | Expr::Cube(sets) | Expr::GroupingSets(sets) => sets.iter().flatten().all(|k| names_column(k, projection)),
         Expr::Identifier(name) if name.quote_style.is_none() && name.value.is_ascii() => !projection.iter().any(|i| match i {
-            SelectItem::ExprWithAlias { expr, alias } => !column(expr) && (!alias.value.is_ascii() || alias.value.trim().eq_ignore_ascii_case(&name.value)),
+            SelectItem::ExprWithAlias { expr, alias } => !column(expr) && may_name(&alias.value, &name.value),
             SelectItem::UnnamedExpr(expr) => !column(expr) && expr.to_string().eq_ignore_ascii_case(&name.value),
             _ => false,
         }),
