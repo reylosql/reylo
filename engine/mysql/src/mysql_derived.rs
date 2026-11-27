@@ -462,9 +462,30 @@ fn expr_queries<'a>(e: &'a Expr, out: &mut Vec<&'a Query>) -> Option<()> {
     }
 }
 
-/// Whether a text, outside the walk, may hold a WITH: the word, but in a ROLLUP's `WITH ROLLUP`.
+/// Whether a text, outside the walk, may hold a WITH: the word outside quotes, but in a ROLLUP's
+/// `WITH ROLLUP`. A string or a quoted name holds no keyword, and where one holds a backslash,
+/// which the session's mode decides the meaning of, the text counts as holding a WITH.
 fn with_in(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
+    let mut bare = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !matches!(c, '\'' | '"' | '`') {
+            bare.push(c);
+            continue;
+        }
+        loop {
+            match chars.next() {
+                None | Some('\\') => return true,
+                Some(q) if q == c && chars.peek() == Some(&c) => {
+                    chars.next();
+                }
+                Some(q) if q == c => break,
+                Some(_) => {}
+            }
+        }
+        bare.push(' ');
+    }
+    let lower = bare.to_ascii_lowercase();
     let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
     lower.match_indices("with").any(|(i, _)| {
         if word(lower[..i].chars().next_back()) || word(lower[i + 4..].chars().next()) {
@@ -928,6 +949,13 @@ mod tests {
     }
 
     #[test]
+    fn a_with_outside_quotes_is_a_with() {
+        assert!(with_in("x in (with t as (select 1) select 1)") && with_in("WITH t AS (SELECT 1)"));
+        assert!(!with_in("x like 'with'") && !with_in("`with` = 1") && !with_in("'it''s with'") && !with_in("k with rollup"));
+        assert!(with_in("'a\\' with t as (select 1)") && with_in("'unterminated with"));
+    }
+
+    #[test]
     fn only_the_with_queries_a_nested_with_reads_again_are_rebound() {
         let sql = "with o as (select 1 as x), z as (select x from tu) select o.x from o where exists (with tu as (select 1 as x) select 1 from z)";
         assert_eq!(rebound(&query(sql)), Rebound::Named(["z".to_string()].into_iter().collect()));
@@ -967,6 +995,7 @@ mod tests {
             // A literal in an ORDER BY, a WITH in a subquery that reads no outer WITH query, and
             // one named like a column.
             "with z as (select x from tu where id = 1) select z.x from z order by concat(z.x, 'with é')",
+            "with o as (select 1 as x) select x from o order by x like 'with', `with` = 'it''s with'",
             "with z as (select x from tu where id = 1) select z.x from z where exists (with q as (select 1) select 1 from q)",
             "with z as (select p.x from t4 p) select d.x from (with x as (select 1 as k) select z.x from z, x) d",
         ] {
