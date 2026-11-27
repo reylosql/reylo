@@ -476,6 +476,11 @@ fn tables(t: &Tree) -> Tables {
             }
         }
         fn sel(&mut self, s: &Sel) {
+            for s in s.arms() {
+                self.arm(s);
+            }
+        }
+        fn arm(&mut self, s: &Sel) {
             for c in &s.columns {
                 self.node(&c.expr);
             }
@@ -493,9 +498,6 @@ fn tables(t: &Tree) -> Tables {
             }
             for n in s.rows.iter().flatten().chain(&s.where_).chain(&s.group_by).chain(&s.having).chain(&s.order_by).chain(&s.limit).chain(&s.offset) {
                 self.node(n);
-            }
-            if let Some(prior) = &s.prior {
-                self.sel(prior);
             }
         }
     }
@@ -579,6 +581,11 @@ fn constant_keys(sql: &str, lexed: &Lexed, t: &Tree) -> Vec<crate::api::Diagnost
             }
         }
         fn sel(&mut self, s: &Sel) {
+            for s in s.arms() {
+                self.arm(s);
+            }
+        }
+        fn arm(&mut self, s: &Sel) {
             self.select_keys(s);
             for c in &s.columns {
                 self.node(&c.expr);
@@ -593,9 +600,6 @@ fn constant_keys(sql: &str, lexed: &Lexed, t: &Tree) -> Vec<crate::api::Diagnost
             }
             for n in s.rows.iter().flatten().chain(&s.where_).chain(&s.group_by).chain(&s.having).chain(&s.order_by).chain(&s.limit).chain(&s.offset) {
                 self.node(n);
-            }
-            if let Some(prior) = &s.prior {
-                self.sel(prior);
             }
         }
     }
@@ -2655,6 +2659,12 @@ impl Analyzer<'_> {
         } else {
             targets
         };
+        for sel in sel.arms() {
+            self.walk_arm(sel, scope, targets, found);
+        }
+    }
+
+    fn walk_arm(&self, sel: &Sel, scope: &ScopeStack, targets: &[Option<Fact>], found: &mut Vec<(String, Fact)>) {
         let mut inner = scope.clone();
         inner.push(&sel.from);
         for (i, e) in sel.columns.iter().map(|c| &c.expr).enumerate().chain(sel.rows.iter().flat_map(|row| row.iter().enumerate())) {
@@ -2698,9 +2708,6 @@ impl Analyzer<'_> {
         }
         for l in sel.limit.iter().chain(sel.offset.iter()) {
             self.walk(l, Ctx::Typed(Some(Fact::new("integer", true))), &inner, found);
-        }
-        if let Some(prior) = &sel.prior {
-            self.walk_select(prior, scope, targets, found);
         }
     }
 
@@ -3094,18 +3101,25 @@ impl Analyzer<'_> {
         if !sel.values && self.one_before_limit(sel).is_ok() {
             return Ok(());
         }
+        if sel.prior.is_none() {
+            return self.arm_at_most_one(sel);
+        }
         // An INTERSECT returns only rows both sides return, and an EXCEPT only rows of its left
         // side (`prior`, the arms before this one): at most one row when a side it draws every
-        // row from is.
-        if let Some(prior) = &sel.prior {
-            let drawn = match sel.op.as_deref() {
-                Some("intersect") => self.at_most_one(prior).is_ok() || self.arm_at_most_one(sel).is_ok(),
-                Some("except") => self.at_most_one(prior).is_ok(),
-                _ => false,
-            };
-            return if drawn { Ok(()) } else { Err("a set operation (UNION, INTERSECT, EXCEPT) returns any number of rows".into()) };
+        // row from is. The arms are read from the last, one after another, each left side proved
+        // as any SELECT is.
+        let mut arm = sel;
+        while let Some(prior) = arm.prior.as_deref() {
+            match arm.op.as_deref() {
+                Some("intersect") if self.arm_at_most_one(arm).is_ok() => return Ok(()),
+                Some("intersect" | "except") => arm = prior,
+                _ => break,
+            }
+            if arm.limit.as_ref().and_then(integer).is_some_and(|n| (0..=1).contains(&n)) || arm.prior.is_none() && (!arm.values && self.one_before_limit(arm).is_ok() || self.arm_at_most_one(arm).is_ok()) {
+                return Ok(());
+            }
         }
-        self.arm_at_most_one(sel)
+        Err("a set operation (UNION, INTERSECT, EXCEPT) returns any number of rows".into())
     }
 
     /// The proof for one SELECT arm, its set operation aside: the closure of [`Self::determined`],
@@ -3256,8 +3270,8 @@ impl Analyzer<'_> {
     }
 
     fn read_output_keys(&self, sel: &Sel) -> Vec<Vec<i64>> {
-        if let Some(prior) = &sel.prior {
-            return self.compound_keys(sel, prior);
+        if sel.prior.is_some() {
+            return self.compound_keys(sel);
         }
         if sel.values {
             return Vec::new();
@@ -3318,37 +3332,41 @@ impl Analyzer<'_> {
     }
 
     /// The keys of a compound SELECT's rows, `sel` its last arm and `prior` the arms before it.
-    /// INTERSECT and EXCEPT return only rows of their left side, so they keep its keys. Any operator
-    /// but UNION ALL returns distinct rows, so the whole row is a key, where each column is a
-    /// column on every arm, of one affinity and one collation, which the comparison that told the
-    /// rows apart and the one that reads them agree on.
-    fn compound_keys(&self, sel: &Sel, prior: &Sel) -> Vec<Vec<i64>> {
-        let op = sel.op.as_deref().unwrap_or("");
+    /// INTERSECT and EXCEPT return only rows of their left side, so they keep its keys, which are
+    /// read down the arms one after another. Any operator but UNION ALL returns distinct rows, so the
+    /// whole row is a key, where each column is a column on every arm, of one affinity and one
+    /// collation, which the comparison that told the rows apart and the one that reads them agree on.
+    fn compound_keys(&self, sel: &Sel) -> Vec<Vec<i64>> {
+        // The whole row's key of `sel` and of each left side whose keys it keeps, the last first.
+        let mut rows = Vec::new();
         let mut keys = Vec::new();
-        if op == "intersect" || op == "except" {
-            keys.extend(self.output_keys(prior));
-        }
-        if op != "union all" {
-            let mut arms = vec![sel];
-            let mut at = Some(prior);
-            while let Some(arm) = at {
-                arms.push(arm);
-                at = arm.prior.as_deref();
+        for top in sel.arms() {
+            if top.prior.is_none() {
+                keys = self.output_keys(top);
+                break;
             }
-            let width = sel.columns.len();
-            let alike = width > 0
-                && arms.iter().all(|arm| !arm.values && arm.columns.len() == width)
-                && (0..width).all(|i| {
-                    let first = &sel.columns[i].expr;
-                    first.op == "column" && arms.iter().all(|arm| {
-                        let e = &arm.columns[i].expr;
-                        e.op == "column" && e.aff == first.aff && e.coll.as_deref().unwrap_or("BINARY").eq_ignore_ascii_case(first.coll.as_deref().unwrap_or("BINARY"))
-                    })
-                });
-            if alike {
-                keys.push((0..width as i64).collect());
+            let op = top.op.as_deref().unwrap_or("");
+            if op != "union all" {
+                let arms: Vec<&Sel> = top.arms().collect();
+                let width = top.columns.len();
+                let alike = width > 0
+                    && arms.iter().all(|arm| !arm.values && arm.columns.len() == width)
+                    && (0..width).all(|i| {
+                        let first = &top.columns[i].expr;
+                        first.op == "column" && arms.iter().all(|arm| {
+                            let e = &arm.columns[i].expr;
+                            e.op == "column" && e.aff == first.aff && e.coll.as_deref().unwrap_or("BINARY").eq_ignore_ascii_case(first.coll.as_deref().unwrap_or("BINARY"))
+                        })
+                    });
+                if alike {
+                    rows.push((0..width as i64).collect());
+                }
+            }
+            if op != "intersect" && op != "except" {
+                break;
             }
         }
+        keys.extend(rows.into_iter().rev());
         keys
     }
 
@@ -4092,6 +4110,26 @@ mod tests {
         let views: Vec<String> = std::iter::once("create view v0 as select 1 as a".to_string()).chain((1..1_000).map(|i| format!("create view v{i} as select * from v{}", i - 1))).collect();
         assert!(small("select a from v998".to_string(), &views).diagnostics.is_empty());
         assert_eq!(refused(&small("select a from v999".to_string(), &views)), ["VIEWs and/or subqueries nested too deep"]);
+    }
+
+    #[test]
+    fn a_compound_s_arms_stand_side_by_side_so_a_subquery_nests_as_deep_in_any_of_them() {
+        // SQLite walks a compound's arms one after another, and reads the deepest chain of views
+        // it accepts in any of them; the engine's bound counts a SELECT inside another, not an
+        // arm beside one, so a chain of WITH queries that are each a compound, reading the one
+        // before in the first arm, is held to the bound of the plain chain.
+        let views: Vec<String> = std::iter::once("create view v0 as select 1 as a".to_string()).chain((1..1_000).map(|i| format!("create view v{i} as select * from v{}", i - 1))).collect();
+        for sql in ["select a from v998 union all select 2", "select 2 as a union all select a from v998", "select 2 as a union all select a from v998 union all select 3"] {
+            let a = analyze_ddl(sql, &views, &Extras::default()).analysis;
+            assert!(a.diagnostics.is_empty(), "{sql}: {:?}", a.diagnostics);
+            assert_eq!((a.cardinality, col(&a, "a")), (Cardinality::Many, ("integer".to_string(), false)), "{sql}");
+        }
+        let with = |n: usize| (1..n).fold("with c0 as (select 1 as a)".to_string(), |q, i| format!("{q}, c{i} as (select a from c{} intersect select 1 except select 2)", i - 1));
+        let at = analyze_ddl(&format!("{} select a from c998", with(999)), &[], &Extras::default()).analysis;
+        assert!(at.diagnostics.is_empty(), "{:?}", at.diagnostics);
+        assert_eq!((at.cardinality, col(&at, "a")), (Cardinality::AtMostOne, ("integer".to_string(), false)));
+        let past = analyze_ddl(&format!("{} select a from c999", with(1_000)), &[], &Extras::default()).analysis;
+        assert_eq!(past.diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>(), ["VIEWs and/or subqueries nested too deep"]);
     }
 
     fn col(a: &Analysis, name: &str) -> (String, bool) {

@@ -333,22 +333,20 @@ static void expr(sqlite3_str *s, Expr *p, Select *pSel){
   closeObj(s);
 }
 
-static void selectJson(sqlite3_str *s, Select *pTop){
-  Select *p = pTop;
+/* A multi-row VALUES is a chain of one-row SELECTs under UNION ALL, the last row on top. Its
+** first row stands for it here, with the rows after it in "rows", so a list of any length nests
+** nothing; an ORDER BY or a LIMIT is on the top row, as on any compound. */
+static Select *firstRow(Select *p){
+  while( (p->selFlags & SF_Values) && p->op==TK_ALL && p->pPrior && (p->pPrior->selFlags & SF_Values) ) p = p->pPrior;
+  return p;
+}
+
+/* One arm of a SELECT, as an object: its members, and "op", the set operator between it and the
+** arm before it, which it returns. */
+static Select *armJson(sqlite3_str *s, Select *pTop){
+  Select *p = firstRow(pTop), *q;
   int i, nMore = 0;
-  if( p==0 ){ sqlite3_str_appendall(s, "null"); return; }
-  /* SQLite reads each view and each WITH query a statement reads as a subquery of its own, and
-  ** holds a chain of views to SQLITE_LIMIT_EXPR_DEPTH (1,000) nested SELECTs but a chain of WITH
-  ** queries, each reading the one before, to none. The walker holds every SELECT it writes to
-  ** that bound, the statement's own counted, so the engine reads no tree of SELECTs deeper than a
-  ** chain of views makes (core/src/stack.rs), and the hook refuses the statement as SQLite refuses
-  ** the views. */
-  if( gDepth>=sqlite3_limit(gDb, SQLITE_LIMIT_EXPR_DEPTH, -1) ){ gTooDeep = 1; sqlite3_str_appendall(s, "null"); return; }
-  gDepth++;
-  /* A multi-row VALUES is a chain of one-row SELECTs under UNION ALL, the last row on top. Its
-  ** first row stands for it here, with the rows after it in "rows", so a list of any length nests
-  ** nothing; an ORDER BY or a LIMIT is on the top row, as on any compound. */
-  while( (p->selFlags & SF_Values) && p->op==TK_ALL && p->pPrior && (p->pPrior->selFlags & SF_Values) ){ p = p->pPrior; nMore++; }
+  for(q=pTop; q!=p; q=q->pPrior) nMore++;
   sqlite3_str_appendchar(s, 1, '{');
   key(s, "columns"); sqlite3_str_appendchar(s, 1, '[');
   for(i=0; p->pEList && i<p->pEList->nExpr; i++){
@@ -362,7 +360,6 @@ static void selectJson(sqlite3_str *s, Select *pTop){
   closeArr(s); sqlite3_str_appendchar(s, 1, ',');
   if( nMore ){
     Select **apRow = sqlite3_malloc64(sizeof(Select*)*(sqlite3_uint64)nMore);
-    Select *q;
     key(s, "rows"); sqlite3_str_appendchar(s, 1, '[');
     for(i=nMore, q=pTop; apRow && i>0; q=q->pPrior) apRow[--i] = q;
     for(i=0; apRow && i<nMore; i++){ exprList(s, apRow[i]->pEList, apRow[i]); sqlite3_str_appendchar(s, 1, ','); }
@@ -408,11 +405,34 @@ static void selectJson(sqlite3_str *s, Select *pTop){
   kv_bool(s, "aggregate", (p->selFlags & SF_Aggregate)!=0);
   kv_bool(s, "values", (p->selFlags & SF_Values)!=0);
   kv_bool(s, "window", p->pWin!=0);
-  if( p->pPrior ){
-    kv_str(s, "op", p->op==TK_ALL ? "union all" : p->op==TK_UNION ? "union" : p->op==TK_INTERSECT ? "intersect" : "except");
-    key(s, "prior"); selectJson(s, p->pPrior); sqlite3_str_appendchar(s, 1, ',');
-  }
+  if( p->pPrior ) kv_str(s, "op", p->op==TK_ALL ? "union all" : p->op==TK_UNION ? "union" : p->op==TK_INTERSECT ? "intersect" : "except");
   closeObj(s);
+  return p->pPrior;
+}
+
+static void selectJson(sqlite3_str *s, Select *pTop){
+  Select *pArm;
+  int compound;
+  if( pTop==0 ){ sqlite3_str_appendall(s, "null"); return; }
+  /* SQLite reads each view and each WITH query a statement reads as a subquery of its own, and
+  ** holds a chain of views to SQLITE_LIMIT_EXPR_DEPTH (1,000) nested SELECTs but a chain of WITH
+  ** queries, each reading the one before, to none. The walker holds every SELECT it writes to
+  ** that bound, the statement's own counted, so the engine reads no tree of SELECTs deeper than a
+  ** chain of views makes (core/src/stack.rs), and the hook refuses the statement as SQLite refuses
+  ** the views. */
+  if( gDepth>=sqlite3_limit(gDb, SQLITE_LIMIT_EXPR_DEPTH, -1) ){ gTooDeep = 1; sqlite3_str_appendall(s, "null"); return; }
+  gDepth++;
+  /* A compound's arms are chained through pPrior, the last on top, but stand side by side, as
+  ** SQLite's own walk takes them (sqlite3WalkSelect): a compound is the list of its arms, the last
+  ** first, each at the compound's depth, so the bound counts a subquery the same in whichever arm
+  ** reads it, and the tree nests no deeper for it. */
+  compound = firstRow(pTop)->pPrior!=0;
+  if( compound ) sqlite3_str_appendchar(s, 1, '[');
+  for(pArm=pTop; pArm; ){
+    pArm = armJson(s, pArm);
+    if( compound ) sqlite3_str_appendchar(s, 1, ',');
+  }
+  if( compound ) closeArr(s);
   gDepth--;
 }
 
@@ -1163,7 +1183,7 @@ static char *missingSchema(const char *zSql, const char *zMsg, int *piOfst, int 
 /* The version of the tree's format, reylo_sqlite_analyze's first member: TREE_VERSION in
 ** src/sqlite_tree.rs, which refuses a tree of another. A change to what either side reads or writes
 ** moves both. */
-#define REYLO_TREE_VERSION 3
+#define REYLO_TREE_VERSION 4
 
 /*
 ** Analyzes one statement against the schema DDL, with the host's scalar functions (azFn[i] taking
