@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Session } from "../src/analyze.ts";
 import { sqlModule } from "../src/loader.ts";
+import { moduleTypes } from "../src/module-types.ts";
 import { DRIVERS, PG, MYSQL, pgLive, mysqlLive, INDEX, postgresDatabase, closeSessions, plain, mysqlDatabase, driver } from "./helpers.ts";
 
 // Structured parameters (wiki/structured-params.md): a parameter cast to `rows(…)` or `row(…)` is
@@ -563,7 +564,9 @@ select value ->> '$.title', value ->> '$.done' from json_each(:todos::json('{
     await assert.rejects(q.run(db, { todos: [{ title: "a", extra: 1 }] }), /at \/0\/extra is a key the schema does not allow/);
     await assert.rejects(q.run(db, { todos: [{ title: "a" }, { title: "b" }, { title: "c" }] }), /must have at most 2 items/);
     // A parameter whose schema has a default at its root may be left out.
-    const limited = await built(root, url, "limited", `select id from todos order by id limit :n::json('{ "type": "integer", "minimum": 1, "maximum": 200, "default": 1 }')`);
+    const limitSql = `select id from todos order by id limit :n::json('{ "type": "integer", "minimum": 1, "maximum": 200, "default": 1 }')`;
+    assert.match(moduleTypes("", await analysis(root, url, limitSql), "sqlite", undefined, true).params, /\bn\?: number\b/);
+    const limited = await built(root, url, "limited", limitSql);
     assert.deepEqual(plain(await limited.run(db, {})), [{ id: 1 }]);
     assert.deepEqual(plain(await limited.run(db, { n: 2 })), [{ id: 1 }, { id: 2 }]);
     await assert.rejects(limited.run(db, { n: 0 }), /Parameter "n" must be at least 1/);

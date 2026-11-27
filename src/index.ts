@@ -111,7 +111,7 @@ export interface Query<Params, Row, C extends Cardinality, D extends Dialect, E 
    */
   readonly readOnly: boolean;
   /** Standard Query's `query`: a driver that supports Standard Query runs the import with the same input and output as `.run()`. A ClickHouse query maps no values, and runs through `.run()` alone (src/standard-query.ts). */
-  readonly "~standard": StandardTypedV1.Props<Params, Materialize<Row, C>> & StandardQueryV1.Props<Params, Materialize<Row, C>, D> & { readonly query: { readonly cardinality: C; output(rows: readonly Record<string, unknown>[]): Materialize<Row, C> } };
+  readonly "~standard": StandardQueryV1.Props<Params, Materialize<Row, C>, D> & { readonly query: { readonly cardinality: C; output(rows: readonly Record<string, unknown>[]): Materialize<Row, C> } };
   readonly "~reylo": ReyloTypes<Params, Row, C>;
   /**
    * Runs the statement on the client, or on a transaction or connection taken from it. The

@@ -185,7 +185,7 @@ const POSTGRES: readonly Case[] = [
 const EXTENSIONS: Readonly<Record<string, string>> = { citext: "citext", hstore: "hstore", ltree: "ltree", vector: "vector", halfvec: "vector", sparsevec: "vector" };
 
 test("Postgres: every type's values are of the type the module declares, as a column and inside each document Postgres builds", { skip: pgLive }, async (t) => {
-  const own = await postgresDatabase("reylo_output_schema");
+  const own = await postgresDatabase("reylo_row_types");
   try {
     const available = new Set((await own.sql`select name from pg_available_extensions`).map((r: { name: string }) => r.name));
     for (const missing of new Set(Object.values(EXTENSIONS).filter((e) => !available.has(e)))) await t.test(`${missing}'s types`, { skip: `the test server has no ${missing}` }, () => {});
@@ -245,7 +245,7 @@ const MYSQL: readonly Case[] = [
 ];
 
 test("MySQL: every type's values are of the type the module declares, as a column and inside each document MySQL builds", { skip: mysqlLive }, async () => {
-  const own = await mysqlDatabase("reylo_output_schema", `set time_zone = '+00:00';\n${tables(MYSQL)}`);
+  const own = await mysqlDatabase("reylo_row_types", `set time_zone = '+00:00';\n${tables(MYSQL)}`);
   try {
     const problems = await check(project(own.url, ["mysql2"]), MYSQL, (t, [, column]) => [
       `select c, json_object('v', c) as o, json_array(c) as a from ${t}`,
@@ -343,7 +343,7 @@ const CLICKHOUSE: readonly Case[] = [
 test("ClickHouse: every type's values are of the type the module declares, as a column", { skip: clickhouseLive }, async () => {
   const setup = CLICKHOUSE.map(([, column, values], i) => `CREATE TABLE t${i} (id Int32, c Nullable(${column})) ENGINE = MergeTree ORDER BY id;\nINSERT INTO t${i} VALUES ${[...values, "NULL"].map((v, n) => `(${n + 1}, ${v})`).join(", ")};`);
   // A type that cannot sit inside Nullable stands as itself, its NULL row left out.
-  const own = await clickhouseDatabase("reylo_output_schema", setup.map((s, i) => (/^(Array|Tuple|Map|LowCardinality|Point|Ring|Variant)/.test(CLICKHOUSE[i]![1]) ? s.replace(/Nullable\((.*)\)\) ENGINE/, "$1) ENGINE").replace(/, \(\d+, NULL\);$/, ";") : s)).join("\n"));
+  const own = await clickhouseDatabase("reylo_row_types", setup.map((s, i) => (/^(Array|Tuple|Map|LowCardinality|Point|Ring|Variant)/.test(CLICKHOUSE[i]![1]) ? s.replace(/Nullable\((.*)\)\) ENGINE/, "$1) ENGINE").replace(/, \(\d+, NULL\);$/, ";") : s)).join("\n"));
   try {
     const problems = await check(project(own.url, ["@clickhouse/client"]), CLICKHOUSE, (t, [, column]) => [`SELECT c FROM ${t} ORDER BY id`, ...(column === "Int32" ? [`SELECT c AS \`__proto__\` FROM ${t} ORDER BY id`] : [])], async (q) => q.run(own.client));
     assert.deepEqual(problems, [], problems.join("\n"));

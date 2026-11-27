@@ -18,8 +18,8 @@
 //
 // The build decides each column's codecs from its type descriptor, so that the module's declared
 // type and the value `run` returns agree. The renderer (src/render.ts) applies a codec at each
-// position it reaches outside JSON, and the module carries,
-// for each column and parameter that holds one, a plan: where in its value each codec stands
+// position it reaches outside JSON, and the module carries, for each column and parameter that
+// holds one, a plan: where in its value each codec stands
 // (`codecs`, by column name; a parameter's in its `inputs`). The run time decodes every value as
 // src/values.ts does, then follows each plan, in one pass over the rows.
 //
