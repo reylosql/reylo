@@ -299,7 +299,7 @@ pub fn postgres_function_names() -> Vec<&'static str> {
     let lists: &[&[&'static str]] = &[
         FUNCTIONS, POSTGRES_TOTAL, &typed, POSTGRES_NEVER_NULL, POSTGRES_NO_ARGUMENT_NEVER_NULL, POSTGRES_TOTAL_ONE_ARGUMENT, POSTGRES_FIRST_ARG,
         POSTGRES_GROUPED, POSTGRES_GROUPED_NEVER_NULL, POSTGRES_GROUPED_JSON, POSTGRES_ORDERED_SET, POSTGRES_STRICT, POSTGRES_WINDOW,
-        POSTGRES_FRAME_VALUES, POSTGRES_SET_RETURNING, POSTGRES_SERIES, POSTGRES_DATE_PARTS, &["substring", POSTGRES_ENUM_RANGE], crate::jsonshape::POSTGRES_FUNCTIONS,
+        POSTGRES_FRAME_VALUES, POSTGRES_SET_RETURNING, POSTGRES_SERIES, POSTGRES_DATE_PARTS, &["substring", "uuid_extract_version", POSTGRES_ENUM_RANGE], crate::jsonshape::POSTGRES_FUNCTIONS,
     ];
     let from = FROM_FUNCTIONS.iter().map(|(name, ..)| *name).collect::<Vec<_>>();
     for list in lists.iter().copied().chain([from.as_slice()]) {
@@ -5363,6 +5363,10 @@ mod tests {
         // Every name a rule reads is asked about, the set-returning functions of FROM included.
         let names = postgres_function_names();
         assert!(FROM_FUNCTIONS.iter().all(|(name, ..)| names.contains(name)));
+        // And each a rule names by itself.
+        for name in ["count", "row_number", "rank", "dense_rank", "percent_rank", "cume_dist", "ntile", "lag", "lead", "array_agg", "random", "unnest", "uuidv4", "uuidv7", "gen_random_uuid", "uuid_extract_version", "array_remove", "array_append", "array_prepend", "substring", POSTGRES_ENUM_RANGE] {
+            assert!(names.contains(&name), "{name}");
+        }
         let asked = |names: &[&str]| Trust { asked: Some(std::sync::Arc::new(names.iter().map(|n| n.to_string()).collect())), cast_targets: None, ..Trust::default() };
         let trust = asked(&["lower"]);
         assert!(trust.builtin("lower") && !trust.builtin("jsonb_each_text") && !trust.aggregates("count", 1));
