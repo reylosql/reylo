@@ -9066,17 +9066,19 @@ create trigger kids_note after insert on kids begin update parents set name = na
         let ran = |schema: &str| format!("select count(*)::text as n from {schema}.__reylo_migrations where applied_at is not null");
         assert_eq!(p.rows(&ran("public")).await[0].text("n"), "2");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
-        // A second table, as a repair on an earlier version left it: the later runs in it, the first
-        // in the one before.
-        p.exec("create table private.__reylo_migrations (like public.__reylo_migrations); insert into private.__reylo_migrations select * from public.__reylo_migrations; delete from public.__reylo_migrations where name like '%readers.sql'").await;
+        // A second table, as an earlier version left it: each holds a migration the other lacks.
+        p.exec("create table private.__reylo_migrations (like public.__reylo_migrations including all); insert into private.__reylo_migrations select * from public.__reylo_migrations where name like '%readers.sql'; delete from public.__reylo_migrations where name like '%readers.sql'").await;
         let refused = reylo_migrate::status(&p.opts(), &mut |_: &str| {}).await.unwrap_err().0;
         assert_has!(refused.clone(), r"This database holds 2 of Reylo's history tables");
         assert_has!(refused.clone(), r"In public\.__reylo_migrations, 1 migration ran, at ");
-        assert_has!(refused, r"In private\.__reylo_migrations, 2 migrations ran, the last at ");
-        p.exec("drop table public.__reylo_migrations").await;
+        assert_has!(refused.clone(), r"In private\.__reylo_migrations, 1 migration ran, at ");
+        // The commands it gives make them one, keeping both.
+        let insert = regex::Regex::new(r"reylo run '([^']+)' '([^']+)'").unwrap().captures(&refused).map(|c| (c[1].to_string(), c[2].to_string())).unwrap_or_else(|| panic!("{refused}"));
+        p.exec(&insert.0).await;
+        p.exec(&insert.1).await;
         assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(p.dev().await, 0, "{}", p.peek());
-        assert_eq!(p.rows(&ran("private")).await[0].text("n"), "2");
+        assert_eq!(p.rows(&ran("public")).await[0].text("n"), "2");
     }
 
     /// A Supabase database that began without one of Supabase's extensions replays its migrations from

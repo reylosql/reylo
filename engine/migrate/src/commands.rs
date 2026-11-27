@@ -326,24 +326,39 @@ fn migrations_of(dir: &Path, named: impl Iterator<Item = (String, Option<String>
 /// The history table as a statement names it. On Postgres with its schema: the one a database has
 /// it in, else the one `create table` would make it in now. Named without its schema, a migration
 /// that makes a schema the search_path reads before the table's would hide it behind a new, empty
-/// one, as an earlier version did. Where a database holds two, neither may be its whole history, and
-/// which one the next statement takes must not turn on what an earlier one emptied: refused, with
-/// what each holds.
+/// one, as an earlier version did. Where a database holds two, each may hold migrations the other
+/// lacks, and which one the next statement takes must not turn on what an earlier one emptied:
+/// refused, with what each holds and how to make them one. One this role can't read is refused too,
+/// rather than taken for none and made again beside it.
 async fn history_table(db: &mut Db) -> Result<String, Error> {
     if db.dialect() != Dialect::Postgres {
         return Ok(HISTORY_TABLE.to_string());
     }
-    let found = db.rows(&format!("select format('%I.%I', n.nspname, c.relname) as t from pg_class c join pg_namespace n on n.oid = c.relnamespace where {} order by c.oid", history_tables("c", "n"))).await?;
-    let tables: Vec<String> = found.iter().map(|r| r.text("t").to_string()).collect();
+    let found = db
+        .rows(&format!(
+            "select format('%I.%I', n.nspname, c.relname) as t, (has_schema_privilege(n.oid, 'USAGE') and has_table_privilege(c.oid, 'SELECT'))::text as readable
+             from pg_class c join pg_namespace n on n.oid = c.relnamespace where {} order by c.oid",
+            history_tables("c", "n")
+        ))
+        .await?;
+    let tables: Vec<(String, bool)> = found.iter().map(|r| (r.text("t").to_string(), r.text("readable") == "true")).collect();
     match tables.as_slice() {
-        [one] => Ok(one.clone()),
+        [(one, true)] => Ok(one.clone()),
+        [(one, false)] => {
+            let role = db.rows("select quote_ident(current_user) as r").await?.first().map(|r| r.text("r").to_string()).unwrap_or_default();
+            Err(Error(format!("This role can't read Reylo's history, {one}\n  Grant it what Reylo needs, as the table's owner:\n    grant select, insert, update, delete on table {one} to {role}")))
+        }
         [] => {
             let rows = db.rows(&format!("select coalesce(case when current_schema() is not null then format('%I.%I', current_schema(), '{HISTORY_TABLE}') end, '{HISTORY_TABLE}') as t")).await?;
             Ok(rows.first().map(|r| r.text("t").to_string()).unwrap_or_else(|| HISTORY_TABLE.to_string()))
         }
         several => {
             let mut lines = vec![format!("This database holds {} of Reylo's history tables, where it keeps one", several.len())];
-            for table in several {
+            for (table, readable) in several {
+                if !readable {
+                    lines.push(format!("  In {table}, which this role can't read"));
+                    continue;
+                }
                 let rows = db.rows(&format!("select count(applied_at)::text as n, coalesce(max(applied_at)::text, '') as at from {table}")).await?;
                 let (n, at) = rows.first().map(|r| (r.text("n").to_string(), r.text("at").to_string())).unwrap_or_default();
                 lines.push(match n.as_str() {
@@ -352,17 +367,28 @@ async fn history_table(db: &mut Db) -> Result<String, Error> {
                     _ => format!("  In {table}, {n} migrations ran, the last at {at}"),
                 });
             }
-            lines.push("  Drop the one that isn't its history, then see what it ran:".to_string());
+            let keep = &several[0].0;
+            lines.push(format!("  Copy into {keep} the migrations only the others recorded, then drop them:"));
+            for (other, _) in &several[1..] {
+                lines.push(format!("    reylo run 'insert into {keep} (name, sql, applied_at, fingerprint) select name, sql, applied_at, fingerprint from {other} on conflict (name) do nothing' 'drop table {other}'"));
+            }
+            lines.push("  Then see what it ran:".to_string());
             lines.push("    reylo migrate status".to_string());
             Err(Error(lines.join("\n")))
         }
     }
 }
 
-/// Which `pg_class` row `c` in schema `n` is a history table of Reylo's the session may read: in a
-/// schema of its own, not a session's temporary one.
+/// Which `pg_class` row `c` in schema `n` is a history table of Reylo's: in a schema of its own, not
+/// a session's temporary one.
 fn history_tables(c: &str, n: &str) -> String {
-    format!("{c}.relname = '{HISTORY_TABLE}' and {c}.relkind in ('r', 'p') and {n}.nspname not like 'pg\\_temp%' and has_schema_privilege({n}.oid, 'USAGE') and has_table_privilege({c}.oid, 'SELECT')")
+    format!("{c}.relname = '{HISTORY_TABLE}' and {c}.relkind in ('r', 'p') and {n}.nspname not like 'pg\\_temp%'")
+}
+
+/// The history table's name as a string `to_regclass` reads, whatever `standard_conforming_strings`
+/// says of a backslash in it.
+fn history_text(history: &str) -> String {
+    format!("E'{}'", history.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 fn history_ddl(d: Dialect, history: &str) -> String {
@@ -431,7 +457,7 @@ async fn has_fingerprint(db: &mut Db) -> Result<bool, Error> {
 
 /// Whether the history table has `column`, which a table an earlier build made may lack.
 async fn has_column(db: &mut Db, column: &str) -> Result<bool, Error> {
-    let history = crate::db::literal(&history_table(db).await?);
+    let history = history_text(&history_table(db).await?);
     let sql = match db.dialect() {
         Dialect::Postgres => format!("select count(*) > 0 as ok from pg_attribute where attrelid = to_regclass({history}) and attname = '{column}' and not attisdropped"),
         Dialect::Mysql => format!("select count(*) > 0 as ok from information_schema.columns where table_schema = database() and table_name = '{HISTORY_TABLE}' and column_name = '{column}'"),
@@ -455,7 +481,7 @@ async fn ensure_history(db: &mut Db) -> Result<(), Error> {
             let granted = db
                 .rows(&format!(
                     "select distinct case when a.grantee = 0 then 'public' else quote_ident(r.rolname) end as grantee from pg_class c cross join aclexplode(c.relacl) a left join pg_roles r on r.oid = a.grantee where c.oid = to_regclass({}) and a.grantee <> c.relowner",
-                    crate::db::literal(&history)
+                    history_text(&history)
                 ))
                 .await?;
             for r in granted {
@@ -3274,7 +3300,7 @@ async fn extensions_began(db: &mut Db) -> Result<Option<Vec<String>>, Error> {
         return Ok(None);
     }
     if has_history(db).await? {
-        let history = crate::db::literal(&history_table(db).await?);
+        let history = history_text(&history_table(db).await?);
         let note = db.rows(&format!("select obj_description(to_regclass({history}), 'pg_class') as note")).await?;
         if let Some(began) = note.first().and_then(|r| r.get("note")).and_then(crate::db::extensions_in_note) {
             return Ok(Some(began));
@@ -3295,7 +3321,7 @@ async fn extensions_began_adopting(db: &mut Db, files: &[Migration]) -> Result<O
         return Ok(None);
     }
     if has_history(db).await? {
-        let history = crate::db::literal(&history_table(db).await?);
+        let history = history_text(&history_table(db).await?);
         let note = db.rows(&format!("select obj_description(to_regclass({history}), 'pg_class') as note")).await?;
         if let Some(began) = note.first().and_then(|r| r.get("note")).and_then(crate::db::extensions_in_note) {
             return Ok(Some(began));
@@ -3330,7 +3356,7 @@ async fn api_began(db: &mut Db) -> Result<Option<[bool; 2]>, Error> {
         return Ok(None);
     }
     if has_history(db).await? {
-        let history = crate::db::literal(&history_table(db).await?);
+        let history = history_text(&history_table(db).await?);
         let note = db.rows(&format!("select obj_description(to_regclass({history}), 'pg_class') as note")).await?;
         if let Some(on) = note.first().and_then(|r| r.get("note")).and_then(crate::db::api_settings_in_note) {
             return Ok(Some(on));
@@ -3347,7 +3373,7 @@ async fn api_began(db: &mut Db) -> Result<Option<[bool; 2]>, Error> {
 /// change all of. None off Supabase.
 async fn api_began_adopting(db: &mut Db, files: &[Migration]) -> Result<Vec<[bool; 2]>, Error> {
     let Some(noted) = api_began(db).await? else { return Ok(vec![]) };
-    let history = crate::db::literal(&history_table(db).await?);
+    let history = history_text(&history_table(db).await?);
     if has_history(db).await? && db.rows(&format!("select obj_description(to_regclass({history}), 'pg_class') as note")).await?.first().and_then(|r| r.get("note")).and_then(crate::db::api_settings_in_note).is_some() {
         return Ok(vec![noted]);
     }
