@@ -535,42 +535,6 @@ test("MySQL: a float member keeps the -0 `.run()` returns, and refuses NaN and t
   }
 });
 
-test("an imported query carries its input's and its output's JSON Schema, a structured parameter's keys included", async () => {
-  const root = project();
-  const db = new DatabaseSync(join(root, "app.db"));
-  db.exec("create table events (id integer primary key, ts text not null, status text not null default 'new', amount real)");
-  db.close();
-  try {
-    const q = await built(root, "file:./app.db", "insert_events", "insert into events :events::rows(id integer not null, ts text not null, status? text not null, amount real) returning id, status");
-    assert.deepEqual(q.inputSchema, {
-      $schema: "https://json-schema.org/draft/2020-12/schema",
-      type: "object",
-      properties: {
-        events: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: { id: { type: "integer", format: "int64" }, ts: { type: "string" }, status: { type: "string" }, amount: { anyOf: [{ type: "number", format: "double" }, { type: "null" }] } },
-            required: ["id", "ts"],
-            additionalProperties: false,
-          },
-        },
-      },
-      required: ["events"],
-      additionalProperties: false,
-    });
-    assert.deepEqual(q.outputSchema, {
-      $schema: "https://json-schema.org/draft/2020-12/schema",
-      type: "array",
-      items: { type: "object", properties: { id: { type: "integer", format: "int64" }, status: { type: "string" } }, required: ["id", "status"] },
-    });
-    // Standard Schema's converter gives the same.
-    assert.deepEqual(q["~standard"].jsonSchema.input({ target: "draft-2020-12" }), q.inputSchema);
-  } finally {
-    await closeSessions();
-  }
-});
-
 test("SQLite: a typed JSON parameter is typed by its schema, takes its defaults, and is checked before the statement runs", async () => {
   const root = project();
   const db = new DatabaseSync(join(root, "app.db"));
@@ -603,7 +567,6 @@ select value ->> '$.title', value ->> '$.done' from json_each(:todos::json('{
     assert.deepEqual(plain(await limited.run(db, {})), [{ id: 1 }]);
     assert.deepEqual(plain(await limited.run(db, { n: 2 })), [{ id: 1 }, { id: 2 }]);
     await assert.rejects(limited.run(db, { n: 0 }), /Parameter "n" must be at least 1/);
-    assert.deepEqual(limited.inputSchema.required, []);
     // What the profile refuses is the type check's error at the schema, and fails the build.
     const bad = `select * from json_each(:p::json('{ "$ref": "#/$defs/x" }'))`;
     const d = (await analysis(root, url, bad)).diagnostics.find((x) => x.code === 20);

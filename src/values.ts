@@ -1,5 +1,5 @@
 // How Reylo represents a SQL value in JavaScript: one table, which the type renderer
-// (src/render.ts), the JSON Schema writer (src/schema.ts) and the run time's decoders
+// (src/render.ts) and the run time's decoders
 // (src/decode.ts, src/decode-mysql.ts, src/decode-sqlite.ts) all read, so that the type a module
 // declares and the value `run` returns cannot drift apart. Reylo sets
 // every value's type itself, on every driver, whatever the app configured its driver to return:

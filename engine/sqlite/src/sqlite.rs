@@ -1141,8 +1141,8 @@ fn nullable_in_json(f: &JsonFact) -> bool {
     }
 }
 
-/// The JSON Schema of a value inside a document SQLite built, as src/schema.ts spells SQLite's
-/// values there, for a tuple's items and an object's values of any key.
+/// The JSON Schema of a value inside a document SQLite built, for a tuple's items and an object's
+/// values of any key.
 fn value_schema(t: &Ty, nullable: bool) -> serde_json::Value {
     use serde_json::json;
     let schema = match t {

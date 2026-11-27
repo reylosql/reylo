@@ -9,7 +9,6 @@ import { dirname } from "node:path";
 import { Session } from "./analyze.ts";
 import { libraryProblem, sourceName } from "./project.ts";
 import { rowSource } from "./row.ts";
-import { querySchemas } from "./schema.ts";
 import { columnKind } from "./values.ts";
 import { jsonNumbers } from "./render.ts";
 import { analysisWithBases, analysisWithNestedArrays } from "./engine-type.ts";
@@ -253,7 +252,6 @@ export function moduleDefinition(m: ModuleInput, names: { raw: string; sql: stri
     ["source", JSON.stringify(m.source)],
     ["sqlcommenter", m.sqlcommenter ? "true" : undefined],
     ["nestedArrays", m.allowNestedArrays && dialect === "postgres" ? "true" : undefined],
-    ["jsonSchema", literal(querySchemas(m.allowNestedArrays ? analysisWithNestedArrays(analysis) : analysis, dialect, m.codecs))],
     ["checks", checked ? names.checks : undefined],
   ];
   const written = fields.flatMap(([name, value]) => (value === undefined ? [] : [value === name ? name : `${name}: ${value}`]));
