@@ -166,9 +166,12 @@ export function jsonNumbers(t: EngineType, inJson = false, dialect: Dialect = "p
     case "enum":
       return jsonNumbers(t.type, inJson, dialect);
     case "union": {
-      // An integer of one width or another (MySQL's `bigint | int`); a union that may also be a
-      // float, as a SQLite NUMERIC is, holds numbers a double may hold exactly.
-      if (!inJson || (dialect === "postgres" && inDocument(t, "postgres") !== undefined) || !t.members.every((m) => m.kind === "integer")) return undefined;
+      // An integer of one width or another (MySQL's `bigint | int`), and on SQLite an integer
+      // column that may hold a REAL, whose whole number from 2^53 to 2^63 may be a rounded integer,
+      // as a column of it reads (src/decode-sqlite.ts); a union that may also be text, as a SQLite
+      // NUMERIC is, or a float elsewhere, holds numbers a double may hold exactly.
+      const numeric = (m: EngineType) => m.kind === "integer" || (dialect === "sqlite" && m.kind === "float");
+      if (!inJson || (dialect === "postgres" && inDocument(t, "postgres") !== undefined) || !t.members.every(numeric)) return undefined;
       const read = t.members.map((m) => jsonNumbers(m, true, dialect));
       return read.includes("unsigned") ? "unsigned" : read.includes("integer") ? "integer" : undefined;
     }

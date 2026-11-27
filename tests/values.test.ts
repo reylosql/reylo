@@ -1043,9 +1043,9 @@ test("a value goes into a document as JSON.stringify writes it, but for NaN, the
   // A boxed number is the number it holds.
   assert.equal(writeJson({ a: new Number(-0) }, "postgres", fail), `{"a":-0}`);
   assert.throws(() => writeJson({ a: new Number(Infinity) }, "mysql", fail), /^TypeError: at \/a is Infinity/);
-  // A value written as it is, and what JSON.stringify throws on, a BigInt.
+  // A value written as it is, and a BigInt, which JSON.stringify throws on, as its digits.
   assert.equal(writeJson({ big: new RawJson("12345678901234567890") }, "sqlite", fail), `{"big":12345678901234567890}`);
-  assert.throws(() => writeJson({ z: -0, big: 1n }, "postgres", fail), /BigInt/);
+  assert.equal(writeJson({ z: -0, big: 1n }, "postgres", fail), `{"z":-0,"big":1}`);
 });
 
 test("a row converts each name's last column by that column's own mask, by position beside the columns", () => {

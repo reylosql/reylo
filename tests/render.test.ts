@@ -303,6 +303,10 @@ test("the run time refuses an integer past 2^53 - 1 where a 64-bit integer stand
   const keyed = { kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "object", additionalProperties: { anyOf: [{ type: "integer", format: "int64" }, { type: "null" }] } } } as EngineType;
   assert.deepEqual(jsonNumbers(keyed, false, "sqlite"), { keys: [], others: "integer" });
   assert.deepEqual(jsonNumbers(doc(record([field("xs", tuple)]))), { keys: [["xs", { items: false, elements: [null, "integer"] }]] });
+  // A SQLite integer column that may hold a REAL: a whole number from 2^53 to 2^63 may be a rounded integer, as its column reads; a float beside an integer elsewhere is exact.
+  const integerOrReal = { kind: "union", label: "INTEGER", members: [{ kind: "integer", bits: 64 }, { kind: "float", exponent_bits: 11, mantissa_bits: 52, infinity: true }] } as EngineType;
+  assert.deepEqual(jsonNumbers(doc(record([field("n", integerOrReal)])), false, "sqlite"), { keys: [["n", "integer"]] });
+  assert.equal(jsonNumbers(doc(record([field("n", integerOrReal)])), false, "postgres"), undefined);
   // `JSON_ARRAY(big, n)` with a nullable int beside the bigint: each place an integer of one width or another.
   assert.deepEqual(jsonNumbers({ kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "array", items: { anyOf: [{ type: "integer", format: "int64" }, { type: "integer", format: "int32" }] } } } as EngineType), { items: "integer" });
   // An integer or a float at a place holds numbers a double holds exactly.
