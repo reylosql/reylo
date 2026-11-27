@@ -4,7 +4,7 @@ This crate is under the MIT License, except for what it generates or ports from 
 
 ## PostgreSQL
 
-The tables, actions and scanner in `src/postgres/` are generated or ported from `gram.y`, `scan.l` and `kwlist.h` of PostgreSQL 18.6.
+The tables, actions and scanner in `src/postgres/` are generated or ported from `gram.y`, `scan.l` and `kwlist.h` of PostgreSQL 19.0.
 
 ```text
 PostgreSQL Database Management System
@@ -34,7 +34,7 @@ PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
 
 ## libpg_query
 
-The parser patches `gen/postgres.py` applies, the node definitions it reads, and the deparser in `src/postgres/generated/deparse.rs` and `src/postgres/deparse_rt.rs` come from libpg_query.
+The parser patches `gen/postgres.py` applies, the node definitions and type catalog it reads, and the deparser in `src/postgres/generated/deparse.rs` and `src/postgres/deparse_rt.rs` come from libpg_query, brought to Postgres 19 by `gen/patches/libpg_query-postgres-19.patch`.
 
 ```text
 Copyright (c) 2015, Lukas Fittl <lukas@fittl.com>
@@ -70,7 +70,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 ## pg_query.rs
 
-The tree's structures in `src/postgres/generated/pb.rs` and the walker in `src/postgres/generated/walk.rs` come from the `pg_query` crate.
+The tree's structures in `src/postgres/generated/pb.rs` and the walker in `src/postgres/generated/walk.rs` come from the `pg_query` crate, brought to Postgres 19 by `gen/patches/pg_query-postgres-19.patch`.
 
 ```text
 MIT License

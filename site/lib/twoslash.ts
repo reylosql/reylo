@@ -14,7 +14,8 @@ export function reyloTwoslash(): DocsTwoslashOptions {
   // The build runs in site/; the reylo package is the repository root above it.
   const repo = path.resolve(process.cwd(), '..');
   return {
-    packages: [{ name: 'reylo', root: repo, entries: ['src/index.ts'] }],
+    // `reylo/effect` too, which the Effect tabs import.
+    packages: [{ name: 'reylo', root: repo, entries: ['src/index.ts', 'src/effect.ts'] }],
     compilerOptions: {
       // `process.env` and node:sqlite in the examples; @types/node is a dev dependency of the
       // site. A block that uses Bun or Cloudflare D1 references their types itself

@@ -719,7 +719,7 @@ A parameter accepts the same values `.run()` returns for its type. You can pass 
 | `date`, `timestamp`, `time` | `string` |
 | `timestamptz` | a `string` that names its zone |
 | `interval` | a `string`: an ISO 8601 duration (`-P1D` too) or Postgres's own text |
-| `json`, `jsonb` | any value `JSON.stringify` writes, such as a `Date` inside an object, or what the column's JSON Schema admits |
+| `json`, `jsonb` | any value `JSON.stringify` writes, such as a `Date` inside an object, but no `NaN` or infinity, or what the column's JSON Schema admits |
 | `bytea` | `Uint8Array` |
 | An array | an array of its element's parameter type, without `null` |
 | An enum | the union of its labels |
@@ -1159,7 +1159,6 @@ What Reylo can't type on Postgres, and what to do instead:
 | A materialized view, which holds the rows of its last `refresh`: every column is nullable, and only its own unique indexes are keys | Create a unique index on it, and wrap a column that is never null in `coalesce` |
 | The row an `insert`, `update` or `merge` writes through a view, or to a table with an `instead` rule, which need not pass the view's `where`: its `returning` columns are nullable | Write to the table itself |
 | A query nested past 1,000 levels, about 164 subqueries deep | None: Reylo falls back to Postgres's own types, any number of rows and every column nullable. The query's hover says why |
-| Syntax new in Postgres 19, `on conflict … do select` and a window function's `ignore nulls` or `respect nulls`, which Reylo's parser doesn't read yet | None: Reylo falls back to Postgres's own types, any number of rows and every column nullable |
 | A statement other than a query, such as `create index` or `explain` | None: it returns nothing, or rows whose columns are all nullable, as Postgres reports |
 | `copy … from stdin` and `copy … to stdout`, whose rows go through the connection | Run them through your driver |
 | A file of several statements, such as a migration | Put each statement in a file of its own |

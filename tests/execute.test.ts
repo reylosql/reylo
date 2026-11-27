@@ -1,8 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { Readable } from "node:stream";
+import { runInNewContext } from "node:vm";
 import { DatabaseSync } from "node:sqlite";
 import { arrayLiteral } from "../src/execute.ts";
+import { columnKind } from "../src/values.ts";
 import { execute, executeSync, type QueryModule } from "./run.ts";
 import { checks, defineQuery } from "../src/index.ts";
 import type { EngineType, JsonSchema } from "../src/engine-type.ts";
@@ -145,6 +148,110 @@ test("postgres: a JSON parameter's value is a JavaScript value, which every driv
   await execute(postgresJsSql((_, values) => void seen.push(values.map(unwrap))), jsonQuery, jsonValues);
   assert.equal(seen.length, 5);
   for (const values of seen) assert.deepEqual(values, jsonTexts);
+});
+
+test("a JSON parameter's NaN, infinities and -0 go in as each database's JSON reads them, a json[] element's and a structured parameter's JSON member's too, on every driver, and are refused where the database holds none", async () => {
+  const json = { type: { kind: "json" } } as const;
+  const doc = { z: -0, n: [1.5, -0] };
+  // Postgres's `json` keeps -0 as written, and its JSON holds no number for NaN or an infinity.
+  const pq: QueryModule<"postgres"> = { dialect: "postgres", sql: "select :doc::jsonb, :docs::jsonb[]", params: ["doc", "docs"], inputs: { doc: json, docs: { type: array({ kind: "json" }) } } };
+  const pgText = `{"z":-0,"n":[1.5,-0]}`;
+  const seen: unknown[][] = [];
+  await execute(pgPool(async (_: string, values?: unknown[]) => (seen.push(values!), { rows: [] })), pq, { doc, docs: [doc, -0] });
+  const unwrap = (v: unknown) => (v !== null && typeof v === "object" ? (v as { value: unknown }).value : v);
+  await execute(postgresJsSql((_, values) => void seen.push(values.map(unwrap))), pq, { doc, docs: [doc, -0] });
+  // Bun.sql serializes a JSON parameter's value itself, so it gets one whose JSON is the text, -0 included.
+  const unsafe = async (_: string, values?: unknown[]) => (seen.push(values!.map((v) => (v !== null && typeof v === "object" ? JSON.stringify(v) : v))), []);
+  const bun = { unsafe, commitDistributed: async () => {} };
+  const unprepared = { unsafe, commitDistributed: async () => {}, options: { prepare: false } };
+  for (const client of [bun, unprepared]) await execute(client, pq, { doc, docs: [doc, -0] });
+  for (const values of seen) assert.deepEqual(values, [pgText, `{"${pgText.replace(/"/g, '\\"')}","-0"}`]);
+  // An integer past 2^53, written as it is with JSON.rawJSON, keeps its digits beside a -0 on Bun.sql.
+  seen.length = 0;
+  const { rawJSON } = JSON as unknown as { rawJSON(text: string): never };
+  await execute(bun, pq, { doc: { id: rawJSON("9007199254740993"), z: -0 }, docs: null });
+  assert.deepEqual([...seen], [[`{"id":9007199254740993,"z":-0}`, null]]);
+  // MySQL and SQLite read -0 from `-0e0`; SQLite an infinity from a number past a double's range.
+  const mq: QueryModule<"mysql"> = { dialect: "mysql", sql: "select cast(:doc as json)", params: ["doc"], inputs: { doc: json } };
+  const lq: QueryModule<"sqlite"> = { dialect: "sqlite", sql: "select json(:doc)", params: ["doc"], inputs: { doc: json } };
+  const mysql2 = { query: async () => [[], []] as [unknown, unknown], execute: async (_: unknown, v?: unknown[]) => (seen.push(v!), [[], []] as [unknown, unknown]) };
+  const libsql = { execute: async (q: { args: unknown[] }) => (seen.push(q.args), { rows: [] }), executeMultiple: async () => {} };
+  seen.length = 0;
+  await execute(mysql2, mq, { doc: { z: -0, n: [1.5, -0] } });
+  await execute(libsql, lq, { doc: { inf: Infinity, neg: -Infinity, z: -0 } });
+  assert.deepEqual(seen, [[`{"z":-0e0,"n":[1.5,-0e0]}`], [`{"inf":9e999,"neg":-9e999,"z":-0e0}`]]);
+  // Postgres's and MySQL's JSON hold no NaN or infinity, and SQLite no NaN: the parameter is refused before any client is called.
+  await assert.rejects(Promise.resolve().then(() => execute(pgPool(async () => ({ rows: [] })), pq, { doc: { n: NaN }, docs: null })), /^TypeError: Parameter "doc" at \/n is NaN, which JSON holds no number for: write null or a string in its place\.$/);
+  await assert.rejects(Promise.resolve().then(() => execute(bun, pq, { doc: null, docs: [{ n: -Infinity }] })), /^TypeError: Parameter "docs" at \[0\]\/n is -Infinity, which JSON holds no number for/);
+  await assert.rejects(Promise.resolve().then(() => execute(mysql2, mq, { doc: { a: [Infinity] } })), /^TypeError: Parameter "doc" at \/a\/0 is Infinity, which MySQL holds no value for: write null or a string in its place\.$/);
+  await assert.rejects(Promise.resolve().then(() => execute(libsql, lq, { doc: { nan: NaN } })), /^TypeError: Parameter "doc" at \/nan is NaN, which SQLite holds no value for/);
+  await assert.rejects(Promise.resolve().then(() => execute(pgPool(async () => ({ rows: [] })), pq, { doc: null, docs: [{ n: 1n }] })), /BigInt/);
+  assert.equal(seen.length, 2);
+});
+
+test("postgres: a json field of a row value holds -0 and refuses NaN and the infinities as a JSON parameter does, and a value of no type the run time knows keeps -0", async () => {
+  const seen: unknown[][] = [];
+  const client = pgPool(async (_: string, values?: unknown[]) => (seen.push(values!), { rows: [] }));
+  const q: QueryModule<"postgres"> = { dialect: "postgres", sql: "select :e::event, :u", params: ["e", "u"], inputs: { e: { type: record([field("id", pgType("int4")), field("meta", pgType("jsonb"))], "public.event") }, u: { type: { kind: "unknown" } } } };
+  await execute(client, q, { e: { id: 1, meta: { z: -0 } }, u: -0 });
+  assert.deepEqual(seen, [[String.raw`("1","{\"z\":-0}")`, "-0"]]);
+  await assert.rejects(Promise.resolve().then(() => execute(client, q, { e: { id: 1, meta: { score: Infinity } }, u: 0 })), /Infinity, which JSON holds no number for/);
+});
+
+test("NaN and the infinities go only where the database holds them: MySQL holds neither, SQLite no NaN, which its drivers bind as NULL, and a Postgres numeric with a precision no infinity", async () => {
+  const seen: unknown[][] = [];
+  const mysql2 = { query: async () => [[], []] as [unknown, unknown], execute: async (_: unknown, v?: unknown[]) => (seen.push(v!), [[], []] as [unknown, unknown]) };
+  const mq: QueryModule<"mysql"> = { dialect: "mysql", sql: "select :d, :n", params: ["d", "n"], inputs: { d: { type: myType("double") }, n: { type: myType("decimal") } } };
+  for (const v of [NaN, Infinity, -Infinity]) await assert.rejects(Promise.resolve().then(() => execute(mysql2, mq, { d: v, n: 1 })), new RegExp(`^TypeError: Parameter "d" is ${v}, which MySQL holds no value for\\.$`));
+  await assert.rejects(Promise.resolve().then(() => execute(mysql2, mq, { d: 1, n: NaN })), /Parameter "n" is NaN, which MySQL holds no value for/);
+  const db = new DatabaseSync(":memory:");
+  const lq: QueryModule<"sqlite"> = { dialect: "sqlite", ...handWritten("select :r as r, :u as u", "sqlite"), inputs: { r: { type: liteType("real") }, u: { type: { kind: "unknown" } } } };
+  assert.throws(() => execute(db, lq, { r: NaN, u: 1 }), /^TypeError: Parameter "r" is NaN, which SQLite holds no value for: it would be bound as NULL\.$/);
+  assert.throws(() => execute(db, lq, { r: 1, u: NaN }), /Parameter "u" is NaN/);
+  const pq: QueryModule<"postgres"> = { dialect: "postgres", sql: "select :f::float8, :n::numeric, :p::numeric(5,2)", params: ["f", "n", "p"], inputs: { f: { type: pgType("float8") }, n: { type: pgType("numeric") }, p: { type: { kind: "decimal", precision: 5, min_scale: 2, max_scale: 2, nan: true } } } };
+  const client = pgPool(async (_: string, values?: unknown[]) => (seen.push(values!), { rows: [] }));
+  await execute(client, pq, { f: NaN, n: -Infinity, p: NaN });
+  await execute(client, pq, { f: Infinity, n: NaN, p: 1.5 });
+  assert.deepEqual(seen, [[NaN, -Infinity, NaN], [Infinity, NaN, 1.5]]);
+  await assert.rejects(Promise.resolve().then(() => execute(client, pq, { f: 1, n: 1, p: Infinity })), /^TypeError: Parameter "p" is Infinity, which its type, a numeric with a precision, holds no value for\.$/);
+});
+
+test("sqlite: -0 for a float or a value of no declared type, and an infinity, go in at their marks as SQLite's literals, which sqlite3 and Turso's engine would bind as the INTEGER 0 and libSQL refuse; an integer's -0 goes as it is", async () => {
+  const seen: unknown[][] = [];
+  const libsql = { execute: async (q: { sql: string; args: unknown[] }) => (seen.push([q.sql, q.args]), { rows: [] }), executeMultiple: async () => {} };
+  const lq: QueryModule<"sqlite"> = { dialect: "sqlite", ...handWritten("select :r as r, :u as u, :i as i, :n as n, 1-:r as m", "sqlite"), inputs: { r: { type: liteType("real") }, u: { type: { kind: "unknown" } }, i: { type: liteType("integer") }, n: { type: liteType("numeric") } } };
+  await execute(libsql, lq, { r: -0, u: -0, i: -0, n: -0 });
+  await execute(libsql, lq, { r: Infinity, u: -Infinity, i: 1, n: 2.5 });
+  assert.deepEqual(seen, [
+    ["select (-0.0) as r, (-0.0) as u, ? as i, (-0.0) as n, 1-(-0.0) as m", [-0]],
+    ["select (9e999) as r, (-9e999) as u, ? as i, ? as n, 1-(9e999) as m", [1, 2.5]],
+  ]);
+  // Where the run time doesn't know a placeholder's place, a driver that would bind a float's -0 as
+  // 0 (sqlite3, Turso's engine, sql.js, SQLite Wasm, D1), or send an infinity as null (D1), refuses
+  // it; libSQL, which keeps -0, binds it as it is.
+  const unmarked: QueryModule<"sqlite"> = { dialect: "sqlite", sql: "select :r as r", params: ["r"], text: "select ? as r", order: ["r"], inputs: { r: { type: liteType("real") } } };
+  const sqlite3Like = { prepare: () => ({}), exec: () => {}, all: (_: string, v: unknown[], done: (e: null, rows: unknown[]) => void) => setImmediate(() => done(null, [{ r: v[0] }])) };
+  await assert.rejects(Promise.resolve().then(() => execute(sqlite3Like, unmarked, { r: -0 })), /^TypeError: Parameter "r" is -0, which sqlite3 binds as 0/);
+  const d1Like = { batch: async () => [], prepare: () => ({ first: async () => null, bind: (...v: unknown[]) => ({ all: async () => ({ results: [{ r: v[0] }] }) }) }) };
+  await assert.rejects(Promise.resolve().then(() => execute(d1Like, unmarked, { r: Infinity })), /^TypeError: Parameter "r" is Infinity, which D1 sends as null/);
+  await execute(libsql, unmarked, { r: -0 });
+  assert.ok(Object.is((seen.at(-1)![1] as unknown[])[0], -0));
+  // On the drivers themselves, each value comes back as it went in.
+  const read = (rows: unknown) => (rows as Record<string, number>[]).map((r) => ({ r: r.r, u: r.u, m: r.m, sign: Object.is(r.r, -0) && Object.is(r.u, -0) }));
+  const sqlite3 = driver("sqlite3");
+  const db3 = new sqlite3.Database(":memory:");
+  const client = driver("@libsql/client").createClient({ url: ":memory:" });
+  const turso = await driver("@tursodatabase/database").connect(":memory:");
+  try {
+    for (const db of [db3, client, turso, new DatabaseSync(":memory:")]) {
+      assert.deepEqual(read(await execute(db, lq, { r: -0, u: -0, i: 0, n: 0 })), [{ r: -0, u: -0, m: 1, sign: true }]);
+      assert.deepEqual(read(await execute(db, lq, { r: Infinity, u: -Infinity, i: 0, n: 0 })), [{ r: Infinity, u: -Infinity, m: -Infinity, sign: false }]);
+    }
+  } finally {
+    db3.close();
+    client.close();
+    await turso.close();
+  }
 });
 
 test("mysql and sqlite: every driver gets a JSON parameter as its JSON text, and null as NULL", async () => {
@@ -372,6 +479,32 @@ test("postgres: a pgvector vector parameter takes an array of finite numbers, wr
     await assert.rejects(execute(client as never, nearest, { q, qs: [], h: null }) as Promise<unknown>, why);
   }
   await assert.rejects(execute(client as never, nearest, { q: [1], qs: [[1], [NaN]], h: null }) as Promise<unknown>, /element at \[0\] is NaN/);
+});
+
+test("postgres: an array parameter tells its levels from its elements by the element's own value, at any depth, as `.run()` reads them", async () => {
+  const seen: unknown[][] = [];
+  const client = { query: async (config: { values: unknown[] }) => (seen.push(config.values), { rows: [], fields: [] }), getTypeParser: () => String };
+  // A vector its numbers, a segment and a polygon their points, a multirange its ranges: an array
+  // holding no array and no null is one of them, and any other a level of the array around it.
+  const types = { v: array(pgType("vector")), s: array(pgType("lseg")), g: array(pgType("polygon")), m: array(pgType("int4multirange")), b: array(pgType("box")), i: array(pgType("int4")), j: array({ kind: "json" }) };
+  const sql = "select $1::vector[], $2::lseg[], $3::polygon[], $4::int4multirange[], $5::box[], $6::int4[], $7::jsonb[]";
+  const q: QueryModule<"postgres"> = { dialect: "postgres", sql, text: sql, params: Object.keys(types), order: Object.keys(types), inputs: Object.fromEntries(Object.entries(types).map(([k, type]) => [k, { type, ...(k === "b" ? { delimiter: ";" } : {}) }])) };
+  const seg = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+  const range = { lower: 1, upper: 3, bounds: "[)" };
+  const box = { high: { x: 1, y: 1 }, low: { x: 0, y: 0 } };
+  const at = (depth: number, e: unknown): unknown => (depth === 0 ? e : [at(depth - 1, e), at(depth - 1, e)]);
+  for (const depth of [1, 2, 3]) {
+    await execute(client as never, q, { v: at(depth, [1, 2]), s: at(depth, seg), g: at(depth, seg), m: at(depth, [range]), b: at(depth, box), i: at(depth, 7), j: at(1, [1, null]) });
+    const literal = (text: string, delim = ","): string => arrayLiteral(at(depth, text) as unknown[], delim);
+    assert.deepEqual(seen.at(-1), [literal("[1,2]"), literal("[(0,0),(1,1)]"), literal("((0,0),(1,1))"), literal('{["1","3")}'), literal("(1,1),(0,0)", ";"), literal("7"), '{"[1,null]","[1,null]"}'], `depth ${depth}`);
+  }
+  // An empty multirange is one value; a JSON element's own null is its value's, never the array's.
+  await execute(client as never, q, { v: [], s: [], g: [], m: [[[]]], b: [], i: [], j: [[null]] });
+  assert.deepEqual(seen.at(-1), ["{}", "{}", "{}", '{{"{}"}}', "{}", "{}", '{"[null]"}']);
+  // A hole is an undefined, so an array holding one is a level, whose element it is.
+  await assert.rejects(execute(client as never, q, { v: [], s: [], g: [], m: [new Array(1)], b: [], i: [], j: [] }) as Promise<unknown>, /Parameter "m" is an array whose elements may not be null, and the element at \[0\]\[0\] is/);
+  // A NULL is an element of the level around it, which a parameter's elements may not be.
+  await assert.rejects(execute(client as never, q, { v: [[null, null], [[1], [2]]], s: [], g: [], m: [], b: [], i: [], j: [] }) as Promise<unknown>, /Parameter "v" is an array whose elements may not be null, and the element at \[0\]\[0\] is/);
 });
 
 test("postgres: a float of -0 goes as the text -0, which pg, postgres.js, PGlite and Neon would write as 0, alone and inside an array, a vector or a row value; every other float as the number it is", async () => {
@@ -647,6 +780,500 @@ test("mysql: through a server that refuses prepared statements, as Cloudflare Hy
         await other.end();
       }
     }
+    // On a server that reports no change of charset, SET NAMES changes how the session reads the text and not how mysql2 writes it, so the session's own charset is read too.
+    const named = await mysql2.createConnection(connection);
+    try {
+      await named.query("set session session_track_system_variables = ''");
+      await named.query("set names sjis");
+      await assert.rejects(async () => execute(named, byName, { name: "\u00c1\\' or 1=1 -- " }), (e: Error) => e.message.includes("this session reads it in sjis, not UTF-8"));
+      // A run that reads the session first keeps its turn: the select called after the insert, and not awaited, sees its row.
+      await named.query("set names utf8mb4");
+      const insert: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into users values (3, :name)", params: ["name"], text: "insert into users values (3, ?)", order: ["name"], marks: [[29, 30]] };
+      const wrote = execute(named, insert, { name: "C:\\" });
+      const read = execute(named, byName, { name: "C:\\" });
+      await wrote;
+      assert.deepEqual(plain((await read) as object[]), [{ id: 3 }]);
+    } finally {
+      await named.end();
+    }
+  } finally {
+    await proxy.close();
+    await own.drop();
+  }
+});
+
+// mariadb's client shapes, each opened on `connection` with `run` for a statement of the app's own
+// on the session `.run()` takes next: a pool and a Knex instance hold one connection, so that it is.
+type MariadbShape = [string, () => Promise<{ client: any; run(sql: string): Promise<unknown>; end(): Promise<unknown> }>];
+function mariadbShapes(connection: Record<string, unknown>): MariadbShape[] {
+  const mariadb = driver("mariadb");
+  const callbacks = driver("mariadb/callback");
+  const called = (call: (done: (e: Error | null) => void) => void) => new Promise<void>((ok, no) => call((e) => (e ? no(e) : ok())));
+  return [
+    [
+      "a Connection",
+      async () => {
+        const c = await mariadb.createConnection(connection);
+        return { client: c, run: (sql) => c.query(sql), end: () => c.end() };
+      },
+    ],
+    [
+      "a Pool",
+      async () => {
+        const pool = mariadb.createPool({ ...connection, connectionLimit: 1 });
+        return { client: pool, run: (sql) => pool.query(sql), end: () => pool.end() };
+      },
+    ],
+    [
+      "a PoolConnection in a transaction",
+      async () => {
+        const pool = mariadb.createPool({ ...connection, connectionLimit: 1 });
+        const conn = await pool.getConnection();
+        await conn.beginTransaction();
+        return { client: conn, run: (sql) => conn.query(sql), end: async () => (await conn.commit(), await conn.release(), await pool.end()) };
+      },
+    ],
+    [
+      "a callback Pool",
+      async () => {
+        const pool = callbacks.createPool({ ...connection, connectionLimit: 1 });
+        return { client: pool, run: (sql) => called((done) => pool.query(sql, done)), end: () => called((done) => pool.end(done)) };
+      },
+    ],
+    [
+      "Knex",
+      async () => {
+        const db = driver("knex")({ client: "mariadb", connection, pool: { min: 0, max: 1 } });
+        return { client: db, run: (sql) => db.raw(sql), end: () => db.destroy() };
+      },
+    ],
+  ];
+}
+
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, mariadb, which writes each value into the statement, refuses one holding a quote or a backslash where a stored routine has left the session reading a backslash otherwise than the driver writes it", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_mode", "create table t (id int primary key, s varchar(80)); create procedure escapes_nothing() set session sql_mode = concat(@@session.sql_mode, ',NO_BACKSLASH_ESCAPES'); create procedure escapes() set session sql_mode = replace(@@session.sql_mode, 'NO_BACKSLASH_ESCAPES', '')");
+  const u = new URL(MYSQL!);
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  // Defined by hand, without marks. Each value, read otherwise than the driver wrote it, ends its
+  // literal and adds a row: one holding a backslash where the session reads it as an escape and the
+  // driver wrote it as itself, one holding a quote where the session reads a backslash as itself and
+  // the driver wrote one before the quote.
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
+  const states = [
+    { calls: ["call escapes_nothing()"], value: "x\\'), (2, 2) -- " },
+    { calls: ["set session sql_mode = concat(@@session.sql_mode, ',NO_BACKSLASH_ESCAPES')", "call escapes()"], value: "x'), (2, 2) -- " },
+  ];
+  try {
+    for (const [shape, open] of mariadbShapes(connection)) {
+      for (const { calls, value } of states) {
+        const { client, run, end } = await open();
+        try {
+          for (const sql of calls) await run(sql);
+          await assert.rejects(async () => execute(client, ins, { id: 1, s: value }), /^Error: reylo cannot run this mysql statement through mariadb: /, shape);
+          // Setting sql_mode again outside a routine brings the server's report of it up to date.
+          await run("set session sql_mode = @@session.sql_mode");
+          await execute(client, ins, { id: 1, s: value });
+        } finally {
+          await end();
+        }
+        assert.deepEqual(await own.rows("select id, s from t"), [{ id: 1, s: value }], shape);
+        await own.db.query("delete from t");
+      }
+    }
+  } finally {
+    await proxy.close();
+    await own.drop();
+  }
+});
+
+/** A statement of no values, which teaches a connection behind refusingPrepares() that its server refuses prepared statements. */
+const WARM_UP: QueryModule<"mysql"> = { dialect: "mysql", sql: "select 1", params: [] };
+
+// As a build under NO_BACKSLASH_ESCAPES compiles it: 'a\', 'x?' and 'b\' are strings, and :n is the
+// one placeholder. A scan in the default sql_mode reads 'a\', ' as one string, so its placeholder
+// is the one in 'x?', where the value's opening quote would end that string and the rest of the
+// value would run as SQL.
+const SCANNED = "select 'a\\', 'x?', 'b\\', ? as n -- '";
+const scannedOtherwise: QueryModule<"mysql"> = { dialect: "mysql", sql: "select 'a\\', 'x?', 'b\\', :n as n -- '", params: ["n"], text: SCANNED, order: ["n"], marks: [[SCANNED.lastIndexOf("?"), SCANNED.lastIndexOf("?") + 1]], sqlMode: { backslashEscapes: false, ansiQuotes: false } };
+const LEAK = ", (select @@version) as leaked -- ";
+const SCAN_REFUSAL = /finds the placeholders in its text as a session reads them whose sql_mode has neither NO_BACKSLASH_ESCAPES nor ANSI_QUOTES, and the build found them as a session reads them whose sql_mode has NO_BACKSLASH_ESCAPES and not ANSI_QUOTES/;
+const SESSION_READ = "select @@session.sql_mode, @@session.character_set_client";
+
+test("mysql: on a server that takes prepared statements, mariadb binds each value, so a value is stored as given whatever the session's sql_mode, charset or stored routine, and a statement built under NO_BACKSLASH_ESCAPES gets its value at its own placeholder", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_bound", "create table t (id int primary key, s varchar(80), b varbinary(80)); create procedure escapes_nothing() set session sql_mode = concat(@@session.sql_mode, ',NO_BACKSLASH_ESCAPES')");
+  const u = new URL(MYSQL!);
+  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s, b) values (:id, :s, :b)", params: ["id", "s", "b"] };
+  // Each state, and the value that ends its literal where the driver writes it into the text.
+  const states = [
+    { options: {}, calls: ["call escapes_nothing()"], s: "x\\'), (2, 2, null) -- ", b: null },
+    // latin1 has no Ŝ, so the driver writes its low byte, a backslash, which the server stores as part of the one value.
+    { options: { charset: "latin1" }, calls: [], s: "\u015c'), (2, 2, null) -- ", b: null, stored: "\\'), (2, 2, null) -- " },
+    { options: { charset: "sjis" }, calls: [], s: "x", b: Buffer.concat([Buffer.from([0xe0]), Buffer.from("', null), (2, 0x32, null) -- ")]) },
+    // A driver writing SJIS to a session reading UTF-8 sends bytes that are no UTF-8, which the server refuses.
+    { options: { charset: "sjis" }, calls: ["set session session_track_system_variables = ''", "set names utf8mb4"], s: "\u30bd'), (2, 2, null) -- ", b: null, refused: true },
+  ];
+  try {
+    for (const [shape, open] of mariadbShapes(connection)) {
+      for (const { options, calls, s, b, stored, refused } of states as { options: object; calls: string[]; s: string; b: Buffer | null; stored?: string; refused?: boolean }[]) {
+        const [, reopen] = mariadbShapes({ ...connection, ...options }).find(([name]) => name === shape)!;
+        const { client, run, end } = await reopen();
+        try {
+          for (const sql of calls) await run(sql);
+          if (refused) await assert.rejects(async () => execute(client, ins, { id: 1, s, b }), (e: { errno?: number }) => e.errno === 1366, shape);
+          else await execute(client, ins, { id: 1, s, b });
+        } finally {
+          await end();
+        }
+        if (refused) assert.deepEqual(await own.rows("select id from t"), [], shape);
+        else assert.deepEqual(await own.rows("select id, s, hex(b) as b from t"), [{ id: 1, s: stored ?? s, b: b && b.toString("hex").toUpperCase() }], `${shape}, ${JSON.stringify(options)} ${calls.join("; ")}`);
+        await own.db.query("delete from t");
+      }
+      void open;
+      // The server finds the placeholders as the session reads the text, so the value is bound where the build found it.
+      const { client, run, end } = await open();
+      try {
+        await run("set session sql_mode = 'NO_BACKSLASH_ESCAPES'");
+        assert.deepEqual(plain((await execute(client, scannedOtherwise, { n: LEAK })) as object[]).map((row) => Object.values(row)), [["a\\", "x?", "b\\", LEAK]], shape);
+      } finally {
+        await end();
+      }
+    }
+  } finally {
+    await own.drop();
+  }
+});
+
+test("mysql: mariadb and PlanetScale, whose own scans find a statement's placeholders as the default sql_mode reads it, refuse a statement whose build read its strings otherwise, and mariadb runs one whose build read them so only on a session that reads them so too", async () => {
+  const sent: string[] = [];
+  let session = "STRICT_TRANS_TABLES";
+  const mariadb = { batch: async () => ({}), escape: (v: unknown) => `'${String(v)}'`, query: async (options: { sql: string }) => (sent.push(options.sql), options.sql === SESSION_READ ? [[session, "utf8mb4"]] : []) };
+  const planetscale = { execute: async (sql: string) => (sent.push(sql), { rows: [] }) };
+  for (const client of [mariadb, planetscale]) await assert.rejects(execute(client as never, scannedOtherwise, { n: LEAK }) as Promise<unknown>, SCAN_REFUSAL);
+  assert.deepEqual(sent, []);
+  // Its strings read otherwise only after the placeholder, which the default sql_mode finds where the build did.
+  const text = "select ? as n, 'a\\' as s -- '\n, 1 as t";
+  const built: QueryModule<"mysql"> = { dialect: "mysql", sql: "select :n as n, 'a\\' as s -- '\n, 1 as t", params: ["n"], text, order: ["n"], marks: [[7, 8]], sqlMode: { backslashEscapes: true, ansiQuotes: false } };
+  await execute(mariadb as never, built, { n: 1 });
+  session = "STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES";
+  await assert.rejects(execute(mariadb as never, built, { n: 1 }) as Promise<unknown>, /the build found its placeholders as a session reads them whose sql_mode has neither NO_BACKSLASH_ESCAPES nor ANSI_QUOTES, and this session's sql_mode has NO_BACKSLASH_ESCAPES and not ANSI_QUOTES/);
+  await execute(planetscale as never, built, { n: 1 });
+  assert.deepEqual(sent, [SESSION_READ, text, SESSION_READ, text]);
+});
+
+test("mysql: mariadb from before 3.5.4, which writes a backslash before a double quote or a control character on every session, refuses a value holding one where it was told the session reads a backslash as itself", async () => {
+  const sent: string[] = [];
+  let status = 2 | (1 << 9);
+  const old = {
+    batch: async () => ({}),
+    escape: (v: unknown) => `'${String(v).replace(/['"\\]/g, (c) => `\\${c}`)}'`,
+    get info() {
+      return { status };
+    },
+    query: async (options: { sql: string }) => (sent.push(options.sql), options.sql === SESSION_READ ? [["NO_BACKSLASH_ESCAPES", "utf8mb4"]] : []),
+  };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (s) values (:s)", params: ["s"], text: "insert into t (s) values (?)", order: ["s"], marks: [[26, 27]] };
+  // Such a session would store `say "hi"` as `say \"hi\"`, and a JSON value as no JSON at all.
+  const values = ['say "hi"', { a: 1 }, "a\nb", "a\0b"];
+  for (const s of values) await assert.rejects(execute(old as never, ins, { s }) as Promise<unknown>, /with a backslash before each quote, double quote and backslash, and this session's sql_mode, with NO_BACKSLASH_ESCAPES, reads a backslash as itself, so it would read a value holding a quote, a double quote, a backslash or a control character otherwise/);
+  assert.deepEqual(sent, values.map(() => SESSION_READ));
+  // Told the session reads a backslash as an escape, as it does, the driver's backslashes hold, and nothing is read.
+  status = 2;
+  sent.length = 0;
+  await execute(old as never, ins, { s: 'say "hi"' });
+  assert.deepEqual(sent, ["insert into t (s) values (?)"]);
+});
+
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, mariadb refuses a statement whose build read its strings under NO_BACKSLASH_ESCAPES, where its own scan would write a value into one of them", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_scan", "create table t (id int primary key)");
+  const u = new URL(MYSQL!);
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  try {
+    // The driver alone, on a session that reads the statement as its build did, runs the value as SQL.
+    const bare = await driver("mariadb").createConnection(connection);
+    try {
+      await bare.query("set session sql_mode = 'NO_BACKSLASH_ESCAPES'");
+      const [row] = await bare.query({ sql: SCANNED, rowsAsArray: true }, [LEAK]);
+      assert.equal(row.length, 3);
+    } finally {
+      await bare.end();
+    }
+    for (const [shape, open] of mariadbShapes(connection)) {
+      const { client, run, end } = await open();
+      try {
+        for (const mode of ["NO_BACKSLASH_ESCAPES", ""]) {
+          await run(`set session sql_mode = '${mode}'`);
+          await assert.rejects(async () => execute(client, scannedOtherwise, { n: LEAK }), SCAN_REFUSAL, shape);
+        }
+      } finally {
+        await end();
+      }
+    }
+  } finally {
+    await proxy.close();
+    await own.drop();
+  }
+});
+
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, mariadb refuses a value holding a character outside ASCII where it writes text in another charset than the session reads, as after SET NAMES on a server that reports no change of charset", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_encoder", "create table t (id int primary key, s varbinary(80))");
+  const u = new URL(MYSQL!);
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
+  // SJIS writes ソ as 0x83 0x5c, which a session in UTF-8 reads as a byte and a backslash: that
+  // backslash escapes the one the driver writes before the quote, and the quote ends the literal.
+  const value = "ソ'), (2, 0x32) -- ";
+  try {
+    for (const [shape, open] of mariadbShapes({ ...connection, charset: "sjis" })) {
+      const { client, run, end } = await open();
+      try {
+        await run("set session session_track_system_variables = ''");
+        await run("set names utf8mb4");
+        await assert.rejects(async () => execute(client, ins, { id: 1, s: value }), (e: Error) => e.message.includes("writes text in a charset that is not UTF-8 while the session reads it as UTF-8"), shape);
+        // Bytes too: a driver writing in SJIS leaves 0x83 0x5c as one character, whose backslash a session in UTF-8 reads as an escape.
+        await assert.rejects(async () => execute(client, ins, { id: 1, s: Buffer.concat([Buffer.from([0x83, 0x5c, 0x27]), Buffer.from("), (2, 0x32) -- ")]) }), (e: Error) => e.message.includes("mariadb writes text in sjis") && e.message.includes("the session reads the text in utf8mb4"), shape);
+        await execute(client, ins, { id: 1, s: "ada" });
+      } finally {
+        await end();
+      }
+      assert.deepEqual(await own.rows("select id, hex(s) as s from t"), [{ id: 1, s: "616461" }], shape);
+      await own.db.query("delete from t");
+    }
+  } finally {
+    await proxy.close();
+    await own.drop();
+  }
+});
+
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, a run on mariadb that reads the driver's state of the session waits for the runs called before it to answer, since the driver takes that state from each answer", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_answered", "create table t (id int primary key, s varchar(80)); create procedure escapes_nothing() set session sql_mode = concat(@@session.sql_mode, ',NO_BACKSLASH_ESCAPES')");
+  const u = new URL(MYSQL!);
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const call: QueryModule<"mysql"> = { dialect: "mysql", sql: "call escapes_nothing()", params: [] };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
+  try {
+    for (const [shape, open] of mariadbShapes(connection).filter(([shape]) => shape === "a Connection" || shape === "a PoolConnection in a transaction")) {
+      const { client, end } = await open();
+      // Refused once, the connection takes query() from then on.
+      await execute(client, WARM_UP, {});
+      try {
+        // The routine's answer tells the driver the session is in NO_BACKSLASH_ESCAPES, which it no
+        // longer is, so the driver would write the backslash as it is, which the session reads as an escape.
+        const called = execute(client, call, {});
+        const wrote = execute(client, ins, { id: 1, s: "x\\'), (2, 'two') -- " });
+        await called;
+        await assert.rejects(wrote as Promise<unknown>, /^Error: reylo cannot run this mysql statement through mariadb: mariadb writes each value into the statement with each quote doubled/, shape);
+      } finally {
+        await end();
+      }
+      assert.deepEqual(await own.rows("select id from t"), [], shape);
+    }
+  } finally {
+    await proxy.close();
+    await own.drop();
+  }
+});
+
+test("mysql: mariadb and PlanetScale, which write an array as a list of values, refuse one for a parameter", async () => {
+  const sent: string[] = [];
+  const mariadb = { batch: async () => ({}), query: async (options: { sql: string }) => (sent.push(options.sql), []) };
+  const planetscale = { execute: async (sql: string) => (sent.push(sql), { rows: [] }) };
+  const update: QueryModule<"mysql"> = { dialect: "mysql", sql: "update users set doc = json_set(doc, '$.name', :name)", params: ["name"], text: "update users set doc = json_set(doc, '$.name', ?)", order: ["name"], marks: [[47, 48]] };
+  for (const client of [mariadb, planetscale]) await assert.rejects(execute(client as never, update, { name: ["x", "$.role", "admin"] }) as Promise<unknown>, /^TypeError: Parameter "name" is an array, which (mariadb|@planetscale\/database) writes into the statement as a list of values/);
+  assert.deepEqual(sent, []);
+  // An object goes to mariadb as its JSON text, which an app's permitSetMultiParamEntries would otherwise write as `key` = value pairs; a GeoJSON geometry goes as it is, for the driver to write as one.
+  const given: unknown[][] = [];
+  const recording = { batch: async () => ({}), query: async (_options: unknown, values: unknown[]) => (given.push(values), []) };
+  const point = { type: "Point", coordinates: [1, 2] };
+  await execute(recording as never, update, { name: { role: "admin" } });
+  await execute(recording as never, update, { name: point });
+  // A stream is the driver's to write, and a boxed string goes as its string.
+  const stream = Readable.from(["hello"]);
+  const boxed = new String("hello");
+  await execute(recording as never, update, { name: stream });
+  await execute(recording as never, update, { name: boxed });
+  // A class's instance has no writing of its own in the driver, so it goes as its JSON text too.
+  class Role {
+    role = "admin";
+  }
+  await execute(recording as never, update, { name: new Role() });
+  // A Date from another realm goes as one of this realm's, and long.js's Long, -2^40 and 2^64 - 1 here, as the BigInt it holds.
+  const date = runInNewContext("new Date(0)");
+  await execute(recording as never, update, { name: date });
+  // long.js marks a Long on its prototype; a JSON document shaped like one stays a document.
+  class Long {
+    low: number;
+    high: number;
+    unsigned: boolean;
+    constructor(low: number, high: number, unsigned: boolean) {
+      this.low = low;
+      this.high = high;
+      this.unsigned = unsigned;
+    }
+  }
+  Object.defineProperty(Long.prototype, "__isLong__", { value: true });
+  const lookalike = { __isLong__: true, low: 12, high: 0, source: "legacy" };
+  await execute(recording as never, update, { name: new Long(0, -256, false) });
+  await execute(recording as never, update, { name: new Long(-1, -1, true) });
+  await execute(recording as never, update, { name: lookalike });
+  assert.deepEqual(given, [['{"role":"admin"}'], [point], [stream], ["hello"], ['{"role":"admin"}'], [new Date(0)], [-(2n ** 40n)], [2n ** 64n - 1n], [JSON.stringify(lookalike)]]);
+  assert.equal(given[2]![0], stream);
+});
+
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, a run on mariadb whose session needs no read hands the driver its statement before anything is awaited, so the connection's own rollback() called next follows it", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_rollback", "create table t (id int primary key, s varchar(80))");
+  const u = new URL(MYSQL!);
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
+  const conn = await driver("mariadb").createConnection(connection);
+  try {
+    // Refused once, the connection takes query() from then on.
+    await execute(conn, WARM_UP, {});
+    await conn.beginTransaction();
+    // A double quote, which the driver writes after a backslash, as the session reads it.
+    const wrote = execute(conn, ins, { id: 1, s: 'say "hello"' });
+    const rolledBack = conn.rollback();
+    await wrote;
+    await rolledBack;
+  } finally {
+    await conn.end();
+  }
+  assert.deepEqual(await own.rows("select id from t"), []);
+  await proxy.close();
+    await own.drop();
+});
+
+test("mysql: on mariadb, a query defined by hand whose text holds a backslash or a double quote runs only on a session that reads its strings as the driver's scan does", async () => {
+  const sent: string[] = [];
+  let session = "ANSI_QUOTES";
+  const mariadb = { batch: async () => ({}), escape: (v: unknown) => `'${String(v)}'`, query: async (options: { sql: string }) => (sent.push(options.sql), options.sql === SESSION_READ ? [[session, "utf8mb4"]] : []) };
+  const text = 'select "a?" as q, ? as n';
+  const byHand: QueryModule<"mysql"> = { dialect: "mysql", sql: 'select "a?" as q, :n as n', params: ["n"], text, order: ["n"] };
+  await assert.rejects(execute(mariadb as never, byHand, { n: 1 }) as Promise<unknown>, /the build found its placeholders as a session reads them whose sql_mode has neither NO_BACKSLASH_ESCAPES nor ANSI_QUOTES, and this session's sql_mode has ANSI_QUOTES and not NO_BACKSLASH_ESCAPES/);
+  session = "";
+  await execute(mariadb as never, byHand, { n: 1 });
+  assert.deepEqual(sent, [SESSION_READ, SESSION_READ, text]);
+});
+
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, a run on mariadb that reads the session first keeps its turn, so a run called after it on the same connection does not overtake it", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_turn", "create table t (id int primary key, s varchar(80))");
+  const u = new URL(MYSQL!);
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
+  const all: QueryModule<"mysql"> = { dialect: "mysql", sql: "select s from t", params: [] };
+  try {
+    for (const [shape, open] of mariadbShapes(connection).filter(([shape]) => shape === "a Connection" || shape === "a PoolConnection in a transaction")) {
+      const { client, end } = await open();
+      // Refused once, the connection takes query() from then on.
+      await execute(client, WARM_UP, {});
+      try {
+        // The quote has the session read first; the select, called next and not awaited, reads nothing.
+        const wrote = execute(client, ins, { id: 1, s: "it's" });
+        const read = execute(client, all, {});
+        await wrote;
+        assert.deepEqual(plain((await read) as object[]), [{ s: "it's" }], shape);
+      } finally {
+        await end();
+      }
+      await own.db.query("delete from t");
+    }
+  } finally {
+    await proxy.close();
+    await own.drop();
+  }
+});
+
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, mariadb, which writes each value into the statement, refuses one holding a character outside ASCII on a connection whose charset is not UTF-8, which could write it with a quote's or a backslash's byte", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_charset", "create table t (id int primary key, s varchar(80))");
+  const u = new URL(MYSQL!);
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
+  // latin1 keeps a character's low byte, so Ŝ is a backslash's, which would end the literal and add a row.
+  const value = "\u015c'), (3, 3) -- ";
+  const latin1 = { ...connection, charset: "latin1" };
+  const shapes: MariadbShape[] = [
+    ...mariadbShapes(latin1),
+    [
+      "a Connection after SET NAMES",
+      async () => {
+        const c = await driver("mariadb").createConnection(connection);
+        await c.query("set names latin1");
+        return { client: c, run: (sql) => c.query(sql), end: () => c.end() };
+      },
+    ],
+  ];
+  try {
+    for (const [shape, open] of shapes) {
+      const { client, run, end } = await open();
+      try {
+        await execute(client, ins, { id: 1, s: "ada" });
+        await assert.rejects(async () => execute(client, ins, { id: 2, s: value }), (e: Error) => e.message.startsWith("reylo cannot run a mysql statement through mariadb") && e.message.includes("is not UTF-8"), shape);
+        await run("set names utf8mb4");
+        await execute(client, ins, { id: 2, s: value });
+      } finally {
+        await end();
+      }
+      assert.deepEqual(await own.rows("select id, s from t order by id"), [{ id: 1, s: "ada" }, { id: 2, s: value }], shape);
+      await own.db.query("delete from t");
+    }
+  } finally {
+    await proxy.close();
+    await own.drop();
+  }
+});
+
+test("mysql: where the server refuses prepared statements, as Cloudflare Hyperdrive does, mariadb, which writes a backslash before a quote or a backslash in bytes, refuses bytes holding one after a byte of 0x80 or above on a connection whose charset reads that byte and the backslash as one character", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_bytes", "create table t (id int primary key, b varbinary(80), s varchar(80))");
+  const u = new URL(MYSQL!);
+  const proxy = await refusingPrepares();
+  const connection = { host: "127.0.0.1", port: proxy.port, user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, b, s) values (:id, :b, :s)", params: ["id", "b", "s"] };
+  // 0xe0 begins a character in each of these charsets, whose second byte may be a backslash's. A
+  // session that reads it and the driver's backslash as one character would end the first value's
+  // literal at its quote, and take the second's closing quote with its backslash, either way adding
+  // the row (2, "2", null).
+  const values = [
+    { id: 1, b: Buffer.concat([Buffer.from([0xe0]), Buffer.from("', null), (2, 0x32, null) -- ")]), s: "x" },
+    { id: 3, b: Buffer.from([0xe0, 0x5c]), s: ", null), (2, 0x32, null) -- " },
+    // The driver writes a backslash before a double quote and NUL too, which such a session would keep as the byte's second.
+    { id: 4, b: Buffer.from([0xe0, 0x22]), s: "x" },
+    { id: 5, b: Buffer.from([0xe0, 0x00]), s: "x" },
+  ];
+  const stored = async (shape: string) => {
+    assert.deepEqual(await own.rows("select id, hex(b) as b, s from t order by id"), values.map(({ id, b, s }) => ({ id, b: b.toString("hex").toUpperCase(), s })), shape);
+    await own.db.query("delete from t");
+  };
+  try {
+    for (const charset of ["big5", "cp932", "gb18030", "gbk", "sjis"]) {
+      for (const [shape, open] of mariadbShapes({ ...connection, charset })) {
+        const { client, run, end } = await open();
+        try {
+          for (const value of values) await assert.rejects(async () => execute(client, ins, value), (e: Error) => e.message.startsWith("reylo cannot run a mysql statement through mariadb with bytes") && e.message.includes(`charset, ${charset},`), `${shape}, ${charset}`);
+          await run("set names utf8mb4");
+          for (const value of values) await execute(client, ins, value);
+        } finally {
+          await end();
+        }
+        await stored(`${shape}, ${charset}`);
+      }
+    }
+    // euckr's second bytes are never a backslash's.
+    for (const [shape, open] of mariadbShapes({ ...connection, charset: "euckr" })) {
+      const { client, end } = await open();
+      try {
+        for (const value of values) await execute(client, ins, value);
+      } finally {
+        await end();
+      }
+      await stored(`${shape}, euckr`);
+    }
   } finally {
     await proxy.close();
     await own.drop();
@@ -848,22 +1475,191 @@ test("postgres: an array of a domain over an array type comes back as whole arra
   }
 });
 
+test("postgres: under allow_nested_arrays, an array of every element whose value is an array or an object comes back and goes back in at depths 1 to 3 on pg, postgres.js and PGlite", { skip: pgLive }, async () => {
+  const own = await postgresDatabase("reylo_execute_nested_arrays");
+  const pg = driver("pg");
+  const client = new pg.Client(own.url);
+  await client.connect();
+  const { PGlite } = driver("@electric-sql/pglite");
+  const lite = new PGlite();
+  // Each element type and its value's text, beside types whose value is no array.
+  const elements: [string, string, string?][] = [
+    ["lseg", "[(0,0),(1,1)]"], ["polygon", "((0,0),(1,1),(1,0))"], ["int4multirange", "{[1,3),[5,7)}"], ["int4multirange", "{}"], ["box", "(1,1),(0,0)"], ["point", "(1,2)"],
+    ["circle", "<(0,0),1>"], ["path", "[(0,0),(1,1)]"], ["line", "{1,2,3}"], ["int4range", "[1,3)"], ["int4", "7"], ["bytea", "\\x0102"], ["bit", "101", "bit(3)"],
+  ];
+  try {
+    for (const [name, text, cast = name] of elements) {
+      const type = array({ ...pgType(name), label: name } as EngineType, false, `_${name}`);
+      const delim = name === "box" ? ";" : ",";
+      const kind = columnKind(type, "postgres");
+      for (const depth of [1, 2, 3]) {
+        let literal = `"${text.replace(/["\\]/g, "\\$&")}"`;
+        for (let d = 0; d < depth; d++) literal = `{${literal}${delim}${literal}}`;
+        const value = `'${literal.replace(/'/g, "''")}'::${cast}[]`;
+        const read = defineQuery({ dialect: "postgres", sql: `select ${value} as a`, params: [], cardinality: "one", columns: [delim === "," ? ["a", kind] : ["a", kind, delim]], nestedArrays: true });
+        const back = defineQuery({ dialect: "postgres", sql: `select ($1::${cast}[])::text as a, (${value})::text as b`, params: ["p"], cardinality: "one", inputs: { p: { type, ...(delim === "," ? {} : { delimiter: delim }) } }, nestedArrays: true });
+        for (const [driverName, c] of [["pg", client], ["postgres.js", own.sql], ["PGlite", lite]] as const) {
+          const { a } = (await read.run(c as never)) as { a: unknown };
+          const { a: written, b: want } = (await back.run(c as never, { p: a })) as { a: string; b: string };
+          assert.equal(written, want, `${name} at depth ${depth} on ${driverName}`);
+        }
+      }
+    }
+  } finally {
+    await client.end();
+    await lite.close();
+    await own.drop();
+  }
+});
+
 test("mysql: PlanetScale's execute() → { rows }", async () => {
   const conn = { execute: async () => ({ rows: [row], statement: "select", headers: ["id"], insertId: "0" }) };
   assert.deepEqual(await execute(conn, my, { id: 1, name: "ada" }), [row]);
 });
 
-test("mysql: mariadb runs through query(), not its own execute(); a write's OK packet gives no rows", async () => {
+test("mysql: mariadb 3 runs through its execute(), which binds each value, and query() where the server refuses prepared statements or the driver has no execute(); a write's OK packet gives no rows", async () => {
   const calls: string[] = [];
   const answers: unknown[] = [Object.assign([row], { meta: [] }), { affectedRows: 1, insertId: 7n, warningStatus: 0 }];
   const conn = {
-    query: async () => (calls.push("query"), answers.shift()),
+    query: async () => (calls.push("query"), [row]),
     batch: async () => (calls.push("batch"), {}),
-    execute: async () => (calls.push("execute"), [row]),
+    execute: async () => (calls.push("execute"), answers.shift()),
   };
   assert.deepEqual([...((await execute(conn, my, { id: 1, name: "ada" })) as unknown[])], [row]);
   assert.deepEqual(await execute(conn, my, { id: 1, name: "ada" }), []);
-  assert.deepEqual(calls, ["query", "query"]);
+  assert.deepEqual(calls, ["execute", "execute"]);
+  // Refused once, a connection takes query() from then on.
+  calls.length = 0;
+  const refusal = Object.assign(new Error("Hyperdrive does not currently support MySQL COM_STMT_PREPARE messages"), { code: "ER_UNKNOWN_COM_ERROR" });
+  const refusing = { ...conn, execute: async () => (calls.push("execute"), Promise.reject(refusal)) };
+  await execute(refusing, my, { id: 1, name: "ada" });
+  await execute(refusing, my, { id: 1, name: "ada" });
+  assert.deepEqual(calls, ["execute", "query", "query"]);
+  // mariadb 2 has no execute().
+  calls.length = 0;
+  const { execute: _, ...older } = conn;
+  await execute(older, my, { id: 1, name: "ada" });
+  assert.deepEqual(calls, ["query"]);
+});
+
+test("mysql: mariadb's execute(), which throws inside the driver on a BigInt below -2^63, gets one as its digits, as mysql2 sends it", async () => {
+  const given: unknown[][] = [];
+  const mariadb = { batch: async () => ({}), query: async () => [], execute: async (_options: unknown, values: unknown[]) => (given.push(values), []) };
+  const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "select :n as n", params: ["n"] };
+  for (const n of [-(2n ** 63n) - 1n, -(2n ** 63n), 2n ** 64n]) await execute(mariadb as never, q, { n });
+  assert.deepEqual(given, [["-9223372036854775809"], [-(2n ** 63n)], [2n ** 64n]]);
+  // query() writes it as a number, as it did.
+  const written: unknown[][] = [];
+  const older = { batch: async () => ({}), query: async (_options: unknown, values: unknown[]) => (written.push(values), []) };
+  await execute(older as never, q, { n: -(2n ** 63n) - 1n });
+  assert.deepEqual(written, [[-(2n ** 63n) - 1n]]);
+});
+
+test("mysql: runs on one mariadb connection keep their order through the first refusal of a prepared statement, and a statement that reads the session's diagnostics takes query()", async () => {
+  const refusal = Object.assign(new Error("Hyperdrive does not currently support MySQL COM_STMT_PREPARE messages"), { errno: 1047 });
+  const order: unknown[] = [];
+  const refusing = { batch: async () => ({}), execute: () => new Promise((_, reject) => setImmediate(() => reject(refusal))), query: async (_options: unknown, values: unknown[]) => (order.push(values[0]), []) };
+  const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "select :n as n", params: ["n"] };
+  await Promise.all([1, 2, 3].map((n) => execute(refusing as never, q, { n })));
+  assert.deepEqual(order, [1, 2, 3]);
+  // A statement that reads the session's diagnostics goes to query(), since preparing it would clear them; any other error of execute() is the driver's own, and is never run again.
+  const calls: string[] = [];
+  const signalled = Object.assign(new Error("This command is not supported in the prepared statement protocol yet"), { errno: 1295 });
+  const conn = {
+    batch: async () => ({}),
+    execute: async (options: { sql: string }) => (calls.push(`execute ${options.sql}`), options.sql.startsWith("call") ? Promise.reject(signalled) : []),
+    query: async (options: { sql: string }) => (calls.push(`query ${options.sql}`), []),
+  };
+  await execute(conn as never, { dialect: "mysql", sql: "-- after the insert\nshow count(*) warnings", params: [] }, {});
+  await assert.rejects(execute(conn as never, { dialect: "mysql", sql: "call writes_then_signals()", params: [] }, {}) as Promise<unknown>, (e) => e === signalled);
+  await execute(conn as never, q, { n: 1 });
+  assert.deepEqual(calls, ["query -- after the insert\nshow count(*) warnings", "execute call writes_then_signals()", "execute select ? as n"]);
+});
+
+test("mysql: through mariadb's execute(), a row of objects keeps its value of a name as the last column of that name gave it, whatever an earlier column of that name was", async () => {
+  const meta = [
+    { name: () => "v", type: "TIME", scale: 0 },
+    { name: () => "v", type: "VAR_STRING", scale: 0 },
+  ];
+  const conn = { batch: async () => ({}), query: async () => [], execute: async () => Object.assign([{ v: "literal.with.dot" }], { meta }) };
+  assert.deepEqual(plain((await execute(conn as never, { dialect: "mysql", sql: "select t as v, s as v from t", params: [] }, {})) as object[]), [{ v: "literal.with.dot" }]);
+});
+
+test("mysql: only the server's own refusal of a prepared statement sends mariadb to query(), not a message that quotes a value", async () => {
+  const calls: string[] = [];
+  const duplicate = Object.assign(new Error("(conn:5, no: 1062, SQLState: 23000) Duplicate entry 'COM_STMT_PREPARE' for key 'users.name'\nsql: insert into users (name) values (?)"), { sqlMessage: "Duplicate entry 'COM_STMT_PREPARE' for key 'users.name'", errno: 1062 });
+  const conn = { batch: async () => ({}), query: async () => (calls.push("query"), []), execute: async () => (calls.push("execute"), Promise.reject(duplicate)) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into users (name) values (:name)", params: ["name"] };
+  await assert.rejects(execute(conn as never, ins, { name: "COM_STMT_PREPARE" }) as Promise<unknown>, (e) => e === duplicate);
+  await assert.rejects(execute(conn as never, ins, { name: "COM_STMT_PREPARE" }) as Promise<unknown>, (e) => e === duplicate);
+  assert.deepEqual(calls, ["execute", "execute"]);
+});
+
+test("mysql: mariadb's execute() gets a Date of another realm as one of this realm's and a boxed string as its string, which mariadb 3.5 would bind as quoted JSON", async () => {
+  const given: unknown[][] = [];
+  const conn = { batch: async () => ({}), query: async () => [], execute: async (_options: unknown, values: unknown[]) => (given.push(values), []) };
+  const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "select :a, :b", params: ["a", "b"] };
+  await execute(conn as never, q, { a: runInNewContext("new Date(0)"), b: new String("hello") });
+  assert.ok(given[0]![0] instanceof Date);
+  assert.equal((given[0]![0] as Date).getTime(), 0);
+  assert.equal(given[0]![1], "hello");
+});
+
+test("mysql: through mariadb's execute(), a TIME, a DATETIME and a TIMESTAMP come back with their column's fraction digits, and one of more than six as the driver gives it", async () => {
+  const meta = [
+    { name: () => "t", type: "TIME", scale: 2 },
+    { name: () => "z", type: "TIME", scale: 6 },
+    { name: () => "d", type: "DATETIME", scale: 3 },
+    { name: () => "s", type: "TIMESTAMP", scale: 6 },
+    { name: () => "x", type: "TIME", scale: 31 },
+  ];
+  const conn = { batch: async () => ({}), query: async () => [], execute: async () => Object.assign([{ t: "-00:00:01.500000", z: "00:00:00", d: "2024-01-01 09:31:00", s: "2024-01-01 09:31:00.5", x: "12:00:01.500000" }], { meta }) };
+  const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "select * from t", params: [] };
+  assert.deepEqual(plain((await execute(conn as never, q, {})) as object[]), [{ t: "-00:00:01.50", z: "00:00:00.000000", d: "2024-01-01T09:31:00.000", s: "2024-01-01T09:31:00.500000", x: "12:00:01.500000" }]);
+});
+
+test("mysql: mariadb's execute() runs a statement on an app's pool made with namedPlaceholders, and keeps the order runs were called in on one connection, one prepared already or not", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_prepared", "create table t (id int primary key, s varchar(80))");
+  const u = new URL(MYSQL!);
+  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
+  const all: QueryModule<"mysql"> = { dialect: "mysql", sql: "select s from t order by id", params: [] };
+  try {
+    const pool = driver("mariadb").createPool({ ...connection, connectionLimit: 1, namedPlaceholders: true });
+    try {
+      await execute(pool, ins, { id: 1, s: "ada" });
+      assert.deepEqual(plain((await execute(pool, all, {})) as object[]), [{ s: "ada" }]);
+      // SHOW COUNT(*) WARNINGS reads the warnings of the statement before it, which preparing it would clear.
+      const conn = await pool.getConnection();
+      try {
+        for (const sql of ["show count(*) warnings", "show /* inspect */ count(*)warnings", "select @@session.warning_count"]) {
+          await conn.query("select cast('x' as signed)");
+          assert.deepEqual(plain((await execute(conn, { dialect: "mysql", sql, params: [] }, {})) as object[]).map((row) => Object.values(row).map((v) => BigInt(v as bigint))), [[1n]], sql);
+        }
+        // Without values the text goes as it is, with no scan for placeholders that reads its strings as another sql_mode would.
+        await conn.query("set session sql_mode = 'NO_BACKSLASH_ESCAPES'");
+        assert.deepEqual(plain((await execute(conn, { dialect: "mysql", sql: "select 'warnings\\' as label, 'why?' as marker", params: [], text: "select 'warnings\\' as label, 'why?' as marker", order: [] }, {})) as object[]), [{ label: "warnings\\", marker: "why?" }]);
+        await conn.query("set session sql_mode = default");
+      } finally {
+        await conn.release();
+      }
+    } finally {
+      await pool.end();
+    }
+    // The select is prepared already, the insert not: the driver would send the select's EXECUTE first.
+    const conn = await driver("mariadb").createConnection(connection);
+    try {
+      await execute(conn, all, {});
+      const wrote = execute(conn, ins, { id: 2, s: "grace" });
+      const read = execute(conn, all, {});
+      await wrote;
+      assert.deepEqual(plain((await read) as object[]), [{ s: "ada" }, { s: "grace" }]);
+    } finally {
+      await conn.end();
+    }
+  } finally {
+    await own.drop();
+  }
 });
 
 test("mysql: mariadb's callback API answers through the callback, and its errors reject", async () => {
@@ -902,34 +1698,42 @@ test("mysql: mariadb, which writes a value that is not a Buffer as JSON, gets a 
   }
 });
 
-test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which write a number into the statement and -0 as 0, written in at each of its places as the float (-0e0), the rest left to the driver; mysql2 gets the number, which it binds as a DOUBLE", async () => {
+test("mysql: a DOUBLE or FLOAT of -0, and one of a type its value decides between that may be a DOUBLE, goes to mariadb and PlanetScale, which write a number into the statement and -0 as 0, written in at each of its places as the float (-0e0), the rest left to the driver; mysql2 gets the number, which it binds as a DOUBLE", async () => {
   // A query defined by hand may name a parameter twice, which a build refuses; the first place types it.
   const text = "update r set d = ?, f = ?, i = ? + ?, payload = json_array(?)";
   const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "update r set d = :d, f = :f, i = :i + :u, payload = json_array(:d)", params: ["d", "f", "i", "u"], text, order: ["d", "f", "i", "u", "d"], marks: [[17, 18], [24, 25], [31, 32], [35, 36], [59, 60]], inputs: { d: { type: myType("double") }, f: { type: myType("float") }, i: { type: myType("int") }, u: { type: oneOf(myType("bigint"), myType("double")) } } };
   const seen: unknown[][] = [];
-  const mariadb = { batch: async () => ({}), query: async (options: { sql: string }, values: unknown[]) => (seen.push([options.sql, values]), []) };
+  const mariadb = { batch: async () => ({}), query: async (options: { sql: string }, values: unknown[]) => (options.sql === SESSION_READ ? [["", "utf8mb4"]] : (seen.push([options.sql, values]), [])) };
   const planetscale = { execute: async (sql: string, values: unknown[] | null) => (seen.push([sql, values]), { rows: [] }) };
   const mysql2 = { query: async () => [[], []], execute: async (options: { sql: string }, values: unknown[]) => (seen.push([options.sql, values]), [[], []]) };
   for (const client of [mariadb, planetscale, mysql2]) await execute(client as never, q, { d: -0, f: -0, i: -0, u: -0 });
-  const written = "update r set d = (-0e0), f = (-0e0), i = ? + ?, payload = json_array((-0e0))";
-  assert.deepEqual(seen, [[written, [-0, -0]], [written, [-0, -0]], [text, [-0, -0, -0, -0, -0]]]);
+  const written = "update r set d = (-0e0), f = (-0e0), i = ? + (-0e0), payload = json_array((-0e0))";
+  assert.deepEqual(seen, [[written, [-0]], [written, [-0]], [text, [-0, -0, -0, -0, -0]]]);
   // A -0 alone leaves no value for the driver to write.
   const alone: QueryModule<"mysql"> = { dialect: "mysql", sql: "select coalesce(:d, d) as x from r", params: ["d"], text: "select coalesce(?, d) as x from r", order: ["d"], marks: [[16, 17]], inputs: { d: { type: myType("double") } } };
   seen.length = 0;
   for (const client of [mariadb, planetscale]) await execute(client as never, alone, { d: -0 });
-  assert.deepEqual(seen, [["select coalesce((-0e0), d) as x from r", []], ["select coalesce((-0e0), d) as x from r", null]]);
+  assert.deepEqual(seen, [["select coalesce((-0e0), d) as x from r", undefined], ["select coalesce((-0e0), d) as x from r", null]]);
   // After a minus, the parentheses keep `--`, which mariadb 2 reads as a comment, out of the text.
   const minus: QueryModule<"mysql"> = { dialect: "mysql", sql: "select 1-:d as a, :e as b", params: ["d", "e"], text: "select 1-? as a, ? as b", order: ["d", "e"], marks: [[9, 10], [17, 18]], inputs: { d: { type: myType("double") }, e: { type: myType("double") } } };
   seen.length = 0;
   await execute(mariadb as never, minus, { d: -0, e: 1 });
   assert.deepEqual(seen, [["select 1-(-0e0) as a, ? as b", [1]]]);
-  // Without inputs or marks, as defined by hand, or with the sql_mode its build read its strings
-  // under, every value goes as it is.
+  // Without inputs, as defined by hand, every value goes as it is. Without marks, or with the
+  // sql_mode its build read its strings under, a float's -0 has no place to be written in, and the
+  // driver would write it as 0, so it is refused.
   const { inputs: _, ...untyped } = q;
   const { marks: __, ...unmarked } = q;
   seen.length = 0;
-  for (const query of [untyped, unmarked, { ...q, sqlMode: { backslashEscapes: false, ansiQuotes: false } }]) await execute(mariadb as never, query, { d: -0, f: -0, i: -0, u: -0 });
-  assert.deepEqual(seen, Array(3).fill([text, [-0, -0, -0, -0, -0]]));
+  await execute(mariadb as never, untyped, { d: -0, f: -0, i: -0, u: -0 });
+  assert.deepEqual(seen, [[text, [-0, -0, -0, -0, -0]]]);
+  for (const query of [unmarked, { ...q, sqlMode: { backslashEscapes: true, ansiQuotes: false } }]) {
+    for (const [client, name] of [[mariadb, "mariadb"], [planetscale, "PlanetScale"]] as const) {
+      await assert.rejects(Promise.resolve().then(() => execute(client as never, query, { d: -0, f: 1, i: 0, u: 1 })), new RegExp(`^TypeError: Parameter "d" is -0, which ${name} writes into the statement as 0`));
+    }
+    await execute(mariadb as never, query, { d: 1, f: 1, i: -0, u: 1 });
+  }
+  assert.deepEqual(seen.slice(1), Array(2).fill([text, [1, 1, -0, 1, 1]]));
   seen.length = 0;
   for (const client of [mariadb, planetscale]) await execute(client as never, q, { d: 1.5, f: 0, i: 0, u: 2 });
   assert.deepEqual(seen, Array(2).fill([text, [1.5, 0, 0, 2, 1.5]]));

@@ -50,20 +50,12 @@ pub fn is_blank(sql: &str, dialect: Dialect) -> bool {
     tokenize(sql, dialect).is_empty()
 }
 
-fn is_word_start(b: u8) -> bool {
-    b.is_ascii_alphabetic() || b == b'_' || b >= 0x80
-}
-
-fn is_word_part(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80
-}
-
 /// The tokens of `sql`: words (keywords and bare names), quoted names, string literals, numbers and
 /// symbols, with comments and whitespace dropped. A `;` is a symbol. The lexing follows each
-/// dialect's default reading: MySQL's backslash escapes, `#` comments and executable comments,
-/// Postgres's nested block comments, dollar quotes and E'' strings, SQLite's `[name]` and backtick
-/// names. Every delimiter is ASCII, so the text is scanned byte by byte, and a byte of a character
-/// outside ASCII is part of a word.
+/// dialect's default reading, by its rules (`reylo_engine_core::lexical`): its whitespace, MySQL's
+/// backslash escapes, `#` comments and executable comments, Postgres's nested block comments, dollar
+/// quotes and E'' strings, SQLite's `[name]` and backtick names. Every delimiter is ASCII, so the
+/// text is scanned byte by byte, and a byte of a character outside ASCII is part of a word.
 pub fn tokenize(sql: &str, dialect: Dialect) -> Vec<Token> {
     lex(sql, dialect).0
 }
@@ -119,7 +111,7 @@ fn lex_on(sql: &str, dialect: Dialect, server: Option<u64>) -> (Vec<Token>, Vec<
     let b = sql.as_bytes();
     let n = b.len();
     let mysql = dialect == Dialect::Mysql;
-    let postgres = dialect == Dialect::Postgres;
+    let rules = dialect.rules();
     let mut out = Vec::new();
     let mut openings = Vec::new();
     let mut executable = false;
@@ -128,8 +120,9 @@ fn lex_on(sql: &str, dialect: Dialect, server: Option<u64>) -> (Vec<Token>, Vec<
     while i < n {
         let ch = b[i];
         let next = b.get(i + 1).copied();
-        if ch.is_ascii_whitespace() {
-            i += 1;
+        let space = rules.space_at(b, i);
+        if space > 0 {
+            i += space;
             continue;
         }
         if executable && ch == b'*' && next == Some(b'/') {
@@ -148,59 +141,35 @@ fn lex_on(sql: &str, dialect: Dialect, server: Option<u64>) -> (Vec<Token>, Vec<
             i = text;
             continue;
         }
-        // Comments. MySQL reads `--` as a comment only before whitespace or a control character, and
-        // Postgres ends one at a carriage return as at a line feed.
-        if ch == b'-' && next == Some(b'-') && !(mysql && i + 2 < n && b[i + 2] > 32) {
-            i = sql[i..].find(|c| c == '\n' || (postgres && c == '\r')).map_or(n, |e| i + e + 1);
-            continue;
-        }
-        if ch == b'#' && mysql {
-            i = sql[i..].find('\n').map_or(n, |e| i + e + 1);
+        // Comments, as the dialect reads them: MySQL's `--` is one only before whitespace or a control
+        // character, its `#` always is, Postgres ends one at a carriage return as at a line feed, and
+        // nests block comments. MySQL's `--` before DEL is a comment to the server too, but it splits
+        // here as two minus signs still: reading it as a comment would split a migration that already
+        // ran into other statements, under a lock checksum that doesn't tell the two readings apart.
+        let dashes_before_delete = mysql && b[i..].starts_with(b"--\x7f");
+        if (ch == b'-' || ch == b'#') && rules.line_comment_at(b, i) && !dashes_before_delete {
+            i = (rules.line_comment_end(b, i) + 1).min(n);
             continue;
         }
         if ch == b'/' && next == Some(b'*') {
-            let mut depth = 1;
-            let mut j = i + 2;
-            while j < n && depth > 0 {
-                if postgres && b[j] == b'/' && b.get(j + 1) == Some(&b'*') {
-                    depth += 1;
-                    j += 2;
-                    continue;
-                }
-                if b[j] == b'*' && b.get(j + 1) == Some(&b'/') {
-                    depth -= 1;
-                    j += 2;
-                    continue;
-                }
-                j += 1;
-            }
-            i = j.min(n);
+            i = rules.block_comment_end(b, i).unwrap_or(n);
             continue;
         }
         let start = i;
         // Postgres dollar quotes: $$ … $$ and $tag$ … $tag$, whose tag may hold any letter, as an
         // identifier may (a byte past ASCII is part of one).
-        if ch == b'$' && postgres {
-            let mut j = i + 1;
-            if j < n && (b[j].is_ascii_alphabetic() || b[j] == b'_' || b[j] >= 0x80) {
-                while j < n && (b[j].is_ascii_alphanumeric() || b[j] == b'_' || b[j] >= 0x80) {
-                    j += 1;
-                }
-            }
-            if j < n && b[j] == b'$' {
-                let tag = &sql[i..=j];
-                i = sql[j + 1..].find(tag).map_or(n, |at| j + 1 + at + tag.len());
-                push(TokenKind::Str, start, i, &mut out);
-                continue;
-            }
+        if let Some(tag_end) = rules.dollar_tag_end(b, i) {
+            i = rules.dollar_quote_end(b, i, tag_end).unwrap_or(n);
+            push(TokenKind::Str, start, i, &mut out);
+            continue;
         }
         // String literals: '…' with '' (and on MySQL, or in Postgres's E'', a backslash) escaping.
-        let escaped = postgres && (ch == b'E' || ch == b'e') && next == Some(b'\'');
-        if ch == b'\'' || escaped || (mysql && ch == b'"') {
+        let escaped = rules.escape_strings && (ch == b'E' || ch == b'e') && next == Some(b'\'');
+        if ch == b'\'' || escaped || (rules.double_quoted_strings && ch == b'"') {
             let quote = if escaped { b'\'' } else { ch };
             let mut j = if escaped { i + 2 } else { i + 1 };
             while j < n {
-                if (mysql || escaped) && b[j] == b'\\' {
+                if (rules.backslash_in_strings || escaped) && b[j] == b'\\' {
                     j += 2;
                     continue;
                 }
@@ -219,7 +188,7 @@ fn lex_on(sql: &str, dialect: Dialect, server: Option<u64>) -> (Vec<Token>, Vec<
             continue;
         }
         // Quoted names.
-        if ch == b'"' || ch == b'`' || (ch == b'[' && dialect == Dialect::Sqlite) {
+        if ch == b'"' || ch == b'`' || (ch == b'[' && rules.bracketed_names) {
             let close = if ch == b'[' { b']' } else { ch };
             let mut j = i + 1;
             while j < n {
@@ -246,12 +215,8 @@ fn lex_on(sql: &str, dialect: Dialect, server: Option<u64>) -> (Vec<Token>, Vec<
             push(TokenKind::Number, start, i, &mut out);
             continue;
         }
-        if is_word_start(ch) {
-            let mut j = i + 1;
-            while j < n && is_word_part(b[j]) {
-                j += 1;
-            }
-            i = j;
+        if rules.name_start(ch) {
+            i = rules.name_end(b, i);
             push(TokenKind::Word, start, i, &mut out);
             continue;
         }
@@ -392,7 +357,7 @@ macro_rules! re {
 }
 
 re!(TRANSACTION_CONTROL, r"^(BEGIN|START TRANSACTION|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE|ABORT|SET TRANSACTION)\b");
-re!(PG_ALONE, r"^(CREATE (UNIQUE )?INDEX CONCURRENTLY|DROP INDEX CONCURRENTLY|REINDEX\b.*\bCONCURRENTLY|VACUUM|ALTER SYSTEM|CREATE DATABASE|DROP DATABASE|CREATE TABLESPACE|DROP TABLESPACE|CLUSTER$|REINDEX (SYSTEM|DATABASE))");
+re!(PG_ALONE, r"^(CREATE (UNIQUE )?INDEX CONCURRENTLY|DROP INDEX CONCURRENTLY|REINDEX\b.*\bCONCURRENTLY|VACUUM|ALTER SYSTEM|CREATE DATABASE|DROP DATABASE|CREATE TABLESPACE|DROP TABLESPACE|REINDEX (SYSTEM|DATABASE))");
 re!(SQLITE_ALONE, r"^(VACUUM|ATTACH|DETACH)\b");
 re!(PG_DETACH, r"^ALTER TABLE\b.*\bDETACH PARTITION\b.*\bCONCURRENTLY\b");
 re!(PG_BUILDS_INDEX, r"^CREATE (UNIQUE )?INDEX CONCURRENTLY\b");
@@ -435,6 +400,51 @@ fn sets_server(statement: &Statement) -> bool {
     false
 }
 
+/// Whether a Postgres CLUSTER or REPACK refuses a transaction block: one of every table, with no
+/// table named, or one whose last CONCURRENTLY or ANALYZE turns it on, as `defGetBoolean` reads the
+/// value. One of a partitioned table refuses it too, which the statement's text doesn't say.
+fn reorders_alone(tokens: &[Token]) -> bool {
+    let word = |i: usize| tokens.get(i).map(Token::upper).unwrap_or_default();
+    if !matches!(word(0).as_str(), "CLUSTER" | "REPACK") {
+        return false;
+    }
+    let mut i = 1;
+    let (mut concurrently, mut analyze) = (false, false);
+    if tokens.get(1).is_some_and(|t| t.text == "(") {
+        i = 2;
+        while i < tokens.len() && tokens[i].text != ")" {
+            // A name as Postgres folds it: a word lowercased, a quoted one as written.
+            let name = match tokens[i].kind {
+                TokenKind::Quoted => tokens[i].text.trim_matches('"').replace("\"\"", "\""),
+                _ => tokens[i].text.to_ascii_lowercase(),
+            };
+            i += 1;
+            let start = i;
+            while i < tokens.len() && tokens[i].text != "," && tokens[i].text != ")" {
+                i += 1;
+            }
+            let value: String = tokens[start..i]
+                .iter()
+                .filter(|t| t.text != "+")
+                .map(|t| t.text.strip_prefix(['E', 'e']).filter(|_| t.kind == TokenKind::Str).unwrap_or(&t.text).trim_matches(['\'', '"']).to_ascii_lowercase())
+                .collect();
+            let enabled = !matches!(value.as_str(), "f" | "fa" | "fal" | "fals" | "false" | "n" | "no" | "of" | "off" | "0");
+            match name.as_str() {
+                "concurrently" => concurrently = enabled,
+                "analyze" | "analyse" => analyze = enabled,
+                _ => {}
+            }
+            if tokens.get(i).is_some_and(|t| t.text == ",") {
+                i += 1;
+            }
+        }
+        i += 1;
+    } else if word(1) == "VERBOSE" {
+        i = 2;
+    }
+    concurrently || analyze || tokens.get(i).is_none_or(|t| t.upper() == "USING")
+}
+
 /// How the statement runs on the dialect: inside the file's transaction, or not.
 pub fn kind_of(statement: &Statement, dialect: Dialect) -> Kind {
     let h = head(statement, 6);
@@ -443,7 +453,7 @@ pub fn kind_of(statement: &Statement, dialect: Dialect) -> Kind {
     }
     match dialect {
         Dialect::Postgres => {
-            if PG_ALONE.is_match(&h) || PG_DETACH.is_match(&head(statement, statement.tokens.len())) {
+            if PG_ALONE.is_match(&h) || PG_DETACH.is_match(&head(statement, statement.tokens.len())) || reorders_alone(&statement.tokens) {
                 Kind::Alone
             } else {
                 Kind::Transactional
@@ -826,6 +836,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn whitespace_and_comments_are_the_dialects() {
+        let p = Dialect::Postgres;
+        // A vertical tab is whitespace to Postgres and MySQL, so the words around one are read.
+        assert!(builds_index_alone("create\u{b}index\u{b}concurrently users_h on users (handle)", p));
+        assert!(runs_alone("create\u{b}index concurrently users_h on users (handle)", p));
+        // MySQL's `--` before a control character is a comment; before DEL it splits as it always
+        // has, which a migration that already ran was split by. A `$` is a character of its names.
+        assert_eq!(texts("select 1 --\u{1} ; drop table t\n; select 2", Dialect::Mysql), ["select 1 --\u{1} ; drop table t", "select 2"]);
+        assert_eq!(texts("select 1 --\u{7f} ; select 2", Dialect::Mysql), ["select 1 --\u{7f}", "select 2"]);
+        assert_eq!(tokenize("select $a, b$c", Dialect::Mysql).iter().filter(|t| t.kind == TokenKind::Word).map(|t| t.text.as_str()).collect::<Vec<_>>(), ["select", "$a", "b$c"]);
+    }
+
+    #[test]
+    fn the_corpus_strings_are_strings_and_its_comments_hold_no_token() {
+        let Some(corpus) = reylo_engine_core::lexical::Corpus::beside(env!("CARGO_MANIFEST_DIR")) else { return };
+        for dialect in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
+            for case in &corpus.cases {
+                let Some(reading) = case.readings.get(dialect.name()).filter(|r| r.error.is_none()) else { continue };
+                // MySQL's `--` before DEL splits as two minus signs here ([`lex_on`]).
+                if dialect == Dialect::Mysql && case.text.contains("--\u{7f}") {
+                    continue;
+                }
+                let at = format!("{dialect:?}, {}: {:?}", case.about, case.text);
+                let tokens = tokenize(&case.text, dialect);
+                // An E'' string's token starts at its `E`, as the lexer's span does.
+                let strings: Vec<&str> = tokens.iter().filter(|t| matches!(t.kind, TokenKind::Str | TokenKind::Quoted)).map(|t| t.text.as_str()).collect();
+                assert_eq!(strings, reading.strings, "{at}");
+                let mut from = 0;
+                for comment in &reading.comments {
+                    let start = from + case.text[from..].find(comment.as_str()).expect("the comment is in the text");
+                    let end = start + comment.len();
+                    assert!(!tokens.iter().any(|t| t.start < end && t.end > start), "{at}: a token inside {comment:?}");
+                    from = end;
+                }
+            }
+        }
+    }
+
+    #[test]
     fn only_a_concurrent_index_build_leaves_nothing_when_it_fails() {
         let p = Dialect::Postgres;
         assert!(builds_index_alone("-- by handle\ncreate unique index concurrently users_h on users (handle);", p));
@@ -835,6 +884,18 @@ mod tests {
             assert!(!builds_index_alone(sql, p), "{sql}");
         }
         assert!(!builds_index_alone("create index users_h on users (handle)", Dialect::Mysql));
+    }
+
+    #[test]
+    fn what_postgres_runs_only_outside_a_transaction_runs_alone() {
+        let kind = |sql: &str| kind_of(&split_statements(sql, Dialect::Postgres)[0], Dialect::Postgres);
+        // Postgres 19's REPACK of every table, or with CONCURRENTLY or ANALYZE, refuses a transaction block, as CLUSTER of every table does.
+        for sql in ["repack", "repack (verbose)", "repack using index", "repack (verbose) using index", "repack (concurrently) t", "repack (analyze, verbose) t using index", "repack (analyse) t", "repack (verbose, analyze on) t", "repack (\"analyze\") t", "repack (analyze false, analyse) t", "cluster", "cluster (verbose)", "cluster verbose", "vacuum t"] {
+            assert_eq!(kind(sql), Kind::Alone, "{sql}");
+        }
+        for sql in ["repack t", "repack (verbose) t using index t_pkey", "repack (analyze false) t", "repack (concurrently off, verbose) t", "repack (analyze \"off\") t", "repack (analyze E'false') t", "repack (analyze +0) t", "repack (analyze true, analyse false) t", "cluster t using t_pkey", "cluster (verbose) t", "cluster verbose t", "cluster t_pkey on t", "repack \"Orders\""] {
+            assert_eq!(kind(sql), Kind::Transactional, "{sql}");
+        }
     }
 
     fn texts(sql: &str, d: Dialect) -> Vec<String> {

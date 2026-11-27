@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { use, useMemo } from 'react';
+import { ogImage } from 'docs-kit/page.server';
 import { DocsShell } from 'docs-kit/shell';
 import type { Root } from 'fumadocs-core/page-tree';
 import type { Route } from './+types/page';
@@ -8,6 +8,7 @@ import { Brand } from '@/components/brand';
 import { HeroTitle } from '@/components/hero';
 import { getMDXComponents } from '@/components/mdx';
 import { HeroActions } from '@/components/hero';
+import { migratePage } from '@/components/og-logo';
 import { loadPage } from '@/lib/content';
 import { agentPromptFiles, readAgentPrompt } from '@/lib/agent-prompt';
 import { migrateMovedAnchorsScript } from '@/lib/moved-anchors';
@@ -34,8 +35,9 @@ const CENTERED: Record<string, string> = {
 /**
  * Run at build time only, when each page is rendered to a file (react-router.config.ts): the page
  * as the meta tags and the shell need it, without its content, which the component loads itself
- * (lib/content.ts). The link preview's URL carries a hash of the text of the image's route, so that
- * a change to the card changes the URL and the caches of X and Slack fetch the new card.
+ * (lib/content.ts). The link preview is the card Docs Kit draws for the page (docs.config.ts), or for
+ * the intro the homepage's, and its URL carries a hash of what it is drawn from, so that a change to
+ * the card changes the URL and the caches of X and Slack fetch the new card.
  */
 export async function loader({ params, request }: Route.LoaderArgs) {
   // All docs live under /docs (app/routes.ts): /docs is index.mdx, /docs/migrate/<name> is
@@ -47,7 +49,6 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   if (slug === undefined) throw new Response('Not found', { status: 404 });
   const page = source.getPage(slug ? [slug] : []);
   if (!page) throw new Response('Not found', { status: 404 });
-  const card = await readFile('app/routes/opengraph-image.tsx');
   // Setup's agent card holds the prompt; the main page's button copies the same text, from another page.
   const agentPrompt = slug ? undefined : await readAgentPrompt(agentPromptFiles.reylo);
   return {
@@ -57,7 +58,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     title: page.data.title,
     description: page.data.description ?? '',
     tree: source.getPageTree(),
-    og: createHash('sha256').update(card).digest('hex').slice(0, 16),
+    image: await ogImage(slug),
     agentPrompt,
     // The intro's star pill shows the count.
     stars: slug ? undefined : await fetchStars(),
@@ -75,9 +76,9 @@ async function typedefsVersion(): Promise<{ version: string | null; href: string
 }
 
 /**
- * The main page's metadata: the title, the frontmatter's description, and the link previews, whose
- * image is app/routes/opengraph-image.tsx. Each dialect's page has its own title, description and
- * address, in the link previews too, and the same image.
+ * A page's metadata: the title, the frontmatter's description, and the link previews, whose image is
+ * the page's own card, its title under Reylo's wordmark (Reylo Migrate's on Migrate's pages), and for
+ * the intro the homepage's card (app/routes/opengraph-image.tsx).
  */
 export function meta({ loaderData }: Route.MetaArgs): Route.MetaDescriptors {
   if (!loaderData) return [];
@@ -86,7 +87,9 @@ export function meta({ loaderData }: Route.MetaArgs): Route.MetaDescriptors {
   const title = main ? docsTitle('Docs') : loaderData.slug === 'compare' ? compareTitle : DIALECT_PAGES.has(loaderData.slug) ? pageTitle(loaderData.title) : docsTitle(loaderData.title);
   const { description } = loaderData;
   const url = `${siteUrl}${loaderData.url}`;
-  const image = `${siteUrl}/opengraph-image.png?${loaderData.og}`;
+  const image = loaderData.image ?? `${siteUrl}/opengraph-image.png`;
+  // The card's text as it reads, the logo's name and the title; the intro's is the homepage card's.
+  const alt = main ? ogAlt : `${migratePage(loaderData.slug) ? 'Reylo Migrate' : 'Reylo'}: ${loaderData.title}`;
   return [
     { title },
     { name: 'description', content: description },
@@ -107,14 +110,14 @@ export function meta({ loaderData }: Route.MetaArgs): Route.MetaDescriptors {
     { property: 'og:image:type', content: 'image/png' },
     { property: 'og:image:width', content: String(ogSize.width) },
     { property: 'og:image:height', content: String(ogSize.height) },
-    { property: 'og:image:alt', content: ogAlt },
+    { property: 'og:image:alt', content: alt },
     { property: 'og:type', content: 'article' },
     { name: 'twitter:card', content: 'summary_large_image' },
     { name: 'twitter:creator', content: '@colinhacks' },
     { name: 'twitter:title', content: title },
     { name: 'twitter:description', content: description },
     { name: 'twitter:image', content: image },
-    { name: 'twitter:image:alt', content: ogAlt },
+    { name: 'twitter:image:alt', content: alt },
     { name: 'twitter:image:type', content: 'image/png' },
     { name: 'twitter:image:width', content: String(ogSize.width) },
     { name: 'twitter:image:height', content: String(ogSize.height) },

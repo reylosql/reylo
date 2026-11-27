@@ -8,9 +8,10 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import { Session } from "../src/analyze.ts";
 import { validate } from "../src/json-schema.ts";
 import { sqlModule } from "../src/loader.ts";
-import { querySchemas, typeSchema } from "../src/schema.ts";
+import { POSTGRES_TEXT_IN_JSON, querySchemas, typeSchema } from "../src/schema.ts";
 import type { EngineType } from "../src/engine-type.ts";
-import { DRIVERS, INDEX, MYSQL, driver, mysqlDatabase, mysqlLive } from "./helpers.ts";
+import { readFileSync } from "node:fs";
+import { DRIVERS, INDEX, MYSQL, ROOT, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase } from "./helpers.ts";
 
 const int4 = (facts: object): EngineType => ({ kind: "integer", bits: 32, label: "int4", ...facts }) as EngineType;
 const varchar = (facts: object): EngineType => ({ kind: "text", label: "varchar", ...facts }) as EngineType;
@@ -82,10 +83,60 @@ test("a number's facts are written where its form here is a JSON number and they
   assert.equal((output(numeric, true) as { minimum?: number }).minimum, 0);
   assert.equal((output(numeric, true) as { exclusiveMaximum?: number }).exclusiveMaximum, undefined);
   // A divisor is written only where a JSON number is that very decimal: one a double rounds would hold a value to another divisor.
-  const divisor = (multiple_of: string) => (output({ kind: "decimal", label: "numeric", multiple_of } as EngineType, true) as { multipleOf?: number }).multipleOf;
-  assert.deepEqual([divisor("0.01"), divisor("0.50"), divisor("2.5e-3"), divisor("1E2")], [0.01, 0.5, 0.0025, 100]);
+  // And only a whole one: a validator that divides as a double, ajv's or Python's, finds 0.15 no multiple of 0.05.
+  const divisor = (multiple_of: string) => (output({ kind: "decimal", label: "numeric", precision: 10, min_scale: 2, max_scale: 2, multiple_of } as EngineType, true) as { multipleOf?: number }).multipleOf;
+  assert.deepEqual([divisor("3"), divisor("1E2"), divisor("100.0")], [3, 100, 100]);
+  for (const text of ["0.01", "0.50", "2.5e-3"]) assert.equal(divisor(text), undefined, text);
   for (const text of ["1e-400", "9007199254740993", "0.10000000000000000001", "1e400", `1${"0".repeat(131000)}`]) assert.equal(divisor(text), undefined, text.slice(0, 24));
   assert.equal(divisor(`1.${"0".repeat(131000)}`), 1);
+  // A bound is written only where a JSON number is that very decimal too: an exact reader holds 0.29999999999999999 to it.
+  assert.equal((output({ ...numeric, min: "0.29999999999999999" } as EngineType, true) as { minimum?: number }).minimum, undefined);
+  assert.equal((output({ ...numeric, min: "0.3" } as EngineType, true) as { minimum?: number }).minimum, 0.3);
+  // A divisor and an exclusive bound only where a double holds every value exactly, as JSON.parse reads it: an integer within
+  // ±2^53 by its width or its bounds, a decimal of at most 15 digits. Past that a true multiple, 9007199254740993 of 3, reads
+  // as 9007199254740992, and a value just under an exclusive bound reads as the bound. An inclusive bound holds of a rounded value too.
+  const facts = (t: object, inJson = false) => output(t as EngineType, inJson) as Record<string, unknown>;
+  assert.equal(facts({ ...int8, multiple_of: "3" }).multipleOf, undefined);
+  assert.equal(facts({ ...int8, multiple_of: "3", min: "-9007199254740991", max: "9007199254740991" }).multipleOf, 3);
+  assert.equal(facts({ ...int8, multiple_of: "3", min: "0" }).multipleOf, undefined);
+  assert.equal(facts({ kind: "integer", bits: 53, unsigned: true, multiple_of: "3" }).multipleOf, 3);
+  assert.equal(facts({ kind: "decimal", label: "numeric", multiple_of: "0.05" }, true).multipleOf, undefined);
+  // A decimal's digits before its point bound it, which a negative scale moves: numeric(15,-2) reaches 10^17, whose multiples of 24 read rounded.
+  assert.equal(facts({ kind: "decimal", label: "numeric", precision: 15, min_scale: -2, max_scale: -2, multiple_of: "24" }, true).multipleOf, undefined);
+  assert.equal(facts({ kind: "decimal", label: "numeric", precision: 15, min_scale: 0, max_scale: 0, multiple_of: "24" }, true).multipleOf, 24);
+  assert.equal(facts({ kind: "decimal", label: "numeric", multiple_of: "24", min: "0", max: "1000" }, true).multipleOf, 24);
+  assert.deepEqual(facts({ kind: "decimal", label: "numeric", precision: 16, multiple_of: "0.05", min: "0.1", exclusive_max: "100" }, true), { type: "number", format: "decimal", minimum: 0.1 });
+  assert.deepEqual(facts({ kind: "decimal", label: "numeric", precision: 15, min_scale: 2, max_scale: 2, multiple_of: "5", min: "0.1", exclusive_max: "100" }, true), { type: "number", format: "decimal", minimum: 0.1, exclusiveMaximum: 100, multipleOf: 5 });
+  // A float narrower than a double is written as its own shortest text, which reads as another double: no bounds.
+  assert.deepEqual(facts({ kind: "float", exponent_bits: 8, mantissa_bits: 23, label: "float4", min: "0.1" }), { type: "number", format: "float" });
+});
+
+test("a tuple, a union, an intersection and a tagged union of nothing are JSON Schema 2020-12 schemas still, which refuses an empty prefixItems, anyOf and allOf", () => {
+  const ajv = new Ajv2020({ strict: false });
+  const empty: [EngineType, object][] = [
+    [{ kind: "tuple", elements: [] } as EngineType, { type: "array", items: false, minItems: 0, maxItems: 0 }],
+    [{ kind: "union", members: [] } as EngineType, { not: {} }],
+    [{ kind: "intersection", members: [] } as EngineType, {}],
+    [{ kind: "tagged_union", alternatives: [] } as EngineType, { not: {} }],
+  ];
+  for (const [t, schema] of empty) {
+    assert.deepEqual(output(t), schema, t.kind);
+    assert.ok(ajv.validateSchema(output(t) as object), t.kind);
+  }
+});
+
+test("a field named __proto__ is a key of the schema like any other, required where the others are", () => {
+  const schema = querySchemas({ params: [], columns: [{ name: "__proto__", type: int4({}) }, { name: "b", type: varchar({}) }], cardinality: "one" }, "postgres").output as { properties: object; required: string[] };
+  assert.ok(Object.hasOwn(schema.properties, "__proto__"));
+  assert.deepEqual(schema.required, ["__proto__", "b"]);
+  assert.equal(JSON.stringify(schema.properties), '{"__proto__":{"type":"integer","format":"int32"},"b":{"type":"string"}}');
+});
+
+test("the types Postgres writes as their text inside a document are the engine's own list, which a built array's schema and the Rust crate read", () => {
+  const source = readFileSync(join(ROOT, "engine", "core", "src", "schema.rs"), "utf8");
+  const list = /pub const POSTGRES_TEXT_IN_JSON: &\[&str\] = &\[([^\]]*)\];/.exec(source)?.[1];
+  assert.ok(list !== undefined, "engine/core/src/schema.rs names no POSTGRES_TEXT_IN_JSON");
+  assert.deepEqual([...list.matchAll(/"([^"]+)"/g)].map((m) => m[1]), [...POSTGRES_TEXT_IN_JSON]);
 });
 
 test("an array's size is written on an array", () => {
@@ -147,6 +198,78 @@ test("a time with no zone and MySQL's TIME take no format their values would fai
   const span = schema({ kind: "duration", max: "PT838H59M59S", tick: "1/10000", label: "time" }, "mysql");
   assert.equal(span.format, undefined);
   for (const value of ["-838:59:59.0000", "838:59:59", "12:00:00.1235"]) assert.equal(validate(span, value), undefined);
+});
+
+test("Postgres: a date or a timestamptz outside 0000–9999 holds to its query's JSON Schema wherever it stands, and a parameter takes it back", { skip: pgLive, timeout: 60_000 }, async () => {
+  const own = await postgresDatabase(
+    "reylo_schema_years",
+    `create table e (id int primary key, d date, at timestamptz, ds date[], r daterange, tr tstzrange);
+    insert into e values
+      (1, '0002-06-01 BC', '12345-01-01 00:00:00+00', array['12345-01-01'::date, '0002-06-01 BC'], '[0002-06-01 BC, 12345-01-01)', '[4713-01-01 00:00:00+00 BC, 12345-01-01 00:00:00.5+00)'),
+      (2, '2026-06-01', '2026-01-01 00:00:00+00', array['2026-01-01'::date], 'empty', null)`,
+  );
+  const root = mkdtempSync(join(tmpdir(), "reylo-schema-years-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  writeFileSync(join(root, ".env"), `DATABASE_URL=${own.url}\n`);
+  mkdirSync(join(root, "node_modules"));
+  symlinkSync(join(DRIVERS, "postgres"), join(root, "node_modules", "postgres"));
+  const built = async (name: string, sql: string) => {
+    const file = join(root, `${name}.sql`);
+    writeFileSync(file, sql);
+    const { code } = await sqlModule(file, sql);
+    const out = join(root, `${name}.mjs`);
+    writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+    return (await import(pathToFileURL(out).href)).default;
+  };
+  try {
+    const columns = await built("columns", "select d, at, ds, r, tr from e order by id");
+    const document = await built("document", "select jsonb_build_object('d', d, 'at', lower(tr)) as o, json_build_array(d, lower(tr)) as a from e order by id");
+    const param = await built("param", "select id from e where d = :d::date and at = :at::timestamptz");
+    const rows = await columns.run(own.sql);
+    assert.deepEqual(rows[0], { d: "-000001-06-01", at: "+012345-01-01T00:00:00.000000Z", ds: ["+012345-01-01", "-000001-06-01"], r: { lower: "-000001-06-01", upper: "+012345-01-01", bounds: "[)" }, tr: { lower: "-004712-01-01T00:00:00.000000Z", upper: "+012345-01-01T00:00:00.500000Z", bounds: "[)" } });
+    // Inside a document Postgres writes its own year, and an instant before a zone's first standard time with an offset to the second.
+    await own.sql.unsafe("set time zone 'America/New_York'");
+    const documents = await document.run(own.sql);
+    assert.deepEqual(documents[0], { o: { d: "0002-06-01 BC", at: "4714-12-31T19:03:58-04:56:02 BC" }, a: ["0002-06-01 BC", "4714-12-31T19:03:58-04:56:02 BC"] });
+    // A POSIX session zone takes the offset there past RFC 3339's 23:59, as far as 169 hours: the 168 Postgres reads, and
+    // an hour of summer time, which the second zone keeps in January.
+    await own.sql.unsafe("set time zone 'XXX-30'");
+    const posix = await document.run(own.sql);
+    assert.deepEqual(posix[0].a, ["0002-06-01 BC", "4713-01-02T06:00:00+30:00 BC"]);
+    await own.sql.unsafe("set time zone 'XXX-167:59:60YYY,M10.1.0,M3.3.0'");
+    const furthest = await document.run(own.sql);
+    assert.deepEqual(furthest[0].o, { d: "0002-06-01 BC", at: "4713-01-08T01:00:00+169:00 BC" });
+    // A year from 1 to 9999 takes those offsets too, which the format refuses.
+    const fourDigits = await built("four-digits", "select jsonb_build_object('at', at, 'lmt', timestamptz '1850-01-01 00:00:00+00') as o, json_build_array(at, timestamptz '1850-01-01 00:00:00+00') as a from e where id = 2");
+    await own.sql.unsafe("set time zone 'America/New_York'");
+    const localMean = await fourDigits.run(own.sql);
+    // One row by its key, which `.run()` gives alone.
+    assert.deepEqual(localMean.a, ["2025-12-31T19:00:00-05:00", "1849-12-31T19:03:58-04:56:02"]);
+    await own.sql.unsafe("set time zone 'XXX-30'");
+    const posixFour = await fourDigits.run(own.sql);
+    assert.deepEqual(posixFour.o, { at: "2026-01-02T06:00:00+30:00", lmt: "1850-01-02T06:00:00+30:00" });
+    // A range and a multirange inside a document are their text.
+    const ranges = await built("ranges", "select jsonb_build_object('r', r) as o, json_build_array(r, int4multirange(int4range(1, 3), int4range(5, 7))) as a from e order by id");
+    const rangeRows = await ranges.run(own.sql);
+    assert.deepEqual(rangeRows.map((row: { a: unknown }) => row.a), [['["0002-06-01 BC",12345-01-01)', "{[1,3),[5,7)}"], ["empty", "{[1,3),[5,7)}"]]);
+    const ajv = new Ajv2020({ strict: false, validateFormats: false, logger: false });
+    for (const [query, result] of [[columns, rows], [document, documents], [document, posix], [document, furthest], [fourDigits, localMean], [fourDigits, posixFour], [ranges, rangeRows]]) {
+      const json = JSON.parse(JSON.stringify(result));
+      assert.equal(validate(query.outputSchema, json), undefined);
+      assert.ok(ajv.validate(query.outputSchema, json), ajv.errorsText());
+    }
+    // Each place's own spelling: Postgres's inside a document is no value `.run()` gives a column.
+    assert.equal(validate(columns.outputSchema, [{ ...rows[0], d: "0002-06-01 BC" }])?.path, "/0/d");
+    // The engine writes a built array's items (engine/core's `json_schema`), the run time a built object's keys: one schema for one type.
+    const { o, a } = document.outputSchema.items.properties;
+    assert.deepEqual(a.prefixItems, [o.properties.d, o.properties.at]);
+    const back = { d: rows[0].d, at: rows[0].at };
+    assert.equal(validate(param.inputSchema, back), undefined);
+    assert.deepEqual(await param.run(own.sql, back), [{ id: 1 }]);
+  } finally {
+    for (const session of Session.opened()) await session.close();
+    await own.drop();
+  }
 });
 
 test("MySQL: a column's definition reaches a query's JSON Schema as a length in code points alone, and every row `.run()` returns holds to it, on mysql2 and mariadb", { skip: mysqlLive, timeout: 60_000 }, async () => {

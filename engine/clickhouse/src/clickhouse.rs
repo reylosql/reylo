@@ -59,6 +59,7 @@ use reylo_engine_core::analysis::{self, ResultTarget};
 use reylo_engine_core::api::DbError;
 use reylo_engine_core::dialect::Dialect;
 use reylo_engine_core::lex::{self, Lexed, Placeholder, Rewritten, Target};
+use reylo_engine_core::lexical::Rules;
 use reylo_engine_core::types::{Cardinality, StatementKind, Type};
 use serde_json::Value;
 
@@ -179,15 +180,19 @@ fn skipped(lexed: &Lexed, but: &Placeholder) -> Vec<(usize, usize)> {
 }
 
 fn is_comment(sql: &str, start: usize) -> bool {
-    sql[start..].starts_with("--") || sql[start..].starts_with("/*") || sql[start..].starts_with('#')
+    lex::is_comment(&sql[start..])
 }
+
+/// ClickHouse's rules for the text around its tokens: its whitespace takes the vertical tab and
+/// Unicode's spaces.
+const TEXT: Rules = Rules::of(Dialect::Clickhouse);
 
 /// The end of the code before `at`: past the whitespace and comments that stand between.
 fn code_before(sql: &str, lexed: &Lexed, mut at: usize) -> usize {
     let b = sql.as_bytes();
     loop {
-        while at > 0 && b[at - 1].is_ascii_whitespace() {
-            at -= 1;
+        while let Some(c) = sql[..at].chars().next_back().filter(|c| TEXT.space_at(b, at - c.len_utf8()) == c.len_utf8()) {
+            at -= c.len_utf8();
         }
         match lexed.opaque.iter().find(|&&(start, end)| end == at && is_comment(sql, start)) {
             Some(&(start, _)) => at = start,
@@ -200,9 +205,7 @@ fn code_before(sql: &str, lexed: &Lexed, mut at: usize) -> usize {
 fn code_after(sql: &str, lexed: &Lexed, mut at: usize) -> usize {
     let b = sql.as_bytes();
     loop {
-        while at < b.len() && b[at].is_ascii_whitespace() {
-            at += 1;
-        }
+        at = TEXT.skip_spaces(b, at);
         match lexed.opaque.iter().find(|&&(start, _)| start == at && is_comment(sql, start)) {
             Some(&(_, end)) => at = end,
             None => return at,
@@ -545,10 +548,14 @@ fn is_identifier(name: &str) -> bool {
     chars.next().is_some_and(|c| c.is_alphabetic() || c == '_') && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-/// The length of the name `text` opens with: letters, digits and `_`, or a name in backquotes or
-/// double quotes, in which a backslash escapes.
+/// The length of the name `text` opens with: letters, digits and `_`, a name in backquotes or
+/// double quotes, in which a backslash escapes, or one in typographic quotes, `“…”`, to its first
+/// `”` (`lexical::Rules::typographic_quotes`).
 fn name_length(text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
+    if let Some(inside) = text.strip_prefix('“') {
+        return inside.find('”').map(|at| '“'.len_utf8() + at + '”'.len_utf8());
+    }
     match *bytes.first()? {
         quote @ (b'`' | b'"') => {
             let mut i = 1;
@@ -604,13 +611,16 @@ fn names_itself(item: &str) -> bool {
     let alias = || {
         let bytes = item.as_bytes();
         let start = match *bytes.last()? {
+            // A name in typographic quotes, as the lexer's span that ends the item: a `“` in an earlier
+            // string or comment opens none.
+            _ if item.ends_with('”') => lex::lex(item, Dialect::Clickhouse).ok()?.opaque.last().filter(|&&(_, end)| end == item.len())?.0,
             quote @ (b'`' | b'"') => (0..bytes.len() - 1).rev().find(|&i| bytes[i] == quote && (i == 0 || bytes[i - 1] != b'\\'))?,
             _ => bytes.iter().rposition(|b| !(b.is_ascii_alphanumeric() || *b == b'_' || *b >= 0x80)).map_or(0, |i| i + 1),
         };
         (name_length(&item[start..]) == Some(item.len() - start)).then_some(())?;
         let before = item[..start].trim_end();
         let word = before.len().checked_sub(2).and_then(|at| before.get(at..))?;
-        (word.eq_ignore_ascii_case("as") && before[..before.len() - 2].ends_with(|c: char| c.is_whitespace() || c == ')' || c == ']' || c == '\'' || c == '`' || c == '"')).then_some(())
+        (word.eq_ignore_ascii_case("as") && before[..before.len() - 2].ends_with(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '\'' | '`' | '"' | '’' | '”'))).then_some(())
     };
     column || alias().is_some()
 }
@@ -654,11 +664,11 @@ pub fn analyze(sql: &str, host: &Host) -> Lazy<Analysis> {
         Err(e) => return Some(analysis::bare(sql, &analysis::none(), Dialect::Clickhouse, vec![analysis::diag(e.message, e.offset, 1, 1)])),
     };
     let refuse = |d: Vec<Diagnostic>| Some(analysis::bare(sql, &lexed, Dialect::Clickhouse, d));
-    let statement = match lex::one_statement(sql, &lexed, &["select", "with", "from", "insert", "delete", "update", "alter"]) {
+    let statement = match lex::one_statement(sql, &lexed, Dialect::Clickhouse, &["select", "with", "from", "insert", "delete", "update", "alter"]) {
         Ok(statement) => statement,
         Err(message) => return refuse(vec![whole(sql, message, 10, None)]),
     };
-    let word = lex::first_word(sql, &lexed);
+    let word = lex::first_word(sql, &lexed, Dialect::Clickhouse);
     // Any other first word is read as a query's, and the server's error names it (`selec`).
     let writes = matches!(word.as_str(), "insert" | "delete" | "update" | "alter");
     if let lex::Statement::Command(command) = &statement {
@@ -2743,6 +2753,9 @@ mod tests {
         assert!(!is_star("match(name, 'a.* b')") && !is_star("'t.*'"));
         assert_eq!(named("SELECT id, match(name, 'a.* b') FROM users", &[("id", "UInt64"), ("match(name, 'a.* b')", "UInt8")]).len(), 1);
         assert!(names_itself("a.b.c") && names_itself("`a b`") && names_itself("f(x) AS `a b`") && names_itself("x as y") && names_itself("(1)AS y"));
+        // A name in typographic quotes, which ClickHouse reads as it reads one in backquotes.
+        assert!(names_itself("“a b”") && names_itself("1 AS “a b”") && names_itself("‘x’ AS “a b”") && !names_itself("1 + “a”"));
+        assert!(names_itself("'“' AS “a b”") && names_itself("“a“b”") && names_itself("1 /* “ */ AS “a b”"));
         assert!(!names_itself("a + b") && !names_itself("f(x)") && !names_itself("pair.1") && !names_itself("CAST(x AS String)") && !names_itself("x IS NULL"));
     }
 

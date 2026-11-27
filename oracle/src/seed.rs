@@ -1467,6 +1467,8 @@ struct SqliteTable {
     name: String,
     /// The visible columns, by name and declared type.
     columns: Vec<(String, String)>,
+    /// Whether the table is STRICT, which holds each column to its declared type.
+    strict: bool,
     /// The column that is an AUTOINCREMENT key, which never takes the largest integer: the next
     /// INSERT without a key would find the table full.
     autoincrement: Option<usize>,
@@ -1595,18 +1597,18 @@ fn value_text(v: &rusqlite::types::Value) -> String {
 /// table, whose rows are the virtual table's to write, and none of the tables libSQL keeps a vector
 /// index in, which are its own.
 fn sqlite_tables<D: SqliteDb + ?Sized>(db: &D) -> Result<Vec<SqliteTable>, String> {
-    let listed: Vec<(String, String, String)> = sqlite_rows(
+    let listed: Vec<(String, String, String, bool)> = sqlite_rows(
         db,
-        "select l.name, l.type, coalesce(s.sql, '') from pragma_table_list l left join sqlite_schema s on s.type = 'table' and s.name = l.name \
+        "select l.name, l.type, coalesce(s.sql, ''), l.strict from pragma_table_list l left join sqlite_schema s on s.type = 'table' and s.name = l.name \
          where l.schema = 'main' and l.type in ('table', 'virtual') and l.name not like 'sqlite_%' order by s.rowid",
     )?
     .iter()
-    .map(|r| (value_text(&r[0]), value_text(&r[1]), value_text(&r[2])))
+    .map(|r| (value_text(&r[0]), value_text(&r[1]), value_text(&r[2]), r[3] == rusqlite::types::Value::Integer(1)))
     .collect();
     // libSQL's list of its vector indexes, each kept in a table named after it; none on SQLite.
     let vector_tables: HashSet<String> = sqlite_rows(db, "select name || '_shadow' from libsql_vector_meta_shadow").unwrap_or_default().iter().map(|r| value_text(&r[0]).to_ascii_lowercase()).chain(["libsql_vector_meta_shadow".to_string()]).collect();
     let mut out = Vec::new();
-    for (name, kind, sql) in listed.into_iter().filter(|(name, _, _)| !vector_tables.contains(&name.to_ascii_lowercase())) {
+    for (name, kind, sql, strict) in listed.into_iter().filter(|(name, _, _, _)| !vector_tables.contains(&name.to_ascii_lowercase())) {
         let columns: Vec<(String, String, bool, i64)> = sqlite_rows(db, &format!("select name, type, hidden, pk from pragma_table_xinfo('{}')", name.replace('\'', "''")))?
             .iter()
             .map(|r| (value_text(&r[0]), value_text(&r[1]), r[2] != rusqlite::types::Value::Integer(0), if let rusqlite::types::Value::Integer(pk) = r[3] { pk } else { 0 }))
@@ -1621,7 +1623,7 @@ fn sqlite_tables<D: SqliteDb + ?Sized>(db: &D) -> Result<Vec<SqliteTable>, Strin
             Some(content) => Rows::Rebuilt(content),
             None => Rows::Inserted,
         };
-        out.push(SqliteTable { name, columns: columns.into_iter().map(|(n, t, _)| (n, t)).collect(), autoincrement, rows });
+        out.push(SqliteTable { name, columns: columns.into_iter().map(|(n, t, _)| (n, t)).collect(), strict, autoincrement, rows });
     }
     Ok(out)
 }
@@ -1690,7 +1692,7 @@ pub fn check_sqlite<D: SqliteDb + ?Sized>(db: &D, statements: &[(String, String,
                     .map(|(i, p)| {
                         let declared = sqlite_declared(&p["type"]);
                         let declared = declared.as_str();
-                        let mut values = sqlite_pool(declared, Scenario::Edges, false);
+                        let mut values = sqlite_pool(declared, Scenario::Edges, false, true);
                         if declared == "text" {
                             values.extend(vector_texts.iter().cloned());
                         }
@@ -1733,6 +1735,20 @@ pub fn check_sqlite<D: SqliteDb + ?Sized>(db: &D, statements: &[(String, String,
                                 // is a BigInt to the run time, which only an INTEGER is.
                                 Some(value) if col["type"]["kind"] == "integer" && col["type"]["label"] == "BIGINT" && !matches!(value, rusqlite::types::Value::Null | rusqlite::types::Value::Integer(_)) => {
                                     found.push(format!("{file}: column {name} typed int8 holds {value:?} with ({shown})"));
+                                }
+                                // A column typed real is read as a REAL: an INTEGER there past 2^53
+                                // comes back rounded from a driver that reads numbers, with no
+                                // error, and Rust's f64 refuses one.
+                                Some(rusqlite::types::Value::Integer(i)) if col["type"]["kind"] == "float" => {
+                                    found.push(format!("{file}: column {name} typed real holds the INTEGER {i} with ({shown})"));
+                                }
+                                // And a column typed integer as an INTEGER, but for what SQLite's
+                                // integer arithmetic answers past 64 bits, a REAL of at least
+                                // 2^63, which the type leaves out as Postgres's overflow error is.
+                                // An INTEGER column outside a STRICT table, which keeps a REAL, is
+                                // typed as what it holds.
+                                Some(rusqlite::types::Value::Real(f)) if col["type"]["kind"] == "integer" && f.abs() < 9.223372036854775808e18 => {
+                                    found.push(format!("{file}: column {name} typed integer holds the REAL {f} with ({shown})"));
                                 }
                                 // JSON a constructor built is text that parses as that JSON,
                                 // each value of the type the engine gave it.
@@ -1981,7 +1997,9 @@ fn run_sqlite_statement<D: SqliteDb + ?Sized>(db: &D, sql: &str, values: &[rusql
 
 /// The edge values of a declared SQLite type in a state, NULL first, by the affinity SQLite gives
 /// the name. The largest integer is in the edge state alone, and never in an AUTOINCREMENT key.
-fn sqlite_pool(declared: &str, scenario: Scenario, autoincrement: bool) -> Vec<rusqlite::types::Value> {
+/// Outside a STRICT table an INTEGER column, a 64-bit one too, also takes a REAL with a fraction,
+/// which it keeps as that REAL.
+fn sqlite_pool(declared: &str, scenario: Scenario, autoincrement: bool, strict: bool) -> Vec<rusqlite::types::Value> {
     use rusqlite::types::Value::{Blob, Integer, Null, Real, Text};
     let t = declared.to_ascii_lowercase();
     let text = || vec![Text("a".into()), Text("A".into()), Text(String::new()), Text("a ".into())];
@@ -2014,6 +2032,9 @@ fn sqlite_pool(declared: &str, scenario: Scenario, autoincrement: bool) -> Vec<r
     }
     if t.contains("int") {
         out.extend([Integer(1), Integer(2), Integer(0), Integer(-1)]);
+        if !strict && !autoincrement {
+            out.push(Real(0.5));
+        }
         if edges {
             out.push(Integer(if autoincrement { AUTOINCREMENT_TOP } else { i64::MAX }));
         }
@@ -2120,7 +2141,7 @@ fn seed_sqlite<D: SqliteDb + ?Sized>(db: &D, tables: &[SqliteTable], scenario: S
             continue;
         }
         let columns = &table.columns;
-        let pools: Vec<Vec<rusqlite::types::Value>> = columns.iter().enumerate().map(|(i, (_, ty))| sqlite_pool(ty, scenario, table.autoincrement == Some(i))).collect();
+        let pools: Vec<Vec<rusqlite::types::Value>> = columns.iter().enumerate().map(|(i, (_, ty))| sqlite_pool(ty, scenario, table.autoincrement == Some(i), table.strict)).collect();
         let base: Vec<rusqlite::types::Value> = pools.iter().map(|p| p.get(1).cloned().unwrap_or(rusqlite::types::Value::Null)).collect();
         let mut rows = vec![base.clone(), vec![rusqlite::types::Value::Null; columns.len()]];
         for (i, pool) in pools.iter().enumerate() {
@@ -2329,19 +2350,23 @@ mod tests {
             assert!(!plain.iter().any(|v| EXTREMES.iter().any(|x| v.starts_with(x))), "{base}: {plain:?}");
             assert!(plain.len() > 1, "{base}: the plain state keeps a value");
         }
-        assert!(sqlite_pool("INTEGER", Scenario::Edges, false).contains(&Integer(i64::MAX)));
-        assert!(!sqlite_pool("INTEGER", Scenario::Plain, false).contains(&Integer(i64::MAX)));
-        assert!(sqlite_pool("REAL", Scenario::Edges, false).contains(&Real(1e308)));
-        assert!(!sqlite_pool("REAL", Scenario::Plain, false).contains(&Real(1e308)));
+        assert!(sqlite_pool("INTEGER", Scenario::Edges, false, true).contains(&Integer(i64::MAX)));
+        assert!(!sqlite_pool("INTEGER", Scenario::Plain, false, true).contains(&Integer(i64::MAX)));
+        assert!(sqlite_pool("REAL", Scenario::Edges, false, true).contains(&Real(1e308)));
+        assert!(!sqlite_pool("REAL", Scenario::Plain, false, true).contains(&Real(1e308)));
+        // Outside a STRICT table an INTEGER column takes a REAL with a fraction.
+        assert!(sqlite_pool("INTEGER", Scenario::Plain, false, false).contains(&Real(0.5)));
+        assert!(sqlite_pool("BIGINT", Scenario::Plain, false, false).contains(&Real(0.5)));
+        assert!(!sqlite_pool("INTEGER", Scenario::Plain, false, true).contains(&Real(0.5)));
     }
 
     #[test]
     fn an_autoincrement_key_never_takes_the_largest_integer() {
         for scenario in SCENARIOS {
-            let pool = sqlite_pool("INTEGER", scenario, true);
+            let pool = sqlite_pool("INTEGER", scenario, true, false);
             assert!(pool.iter().all(|v| !matches!(v, Integer(n) if *n > AUTOINCREMENT_TOP)), "{scenario:?}: {pool:?}");
         }
-        assert!(sqlite_pool("INTEGER", Scenario::Edges, true).contains(&Integer(AUTOINCREMENT_TOP)));
+        assert!(sqlite_pool("INTEGER", Scenario::Edges, true, false).contains(&Integer(AUTOINCREMENT_TOP)));
     }
 
     #[test]

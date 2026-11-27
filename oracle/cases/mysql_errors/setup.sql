@@ -8,6 +8,10 @@ create trigger audited_audit before insert on audited for each row set new.id = 
 create function tax(n int) returns int deterministic return n * 2;
 create view taxed as select id, tax(age) as taxed from users;
 create view user_emails as select id, email from users;
+create view email_echoes as with recursive r (x, k) as (select email, 1 from users union all select concat(x, x), k + 1 from r where k < 3) select x as echo from r;
+create view scores as select id, score as points from (select id, cast(age * 1000 as decimal(4,0)) as score from users limit 1000) d;
+create view handles as select u.id, j.handle as nick from users u, json_table(json_array(u.email), '$[*]' columns (handle varchar(4) path '$' error on error)) j;
+create view nicks as select id, nick from handles;
 create table members (id int primary key);
 create table bans (member_id int primary key);
 create table ledger (id int primary key);

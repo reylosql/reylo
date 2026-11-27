@@ -25,3 +25,6 @@ with_in_derived.sql: at_most_one () -> { n: bigint }
 with_in_operand.sql: many () -> { c: varchar? }
 with_left_join.sql: many () -> { id: int, next: bigint? }
 with_query.sql: many () -> { id: int, n: bigint }
+with_shadowed.sql: many () -> { e: text(≤65535) }
+with_shadowed_read_before.sql: many () -> { t: text(≤65535)? }
+with_shadowed_read_by_scope.sql: many () -> { t: varchar }

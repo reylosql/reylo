@@ -145,7 +145,7 @@ text_from_base64.sql: at_most_one (e: varchar) -> { id: int }
 text_hex_literal.sql: at_most_one () -> { id: int }
 text_literal.sql: at_most_one () -> { id: int }
 text_lower.sql: at_most_one (e: varchar) -> { id: int }
-text_md5.sql: many (e: varchar) -> { id: int }
+text_md5.sql: at_most_one (e: varchar) -> { id: int }
 text_nullable_key.sql: at_most_one (nick: varchar) -> { id: int }
 text_nullable_key_is_null.sql: many () -> { id: int }
 text_nullable_key_null_safe.sql: many (nick: varchar) -> { id: int }

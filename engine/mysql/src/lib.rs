@@ -16,10 +16,12 @@ pub mod mysql_derived;
 pub mod mysql_keys;
 pub mod mysql_labels;
 pub mod mysql_literals;
+pub mod mysql_names;
 pub mod mysql_nulls;
 pub mod mysql_params;
 pub mod mysql_shape;
 pub mod mysql_types;
+pub mod schema_fingerprint;
 
 use reylo_engine_core::{analysis, dialect, fresh, lex, schema_type, shape, structured, types};
 #[cfg(test)]

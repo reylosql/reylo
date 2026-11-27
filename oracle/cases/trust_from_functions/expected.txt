@@ -1,0 +1,3 @@
+builtin_control.sql: many () -> { key: text(¬NUL) }
+each_text.sql: many () -> { key: text(¬NUL)?, value: text(¬NUL)? }
+object_keys.sql: many () -> { k: text(¬NUL)? }

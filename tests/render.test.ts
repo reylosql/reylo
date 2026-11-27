@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { EngineType } from "../src/engine.ts";
 import { analysisWithNestedArrays } from "../src/engine-type.ts";
 import { jsonNumbers, orNull, renderParamType, renderType } from "../src/render.ts";
-import { numbersInJson } from "../src/values.ts";
+import { columnKind, numbersInJson } from "../src/values.ts";
 import { typeSchema } from "../src/schema.ts";
 import { array, checked, doc, enumOf, field, lite, my, oneOf, pg, record } from "./descriptors.ts";
 
@@ -87,6 +87,15 @@ test("a union is either", () => {
   assert.equal(renderType(doc({ kind: "array", element: { type: oneOf({ kind: "boolean" }, my("bigint")), nullable: true } }), false, "mysql"), "(boolean | number | null)[]");
   // A member whose JSON form is unknown is nothing known inside a document.
   assert.equal(renderType(oneOf(my("bigint"), { kind: "opaque", label: "mystery" }), true, "mysql"), "Json");
+  // A ClickHouse Variant is whichever of its types its value has, each as a column of that type
+  // is, an array among them; one member of no known type leaves any value.
+  const bytes = array({ kind: "integer", bits: 8, unsigned: true }, false);
+  assert.equal(renderType(oneOf(bytes, { kind: "text" }), false, "clickhouse"), "number[] | string");
+  assert.equal(renderType(oneOf(bytes, { kind: "unknown" }), false, "clickhouse"), "unknown");
+  // A codec reaches a Variant whose members are all of its family, and no member of any other.
+  const decimal = (precision: number): EngineType => ({ kind: "decimal", precision, min_scale: 2, max_scale: 2 });
+  assert.equal(renderType(oneOf(decimal(9), decimal(18)), false, "clickhouse", { decimal: "number" }), "number");
+  assert.equal(renderType(oneOf(array(decimal(9), false), { kind: "text" }), false, "clickhouse", { decimal: "number" }), "string[] | string");
 });
 
 test("pgvector's vector and halfvec are arrays of numbers, as columns and as parameters; inside a document their text", () => {
@@ -97,7 +106,7 @@ test("pgvector's vector and halfvec are arrays of numbers, as columns and as par
     assert.equal(renderType(array(pg(name)), false, "postgres"), "(number[] | null)[]");
     assert.equal(renderParamType(array(pg(name)), "postgres"), "number[][]");
     assert.deepEqual(typeSchema(pg(name), "postgres"), { type: "array", items: { type: "number", format: "float" } });
-    assert.deepEqual(typeSchema(pg(name), "postgres", false, true), { type: "string" });
+    assert.deepEqual(typeSchema(pg(name), "postgres", false, true), { type: "string", description: `pg type ${name}` });
   }
   // A sparsevec stays its text.
   assert.equal(renderType(pg("sparsevec"), false, "postgres"), "string");
@@ -145,6 +154,12 @@ test("SQLite: an INTEGER is a number, exact or an error; a NUMERIC whichever the
   assert.equal(renderType({ ...lite("numeric"), label: "DECIMAL(10,2)" } as EngineType, false, "sqlite"), "number | string");
   assert.equal(renderType({ ...lite("numeric"), label: "bigint(20)" } as EngineType, false, "sqlite"), "bigint");
   assert.equal(renderType({ kind: "union", label: "VARCHAR(20)", members: [lite("text"), lite("blob")] }, false, "sqlite"), "string");
+  // A number SQLite computes as an INTEGER or a REAL is a number, inside a document too.
+  assert.equal(renderType(lite("number"), false, "sqlite"), "number");
+  assert.equal(renderType(lite("number"), true, "sqlite"), "number");
+  assert.equal(columnKind(lite("number"), "sqlite"), "int|float");
+  assert.deepEqual(typeSchema(lite("number"), "sqlite"), { type: "number" });
+  assert.deepEqual(typeSchema(lite("number"), "sqlite", false, true), { type: "number" });
   // The driver binds a number for an INTEGER, and the run time a truth value as 1 or 0.
   assert.equal(renderParamType(lite("integer"), "sqlite"), "number");
   assert.equal(renderParamType(lite("numeric"), "sqlite"), "number | string | boolean");

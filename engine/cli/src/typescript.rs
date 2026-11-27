@@ -171,23 +171,25 @@ fn holds_whole_arrays(t: &Value) -> bool {
     named(t) && named(&t["element"]["type"]) && label(&t["element"]["type"]) != label(t)
 }
 
-fn mark_nesting(t: &Value) -> Value {
+/// The type with each Postgres array marked to nest; a parameter's array of whole arrays, or of
+/// JSON, keeps one level outside them, which it writes each element of whole (src/engine-type.ts, `markNesting`).
+fn mark_nesting(t: &Value, parameter: bool) -> Value {
     let mut out = t.clone();
     match kind(t) {
         "array" => {
-            out["element"]["type"] = mark_nesting(&t["element"]["type"]);
-            if postgres_array(t) {
+            out["element"]["type"] = mark_nesting(&t["element"]["type"], parameter);
+            if postgres_array(t) && !(parameter && (holds_whole_arrays(t) || kind(&t["element"]["type"]) == "json")) {
                 out[NESTS] = Value::Bool(true);
             }
         }
         "struct" => {
             if let Some(fields) = out["fields"].as_array_mut() {
                 for f in fields {
-                    f["type"] = mark_nesting(&f["type"]);
+                    f["type"] = mark_nesting(&f["type"], parameter);
                 }
             }
         }
-        "json" if t.get("content").is_some() => out["content"]["type"] = mark_nesting(&t["content"]["type"]),
+        "json" if t.get("content").is_some() => out["content"]["type"] = mark_nesting(&t["content"]["type"], parameter),
         _ => {}
     }
     out
@@ -341,8 +343,9 @@ fn column_kind(t: &Value, dialect: &str) -> String {
         "duration" => if dialect == "mysql" { "text" } else { "interval" }.into(),
         "map" => if dialect == "postgres" && name == "hstore" { "hstore" } else { "unknown" }.into(),
         "union" => {
-            if dialect == "sqlite" {
-                return label(t).map_or_else(|| "unknown".into(), sqlite_declared_kind);
+            // SQLite: what a declared column stores, or a number SQLite computes as an INTEGER or a REAL.
+            if let (true, Some(declared)) = (dialect == "sqlite", label(t)) {
+                return sqlite_declared_kind(declared);
             }
             if dialect == "postgres" && (name == "inet" || name == "cidr") {
                 return "text".into();
@@ -537,13 +540,25 @@ const JSON_TYPE: &str = "Json";
 const JSON_INPUT_TYPE: &str = "JsonInput";
 const NO_CODECS: &Value = &Value::Null;
 
-/// What Postgres writes inside a JSON document for a type whose form there its kind does not say.
+/// The form Postgres writes `t` in inside a JSON document, of those `json_image` names
+/// (src/schema.ts, `postgresInJson`): a built-in structure is known by its own label, which a type
+/// of another schema never has, and any other type, pgvector's among them, by its name in whatever
+/// schema its extension was created in.
+fn postgres_json_image(t: &Value) -> Option<&'static str> {
+    let name = bare_name(t);
+    let structure = matches!(kind(t), "array" | "struct" | "union") && !(kind(t) == "array" && matches!(name.as_str(), "vector" | "halfvec" | "sparsevec"));
+    if structure { label(t).and_then(json_image) } else { json_image(&name) }
+}
+
+/// What Postgres writes inside a JSON document for a type whose form there its kind does not say:
+/// the text of each type core's schema writer names, and an hstore's, a geometry's and an unread
+/// row's own forms.
 fn json_image(name: &str) -> Option<&'static str> {
     Some(match name {
-        "bit" | "varbit" | "vector" | "halfvec" | "sparsevec" | "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle" | "inet" | "cidr" | "money" | "tsvector" | "tsquery" | "regclass" | "regtype" | "ltree" | "lquery" | "ltxtquery" | "pg_lsn" | "jsonpath" | "xid" | "xid8" | "oid8" | "regdatabase" | "regproc" | "regprocedure" | "regoper" | "regoperator" | "regnamespace" | "regrole" | "regcollation" | "regconfig" | "regdictionary" | "geography" | "box2d" | "box3d" | "spheroid" | "raster" | "cube" | "seg" | "ean13" | "isbn" | "isbn13" | "ismn" | "ismn13" | "issn" | "issn13" | "upc" | "query_int" | "h3index" | "hll" | "hll_hashval" | "ip4" | "ip4r" | "ip6" | "ip6r" | "ipaddress" | "iprange" | "ulid" | "prefix_range" | "mol" | "qmol" | "xqmol" | "reaction" | "bfp" | "sfp" | "roaringbitmap" | "s3vec" | "semver" | "semverrange" | "semvermultirange" | "unit" | "unitrange" | "unitmultirange" | "rabitq8" | "rabitq4" => "string",
         "hstore" => "Record<string, string | null>",
         "geometry" => "{ type: string; [key: string]: Json | undefined }",
         "record" => "Record<string, Json>",
+        _ if reylo_engine_core::schema::POSTGRES_TEXT_IN_JSON.contains(&name) => "string",
         _ => return None,
     })
 }
@@ -613,17 +628,21 @@ fn json_image_of(t: &Value, dialect: &str, in_union: bool) -> String {
         }
         "text" => "string".into(),
         "union" => {
+            // A SQLite column declared BOOLEAN holds 0 and 1, which SQLite writes as numbers.
             if dialect == "sqlite" {
                 return if BOOLEAN.is_match(&name) {
-                    "boolean".into()
+                    "number".into()
                 } else if name.to_uppercase() == "NUMERIC" {
                     "number | string".into()
+                } else if items(&t["members"]).iter().all(|m| matches!(m["kind"].as_str(), Some("integer" | "float"))) {
+                    // An INTEGER that may be a REAL, which SQLite keeps outside a STRICT table.
+                    "number".into()
                 } else {
                     JSON_TYPE.into()
                 };
             }
             if dialect == "postgres" {
-                if let Some(image) = json_image(&name) {
+                if let Some(image) = postgres_json_image(t) {
                     return image.into();
                 }
             }
@@ -634,7 +653,7 @@ fn json_image_of(t: &Value, dialect: &str, in_union: bool) -> String {
             dedupe(parts.iter().flat_map(|p| p.split(" | ").map(String::from)).collect()).join(" | ")
         }
         "bytes" | "uuid" | "date" | "time" | "datetime" | "instant" | "duration" | "range" | "multirange" | "xml" => if dialect == "sqlite" { JSON_TYPE } else { "string" }.into(),
-        _ => (if dialect == "postgres" { json_image(&name) } else { None }).unwrap_or(JSON_TYPE).into(),
+        _ => (if dialect == "postgres" { postgres_json_image(t) } else { None }).unwrap_or(JSON_TYPE).into(),
     }
 }
 
@@ -656,11 +675,12 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
         "enum" => return enum_literal(t, &render_type(&t["type"], in_json, dialect, codecs)),
         "tuple" => return tuple_of(t, &|e| render_type(e, in_json, dialect, codecs)),
         "array" => {
+            // A SET is its text inside a document, but on SQLite, which has none, any JSON (src/schema.ts, `inDocument`).
             if is_mysql_set(t) {
-                return if !in_json && dialect == "mysql" { format!("Set<{}>", render_type(&t["element"]["type"], false, dialect, codecs)) } else { "string".into() };
+                return if !in_json && dialect == "mysql" { format!("Set<{}>", render_type(&t["element"]["type"], false, dialect, codecs)) } else if in_json && dialect == "sqlite" { JSON_TYPE.into() } else { "string".into() };
             }
             if in_json && dialect == "postgres" {
-                if let Some(image) = json_image(&name) {
+                if let Some(image) = postgres_json_image(t) {
                     return image.into();
                 }
             }
@@ -682,7 +702,7 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
         }
         "struct" => {
             if in_json {
-                return match json_image(&name) {
+                return match postgres_json_image(t) {
                     Some(image) if dialect == "postgres" && name != "record" => image.into(),
                     _ => render_fields(items(&t["fields"]), dialect, t.get("extra")),
                 };
@@ -725,6 +745,13 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
                 })
                 .collect::<Vec<_>>()
                 .join(" | ");
+        }
+        // A ClickHouse Variant's value is its member's own, so its type is the union of its
+        // members' (src/render.ts); a member of no known type leaves any value. A codec of the
+        // Variant whole took it above; past that no codec reaches a member.
+        "union" if !in_json && dialect == "clickhouse" => {
+            let members = dedupe(items(&t["members"]).iter().map(|m| render_type(m, false, dialect, NO_CODECS)).collect());
+            return if members.iter().any(|m| m == "unknown") { "unknown".into() } else { members.join(" | ") };
         }
         k @ ("range" | "multirange") if !in_json && dialect == "postgres" => {
             let range = range_of(&render_type(&t["subtype"], false, dialect, codecs), false);
@@ -1074,6 +1101,9 @@ fn render_param_type(t: &Value, dialect: &str, in_row: bool, members: Option<&Va
         if kind.ends_with("[]") {
             let element = render_param_type(&t["element"]["type"], dialect, in_row, None, codecs);
             let inner = if in_row { or_null(&element) } else { element };
+            if nests_any_deep(t) {
+                return format!("NestedArray<{inner}>");
+            }
             return if UNION_MARK.is_match(&inner) { format!("({inner})[]") } else { format!("{inner}[]") };
         }
     }
@@ -1162,14 +1192,13 @@ fn module_types(written: &Value, dialect: &str, codecs: &Value, allow_nested_arr
     let empty = Map::new();
     let domains = written.get("domains").and_then(Value::as_object).unwrap_or(&empty);
     let based = |t: &Value| if domains.is_empty() { t.clone() } else { with_bases(t, domains) };
-    let params: Vec<Value> = items(&written["params"]).iter().map(|p| with_type(p, based(&p["type"]))).collect();
-    let columns: Vec<Value> = items(&written["columns"])
-        .iter()
-        .map(|c| {
-            let ty = based(&c["type"]);
-            with_type(c, if allow_nested_arrays { mark_nesting(&ty) } else { ty })
-        })
-        .collect();
+    // A parameter nests where the project lets columns nest, so it takes back what a column of its type returns.
+    let nesting = |slot: &Value, parameter: bool| {
+        let ty = based(&slot["type"]);
+        with_type(slot, if allow_nested_arrays { mark_nesting(&ty, parameter) } else { ty })
+    };
+    let params: Vec<Value> = items(&written["params"]).iter().map(|p| nesting(p, true)).collect();
+    let columns: Vec<Value> = items(&written["columns"]).iter().map(|c| nesting(c, false)).collect();
     let cardinality = match written["cardinality"].as_str().unwrap_or("many") {
         "at_most_one" => "maybeOne",
         other => other,
@@ -1616,6 +1645,22 @@ mod tests {
     }
 
     #[test]
+    fn an_array_parameter_nests_at_any_depth_where_columns_do() {
+        let int4 = json!({ "kind": "integer", "bits": 32, "label": "int4" });
+        let a = analysis(json!([]), json!([{ "name": "cells", "type": { "kind": "array", "label": "_int4", "element": { "type": int4 } } }]), "none");
+        assert_eq!(printed(&a, "postgres", &Value::Null, false).text(), "type Params = { cells: number[] };\ntype Returns = void;\n");
+        assert_eq!(printed(&a, "postgres", &Value::Null, true).text(), "type Params = { cells: NestedArray<number> };\ntype Returns = void;\n");
+        // An array of whole arrays, a domain's over `int4[]`, keeps one level outside them, which a parameter writes each of whole.
+        let ints = json!({ "kind": "array", "label": "public._ints", "element": { "type": { "kind": "array", "label": "public.ints", "element": { "type": int4 } } } });
+        let mut b = analysis(json!([]), json!([{ "name": "x", "type": ints }]), "none");
+        b["domains"] = json!({ "public.ints": "_int4" });
+        assert_eq!(printed(&b, "postgres", &Value::Null, true).text(), "type Params = { x: NestedArray<number>[] };\ntype Returns = void;\n");
+        // A JSON element may be an array itself, which a parameter writes whole.
+        let docs = analysis(json!([]), json!([{ "name": "docs", "type": { "kind": "array", "label": "_jsonb", "element": { "type": { "kind": "json", "label": "jsonb" } } } }]), "none");
+        assert_eq!(printed(&docs, "postgres", &Value::Null, true).text(), printed(&docs, "postgres", &Value::Null, false).text());
+    }
+
+    #[test]
     fn a_wide_type_breaks_over_lines_and_a_comment_documents_its_field() {
         let a = analysis(
             json!([
@@ -1640,6 +1685,21 @@ mod tests {
         assert_eq!(column_kind(&with_bases(&ints, a["domains"].as_object().unwrap()), "postgres"), "{int[]}[]");
         assert_eq!(printed(&a, "postgres", &Value::Null, false).returns, "{ x: ((number | null)[] | null)[] }[]");
         assert_eq!(printed(&a, "postgres", &Value::Null, true).returns, "{ x: NestedArray<NestedArray<number | null> | null> }[]");
+    }
+
+    #[test]
+    fn a_clickhouse_variant_is_whichever_of_its_types_its_value_has() {
+        // `Variant(Array(UInt8), String)`, and a Variant with a member of no known type.
+        let bytes = json!({ "kind": "array", "element": { "type": { "kind": "integer", "bits": 8, "unsigned": true, "label": "UInt8" } } });
+        let a = analysis(
+            json!([
+                { "name": "v", "nullable": true, "type": { "kind": "union", "members": [bytes.clone(), { "kind": "text", "label": "String" }] } },
+                { "name": "w", "nullable": true, "type": { "kind": "union", "members": [bytes, { "kind": "unknown" }] } },
+            ]),
+            json!([]),
+            "many",
+        );
+        assert_eq!(printed(&a, "clickhouse", &Value::Null, false).returns, "{ v: number[] | string | null; w: unknown | null }[]");
     }
 
     #[test]

@@ -6,6 +6,7 @@
 // `Json`, which the generated module imports from `reylo`.
 import { CODEC_TYPE, leafCodec, type Codec, type Codecs } from "./codecs.ts";
 import { bareName, isMysqlSet, nestsAnyDeep, postgresArray, schemaOf, type EngineType, type Field, type Slot } from "./engine-type.ts";
+import { inDocument, JSON_TYPE, postgresInJson } from "./schema.ts";
 import { columnKind, isRowKind, kindType as typeOfKind, RANGE_BOUNDS, type Dialect, type JsonNumbers } from "./values.ts";
 
 /** GeoJSON's type of each geometry subtype the type descriptor names (@types/geojson). */
@@ -24,38 +25,8 @@ function codecType(codec: Codec, t: EngineType, member: (t: EngineType) => strin
 /** A Postgres range of bounds of the type `bound`, as `.run()` returns it, and as a parameter takes it (`input`), its brackets `[)` where it leaves them out (src/values.ts). */
 const rangeOf = (bound: string, input = false) => `{ empty: true } | { lower?: ${bound}; upper?: ${bound}; bounds${input ? "?" : ""}: ${RANGE_BOUNDS.map((b) => JSON.stringify(b)).join(" | ")} }`;
 
-// What Postgres writes inside a JSON document for a type whose form there its kind does not say
-// (the spec's facts): the text of a type the format structures (a bit string, a vector, a
-// geometric type, a network address) or does not (an extension's), an object of its keys for an
-// hstore, GeoJSON for a geometry, and an object of its columns for a row whose columns were not
-// read. A type named nowhere here, which the engine knows no form of, is any JSON value.
-const json: Record<string, string> = {
-  bit: "string", varbit: "string", vector: "string", halfvec: "string", sparsevec: "string",
-  point: "string", line: "string", lseg: "string", box: "string", path: "string", polygon: "string", circle: "string",
-  inet: "string", cidr: "string",
-  money: "string", tsvector: "string", tsquery: "string", regclass: "string", regtype: "string",
-  ltree: "string", lquery: "string", ltxtquery: "string",
-  // Types with no cast to JSON, which Postgres writes inside a document as their text: built-in
-  // system types, and the extensions' on Neon and Supabase (PostGIS's others, cube, seg, isn,
-  // intarray, h3, hll, ip4r, pgx_ulid, prefix, rdkit, roaringbitmap, semver, unit, VectorChord).
-  pg_lsn: "string", jsonpath: "string", xid: "string", xid8: "string", oid8: "string", regdatabase: "string",
-  regproc: "string", regprocedure: "string", regoper: "string", regoperator: "string", regnamespace: "string", regrole: "string", regcollation: "string", regconfig: "string", regdictionary: "string",
-  geography: "string", box2d: "string", box3d: "string", spheroid: "string", raster: "string",
-  cube: "string", seg: "string", ean13: "string", isbn: "string", isbn13: "string", ismn: "string", ismn13: "string", issn: "string", issn13: "string", upc: "string",
-  query_int: "string", h3index: "string", hll: "string", hll_hashval: "string",
-  ip4: "string", ip4r: "string", ip6: "string", ip6r: "string", ipaddress: "string", iprange: "string", ulid: "string", prefix_range: "string",
-  mol: "string", qmol: "string", xqmol: "string", reaction: "string", bfp: "string", sfp: "string", roaringbitmap: "string", s3vec: "string",
-  semver: "string", semverrange: "string", semvermultirange: "string", unit: "string", unitrange: "string", unitmultirange: "string", rabitq8: "string", rabitq4: "string",
-  // An hstore is an object of its keys inside a document, each value text or null (`{"a": "1", "b": null}`).
-  hstore: "Record<string, string | null>",
-  // PostGIS writes a geometry through its cast to JSON: a GeoJSON geometry, `{"type":"Point","coordinates":[1,2]}`.
-  geometry: "{ type: string; [key: string]: Json | undefined }",
-  // A row whose columns were not read (a subquery's): an object of them inside a document.
-  record: "Record<string, Json>",
-};
-
 /** Any JSON value, as a module names it: the type `reylo` exports. */
-export const JSON_TYPE = "Json";
+export { JSON_TYPE };
 
 /** What a JSON parameter with no schema takes, the type `reylo` exports: any value `JSON.stringify` writes. */
 export const JSON_INPUT_TYPE = "JsonInput";
@@ -67,49 +38,24 @@ export const ident = (name: string) => (/^[A-Za-z_$][\w$]*$/.test(name) ? name :
 
 /**
  * The TypeScript of a value inside a document the database built, typed by the SQL value it was
- * written from, as the database writes that value in there (the spec's facts on what each database
- * writes inside its own JSON): a number for an integer (Postgres's `oid` but its text) and for a
- * float or a decimal, with the text of each infinity or NaN the type holds beside it where JSON has
- * no number for it (SQLite writes ±Infinity as a number), the text of a date or of any type the
- * table above names, an object for an hstore and a row, GeoJSON for a geometry, and any JSON value
- * for one nothing types.
+ * written from, as the database writes that value in there: a scalar's by the table the output
+ * schema reads too (src/schema.ts, `inDocument`), an enum's labels, a tuple's elements, a union's
+ * members, and any JSON value for one nothing types.
  */
 function jsonImage(t: EngineType, dialect: Dialect, inUnion = false): string {
-  const name = bareName(t);
-  // MySQL writes a SET inside a document as its members joined by commas.
-  if (isMysqlSet(t)) return dialect === "sqlite" ? JSON_TYPE : "string";
+  const form = inDocument(t, dialect, inUnion);
+  if (form !== undefined) return form.type;
   switch (t.kind) {
-    case "boolean": return "boolean";
     case "enum": return enumLiteral(t, jsonImage(t.type, dialect, inUnion));
     case "tuple": return tupleOf(t, (e) => jsonImage(e, dialect));
-    case "integer":
-      if (dialect === "postgres" && name === "oid") return "string";
-      return "number";
-    case "float":
-    case "decimal": {
-      if (dialect === "sqlite") return "number";
-      // Postgres writes a NaN or an infinity inside a document as its text, which the run time
-      // gives as the number it is wherever a float or a decimal stands on its own (`jsonNumbers`);
-      // a union's member keeps the text, which another member may also be.
-      if (dialect === "postgres" && !inUnion) return "number";
-      const text = [...(t.nan ? [`"NaN"`] : []), ...(t.infinity ? [`"Infinity"`, `"-Infinity"`] : [])];
-      return ["number", ...text].join(" | ");
-    }
-    case "text":
-      return "string";
     case "union": {
-      // SQLite: a value of a column a NUMERIC declares is a number or the text it holds.
-      if (dialect === "sqlite") return /^bool(ean)?$/i.test(name) ? "boolean" : name.toUpperCase() === "NUMERIC" ? "number | string" : JSON_TYPE;
-      if (dialect === "postgres" && json[name]) return json[name]!;
       const parts = t.members.map((m) => jsonImage(m, dialect, true));
       return parts.includes(JSON_TYPE) ? JSON_TYPE : [...new Set(parts.flatMap((part) => part.split(" | ")))].join(" | ");
     }
-    case "bytes":
-      return dialect === "sqlite" ? JSON_TYPE : "string";
-    case "uuid": case "date": case "time": case "datetime": case "instant": case "duration": case "range": case "multirange": case "xml":
-      return dialect === "sqlite" ? JSON_TYPE : "string";
+    // A structure standing where no walk reaches it, a union's member or a tuple's element: its
+    // Postgres name's form, a row whose columns were not read among them, else any JSON.
     default:
-      return (dialect === "postgres" ? json[name] : undefined) ?? JSON_TYPE;
+      return (dialect === "postgres" ? postgresInJson(t)?.type : undefined) ?? JSON_TYPE;
   }
 }
 
@@ -118,9 +64,11 @@ function jsonImage(t: EngineType, dialect: Dialect, inUnion = false): string {
  * position outside JSON (src/codecs.ts).
  */
 export function renderType(t: EngineType, inJson = false, dialect: Dialect = "postgres", codecs: Codecs = {}): string {
-  const name = bareName(t);
   const codec = inJson ? undefined : leafCodec(t, dialect, codecs);
   if (codec !== undefined) return codecType(codec, t, (e) => renderType(e, false, dialect));
+  // A value inside a document as the database writes it there, by the output schema's table too.
+  const form = inJson ? inDocument(t, dialect) : undefined;
+  if (form !== undefined) return form.type;
   switch (t.kind) {
     // An enum's labels, a CHECK's list, or a literal.
     case "enum":
@@ -128,13 +76,8 @@ export function renderType(t: EngineType, inJson = false, dialect: Dialect = "po
     case "tuple":
       return tupleOf(t, (e) => renderType(e, inJson, dialect, codecs));
     case "array": {
-      // A MySQL SET is a Set of its members, and its text inside a document or on another database.
+      // A MySQL SET is a Set of its members, and its text on another database.
       if (isMysqlSet(t)) return !inJson && dialect === "mysql" ? `Set<${renderType(t.element.type, false, dialect, codecs)}>` : "string";
-      // A type Postgres structures as an array and writes as its text (a bit string, a vector), or
-      // an array of row values, which no driver parses.
-      if (inJson && dialect === "postgres" && json[name] !== undefined) return json[name]!;
-      // MySQL writes a BIT inside a document as its bytes in base64.
-      if (inJson && dialect === "mysql" && name === "bit") return "string";
       if (!inJson) {
         const kind = columnKind(t, dialect);
         if (!kind.endsWith("[]")) return typeOfKind(kind);
@@ -150,8 +93,8 @@ export function renderType(t: EngineType, inJson = false, dialect: Dialect = "po
       return /[|&]/.test(inner) && !/^(?:\(.*\)\[\]|NestedArray<.*>)(?:\[\])*$/.test(inner) ? `(${inner})[]` : `${inner}[]`;
     }
     case "struct":
-      // A row inside a document is an object of its fields; a built-in geometric type, its text.
-      if (inJson) return dialect === "postgres" && name !== "record" && json[name] !== undefined ? json[name]! : renderFields(t.fields, dialect, t.extra);
+      // A row inside a document is an object of its fields.
+      if (inJson) return renderFields(t.fields, dialect, t.extra);
       // A Postgres row value, and a geometric type, is an object of its fields, each as a column
       // of its type is (src/values.ts), and so is a ClickHouse tuple whose elements have names. Of
       // two fields of one name the object keeps the last, as the decoder does.
@@ -169,6 +112,16 @@ export function renderType(t: EngineType, inJson = false, dialect: Dialect = "po
       // engine does not read, any JSON.
       if (inJson) break;
       return t.alternatives.length ? t.alternatives.map((a) => `{ tag: ${JSON.stringify(a.tag)}; value: ${a.nullable ? orNull(renderType(a.type, false, dialect, codecs)) : renderType(a.type, false, dialect, codecs)} }`).join(" | ") : "never";
+    // A ClickHouse Variant's value is its member's own, read as a column of that type is
+    // (src/decode-clickhouse.ts), so its type is the union of its members'; a member of no known
+    // type leaves any value. A codec of the Variant whole, whose members are all of its family,
+    // took it above; past that no codec reaches a member, since the value no longer says which
+    // member it is (src/codecs.ts, `planOf`).
+    case "union": {
+      if (inJson || dialect !== "clickhouse") break;
+      const members = [...new Set(t.members.map((m) => renderType(m, false, dialect)))];
+      return members.includes("unknown") ? "unknown" : members.join(" | ");
+    }
     // A Postgres range is an object of its bounds, a multirange an array of ranges.
     case "range":
     case "multirange":
@@ -198,13 +151,12 @@ const FLAT_ELEMENTS: ReadonlySet<EngineType["kind"]> = new Set(["boolean", "inte
  * array inside JSON the run time holds to one level.
  */
 export function jsonNumbers(t: EngineType, inJson = false): JsonNumbers | undefined {
-  const name = bareName(t);
   switch (t.kind) {
     case "float":
     case "decimal":
       return inJson && (t.nan === true || t.infinity === true) ? true : undefined;
     case "array": {
-      if (inJson ? json[name] !== undefined : !columnKind(t, "postgres").endsWith("[]")) return undefined;
+      if (inJson ? inDocument(t, "postgres") !== undefined : !columnKind(t, "postgres").endsWith("[]")) return undefined;
       const items = jsonNumbers(t.element.type, inJson);
       // A Postgres array inside a document has as many levels as its value, which the run time
       // holds to one, as it does a column's (src/values.ts, `numbersInJson`), unless the project lets
@@ -214,7 +166,7 @@ export function jsonNumbers(t: EngineType, inJson = false): JsonNumbers | undefi
       return { items: items ?? false, ...(nestsAnyDeep(t) ? { deep: true as const } : {}), ...(flat ? { flat: true as const } : {}) };
     }
     case "struct": {
-      if (!inJson || json[name] !== undefined) return undefined;
+      if (!inJson || inDocument(t, "postgres") !== undefined) return undefined;
       const keys = lastOfEachName(t.fields).flatMap((f): [string, JsonNumbers][] => {
         const inner = jsonNumbers(f.type, true);
         return inner === undefined ? [] : [[f.name, inner]];
@@ -481,6 +433,7 @@ export function renderParamType(t: EngineType, dialect: Dialect = "postgres", in
     if (dialect === "postgres" && kind === "text" && bareName(t.element.type) === "record") return "string | string[]";
     if (kind.endsWith("[]")) {
       const inner = inRow ? orNull(renderParamType(t.element.type, dialect, inRow, undefined, codecs)) : renderParamType(t.element.type, dialect, false, undefined, codecs);
+      if (nestsAnyDeep(t)) return `NestedArray<${inner}>`;
       return /[|&]/.test(inner) ? `(${inner})[]` : `${inner}[]`;
     }
   }

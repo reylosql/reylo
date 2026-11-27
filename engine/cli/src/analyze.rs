@@ -8,6 +8,7 @@ use reylo_engine_core::api::{utf16_offset, Analysis};
 use reylo_engine_core::dialect::Dialect;
 use reylo_engine_core::types::{Cardinality, DialectVersion, Diagnostic, Kind, ResultRows, StatementDescriptor};
 use reylo_engine::Failure;
+use crate::lsp::reading::Lines;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -363,23 +364,33 @@ async fn analyze_all(dialect: &str, url: String, given: bool, base: &Path, proje
 }
 
 /// Each diagnostic on standard error as a compiler writes one, `file:line:column: message`, with its
-/// line below it and a caret under its place, whichever format standard output holds. The column
-/// counts characters, and a place that runs past its line is marked to the line's end.
+/// line below it and a caret under its place, whichever format standard output holds.
 fn report(file: Option<&str>, sql: &str, diagnostics: &[Diagnostic]) {
+    for line in reported(file, sql, diagnostics) {
+        eprintln!("{line}");
+    }
+}
+
+/// The lines [`report`] writes. A line ends at `\n`, `\r\n` or a lone `\r`, as the language server
+/// counts them, the column counts characters, and a place that runs past its line is marked to the
+/// line's end.
+fn reported(file: Option<&str>, sql: &str, diagnostics: &[Diagnostic]) -> Vec<String> {
+    let lines = Lines::new(sql);
+    let mut out = Vec::new();
     for diagnostic in diagnostics {
         let start = byte_offset(sql, diagnostic.start);
         let end = byte_offset(sql, diagnostic.end).max(start);
-        let line_start = sql[..start].rfind('\n').map_or(0, |i| i + 1);
-        let line_end = sql[start..].find('\n').map_or(sql.len(), |i| start + i);
-        let number = sql[..start].matches('\n').count() + 1;
+        let (line, range) = lines.line(sql, start);
+        let (line_start, line_end) = (range.start, range.end.max(start));
         let column = sql[line_start..start].chars().count() + 1;
         // A tab before the place stays a tab, so the caret lines up where the terminal puts it.
         let lead: String = sql[line_start..start].chars().map(|c| if c == '\t' { '\t' } else { ' ' }).collect();
         let marks = sql[start..end.min(line_end)].chars().count().max(1);
-        eprintln!("{}:{number}:{column}: {}", file.unwrap_or("<statement>"), diagnostic.message);
-        eprintln!("  {}", sql[line_start..line_end].trim_end_matches('\r'));
-        eprintln!("  {lead}{}", "^".repeat(marks));
+        out.push(format!("{}:{}:{column}: {}", file.unwrap_or("<statement>"), line + 1, diagnostic.message));
+        out.push(format!("  {}", sql[line_start..line_end].trim_end_matches(['\r', '\n'])));
+        out.push(format!("  {lead}{}", "^".repeat(marks)));
     }
+    out
 }
 
 /// The UTF-8 byte offset of a UTF-16 offset into `text`, as a diagnostic counts its place: the
@@ -453,4 +464,23 @@ fn usage(message: &str) -> i32 {
 fn fail(message: &str) -> i32 {
     eprintln!("reylo analyze: {message}");
     2
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_report_counts_every_line_end() {
+        let at = |sql: &str, offset: usize| {
+            let start = utf16_offset(sql, offset);
+            reported(Some("q.sql"), sql, &[Diagnostic { message: "here".into(), start, end: start + 1, code: None }])
+        };
+        for sql in ["select 1\nfrom t\nwhere x", "select 1\r\nfrom t\r\nwhere x", "select 1\rfrom t\rwhere x"] {
+            assert_eq!(at(sql, sql.find('x').unwrap()), ["q.sql:3:7: here", "  where x", "        ^"], "{sql:?}");
+            assert_eq!(at(sql, sql.find("from").unwrap()), ["q.sql:2:1: here", "  from t", "  ^"], "{sql:?}");
+        }
+        // A place at a line's end is marked there.
+        assert_eq!(at("select 1\r\nx", 8), ["q.sql:1:9: here", "  select 1", "          ^"]);
+    }
 }
