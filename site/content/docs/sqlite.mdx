@@ -140,7 +140,7 @@ from orders
 
 **Values of another kind**
 
-Outside a `STRICT` table, a value of another kind makes `.run()` throw a `TypeError` that names the column. An example is the text `'abc'` in an `INTEGER` column. To read whatever the column holds, cast it:
+Outside a `STRICT` table, a value of another kind makes `.run()` throw a `TypeError` that names the column. An example is the text `'abc'` in an `INTEGER` column. The exception is a `REAL` such as `0.5` there, which `.run()` returns as the number it is. So a query's `outputSchema` types that column, and what's computed from it, as a number. To read whatever the column holds, cast it:
 
 <InferenceCard>
 
