@@ -6,7 +6,7 @@
 // written again without the keys a call leaves out, so every row of a call gives the same keys.
 // Nothing here changes a value: a value the database would round, truncate or read in a zone
 // nobody chose is refused.
-import type { EngineType, JsonSchema } from "./engine-type.ts";
+import { holdsWholeArrays, type EngineType, type JsonSchema } from "./engine-type.ts";
 import type { Marks } from "./execute.ts";
 import { validate, withDefaults } from "./json-schema.ts";
 import { columnKind, describe, given, hstoreText, isLevel, ParameterError, postgresInterval, postgresLiteral, postgresYear, vectorText, zoned } from "./values.ts";
@@ -158,7 +158,8 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
         const kind = columnKind(type.element.type, dialect);
         return v.map((e, i) => {
           if (e === null) return null;
-          const level = dialect === "postgres" && Array.isArray(e) && isLevel(kind, e);
+          // Each element of an array of whole arrays (a domain's over an array type) is one, whatever it holds.
+          const level = dialect === "postgres" && Array.isArray(e) && !holdsWholeArrays(type) && isLevel(kind, e);
           return check(level ? type : type.element.type, level ? written : element, e, dialect, (message) => fail(`element ${i + 1} ${message}`));
         });
       }

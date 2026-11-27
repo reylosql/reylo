@@ -162,6 +162,10 @@ test("an array member tells its levels from its elements as a parameter does, so
   const seg = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
   assert.deepEqual(prepareRows("grids", gridsOf.rows, [{ history: [[[0.5]], [null]], segs: [[seg], [null]], cells: [[[1, 2]], [[3, null]]] }], "postgres", true).value, [{ history: [["[0.5]"], [null]], segs: [["[(0,0),(1,1)]"], [null]], cells: [[[1, 2]], [[3, null]]] }]);
   assert.throws(() => prepareRows("grids", gridsOf.rows, [{ history: [[["x"]]] }], "postgres", true), /"history" element 1 element 1 is halfvec, an array of finite numbers/);
+  // An array of whole arrays, a domain's over `int4[]`, takes each element whole.
+  const ints: EngineType = { kind: "array", label: "public._ints", element: { nullable: true, type: { kind: "array", label: "_int4", element: { nullable: true, type: pg("int4") } } } } as EngineType;
+  const tagged = structured(false, [["tags", ints, "ints[]", true, true]]);
+  assert.deepEqual(prepareRows("tagged", tagged.rows, [{ tags: [[1, 2], [[3]], null] }], "postgres", true).value, [{ tags: [[1, 2], [[3]], null] }]);
 });
 
 test("an hstore member takes an object of its keys, written as the text hstore reads", () => {

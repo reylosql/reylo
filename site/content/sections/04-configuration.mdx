@@ -120,7 +120,7 @@ allow_untyped_params: true
 
 ## `allow_nested_arrays`
 
-Whether a Postgres array column may hold nested arrays.
+Whether Postgres arrays may nest, in a column or a parameter.
 
 Postgres doesn't track an array's dimensions. By default Reylo types an array column as one-dimensional, and `.run()` throws on a deeper value. With this set, an array column and an array parameter are each a `NestedArray<T>` of any depth.
 

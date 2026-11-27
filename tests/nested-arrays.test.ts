@@ -7,6 +7,13 @@ import { playResult } from "../src/play-result.ts";
 import { analysisWithNestedArrays } from "../src/engine-type.ts";
 import type { Analysis } from "../src/engine.ts";
 
+/** The items of an array the project lets nest: its element, or arrays of it, to Postgres's six dimensions. */
+function deep(items: unknown): unknown {
+  let at = items;
+  for (let level = 1; level < 6; level++) at = { anyOf: [items, { type: "array", items: at }] };
+  return at;
+}
+
 const analysis = {
   params: [],
   columns: [
@@ -53,7 +60,7 @@ test("an array of a type the format structures as an array, such as bit or lseg,
   assert.match(nested.row, /doc: \{ flags: NestedArray<string \| null> \}/);
   assert.match(nested.row, /stacked: NestedArray<string \| null>\[\] \}/);
   const items = (a: Analysis) => (querySchemas(a, "postgres").output as { items: { properties: { segments: { items: unknown } } } }).items.properties.segments.items;
-  assert.deepEqual(items(analysisWithNestedArrays(whole)), { anyOf: [items(whole), { type: "array" }] });
+  assert.deepEqual(items(analysisWithNestedArrays(whole)), deep(items(whole)));
 });
 
 test("reylo play types an array column as the type check does under allow_nested_arrays", () => {
@@ -63,7 +70,7 @@ test("reylo play types an array column as the type check does under allow_nested
 
 test("a query's output schema lets an array nest under allow_nested_arrays", () => {
   const items = (a: Analysis) => (querySchemas(a, "postgres").output as { items: { properties: { cells: { items: unknown } } } }).items.properties.cells.items;
-  assert.deepEqual(items(analysisWithNestedArrays(analysis)), { anyOf: [items(analysis), { type: "array" }] });
+  assert.deepEqual(items(analysisWithNestedArrays(analysis)), deep(items(analysis)));
 });
 
 test("an array column inside JSON a statement builds is typed at any depth under allow_nested_arrays", () => {
@@ -104,5 +111,5 @@ test("a Postgres array parameter is typed with one dimension by default, and at 
   assert.equal(reyloImport(`${nested.params} ${nested.row}`), `import type { NestedArray, Query } from "reylo";`);
   // The input's JSON Schema lets them nest too.
   const items = (a: Analysis) => (querySchemas(a, "postgres").input as { properties: { cells: { items: unknown } } }).properties.cells.items;
-  assert.deepEqual(items(analysisWithNestedArrays(withParams)), { anyOf: [items(withParams), { type: "array" }] });
+  assert.deepEqual(items(analysisWithNestedArrays(withParams)), deep(items(withParams)));
 });
