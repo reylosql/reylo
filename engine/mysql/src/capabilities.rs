@@ -65,7 +65,7 @@ fn reached(analysis: &Analysis, sql: &str, host: &Host, capabilities: &mut Capab
         unread(capabilities);
         return Some(());
     };
-    if tables.read.iter().chain(&tables.write).any(|t| t.contains('.') || t.contains('\\')) {
+    if tables.read.iter().chain(&tables.write).any(|t| t.contains('.') || crate::errors::unwritable(t)) {
         unread(capabilities);
         return Some(());
     }
