@@ -680,6 +680,173 @@ test("mysql: through a server that refuses prepared statements, as Cloudflare Hy
   }
 });
 
+// mariadb's client shapes, each opened on `connection` with `run` for a statement of the app's own
+// on the session `.run()` takes next: a pool and a Knex instance hold one connection, so that it is.
+type MariadbShape = [string, () => Promise<{ client: any; run(sql: string): Promise<unknown>; end(): Promise<unknown> }>];
+function mariadbShapes(connection: Record<string, unknown>): MariadbShape[] {
+  const mariadb = driver("mariadb");
+  const callbacks = driver("mariadb/callback");
+  const called = (call: (done: (e: Error | null) => void) => void) => new Promise<void>((ok, no) => call((e) => (e ? no(e) : ok())));
+  return [
+    [
+      "a Connection",
+      async () => {
+        const c = await mariadb.createConnection(connection);
+        return { client: c, run: (sql) => c.query(sql), end: () => c.end() };
+      },
+    ],
+    [
+      "a Pool",
+      async () => {
+        const pool = mariadb.createPool({ ...connection, connectionLimit: 1 });
+        return { client: pool, run: (sql) => pool.query(sql), end: () => pool.end() };
+      },
+    ],
+    [
+      "a PoolConnection in a transaction",
+      async () => {
+        const pool = mariadb.createPool({ ...connection, connectionLimit: 1 });
+        const conn = await pool.getConnection();
+        await conn.beginTransaction();
+        return { client: conn, run: (sql) => conn.query(sql), end: async () => (await conn.commit(), await conn.release(), await pool.end()) };
+      },
+    ],
+    [
+      "a callback Pool",
+      async () => {
+        const pool = callbacks.createPool({ ...connection, connectionLimit: 1 });
+        return { client: pool, run: (sql) => called((done) => pool.query(sql, done)), end: () => called((done) => pool.end(done)) };
+      },
+    ],
+    [
+      "Knex",
+      async () => {
+        const db = driver("knex")({ client: "mariadb", connection, pool: { min: 0, max: 1 } });
+        return { client: db, run: (sql) => db.raw(sql), end: () => db.destroy() };
+      },
+    ],
+  ];
+}
+
+test("mysql: mariadb, which writes each value into the statement, refuses one holding a quote or a backslash where a stored routine has left the session reading a backslash otherwise than the driver writes it", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_mode", "create table t (id int primary key, s varchar(80)); create procedure escapes_nothing() set session sql_mode = concat(@@session.sql_mode, ',NO_BACKSLASH_ESCAPES'); create procedure escapes() set session sql_mode = replace(@@session.sql_mode, 'NO_BACKSLASH_ESCAPES', '')");
+  const u = new URL(MYSQL!);
+  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  // Defined by hand, without marks. Each value, read otherwise than the driver wrote it, ends its
+  // literal and adds a row: one holding a backslash where the session reads it as an escape and the
+  // driver wrote it as itself, one holding a quote where the session reads a backslash as itself and
+  // the driver wrote one before the quote.
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
+  const states = [
+    { calls: ["call escapes_nothing()"], value: "x\\'), (2, 2) -- " },
+    { calls: ["set session sql_mode = concat(@@session.sql_mode, ',NO_BACKSLASH_ESCAPES')", "call escapes()"], value: "x'), (2, 2) -- " },
+  ];
+  try {
+    for (const [shape, open] of mariadbShapes(connection)) {
+      for (const { calls, value } of states) {
+        const { client, run, end } = await open();
+        try {
+          for (const sql of calls) await run(sql);
+          await assert.rejects(async () => execute(client, ins, { id: 1, s: value }), /^Error: reylo cannot run this mysql statement through mariadb: /, shape);
+          // Setting sql_mode again outside a routine brings the server's report of it up to date.
+          await run("set session sql_mode = @@session.sql_mode");
+          await execute(client, ins, { id: 1, s: value });
+        } finally {
+          await end();
+        }
+        assert.deepEqual(await own.rows("select id, s from t"), [{ id: 1, s: value }], shape);
+        await own.db.query("delete from t");
+      }
+    }
+  } finally {
+    await own.drop();
+  }
+});
+
+test("mysql: mariadb, which writes each value into the statement, refuses one holding a character outside ASCII on a connection whose charset is not UTF-8, which could write it with a quote's or a backslash's byte", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_charset", "create table t (id int primary key, s varchar(80))");
+  const u = new URL(MYSQL!);
+  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
+  // latin1 keeps a character's low byte, so Ŝ is a backslash's, which would end the literal and add a row.
+  const value = "\u015c'), (3, 3) -- ";
+  const latin1 = { ...connection, charset: "latin1" };
+  const shapes: MariadbShape[] = [
+    ...mariadbShapes(latin1),
+    [
+      "a Connection after SET NAMES",
+      async () => {
+        const c = await driver("mariadb").createConnection(connection);
+        await c.query("set names latin1");
+        return { client: c, run: (sql) => c.query(sql), end: () => c.end() };
+      },
+    ],
+  ];
+  try {
+    for (const [shape, open] of shapes) {
+      const { client, run, end } = await open();
+      try {
+        await execute(client, ins, { id: 1, s: "ada" });
+        await assert.rejects(async () => execute(client, ins, { id: 2, s: value }), (e: Error) => e.message.startsWith("reylo cannot run a mysql statement through mariadb") && e.message.includes("is not UTF-8"), shape);
+        await run("set names utf8mb4");
+        await execute(client, ins, { id: 2, s: value });
+      } finally {
+        await end();
+      }
+      assert.deepEqual(await own.rows("select id, s from t order by id"), [{ id: 1, s: "ada" }, { id: 2, s: value }], shape);
+      await own.db.query("delete from t");
+    }
+  } finally {
+    await own.drop();
+  }
+});
+
+test("mysql: mariadb, which writes a backslash before a quote or a backslash in bytes, refuses bytes holding one after a byte of 0x80 or above on a connection whose charset reads that byte and the backslash as one character", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_bytes", "create table t (id int primary key, b varbinary(80), s varchar(80))");
+  const u = new URL(MYSQL!);
+  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, b, s) values (:id, :b, :s)", params: ["id", "b", "s"] };
+  // 0xe0 begins a character in each of these charsets, whose second byte may be a backslash's. A
+  // session that reads it and the driver's backslash as one character would end the first value's
+  // literal at its quote, and take the second's closing quote with its backslash, either way adding
+  // the row (2, "2", null).
+  const values = [
+    { id: 1, b: Buffer.concat([Buffer.from([0xe0]), Buffer.from("', null), (2, 0x32, null) -- ")]), s: "x" },
+    { id: 3, b: Buffer.from([0xe0, 0x5c]), s: ", null), (2, 0x32, null) -- " },
+  ];
+  const stored = async (shape: string) => {
+    assert.deepEqual(await own.rows("select id, hex(b) as b, s from t order by id"), values.map(({ id, b, s }) => ({ id, b: b.toString("hex").toUpperCase(), s })), shape);
+    await own.db.query("delete from t");
+  };
+  try {
+    for (const charset of ["big5", "cp932", "gb18030", "gbk", "sjis"]) {
+      for (const [shape, open] of mariadbShapes({ ...connection, charset })) {
+        const { client, run, end } = await open();
+        try {
+          for (const value of values) await assert.rejects(async () => execute(client, ins, value), (e: Error) => e.message.startsWith("reylo cannot run a mysql statement through mariadb with bytes") && e.message.includes(`charset, ${charset},`), `${shape}, ${charset}`);
+          await run("set names utf8mb4");
+          for (const value of values) await execute(client, ins, value);
+        } finally {
+          await end();
+        }
+        await stored(`${shape}, ${charset}`);
+      }
+    }
+    // euckr's second bytes are never a backslash's.
+    for (const [shape, open] of mariadbShapes({ ...connection, charset: "euckr" })) {
+      const { client, end } = await open();
+      try {
+        for (const value of values) await execute(client, ins, value);
+      } finally {
+        await end();
+      }
+      await stored(`${shape}, euckr`);
+    }
+  } finally {
+    await own.drop();
+  }
+});
+
 // Statements whose placeholder a session's sql_mode moves. Under NO_BACKSLASH_ESCAPES `'a\'` ends
 // at its second quote, so `:id` follows it, and the comment hides the last quote; in the default
 // mode the backslash escapes that quote, so the string runs on to the one in the comment and holds
