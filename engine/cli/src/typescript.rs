@@ -539,13 +539,25 @@ const JSON_TYPE: &str = "Json";
 const JSON_INPUT_TYPE: &str = "JsonInput";
 const NO_CODECS: &Value = &Value::Null;
 
-/// What Postgres writes inside a JSON document for a type whose form there its kind does not say.
+/// The form Postgres writes `t` in inside a JSON document, of those `json_image` names
+/// (src/schema.ts, `postgresInJson`): a built-in structure is known by its own label, which a type
+/// of another schema never has, and any other type, pgvector's among them, by its name in whatever
+/// schema its extension was created in.
+fn postgres_json_image(t: &Value) -> Option<&'static str> {
+    let name = bare_name(t);
+    let structure = matches!(kind(t), "array" | "struct" | "union") && !(kind(t) == "array" && matches!(name.as_str(), "vector" | "halfvec" | "sparsevec"));
+    if structure { label(t).and_then(json_image) } else { json_image(&name) }
+}
+
+/// What Postgres writes inside a JSON document for a type whose form there its kind does not say:
+/// the text of each type core's schema writer names, and an hstore's, a geometry's and an unread
+/// row's own forms.
 fn json_image(name: &str) -> Option<&'static str> {
     Some(match name {
-        "bit" | "varbit" | "vector" | "halfvec" | "sparsevec" | "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle" | "inet" | "cidr" | "money" | "tsvector" | "tsquery" | "regclass" | "regtype" | "ltree" | "lquery" | "ltxtquery" | "pg_lsn" | "jsonpath" | "xid" | "xid8" | "oid8" | "regdatabase" | "regproc" | "regprocedure" | "regoper" | "regoperator" | "regnamespace" | "regrole" | "regcollation" | "regconfig" | "regdictionary" | "geography" | "box2d" | "box3d" | "spheroid" | "raster" | "cube" | "seg" | "ean13" | "isbn" | "isbn13" | "ismn" | "ismn13" | "issn" | "issn13" | "upc" | "query_int" | "h3index" | "hll" | "hll_hashval" | "ip4" | "ip4r" | "ip6" | "ip6r" | "ipaddress" | "iprange" | "ulid" | "prefix_range" | "mol" | "qmol" | "xqmol" | "reaction" | "bfp" | "sfp" | "roaringbitmap" | "s3vec" | "semver" | "semverrange" | "semvermultirange" | "unit" | "unitrange" | "unitmultirange" | "rabitq8" | "rabitq4" => "string",
         "hstore" => "Record<string, string | null>",
         "geometry" => "{ type: string; [key: string]: Json | undefined }",
         "record" => "Record<string, Json>",
+        _ if reylo_engine_core::schema::POSTGRES_TEXT_IN_JSON.contains(&name) => "string",
         _ => return None,
     })
 }
@@ -615,9 +627,10 @@ fn json_image_of(t: &Value, dialect: &str, in_union: bool) -> String {
         }
         "text" => "string".into(),
         "union" => {
+            // A SQLite column declared BOOLEAN holds 0 and 1, which SQLite writes as numbers.
             if dialect == "sqlite" {
                 return if BOOLEAN.is_match(&name) {
-                    "boolean".into()
+                    "number".into()
                 } else if name.to_uppercase() == "NUMERIC" {
                     "number | string".into()
                 } else {
@@ -625,7 +638,7 @@ fn json_image_of(t: &Value, dialect: &str, in_union: bool) -> String {
                 };
             }
             if dialect == "postgres" {
-                if let Some(image) = json_image(&name) {
+                if let Some(image) = postgres_json_image(t) {
                     return image.into();
                 }
             }
@@ -636,7 +649,7 @@ fn json_image_of(t: &Value, dialect: &str, in_union: bool) -> String {
             dedupe(parts.iter().flat_map(|p| p.split(" | ").map(String::from)).collect()).join(" | ")
         }
         "bytes" | "uuid" | "date" | "time" | "datetime" | "instant" | "duration" | "range" | "multirange" | "xml" => if dialect == "sqlite" { JSON_TYPE } else { "string" }.into(),
-        _ => (if dialect == "postgres" { json_image(&name) } else { None }).unwrap_or(JSON_TYPE).into(),
+        _ => (if dialect == "postgres" { postgres_json_image(t) } else { None }).unwrap_or(JSON_TYPE).into(),
     }
 }
 
@@ -658,11 +671,12 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
         "enum" => return enum_literal(t, &render_type(&t["type"], in_json, dialect, codecs)),
         "tuple" => return tuple_of(t, &|e| render_type(e, in_json, dialect, codecs)),
         "array" => {
+            // A SET is its text inside a document, but on SQLite, which has none, any JSON (src/schema.ts, `inDocument`).
             if is_mysql_set(t) {
-                return if !in_json && dialect == "mysql" { format!("Set<{}>", render_type(&t["element"]["type"], false, dialect, codecs)) } else { "string".into() };
+                return if !in_json && dialect == "mysql" { format!("Set<{}>", render_type(&t["element"]["type"], false, dialect, codecs)) } else if in_json && dialect == "sqlite" { JSON_TYPE.into() } else { "string".into() };
             }
             if in_json && dialect == "postgres" {
-                if let Some(image) = json_image(&name) {
+                if let Some(image) = postgres_json_image(t) {
                     return image.into();
                 }
             }
@@ -684,7 +698,7 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
         }
         "struct" => {
             if in_json {
-                return match json_image(&name) {
+                return match postgres_json_image(t) {
                     Some(image) if dialect == "postgres" && name != "record" => image.into(),
                     _ => render_fields(items(&t["fields"]), dialect, t.get("extra")),
                 };
