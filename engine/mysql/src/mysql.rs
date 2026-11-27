@@ -26,12 +26,14 @@ use syntax::mysql::ast::{self, Expr, FunctionArg, FunctionArgExpr, GroupByExpr, 
 use std::collections::{HashMap, HashSet};
 
 /// The session's `sql_mode`, asked only for a statement whose reading turns on it.
-const SQL_MODE_QUERY: &str = "select @@session.sql_mode";
+pub(crate) const SQL_MODE_QUERY: &str = "select @@session.sql_mode";
 
-/// Every view the session sees, in any schema. Asked once for a session, by a SELECT, which reads
-/// each one materialized ([`crate::mysql_derived`]), and by a statement that returns an integer
-/// column of a table or a view ([`settle`]).
-const VIEWS_QUERY: &str = "select table_name from information_schema.views";
+/// Every view the session sees, in any schema but Reylo Migrate's shadows (`reylo_shadow_…`), each
+/// named at random and dropped by the one check that made it, so no statement names one, and which
+/// the schema's fingerprint leaves out; the session's own counts, as a dry run's is. Asked once for
+/// a session, by a SELECT, which reads each one materialized ([`crate::mysql_derived`]), and by a
+/// statement that returns an integer column of a table or a view ([`settle`]).
+pub(crate) const VIEWS_QUERY: &str = "select table_name from information_schema.views where table_schema = database() or left(table_schema, 13) <> 'reylo_shadow_'";
 
 /// The built-ins MySQL moved out of the server from the version given: 9.6 moved `md5`, `sha` and
 /// `sha1` into the classic_hashing component, which is not installed by default. There a call of
@@ -186,7 +188,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     let server = host.query(crate::structured::MYSQL_SERVER_QUERY, Vec::new(), Scope::Session);
     let moved = not_builtin(server.as_ref().map(|r| r.as_deref().unwrap_or_default()));
     NOT_BUILTIN.with(|names| *names.borrow_mut() = moved);
-    let statement = match lex::one_statement(sql, lexed, KINDS) {
+    let statement = match lex::one_statement(sql, lexed, Dialect::Mysql, KINDS) {
         Ok(statement) => statement,
         Err(message) => return Some(crate::analysis::bare(sql, lexed, Dialect::Mysql, vec![Diagnostic { message, start: 0, length: sql.trim_end().len().max(1), code: 10, server_code: None }])),
     };
@@ -1900,7 +1902,7 @@ const SPACE_SENSITIVE: &[&str] = &[
 /// these; an optimizer hint that sets a variable for the statement leaves no mode to ask for.
 fn misread(sql: &str, lexed: &Lexed, host: &Host) -> Lazy<(Option<String>, bool)> {
     let text = |&(start, end): &(usize, usize)| &sql[start..end];
-    let is_comment = |span: &str| span.starts_with("--") || span.starts_with("/*") || span.starts_with('#');
+    let is_comment = lex::is_comment;
     if lexed.opaque.iter().map(text).any(|span| span.starts_with("/*+") && span.to_ascii_lowercase().contains("set_var")) {
         return Some((Some("an optimizer hint sets a variable for this statement (SET_VAR), which may change how the server reads it, so nothing bounds its rows".into()), false));
     }

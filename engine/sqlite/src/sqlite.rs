@@ -217,7 +217,7 @@ const KINDS: &[&str] = &["select", "with", "values", "insert", "replace", "updat
 
 fn run(sql: &str, lexed: &Lexed, ddl: &[String], extras: &Extras, marked: &[String]) -> SqliteAnalysis {
     let failed = |analysis: Analysis| SqliteAnalysis { analysis, declared: Vec::new(), readonly: false, unique_keys: HashMap::new(), booleans: Vec::new() };
-    let statement = match lex::one_statement(sql, lexed, KINDS) {
+    let statement = match lex::one_statement(sql, lexed, Dialect::Sqlite, KINDS) {
         Ok(statement) => statement,
         Err(message) => return failed(bare(sql, lexed, Dialect::Sqlite, vec![diag(message, 0, sql.trim_end().len(), 10)])),
     };
@@ -1088,7 +1088,12 @@ fn record(values: Vec<serde_json::Value>) -> Ty {
             distinct.push(v);
         }
     }
-    let rest = if distinct.len() == 1 { distinct.pop().unwrap_or_default() } else { serde_json::json!({"anyOf": distinct}) };
+    // Of no values, no other key: JSON Schema 2020-12 refuses an empty `anyOf`.
+    let rest = match distinct.len() {
+        0 => serde_json::Value::Bool(false),
+        1 => distinct.pop().unwrap_or_default(),
+        _ => serde_json::json!({"anyOf": distinct}),
+    };
     Ty::Json { schema: Some(serde_json::json!({"type": "object", "additionalProperties": rest})) }
 }
 

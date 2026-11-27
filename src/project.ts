@@ -46,7 +46,7 @@ export type ResolvedProject = {
   dialect: Dialect;
   /** Whether a parameter the statement does not type is an error rather than `unknown`: true unless the file says `allow_untyped_params: true`. */
   strictParams: boolean;
-  /** Whether a Postgres array column may hold nested arrays, typed at any depth and with nothing refused: false unless the file says `allow_nested_arrays: true`. */
+  /** Whether a Postgres array column may hold nested arrays, typed at any depth and with nothing refused, as a parameter of its type takes them: false unless the file says `allow_nested_arrays: true`. */
   allowNestedArrays: boolean;
   /** Whether each statement carries a sqlcommenter comment naming its file (src/sqlcommenter.ts): true unless the file says `sqlcommenter: false`. */
   sqlcommenter: boolean;

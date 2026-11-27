@@ -95,6 +95,16 @@ impl Dialect {
         }
     }
 
+    /// How the database reads the text around its tokens: its whitespace, comments, quotes and names.
+    pub fn rules(self) -> reylo_engine_core::lexical::Rules {
+        use reylo_engine_core::dialect::Dialect as Core;
+        reylo_engine_core::lexical::Rules::of(match self {
+            Dialect::Postgres => Core::Postgres,
+            Dialect::Mysql => Core::Mysql,
+            Dialect::Sqlite => Core::Sqlite,
+        })
+    }
+
     /// Whether the database is a file the process opens, rather than a server: SQLite.
     pub fn is_file(self) -> bool {
         self == Dialect::Sqlite

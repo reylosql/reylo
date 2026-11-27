@@ -8,7 +8,7 @@
 // refuses a BigInt), a decimal its text, a timestamptz its ISO text in UTC, a date and a timestamp
 // the wall-clock text the server wrote. The input is the parameters the caller passes.
 import { bareName, isMysqlSet, nestsAnyDeep, schemaOf, type EngineType, type JsonSchema } from "./engine-type.ts";
-import { columnKind, RANGE_BOUNDS, sqliteAffinity, sqliteWide, type ScalarKind } from "./values.ts";
+import { columnKind, RANGE_BOUNDS, sqliteAffinity, sqliteWide, TS_TYPE, type ScalarKind } from "./values.ts";
 import { leafCodec, type Codec, type Codecs } from "./codecs.ts";
 
 type Dialect = "postgres" | "mysql" | "sqlite" | "clickhouse";
@@ -32,6 +32,177 @@ function nullable(schema: Schema | JsonSchema): Schema | JsonSchema {
 /** A PostGIS geometry inside a document, which its cast to JSON writes as GeoJSON. */
 const GEOJSON: Schema = { type: "object", properties: { type: { type: "string" } }, required: ["type"], description: "a GeoJSON geometry" };
 
+/** A schema no value meets: a union of no members. JSON Schema 2020-12 refuses an empty `anyOf`, `allOf` or `prefixItems`. */
+const NOTHING: Schema = { not: {} };
+
+/** Any JSON value, as a module names it: the type `reylo` exports. */
+export const JSON_TYPE = "Json";
+
+/** A value's form inside a JSON document a database built: its JSON Schema, and its TypeScript type. */
+export type DocumentForm = { schema: Schema; type: string };
+
+const ANY: DocumentForm = { schema: {}, type: JSON_TYPE };
+const BOOLEAN: DocumentForm = { schema: { type: "boolean" }, type: "boolean" };
+const string = (schema: Schema = { type: "string" }): DocumentForm => ({ schema, type: "string" });
+
+/**
+ * The Postgres types whose form inside a JSON document their kind does not say, and which Postgres
+ * writes there as their text, having no cast to JSON: types the format structures (a bit string, a
+ * vector, a geometric type, a network address), built-in system types, and the extensions' on Neon
+ * and Supabase (PostGIS's others, cube, seg, isn, intarray, h3, hll, ip4r, pgx_ulid, prefix, rdkit,
+ * roaringbitmap, semver, unit, VectorChord). The same list in engine/core/src/schema.rs, which
+ * tests/schema-facts.test.ts holds this one to.
+ */
+export const POSTGRES_TEXT_IN_JSON: readonly string[] = [
+  "bit", "varbit", "vector", "halfvec", "sparsevec",
+  "point", "line", "lseg", "box", "path", "polygon", "circle",
+  "inet", "cidr",
+  "money", "tsvector", "tsquery", "regclass", "regtype",
+  "ltree", "lquery", "ltxtquery",
+  "oid", "pg_lsn", "jsonpath", "xid", "xid8", "oid8", "regdatabase",
+  "regproc", "regprocedure", "regoper", "regoperator", "regnamespace", "regrole", "regcollation", "regconfig", "regdictionary",
+  "tid", "cid", "aclitem", "refcursor", "pg_snapshot", "txid_snapshot",
+  "geography", "box2d", "box3d", "spheroid", "raster",
+  "cube", "seg", "ean13", "isbn", "isbn13", "ismn", "ismn13", "issn", "issn13", "upc",
+  "query_int", "h3index", "hll", "hll_hashval",
+  "ip4", "ip4r", "ip6", "ip6r", "ipaddress", "iprange", "ulid", "prefix_range",
+  "mol", "qmol", "xqmol", "reaction", "bfp", "sfp", "roaringbitmap", "s3vec",
+  "semver", "semverrange", "semvermultirange", "unit", "unitrange", "unitmultirange", "rabitq8", "rabitq4",
+];
+
+// What Postgres writes inside a JSON document for a type whose form there its kind does not say:
+// the text of each type above, an object of its keys for an hstore, GeoJSON for a geometry, and an
+// object of its columns for a row whose columns were not read. A type named nowhere here, whose form
+// the engine does not know, is any JSON value: an extension's type may have a cast to JSON.
+const POSTGRES_IN_JSON: ReadonlyMap<string, DocumentForm> = new Map([
+  ...POSTGRES_TEXT_IN_JSON.map((name): [string, DocumentForm] => [name, string({ type: "string", description: `pg type ${name}` })]),
+  // An hstore is an object of its keys inside a document, each value text or null (`{"a": "1", "b": null}`).
+  ["hstore", { schema: { type: "object", additionalProperties: { type: ["string", "null"] } }, type: "Record<string, string | null>" }],
+  // PostGIS writes a geometry through its cast to JSON: a GeoJSON geometry, `{"type":"Point","coordinates":[1,2]}`.
+  ["geometry", { schema: GEOJSON, type: "{ type: string; [key: string]: Json | undefined }" }],
+  // A row whose columns were not read (a subquery's): an object of them inside a document.
+  ["record", { schema: { type: "object" }, type: "Record<string, Json>" }],
+]);
+
+/** pgvector's types, arrays of numbers that Postgres writes inside a document as their text, in whatever schema the extension was created in. */
+const PGVECTOR = new Set(["vector", "halfvec", "sparsevec"]);
+
+/**
+ * The form Postgres writes a value of `t` in inside a document, of those the table above names. A
+ * built-in structure (a geometric type, a bit string, a network address) is known by its own
+ * label, which a type of another schema never has, since the engine qualifies one: a composite of
+ * the user's named `public.point` is an object of its fields there. An extension's type is known
+ * by its name in whatever schema it was created in.
+ */
+export function postgresInJson(t: EngineType): DocumentForm | undefined {
+  const name = bareName(t);
+  const key = (t.kind === "array" || t.kind === "struct" || t.kind === "union") && !(t.kind === "array" && PGVECTOR.has(name)) ? ("label" in t ? t.label : undefined) : name;
+  return key === undefined ? undefined : POSTGRES_IN_JSON.get(key);
+}
+
+/**
+ * MySQL's bytes inside a document, a BIT's at any width among them: `base64:type<n>:` and their
+ * base64, `<n>` the column's type code (15 for a VARBINARY, 16 for a BIT, 252 for a BLOB, 254 for a
+ * BINARY), with a newline after every 76 characters of it, as MIME's base64 breaks its lines.
+ */
+const MYSQL_BYTES = string({ type: "string", pattern: "^base64:type[0-9]+:[A-Za-z0-9+/\\n]*={0,2}$", description: "bytes as MySQL writes them inside JSON, their type code and their base64 (base64:type15:YWI=)" });
+
+/**
+ * How `dialect` writes a value of `t` inside a JSON document it builds, where the value is no
+ * structure the writers walk: the one table both the output schema (`plainSchema`) and the declared
+ * type (src/render.ts) read, so the two cannot disagree. Undefined for an array, a row, a tuple, an
+ * enum, a union and a document, each of whose parts it answers for. `inUnion`: the value is a
+ * union's member, where a float's or a decimal's NaN and infinities stay the text Postgres writes,
+ * which the run time converts only where the value stands alone (src/values.ts, `numbersInJson`).
+ */
+export function inDocument(t: EngineType, dialect: Dialect, inUnion = false): DocumentForm | undefined {
+  const name = bareName(t);
+  // MySQL writes a SET as its members joined by commas.
+  if (isMysqlSet(t)) return dialect === "sqlite" ? ANY : string();
+  if (dialect === "sqlite") {
+    // SQLite writes a value as its storage class: a number, text, or a NUMERIC's either; a column
+    // declared BOOLEAN holds 0 and 1, which it writes as numbers. A BLOB is no JSON.
+    switch (t.kind) {
+      case "integer": return { schema: { type: "integer", format: "int64" }, type: "number" };
+      case "float": return { schema: { type: "number", format: "double" }, type: "number" };
+      case "decimal": return { schema: { type: "number" }, type: "number" };
+      case "boolean": return BOOLEAN;
+      case "text": return string();
+      case "union": return /^bool(ean)?$/i.test(name.trim()) ? { schema: { type: "integer", format: "int64" }, type: "number" } : name.toUpperCase() === "NUMERIC" ? { schema: { type: ["number", "string"] }, type: "number | string" } : ANY;
+      case "enum": case "array": case "tuple": case "struct": case "json": case "table": case "intersection": case "tagged_union": case "null": case "unknown": return undefined;
+      default: return ANY;
+    }
+  }
+  if (dialect === "postgres") {
+    switch (t.kind) {
+      case "array": case "struct": case "union":
+        // A type the format structures that Postgres writes as its text, or a network address.
+        return t.kind === "struct" && name === "record" ? undefined : postgresInJson(t);
+      // An oid is no number JSON writes: Postgres writes its text.
+      case "integer": return name === "oid" ? string() : { schema: integer(t), type: "number" };
+      case "bytes": return name === "macaddr" || name === "macaddr8" ? string({ type: "string", description: `pg type ${name}` }) : string({ type: "string", format: "hex" });
+      // Postgres's own interval text: the run time converts a column's interval, never one inside a document.
+      case "duration": return string({ type: "string", description: "pg type interval" });
+      // A range is its text inside a document, `[1,5)`.
+      case "range": case "multirange": return string({ type: "string", description: `pg type ${name || t.kind}` });
+      case "xml": return string({ type: "string", description: "pg type xml" });
+      case "opaque": case "map": case "geometry": case "zoned_datetime":
+        return postgresInJson(t) ?? (name ? { schema: { description: `pg type ${name}` }, type: JSON_TYPE } : ANY);
+    }
+  }
+  // MySQL writes any bytes as their base64.
+  if (dialect === "mysql" && (t.kind === "bytes" || (t.kind === "array" && name === "bit"))) return MYSQL_BYTES;
+  switch (t.kind) {
+    case "boolean": return BOOLEAN;
+    // An integer is a JSON number in there, a MySQL `tinyint(1)` too.
+    case "integer": return { schema: integer(t), type: "number" };
+    case "float":
+    case "decimal": {
+      const number = { type: "number", format: t.kind === "decimal" ? "decimal" : t.exponent_bits <= 8 ? "float" : "double" };
+      const text = [...(t.nan ? ["NaN"] : []), ...(t.infinity ? ["Infinity", "-Infinity"] : [])];
+      if (dialect === "postgres" && !inUnion) return { schema: number, type: "number" };
+      return { schema: dialect === "postgres" && text.length ? { anyOf: [number, { enum: text }] } : number, type: ["number", ...text.map((x) => JSON.stringify(x))].join(" | ") };
+    }
+    case "text": return string();
+    case "uuid": return string(uuid(t));
+    case "bytes": return string();
+    case "date": return string(besideFormat({ type: "string", format: "date" }, t, true));
+    case "instant":
+      // A MySQL TIMESTAMP is the session's wall-clock time.
+      return string(dialect === "mysql" ? WALL_CLOCK : besideFormat({ type: "string", format: "date-time" }, t, true));
+    case "datetime": return string(WALL_CLOCK);
+    case "time": return string(timeOfDay(t, name));
+    case "duration": return string(MYSQL_TIME);
+    case "range": case "multirange": case "xml": return string({ type: "string", description: `${dialect === "mysql" ? "MySQL" : "ClickHouse"} type ${name || t.kind}` });
+    case "array": case "struct": case "union": case "enum": case "tuple": case "json": case "table": case "intersection": case "tagged_union": case "null": case "unknown": return undefined;
+    default: return ANY;
+  }
+}
+
+/** An integer's JSON Schema: OpenAPI's `int32` or `int64` where its range fits one (an unsigned type needs a bit more), and no format past 64 bits, as ClickHouse's UInt64 and wider reach. A SQLite INTEGER is 64 bits wide. */
+function integer(t: EngineType, dialect?: Dialect): Schema {
+  const bits = dialect === "sqlite" || t.kind !== "integer" ? 64 : t.bits + (t.unsigned ? 1 : 0);
+  return bits <= 32 ? { type: "integer", format: "int32" } : bits <= 64 ? { type: "integer", format: "int64" } : { type: "integer" };
+}
+
+/** RFC 9562's text form, its version digit and its variant fixed where every value has a version. */
+function uuid(t: Extract<EngineType, { kind: "uuid" }>): Schema {
+  if (t.versions === undefined) return { type: "string", format: "uuid" };
+  const digits = t.versions.map((v) => v.toString(16)).join("");
+  return { type: "string", format: "uuid", pattern: `^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-${digits.length === 1 ? digits : `[${digits}]`}[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$` };
+}
+
+/** A date and a time with no zone, which RFC 3339's date-time does not admit. */
+const WALL_CLOCK: Schema = { type: "string", description: "a date and time without a time zone, as the database wrote it (2026-10-20T10:00:00.123456)" };
+
+/** MySQL's TIME, a length of time rather than a time of day. */
+const MYSQL_TIME: Schema = { type: "string", description: "a length of time as MySQL writes it, up to 838:59:59 either way (-12:00:00.5)" };
+
+/** RFC 3339's time, which JSON Schema's `time` format names, needs an offset and stops at 23:59:60. */
+function timeOfDay(t: Extract<EngineType, { kind: "time" }>, name: string): Schema {
+  return t.offset ? { type: "string", description: `pg type ${name}` } : { type: "string", description: "a time of day without a time zone (10:00:00.5)" };
+}
+
 /** A SQLite value's storage class, as the affinity of the declared type the engine traced it to names it, or of the value it computes. */
 function sqliteClass(t: EngineType): string {
   const name = "label" in t ? (t.label ?? "") : "";
@@ -50,87 +221,64 @@ function sqliteClass(t: EngineType): string {
   }
 }
 
-/** A value of a type with no structure of its own here, standing where `inJson` says: inside a JSON document, as a parameter the caller passes, or as `run` returns it. */
-function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean, inUnion = false): Schema {
+/** A value of a type with no structure of its own here, outside any document: as a parameter the caller passes (`input`), or as `.run()` returns it. */
+function scalar(t: EngineType, dialect: Dialect, input: boolean): Schema {
   const name = bareName(t);
   if (dialect === "sqlite") {
-    // A SQLite INTEGER is a number as a parameter (src/render.ts), and its JSON spelling inside a
-    // document; as `run` returns it, its kind's.
-    if (inJson || input) {
+    // A SQLite INTEGER is a number as a parameter (src/render.ts); as `.run()` returns it, its kind's.
+    if (input) {
       switch (sqliteClass(t)) {
         case "integer": case "int8": return { type: "integer", format: "int64" };
         case "real": return { type: "number", format: "double" };
         case "text": return { type: "string" };
         case "blob": return { type: "string", format: "byte", contentEncoding: "base64" };
-        case "numeric": return { type: ["number", "string"] };
-        case "bool": return { type: "boolean" };
+        // A NUMERIC's and a BOOLEAN's parameter takes a truth value, which the run time binds as 1 or 0, and a number (src/render.ts).
+        case "numeric": return { type: ["number", "string", "boolean"] };
+        case "bool": return { type: ["boolean", "number"] };
         default: return {};
       }
     }
     const kinds = columnKind(t, dialect).split("|");
     if (kinds.length > 1) {
       // A NUMERIC: whichever storage class the row stored, an integer being a number too.
-      const types = [...new Set(kinds.map((k) => kindSchema(k as ScalarKind, t, dialect).type as string))];
+      const types = [...new Set(kinds.map((k) => kindSchema(scalarKind(k), t, dialect).type as string))];
       return { type: types.includes("number") ? types.filter((type) => type !== "integer") : types };
     }
-    return kindSchema(kinds[0] as ScalarKind, t, dialect);
+    return kindSchema(scalarKind(kinds[0]!), t, dialect);
   }
-  if (t.kind === "union" && !(dialect === "postgres" && (name === "inet" || name === "cidr"))) return { anyOf: t.members.map((m) => scalar(m, dialect, inJson, input, true)) };
+  // A union's members, each as a value of its own type is, an array or a row among them (a ClickHouse Variant's).
+  if (t.kind === "union" && !(dialect === "postgres" && (name === "inet" || name === "cidr"))) return anyOf(t.members.map((m) => typeSchema(m, dialect, input)));
   const kind = columnKind(t, dialect);
-  if (inJson) {
-    // As the database writes the value inside a document.
-    // JSON has no number for a non-finite value, so Postgres writes a float's or a decimal's as text,
-    // which the run time gives as the number it is where the value stands on its own
-    // (src/render.ts, `jsonNumbers`); MySQL stores none.
-    if (t.kind === "integer" && name === "oid" && dialect === "postgres") return { type: "string" };
-    // An integer is a JSON number in there, a MySQL `tinyint(1)` too.
-    if (t.kind === "integer") return { type: "integer", format: t.bits > 32 || (t.bits === 32 && t.unsigned) ? "int64" : "int32" };
-    if (t.kind === "float" || t.kind === "decimal") {
-      const number = { type: "number", format: t.kind === "decimal" ? "decimal" : t.exponent_bits <= 8 ? "float" : "double" };
-      const text = [...(t.nan ? ["NaN"] : []), ...(t.infinity ? ["Infinity", "-Infinity"] : [])];
-      return dialect === "postgres" && inUnion && text.length ? { anyOf: [number, { enum: text }] } : number;
-    }
-    // MySQL writes a BIT inside a document as its bytes in base64 (`base64:type16:AQ==`), at any
-    // width: no truth value for a BIT(1), and no hex for a wider one (src/render.ts).
-    if (dialect === "mysql" && name === "bit") return { type: "string" };
-    if (kind === "bytes") return { type: "string", format: "hex" };
-    // Postgres's own interval text: the run time converts a column's interval, never one inside a document.
-    if (t.kind === "duration" && dialect === "postgres") return { type: "string", description: "pg type interval" };
-    // A row whose columns were not read (a subquery's): an object of them.
-    if (t.kind === "opaque" && name === "record") return { type: "object" };
-    // An hstore: an object of its keys, each value text or null.
-    if (kind === "hstore") return { type: "object", additionalProperties: { type: ["string", "null"] } };
-    // PostGIS's cast to JSON: a GeoJSON geometry.
-    if (t.kind === "geometry" && name === "geometry" && dialect === "postgres") return GEOJSON;
-    // pgvector has no cast to JSON, so a vector inside a document is its text.
-    if (kind === "vector") return { type: "string" };
-  } else if (input) {
+  if (input) {
     // A MySQL TINYINT(1) or BIT(1) column's parameter takes the truth value its rows return, or the integer it stores.
     if (dialect === "mysql" && kind === "bool" && t.kind !== "boolean") return { anyOf: [{ type: "boolean" }, { type: "integer", format: "int32" }] };
     // What every driver binds: a 64-bit integer as a number, a BigInt or its digits; a decimal as its digits.
     // A ClickHouse parameter is written by Reylo, which takes a number or a BigInt and no digits.
-    if (kind === "int8") return dialect === "clickhouse" ? kindSchema("int8", t, dialect) : { type: ["integer", "string"], format: "int64" };
+    if (kind === "int8") return dialect === "clickhouse" ? kindSchema("int8", t, dialect) : { ...kindSchema("int8", t, dialect), type: ["integer", "string"] };
     if (kind === "decimal") return { type: "string", format: "decimal" };
   }
-  // A SET inside a document is its text, its members joined by commas.
-  if (inJson && isMysqlSet(t)) return { type: "string" };
-  if (kind.includes("|")) return { anyOf: kind.split("|").map((k) => kindSchema(k as ScalarKind, t, dialect)) };
-  const schema = kindSchema(kind as ScalarKind, t, dialect);
-  if (kind !== "text") return besideFormat(schema, t, inJson);
+  if (kind.includes("|")) return { anyOf: kind.split("|").map((k) => kindSchema(scalarKind(k), t, dialect)) };
+  const schema = kindSchema(scalarKind(kind), t, dialect);
+  if (kind !== "text") return besideFormat(schema, t, false);
   if (isMysqlSet(t)) return { type: "string" };
   switch (t.kind) {
     case "text": return { type: "string" };
-    // RFC 9562's text form, its version digit and its variant fixed where every value has a version.
-    case "uuid": {
-      if (t.versions === undefined) return { type: "string", format: "uuid" };
-      const digits = t.versions.map((v) => v.toString(16)).join("");
-      return { type: "string", format: "uuid", pattern: `^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-${digits.length === 1 ? digits : `[${digits}]`}[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$` };
-    }
-    // RFC 3339's time, which JSON Schema's `time` format names, needs an offset and stops at 23:59:60.
-    case "time": return t.offset ? { type: "string", description: `pg type ${name}` } : { type: "string", description: "a time of day without a time zone (10:00:00.5)" };
-    case "duration": return { type: "string", description: "a length of time as MySQL writes it, up to 838:59:59 either way (-12:00:00.5)" };
+    case "uuid": return uuid(t);
+    case "time": return timeOfDay(t, name);
+    case "duration": return MYSQL_TIME;
     default: return { type: "string", description: `${dialect === "mysql" ? "MySQL" : dialect === "clickhouse" ? "ClickHouse" : "pg"} type ${name || t.kind}` };
   }
+}
+
+/** A union's schema: any of its members', and none for a union of no members, which JSON Schema has no empty `anyOf` for. */
+function anyOf(members: (Schema | JsonSchema)[]): Schema {
+  return members.length ? { anyOf: members } : NOTHING;
+}
+
+/** `kind`, a column's kind with no structure of its own (src/values.ts), as the scalar kind it is. */
+function scalarKind(kind: string): ScalarKind {
+  if (!Object.hasOwn(TS_TYPE, kind)) throw new Error(`Reylo has no JSON Schema for a value of the kind ${kind} here; this is a bug in Reylo, which writes the schema of every kind a value takes`);
+  return kind as ScalarKind;
 }
 
 // The fields of a date's and an instant's text, each within its range: a year from 0001 to 9999, a
@@ -185,23 +333,22 @@ function besideFormat(schema: Schema, t: EngineType, inJson: boolean): Schema {
   return forms.length > 1 ? { anyOf: forms } : schema;
 }
 
-/** The JSON form of a value of `kind` as `run` returns it, once JSON: each kind's one representation (src/values.ts). */
+/** The JSON form of a value of `kind` as `.run()` returns it, once JSON: each kind's one representation (src/values.ts). */
 function kindSchema(kind: ScalarKind, t: EngineType, dialect: Dialect): Schema {
   switch (kind) {
     case "bool": return { type: "boolean" };
-    // A SQLite INTEGER is 64 bits wide, and so is an unsigned 32-bit integer's range past int4's.
-    case "int": return t.kind === "integer" && t.bits <= 32 && !(t.bits === 32 && t.unsigned) && dialect !== "sqlite" ? { type: "integer", format: "int32" } : { type: "integer", format: "int64" };
+    // A SQLite INTEGER is 64 bits wide.
+    case "int": return integer(t, dialect);
     case "float": return t.kind === "float" && t.exponent_bits <= 8 ? { type: "number", format: "float" } : { type: "number", format: "double" };
-    // A BigInt, as the JSON integer it is: one of more than 64 bits, as ClickHouse has, is of no named format.
-    case "int8": return t.kind === "integer" && t.bits > 64 ? { type: "integer" } : { type: "integer", format: "int64" };
+    // A BigInt, as the JSON integer it is.
+    case "int8": return integer(t);
     case "decimal":
     case "money": return { type: "string", format: "decimal" };
     case "timestamptz": return { type: "string", format: "date-time" };
     // RFC 3339's duration, which JSON Schema's `duration` format names, has no sign and no fraction.
     case "interval": return { type: "string", description: "an ISO 8601 duration with its sign in front (P1Y2M3DT4H5M6.789S, -P1D); one whose parts differ in sign signs each part (P1M-1D)" };
     case "date": return { type: "string", format: "date" };
-    // A date and a time with no zone, which RFC 3339's date-time does not admit.
-    case "timestamp": return { type: "string", description: "a date and time without a time zone, as the database wrote it (2026-10-20T10:00:00.123456)" };
+    case "timestamp": return WALL_CLOCK;
     case "bytes": return { type: "string", format: "byte", contentEncoding: "base64" };
     case "vector": return { type: "array", items: { type: "number", format: "float" } };
     case "hstore": return { type: "object", additionalProperties: { type: ["string", "null"] } };
@@ -210,25 +357,31 @@ function kindSchema(kind: ScalarKind, t: EngineType, dialect: Dialect): Schema {
     case "geometry": return {};
     case "unknown": return {};
     case "enum": return { type: "string" };
-    // A Set's members, which a Set holds once each; `JSON.stringify` writes a Set itself as `{}`.
+    // A Set's members, which a Set holds once each.
     case "set": return { type: "array", items: { type: "string" }, uniqueItems: true };
     // A geometric type is an object of its fields, which `typeSchema` writes from its descriptor.
     case "point": case "line": case "lseg": case "box": case "path": case "polygon": case "circle": return { type: kind === "lseg" || kind === "polygon" ? "array" : "object" };
+    default: {
+      const unhandled: never = kind;
+      throw new Error(`Reylo has no JSON Schema for a value of the kind ${String(unhandled)}`);
+    }
   }
 }
 
 /** An object of `fields`, each spelled by `field`, every key required unless `optional` says otherwise. */
-function object(fields: readonly { name: string }[], field: (f: number) => Schema | JsonSchema, optional: (f: number) => boolean = () => false, closed = false): Schema {
+function object(fields: readonly { name: string }[], field: (f: number) => Schema | JsonSchema, optional: (f: number) => boolean = () => false, closed: boolean | Schema | JsonSchema = false): Schema {
   const properties: Record<string, unknown> = {};
   const required: string[] = [];
   // A later field of a name replaces an earlier one, as a row object and `JSON.parse` keep the last.
+  // A field named `__proto__` is a key like any other, which an assignment would not make.
   fields.forEach((f, i) => {
-    properties[f.name] = field(i);
+    Object.defineProperty(properties, f.name, { value: field(i), writable: true, enumerable: true, configurable: true });
     const at = required.indexOf(f.name);
     if (at >= 0) required.splice(at, 1);
     if (!optional(i)) required.push(f.name);
   });
-  return { type: "object", properties, required, ...(closed ? { additionalProperties: false } : {}) };
+  // `closed`: no other key, or the schema of every other key.
+  return { type: "object", properties, required, ...(closed === false ? {} : { additionalProperties: closed === true ? false : closed }) };
 }
 
 /** The JSON Schema of a value of `t`, as a result column (`input` false) or a parameter the caller passes (`input` true), or a structured parameter's member (`inRow`); `members`, a structured parameter's column list as written. */
@@ -238,22 +391,43 @@ export function typeSchema(t: EngineType, dialect: Dialect, input = false, inJso
   return !inJson && leafCodec(t, dialect, codecs) !== undefined ? schema : withFacts(schema, t, input);
 }
 
-/** A number the format writes as text, where JSON Schema can write it exactly. */
+/**
+ * A number the format writes as text, where a JSON number holds that very decimal: a reader takes a
+ * number in a schema as the decimal it prints as, so one a double rounds, as 0.29999999999999999 to
+ * 0.3 or 9007199254740993 to its neighbour, would hold a value to another bound.
+ */
 function exactNumber(text: string, whole: boolean): number | undefined {
   const value = Number(text);
-  return whole ? (Number.isSafeInteger(value) ? value : undefined) : Number.isFinite(value) ? value : undefined;
+  if (whole) return Number.isSafeInteger(value) ? value : undefined;
+  const written = decimal(text);
+  return Number.isFinite(value) && written !== undefined && decimal(String(value)) === written ? value : undefined;
+}
+
+/** A divisor the format writes as text, where a JSON number holds it exactly (`exactNumber`): one a double rounds, as 1e-400 to zero, would hold a value to another divisor. */
+function exactDivisor(text: string, whole: boolean): number | undefined {
+  const value = exactNumber(text, whole);
+  return value === 0 ? undefined : value;
 }
 
 /**
- * A divisor the format writes as text, where a JSON number holds that very decimal: the validator
- * reads a divisor as the decimal it prints as, so one a double rounds, as 1e-400 to zero or
- * 9007199254740993 to its neighbour, would hold a value to another divisor.
+ * Whether a double tells every two values of `t` apart, as a reader of JSON in JavaScript parses
+ * them, so that a value just inside an exclusive bound never reads as the bound: a decimal of at
+ * most 15 digits, and a float of a double's precision, which the database writes at the shortest
+ * text that reads back as it.
  */
-function exactDivisor(text: string, whole: boolean): number | undefined {
-  const value = exactNumber(text, whole);
-  if (value === undefined || value === 0) return undefined;
-  const written = decimal(text);
-  return written !== undefined && decimal(String(value)) === written ? value : undefined;
+function distinctInDouble(t: Extract<EngineType, { kind: "float" | "decimal" }>): boolean {
+  return t.kind === "float" ? t.mantissa_bits >= 52 : t.precision !== undefined && t.precision <= 15;
+}
+
+/**
+ * Whether every value of `t` a whole divisor can divide is an integer a double holds exactly, within
+ * ±2^53, as a validator that divides as doubles needs: by an integer's width, a decimal's digits
+ * before its point (`numeric(15,-2)` reaches 10^17), or the bounds of either. Past that a true
+ * multiple, 9007199254740993 of 3, reads as 9007199254740992, which is none.
+ */
+function wholeInDouble(t: Extract<EngineType, { kind: "integer" | "decimal" }>): boolean {
+  if ([t.min, t.max].every((b) => b !== undefined && Math.abs(Number(b)) <= Number.MAX_SAFE_INTEGER)) return true;
+  return t.kind === "integer" ? t.bits + (t.unsigned ? 1 : 0) <= 54 : t.precision !== undefined && t.min_scale !== undefined && t.precision - t.min_scale <= 15;
 }
 
 /** A decimal's text as its digits and power of ten, with no zero to spare, as `1.50` and `15e-1` both read `15e-1`. */
@@ -321,7 +495,12 @@ function withFacts(schema: Schema | JsonSchema, t: EngineType, input: boolean): 
     if (t.size !== undefined && !("unit" in t.size && t.size.unit !== undefined)) sized(t.size, "minLength", "maxLength", input);
     if (t.pattern !== undefined) facts.pattern = ecmaPattern(t.pattern);
   }
-  if ((t.kind === "integer" || t.kind === "float" || t.kind === "decimal") && (schema.type === "integer" || schema.type === "number")) {
+  // A number's bounds and divisor where a double reading the value agrees with the value: an
+  // inclusive bound a JSON number writes exactly holds of a value rounded towards it too, but an
+  // exclusive bound only where a double tells the values apart (`distinctInDouble`), and a divisor
+  // only where it divides doubles exactly (`wholeInDouble`). A float narrower than a double takes
+  // none: the database writes its shortest text, which reads as another double.
+  if ((t.kind === "integer" || t.kind === "float" || t.kind === "decimal") && (schema.type === "integer" || schema.type === "number") && (t.kind !== "float" || distinctInDouble(t))) {
     const whole = t.kind === "integer";
     const bound = (text: string | undefined, keyword: string) => {
       const value = text === undefined ? undefined : exactNumber(text, whole);
@@ -329,12 +508,14 @@ function withFacts(schema: Schema | JsonSchema, t: EngineType, input: boolean): 
     };
     bound(t.min, "minimum");
     bound(t.max, "maximum");
-    if (!whole) {
+    if (t.kind !== "integer" && distinctInDouble(t)) {
       bound(t.exclusive_min, "exclusiveMinimum");
       bound(t.exclusive_max, "exclusiveMaximum");
     }
-    const divisor = t.kind === "float" || t.multiple_of === undefined ? undefined : exactDivisor(t.multiple_of, whole);
-    if (divisor !== undefined) facts.multipleOf = divisor;
+    // A divisor that is a whole number: a validator that divides as a double, ajv's or Python's,
+    // finds 0.15 no multiple of 0.05, whose quotient is 2.9999999999999996.
+    const divisor = t.kind === "float" || t.multiple_of === undefined || !wholeInDouble(t) ? undefined : exactDivisor(t.multiple_of, whole);
+    if (divisor !== undefined && Number.isInteger(divisor)) facts.multipleOf = divisor;
   }
   if (t.kind === "array" && schema.type === "array" && t.size !== undefined) sized(t.size, "minItems", "maxItems", false);
   if (t.kind === "map" && schema.type === "object" && t.size !== undefined) sized(t.size, "minProperties", "maxProperties", false);
@@ -375,6 +556,9 @@ function plainSchema(t: EngineType, dialect: Dialect, input: boolean, inJson: bo
       return t.kind === "struct" ? row : { type: "array", items: row };
     }
   }
+  // A value inside a document as the database writes it there (`inDocument`), the declared type's table too.
+  const form = inJson ? inDocument(t, dialect) : undefined;
+  if (form !== undefined) return form.schema;
   const slot = (s: { type: EngineType; nullable?: true }) => (s.nullable ? nullable : (x: Schema | JsonSchema) => x)(typeSchema(s.type, dialect, input, inJson, false, undefined, codecs));
   switch (t.kind) {
     // An enum's values as its base's form writes them: a truth value and a number JSON writes
@@ -384,39 +568,42 @@ function plainSchema(t: EngineType, dialect: Dialect, input: boolean, inJson: bo
       const base = typeSchema(t.type, dialect, input, inJson, inRow, undefined, codecs);
       if (typeof base !== "object" || base === null) return base;
       const values = t.values.map(({ value: v }): unknown => {
-        if (base.type === "boolean") return v === "true";
+        // A truth value, which an integer base such as MySQL's TINYINT(1) writes as 1 and 0.
+        if (base.type === "boolean") return v === "true" || v === "1" ? true : v === "false" || v === "0" ? false : undefined;
         if (base.type === "integer" || base.type === "number") return exactNumber(v, base.type === "integer");
         if (base.type === "string" && t.type.kind === "text") return v;
         return undefined;
       });
-      return values.every((v) => v !== undefined) ? { ...base, enum: values } : base;
+      return values.every((v) => v !== undefined) ? { ...base, enum: [...new Set(values)] } : base;
     }
     // A tuple: its elements, then its optional ones, then any number of its rest.
+    // JSON Schema 2020-12 refuses an empty `prefixItems`, so a tuple of none is `items` alone.
     case "tuple": {
       const items = [...t.elements, ...(t.optional_elements ?? [])].map(slot);
-      return { type: "array", prefixItems: items, items: t.rest ? slot(t.rest) : false, minItems: t.elements.length, ...(t.rest ? {} : { maxItems: items.length }) };
+      return { type: "array", ...(items.length ? { prefixItems: items } : {}), items: t.rest ? slot(t.rest) : false, minItems: t.elements.length, ...(t.rest ? {} : { maxItems: items.length }) };
     }
     // A table nested in a value is an array of its rows.
     case "table":
       return { type: "array", items: object(t.columns, (i) => slot(t.columns[i]!)) };
+    // Of no members, every value.
     case "intersection":
-      return { allOf: t.members.map((m) => typeSchema(m, dialect, input, inJson, inRow, undefined, codecs)) };
+      return t.members.length ? { allOf: t.members.map((m) => typeSchema(m, dialect, input, inJson, inRow, undefined, codecs)) } : {};
+    // A union inside a document: any of its members, each as the database writes it there.
+    case "union":
+      if (inJson) return anyOf(t.members.map((m) => inDocument(m, dialect, true)?.schema ?? typeSchema(m, dialect, input, true, inRow, undefined, codecs)));
+      break;
     case "null":
       return { type: "null" };
     case "array": {
-      // A MySQL SET's members, each one of its labels where the column declares them; inside a
-      // document it is its text.
+      // A MySQL SET's members, each one of its labels where the column declares them.
       if (isMysqlSet(t)) {
         if (inJson || dialect !== "mysql") break;
         return { type: "array", items: typeSchema(t.element.type, dialect, input), uniqueItems: true };
       }
-      // A type Postgres writes as its text inside a document, or a client gets as its own (a
-      // bit string, a vector), is no array here.
-      // A segment and a polygon are arrays of their points outside JSON.
-      if (inJson) {
-        if ((dialect === "postgres" && ["bit", "varbit", "vector", "halfvec", "sparsevec", "lseg", "polygon"].includes(name)) || (dialect === "mysql" && name === "bit")) break;
-      } else {
-        // Read only here: a row's kind doubles in length with each level it nests, so a document, which may nest hundreds deep, never builds one.
+      // A type a client gets as its own (a bit string, a vector) is no array here; a segment and a
+      // polygon are arrays of their points. Read outside a document only: a row's kind doubles in
+      // length with each level it nests, so a document, which may nest hundreds deep, never builds one.
+      if (!inJson) {
         const kind = columnKind(t, dialect);
         if (!kind.endsWith("[]") && kind !== "lseg" && kind !== "polygon") break;
       }
@@ -425,18 +612,22 @@ function plainSchema(t: EngineType, dialect: Dialect, input: boolean, inJson: bo
       // array's type says whether an element may be null, a parameter's too.
       const each = typeSchema(t.element.type, dialect, input, inJson, inRow, undefined, codecs);
       const items = (input && dialect !== "clickhouse" ? inRow : t.element.nullable) ? nullable(each) : each;
-      // An array the project lets nest holds its elements, or arrays of them at any depth.
-      return { type: "array", items: !input && nestsAnyDeep(t) ? { anyOf: [items, { type: "array" }] } : items };
+      // An array the project lets nest holds its elements, or arrays of them at any depth. A
+      // parameter's names its element at each level, to the six dimensions Postgres holds at most
+      // (MAXDIM), each level and the element once in the input's `$defs`, so that an array inside
+      // a row inside an array adds to the schema rather than multiplying it; a result's leaves the
+      // levels below the first open.
+      if (!nestsAnyDeep(t)) return { type: "array", items };
+      if (!input) return { type: "array", items: { anyOf: [items, { type: "array" }] } };
+      return nestedLevels(items);
     }
-    case "struct": {
-      // A built-in geometric type is its text inside a document.
-      if (inJson && dialect === "postgres" && ["point", "line", "box", "path", "circle"].includes(name)) break;
-      // A row value is an object of its fields, and so is a geometric type outside a document.
-      return object(t.fields, (i) => (t.fields[i]!.nullable ? nullable : (s: Schema | JsonSchema) => s)(typeSchema(t.fields[i]!.type, dialect, input, inJson, false, undefined, codecs)));
-    }
+    // A row value is an object of its fields, and so is a geometric type outside a document; an open
+    // one's other keys are each of its `extra`.
+    case "struct":
+      return object(t.fields, (i) => (t.fields[i]!.nullable ? nullable : (s: Schema | JsonSchema) => s)(typeSchema(t.fields[i]!.type, dialect, input, inJson, false, undefined, codecs)), undefined, t.extra === undefined ? false : slot(t.extra));
     case "range":
     case "multirange": {
-      // A Postgres range is an object of its bounds outside a document, where it is its text.
+      // A Postgres range is an object of its bounds outside a document.
       if (inJson || dialect !== "postgres") break;
       const bound = typeSchema(t.subtype, dialect, input, false, false, undefined, codecs);
       const range: Schema = { anyOf: [{ type: "object", properties: { empty: { const: true } }, required: ["empty"], additionalProperties: false }, { type: "object", properties: { lower: bound, upper: bound, bounds: { enum: [...RANGE_BOUNDS] } }, required: input ? [] : ["bounds"], additionalProperties: false }] };
@@ -453,19 +644,20 @@ function plainSchema(t: EngineType, dialect: Dialect, input: boolean, inJson: bo
       // A tagged union as its tag and its value; inside a document, whose form of it the engine
       // does not read, any JSON.
       if (inJson) return {};
-      return { anyOf: t.alternatives.map((a) => object([{ name: "tag" }, { name: "value" }], (i) => (i === 0 ? { const: a.tag } : (a.nullable ? nullable : (s: Schema | JsonSchema) => s)(typeSchema(a.type, dialect, input, false, false, undefined, codecs))))) };
+      return anyOf(t.alternatives.map((a) => object([{ name: "tag" }, { name: "value" }], (i) => (i === 0 ? { const: a.tag } : (a.nullable ? nullable : (s: Schema | JsonSchema) => s)(typeSchema(a.type, dialect, input, false, false, undefined, codecs))))));
     case "unknown":
       return {};
   }
-  return scalar(t, dialect, inJson, input);
+  // Inside a document, a value of no form the database is known to write there is any JSON.
+  return inJson ? {} : scalar(t, dialect, input);
 }
 
 /** The query's input and output schemas: the parameters as an object, and the result as `run` returns it once JSON. */
 /** A decimal library's value as JSON: its `toJSON()` writes its `toString()`, which turns to exponent form for a large or small value. */
 const LIBRARY_DECIMAL: Schema = { type: "string", format: "decimal", description: "a decimal as its library's toJSON() writes it, in exponent form for a large or small value (1e+40, 1e-7)" };
 
-/** A typed array as JSON: `JSON.stringify` writes it as an object of its elements by index, as it writes a `Set` as `{}`. */
-const TYPED_ARRAY: Schema = { type: "object", additionalProperties: { type: "number" }, description: "a typed array, which JSON.stringify writes as an object of its elements by index ({\"0\":0.5,\"1\":1})" };
+/** A typed array of numbers as JSON: an array of them, as a Set is one of its members (`AsJson` in src/index.ts). */
+const TYPED_ARRAY: Schema = { type: "array", items: { type: "number" } };
 
 /** The JSON form of each codec's value: what `JSON.stringify` writes of it, a Temporal value's being its ISO 8601 text, which a SQLite column declared as a date gives where it otherwise holds any storage class. */
 const CODEC_SCHEMA: Readonly<Record<Codec, Schema>> = {
@@ -482,7 +674,6 @@ const CODEC_SCHEMA: Readonly<Record<Codec, Schema>> = {
   duration: { type: "string", description: "an ISO 8601 duration with its sign in front (P1Y2M3DT4H5M6.789S, -P1D)" },
   // A SET's members, each once; `typeSchema` gives its items the members' own schema.
   "set:array": { type: "array", items: { type: "string" }, uniqueItems: true },
-  // `JSON.stringify` writes a typed array as an object of its elements by index.
   "vector:float32": TYPED_ARRAY,
   "vector:float16": TYPED_ARRAY,
   // ip-address's values have no toJSON(), so JSON.stringify writes their fields.
@@ -490,7 +681,21 @@ const CODEC_SCHEMA: Readonly<Record<Codec, Schema>> = {
   geometry: { type: "object", properties: { type: { type: "string" }, srid: { type: "integer", minimum: 0 } }, required: ["type", "srid"], description: "a GeoJSON geometry, with its SRID as srid" },
 };
 
+/** The input's `$defs` while it is built: each nested array's element and levels below the first (`nestedLevels`). */
+let inputDefs: Record<string, Schema | JsonSchema> | undefined;
+
+/** A nested array parameter's schema: its element, or an array of it, at each of six levels, the element and the levels below the first in the input's `$defs`. */
+function nestedLevels(items: Schema | JsonSchema): Schema {
+  const defs = (inputDefs ??= {});
+  const id = `nested${Object.keys(defs).length / 6}`;
+  const ref = (name: string) => ({ $ref: `#/$defs/${name}` });
+  defs[id] = items;
+  for (let level = 6; level >= 2; level--) defs[`${id}_${level}`] = { type: "array", items: level === 6 ? ref(id) : { anyOf: [ref(id), ref(`${id}_${level + 1}`)] } };
+  return { type: "array", items: { anyOf: [ref(id), ref(`${id}_2`)] } };
+}
+
 export function querySchemas(analysis: Analysis, dialect: Dialect, codecs: Codecs = {}): { input: Schema; output: Schema } {
+  inputDefs = undefined;
   // A typed JSON parameter's schema as written, with its defaults; one with a `default` at its root may be left out, as may one that takes null.
   const input = object(analysis.params, (i) => {
     const p = analysis.params[i]!;
@@ -510,5 +715,7 @@ export function querySchemas(analysis: Analysis, dialect: Dialect, codecs: Codec
   const row = value ? (column(value) as Schema) : object(analysis.columns, (i) => column(analysis.columns[i]!));
   const output: Schema = analysis.cardinality === "many" ? { type: "array", items: row } : analysis.cardinality === "one" ? row : analysis.cardinality === "at_most_one" ? (value?.nullable ? row : { anyOf: [row, { type: "null" }] }) : { type: "null" };
   const about = analysis.comment === undefined ? {} : { description: analysis.comment };
-  return { input: { $schema: "https://json-schema.org/draft/2020-12/schema", ...about, ...input }, output: { $schema: "https://json-schema.org/draft/2020-12/schema", ...about, ...output } };
+  const defs = inputDefs;
+  inputDefs = undefined;
+  return { input: { $schema: "https://json-schema.org/draft/2020-12/schema", ...about, ...input, ...(defs === undefined ? {} : { $defs: defs }) }, output: { $schema: "https://json-schema.org/draft/2020-12/schema", ...about, ...output } };
 }

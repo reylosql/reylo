@@ -1,0 +1,5 @@
+dash_control.sql: at_most_one (id: int32) -> { id: int }
+dash_delete.sql: at_most_one (id: int32) -> { id: int }
+dollar_name.sql: at_most_one (id: int32) -> { a$$b: int }
+nbsp_name.sql: many () -> { x : int }
+vertical_tab.sql: at_most_one (id: int32) -> { id: int }

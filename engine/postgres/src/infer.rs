@@ -4331,6 +4331,11 @@ fn written_returning_here(sql: &str, trust: &Trust, columns: &Columns) -> Option
                     updates.push(way(assignments(&c.target_list), true));
                     TRIGGER_ROW_INSERT | TRIGGER_ROW_UPDATE
                 }
+                // `DO SELECT` returns the conflicting row unchanged, as an update that assigns nothing would.
+                Some(c) if c.action == protobuf::OnConflictAction::OnconflictSelect as i32 => {
+                    updates.push(way(assignments(&c.target_list), true));
+                    TRIGGER_ROW_INSERT
+                }
                 _ => TRIGGER_ROW_INSERT,
             }
         }

@@ -65,6 +65,13 @@ fn is_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
+/// Whether `--` followed by `next` starts a comment, as MySQL reads one (`sql_lex.cc`): before
+/// whitespace or a control character, DEL included, or at the text's end. TiDB's scanner takes
+/// whitespace alone, so `--\x01` would be two minus signs there.
+fn dashes_comment(next: Option<u8>) -> bool {
+    next.is_none_or(|c| is_space(c) || c < b' ' || c == 0x7f)
+}
+
 fn is_ident_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80
 }
@@ -134,7 +141,7 @@ impl<'t> Scanner<'t> {
                     self.while_(|c| c != b'\n');
                     continue;
                 }
-                b'-' if rest.starts_with(b"--") && (rest.len() == 2 || is_space(rest[2])) => {
+                b'-' if rest.starts_with(b"--") && dashes_comment(rest.get(2).copied()) => {
                     self.while_(|c| c != b'\n');
                     continue;
                 }
@@ -661,7 +668,7 @@ pub(crate) fn conditional_close(text: &str, from: usize) -> usize {
         match z[i] {
             c if is_space(c) => i += 1,
             b'#' => i = z[i..].iter().position(|&c| c == b'\n').map_or(z.len(), |n| i + n),
-            b'-' if z[i..].starts_with(b"--") && z.get(i + 2).is_none_or(|&c| is_space(c)) => i = z[i..].iter().position(|&c| c == b'\n').map_or(z.len(), |n| i + n),
+            b'-' if z[i..].starts_with(b"--") && dashes_comment(z.get(i + 2).copied()) => i = z[i..].iter().position(|&c| c == b'\n').map_or(z.len(), |n| i + n),
             b'/' if z[i..].starts_with(b"/*") && !z[i..].starts_with(b"/*!") => match z[i + 2..].windows(2).position(|w| w == b"*/") {
                 Some(n) => i += 2 + n + 2,
                 None => return end,

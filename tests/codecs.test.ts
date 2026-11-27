@@ -525,6 +525,8 @@ test("a vector is its typed array at every position outside JSON, and nothing bu
   assert.equal(renderParamType(pg("halfvec"), "postgres", false, undefined, codecs), "Float16Array");
   assert.equal(renderType(array(pg("vector")), false, "postgres", codecs), "(Float32Array | null)[]");
   assert.deepEqual(planOf(array(pg("vector")), "postgres", codecs), { array: "vector:float32" });
+  // As JSON a typed array is an array of its numbers, as a Set is one of its members (`AsJson`), where JSON.stringify writes an object by index.
+  for (const name of ["vector", "halfvec"]) assert.deepEqual(typeSchema(pg(name), "postgres", false, false, false, undefined, codecs), { type: "array", items: { type: "number" } });
 });
 
 test("ClickHouse: a codec reaches a tuple's elements, by name and by place, an array's and a map's pairs", () => {
@@ -580,6 +582,9 @@ test("a vector's typed array holds the floats the server stores, and a parameter
   const deep = decodePlan({ array: "vector:float32" }, [[null, null], [[1, 2], null]], "embeddings") as [[null, null], [Float32Array, null]];
   assert.deepEqual(deep[0], [null, null]);
   assert.ok(deep[1][0] instanceof Float32Array && deep[1][1] === null);
+  // And goes back in at its depth, as a parameter of the type it came from.
+  assert.deepEqual(encodePlan({ array: "vector:float32" }, deep, "embeddings", "postgres"), [[null, null], [[1, 2], null]]);
+  assert.deepEqual(encodePlan({ array: "vector:float32" }, [[Float32Array.of(1)], [Float32Array.of(2)]], "embeddings", "postgres"), [[[1]], [[2]]]);
   // A number[] or another typed array is refused, as TypeScript refuses it.
   for (const [codec, v, expected] of [["vector:float32", [1, 2], "Float32Array"], ["vector:float32", new Float64Array([1]), "Float32Array"], ["vector:float16", new Float32Array([1]), "Float16Array"]] as const) {
     assert.throws(() => encodeCodec(codec, v, "embedding", "postgres"), (e: Error) => e instanceof ParameterError && e.message.startsWith(`Parameter "embedding" takes a ${expected}, as js.codecs.vector in the project file says`), expected);

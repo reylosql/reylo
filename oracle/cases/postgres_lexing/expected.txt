@@ -1,0 +1,8 @@
+cr_comment.sql: one (a: int4, b: int4) -> { a: int4, b: int4 }
+crlf_comment.sql: at_most_one (id: int4) -> { id: int4 }
+dollar_name.sql: one (id: int4) -> { a$$b: int4(1), id: int4 }
+dollar_tag.sql: one (y: int4) -> { s: text(¬NUL, 'it''s :x'), y: int4 }
+nbsp_name.sql: many () -> { x : int4 } key (x )
+nested_comment.sql: many () -> { x: int4, y: int4(2) } key (x)
+slice_name.sql: many () -> { s: int4?[]? }
+vertical_tab.sql: many () -> { s: int4?[]? }

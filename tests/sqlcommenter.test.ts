@@ -9,6 +9,8 @@ test("the comment ends the statement, before a closing semicolon, its file URL-e
   assert.equal(withSqlcommenter("select 1\n", "queries/get_user.sql"), `select 1 ${tag}`);
   assert.equal(withSqlcommenter("select 1;\n", "queries/get_user.sql"), `select 1 ${tag};`);
   assert.equal(withSqlcommenter("select 1 ;  \n\n", "queries/get_user.sql"), `select 1 ${tag};`);
+  // A no-break space the statement ends with is part of its last name, which keeps it.
+  assert.equal(withSqlcommenter("select 1 as x\u00a0\n", "queries/get_user.sql", "postgres"), `select 1 as x\u00a0 ${tag}`);
   // After a line comment the tag starts a line of its own, so the comment does not take it in.
   assert.equal(withSqlcommenter("select 1 -- the one\n", "queries/get_user.sql"), `select 1 -- the one\n${tag}`);
   assert.equal(withSqlcommenter("select 1 # MySQL's\n", "queries/get_user.sql"), `select 1 # MySQL's\n${tag}`);

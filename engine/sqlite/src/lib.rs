@@ -11,6 +11,7 @@ pub mod api;
 pub mod capabilities;
 pub mod errors;
 pub mod host;
+pub mod schema_fingerprint;
 pub mod sqlite;
 pub mod sqlite_tree;
 

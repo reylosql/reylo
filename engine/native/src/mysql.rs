@@ -51,6 +51,17 @@ struct Connection {
 }
 
 impl Connection {
+    /// A query's rows, as mysql2 reads them, over the connection opened again once where it was
+    /// lost; a failure is the answer the program gives for it.
+    async fn rows(&mut self, text: String) -> Result<Vec<Vec<Value>>, Value> {
+        let mut result = rows(&mut self.conn, text.clone()).await;
+        if matches!(result, Err(ref e) if !matches!(e, mysql_async::Error::Server(_))) && self.lost().await {
+            self.reopen().await?;
+            result = rows(&mut self.conn, text).await;
+        }
+        result.map_err(|e| failure(&e))
+    }
+
     /// Whether the connection is gone, after a call failed with something other than the server's
     /// answer: mysql_async tells a lost connection apart from no other failure, so it is asked.
     async fn lost(&mut self) -> bool {
@@ -125,9 +136,27 @@ impl Session {
     }
 }
 
+/// What names this program's analyses in `reylo/.cache/` beside the statement and the schema
+/// ([`Program::fingerprint`]), whichever host writes them: this program for the type check, or a Rust
+/// build (reylo-build).
+pub fn cache_fingerprint() -> String {
+    crate::cache_fingerprint(crate::engines::mysql::FINGERPRINT, &[])
+}
+
+/// The schema's fingerprint, read over `conn` as every host reads it, each value as mysql2 decodes
+/// it, so that each reads the entries the others write ([`crate::Schema`],
+/// [`crate::engines::mysql::schema_fingerprint`]).
+pub async fn schema(conn: &mut Conn) -> mysql_async::Result<crate::Schema> {
+    Ok(crate::Schema::of(&rows(conn, crate::engines::mysql::schema_fingerprint::QUERY.to_string()).await?, None))
+}
+
 impl Program for Mysql {
     fn call(&self, request: &str) -> String {
         reylo_engine_core::api::call::<crate::engines::mysql::Mysql>(request)
+    }
+
+    fn fingerprint(&self) -> String {
+        cache_fingerprint()
     }
 
     async fn serve(&mut self, request: &Value) -> Option<Value> {
@@ -155,29 +184,28 @@ impl Program for Mysql {
                     Err(failure) => failure,
                 },
             },
-            // A query the host runs itself (the schema's fingerprint), its rows as mysql2 reads them,
-            // and its failure told apart as `open`'s is: a refused login, a lost server, an error.
+            // A query the host runs itself (a host's own catalog query), its rows as mysql2 reads
+            // them, and its failure told apart as `open`'s is: a refused login, a lost server, an error.
             "query" => match self.connections.get_mut(&id) {
                 None => closed(id),
                 Some(c) => {
                     let params = request["params"].as_array().cloned().unwrap_or_default();
                     match answers::interpolate(sql, &params) {
                         None => json!({ "status": "error", "message": format!("cannot write {params:?} into the query") }),
-                        Some(text) => {
-                            let mut result = rows(&mut c.conn, text.clone()).await;
-                            if matches!(result, Err(ref e) if !matches!(e, mysql_async::Error::Server(_))) && c.lost().await {
-                                if let Err(failure) = c.reopen().await {
-                                    return Some(failure);
-                                }
-                                result = rows(&mut c.conn, text).await;
-                            }
-                            match result {
-                                Ok(rows) => json!({ "status": "rows", "rows": rows }),
-                                Err(e) => failure(&e),
-                            }
-                        }
+                        Some(text) => match c.rows(text).await {
+                            Ok(rows) => json!({ "status": "rows", "rows": rows }),
+                            Err(failure) => failure,
+                        },
                     }
                 }
+            },
+            // The schema's fingerprint, as every host reads it ([`schema`]).
+            "schema" => match self.connections.get_mut(&id) {
+                None => closed(id),
+                Some(c) => match c.rows(crate::engines::mysql::schema_fingerprint::QUERY.to_string()).await {
+                    Ok(rows) => crate::Schema::of(&rows, None).answer(),
+                    Err(failure) => failure,
+                },
             },
             // The schema changed: what the engine was told about the old one is stale.
             "forget" => match self.connections.get_mut(&id) {
@@ -258,6 +286,14 @@ fn mariadb(version: &str) -> Option<String> {
     Some(if number.is_empty() { "MariaDB".to_string() } else { format!("MariaDB {number}") })
 }
 
+/// Where a MySQL URL connects, as this engine reads it: the socket, the host and port, the user and
+/// the database, which a test holds the names of a cache's entries to, as [`super::postgres::target`].
+#[doc(hidden)]
+pub fn target(url: &str) -> Result<String, String> {
+    let opts = parse(url)?;
+    Ok(format!("{:?} {} {} {:?} {:?}", opts.socket(), opts.ip_or_hostname(), opts.tcp_port(), opts.user(), opts.db_name()))
+}
+
 /// The URL as mysql_async's options. The TLS settings mysql2 projects write are read here: mysql2's
 /// `ssl` (`true`, or JSON with `rejectUnauthorized`, `ca`, `cert` and `key`, each certificate and
 /// key as PEM text), MySQL's own `ssl-mode`, and `sslaccept`; mysql2's `socketPath` is the socket.
@@ -276,8 +312,9 @@ fn parse(url: &str) -> Result<Opts, String> {
     let (mut roots, mut identity) = (Vec::new(), None::<ClientIdentity>);
     for pair in query.split('&').filter(|p| !p.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let value = crate::decode(value);
-        match key {
+        // A name is read decoded, as mysql2 reads the URL's parameters.
+        let (key, value) = (crate::decode(key), crate::decode(value));
+        match key.as_str() {
             "ssl" => {
                 tls = match value.trim() {
                     "" | "false" | "0" => None,
@@ -407,11 +444,15 @@ mod tests {
             "mysql://root@localhost/app?socket=/tmp/mysql.sock&ssl=true",
             "mysql://root@localhost/app?socketPath=%2Ftmp%2Fmysql.sock&ssl-mode=REQUIRED",
             r#"mysql://root@localhost/app?ssl={"rejectUnauthorized":true}&socketPath=/tmp/mysql.sock"#,
+            // A parameter's name read decoded, as mysql2 reads it.
+            "mysql://root@localhost/app?%73ocketPath=/tmp/mysql.sock",
         ] {
             let opts = parse(url).unwrap();
             assert_eq!(opts.socket(), Some("/tmp/mysql.sock"), "{url}");
             assert!(opts.ssl_opts().is_none(), "{url}");
         }
         assert!(parse("mysql://root@localhost/app?ssl=true").unwrap().ssl_opts().is_some());
+        // A + in the path is a space, as mysql2 reads a URL's parameters.
+        assert_eq!(parse("mysql://root@localhost/app?socketPath=/tmp/a+b.sock").unwrap().socket(), Some("/tmp/a b.sock"));
     }
 }
