@@ -1,5 +1,6 @@
 derived_random.sql: many () -> { id: INTEGER }
 distinct_random.sql: many () -> { id: int64 }
+distinct_random_where.sql: many () -> { id: int64 }
 key_correlated.sql: many () -> { id: INTEGER }
 key_filter_correlated.sql: many () -> { id: INTEGER }
 key_filter_own.sql: at_most_one () -> { id: INTEGER }

@@ -441,7 +441,7 @@ impl<'a> From<'a> {
             Expr::Identifier(_) if !bare => false,
             // In an ON clause, a qualifier this FROM also has may name its item rather than the
             // subquery's: a sibling of the join, which the clause does not see, may reuse it.
-            Expr::CompoundIdentifier(parts) if !bare && parts.len() >= 2 && self.named(&parts[parts.len() - 2].value).is_some() => false,
+            Expr::CompoundIdentifier(parts) if !bare && parts.len() >= 2 && self.items.iter().any(|it| crate::mysql_names::may_match(&it.alias, &parts[parts.len() - 2].value)) => false,
             Expr::Identifier(_) | Expr::CompoundIdentifier(_) => match sub.place_expr(e) {
                 Some(Placed::Item(..)) => true,
                 Some(Placed::Outside) => match self.place_expr(e) {
@@ -579,7 +579,13 @@ impl<'a> From<'a> {
     /// ([`calls_nondeterministic`]). Such an item pins no other, and its columns are no one value
     /// to group or to tell rows apart by.
     fn varying(&self) -> Vec<bool> {
-        self.items.iter().map(|it| matches!(&it.source, Source::Query(q, ..) | Source::Lateral(q, _) if calls_nondeterministic(&q.to_string()))).collect()
+        self.items
+            .iter()
+            .map(|it| match &it.source {
+                Source::Query(q, ctes, _) | Source::Lateral(q, ctes) => query_varies(q, ctes, self.keys, VIEW_DEPTH),
+                _ => false,
+            })
+            .collect()
     }
 
     fn all_keys(&self) -> Vec<Vec<Key>> {
@@ -591,7 +597,10 @@ impl<'a> From<'a> {
     fn pinned(&self, e: &Expr, constant: &[bool]) -> bool {
         match self.place_expr(e) {
             Some(Placed::Item(i, column)) => {
-                (constant[i] && !self.varying()[i]) || {
+                // A varying item's column is no one value, a WHERE's equality with it included: a
+                // merged derived table computes it again in the WHERE and in the select list.
+                let varies = self.varying()[i];
+                (constant[i] && !varies) || !varies && {
                     let class = self.class(i, &column);
                     let none = vec![false; self.items.len()];
                     self.conjuncts.iter().any(|c| c.may_pin.is_none() && self.equates(c.expr, i, &column, class, &none))
@@ -657,6 +666,29 @@ fn calls_nondeterministic(text: &str) -> bool {
             before && lower[at + name.len()..].trim_start().starts_with('(')
         })
     })
+}
+
+/// How many WITH queries and views deep [`query_varies`] reads before it takes a query to vary.
+const VIEW_DEPTH: usize = 4;
+
+/// Whether a query calls a function whose every call may differ ([`calls_nondeterministic`]), in
+/// its own text, in a WITH query in `ctes` it may read, or in a view it reads, `depth` deep. A
+/// WITH query of a RECURSIVE WITH, whose body the scope does not carry, may.
+fn query_varies(q: &Query, ctes: &[Cte], keys: &Keys, depth: usize) -> bool {
+    let text = q.to_string();
+    if calls_nondeterministic(&text) {
+        return true;
+    }
+    let lower = text.to_ascii_lowercase();
+    let read = |name: &str| names(&lower, &name.to_ascii_lowercase());
+    let withs = ctes.iter().filter(|(name, ..)| read(name)).any(|(_, body, sees, _)| depth == 0 || body.is_none_or(|b| query_varies(b, &ctes[..(*sees).min(ctes.len())], keys, depth - 1)));
+    withs || tables_anywhere(q, keys.schema.as_deref()).iter().filter_map(|t| keys.view(t)).any(|view| depth == 0 || query_varies(view, &[], keys, depth - 1))
+}
+
+/// Whether `text` names `name` as a word, both in lower case.
+fn names(text: &str, name: &str) -> bool {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    text.match_indices(name).any(|(at, _)| text[..at].chars().next_back().is_none_or(|c| !word(c)) && text[at + name.len()..].chars().next().is_none_or(|c| !word(c)))
 }
 
 /// The terms of a condition's top-level `AND`.

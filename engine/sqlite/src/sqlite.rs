@@ -3523,6 +3523,11 @@ impl Analyzer<'_> {
         let constant: Vec<bool> = constant.iter().zip(&varies).map(|(c, v)| *c && !v).collect();
         let constant = constant.as_slice();
         if e.op == "column" {
+            // A varying item's column is no one value, a WHERE's equality with it included: a
+            // flattened subquery computes it again in the WHERE and in the select list.
+            if index.get(&e.cursor).is_some_and(|i| varies[*i]) {
+                return false;
+            }
             if index.get(&e.cursor).is_some_and(|i| constant[*i]) {
                 return true;
             }
