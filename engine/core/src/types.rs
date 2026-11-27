@@ -1897,11 +1897,25 @@ mod tests {
     #[test]
     fn rule_7_refuses_what_no_shape_rules_out() {
         let refused = |value: Value| serde_json::from_value::<Type>(value.clone()).unwrap().check().err().unwrap_or_else(|| panic!("{value} passed"));
+        let passes = |value: Value| serde_json::from_value::<Type>(value).unwrap().check().unwrap();
         refused(json!({"kind": "float", "exponent_bits": 11, "mantissa_bits": 52, "min": "0", "exclusive_min": "0"}));
         refused(json!({"kind": "integer", "bits": 32, "exclusive_min": "0"}));
         refused(json!({"kind": "map", "key": {"type": {"kind": "text"}}, "value": {"type": {"kind": "text"}}, "size": {"min": 4, "max": 2}}));
         refused(json!({"kind": "map", "key": {"type": {"kind": "text"}}, "value": {"type": {"kind": "text"}}, "size": {"unit": "byte", "max": 2}}));
         refused(json!({"kind": "integer", "bits": 32, "min": "5", "max": "1"}));
+        // Bounds compare as the values they write: whole numbers past 2^53 and decimals of any
+        // length digit by digit, moments in UTC, whatever offset a bound is written in, and times of
+        // day as the times they write.
+        refused(json!({"kind": "integer", "bits": 64, "min": "9223372036854775807", "max": "9223372036854775806"}));
+        refused(json!({"kind": "decimal", "min": "0.10000000000000000001", "max": "0.1"}));
+        refused(json!({"kind": "date", "min": "+10000-01-01", "max": "-4713-11-24"}));
+        refused(json!({"kind": "instant", "tick": "1/1000000", "min": "2026-01-01T00:00:00.5Z", "max": "2026-01-01T00:00:00Z"}));
+        refused(json!({"kind": "zoned_datetime", "tick": "1", "min": "2026-01-01T20:00:00-08:00[America/Los_Angeles]", "max": "2026-01-02T10:00:00+09:00[Asia/Tokyo]"}));
+        passes(json!({"kind": "decimal", "exclusive_min": "-1e131072", "max": "0.1"}));
+        passes(json!({"kind": "instant", "tick": "1/1000000", "min": "2026-01-01T00:00:00Z", "max": "2026-01-01T00:00:00.5Z"}));
+        passes(json!({"kind": "zoned_datetime", "tick": "1", "min": "2026-01-01T10:00:00+09:00[Asia/Tokyo]", "max": "2026-01-01T05:00:00-08:00[America/Los_Angeles]"}));
+        passes(json!({"kind": "time", "tick": "1/1000000", "min": "12:00:00.500000", "max": "12:00:00.5"}));
+        refused(json!({"kind": "time", "tick": "1", "min": "24:00:00", "max": "23:59:60"}));
         refused(json!({"kind": "uuid", "versions": [9]}));
         refused(json!({"kind": "uuid", "versions": []}));
         refused(json!({"kind": "uuid", "versions": [7, 4]}));
@@ -1950,7 +1964,6 @@ mod tests {
             table.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
             table
         };
-        let passes = |value: Value| serde_json::from_value::<Type>(value).unwrap().check().unwrap();
         refused(table(json!({"unique": [["missing"]]})));
         refused(table(json!({"unique": [[]]})));
         refused(table(json!({"cardinality": "at_most_one", "unique": [["id"]]})));
