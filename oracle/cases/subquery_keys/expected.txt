@@ -11,6 +11,7 @@ distinct_on.sql: at_most_one (a: int8) -> { author_id: int8, id: int8 }
 distinct_on_cast_name.sql: many (x: text(¬NUL)) -> { x: text(¬NUL) }
 distinct_on_output_name.sql: many (t: text(¬NUL)) -> { title: int8, t2: text(¬NUL) } key (title)
 distinct_on_position_star.sql: many (a: text(¬NUL)) -> { a: text(¬NUL) }
+enclosing_in_subquery.sql: at_most_one (id: int8) -> { id: int8, title: text(¬NUL) }
 except_left_keys.sql: at_most_one (id: int8) -> { id: int8, title: text(¬NUL) }
 expression.sql: many (id: int8) -> { id: int8, title: text(¬NUL) }
 expression_key.sql: at_most_one (e: text(¬NUL)) -> { id: int8, e: text(¬NUL) }
@@ -50,6 +51,7 @@ second_key.sql: at_most_one (e: text(¬NUL)) -> { id: int8, email: text(¬NUL) }
 self_join_key.sql: at_most_one (id: int8) -> { id: int8, title: text(¬NUL) }
 self_join_nonkey.sql: many (id: int8) -> { id: int8 }
 set_returning.sql: many (id: int8) -> { id: int8, x: int4 }
+shadows_enclosing.sql: many (post: int8, id: int8) -> { id: int8 }
 sibling_with.sql: at_most_one (id: int8) -> { id: int8, title: text(¬NUL) }
 sibling_with_join_many.sql: many (id: int8) -> { id: int8, tag: text(¬NUL) }
 star.sql: at_most_one (id: int8) -> { id: int8, author_id: int8, title: text(¬NUL) }

@@ -1,0 +1,5 @@
+distinct_20.sql: at_most_one (id: int32) -> { id: int }
+group_by_20.sql: at_most_one (id: int32) -> { id: int }
+join_20.sql: at_most_one (id: int32) -> { id: int }
+left_join_20.sql: many (id: int32) -> { id: int }
+with_20.sql: at_most_one (id: int32) -> { id: int }
