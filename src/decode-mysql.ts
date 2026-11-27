@@ -787,7 +787,8 @@ const GEO_TYPES = new Set(["Point", "LineString", "Polygon", "MultiPoint", "Mult
 function asMariadbValue(v: unknown): unknown {
   if (v === null || typeof v !== "object" || v instanceof Uint8Array || v instanceof String || Object.prototype.toString.call(v) === "[object Date]") return v;
   const own = v as { pipe?: unknown; read?: unknown; toSqlString?: unknown; type?: unknown; __isLong__?: unknown; low?: unknown; high?: unknown; unsigned?: unknown };
-  if (own.__isLong__ === true && Number.isInteger(own.low) && Number.isInteger(own.high)) {
+  // long.js marks a Long on its prototype, so a JSON document shaped like one stays a document.
+  if (own.__isLong__ === true && !Object.hasOwn(v, "__isLong__") && Number.isInteger(own.low) && Number.isInteger(own.high)) {
     const bits = (BigInt((own.high as number) >>> 0) << 32n) | BigInt((own.low as number) >>> 0);
     return own.unsigned === true ? bits : BigInt.asIntN(64, bits);
   }

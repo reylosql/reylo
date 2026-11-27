@@ -942,9 +942,23 @@ test("mysql: mariadb and PlanetScale, which write an array as a list of values, 
   // A Date from another realm stays the driver's, and long.js's Long, -2^40 and 2^64 - 1 here, goes as the BigInt it holds.
   const date = runInNewContext("new Date(0)");
   await execute(recording as never, update, { name: date });
-  await execute(recording as never, update, { name: { low: 0, high: -256, unsigned: false, __isLong__: true } });
-  await execute(recording as never, update, { name: { low: -1, high: -1, unsigned: true, __isLong__: true } });
-  assert.deepEqual(given, [['{"role":"admin"}'], [point], [stream], [boxed], ['{"role":"admin"}'], [date], [-(2n ** 40n)], [2n ** 64n - 1n]]);
+  // long.js marks a Long on its prototype; a JSON document shaped like one stays a document.
+  class Long {
+    low: number;
+    high: number;
+    unsigned: boolean;
+    constructor(low: number, high: number, unsigned: boolean) {
+      this.low = low;
+      this.high = high;
+      this.unsigned = unsigned;
+    }
+  }
+  Object.defineProperty(Long.prototype, "__isLong__", { value: true });
+  const lookalike = { __isLong__: true, low: 12, high: 0, source: "legacy" };
+  await execute(recording as never, update, { name: new Long(0, -256, false) });
+  await execute(recording as never, update, { name: new Long(-1, -1, true) });
+  await execute(recording as never, update, { name: lookalike });
+  assert.deepEqual(given, [['{"role":"admin"}'], [point], [stream], [boxed], ['{"role":"admin"}'], [date], [-(2n ** 40n)], [2n ** 64n - 1n], [JSON.stringify(lookalike)]]);
   assert.equal(given[2]![0], stream);
 });
 
