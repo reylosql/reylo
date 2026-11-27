@@ -1,5 +1,5 @@
 // A post's link preview, at /og/blog/<name>.png (app/routes.ts): its title on the card Docs Kit draws
-// for each docs page (docs.config.ts), under Reylo's wordmark.
+// for each docs page (docs.config.ts).
 import { ogCard } from 'docs-kit/og';
 import site from '@/docs.config';
 import { blogUrl, posts } from '@/lib/blog';
