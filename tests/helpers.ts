@@ -190,6 +190,31 @@ export async function mysqlDatabase(prefix: string, setup?: string) {
   };
 }
 
+/**
+ * An account of a test's own on the test MySQL, granted `databases` alone, with the URL of each of them for it. MySQL's schema fingerprint reads every database the session's account may reach, so a test that needs it to hold still runs its sessions as such an account: the databases other tests make and drop meanwhile are out of its sight.
+ */
+export async function mysqlAccount(admin: { query(sql: string): Promise<unknown> }, user: string, databases: string[]) {
+  await admin.query(`drop user if exists '${user}'@'%'`);
+  await admin.query(`create user '${user}'@'%'`);
+  try {
+    // A `_` in a granted database's name matches any character, unless escaped.
+    for (const database of databases) await admin.query(`grant all on \`${database.replaceAll("_", "\\_")}\`.* to '${user}'@'%'`);
+  } catch (e) {
+    await admin.query(`drop user if exists '${user}'@'%'`);
+    throw e;
+  }
+  return {
+    url(database: string) {
+      const url = new URL(MYSQL!);
+      url.username = user;
+      url.password = "";
+      url.pathname = `/${database}`;
+      return url.href;
+    },
+    drop: () => admin.query(`drop user if exists '${user}'@'%'`),
+  };
+}
+
 /** A database of a test's own on the test ClickHouse, the URL a project names it by, the address of its HTTP interface, which a client takes, and a client of `@clickhouse/client` on it, with each statement of `setup` run first, a `;` at a line's end between two. */
 export async function clickhouseDatabase(prefix: string, setup?: string) {
   const { createClient } = driver("@clickhouse/client");

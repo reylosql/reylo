@@ -9,6 +9,8 @@ create table scratch (id integer primary key autoincrement, tag text not null, n
 create table uniq (k text primary key);
 insert into uniq values ('taken');
 -- One value of each storage class, JSON text and a truth value (S10), an integer past 2^53, which Reylo refuses, and the
--- same in a column declared BIGINT, which Reylo reads as a BigInt where the driver does not round it first.
-create table typed (id integer primary key, n integer, r real, s text, b blob, doc text, flag integer, x, big integer, wide bigint);
-insert into typed values (1, 5, 1.5, 'hi', x'0102ff', '{"a":[1,2]}', 1, 7, 9007199254740993, 9007199254740993);
+-- same in a column declared BIGINT, which Reylo reads as a BigInt where the driver does not round it first; an
+-- infinity, which libSQL binds no parameter of, and -0 in a column with no type, the one place SQLite keeps its
+-- sign, which sqlite3 and Turso's engine bind as the INTEGER 0.
+create table typed (id integer primary key, n integer, r real, s text, b blob, doc text, flag integer, x, big integer, wide bigint, inf real, zx);
+insert into typed values (1, 5, 1.5, 'hi', x'0102ff', '{"a":[1,2]}', 1, 7, 9007199254740993, 9007199254740993, 9e999, -0.0);

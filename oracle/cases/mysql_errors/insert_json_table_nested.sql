@@ -1,0 +1,1 @@
+insert into posts (id, user_id, title) select u.id, u.id, j.`Handle` from users u, json_table(json_object('h', json_array(u.email)), '$' columns (nested path '$.h[*]' columns (`Handle` varchar(4) path '$' error on error))) j

@@ -76,7 +76,7 @@ In TypeScript, `.run()` returns the same value for a type on every driver. The e
 | `BOOLEAN` (a `TINYINT(1)`), `BIT(1)` | `boolean` | `true` |
 | A comparison, `IS NULL`, `IN`, `BETWEEN`, `LIKE`, `EXISTS`, `NOT`, `AND`, `OR` | `boolean` | `false` |
 | `DECIMAL`, `SUM(…)`, `AVG(…)`, `/` | `string` | `"12.50"` |
-| `FLOAT`, `DOUBLE` | `number` | `1.1` |
+| `FLOAT`, `DOUBLE` | `number`, but not `NaN` or an infinity | `1.1` |
 | `CHAR`, `VARCHAR`, `TEXT` | `string` | `"Ada"` |
 | `ENUM` | the union of its labels | `"member"` |
 | `SET` | a `Set` of its labels, its members in the order the column declares them | `new Set(["a", "c"])` |
@@ -388,7 +388,7 @@ Each column can be null unless Reylo can tell it [never is](/docs/inference#left
 - **The server's flags.** Reylo starts from whether MySQL reports each column `NOT NULL`. MySQL is cautious with string and date functions, most casts and division, which stay nullable even over a `NOT NULL` column: `length(name)` is never null, and `upper(name)` can be.
 - **Tests through `coalesce`, `ifnull` and `<=>`** don't make their column non-null, and neither does a test under an `or` that tests another column.
 - **`bit_and`, `bit_or` and `bit_xor`** are never null, even over no rows. Neither are `json_arrayagg` and `json_objectagg` in a group or over a window.
-- **`WITH ROLLUP`** adds summary rows whose grouped columns are `NULL`, so their types include `null`.
+- **`WITH ROLLUP`** adds summary rows whose grouped columns are `NULL`, so their types include `null`. A window reads those rows too, as in `json_arrayagg(id) over ()`.
 - **An aggregate in a subquery that reads only the outer query's columns** aggregates the outer query. An example is `count(u.name)` in `(select count(u.name) from posts)`. The outer query then returns one row even where it reads none.
 
 To say a value is never null, write `coalesce(x, …)`, `ifnull(x, …)` or `where x is not null`.
@@ -447,7 +447,7 @@ A parameter accepts the same values `.run()` returns for its type. You can pass 
 | An `ENUM` column | the union of its labels |
 | A `SET` column | a `Set` of its labels |
 | `DATE`, `DATETIME`, `TIMESTAMP`, `TIME` | `string` |
-| `JSON` | any value `JSON.stringify` writes, such as a `Date` inside an object |
+| `JSON` | any value `JSON.stringify` writes, such as a `Date` inside an object, but no `NaN` or infinity |
 | `BINARY`, `VARBINARY`, `BLOB` | `Uint8Array` |
 | `VECTOR` | `number[]` |
 
@@ -567,7 +567,7 @@ With [`.try()`](/docs/typescript#try), an error MySQL raised comes back as `{ er
 
 Reylo names the error from MySQL's own list, whichever driver ran it. MySQL names a key, a constraint or a column only in its message. Reylo reads it in English, so with another `lc_messages` language those fields are `undefined`.
 
-When the query fires no trigger and calls no stored function, its error type is narrowed. A duplicate entry names only the unique keys of the tables it writes. Other errors name only their constraints and columns.
+When the query fires no trigger and calls no stored function, its error type is narrowed. A duplicate entry names only the unique keys of the tables it writes. Other errors name only their constraints and columns. A value's column may also be one of the query's `JSON_TABLE` columns with `ERROR ON ERROR`. It isn't narrowed where the query holds a recursive `WITH` query, or reads a view that holds one or such a `JSON_TABLE`. Nor is an out-of-range value's where either casts to `DECIMAL`, which MySQL names by the cast's select item.
 
 ## Drivers
 
@@ -605,6 +605,8 @@ Reylo runs each query through `mysql2`'s `execute()`, which prepares it first. W
 
 - A `FLOAT` column comes back with the 6 significant digits MySQL sends as text, so `1.100000023841858` reads as `1.1`.
 - A custom `queryFormat` is refused there, since it would rewrite each statement. So is a non-ASCII value where the connection or the session reads text in a charset other than UTF-8, as after `SET NAMES`.
+
+Before `mysql2` 3.23.4, a `TIME` fraction loses its leading zeros, so `12:00:00.05` comes back as `12:00:00.500000`. Use 3.23.4 or later.
 
 ### `mariadb`
 
@@ -746,6 +748,7 @@ What Reylo can't type on MySQL, and what to do instead:
 | A `BIT` that a view, a derived table or a `WITH` query computes, which MySQL sends as bytes or as decimal digits by what computes it: read as a column, it is typed `unknown` | Make it a number where it is computed: `max(mask) + 0` |
 | A loadable function (`create function … soname`), which `information_schema` doesn't list, so `.readOnly` can't see one | Don't retry a query that calls one |
 | A call of `md5`, `sha` or `sha1` on MySQL 9.6 and later, which moved them out of the server: a component or a function of yours answers it, so Reylo keeps MySQL's types for it | Use `sha2`, which MySQL keeps |
+| Two tables, aliases or `WITH` queries whose names differ only in case, as `t A` beside `t a`, which MySQL tells apart on Linux and not on macOS or Windows: their columns keep MySQL's own types, and their keys don't count | Name them apart by more than case |
 | A query Reylo's parser can't read | None: it keeps MySQL's types, every column can be null, it returns `Row[]`, and its JSON is `Json` |
 | A query MySQL reads otherwise than Reylo's parser, by its `sql_mode` (`count (x)` without `IGNORE_SPACE`, `not` under `HIGH_NOT_PRECEDENCE`) or by a `SET_VAR` hint | None: Reylo keeps MySQL's types, every column can be null, and it has no row counts or JSON shapes |
 | A `/*! … */` comment, which MySQL runs as SQL, so it's an error | Write it as plain SQL |

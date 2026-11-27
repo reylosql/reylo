@@ -13,6 +13,7 @@ use crate::host::{as_str, Host, Lazy};
 use crate::lex;
 use crate::mysql::by_table;
 use crate::mysql_keys::Cte;
+use crate::mysql_names::Reads;
 use syntax::mysql::ast::{self, Expr, FunctionArg, FunctionArgExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins};
 use std::collections::{HashMap, HashSet};
 
@@ -20,24 +21,26 @@ use std::collections::{HashMap, HashSet};
 /// and a generated column's expression, as `information_schema` prints it ([`refused_by`]), in the
 /// order an INSERT without a column list fills them, which passes over an INVISIBLE column. A
 /// view's column is taken to refuse NULL: what a write through it takes is its table's to say. `?`
-/// is the comma-joined table names, because MySQL binds no arrays.
+/// is one table's name ([`by_table`]).
 const COLUMNS_QUERY: &str = "select c.table_name, c.column_name, if(t.table_type = 'VIEW', 'NO', c.is_nullable), c.extra, c.generation_expression from information_schema.columns c \
     join information_schema.tables t on t.table_schema = c.table_schema and t.table_name = c.table_name \
-    where c.table_schema = database() and find_in_set(c.table_name, ?) order by c.table_name, c.ordinal_position";
+    where c.table_schema = database() and c.table_name = ? order by c.table_name, c.ordinal_position";
 
 /// The enforced CHECKs of the named tables of the current schema, as the server prints each
 /// (MySQL 8.0.16 and later; a server without the views answers an error, and no CHECK refuses
 /// null there).
 const CHECKS_QUERY: &str = "select tc.table_name, cc.check_clause from information_schema.table_constraints tc \
     join information_schema.check_constraints cc on cc.constraint_schema = tc.constraint_schema and cc.constraint_name = tc.constraint_name \
-    where tc.table_schema = database() and tc.constraint_type = 'CHECK' and tc.enforced = 'YES' and find_in_set(tc.table_name, ?)";
+    where tc.table_schema = database() and tc.constraint_type = 'CHECK' and tc.enforced = 'YES' and tc.table_name = ?";
 
 /// Each column's type of the named tables of the current schema, for [`typed`]: its
 /// `data_type`, its `column_type` (`tinyint(1)`, `bit(1)`, `bigint unsigned`), its `extra`, its
 /// comment, empty for none (a view's column has its table column's), and its character set, NULL
-/// for a column that is no text.
-pub(crate) const TYPES_QUERY: &str = "select c.table_name, c.column_name, c.data_type, c.column_type, c.extra, c.column_comment, c.character_set_name from information_schema.columns c \
-    where c.table_schema = database() and find_in_set(c.table_name, ?) order by c.table_name, c.ordinal_position";
+/// for a column that is no text. Each table is named as a column's origin in the prepare names it,
+/// which with `lower_case_table_names` 2 (macOS) is in lower case, while the catalog keeps the case
+/// the table was made with.
+pub(crate) const TYPES_QUERY: &str = "select if(@@lower_case_table_names = 2, lower(c.table_name), c.table_name), c.column_name, c.data_type, c.column_type, c.extra, c.column_comment, c.character_set_name from information_schema.columns c \
+    where c.table_schema = database() and c.table_name = ? order by c.table_name, c.ordinal_position";
 
 /// The parameter each `?` of the rewritten text is, by where it stands as the parser counts:
 /// lines and characters from 1.
@@ -130,11 +133,11 @@ pub(crate) struct Typed {
     /// Per parameter, the comment of the columns it is written to or compared with, where they
     /// share one.
     pub comments: HashMap<String, String>,
-    /// Per column of the tables the result columns read ([`traced_from`]), by table and column in
-    /// lower case, its comment where it has one.
+    /// Per column of the tables the result columns read ([`traced_from`]), by table as the server
+    /// names it and column in lower case, its comment where it has one.
     pub columns: HashMap<(String, String), String>,
-    /// Per `ENUM` and `SET` column of those tables, by table and column in lower case, its type
-    /// with the labels it declares, which the prepare does not give.
+    /// Per `ENUM` and `SET` column of those tables, by table as the server names it and column in
+    /// lower case, its type with the labels it declares, which the prepare does not give.
     pub labelled: HashMap<(String, String), crate::types::Type>,
     /// The character set each string column of those tables stores its values in, by table as the
     /// server names it and column in lower case ([`crate::mysql_types::character_set`]).
@@ -158,7 +161,10 @@ pub(crate) fn typed(statement: &Statement, names: &Names, host: &Host) -> Lazy<T
     if tables.is_empty() {
         return Some(Typed::default());
     }
-    let rows = by_table(host, TYPES_QUERY, &tables)?;
+    let (rows, answers) = match crate::mysql::answered_by_table(host, TYPES_QUERY, &tables)? {
+        Ok((rows, answers)) => (Ok(rows), answers),
+        Err(e) => (Err(e), Default::default()),
+    };
     let mut out = Typed::default();
     // Per table as the server names it: each column in lower case, its type, whether it is INVISIBLE, and its comment.
     let mut columns: HashMap<String, Vec<(String, Option<crate::types::Type>, bool, Option<String>)>> = HashMap::new();
@@ -183,7 +189,7 @@ pub(crate) fn typed(statement: &Statement, names: &Names, host: &Host) -> Lazy<T
         };
         if matches!(data_type.to_ascii_lowercase().as_str(), "enum" | "set") {
             if let Some(ty) = &ty {
-                out.labelled.insert((table.to_ascii_lowercase(), column.to_ascii_lowercase()), ty.clone());
+                out.labelled.insert((table.to_string(), column.to_ascii_lowercase()), ty.clone());
             }
         }
         let comment = row.get(5).and_then(as_str).filter(|c| !c.is_empty()).map(String::from);
@@ -191,23 +197,16 @@ pub(crate) fn typed(statement: &Statement, names: &Names, host: &Host) -> Lazy<T
             out.charsets.insert((table.to_string(), column.to_ascii_lowercase()), charset.to_string());
         }
         if let Some(comment) = &comment {
-            out.columns.insert((table.to_ascii_lowercase(), column.to_ascii_lowercase()), comment.clone());
+            out.columns.insert((table.to_string(), column.to_ascii_lowercase()), comment.clone());
         }
         columns.entry(table.to_string()).or_default().push((column.to_ascii_lowercase(), ty, invisible, comment));
     }
+    // The server's name for a table the statement names in another case ([`crate::mysql_names::Answers`]).
+    let server_name = |table: &str| answers.name(table).map(String::from);
     let mut found: HashMap<String, Option<crate::types::Type>> = HashMap::new();
     let mut noted: HashMap<String, Option<String>> = HashMap::new();
     for (param, table, target) in targets {
-        let known = match columns.get(&table) {
-            Some(known) => Some(known),
-            None => {
-                let mut same = columns.iter().filter(|(name, _)| name.eq_ignore_ascii_case(&table));
-                match (same.next(), same.next()) {
-                    (Some((_, known)), None) => Some(known),
-                    _ => None,
-                }
-            }
-        };
+        let known = columns.get(&table).or_else(|| columns.get(&server_name(&table)?));
         let column = known.and_then(|known| match &target {
             Target::Name(name) => known.iter().find(|(c, _, _, _)| c == name),
             Target::Position(i) => known.iter().filter(|(_, _, invisible, _)| !invisible).nth(*i),
@@ -221,16 +220,7 @@ pub(crate) fn typed(statement: &Statement, names: &Names, host: &Host) -> Lazy<T
     // The one column each bare parameter is written to, the SELECT that feeds an INSERT included.
     let mut written: HashMap<String, Option<(String, String)>> = HashMap::new();
     for (param, table, target) in filled(statement, names, Fill::Bare) {
-        let known = match columns.get_key_value(&table) {
-            Some(known) => Some(known),
-            None => {
-                let mut same = columns.iter().filter(|(name, _)| name.eq_ignore_ascii_case(&table));
-                match (same.next(), same.next()) {
-                    (Some(known), None) => Some(known),
-                    _ => None,
-                }
-            }
-        };
+        let known = columns.get_key_value(&table).or_else(|| columns.get_key_value(&server_name(&table)?));
         let place = known.and_then(|(name, known)| {
             let column = match &target {
                 Target::Name(column) => known.iter().find(|(c, _, _, _)| c == column),
@@ -254,11 +244,11 @@ pub(crate) fn typed(statement: &Statement, names: &Names, host: &Host) -> Lazy<T
 fn compared(statement: &Statement, names: &Names) -> Vec<(String, String, Target)> {
     let mut out = Vec::new();
     match statement {
-        Statement::Query(q) => compared_query(q, &[], names, &mut out),
-        Statement::Update(update) => compared_select(&[&update.table], update.selection.iter().collect(), None, &[], names, &mut out),
+        Statement::Query(q) => compared_query(q, &[], false, names, &mut out),
+        Statement::Update(update) => compared_select(&[&update.table], update.selection.iter().collect(), None, &[], false, names, &mut out),
         Statement::Delete(delete) => {
             let (ast::FromTable::WithFromKeyword(from) | ast::FromTable::WithoutKeyword(from)) = &delete.from;
-            compared_select(&from.iter().collect::<Vec<_>>(), delete.selection.iter().collect(), None, &[], names, &mut out);
+            compared_select(&from.iter().collect::<Vec<_>>(), delete.selection.iter().collect(), None, &[], false, names, &mut out);
         }
         _ => {}
     }
@@ -266,18 +256,19 @@ fn compared(statement: &Statement, names: &Names) -> Vec<(String, String, Target
 }
 
 /// The comparisons of a query: its body's, and those inside each of its WITH queries, each read
-/// with the WITH queries it sees ([`crate::mysql_keys::ctes_of`]).
-fn compared_query<'a>(q: &'a Query, outer: &[Cte<'a>], names: &Names, out: &mut Vec<(String, String, Target)>) {
+/// with the WITH queries it sees ([`crate::mysql_keys::ctes_of`]). `enclosed` where it sees the
+/// FROM items of an enclosing query, as a LATERAL derived table does.
+fn compared_query<'a>(q: &'a Query, outer: &[Cte<'a>], enclosed: bool, names: &Names, out: &mut Vec<(String, String, Target)>) {
     let ctes = crate::mysql_keys::ctes_of(q, outer);
     for (_, body, sees, _) in ctes.iter().skip(outer.len()) {
         if let Some(body) = body {
-            compared_query(body, &ctes[..*sees], names, out);
+            compared_query(body, &ctes[..*sees], enclosed, names, out);
         }
     }
-    compared_body(&q.body, &ctes, names, out);
+    compared_body(&q.body, &ctes, enclosed, names, out);
 }
 
-fn compared_body<'a>(body: &'a SetExpr, ctes: &[Cte<'a>], names: &Names, out: &mut Vec<(String, String, Target)>) {
+fn compared_body<'a>(body: &'a SetExpr, ctes: &[Cte<'a>], enclosed: bool, names: &Names, out: &mut Vec<(String, String, Target)>) {
     match body {
         SetExpr::Select(s) => {
             // In a HAVING the server reads a bare name as the select list's alias before the FROM's
@@ -298,13 +289,13 @@ fn compared_body<'a>(body: &'a SetExpr, ctes: &[Cte<'a>], names: &Names, out: &m
                 })
                 .collect();
             let having = s.having.as_ref().map(|having| (having, aliases));
-            compared_select(&s.from.iter().collect::<Vec<_>>(), s.selection.iter().collect(), having, ctes, names, out)
+            compared_select(&s.from.iter().collect::<Vec<_>>(), s.selection.iter().collect(), having, ctes, enclosed, names, out)
         }
         SetExpr::SetOperation { left, right, .. } => {
-            compared_body(left, ctes, names, out);
-            compared_body(right, ctes, names, out);
+            compared_body(left, ctes, enclosed, names, out);
+            compared_body(right, ctes, enclosed, names, out);
         }
-        SetExpr::Query(q) => compared_query(q, ctes, names, out),
+        SetExpr::Query(q) => compared_query(q, ctes, enclosed, names, out),
         _ => {}
     }
 }
@@ -315,10 +306,13 @@ fn compared_body<'a>(body: &'a SetExpr, ctes: &[Cte<'a>], names: &Names, out: &m
 /// ([`crate::mysql_keys::output_origins`]): one, or one per side of a set operation, whose types
 /// [`typed`] keeps only where they agree. Beside the HAVING, the select list's aliases, which a
 /// bare name there reads first.
-fn compared_select<'a>(from: &[&'a TableWithJoins], filters: Vec<&'a Expr>, having: Option<(&'a Expr, Vec<String>)>, ctes: &[Cte<'a>], names: &Names, out: &mut Vec<(String, String, Target)>) {
+fn compared_select<'a>(from: &[&'a TableWithJoins], filters: Vec<&'a Expr>, having: Option<(&'a Expr, Vec<String>)>, ctes: &[Cte<'a>], enclosed: bool, names: &Names, out: &mut Vec<(String, String, Target)>) {
     // The tables by the name the statement reads each by; `plain` where every item is a table.
     let mut tables: Vec<(String, String)> = Vec::new();
     let mut derived: Vec<(String, &Query, &[Cte], Vec<String>)> = Vec::new();
+    // The names of the items neither list follows, so that a qualifier one of them may take is
+    // taken for no other item's ([`crate::mysql_names::item`]).
+    let mut others: Vec<String> = Vec::new();
     let mut plain = true;
     let mut items = 0;
     let listed = |alias: &Option<ast::TableAlias>| -> Vec<String> { alias.as_ref().map(|a| a.columns.iter().map(|c| c.name.value.to_ascii_lowercase()).collect()).unwrap_or_default() };
@@ -329,38 +323,53 @@ fn compared_select<'a>(from: &[&'a TableWithJoins], filters: Vec<&'a Expr>, havi
                 TableFactor::Table { name, alias, args: None, .. } => {
                     // A name one of the statement's WITH queries has is that query, never a table.
                     let cte = match name.0.as_slice() {
-                        [ast::ObjectNamePart::Identifier(n)] => ctes.iter().rposition(|(c, _, _, _)| *c == n.value.to_ascii_lowercase()),
-                        _ => None,
+                        [ast::ObjectNamePart::Identifier(n)] => crate::mysql_names::with_query(ctes.iter().map(|(c, _, _, _)| c.as_str()), &n.value),
+                        _ => Reads::Table,
                     };
                     match (cte, table_name(name)) {
-                        (Some(at), _) => {
+                        (Reads::Unknown, _) => {
+                            plain = false;
+                            others.extend(alias.as_ref().map(|a| a.name.value.clone()).or_else(|| name.0.last().and_then(|p| p.as_ident()).map(|i| i.value.clone())));
+                        }
+                        (Reads::With(at), _) => {
                             plain = false;
                             let (cte_name, body, sees, columns) = &ctes[at];
-                            let by = alias.as_ref().map(|a| a.name.value.to_ascii_lowercase()).unwrap_or_else(|| cte_name.clone());
-                            if let Some(body) = body {
-                                let mut renamed = columns.clone();
-                                for (at, name) in listed(alias).into_iter().enumerate() {
-                                    match renamed.get_mut(at) {
-                                        Some(slot) => *slot = name,
-                                        None => renamed.push(name),
+                            let by = alias.as_ref().map(|a| a.name.value.clone()).unwrap_or_else(|| cte_name.clone());
+                            match body {
+                                Some(body) => {
+                                    let mut renamed = columns.clone();
+                                    for (at, name) in listed(alias).into_iter().enumerate() {
+                                        match renamed.get_mut(at) {
+                                            Some(slot) => *slot = name,
+                                            None => renamed.push(name),
+                                        }
                                     }
+                                    derived.push((by, body, &ctes[..*sees], renamed));
                                 }
-                                derived.push((by, body, &ctes[..*sees], renamed));
+                                None => others.push(by),
                             }
                         }
-                        (None, Some(table)) => {
+                        (Reads::Table, Some(table)) => {
                             let by = alias.as_ref().map(|a| a.name.value.clone()).unwrap_or_else(|| table.clone());
-                            tables.push((by.to_ascii_lowercase(), table));
+                            tables.push((by, table));
                         }
-                        (None, None) => plain = false,
+                        (Reads::Table, None) => {
+                            plain = false;
+                            others.extend(alias.as_ref().map(|a| a.name.value.clone()).or_else(|| name.0.last().and_then(|p| p.as_ident()).map(|i| i.value.clone())));
+                        }
                     }
                 }
                 TableFactor::Derived { lateral, subquery, alias, .. } => {
                     plain = false;
-                    compared_query(subquery, ctes, names, out);
-                    if let (false, Some(a)) = (lateral, alias) {
-                        derived.push((a.name.value.to_ascii_lowercase(), subquery.as_ref(), ctes, listed(alias)));
+                    compared_query(subquery, ctes, enclosed || *lateral, names, out);
+                    match (lateral, alias) {
+                        (false, Some(a)) => derived.push((a.name.value.clone(), subquery.as_ref(), ctes, listed(alias))),
+                        (_, a) => others.extend(a.as_ref().map(|a| a.name.value.clone())),
                     }
+                }
+                TableFactor::JsonTable { alias, .. } | TableFactor::TableFunction { alias, .. } | TableFactor::Function { alias, .. } => {
+                    plain = false;
+                    others.extend(alias.as_ref().map(|a| a.name.value.clone()));
                 }
                 _ => plain = false,
             }
@@ -369,13 +378,16 @@ fn compared_select<'a>(from: &[&'a TableWithJoins], filters: Vec<&'a Expr>, havi
     let column = |e: &Expr| -> Vec<(String, String)> {
         match e {
             Expr::Identifier(i) if plain && tables.len() == 1 => vec![(tables[0].1.clone(), i.value.to_ascii_lowercase())],
-            Expr::Identifier(i) if items == 1 && derived.len() == 1 => crate::mysql_keys::output_origins(derived[0].1, derived[0].2, &derived[0].3, &i.value.to_ascii_lowercase()),
+            Expr::Identifier(i) if items == 1 && derived.len() == 1 => crate::mysql_keys::output_origins(derived[0].1, derived[0].2, enclosed, &derived[0].3, &i.value.to_ascii_lowercase()),
             Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
-                let by = parts[0].value.to_ascii_lowercase();
                 let name = parts[1].value.to_ascii_lowercase();
-                match tables.iter().find(|(b, _)| *b == by) {
-                    Some((_, t)) => vec![(t.clone(), name)],
-                    None => derived.iter().find(|(b, _, _, _)| *b == by).map(|(_, q, sees, columns)| crate::mysql_keys::output_origins(q, sees, columns, &name)).unwrap_or_default(),
+                let items: Vec<&str> = tables.iter().map(|(b, _)| b.as_str()).chain(derived.iter().map(|(b, _, _, _)| b.as_str())).chain(others.iter().map(String::as_str)).collect();
+                match crate::mysql_names::item(items.iter().copied(), &parts[0].value) {
+                    // Spelled otherwise than the item, it may be an enclosing item spelled so.
+                    Some(i) if enclosed && items[i] != parts[0].value => Vec::new(),
+                    Some(i) if i < tables.len() => vec![(tables[i].1.clone(), name)],
+                    Some(i) => derived.get(i - tables.len()).map(|(_, q, sees, columns)| crate::mysql_keys::output_origins(q, sees, enclosed, columns, &name)).unwrap_or_default(),
+                    None => Vec::new(),
                 }
             }
             _ => Vec::new(),
@@ -454,8 +466,12 @@ pub(crate) fn nullable(statement: &Statement, names: &Names, host: &Host, marked
     }
     // Every table a parameter is written to whole, as `prefetch` asked.
     let tables = written(statement, names);
-    let (rows, checks) = (by_table(host, COLUMNS_QUERY, &tables), by_table(host, CHECKS_QUERY, &tables));
+    let (rows, checks) = (crate::mysql::answered_by_table(host, COLUMNS_QUERY, &tables), by_table(host, CHECKS_QUERY, &tables));
     let (rows, checks) = (rows?, checks?);
+    let (rows, answers) = match rows {
+        Ok((rows, answers)) => (Ok(rows), answers),
+        Err(e) => (Err(e), Default::default()),
+    };
     // Per table as the server names it, the CHECKs.
     let mut checked: HashMap<String, Vec<String>> = HashMap::new();
     for row in checks.unwrap_or_default() {
@@ -477,17 +493,10 @@ pub(crate) fn nullable(statement: &Statement, names: &Names, host: &Host, marked
     }
     // The column a target names, and whether it may hold NULL.
     let column_of = |table: &String, target: &Target| {
-        // The server's name for the table: the query compares names as the server does, so a
-        // row under another case came back because the server holds the two for one table.
+        // The server's name for the table ([`crate::mysql_names::Answers`]).
         let known = match columns.get(table) {
             Some(known) => known,
-            None => {
-                let mut same = columns.iter().filter(|(name, _)| name.eq_ignore_ascii_case(table));
-                match (same.next(), same.next()) {
-                    (Some((_, known)), None) => known,
-                    _ => return None,
-                }
-            }
+            None => columns.get(answers.name(table)?)?,
         };
         let (column, nullable, _) = match target {
             Target::Name(name) => known.iter().find(|(c, _, _)| c == name),
@@ -776,7 +785,7 @@ fn filled(statement: &Statement, names: &Names, fill: Fill) -> Vec<(String, Stri
                     TableFactor::Table { name, alias, .. } => match table_name(name) {
                         Some(table) => {
                             let by = alias.as_ref().map(|a| a.name.value.clone()).unwrap_or_else(|| table.clone());
-                            tables.push((by.to_ascii_lowercase(), table));
+                            tables.push((by, table));
                         }
                         None => plain = false,
                     },
@@ -789,8 +798,8 @@ fn filled(statement: &Statement, names: &Names, fill: Fill) -> Vec<(String, Stri
                     // A bare column is the one table's, where there is one.
                     (_, 1) if plain => tables.first().map(|(_, t)| t.clone()),
                     (ast::AssignmentTarget::ColumnName(n), 2) => {
-                        let by = n.0.first().and_then(|p| p.as_ident()).map(|i| i.value.to_ascii_lowercase());
-                        tables.iter().find(|(b, _)| Some(b) == by.as_ref()).map(|(_, t)| t.clone())
+                        let by = n.0.first().and_then(|p| p.as_ident());
+                        by.and_then(|by| crate::mysql_names::item(tables.iter().map(|(b, _)| b.as_str()), &by.value)).map(|i| tables[i].1.clone())
                     }
                     _ => None,
                 };
@@ -872,7 +881,7 @@ impl Walk {
         let mut env = env.clone();
         for cte in q.with.iter().flat_map(|w| &w.cte_tables) {
             self.query(&cte.query, &env);
-            env.ctes.push(cte.alias.name.value.to_ascii_lowercase());
+            env.ctes.push(cte.alias.name.value.clone());
         }
         self.body(&q.body, &env);
         for o in q.order_by.iter().flat_map(|o| match &o.kind {
@@ -948,11 +957,12 @@ impl Walk {
     fn factor<'t>(&mut self, factor: &'t TableFactor, env: &Env, on: &mut Vec<&'t Expr>) {
         match factor {
             TableFactor::Table { name, .. } => {
-                // A WITH query in scope is what a bare name in FROM reads, whatever table shares it.
-                let table = table_name(name).map(|t| t.to_ascii_lowercase());
+                // A WITH query in scope is what a bare name in FROM reads, whatever table shares it;
+                // one a server may read as a table counts as one.
+                let table = table_name(name);
                 self.by_schema |= table.is_none();
-                if !table.is_some_and(|t| env.ctes.contains(&t)) {
-                    self.tables.extend(table_name(name));
+                if !table.as_ref().is_some_and(|t| matches!(crate::mysql_names::with_query(env.ctes.iter().map(String::as_str), t), Reads::With(_))) {
+                    self.tables.extend(table);
                 }
             }
             TableFactor::Derived { subquery, .. } => self.query(subquery, env),
@@ -1113,6 +1123,36 @@ mod tests {
         panic!("the analysis never settled")
     }
 
+    #[test]
+    fn a_table_named_in_two_cases_is_one_table_where_the_server_folds_names() {
+        // The server folds names: each case asked answers with the rows of the one table `users`.
+        let rows = [["users", "id", "NO", ""], ["users", "name", "NO", ""], ["users", "bio", "YES", ""]];
+        let sql = "update Users u join users v on u.id = 1 and v.id = 2 set u.name = :name::nullable(text), v.bio = :bio";
+        let mut answers: HashMap<String, Answer> = HashMap::new();
+        for _ in 0..8 {
+            let host = Host::new(&answers);
+            if let Some(analysis) = crate::mysql::analyze_text(sql, &host) {
+                assert!(analysis.diagnostics.iter().any(|d| d.message.contains(".name, which refuses null")), "{:?}", analysis.diagnostics);
+                return;
+            }
+            for need in host.needs() {
+                let (id, answer) = match need {
+                    Need::Describe { id, sql: text } => {
+                        let params: Vec<_> = text.matches('?').map(|_| json!({ "type": 253, "flags": 0, "charset": 255 })).collect();
+                        (id, json!({ "mysql": { "columns": [], "params": params } }))
+                    }
+                    Need::Query { id, sql, params, .. } if sql == super::COLUMNS_QUERY => {
+                        let asked = params.first().and_then(|p| p.as_str()).unwrap_or_default().to_string();
+                        (id, json!({ "rows": rows.iter().filter(|r| r[0].eq_ignore_ascii_case(&asked)).collect::<Vec<_>>() }))
+                    }
+                    Need::Query { id, .. } => (id, json!({ "rows": [] })),
+                };
+                answers.insert(id, serde_json::from_value(answer).unwrap());
+            }
+        }
+        panic!("the analysis never settled")
+    }
+
     /// Each parameter's type, the prepare describing every `?` with `code` as MySQL 8.4 does for a context (8 an integer one, 16 a BIT one).
     fn param_types(sql: &str, code: u32) -> Vec<(String, String)> {
         let types = json!({ "rows": [
@@ -1186,6 +1226,9 @@ mod tests {
         assert_eq!(tables("select u.id, (select count(*) from posts p where p.user_id = u.id) from `users` u where exists (select 1 from tags t where t.id = u.id)"), (names(&["posts", "tags", "users"]), vec![]));
         // A WITH query is no table, even one named like a table; a derived table's are read.
         assert_eq!(tables("with users as (select id from accounts) select id from users join (select user_id from posts) p on p.user_id = users.id"), (names(&["accounts", "posts"]), vec![]));
+        // A WITH query named in another case is the table of that name where the server keeps case,
+        // and counts as read.
+        assert_eq!(tables("with users as (select id from accounts) select id from Users"), (names(&["Users", "accounts"]), vec![]));
         // What an INSERT, an UPDATE and a DELETE write, and the tables they read.
         assert_eq!(tables("insert into audit (user_id) select id from users"), (names(&["users"]), names(&["audit"])));
         assert_eq!(tables("update users set name = (select max(title) from posts) where id = 1"), (names(&["posts", "users"]), names(&["users"])));
