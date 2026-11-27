@@ -49,6 +49,8 @@ static int gCaptured;           /* the first top-level hook has fired */
 static Select *gInsertSelect;   /* the SELECT or VALUES that feeds the INSERT, about to be coded */
 static Table *gTables[128];
 static int gnTables;
+static int gDepth;              /* how many SELECTs the walker is inside */
+static int gTooDeep;            /* it reached one nested past the bound selectJson holds them to */
 
 /* A table of the schema the statement reads. A WITH query's table is ephemeral, as a subquery's
 ** is: the statement owns it and frees it as the prepare ends, before tables() reads the list. */
@@ -335,6 +337,14 @@ static void selectJson(sqlite3_str *s, Select *pTop){
   Select *p = pTop;
   int i, nMore = 0;
   if( p==0 ){ sqlite3_str_appendall(s, "null"); return; }
+  /* SQLite reads each view and each WITH query a statement reads as a subquery of its own, and
+  ** holds a chain of views to SQLITE_LIMIT_EXPR_DEPTH (1,000) nested SELECTs but a chain of WITH
+  ** queries, each reading the one before, to none. The walker holds every SELECT it writes to
+  ** that bound, the statement's own counted, so the engine reads no tree of SELECTs deeper than a
+  ** chain of views makes (core/src/stack.rs), and the hook refuses the statement as SQLite refuses
+  ** the views. */
+  if( gDepth>=sqlite3_limit(gDb, SQLITE_LIMIT_EXPR_DEPTH, -1) ){ gTooDeep = 1; sqlite3_str_appendall(s, "null"); return; }
+  gDepth++;
   /* A multi-row VALUES is a chain of one-row SELECTs under UNION ALL, the last row on top. Its
   ** first row stands for it here, with the rows after it in "rows", so a list of any length nests
   ** nothing; an ORDER BY or a LIMIT is on the top row, as on any compound. */
@@ -403,11 +413,17 @@ static void selectJson(sqlite3_str *s, Select *pTop){
     key(s, "prior"); selectJson(s, p->pPrior); sqlite3_str_appendchar(s, 1, ',');
   }
   closeObj(s);
+  gDepth--;
 }
 
 /* ---- the hooks ------------------------------------------------------------------------------- */
 
 static int skipHook(Parse *pParse){ return pParse->nErr || pParse->db->init.busy; }
+
+/* After a hook has written its part: a SELECT nested past selectJson's bound refuses the statement. */
+static void refuseTooDeep(Parse *pParse){
+  if( gTooDeep ) sqlite3ErrorMsg(pParse, "VIEWs and/or subqueries nested too deep");
+}
 
 static void selectHook(Parse *pParse, Select *p, SelectDest *pDest){
   if( skipHook(pParse) ) return;
@@ -418,6 +434,7 @@ static void selectHook(Parse *pParse, Select *p, SelectDest *pDest){
     gCaptured = 1;
     selectJson(gStmt, p);
   }
+  refuseTooDeep(pParse);
 }
 /* SQLite codes the SELECT that feeds an INSERT before it reaches the INSERT hook: this names it,
 ** and the SELECT hook serializes it as resolved, before the code generator rewrites it. */
@@ -494,6 +511,7 @@ static void insertHook(Parse *pParse, Table *pTab, IdList *pColumn, ExprList *pL
     kv_int(gDml, "rows", 1);
   }
   closeObj(gDml);
+  refuseTooDeep(pParse);
 }
 static void updateHook(Parse *pParse, Table *pTab, ExprList *pChanges, Expr *pWhere, int *aXRef, SrcList *pTabList, int onError, Upsert *pUpsert){
   int i, j;
@@ -517,6 +535,7 @@ static void updateHook(Parse *pParse, Table *pTab, ExprList *pChanges, Expr *pWh
   closeArr(gDml); sqlite3_str_appendchar(gDml, 1, ',');
   key(gDml, "where"); expr(gDml, pWhere, 0); sqlite3_str_appendchar(gDml, 1, ',');
   closeObj(gDml);
+  refuseTooDeep(pParse);
 }
 static void deleteHook(Parse *pParse, Table *pTab, Expr *pWhere){
   if( skipHook(pParse) || gCaptured ) return;
@@ -527,6 +546,7 @@ static void deleteHook(Parse *pParse, Table *pTab, Expr *pWhere){
   kv_str(gDml, "table", pTab->zName);
   key(gDml, "where"); expr(gDml, pWhere, 0); sqlite3_str_appendchar(gDml, 1, ',');
   closeObj(gDml);
+  refuseTooDeep(pParse);
 }
 static void returningHook(Parse *pParse, Table *pTab, ExprList *pNew){
   int i;
@@ -541,6 +561,7 @@ static void returningHook(Parse *pParse, Table *pTab, ExprList *pNew){
     closeObj(gReturning); sqlite3_str_appendchar(gReturning, 1, ',');
   }
   closeArr(gReturning);
+  refuseTooDeep(pParse);
 }
 
 /* ---- tables: columns and unique keys ------------------------------------------------------- */
@@ -1174,7 +1195,7 @@ char *reylo_sqlite_analyze(
     return sqlite3_str_finish(out);
   }
   gStmt = sqlite3_str_new(0); gDml = sqlite3_str_new(0); gReturning = sqlite3_str_new(0);
-  gCaptured = 0; gInsertSelect = 0; gnTables = 0;
+  gCaptured = 0; gInsertSelect = 0; gnTables = 0; gTooDeep = 0;
   gHost = azHost; gnHost = nHost; gExtra = azFn; gnExtra = nFn; gnDenied = 0; gDeniedView = 0;
   if( nHost>=0 ) sqlite3_set_authorizer(gDb, functionAuth, 0);
   installHooks(1);
