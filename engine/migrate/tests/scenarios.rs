@@ -4438,6 +4438,9 @@ fn a_project_with_pg_cron_replays_in_shadows() {
         q.file("20261126110000_again.sql", "drop/* again */extension\nif exists \"legacy;extension\", pg_cron; create extension pg_cron;");
         assert_eq!(q.dry_run().await, 0, "{}", q.peek());
         assert_eq!(q.migrate().await, 0, "{}", q.peek());
+        q.file("20261126120000_in_a_block.sql", "do $$ begin drop extension pg_cron; end $$; create extension pg_cron;");
+        assert_eq!(q.dry_run().await, 0, "{}", q.peek());
+        assert_eq!(q.migrate().await, 0, "{}", q.peek());
         assert!(q.rows("select 1 from pg_database where datname = 'contrib_regression'").await.is_empty(), "a shadow kept pg_cron's name");
         forget(&q.url).await;
 
