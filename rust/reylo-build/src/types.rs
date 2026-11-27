@@ -748,6 +748,10 @@ impl Types {
                 _ => quote!(::reylo::serde_json::Number),
             },
             Kind::Float(_) => quote!(f64),
+            // A SQLite INTEGER that may be a REAL, which SQLite keeps outside a STRICT table: the
+            // i64 its declared type names, as outside a document, where a REAL is an error when
+            // the row is read.
+            Kind::Union(_) if self.dialect == Dialect::Sqlite && t.label.as_deref().is_some_and(|n| !is_bool(n) && affinity(n) == Affinity::Integer) => quote!(i64),
             // serde_json reads a number with a fraction as an f64, which rounds a decimal.
             Kind::Decimal(_) => return Err(syn::Error::new(self.span, format!("{label} holds a decimal inside JSON, which no Rust number reads exactly: cast it to text inside the JSON, as `x::text`"))),
             Kind::Text(_) | Kind::Uuid(_) | Kind::Bytes(_) | Kind::Date(_) | Kind::Time(_) | Kind::DateTime(_) | Kind::Instant(_) | Kind::ZonedDateTime(_) | Kind::Duration(_) => quote!(::std::string::String),
@@ -1291,6 +1295,18 @@ mod tests {
         assert!(impls.contains(r#"array_of ("public.\"ResourceKind\"")"#), "{impls}");
         assert_eq!(super::qualified("\"a.b\".\"c\"\"d\""), ("\"a.b\"", "\"c\"\"d\""));
         assert_eq!(super::unquoted("\"c\"\"d\""), "c\"d");
+    }
+
+    #[test]
+    fn a_sqlite_integer_that_may_be_a_real_is_an_i64_inside_a_document_too() {
+        use reylo_engine_core::types::{Field, Slot};
+        let either = Type::union(vec![Type::integer(64), Type::double()]).named("INTEGER");
+        assert_eq!(column(Dialect::Sqlite, either.clone()), Ok(("i64".into(), true)));
+        let built = Type::json_of(Slot::non_null(Type::structure(vec![Field::new("n", either, false)])));
+        let mut types = Types::new(Dialect::Sqlite, Options::default(), BTreeMap::new(), Span::call_site(), false);
+        types.column(&built, false, "c").unwrap();
+        let items = types.items.iter().map(|i| i.to_string().replace(' ', "")).collect::<String>();
+        assert!(items.contains("pubn:i64"), "{items}");
     }
 
     #[test]
