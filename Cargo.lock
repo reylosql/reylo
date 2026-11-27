@@ -1991,11 +1991,13 @@ dependencies = [
 name = "reylo-engine-mysql"
 version = "0.9.0"
 dependencies = [
+ "mysql_async",
  "reylo-engine-build",
  "reylo-engine-core",
  "reylo-sql",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
