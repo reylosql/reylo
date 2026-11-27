@@ -126,10 +126,10 @@ fn names_output(item: &Expr, projection: &[SelectItem]) -> bool {
 }
 
 /// Whether a GROUP BY item is surely a column: one named with its table, or a position of the
-/// select list's that is one, and each member of a ROLLUP alike. A bare name is none: MySQL may
-/// take it for an alias of any item, as it folds the letter case of names past ASCII, drops an
-/// alias's leading spaces and names an item with no alias by its text, which the planning cannot
-/// match.
+/// select list's that is one, and each member of a ROLLUP alike. A bare name may be an alias of
+/// another item, as MySQL drops an alias's leading spaces, folds the letter case of names past
+/// ASCII and names an item with no alias by its text: one is a column only where it is unquoted
+/// and ASCII, and no other item's alias may be it.
 fn names_column(item: &Expr, projection: &[SelectItem]) -> bool {
     fn column(e: &Expr) -> bool {
         match e {
@@ -141,6 +141,11 @@ fn names_column(item: &Expr, projection: &[SelectItem]) -> bool {
     match item {
         Expr::Nested(inner) => names_column(inner, projection),
         Expr::Rollup(sets) | Expr::Cube(sets) | Expr::GroupingSets(sets) => sets.iter().flatten().all(|k| names_column(k, projection)),
+        Expr::Identifier(name) if name.quote_style.is_none() && name.value.is_ascii() => !projection.iter().any(|i| match i {
+            SelectItem::ExprWithAlias { expr, alias } => !column(expr) && (!alias.value.is_ascii() || alias.value.trim().eq_ignore_ascii_case(&name.value)),
+            SelectItem::UnnamedExpr(expr) => !column(expr) && expr.to_string().eq_ignore_ascii_case(&name.value),
+            _ => false,
+        }),
         Expr::CompoundIdentifier(_) => true,
         Expr::Value(v) if !projection.iter().any(|i| matches!(i, SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..))) => match &v.value {
             Value::Number(n, _) => n.parse::<usize>().ok().and_then(|n| projection.get(n.checked_sub(1)?)).is_some_and(|i| matches!(i, SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } if column(e))),
