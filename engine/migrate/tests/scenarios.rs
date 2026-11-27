@@ -2200,8 +2200,9 @@ async fn a_not_null_the_rows_break_is_named_by_its_column(mut p: P) {
 }
 
 /// On Postgres 19, a publication of all sequences, and the tables its all tables leave out, are
-/// part of it: a schema.sql that changes either disagrees with the migrations, the change makes the
-/// publication again, and introspect writes both.
+/// part of it: a schema.sql that changes either disagrees with the migrations, and the change sets
+/// them in place, while one to a list of tables makes the publication again. Introspect writes both,
+/// and the schemas of the tables left out, which the publication can't be made without.
 async fn a_publications_sequences_and_exceptions_are_its_own(mut p: P) {
     if p.d != Dialect::Postgres || p.rows("select current_setting('server_version_num')::int >= 190000 as ok").await[0].text("ok") != "t" {
         return;
@@ -2213,25 +2214,31 @@ async fn a_publications_sequences_and_exceptions_are_its_own(mut p: P) {
     let (code, out) = p.check_every_way().await;
     assert_eq!(code, 0, "{out}");
     assert!(!out.contains("ahead of the migrations"), "{out}");
-    // Changing what all tables cover makes the publication again, which the migrations don't.
-    for (schema, made) in [
-        ("create publication p for all tables except (table b), all sequences;", r"create publication p for all tables except \(table (only )?b\), all sequences;"),
-        ("create publication p for all tables except (table a);", r"create publication p for all tables except \(table (only )?a\);"),
+    for (schema, plan) in [
+        ("create publication p for all tables except (table b), all sequences;", r"alter publication p set all tables except \(table only (public\.)?b\), all sequences;"),
+        ("create publication p for all tables except (table a);", r"alter publication p set all tables except \(table only (public\.)?a\);"),
+        ("create publication p for all sequences;", r"alter publication p set all sequences;"),
+        ("create publication p for table b;", r"drop publication p;\n    create publication p for table (only )?(public\.)?b;"),
     ] {
         p.schema(&format!("{tables}\n{schema}"));
         let (_, out) = p.check_every_way().await;
-        assert_has!(&out, &format!(r"The migrations and \S+ disagree\n    drop publication p;\n    {made}\n"));
+        assert_has!(&out, &format!(r"The migrations and \S+ disagree\n    {plan}\n"));
     }
-    // Introspect of one schema of several writes the publications itself, beside pg_dump's dump of it, as pg_dump 19 writes them.
+    // Introspect of one schema of several writes the publications itself, beside pg_dump's dump of
+    // it, as pg_dump 19 writes them, and the schema of a table one leaves out, so that it replays.
     p.schema(&published);
     assert_eq!(p.migrate().await, 0, "{}", p.peek());
-    p.exec("create schema other; create table other.x (id int)").await;
+    p.exec("create schema other; create table other.x (id int); create schema third; create table third.y (id int); alter publication p set all tables except (table a, table other.x), all sequences").await;
     let mut said = Vec::new();
     let text = match reylo_migrate::db_introspect(&p.opts(), &["public".to_string()], &mut |l: &str| said.push(l.to_string())).await {
         Ok(Ok(text)) => text,
         other => panic!("introspect: {:?}\n{}", other.map_err(|e| e.0), said.join("\n")),
     };
-    assert!(text.contains("CREATE PUBLICATION p FOR ALL TABLES EXCEPT (TABLE ONLY public.a), ALL SEQUENCES"), "{text}");
+    assert_eq!(said.first().map(String::as_str), Some("» Reading other too, which a publication names"), "{}", said.join("\n"));
+    assert!(text.contains("CREATE PUBLICATION p FOR ALL TABLES EXCEPT (TABLE ONLY other.x, TABLE ONLY public.a), ALL SEQUENCES"), "{text}");
+    let q = P::new(p.d).await.unwrap();
+    q.exec(&text).await;
+    assert_eq!(q.rows("select 1 from pg_publication_rel where prexcept").await.len(), 2);
 }
 
 /// A change `migrate new` split across two tables, an index on each in a file of its own: the files

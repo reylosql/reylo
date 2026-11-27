@@ -2074,6 +2074,7 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
         if r.flag("all_sequences") {
             what.push("all sequences".to_string());
         }
+        let all = what.join(", ");
         // Each table it holds as itself alone: Postgres lists a table's inheriting children as tables
         // of their own where a publication takes them, so a table named without `only` would bring
         // children the target leaves out.
@@ -2106,8 +2107,6 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
             .collect();
         let mut objects: Vec<String> = tables.iter().map(|(_, t, _)| format!("table only {t}")).collect();
         objects.extend(in_schemas.iter().map(|n| format!("tables in schema {n}")));
-        // What `all` covers changes only by making the publication again.
-        let all = format!("{} {} except {}", r.flag("all_tables"), r.flag("all_sequences"), excepted.join(", "));
         let extra = vec![format!("all {all}"), format!("objects {}", objects.join(", ")), format!("with {}", with.join(", ")), format!("publish {}", r.text("publish"))];
         ids.publications.insert(oid(&r, "oid"), format!("publication {name}"));
         // After the tables it names, among the last objects made.
@@ -5426,13 +5425,17 @@ impl Alterer for PostgresAlterer {
                 Some(out)
             }
             Kind::Statistics if to.id.starts_with("publication ") => {
-                // What a publication publishes changes in place; whether it is all tables does not.
+                // What a publication publishes changes in place, and so, on Postgres 19, does what a
+                // publication of all tables or all sequences covers. Whether it covers all of either
+                // or names its tables does not.
                 let name = to.id.strip_prefix("publication ")?;
                 let part = |o: &Object, what: &str| o.extra.iter().find_map(|l| l.strip_prefix(what)).map(String::from).unwrap_or_default();
-                if part(from, "all ") != part(to, "all ") {
-                    return None;
-                }
                 let mut out = Vec::new();
+                match (part(from, "all "), part(to, "all ")) {
+                    (a, b) if a == b => {}
+                    (a, b) if a.is_empty() || b.is_empty() => return None,
+                    (_, b) => out.push(format!("alter publication {name} set {b}")),
+                }
                 match (part(from, "objects "), part(to, "objects ")) {
                     (a, b) if a == b => {}
                     (a, b) if b.is_empty() => out.push(format!("alter publication {name} drop {}", without_lists(&a))),

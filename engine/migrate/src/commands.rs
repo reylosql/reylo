@@ -9347,6 +9347,14 @@ async fn with_referenced(db: &mut Db, schemas: &[String], log: Log<'_>) -> Resul
     }
     let project = crate::catalog::user_schemas(db).await?;
     let mut named = schemas.to_vec();
+    // A publication is in no schema, so its SQL is written whatever --schema names, and it names
+    // tables and schemas of its own, which have to be made before it.
+    let published: Vec<String> = published_schemas(db).await?.into_iter().filter(|s| project.contains(s) && !named.contains(s)).collect();
+    if !published.is_empty() {
+        log(&note(format!("Reading {} too, which a publication names", and_list(&published))));
+        named.extend(published);
+    }
+    let before = named.len();
     loop {
         let more: Vec<String> = referenced_schemas(db, &named).await?.into_iter().filter(|s| project.contains(s) && !named.contains(s)).collect();
         if more.is_empty() {
@@ -9354,10 +9362,32 @@ async fn with_referenced(db: &mut Db, schemas: &[String], log: Log<'_>) -> Resul
         }
         named.extend(more);
     }
-    if named.len() > schemas.len() {
-        log(&note(format!("Reading {} too, which {} refers to", and_list(&named[schemas.len()..]), and_list(schemas))));
+    if named.len() > before {
+        log(&note(format!("Reading {} too, which {} refers to", and_list(&named[before..]), and_list(&named[..before]))));
     }
     Ok(named)
+}
+
+/// The schemas the project's publications name: those of the tables each lists or leaves out of
+/// all tables, and each whose tables it publishes.
+#[cfg(feature = "cli")]
+async fn published_schemas(db: &mut Db) -> Result<Vec<String>, Error> {
+    let version: i64 = db.rows("select current_setting('server_version_num') as v").await?.first().and_then(|r| r.first()?.parse().ok()).unwrap_or(0);
+    // Postgres 15 publishes a schema's tables.
+    let in_schema = if version >= 150000 { "union select pn.pnnspid from pg_publication_namespace pn where pn.pnpubid = p.oid" } else { "" };
+    let rows = db
+        .rows(&format!(
+            "select distinct n.nspname as name from pg_publication p
+               cross join lateral (select c.relnamespace as ns from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid where pr.prpubid = p.oid {in_schema}) o
+               join pg_namespace n on n.oid = o.ns
+             where {} and not ({} and p.pubname = {})
+             order by 1",
+            crate::catalog::not_platform("p.pubowner"),
+            crate::catalog::platform_names(),
+            crate::db::literal(crate::catalog::PLATFORM_PUBLICATION)
+        ))
+        .await?;
+    Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
 }
 
 /// The schemas of the project's that --schema has to name for SQL of them to hold them: each that
