@@ -77,9 +77,11 @@ test("every Postgres type's values at its edges hold to its JSON Schema, as `.ru
     const schema = typeSchema(t, "postgres") as JsonSchema;
     for (const text of texts) {
       const value = textDecoder(columnKind(t, "postgres"))(text);
-      // As JSON writes it: a BigInt the integer it is, bytes their base64.
-      const json = JSON.parse(JSON.stringify(value instanceof Uint8Array ? Buffer.from(value).toString("base64") : value, (_, x) => (typeof x === "bigint" ? (JSON as unknown as { rawJSON(text: string): unknown }).rawJSON(String(x)) : x)));
-      assert.equal(validate(schema, json), undefined, `${name} ${text}: ${JSON.stringify(json)}`);
+      // As JSON writes it: a BigInt the integer it is, bytes their base64. Read back exactly, a whole
+      // number past 2^53 - 1 from its digits, which the validator refuses as a number.
+      const text_ = JSON.stringify(value instanceof Uint8Array ? Buffer.from(value).toString("base64") : value, (_, x) => (typeof x === "bigint" ? (JSON as unknown as { rawJSON(text: string): unknown }).rawJSON(String(x)) : x));
+      const json = JSON.parse(text_, (_key, x, context?: { source?: string }) => (typeof x === "number" && !Number.isSafeInteger(x) && /^-?\d+$/.test(context?.source ?? "") ? BigInt(context!.source!) : x));
+      assert.equal(validate(schema, json), undefined, `${name} ${text}: ${text_}`);
     }
   }
 });
