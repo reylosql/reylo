@@ -831,7 +831,8 @@ fn schema_kind_type(kind: &str, m: &Map<String, Value>, beside_objects: bool, in
             let open = additional.is_none() || rest == JSON_TYPE;
             let signature = if fields.is_empty() { rest != "never" } else { (rest != "never" && rest != JSON_TYPE) || (open && beside_objects) };
             if signature {
-                let of = if fields.is_empty() { rest.clone() } else { format!("{JSON_TYPE} | undefined") };
+                // A parameter's named field may hold a BigInt, which `Json` doesn't, so a signature beside one is `unknown`.
+                let of = if fields.is_empty() { rest.clone() } else if input && fields.iter().any(|f| f.contains("bigint")) { "unknown".to_string() } else { format!("{JSON_TYPE} | undefined") };
                 fields.push(format!("[key: string]: {of}"));
             }
             if !fields.is_empty() {

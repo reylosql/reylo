@@ -193,7 +193,8 @@ const FLAT_ELEMENTS: ReadonlySet<EngineType["kind"]> = new Set(["boolean", "inte
  * on Postgres, a float or a decimal that may be NaN or an infinity, which Postgres writes there as
  * the text `"NaN"`, `"Infinity"` or `"-Infinity"` and the run time gives as that number, `true`;
  * on every dialect but ClickHouse, an integer wider than a double holds exactly, whose number past
- * 2^53 - 1 JSON.parse may already have rounded and the run time refuses, `"integer"`; `items` for
+ * 2^53 - 1 JSON.parse may already have rounded and the run time refuses, `"integer"`, or
+ * `"unsigned"` for an unsigned one; `items` for
  * an array's elements (through nested arrays where Postgres's own may nest), `keys` for an
  * object's fields; undefined where it holds none. It walks the type as `renderType` prints it, so
  * each place printed `number` there is one the run time reads. It marks `flat` each Postgres array
@@ -207,14 +208,16 @@ export function jsonNumbers(t: EngineType, inJson = false, dialect: Dialect = "p
       return inJson && dialect === "postgres" && (t.nan === true || t.infinity === true) ? true : undefined;
     case "integer":
       // A signed integer of 55 bits or more, or an unsigned one of 54 or more, holds a number past 2^53 - 1.
-      return inJson && dialect !== "clickhouse" && !(dialect === "postgres" && name === "oid") && (t.unsigned ? t.bits : t.bits - 1) > 53 ? "integer" : undefined;
+      if (!inJson || dialect === "clickhouse" || (dialect === "postgres" && name === "oid") || (t.unsigned ? t.bits : t.bits - 1) <= 53) return undefined;
+      return t.unsigned ? "unsigned" : "integer";
     case "enum":
       return jsonNumbers(t.type, inJson, dialect);
     case "union": {
       // An integer of one width or another (MySQL's `bigint | int`); a union that may also be a
       // float, as a SQLite NUMERIC is, holds numbers a double may hold exactly.
       if (!inJson || (dialect === "postgres" && json[name] !== undefined) || !t.members.every((m) => m.kind === "integer")) return undefined;
-      return t.members.some((m) => jsonNumbers(m, true, dialect) === "integer") ? "integer" : undefined;
+      const read = t.members.map((m) => jsonNumbers(m, true, dialect));
+      return read.includes("unsigned") ? "unsigned" : read.includes("integer") ? "integer" : undefined;
     }
     case "array": {
       if (inJson ? dialect === "postgres" && json[name] !== undefined : dialect !== "postgres" || !columnKind(t, "postgres").endsWith("[]")) return undefined;
@@ -259,14 +262,25 @@ function admitsNumber(schema: unknown): boolean {
   return !kinds.length || kinds.includes("number") || kinds.includes("integer");
 }
 
+/** Whether a schema admits no number but an integer: its numbers past 2^53, where a 64-bit integer stands beside it, are that integer's. */
+function integerOnly(schema: unknown): boolean {
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return false;
+  const kinds = kindsOf(schema as Record<string, unknown>);
+  return kinds.includes("integer") && kinds.every((k) => k === "integer" || k === "null");
+}
+
 function schemaNumbers(schema: unknown): JsonNumbers | undefined {
   if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return undefined;
   const m = schema as Record<string, unknown>;
   if (Array.isArray(m.anyOf)) {
-    // Each alternative's reading, where they agree: an integer or null reads as the integer, and an
-    // integer or a float as neither, since a float's number past 2^53 is exact.
-    const read = m.anyOf.map((s) => [schemaNumbers(s), s] as const).filter(([at, s]) => at !== undefined || admitsNumber(s));
-    return read.length && read.every(([at]) => at !== undefined && JSON.stringify(at) === JSON.stringify(read[0]![0])) ? read[0]![0] : undefined;
+    // Each alternative's reading, where they agree: an integer or null reads as the integer, and so
+    // does a 64-bit integer beside a narrower one, whose numbers hold to 2^53; an integer or a float
+    // reads as neither, since a float's number past 2^53 is exact.
+    const read = m.anyOf.flatMap((s) => {
+      const at = schemaNumbers(s);
+      return at !== undefined ? [at] : !admitsNumber(s) || integerOnly(s) ? [] : [undefined];
+    });
+    return read.length && read.every((at) => at !== undefined && JSON.stringify(at) === JSON.stringify(read[0])) ? read[0] : undefined;
   }
   const kinds = kindsOf(m);
   if (kinds.includes("integer") && m.format === "int64" && kinds.every((k) => k === "integer" || k === "null")) return "integer";
@@ -351,7 +365,8 @@ function kindType(kind: string, m: Record<string, unknown>, besideObjects: boole
       const rest = m.additionalProperties === undefined || m.additionalProperties === false ? "never" : schemaType(m.additionalProperties, false, input);
       const open = m.additionalProperties === undefined || rest === JSON_TYPE;
       const signature = fields.length ? (rest !== "never" && rest !== JSON_TYPE) || (open && besideObjects) : rest !== "never";
-      if (signature) fields.push(`[key: string]: ${fields.length ? `${JSON_TYPE} | undefined` : rest}`);
+      // A parameter's named field may hold a BigInt, which `Json` doesn't, so a signature beside one is `unknown`.
+      if (signature) fields.push(`[key: string]: ${fields.length ? (input && fields.some((f) => f.includes("bigint")) ? "unknown" : `${JSON_TYPE} | undefined`) : rest}`);
       if (fields.length) return `{ ${fields.join("; ")} }`;
       return m.additionalProperties === undefined ? `Record<string, ${JSON_TYPE}>` : "Record<never, never>";
     }

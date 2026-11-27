@@ -56,7 +56,7 @@ export type Columns = readonly (readonly [name: string, kind: Kind, delimiter?: 
  * What the run time reads inside a document a statement builds (src/render.ts, `jsonNumbers`):
  * where it holds a float or a decimal that may be NaN or an infinity, which Postgres writes there
  * as text, `true` for such a value; where it holds an integer wider than a double holds exactly,
- * `"integer"`; for an array, `items` for its elements (`false` where they need nothing), the first
+ * `"integer"`, or `"unsigned"` for an unsigned one; for an array, `items` for its elements (`false` where they need nothing), the first
  * of them by place in `elements` where they differ, through nested arrays where `deep`, and `flat`
  * where it is a Postgres array held to one level; and `keys` for an object's fields, `others` for
  * every key they don't name.
@@ -64,6 +64,7 @@ export type Columns = readonly (readonly [name: string, kind: Kind, delimiter?: 
 export type JsonNumbers =
   | true
   | "integer"
+  | "unsigned"
   | { readonly items: JsonNumbers | false; readonly elements?: readonly (JsonNumbers | null)[]; readonly deep?: true; readonly flat?: true }
   | { readonly keys: readonly (readonly [key: string, at: JsonNumbers])[]; readonly others?: JsonNumbers };
 
@@ -86,8 +87,13 @@ class Rounded {
   }
 }
 
-/** The widest value a 64-bit integer holds: a number past it inside a document is a float, which JSON.parse reads exactly. */
-const INTEGER_64 = 2 ** 64;
+/**
+ * The widest value a signed and an unsigned 64-bit integer hold, as doubles: a number past it inside
+ * a document is a float, which JSON.parse reads exactly, as a non-STRICT SQLite INTEGER column may
+ * store one.
+ */
+const SIGNED_64 = 2 ** 63;
+const UNSIGNED_64 = 2 ** 64;
 
 /**
  * A parsed JSON value with the text Postgres writes for each non-finite float or decimal at
@@ -110,8 +116,8 @@ export function numbersInJson(v: unknown, at: JsonNumbers, column = ""): unknown
 
 function read(v: unknown, at: JsonNumbers, column: string): unknown {
   if (at === true) return v === "NaN" ? NaN : v === "Infinity" ? Infinity : v === "-Infinity" ? -Infinity : v;
-  if (at === "integer") {
-    if (typeof v === "number" && Math.abs(v) > Number.MAX_SAFE_INTEGER && Math.abs(v) <= INTEGER_64) throw new Rounded(v);
+  if (at === "integer" || at === "unsigned") {
+    if (typeof v === "number" && Math.abs(v) > Number.MAX_SAFE_INTEGER && Math.abs(v) <= (at === "integer" ? SIGNED_64 : UNSIGNED_64)) throw new Rounded(v);
     return v;
   }
   if (v === null || typeof v !== "object") return v;
@@ -1306,13 +1312,13 @@ export function withRawIntegers(v: unknown): unknown {
 
 const bigintToJson = () => typeof (BigInt.prototype as { toJSON?: unknown }).toJSON === "function";
 
-function rawCopy(v: unknown): unknown {
+function rawCopy(v: unknown, key = ""): unknown {
   if (typeof v === "bigint") return rawInteger(v);
   if (v === null || typeof v !== "object" || (JSON as { isRawJSON?: (x: unknown) => boolean }).isRawJSON?.(v)) return v;
-  // What JSON.stringify writes for the value: its toJSON()'s (a Date's), or its items and own keys.
-  if (typeof (v as { toJSON?: unknown }).toJSON === "function") return rawCopy((v as { toJSON(key: string): unknown }).toJSON(""));
-  if (Array.isArray(v)) return Array.from(v, rawCopy);
-  return Object.fromEntries(Object.entries(v).map(([key, x]) => [key, rawCopy(x)]));
+  // What JSON.stringify writes for the value: its toJSON()'s (a Date's), given the key it stands at, or its items and own keys.
+  if (typeof (v as { toJSON?: unknown }).toJSON === "function") return rawCopy((v as { toJSON(key: string): unknown }).toJSON(key), key);
+  if (Array.isArray(v)) return Array.from(v, (x, i) => rawCopy(x, String(i)));
+  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, rawCopy(x, k)]));
 }
 
 /** The integers MySQL and SQLite read from JSON as integers: SQLite's 64-bit signed ones, and MySQL's signed and unsigned ones. */
