@@ -433,6 +433,7 @@ fn expr_queries<'a>(e: &'a Expr, out: &mut Vec<&'a Query>) -> Option<()> {
             Some(())
         }
         Expr::BinaryOp { left, right, .. } => all(&mut [&**left, &**right].into_iter(), out),
+        Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } | Expr::SimilarTo { expr, pattern, .. } | Expr::RLike { expr, pattern, .. } => all(&mut [&**expr, &**pattern].into_iter(), out),
         Expr::Nested(inner) | Expr::UnaryOp { expr: inner, .. } | Expr::IsNull(inner) | Expr::IsNotNull(inner) | Expr::IsTrue(inner) | Expr::IsFalse(inner) | Expr::Cast { expr: inner, .. } => expr_queries(inner, out),
         Expr::InList { expr, list, .. } => all(&mut std::iter::once(&**expr).chain(list), out),
         Expr::Between { expr, low, high, .. } => all(&mut [&**expr, &**low, &**high].into_iter(), out),
@@ -462,13 +463,27 @@ fn expr_queries<'a>(e: &'a Expr, out: &mut Vec<&'a Query>) -> Option<()> {
     }
 }
 
-/// Whether a text, outside the walk, may hold a WITH: the word outside quotes, but in a ROLLUP's
-/// `WITH ROLLUP`. A string or a quoted name holds no keyword, and where one holds a backslash,
-/// which the session's mode decides the meaning of, the text counts as holding a WITH.
+/// Whether a text, outside the walk, may hold a WITH: the word outside quotes and comments, but in
+/// a ROLLUP's `WITH ROLLUP`. A string, a quoted name and an optimizer hint hold no keyword. Where a
+/// quoted one holds a backslash, which the session's mode decides the meaning of, or one never
+/// ends, the text counts as holding a WITH.
 fn with_in(text: &str) -> bool {
     let mut bare = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
+        if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            let mut last = ' ';
+            loop {
+                match chars.next() {
+                    None => return true,
+                    Some('/') if last == '*' => break,
+                    Some(next) => last = next,
+                }
+            }
+            bare.push(' ');
+            continue;
+        }
         if !matches!(c, '\'' | '"' | '`') {
             bare.push(c);
             continue;
@@ -953,6 +968,8 @@ mod tests {
         assert!(with_in("x in (with t as (select 1) select 1)") && with_in("WITH t AS (SELECT 1)"));
         assert!(!with_in("x like 'with'") && !with_in("`with` = 1") && !with_in("'it''s with'") && !with_in("k with rollup"));
         assert!(with_in("'a\\' with t as (select 1)") && with_in("'unterminated with"));
+        // A hint is no SQL, whatever quotes it holds.
+        assert!(with_in("(select /*+ QB_NAME(') */ (with t as (select 1) select 1))") && !with_in("/*+ with */ 1") && with_in("/*+ unterminated with"));
     }
 
     #[test]
@@ -996,6 +1013,7 @@ mod tests {
             // one named like a column.
             "with z as (select x from tu where id = 1) select z.x from z order by concat(z.x, 'with é')",
             "with o as (select 1 as x) select x from o order by x like 'with', `with` = 'it''s with'",
+            "with o as (select 'a_b' as x) select x from o order by x like 'a\\_b'",
             "with z as (select x from tu where id = 1) select z.x from z where exists (with q as (select 1) select 1 from q)",
             "with z as (select p.x from t4 p) select d.x from (with x as (select 1 as k) select z.x from z, x) d",
         ] {
