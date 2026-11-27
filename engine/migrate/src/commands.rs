@@ -1803,26 +1803,29 @@ fn leftover_filter(statement: &str) -> Option<String> {
     const S: &str = r"[ \t\n\r\x0B\x0C]";
     static PATTERNS: LazyLock<[Regex; 3]> = LazyLock::new(|| {
         let part = r#"(?:"(?:[^"]|"")*"|[^ \t\n\r\x0B\x0C(".;]+)"#;
-        let name = format!(r"{part}(?:\.{part})*");
+        // A dotted name, the dots with or without spacing around them, ending where a word does.
+        let name = format!(r"{part}(?:\s*\.\s*{part})*");
+        let end = r"(?:\s|[,;(]|$)";
         let re = |p: String| Regex::new(&p.replace("\\s", S)).expect("a valid pattern");
         [
-            re(format!(r"(?i)^create\s+(?:unique\s+)?index\s+concurrently\s+(?:if\s+not\s+exists\s+)?(?:({name})\s+)?on\s+(?:only\s+)?({name})")),
-            re(format!(r"(?i)^drop\s+index\s+concurrently\s+(?:if\s+exists\s+)?({name})")),
-            re(format!(r"(?i)^reindex\s+(?:\([^)]*\)\s*)?(index|table)\s+concurrently\s+({name})")),
+            re(format!(r"(?i)^create\s+(?:unique\s+)?index\s+concurrently\s+(?:if\s+not\s+exists\s+)?(?:({name})\s+)?on\s+(?:only\s+)?({name}){end}")),
+            re(format!(r"(?i)^drop\s+index\s+concurrently\s+(?:if\s+exists\s+)?({name}){end}")),
+            re(format!(r"(?i)^reindex\s+(?:\([^)]*\)\s*)?(index|table)\s+concurrently\s+({name}){end}")),
         ]
     });
     let [create, drop, reindex] = &*PATTERNS;
     let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    // The statement as its tokens, so that a comment between two words is no name; a dotted name
-    // stays one word.
+    // The statement as its tokens, a space where spacing or a comment came between two, so that a
+    // comment is no name and a name written as one word (`U&"i"`) stays one, which matches nothing
+    // here rather than a part of it.
     let mut sql = String::new();
-    let mut last = "";
+    let mut last = None;
     for t in crate::sql::tokenize(statement, Dialect::Postgres) {
-        if !sql.is_empty() && t.text != "." && last != "." {
+        if last.is_some_and(|end| end < t.start) {
             sql.push(' ');
         }
         sql.push_str(&t.text);
-        last = if t.text == "." { "." } else { "" };
+        last = Some(t.end);
     }
     let sql = sql.trim_end_matches(';').trim_end_matches(|c: char| c.is_ascii_whitespace());
     if let Some(c) = create.captures(sql) {
@@ -11178,6 +11181,10 @@ mod tests {
         assert_eq!(f("create index concurrently on \"T\"\n  (x)"), "i.indrelid = to_regclass('\"T\"')");
         assert!(f("reindex index concurrently Édition_IDX").contains("x.oid = to_regclass('Édition_IDX')) || '_ccnew')"));
         assert_eq!(super::leftover_filter("create index i on t (x)"), None);
+        // A name read only in part would name another index: nothing is matched.
+        assert_eq!(super::leftover_filter("drop index concurrently U&\"actual_idx\""), None);
+        assert_eq!(super::leftover_filter("create index concurrently i on U&\"t\" (x)"), None);
+        assert_eq!(f("drop index concurrently app . idx;"), "c.oid = to_regclass('app . idx')");
     }
 
     #[test]
