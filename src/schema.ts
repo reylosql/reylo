@@ -52,9 +52,9 @@ const string = (schema: Schema = { type: "string" }): DocumentForm => ({ schema,
 // read. A type named nowhere here, whose form the engine does not know, is any JSON value: an
 // extension's type may have a cast to JSON. The same list in engine/core/src/schema.rs and
 // engine/cli/src/typescript.rs.
-export const POSTGRES_IN_JSON: Readonly<Record<string, DocumentForm>> = {
-  ...Object.fromEntries(
-    [
+const POSTGRES_IN_JSON: ReadonlyMap<string, DocumentForm> = new Map([
+  ...[
+
       "bit", "varbit", "vector", "halfvec", "sparsevec",
       "point", "line", "lseg", "box", "path", "polygon", "circle",
       "inet", "cidr",
@@ -63,7 +63,7 @@ export const POSTGRES_IN_JSON: Readonly<Record<string, DocumentForm>> = {
       // Types with no cast to JSON, which Postgres writes inside a document as their text: built-in
       // system types, and the extensions' on Neon and Supabase (PostGIS's others, cube, seg, isn,
       // intarray, h3, hll, ip4r, pgx_ulid, prefix, rdkit, roaringbitmap, semver, unit, VectorChord).
-      "pg_lsn", "jsonpath", "xid", "xid8", "oid8", "regdatabase",
+      "oid", "pg_lsn", "jsonpath", "xid", "xid8", "oid8", "regdatabase",
       "regproc", "regprocedure", "regoper", "regoperator", "regnamespace", "regrole", "regcollation", "regconfig", "regdictionary",
       "geography", "box2d", "box3d", "spheroid", "raster",
       "cube", "seg", "ean13", "isbn", "isbn13", "ismn", "ismn13", "issn", "issn13", "upc",
@@ -71,22 +71,37 @@ export const POSTGRES_IN_JSON: Readonly<Record<string, DocumentForm>> = {
       "ip4", "ip4r", "ip6", "ip6r", "ipaddress", "iprange", "ulid", "prefix_range",
       "mol", "qmol", "xqmol", "reaction", "bfp", "sfp", "roaringbitmap", "s3vec",
       "semver", "semverrange", "semvermultirange", "unit", "unitrange", "unitmultirange", "rabitq8", "rabitq4",
-    ].map((name) => [name, string({ type: "string", description: `pg type ${name}` })]),
-  ),
+  ].map((name): [string, DocumentForm] => [name, string({ type: "string", description: `pg type ${name}` })]),
   // An hstore is an object of its keys inside a document, each value text or null (`{"a": "1", "b": null}`).
-  hstore: { schema: { type: "object", additionalProperties: { type: ["string", "null"] } }, type: "Record<string, string | null>" },
+  ["hstore", { schema: { type: "object", additionalProperties: { type: ["string", "null"] } }, type: "Record<string, string | null>" }],
   // PostGIS writes a geometry through its cast to JSON: a GeoJSON geometry, `{"type":"Point","coordinates":[1,2]}`.
-  geometry: { schema: GEOJSON, type: "{ type: string; [key: string]: Json | undefined }" },
+  ["geometry", { schema: GEOJSON, type: "{ type: string; [key: string]: Json | undefined }" }],
   // A row whose columns were not read (a subquery's): an object of them inside a document.
-  record: { schema: { type: "object" }, type: "Record<string, Json>" },
-};
+  ["record", { schema: { type: "object" }, type: "Record<string, Json>" }],
+]);
+
+/** pgvector's types, arrays of numbers that Postgres writes inside a document as their text, in whatever schema the extension was created in. */
+const PGVECTOR = new Set(["vector", "halfvec", "sparsevec"]);
+
+/**
+ * The form Postgres writes a value of `t` in inside a document, of those the table above names. A
+ * built-in structure (a geometric type, a bit string, a network address) is known by its own
+ * label, which a type of another schema never has, since the engine qualifies one: a composite of
+ * the user's named `public.point` is an object of its fields there. An extension's type is known
+ * by its name in whatever schema it was created in.
+ */
+export function postgresInJson(t: EngineType): DocumentForm | undefined {
+  const name = bareName(t);
+  const key = (t.kind === "array" || t.kind === "struct" || t.kind === "union") && !(t.kind === "array" && PGVECTOR.has(name)) ? ("label" in t ? t.label : undefined) : name;
+  return key === undefined ? undefined : POSTGRES_IN_JSON.get(key);
+}
 
 /**
  * MySQL's bytes inside a document, a BIT's at any width among them: `base64:type<n>:` and their
  * base64, `<n>` the column's type code (15 for a VARBINARY, 16 for a BIT, 252 for a BLOB, 254 for a
- * BINARY).
+ * BINARY), with a newline after every 76 characters of it, as MIME's base64 breaks its lines.
  */
-const MYSQL_BYTES = string({ type: "string", pattern: "^base64:type[0-9]+:([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$", description: "bytes as MySQL writes them inside JSON, their type code and their base64 (base64:type15:YWI=)" });
+const MYSQL_BYTES = string({ type: "string", pattern: "^base64:type[0-9]+:[A-Za-z0-9+/\\n]*={0,2}$", description: "bytes as MySQL writes them inside JSON, their type code and their base64 (base64:type15:YWI=)" });
 
 /**
  * How `dialect` writes a value of `t` inside a JSON document it builds, where the value is no
@@ -116,7 +131,7 @@ export function inDocument(t: EngineType, dialect: Dialect, inUnion = false): Do
     switch (t.kind) {
       case "array": case "struct": case "union":
         // A type the format structures that Postgres writes as its text, or a network address.
-        return t.kind === "struct" && name === "record" ? undefined : POSTGRES_IN_JSON[name];
+        return t.kind === "struct" && name === "record" ? undefined : postgresInJson(t);
       // An oid is no number JSON writes: Postgres writes its text.
       case "integer": return name === "oid" ? string() : { schema: integer(t), type: "number" };
       case "bytes": return name === "macaddr" || name === "macaddr8" ? string({ type: "string", description: `pg type ${name}` }) : string({ type: "string", format: "hex" });
@@ -126,7 +141,7 @@ export function inDocument(t: EngineType, dialect: Dialect, inUnion = false): Do
       case "range": case "multirange": return string({ type: "string", description: `pg type ${name || t.kind}` });
       case "xml": return string({ type: "string", description: "pg type xml" });
       case "opaque": case "map": case "geometry": case "zoned_datetime":
-        return POSTGRES_IN_JSON[name] ?? (name ? { schema: { description: `pg type ${name}` }, type: JSON_TYPE } : ANY);
+        return postgresInJson(t) ?? (name ? { schema: { description: `pg type ${name}` }, type: JSON_TYPE } : ANY);
     }
   }
   if (dialect === "mysql") {
@@ -227,7 +242,8 @@ function scalar(t: EngineType, dialect: Dialect, input: boolean): Schema {
     }
     return kindSchema(scalarKind(kinds[0]!), t, dialect);
   }
-  if (t.kind === "union" && !(dialect === "postgres" && (name === "inet" || name === "cidr"))) return anyOf(t.members.map((m) => scalar(m, dialect, input)));
+  // A union's members, each as a value of its own type is, an array or a row among them (a ClickHouse Variant's).
+  if (t.kind === "union" && !(dialect === "postgres" && (name === "inet" || name === "cidr"))) return anyOf(t.members.map((m) => typeSchema(m, dialect, input)));
   const kind = columnKind(t, dialect);
   if (input) {
     // A MySQL TINYINT(1) or BIT(1) column's parameter takes the truth value its rows return, or the integer it stores.
@@ -486,8 +502,10 @@ function withFacts(schema: Schema | JsonSchema, t: EngineType, input: boolean): 
       bound(t.exclusive_min, "exclusiveMinimum");
       bound(t.exclusive_max, "exclusiveMaximum");
     }
+    // A divisor that is a whole number: a validator that divides as a double, ajv's or Python's,
+    // finds 0.15 no multiple of 0.05, whose quotient is 2.9999999999999996.
     const divisor = t.kind === "float" || t.multiple_of === undefined || !exact ? undefined : exactDivisor(t.multiple_of, whole);
-    if (divisor !== undefined) facts.multipleOf = divisor;
+    if (divisor !== undefined && Number.isInteger(divisor)) facts.multipleOf = divisor;
   }
   if (t.kind === "array" && schema.type === "array" && t.size !== undefined) sized(t.size, "minItems", "maxItems", false);
   if (t.kind === "map" && schema.type === "object" && t.size !== undefined) sized(t.size, "minProperties", "maxProperties", false);
@@ -540,12 +558,13 @@ function plainSchema(t: EngineType, dialect: Dialect, input: boolean, inJson: bo
       const base = typeSchema(t.type, dialect, input, inJson, inRow, undefined, codecs);
       if (typeof base !== "object" || base === null) return base;
       const values = t.values.map(({ value: v }): unknown => {
-        if (base.type === "boolean") return v === "true";
+        // A truth value, which an integer base such as MySQL's TINYINT(1) writes as 1 and 0.
+        if (base.type === "boolean") return v === "true" || v === "1" ? true : v === "false" || v === "0" ? false : undefined;
         if (base.type === "integer" || base.type === "number") return exactNumber(v, base.type === "integer");
         if (base.type === "string" && t.type.kind === "text") return v;
         return undefined;
       });
-      return values.every((v) => v !== undefined) ? { ...base, enum: values } : base;
+      return values.every((v) => v !== undefined) ? { ...base, enum: [...new Set(values)] } : base;
     }
     // A tuple: its elements, then its optional ones, then any number of its rest.
     // JSON Schema 2020-12 refuses an empty `prefixItems`, so a tuple of none is `items` alone.

@@ -71,6 +71,12 @@ fn member_schema(ty: &Type, opts: SchemaOptions) -> Value {
     }
 }
 
+/// A built-in type's name, which is its label: a type of another schema has its schema in its label
+/// (`public.point`), so that a composite of the user's named so is no geometric type.
+fn builtin_name(ty: &Type) -> &str {
+    ty.label.as_deref().unwrap_or("")
+}
+
 /// The type's name without the schema that qualifies it: `hstore` of `public.hstore`.
 fn bare_name(ty: &Type) -> &str {
     ty.label.as_deref().map(|n| n.rsplit('.').next().unwrap_or(n)).unwrap_or("")
@@ -85,7 +91,7 @@ fn bare_name(ty: &Type) -> &str {
 /// src/schema.ts, `POSTGRES_IN_JSON`.
 pub const POSTGRES_TEXT_IN_JSON: &[&str] = &[
     "bit", "varbit", "vector", "halfvec", "sparsevec", "point", "line", "lseg", "box", "path", "polygon", "circle", "inet", "cidr", "money", "tsvector", "tsquery", "regclass", "regtype", "ltree", "lquery", "ltxtquery",
-    "pg_lsn", "jsonpath", "xid", "xid8", "oid8", "regdatabase", "regproc", "regprocedure", "regoper", "regoperator", "regnamespace", "regrole", "regcollation", "regconfig", "regdictionary",
+    "oid", "pg_lsn", "jsonpath", "xid", "xid8", "oid8", "regdatabase", "regproc", "regprocedure", "regoper", "regoperator", "regnamespace", "regrole", "regcollation", "regconfig", "regdictionary",
     "geography", "box2d", "box3d", "spheroid", "raster", "cube", "seg", "ean13", "isbn", "isbn13", "ismn", "ismn13", "issn", "issn13", "upc", "query_int", "h3index", "hll", "hll_hashval",
     "ip4", "ip4r", "ip6", "ip6r", "ipaddress", "iprange", "ulid", "prefix_range", "mol", "qmol", "xqmol", "reaction", "bfp", "sfp", "roaringbitmap", "s3vec",
     "semver", "semverrange", "semvermultirange", "unit", "unitrange", "unitmultirange", "rabitq8", "rabitq4",
@@ -294,9 +300,10 @@ impl Type {
             // spelling of the same base64, kept beside it for validators.
             Kind::Bytes(_) => json!({"type": "string", "format": "byte", "contentEncoding": "base64"}),
             // A bit string and pgvector's vectors are their text to a client.
-            Kind::Array(_) if matches!(bare_name(self), "bit" | "varbit" | "vector" | "halfvec" | "sparsevec") => text_of(self),
+            Kind::Array(_) if matches!(builtin_name(self), "bit" | "varbit") || matches!(bare_name(self), "vector" | "halfvec" | "sparsevec") => text_of(self),
             // Postgres has no cast of a geometric type to JSON, so a document holds its text.
-            Kind::Array(_) | Kind::Struct(_) if opts.in_json && matches!(bare_name(self), "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle") => text_of(self),
+            // A composite of the user's named so, `public.point`, is an object of its fields.
+            Kind::Array(_) | Kind::Struct(_) if opts.in_json && matches!(builtin_name(self), "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle") => text_of(self),
             Kind::Array(a) => {
                 let items = a.element.ty.json_schema(opts);
                 // A parameter's elements are strict; a result's may be NULL unless the statement
@@ -362,7 +369,7 @@ impl Type {
                 let value = a.ty.json_schema(opts);
                 json!({"type": "object", "properties": {"tag": {"const": a.tag}, "value": if a.nullable { nullable(value) } else { value }}, "required": ["tag", "value"]})
             }).collect::<Vec<_>>()}),
-            Kind::Union(_) if matches!(bare_name(self), "inet" | "cidr") => text_of(self),
+            Kind::Union(_) if matches!(builtin_name(self), "inet" | "cidr") => text_of(self),
             // One of several types, the execution's or each value's; of none, no value, and every
             // value of an intersection of none.
             Kind::Union(u) if u.members.is_empty() => nothing(),
@@ -660,6 +667,10 @@ mod tests {
         assert_eq!(Type::opaque("money").json_schema(IN_JSON), json!({"type": "string", "description": "pg type money"}));
         assert_eq!(Type::opaque("public.unheard_of").json_schema(IN_JSON), json!({"description": "pg type public.unheard_of"}));
         assert_eq!(Type::opaque("public.unheard_of").json_schema(WIRE), json!({"type": "string", "description": "pg type public.unheard_of"}));
+        // A built-in structure is known by its own label, which a composite of the user's, whose label is qualified, never has.
+        let point = |name: &str| Type::structure(vec![field("x", Type::double(), false)]).named(name);
+        assert_eq!(point("point").json_schema(IN_JSON), json!({"type": "string", "description": "pg type point"}));
+        assert_eq!(point("public.point").json_schema(IN_JSON)["type"], json!("object"));
     }
 
     #[test]

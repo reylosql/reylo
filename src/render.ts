@@ -6,7 +6,7 @@
 // `Json`, which the generated module imports from `reylo`.
 import { CODEC_TYPE, leafCodec, type Codec, type Codecs } from "./codecs.ts";
 import { bareName, isMysqlSet, nestsAnyDeep, postgresArray, schemaOf, type EngineType, type Field, type Slot } from "./engine-type.ts";
-import { inDocument, JSON_TYPE, POSTGRES_IN_JSON } from "./schema.ts";
+import { inDocument, JSON_TYPE, postgresInJson } from "./schema.ts";
 import { columnKind, isRowKind, kindType as typeOfKind, RANGE_BOUNDS, type Dialect, type JsonNumbers } from "./values.ts";
 
 /** GeoJSON's type of each geometry subtype the type descriptor names (@types/geojson). */
@@ -55,7 +55,7 @@ function jsonImage(t: EngineType, dialect: Dialect, inUnion = false): string {
     // A structure standing where no walk reaches it, a union's member or a tuple's element: its
     // Postgres name's form, a row whose columns were not read among them, else any JSON.
     default:
-      return (dialect === "postgres" ? POSTGRES_IN_JSON[bareName(t)]?.type : undefined) ?? JSON_TYPE;
+      return (dialect === "postgres" ? postgresInJson(t)?.type : undefined) ?? JSON_TYPE;
   }
 }
 

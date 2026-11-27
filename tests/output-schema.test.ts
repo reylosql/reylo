@@ -204,10 +204,17 @@ const POSTGRES: readonly Case[] = [
   ["enum", "mood", ["'ok'"]],
   ["composite", "pair", ["row(1, 'a')", "row(null, null)"]],
   ["domain", "posint", ["1"]],
+  // Postgres writes a field and an element inside a document as it writes the value there.
+  ["composite of text forms", "shape", ["row('(1,2)', '[1,3)', 5)"]],
+  ["point[]", "point[]", ["'{\"(1,2)\",NULL}'"]],
+  ["domain over money", "cash", ["5"]],
+  // A composite of the user's named as an extension's type or a built-in one is an object of its fields, whose name is qualified.
+  ["composite named like an extension's type", "semver", ["row(1, 2)"]],
+  ["composite named like a built-in type", "public.point", ["row(1)"]],
 ];
 
 test("Postgres: every type's values hold to the output schema, as a column and inside each document Postgres builds", { skip: pgLive }, async () => {
-  const types = "create extension if not exists citext; create extension if not exists hstore; create extension if not exists ltree; create extension if not exists vector; create type mood as enum ('ok', 'sad'); create type pair as (a int4, b text); create domain posint as int4 check (value > 0);";
+  const types = "create extension if not exists citext; create extension if not exists hstore; create extension if not exists ltree; create extension if not exists vector; create type mood as enum ('ok', 'sad'); create type pair as (a int4, b text); create domain posint as int4 check (value > 0); create type shape as (p point, r int4range, m money); create domain cash as money; create type semver as (major int4, minor int4); create type public.point as (x int4);";
   const own = await postgresDatabase("reylo_output_schema", `${types}\n${tables(POSTGRES)}`);
   try {
     const problems = await check(project(own.url, ["postgres"]), POSTGRES, (t, [, column]) => [
@@ -233,6 +240,7 @@ const MYSQL: readonly Case[] = [
   ["bigint", "bigint", ["-9223372036854775808", "9223372036854775807"]],
   ["bigint unsigned", "bigint unsigned", ["0", "18446744073709551615"]],
   ["tinyint(1)", "tinyint(1)", ["0", "1"]],
+  ["tinyint(1) of 0 or 1", "tinyint(1) check (c in (0, 1))", ["0", "1"]],
   ["boolean", "boolean", ["true", "false"]],
   ["decimal(10,2)", "decimal(10,2)", ["-99999999.99", "0.01"]],
   ["decimal(65,30)", "decimal(65,30)", ["99999999999999999999999999999999999.999999999999999999999999999999"]],
@@ -247,7 +255,8 @@ const MYSQL: readonly Case[] = [
   ["set", "set('a','b')", ["''", "'a,b'"]],
   ["binary(2)", "binary(2)", ["x'0102'"]],
   ["varbinary(4)", "varbinary(4)", ["x''", "x'0a'"]],
-  ["blob", "blob", ["x'ff'"]],
+  // MySQL breaks bytes' base64 inside a document onto a new line every 76 characters.
+  ["blob", "blob", ["x'ff'", "repeat('a', 100)"]],
   ["tinyblob", "tinyblob", ["x'00'"]],
   ["date", "date", ["'1000-01-01'", "'9999-12-31'"]],
   ["datetime(6)", "datetime(6)", ["'1000-01-01 00:00:00'", "'9999-12-31 23:59:59.999999'"]],
@@ -342,12 +351,14 @@ const CLICKHOUSE: readonly Case[] = [
   ["LowCardinality(String)", "LowCardinality(String)", ["'a'"]],
   ["Point", "Point", ["(1.5, -2)"]],
   ["Ring", "Ring", ["[(0, 0), (1, 1)]"]],
+  ["Variant(Array(UInt8), String)", "Variant(Array(UInt8), String)", ["[1, 2]", "'a'"]],
+  ["Variant(UInt64, Ring)", "Variant(UInt64, Ring)", ["18446744073709551615", "[(0, 0)]"]],
 ];
 
 test("ClickHouse: every type's values hold to the output schema, as a column", { skip: clickhouseLive }, async () => {
   const setup = CLICKHOUSE.map(([, column, values], i) => `CREATE TABLE t${i} (id Int32, c Nullable(${column})) ENGINE = MergeTree ORDER BY id;\nINSERT INTO t${i} VALUES ${[...values, "NULL"].map((v, n) => `(${n + 1}, ${v})`).join(", ")};`);
   // A type that cannot sit inside Nullable stands as itself, its NULL row left out.
-  const own = await clickhouseDatabase("reylo_output_schema", setup.map((s, i) => (/^(Array|Tuple|Map|LowCardinality|Point|Ring)/.test(CLICKHOUSE[i]![1]) ? s.replace(/Nullable\((.*)\)\) ENGINE/, "$1) ENGINE").replace(/, \(\d+, NULL\);$/, ";") : s)).join("\n"));
+  const own = await clickhouseDatabase("reylo_output_schema", setup.map((s, i) => (/^(Array|Tuple|Map|LowCardinality|Point|Ring|Variant)/.test(CLICKHOUSE[i]![1]) ? s.replace(/Nullable\((.*)\)\) ENGINE/, "$1) ENGINE").replace(/, \(\d+, NULL\);$/, ";") : s)).join("\n"));
   try {
     const problems = await check(project(own.url, ["@clickhouse/client"]), CLICKHOUSE, (t, [, column]) => [`SELECT c FROM ${t} ORDER BY id`, ...(column === "Int32" ? [`SELECT c AS \`__proto__\` FROM ${t} ORDER BY id`] : [])], async (q) => q.run(own.client));
     assert.deepEqual(problems, [], problems.join("\n"));

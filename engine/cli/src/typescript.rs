@@ -537,6 +537,16 @@ const JSON_TYPE: &str = "Json";
 const JSON_INPUT_TYPE: &str = "JsonInput";
 const NO_CODECS: &Value = &Value::Null;
 
+/// The form Postgres writes `t` in inside a JSON document, of those `json_image` names
+/// (src/schema.ts, `postgresInJson`): a built-in structure is known by its own label, which a type
+/// of another schema never has, and any other type, pgvector's among them, by its name in whatever
+/// schema its extension was created in.
+fn postgres_json_image(t: &Value) -> Option<&'static str> {
+    let name = bare_name(t);
+    let structure = matches!(kind(t), "array" | "struct" | "union") && !(kind(t) == "array" && matches!(name.as_str(), "vector" | "halfvec" | "sparsevec"));
+    if structure { label(t).and_then(json_image) } else { json_image(&name) }
+}
+
 /// What Postgres writes inside a JSON document for a type whose form there its kind does not say:
 /// the text of each type core's schema writer names, and an hstore's, a geometry's and an unread
 /// row's own forms.
@@ -626,7 +636,7 @@ fn json_image_of(t: &Value, dialect: &str, in_union: bool) -> String {
                 };
             }
             if dialect == "postgres" {
-                if let Some(image) = json_image(&name) {
+                if let Some(image) = postgres_json_image(t) {
                     return image.into();
                 }
             }
@@ -637,7 +647,7 @@ fn json_image_of(t: &Value, dialect: &str, in_union: bool) -> String {
             dedupe(parts.iter().flat_map(|p| p.split(" | ").map(String::from)).collect()).join(" | ")
         }
         "bytes" | "uuid" | "date" | "time" | "datetime" | "instant" | "duration" | "range" | "multirange" | "xml" => if dialect == "sqlite" { JSON_TYPE } else { "string" }.into(),
-        _ => (if dialect == "postgres" { json_image(&name) } else { None }).unwrap_or(JSON_TYPE).into(),
+        _ => (if dialect == "postgres" { postgres_json_image(t) } else { None }).unwrap_or(JSON_TYPE).into(),
     }
 }
 
@@ -663,7 +673,7 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
                 return if !in_json && dialect == "mysql" { format!("Set<{}>", render_type(&t["element"]["type"], false, dialect, codecs)) } else { "string".into() };
             }
             if in_json && dialect == "postgres" {
-                if let Some(image) = json_image(&name) {
+                if let Some(image) = postgres_json_image(t) {
                     return image.into();
                 }
             }
@@ -685,7 +695,7 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
         }
         "struct" => {
             if in_json {
-                return match json_image(&name) {
+                return match postgres_json_image(t) {
                     Some(image) if dialect == "postgres" && name != "record" => image.into(),
                     _ => render_fields(items(&t["fields"]), dialect, t.get("extra")),
                 };
