@@ -9048,7 +9048,7 @@ create trigger kids_note after insert on kids begin update parents set name = na
     /// On a database whose search_path names, before `public`, a schema a migration makes, the history
     /// stays the one table Reylo made: later runs read what ran, and a change to a grant's option runs
     /// as any change does. Two tables of its name, as an earlier version made in that schema, are
-    /// refused with what each holds, until one is dropped.
+    /// refused with what each holds, until they are one.
     pub async fn the_history_stays_where_it_was_made_whatever_the_search_path(mut p: P) {
         p.exec("do $$ begin create role madv_readers; exception when duplicate_object or unique_violation then null; end $$").await;
         p.exec(&format!("alter database {} set search_path = private, public", p.name)).await;
@@ -9066,16 +9066,15 @@ create trigger kids_note after insert on kids begin update parents set name = na
         let ran = |schema: &str| format!("select count(*)::text as n from {schema}.__reylo_migrations where applied_at is not null");
         assert_eq!(p.rows(&ran("public")).await[0].text("n"), "2");
         assert_eq!(p.migrate().await, 0, "{}", p.peek());
-        // A second table, as an earlier version left it: each holds a migration the other lacks.
-        p.exec("create table private.__reylo_migrations (like public.__reylo_migrations including all); insert into private.__reylo_migrations select * from public.__reylo_migrations where name like '%readers.sql'; delete from public.__reylo_migrations where name like '%readers.sql'").await;
+        // A second table, as an earlier version left it: each holds a migration the other lacks, and
+        // one a run the other finished.
+        p.exec("create table private.__reylo_migrations (like public.__reylo_migrations including all); insert into private.__reylo_migrations select * from public.__reylo_migrations; delete from public.__reylo_migrations where name like '%readers.sql'; update private.__reylo_migrations set applied_at = null where name like '%notes.sql'").await;
         let refused = reylo_migrate::status(&p.opts(), &mut |_: &str| {}).await.unwrap_err().0;
         assert_has!(refused.clone(), r"This database holds 2 of Reylo's history tables");
-        assert_has!(refused.clone(), r"In public\.__reylo_migrations, 1 migration ran, at ");
-        assert_has!(refused.clone(), r"In private\.__reylo_migrations, 1 migration ran, at ");
-        // The commands it gives make them one, keeping both.
-        let insert = regex::Regex::new(r"reylo run '([^']+)' '([^']+)'").unwrap().captures(&refused).map(|c| (c[1].to_string(), c[2].to_string())).unwrap_or_else(|| panic!("{refused}"));
-        p.exec(&insert.0).await;
-        p.exec(&insert.1).await;
+        assert_has!(refused.clone(), r"In public\.__reylo_migrations, 1 migration ran, at [^\n,]+\n");
+        assert_has!(refused.clone(), r"In private\.__reylo_migrations, 1 migration ran, at [^\n]+, and 1 started");
+        assert_has!(refused, r"Keep one table holding every migration any of them records as run, and drop the others");
+        p.exec("insert into public.__reylo_migrations select * from private.__reylo_migrations where applied_at is not null on conflict (name) do nothing; drop table private.__reylo_migrations").await;
         assert_eq!(p.status().await, 0, "{}", p.peek());
         assert_eq!(p.dev().await, 0, "{}", p.peek());
         assert_eq!(p.rows(&ran("public")).await[0].text("n"), "2");

@@ -328,7 +328,7 @@ fn migrations_of(dir: &Path, named: impl Iterator<Item = (String, Option<String>
 /// that makes a schema the search_path reads before the table's would hide it behind a new, empty
 /// one, as an earlier version did. Where a database holds two, each may hold migrations the other
 /// lacks, and which one the next statement takes must not turn on what an earlier one emptied:
-/// refused, with what each holds and how to make them one. One this role can't read is refused too,
+/// refused, with what each holds. One this role can't read is refused too, with what it lacks,
 /// rather than taken for none and made again beside it.
 async fn history_table(db: &mut Db) -> Result<String, Error> {
     if db.dialect() != Dialect::Postgres {
@@ -336,17 +336,23 @@ async fn history_table(db: &mut Db) -> Result<String, Error> {
     }
     let found = db
         .rows(&format!(
-            "select format('%I.%I', n.nspname, c.relname) as t, (has_schema_privilege(n.oid, 'USAGE') and has_table_privilege(c.oid, 'SELECT'))::text as readable
+            "select format('%I.%I', n.nspname, c.relname) as t, format('%I', n.nspname) as s,
+               has_schema_privilege(n.oid, 'USAGE')::text as usage, has_table_privilege(c.oid, 'SELECT')::text as reads
              from pg_class c join pg_namespace n on n.oid = c.relnamespace where {} order by c.oid",
             history_tables("c", "n")
         ))
         .await?;
-    let tables: Vec<(String, bool)> = found.iter().map(|r| (r.text("t").to_string(), r.text("readable") == "true")).collect();
+    let tables: Vec<(String, String, bool, bool)> = found.iter().map(|r| (r.text("t").to_string(), r.text("s").to_string(), r.text("usage") == "true", r.text("reads") == "true")).collect();
     match tables.as_slice() {
-        [(one, true)] => Ok(one.clone()),
-        [(one, false)] => {
+        [(one, _, true, true)] => Ok(one.clone()),
+        [(one, schema, usage, _)] => {
             let role = db.rows("select quote_ident(current_user) as r").await?.first().map(|r| r.text("r").to_string()).unwrap_or_default();
-            Err(Error(format!("This role can't read Reylo's history, {one}\n  Grant it what Reylo needs, as the table's owner:\n    grant select, insert, update, delete on table {one} to {role}")))
+            let mut lines = vec![format!("This role can't read Reylo's history, {one}"), "  Grant it what Reylo needs, as the table's owner:".to_string()];
+            if !usage {
+                lines.push(format!("    grant usage on schema {schema} to {role}"));
+            }
+            lines.push(format!("    grant select, insert, update, delete on table {one} to {role}"));
+            Err(Error(lines.join("\n")))
         }
         [] => {
             let rows = db.rows(&format!("select coalesce(case when current_schema() is not null then format('%I.%I', current_schema(), '{HISTORY_TABLE}') end, '{HISTORY_TABLE}') as t")).await?;
@@ -354,24 +360,26 @@ async fn history_table(db: &mut Db) -> Result<String, Error> {
         }
         several => {
             let mut lines = vec![format!("This database holds {} of Reylo's history tables, where it keeps one", several.len())];
-            for (table, readable) in several {
-                if !readable {
+            for (table, _, usage, reads) in several {
+                if !(*usage && *reads) {
                     lines.push(format!("  In {table}, which this role can't read"));
                     continue;
                 }
-                let rows = db.rows(&format!("select count(applied_at)::text as n, coalesce(max(applied_at)::text, '') as at from {table}")).await?;
-                let (n, at) = rows.first().map(|r| (r.text("n").to_string(), r.text("at").to_string())).unwrap_or_default();
-                lines.push(match n.as_str() {
-                    "0" => format!("  In {table}, no migration ran"),
-                    "1" => format!("  In {table}, 1 migration ran, at {at}"),
-                    _ => format!("  In {table}, {n} migrations ran, the last at {at}"),
-                });
+                let rows = db.rows(&format!("select count(applied_at)::text as n, (count(*) - count(applied_at))::text as started, coalesce(max(applied_at)::text, '') as at from {table}")).await?;
+                let (n, started, at) = rows.first().map(|r| (r.text("n").to_string(), r.text("started").to_string(), r.text("at").to_string())).unwrap_or_default();
+                let ran = match n.as_str() {
+                    "0" => "no migration ran".to_string(),
+                    "1" => format!("1 migration ran, at {at}"),
+                    _ => format!("{n} migrations ran, the last at {at}"),
+                };
+                let started = match started.as_str() {
+                    "0" => String::new(),
+                    "1" => ", and 1 started".to_string(),
+                    _ => format!(", and {started} started"),
+                };
+                lines.push(format!("  In {table}, {ran}{started}"));
             }
-            let keep = &several[0].0;
-            lines.push(format!("  Copy into {keep} the migrations only the others recorded, then drop them:"));
-            for (other, _) in &several[1..] {
-                lines.push(format!("    reylo run 'insert into {keep} (name, sql, applied_at, fingerprint) select name, sql, applied_at, fingerprint from {other} on conflict (name) do nothing' 'drop table {other}'"));
-            }
+            lines.push("  Keep one table holding every migration any of them records as run, and drop the others".to_string());
             lines.push("  Then see what it ran:".to_string());
             lines.push("    reylo migrate status".to_string());
             Err(Error(lines.join("\n")))
