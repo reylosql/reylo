@@ -9,7 +9,7 @@
 import type { EngineType, JsonSchema } from "./engine-type.ts";
 import type { Marks } from "./execute.ts";
 import { validate, withDefaults } from "./json-schema.ts";
-import { columnKind, describe, given, hstoreText, ParameterError, postgresInterval, postgresLiteral, postgresYear, vectorText, zoned } from "./values.ts";
+import { columnKind, describe, given, hstoreText, isLevel, ParameterError, postgresInterval, postgresLiteral, postgresYear, vectorText, zoned } from "./values.ts";
 
 export { describe, zoned } from "./values.ts";
 
@@ -154,7 +154,13 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
       if (columnKind(type, dialect).endsWith("[]")) {
         if (!Array.isArray(v)) return fail(`is ${written}, an array; got ${describe(v)}.`);
         const element = written.replace(/\s*\[\s*\]\s*$/, "");
-        return v.map((e, i) => (e === null ? null : check(type.element.type, element, e, dialect, (message) => fail(`element ${i + 1} ${message}`))));
+        // A level of a Postgres array is told from one element as a parameter tells it (src/values.ts).
+        const kind = columnKind(type.element.type, dialect);
+        return v.map((e, i) => {
+          if (e === null) return null;
+          const level = dialect === "postgres" && Array.isArray(e) && isLevel(kind, e);
+          return check(level ? type : type.element.type, level ? written : element, e, dialect, (message) => fail(`element ${i + 1} ${message}`));
+        });
       }
       break;
     case "struct":

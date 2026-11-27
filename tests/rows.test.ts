@@ -153,6 +153,17 @@ test("a pgvector vector member takes an array of finite numbers, written as the 
   for (const embedding of [[], [1, NaN], ["1"], "x".length]) assert.throws(() => prepareRows("items", items, [{ embedding }], "postgres", true), /embedding.* is vector\(3\), an array of finite numbers with one at least/);
 });
 
+test("an array member tells its levels from its elements as a parameter does, so a vector, a segment or an int array goes in at any depth", () => {
+  const gridsOf = structured(false, [
+    ["history", array(pg("halfvec")), "halfvec[]", true, true],
+    ["segs", array(pg("lseg")), "lseg[]", true, true],
+    ["cells", array(pg("int4")), "int4[]", true, true],
+  ]);
+  const seg = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+  assert.deepEqual(prepareRows("grids", gridsOf.rows, [{ history: [[[0.5]], [null]], segs: [[seg], [null]], cells: [[[1, 2]], [[3, null]]] }], "postgres", true).value, [{ history: [["[0.5]"], [null]], segs: [["[(0,0),(1,1)]"], [null]], cells: [[[1, 2]], [[3, null]]] }]);
+  assert.throws(() => prepareRows("grids", gridsOf.rows, [{ history: [[["x"]]] }], "postgres", true), /"history" element 1 element 1 is halfvec, an array of finite numbers/);
+});
+
 test("an hstore member takes an object of its keys, written as the text hstore reads", () => {
   const settingsOf = structured(true, [["prefs", pg("hstore"), "hstore", false, false]]);
   const settings = settingsOf.rows;

@@ -10,7 +10,7 @@
 // the databases its queries are written for.
 
 import type { QueryError } from "./query-error.ts";
-import { columnKind, describe, given, hstoreText, isArrayValued, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresLiteral, postgresYear, rowMasks, vectorText, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
+import { columnKind, describe, given, hstoreText, isLevel, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, postgresInterval, postgresLiteral, postgresYear, rowMasks, vectorText, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
 import { bareName, holdsWholeArrays, isMysqlSet, schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
@@ -610,7 +610,8 @@ function statement(query: QueryModule, params: ParamsInput) {
     // structured parameter's member keeps its NULL elements (src/rows.ts).
     // A ClickHouse array's type says whether an element may be NULL, and its binder holds each to it.
     if (type?.kind === "array" && Array.isArray(bound.values[i]) && query.dialect !== "clickhouse") {
-      const at = nullElement(bound.values[i] as unknown[]);
+      const kind = columnKind(type, query.dialect);
+      const at = nullElement(bound.values[i] as unknown[], kind.endsWith("[]") ? columnKind(type.element.type, query.dialect) : undefined);
       if (at !== undefined) throw new ParameterError(`Parameter "${name}" is an array whose elements may not be null, and the element at ${at} is. Leave it out of the array.`);
     }
     // A `::type` written on MySQL or SQLite, whose cast turns a value it cannot read into 0 or
@@ -683,12 +684,13 @@ function checksFor(query: QueryModule, name: string): Checks {
 }
 
 /** Where an array, or an array inside it (a multidimensional one), holds null or undefined: `[2]`, `[1][0]`. */
-function nullElement(array: readonly unknown[], path = ""): string | undefined {
+function nullElement(array: readonly unknown[], element: Kind | undefined, path = ""): string | undefined {
   for (let i = 0; i < array.length; i++) {
     const e = array[i];
     if (e == null) return `${path}[${i}]`;
-    if (Array.isArray(e)) {
-      const inner = nullElement(e, `${path}[${i}]`);
+    // Only a level of the array is looked into (src/values.ts, `isLevel`): a JSON element's own null is its value's.
+    if (Array.isArray(e) && (element === undefined || isLevel(element, e))) {
+      const inner = nullElement(e, element, `${path}[${i}]`);
       if (inner !== undefined) return inner;
     }
   }
@@ -822,7 +824,7 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
   if (type.kind === "array" && holdsWholeArrays(type) && Array.isArray(v)) return v.map((e) => (e == null ? e : postgresLiteral(type.element.type, e, (message) => {
     throw new ParameterError(`Parameter "${name}" is an array of arrays, each element ${message}`);
   })));
-  if (type.kind === "array" && kind.endsWith("[]")) return Array.isArray(v) ? v.map((e) => encode(Array.isArray(e) && !isArrayValued(columnKind(type.element.type, dialect)) ? type : type.element.type, e, dialect, name)) : v;
+  if (type.kind === "array" && kind.endsWith("[]")) return Array.isArray(v) ? v.map((e) => encode(Array.isArray(e) && isLevel(columnKind(type.element.type, dialect), e) ? type : type.element.type, e, dialect, name)) : v;
   if (kind === "vector" && Array.isArray(v)) {
     if (!v.length) throw new ParameterError(`Parameter "${name}" is a pgvector ${bareName(type)}, which has one dimension at least; got an empty array.`);
     return vectorParameter(v, name, `a pgvector ${bareName(type)}`);
