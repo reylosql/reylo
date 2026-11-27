@@ -113,7 +113,7 @@ impl Connection {
             }
             // A connection opened since the loader read the fingerprint has seen no server show it.
             if self.shown.is_empty() {
-                self.read();
+                let _ = self.read();
             }
         }
         let before = self.shown.clone();
