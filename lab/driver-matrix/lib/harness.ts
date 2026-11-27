@@ -409,15 +409,9 @@ export function queries(d: Dialect, typed = true) {
       "one",
       { columns: [["doc", "json"], ["raw", "json"]], nonFinite: [{ keys: [["nan", true], ["inf", true], ["neg", true], ["n", true], ["xs", { items: true, deep: true }]] }, null] },
     ),
-    // The JSON S10k reads, passed back as a JSON parameter: Postgres's text for each number that is
-    // not finite, which stored as null would be another document. And -0, which a `json` value keeps
-    // as written and `jsonb` makes 0.
-    nonFiniteBack: q(
-      `select :doc::jsonb = json_build_object('nan', 'NaN'::float8, 'inf', 'Infinity'::numeric, 'neg', '-Infinity'::float4, 'n', 1.5::numeric, 'xs', array['NaN'::float8, 2])::jsonb as doc, (:z::json) ->> 'z' = '-0' as zero`,
-      ["doc", "z"],
-      "one",
-      { inputs: { doc: { type: T.json }, z: { type: T.json } }, columns: [["doc", "bool"], ["zero", "bool"]] },
-    ),
+    // -0 in a JSON parameter, which a `json` value keeps as written and `jsonb` makes 0; the
+    // JSON S10k reads, whose NaN and infinities Postgres's JSON holds no number for, is refused.
+    nonFiniteBack: q(`select (:z::json) ->> 'z' = '-0' as zero, :doc::jsonb is not null as doc`, ["z", "doc"], "one", { inputs: { z: { type: T.json }, doc: { type: T.json } }, columns: [["zero", "bool"], ["doc", "bool"]] }),
     // SQLite: JSON a statement builds holding infinities, which SQLite writes as a number past a double's range.
     infiniteJson: q(`select json_object('r', 1e999, 'n', -1e999) as doc`, [], "one", { columns: [["doc", "json"]] }),
     // The same passed back as a JSON parameter and read back, and -0 to a value of no declared type, which keeps its sign.
@@ -1170,7 +1164,14 @@ export const SCENARIOS: Scenario[] = [
       const d = ctx.job.dialect;
       if (d === "postgres") {
         const { doc } = (await call(ctx, q.nonFiniteJson, client)) as { doc: unknown };
-        typedEq(await call(ctx, q.nonFiniteBack, client, { doc, z: { z: -0 } }), { doc: true, zero: true }, "the document passed back equal to the one built, and -0 in a json value");
+        typedEq(await call(ctx, q.nonFiniteBack, client, { z: { z: -0 }, doc: { n: 1.5 } }), { zero: true, doc: true }, "-0 in a json value");
+        try {
+          await call(ctx, q.nonFiniteBack, client, { z: { z: 0 }, doc });
+        } catch (e) {
+          if (e instanceof TypeError && /is NaN, which JSON holds no number for/.test(e.message)) return;
+          throw new Mismatch(`not the refusal of the document's NaN: ${describe(e)}`);
+        }
+        throw new Mismatch("the document's NaN went in as a JSON parameter");
       } else if (d === "sqlite") {
         const { doc } = (await call(ctx, q.infiniteJson, client)) as { doc: unknown };
         typedEq(doc, { n: -Infinity, r: Infinity }, "the document built");

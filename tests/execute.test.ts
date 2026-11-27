@@ -150,10 +150,10 @@ test("postgres: a JSON parameter's value is a JavaScript value, which every driv
 
 test("a JSON parameter's NaN, infinities and -0 go in as each database's JSON reads them, a json[] element's and a structured parameter's JSON member's too, on every driver, and are refused where the database holds none", async () => {
   const json = { type: { kind: "json" } } as const;
-  const doc = { nan: NaN, inf: Infinity, neg: -Infinity, z: -0 };
-  // Postgres writes a float's NaN and infinities inside a document as their text.
+  const doc = { z: -0, n: [1.5, -0] };
+  // Postgres's `json` keeps -0 as written, and its JSON holds no number for NaN or an infinity.
   const pq: QueryModule<"postgres"> = { dialect: "postgres", sql: "select :doc::jsonb, :docs::jsonb[]", params: ["doc", "docs"], inputs: { doc: json, docs: { type: array({ kind: "json" }) } } };
-  const pgText = `{"nan":"NaN","inf":"Infinity","neg":"-Infinity","z":-0}`;
+  const pgText = `{"z":-0,"n":[1.5,-0]}`;
   const seen: unknown[][] = [];
   await execute(pgPool(async (_: string, values?: unknown[]) => (seen.push(values!), { rows: [] })), pq, { doc, docs: [doc, -0] });
   const unwrap = (v: unknown) => (v !== null && typeof v === "object" ? (v as { value: unknown }).value : v);
@@ -177,19 +177,22 @@ test("a JSON parameter's NaN, infinities and -0 go in as each database's JSON re
   await execute(mysql2, mq, { doc: { z: -0, n: [1.5, -0] } });
   await execute(libsql, lq, { doc: { inf: Infinity, neg: -Infinity, z: -0 } });
   assert.deepEqual(seen, [[`{"z":-0e0,"n":[1.5,-0e0]}`], [`{"inf":9e999,"neg":-9e999,"z":-0e0}`]]);
-  // MySQL holds no NaN or infinity, and SQLite no NaN: the parameter is refused before any client is called.
+  // Postgres's and MySQL's JSON hold no NaN or infinity, and SQLite no NaN: the parameter is refused before any client is called.
+  await assert.rejects(Promise.resolve().then(() => execute(pgPool(async () => ({ rows: [] })), pq, { doc: { n: NaN }, docs: null })), /^TypeError: Parameter "doc" at \/n is NaN, which JSON holds no number for: write null or a string in its place\.$/);
+  await assert.rejects(Promise.resolve().then(() => execute(bun, pq, { doc: null, docs: [{ n: -Infinity }] })), /^TypeError: Parameter "docs" at \[0\]\/n is -Infinity, which JSON holds no number for/);
   await assert.rejects(Promise.resolve().then(() => execute(mysql2, mq, { doc: { a: [Infinity] } })), /^TypeError: Parameter "doc" at \/a\/0 is Infinity, which MySQL holds no value for: write null or a string in its place\.$/);
   await assert.rejects(Promise.resolve().then(() => execute(libsql, lq, { doc: { nan: NaN } })), /^TypeError: Parameter "doc" at \/nan is NaN, which SQLite holds no value for/);
   await assert.rejects(Promise.resolve().then(() => execute(pgPool(async () => ({ rows: [] })), pq, { doc: null, docs: [{ n: 1n }] })), /BigInt/);
   assert.equal(seen.length, 2);
 });
 
-test("postgres: a json field of a row value holds NaN, the infinities and -0 as a JSON parameter does, and a value of no type the run time knows keeps -0", async () => {
+test("postgres: a json field of a row value holds -0 and refuses NaN and the infinities as a JSON parameter does, and a value of no type the run time knows keeps -0", async () => {
   const seen: unknown[][] = [];
   const client = pgPool(async (_: string, values?: unknown[]) => (seen.push(values!), { rows: [] }));
   const q: QueryModule<"postgres"> = { dialect: "postgres", sql: "select :e::event, :u", params: ["e", "u"], inputs: { e: { type: record([field("id", pgType("int4")), field("meta", pgType("jsonb"))], "public.event") }, u: { type: { kind: "unknown" } } } };
-  await execute(client, q, { e: { id: 1, meta: { score: Infinity, n: NaN, z: -0 } }, u: -0 });
-  assert.deepEqual(seen, [[String.raw`("1","{\"score\":\"Infinity\",\"n\":\"NaN\",\"z\":-0}")`, "-0"]]);
+  await execute(client, q, { e: { id: 1, meta: { z: -0 } }, u: -0 });
+  assert.deepEqual(seen, [[String.raw`("1","{\"z\":-0}")`, "-0"]]);
+  await assert.rejects(Promise.resolve().then(() => execute(client, q, { e: { id: 1, meta: { score: Infinity } }, u: 0 })), /Infinity, which JSON holds no number for/);
 });
 
 test("NaN and the infinities go only where the database holds them: MySQL holds neither, SQLite no NaN, which its drivers bind as NULL, and a Postgres numeric with a precision no infinity", async () => {

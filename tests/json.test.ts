@@ -227,10 +227,10 @@ test("Postgres: a float or a numeric inside JSON is a number, NaN and the infini
   }
 });
 
-test("Postgres: a document `.run()` returns from JSON a statement builds goes back in as a JSON parameter unchanged, its NaN, infinities and -0 written as Postgres writes them in a document, on every driver", { skip: pgLive }, async () => {
+test("Postgres: a JSON parameter keeps the -0 `.run()` returns from JSON a statement builds, which `json` keeps as written, and refuses its NaN and infinities, which JSON holds no number for, on every driver", { skip: pgLive }, async () => {
   const own = await postgresDatabase("reylo_json_back", "create table docs (id int primary key, j json not null, b jsonb not null)");
   const root = project(own.url, "pg");
-  const build = `select json_build_object('nan', 'NaN'::float8, 'inf', 'Infinity'::float8, 'neg', '-Infinity'::numeric, 'z', '-0'::float8) as doc\n`;
+  const build = `select json_build_object('z', '-0'::float8) as zero, json_build_object('nan', 'NaN'::float8, 'inf', 'Infinity'::numeric) as other\n`;
   const insert = "insert into docs (id, j, b) values (:id, :j, :b)\n";
   const pg = driver("pg");
   const client = new pg.Client({ connectionString: own.url });
@@ -239,14 +239,15 @@ test("Postgres: a document `.run()` returns from JSON a statement builds goes ba
     const [read, write] = [await built(root, "build", build), await built(root, "insert", insert)];
     let id = 0;
     for (const db of [own.sql, client]) {
-      const { doc } = (await read.run(db)) as { doc: Record<string, number> };
-      assert.deepEqual(doc, { nan: NaN, inf: Infinity, neg: -Infinity, z: -0 });
-      assert.ok(Object.is(doc.z, -0));
-      await write.run(db, { id: ++id, j: doc, b: doc });
+      const { zero, other } = (await read.run(db)) as { zero: { z: number }; other: object };
+      assert.ok(Object.is(zero.z, -0));
+      assert.deepEqual(other, { nan: NaN, inf: Infinity });
+      await write.run(db, { id: ++id, j: zero, b: zero });
+      await assert.rejects(async () => write.run(db, { id: 9, j: other, b: other }), /: Parameter "j" at \/nan is NaN, which JSON holds no number for: write null or a string in its place\.$/);
     }
-    // json keeps the document as written, and Postgres's own readers take the text as the float.
-    const stored = await own.sql.unsafe(`select j::text as j, b::text as b, x.* from docs, jsonb_to_record(b) as x(nan float8, inf float8, neg float8) order by id`);
-    assert.deepEqual(stored.map((row: object) => ({ ...row })), [1, 2].map(() => ({ j: `{"nan":"NaN","inf":"Infinity","neg":"-Infinity","z":-0}`, b: `{"z": 0, "inf": "Infinity", "nan": "NaN", "neg": "-Infinity"}`, nan: NaN, inf: Infinity, neg: -Infinity })));
+    // json keeps the document as written; jsonb holds no -0.
+    const stored = await own.sql.unsafe(`select j::text as j, b::text as b from docs order by id`);
+    assert.deepEqual(stored.map((row: object) => ({ ...row })), [1, 2].map(() => ({ j: `{"z":-0}`, b: `{"z": 0}` })));
   } finally {
     await client.end();
     await closeSessions();

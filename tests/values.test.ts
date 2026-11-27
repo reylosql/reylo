@@ -1020,10 +1020,9 @@ test("a value goes into a document as JSON.stringify writes it, but for NaN, the
   const written = JSON.stringify(special).replace(/"z":0/, `"z":-0`).replace(/"list":\[null,0,null,0\]/, `"list":[null,-0,null,-0]`).replace(/"a\/b~c":0/, `"a/b~c":-0`);
   assert.equal(writeJson(special, "postgres", fail), written);
   assert.equal(writeJson(special, "mysql", fail), written.replace(/-0([,\]}])/g, "-0e0$1"));
-  // Postgres writes a float's NaN and infinities inside a document as their text, which `.run()`
-  // reads back as numbers where the type says one stands (`numbersInJson`).
-  assert.equal(writeJson({ nan: NaN, inf: Infinity, neg: -Infinity, z: -0 }, "postgres", fail), `{"nan":"NaN","inf":"Infinity","neg":"-Infinity","z":-0}`);
-  assert.equal(writeJson([NaN], "postgres", fail, "[2]"), `["NaN"]`);
+  // Postgres's JSON holds no number for NaN or an infinity.
+  for (const n of [NaN, Infinity, -Infinity]) assert.throws(() => writeJson({ z: -0, n }, "postgres", fail), new RegExp(`^TypeError: at /n is ${n}, which JSON holds no number for: write null or a string in its place\\.$`));
+  assert.throws(() => writeJson([NaN], "postgres", fail, "[2]"), /^TypeError: at \[2\]\/0 is NaN/);
   // SQLite writes an infinity as a number past a double's range, and holds no NaN.
   assert.equal(writeJson({ inf: Infinity, neg: -Infinity, z: -0 }, "sqlite", fail), `{"inf":9e999,"neg":-9e999,"z":-0e0}`);
   assert.deepEqual(JSON.parse(writeJson({ inf: Infinity, z: -0 }, "sqlite", fail)!), { inf: Infinity, z: -0 });
