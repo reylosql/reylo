@@ -637,20 +637,18 @@ function statement(query: QueryModule, params: ParamsInput, run = true) {
   // on every driver: sqlite3, Turso's engine, sql.js and SQLite Wasm bind -0 as the INTEGER 0, D1
   // sends -0 as 0 and an infinity as null, and libSQL refuses an infinity, which a REAL holds. -0 is
   // written so where the type takes a float, whose sign a REAL value keeps (a REAL column stores it
-  // as 0), and one whose place isn't known is refused (src/decode-mysql.ts, `signedZeros`, does the
-  // same on MySQL). A Standard Query's values bind to the module's own text (src/standard-query.ts),
-  // so they go as they are.
+  // as 0). Those drivers refuse one whose place isn't known (src/decode-sqlite.ts, `unplaced`), as
+  // mariadb and PlanetScale do on MySQL (src/decode-mysql.ts, `signedZeros`). A Standard Query's
+  // values bind to the module's own text (src/standard-query.ts), so they go as they are.
   if (query.dialect === "sqlite" && run) {
-    const zero = (v: unknown, name: string) => {
-      const type = query.inputs?.[name]?.type;
-      return Object.is(v, -0) && type !== undefined && takesFloat(type, "sqlite");
-    };
     Object.assign(
       bound,
-      literalsAtMarks(bound, (v, i) => (v === Infinity || v === -Infinity ? (v > 0 ? "(9e999)" : "(-9e999)") : zero(v, bound.names[i]!) ? "(-0.0)" : undefined)),
+      literalsAtMarks(bound, (v, i) => {
+        if (v === Infinity || v === -Infinity) return v > 0 ? "(9e999)" : "(-9e999)";
+        const type = query.inputs?.[bound.names[i]!]?.type;
+        return Object.is(v, -0) && type !== undefined && takesFloat(type, "sqlite") ? "(-0.0)" : undefined;
+      }),
     );
-    const left = bound.values.findIndex((v, i) => zero(v, bound.names[i]!));
-    if (left >= 0) throw new ParameterError(`Parameter "${bound.names[left]}" is -0, which most SQLite drivers bind as the INTEGER 0, and Reylo writes it in as -0.0 only where it knows the placeholder's place, which this query doesn't carry: pass 0, or give the query its marks as a build step writes them.`);
   }
   // The comment naming the file goes on last, after a structured parameter's lists are written. It
   // ends the statement on Postgres and MySQL, so every mark keeps its place; on SQLite and ClickHouse
@@ -703,8 +701,9 @@ export function sentText(query: QueryModule, text: string): string {
  * The statement and its values in the database's raw form, which a Standard Query's `encode`
  * returns (src/standard-query.ts), bound as `.run()` binds them, its checks included: on Postgres
  * each value's text, which a driver binds with no declared type, so the server reads it as the
- * parameter's type; on MySQL and SQLite each value as a driver binds it. ClickHouse has no such
- * form, and a Standard Query on it binds nothing (src/standard-query.ts).
+ * parameter's type; on MySQL and SQLite each value as a driver binds it, with no number written
+ * into the text, since the values bind to the module's own (a -0 or an infinity goes as it is).
+ * ClickHouse has no such form, and a Standard Query on it binds nothing (src/standard-query.ts).
  */
 export function rawStatement(query: QueryModule, params: unknown): { text: string; values: unknown[] } {
   checkParams(query, params);

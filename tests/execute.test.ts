@@ -215,13 +215,16 @@ test("sqlite: -0 for a float or a value of no declared type, and an infinity, go
     ["select (-0.0) as r, (-0.0) as u, ? as i, (-0.0) as n, 1-(-0.0) as m", [-0]],
     ["select (9e999) as r, (-9e999) as u, ? as i, ? as n, 1-(9e999) as m", [1, 2.5]],
   ]);
-  // Where the run time doesn't know a placeholder's place, a float's -0, which sqlite3, Turso's
-  // engine, sql.js, SQLite Wasm and D1 would bind as 0, is refused on every driver; an infinity, a
-  // REAL's, goes as it is.
+  // Where the run time doesn't know a placeholder's place, a driver that would bind a float's -0 as
+  // 0 (sqlite3, Turso's engine, sql.js, SQLite Wasm, D1), or send an infinity as null (D1), refuses
+  // it; libSQL, which keeps -0, binds it as it is.
   const unmarked: QueryModule<"sqlite"> = { dialect: "sqlite", sql: "select :r as r", params: ["r"], text: "select ? as r", order: ["r"], inputs: { r: { type: liteType("real") } } };
-  await assert.rejects(Promise.resolve().then(() => execute(libsql, unmarked, { r: -0 })), /^TypeError: Parameter "r" is -0, which most SQLite drivers bind as the INTEGER 0/);
-  await execute(libsql, unmarked, { r: Infinity });
-  assert.deepEqual(seen.at(-1), ["select ? as r", [Infinity]]);
+  const sqlite3Like = { prepare: () => ({}), exec: () => {}, all: (_: string, v: unknown[], done: (e: null, rows: unknown[]) => void) => setImmediate(() => done(null, [{ r: v[0] }])) };
+  await assert.rejects(Promise.resolve().then(() => execute(sqlite3Like, unmarked, { r: -0 })), /^TypeError: Parameter "r" is -0, which sqlite3 binds as 0/);
+  const d1Like = { batch: async () => [], prepare: () => ({ first: async () => null, bind: (...v: unknown[]) => ({ all: async () => ({ results: [{ r: v[0] }] }) }) }) };
+  await assert.rejects(Promise.resolve().then(() => execute(d1Like, unmarked, { r: Infinity })), /^TypeError: Parameter "r" is Infinity, which D1 sends as null/);
+  await execute(libsql, unmarked, { r: -0 });
+  assert.ok(Object.is((seen.at(-1)![1] as unknown[])[0], -0));
   // On the drivers themselves, each value comes back as it went in.
   const read = (rows: unknown) => (rows as Record<string, number>[]).map((r) => ({ r: r.r, u: r.u, m: r.m, sign: Object.is(r.r, -0) && Object.is(r.u, -0) }));
   const sqlite3 = driver("sqlite3");

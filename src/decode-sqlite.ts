@@ -37,7 +37,7 @@
 //   only be one; a BIGINT's number within 2^53, or libSQL's BigInt or digits, is its BigInt.
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, coerce, columnKind, DecodeError, exactInteger, ParameterError, refuseTruth, truth, type Columns, type Kind } from "./values.ts";
-import { EFFECT_SQL, isDurableObjectSql, isSqlJs, isSqliteWasm, isTurso, type AnyClient as Client, type Bound, type EffectSql, type QueryModule, type Runtime } from "./execute.ts";
+import { EFFECT_SQL, isDurableObjectSql, isSqlJs, isSqliteWasm, isTurso, takesFloat, type AnyClient as Client, type Bound, type EffectSql, type QueryModule, type Runtime } from "./execute.ts";
 import { readSqliteError } from "./query-error.ts";
 import type { EngineType } from "./engine-type.ts";
 
@@ -375,6 +375,18 @@ function numberOrDigits(v: unknown, type: EngineType | undefined, driver: "sqlit
   throw new ParameterError(`sqlite3 binds a BigInt as NULL, and ${v} is past 2^53 - 1, where a number stops being exact: ${digits}, or run the statement on better-sqlite3, node:sqlite or libSQL, which bind a BigInt.`);
 }
 
+// sqlite3, Turso's engine, sql.js and SQLite Wasm bind a float's -0 as the INTEGER 0, and D1 sends
+// -0 as 0 and an infinity as null. The run time writes either in at its mark (src/execute.ts), so
+// one still among the values is one whose place it doesn't know, which these drivers refuse.
+function unplaced(query: QueryModule<"sqlite">, names: readonly string[], values: readonly unknown[], driver: string, infinities = false): void {
+  values.forEach((v, i) => {
+    const type = query.inputs?.[names[i]!]?.type;
+    const zero = Object.is(v, -0) && type !== undefined && takesFloat(type, "sqlite");
+    if (!zero && !(infinities && (v === Infinity || v === -Infinity))) return;
+    throw new ParameterError(`Parameter "${names[i]}" is ${zero ? "-0" : v}, which ${driver} ${zero ? "binds as 0" : "sends as null"}, and Reylo writes it into the statement only where it knows the placeholder's place, which this query doesn't carry: pass ${zero ? "0" : "null"}, or build the query again so that it does.`);
+  });
+}
+
 /** A SQLite statement's rows on each SQLite driver's client that answers through a promise, each value given its kind, or undefined on any other client. */
 async function runSqlite(c: Client, query: QueryModule<"sqlite">, { text, values, names }: Bound): Promise<unknown[] | undefined> {
   const type = (i: number) => query.inputs?.[names[i]!]?.type;
@@ -383,6 +395,7 @@ async function runSqlite(c: Client, query: QueryModule<"sqlite">, { text, values
   if (effect?.dialect === "sqlite") {
     // D1 and a Durable Object refuse a BigInt, through Effect as on their own clients.
     const driver = effect.driver;
+    if (driver === "d1") unplaced(query, names, values, "D1", true);
     const bound = driver === "d1" || driver === "sqlite-do" ? values.map((v, i) => numberOrDigits(v, type(i), driver === "d1" ? "d1" : "durable-object")) : values;
     const options = { exact: effect.exact, d1: driver === "d1" };
     // Effect's raw result is the driver's own, read by the driver's column names as `.run()` reads
@@ -393,13 +406,17 @@ async function runSqlite(c: Client, query: QueryModule<"sqlite">, { text, values
     if (Array.isArray(raw?.rows)) return normalize(libsqlRows(raw.rows, columns, Array.isArray(raw.columns) ? raw.columns : undefined), columns, options);
     return normalize(Array.isArray(raw?.results) ? raw.results : [], columns, options);
   }
-  if (isTurso(c)) tursoValues(names, values);
+  if (isTurso(c)) {
+    tursoValues(names, values);
+    unplaced(query, names, values, "Turso's engine");
+  }
   if (typeof c.unsafe === "function") return normalize(await c.unsafe(text, values), columns);
   if (typeof c.execute === "function") {
     const result = await c.execute({ sql: text, args: values });
     return normalize(libsqlRows(result.rows, columns, Array.isArray(result.columns) ? result.columns : undefined), columns);
   }
   if (isTurso(c)) return await runTurso(c, text, values, columns);
+  if (typeof c.getDatabaseInstance === "function" || (typeof c.all === "function" && typeof c.exec === "function")) unplaced(query, names, values, "sqlite3");
   // The sqlite package wraps sqlite3, and sqlite3 binds a BigInt as NULL.
   if (typeof c.getDatabaseInstance === "function") return normalize(await c.all(text, values.map((v, i) => numberOrDigits(v, type(i), "sqlite3"))), columns);
   if (typeof c.all === "function" && typeof c.exec === "function") {
@@ -412,6 +429,7 @@ async function runSqlite(c: Client, query: QueryModule<"sqlite">, { text, values
   if (typeof c.prepare === "function") {
     const prepared = c.prepare(text);
     // D1 refuses a BigInt, which `.run()` returns for a BIGINT column.
+    if (typeof prepared.first === "function") unplaced(query, names, values, "D1", true);
     if (typeof prepared.first === "function") return normalize((await prepared.bind(...values.map((v, i) => numberOrDigits(v, type(i), "d1"))).all()).results, columns, { d1: true });
     return normalize(await prepared.all(...values), columns);
   }
@@ -441,10 +459,19 @@ function runSqliteSync(c: Client, query: QueryModule<"sqlite">, { text, values, 
   // Every Database of Turso's has maxWriteReplicationIndex(), and its compat Database has no sync()
   // (nor batch() before 0.7); the libsql package's Database has both of the first two, and binds
   // 2^63 as a REAL.
-  if (typeof c.maxWriteReplicationIndex === "function" && typeof c.sync !== "function") tursoValues(names, values);
+  if (typeof c.maxWriteReplicationIndex === "function" && typeof c.sync !== "function") {
+    tursoValues(names, values);
+    unplaced(query, names, values, "Turso's engine");
+  }
   if (isDurableObjectSql(c)) return runDurableObject(c, text, values.map((v, i) => numberOrDigits(v, query.inputs?.[names[i]!]?.type, "durable-object")), query.columns);
-  if (isSqliteWasm(c)) return runSqliteWasm(c, text, sqliteWasmValues(names, values), query.columns);
-  if (isSqlJs(c)) return runSqlJs(c, text, values, query.columns);
+  if (isSqliteWasm(c)) {
+    unplaced(query, names, values, "SQLite Wasm");
+    return runSqliteWasm(c, text, sqliteWasmValues(names, values), query.columns);
+  }
+  if (isSqlJs(c)) {
+    unplaced(query, names, values, "sql.js");
+    return runSqlJs(c, text, values, query.columns);
+  }
   return runSyncSqlite(c, text, values, query.columns);
 }
 
