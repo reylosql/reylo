@@ -2,7 +2,7 @@
 //! server's prepare, its column and parameter definitions as mysql2 reports them, and a catalog
 //! query with its values written into the text, as mysql2's `query()` writes them.
 
-use crate::{AnswerCache, Analysis, AsyncAnswerer, DbError, HostError, ReplayError};
+use crate::{server_errors, AnswerCache, Analysis, AsyncAnswerer, DbError, HostError, ReplayError};
 use ::mysql_async::prelude::Queryable;
 use ::mysql_async::{Conn, Value as My};
 use reylo_engine_core::database::Database;
@@ -48,6 +48,9 @@ impl AsyncAnswerer<Describe> for Answers<'_> {
                 // such a lock: a prepare runs nothing, so the interruption says nothing of the
                 // statement either, and nothing is kept as its error.
                 Err(::mysql_async::Error::Server(e)) if e.code == QUERY_INTERRUPTED => Err(HostError(format!("The server interrupted the analysis of this statement: {} ({})", e.message, e.code))),
+                // Any other error that is not the statement's, as a deadlock, the server's memory, its
+                // limit on prepared statements or a Vitess tablet not serving: the next analysis asks again.
+                Err(::mysql_async::Error::Server(e)) if !server_errors::mysql(e.code, Some(&e.state), Some(&e.message)) => Err(HostError(format!("The server failed the analysis of this statement for a reason of its own, so run it again: {} ({})", e.message, e.code))),
                 // The server's error number, which the engine names in its message.
                 Err(::mysql_async::Error::Server(e)) => Ok(Err(DbError { message: e.message, code: Some(e.code.to_string()), position: None })),
                 Err(e) => Err(HostError(format!("the prepare did not reach the server: {e}"))),

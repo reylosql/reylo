@@ -65,9 +65,11 @@ test("a value is checked as the JSON it is stored as: a key whose value is undef
   assert.equal(validate({ const: { a: 1 } }, { a: 1, b: undefined }), undefined);
 });
 
-test("multipleOf holds a value to a real multiple, within the division's rounding error alone", () => {
-  for (const [value, of] of [[4.35, 0.01], [0.3, 0.1], [19.99, 0.01], [12391239123, 1e-8], [0, 5], [-15, 5], [1e308, 0.5], [0.075, 0.025]] as const) assert.equal(validate({ multipleOf: of }, value), undefined, `${value} / ${of}`);
-  for (const [value, of] of [[4e-9, 5], [1.0000000001, 1], [0.0100000000001, 0.01], [7, 5], [0.0075, 0.01]] as const) assert.match(validate({ multipleOf: of }, value)?.message ?? "", /must be a multiple of/, `${value} / ${of}`);
+test("multipleOf holds a value to a whole multiple, each number read as the decimal JSON writes it", () => {
+  for (const [value, of] of [[4.35, 0.01], [0.3, 0.1], [19.99, 0.01], [12391239123, 1e-8], [0, 5], [-15, 5], [1e308, 0.5], [0.075, 0.025], [-0, 5], [1e308, 5e-324]] as const) assert.equal(validate({ multipleOf: of }, value), undefined, `${value} / ${of}`);
+  for (const [value, of] of [[4e-9, 5], [1.0000000001, 1], [0.0100000000001, 0.01], [7, 5], [0.0075, 0.01], [3000000000000001, 3], [9007199254740992, 3], [1e17, 7], [1.0000000000000002, 1], [0.30000000000000004, 0.1]] as const) assert.match(validate({ multipleOf: of }, value)?.message ?? "", /must be a multiple of/, `${value} / ${of}`);
+  // A divisor JSON Schema forbids divides nothing, and a number JSON cannot write is no multiple.
+  for (const [value, of] of [[5, 0], [0, 0], [5, Infinity], [Infinity, 5], [NaN, 5]] as const) assert.match(validate({ multipleOf: of }, value)?.message ?? "", /must be a multiple of/, `${value} / ${of}`);
 });
 
 test("a pattern Unicode mode refuses and the plain mode reads is read plainly, and one neither reads still throws", () => {

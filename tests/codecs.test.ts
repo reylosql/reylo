@@ -21,6 +21,7 @@ import { defineQuery } from "../src/index.ts";
 import { moduleTypes, standardColumnsType } from "../src/module-types.ts";
 import { renderParamType, renderType } from "../src/render.ts";
 import { querySchemas, typeSchema } from "../src/schema.ts";
+import { validate } from "../src/json-schema.ts";
 import { DecodeError, ParameterError } from "../src/values.ts";
 import type { EngineType } from "../src/engine-type.ts";
 
@@ -114,10 +115,13 @@ test("a codec position is declared its codec's type, through every part Reylo de
   assert.match(types.params, /since: Temporal\.Instant/);
   const plain = moduleTypes("select …", analysis, "postgres", { params: ["since"], placeholders: [] }, true);
   assert.match(plain.row, /id: bigint;[\s\S]*price: string;[\s\S]*at: string/);
-  // The JSON Schema names the JSON form the codec's value writes.
+  // The JSON Schema names the JSON form the codec's value writes: a Temporal.Instant's, with a year
+  // outside 0000–9999 as ISO 8601 extends it.
   const schemas = querySchemas(analysis, "postgres", every);
   const row = (schemas.output as any).items.properties;
   assert.deepEqual([row.id, row.price, row.total, row.took], [{ type: "integer", format: "int64" }, { type: "number" }, { type: ["number", "null"] }, { type: "string", description: "an ISO 8601 duration with its sign in front (P1Y2M3DT4H5M6.789S, -P1D)" }]);
+  assert.deepEqual(row.at, { anyOf: [{ type: "string", format: "date-time" }, { type: "string", pattern: "^([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3}))-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$" }] });
+  assert.equal(validate(row.at, JSON.parse(JSON.stringify(Temporal.Instant.from("+012345-01-01T00:00:00Z")))), undefined);
 });
 
 test("a codec gives each value its type exactly, or refuses it naming the column and the value", () => {
@@ -521,6 +525,8 @@ test("a vector is its typed array at every position outside JSON, and nothing bu
   assert.equal(renderParamType(pg("halfvec"), "postgres", false, undefined, codecs), "Float16Array");
   assert.equal(renderType(array(pg("vector")), false, "postgres", codecs), "(Float32Array | null)[]");
   assert.deepEqual(planOf(array(pg("vector")), "postgres", codecs), { array: "vector:float32" });
+  // As JSON a typed array is an array of its numbers, as a Set is one of its members (`AsJson`), where JSON.stringify writes an object by index.
+  for (const name of ["vector", "halfvec"]) assert.deepEqual(typeSchema(pg(name), "postgres", false, false, false, undefined, codecs), { type: "array", items: { type: "number" } });
 });
 
 test("ClickHouse: a codec reaches a tuple's elements, by name and by place, an array's and a map's pairs", () => {
@@ -576,6 +582,9 @@ test("a vector's typed array holds the floats the server stores, and a parameter
   const deep = decodePlan({ array: "vector:float32" }, [[null, null], [[1, 2], null]], "embeddings") as [[null, null], [Float32Array, null]];
   assert.deepEqual(deep[0], [null, null]);
   assert.ok(deep[1][0] instanceof Float32Array && deep[1][1] === null);
+  // And goes back in at its depth, as a parameter of the type it came from.
+  assert.deepEqual(encodePlan({ array: "vector:float32" }, deep, "embeddings", "postgres"), [[null, null], [[1, 2], null]]);
+  assert.deepEqual(encodePlan({ array: "vector:float32" }, [[Float32Array.of(1)], [Float32Array.of(2)]], "embeddings", "postgres"), [[[1]], [[2]]]);
   // A number[] or another typed array is refused, as TypeScript refuses it.
   for (const [codec, v, expected] of [["vector:float32", [1, 2], "Float32Array"], ["vector:float32", new Float64Array([1]), "Float32Array"], ["vector:float16", new Float32Array([1]), "Float16Array"]] as const) {
     assert.throws(() => encodeCodec(codec, v, "embedding", "postgres"), (e: Error) => e instanceof ParameterError && e.message.startsWith(`Parameter "embedding" takes a ${expected}, as js.codecs.vector in the project file says`), expected);

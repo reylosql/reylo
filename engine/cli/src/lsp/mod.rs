@@ -4,7 +4,7 @@
 //!
 //! Everything that can wait runs off the message loop, each on a thread of its own: finding a project (its URL may run a command), analyzing a statement, and reading the schema. So a locked table or a silent server never holds up the editor, and requests are answered from what was last read.
 
-mod reading;
+pub(crate) mod reading;
 
 use crate::analyze::{untyped_params, Session};
 use reading::{catalog_key, created_tables, for_grammar, items, key, output_column, scopes, select_list, tokens, Class, Created, Lines, Named, Scopes, Source, SourceKind, Tok, RESERVED};
@@ -1287,14 +1287,43 @@ fn in_comment_or_string(dialect: Dialect, text: &str, reading: &Reading, offset:
     }
     // The trivia between the token before the cursor and the cursor.
     let gap_start = i.checked_sub(1).map_or(0, |p| reading.spans[p].end as usize);
-    let gap = &text[gap_start..offset];
-    if let Some(open) = gap.rfind("/*") {
-        if !gap[open..].contains("*/") {
+    in_comment(dialect, text, gap_start, offset)
+}
+
+/// Whether `offset` is inside a comment of the trivia that runs from `from`, the comments read as
+/// the dialect reads them (`reylo_engine_core::lexical`), and SQL Server's as `--` and `/* */`.
+fn in_comment(dialect: Dialect, text: &str, from: usize, offset: usize) -> bool {
+    use reylo_engine_core::dialect::Dialect as Core;
+    let rules = match dialect {
+        Dialect::Postgres => reylo_engine_core::lexical::Rules::of(Core::Postgres),
+        Dialect::Sqlite => reylo_engine_core::lexical::Rules::of(Core::Sqlite),
+        Dialect::Mysql => reylo_engine_core::lexical::Rules::of(Core::Mysql),
+        Dialect::ClickHouse => reylo_engine_core::lexical::Rules::of(Core::Clickhouse),
+        Dialect::SqlServer => {
+            let gap = &text[from..offset];
+            return gap.rfind("/*").is_some_and(|open| !gap[open..].contains("*/")) || gap.rsplit(['\n', '\r']).next().unwrap_or("").contains("--");
+        }
+    };
+    let b = text.as_bytes();
+    let mut i = from;
+    while i < offset {
+        // A line comment holds the cursor at its line's end too; a block comment, before its `*/`.
+        let (end, holds) = if rules.line_comment_at(b, i) {
+            let end = rules.line_comment_end(b, i);
+            (end, offset <= end)
+        } else if b[i..].starts_with(b"/*") {
+            let end = rules.block_comment_end(b, i).unwrap_or(b.len());
+            (end, offset < end || end == b.len())
+        } else {
+            i += 1;
+            continue;
+        };
+        if holds {
             return true;
         }
+        i = end;
     }
-    let line = gap.rsplit(['\n', '\r']).next().unwrap_or("");
-    line.contains("--") || (dialect == Dialect::Mysql && line.contains('#')) || (dialect == Dialect::ClickHouse && (line.contains("#!") || line.contains("# ")))
+    false
 }
 
 fn complete_source(place: &Place, names: &Scopes, at: usize, source: &Source, items: &mut Vec<Value>) {
@@ -1347,7 +1376,9 @@ fn quoted(place: &Place, name: &str) -> String {
         return name.to_string();
     }
     match dialect {
-        Dialect::Mysql | Dialect::ClickHouse => format!("`{}`", name.replace('`', "``")),
+        Dialect::Mysql => format!("`{}`", name.replace('`', "``")),
+        // ClickHouse reads a backslash in backquotes as an escape, as it does in a string.
+        Dialect::ClickHouse => format!("`{}`", name.replace('\\', "\\\\").replace('`', "\\`")),
         Dialect::SqlServer => format!("[{}]", name.replace(']', "]]")),
         _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }
@@ -1523,6 +1554,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_comment_is_read_as_its_dialect_reads_it() {
+        let inside = |d: Dialect, text: &str| in_comment(d, text, 0, text.len());
+        assert!(inside(Dialect::ClickHouse, "SELECT 1 // a"));
+        assert!(!inside(Dialect::Postgres, "select 1 // a"));
+        // MySQL's `--x` is two minus signs; a Postgres block comment nests.
+        assert!(!inside(Dialect::Mysql, "select 1 --x"));
+        assert!(inside(Dialect::Mysql, "select 1 -- x"));
+        assert!(inside(Dialect::Postgres, "select 1 /* a /* b */ c"));
+        assert!(!inside(Dialect::Sqlite, "select 1 /* a /* b */ c"));
+        // A Postgres line comment ends at a carriage return, elsewhere at the line feed.
+        assert!(!inside(Dialect::Postgres, "select 1 -- a\rx"));
+        assert!(inside(Dialect::Sqlite, "select 1 -- a\rx"));
+        assert!(inside(Dialect::SqlServer, "select 1 -- a"));
+    }
+
+    #[test]
     fn reads_mysql_under_the_sql_mode_that_finds_the_least_wrong() {
         assert!(Reading::of(Dialect::Mysql, "select \"a\" from \"t\"").errors.is_empty());
         assert!(Reading::of(Dialect::Mysql, "select 'a\\', 'b'").errors.is_empty());
@@ -1562,7 +1609,7 @@ mod tests {
 
     #[test]
     fn quotes_a_name_only_where_the_dialect_needs_it() {
-        for (dialect, name, written) in [(Dialect::Postgres, "users", "users"), (Dialect::Postgres, "camelCase", "\"camelCase\""), (Dialect::Postgres, "two words", "\"two words\""), (Dialect::Postgres, "order", "\"order\""), (Dialect::Postgres, "user", "\"user\""), (Dialect::Postgres, "table", "\"table\""), (Dialect::Sqlite, "index", "\"index\""), (Dialect::Sqlite, "name", "name"), (Dialect::Mysql, "camelCase", "camelCase"), (Dialect::Mysql, "two words", "`two words`"), (Dialect::SqlServer, "a]b", "[a]]b]")] {
+        for (dialect, name, written) in [(Dialect::Postgres, "users", "users"), (Dialect::Postgres, "camelCase", "\"camelCase\""), (Dialect::Postgres, "two words", "\"two words\""), (Dialect::Postgres, "order", "\"order\""), (Dialect::Postgres, "user", "\"user\""), (Dialect::Postgres, "table", "\"table\""), (Dialect::Sqlite, "index", "\"index\""), (Dialect::Sqlite, "name", "name"), (Dialect::Mysql, "camelCase", "camelCase"), (Dialect::Mysql, "two words", "`two words`"), (Dialect::Mysql, "a`b\\c", "`a``b\\c`"), (Dialect::ClickHouse, "two words", "`two words`"), (Dialect::ClickHouse, "a`b\\c", "`a\\`b\\\\c`"), (Dialect::SqlServer, "a]b", "[a]]b]")] {
             assert_eq!(quoted(&Place::new(dialect), name), written);
         }
     }

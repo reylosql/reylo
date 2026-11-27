@@ -1,0 +1,43 @@
+--- a/src/backend/parser/gram.y
++++ b/src/backend/parser/gram.y
+@@ -815,9 +815,11 @@
+  * precedence as LIKE; otherwise they'd effectively have the same precedence
+  * as NOT, at least with respect to their left-hand subexpression.
+  * FORMAT_LA, NULLS_LA, WITH_LA, and WITHOUT_LA are needed to make the grammar
+- * LALR(1).
++ * LALR(1).  IGNORE_LA and RESPECT_LA, which Reylo's lexer reads
++ * before NULLS after a closing parenthesis, keep IGNORE and RESPECT bare
++ * column labels, as releases before 19 read them.
+  */
+-%token		FORMAT_LA NOT_LA NULLS_LA WITH_LA WITHOUT_LA
++%token		FORMAT_LA NOT_LA NULLS_LA WITH_LA WITHOUT_LA IGNORE_LA RESPECT_LA
+ 
+ /*
+  * The grammar likewise thinks these tokens are keywords, but they are never
+@@ -16735,8 +16737,8 @@
+  * Window Definitions
+  */
+ null_treatment:
+-			IGNORE_P NULLS_P						{ $$ = PARSER_IGNORE_NULLS; }
+-			| RESPECT_P NULLS_P						{ $$ = PARSER_RESPECT_NULLS; }
++			IGNORE_LA NULLS_P						{ $$ = PARSER_IGNORE_NULLS; }
++			| RESPECT_LA NULLS_P					{ $$ = PARSER_RESPECT_NULLS; }
+ 			| /*EMPTY*/								{ $$ = NO_NULLTREATMENT; }
+ 		;
+ 
+@@ -18818,6 +18820,7 @@
+ 			| HOLD
+ 			| IDENTITY_P
+ 			| IF_P
++			| IGNORE_P
+ 			| ILIKE
+ 			| IMMEDIATE
+ 			| IMMUTABLE
+@@ -18983,6 +18986,7 @@
+ 			| REPLACE
+ 			| REPLICA
+ 			| RESET
++			| RESPECT_P
+ 			| RESTART
+ 			| RESTRICT
+ 			| RETURN

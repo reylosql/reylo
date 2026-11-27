@@ -54,7 +54,7 @@ pub struct Plan {
 }
 
 /// Read one statement's JSON constructors; the probes come back as text for the build to prepare.
-pub fn plan(q: &Query, columns: &Columns) -> Plan {
+pub fn plan(q: &Query, columns: &Columns, views: &HashSet<String>) -> Plan {
     let SetExpr::Select(select) = q.body.as_ref() else { return Plan::default() };
     // A probe of a statement read materialized is read so too ([`crate::mysql_derived`]).
     let hint = if crate::mysql_derived::is_materialized(q) { crate::mysql_derived::hint() } else { String::new() };
@@ -64,9 +64,12 @@ pub fn plan(q: &Query, columns: &Columns) -> Plan {
     // aggregate's arguments valid under its GROUP BY, which a probe of them carries ([`group_of`]).
     let groups = group_of(select).into_iter().map(|g| (0, g)).collect();
     let rolled = usize::from(crate::mysql_nulls::rolls_up(&select.group_by));
-    let mut b = Builder { stack: vec![top], columns, ctes: with_names(q), wanted: Vec::new(), next_ctx: 0, drafts: Vec::new(), overflowed: false, booleans: Vec::new(), either: Vec::new(), digits: Vec::new(), reads: Reads::Itself, grouped, groups, in_aggregate: 0, rolled, rollups: (rolled > 0).then_some(0).into_iter().collect(), rowless: HashSet::new(), windows: select.named_window.clone() };
+    let mut b = Builder { stack: vec![top], columns, views, ctes: with_names(q), rebound: crate::mysql_derived::rebound(q), wanted: Vec::new(), next_ctx: 0, drafts: Vec::new(), overflowed: false, booleans: Vec::new(), either: Vec::new(), digits: Vec::new(), reads: Reads::Itself, grouped, groups, in_aggregate: 0, in_window: 0, rolled, rollups: (rolled > 0).then_some(0).into_iter().collect(), keyed: HashSet::new(), rowless: HashSet::new(), windows: select.named_window.clone() };
     if b.may_be_rowless(select) {
         b.rowless.insert(0);
+    }
+    if b.may_group_shapes(select) {
+        b.keyed.insert(0);
     }
     let mut columns = Vec::new();
     for item in &select.projection {
@@ -118,6 +121,42 @@ fn names_output(item: &Expr, projection: &[SelectItem]) -> bool {
         Expr::Value(_) => true,
         Expr::Nested(inner) => names_output(inner, projection),
         Expr::Identifier(name) => projection.iter().any(|i| matches!(i, SelectItem::ExprWithAlias { alias, .. } if alias.value.eq_ignore_ascii_case(&name.value))),
+        _ => false,
+    }
+}
+
+/// Whether a GROUP BY item is surely a column: one named with its table, or a position of the
+/// select list's that is one, and each member of a ROLLUP alike. A bare name may be an alias of
+/// another item, as MySQL drops an alias's leading spaces, ends it at a NUL, folds the letter case
+/// of names past ASCII and names an item with no alias by its text: one is a column only where it
+/// is unquoted and ASCII, and no other item's alias may be it, one of printable ASCII and no
+/// longer than a name may be compared for it. An item that aggregates is none: MySQL refuses to
+/// group by one.
+fn names_column(item: &Expr, projection: &[SelectItem]) -> bool {
+    fn may_name(alias: &str, name: &str) -> bool {
+        let plain = alias.len() <= 64 && alias.bytes().all(|b| (b' '..=b'~').contains(&b));
+        !plain || alias.trim().eq_ignore_ascii_case(name)
+    }
+    fn column(e: &Expr) -> bool {
+        match e {
+            Expr::Nested(inner) => column(inner),
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_) => true,
+            _ => false,
+        }
+    }
+    match item {
+        Expr::Nested(inner) => names_column(inner, projection),
+        Expr::Rollup(sets) | Expr::Cube(sets) | Expr::GroupingSets(sets) => sets.iter().flatten().all(|k| names_column(k, projection)),
+        Expr::Identifier(name) if name.quote_style.is_none() && name.value.is_ascii() => !projection.iter().any(|i| match i {
+            SelectItem::ExprWithAlias { expr, alias } => !column(expr) && !crate::mysql::has_aggregate(expr) && may_name(&alias.value, &name.value),
+            SelectItem::UnnamedExpr(expr) => !column(expr) && expr.to_string().eq_ignore_ascii_case(&name.value),
+            _ => false,
+        }),
+        Expr::CompoundIdentifier(_) => true,
+        Expr::Value(v) if !projection.iter().any(|i| matches!(i, SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..))) => match &v.value {
+            Value::Number(n, _) => n.parse::<usize>().ok().and_then(|n| projection.get(n.checked_sub(1)?)).is_some_and(|i| matches!(i, SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } if column(e))),
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -402,8 +441,14 @@ struct Builder<'a> {
     /// The queries in scope, outermost first.
     stack: Vec<Level>,
     columns: &'a Columns,
+    /// The names of the views of every schema, in lowercase: a view the copy does not read
+    /// through a derived table, as one inside a subquery, may select any expression.
+    views: &'a HashSet<String>,
     /// The WITH queries in scope where the builder stands, whose names are no tables'.
     ctes: Vec<Cte>,
+    /// The WITH queries of the statement MySQL may read otherwise where they are read
+    /// ([`crate::mysql_derived::rebound`]), whose columns are not followed.
+    rebound: crate::mysql_derived::Rebound,
     wanted: Vec<String>,
     next_ctx: usize,
     drafts: Vec<Draft>,
@@ -421,6 +466,9 @@ struct Builder<'a> {
     groups: HashMap<usize, Vec<Expr>>,
     /// How many aggregates of the query the walk stands in it is inside the arguments of.
     in_aggregate: usize,
+    /// How many of those are window calls, whose arguments read the query's grouped rows, as the
+    /// select list does ([`Builder::reads_grouped_rows`]).
+    in_window: usize,
     /// How many of the queries in scope group WITH ROLLUP, whose super-aggregate rows hold NULL
     /// in every column they group by, which a subquery reading the row reads too: a value read
     /// outside an aggregate's arguments may be NULL there, whatever its probe says.
@@ -429,6 +477,9 @@ struct Builder<'a> {
     /// its rows before they are grouped, which its super-aggregate rows null nothing of; a column
     /// of a query around it that rolls up is NULL in that query's super-aggregate row all the same.
     rollups: HashSet<usize>,
+    /// The context ids of the queries that group WITH ROLLUP by what may be one of the values the
+    /// shapes speak for ([`Builder::may_group_shapes`]).
+    keyed: HashSet<usize>,
     /// The context ids of the queries that may aggregate with no GROUP BY ([`Builder::may_be_rowless`]),
     /// which return their one row over no rows too: a value that reads the row outside every
     /// aggregate's call ([`crate::mysql::reads_row`]) is NULL there, which its probe, with no
@@ -537,10 +588,10 @@ impl Builder<'_> {
                         // A WITH query hides a table of its name. Only the one named exactly as
                         // the reference names it is surely the one read: a name in another case
                         // may be a table where table names are compared as written.
-                        Some(t) => match self.ctes.iter().rev().find(|c| c.name.eq_ignore_ascii_case(t)) {
-                            Some(cte) if cte.name == *t => Source::Columns(cte.columns.clone()),
-                            Some(_) => Source::Unknown,
-                            None => Source::Catalog(t.clone()),
+                        Some(t) => match crate::mysql_names::with_query(self.ctes.iter().map(|c| c.name.as_str()), t) {
+                            crate::mysql_names::Reads::With(at) if !self.rebound.has(t) => Source::Columns(self.ctes[at].columns.clone()),
+                            crate::mysql_names::Reads::With(_) | crate::mysql_names::Reads::Unknown => Source::Unknown,
+                            crate::mysql_names::Reads::Table => Source::Catalog(t.clone()),
                         },
                         None => Source::Unknown,
                     };
@@ -585,6 +636,16 @@ impl Builder<'_> {
         if self.overflowed {
             return Shape::Unknown;
         }
+        let shape = self.build(e);
+        // A value a query in scope may group by WITH ROLLUP is NULL in its super-aggregate rows,
+        // whatever builds it: an object, a subquery, or a fallback that is never NULL itself
+        // (`ifnull(…, json_array())`), as is one inside it ([`Builder::rolled_key`]). One that calls
+        // an aggregate or a window function of its own query is no GROUP BY item, which can hold
+        // neither.
+        if self.rolled_key() && !crate::mysql::has_aggregate(e) && !calls_window(e) { force_nullable(shape) } else { shape }
+    }
+
+    fn build(&mut self, e: &Expr) -> Shape {
         match e {
             Expr::Nested(inner) => self.walk(inner),
             Expr::Function(f) => {
@@ -621,9 +682,13 @@ impl Builder<'_> {
                             None => self.plain_group(),
                             Some(_) => self.stack.len() == 1 && crate::mysql_nulls::windowed(e, &self.windows) == Some(crate::mysql_nulls::Windowed::Always),
                         };
+                        // A window's argument reads the grouped rows, super-aggregate rows and all.
+                        let window = usize::from(f.over.is_some());
                         self.in_aggregate += 1;
+                        self.in_window += window;
                         let items = self.walk_as(args[0], Reads::Copy);
                         self.in_aggregate -= 1;
+                        self.in_window -= window;
                         Shape::Array { items: Box::new(items), non_null: has_a_row, distinct: false }
                     }
                     // The value is the first argument that is not NULL. A constructor that is
@@ -668,10 +733,15 @@ impl Builder<'_> {
                     self.rollups.insert(self.next_ctx);
                 }
                 self.stack.push(Level { ctx: self.next_ctx, from: select.from.clone(), with: q.with.clone() });
+                if self.may_group_shapes(select) {
+                    self.keyed.insert(self.next_ctx);
+                }
                 // The subquery's select list is outside its own aggregates, wherever it stands.
                 let in_aggregate = std::mem::take(&mut self.in_aggregate);
+                let in_window = std::mem::take(&mut self.in_window);
                 let shape = self.walk_as(inner, Reads::Result);
                 self.in_aggregate = in_aggregate;
+                self.in_window = in_window;
                 self.rolled -= rolls_up;
                 self.stack.pop();
                 // A scalar subquery is one row only when it is an ungrouped aggregate of its own
@@ -784,6 +854,60 @@ impl Builder<'_> {
             || select.having.as_ref().is_some_and(|having| self.own_aggregates(having) > 0)
     }
 
+    /// Whether a query that groups WITH ROLLUP may group by one of the values the shapes speak for,
+    /// which its super-aggregate rows hold NULL in. The server nulls there every expression of the
+    /// select list, at any depth, that it takes for a GROUP BY item, and it compares them as it
+    /// resolves them, which the engine does not: `json_object('T', title)` is
+    /// `json_object('t', title)` under a case-insensitive collation, an alias stands for its item
+    /// inside an expression (`coalesce(o)`), and a column of a derived table, a WITH query or a
+    /// view is the expression it selects (measured on 8.4). A table's column is none of those
+    /// values, so a query is clear of them only where it groups by such columns alone: every item
+    /// a column ([`names_column`]), and every FROM in scope reads tables alone.
+    fn may_group_shapes(&self, select: &ast::Select) -> bool {
+        if !crate::mysql_nulls::rolls_up(&select.group_by) {
+            return false;
+        }
+        let ast::GroupByExpr::Expressions(keys, _) = &select.group_by else { return true };
+        !keys.iter().all(|k| names_column(k, &select.projection)) || !self.stack.iter().all(|l| self.reads_tables(&l.from))
+    }
+
+    /// Whether a FROM reads tables alone: no derived table, table function, view or WITH query in
+    /// scope, whose columns may be any expression.
+    fn reads_tables(&self, from: &[TableWithJoins]) -> bool {
+        from.iter().all(|t| {
+            std::iter::once(&t.relation).chain(t.joins.iter().map(|j| &j.relation)).all(|factor| match factor {
+                TableFactor::Table { name, args: None, .. } => match name.0.as_slice() {
+                    [ast::ObjectNamePart::Identifier(one)] => !self.ctes.iter().any(|c| c.name.eq_ignore_ascii_case(&one.value)) && !self.is_view(&one.value),
+                    [.., ast::ObjectNamePart::Identifier(last)] => !self.is_view(&last.value),
+                    _ => false,
+                },
+                TableFactor::NestedJoin { table_with_joins, .. } => self.reads_tables(std::slice::from_ref(table_with_joins.as_ref())),
+                _ => false,
+            })
+        })
+    }
+
+    /// Whether a table name may be a view's: views' names are compared in lowercase, and one past
+    /// ASCII may fold otherwise.
+    fn is_view(&self, name: &str) -> bool {
+        !name.is_ascii() || self.views.contains(&name.to_ascii_lowercase())
+    }
+
+    /// Whether a value where the walk stands may be one a query in scope groups by WITH ROLLUP
+    /// ([`Builder::keyed`]), and so NULL in its super-aggregate rows: outside the arguments of that
+    /// query's aggregates, which read its rows before they are grouped, or in a query inside it.
+    fn rolled_key(&self) -> bool {
+        let ctx = self.stack[self.stack.len() - 1].ctx;
+        self.stack.iter().any(|l| self.keyed.contains(&l.ctx) && (l.ctx != ctx || self.reads_grouped_rows()))
+    }
+
+    /// Whether the walk reads its query's grouped rows, a ROLLUP's super-aggregate rows among them:
+    /// outside the arguments of every aggregate but a window call's, which read the rows before
+    /// they are grouped.
+    fn reads_grouped_rows(&self) -> bool {
+        self.in_aggregate == self.in_window
+    }
+
     /// Whether the walk stands in the select list of a query that groups or aggregates, outside the
     /// arguments of its aggregates.
     fn outside_aggregates(&self) -> bool {
@@ -848,7 +972,7 @@ impl Builder<'_> {
         // super-aggregate rows null nothing of and which exist wherever it is read. A query around
         // it that rolls up nulls its columns all the same.
         let own = usize::from(self.rollups.contains(&ctx));
-        let rolled = self.rolled > own || (own > 0 && self.in_aggregate == 0);
+        let rolled = self.rolled > own || (own > 0 && self.reads_grouped_rows());
         let nulled = rolled || (self.in_aggregate == 0 && self.rowless.contains(&ctx) && crate::mysql::reads_row(e, self.columns));
         if nulled {
             Shape::Nullable(Box::new(Shape::Column { probe, index }))
@@ -1150,6 +1274,16 @@ fn subqueries<'e>(e: &'e Expr, out: &mut Vec<&'e Query>) {
     }
 }
 
+/// Whether an expression calls a window function of its own query: not inside a subquery.
+fn calls_window(e: &Expr) -> bool {
+    match e {
+        Expr::Function(f) => f.over.is_some() || args(f).is_some_and(|a| a.into_iter().any(calls_window)),
+        Expr::Nested(inner) | Expr::UnaryOp { expr: inner, .. } | Expr::Cast { expr: inner, .. } | Expr::IsNull(inner) | Expr::IsNotNull(inner) => calls_window(inner),
+        Expr::BinaryOp { left, right, .. } => calls_window(left) || calls_window(right),
+        _ => false,
+    }
+}
+
 /// An array that is empty and never NULL: `json_array()`, or the text `[]` cast to JSON.
 fn is_empty_array(e: &Expr) -> bool {
     match e {
@@ -1174,7 +1308,7 @@ mod tests {
     #[test]
     fn nested_fetch_plans_two_probes() {
         let q = query("select u.id, (select coalesce(json_arrayagg(json_object('id', p.id, 'title', p.title)), json_array()) from posts p where p.user_id = u.id) as posts, json_object('email', u.email, 'n', u.id + ?) as meta from users u where u.id = ?");
-        let plan = plan(&q, &Columns::new());
+        let plan = plan(&q, &Columns::new(), &HashSet::new());
         assert_eq!(plan.probes.len(), 2);
         assert_eq!(plan.probes[0].sql, "SELECT p.id, p.title FROM posts p");
         assert_eq!(plan.probes[0].wider.as_deref(), Some("SELECT p.id, p.title FROM users u, posts p"));
@@ -1187,7 +1321,7 @@ mod tests {
 
     #[test]
     fn an_aggregate_beside_a_column_is_probed_under_the_group_by() {
-        let probes = |sql: &str| plan(&query(sql), &Columns::new()).probes.into_iter().map(|p| p.sql).collect::<Vec<_>>();
+        let probes = |sql: &str| plan(&query(sql), &Columns::new(), &HashSet::new()).probes.into_iter().map(|p| p.sql).collect::<Vec<_>>();
         // The statement's own expressions under its GROUP BY, its bare columns and the arguments
         // of its aggregates without it.
         assert_eq!(
@@ -1211,7 +1345,7 @@ mod tests {
 
     #[test]
     fn a_value_beside_an_aggregate_with_no_group_by_or_under_a_rollup_may_be_null() {
-        let fields = |sql: &str| match plan(&query(sql), &Columns::new()).columns.pop() {
+        let fields = |sql: &str| match plan(&query(sql), &Columns::new(), &HashSet::new()).columns.pop() {
             Some((_, Shape::Object { fields, .. })) => fields.into_iter().map(|(k, s)| (k, matches!(s, Shape::Nullable(_)))).collect::<Vec<_>>(),
             other => panic!("{other:?}"),
         };
@@ -1224,15 +1358,15 @@ mod tests {
         assert_eq!(fields("select json_object('id', id, 'r', row_number() over ()) as o from users"), pairs(&[("id", false), ("r", false)]));
         // A super-aggregate row nulls what it groups by, in the row a subquery reads too.
         assert_eq!(fields("select json_object('name', name, 'n', count(*)) as o from users group by name with rollup"), pairs(&[("name", true), ("n", true)]));
-        let sub = plan(&query("select (select json_object('k', u.id, 'c', count(*)) from posts p group by p.user_id limit 1) as o from users u group by u.id with rollup"), &Columns::new());
+        let sub = plan(&query("select (select json_object('k', u.id, 'c', count(*)) from posts p group by p.user_id limit 1) as o from users u group by u.id with rollup"), &Columns::new(), &HashSet::new());
         let Some((_, Shape::Object { fields, .. })) = sub.columns.first() else { panic!("{:?}", sub.columns) };
         assert!(matches!(fields[0].1, Shape::Nullable(_)), "{fields:?}");
         // An aggregate's argument in a subquery reads the rolled-up row of the query around it.
-        let sub = plan(&query("select (select json_object('a', json_arrayagg(u.id)) from posts p limit 1) as o from users u group by u.id with rollup"), &Columns::new());
+        let sub = plan(&query("select (select json_object('a', json_arrayagg(u.id)) from posts p limit 1) as o from users u group by u.id with rollup"), &Columns::new(), &HashSet::new());
         let Some((_, Shape::Object { fields, .. })) = sub.columns.first() else { panic!("{:?}", sub.columns) };
         assert!(matches!(&fields[0].1, Shape::Array { items, .. } if matches!(items.as_ref(), Shape::Nullable(_))), "{fields:?}");
         // Over no rows, a subquery that reads the row of a query aggregating with no GROUP BY is NULL.
-        let sub = plan(&query("select (select json_object('n', count(*), 's', (select json_object('c', count(*), 'k', any_value(x.name)) from posts p)) from users x) as o"), &Columns::new());
+        let sub = plan(&query("select (select json_object('n', count(*), 's', (select json_object('c', count(*), 'k', any_value(x.name)) from posts p)) from users x) as o"), &Columns::new(), &HashSet::new());
         let Some((_, Shape::Object { fields, .. })) = sub.columns.first() else { panic!("{:?}", sub.columns) };
         assert!(matches!(fields[1].1, Shape::Object { non_null: false, .. }), "{fields:?}");
     }
@@ -1240,7 +1374,7 @@ mod tests {
     #[test]
     fn a_truth_value_inside_a_constructor_is_marked_boolean() {
         let q = query("select json_object('t', true, 'c', u.id > 0, 'in', u.id in (1, 2), 'not', not (u.id = 1), 'n', u.id, 's', u.name) as o from users u");
-        let plan = plan(&q, &Columns::new());
+        let plan = plan(&q, &Columns::new(), &HashSet::new());
         assert_eq!(plan.probes[0].sql, "SELECT true, u.id > 0, u.id IN (1, 2), NOT (u.id = 1), u.id, u.name FROM users u");
         assert_eq!(plan.booleans, vec![(0, 0), (0, 1), (0, 2), (0, 3)]);
     }
@@ -1248,14 +1382,14 @@ mod tests {
     #[test]
     fn a_call_that_writes_a_bits_digits_is_marked() {
         let q = query("select json_object('c', coalesce(f.mask, f.mask), 'g', (greatest(f.mask, f.mask)), 'm', f.mask, 'n', nullif(f.mask, f.mask)) as o from flags f");
-        let plan = plan(&q, &Columns::new());
+        let plan = plan(&q, &Columns::new(), &HashSet::new());
         assert_eq!(plan.digits, vec![(0, 0), (0, 1)]);
     }
 
     #[test]
     fn a_truth_value_the_function_may_read_a_copy_of_is_either() {
         let marks = |sql: &str| {
-            let plan = plan(&query(sql), &Columns::new());
+            let plan = plan(&query(sql), &Columns::new(), &HashSet::new());
             (plan.booleans, plan.either)
         };
         // Beside an aggregate each argument without one is copied, a literal aside; an expression
@@ -1279,7 +1413,7 @@ mod tests {
 
     #[test]
     fn a_guard_keeps_the_shape_it_has_itself() {
-        let shape = |item: &str| plan(&query(&format!("select {item} as o from users u")), &Columns::new()).columns.pop().map(|(_, shape)| shape);
+        let shape = |item: &str| plan(&query(&format!("select {item} as o from users u")), &Columns::new(), &HashSet::new()).columns.pop().map(|(_, shape)| shape);
         let list = |non_null: bool| Some(Shape::Array { items: Box::new(Shape::Column { probe: 0, index: 0 }), non_null, distinct: false });
         assert_eq!(shape("json_arrayagg(u.id)"), list(false));
         for guard in ["json_array()", "cast('[]' as json)", "cast(' [ ] ' as json)", "json_array(), (json_array())"] {
@@ -1294,14 +1428,14 @@ mod tests {
         // A constructor that is never NULL is the value whatever follows it.
         assert!(matches!(shape("coalesce(json_object('id', u.id), ?)"), Some(Shape::Object { non_null: true, .. })));
         // A guard over anything else is one value, of the type the server gives the whole call.
-        let plan = plan(&query("select json_object('n', coalesce(u.n, 'none'), 'j', cast(u.name as json), 't', cast(u.id = 1 as json)) as o from users u"), &Columns::new());
+        let plan = plan(&query("select json_object('n', coalesce(u.n, 'none'), 'j', cast(u.name as json), 't', cast(u.id = 1 as json)) as o from users u"), &Columns::new(), &HashSet::new());
         assert_eq!(plan.probes[0].sql, "SELECT coalesce(u.n, 'none'), CAST(u.name AS JSON), u.id = 1 FROM users u");
         assert_eq!(plan.booleans, vec![(0, 2)]);
     }
 
     #[test]
     fn a_key_given_twice_holds_its_last_value() {
-        let plan = plan(&query("select json_object('id', u.id, 'name', u.name, 'id', u.email) as o from users u"), &Columns::new());
+        let plan = plan(&query("select json_object('id', u.id, 'name', u.name, 'id', u.email) as o from users u"), &Columns::new(), &HashSet::new());
         let fields = vec![("id".to_string(), Shape::Column { probe: 0, index: 2 }), ("name".to_string(), Shape::Column { probe: 0, index: 1 })];
         assert_eq!(plan.columns, vec![("o".to_string(), Shape::Object { fields, non_null: true })]);
     }
@@ -1309,7 +1443,7 @@ mod tests {
     #[test]
     fn subquery_items_are_planned_and_left_out_of_the_outer_probe() {
         let q = query("select u.id, u.name, (select count(*) from posts p where p.user_id = u.id) as n, (select p.id from posts p where p.user_id = u.id limit 1) as first from users u where u.id = ?");
-        let plan = plan(&q, &Columns::new());
+        let plan = plan(&q, &Columns::new(), &HashSet::new());
         // The exactly-one aggregate keeps its column; the `limit 1` fetch falls back to the server's verdict.
         assert_eq!(plan.columns, vec![("n".to_string(), Shape::Column { probe: 0, index: 0 })]);
         assert_eq!(plan.probes[0].sql, "SELECT count(*) FROM posts p");
@@ -1325,7 +1459,7 @@ mod tests {
         let columns: Columns = [("posts", vec!["id", "user_id", "title"]), ("users", vec!["id", "name"])].into_iter().map(|(t, c)| (t.to_string(), c.into_iter().map(String::from).collect())).collect();
         // The first column's shape, and the tables whose columns the plan lacked.
         let first = |sql: &str, columns: &Columns| {
-            let plan = plan(&query(sql), columns);
+            let plan = plan(&query(sql), columns, &HashSet::new());
             (plan.columns.first().map(|(_, shape)| shape.clone()), plan.wanted)
         };
         let kept = |sql: &str| matches!(first(sql, &columns).0, Some(Shape::Column { .. } | Shape::Array { non_null: true, .. }));
@@ -1385,7 +1519,7 @@ mod tests {
             assert!(!kept(sql), "{sql}");
         }
         // A constructor qualified with a schema is a stored function of that name.
-        assert!(plan(&query("select app.json_object('id', u.id) as o from users u"), &columns).columns.is_empty());
+        assert!(plan(&query("select app.json_object('id', u.id) as o from users u"), &columns, &HashSet::new()).columns.is_empty());
         assert!(!kept("select (select app.count(p.id) from posts p) as n from users u"));
         // Without the table's columns a bare name proves nothing, and the plan says which table.
         let bare = "select (select count(title) from posts where user_id = u.id) as n from users u";
@@ -1396,7 +1530,7 @@ mod tests {
 
     #[test]
     fn a_subquery_probe_carries_the_with_of_every_level() {
-        let probes = |sql: &str| plan(&query(sql), &Columns::new()).probes.into_iter().map(|p| (p.sql, p.wider)).collect::<Vec<_>>();
+        let probes = |sql: &str| plan(&query(sql), &Columns::new(), &HashSet::new()).probes.into_iter().map(|p| (p.sql, p.wider)).collect::<Vec<_>>();
         let probe = |sql: &str, narrow: &str, wider: Option<&str>| assert_eq!(probes(sql), vec![(narrow.to_string(), wider.map(String::from))], "{sql}");
         let posts = "WITH r AS (SELECT id FROM posts) ";
         // The subquery's own WITH, the statement's before it, and each nested subquery's after its parent's.
@@ -1441,7 +1575,7 @@ mod tests {
 
     #[test]
     fn a_correlated_from_is_read_after_the_queries_around_it() {
-        let probes = |sql: &str| plan(&query(sql), &Columns::new()).probes.into_iter().map(|p| (p.sql, p.wider)).collect::<Vec<_>>();
+        let probes = |sql: &str| plan(&query(sql), &Columns::new(), &HashSet::new()).probes.into_iter().map(|p| (p.sql, p.wider)).collect::<Vec<_>>();
         // A derived table that reads a query around it is LATERAL in the wider form, right of
         // the tables it reads.
         assert_eq!(
@@ -1471,7 +1605,7 @@ mod tests {
     #[test]
     fn a_scalar_subquery_that_can_miss_is_nullable() {
         let q = query("select (select json_object('id', p.id) from posts p where p.user_id = u.id limit 1) as first, json_arrayagg(u.id) as ids, u.name from users u");
-        let plan = plan(&q, &Columns::new());
+        let plan = plan(&q, &Columns::new(), &HashSet::new());
         assert!(matches!(plan.columns[0].1, Shape::Object { non_null: false, .. }));
         assert!(matches!(plan.columns[1].1, Shape::Array { non_null: false, .. }));
         assert_eq!(plan.columns.len(), 2);

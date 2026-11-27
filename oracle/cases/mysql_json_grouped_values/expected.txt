@@ -65,11 +65,22 @@ rollup_arrayagg_outer_mid.sql: one () -> { o: json { a: ({ k: int?, p: int? })[]
 rollup_arrayagg_outer_nested_sub.sql: many () -> { id: int | bigint?, o: json { a: ({ k: unknown? })[]? }? }
 rollup_arrayagg_outer_truth.sql: many () -> { id: int | bigint?, o: json { a: (boolean | bigint?)[] }? }
 rollup_arrayagg_own_col.sql: one () -> { o: json { a: ({ t: varchar(≤20), u: int })[]? }? }
+rollup_bare_key.sql: many () -> { id: int | bigint?, o: json { id: int? } }
+rollup_bare_key_spaced_alias.sql: many () -> { id: int | bigint?, o: json { id: int? }, display label: json { n: int? } }
 rollup_bare_sub_no_agg.sql: many () -> { id: int | bigint?, o: json { k: int? }? }
+rollup_beside_expr_key.sql: many () -> { k: bigint?, o: json { n: bigint? } }
+rollup_beside_key.sql: many () -> { title: varchar?, o: json { t: unknown?, n: unknown? } }
 rollup_correlated.sql: many () -> { id: int | bigint?, o: json { k: int?, c: bigint? }? }
 rollup_count.sql: many () -> { id: int | bigint?, o: json { k: int?, c: bigint? }? }
 rollup_cte_outer.sql: many () -> { o: json { k: bigint?, c: bigint }? }
 rollup_derived_outer.sql: many () -> { o: json { k: bigint?, c: bigint }? }
+rollup_key.sql: many () -> { o: json { t: varchar(≤20)? }?, n: bigint }
+rollup_key_cast.sql: many () -> { o: json { t: varchar(≤20)? }?, n: bigint }
+rollup_key_expr.sql: many () -> { o: json { t: varchar(≤20)? }?, n: bigint }
+rollup_key_nested.sql: many () -> { o: json { o: { t: varchar(≤20)? }? }?, n: bigint }
+rollup_key_position.sql: many () -> { o: json { t: varchar(≤20)?, u: int? }?, n: bigint }
+rollup_key_second.sql: many () -> { user_id: int | bigint?, o: json { t: varchar(≤20)? }?, n: bigint }
+rollup_key_subquery.sql: many () -> { o: json int?[]?, n: bigint }
 rollup_max_outer.sql: many () -> { id: int | bigint?, o: json { m: bigint?, c: bigint? }? }
 rollup_mid_level.sql: one () -> { o: json { k: int?, c: bigint? }? }
 rollup_nested_object.sql: many () -> { id: int | bigint?, o: json { o: { k: int? }, c: bigint? }? }
@@ -84,6 +95,9 @@ rollup_three_levels.sql: many () -> { id: int | bigint?, o: json { k: int?, x: i
 rollup_top.sql: many () -> { o: json { t: unknown?, c: unknown?, a: unknown?[]?, m: unknown? } }
 rollup_top_arrayagg.sql: many () -> { o: json { t: varchar(≤20)?, a: int[]? } }
 rollup_ungrouped_arrayagg.sql: many () -> { id: int | bigint?, o: json { k: int?, a: int?[]? } }
+rollup_window_in_object.sql: many () -> { user_id: int | bigint?, o: json { w: int?[] } }
+rollup_window_items.sql: many () -> { user_id: int | bigint?, w: json int?[] }
+rollup_window_object.sql: many () -> { user_id: int | bigint?, w: json ({ u: int? })[] }
 rowless_arrayagg_outer_item.sql: one () -> { n: bigint, o: json? }
 rowless_arrayagg_outer_top.sql: one () -> { o: json? }
 rowless_mid_one_row_sub.sql: one () -> { o: json { n: bigint, s: { c: bigint, k: varchar? }? } }

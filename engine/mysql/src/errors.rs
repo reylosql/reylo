@@ -15,7 +15,8 @@ use serde_json::Value;
 
 /// `{written}` and `{read}` are lists of string literals, the tables the statement writes and reads;
 /// `{called}` the words it calls as functions, which a stored function of any schema may answer to,
-/// since a call may name the schema; `{cascades}` whether a row it writes may change a key
+/// since a call may name the schema, but for Reylo Migrate's shadows (`reylo_shadow_…`), each named
+/// at random and dropped by the one check that made it, other than the session's own; `{cascades}` whether a row it writes may change a key
 /// another table's foreign key refers to. One row `('open', why)` for each trigger and stored
 /// function that may run, for each written table whose triggers the session cannot see (it holds no
 /// TRIGGER privilege there, and `information_schema` shows a table's triggers only to one that
@@ -23,7 +24,7 @@ use serde_json::Value;
 /// one `('name', code, field, name)` for each name an error may carry.
 /// What a write reaches: the written tables, a view's tables, and, where `{cascades}`, the tables a
 /// foreign key's action writes in turn.
-const ERRORS_QUERY: &str = "with recursive w(t) as ( \
+pub(crate) const ERRORS_QUERY: &str = "with recursive w(t) as ( \
       select table_name from information_schema.tables where table_schema = database() and table_name in ({written}) \
       union select u.table_name from information_schema.view_table_usage u join w on u.view_name = w.t where u.view_schema = database() and u.table_schema = database() \
       union select r.table_name from information_schema.referential_constraints r join w on r.referenced_table_name = w.t \
@@ -32,7 +33,7 @@ const ERRORS_QUERY: &str = "with recursive w(t) as ( \
       union select u.table_name from information_schema.view_table_usage u join r on u.view_name = r.t where u.view_schema = database() and u.table_schema = database()), \
     rel(t) as (select t from w union select t from r) \
     select 'open' as kind, 'trigger' as code, cast(g.trigger_name as char) as field, cast(null as char) as name from information_schema.triggers g join w on g.event_object_table = w.t where g.event_object_schema = database() \
-    union all select 'open', 'function', cast(p.routine_name as char), null from information_schema.routines p where p.routine_type = 'FUNCTION' and lower(p.routine_name) in ({called}) \
+    union all select 'open', 'function', cast(p.routine_name as char), null from information_schema.routines p where p.routine_type = 'FUNCTION' and (p.routine_schema = database() or left(p.routine_schema, 13) <> 'reylo_shadow_') and lower(p.routine_name) in ({called}) \
     union all select 'open', 'view', cast(v.table_name as char), null from information_schema.view_routine_usage v join rel on v.table_name = rel.t where v.table_schema = database() \
     union all select 'open', 'hidden triggers', cast(w.t as char), null from w where not exists ( \
       select 1 from information_schema.user_privileges p where p.privilege_type = 'TRIGGER' and p.grantee = concat('''', substring_index(current_user(), '@', 1), '''@''', substring_index(current_user(), '@', -1), '''') \

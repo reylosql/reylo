@@ -44,7 +44,7 @@ test("this platform has a package of the executable, named as reylo's optional d
 });
 
 test("REYLO_ENGINE_PATH comes first, and one that names no file is refused, saying so", async () => {
-  const path = standIn({ status: "ok", version: VERSION, fingerprint: "0123456789abcdef", database: "postgres" });
+  const path = standIn({ status: "ok", version: VERSION, fingerprint: "0123456789abcdef", cache: "0123456789abcdef", database: "postgres" });
   await withEngine(path, async () => assert.equal(nativeBinary(), path));
   const missing = join(tmpdir(), "reylo-no-such-engine");
   await withEngine(missing, async () => {
@@ -61,7 +61,7 @@ test("REYLO_ENGINE_PATH comes first, and one that names no file is refused, sayi
 });
 
 test("an engine of another version than reylo is refused, naming both versions and how to get the right one", { skip: noShell }, async () => {
-  const path = standIn({ status: "ok", version: "9.9.9", fingerprint: "0123456789abcdef", database: "postgres" });
+  const path = standIn({ status: "ok", version: "9.9.9", fingerprint: "0123456789abcdef", cache: "0123456789abcdef", database: "postgres" });
   await withEngine(path, () =>
     assert.rejects(engine("postgres"), (e: Error) => {
       assert.ok(e instanceof MissingEngine);
@@ -72,7 +72,7 @@ test("an engine of another version than reylo is refused, naming both versions a
 });
 
 test("an executable that answers as another database's engine, or not at all, is refused", { skip: noShell }, async () => {
-  const other = standIn({ status: "ok", version: VERSION, fingerprint: "0123456789abcdef", database: "sqlite" });
+  const other = standIn({ status: "ok", version: VERSION, fingerprint: "0123456789abcdef", cache: "0123456789abcdef", database: "sqlite" });
   await withEngine(other, () => assert.rejects(engine("postgres"), { message: `${other} serves sqlite's engine when asked for postgres's` }));
   const broken = join(mkdtempSync(join(tmpdir(), "reylo-engine-")), "reylo");
   writeFileSync(broken, "#!/bin/sh\necho 'no such thing' >&2\nexit 3\n");
@@ -88,7 +88,7 @@ test("an executable that answers as another database's engine, or not at all, is
 test("an answer that is not a whole answer to its request, or no answer at all, fails that request, saying what was asked and what came back", { skip: noShell }, async () => {
   // It answers the ping as the engine does, `open` without the connection's number, and anything else with a line that is no JSON.
   const path = join(mkdtempSync(join(tmpdir(), "reylo-engine-")), "reylo");
-  const ping = JSON.stringify({ status: "ok", version: VERSION, fingerprint: "0123456789abcdef", database: "postgres" }).slice(0, -1);
+  const ping = JSON.stringify({ status: "ok", version: VERSION, fingerprint: "0123456789abcdef", cache: "0123456789abcdef", database: "postgres" }).slice(0, -1);
   writeFileSync(path, `#!/bin/sh\nwhile read -r line; do\n  id=$(printf '%s' "$line" | sed -n 's/.*"id":\\([0-9]*\\).*/\\1/p')\n  case "$line" in\n    *'"op":"ping"'*) echo '${ping},"id":'"$id"'}' ;;\n    *'"op":"open"'*) echo '{"status":"opened","version":"18.1","id":'"$id"'}' ;;\n    *) echo 'thread main panicked at engine/native/src/lib.rs' ;;\n  esac\ndone\n`);
   chmodSync(path, 0o755);
   await withEngine(path, async () => {
@@ -105,10 +105,14 @@ test("each diagnostic code keeps its number, which the type check shows as TS<co
 test("each database's engine names its database, and refuses another database's statement by name", async () => {
   for (const dialect of ["postgres", "mysql", "sqlite"] as const) {
     const e = await engine(dialect);
-    const ping = e.call({ op: "ping" }) as { database?: string; fingerprint: string; version: string };
+    const ping = e.call({ op: "ping" }) as { database?: string; fingerprint: string; cache?: string; version: string };
     assert.deepEqual([ping.database, ping.version], [dialect, VERSION]);
     assert.match(ping.fingerprint, /^[0-9a-f]{16}$/);
     assert.equal(e.fingerprint, ping.fingerprint);
+    // What names its analyses in reylo/.cache/ is the engine's fingerprint with the program's sources.
+    assert.match(ping.cache ?? "", /^[0-9a-f]{16}$/);
+    assert.notEqual(ping.cache, ping.fingerprint);
+    assert.equal(e.cache, ping.cache);
     const other = dialect === "postgres" ? "mysql" : "postgres";
     assert.deepEqual(e.call({ op: "analyze", sql: "select 1", dialect: other, answers: {} }), { status: "error", message: `this engine reads ${dialect} statements, not ${other} ones` });
   }

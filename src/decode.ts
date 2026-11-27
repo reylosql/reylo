@@ -26,9 +26,9 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, DecodeError, elementKind, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
-import { lastOfEach, rowOf, type RowBuilder } from "./row.ts";
-import { arrayLiteral, asByteaHex, isJsonValue, jsonText, jsonValue, postgresText, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { civilFromDays, coerce, DecodeError, elementKind, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
+import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
+import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, jsonText, jsonValue, postgresText, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
 
 type AnyClient = Record<string, any>;
@@ -93,13 +93,21 @@ const learnedOf = (key: object): Learned => {
   return l;
 };
 
+/**
+ * Whether a column's kind, as its module gives it, outranks what a client learned of its oid: a row
+ * value's, whose oid says nothing of its fields, and an array of whole arrays', which the catalog
+ * reads as text where a domain is over an array of a type the database created.
+ */
+const byModule = (kind: Kind) => isRowKind(kind) || wholeArrayKind(elementKind(kind)) !== undefined;
+
 /** Rows as arrays of text, from a query that reads the catalog. */
 type Load = (sql: string) => Promise<(string | null)[][]>;
 
 // Every type among `oids`, and every array type's element, with its base type through any number
 // of domains and that base type's name (an array of a type whose own output is an array stays
-// text), a row type's fields as a JSON array of each one's name and type, and a range's or a
-// multirange's subtype. An oid goes out as int8, since one above 2^31 would wrap as int4.
+// text, unless it is a domain over a built-in array), a row type's fields as a JSON array of each
+// one's name and type, and a range's or a multirange's subtype. An oid goes out as int8, since one
+// above 2^31 would wrap as int4.
 const catalogSql = (oids: number[]) => {
   const list = `'{${oids.map((o) => Math.trunc(o)).join(",")}}'::pg_catalog.oid[]`;
   return `with recursive d(oid, base) as (
@@ -143,12 +151,15 @@ async function learn(key: object, oids: Iterable<number>, load: Load): Promise<v
   for (const [array, base, isText, delim, oid, name] of rows) {
     const fields = rowTypes.get(Number(base));
     const range = subtypes.get(Number(base));
-    const element = fields !== undefined ? rowKind(fields) : range !== undefined ? `${range.range}:${(builtin(range.subtype) ?? known.get(range.subtype))?.kind ?? "text"}` : isText === "true" ? undefined : (builtin(Number(base))?.kind ?? (name ? scalarKind(name) : "text"));
+    // A domain over an array is a whole array as an element of one (src/values.ts, `{k}`), where
+    // its base is a built-in array whose elements a comma separates; any other stays text.
+    const whole = isText === "true" && fields === undefined ? builtin(Number(base)) : undefined;
+    const element = fields !== undefined ? rowKind(fields) : range !== undefined ? `${range.range}:${(builtin(range.subtype) ?? known.get(range.subtype))?.kind ?? "text"}` : whole?.kind.endsWith("[]") && whole.delim === "," ? `{${whole.kind}}` : isText === "true" ? undefined : (builtin(Number(base))?.kind ?? (name ? scalarKind(name) : "text"));
     if (missing.has(Number(array))) {
       arrays.add(Number(array));
       known.set(Number(array), element === undefined || element.endsWith("[]") ? { kind: "text", delim: "," } : { kind: `${element}[]`, delim: delim ?? "," });
     }
-    if (missing.has(Number(oid)) && !arrays.has(Number(oid))) known.set(Number(oid), { kind: element ?? "text", delim: "," });
+    if (missing.has(Number(oid)) && !arrays.has(Number(oid))) known.set(Number(oid), { kind: wholeArrayKind(element ?? "") ?? element ?? "text", delim: "," });
   }
   for (const oid of missing) if (!known.has(oid)) known.set(oid, { kind: "text", delim: "," });
 }
@@ -166,7 +177,7 @@ async function fieldDecoders(fields: Field[], columns: Columns | undefined, key:
   else if (created.length) await learn(key, created.map((f) => f.oid), load);
   return fields.map((f, i) => {
     const column = byColumn?.[i];
-    if (column && isRowKind(column[1])) return textDecoder(column[1], column[2]);
+    if (column && byModule(column[1])) return textDecoder(column[1], column[2]);
     const b = builtinDecoder(f.oid);
     if (b) return b;
     const k = known.get(f.oid) ?? { kind: "text", delim: "," };
@@ -237,10 +248,11 @@ async function pgFamily(key: object, run: (types: object) => Promise<PgResult>, 
   const result = await run(types.table);
   const rows = Array.isArray(result) ? (result as Record<string, unknown>[]) : result.rows;
   if (types.sawBinary()) throw refuseBinary();
-  // The table goes by oid, which says nothing of a built-in row's fields, so those are still text.
-  const rowColumns = columns?.filter(([, kind]) => isRowKind(kind));
-  if (rowColumns?.length) {
-    const decoders = rowColumns.map(([name, kind, delim]) => [name, textDecoder(kind, delim)] as const);
+  // The table goes by oid, which says nothing of a built-in row's fields, so those are still text,
+  // as an array of whole arrays may be.
+  const moduleColumns = columns && lastOfEach(columns).filter(([, kind]) => byModule(kind));
+  if (moduleColumns?.length) {
+    const decoders = moduleColumns.map(([name, kind, delim]) => [name, textDecoder(kind, delim)] as const);
     for (const row of rows) {
       for (const [name, decode] of decoders) {
         const v = row[name];
@@ -263,6 +275,30 @@ async function pgFamily(key: object, run: (types: object) => Promise<PgResult>, 
     }
   }
   return rows;
+}
+
+/**
+ * A statement on Effect SQL's Postgres client, whose `queryTextValues` hands over every value as the
+ * server's text, by position: each decoded by Reylo's table, as on pg, under the module's names
+ * where the result is still its columns (`namesInResult`), else under the result's.
+ */
+async function effectPostgres(effect: Extract<EffectSql[typeof EFFECT_SQL], { dialect: "postgres" }>, text: string, values: (string | null)[], columns: Columns | undefined): Promise<unknown[]> {
+  const load: Load = async (sql) => (await effect.text(sql, [])).values as (string | null)[][];
+  return pgFamily(
+    effect.key,
+    async (types) => {
+      const result = await effect.text(text, values);
+      const names = result.fields.map((f) => f.name);
+      const build = rowOf(columns?.length ? namesInResult(columns.map(([name]) => name), names) : names);
+      const decoders = result.fields.map((f) => (types as ReturnType<typeof pgTypes>["table"]).getTypeParser(f.dataTypeId));
+      return {
+        rows: result.values.map((row) => build(row.map((v, i) => (v === null ? null : decoders[i]!(v))))),
+        fields: result.fields.map((f) => ({ name: f.name, dataTypeID: f.dataTypeId })),
+      };
+    },
+    columns,
+    load,
+  );
 }
 
 /** A decoder table that keeps every value its text: the catalog's rows, whatever the app registered. */
@@ -386,7 +422,9 @@ async function pglite(db: AnyClient, text: string, values: unknown[], columns: C
   // Created types, which the table kept as text, an oid the table did not name, which went through
   // the instance's parser, and a row value, whose oid says nothing of its fields.
   const byColumn = columns && columns.length === fields.length ? columns : undefined;
-  const after = fields.map((f, i) => [f, i] as const).filter(([f, i]) => f.oid >= FIRST_USER_OID || !oids.has(f.oid) || (byColumn !== undefined && isRowKind(byColumn[i]![1])));
+  // A row holds the last column of each name, which only that column's kind decodes.
+  const last = new Map(fields.map((f, i) => [f.name, i]));
+  const after = fields.map((f, i) => [f, i] as const).filter(([f, i]) => last.get(f.name) === i && (f.oid >= FIRST_USER_OID || !oids.has(f.oid) || (byColumn !== undefined && isRowKind(byColumn[i]![1]))));
   if (after.length) {
     const load: Load = async (sql) => (await db.query(sql, [], { rowMode: "array", parsers: { 25: keepText } })).rows;
     const decoders = await fieldDecoders(fields, columns, db, load);
@@ -919,6 +957,7 @@ function slonikValue(kind: Kind, v: unknown, name: string, delim?: string): unkn
   if (typeof v === "string") return textDecoder(kind, delim)(v);
   // pg parses an array's text into an array, each element by the element type's parser, which
   // Reylo's tag passes through for the types it names.
+  if (Array.isArray(v) && wholeArrayKind(elementKind(kind)) !== undefined) return coerce(kind, v, name, delim, true);
   if (Array.isArray(v) && kind.endsWith("[]")) return v.map((e) => (Array.isArray(e) ? slonikValue(kind, e, name, delim) : slonikValue(elementKind(kind), e, name, delim)));
   if (SLONIK_STRICT.test(kind)) {
     throw new DecodeError(`Column "${name}" reached Reylo already converted by Slonik's driver (${v instanceof Date ? "a Date" : typeof v}), which ignored the query's type parsers, as a custom driverFactory may: Reylo refuses it rather than return a value that may have been rounded.`);
@@ -970,6 +1009,11 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
   // parameter's type and sends an object as its String() ("invalid input syntax for type json"),
   // so it gets the JSON text, which the server reads as the parameter's type.
   const json = () => bound.map((v, i) => (isJsonParam(v, i) ? jsonText(v) : v));
+  // Effect SQL's client (src/effect.ts) binds a string as an untyped text parameter, which the
+  // server reads as the parameter's type, and a number or a Date by its JavaScript type, so every
+  // value goes as the text Postgres reads.
+  const effect = (c as Partial<EffectSql>)[EFFECT_SQL];
+  if (effect?.dialect === "postgres") return await effectPostgres(effect, text, bound.map((v, i) => postgresText(query, names[i]!, v)), query.columns);
   // Slonik before every other query(): its query() takes only its sql tag's queries.
   if (isSlonik(c)) return await slonik(c, text, marks, json().map(slonikParam), query.columns);
   // Drizzle's driver writes an array as its literal and binds a Uint8Array as bytea, as pg does.

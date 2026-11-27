@@ -23,10 +23,10 @@ function fnv(hash: bigint, bytes: Uint8Array, crlf: boolean): bigint {
   return hash;
 }
 
-/** What a crate's build script hashes besides `Cargo.toml`: the entries it hands `reylo_engine_build::emit`. */
-function entries(crate: string): string[] {
+/** What a crate's build script hashes besides `Cargo.toml`: the entries it hands `reylo_engine_build::emit`, for the variable `name` where it hashes more than once. */
+function entries(crate: string, name = "\\w+"): string[] {
   const script = readFileSync(join(crate, "build.rs"), "utf8");
-  const list = /reylo_engine_build::emit\(\s*"\w+"\s*,\s*&\[([^\]]*)\]/.exec(script)?.[1];
+  const list = new RegExp(`reylo_engine_build::emit\\(\\s*"${name}"\\s*,\\s*&\\[([^\\]]*)\\]`).exec(script)?.[1];
   assert.ok(list !== undefined, `${crate}/build.rs hands reylo_engine_build::emit no list of entries`);
   return [...list.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
 }
@@ -52,10 +52,10 @@ function byComponents(a: string, b: string): number {
   return x.length - y.length;
 }
 
-/** `reylo_engine_build::source_hash` over the crate at `crate`. */
-function sourceHash(crate: string): bigint {
+/** `reylo_engine_build::source_hash` over the crate at `crate`, the entries its build script hashes for `name`. */
+function sourceHash(crate: string, name?: string): bigint {
   const files = ["Cargo.toml"];
-  for (const entry of entries(crate)) {
+  for (const entry of entries(crate, name)) {
     if (statSync(join(crate, entry), { throwIfNoEntry: false })?.isFile()) {
       files.push(entry);
       continue;
@@ -77,17 +77,25 @@ function sourceHash(crate: string): bigint {
 /** The crates of its own a database's engine builds on, whose hashes its fingerprint combines after its own: the parser, for Postgres and MySQL. */
 const BUILDS_ON: Record<string, string[]> = { postgres: ["syntax"], mysql: ["syntax"] };
 
-/** `reylo_engine_core::fingerprint::combine` of core's hash, the database crate's and each crate it builds on: FNV-1a over their little-endian bytes. */
-function fingerprint(database: string): string {
-  const crates = ["core", database, ...(BUILDS_ON[database] ?? [])];
-  const parts = Buffer.alloc(8 * crates.length);
-  crates.forEach((crate, i) => parts.writeBigUInt64LE(sourceHash(join(ENGINE, crate)), 8 * i));
+/** `reylo_engine_core::fingerprint::combine` of `hashes`: FNV-1a over their little-endian bytes. */
+function combine(hashes: bigint[]): string {
+  const parts = Buffer.alloc(8 * hashes.length);
+  hashes.forEach((hash, i) => parts.writeBigUInt64LE(hash, 8 * i));
   return fnv(0xcbf29ce484222325n, parts, false).toString(16).padStart(16, "0");
+}
+
+/** A database's fingerprint: core's hash, the database crate's and each crate it builds on. */
+function fingerprint(database: string): string {
+  return combine(["core", database, ...(BUILDS_ON[database] ?? [])].map((crate) => sourceHash(join(ENGINE, crate))));
 }
 
 for (const database of ["postgres", "sqlite", "mysql"] as const) {
   test(`the ${database} engine is the build of the engine's sources`, async () => {
-    const { binary, fingerprint: built } = await engine(database);
+    const { binary, fingerprint: built, cache } = await engine(database);
     assert.equal(built, fingerprint(database), `${binary} was built from other sources than engine/core and engine/${database}: build it again with cargo build --release -p reylo-cli`);
+    // What names its analyses in reylo/.cache/: the engine's fingerprint and the program's sources
+    // (engine/native), which every host's analysis goes through, and on SQLite the functions of the
+    // SQLite the program reads a file with, which no source here says.
+    if (database !== "sqlite") assert.equal(cache, combine([BigInt(`0x${built}`), sourceHash(join(ENGINE, "native"), "REYLO_ENGINE_NATIVE_HASH")]), `${binary} was built from other sources than engine/native: build it again with cargo build --release -p reylo-cli`);
   });
 }

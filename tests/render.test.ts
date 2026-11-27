@@ -97,7 +97,7 @@ test("pgvector's vector and halfvec are arrays of numbers, as columns and as par
     assert.equal(renderType(array(pg(name)), false, "postgres"), "(number[] | null)[]");
     assert.equal(renderParamType(array(pg(name)), "postgres"), "number[][]");
     assert.deepEqual(typeSchema(pg(name), "postgres"), { type: "array", items: { type: "number", format: "float" } });
-    assert.deepEqual(typeSchema(pg(name), "postgres", false, true), { type: "string" });
+    assert.deepEqual(typeSchema(pg(name), "postgres", false, true), { type: "string", description: `pg type ${name}` });
   }
   // A sparsevec stays its text.
   assert.equal(renderType(pg("sparsevec"), false, "postgres"), "string");
