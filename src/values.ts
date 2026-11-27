@@ -1325,7 +1325,10 @@ const LEFT_OUT: unique symbol = Symbol("left out");
 // keys of an object, without a key's function (a toJSON() among them), symbol or undefined, which
 // it leaves out, so the driver serializes the copy as that text.
 function rawValue(v: unknown, key: string): unknown {
-  if ((typeof v === "object" || typeof v === "function") && v !== null && typeof (v as { toJSON?: unknown }).toJSON === "function") v = (v as { toJSON(key: string): unknown }).toJSON(key);
+  if ((typeof v === "object" || typeof v === "function") && v !== null) {
+    const hook = (v as { toJSON?: unknown }).toJSON;
+    if (typeof hook === "function") v = (hook as (key: string) => unknown).call(v, key);
+  }
   if (typeof v === "bigint") return rawInteger(v);
   if (v === undefined || typeof v === "function" || typeof v === "symbol") return LEFT_OUT;
   if (v === null || typeof v !== "object" || (JSON as { isRawJSON?: (x: unknown) => boolean }).isRawJSON?.(v)) return v;
