@@ -801,7 +801,7 @@ fn write_entry(cache: &Path, file: &Path, entry: &Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{newest_entry, offline_entry, old_lock, place, sha256, unverified_line, utc_day, ENTRY_VERSION};
+    use super::{newest_entry, offline_entry, old_lock, place, read_entry, sha256, unverified_line, utc_day, ENTRY_VERSION};
     use serde_json::json;
 
     #[test]
