@@ -81,7 +81,10 @@ test("a query of Postgres's rarer types reads them with the postgresTypes its mo
 function fresh(script: string): string {
   // On standard input, since a bundle is past the length a command line takes on Windows.
   const out = spawnSync(process.execPath, ["--input-type=module"], { input: script, encoding: "utf8" });
-  return (out.stdout + out.stderr).trim();
+  // A process that fails to start or crashes is the test's failure, never a value it prints.
+  if (out.error) throw out.error;
+  if (out.status !== 0) throw new Error(`The script exited with ${out.status}: ${out.stderr}`);
+  return out.stdout.trim();
 }
 
 test("a kind needs Postgres's rarer types exactly where the module a build step writes imports them for it", () => {
