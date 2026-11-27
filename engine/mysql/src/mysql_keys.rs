@@ -25,6 +25,8 @@
 
 use crate::mysql::{compares_as_is, const_limit, deterministic, is_variable, one_before_limit, reads_column, select_of, value_class, Class, Keys};
 use syntax::mysql::ast::{self, Distinct, Expr, GroupByExpr, JoinConstraint, JoinOperator, ObjectNamePart, Query, Select, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, TableFactor, TableWithJoins};
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 /// One WITH query in scope: its name in lower case, its body (`None` for one of a RECURSIVE WITH),
 /// how many of the entries before it its body sees, and the names its column list gives its
@@ -690,8 +692,10 @@ fn select_origins<'a>(s: &'a Select, ctes: &[Cte<'a>], keys: &'a Keys, name: &st
 ///
 /// None for a VALUES list.
 fn output_keys(q: &Query, outer: &[Cte], keys: &Keys) -> Vec<Key> {
-    let ctes = ctes_of(q, outer);
-    body_keys(&q.body, &ctes, keys)
+    found(|found| &mut found.keys, q, outer, || {
+        let ctes = ctes_of(q, outer);
+        body_keys(&q.body, &ctes, keys)
+    })
 }
 
 /// [`output_keys`] of a query's body, with the WITH queries it sees.
@@ -849,10 +853,69 @@ fn body_columns<'a>(body: &'a SetExpr, ctes: &[Cte<'a>], keys: &'a Keys) -> Opti
 
 /// Prove that a query returns at most one row, or say why the engine cannot.
 pub(crate) fn at_most_one(q: &Query, keys: &Keys) -> Result<(), String> {
+    struct Outer(Option<Found>);
+    impl Drop for Outer {
+        fn drop(&mut self) {
+            let outer = self.0.take();
+            FOUND.with(|found| *found.borrow_mut() = outer);
+        }
+    }
+    let _outer = Outer(FOUND.with(|found| found.borrow_mut().replace(Found::default())));
     at_most_one_in(q, &[], keys)
 }
 
+/// What [`at_most_one_in`] and [`output_keys`] found of each query while one [`at_most_one`] runs,
+/// by the query and the WITH queries it sees. A FROM asks both of each derived table and WITH
+/// query it reads, and asks again for each item it seeds a closure with, so answered anew each
+/// time, the work would double with each level of nesting. Every query asked about lives as long
+/// as the call: in the statement's tree, or among the views of [`Keys`].
+#[derive(Default)]
+struct Found {
+    at_most_one: HashMap<Asked, Result<(), String>>,
+    keys: HashMap<Asked, Vec<Key>>,
+}
+
+/// A query, by its place, and the WITH queries it sees, each by its name, its body's place, how
+/// many before it its body sees, and its column list.
+type Asked = (usize, Vec<(String, Option<usize>, usize, Vec<String>)>);
+
+thread_local! {
+    static FOUND: RefCell<Option<Found>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many queries [`found`] proved anew.
+    pub(crate) static FINDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// What `find` answers for `q` under `outer`, found once while an [`at_most_one`] runs, and anew
+/// outside one. `table` is where the answers of `find`'s kind are kept.
+fn found<T: Clone>(table: fn(&mut Found) -> &mut HashMap<Asked, T>, q: &Query, outer: &[Cte], find: impl FnOnce() -> T) -> T {
+    let running = FOUND.with(|found| found.borrow().is_some());
+    if !running {
+        return find();
+    }
+    let asked: Asked = (q as *const Query as usize, outer.iter().map(|(name, body, sees, columns)| (name.clone(), body.map(|b| b as *const Query as usize), *sees, columns.clone())).collect());
+    if let Some(answer) = FOUND.with(|found| found.borrow_mut().as_mut().and_then(|found| table(found).get(&asked).cloned())) {
+        return answer;
+    }
+    #[cfg(test)]
+    FINDS.set(FINDS.get() + 1);
+    let answer = find();
+    FOUND.with(|found| {
+        if let Some(found) = found.borrow_mut().as_mut() {
+            table(found).insert(asked, answer.clone());
+        }
+    });
+    answer
+}
+
 fn at_most_one_in(q: &Query, outer: &[Cte], keys: &Keys) -> Result<(), String> {
+    found(|found| &mut found.at_most_one, q, outer, || at_most_one_anew(q, outer, keys))
+}
+
+fn at_most_one_anew(q: &Query, outer: &[Cte], keys: &Keys) -> Result<(), String> {
     if matches!(const_limit(q), Some(Some(n)) if (0..=1).contains(&n)) {
         return Ok(());
     }
