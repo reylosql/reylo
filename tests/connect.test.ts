@@ -284,6 +284,39 @@ test("Postgres: an analysis whose describe is cancelled before another of its ro
   }
 });
 
+test("Postgres: an analysis whose describe is the deadlock victim of a session that locks the tables it joins in the other order fails, and nothing is kept as the statement's error", { skip: pgLive }, async () => {
+  const { url, sql, drop } = await postgresDatabase("reylo_deadlock", "create table t1 (id bigint primary key, a text not null); create table t2 (id bigint primary key, b text not null)");
+  const e = await engine("postgres");
+  const c = await e.open(url);
+  const watch = await e.open(url);
+  const statement = "select t1.a, t2.b from t1 join t2 on t2.id = t1.id where t1.id = :id";
+  try {
+    const session = Number(((await c.query("select pg_catalog.pg_backend_pid()", [])) as [[unknown]])[0][0]);
+    let analyzing: Promise<unknown> | undefined;
+    await sql.begin(async (tx: any) => {
+      // This session checks for a deadlock long after the analysis's does, at its default of 1 s, so the analysis is the one chosen to end it.
+      await tx.unsafe("set local deadlock_timeout = '30s'");
+      await tx.unsafe("lock table t2 in access exclusive mode");
+      // The describe holds t1, which it reads first, and waits for t2.
+      analyzing = c.analyze(statement).then(() => "answered", (err: Error) => err);
+      for (let tries = 0; ((await watch.query(`select pid from pg_catalog.pg_stat_activity where pid = ${session} and wait_event_type = 'Lock'`, [])) as unknown[]).length === 0; tries++) {
+        assert.ok(tries < 100, "the analysis never waited for t2's lock");
+        await new Promise((done) => setTimeout(done, 50));
+      }
+      // Waiting for t1 closes the cycle, and the lock is granted once the describe has ended.
+      await tx.unsafe("lock table t1 in access exclusive mode");
+    });
+    const failed = await analyzing;
+    assert.ok(failed instanceof Error && !(failed instanceof Unreachable), `the analysis ${String(failed)}`);
+    assert.equal(failed.message, "The server failed the analysis of this statement for a reason of its own, so run it again: deadlock detected (40P01)");
+    assert.deepEqual((await c.analyze(statement)).columns.map((col) => col.name), ["a", "b"]);
+  } finally {
+    await watch.close();
+    await c.close();
+    await drop();
+  }
+});
+
 test("Postgres: a session a lock timeout gives up on is closed, so a role allowed one connection analyzes the next statement while the lock is still held", { skip: pgLive }, async (t) => {
   const { url, sql, drop } = await postgresDatabase("reylo_lock_one", "create table users (id bigint primary key, name text not null); create table orders (id bigint primary key)");
   if (!(await sql.begin((tx: any) => tx.unsafe("set local client_connection_check_interval = '100ms'")).then(() => true, () => false))) {

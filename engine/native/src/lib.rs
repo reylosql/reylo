@@ -61,8 +61,12 @@ pub mod engines {
 #[cfg(any(feature = "postgres", feature = "sqlite", feature = "mysql", feature = "clickhouse"))]
 pub mod clients;
 
+pub mod server_errors;
+
 /// Why a client could not answer the engine at all: a lost connection, a catalog query the
-/// database refused. A refused describe is not one: the engine reads it as an answer.
+/// database refused, a describe the server failed for a reason of its own rather than the
+/// statement's ([`server_errors`]). A describe refused for the statement's reason is not one: the
+/// engine reads it as an answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostError(pub String);
 

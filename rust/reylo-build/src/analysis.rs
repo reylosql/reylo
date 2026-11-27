@@ -631,10 +631,24 @@ fn moved(schema: &str, now: Result<Result<String, String>, String>, tries: u32) 
     }
 }
 
-/// The analysis as the build reads it, and written to `file` under `schema` where there is one.
+/// The analysis as the build reads it, and written to `file` under `schema` where there is one,
+/// unless it carries an error no analysis is kept with: the server's own rather than the
+/// statement's, or a privilege's, which a grant does not move the schema's fingerprint for
+/// (`reylo_engine::server_errors::kept`).
 fn remember(cache: &Path, file: &Path, dialect: Dialect, schema: Option<&str>, analysis: &reylo_engine::Analysis) -> Result<Value, String> {
+    let engine = match dialect {
+        Dialect::Postgres => reylo_engine::Dialect::Postgres,
+        Dialect::Mysql => reylo_engine::Dialect::Mysql,
+        Dialect::Sqlite => reylo_engine::Dialect::Sqlite,
+    };
+    let kept = analysis.diagnostics.iter().all(|d| d.server_code.as_deref().is_none_or(|code| reylo_engine::server_errors::kept(engine, code, Some(&d.message))));
     let analysis = serde_json::to_value(analysis).map_err(|e| e.to_string())?;
-    if let Some(schema) = schema {
+    // An entry of an older schema is no answer where the database now refuses the statement, so a
+    // build with the database out of reach does not build from it.
+    if schema.is_some() && !kept {
+        let _ = fs::remove_file(file);
+    }
+    if let Some(schema) = schema.filter(|_| kept) {
         let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         write_entry(cache, file, &json!({ "version": ENTRY_VERSION, "dialect": dialect.name(), "schema": schema, "analysis": analysis, "at": at }));
     }
@@ -740,7 +754,21 @@ fn fingerprint(rows: &[Vec<Value>]) -> String {
 
 fn read_entry(file: &Path) -> Option<Value> {
     let entry: Value = serde_json::from_str(&fs::read_to_string(file).ok()?).ok()?;
-    (entry["version"].as_u64() == Some(ENTRY_VERSION)).then_some(entry)
+    (entry["version"].as_u64() == Some(ENTRY_VERSION) && kept_entry(&entry)).then_some(entry)
+}
+
+/// Whether an entry carries no error an analysis is not kept with (`reylo_engine::server_errors::kept`),
+/// as one an older build wrote may. One of a dialect this build does not name is read as it is.
+fn kept_entry(entry: &Value) -> bool {
+    let dialect = match entry["dialect"].as_str() {
+        Some("postgres") => reylo_engine::Dialect::Postgres,
+        Some("mysql") => reylo_engine::Dialect::Mysql,
+        Some("sqlite") => reylo_engine::Dialect::Sqlite,
+        Some("clickhouse") => reylo_engine::Dialect::Clickhouse,
+        _ => return true,
+    };
+    let diagnostics = entry["analysis"]["diagnostics"].as_array().map_or(&[][..], Vec::as_slice);
+    diagnostics.iter().all(|d| d["server_code"].as_str().is_none_or(|code| reylo_engine::server_errors::kept(dialect, code, d["message"].as_str())))
 }
 
 /// The entry written last for the statement, by any server.
@@ -773,8 +801,24 @@ fn write_entry(cache: &Path, file: &Path, entry: &Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{newest_entry, offline_entry, old_lock, place, sha256, unverified_line, utc_day, ENTRY_VERSION};
+    use super::{newest_entry, offline_entry, old_lock, place, read_entry, sha256, unverified_line, utc_day, ENTRY_VERSION};
     use serde_json::json;
+
+    #[test]
+    fn an_entry_with_an_error_no_analysis_is_kept_with_is_read_as_none() {
+        let file = std::env::temp_dir().join(format!("reylo-build-kept-{}.json", std::process::id()));
+        let read = |code: &str, message: &str| {
+            std::fs::write(&file, json!({"version": ENTRY_VERSION, "dialect": "mysql", "at": 1, "analysis": {"diagnostics": [{"message": message, "start": 0, "length": 1, "code": 6, "server_code": code}]}}).to_string()).unwrap();
+            read_entry(&file).is_some()
+        };
+        assert!(read("1054", "Unknown column 'x' in 'field list' (ER_BAD_FIELD_ERROR)"));
+        assert!(read("1105", "VT12001: unsupported: subquery in GROUP BY (ER_UNKNOWN_ERROR)"));
+        // A deadlock, a tablet not serving, a privilege, kept by an older build.
+        assert!(!read("1213", "Deadlock found when trying to get lock; try restarting transaction (ER_LOCK_DEADLOCK)"));
+        assert!(!read("1105", "target: shop.-.primary: no healthy tablet available for 'keyspace:\"shop\"' (ER_UNKNOWN_ERROR)"));
+        assert!(!read("1142", "SELECT command denied to user 'app'@'%' for table 'users' (ER_TABLEACCESS_DENIED_ERROR)"));
+        std::fs::remove_file(&file).unwrap();
+    }
 
     #[test]
     fn an_unreachable_server_builds_from_its_own_entry_alone() {

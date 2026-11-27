@@ -10,7 +10,8 @@ import { join, relative } from "node:path";
 import { anyEngine, DIAGNOSTIC, engine, reason, MissingEngine, REYLO_VERSION, Unreachable, type Analysis, type Engine, type Lexed } from "./engine.ts";
 import { packageDir, resolveProject, sqlitePath, type Dialect, type ResolvedProject } from "./project.ts";
 import { NotMysql, refusedLogin } from "./connection.ts";
-import { openProjectDrivers, placeRefusal, projectDriverVersions, type SqliteDriver } from "./sqlite-drivers.ts";
+import { keptError } from "./server-errors.ts";
+import { NotPrepared, openProjectDrivers, placeRefusal, projectDriverVersions, type SqliteDriver } from "./sqlite-drivers.ts";
 
 /** What `reylo/.cache/` holds for one statement. */
 export type Entry = {
@@ -285,7 +286,14 @@ export class Session {
     if (analysis.diagnostics.length || this.#schema?.value == null) return outcome;
     const io = await this.#connection().catch(() => undefined);
     for (const driver of io?.drivers ?? []) {
-      const refusal = await driver.refuses(analysis.rewritten.sql, analysis.rewritten.order.length);
+      let refusal: string | undefined;
+      try {
+        refusal = await driver.refuses(analysis.rewritten.sql, analysis.rewritten.order.length);
+      } catch (e) {
+        // Neither a refusal nor a pass: the next analysis asks the driver again.
+        if (e instanceof NotPrepared) return { ok: false, message: `${driver.name} could not prepare this statement: ${e.message}`, code: DIAGNOSTIC.unreachable };
+        throw e;
+      }
       if (refusal === undefined) continue;
       const { start, length } = placeRefusal(sql, refusal);
       const message = driver.says(refusal);
@@ -369,9 +377,21 @@ export class Session {
       if (now === null || now.startsWith("unverified ") || tries === ANALYSES) return { ok: true, analysis, source: "database", entry: file };
       label = now;
     }
-    if (options.store !== false) {
+    // An analysis that carries an error the server raised for a reason of its own rather than the
+    // statement's, which the engine's host fails the analysis with and which would stand for the
+    // statement until the schema moved, is not kept, nor one a privilege decides, since a grant
+    // moves no schema's fingerprint (src/server-errors.ts).
+    const kept = keptAnalysis(this.project.dialect, analysis);
+    if (options.store !== false && kept) {
       writeEntry(this.project.cache, file, { version: ENTRY_VERSION, dialect: this.project.dialect, schema: label, analysis, at: Date.now() });
       this.#prune(sql, file);
+    } else if (options.store !== false) {
+      // An entry of an older schema is no answer where the database now refuses the statement, so
+      // a build with the database out of reach does not build from it.
+      try {
+        rmSync(file, { force: true });
+      } catch {}
+      this.#listing = undefined;
     }
     return { ok: true, analysis, source: "database", entry: file };
   }
@@ -688,11 +708,17 @@ function listed(pair: string): string {
   return name.startsWith("http_header_") ? name.toLowerCase() : name;
 }
 
+/** Whether an analysis may stand in `reylo/.cache/`: none of its diagnostics carries an error no analysis is kept with (src/server-errors.ts). */
+function keptAnalysis(dialect: Dialect, analysis: Analysis): boolean {
+  return analysis.diagnostics.every((d) => d.server_code === undefined || keptError(dialect, d.server_code, d.message));
+}
+
 function readEntry(file: string): Entry | undefined {
   if (!existsSync(file)) return undefined;
   try {
     const entry = JSON.parse(readFileSync(file, "utf8")) as Entry;
-    return entry.version === ENTRY_VERSION ? entry : undefined;
+    // An entry that carries an error no analysis is kept with, as one an older build wrote, is none.
+    return entry.version === ENTRY_VERSION && keptAnalysis(entry.dialect, entry.analysis) ? entry : undefined;
   } catch {
     return undefined;
   }

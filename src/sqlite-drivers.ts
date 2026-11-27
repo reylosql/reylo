@@ -21,6 +21,7 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { packageDir } from "./project.ts";
+import { statementError } from "./server-errors.ts";
 
 export interface SqliteDriver {
   /** The package the project lists. */
@@ -158,6 +159,25 @@ export function withoutSqlean(sql: string, name: string): string | undefined {
   return changed ? out : undefined;
 }
 
+/**
+ * A driver that could not prepare a statement for a reason of the connection's or the file's rather
+ * than the statement's: another connection's lock as it read the schema again, memory, a file it
+ * cannot read. The statement is neither refused nor passed (src/analyze.ts).
+ */
+export class NotPrepared extends Error {}
+
+/**
+ * A driver's error as its refusal of the statement: SQLite's message, where the result code the
+ * driver gives (better-sqlite3's, libsql's and node-sqlite3's `code`) is a statement's
+ * (src/server-errors.ts) or where it gives none of SQLite's, as Turso's (`GenericFailure`). A
+ * `NotPrepared` where it is not.
+ */
+function refusal(e: unknown, message: string): string {
+  const code = (e as { code?: unknown }).code;
+  if (typeof code === "string" && code.startsWith("SQLITE_") && !statementError("sqlite", code)) throw new NotPrepared(`${message} (${code})`);
+  return message;
+}
+
 function sync(name: string, db: SyncDatabase, server = false): SqliteDriver {
   const row = db.prepare("select sqlite_version() as v").get() as { v: string };
   return {
@@ -173,7 +193,7 @@ function sync(name: string, db: SyncDatabase, server = false): SqliteDriver {
           const message = (e as Error).message;
           const missing = /^no such (?:function|table): (\w+)$/.exec(message)?.[1];
           const next = server && missing !== undefined && SQLEAN_FUNCTIONS.has(missing.toLowerCase()) ? withoutSqlean(text, missing) : undefined;
-          if (next === undefined) return message;
+          if (next === undefined) return refusal(e, message);
           text = next;
         }
       }
@@ -225,11 +245,15 @@ const DRIVERS: [string, Open][] = [
         name: "sqlite3",
         says: (refusal) => `sqlite3 runs SQLite ${version}, which refuses this statement: ${refusal}`,
         refuses: (sql) =>
-          new Promise((done) => {
+          new Promise((done, fail) => {
             const statement = db.prepare(sql, (e) => {
-              if (!e) statement.finalize();
+              if (!e) return (statement.finalize(), done(undefined));
               // node-sqlite3 writes the result code before SQLite's message.
-              done(e ? e.message.replace(/^SQLITE_\w+: /, "") : undefined);
+              try {
+                done(refusal(e, e.message.replace(/^SQLITE_\w+: /, "")));
+              } catch (failed) {
+                fail(failed);
+              }
             });
           }),
         close: () => new Promise<void>((done) => db.close(() => done())),
