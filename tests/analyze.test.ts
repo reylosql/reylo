@@ -927,13 +927,16 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
     const signatures = ["f(x varchar(10))", "f(x varchar(10), y int)"].map((signature) => ["drop function f", `create function ${signature} returns int deterministic return x`]);
     // A structured parameter is expanded by the database's character set and collation.
     const database = [`alter database ${ownName} character set latin1 collate latin1_swedish_ci`, `alter database ${ownName} collate latin1_bin`];
+    // Which keys a structured parameter's rows may leave out is read from each column's default.
+    const defaults = ["alter table m alter v set default 'x'", "alter table m alter v drop default"];
     // A statement may read another database's table or call its function, and the engine takes a
     // column of a table for a view's wherever any database has a view of that name.
     const elsewhere = [`alter table ${otherName}.t modify c varchar(10) null`, `create view ${otherName}.m as select 1 as v`, [`drop function ${otherName}.g`, `create function ${otherName}.g(x varchar(10)) returns int deterministic return x`]];
     // Without the TRIGGER privilege, a written table's triggers are hidden from the account. A grant
     // on a database's pattern names the pattern, which the engine does not read as the database.
-    const privileges = [`grant trigger on \`${ownName}\`.m to '${user}'@'%'`];
-    for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks, ...signatures, ...elsewhere, ...privileges, ...database]) {
+    // And a statement is prepared against the account's privileges, a column's included.
+    const privileges = [`grant trigger on \`${ownName}\`.m to '${user}'@'%'`, `grant select (v) on \`${ownName}\`.m to '${user}'@'%'`];
+    for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks, ...signatures, ...elsewhere, ...privileges, ...database, ...defaults]) {
       const statements = [change].flat();
       for (const statement of statements) await own.db.query(statement);
       const next = await fingerprint();

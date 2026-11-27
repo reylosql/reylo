@@ -108,11 +108,11 @@ fn query() -> String {
         // queries are chosen by; the search path that resolves each name; whether a backslash in a
         // string is a character or an escape, and whether `\'` may be written, which decide how the
         // server reads a statement, and the first of which the CHECKs are read under alone; and the
-        // style the session writes dates in (the first part of DateStyle, `ISO` or another), which
-        // the engine's host reports an error for (engine/native).
+        // session's DateStyle, whose style the engine's host reports an error for, naming the
+        // setting (engine/native).
         format!(
             "select {} as x",
-            line("v", &[setting("server_version_num"), setting("search_path"), setting("standard_conforming_strings"), setting("backslash_quote"), format!("pg_catalog.split_part({}, ','::pg_catalog.text, 1)", setting("DateStyle"))])
+            line("v", &[setting("server_version_num"), setting("search_path"), setting("standard_conforming_strings"), setting("backslash_quote"), setting("DateStyle")])
         ),
         // Relations, their columns with their type modifiers (a `varchar(n)`'s size, a
         // `numeric(p,s)`'s precision) and whether each is an identity or a generated one,

@@ -8,6 +8,8 @@
 //! The cache is the TypeScript loader's (`src/analyze.ts`): the same file names, the same entry and
 //! the same schema fingerprint, read by the engine's own query as the loader's engine reads it
 //! (`reylo_engine`'s `schema` of each database), so a crate and a package in one directory share it.
+//! On SQLite an entry's name holds the functions of the SQLite that reads the file too, so a crate
+//! whose SQLite is built with other functions than the package's keeps entries of its own.
 //!
 //! Each database is behind the feature of its name, which brings its engine and its client, so a
 //! crate that runs on one database builds neither of the others. With none on, nothing is read, and

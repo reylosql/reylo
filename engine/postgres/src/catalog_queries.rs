@@ -53,7 +53,7 @@ const EXTENSION_CALLS: [&str; 3] = ["VERSION_QUERY", "ANALYZE_QUERY", "ANSWER_QU
 /// polymorphic argument. A query that needs another adds it here once it is checked to be so:
 /// `unnest`, `array_agg`, `cardinality`, `array_length`, `to_jsonb` and the like take any type, and
 /// an overload of narrower types created in `pg_catalog` would be the closer match.
-const FUNCTIONS: [&str; 41] = [
+const FUNCTIONS: [&str; 40] = [
     "bit_or",
     "bool_or",
     "count",
@@ -87,7 +87,6 @@ const FUNCTIONS: [&str; 41] = [
     "regtypeout",
     "regexp_matches",
     "replace",
-    "split_part",
     "string_agg",
     "textcat",
     "textin",
