@@ -674,6 +674,22 @@ test("mysql: through a server that refuses prepared statements, as Cloudflare Hy
         await other.end();
       }
     }
+    // On a server that reports no change of charset, SET NAMES changes how the session reads the text and not how mysql2 writes it, so the session's own charset is read too.
+    const named = await mysql2.createConnection(connection);
+    try {
+      await named.query("set session session_track_system_variables = ''");
+      await named.query("set names sjis");
+      await assert.rejects(async () => execute(named, byName, { name: "\u00c1\\' or 1=1 -- " }), (e: Error) => e.message.includes("this session reads it in sjis, not UTF-8"));
+      // A run that reads the session first keeps its turn: the select called after the insert, and not awaited, sees its row.
+      await named.query("set names utf8mb4");
+      const insert: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into users values (3, :name)", params: ["name"], text: "insert into users values (3, ?)", order: ["name"], marks: [[29, 30]] };
+      const wrote = execute(named, insert, { name: "C:\\" });
+      const read = execute(named, byName, { name: "C:\\" });
+      await wrote;
+      assert.deepEqual(plain((await read) as object[]), [{ id: 3 }]);
+    } finally {
+      await named.end();
+    }
   } finally {
     await proxy.close();
     await own.drop();
@@ -763,6 +779,194 @@ test("mysql: mariadb, which writes each value into the statement, refuses one ho
   }
 });
 
+// As a build under NO_BACKSLASH_ESCAPES compiles it: 'a\', 'x?' and 'b\' are strings, and :n is the
+// one placeholder. A scan in the default sql_mode reads 'a\', ' as one string, so its placeholder
+// is the one in 'x?', where the value's opening quote would end that string and the rest of the
+// value would run as SQL.
+const SCANNED = "select 'a\\', 'x?', 'b\\', ? as n -- '";
+const scannedOtherwise: QueryModule<"mysql"> = { dialect: "mysql", sql: "select 'a\\', 'x?', 'b\\', :n as n -- '", params: ["n"], text: SCANNED, order: ["n"], marks: [[SCANNED.lastIndexOf("?"), SCANNED.lastIndexOf("?") + 1]], sqlMode: { backslashEscapes: false, ansiQuotes: false } };
+const LEAK = ", (select @@version) as leaked -- ";
+const SCAN_REFUSAL = /finds the placeholders in its text as a session reads them whose sql_mode has neither NO_BACKSLASH_ESCAPES nor ANSI_QUOTES, and the build found them as a session reads them whose sql_mode has NO_BACKSLASH_ESCAPES and not ANSI_QUOTES/;
+const SESSION_READ = "select @@session.sql_mode, @@session.character_set_client";
+
+test("mysql: mariadb and PlanetScale, whose own scans find a statement's placeholders as the default sql_mode reads it, refuse a statement whose build read its strings otherwise, and mariadb runs one whose build read them so only on a session that reads them so too", async () => {
+  const sent: string[] = [];
+  let session = "STRICT_TRANS_TABLES";
+  const mariadb = { batch: async () => ({}), escape: (v: unknown) => `'${String(v)}'`, query: async (options: { sql: string }) => (sent.push(options.sql), options.sql === SESSION_READ ? [[session, "utf8mb4"]] : []) };
+  const planetscale = { execute: async (sql: string) => (sent.push(sql), { rows: [] }) };
+  for (const client of [mariadb, planetscale]) await assert.rejects(execute(client as never, scannedOtherwise, { n: LEAK }) as Promise<unknown>, SCAN_REFUSAL);
+  assert.deepEqual(sent, []);
+  // Its strings read otherwise only after the placeholder, which the default sql_mode finds where the build did.
+  const text = "select ? as n, 'a\\' as s -- '\n, 1 as t";
+  const built: QueryModule<"mysql"> = { dialect: "mysql", sql: "select :n as n, 'a\\' as s -- '\n, 1 as t", params: ["n"], text, order: ["n"], marks: [[7, 8]], sqlMode: { backslashEscapes: true, ansiQuotes: false } };
+  await execute(mariadb as never, built, { n: 1 });
+  session = "STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES";
+  await assert.rejects(execute(mariadb as never, built, { n: 1 }) as Promise<unknown>, /the build found its placeholders as a session reads them whose sql_mode has neither NO_BACKSLASH_ESCAPES nor ANSI_QUOTES, and this session's sql_mode has NO_BACKSLASH_ESCAPES and not ANSI_QUOTES/);
+  await execute(planetscale as never, built, { n: 1 });
+  assert.deepEqual(sent, [SESSION_READ, text, SESSION_READ, text]);
+});
+
+test("mysql: mariadb from before 3.5.4, which writes a backslash before a double quote or a control character on every session, refuses a value holding one where it was told the session reads a backslash as itself", async () => {
+  const sent: string[] = [];
+  let status = 2 | (1 << 9);
+  const old = {
+    batch: async () => ({}),
+    escape: (v: unknown) => `'${String(v).replace(/['"\\]/g, (c) => `\\${c}`)}'`,
+    get info() {
+      return { status };
+    },
+    query: async (options: { sql: string }) => (sent.push(options.sql), options.sql === SESSION_READ ? [["NO_BACKSLASH_ESCAPES", "utf8mb4"]] : []),
+  };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (s) values (:s)", params: ["s"], text: "insert into t (s) values (?)", order: ["s"], marks: [[26, 27]] };
+  // Such a session would store `say "hi"` as `say \"hi\"`, and a JSON value as no JSON at all.
+  const values = ['say "hi"', { a: 1 }, "a\nb", "a\0b"];
+  for (const s of values) await assert.rejects(execute(old as never, ins, { s }) as Promise<unknown>, /with a backslash before each quote, double quote and backslash, and this session's sql_mode, with NO_BACKSLASH_ESCAPES, reads a backslash as itself, so it would read a value holding a quote, a double quote, a backslash or a control character otherwise/);
+  assert.deepEqual(sent, values.map(() => SESSION_READ));
+  // Told the session reads a backslash as an escape, as it does, the driver's backslashes hold, and nothing is read.
+  status = 2;
+  sent.length = 0;
+  await execute(old as never, ins, { s: 'say "hi"' });
+  assert.deepEqual(sent, ["insert into t (s) values (?)"]);
+});
+
+test("mysql: mariadb refuses a statement whose build read its strings under NO_BACKSLASH_ESCAPES, where its own scan would write a value into one of them", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_scan", "create table t (id int primary key)");
+  const u = new URL(MYSQL!);
+  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  try {
+    // The driver alone, on a session that reads the statement as its build did, runs the value as SQL.
+    const bare = await driver("mariadb").createConnection(connection);
+    try {
+      await bare.query("set session sql_mode = 'NO_BACKSLASH_ESCAPES'");
+      const [row] = await bare.query({ sql: SCANNED, rowsAsArray: true }, [LEAK]);
+      assert.equal(row.length, 3);
+    } finally {
+      await bare.end();
+    }
+    for (const [shape, open] of mariadbShapes(connection)) {
+      const { client, run, end } = await open();
+      try {
+        for (const mode of ["NO_BACKSLASH_ESCAPES", ""]) {
+          await run(`set session sql_mode = '${mode}'`);
+          await assert.rejects(async () => execute(client, scannedOtherwise, { n: LEAK }), SCAN_REFUSAL, shape);
+        }
+      } finally {
+        await end();
+      }
+    }
+  } finally {
+    await own.drop();
+  }
+});
+
+test("mysql: mariadb refuses a value holding a character outside ASCII where it writes text in another charset than the session reads, as after SET NAMES on a server that reports no change of charset", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_encoder", "create table t (id int primary key, s varbinary(80))");
+  const u = new URL(MYSQL!);
+  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
+  // SJIS writes ソ as 0x83 0x5c, which a session in UTF-8 reads as a byte and a backslash: that
+  // backslash escapes the one the driver writes before the quote, and the quote ends the literal.
+  const value = "ソ'), (2, 0x32) -- ";
+  try {
+    for (const [shape, open] of mariadbShapes({ ...connection, charset: "sjis" })) {
+      const { client, run, end } = await open();
+      try {
+        await run("set session session_track_system_variables = ''");
+        await run("set names utf8mb4");
+        await assert.rejects(async () => execute(client, ins, { id: 1, s: value }), (e: Error) => e.message.includes("writes text in a charset that is not UTF-8 while the session reads it as UTF-8"), shape);
+        // Bytes too: a driver writing in SJIS leaves 0x83 0x5c as one character, whose backslash a session in UTF-8 reads as an escape.
+        await assert.rejects(async () => execute(client, ins, { id: 1, s: Buffer.concat([Buffer.from([0x83, 0x5c, 0x27]), Buffer.from("), (2, 0x32) -- ")]) }), (e: Error) => e.message.includes("mariadb writes text in sjis") && e.message.includes("the session reads the text in utf8mb4"), shape);
+        await execute(client, ins, { id: 1, s: "ada" });
+      } finally {
+        await end();
+      }
+      assert.deepEqual(await own.rows("select id, hex(s) as s from t"), [{ id: 1, s: "616461" }], shape);
+      await own.db.query("delete from t");
+    }
+  } finally {
+    await own.drop();
+  }
+});
+
+test("mysql: a run on mariadb that reads the driver's state of the session waits for the runs called before it to answer, since the driver takes that state from each answer", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_answered", "create table t (id int primary key, s varchar(80)); create procedure escapes_nothing() set session sql_mode = concat(@@session.sql_mode, ',NO_BACKSLASH_ESCAPES')");
+  const u = new URL(MYSQL!);
+  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const call: QueryModule<"mysql"> = { dialect: "mysql", sql: "call escapes_nothing()", params: [] };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
+  try {
+    for (const [shape, open] of mariadbShapes(connection).filter(([shape]) => shape === "a Connection" || shape === "a PoolConnection in a transaction")) {
+      const { client, end } = await open();
+      try {
+        // The routine's answer tells the driver the session is in NO_BACKSLASH_ESCAPES, which it no
+        // longer is, so the driver would write the backslash as it is, which the session reads as an escape.
+        const called = execute(client, call, {});
+        const wrote = execute(client, ins, { id: 1, s: "x\\'), (2, 'two') -- " });
+        await called;
+        await assert.rejects(wrote as Promise<unknown>, /^Error: reylo cannot run this mysql statement through mariadb: mariadb writes each value into the statement with each quote doubled/, shape);
+      } finally {
+        await end();
+      }
+      assert.deepEqual(await own.rows("select id from t"), [], shape);
+    }
+  } finally {
+    await own.drop();
+  }
+});
+
+test("mysql: mariadb and PlanetScale, which write an array as a list of values, refuse one for a parameter", async () => {
+  const sent: string[] = [];
+  const mariadb = { batch: async () => ({}), query: async (options: { sql: string }) => (sent.push(options.sql), []) };
+  const planetscale = { execute: async (sql: string) => (sent.push(sql), { rows: [] }) };
+  const update: QueryModule<"mysql"> = { dialect: "mysql", sql: "update users set doc = json_set(doc, '$.name', :name)", params: ["name"], text: "update users set doc = json_set(doc, '$.name', ?)", order: ["name"], marks: [[47, 48]] };
+  for (const client of [mariadb, planetscale]) await assert.rejects(execute(client as never, update, { name: ["x", "$.role", "admin"] }) as Promise<unknown>, /^TypeError: Parameter "name" is an array, which (mariadb|@planetscale\/database) writes into the statement as a list of values/);
+  assert.deepEqual(sent, []);
+  // An object goes to mariadb as its JSON text, which an app's permitSetMultiParamEntries would otherwise write as `key` = value pairs; a GeoJSON geometry goes as it is, for the driver to write as one.
+  const given: unknown[][] = [];
+  const recording = { batch: async () => ({}), query: async (_options: unknown, values: unknown[]) => (given.push(values), []) };
+  const point = { type: "Point", coordinates: [1, 2] };
+  await execute(recording as never, update, { name: { role: "admin" } });
+  await execute(recording as never, update, { name: point });
+  assert.deepEqual(given, [['{"role":"admin"}'], [point]]);
+});
+
+test("mysql: on mariadb, a query defined by hand whose text holds a backslash or a double quote runs only on a session that reads its strings as the driver's scan does", async () => {
+  const sent: string[] = [];
+  let session = "ANSI_QUOTES";
+  const mariadb = { batch: async () => ({}), escape: (v: unknown) => `'${String(v)}'`, query: async (options: { sql: string }) => (sent.push(options.sql), options.sql === SESSION_READ ? [[session, "utf8mb4"]] : []) };
+  const text = 'select "a?" as q, ? as n';
+  const byHand: QueryModule<"mysql"> = { dialect: "mysql", sql: 'select "a?" as q, :n as n', params: ["n"], text, order: ["n"] };
+  await assert.rejects(execute(mariadb as never, byHand, { n: 1 }) as Promise<unknown>, /the build found its placeholders as a session reads them whose sql_mode has neither NO_BACKSLASH_ESCAPES nor ANSI_QUOTES, and this session's sql_mode has ANSI_QUOTES and not NO_BACKSLASH_ESCAPES/);
+  session = "";
+  await execute(mariadb as never, byHand, { n: 1 });
+  assert.deepEqual(sent, [SESSION_READ, SESSION_READ, text]);
+});
+
+test("mysql: a run on mariadb that reads the session first keeps its turn, so a run called after it on the same connection does not overtake it", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_turn", "create table t (id int primary key, s varchar(80))");
+  const u = new URL(MYSQL!);
+  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
+  const all: QueryModule<"mysql"> = { dialect: "mysql", sql: "select s from t", params: [] };
+  try {
+    for (const [shape, open] of mariadbShapes(connection).filter(([shape]) => shape === "a Connection" || shape === "a PoolConnection in a transaction")) {
+      const { client, end } = await open();
+      try {
+        // The quote has the session read first; the select, called next and not awaited, reads nothing.
+        const wrote = execute(client, ins, { id: 1, s: "it's" });
+        const read = execute(client, all, {});
+        await wrote;
+        assert.deepEqual(plain((await read) as object[]), [{ s: "it's" }], shape);
+      } finally {
+        await end();
+      }
+      await own.db.query("delete from t");
+    }
+  } finally {
+    await own.drop();
+  }
+});
+
 test("mysql: mariadb, which writes each value into the statement, refuses one holding a character outside ASCII on a connection whose charset is not UTF-8, which could write it with a quote's or a backslash's byte", { skip: mariadbLive }, async () => {
   const own = await mysqlDatabase("reylo_execute_mariadb_charset", "create table t (id int primary key, s varchar(80))");
   const u = new URL(MYSQL!);
@@ -813,6 +1017,9 @@ test("mysql: mariadb, which writes a backslash before a quote or a backslash in 
   const values = [
     { id: 1, b: Buffer.concat([Buffer.from([0xe0]), Buffer.from("', null), (2, 0x32, null) -- ")]), s: "x" },
     { id: 3, b: Buffer.from([0xe0, 0x5c]), s: ", null), (2, 0x32, null) -- " },
+    // The driver writes a backslash before a double quote and NUL too, which such a session would keep as the byte's second.
+    { id: 4, b: Buffer.from([0xe0, 0x22]), s: "x" },
+    { id: 5, b: Buffer.from([0xe0, 0x00]), s: "x" },
   ];
   const stored = async (shape: string) => {
     assert.deepEqual(await own.rows("select id, hex(b) as b, s from t order by id"), values.map(({ id, b, s }) => ({ id, b: b.toString("hex").toUpperCase(), s })), shape);
@@ -1138,7 +1345,7 @@ test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which writ
   const text = "update r set d = ?, f = ?, i = ? + ?, payload = json_array(?)";
   const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "update r set d = :d, f = :f, i = :i + :u, payload = json_array(:d)", params: ["d", "f", "i", "u"], text, order: ["d", "f", "i", "u", "d"], marks: [[17, 18], [24, 25], [31, 32], [35, 36], [59, 60]], inputs: { d: { type: myType("double") }, f: { type: myType("float") }, i: { type: myType("int") }, u: { type: oneOf(myType("bigint"), myType("double")) } } };
   const seen: unknown[][] = [];
-  const mariadb = { batch: async () => ({}), query: async (options: { sql: string }, values: unknown[]) => (seen.push([options.sql, values]), []) };
+  const mariadb = { batch: async () => ({}), query: async (options: { sql: string }, values: unknown[]) => (options.sql === SESSION_READ ? [["", "utf8mb4"]] : (seen.push([options.sql, values]), [])) };
   const planetscale = { execute: async (sql: string, values: unknown[] | null) => (seen.push([sql, values]), { rows: [] }) };
   const mysql2 = { query: async () => [[], []], execute: async (options: { sql: string }, values: unknown[]) => (seen.push([options.sql, values]), [[], []]) };
   for (const client of [mariadb, planetscale, mysql2]) await execute(client as never, q, { d: -0, f: -0, i: -0, u: -0 });
@@ -1159,7 +1366,7 @@ test("mysql: a DOUBLE or FLOAT of -0 goes to mariadb and PlanetScale, which writ
   const { inputs: _, ...untyped } = q;
   const { marks: __, ...unmarked } = q;
   seen.length = 0;
-  for (const query of [untyped, unmarked, { ...q, sqlMode: { backslashEscapes: false, ansiQuotes: false } }]) await execute(mariadb as never, query, { d: -0, f: -0, i: -0, u: -0 });
+  for (const query of [untyped, unmarked, { ...q, sqlMode: { backslashEscapes: true, ansiQuotes: false } }]) await execute(mariadb as never, query, { d: -0, f: -0, i: -0, u: -0 });
   assert.deepEqual(seen, Array(3).fill([text, [-0, -0, -0, -0, -0]]));
   seen.length = 0;
   for (const client of [mariadb, planetscale]) await execute(client as never, q, { d: 1.5, f: 0, i: 0, u: 2 });

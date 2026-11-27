@@ -604,7 +604,7 @@ await getUser.run(callbackPool, { id: 1 });
 Reylo runs each query through `mysql2`'s `execute()`, which prepares it first. Where the server refuses prepared statements, as Hyperdrive does, Reylo writes the values into the statement and uses `query()`:
 
 - A `FLOAT` column comes back with the 6 significant digits MySQL sends as text, so `1.100000023841858` reads as `1.1`.
-- A custom `queryFormat` is refused there, since it would rewrite each statement. So is a non-ASCII value on a connection whose charset isn't UTF-8.
+- A custom `queryFormat` is refused there, since it would rewrite each statement. So is a non-ASCII value where the connection or the session reads text in a charset other than UTF-8, as after `SET NAMES`.
 
 ### `mariadb`
 
@@ -649,9 +649,13 @@ export default {
 
 The driver writes each value into the statement itself. For a value holding a quote, a backslash or a non-ASCII character, Reylo reads the session's `sql_mode` and charset. It refuses a value the session would read otherwise:
 
-- A character outside ASCII, on a connection whose charset isn't UTF-8.
+- A character outside ASCII, where the driver or the session uses a charset other than UTF-8.
 - A quote or a backslash, where the session reads a backslash otherwise than the driver writes it. A stored routine that sets `sql_mode` can cause this, so set `sql_mode` again after calling one.
-- A binary value with a quote or a backslash right after a byte of 0x80 or above, on some charsets. A session in Big5, CP932, GB18030, GBK or SJIS reads that byte and the driver's backslash as one character.
+- A double quote or a control character, on a session with `NO_BACKSLASH_ESCAPES`, from a driver older than 3.2.5, 3.3.4, 3.4.7 or 3.5.4 in its line. Those versions write a backslash before it that the session keeps.
+- A binary value with a quote, a double quote, a backslash or NUL right after a byte of 0x80 or above, on some charsets. A session in Big5, CP932, GB18030, GBK or SJIS reads that byte and the driver's backslash as one character.
+- A binary value with a backslash right after a byte of 0x80 or above, where the driver writes in one of those charsets and the session reads another.
+
+The driver also finds the placeholders itself, reading the statement as a server without `NO_BACKSLASH_ESCAPES` and `ANSI_QUOTES` does. So a statement whose strings those modes read otherwise runs only where the server Reylo read it on had neither, and the session has neither too. It refuses an array as well, which the driver writes as a list of values.
 
 ### PlanetScale
 
@@ -669,6 +673,8 @@ await db.transaction((tx) => getUser.run(tx, { id: 1 }));
 ```
 
 Version 2.0 isn't supported, since it can't bind parameters.
+
+The driver finds the placeholders itself, as `mariadb` does. So a statement whose strings `NO_BACKSLASH_ESCAPES` or `ANSI_QUOTES` read otherwise is refused where the server Reylo read it on has either. So is an array, which the driver writes as a list of values.
 
 ### `Bun.sql`
 
