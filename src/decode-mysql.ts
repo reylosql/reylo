@@ -179,14 +179,13 @@ const preparesKey = (m: AnyClient): object => m.pool ?? m.connection ?? m;
  * quotes values, as "Duplicate entry '…'" does.
  */
 /**
- * Whether a statement reads the session's diagnostics (SHOW WARNINGS, SHOW ERRORS, SHOW COUNT(*)
- * of either, GET DIAGNOSTICS), which MySQL will not prepare, and whose conditions preparing it would
- * clear. Its leading comments and spaces are skipped.
+ * Whether a statement of no values may read the session's diagnostics: it names warnings, errors,
+ * diagnostics, @@warning_count or @@error_count anywhere, as SHOW COUNT(*) WARNINGS and GET
+ * DIAGNOSTICS do. MySQL prepares none of those, and preparing one would clear the conditions it
+ * reads. Such a statement goes to query(), which writes nothing into a statement of no values, so a
+ * word that only looks like one costs nothing.
  */
-function readsDiagnostics(text: string): boolean {
-  const body = text.replace(/^(?:\s+|--[^\n]*(?:\n|$)|#[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*/, "");
-  return /^(?:show\s+(?:count\s*\(\s*\*\s*\)\s+)?(?:warnings|errors)|get\s+(?:current\s+|stacked\s+)?diagnostics)\b/i.test(body);
-}
+const mayReadDiagnostics = (text: string, values: unknown[]) => values.length === 0 && /\b(?:warnings|errors|diagnostics|warning_count|error_count)\b/i.test(text);
 
 const isPrepareRefusal = (e: unknown) => e instanceof Error && /^[^'"]*\bCOM_STMT_PREPARE\b/.test(String((e as { sqlMessage?: unknown }).sqlMessage ?? e.message));
 
@@ -634,7 +633,7 @@ export async function mariadb(c: AnyClient, text: string, values: unknown[], col
   // where it has the statement prepared already, so one run could overtake another: each run on a
   // connection waits for the one before it to answer, and keeps its turn through a retry on query().
   const result: unknown =
-    typeof c.execute === "function" && !refusesPrepares.has(key) && !readsDiagnostics(text)
+    typeof c.execute === "function" && !refusesPrepares.has(key) && !mayReadDiagnostics(text, values)
       ? await inTurn(pool ? undefined : c, true, async (handed) => {
           try {
             // A run before this one may have found that the server refuses prepared statements.

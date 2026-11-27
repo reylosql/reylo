@@ -1632,8 +1632,10 @@ test("mysql: mariadb's execute() runs a statement on an app's pool made with nam
       // SHOW COUNT(*) WARNINGS reads the warnings of the statement before it, which preparing it would clear.
       const conn = await pool.getConnection();
       try {
-        await conn.query("select cast('x' as signed)");
-        assert.deepEqual(plain((await execute(conn, { dialect: "mysql", sql: "show count(*) warnings", params: [] }, {})) as object[]).map((row) => Object.values(row)), [[1n]]);
+        for (const sql of ["show count(*) warnings", "show /* inspect */ count(*)warnings", "select @@session.warning_count"]) {
+          await conn.query("select cast('x' as signed)");
+          assert.deepEqual(plain((await execute(conn, { dialect: "mysql", sql, params: [] }, {})) as object[]).map((row) => Object.values(row).map((v) => BigInt(v as bigint))), [[1n]], sql);
+        }
       } finally {
         await conn.release();
       }
