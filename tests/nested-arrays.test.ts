@@ -81,6 +81,9 @@ test("an array of a domain over an array type holds whole arrays: one dimension 
   const whole = { ...analysis, columns: [{ name: "x", nullable: false, type: ints }], domains: { "public.ints": "_int4" } } as unknown as Analysis;
   assert.match(moduleTypes("", whole, "postgres", undefined, true).row, /x: \(\(number \| null\)\[\] \| null\)\[\]/);
   assert.match(moduleTypes("", whole, "postgres", undefined, true, ".reylo.yaml", {}, true).row, /x: NestedArray<NestedArray<number \| null> \| null>/);
+  // A parameter writes each whole array as one element, so the level outside them is one dimension.
+  const param = { ...whole, params: [{ name: "x", nullable: false, type: ints }] } as unknown as Analysis;
+  assert.match(moduleTypes("", param, "postgres", undefined, true, ".reylo.yaml", {}, true).params, /x: NestedArray<number>\[\]/);
 });
 
 test("a Postgres array parameter is typed with one dimension by default, and at any depth under allow_nested_arrays, so it takes back what a column of its type returns", () => {

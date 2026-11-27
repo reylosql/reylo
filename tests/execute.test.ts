@@ -395,6 +395,8 @@ test("postgres: an array parameter tells its levels from its elements by the ele
   // An empty multirange is one value; a JSON element's own null is its value's, never the array's.
   await execute(client as never, q, { v: [], s: [], g: [], m: [[[]]], b: [], i: [], j: [[null]] });
   assert.deepEqual(seen.at(-1), ["{}", "{}", "{}", '{{"{}"}}', "{}", "{}", '{"[null]"}']);
+  // A hole is an undefined, so an array holding one is a level, whose element it is.
+  await assert.rejects(execute(client as never, q, { v: [], s: [], g: [], m: [new Array(1)], b: [], i: [], j: [] }) as Promise<unknown>, /Parameter "m" is an array whose elements may not be null, and the element at \[0\]\[0\] is/);
   // A NULL is an element of the level around it, which a parameter's elements may not be.
   await assert.rejects(execute(client as never, q, { v: [[null, null], [[1], [2]]], s: [], g: [], m: [], b: [], i: [], j: [] }) as Promise<unknown>, /Parameter "v" is an array whose elements may not be null, and the element at \[0\]\[0\] is/);
 });

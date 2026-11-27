@@ -779,12 +779,15 @@ export const isArrayValued = (kind: Kind): boolean => kind === "vector" || kind 
  * and a parameter writes them by. A value of most types is no array, so an array there is a level.
  * One that is an array itself (`isArrayValued`) holds neither an array nor a null (a vector its
  * numbers, a segment and a polygon their points, a multirange its ranges), so an array holding
- * either is a level and any other is one value, `[]` an empty multirange. A JSON value may be any
+ * either, or a hole, is a level and any other is one value, `[]` an empty multirange. A JSON value may be any
  * array, so an array there is one JSON value.
  */
 export function isLevel(element: Kind, a: readonly unknown[]): boolean {
   if (element === "json") return false;
-  return !isArrayValued(element) || a.some((e) => e === null || e === undefined || Array.isArray(e));
+  if (!isArrayValued(element)) return true;
+  // A hole is an undefined too, which `some` would skip.
+  for (let i = 0; i < a.length; i++) if (!(i in a) || a[i] === null || a[i] === undefined || Array.isArray(a[i])) return true;
+  return false;
 }
 /** The kind of a whole array standing as an element, `int[]` of `{int[]}`; undefined for any other kind. */
 export const wholeArrayKind = (kind: Kind): Kind | undefined => (kind.startsWith("{") && kind.endsWith("}") ? kind.slice(1, -1) : undefined);

@@ -541,6 +541,8 @@ export function encodeCodec(codec: Codec, v: unknown, name: string, dialect: Dia
   // A vector takes its typed array alone, and binds as the numbers the driver writes as its text.
   const vector = VECTOR_CLASS[codec];
   if (vector !== undefined) {
+    // A vector is its typed array here, so an array of anything but numbers is a level of vectors, as `decodeCodec` reads one.
+    if (Array.isArray(v) && !v.every((e) => typeof e === "number")) return v.map((e) => encodeCodec(codec, e, name, dialect, libraries));
     if (tag(v) !== `[object ${vector}]`) throw refuse(`a ${vector}`);
     return Array.from(v as ArrayLike<number>);
   }
