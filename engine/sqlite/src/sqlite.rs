@@ -1206,10 +1206,87 @@ fn reads_cursor(n: &Node, cursors: &HashSet<i64>) -> bool {
         || n.list.iter().chain(&n.args).chain(&n.order_by).chain(&n.partition_by).any(|x| reads_cursor(x, cursors))
 }
 
-/// The columns a WHERE test at the top level rejects NULL in: under OR the ones every arm does; a
-/// comparison, `IN`, `BETWEEN`, `IS NOT NULL`, `LIKE` or `GLOB`, in the columns its operands
-/// answer NULL for. `IS` and `IS NOT` compare NULL like a value, and reject nothing. A function the
-/// host registers over a built-in's name is the one a call resolves to, and proves nothing.
+/// Which arguments of a call to a built-in make it NULL where they are NULL.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Strict {
+    /// Every argument.
+    Every,
+    /// These positions, from 0; NULL elsewhere may give a value.
+    At(&'static [usize]),
+}
+
+use Strict::{At, Every};
+
+/// SQLite's built-in scalar functions that are NULL wherever one of the arguments named is NULL, a
+/// row for calls of from its first number of arguments to its second, both included. The engine's
+/// tests measure every row against the SQLite rusqlite bundles, with its math, percentile and
+/// geopoly functions: each call at every number of arguments a row covers, with that argument NULL
+/// and the others drawn from values chosen to give a value in its place (numbers at their bounds,
+/// empty and non-empty text and blobs, JSON documents and paths, dates and modifiers, formats),
+/// which it never does; and every scalar function that SQLite lists, at every position, is here
+/// wherever it measures as such, but where a SQLite a driver runs answers otherwise. A call of
+/// another number of arguments, and a function not here, claims nothing.
+///
+/// Each row was also measured so on SQLite 3.38.5 to 3.47.0, libSQL's and the Turso engine's
+/// (0.8.3), where they have the function. These were not, and are left out: `json_valid(NULL)` is 0 before 3.42
+/// (and in a build with `SQLITE_LEGACY_JSON_VALID`); `json_extract` of two paths or more writes a
+/// NULL path as JSON's null in an array before 3.45; and on the Turso engine `json_set`,
+/// `json_insert`, `json_replace` and their `jsonb_` forms edit a NULL document, `json_remove`
+/// takes a NULL path as no edit, and `jsonb_remove` edits a NULL document.
+///
+/// `nullif(a, NULL)` is `a`, `concat_ws` skips a NULL after its separator, `printf` and `format`
+/// write a NULL value as nothing, `json_pretty` reads a NULL indent as the default one, and
+/// `geopoly_regular` and `geopoly_contains_point` read a NULL coordinate as 0. `replace(X, '', Z)` is X whatever Z
+/// is, so `replace` is NULL for a NULL replacement only behind a pattern that is a text literal
+/// other than '' ([`strict_args`]). With one argument `min` and `max` are the aggregates; `iif`
+/// and `if` of two have no ELSE, so they are NULL wherever their condition or their value is.
+const NULL_STRICT: &[(&str, usize, usize, Strict)] = &[
+    // Text.
+    ("concat_ws", 2, 8, At(&[0])), ("format", 1, 8, At(&[0])), ("glob", 2, 2, Every), ("instr", 2, 2, Every), ("length", 1, 1, Every), ("like", 2, 3, Every), ("lower", 1, 1, Every), ("ltrim", 1, 2, Every), ("octet_length", 1, 1, Every), ("printf", 1, 8, At(&[0])), ("replace", 3, 3, At(&[0, 1])), ("rtrim", 1, 2, Every), ("substr", 2, 3, Every), ("substring", 2, 3, Every), ("trim", 1, 2, Every), ("unhex", 1, 2, Every), ("unicode", 1, 1, Every), ("unistr", 1, 1, Every), ("upper", 1, 1, Every),
+    // Numbers.
+    ("abs", 1, 1, Every), ("acos", 1, 1, Every), ("acosh", 1, 1, Every), ("asin", 1, 1, Every), ("asinh", 1, 1, Every), ("atan", 1, 1, Every), ("atan2", 2, 2, Every), ("atanh", 1, 1, Every), ("ceil", 1, 1, Every), ("ceiling", 1, 1, Every), ("cos", 1, 1, Every), ("cosh", 1, 1, Every), ("degrees", 1, 1, Every), ("exp", 1, 1, Every), ("floor", 1, 1, Every), ("ln", 1, 1, Every), ("log", 1, 2, Every), ("log10", 1, 1, Every), ("log2", 1, 1, Every), ("mod", 2, 2, Every), ("pow", 2, 2, Every), ("power", 2, 2, Every), ("radians", 1, 1, Every), ("round", 1, 2, Every), ("sign", 1, 1, Every), ("sin", 1, 1, Every), ("sinh", 1, 1, Every), ("sqrt", 1, 1, Every), ("tan", 1, 1, Every), ("tanh", 1, 1, Every), ("trunc", 1, 1, Every),
+    // Dates and times.
+    ("date", 1, 6, Every), ("datetime", 1, 6, Every), ("julianday", 1, 6, Every), ("strftime", 1, 6, Every), ("time", 1, 6, Every), ("timediff", 2, 2, Every), ("unixepoch", 1, 6, Every),
+    // JSON.
+    ("->", 2, 2, Every), ("->>", 2, 2, Every), ("json", 1, 1, Every), ("json_array_length", 1, 2, Every), ("json_error_position", 1, 1, Every), ("json_extract", 2, 2, Every), ("json_patch", 2, 2, Every), ("json_pretty", 1, 2, At(&[0])), ("json_remove", 1, 8, At(&[0])), ("json_type", 1, 2, Every),
+    ("jsonb", 1, 1, Every), ("jsonb_extract", 2, 8, Every), ("jsonb_patch", 2, 2, Every),
+    // Geopoly.
+    ("geopoly_area", 1, 1, Every), ("geopoly_bbox", 1, 1, Every), ("geopoly_blob", 1, 1, Every), ("geopoly_ccw", 1, 1, Every), ("geopoly_contains_point", 3, 3, At(&[0])), ("geopoly_json", 1, 1, Every), ("geopoly_overlap", 2, 2, Every), ("geopoly_regular", 4, 4, At(&[2, 3])), ("geopoly_svg", 1, 8, At(&[0])), ("geopoly_within", 2, 2, Every), ("geopoly_xform", 7, 7, At(&[0])),
+    // The rest.
+    ("if", 2, 2, Every), ("iif", 2, 2, Every), ("likelihood", 2, 2, At(&[0])), ("likely", 1, 1, Every), ("max", 2, 8, Every), ("min", 2, 8, Every), ("nullif", 2, 2, At(&[0])), ("sqlite_compileoption_used", 1, 1, Every), ("unlikely", 1, 1, Every),
+];
+
+/// The arguments of a call that make it NULL where they are NULL, by [`NULL_STRICT`]: none for an
+/// aggregate or a window call, or for a function the host registers over a built-in's name, which
+/// is the one the call resolves to. `replace`'s replacement is one behind a pattern that is a text
+/// literal other than ''.
+fn strict_args(n: &Node, extras: &Extras) -> Vec<usize> {
+    let Some(name) = n.name.as_deref().filter(|_| n.op == "function" && !n.agg && !n.window) else { return Vec::new() };
+    if extras.function(name, n.args.len()).is_some() {
+        return Vec::new();
+    }
+    strict_positions(name, n.args.len(), n.args.get(1).and_then(literal_text))
+}
+
+/// The arguments of a call of the built-in `name` with `count` arguments that make it NULL where
+/// they are NULL ([`NULL_STRICT`]), given the text literal its second argument is, if it is one.
+fn strict_positions(name: &str, count: usize, second: Option<&str>) -> Vec<usize> {
+    let Some((.., strict)) = NULL_STRICT.iter().find(|(f, fewest, most, _)| *f == name && (*fewest..=*most).contains(&count)) else { return Vec::new() };
+    let mut positions: Vec<usize> = match strict {
+        Every => (0..count).collect(),
+        At(positions) => positions.to_vec(),
+    };
+    if name == "replace" && second.is_some_and(|p| !p.is_empty()) {
+        positions.push(2);
+    }
+    positions
+}
+
+/// The columns a WHERE test at the top level rejects NULL in: under AND the ones any arm does, and
+/// under OR the ones every arm does; `IS NOT NULL` and `IN`, the columns the tested value answers
+/// NULL for; `BETWEEN`, the ones the value or a bound does; any other test, a comparison, a `LIKE`
+/// or a bare value, the columns it answers NULL for ([`nulls_with`]). `IS` and `IS NOT` compare
+/// NULL like a value, and reject nothing.
 fn strict_in(n: &Node, extras: &Extras) -> HashSet<(i64, String)> {
     let nulls = |x: &Node| nulls_with(x, extras);
     match n.op.as_str() {
@@ -1219,40 +1296,30 @@ fn strict_in(n: &Node, extras: &Extras) -> HashSet<(i64, String)> {
             let right = strict_in(r, extras);
             strict_in(l, extras).into_iter().filter(|c| right.contains(c)).collect()
         }
-        "notnull" | "in" | "between" => n.left.as_deref().map(nulls).unwrap_or_default(),
-        "=" | "!=" | "<" | "<=" | ">" | ">=" => n.left.iter().chain(n.right.iter()).flat_map(|x| nulls(x)).collect(),
-        "not" => match n.left.as_deref() {
-            Some(inner) if inner.op == "isnull" => inner.left.as_deref().map(nulls).unwrap_or_default(),
-            // `x NOT IN (SELECT …)` is true of a NULL `x` where the subquery returns no row; a
-            // list is never empty.
-            Some(inner) => strict_in(inner, extras).into_iter().filter(|_| matches!(inner.op.as_str(), "=" | "!=" | "<" | "<=" | ">" | ">=" | "between") || (inner.op == "in" && inner.select.is_none())).collect(),
-            None => HashSet::new(),
-        },
-        "function" if !n.agg && !n.window && matches!(n.name.as_deref(), Some("like" | "glob")) && extras.function(n.name.as_deref().unwrap_or(""), n.args.len()).is_none() => {
-            n.args.iter().flat_map(nulls).collect()
-        }
-        "column" => nulls(n),
-        _ => HashSet::new(),
+        // `x IN (SELECT …)` is NULL or false for a NULL `x`.
+        "notnull" | "in" => n.left.as_deref().map(nulls).unwrap_or_default(),
+        // `x BETWEEN a AND b` is `x >= a AND x <= b`, never true for a NULL bound.
+        "between" => n.left.iter().map(|x| &**x).chain(&n.list).flat_map(nulls).collect(),
+        // `NOT (x IS NULL)` is `x IS NOT NULL`; any other NOT is NULL where its operand is.
+        "not" if n.left.as_deref().is_some_and(|inner| inner.op == "isnull") => n.left.as_deref().and_then(|inner| inner.left.as_deref()).map(nulls).unwrap_or_default(),
+        _ => nulls(n),
     }
 }
 
-/// The columns an expression answers NULL for: the column itself, and through arithmetic,
-/// concatenation, a cast, a COLLATE or a built-in that is NULL for a NULL argument (not one the
-/// host registers over it), every column an operand answers NULL for.
+/// The columns an expression answers NULL for: the column itself; through arithmetic,
+/// concatenation, a bitwise operator, a comparison, NOT, a cast or a COLLATE, every column an
+/// operand answers NULL for; through `IN` and `BETWEEN`, every column the tested value does (a
+/// bound or a list member that is NULL leaves the answer false where another settles it); and
+/// through a built-in, every column the arguments [`strict_args`] names answer NULL for. A row
+/// value is NULL in none of its fields: `(NULL, 1) = (1, 2)` is false.
 fn nulls_with(n: &Node, extras: &Extras) -> HashSet<(i64, String)> {
-    const STRICT: &[&str] = &["upper", "lower", "length", "abs", "trim", "ltrim", "rtrim", "substr", "substring", "replace", "round", "instr", "unicode", "sign", "octet_length"];
     match n.op.as_str() {
         "column" => n.column.clone().map(|c| HashSet::from([(n.cursor, c)])).unwrap_or_default(),
-        "+" | "-" | "*" | "/" | "%" | "||" => n.left.iter().chain(n.right.iter()).flat_map(|x| nulls_with(x, extras)).collect(),
-        "neg" | "pos" | "cast" | "collate" => n.left.as_deref().map(|x| nulls_with(x, extras)).unwrap_or_default(),
-        // `replace(X, '', Z)` is X whatever Z is: NULL for a NULL in its first two arguments, and in Z only behind a pattern that is a text literal other than ''.
-        "function" if !n.agg && !n.window && n.name.as_deref().is_some_and(|f| STRICT.contains(&f) && extras.function(f, n.args.len()).is_none()) => {
-            let strict = match n.name.as_deref() {
-                Some("replace") if !n.args.get(1).and_then(literal_text).is_some_and(|p| !p.is_empty()) => 2,
-                _ => n.args.len(),
-            };
-            n.args.iter().take(strict).flat_map(|x| nulls_with(x, extras)).collect()
-        }
+        "+" | "-" | "*" | "/" | "%" | "||" | "&" | "|" | "<<" | ">>" | "=" | "!=" | "<" | "<=" | ">" | ">=" => n.left.iter().chain(n.right.iter()).flat_map(|x| nulls_with(x, extras)).collect(),
+        "neg" | "pos" | "~" | "not" | "cast" | "collate" | "between" => n.left.as_deref().map(|x| nulls_with(x, extras)).unwrap_or_default(),
+        // `x IN (SELECT …)` is false where the subquery returns no row; a list is never empty.
+        "in" if n.select.is_none() => n.left.as_deref().map(|x| nulls_with(x, extras)).unwrap_or_default(),
+        "function" => strict_args(n, extras).into_iter().filter_map(|i| n.args.get(i)).flat_map(|x| nulls_with(x, extras)).collect(),
         _ => HashSet::new(),
     }
 }
@@ -1799,7 +1866,11 @@ impl Analyzer<'_> {
             return Fact { ty, non_null: self.built_non_null(n, scope) };
         }
         let args: Vec<Fact> = n.args.iter().map(|a| self.type_of(a, scope)).collect();
-        self.function(n, &args)
+        let fact = self.function(n, &args);
+        // A call NULL for a NULL argument ([`NULL_STRICT`]) is NULL where that argument may be,
+        // whatever the function's own row says of it.
+        let nullable_strict = strict_args(n, &self.extras).iter().any(|i| args.get(*i).is_some_and(|a| !a.non_null));
+        Fact { non_null: fact.non_null && !nullable_strict, ..fact }
     }
 
     /// Whether JSON a constructor builds ([`Analyzer::shape`]) is never NULL. Every constructor
@@ -5759,5 +5830,225 @@ mod tests {
         assert!(said("insert into g (_shape) values ('[[0,0],[1,0],[0,1],[0,0]]')", &["create virtual table g using geopoly(name text not null)"]).is_empty());
         assert!(said("explain insert into req (id) values (1)", &[]).is_empty());
         assert!(said("explain query plan insert into req (id) values (1)", &[]).is_empty());
+    }
+
+    /// [`NULL_STRICT`] measured against SQLite itself: the SQLite rusqlite bundles, built with the
+    /// math, percentile and geopoly functions (`.cargo/config.toml`).
+    mod null_strict {
+        use super::*;
+        use rusqlite::{types::ValueRef, Connection};
+
+        /// The values an argument takes beside a NULL one, as SQL literals: numbers at their
+        /// bounds, empty and non-empty text and blobs, JSON documents and paths (a document of
+        /// JSON's own subtype too), a polygon, dates, date modifiers, formats and patterns.
+        const VALUES: &[&str] = &[
+            "NULL", "0", "1", "-1", "2", "3", "0.5", "-0.5", "-0.0", "1e308", "1e999", "-1e999", "9223372036854775807", "-9223372036854775808", "''", "' '", "'a'", "'abc'", "'A'", "'x'", "'ab'", "'b'", "'é'",
+            "'%'", "'_'", "'*'", "'1'", "'0'", "'-1'", "'2.5'", "'$'", "'$.a'", "'$[0]'", "'$[#]'", "'$[#-1]'", "'$.\"a\"'", "'\"a\"'", "'[1]'", "'{\"a\":1}'", "'{}'", "'[]'", "'null'", "'true'",
+            "'[[0,0],[1,0],[0,1],[0,0]]'", "'now'", "'2020-01-02'", "'2020-01-02 03:04:05'", "'+1 day'", "'unixepoch'", "'subsec'", "'start of month'", "'%Y'", "'%s'", "'%d'",
+            "x''", "x'00'", "x'616263'", "x'ffff'", "'\\u0041'", "json('[1]')", "jsonb('{\"a\":1}')",
+        ];
+
+        /// Functions whose answers say nothing of a call in a statement: each call a new value or
+        /// an effect, and FTS5's helper for the text of a MATCH query.
+        const LEFT_OUT: &[&str] = &["random", "randomblob", "changes", "total_changes", "last_insert_rowid", "load_extension", "sqlite_log", "sqlite_offset", "fts5_insttoken"];
+
+        /// Calls this SQLite answers NULL for a NULL argument, which [`NULL_STRICT`] leaves out
+        /// since another SQLite a driver runs does not (its comment says which).
+        const ELSEWHERE: &[(&str, usize, usize, Strict)] = &[
+            ("json_valid", 1, 2, At(&[0])), ("json_extract", 3, 8, Every), ("json_remove", 2, 8, Every), ("jsonb_remove", 1, 8, Every),
+            ("json_insert", 1, 9, At(&[0])), ("json_replace", 1, 9, At(&[0])), ("json_set", 1, 9, At(&[0])), ("jsonb_insert", 1, 9, At(&[0])), ("jsonb_replace", 1, 9, At(&[0])), ("jsonb_set", 1, 9, At(&[0])),
+        ];
+
+        /// `k` arguments from [`VALUES`]: every combination where there are at most 4,000, else
+        /// 4,000 drawn from them, the same on every run.
+        fn draws(k: usize) -> Vec<Vec<&'static str>> {
+            let n = VALUES.len();
+            match n.checked_pow(k as u32).filter(|total| *total <= 4_000) {
+                Some(total) => (0..total).map(|mut i| (0..k).map(|_| { let v = VALUES[i % n]; i /= n; v }).collect()).collect(),
+                None => {
+                    let mut seed: u64 = 0x5eed;
+                    (0..4_000).map(|_| (0..k).map(|_| { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); VALUES[(seed >> 33) as usize % n] }).collect()).collect()
+                }
+            }
+        }
+
+        /// The arguments of calls with `count` of them, argument `i` NULL.
+        fn null_at(count: usize, i: usize) -> Vec<Vec<&'static str>> {
+            draws(count - 1).into_iter().map(|mut args| { args.insert(i, "NULL"); args }).collect()
+        }
+
+        fn call(name: &str, args: &[&str]) -> String {
+            match name {
+                "->" | "->>" => format!("{} {name} {}", args[0], args[1]),
+                _ => format!("\"{name}\"({})", args.join(", ")),
+            }
+        }
+
+        /// Whether SQLite answers the call with NULL; `None` where it refuses it.
+        fn null(db: &Connection, name: &str, args: &[&str]) -> Option<bool> {
+            db.query_row(&format!("select {}", call(name, args)), [], |r| Ok(matches!(r.get_ref(0)?, ValueRef::Null))).ok()
+        }
+
+        /// SQLite's scalar functions, each with the numbers of arguments it is called with here:
+        /// its own, or from 1 to 8 for one that takes any number, but a number of arguments at
+        /// which the name is an aggregate's (`max(x)`).
+        fn scalars(db: &Connection) -> Vec<(String, Vec<usize>)> {
+            let mut listing = db.prepare("select name, narg, type from pragma_function_list").unwrap();
+            let listed: Vec<(String, i64, String)> = listing.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))).unwrap().map(Result::unwrap).collect();
+            let aggregate = |name: &str, count: usize| listed.iter().any(|(n, narg, ty)| n == name && *narg == count as i64 && ty != "s");
+            let mut out: Vec<(String, Vec<usize>)> = Vec::new();
+            for (name, narg, ty) in &listed {
+                if ty != "s" || LEFT_OUT.contains(&name.as_str()) {
+                    continue;
+                }
+                let counts: Vec<usize> = if *narg < 0 { (1..=8).collect() } else { vec![*narg as usize] };
+                let counts = counts.into_iter().filter(|c| *c > 0 && !aggregate(name, *c)).collect();
+                out.push((name.clone(), counts));
+            }
+            out
+        }
+
+        #[test]
+        fn the_rows_are_in_lower_case_and_apart() {
+            for (i, (name, fewest, most, strict)) in NULL_STRICT.iter().enumerate() {
+                assert_eq!(*name, name.to_ascii_lowercase());
+                assert!(1 <= *fewest && fewest <= most, "{name}");
+                if let At(positions) = strict {
+                    assert!(!positions.is_empty() && positions.windows(2).all(|w| w[0] < w[1]) && positions.iter().all(|p| p < fewest), "{name}");
+                }
+                assert!(NULL_STRICT[i + 1..].iter().all(|(other, lo, hi, _)| other != name || hi < fewest || lo > most), "{name}");
+            }
+        }
+
+        #[test]
+        fn each_row_is_null_for_a_null_argument_as_sqlite_answers() {
+            let db = Connection::open_in_memory().unwrap();
+            let mut wrong = Vec::new();
+            for (name, fewest, most, _) in NULL_STRICT {
+                for count in *fewest..=*most {
+                    let listed: bool = db.query_row("select count(*) > 0 from pragma_function_list where name = ?1 and type = 's' and (narg = ?2 or narg < 0)", rusqlite::params![name, count as i64], |r| r.get(0)).unwrap();
+                    assert!(listed, "{name} of {count} arguments is no scalar function of SQLite {}", rusqlite::version());
+                    for i in strict_positions(name, count, None) {
+                        if let Some(args) = null_at(count, i).into_iter().find(|args| null(&db, name, args) == Some(false)) {
+                            wrong.push(call(name, &args));
+                        }
+                    }
+                }
+            }
+            // A NULL replacement behind a pattern that is a text literal other than ''.
+            for pattern in VALUES.iter().filter(|v| v.starts_with('\'') && **v != "''") {
+                for x in VALUES {
+                    if null(&db, "replace", &[*x, *pattern, "NULL"]) == Some(false) {
+                        wrong.push(call("replace", &[*x, *pattern, "NULL"]));
+                    }
+                }
+            }
+            assert!(wrong.is_empty(), "SQLite {} answers these with a value, for a NULL argument the table names: {wrong:#?}", rusqlite::version());
+        }
+
+        #[test]
+        fn every_argument_sqlite_answers_null_for_is_a_row_s() {
+            let db = Connection::open_in_memory().unwrap();
+            let mut missing = Vec::new();
+            for (name, counts) in scalars(&db) {
+                for count in counts {
+                    // A function no call of which gives a value here says nothing of its NULLs.
+                    if !draws(count).iter().any(|args| !args.contains(&"NULL") && null(&db, &name, args) == Some(false)) {
+                        continue;
+                    }
+                    let strict = strict_positions(&name, count, None);
+                    let elsewhere: Vec<usize> = ELSEWHERE.iter().filter(|(f, fewest, most, _)| *f == name && (*fewest..=*most).contains(&count)).flat_map(|(.., s)| match s { Every => (0..count).collect::<Vec<_>>(), At(p) => p.to_vec() }).collect();
+                    for i in (0..count).filter(|i| !strict.contains(i) && !elsewhere.contains(i)) {
+                        let answers: Vec<Option<bool>> = null_at(count, i).iter().map(|args| null(&db, &name, args)).collect();
+                        if answers.contains(&Some(true)) && !answers.contains(&Some(false)) {
+                            missing.push(format!("{name} of {count} arguments, argument {i}"));
+                        }
+                    }
+                }
+            }
+            assert!(missing.is_empty(), "SQLite {} answers NULL for a NULL in each of these, which NULL_STRICT leaves out: {missing:#?}", rusqlite::version());
+        }
+
+        /// Whether the engine types `u.v` non-null under a WHERE of `test` over a LEFT JOIN that
+        /// null-extends `u`; `None` where SQLite refuses the statement.
+        fn narrows(test: &str) -> Option<bool> {
+            let ddl = vec!["create table t (id integer primary key)".to_string(), "create table u (id integer primary key, v)".to_string()];
+            let sql = format!("select u.v as v from t left join u on u.id = t.id where {test}");
+            let a = analyze_ddl(&sql, &ddl, &Extras::default()).analysis;
+            a.diagnostics.is_empty().then(|| !col(&a, "v").1)
+        }
+
+        #[test]
+        fn a_where_test_narrows_through_each_argument_a_row_names_and_no_other() {
+            for (name, fewest, most, _) in NULL_STRICT {
+                for count in *fewest..=*most {
+                    let strict = strict_positions(name, count, None);
+                    for i in 0..count {
+                        // 0.5 elsewhere, since `likelihood` takes a literal real, and refuses a column.
+                        let mut args = vec!["0.5"; count];
+                        args[i] = "u.v";
+                        let test = format!("{} is not null", call(name, &args));
+                        match narrows(&test) {
+                            Some(narrowed) => assert_eq!(narrowed, strict.contains(&i), "{test}"),
+                            None => assert!(*name == "likelihood" && i == 1, "{test} is refused"),
+                        }
+                    }
+                }
+            }
+            // What another SQLite answers otherwise narrows nothing.
+            for (name, fewest, most, _) in ELSEWHERE {
+                for count in *fewest..=*most {
+                    let strict = strict_positions(name, count, None);
+                    for i in (0..count).filter(|i| !strict.contains(i)) {
+                        let mut args = vec!["'{}'"; count];
+                        args[i] = "u.v";
+                        let test = format!("{} is not null", call(name, &args));
+                        assert_ne!(narrows(&test), Some(true), "{test}");
+                    }
+                }
+            }
+            // Operators, `replace` behind a pattern that is a text literal, and a function inside another's argument.
+            for test in [
+                "u.v + 1 > 0", "u.v & 1", "1 | u.v", "u.v << 1", "~u.v", "not u.v", "(u.v = 1) = 0", "(u.v < 1) is not null", "-u.v is not null", "+u.v is not null", "cast(u.v as text) is not null",
+                "u.v collate nocase is not null", "(u.v between 1 and 2) is not null", "(u.v in (1, 2)) is not null", "abs(sqrt(u.v)) > 0", "date(u.v) = '2020-01-02'", "u.v ->> '$.a' = 1", "json_extract(u.v, '$.a') = 1",
+                "'x' like u.v escape '\\'", "'x' like 'x' escape u.v", "nullif(u.v, 1) is not null", "max(u.v, 1) > 0", "iif(u.v, 1)", "replace('x', 'a', u.v) is not null", "1 between u.v and 2", "1 between 0 and u.v",
+                "not (u.v like 'a%')", "not (u.v in (1, 2))",
+            ] {
+                assert_eq!(narrows(test), Some(true), "{test}");
+            }
+            for test in [
+                "(1 between u.v and 0) is not null", "not json_valid(u.v)", "json_extract('{}', '$', u.v) is not null", "json_set(u.v, '$', 1) is not null", "json_remove('{}', u.v) is not null", "jsonb_remove(u.v) is not null", "not (1 between u.v and 0)", "not (u.v in (select 1))", "not (u.v is null) is null", "(1 in (u.v, 1)) is not null", "(u.v in (select 1)) is not null", "u.v is not 1", "coalesce(u.v, 1) > 0", "nullif(1, u.v) > 0", "iif(u.v, 1, 2) > 0",
+                "json_set('{}', u.v, 1) is not null", "concat_ws(',', u.v) is not null", "printf('%s', u.v) is not null", "replace('x', '', u.v) = 'x'", "((u.v, 1) = (1, 2)) is not null", "(u.v or 1) is not null",
+            ] {
+                assert_eq!(narrows(test), Some(false), "{test}");
+            }
+        }
+
+        #[test]
+        fn a_call_sqlite_answers_null_for_is_typed_nullable() {
+            let db = Connection::open_in_memory().unwrap();
+            let ddl = vec!["create table c (n0, n1 integer, n2 real, n3 text, n4 blob)".to_string()];
+            let mut wrong = Vec::new();
+            for (name, counts) in scalars(&db) {
+                for count in counts {
+                    for i in 0..count {
+                        // A few calls SQLite answers with NULL, with the NULL a nullable column of each type.
+                        let (plain, nulls): (Vec<_>, Vec<_>) = null_at(count, i).into_iter().partition(|args| args.iter().filter(|a| **a == "NULL").count() == 1);
+                        for args in plain.into_iter().chain(nulls).filter(|args| null(&db, &name, args) == Some(true)).take(5) {
+                            for column in ["c.n0", "c.n1", "c.n2", "c.n3", "c.n4"] {
+                                let mut args = args.clone();
+                                args[i] = column;
+                                let sql = format!("select {} as v from c", call(&name, &args));
+                                let a = analyze_ddl(&sql, &ddl, &Extras::default()).analysis;
+                                if a.diagnostics.is_empty() && !col(&a, "v").1 {
+                                    wrong.push(sql);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(wrong.is_empty(), "SQLite {} answers NULL for each of these with the column NULL, which the engine types non-null: {wrong:#?}", rusqlite::version());
+        }
     }
 }

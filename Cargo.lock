@@ -2016,6 +2016,7 @@ dependencies = [
  "cc",
  "reylo-engine-build",
  "reylo-engine-core",
+ "rusqlite",
  "serde",
  "serde_json",
 ]
