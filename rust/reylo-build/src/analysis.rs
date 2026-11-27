@@ -748,7 +748,7 @@ mod tests {
     fn on_mysql_an_analysis_made_after_a_migration_is_written_under_the_migrated_schemas_fingerprint() {
         use mysql_async::prelude::Queryable;
         let Ok(server) = std::env::var("REYLO_TEST_MYSQL") else { return };
-        let name = format!("reylo_build_migrated_{}", std::process::id());
+        let name = format!("reylo_build_migrated_mysql_{}", std::process::id());
         let url = format!("{}/{name}", server.trim_end_matches('/'));
         let run = |url: &str, sql: &str| {
             super::runtime().unwrap().block_on(async {

@@ -925,13 +925,15 @@ test("the MySQL fingerprint holds while nothing changes, and moves with a column
     const checks = [`alter table docs drop check j_shape, add constraint j_shape check (json_schema_valid('{"type":"object","properties":{"a":{"type":"string"}}}', j))`, "alter table docs alter check j_shape not enforced"];
     // A parameter is typed as the argument it is passed for, and a call checked against their count.
     const signatures = ["f(x varchar(10))", "f(x varchar(10), y int)"].map((signature) => ["drop function f", `create function ${signature} returns int deterministic return x`]);
+    // A structured parameter is expanded by the database's character set and collation.
+    const database = [`alter database ${ownName} character set latin1 collate latin1_swedish_ci`, `alter database ${ownName} collate latin1_bin`];
     // A statement may read another database's table or call its function, and the engine takes a
     // column of a table for a view's wherever any database has a view of that name.
     const elsewhere = [`alter table ${otherName}.t modify c varchar(10) null`, `create view ${otherName}.m as select 1 as v`, [`drop function ${otherName}.g`, `create function ${otherName}.g(x varchar(10)) returns int deterministic return x`]];
     // Without the TRIGGER privilege, a written table's triggers are hidden from the account. A grant
     // on a database's pattern names the pattern, which the engine does not read as the database.
     const privileges = [`grant trigger on \`${ownName}\`.m to '${user}'@'%'`];
-    for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks, ...signatures, ...elsewhere, ...privileges]) {
+    for (const change of ["alter table m modify v varchar(50)", "alter table m modify n decimal(12,4)", "alter table m modify at datetime(6)", "alter table m modify body text character set utf8mb4", ...checks, ...signatures, ...elsewhere, ...privileges, ...database]) {
       const statements = [change].flat();
       for (const statement of statements) await own.db.query(statement);
       const next = await fingerprint();
