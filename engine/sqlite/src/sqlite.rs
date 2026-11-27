@@ -1001,12 +1001,34 @@ fn textual(t: &Ty) -> Ty {
     if is_built(t) { Ty::Scalar { name: "text".into() } } else { t.clone() }
 }
 
+/// A [`LAX`] value's JSON Schema inside a document: an int64 or a REAL's double, so that a reader
+/// keeps the integer exact.
+fn lax_schema() -> serde_json::Value {
+    serde_json::json!({"anyOf": [{"type": "integer", "format": "int64"}, {"type": "number", "format": "double"}]})
+}
+
+/// The one schema two are where they differ only in that one holds an INTEGER's where the other
+/// holds a [`LAX`] value's: the [`LAX`]'s.
+fn widened_schema(a: &serde_json::Value, b: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    let integer = serde_json::json!({"type": "integer", "format": "int64"});
+    let lax = lax_schema();
+    match (a, b) {
+        _ if a == b => Some(a.clone()),
+        _ if (*a == integer && *b == lax) || (*a == lax && *b == integer) => Some(lax),
+        (Value::Object(x), Value::Object(y)) if x.len() == y.len() => x.iter().map(|(k, v)| Some((k.clone(), widened_schema(v, y.get(k)?)?))).collect::<Option<serde_json::Map<_, _>>>().map(Value::Object),
+        (Value::Array(x), Value::Array(y)) if x.len() == y.len() => x.iter().zip(y).map(|(v, w)| widened_schema(v, w)).collect::<Option<Vec<_>>>().map(Value::Array),
+        _ => None,
+    }
+}
+
 /// The one type several are where they differ only in that one holds an INTEGER where another
 /// holds a [`LAX`], at any depth of a document: the [`LAX`].
 fn widened(types: &[&Ty]) -> Option<Ty> {
     fn widen(a: &Ty, b: &Ty) -> Option<Ty> {
         match (a, b) {
             _ if a == b => Some(a.clone()),
+            (Ty::Json { schema: Some(x) }, Ty::Json { schema: Some(y) }) => Some(Ty::Json { schema: Some(widened_schema(x, y)?) }),
             (Ty::Scalar { name: x }, Ty::Scalar { name: y }) if matches!((x.as_str(), y.as_str()), ("integer", LAX) | (LAX, "integer")) => Some(Ty::Scalar { name: LAX.into() }),
             (Ty::Object { fields: f }, Ty::Object { fields: g }) if f.len() == g.len() => {
                 let fields = f.iter().zip(g).map(|(f, g)| (f.name == g.name && f.nullable == g.nullable).then(|| widen(&f.ty, &g.ty).map(|ty| TyField { ty, ..f.clone() })).flatten()).collect::<Option<Vec<_>>>()?;
@@ -1123,8 +1145,7 @@ fn value_schema(t: &Ty, nullable: bool) -> serde_json::Value {
         Ty::Scalar { name } => match name.as_str() {
             "integer" | "int8" => json!({"type": "integer", "format": "int64"}),
             "real" => json!({"type": "number", "format": "double"}),
-            // An int64 or a REAL's double, so that a reader keeps the integer exact.
-            LAX => json!({"anyOf": [{"type": "integer", "format": "int64"}, {"type": "number", "format": "double"}]}),
+            LAX => lax_schema(),
             "text" => json!({"type": "string"}),
             "numeric" => json!({"type": ["number", "string"]}),
             _ => json!({}),
@@ -4566,6 +4587,11 @@ mod tests {
         // Arms that build one shape, but for an INTEGER beside such a value, build it with the value.
         let arms = serde_json::to_string(&analyze_ddl("select case when id = 1 then json_object('n', n) else json_object('n', id) end as j from loose", &ddl, &Extras::default()).analysis.columns[0].ty).unwrap();
         assert!(arms.contains(r#""kind":"json""#) && arms.contains(r#""label":"INTEGER""#), "{arms}");
+        // So do arms that build one tuple, or one map, of such a value and an INTEGER.
+        for sql in ["select case when id = 1 then json_array(n) else json_array(id) end as j from loose", "select case when id = 1 then json_object(cast(id as text), n) else json_object(cast(id as text), id) end as j from loose", "select case when id = 1 then json_array(big) else json_array(id) end as j from loose"] {
+            let ty = serde_json::to_value(&analyze_ddl(sql, &ddl, &Extras::default()).analysis.columns[0].ty).unwrap();
+            assert_eq!(ty["kind"], "json", "{sql}: {ty}");
+        }
         // A map's values keep an integer exact: an int64, or a REAL's double.
         let map = serde_json::to_string(&analyze_ddl("select json_group_object(cast(id as text), n) as j from loose", &ddl, &Extras::default()).analysis.columns[0].ty).unwrap();
         assert!(map.contains(r#""anyOf":[{"format":"int64","type":"integer"},{"format":"double","type":"number"}]"#) || map.contains(r#""anyOf":[{"type":"integer","format":"int64"},{"type":"number","format":"double"}]"#), "{map}");

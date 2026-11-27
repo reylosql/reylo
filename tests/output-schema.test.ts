@@ -327,7 +327,7 @@ test("SQLite: every type's values hold to the output schema, as a column and ins
         `select coalesce(c, 0) as k, max(c, 0) as w, c + 1 as p, -c as m, abs(c) as b, iif(id > 0, c, 0) as i, (select c) as s, json_object('v', c + 1) as o from ${t}`,
         `select sum(c) as s, max(c) as x, min(c) as n, json_group_array(coalesce(c, 0)) as a from ${t}`,
         `select max(c) over () as w, lag(c) over (order by id) as l from ${t}`,
-        `select case when c is null then json_object('v', id) else json_object('v', c) end as o, json_group_object(cast(id as text), c) over () as m from ${t}`,
+        `select case when c is null then json_object('v', id) else json_object('v', c) end as o, case when c is null then json_array(id) else json_array(c) end as a, json_group_object(cast(id as text), c) over () as m from ${t}`,
       ] : []),
     ], async (q) => q.run(own));
     assert.deepEqual(problems, [], problems.join("\n"));
