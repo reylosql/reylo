@@ -38,6 +38,14 @@ const SPINNING: &str = "Checking on a shadow database";
 /// A step that failed: its label and why.
 pub(crate) type Failed = (String, String);
 
+/// What [`Shadows::before`] did for a step that makes pg_cron.
+pub(crate) enum PgCron {
+    Unneeded,
+    Named,
+    /// Why the shadow couldn't take pg_cron's name.
+    Refused(String),
+}
+
 struct Lane {
     steps: Vec<Step>,
     /// The cache's key of each prefix: `keys[i]` is that of the first `i` steps.
@@ -196,14 +204,17 @@ impl<'s> Shadows<'s> {
             }
         }
         while self.lanes[l].at < n {
-            let lane = &mut self.lanes[l];
-            let i = lane.at;
-            let step = lane.steps[i].clone();
+            let i = self.lanes[l].at;
+            let step = self.lanes[l].steps[i].clone();
             spinning.say(format!("Replaying {} on a shadow database", step.label));
+            let pg_cron = self.before(l, &step.sql).await?;
+            let lane = &mut self.lanes[l];
             let db = &mut lane.shadow.as_mut().expect("a shadow").db;
             let result = if step.schema { db.script(&step.sql).await } else { run(db, &Migration { name: step.label.clone(), time: String::new(), path: PathBuf::new(), sql: step.sql.clone() }).await };
             count(|s| s.replayed += 1);
             lane.at = i + 1;
+            let result = self.after(l, pg_cron, result).await?;
+            let lane = &mut self.lanes[l];
             if let Err(e) = result {
                 // The rest was never run: the lane goes on from the failure, as a shadow does.
                 lane.caching = false;
@@ -218,6 +229,44 @@ impl<'s> Shadows<'s> {
             }
         }
         Ok(Ok(()))
+    }
+
+    /// Readies lane `l`'s shadow to run `sql`. Where it makes pg_cron, which makes itself only in the
+    /// database `cron.database_name` names, the shadow goes by the one other name pg_cron takes until
+    /// [`Shadows::after`] names it back.
+    pub(crate) async fn before(&mut self, l: usize, sql: &str) -> Result<PgCron, Error> {
+        if self.server.dialect() != Dialect::Postgres || !sql.to_ascii_lowercase().contains("pg_cron") || !crate::commands::extensions_in(sql).iter().any(|e| e == "pg_cron") {
+            return Ok(PgCron::Unneeded);
+        }
+        let Some(shadow) = self.lanes[l].shadow.take() else { return Ok(PgCron::Unneeded) };
+        let (shadow, named) = self.server.name_for_pg_cron(shadow).await?;
+        self.lanes[l].shadow = Some(shadow);
+        Ok(match named {
+            Ok(true) => PgCron::Named,
+            Ok(false) => PgCron::Unneeded,
+            Err(why) => PgCron::Refused(why),
+        })
+    }
+
+    /// The lane's shadow under its own name again after [`Shadows::before`], with `result`, what ran
+    /// on it, and on a failure where pg_cron's name couldn't be taken, why.
+    pub(crate) async fn after(&mut self, l: usize, pg_cron: PgCron, result: Result<(), Error>) -> Result<Result<(), Error>, Error> {
+        match pg_cron {
+            PgCron::Unneeded => Ok(result),
+            PgCron::Named => {
+                let shadow = self.lanes[l].shadow.take().expect("a shadow");
+                self.lanes[l].shadow = Some(self.server.unname_for_pg_cron(shadow).await?);
+                Ok(result)
+            }
+            PgCron::Refused(why) => Ok(result.map_err(|e| if !e.0.contains("cron") { e } else { Error(format!("{}\npg_cron makes itself only in the database cron.database_name names, or in one named {}, and the shadow couldn't take that name: {why}", e.0, crate::db::PG_CRON_NAME)) })),
+        }
+    }
+
+    /// Runs the migration `m` on lane `l`'s database, for a command that writes to it.
+    pub(crate) async fn run(&mut self, l: usize, m: &Migration) -> Result<(), Error> {
+        let pg_cron = self.before(l, &m.sql).await?;
+        let result = run(self.db(l), m).await;
+        self.after(l, pg_cron, result).await?
     }
 
     /// At a mark: the database is copied into the cache, where none holds its prefix, before the

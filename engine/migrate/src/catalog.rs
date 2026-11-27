@@ -1288,8 +1288,10 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             "select format('%I.%I', n.nspname, c.relname) as rel, p.polname as name, p.polcmd as cmd, p.polpermissive as permissive,
               (select string_agg(case when r = 0 then 'PUBLIC' else pg_get_userbyid(r) end, ',' order by 1) from unnest(p.polroles) r) as roles,
               pg_get_expr(p.polqual, p.polrelid) as qual, pg_get_expr(p.polwithcheck, p.polrelid) as check
-            from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace where {ns} and {}",
-            not_history("c.relname")
+            from pg_policy p join pg_class c on c.oid = p.polrelid join pg_namespace n on n.oid = c.relnamespace where {ns} and {} and {}",
+            not_history("c.relname"),
+            // One on an extension's table is the extension's, as pg_dump has it (pg_cron's on `cron.job`).
+            not_extension("pg_class", "c")
         ))
         .await?
     {
@@ -1350,7 +1352,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             union all select 'trigger ' || format('%I', tg.tgname) || ' on ' || format('%I.%I', n.nspname, c.relname), null, obj_description(tg.oid, 'pg_trigger'), null
             from pg_trigger tg join pg_class c on c.oid = tg.tgrelid join pg_namespace n on n.oid = c.relnamespace where not tg.tgisinternal and {ns} and {}
             union all select 'policy ' || format('%I', po.polname) || ' on ' || format('%I.%I', n.nspname, c.relname), null, obj_description(po.oid, 'pg_policy'), null
-            from pg_policy po join pg_class c on c.oid = po.polrelid join pg_namespace n on n.oid = c.relnamespace where {ns} and {}
+            from pg_policy po join pg_class c on c.oid = po.polrelid join pg_namespace n on n.oid = c.relnamespace where {ns} and {} and {}
             union all select 'collation ' || format('%I.%I', n.nspname, co.collname), null, obj_description(co.oid, 'pg_collation'), null
             from pg_collation co join pg_namespace n on n.oid = co.collnamespace where {ns} and {}
             union all select 'publication ' || format('%I', pb.pubname), null, obj_description(pb.oid, 'pg_publication'), null from pg_publication pb
@@ -1382,6 +1384,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             pg_not_history("cc"),
             not_history("c.relname"),
             not_history("c.relname"),
+            not_extension("pg_class", "c"),
             not_extension("pg_collation", "co"),
             not_history("c.relname"),
             not_extension("pg_event_trigger", "et"),
