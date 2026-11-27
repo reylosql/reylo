@@ -56,11 +56,16 @@ export type Columns = readonly (readonly [name: string, kind: Kind, delimiter?: 
  * What the run time reads inside a document a statement builds (src/render.ts, `jsonNumbers`):
  * where it holds a float or a decimal that may be NaN or an infinity, which Postgres writes there
  * as text, `true` for such a value; where it holds an integer wider than a double holds exactly,
- * `"integer"`; for an array, `items` for its elements (`false` where they need nothing), through
- * nested arrays where `deep`, and `flat` where it is a Postgres array held to one level; and `keys`
- * for an object's fields.
+ * `"integer"`; for an array, `items` for its elements (`false` where they need nothing), the first
+ * of them by place in `elements` where they differ, through nested arrays where `deep`, and `flat`
+ * where it is a Postgres array held to one level; and `keys` for an object's fields, `others` for
+ * every key they don't name.
  */
-export type JsonNumbers = true | "integer" | { readonly items: JsonNumbers | false; readonly deep?: true; readonly flat?: true } | { readonly keys: readonly (readonly [key: string, at: JsonNumbers])[] };
+export type JsonNumbers =
+  | true
+  | "integer"
+  | { readonly items: JsonNumbers | false; readonly elements?: readonly (JsonNumbers | null)[]; readonly deep?: true; readonly flat?: true }
+  | { readonly keys: readonly (readonly [key: string, at: JsonNumbers])[]; readonly others?: JsonNumbers };
 
 /**
  * The JSON columns of a row whose non-finite numbers `.run()` gives as numbers: each name's last
@@ -72,6 +77,18 @@ export function rowMasks(columns: Columns, nonFinite: readonly (JsonNumbers | nu
   return [...last].flatMap(([name, at]) => (at === null ? [] : [[name, at] as const]));
 }
 
+/** An integer inside a document that JSON.parse may have rounded, and where it stands, built up as the walk returns. */
+class Rounded {
+  readonly value: number;
+  readonly path: string[] = [];
+  constructor(value: number) {
+    this.value = value;
+  }
+}
+
+/** The widest value a 64-bit integer holds: a number past it inside a document is a float, which JSON.parse reads exactly. */
+const INTEGER_64 = 2 ** 64;
+
 /**
  * A parsed JSON value with the text Postgres writes for each non-finite float or decimal at
  * `at`, `"NaN"`, `"Infinity"` or `"-Infinity"`, as that number, in place: JSON has no number for
@@ -81,13 +98,20 @@ export function rowMasks(columns: Columns, nonFinite: readonly (JsonNumbers | nu
  * 2^53 - 1 where a 64-bit integer stands, which JSON.parse may already have rounded to it: a column
  * of the integer is an exact BigInt, and a number refuses such a value rather than round it.
  */
-export function numbersInJson(v: unknown, at: JsonNumbers, column = "", path = ""): unknown {
+export function numbersInJson(v: unknown, at: JsonNumbers, column = ""): unknown {
+  try {
+    return read(v, at, column);
+  } catch (e) {
+    if (!(e instanceof Rounded)) throw e;
+    const where = e.path.length ? ` at /${e.path.reverse().join("/")}` : "";
+    throw new DecodeError(`Column "${column}" holds, inside its JSON${where}, the integer ${BigInt(e.value)}, which is ${e.value < 0 ? "below -(2^53 - 1)" : "past 2^53 - 1"}, where JSON.parse rounds a number, so it may have been another one. Write it into the document as text and read that with BigInt().`);
+  }
+}
+
+function read(v: unknown, at: JsonNumbers, column: string): unknown {
   if (at === true) return v === "NaN" ? NaN : v === "Infinity" ? Infinity : v === "-Infinity" ? -Infinity : v;
   if (at === "integer") {
-    // A finite double past 2^53 - 1 is whole, so its digits are BigInt's.
-    if (typeof v === "number" && Math.abs(v) > Number.MAX_SAFE_INTEGER) {
-      throw new DecodeError(`Column "${column}" holds, inside its JSON${path ? ` at ${path}` : ""}, the integer ${Number.isFinite(v) ? BigInt(v) : v}, which is past 2^53 - 1, where JSON.parse rounds a number, so it may have been another one. Select the integer as a column of its own, which comes back an exact BigInt, or write it into the document as text and read that with BigInt().`);
-    }
+    if (typeof v === "number" && Math.abs(v) > Number.MAX_SAFE_INTEGER && Math.abs(v) <= INTEGER_64) throw new Rounded(v);
     return v;
   }
   if (v === null || typeof v !== "object") return v;
@@ -96,22 +120,42 @@ export function numbersInJson(v: unknown, at: JsonNumbers, column = "", path = "
     if (at.flat === true && v.some(Array.isArray)) {
       throw new DecodeError(`Column "${column}" holds, inside its JSON, a Postgres array of more than one dimension, and its type has one: Reylo types a Postgres array with one dimension, which Postgres doesn't enforce. Write to_jsonb(<the array>) into the document to read it as JSON, or set allow_nested_arrays: true in .reylo.yaml to type it at any depth.`);
     }
-    const items = at.items;
-    if (items === false) return v;
+    const { items, elements = [] } = at;
+    if (items === false && !elements.length) return v;
     // A Postgres array nests to any depth, each level an array; where its element is a JSON array
     // as well, an array is read as the element, since the two cannot be told apart.
     const nested = at.deep === true && !(typeof items === "object" && "items" in items);
-    for (let i = 0; i < v.length; i++) v[i] = nested && Array.isArray(v[i]) ? numbersInJson(v[i], at, column, `${path}/${i}`) : numbersInJson(v[i], items, column, `${path}/${i}`);
+    for (let i = 0; i < v.length; i++) {
+      const inner = i < elements.length ? elements[i]! : items;
+      if (inner === null || inner === false) continue;
+      try {
+        v[i] = nested && Array.isArray(v[i]) ? read(v[i], at, column) : read(v[i], inner, column);
+      } catch (e) {
+        if (e instanceof Rounded) e.path.push(String(i));
+        throw e;
+      }
+    }
     return v;
   }
   const o = v as Record<string, unknown>;
-  for (const [key, inner] of at.keys) {
-    if (!Object.prototype.hasOwnProperty.call(o, key)) continue;
-    const value = numbersInJson(o[key], inner, column, `${path}/${key.replace(/~/g, "~0").replace(/\//g, "~1")}`);
+  const named = new Set<string>();
+  const each = (key: string, inner: JsonNumbers) => {
+    let value: unknown;
+    try {
+      value = read(o[key], inner, column);
+    } catch (e) {
+      if (e instanceof Rounded) e.path.push(key.replace(/~/g, "~0").replace(/\//g, "~1"));
+      throw e;
+    }
     // `__proto__` is an own key JSON.parse made, which an assignment would not reach.
     if (key === "__proto__") Object.defineProperty(o, key, { value, writable: true, enumerable: true, configurable: true });
     else o[key] = value;
+  };
+  for (const [key, inner] of at.keys) {
+    named.add(key);
+    if (Object.prototype.hasOwnProperty.call(o, key)) each(key, inner);
   }
+  if (at.others !== undefined) for (const key of Object.keys(o)) if (!named.has(key)) each(key, at.others);
   return v;
 }
 
@@ -1225,16 +1269,39 @@ export class ParameterError extends TypeError {}
  * A JSON value as its text, as JSON.stringify writes it, but each BigInt in it as its digits, which
  * JSON.stringify refuses and a schema's `integer` takes (src/json-schema.ts). `JSON.rawJSON`
  * writes them, named through a cast, since a project may type-check the run time with a `lib`
- * older than it.
+ * older than it. Each is read from the value that holds it, so a `BigInt.prototype.toJSON` an app
+ * installs, which writes text or a rounded number, never reaches one. On MySQL and SQLite a BigInt
+ * is held to the 64-bit integers the database reads from JSON, which reads a longer one as a float.
  */
-export function jsonStringify(v: unknown): string {
-  return JSON.stringify(v, (_key, x: unknown) => (typeof x === "bigint" ? rawInteger(x) : x));
+export function jsonStringify(v: unknown, dialect?: Dialect): string {
+  if (!bigintToJson()) {
+    try {
+      return JSON.stringify(v);
+    } catch (e) {
+      // A BigInt, which the replacer below writes; any other error it throws again.
+      if (!(e instanceof TypeError)) throw e;
+    }
+  }
+  return JSON.stringify(v, function (this: Record<string, unknown>, key: string, x: unknown) {
+    const held = this[key];
+    return typeof held === "bigint" ? rawInteger(held, dialect) : x;
+  });
 }
 
 /** A JSON value with each BigInt in it as `JSON.rawJSON` of its digits, for a driver that serializes the value itself (Bun.sql): a copy where it holds one. */
 export function withRawIntegers(v: unknown): unknown {
-  return v !== null && typeof v === "object" && !holdsBigInt(v) ? v : rawCopy(v);
+  if (!bigintToJson()) {
+    try {
+      JSON.stringify(v);
+      return v;
+    } catch {
+      // A BigInt, which the copy writes; any other error JSON.stringify throws again where the driver serializes it.
+    }
+  }
+  return rawCopy(v);
 }
+
+const bigintToJson = () => typeof (BigInt.prototype as { toJSON?: unknown }).toJSON === "function";
 
 function rawCopy(v: unknown): unknown {
   if (typeof v === "bigint") return rawInteger(v);
@@ -1245,16 +1312,15 @@ function rawCopy(v: unknown): unknown {
   return Object.fromEntries(Object.entries(v).map(([key, x]) => [key, rawCopy(x)]));
 }
 
-function holdsBigInt(v: object): boolean {
-  let found = false;
-  JSON.stringify(v, (_key, x: unknown) => {
-    if (typeof x === "bigint") found = true;
-    return found ? undefined : x;
-  });
-  return found;
-}
+/** The integers MySQL and SQLite read from JSON as integers: SQLite's 64-bit signed ones, and MySQL's signed and unsigned ones. */
+const JSON_INTEGERS: Partial<Record<Dialect, readonly [bigint, bigint]>> = {
+  sqlite: [-(BigInt(2) ** BigInt(63)), BigInt(2) ** BigInt(63) - BigInt(1)],
+  mysql: [-(BigInt(2) ** BigInt(63)), BigInt(2) ** BigInt(64) - BigInt(1)],
+};
 
-function rawInteger(x: bigint): unknown {
+function rawInteger(x: bigint, dialect?: Dialect): unknown {
+  const range = dialect === undefined ? undefined : JSON_INTEGERS[dialect];
+  if (range !== undefined && (x < range[0] || x > range[1])) throw new ParameterError(`A JSON parameter holds the BigInt ${x}, which ${dialect === "sqlite" ? "SQLite" : "MySQL"} reads from JSON as a float: its 64-bit integers run from ${range[0]} to ${range[1]}.`);
   const raw = (JSON as { rawJSON?: (text: string) => unknown }).rawJSON;
   if (raw === undefined) throw new ParameterError(`A JSON parameter holds the BigInt ${x}, and this runtime has no JSON.rawJSON to write it exactly: pass it as a number, up to 2^53 - 1.`);
   return raw(x.toString());

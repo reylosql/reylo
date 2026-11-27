@@ -127,7 +127,7 @@ export function prepareRows(name: string, type: RowsType, value: unknown, dialec
  * a JSON parameter of its own is written. Postgres takes the rows as they are.
  */
 function jsonMember(f: RowField, v: unknown, dialect: Dialect): unknown {
-  return dialect !== "postgres" && f.type.kind === "json" ? new Raw(jsonStringify(v)) : v;
+  return dialect !== "postgres" && f.type.kind === "json" ? new Raw(jsonStringify(v, dialect)) : v;
 }
 
 /** One value checked against its type, as the JSON the database reads; `fail` says why not. */
@@ -136,7 +136,7 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
     case "json":
       // A JSON member holds JSON, a BigInt written as its digits: JSON.stringify skips a function.
       try {
-        if (jsonStringify(v) === undefined) fail(`is ${written}, which holds a JSON value; got ${describe(v)}.`);
+        if (jsonStringify(v, dialect) === undefined) fail(`is ${written}, which holds a JSON value; got ${describe(v)}.`);
       } catch (e) {
         fail(`is ${written}, which holds a JSON value: ${(e as Error).message}.`);
       }

@@ -208,6 +208,14 @@ export function jsonNumbers(t: EngineType, inJson = false, dialect: Dialect = "p
     case "integer":
       // A signed integer of 55 bits or more, or an unsigned one of 54 or more, holds a number past 2^53 - 1.
       return inJson && dialect !== "clickhouse" && !(dialect === "postgres" && name === "oid") && (t.unsigned ? t.bits : t.bits - 1) > 53 ? "integer" : undefined;
+    case "enum":
+      return jsonNumbers(t.type, inJson, dialect);
+    case "union": {
+      // An integer of one width or another (MySQL's `bigint | int`); a union that may also be a
+      // float, as a SQLite NUMERIC is, holds numbers a double may hold exactly.
+      if (!inJson || (dialect === "postgres" && json[name] !== undefined) || !t.members.every((m) => m.kind === "integer")) return undefined;
+      return t.members.some((m) => jsonNumbers(m, true, dialect) === "integer") ? "integer" : undefined;
+    }
     case "array": {
       if (inJson ? dialect === "postgres" && json[name] !== undefined : dialect !== "postgres" || !columnKind(t, "postgres").endsWith("[]")) return undefined;
       const items = jsonNumbers(t.element.type, inJson, dialect);
@@ -227,10 +235,43 @@ export function jsonNumbers(t: EngineType, inJson = false, dialect: Dialect = "p
       return keys.length ? { keys } : undefined;
     }
     case "json":
-      return t.content === undefined ? undefined : jsonNumbers(t.content.type, true, dialect);
+      if (t.content !== undefined) return jsonNumbers(t.content.type, true, dialect);
+      return dialect === "clickhouse" || t.schema === undefined ? undefined : schemaNumbers(schemaOf(t));
     default:
       return undefined;
   }
+}
+
+/**
+ * Where JSON a schema describes holds a 64-bit integer, as `jsonNumbers` reads it: the schema the
+ * engine writes for a document whose shape is no struct, `json_build_array(…)`'s or a
+ * `json_object` with a computed key's, names one `{ "type": "integer", "format": "int64" }`.
+ */
+function schemaNumbers(schema: unknown): JsonNumbers | undefined {
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return undefined;
+  const m = schema as Record<string, unknown>;
+  if (Array.isArray(m.anyOf)) {
+    // Each alternative's reading, where they agree: an integer or null reads as the integer.
+    const read = m.anyOf.map(schemaNumbers).filter((at) => at !== undefined);
+    return read.length && read.every((at) => JSON.stringify(at) === JSON.stringify(read[0])) ? read[0] : undefined;
+  }
+  const kinds = kindsOf(m);
+  if (kinds.includes("integer") && m.format === "int64" && kinds.every((k) => k === "integer" || k === "null")) return "integer";
+  if (kinds.includes("array")) {
+    const elements = Array.isArray(m.prefixItems) ? m.prefixItems.map((s) => schemaNumbers(s) ?? null) : [];
+    const items = typeof m.items === "object" ? schemaNumbers(m.items) : undefined;
+    return items === undefined && !elements.some((at) => at !== null) ? undefined : { items: items ?? false, ...(elements.some((at) => at !== null) ? { elements } : {}) };
+  }
+  if (kinds.includes("object")) {
+    const properties = m.properties !== null && typeof m.properties === "object" && !Array.isArray(m.properties) ? (m.properties as Record<string, unknown>) : {};
+    const keys = Object.entries(properties).flatMap(([key, s]): [string, JsonNumbers][] => {
+      const at = schemaNumbers(s);
+      return at === undefined ? [] : [[key, at]];
+    });
+    const others = typeof m.additionalProperties === "object" ? schemaNumbers(m.additionalProperties) : undefined;
+    return keys.length || others !== undefined ? { keys, ...(others === undefined ? {} : { others }) } : undefined;
+  }
+  return undefined;
 }
 
 /**

@@ -275,7 +275,21 @@ test("the run time refuses an integer past 2^53 - 1 where a 64-bit integer stand
   const rounds = { items: { keys: [["amount", "integer"]] } } as const;
   assert.deepEqual(numbersInJson([{ amount: 9007199254740991 }, { amount: -9007199254740991 }, { amount: null }], rounds, "rounds"), [{ amount: 9007199254740991 }, { amount: -9007199254740991 }, { amount: null }]);
   assert.throws(() => numbersInJson([{ amount: 1 }, { amount: 9007199254740993 }], rounds, "rounds"), /Column "rounds" holds, inside its JSON at \/1\/amount, the integer 9007199254740992, which is past 2\^53 - 1, where JSON\.parse rounds a number/);
-  assert.throws(() => numbersInJson({ "a/b": -9007199254740992 }, { keys: [["a/b", "integer"]] }, "doc"), /at \/a~1b, the integer -9007199254740992/);
+  assert.throws(() => numbersInJson({ "a/b": -9007199254740992 }, { keys: [["a/b", "integer"]] }, "doc"), /at \/a~1b, the integer -9007199254740992, which is below -\(2\^53 - 1\)/);
+  // A float past what a 64-bit integer holds, as a non-STRICT SQLite INTEGER column may store, is one JSON.parse reads exactly.
+  assert.deepEqual(numbersInJson({ n: 1e20 }, { keys: [["n", "integer"]] }, "doc"), { n: 1e20 });
+  // An integer of one width or another, and an enum of integers; a SQLite NUMERIC may be a float.
+  assert.deepEqual(jsonNumbers(doc(record([field("n", oneOf(my("bigint"), my("int"))), field("e", { kind: "enum", type: pg("int8"), values: [{ value: "1" }] } as EngineType), field("x", lite("numeric"))])), false, "mysql"), { keys: [["n", "integer"], ["e", "integer"]] });
+  // The schema the engine writes for `json_build_array(id, amount)` and SQLite's `json_object(k, amount)`.
+  const tuple = { kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "array", prefixItems: [{ type: "integer", format: "int32" }, { type: "integer", format: "int64" }], items: false, minItems: 2 } } as EngineType;
+  assert.deepEqual(jsonNumbers(tuple), { items: false, elements: [null, "integer"] });
+  const keyed = { kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "object", additionalProperties: { anyOf: [{ type: "integer", format: "int64" }, { type: "null" }] } } } as EngineType;
+  assert.deepEqual(jsonNumbers(keyed, false, "sqlite"), { keys: [], others: "integer" });
+  assert.deepEqual(jsonNumbers(doc(record([field("xs", tuple)]))), { keys: [["xs", { items: false, elements: [null, "integer"] }]] });
+  assert.equal(jsonNumbers({ kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "array", items: { type: "integer" } } } as EngineType), undefined);
+  assert.throws(() => numbersInJson([1, 9007199254740993], { items: false, elements: [null, "integer"] }, "a"), /at \/1, the integer 9007199254740992/);
+  assert.deepEqual(numbersInJson([9007199254740993, 1], { items: false, elements: [null, "integer"] }, "a"), [9007199254740992, 1]);
+  assert.throws(() => numbersInJson({ ok: 1, big: 9007199254740993 }, { keys: [], others: "integer" }, "b"), /at \/big, the integer/);
 });
 
 test("two columns or keys of one name keep the last, as a row object and JSON.parse do", () => {

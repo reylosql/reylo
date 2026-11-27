@@ -608,7 +608,7 @@ function statement(query: QueryModule, params: ParamsInput) {
   });
   // Every MySQL and SQLite driver binds JSON text as text, which the database reads as JSON (a
   // structured parameter's is written already).
-  if (query.dialect !== "postgres") bound.values = bound.values.map((v, i) => (isJsonValue(query, bound.names[i]!, v) && query.inputs?.[bound.names[i]!]?.members === undefined ? jsonText(v) : v));
+  if (query.dialect !== "postgres") bound.values = bound.values.map((v, i) => (isJsonValue(query, bound.names[i]!, v) && query.inputs?.[bound.names[i]!]?.members === undefined ? jsonText(v, query.dialect) : v));
   // SQLite holds an INTEGER in 64 bits, so a BigInt outside them has no exact form there.
   // better-sqlite3, node:sqlite, libSQL, Turso's engine and SQLite Wasm refuse one, but bun:sqlite
   // and Bun.sql keep its low 64 bits where the statement reads numbers (2^63 was stored as -2^63,
@@ -652,7 +652,7 @@ export function postgresText(query: QueryModule, name: string, v: unknown): stri
   if (v == null) return null;
   const t = query.inputs?.[name]?.type;
   if (isJsonValue(query, name, v)) return jsonText(v);
-  if (Array.isArray(v) && t?.kind === "array") return arrayLiteral(t.element.type.kind === "json" ? v.map((e) => (e == null ? e : JSON.stringify(e))) : v, query.inputs?.[name]?.delimiter);
+  if (Array.isArray(v) && t?.kind === "array") return arrayLiteral(t.element.type.kind === "json" ? v.map((e) => (e == null ? e : jsonStringify(e))) : v, query.inputs?.[name]?.delimiter);
   if (Array.isArray(v)) return arrayLiteral(v);
   if (v instanceof Uint8Array) return asByteaHex(v) as string;
   if (typeof v === "boolean") return v ? "t" : "f";
@@ -723,7 +723,7 @@ const JSON_NULL: unique symbol = Symbol("JSON null");
 export const jsonValue = (v: unknown) => (v === JSON_NULL ? null : v);
 
 /** A JSON parameter's value as the JSON text a driver binds, each BigInt in it as its digits. */
-export const jsonText = (v: unknown) => jsonStringify(jsonValue(v));
+export const jsonText = (v: unknown, dialect?: Dialect) => jsonStringify(jsonValue(v), dialect);
 
 // A date or time value's type says whether it has a zone (src/render.ts),
 // and a value that would be read in a zone nobody chose is refused before the

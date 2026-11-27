@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { execute, type QueryModule } from "./run.ts";
 import { renderParamType, renderType } from "../src/render.ts";
 import { typeSchema } from "../src/schema.ts";
-import { coerce, columnKind, DecodeError, duration, hstore, hstoreText, instant, kindType, money, numbersInJson, parseRow, postgresInterval, postgresLiteral, postgresYear, rowMasks, scalarKind, textDecoder, withinDimensions } from "../src/values.ts";
+import { coerce, columnKind, DecodeError, duration, hstore, hstoreText, instant, jsonStringify, kindType, money, numbersInJson, parseRow, postgresInterval, postgresLiteral, postgresYear, rowMasks, scalarKind, textDecoder, withinDimensions, withRawIntegers } from "../src/values.ts";
 import { withBases, type EngineType, type JsonSchema } from "../src/engine-type.ts";
 import { validate } from "../src/json-schema.ts";
 import { array, field, lite, my, oneOf, pg, record } from "./descriptors.ts";
@@ -1017,4 +1017,25 @@ test("a Postgres money is its exact decimal text, read from the C locale's, and 
   assert.deepEqual(textDecoder("money[]")('{"$1.50",NULL,"-$1,000.00"}'), ["1.50", null, "-1000.00"]);
   for (const text of ["1.234,56 €", "€1,234.56", "1234.56", "$1,23.45", "($1.50)"]) assert.throws(() => money(text), (e: Error) => e instanceof DecodeError && e.message.startsWith(`The database wrote a money value as ${JSON.stringify(text)}, which is not the C locale's form ($1,234.56)`), text);
   assert.deepEqual(typeSchema(pg("money"), "postgres"), { type: "string", format: "decimal" });
+});
+
+test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app gives BigInt, and held to the integers MySQL and SQLite read from JSON", () => {
+  assert.equal(jsonStringify({ a: [9007199254740993n, 1], d: new Date(0) }), '{"a":[9007199254740993,1],"d":"1970-01-01T00:00:00.000Z"}');
+  assert.equal(jsonStringify({ a: 1 }), '{"a":1}');
+  const proto = BigInt.prototype as unknown as { toJSON?: () => unknown };
+  for (const polyfill of [function (this: bigint) { return this.toString(); }, function (this: bigint) { return Number(this); }]) {
+    proto.toJSON = polyfill;
+    try {
+      assert.equal(jsonStringify({ n: 9007199254740993n }), '{"n":9007199254740993}');
+      assert.equal(JSON.stringify(withRawIntegers({ n: 9007199254740993n })), '{"n":9007199254740993}');
+    } finally {
+      delete proto.toJSON;
+    }
+  }
+  assert.equal(jsonStringify([2n ** 64n - 1n], "mysql"), "[18446744073709551615]");
+  assert.throws(() => jsonStringify([2n ** 64n], "mysql"), /the BigInt 18446744073709551616, which MySQL reads from JSON as a float/);
+  assert.throws(() => jsonStringify([2n ** 63n], "sqlite"), /which SQLite reads from JSON as a float: its 64-bit integers run from -9223372036854775808 to 9223372036854775807/);
+  assert.equal(jsonStringify([2n ** 64n], "postgres"), "[18446744073709551616]");
+  const plain = { n: 1 };
+  assert.equal(withRawIntegers(plain), plain, "no copy where it holds no BigInt");
 });

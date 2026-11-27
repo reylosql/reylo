@@ -84,7 +84,7 @@ test("a pattern Unicode mode refuses and the plain mode reads is read plainly, a
 });
 
 test("an integer takes a BigInt, checked exactly, and refuses a number past 2^53 - 1, which may already be another one", () => {
-  // 2^62, which a double holds exactly, as it holds every bound a schema writes.
+  // 2^62, a bound a double holds exactly.
   const amount = { type: "integer", minimum: 0, maximum: 4611686018427387904 };
   assert.equal(validate(amount, 9007199254740993n), undefined);
   assert.equal(validate(amount, 4611686018427387904n), undefined);
@@ -92,7 +92,10 @@ test("an integer takes a BigInt, checked exactly, and refuses a number past 2^53
   assert.match(validate(amount, -1n)!.message, /must be at least 0/);
   assert.equal(validate(amount, 9007199254740991), undefined);
   assert.match(validate({ type: "integer" }, 9007199254740996)!.message, /must be integer, and 9007199254740996 is past 2\^53 - 1, where a number stops being exact, so pass it as a BigInt/);
-  assert.match(validate({ type: ["integer", "null"] }, -9007199254740992)!.message, /is past 2\^53 - 1/);
+  assert.match(validate({ type: ["integer", "null"] }, -9007199254740992)!.message, /-9007199254740992 is below -\(2\^53 - 1\)/);
+  // Inside `not` and `if` it is still the integer JSON Schema calls it.
+  assert.match(validate({ type: "number", not: { type: "integer" } }, 9007199254740996)!.message, /must not match its `not` schema/);
+  assert.equal(validate({ if: { type: "integer" }, then: { minimum: 0 }, else: { type: "string" } }, 9007199254740996), undefined);
   // A number past 2^53 - 1 is still a number, and a BigInt is one too, as JSON writes it.
   assert.equal(validate({ type: "number" }, 9007199254740996), undefined);
   assert.equal(validate({ type: "number" }, 5n), undefined);

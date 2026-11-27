@@ -72,7 +72,7 @@ export function withDefaults(schema: Schema, value: unknown): unknown {
   if (Array.isArray(s.allOf)) for (const sub of s.allOf as Schema[]) out = withDefaults(sub, out);
   // Only the branch the value takes: `if` decides it as the checks will.
   if (s.if !== undefined) {
-    const branch = validate(s.if as Schema, out) === undefined ? s.then : s.else;
+    const branch = check(s.if as Schema, out, "", [], false) ? s.then : s.else;
     if (branch !== undefined) out = withDefaults(branch as Schema, out);
   }
   return out;
@@ -89,7 +89,12 @@ export function validate(schema: Schema, value: unknown): Failure | undefined {
 type Evaluated = Set<string>;
 
 /** Checks `value`; on failure pushes why and returns `undefined`, on success the keys it evaluated. */
-function check(schema: Schema, value: unknown, path: string, out: Failure[]): Evaluated | undefined {
+/**
+ * `asserted`: whether the schema asserts the value, as everywhere but inside `not` and an `if`,
+ * where a whole number past 2^53 - 1 is an integer as JSON Schema says, so that neither turns on
+ * Reylo's refusal of one.
+ */
+function check(schema: Schema, value: unknown, path: string, out: Failure[], asserted = true): Evaluated | undefined {
   const evaluated: Evaluated = new Set();
   if (schema === true) return evaluated;
   if (schema === false) return fail(out, path, "no value is allowed here");
@@ -98,10 +103,12 @@ function check(schema: Schema, value: unknown, path: string, out: Failure[]): Ev
 
   if (s.type !== undefined) {
     const types = Array.isArray(s.type) ? (s.type as string[]) : [s.type as string];
-    if (!types.some((t) => is(t, value))) {
-      // A whole number past 2^53 - 1 may already be another one, which JSON would store as given.
-      if (types.includes("integer") && typeof value === "number" && Number.isInteger(value)) return fail(out, path, `must be integer, and ${BigInt(value)} is past 2^53 - 1, where a number stops being exact, so pass it as a BigInt`);
-      return fail(out, path, `must be ${types.join(" or ")}, got ${kind(value)}`);
+    if (!types.some((t) => is(t, value))) return fail(out, path, `must be ${types.join(" or ")}, got ${kind(value)}`);
+    // A whole number past 2^53 - 1 that only an integer admits may already be another one, which
+    // JSON would store as given; elsewhere, as inside `not` and `if`, it is an integer as JSON
+    // Schema says.
+    if (asserted && typeof value === "number" && !Number.isSafeInteger(value) && Number.isInteger(value) && !types.some((t) => t !== "integer" && is(t, value))) {
+      return fail(out, path, `must be integer, and ${BigInt(value)} is ${value < 0 ? "below -(2^53 - 1)" : "past 2^53 - 1"}, where a number stops being exact, so pass it as a BigInt`);
     }
   }
   if (Array.isArray(s.enum) && !s.enum.some((e) => equal(e, value))) return fail(out, path, `must be one of ${s.enum.map((e) => JSON.stringify(e)).join(", ")}`);
@@ -130,11 +137,11 @@ function check(schema: Schema, value: unknown, path: string, out: Failure[]): Ev
       for (let i = 0; i < value.length; i++) for (let j = i + 1; j < value.length; j++) if (equal(item(value[i]), item(value[j]))) return fail(out, path, `must have no two equal items (${i} and ${j})`);
     }
     const prefix = Array.isArray(s.prefixItems) ? (s.prefixItems as Schema[]) : [];
-    for (let i = 0; i < Math.min(prefix.length, value.length); i++) if (!check(prefix[i]!, item(value[i]), `${path}/${i}`, out)) return undefined;
-    if (s.items !== undefined) for (let i = prefix.length; i < value.length; i++) if (!check(s.items as Schema, item(value[i]), `${path}/${i}`, out)) return undefined;
+    for (let i = 0; i < Math.min(prefix.length, value.length); i++) if (!check(prefix[i]!, item(value[i]), `${path}/${i}`, out, asserted)) return undefined;
+    if (s.items !== undefined) for (let i = prefix.length; i < value.length; i++) if (!check(s.items as Schema, item(value[i]), `${path}/${i}`, out, asserted)) return undefined;
     if (s.contains !== undefined) {
       let matched = 0;
-      for (let i = 0; i < value.length; i++) if (check(s.contains as Schema, item(value[i]), path, [])) matched++;
+      for (let i = 0; i < value.length; i++) if (check(s.contains as Schema, item(value[i]), path, [], asserted)) matched++;
       const min = typeof s.minContains === "number" ? s.minContains : 1;
       if (matched < min) return fail(out, path, min === 1 ? "must contain an item that matches its `contains` schema" : `must contain at least ${min} items that match its \`contains\` schema`);
       if (typeof s.maxContains === "number" && matched > s.maxContains) return fail(out, path, `must contain at most ${s.maxContains} items that match its \`contains\` schema`);
@@ -160,25 +167,25 @@ function check(schema: Schema, value: unknown, path: string, out: Failure[]): Ev
       let named = false;
       if (Object.prototype.hasOwnProperty.call(properties, key)) {
         named = true;
-        if (!check(properties[key]!, o[key], at, out)) return undefined;
+        if (!check(properties[key]!, o[key], at, out, asserted)) return undefined;
       }
       for (const [re, sub] of patterns) {
         if (re.test(key)) {
           named = true;
-          if (!check(sub, o[key], at, out)) return undefined;
+          if (!check(sub, o[key], at, out, asserted)) return undefined;
         }
       }
       if (named) evaluated.add(key);
       else if (s.additionalProperties !== undefined) {
-        if (!check(s.additionalProperties as Schema, o[key], at, out)) return s.additionalProperties === false ? fail(out, at, `is a key the schema does not allow`, true) : undefined;
+        if (!check(s.additionalProperties as Schema, o[key], at, out, asserted)) return s.additionalProperties === false ? fail(out, at, `is a key the schema does not allow`, true) : undefined;
         evaluated.add(key);
       }
-      if (s.propertyNames !== undefined && !check(s.propertyNames as Schema, key, at, [])) return fail(out, at, `is a key whose name the schema does not allow`);
+      if (s.propertyNames !== undefined && !check(s.propertyNames as Schema, key, at, [], asserted)) return fail(out, at, `is a key whose name the schema does not allow`);
     }
     if (s.dependentSchemas && typeof s.dependentSchemas === "object") {
       for (const [key, sub] of Object.entries(s.dependentSchemas as Record<string, Schema>)) {
         if (!has(key)) continue;
-        const e = check(sub, value, path, out);
+        const e = check(sub, value, path, out, asserted);
         if (!e) return undefined;
         e.forEach((k) => evaluated.add(k));
       }
@@ -188,7 +195,7 @@ function check(schema: Schema, value: unknown, path: string, out: Failure[]): Ev
   // The applicators: a subschema's evaluated keys count only where it passed.
   if (Array.isArray(s.allOf)) {
     for (const sub of s.allOf as Schema[]) {
-      const e = check(sub, value, path, out);
+      const e = check(sub, value, path, out, asserted);
       if (!e) return undefined;
       e.forEach((k) => evaluated.add(k));
     }
@@ -196,7 +203,7 @@ function check(schema: Schema, value: unknown, path: string, out: Failure[]): Ev
   if (Array.isArray(s.anyOf)) {
     let any = false;
     for (const sub of s.anyOf as Schema[]) {
-      const e = check(sub, value, path, []);
+      const e = check(sub, value, path, [], asserted);
       if (e) {
         any = true;
         e.forEach((k) => evaluated.add(k));
@@ -207,7 +214,7 @@ function check(schema: Schema, value: unknown, path: string, out: Failure[]): Ev
   if (Array.isArray(s.oneOf)) {
     let matched = 0;
     for (const sub of s.oneOf as Schema[]) {
-      const e = check(sub, value, path, []);
+      const e = check(sub, value, path, [], asserted);
       if (e) {
         matched++;
         e.forEach((k) => evaluated.add(k));
@@ -215,13 +222,13 @@ function check(schema: Schema, value: unknown, path: string, out: Failure[]): Ev
     }
     if (matched !== 1) return fail(out, path, matched === 0 ? "must match one of its `oneOf` schemas" : "must match only one of its `oneOf` schemas, and matches more");
   }
-  if (s.not !== undefined && check(s.not as Schema, value, path, [])) return fail(out, path, "must not match its `not` schema");
+  if (s.not !== undefined && check(s.not as Schema, value, path, [], false)) return fail(out, path, "must not match its `not` schema");
   if (s.if !== undefined) {
-    const e = check(s.if as Schema, value, path, []);
+    const e = check(s.if as Schema, value, path, [], false);
     const branch = e ? s.then : s.else;
     if (e) e.forEach((k) => evaluated.add(k));
     if (branch !== undefined) {
-      const b = check(branch as Schema, value, path, out);
+      const b = check(branch as Schema, value, path, out, asserted);
       if (!b) return undefined;
       b.forEach((k) => evaluated.add(k));
     }
@@ -250,10 +257,9 @@ function is(type: string, v: unknown): boolean {
   switch (type) {
     case "null": return v === null;
     case "boolean": return typeof v === "boolean";
-    // A BigInt is a whole number, which JSON writes as its digits (`jsonText`, src/execute.ts); a
-    // whole number past 2^53 - 1 is no integer here, since it may already be another one.
+    // A BigInt is a whole number, which JSON writes as its digits (src/values.ts, `jsonStringify`).
     case "number": return (typeof v === "number" && Number.isFinite(v)) || typeof v === "bigint";
-    case "integer": return Number.isSafeInteger(v) || typeof v === "bigint";
+    case "integer": return (typeof v === "number" && Number.isInteger(v)) || typeof v === "bigint";
     case "string": return typeof v === "string";
     case "array": return Array.isArray(v);
     case "object": return v !== null && typeof v === "object" && !Array.isArray(v);
