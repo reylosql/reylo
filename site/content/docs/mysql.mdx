@@ -647,6 +647,12 @@ export default {
 };
 ```
 
+The driver writes each value into the statement itself. For a value holding a quote, a backslash or a non-ASCII character, Reylo reads the session's `sql_mode` and charset. It refuses a value the session would read otherwise:
+
+- A character outside ASCII, on a connection whose charset isn't UTF-8.
+- A quote or a backslash, where the session reads a backslash otherwise than the driver writes it. A stored routine that sets `sql_mode` can cause this, so set `sql_mode` again after calling one.
+- A binary value with a quote or a backslash right after a byte of 0x80 or above, on some charsets. A session in Big5, CP932, GB18030, GBK or SJIS reads that byte and the driver's backslash as one character.
+
 ### PlanetScale
 
 Pass a connection, or the transaction it hands its callback:

@@ -262,7 +262,7 @@ async function mysql2Query(m: AnyClient, text: string, marks: Marks | undefined,
   if (marks === undefined) throw new TypeError("reylo cannot run this mysql statement through mysql2 here: this server, as Cloudflare Hyperdrive does, refuses prepared statements, so Reylo writes the values into the statement, and a query defined by hand needs `marks` there, the place of each placeholder in its text, which a build step writes.");
   const config = configOf(m);
   if (typeof config?.queryFormat === "function") throw new Error("reylo cannot run a mysql statement through mysql2 here: this server, as Cloudflare Hyperdrive does, refuses prepared statements, so Reylo runs mysql2's query(), which passes every statement through the app's queryFormat. Connect without a queryFormat, or with the mariadb driver.");
-  if (config?.charsetNumber !== undefined && !isUtf8(config.charsetNumber) && values.some((v) => /[^\x00-\x7f]/.test(textOf(v) ?? ""))) throw new Error("reylo cannot run a mysql statement through mysql2 here: this server, as Cloudflare Hyperdrive does, refuses prepared statements, so Reylo writes the values into the statement, and this connection's charset is not UTF-8, so a character outside ASCII in a value could reach the server as a quote or a backslash (as SJIS writes ¥). Connect with utf8mb4, or with the mariadb driver.");
+  if (config?.charsetNumber !== undefined && !isUtf8(config.charsetNumber) && values.some((v) => /[^\x00-\x7f]/.test(textOf(v) ?? ""))) throw new Error("reylo cannot run a mysql statement through mysql2 here: this server, as Cloudflare Hyperdrive does, refuses prepared statements, so Reylo writes the values into the statement, and this connection's charset is not UTF-8, so a character outside ASCII in a value could reach the server as a quote or a backslash (as SJIS writes ¥). Connect with utf8mb4.");
   const proto = columns?.some(([name]) => name === "__proto__") || values.some((v) => typeof v === "string" && PRIVATE_NAMES.has(v)) ? { disableEval: true } : {};
   const options = { ...MYSQL2_OPTIONS, ...proto, namedPlaceholders: false, typeCast: mysql2TextCast };
   // Without a backslash in a value, every session writes the values alike.
@@ -357,16 +357,84 @@ const mariadbGeometry = (column: { type: string; buffer(): unknown }, next: () =
 
 type MariadbColumn = { type?: string; columnType?: number; name?: string | (() => string); isSet?: () => boolean };
 
+// mariadb writes each value into the statement's text itself, escaping it as its escape() does:
+// a quote doubled, which every session reads alike, and a backslash as it is, or each of them after
+// a backslash. Either way the session must read a backslash as the driver took it. The two hazards
+// of mysql2's query() hold here too: the server's NO_BACKSLASH_ESCAPES status flag, which the
+// driver may go by, can be stale after a stored routine changes sql_mode, and a charset other than
+// UTF-8 can write a character outside ASCII with a quote's or a backslash's byte. A third is this
+// driver's alone: in big5, cp932, gb18030, gbk and sjis a character's second byte may be a
+// backslash's, so a session in one of them can read a byte of 0x80 or above and the backslash the
+// driver writes after it as one character, and the quote or backslash that backslash escaped stands
+// bare. Some versions of the driver write such bytes as the session reads them and some do not, and
+// nothing on the client tells which. So where a value holds a backslash, a quote the driver writes
+// after one, or a character outside ASCII, the session's sql_mode and character_set_client, the
+// charset it reads the statement in, are read first, on the connection the statement then runs on,
+// and a value the session would read otherwise than the driver wrote it is refused: on those five
+// charsets, wherever the driver writes backslashes, that is bytes with a quote or a backslash after
+// a byte of 0x80 or above.
+
+const QUOTE = 0x27, BACKSLASH = 0x5c;
+
+/** The client charsets of MySQL in which a character's second byte may be a backslash's, 0x5c. */
+const BACKSLASH_TRAILS = new Set(["big5", "cp932", "gb18030", "gbk", "sjis"]);
+
+/** Whether a value is bytes with a quote or a backslash directly after a byte of 0x80 or above, a byte those charsets may read with the driver's backslash as one character. */
+const leadsAnEscape = (v: unknown) => v instanceof Uint8Array && v.some((byte, i) => byte >= 0x80 && (v[i + 1] === QUOTE || v[i + 1] === BACKSLASH));
+
+/** Whether a value holds the character `code`: in its text, or in its bytes, which mariadb escapes as it does a string's. */
+const holds = (v: unknown, code: number) => (v instanceof Uint8Array ? v.includes(code) : (textOf(v)?.includes(String.fromCharCode(code)) ?? false));
+
+/** A mariadb call's answer: its promise API returns a promise, its callback API answers through the callback. */
+function answer<T>(call: (done: (error: Error | null, value?: T) => void) => unknown): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const returned = call((error, value) => (error ? reject(error) : resolve(value as T)));
+    if (typeof (returned as PromiseLike<T> | undefined)?.then === "function") (returned as PromiseLike<T>).then(resolve, reject);
+  });
+}
+
+/** `run` on a session that reads each value as mariadb writes it; a client without escape() is taken to write a quote after a backslash. A Pool hands out a PoolConnection first, so that the read and the statement share one session. */
+async function asWritten<T>(c: AnyClient, values: unknown[], run: (conn: AnyClient) => Promise<T>): Promise<T> {
+  const wide = values.some((v) => /[^\x00-\x7f]/.test(textOf(v) ?? ""));
+  const backslash = values.some((v) => holds(v, BACKSLASH));
+  const quote = values.some((v) => holds(v, QUOTE));
+  if (!wide && !backslash && !quote) return await run(c);
+  const pooled = typeof c.getConnection === "function" && typeof c.release !== "function" ? await answer<AnyClient>((done) => c.getConnection(done)) : undefined;
+  const conn = pooled ?? c;
+  try {
+    // How the driver writes a quote on this connection: after a backslash, or doubled, which every session reads alike.
+    const escapes = typeof conn.escape !== "function" || conn.escape("'") !== "''''";
+    const slashed = backslash || (quote && escapes);
+    if (wide || slashed) {
+      const [[mode, charset]] = await answer<[[unknown, unknown]]>((done) => conn.query({ sql: "select @@session.sql_mode, @@session.character_set_client", ...MARIADB_OPTIONS, rowsAsArray: true }, [], done));
+      if (slashed && readsText(String(mode)).backslashEscapes !== escapes) {
+        throw new Error(`reylo cannot run this mysql statement through mariadb: mariadb writes each value into the statement ${escapes ? "with a backslash before each quote and backslash, and this session's sql_mode, with NO_BACKSLASH_ESCAPES, reads a backslash as itself" : "with each quote doubled and each backslash as it is, and this session's sql_mode, without NO_BACKSLASH_ESCAPES, reads a backslash as an escape"}, so it would read a value holding ${escapes ? "a quote or a backslash otherwise than the driver wrote it. Take NO_BACKSLASH_ESCAPES out of the session's sql_mode, or, if a stored routine set sql_mode, set it again after the call (set session sql_mode = @@session.sql_mode), which brings the server's report of it up to date." : "a backslash otherwise than the driver wrote it. Set the session's sql_mode again (set session sql_mode = @@session.sql_mode), which brings the server's report of it up to date, as after a stored routine that set it."}`);
+      }
+      if (wide && !String(charset).startsWith("utf8")) {
+        throw new Error(`reylo cannot run a mysql statement through mariadb with a value holding a character outside ASCII: mariadb writes each value into the statement, and this connection's charset, ${String(charset)}, is not UTF-8, so such a character could reach the server as a quote or a backslash (as SJIS writes ¥). Connect with utf8mb4.`);
+      }
+      if (escapes && BACKSLASH_TRAILS.has(String(charset)) && values.some(leadsAnEscape)) {
+        throw new Error(`reylo cannot run a mysql statement through mariadb with bytes holding a quote or a backslash directly after a byte of 0x80 or above: mariadb writes each value into the statement with a backslash before each quote and backslash, and this connection's charset, ${String(charset)}, can read such a byte and that backslash as one character, so the quote or backslash after them could end the value's literal or escape its closing quote. Connect with utf8mb4.`);
+      }
+    }
+    return await run(conn);
+  } finally {
+    if (pooled) await answer((done) => pooled.release(done));
+  }
+}
+
 /** mariadb's query(), on its promise or its callback API, with Reylo's options. */
 export async function mariadb(c: AnyClient, text: string, values: unknown[], columns: Columns | undefined): Promise<unknown[]> {
   // By position where the module declares the columns: mariadb writes each value into the statement's text, so MySQL names a column with no alias after it (`select :x::int + 1` is `CAST(5 AS SIGNED) + 1`), and two of them may share a name.
   const options = { sql: text, ...MARIADB_OPTIONS, rowsAsArray: Boolean(columns?.length), ...(columns?.some(([, kind]) => kind === "unknown" || kind.split("|").includes("geometry")) ? { typeCast: mariadbGeometry } : {}) };
   // The promise API resolves to the rows with their `meta`; the callback API hands the meta over as a third argument.
   let callbackMeta: MariadbColumn[] | undefined;
-  const result = await new Promise((resolve, reject) => {
-    const returned = c.query(options, values, (error: Error | null, rows: unknown, meta?: MariadbColumn[]) => (error ? reject(error) : ((callbackMeta = meta), resolve(rows))));
-    if (typeof returned?.then === "function") returned.then(resolve, reject);
-  });
+  const query = (conn: AnyClient) =>
+    new Promise((resolve, reject) => {
+      const returned = conn.query(options, values, (error: Error | null, rows: unknown, meta?: MariadbColumn[]) => (error ? reject(error) : ((callbackMeta = meta), resolve(rows))));
+      if (typeof returned?.then === "function") returned.then(resolve, reject);
+    });
+  const result = await asWritten(c, values, query);
   if (!Array.isArray(result)) return [];
   if (!result.length) return result;
   const meta = () => ((result as { meta?: MariadbColumn[] }).meta ?? callbackMeta ?? []) as MariadbColumn[];
