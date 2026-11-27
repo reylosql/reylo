@@ -198,13 +198,31 @@ export function parseType(text: string): Named | undefined {
   return named !== undefined && p.i === text.length ? named : undefined;
 }
 
-/** A string as ClickHouse writes one in a type's name: in single quotes, a quote and a backslash escaped. */
-function quotedText(text: string): string {
-  return `'${text.replaceAll("\\", "\\\\").replaceAll("'", "\\'")}'`;
+/** The escape ClickHouse writes in quotes for each character it escapes. */
+const ESCAPE_OF: Readonly<Record<string, string>> = { "\0": "\\0", "\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r", "\\": "\\\\" };
+
+/** Text between `quote`s as ClickHouse writes it: the quote, a backslash, and each of `ESCAPE_OF` escaped, so that a type's name stays on one line. */
+function quotedIn(text: string, quote: string): string {
+  let out = quote;
+  for (const c of text) out += ESCAPE_OF[c] ?? (c === quote ? `\\${c}` : c);
+  return out + quote;
 }
 
+/** A string as ClickHouse writes one in a type's name: in single quotes, escaped as `quotedIn` says. */
+function quotedText(text: string): string {
+  return quotedIn(text, "'");
+}
+
+/** The words ClickHouse 26.8 writes in backquotes, in any case, though each is letters alone: NULL, which is no name in SQL, and the keywords a query would read as a clause or its modifier. */
+const QUOTED_WORDS: ReadonlySet<string> = new Set(["null", "all", "distinct", "table", "select", "from", "values"]);
+
+/**
+ * A member's name: as it is where it reads as a name, else in backquotes, as the server writes it.
+ * A dot is quoted too: a tuple's member is one name, and only a JSON type reads a bare `a.b` as a
+ * path, which the server also writes in backquotes.
+ */
 function memberName(name: string): string {
-  return /^[A-Za-z_][A-Za-z0-9_.]*$/.test(name) ? name : `\`${name.replaceAll("\\", "\\\\").replaceAll("`", "\\`")}\``;
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !QUOTED_WORDS.has(name.toLowerCase()) ? name : quotedIn(name, "`");
 }
 
 /** The type on one line, as ClickHouse names it beside a result's rows: `DateTime64(3, 'UTC')`. */

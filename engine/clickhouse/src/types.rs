@@ -239,18 +239,50 @@ impl Parser<'_> {
     }
 }
 
-/// A string as ClickHouse writes one: in single quotes, a quote and a backslash escaped.
+/// A string as ClickHouse writes one: in single quotes, escaped as [`quoted_in`] says.
 pub fn quoted(text: &str) -> String {
-    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
+    quoted_in(text, '\'')
 }
 
-/// A member's name: as it is where it reads as a name, else in backquotes.
+/// Text between `quote`s as ClickHouse writes it: the quote, a backslash, and each character the
+/// server writes an escape for (NUL, backspace, tab, newline, form feed and carriage return)
+/// escaped, so that a type's name stays on one line.
+fn quoted_in(text: &str, quote: char) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push(quote);
+    for c in text.chars() {
+        match c {
+            '\0' => out.push_str("\\0"),
+            '\u{8}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            '\\' => out.push_str("\\\\"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+/// The words ClickHouse 26.8 writes in backquotes, in any case, though each is letters alone: NULL,
+/// which is no name in SQL, and the keywords a query would read as a clause or its modifier.
+const QUOTED_WORDS: [&str; 7] = ["null", "all", "distinct", "table", "select", "from", "values"];
+
+/// A member's name: as it is where it reads as a name, else in backquotes, as the server writes it.
+/// A dot is quoted too: a tuple's member is one name, and only a JSON type reads a bare `a.b` as a
+/// path, which the server also writes in backquotes.
 fn member(name: &str) -> String {
-    let plain = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+    let plain = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !QUOTED_WORDS.iter().any(|word| name.eq_ignore_ascii_case(word));
     if plain {
         name.to_string()
     } else {
-        format!("`{}`", name.replace('\\', "\\\\").replace('`', "\\`"))
+        quoted_in(name, '`')
     }
 }
 
