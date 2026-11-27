@@ -791,6 +791,8 @@ fn descriptor(ty: &Ty, declared: Option<&str>, computed: bool, exact: bool) -> T
             (None, "text") => text(),
             (None, "blob") => Type::bytes(),
             (None, "numeric") => stored("numeric").named("NUMERIC"),
+            // A number SQLite computes from what may be either, named by no declared type.
+            (None, "number") => Type::union(vec![int64(), real()]),
             _ => Type::unknown(),
         },
         Ty::Object { .. } | Ty::List { .. } => Type::json_of(crate::types::Slot::non_null(content(ty))),
@@ -876,7 +878,7 @@ fn is_int8_declared(declared: &str) -> bool {
 /// An affinity name as the type model; `none` is unknown.
 fn affinity_type(aff: &str) -> Ty {
     match aff {
-        "integer" | "real" | "text" | "blob" | "numeric" => Ty::Scalar { name: aff.to_string() },
+        "integer" | "real" | "text" | "blob" | "numeric" | "number" => Ty::Scalar { name: aff.to_string() },
         _ => Ty::Unknown,
     }
 }
@@ -889,7 +891,21 @@ fn scalar_name(t: &Ty) -> Option<&str> {
 }
 
 fn is_numeric(t: &Ty) -> bool {
-    matches!(scalar_name(t), Some("integer" | "int8" | "real" | "numeric" | LAX))
+    matches!(scalar_name(t), Some("integer" | "int8" | "real" | "numeric" | LAX | "number"))
+}
+
+/// The type of the number SQLite computes from a value of type `t` where it converts the value to
+/// a number first (`ceil`, `sum`, `-x`): an INTEGER stays an INTEGER and a REAL a REAL, a value
+/// that may be a REAL ([`LAX`], a 64-bit column's) may stay one, and any other value, a NUMERIC's
+/// or text that reads as a number (`'9007199254740993'`), may become either, which `number` is.
+fn as_number(t: &Ty) -> Ty {
+    let name = match scalar_name(t) {
+        Some("integer") => "integer",
+        Some("int8" | LAX) => LAX,
+        Some("real") => "real",
+        _ => "number",
+    };
+    Ty::Scalar { name: name.into() }
 }
 
 /// An INTEGER that may be a REAL: a column of INTEGER affinity outside a STRICT table, which keeps
@@ -916,23 +932,11 @@ fn is_integral(t: &Ty) -> bool {
     matches!(scalar_name(t), Some("integer" | "int8"))
 }
 
-/// The type of a value computed from one of type `t`: a 64-bit column's value passes through
-/// unchanged only as itself (a column, a subquery's or view's column, `min`, `max`, `coalesce`, a
-/// `CASE` arm, a window's `lag`), and what SQLite computes from it (`-id`, `abs(id)`, `sum(id)`,
-/// `id + 1`) is SQLite's INTEGER, as `count(*)` is, or a REAL where the column holds one: a 64-bit
-/// column is never in a STRICT table, so its INTEGER is [`LAX`].
-fn computed(t: Ty) -> Ty {
-    if scalar_name(&t) == Some("int8") {
-        Ty::Scalar { name: LAX.into() }
-    } else {
-        t
-    }
-}
-
 /// The type several arms share: one type when they agree, `int8` for a mix of integers of which
 /// one is a 64-bit column's (`coalesce(user_id, 0)`: any integer is exact as a BigInt), [`LAX`] for
-/// one of an INTEGER and a value that may be a REAL, `numeric`
-/// for a mix with a NUMERIC value, `real` for another mix of numbers, unknown otherwise.
+/// one of an INTEGER and a value that may be a REAL, `numeric` for a mix with a NUMERIC value,
+/// `number` for another mix of numbers, each value keeping its own storage class
+/// (`coalesce(n, 1.5)` is the INTEGER `n` where it is not NULL), unknown otherwise.
 fn shared(facts: &[&Fact]) -> Ty {
     let known: Vec<&Ty> = facts.iter().map(|f| &f.ty).filter(|t| !matches!(t, Ty::Unknown)).collect();
     let Some(first) = known.first() else { return Ty::Unknown };
@@ -966,7 +970,7 @@ fn shared(facts: &[&Fact]) -> Ty {
         // A NUMERIC value is a number or the text it could not convert (a DATE's '2024-01-01'),
         // beside a number too.
         let numeric = known.iter().any(|t| scalar_name(t) == Some("numeric"));
-        return Ty::Scalar { name: if numeric { "numeric" } else { "real" }.into() };
+        return Ty::Scalar { name: if numeric { "numeric" } else { "number" }.into() };
     }
     Ty::Unknown
 }
@@ -1120,7 +1124,7 @@ fn in_json(t: &Ty) -> Ty {
     match scalar_name(t) {
         // Nothing refuses a 64-bit column's REAL inside a document.
         Some("int8") => Ty::Scalar { name: LAX.into() },
-        Some("integer" | "real" | "text" | "numeric" | LAX) => t.clone(),
+        Some("integer" | "real" | "text" | "numeric" | LAX | "number") => t.clone(),
         _ => Ty::Unknown,
     }
 }
@@ -1145,7 +1149,7 @@ fn value_schema(t: &Ty, nullable: bool) -> serde_json::Value {
         Ty::Scalar { name } => match name.as_str() {
             "integer" | "int8" => json!({"type": "integer", "format": "int64"}),
             "real" => json!({"type": "number", "format": "double"}),
-            LAX => lax_schema(),
+            LAX | "number" => lax_schema(),
             "text" => json!({"type": "string"}),
             "numeric" => json!({"type": ["number", "string"]}),
             _ => json!({}),
@@ -1942,7 +1946,7 @@ impl Analyzer<'_> {
             "neg" if n.left.as_deref().is_some_and(is_two_to_the_63) => Fact::new("integer", true),
             "neg" => {
                 let l = arg(&n.left);
-                Fact { ty: if is_numeric(&l.ty) { computed(l.ty) } else { Ty::Scalar { name: "real".into() } }, non_null: l.non_null }
+                Fact { ty: as_number(&l.ty), non_null: l.non_null }
             }
             // Unary plus does nothing to any storage class: `+name` is the text 'bob'. SQLite's
             // parser also writes a one-element `x IN (e)` as `x = +e`.
@@ -2006,7 +2010,7 @@ impl Analyzer<'_> {
                 "percent_rank" | "cume_dist" => done("real", Nulls::Never),
                 "count" => done("integer", Nulls::Never),
                 "total" => done("real", total_nulls(&first)),
-                "sum" => typed(if is_numeric(&first.ty) { computed(first.ty.clone()) } else { Ty::Scalar { name: "real".into() } }, Nulls::Always),
+                "sum" => typed(as_number(&first.ty), Nulls::Always),
                 "avg" => done("real", Nulls::Always),
                 // `lag` and `lead` hand back their default where the row they read is missing.
                 "lag" | "lead" if args.len() >= 3 => typed(values_type(&[(&n.args[0], &args[0]), (&n.args[2], &args[2])]), Nulls::Always),
@@ -2025,7 +2029,7 @@ impl Analyzer<'_> {
             return match name {
                 "count" => done("integer", Nulls::Never),
                 "total" => done("real", total_nulls(&first)),
-                "sum" => typed(if is_numeric(&first.ty) { computed(first.ty.clone()) } else { Ty::Scalar { name: "real".into() } }, Nulls::Always),
+                "sum" => typed(as_number(&first.ty), Nulls::Always),
                 "avg" => done("real", Nulls::Always),
                 "min" | "max" => typed(first.ty.clone(), if grouped { Nulls::IfArgs } else { Nulls::Always }),
                 "group_concat" | "string_agg" => done("text", if grouped { Nulls::IfArgs } else { Nulls::Always }),
@@ -2041,7 +2045,7 @@ impl Analyzer<'_> {
         }
         // A number for SQLite's math functions: a value of INTEGER or REAL type. Any other gives
         // NULL, text that reads as no number included (`sqrt('abc')`, `sign('')`).
-        let numbers = all_non_null && args.iter().all(|a| matches!(scalar_name(&a.ty), Some("integer" | "int8" | "real" | LAX)));
+        let numbers = all_non_null && args.iter().all(|a| matches!(scalar_name(&a.ty), Some("integer" | "int8" | "real" | LAX | "number")));
         match name {
             // An argument after one that is never NULL is never reached: `coalesce((select
             // json_group_array(…) …), '[]')` is the array.
@@ -2055,8 +2059,10 @@ impl Analyzer<'_> {
                 Fact { ty: values_type(&arms), non_null: args.len() >= 3 && args.len() % 2 == 1 && arms.iter().all(|(_, a)| a.non_null) }
             }
             "min" | "max" => Fact { ty: values_type(&n.args.iter().zip(args).collect::<Vec<_>>()), non_null: all_non_null },
-            // `abs` of the least integer is an error, not NULL; of text, 0.0.
-            "abs" => typed(if is_numeric(&first.ty) { computed(first.ty.clone()) } else { Ty::Scalar { name: "real".into() } }, Nulls::IfArgs),
+            // `abs` of the least integer is an error, not NULL. It converts no value to a number
+            // first: text gives a REAL (`abs('-5')` is 5.0), and an INTEGER stays one, as it may
+            // be in a column declared BLOB outside a STRICT table.
+            "abs" => typed(if scalar_name(&textual(&first.ty)) == Some("text") { Ty::Scalar { name: "real".into() } } else { as_number(&first.ty) }, Nulls::IfArgs),
             "round" => done("real", Nulls::IfArgs),
             "length" | "instr" | "json_valid" | "octet_length" => done("integer", Nulls::IfArgs),
             // A path that finds nothing is NULL: `json_array_length('{}', '$.a')`, `json_type('{}', '$.a')`.
@@ -2113,7 +2119,9 @@ impl Analyzer<'_> {
             "json_extract" | "jsonb_extract" | "->" | "->>" => Fact::unknown(),
             // Defined on every number, infinities included: NULL only for an argument that is no
             // number.
-            "atan" | "atan2" | "asinh" | "sinh" | "cosh" | "tanh" | "exp" | "degrees" | "radians" | "ceil" | "ceiling" | "floor" | "trunc" => Fact::new("real", numbers),
+            "atan" | "atan2" | "asinh" | "sinh" | "cosh" | "tanh" | "exp" | "degrees" | "radians" => Fact::new("real", numbers),
+            // An INTEGER comes back as it is, and a REAL rounded as a REAL.
+            "ceil" | "ceiling" | "floor" | "trunc" => Fact { ty: as_number(&first.ty), non_null: numbers },
             "sign" => Fact::new("integer", numbers),
             // NULL outside their domain (`sqrt(-1)`, `ln(0)`, `acos(2)`, `mod(1, 0)`,
             // `pow(-1, 0.5)`) and for an infinite argument (`sin(1e999)`).
@@ -2699,8 +2707,10 @@ impl Analyzer<'_> {
             .map(|(k, name)| {
                 let numbered = format!("?{}", k + 1);
                 let fact = typed.get(numbered.as_str()).map(|f| (*f).clone()).unwrap_or_else(Fact::unknown);
-                // A parameter compared with built JSON is bound as the text it is compared with.
-                let fact = Fact { ty: unlax(textual(&fact.ty)), ..fact };
+                // A parameter compared with built JSON is bound as the text it is compared with, and
+                // one where an INTEGER or a REAL serves (`coalesce(:n, 1.5)`) as a REAL's number.
+                let ty = if scalar_name(&fact.ty) == Some("number") { Ty::Scalar { name: "real".into() } } else { unlax(textual(&fact.ty)) };
+                let fact = Fact { ty, ..fact };
                 let nullable = fills.get(&numbered).copied().unwrap_or(false) || self.nullable_params.contains(&numbered);
                 let ty = if scalar_name(&fact.ty) == Some("int8") { int64().named("BIGINT") } else { descriptor(&fact.ty, None, false, false) };
                 Param { nullable, ..Param::new(name.clone(), ty) }
@@ -3856,13 +3866,16 @@ fn cursors(n: &Node) -> Option<Vec<i64>> {
     Some(out)
 }
 
-/// The type of `a op b` for `+`, `-`, `*`, `/`, `%`: integer stays integer, or a REAL where an
-/// operand may be one ([`LAX`], a 64-bit column's), and anything else is real.
+/// The type of `a op b` for `+`, `-`, `*`, `/`, `%`: two integers give an integer, or a REAL
+/// where an operand may be one ([`LAX`], a 64-bit column's), and a REAL on either side a REAL.
+/// Each side is converted to a number first, so where neither is a REAL and one may hold text
+/// (`s + 0`), or either storage class, the result is either.
 fn arithmetic(l: &Ty, r: &Ty) -> Ty {
     match (scalar_name(l), scalar_name(r)) {
         (Some("integer"), Some("integer")) => Ty::Scalar { name: "integer".into() },
         (Some("integer" | "int8" | LAX), Some("integer" | "int8" | LAX)) => Ty::Scalar { name: LAX.into() },
-        _ => Ty::Scalar { name: "real".into() },
+        (Some("real"), _) | (_, Some("real")) => Ty::Scalar { name: "real".into() },
+        _ => Ty::Scalar { name: "number".into() },
     }
 }
 
@@ -4275,9 +4288,11 @@ mod tests {
             assert_eq!(typed(f), ("real".into(), true), "{f}");
         }
         // Defined on every number; NULL for an argument that is no number (`sign('')`).
-        for f in ["atan(x)", "atan2(x, n)", "asinh(x)", "sinh(x)", "cosh(n)", "tanh(x)", "exp(x)", "degrees(x)", "radians(n)", "ceil(x)", "ceiling(x)", "floor(n)", "trunc(x)", "pi()"] {
+        for f in ["atan(x)", "atan2(x, n)", "asinh(x)", "sinh(x)", "cosh(n)", "tanh(x)", "exp(x)", "degrees(x)", "radians(n)", "ceil(x)", "ceiling(x)", "trunc(x)", "pi()"] {
             assert_eq!(typed(f), ("real".into(), false), "{f}");
         }
+        // `ceil`, `floor` and `trunc` hand back an INTEGER as it is.
+        assert_eq!(typed("floor(n)"), ("integer".into(), false));
         assert_eq!(typed("sign(x)"), ("integer".into(), false));
         for f in ["sign(placed_at)", "sign(v)", "sign(num)", "ceil(placed_at)", "floor(b)", "exp(v)", "atan2(x, placed_at)", "sinh(num)"] {
             assert!(nullable(f), "{f}");
@@ -5486,7 +5501,7 @@ mod tests {
         assert!(r.analysis.diagnostics.is_empty(), "{:?}", r.analysis.diagnostics);
         let types: Vec<String> = r.analysis.columns.iter().map(|c| affinity_of(&c.ty).unwrap_or("?").to_string()).collect();
         // `coalesce(b, 0)` is NUMERIC's number or text: a BOOLEAN column may hold 'yes'.
-        assert_eq!(types, ["bool", "bool", "integer", "integer", "real", "bool", "numeric", "bool", "bool", "bool"]);
+        assert_eq!(types, ["bool", "bool", "integer", "integer", "number", "bool", "numeric", "bool", "bool", "bool"]);
         // The truth values are the ones SQLite computes alone.
         assert_eq!(r.booleans, [false; 10]);
         // Through a view, and across a compound only where every arm is one.
@@ -5536,6 +5551,7 @@ mod tests {
             Kind::Text(_) => Some("text"),
             Kind::Bytes(_) => Some("blob"),
             Kind::Union(_) if is_boolean_declared(name) => Some("bool"),
+            Kind::Union(_) if t.label.is_none() => Some("number"),
             Kind::Union(_) if affinity(name) == "integer" && is_int8_declared(name) => Some("int8"),
             Kind::Union(_) if affinity(name) == "integer" => Some("integer"),
             Kind::Union(u) if u.members.len() == 2 => Some("text"),
@@ -5626,7 +5642,8 @@ mod tests {
         assert_eq!(typed("select case when ok then d else 0 end as v from dts"), ("numeric".into(), false));
         assert_eq!(typed("select coalesce(dt, 1.5) as v from dts"), ("numeric".into(), false));
         assert_eq!(typed("select coalesce(n, 1.5) as v from dts"), ("integer".into(), false));
-        assert_eq!(typed("select iif(ok, n, x) as v from dts"), ("real".into(), false));
+        // Each arm keeps its own storage class: the INTEGER n where ok holds, the REAL x elsewhere.
+        assert_eq!(typed("select iif(ok, n, x) as v from dts"), ("number".into(), false));
     }
 
     #[test]

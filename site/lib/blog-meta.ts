@@ -1,10 +1,9 @@
-import { ogAlt, ogSize } from '@/lib/og';
+import { ogSize } from '@/lib/og';
 import { siteUrl } from '@/lib/layout.shared';
 
-/** The blog's and each post's metadata: the title, the description, and the link previews, the site's own card. */
-export function blogMeta({ title, description, path, og, type }: { title: string; description: string; path: string; og: string; type: 'website' | 'article' }) {
+/** The blog's and each post's metadata: the title, the description, and the link previews, whose image and its text the route gives (the homepage's card for the blog, each post's own for a post). */
+export function blogMeta({ title, description, path, image, alt, type }: { title: string; description: string; path: string; image: string; alt: string; type: 'website' | 'article' }) {
   const url = `${siteUrl}${path}`;
-  const image = `${siteUrl}/opengraph-image.png?${og}`;
   return [
     { title },
     { name: 'description', content: description },
@@ -21,12 +20,12 @@ export function blogMeta({ title, description, path, og, type }: { title: string
     { property: 'og:image', content: image },
     { property: 'og:image:width', content: String(ogSize.width) },
     { property: 'og:image:height', content: String(ogSize.height) },
-    { property: 'og:image:alt', content: ogAlt },
+    { property: 'og:image:alt', content: alt },
     { name: 'twitter:card', content: 'summary_large_image' },
     { name: 'twitter:creator', content: '@colinhacks' },
     { name: 'twitter:title', content: title },
     { name: 'twitter:description', content: description },
     { name: 'twitter:image', content: image },
-    { name: 'twitter:image:alt', content: ogAlt },
+    { name: 'twitter:image:alt', content: alt },
   ];
 }

@@ -484,7 +484,8 @@ impl Types {
                         return Err(syn::Error::new(self.span, format!("{label} is declared {declared}, which holds an integer, a real or text: cast it in the statement, as `cast({label} as {to})`")));
                     }
                 },
-                None => return Err(self.any_value(label)),
+                // A number SQLite computes from what may be either (`ceil(price)` of a NUMERIC).
+                None => return Err(syn::Error::new(self.span, format!("{label} is an integer or a real, by the value: cast it in the statement to the one it holds, as `cast({label} as integer)` or `cast({label} as real)`"))),
             },
             Kind::Unknown => return Err(self.any_value(label)),
             _ => return Err(self.unsupported(label, t, "")),
