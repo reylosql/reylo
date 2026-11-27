@@ -148,13 +148,15 @@ pub const CHECKS_QUERY: &str = concat!(
 /// ([`Engine::nullable_params`]): `(relation, attnum, column, whether its NOT NULL or a domain of
 /// its type's declared NOT NULL refuses it, or the relation is a view, whose columns say nothing
 /// of what the table or the rule or trigger behind it takes, the enforced CHECKs of the table that
-/// read the column, the CHECKs of every domain of its type, and a generated column's expression)`,
-/// each CHECK and expression as the server prints it. A CHECK refuses null where it is false
-/// wherever the column is NULL ([`refuses_null`]); a NOT VALID one still checks every row written.
-/// A CHECK `NOT ENFORCED` (PostgreSQL 18), which checks nothing, is the one the server prints with
-/// those words last. `$1` is `text[]` of relation names as the statement writes them,
-/// schema-qualified or resolved through the search path, `$2` how many; the relation is named as
-/// `$1` names it.
+/// read the column, the CHECKs of every domain of its type, and a generated column's expression,
+/// where every partition and child of the relation computes it the same, since a row computes it
+/// as the table it lands in does)`, each CHECK and expression as the server prints it. A CHECK
+/// refuses null where it is false wherever the column is NULL ([`refuses_null`]); a NOT VALID one
+/// still checks every row written. A NO INHERIT one on a table with children checks none of the
+/// rows a write reaches in them, and none checks a foreign table's, so neither is read. A CHECK
+/// `NOT ENFORCED` (PostgreSQL 18), which checks nothing, is the one the server prints with those
+/// words last. `$1` is `text[]` of relation names as the statement writes them, schema-qualified or
+/// resolved through the search path, `$2` how many; the relation is named as `$1` names it.
 pub const REFUSES_NULL_QUERY: &str = concat!(
     "WITH RECURSIVE rels(name, oid) AS (SELECT DISTINCT x.name, c.oid FROM ",
     cardinality::names!("$1::pg_catalog.text[]", "$2::pg_catalog.int4", "x"),
@@ -167,18 +169,28 @@ pub const REFUSES_NULL_QUERY: &str = concat!(
         JOIN pg_catalog.pg_type t ON t.oid OPERATOR(pg_catalog.=) a.atttypid AND t.typtype OPERATOR(pg_catalog.=) 'd'::pg_catalog.\"char\" \
       WHERE c.oid OPERATOR(pg_catalog.=) ANY (SELECT r.oid FROM rels r) \
       UNION SELECT d.attrelid, d.attnum, t.oid FROM domains d JOIN pg_catalog.pg_type b ON b.oid OPERATOR(pg_catalog.=) d.oid \
-        JOIN pg_catalog.pg_type t ON t.oid OPERATOR(pg_catalog.=) b.typbasetype AND t.typtype OPERATOR(pg_catalog.=) 'd'::pg_catalog.\"char\") \
+        JOIN pg_catalog.pg_type t ON t.oid OPERATOR(pg_catalog.=) b.typbasetype AND t.typtype OPERATOR(pg_catalog.=) 'd'::pg_catalog.\"char\"), \
+    kin(root, oid) AS ( \
+      SELECT r.oid, i.inhrelid FROM rels r JOIN pg_catalog.pg_inherits i ON i.inhparent OPERATOR(pg_catalog.=) r.oid \
+      UNION SELECT n.root, i.inhrelid FROM kin n JOIN pg_catalog.pg_inherits i ON i.inhparent OPERATOR(pg_catalog.=) n.oid) \
     SELECT r.name, a.attnum::pg_catalog.int4, a.attname::pg_catalog.text, \
       a.attnotnull OR c.relkind OPERATOR(pg_catalog.=) ANY ('{v,m}'::pg_catalog.\"char\"[]) OR EXISTS (SELECT 1 FROM domains d JOIN pg_catalog.pg_type t ON t.oid OPERATOR(pg_catalog.=) d.oid \
         WHERE d.attrelid OPERATOR(pg_catalog.=) a.attrelid AND d.attnum OPERATOR(pg_catalog.=) a.attnum AND t.typnotnull), \
       ARRAY(SELECT pg_catalog.pg_get_expr(k.conbin, k.conrelid, true) FROM pg_catalog.pg_constraint k \
         WHERE k.contype OPERATOR(pg_catalog.=) 'c'::pg_catalog.\"char\" AND k.conrelid OPERATOR(pg_catalog.=) c.oid AND a.attnum OPERATOR(pg_catalog.=) ANY (k.conkey) \
+          AND (NOT k.connoinherit OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h WHERE h.inhparent OPERATOR(pg_catalog.=) c.oid)) \
+          AND c.relkind OPERATOR(pg_catalog.<>) 'f'::pg_catalog.\"char\" \
+          AND NOT EXISTS (SELECT 1 FROM kin n JOIN pg_catalog.pg_class f ON f.oid OPERATOR(pg_catalog.=) n.oid WHERE n.root OPERATOR(pg_catalog.=) c.oid AND f.relkind OPERATOR(pg_catalog.=) 'f'::pg_catalog.\"char\") \
           AND NOT (pg_catalog.pg_get_constraintdef(k.oid) OPERATOR(pg_catalog.~~) '% NOT ENFORCED'::pg_catalog.text)), \
       ARRAY(SELECT pg_catalog.pg_get_expr(k.conbin, '0'::pg_catalog.oid, true) FROM domains d \
         JOIN pg_catalog.pg_constraint k ON k.contypid OPERATOR(pg_catalog.=) d.oid AND k.contype OPERATOR(pg_catalog.=) 'c'::pg_catalog.\"char\" \
         WHERE d.attrelid OPERATOR(pg_catalog.=) a.attrelid AND d.attnum OPERATOR(pg_catalog.=) a.attnum), \
       (SELECT pg_catalog.pg_get_expr(g.adbin, g.adrelid, true) FROM pg_catalog.pg_attrdef g \
-        WHERE a.attgenerated OPERATOR(pg_catalog.<>) ''::pg_catalog.\"char\" AND g.adrelid OPERATOR(pg_catalog.=) a.attrelid AND g.adnum OPERATOR(pg_catalog.=) a.attnum) \
+        WHERE a.attgenerated OPERATOR(pg_catalog.<>) ''::pg_catalog.\"char\" AND g.adrelid OPERATOR(pg_catalog.=) a.attrelid AND g.adnum OPERATOR(pg_catalog.=) a.attnum \
+          AND NOT EXISTS (SELECT 1 FROM kin n JOIN pg_catalog.pg_attribute ka ON ka.attrelid OPERATOR(pg_catalog.=) n.oid AND ka.attname OPERATOR(pg_catalog.=) a.attname \
+            LEFT JOIN pg_catalog.pg_attrdef kd ON kd.adrelid OPERATOR(pg_catalog.=) ka.attrelid AND kd.adnum OPERATOR(pg_catalog.=) ka.attnum \
+            WHERE n.root OPERATOR(pg_catalog.=) c.oid AND (kd.adbin IS NULL \
+              OR NOT (pg_catalog.pg_get_expr(kd.adbin, kd.adrelid, true) OPERATOR(pg_catalog.=) pg_catalog.pg_get_expr(g.adbin, g.adrelid, true))))) \
     FROM rels r JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) r.oid \
       JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) c.oid AND a.attnum OPERATOR(pg_catalog.>) 0 AND NOT a.attisdropped"
 );
@@ -3573,13 +3585,40 @@ fn refuses_null(text: &str, column: &str, trust: &Trust) -> bool {
 /// and NULLIF; a comparison; and the operators and functions NULL for a NULL operand
 /// ([`infer::POSTGRES_STRICT_OPERATORS`], [`infer::POSTGRES_STRICT`]). An operator or a function
 /// counts only where it is the built-in whatever its operands' types ([`Trust::checked`]), and so
-/// does the `=` that `IS DISTINCT FROM` and NULLIF compare two values with.
+/// does the `=` that `IS DISTINCT FROM` and NULLIF compare two values with. A float holds an
+/// integer exactly only so far (2^24 for `real`, 2^53 for `double precision`), past which one is
+/// read as a value alone. What a boolean test, AND, OR, NOT or a CASE's test reads is cast to
+/// boolean, which the server prints without the cast: a user's cast to boolean may answer
+/// anything for NULL, so where one exists ([`Trust::cast`]) only a test that is boolean whatever
+/// it reads counts there.
 fn probe(node: &syntax::postgres::protobuf::Node, trust: &Trust) -> Probe {
     use syntax::postgres::protobuf::{a_const::Val, AExprKind, BoolExprType, BoolTestType, NullTestType};
     let at = |n: &Option<Box<syntax::postgres::protobuf::Node>>| n.as_deref().map_or(Probe::Unknown, |n| probe(n, trust));
     let boxed = |n: &Option<Box<syntax::postgres::protobuf::Node>>| Box::new(at(n));
     let builtin = |name: &str| !trust.checked(name);
     let integer = |text: &str| text.parse::<i64>().ok();
+    // An integer as a value of a number type: a float's only where the float holds it exactly.
+    let number = |n: i64, target: &str| match target {
+        "float4" if n.unsigned_abs() > 1 << 24 => Probe::Value,
+        "float8" if n.unsigned_abs() > 1 << 53 => Probe::Value,
+        _ => Probe::Int(n),
+    };
+    // A node in a place the server casts to boolean.
+    let truth = |n: &syntax::postgres::protobuf::Node| {
+        let boolean = trust.cast("bool")
+            || match n.node.as_ref() {
+                Some(NodeEnum::NullTest(_) | NodeEnum::BooleanTest(_) | NodeEnum::BoolExpr(_)) => true,
+                Some(NodeEnum::AConst(c)) => c.isnull || matches!(c.val, Some(Val::Boolval(_))),
+                Some(NodeEnum::AExpr(e)) => match AExprKind::try_from(e.kind) {
+                    Ok(AExprKind::AexprDistinct | AExprKind::AexprNotDistinct) => true,
+                    Ok(AExprKind::AexprOp) => matches!(infer::builtin_name(&e.name).as_deref(), Some("=" | "<>" | "<" | ">" | "<=" | ">=")),
+                    _ => false,
+                },
+                _ => false,
+            };
+        if boolean { probe(n, trust) } else { Probe::Unknown }
+    };
+    let truth_at = |n: &Option<Box<syntax::postgres::protobuf::Node>>| Box::new(n.as_deref().map_or(Probe::Unknown, truth));
     match node.node.as_ref() {
         Some(NodeEnum::AConst(c)) if c.isnull => Probe::Null,
         Some(NodeEnum::AConst(c)) => match &c.val {
@@ -3592,9 +3631,9 @@ fn probe(node: &syntax::postgres::protobuf::Node, trust: &Trust) -> Probe {
             let target = cast.type_name.as_ref().filter(|t| t.array_bounds.is_empty()).and_then(|t| infer::builtin_name(&t.names));
             match (cast.arg.as_deref().and_then(|a| a.node.as_ref()), target.as_deref()) {
                 (Some(NodeEnum::AConst(c)), _) if c.isnull => Probe::Null,
-                (Some(NodeEnum::AConst(c)), Some("int2" | "int4" | "int8" | "numeric" | "float4" | "float8")) => match &c.val {
-                    Some(Val::Ival(i)) => Probe::Int(i.ival.into()),
-                    Some(Val::Fval(f)) => integer(&f.fval).map_or(Probe::Value, Probe::Int),
+                (Some(NodeEnum::AConst(c)), Some(target @ ("int2" | "int4" | "int8" | "numeric" | "float4" | "float8"))) => match &c.val {
+                    Some(Val::Ival(i)) => number(i.ival.into(), target),
+                    Some(Val::Fval(f)) => integer(&f.fval).map_or(Probe::Value, |n| number(n, target)),
                     _ => Probe::Unknown,
                 },
                 (Some(NodeEnum::AConst(c)), Some("text" | "varchar" | "bpchar" | "name")) if matches!(c.val, Some(Val::Sval(_))) => Probe::Value,
@@ -3610,7 +3649,7 @@ fn probe(node: &syntax::postgres::protobuf::Node, trust: &Trust) -> Probe {
         },
         Some(NodeEnum::NullTest(t)) => Probe::IsNull { arg: boxed(&t.arg), not: t.nulltesttype == NullTestType::IsNotNull as i32 },
         Some(NodeEnum::BooleanTest(t)) => {
-            let arg = boxed(&t.arg);
+            let arg = truth_at(&t.arg);
             match BoolTestType::try_from(t.booltesttype) {
                 Ok(BoolTestType::IsTrue) => Probe::IsTrue { arg, not: false },
                 Ok(BoolTestType::IsNotTrue) => Probe::IsTrue { arg, not: true },
@@ -3622,7 +3661,7 @@ fn probe(node: &syntax::postgres::protobuf::Node, trust: &Trust) -> Probe {
             }
         }
         Some(NodeEnum::BoolExpr(b)) => {
-            let mut args = b.args.iter().map(|a| probe(a, trust));
+            let mut args = b.args.iter().map(truth);
             match BoolExprType::try_from(b.boolop) {
                 Ok(BoolExprType::NotExpr) if b.args.len() == 1 => Probe::Not(Box::new(args.next().unwrap_or(Probe::Unknown))),
                 Ok(op @ (BoolExprType::AndExpr | BoolExprType::OrExpr)) => {
@@ -3659,7 +3698,7 @@ fn probe(node: &syntax::postgres::protobuf::Node, trust: &Trust) -> Probe {
         Some(NodeEnum::CoalesceExpr(c)) => Probe::Coalesce(c.args.iter().map(|a| probe(a, trust)).collect()),
         Some(NodeEnum::CaseExpr(c)) if c.arg.is_none() => Probe::Case {
             arms: c.args.iter().filter_map(|w| match w.node.as_ref() {
-                Some(NodeEnum::CaseWhen(w)) => Some((at(&w.expr), at(&w.result))),
+                Some(NodeEnum::CaseWhen(w)) => Some((*truth_at(&w.expr), at(&w.result))),
                 _ => None,
             }).collect(),
             otherwise: c.defresult.as_ref().map(|d| Box::new(probe(d, trust))),
@@ -5455,6 +5494,15 @@ mod tests {
         assert!(!refuses_null("COALESCE(a, 0) > 0", "a", &shadowed));
         assert!(!probe_text("a + 1", &shadowed).is_some_and(|p| with_null(&p, "a") == Known::Null));
         assert!(refuses_null("a IS NOT NULL", "a", &shadowed));
+        // A float holds an integer exactly only so far: 16777217::real is 16777216.
+        assert!(!refuses_null("COALESCE(a, 16777217::real) <= 16777216::double precision", "a", &trust));
+        assert!(refuses_null("COALESCE(a, 16777215::real) <= 16777214::double precision", "a", &trust));
+        // A user's cast to boolean, which the server prints no cast for, may answer true for NULL.
+        let cast = Trust { cast_targets: Some(HashSet::new()), ..Trust::default() };
+        assert!(!refuses_null("a IS TRUE", "a", &cast));
+        assert!(!probe_text("CASE WHEN a THEN 1 ELSE NULL::integer END", &cast).is_some_and(|p| with_null(&p, "a") == Known::Null));
+        assert!(refuses_null("a IS NOT NULL AND b > 0", "a", &cast));
+        assert!(refuses_null("COALESCE(a, 0) > 0 IS TRUE", "a", &cast));
     }
 
     #[test]
