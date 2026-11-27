@@ -164,6 +164,11 @@ const PARAMS: [type: string, name: string, value: unknown, back?: unknown][] = [
   ["Array(String)", "strings", ["it's", "b\tc\\", ""]],
   ["Array(Nullable(UInt8))", "holes", [1, null]],
   ["Array(Array(UInt64))", "nested_list", [[1n], []]],
+  // A tuple's and a map's own value is an array: the type says each level, at any depth.
+  ["Array(Array(Array(UInt8)))", "deep_list", [[[1, 2]], [[3], []]]],
+  ["Array(Array(Tuple(UInt8, String)))", "deep_pairs", [[[1, "a"]], [[2, "b"], [3, "c"]]]],
+  ["Array(Array(Array(Tuple(n UInt8, s String))))", "deep_named", [[[{ n: 1, s: "a" }]]]],
+  ["Array(Array(Map(String, UInt8)))", "deep_maps", [[[{ key: "k", value: 1 }], []]]],
   ["Array(Decimal(18, 2))", "decimals", ["1.5", "-2.25"]],
   ["Array(DateTime64(3, 'UTC'))", "instants", ["2026-01-01T00:00:00.500Z"]],
   ["Array(DateTime('UTC'))", "seconds", ["2026-01-01T00:00:00Z"]],
