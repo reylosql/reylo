@@ -62,6 +62,37 @@ fn is_space(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
+/// The length of a space past ASCII at `at` that ClickHouse reads as whitespace, for text pasted
+/// from a word processor, or 0: U+0085, U+00A0, U+180E, U+2000 to U+200D, U+2028, U+2029, U+202F,
+/// U+205F, U+2060, U+3000 and U+FEFF, as `engine/core/src/lexical.rs` lists them.
+fn clickhouse_space(z: &[u8], at: usize) -> usize {
+    let text = match std::str::from_utf8(&z[at..z.len().min(at + 4)]) {
+        Ok(text) => text,
+        Err(e) => std::str::from_utf8(&z[at..at + e.valid_up_to()]).unwrap_or_default(),
+    };
+    match text.chars().next() {
+        Some(c @ ('\u{85}' | '\u{a0}' | '\u{180e}' | '\u{2000}'..='\u{200d}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{2060}' | '\u{3000}' | '\u{feff}')) => c.len_utf8(),
+        _ => 0,
+    }
+}
+
+/// ClickHouse's typographic quote at `at`, `‘…’` a string and `“…”` a quoted name, to the first
+/// closing quote, with no escape; ClickHouse takes one only with at least six bytes from it.
+fn typographic(z: &[u8], at: usize) -> Option<(usize, u16)> {
+    let (close, kind) = match z.get(at..at + 3)? {
+        [0xe2, 0x80, 0x98] => (0x99, STRING),
+        [0xe2, 0x80, 0x9c] => (0x9d, QUOTED),
+        _ => return None,
+    };
+    if at + 5 >= z.len() {
+        return None;
+    }
+    Some(match z[at + 3..].windows(3).position(|w| w == [0xe2, 0x80, close]) {
+        Some(n) => (3 + n + 3, kind),
+        None => unterminated(z, at),
+    })
+}
+
 #[inline]
 fn is_word(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80
@@ -166,6 +197,12 @@ fn word(z: &[u8], at: usize) -> (usize, u16) {
     (z[at..].iter().position(|c| !is_word(*c)).unwrap_or(z.len() - at), WORD)
 }
 
+/// A ClickHouse word, which ends at a space past ASCII as at any other.
+fn clickhouse_word(z: &[u8], at: usize) -> (usize, u16) {
+    let end = (at..z.len()).find(|&i| !is_word(z[i]) || (z[i] >= 0x80 && clickhouse_space(z, i) > 0)).unwrap_or(z.len());
+    ((end - at).max(1), WORD)
+}
+
 /// The longest operator at `at`.
 fn operator(z: &[u8], at: usize, flavor: Flavor) -> (usize, u16) {
     const LONG: &[&str] = &["<=>", "->>", "<<", ">>", "<=", ">=", "<>", "!=", "||", "&&", "->", ":=", "::"];
@@ -263,10 +300,18 @@ fn dollar_tags(z: &[u8]) -> HashMap<&[u8], Vec<usize>> {
 fn token<'z>(flavor: Flavor, z: &'z [u8], at: usize, ahead: &mut Ahead<'z>) -> (usize, u16) {
     let c = z[at];
     let next = z.get(at + 1).copied().unwrap_or(0);
-    // SQL Server reads every control character as whitespace.
-    let space = |c: u8| is_space(c) || (flavor == Flavor::SqlServer && c <= b' ');
-    if space(c) {
-        return (z[at..].iter().position(|c| !space(*c)).unwrap_or(z.len() - at), SPACE);
+    // SQL Server reads every control character as whitespace, and ClickHouse Unicode's spaces.
+    let space = |at: usize| match z[at] {
+        c if is_space(c) || (flavor == Flavor::SqlServer && c <= b' ') => 1,
+        c if c >= 0x80 && flavor == Flavor::ClickHouse => clickhouse_space(z, at),
+        _ => 0,
+    };
+    if space(at) > 0 {
+        let mut end = at;
+        while end < z.len() && space(end) > 0 {
+            end += space(end);
+        }
+        return (end - at, SPACE);
     }
     match c {
         b'(' => return (1, LPAREN),
@@ -281,16 +326,19 @@ fn token<'z>(flavor: Flavor, z: &'z [u8], at: usize, ahead: &mut Ahead<'z>) -> (
         Flavor::ClickHouse => match c {
             b'-' if next == b'-' => line_comment(z, at),
             b'#' if next == b'!' || next == b' ' => line_comment(z, at),
-            b'/' if next == b'*' => block_comment(z, at, false),
+            b'/' if next == b'/' => line_comment(z, at),
+            // A ClickHouse block comment nests, as its lexer reads one.
+            b'/' if next == b'*' => block_comment(z, at, true),
+            0xe2 if typographic(z, at).is_some() => typographic(z, at).unwrap_or((1, ILLEGAL)),
             b'\'' => string(z, at, 0, b'\'', true, STRING),
             b'"' => string(z, at, 0, b'"', true, QUOTED),
             b'`' => string(z, at, 0, b'`', true, QUOTED),
-            b'$' => heredoc(z, at, ahead).unwrap_or_else(|| word(z, at)),
+            b'$' => heredoc(z, at, ahead).unwrap_or_else(|| clickhouse_word(z, at)),
             b'{' => parameter(z, at, ahead).unwrap_or((1, OPERATOR)),
             // `json.@path`, `user@'host'` and `@@setting`.
             b'@' => at_variable(z, at, b"'\"`", true),
             b':' if next != b':' && next != b'=' => colon_name(z, at).unwrap_or((1, OPERATOR)),
-            _ if is_word(c) => word(z, at),
+            _ if is_word(c) => clickhouse_word(z, at),
             _ => operator(z, at, flavor),
         },
         Flavor::SqlServer => match c {
@@ -320,7 +368,7 @@ fn token<'z>(flavor: Flavor, z: &'z [u8], at: usize, ahead: &mut Ahead<'z>) -> (
     }
 }
 
-/// `$tag$ … $tag$`, a dollar-quoted string. With no closing tag it is an identifier, which `$` may start and run through.
+/// `$tag$ … $tag$`, a heredoc, whose tag is ASCII letters, digits and `_`, as ClickHouse's lexer reads one (`$本文$` opens none). With no closing tag it is an identifier, which `$` may start and run through.
 fn heredoc<'z>(z: &'z [u8], at: usize, ahead: &mut Ahead<'z>) -> Option<(usize, u16)> {
     let mut i = at + 1;
     while z.get(i).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_') {
@@ -625,6 +673,43 @@ mod tests {
     fn reads_a_dollar_quote_to_its_own_tag() {
         assert_eq!(statements(Flavor::ClickHouse, "select $a$ ; $b$ ; $a$; select 2"), 2);
         assert_eq!(statements(Flavor::ClickHouse, "select $$;$$; select 2"), 2);
+    }
+
+    #[test]
+    fn reads_clickhouse_text_as_clickhouse_does() {
+        // A block comment nests, `//` starts a line comment, typographic quotes quote, and Unicode's
+        // spaces are whitespace, which ends a word.
+        assert!(parse(Flavor::ClickHouse, "SELECT 1 /* a /* b */ ( */ AS x").errors.is_empty());
+        assert_eq!(parse(Flavor::ClickHouse, "SELECT 1 /* a /* b */ AS x").errors.len(), 1);
+        assert!(parse(Flavor::ClickHouse, "SELECT 1 // ( it's\n AS x").errors.is_empty());
+        assert!(parse(Flavor::ClickHouse, "SELECT ‘( it's’ AS s, “(” AS n").errors.is_empty());
+        assert_eq!(statements(Flavor::ClickHouse, "SELECT\u{a0}$h$a;b$h$; SELECT 2"), 2);
+    }
+
+    /// The lexing corpus's ClickHouse readings: its strings and quoted names are this lexer's, and no
+    /// token stands inside one of its comments.
+    #[test]
+    fn reads_the_corpus() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../core/tests/lexical.json");
+        let corpus: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).expect("the corpus")).expect("JSON");
+        let texts = |reading: &serde_json::Value, key: &str| reading.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default();
+        let mut read = 0;
+        for case in corpus["cases"].as_array().expect("cases") {
+            let Some(reading) = case["readings"].get("clickhouse").filter(|r| r.get("error").is_none()) else { continue };
+            let text = case["text"].as_str().expect("text");
+            let (lexemes, _) = lexemes(Flavor::ClickHouse, text);
+            let strings: Vec<&str> = lexemes.iter().filter(|l| matches!(l.kind, STRING | QUOTED)).map(|l| &text[l.start as usize..l.end as usize]).collect();
+            assert_eq!(strings, texts(reading, "strings"), "{text:?}");
+            let mut from = 0;
+            for comment in texts(reading, "comments") {
+                let start = from + text[from..].find(&comment).expect("the comment is in the text");
+                let end = start + comment.len();
+                assert!(!lexemes.iter().any(|l| (l.start as usize) < end && l.end as usize > start), "{text:?}: a token inside {comment:?}");
+                from = end;
+            }
+            read += 1;
+        }
+        assert!(read > 5);
     }
 
     #[test]

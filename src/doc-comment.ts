@@ -7,12 +7,26 @@ import type { Dialect } from "./engine.ts";
 export type Leading = { prose: string; end: number };
 
 /**
+ * The whitespace before a statement's first token, as each dialect reads it (`engine/core/src/lexical.rs`):
+ * ASCII's, with the vertical tab (on SQLite only inside a run another space starts), and on ClickHouse Unicode's spaces too. A no-break
+ * space is a character of a name elsewhere, so JavaScript's `\s`, which takes it, reads a comment
+ * after one as the statement's leading comment where the database reads a name first.
+ */
+const SPACES: Record<Dialect | "none", RegExp> = {
+  postgres: /^[ \t\n\r\f\v]*/,
+  mysql: /^[ \t\n\r\f\v]*/,
+  sqlite: /^(?:[ \t\n\r\f][ \t\n\r\f\v]*)?/,
+  clickhouse: /^[ \t\n\r\f\v\u0085\u00a0\u180e\u2000-\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeff]*/,
+  none: /^[ \t\n\r\f\v]*/,
+};
+
+/**
  * The `--` lines and `/* … *\/` blocks before the statement's first token, markers stripped and
  * lines kept: a blank line between two comments, or a change from one form to the other, starts a
  * paragraph. Read as the dialect reads comments: Postgres and ClickHouse nest block comments,
  * MySQL's `--` is one only before a space or a control character and `#` starts one too, as it
- * does on ClickHouse before a space or a `!`, and MySQL's `/*!` and `/*+` are code to the server,
- * so they end the prose. With no dialect (no project), `--` and `/* *\/`.
+ * does on ClickHouse before a space or a `!`, ClickHouse's `//` starts one, and MySQL's `/*!` and
+ * `/*+` are code to the server, so they end the prose. With no dialect (no project), `--` and `/* *\/`.
  */
 export function leadingComment(sql: string, dialect?: Dialect): Leading {
   const paragraphs: string[][] = [];
@@ -21,13 +35,13 @@ export function leadingComment(sql: string, dialect?: Dialect): Leading {
   let i = 0;
   let end = 0;
   for (;;) {
-    const ws = /^\s*/.exec(sql.slice(i))![0];
+    const ws = SPACES[dialect ?? "none"].exec(sql.slice(i))![0];
     const at = i + ws.length;
     const ch = sql[at];
     const next = sql[at + 1];
     // Postgres ends a line at a bare carriage return too, and `\r\n` is one line end.
     const blankBefore = (ws.match(dialect === "postgres" ? /\r\n?|\n/g : /\n/g)?.length ?? 0) > 1;
-    const lineComment = (ch === "-" && next === "-" && !(dialect === "mysql" && at + 2 < sql.length && sql.charCodeAt(at + 2) > 32 && sql.charCodeAt(at + 2) !== 127)) || (ch === "#" && (dialect === "mysql" || (dialect === "clickhouse" && (next === " " || next === "!"))));
+    const lineComment = (ch === "-" && next === "-" && !(dialect === "mysql" && at + 2 < sql.length && sql.charCodeAt(at + 2) > 32 && sql.charCodeAt(at + 2) !== 127)) || (ch === "#" && (dialect === "mysql" || (dialect === "clickhouse" && (next === " " || next === "!")))) || (ch === "/" && next === "/" && dialect === "clickhouse");
     if (lineComment) {
       // Postgres ends a `--` comment at a carriage return as at a line feed.
       const lineEnd = (dialect === "postgres" ? /[\r\n]/g : /\n/g);
@@ -60,9 +74,9 @@ export function leadingComment(sql: string, dialect?: Dialect): Leading {
   return { prose, end };
 }
 
-/** A block comment's lines, without a `/**`'s extra stars or the `*` that starts each line of one written as JSDoc is. */
+/** A block comment's lines, without a `/**`'s extra stars or the `*` that starts each line of one written as JSDoc is. A line ends at `\r\n`, `\n` or a bare `\r`, as an editor shows it. */
 function block(text: string): string[] {
-  const lines = text.replace(/^\*+/, "").split(/\r?\n/);
+  const lines = text.replace(/^\*+/, "").split(/\r\n|\r|\n/);
   const rest = lines.slice(1).filter((l) => l.trim().length);
   if (rest.length && rest.every((l) => /^\s*\*/.test(l))) return [lines[0]!, ...lines.slice(1).map((l) => l.replace(/^\s*\*(?!\/) ?/, ""))];
   return lines;
@@ -77,9 +91,9 @@ function dedent(lines: string[]): string[] {
   return trimmed.map((l) => l.slice(Math.min(indent, /^[ \t]*/.exec(l)![0].length)));
 }
 
-/** The statement after its leading comments, its blank edges trimmed. */
+/** The statement after its leading comments, its blank edges trimmed of ASCII's whitespace alone: a no-break space a statement ends with is part of its last name. */
 export function statementAfter(sql: string, leading: Leading): string {
-  return sql.slice(leading.end).trim();
+  return sql.slice(leading.end).replace(/^[ \t\n\r\f\v]+|[ \t\n\r\f\v]+$/g, "");
 }
 
 /**

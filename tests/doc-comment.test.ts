@@ -57,3 +57,26 @@ test("the doc comment holds the prose, the statement in a sql block and the note
   assert.match(docComment("", "select '```' as a, '````' as b"), /^ \* `````sql$[\s\S]*^ \* `````$/m);
   assert.equal(docComment("See:\n```ts\nrun()", "select 1"), ["/**", " * See:", " * ```ts", " * run()", " * ```", " *", " * ```sql", " * select 1", " * ```", " */", ""].join("\n"));
 });
+
+test("the leading comment reads the corpus each scanner of the engine reads", async () => {
+  // engine/core/tests/lexical.json holds inputs with each dialect's reading, which the engine's own readers run too.
+  const { readFile } = await import("node:fs/promises");
+  const corpus = JSON.parse(await readFile(new URL("../engine/core/tests/lexical.json", import.meta.url), "utf8")) as { cases: { about: string; text: string; readings: Partial<Record<Dialect, { prose?: string }>> }[] };
+  let checked = 0;
+  for (const { about, text, readings } of corpus.cases) {
+    for (const [dialect, reading] of Object.entries(readings) as [Dialect, { prose?: string }][]) {
+      if (reading.prose === undefined) continue;
+      assert.equal(leadingComment(text, dialect).prose, reading.prose, `${dialect}, ${about}: ${JSON.stringify(text)}`);
+      checked++;
+    }
+  }
+  assert.ok(checked > 10);
+});
+
+test("the statement after its comment keeps a no-break space it ends with, which is its last name's", () => {
+  assert.deepEqual(read("-- One.\nselect 1 as x\u00a0\n", "postgres"), ["One.", "select 1 as x\u00a0"]);
+  assert.deepEqual(read("\u00a0-- One.\nselect 1", "postgres"), ["", "\u00a0-- One.\nselect 1"]);
+  assert.deepEqual(read("\u00a0-- One.\nSELECT 1", "clickhouse"), ["One.", "SELECT 1"]);
+  // A block comment's lines end at a bare carriage return too.
+  assert.deepEqual(read("/**\r * One user.\r * By id.\r */\rselect 1", "sqlite"), ["One user.\nBy id.", "select 1"]);
+});

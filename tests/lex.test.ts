@@ -36,6 +36,20 @@ test("the engine's lexer answers alike through its long-lived child and its one-
   }
 });
 
+test("the engine's lexer reads the corpus every scanner of a statement's text is held to", async () => {
+  // engine/core/tests/lexical.json: each input with its reading on each dialect, which the engine's own tests run too.
+  const { readFile } = await import("node:fs/promises");
+  const corpus = JSON.parse(await readFile(new URL("../engine/core/tests/lexical.json", import.meta.url), "utf8")) as { cases: { about: string; text: string; readings: Partial<Record<Dialect, { params?: string[]; error?: string }>> }[] };
+  const engine = await load("sqlite");
+  for (const { about, text, readings } of corpus.cases) {
+    for (const [dialect, reading] of Object.entries(readings) as [Dialect, { params?: string[]; error?: string }][]) {
+      const at = `${dialect}, ${about}: ${JSON.stringify(text)}`;
+      if (reading.error !== undefined) await assert.rejects(engine.lexAsync(text, dialect), (e: Error) => e.message.includes(reading.error!), at);
+      else if (reading.params) assert.deepEqual((await engine.lexAsync(text, dialect)).params, reading.params, at);
+    }
+  }
+});
+
 test("a statement written by hand compiles through the engine's lexer, as a build step compiles one", () => {
   // An `E''` string with an escaped quote and a dollar quote holding `$2` and `:more` hold no placeholder.
   const pg = handWritten("select E'it\\'s :not' as s, $$costs $2 or :more$$ as note, :id::int as id, :name as name", "postgres");

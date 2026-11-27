@@ -654,11 +654,11 @@ pub fn analyze(sql: &str, host: &Host) -> Lazy<Analysis> {
         Err(e) => return Some(analysis::bare(sql, &analysis::none(), Dialect::Clickhouse, vec![analysis::diag(e.message, e.offset, 1, 1)])),
     };
     let refuse = |d: Vec<Diagnostic>| Some(analysis::bare(sql, &lexed, Dialect::Clickhouse, d));
-    let statement = match lex::one_statement(sql, &lexed, &["select", "with", "from", "insert", "delete", "update", "alter"]) {
+    let statement = match lex::one_statement(sql, &lexed, Dialect::Clickhouse, &["select", "with", "from", "insert", "delete", "update", "alter"]) {
         Ok(statement) => statement,
         Err(message) => return refuse(vec![whole(sql, message, 10, None)]),
     };
-    let word = lex::first_word(sql, &lexed);
+    let word = lex::first_word(sql, &lexed, Dialect::Clickhouse);
     // Any other first word is read as a query's, and the server's error names it (`selec`).
     let writes = matches!(word.as_str(), "insert" | "delete" | "update" | "alter");
     if let lex::Statement::Command(command) = &statement {

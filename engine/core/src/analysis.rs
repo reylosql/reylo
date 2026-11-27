@@ -4,6 +4,7 @@
 use crate::api::{Analysis, Diagnostic, Param};
 use crate::dialect::Dialect;
 use crate::lex::{self, Lexed, Style};
+use crate::lexical::Rules;
 use crate::types::{Cardinality, Type};
 
 /// The statement's placeholders, or the bare analysis that reports why they cannot be read: a
@@ -202,11 +203,19 @@ fn placed_columns(columns: usize, targets: Option<&[ResultTarget]>) -> Vec<Optio
 /// Where each item of the statement's result list is written, trimmed of whitespace and comments:
 /// the list after its `RETURNING`, else after its first `select` outside parentheses, up to the
 /// clause that ends it; inside the parentheses of a statement or a first arm written in them. `None`
-/// where the text has no such list, or an item is empty.
+/// where the text has no such list, an item is empty, or the lexer refuses the text. Strings,
+/// quoted names, dollar quotes and comments are the lexer's spans ([`Lexed::opaque`]), read by the
+/// dialect's rules, and so is whitespace.
 pub fn result_items(sql: &str, dialect: Dialect) -> Option<Vec<(usize, usize)>> {
+    let opaque = lex::lex(sql, dialect).ok()?.opaque;
+    items_of(sql, &Rules::of(dialect), &opaque)
+}
+
+fn items_of(sql: &str, rules: &Rules, opaque: &[(usize, usize)]) -> Option<Vec<(usize, usize)>> {
     const MODIFIERS: [&str; 11] = ["distinct", "all", "distinctrow", "high_priority", "straight_join", "sql_small_result", "sql_big_result", "sql_buffer_result", "sql_no_cache", "sql_cache", "sql_calc_found_rows"];
     const ENDS: [&str; 16] = ["from", "where", "group", "having", "window", "order", "limit", "offset", "fetch", "union", "intersect", "except", "into", "qualify", "for", "returning"];
     const SET_OPERATIONS: [&str; 3] = ["union", "intersect", "except"];
+    let dialect = rules.dialect;
     let bytes = sql.as_bytes();
     // The words and commas outside parentheses, strings and comments; which bytes are code (not a
     // comment, not whitespace), and which of those are a string's or a quoted name's; the first
@@ -220,63 +229,27 @@ pub fn result_items(sql: &str, dialect: Dialect) -> Option<Vec<(usize, usize)>> 
     let mut end = bytes.len();
     let mut depth = 0usize;
     let mut i = 0;
-    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
+    let mut span = 0;
+    let ident = |b: u8| rules.name_part(b);
     while i < bytes.len() {
+        // A comment is neither code nor whitespace; a string, a quoted name and a dollar quote are
+        // code, and quoted.
+        if let Some(&(from, to)) = opaque.get(span).filter(|(from, _)| *from <= i) {
+            span += 1;
+            if !lex::is_comment(&sql[from..]) {
+                code[from..to].fill(true);
+                quoted[from..to].fill(true);
+            }
+            i = to.max(i);
+            continue;
+        }
         let b = bytes[i];
-        match b {
-            b'\'' | b'"' | b'`' => {
-                // MySQL reads a backslash in a string as an escape, and so does Postgres in E'…'.
-                // ClickHouse reads one in a string and in a quoted name alike, and has no E'…'.
-                let escapes = (dialect == Dialect::Mysql && b != b'`') || dialect == Dialect::Clickhouse || (b == b'\'' && i > 0 && matches!(bytes[i - 1], b'e' | b'E') && (i < 2 || !ident(bytes[i - 2])));
-                let from = i;
-                i += 1;
-                while i < bytes.len() && bytes[i] != b {
-                    i += if escapes && bytes[i] == b'\\' { 2 } else { 1 };
-                }
-                i = (i + 1).min(bytes.len());
-                code[from..i].fill(true);
-                quoted[from..i].fill(true);
-                continue;
-            }
-            b'-' if bytes.get(i + 1) == Some(&b'-') => {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-                continue;
-            }
-            b'#' if dialect == Dialect::Mysql || (dialect == Dialect::Clickhouse && matches!(bytes.get(i + 1), Some(b' ' | b'!'))) => {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-                continue;
-            }
-            b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                i += 2;
-                while i < bytes.len() && !bytes[i..].starts_with(b"*/") {
-                    i += 1;
-                }
-                i = (i + 2).min(bytes.len());
-                continue;
-            }
-            // A dollar-quoted string, `$$…$$` or `$tag$…$tag$`; `$1` is a parameter. A tag reads every
-            // byte past ASCII as a letter, as a Postgres name does (`$本文$`).
-            b'$' if dialect == Dialect::Postgres && (i == 0 || !ident(bytes[i - 1])) && bytes.get(i + 1).is_some_and(|c| *c == b'$' || c.is_ascii_alphabetic() || *c == b'_' || *c >= 0x80) => {
-                let tag_end = bytes[i + 1..].iter().position(|c| !(c.is_ascii_alphanumeric() || *c == b'_' || *c >= 0x80)).map(|p| i + 1 + p);
-                if let Some(t) = tag_end.filter(|t| bytes[*t] == b'$') {
-                    let tag = &bytes[i..=t];
-                    let close = bytes[t + 1..].windows(tag.len()).position(|w| w == tag);
-                    let to = close.map_or(bytes.len(), |c| t + 1 + c + tag.len());
-                    code[i..to].fill(true);
-                    quoted[i..to].fill(true);
-                    i = to;
-                    continue;
-                }
-            }
-            _ => {}
+        let space = rules.space_at(bytes, i);
+        if space > 0 {
+            i += space;
+            continue;
         }
-        if !b.is_ascii_whitespace() {
-            code[i] = true;
-        }
+        code[i] = true;
         match b {
             b'(' | b'[' | b'{' => {
                 if depth == 0 {
@@ -327,7 +300,8 @@ pub fn result_items(sql: &str, dialect: Dialect) -> Option<Vec<(usize, usize)>> 
     if returning.is_none() && (select.is_none() || first_arm) {
         let first_code = code.iter().position(|c| *c)?;
         let (open, close) = group.filter(|(open, _)| *open == first_code)?;
-        return result_items(&sql[open + 1..close], dialect).map(|items| items.into_iter().map(|(s, l)| (s + open + 1, l)).collect());
+        let inner: Vec<(usize, usize)> = opaque.iter().filter(|(from, to)| *from > open && *to <= close).map(|(from, to)| (from - open - 1, to - open - 1)).collect();
+        return items_of(&sql[open + 1..close], rules, &inner).map(|items| items.into_iter().map(|(s, l)| (s + open + 1, l)).collect());
     }
     let (mut start, from_returning) = match returning {
         Some(k) => (k, true),
@@ -372,7 +346,7 @@ pub fn result_items(sql: &str, dialect: Dialect) -> Option<Vec<(usize, usize)>> 
 
 /// The statement's first word, past any whitespace.
 fn first_word(sql: &str) -> (usize, usize) {
-    let start = sql.len() - sql.trim_start().len();
+    let start = sql.len() - sql.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '\u{b}').len();
     let length = sql[start..].bytes().take_while(|b| b.is_ascii_alphanumeric() || *b == b'_').count();
     (start, length.max(1))
 }
@@ -619,5 +593,25 @@ mod result_items {
         assert_eq!(pg("values (1, 2)"), None);
         assert_eq!(pg("select offset from t"), None);
         assert_eq!(pg("select a, , b"), None);
+    }
+
+    #[test]
+    fn each_dialect_reads_its_own_comments_and_strings() {
+        // A Postgres and a ClickHouse block comment nests; a SQLite and a MySQL one ends at its first `*/`.
+        assert_eq!(texts("select 1 /* a /* b */ , c */ as x, 2 as y", Dialect::Postgres).unwrap(), ["1 /* a /* b */ , c */ as x", "2 as y"]);
+        assert_eq!(texts("SELECT 1 /* a /* b */ , c */ AS x, 2 AS y", Dialect::Clickhouse).unwrap(), ["1 /* a /* b */ , c */ AS x", "2 AS y"]);
+        assert_eq!(texts("select 1 /* a /* b */ , 2 as y", Dialect::Sqlite).unwrap(), ["1", "2 as y"]);
+        // A Postgres `--` comment ends at a carriage return, elsewhere at the line feed.
+        assert_eq!(texts("select 1 -- a\r, 2\n, 3", Dialect::Postgres).unwrap(), ["1", "2", "3"]);
+        assert_eq!(texts("select 1 -- a\r, 2\n, 3", Dialect::Sqlite).unwrap(), ["1", "3"]);
+        // MySQL's `--x` is two minus signs.
+        assert_eq!(texts("select 1 --x, 2", Dialect::Mysql).unwrap(), ["1 --x", "2"]);
+        // SQLite has no `E''` string, and a ClickHouse heredoc is one string.
+        assert_eq!(texts(r"select e'\', 2 as x, '\' from (select 1 as e)", Dialect::Sqlite).unwrap(), [r"e'\'", "2 as x", r"'\'"]);
+        assert_eq!(texts("SELECT $h$a, b$h$ AS s, 2 AS t", Dialect::Clickhouse).unwrap(), ["$h$a, b$h$ AS s", "2 AS t"]);
+        assert_eq!(texts("SELECT 1 AS a // , b\n, ‘x, y’ AS s", Dialect::Clickhouse).unwrap(), ["1 AS a", "‘x, y’ AS s"]);
+        // A vertical tab is whitespace, and a no-break space is a name's on Postgres.
+        assert_eq!(texts("select\u{b}a,\u{b}b\u{b}from t", Dialect::Postgres).unwrap(), ["a", "b"]);
+        assert_eq!(texts("select a,\u{a0}b from t", Dialect::Postgres).unwrap(), ["a", "\u{a0}b"]);
     }
 }

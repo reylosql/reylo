@@ -150,7 +150,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     // What the engine prints of the statement, for the probes it describes, writes its strings
     // as the session reads them back.
     syntax::mysql::ast::set_backslash_escapes(dialect.0.backslash_escapes);
-    let statement = match lex::one_statement(sql, lexed, KINDS) {
+    let statement = match lex::one_statement(sql, lexed, Dialect::Mysql, KINDS) {
         Ok(statement) => statement,
         Err(message) => return Some(crate::analysis::bare(sql, lexed, Dialect::Mysql, vec![Diagnostic { message, start: 0, length: sql.trim_end().len().max(1), code: 10, server_code: None }])),
     };

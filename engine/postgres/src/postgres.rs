@@ -1093,7 +1093,7 @@ impl<'a> Engine<'a> {
             .collect();
 
         // Row count.
-        let (cardinality, reason) = self.cardinality(&rewritten.sql, &lex::first_word(sql, lexed), parsed.as_ref(), &described, &trust, &catalog);
+        let (cardinality, reason) = self.cardinality(&rewritten.sql, &lex::first_word(sql, lexed, Dialect::Postgres), parsed.as_ref(), &described, &trust, &catalog);
         let unique = result_keys(&rewritten.sql, parsed.as_ref(), &cardinality, &columns, &trust, &catalog);
         let key = shortest_key(&unique, &columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>());
         let order = result_order(&rewritten.sql, parsed.as_ref(), &cardinality, &columns, &trust, &catalog);
@@ -1201,7 +1201,7 @@ impl<'a> Engine<'a> {
         let mut oids = raw.params.clone();
         oids.extend(raw.columns.iter().map(|c| c.oid));
         self.types(&oids)?;
-        let kind = lex::first_word(sql, lexed);
+        let kind = lex::first_word(sql, lexed, Dialect::Postgres);
         // Postgres binds a parameter only in the commands it analyzes when it prepares them
         // (EXPLAIN, CALL, CREATE TABLE ... AS); in any other the server takes none, and a run that
         // passes one fails.

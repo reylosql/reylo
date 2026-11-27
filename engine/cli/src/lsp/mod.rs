@@ -4,7 +4,7 @@
 //!
 //! Everything that can wait runs off the message loop, each on a thread of its own: finding a project (its URL may run a command), analyzing a statement, and reading the schema. So a locked table or a silent server never holds up the editor, and requests are answered from what was last read.
 
-mod reading;
+pub(crate) mod reading;
 
 use crate::analyze::{untyped_params, Session};
 use reading::{catalog_key, created_tables, for_grammar, items, key, output_column, scopes, select_list, tokens, Class, Created, Lines, Named, Scopes, Source, SourceKind, Tok, RESERVED};
