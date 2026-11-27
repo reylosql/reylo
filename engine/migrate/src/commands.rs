@@ -1813,14 +1813,28 @@ fn leftover_filter(statement: &str) -> Option<String> {
     });
     let [create, drop, reindex] = &*PATTERNS;
     let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    let sql = statement.trim_end_matches(';').trim_end_matches(|c: char| c.is_ascii_whitespace());
+    // The statement as its tokens, so that a comment between two words is no name; a dotted name
+    // stays one word.
+    let mut sql = String::new();
+    let mut last = "";
+    for t in crate::sql::tokenize(statement, Dialect::Postgres) {
+        if !sql.is_empty() && t.text != "." && last != "." {
+            sql.push(' ');
+        }
+        sql.push_str(&t.text);
+        last = if t.text == "." { "." } else { "" };
+    }
+    let sql = sql.trim_end_matches(';').trim_end_matches(|c: char| c.is_ascii_whitespace());
     if let Some(c) = create.captures(sql) {
-        // An index is made in its table's schema, and named without one.
+        // An index is made in its table's schema, and named without one. The server keeps a name's
+        // first 63 bytes, as `name` does.
         let on = format!("i.indrelid = to_regclass({})", literal(&c[2]));
-        return Some(match c.get(1) {
-            Some(name) => format!("{on} and c.relname = (parse_ident({}, false))[1]", literal(name.as_str())),
-            None => on,
-        });
+        return match c.get(1).map(|m| m.as_str()) {
+            Some(name) if name.starts_with(|c: char| c == '"' || c == '_' || c.is_ascii_alphabetic() || !c.is_ascii()) => Some(format!("{on} and c.relname = ((parse_ident({}, false))[1])::name", literal(name))),
+            // No name the server would have taken, so no index it built.
+            Some(_) => None,
+            None => Some(on),
+        };
     }
     if let Some(c) = drop.captures(sql) {
         return Some(format!("c.oid = to_regclass({})", literal(&c[1])));
@@ -11157,7 +11171,9 @@ mod tests {
     fn an_index_cut_off_is_found_by_its_whole_name() {
         let f = |sql: &str| super::leftover_filter(sql).unwrap();
         // Postgres reads a U+3000 as part of an unquoted name; the server folds the name itself.
-        assert_eq!(f("create unique index concurrently users_email\u{3000} on users (email);"), "i.indrelid = to_regclass('users') and c.relname = (parse_ident('users_email\u{3000}', false))[1]");
+        assert_eq!(f("create unique index concurrently users_email\u{3000} on users (email);"), "i.indrelid = to_regclass('users') and c.relname = ((parse_ident('users_email\u{3000}', false))[1])::name");
+        // A comment between the words is no name.
+        assert_eq!(f("CREATE INDEX CONCURRENTLY /*review*/ ON app.t (x)"), "i.indrelid = to_regclass('app.t')");
         assert_eq!(f("drop index concurrently a\u{a0}b;"), "c.oid = to_regclass('a\u{a0}b')");
         assert_eq!(f("create index concurrently on \"T\"\n  (x)"), "i.indrelid = to_regclass('\"T\"')");
         assert!(f("reindex index concurrently Édition_IDX").contains("x.oid = to_regclass('Édition_IDX')) || '_ccnew')"));
