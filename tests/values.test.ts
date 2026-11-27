@@ -1173,6 +1173,9 @@ test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app
       assert.equal(writeJson(got, "postgres", fail), '{"n":9007199254740993}');
       assert.equal(gets, 1);
       assert.throws(() => writeJson(Object.defineProperty({}, "n", { enumerable: true, get: () => 2n ** 63n }), "sqlite", fail), /the BigInt 9223372036854775808, which SQLite reads/);
+      // Written by the spec's walk, a boxed boolean is the one it holds and a toJSON() is applied as it is.
+      const boxed = Object.assign(new Boolean(true), { valueOf: () => false });
+      assert.equal(writeJson({ b: boxed, c: { toJSON: Object.assign((key: string) => key, { call: null }) } }, "postgres", fail), '{"b":true,"c":"c"}');
     } finally {
       delete proto.toJSON;
     }
@@ -1181,6 +1184,14 @@ test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app
   assert.throws(() => writeJson([2n ** 64n], "mysql", fail), /^TypeError: at \/0 is the BigInt 18446744073709551616, which MySQL reads from JSON as a float: its 64-bit integers run from -9223372036854775808 to 18446744073709551615\.$/);
   assert.throws(() => writeJson({ n: 2n ** 63n }, "sqlite", fail), /^TypeError: at \/n is the BigInt 9223372036854775808, which SQLite reads from JSON as a float/);
   assert.equal(writeJson([2n ** 64n], "postgres", fail), "[18446744073709551616]");
+  // A hook given by a getter is found without running it, and still never reaches a BigInt.
+  Object.defineProperty(BigInt.prototype, "toJSON", { configurable: true, get(this: unknown) { return typeof this === "bigint" ? function (this: bigint) { return Number(this); } : undefined; } });
+  try {
+    assert.equal(writeJson({ n: 9007199254740993n }, "sqlite", fail), '{"n":9007199254740993}');
+    assert.equal(writeJson({ n: 1 }, "sqlite", fail), '{"n":1}');
+  } finally {
+    delete (BigInt.prototype as unknown as { toJSON?: unknown }).toJSON;
+  }
   // A getter runs once.
   let reads = 0;
   const once = Object.defineProperty({}, "n", { enumerable: true, get: () => (++reads === 1 ? 9007199254740993n : 1n) });

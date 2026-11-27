@@ -191,7 +191,8 @@ export function writeJson(v: unknown, dialect: Dialect, fail: (message: string) 
   // An app's `BigInt.prototype.toJSON` runs before any replacer sees the BigInt it turns into text
   // or a rounded number, so then the value is written by the algorithm below, which reads each
   // property once and a BigInt before its toJSON().
-  const bigintHook = typeof (BigInt.prototype as { toJSON?: unknown }).toJSON === "function";
+  // Found by its property, whose getter, if it has one, runs only when JSON.stringify reads it.
+  const bigintHook = Object.getOwnPropertyDescriptor(BigInt.prototype, "toJSON") !== undefined;
   if (rawJson !== undefined && !bigintHook) {
     const places = new WeakMap<object, string>();
     return JSON.stringify(v, function (this: object, key: string, x: unknown) {
@@ -255,12 +256,13 @@ function jsonNumber(n: number, at: string, dialect: Dialect, fail: (message: str
 function jsonOf(key: string, value: unknown, at: string, number: (n: number | bigint, at: string) => string): string | undefined {
   if (value !== null && (typeof value === "object" || typeof value === "function")) {
     const toJSON = (value as { toJSON?: unknown }).toJSON;
-    if (typeof toJSON === "function") value = toJSON.call(value, key);
+    if (typeof toJSON === "function") value = Reflect.apply(toJSON, value, [key]);
   }
   if (value instanceof RawJson) return value.text;
   if (value instanceof Number) value = Number(value);
   else if (value instanceof String) value = String(value);
-  else if (value instanceof Boolean) value = value.valueOf();
+  // A boxed boolean is the one it holds, as JSON.stringify reads it, whatever its valueOf() says.
+  else if (value instanceof Boolean) value = Boolean.prototype.valueOf.call(value);
   else if (isRawJson(value)) return value.rawJSON;
   if (typeof value === "number" || typeof value === "bigint") return number(value, at);
   if (value === null || typeof value !== "object") return JSON.stringify(value);
