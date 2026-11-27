@@ -64,9 +64,12 @@ pub fn plan(q: &Query, columns: &Columns) -> Plan {
     // aggregate's arguments valid under its GROUP BY, which a probe of them carries ([`group_of`]).
     let groups = group_of(select).into_iter().map(|g| (0, g)).collect();
     let rolled = usize::from(crate::mysql_nulls::rolls_up(&select.group_by));
-    let mut b = Builder { stack: vec![top], columns, ctes: with_names(q), rebound: crate::mysql_derived::rebound(q), wanted: Vec::new(), next_ctx: 0, drafts: Vec::new(), overflowed: false, booleans: Vec::new(), either: Vec::new(), digits: Vec::new(), reads: Reads::Itself, grouped, groups, in_aggregate: 0, rolled, rollups: (rolled > 0).then_some(0).into_iter().collect(), rowless: HashSet::new(), windows: select.named_window.clone() };
+    let mut b = Builder { stack: vec![top], columns, ctes: with_names(q), rebound: crate::mysql_derived::rebound(q), wanted: Vec::new(), next_ctx: 0, drafts: Vec::new(), overflowed: false, booleans: Vec::new(), either: Vec::new(), digits: Vec::new(), reads: Reads::Itself, grouped, groups, in_aggregate: 0, rolled, rollups: (rolled > 0).then_some(0).into_iter().collect(), keyed: HashSet::new(), rowless: HashSet::new(), windows: select.named_window.clone() };
     if b.may_be_rowless(select) {
         b.rowless.insert(0);
+    }
+    if b.may_group_shapes(select) {
+        b.keyed.insert(0);
     }
     let mut columns = Vec::new();
     for item in &select.projection {
@@ -118,6 +121,30 @@ fn names_output(item: &Expr, projection: &[SelectItem]) -> bool {
         Expr::Value(_) => true,
         Expr::Nested(inner) => names_output(inner, projection),
         Expr::Identifier(name) => projection.iter().any(|i| matches!(i, SelectItem::ExprWithAlias { alias, .. } if alias.value.eq_ignore_ascii_case(&name.value))),
+        _ => false,
+    }
+}
+
+/// Whether a GROUP BY item is a column: one named, or an alias or a position of the select list's
+/// that is one, and each member of a ROLLUP alike. A bare name that is also an alias of anything
+/// else is none, though MySQL takes a column of the FROM first, which the planning cannot see.
+fn names_column(item: &Expr, projection: &[SelectItem]) -> bool {
+    fn column(e: &Expr) -> bool {
+        match e {
+            Expr::Nested(inner) => column(inner),
+            Expr::Identifier(_) | Expr::CompoundIdentifier(_) => true,
+            _ => false,
+        }
+    }
+    match item {
+        Expr::Nested(inner) => names_column(inner, projection),
+        Expr::Rollup(sets) | Expr::Cube(sets) | Expr::GroupingSets(sets) => sets.iter().flatten().all(|k| names_column(k, projection)),
+        Expr::Identifier(name) => !projection.iter().any(|i| matches!(i, SelectItem::ExprWithAlias { expr, alias } if alias.value.eq_ignore_ascii_case(&name.value) && !column(expr))),
+        Expr::CompoundIdentifier(_) => true,
+        Expr::Value(v) if !projection.iter().any(|i| matches!(i, SelectItem::Wildcard(_) | SelectItem::QualifiedWildcard(..))) => match &v.value {
+            Value::Number(n, _) => n.parse::<usize>().ok().and_then(|n| projection.get(n.checked_sub(1)?)).is_some_and(|i| matches!(i, SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } if column(e))),
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -432,6 +459,9 @@ struct Builder<'a> {
     /// its rows before they are grouped, which its super-aggregate rows null nothing of; a column
     /// of a query around it that rolls up is NULL in that query's super-aggregate row all the same.
     rollups: HashSet<usize>,
+    /// The context ids of the queries that group WITH ROLLUP by what may be one of the values the
+    /// shapes speak for ([`Builder::may_group_shapes`]).
+    keyed: HashSet<usize>,
     /// The context ids of the queries that may aggregate with no GROUP BY ([`Builder::may_be_rowless`]),
     /// which return their one row over no rows too: a value that reads the row outside every
     /// aggregate's call ([`crate::mysql::reads_row`]) is NULL there, which its probe, with no
@@ -608,7 +638,7 @@ impl Builder<'_> {
                                 None => fields.push((key, value)),
                             }
                         }
-                        Shape::Object { fields, non_null: true }
+                        Shape::Object { fields, non_null: !self.rolled_key() }
                     }
                     // An aggregate over no rows is NULL, so the array is non-null only under a
                     // guard, under a plain GROUP BY, where every group has a row, or over a window
@@ -671,6 +701,9 @@ impl Builder<'_> {
                     self.rollups.insert(self.next_ctx);
                 }
                 self.stack.push(Level { ctx: self.next_ctx, from: select.from.clone(), with: q.with.clone() });
+                if self.may_group_shapes(select) {
+                    self.keyed.insert(self.next_ctx);
+                }
                 // The subquery's select list is outside its own aggregates, wherever it stands.
                 let in_aggregate = std::mem::take(&mut self.in_aggregate);
                 let shape = self.walk_as(inner, Reads::Result);
@@ -696,11 +729,18 @@ impl Builder<'_> {
                 // subquery of its one row that reads that row, whatever the subquery returns. The
                 // statement's own such columns are read whole, with the catalog's columns
                 // (`rowless` in `crate::mysql`); a query inside it is read here.
-                if around != 0 && self.in_aggregate == 0 && self.rowless.contains(&around) && crate::mysql::reads_row(e, self.columns) {
+                let shape = if around != 0 && self.in_aggregate == 0 && self.rowless.contains(&around) && crate::mysql::reads_row(e, self.columns) {
                     match shape {
                         Shape::Column { .. } => Shape::Nullable(Box::new(shape)),
                         other => force_nullable(other),
                     }
+                } else {
+                    shape
+                };
+                // A subquery the query around it may group by WITH ROLLUP is NULL in its
+                // super-aggregate rows ([`Builder::rolled_key`]).
+                if self.rolled_key() {
+                    force_nullable(shape)
                 } else {
                     shape
                 }
@@ -785,6 +825,48 @@ impl Builder<'_> {
         crate::mysql::lone_aggregate(select)
             || select.projection.iter().any(|i| matches!(i, SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } if self.own_aggregates(e) > 0))
             || select.having.as_ref().is_some_and(|having| self.own_aggregates(having) > 0)
+    }
+
+    /// Whether a query that groups WITH ROLLUP may group by one of the values the shapes speak for,
+    /// which its super-aggregate rows hold NULL in. The server nulls there every expression of the
+    /// select list, at any depth, that it takes for a GROUP BY item, and it compares them as it
+    /// resolves them, which the engine does not: `json_object('T', title)` is
+    /// `json_object('t', title)` under a case-insensitive collation, an alias stands for its item
+    /// inside an expression (`coalesce(o)`), and a column of a derived table, a WITH query or a
+    /// view is the expression it selects (measured on 8.4). A table's column is none of those
+    /// values, so a query is clear of them only where it groups by such columns alone: every item
+    /// a column ([`names_column`]), and every FROM in scope reads tables alone.
+    fn may_group_shapes(&self, select: &ast::Select) -> bool {
+        if !crate::mysql_nulls::rolls_up(&select.group_by) {
+            return false;
+        }
+        let ast::GroupByExpr::Expressions(keys, _) = &select.group_by else { return true };
+        !keys.iter().all(|k| names_column(k, &select.projection)) || !self.stack.iter().all(|l| self.reads_tables(&l.from))
+    }
+
+    /// Whether a FROM reads tables alone: no derived table, table function or WITH query in scope,
+    /// whose columns may be any expression. A view is a derived table in the copy the shapes are
+    /// planned over ([`crate::mysql_derived::materialized`]).
+    fn reads_tables(&self, from: &[TableWithJoins]) -> bool {
+        from.iter().all(|t| {
+            std::iter::once(&t.relation).chain(t.joins.iter().map(|j| &j.relation)).all(|factor| match factor {
+                TableFactor::Table { name, args: None, .. } => match name.0.as_slice() {
+                    [ast::ObjectNamePart::Identifier(one)] => !self.ctes.iter().any(|c| c.name.eq_ignore_ascii_case(&one.value)),
+                    [.., ast::ObjectNamePart::Identifier(_)] => true,
+                    _ => false,
+                },
+                TableFactor::NestedJoin { table_with_joins, .. } => self.reads_tables(std::slice::from_ref(table_with_joins.as_ref())),
+                _ => false,
+            })
+        })
+    }
+
+    /// Whether a value where the walk stands may be one a query in scope groups by WITH ROLLUP
+    /// ([`Builder::keyed`]), and so NULL in its super-aggregate rows: outside the arguments of that
+    /// query's aggregates, which read its rows before they are grouped, or in a query inside it.
+    fn rolled_key(&self) -> bool {
+        let ctx = self.stack[self.stack.len() - 1].ctx;
+        self.stack.iter().any(|l| self.keyed.contains(&l.ctx) && (l.ctx != ctx || self.in_aggregate == 0))
     }
 
     /// Whether the walk stands in the select list of a query that groups or aggregates, outside the

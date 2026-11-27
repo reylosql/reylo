@@ -66,10 +66,16 @@ rollup_arrayagg_outer_nested_sub.sql: many () -> { id: int | bigint?, o: json { 
 rollup_arrayagg_outer_truth.sql: many () -> { id: int | bigint?, o: json { a: (boolean | bigint?)[] }? }
 rollup_arrayagg_own_col.sql: one () -> { o: json { a: ({ t: varchar(≤20), u: int })[]? }? }
 rollup_bare_sub_no_agg.sql: many () -> { id: int | bigint?, o: json { k: int? }? }
+rollup_beside_key.sql: many () -> { title: varchar?, o: json { t: unknown?, n: unknown? } }
 rollup_correlated.sql: many () -> { id: int | bigint?, o: json { k: int?, c: bigint? }? }
 rollup_count.sql: many () -> { id: int | bigint?, o: json { k: int?, c: bigint? }? }
 rollup_cte_outer.sql: many () -> { o: json { k: bigint?, c: bigint }? }
 rollup_derived_outer.sql: many () -> { o: json { k: bigint?, c: bigint }? }
+rollup_key.sql: many () -> { o: json { t: varchar(≤20)? }?, n: bigint }
+rollup_key_expr.sql: many () -> { o: json { t: varchar(≤20)? }?, n: bigint }
+rollup_key_nested.sql: many () -> { o: json { o: { t: varchar(≤20)? }? }?, n: bigint }
+rollup_key_position.sql: many () -> { o: json { t: varchar(≤20)?, u: int? }?, n: bigint }
+rollup_key_subquery.sql: many () -> { o: json int?[]?, n: bigint }
 rollup_max_outer.sql: many () -> { id: int | bigint?, o: json { m: bigint?, c: bigint? }? }
 rollup_mid_level.sql: one () -> { o: json { k: int?, c: bigint? }? }
 rollup_nested_object.sql: many () -> { id: int | bigint?, o: json { o: { k: int? }, c: bigint? }? }
