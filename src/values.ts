@@ -1318,8 +1318,11 @@ function rawCopy(v: unknown, key = ""): unknown {
   if (v !== null && typeof v === "object" && typeof (v as { toJSON?: unknown }).toJSON === "function") v = (v as { toJSON(key: string): unknown }).toJSON(key);
   if (typeof v === "bigint") return rawInteger(v);
   if (v === null || typeof v !== "object" || (JSON as { isRawJSON?: (x: unknown) => boolean }).isRawJSON?.(v)) return v;
-  if (Array.isArray(v)) return Array.from(v, (x, i) => rawCopy(x, String(i)));
-  return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, rawCopy(x, k)]));
+  // Without what JSON.stringify leaves out, a key's function (a toJSON() among them), symbol or
+  // undefined, or writes as null in an array, so the driver serializes the copy as that text.
+  const skipped = (x: unknown) => x === undefined || typeof x === "function" || typeof x === "symbol";
+  if (Array.isArray(v)) return Array.from(v, (x, i) => (skipped(x) ? null : rawCopy(x, String(i))));
+  return Object.fromEntries(Object.entries(v).flatMap(([k, x]) => (skipped(x) ? [] : [[k, rawCopy(x, k)]])));
 }
 
 /** The integers MySQL and SQLite read from JSON as integers: SQLite's 64-bit signed ones, and MySQL's signed and unsigned ones. */
