@@ -31,6 +31,12 @@ if (!site) {
 }
 const target = path.resolve(site, 'docs-kit');
 const MANIFEST = '.synced.json';
+// Docs Kit's pages and routes import the site's config as `@/docs.config`, and every site type-checks
+// its copy, so a copy in a site without one fails the site's build.
+if (!check && !existsSync(path.resolve(site, 'docs.config.ts'))) {
+  console.error(`docs-kit: ${path.resolve(site)} has no docs.config.ts, which Docs Kit's pages and routes import; add it first (README.md, "A site's config and routes")`);
+  process.exit(1);
+}
 
 /** The files of a docs-kit tree, relative to it: package.json, README.md and everything in src/. */
 function files(root) {
@@ -67,7 +73,9 @@ function edited() {
   const { files: recorded } = JSON.parse(readFileSync(manifestFile, 'utf8'));
   const now = hashes(target);
   const names = new Set([...Object.keys(recorded), ...Object.keys(now)]);
-  return [...names].filter((name) => recorded[name] !== now[name]).sort();
+  // A site may keep the README out of its repository (Reylo's clone excludes it), so a copy without
+  // one was left out, not edited.
+  return [...names].filter((name) => recorded[name] !== now[name] && !(name === 'README.md' && !(name in now))).sort();
 }
 
 const changed = edited();
