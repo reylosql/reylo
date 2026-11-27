@@ -1794,7 +1794,7 @@ async fn leftovers(db: &mut Db, history: &[HistoryRow]) -> Result<Vec<Leftover>,
     for m in started {
         // The one statement, without the comments above it.
         let Some(statement) = split_statements(&m.sql, Dialect::Postgres).into_iter().next() else { continue };
-        let sql = statement.text.trim().trim_end_matches(';').trim();
+        let sql = statement.text.trim_end_matches(';').trim_end_matches(|c: char| c.is_ascii_whitespace());
         let found = if let Some(c) = create.captures(sql) {
             // An index is made in its table's schema, and named without one.
             let on = format!("i.indrelid = to_regclass({})", literal(&c[2]));
