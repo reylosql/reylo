@@ -106,8 +106,8 @@ function check(schema: Schema, value: unknown, path: string, out: Failure[], ass
     if (!types.some((t) => is(t, value))) return fail(out, path, `must be ${types.join(" or ")}, got ${kind(value)}`);
     // A whole number past 2^53 - 1 that only an integer admits may already be another one, which
     // JSON would store as given; elsewhere, as inside `not` and `if`, it is an integer as JSON
-    // Schema says.
-    if (asserted && typeof value === "number" && !Number.isSafeInteger(value) && Number.isInteger(value) && !types.some((t) => t !== "integer" && is(t, value))) {
+    // Schema says, and so is one past what a 64-bit integer holds, which no 64-bit column takes.
+    if (asserted && typeof value === "number" && !Number.isSafeInteger(value) && Math.abs(value) <= 2 ** 64 && Number.isInteger(value) && !types.some((t) => t !== "integer" && is(t, value))) {
       return fail(out, path, `must be integer, and ${BigInt(value)} is ${value < 0 ? "below -(2^53 - 1)" : "past 2^53 - 1"}, where a number stops being exact, so pass it as a BigInt`);
     }
   }
@@ -141,10 +141,15 @@ function check(schema: Schema, value: unknown, path: string, out: Failure[], ass
     if (s.items !== undefined) for (let i = prefix.length; i < value.length; i++) if (!check(s.items as Schema, item(value[i]), `${path}/${i}`, out, asserted)) return undefined;
     if (s.contains !== undefined) {
       let matched = 0;
-      for (let i = 0; i < value.length; i++) if (check(s.contains as Schema, item(value[i]), path, [], asserted)) matched++;
+      // At most counts the items JSON Schema counts: an unsafe whole number is an integer there.
+      let counted = 0;
+      for (let i = 0; i < value.length; i++) {
+        if (check(s.contains as Schema, item(value[i]), path, [], asserted)) matched++;
+        if (check(s.contains as Schema, item(value[i]), path, [], false)) counted++;
+      }
       const min = typeof s.minContains === "number" ? s.minContains : 1;
       if (matched < min) return fail(out, path, min === 1 ? "must contain an item that matches its `contains` schema" : `must contain at least ${min} items that match its \`contains\` schema`);
-      if (typeof s.maxContains === "number" && matched > s.maxContains) return fail(out, path, `must contain at most ${s.maxContains} items that match its \`contains\` schema`);
+      if (typeof s.maxContains === "number" && counted > s.maxContains) return fail(out, path, `must contain at most ${s.maxContains} items that match its \`contains\` schema`);
     }
   }
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
@@ -212,15 +217,13 @@ function check(schema: Schema, value: unknown, path: string, out: Failure[], ass
     if (!any) return fail(out, path, "must match one of its `anyOf` schemas");
   }
   if (Array.isArray(s.oneOf)) {
-    let matched = 0;
-    for (const sub of s.oneOf as Schema[]) {
-      const e = check(sub, value, path, [], asserted);
-      if (e) {
-        matched++;
-        e.forEach((k) => evaluated.add(k));
-      }
-    }
-    if (matched !== 1) return fail(out, path, matched === 0 ? "must match one of its `oneOf` schemas" : "must match only one of its `oneOf` schemas, and matches more");
+    // The alternatives JSON Schema counts, where an unsafe whole number is an integer; the one that
+    // matches is then checked as it asserts the value.
+    const matches = (s.oneOf as Schema[]).filter((sub) => check(sub, value, path, [], false));
+    if (matches.length !== 1) return fail(out, path, matches.length === 0 ? "must match one of its `oneOf` schemas" : "must match only one of its `oneOf` schemas, and matches more");
+    const e = check(matches[0]!, value, path, out, asserted);
+    if (!e) return undefined;
+    e.forEach((k) => evaluated.add(k));
   }
   if (s.not !== undefined && check(s.not as Schema, value, path, [], false)) return fail(out, path, "must not match its `not` schema");
   if (s.if !== undefined) {

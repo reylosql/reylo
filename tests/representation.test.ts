@@ -525,7 +525,7 @@ test("SQLite: JSON a statement builds is the object its type says on every drive
   const setup = new DatabaseSync(file);
   setup.exec(`create table users (id integer primary key, name text not null, github_id bigint, score real, active boolean not null default 1, doc text);
     create table posts (id integer primary key, user_id integer not null references users (id), title text not null, body text) strict;
-    insert into users values (1, 'ann', 9007199254740993, 1.5, 1, '[1]'), (2, 'bob', null, null, 0, null);
+    insert into users values (1, 'ann', 9007199254740991, 1.5, 1, '[1]'), (2, 'bob', null, null, 0, null);
     insert into posts values (10, 1, 'hello', null), (11, 1, 'world', 'b')`);
   setup.close();
   const sql = {
@@ -538,6 +538,7 @@ from users u where u.id = :id::int`,
     // a truth value is 1 or 0 there, and a BOOLEAN column what it holds.
     values: `select json_object('big', github_id, 'score', score, 'flag', active, 'more', id > 1, 'pair', json_array(name, score), 'doc', doc) as o,
   doc, json_object('n', name) || '' as glued from users order by id`,
+    rounded: "select json_object('big', github_id + 2) as o from users where id = 1",
   };
   // The types the module declares, as the type check renders them.
   writeFileSync(join(root, ".env"), "DATABASE_URL=file:./app.db\n");
@@ -552,22 +553,26 @@ from users u where u.id = :id::int`,
     assert.deepEqual(types, {
       profile: "profile: { user: { id: number; name: string }; posts: { id: number; title: string }[] }",
       values: "o: { big: number | null; score: number | null; flag: number | string; more: number; pair: [string, number | null]; doc: string | null }; doc: string | null; glued: string",
+      rounded: "o: { big: number | null }",
     });
   } finally {
     await session.close();
   }
   const profile = await built(root, "file:./app.db", "profile", sql.profile);
   const values = await built(root, "file:./app.db", "values", sql.values);
+  const rounded = await built(root, "file:./app.db", "rounded", sql.rounded);
   const ann = { profile: { user: { id: 1, name: "ann" }, posts: [{ id: 10, title: "hello" }, { id: 11, title: "world" }] } };
   const bob = { profile: { user: { id: 2, name: "bob" }, posts: [] } };
   const rows = [
-    { o: { big: 9007199254740992, score: 1.5, flag: 1, more: 0, pair: ["ann", 1.5], doc: "[1]" }, doc: "[1]", glued: '{"n":"ann"}' },
+    { o: { big: 9007199254740991, score: 1.5, flag: 1, more: 0, pair: ["ann", 1.5], doc: "[1]" }, doc: "[1]", glued: '{"n":"ann"}' },
     { o: { big: null, score: null, flag: 0, more: 1, pair: ["bob", null], doc: null }, doc: null, glued: '{"n":"bob"}' },
   ];
   const check = async (label: string, run: (q: any, params?: object) => unknown) => {
     assert.deepEqual(plain(await run(profile, { id: 1 })), ann, `${label}: the profile`);
     assert.deepEqual(plain(await run(profile, { id: 2 })), bob, `${label}: a user with no posts`);
     assert.deepEqual(plain(await run(values)), rows, `${label}: the values`);
+    // A 64-bit integer past 2^53 - 1 inside the document is refused, since JSON.parse rounds it.
+    await assert.rejects(async () => run(rounded), /Column "o" holds, inside its JSON at \/big, the integer 9007199254740992/, `${label}: an integer JSON.parse rounds`);
   };
   for (const safe of [false, true]) {
     const db = new Database(file);

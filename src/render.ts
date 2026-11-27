@@ -247,13 +247,26 @@ export function jsonNumbers(t: EngineType, inJson = false, dialect: Dialect = "p
  * engine writes for a document whose shape is no struct, `json_build_array(…)`'s or a
  * `json_object` with a computed key's, names one `{ "type": "integer", "format": "int64" }`.
  */
+/** Whether a schema admits a number at its top, which an alternative reading as nothing would leave unread. */
+function admitsNumber(schema: unknown): boolean {
+  if (schema === false) return false;
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return true;
+  const m = schema as Record<string, unknown>;
+  if (Array.isArray(m.anyOf)) return m.anyOf.some(admitsNumber);
+  if (Array.isArray(m.enum)) return m.enum.some((v) => typeof v === "number");
+  if ("const" in m) return typeof m.const === "number";
+  const kinds = kindsOf(m);
+  return !kinds.length || kinds.includes("number") || kinds.includes("integer");
+}
+
 function schemaNumbers(schema: unknown): JsonNumbers | undefined {
   if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return undefined;
   const m = schema as Record<string, unknown>;
   if (Array.isArray(m.anyOf)) {
-    // Each alternative's reading, where they agree: an integer or null reads as the integer.
-    const read = m.anyOf.map(schemaNumbers).filter((at) => at !== undefined);
-    return read.length && read.every((at) => JSON.stringify(at) === JSON.stringify(read[0])) ? read[0] : undefined;
+    // Each alternative's reading, where they agree: an integer or null reads as the integer, and an
+    // integer or a float as neither, since a float's number past 2^53 is exact.
+    const read = m.anyOf.map((s) => [schemaNumbers(s), s] as const).filter(([at, s]) => at !== undefined || admitsNumber(s));
+    return read.length && read.every(([at]) => at !== undefined && JSON.stringify(at) === JSON.stringify(read[0]![0])) ? read[0]![0] : undefined;
   }
   const kinds = kindsOf(m);
   if (kinds.includes("integer") && m.format === "int64" && kinds.every((k) => k === "integer" || k === "null")) return "integer";

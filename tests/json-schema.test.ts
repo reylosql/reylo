@@ -96,6 +96,12 @@ test("an integer takes a BigInt, checked exactly, and refuses a number past 2^53
   // Inside `not` and `if` it is still the integer JSON Schema calls it.
   assert.match(validate({ type: "number", not: { type: "integer" } }, 9007199254740996)!.message, /must not match its `not` schema/);
   assert.equal(validate({ if: { type: "integer" }, then: { minimum: 0 }, else: { type: "string" } }, 9007199254740996), undefined);
+  // So it is in what `oneOf` and `maxContains` count: 1e20 is both an integer and a number.
+  assert.match(validate({ oneOf: [{ type: "integer" }, { type: "number" }] }, 1e20)!.message, /must match only one of its `oneOf` schemas/);
+  assert.match(validate({ oneOf: [{ type: "integer" }, { type: "string" }] }, 1e19)!.message, /is past 2\^53 - 1/);
+  assert.match(validate({ type: "array", contains: { type: "integer" }, maxContains: 1 }, [5, 1e20])!.message, /must contain at most 1 items/);
+  // One past what a 64-bit integer holds is a whole number no 64-bit column takes, which JSON Schema calls an integer.
+  assert.equal(validate({ type: "integer" }, 1.2e52), undefined);
   // A number past 2^53 - 1 is still a number, and a BigInt is one too, as JSON writes it.
   assert.equal(validate({ type: "number" }, 9007199254740996), undefined);
   assert.equal(validate({ type: "number" }, 5n), undefined);

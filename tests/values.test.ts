@@ -1036,6 +1036,8 @@ test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app
   assert.throws(() => jsonStringify([2n ** 64n], "mysql"), /the BigInt 18446744073709551616, which MySQL reads from JSON as a float/);
   assert.throws(() => jsonStringify([2n ** 63n], "sqlite"), /which SQLite reads from JSON as a float: its 64-bit integers run from -9223372036854775808 to 9223372036854775807/);
   assert.equal(jsonStringify([2n ** 64n], "postgres"), "[18446744073709551616]");
+  // A value whose own toJSON() returns a BigInt.
+  assert.equal(jsonStringify({ id: { toJSON: () => 9007199254740993n } }), '{"id":9007199254740993}');
   const plain = { n: 1 };
   assert.equal(withRawIntegers(plain), plain, "no copy where it holds no BigInt");
 });

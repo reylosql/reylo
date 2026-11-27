@@ -286,6 +286,8 @@ test("the run time refuses an integer past 2^53 - 1 where a 64-bit integer stand
   const keyed = { kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "object", additionalProperties: { anyOf: [{ type: "integer", format: "int64" }, { type: "null" }] } } } as EngineType;
   assert.deepEqual(jsonNumbers(keyed, false, "sqlite"), { keys: [], others: "integer" });
   assert.deepEqual(jsonNumbers(doc(record([field("xs", tuple)]))), { keys: [["xs", { items: false, elements: [null, "integer"] }]] });
+  // An integer or a float at a place holds numbers a double holds exactly.
+  assert.equal(jsonNumbers({ kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "array", prefixItems: [{ anyOf: [{ type: "integer", format: "int64" }, { type: "number" }] }], items: false } } as EngineType), undefined);
   assert.equal(jsonNumbers({ kind: "json", schema: { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "array", items: { type: "integer" } } } as EngineType), undefined);
   assert.throws(() => numbersInJson([1, 9007199254740993], { items: false, elements: [null, "integer"] }, "a"), /at \/1, the integer 9007199254740992/);
   assert.deepEqual(numbersInJson([9007199254740993, 1], { items: false, elements: [null, "integer"] }, "a"), [9007199254740992, 1]);

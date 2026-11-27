@@ -608,7 +608,7 @@ function statement(query: QueryModule, params: ParamsInput) {
   });
   // Every MySQL and SQLite driver binds JSON text as text, which the database reads as JSON (a
   // structured parameter's is written already).
-  if (query.dialect !== "postgres") bound.values = bound.values.map((v, i) => (isJsonValue(query, bound.names[i]!, v) && query.inputs?.[bound.names[i]!]?.members === undefined ? jsonText(v, query.dialect) : v));
+  if (query.dialect !== "postgres") bound.values = bound.values.map((v, i) => (isJsonValue(query, bound.names[i]!, v) && query.inputs?.[bound.names[i]!]?.members === undefined ? namedJsonText(bound.names[i]!, v, query.dialect) : v));
   // SQLite holds an INTEGER in 64 bits, so a BigInt outside them has no exact form there.
   // better-sqlite3, node:sqlite, libSQL, Turso's engine and SQLite Wasm refuse one, but bun:sqlite
   // and Bun.sql keep its low 64 bits where the statement reads numbers (2^63 was stored as -2^63,
@@ -721,6 +721,16 @@ const JSON_NULL: unique symbol = Symbol("JSON null");
 
 /** A JSON parameter's value as JSON: `JSON_NULL` as null. */
 export const jsonValue = (v: unknown) => (v === JSON_NULL ? null : v);
+
+/** A JSON parameter's text, a refusal of a BigInt in it naming the parameter. */
+function namedJsonText(name: string, v: unknown, dialect: Dialect): string {
+  try {
+    return jsonText(v, dialect);
+  } catch (e) {
+    if (e instanceof ParameterError) throw new ParameterError(`Parameter "${name}": ${e.message}`);
+    throw e;
+  }
+}
 
 /** A JSON parameter's value as the JSON text a driver binds, each BigInt in it as its digits. */
 export const jsonText = (v: unknown, dialect?: Dialect) => jsonStringify(jsonValue(v), dialect);

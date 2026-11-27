@@ -1283,8 +1283,10 @@ export function jsonStringify(v: unknown, dialect?: Dialect): string {
     }
   }
   return JSON.stringify(v, function (this: Record<string, unknown>, key: string, x: unknown) {
+    // The held value is the BigInt before an app's `BigInt.prototype.toJSON` turns it into text;
+    // `x` is the one a value's own toJSON() returns.
     const held = this[key];
-    return typeof held === "bigint" ? rawInteger(held, dialect) : x;
+    return typeof held === "bigint" ? rawInteger(held, dialect) : typeof x === "bigint" ? rawInteger(x, dialect) : x;
   });
 }
 
