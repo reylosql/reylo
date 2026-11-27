@@ -439,6 +439,9 @@ impl<'a> From<'a> {
         }
         match e {
             Expr::Identifier(_) if !bare => false,
+            // In an ON clause, a qualifier this FROM also has may name its item rather than the
+            // subquery's: a sibling of the join, which the clause does not see, may reuse it.
+            Expr::CompoundIdentifier(parts) if !bare && parts.len() >= 2 && self.named(&parts[parts.len() - 2].value).is_some() => false,
             Expr::Identifier(_) | Expr::CompoundIdentifier(_) => match sub.place_expr(e) {
                 Some(Placed::Item(..)) => true,
                 Some(Placed::Outside) => match self.place_expr(e) {
@@ -542,11 +545,7 @@ impl<'a> From<'a> {
     fn determined(&self, mut done: Vec<bool>, keys: &[Vec<Key>], constant: bool) -> Vec<bool> {
         let n = self.items.len();
         let per_row: Vec<bool> = self.items.iter().map(|it| matches!(it.source, Source::Lateral(..))).collect();
-        // The server may merge a derived table, a WITH query or a view into the query that reads
-        // it and call a function of it again for each row it meets, so a determined one that calls
-        // one whose every call may differ ([`calls_nondeterministic`]) is still no one value to pin
-        // another item to.
-        let varies: Vec<bool> = self.items.iter().map(|it| matches!(&it.source, Source::Query(q, ..) | Source::Lateral(q, _) if calls_nondeterministic(&q.to_string()))).collect();
+        let varies = self.varying();
         loop {
             let mut changed = false;
             let steady: Vec<bool> = done.iter().zip(&varies).map(|(d, v)| *d && !v).collect();
@@ -574,6 +573,15 @@ impl<'a> From<'a> {
         }
     }
 
+    /// Which items' columns may differ from row to row however few rows they have: the server may
+    /// merge a derived table, a WITH query or a view into the query that reads it and call a
+    /// function of it again for each row it meets, where it calls one whose every call may differ
+    /// ([`calls_nondeterministic`]). Such an item pins no other, and its columns are no one value
+    /// to group or to tell rows apart by.
+    fn varying(&self) -> Vec<bool> {
+        self.items.iter().map(|it| matches!(&it.source, Source::Query(q, ..) | Source::Lateral(q, _) if calls_nondeterministic(&q.to_string()))).collect()
+    }
+
     fn all_keys(&self) -> Vec<Vec<Key>> {
         (0..self.items.len()).map(|i| self.item_keys(i)).collect()
     }
@@ -583,7 +591,7 @@ impl<'a> From<'a> {
     fn pinned(&self, e: &Expr, constant: &[bool]) -> bool {
         match self.place_expr(e) {
             Some(Placed::Item(i, column)) => {
-                constant[i] || {
+                (constant[i] && !self.varying()[i]) || {
                     let class = self.class(i, &column);
                     let none = vec![false; self.items.len()];
                     self.conjuncts.iter().any(|c| c.may_pin.is_none() && self.equates(c.expr, i, &column, class, &none))

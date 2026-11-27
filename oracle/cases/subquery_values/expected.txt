@@ -1,5 +1,7 @@
 derived_random.sql: many () -> { id: int4 } key (id)
 derived_stable.sql: at_most_one () -> { id: int4 }
+derived_view_volatile.sql: many () -> { id: int4 } key (id)
+distinct_random.sql: many () -> { id: int4 } key (id)
 key_any.sql: at_most_one (id: int4) -> { id: int4 }
 key_in.sql: at_most_one (id: int4) -> { id: int4 }
 key_in_correlated.sql: many () -> { id: int4 } key (id)

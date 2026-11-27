@@ -1335,17 +1335,7 @@ impl<'a> From<'a> {
         // The catalog each WITH query's and subquery's statement is read in, made once.
         let scopes: Vec<OnceCell<Catalog>> = (0..n).map(|_| OnceCell::new()).collect();
         let inside = |i: usize| scopes[i].get_or_init(|| self.inside(i, catalog));
-        // A subquery that calls something volatile runs again where the plan scans it again, as
-        // the inner side of a nested loop does, so a determined one's columns are still no one
-        // value to pin another item to. A WITH query that calls one is materialized, and read once.
-        let varies: Vec<bool> = self
-            .items
-            .iter()
-            .map(|item| match &item.source {
-                Source::Subquery(sub, _) => calls_volatile(&protobuf::Node { node: Some(NodeEnum::SelectStmt(Box::new((*sub).clone()))) }, catalog),
-                _ => false,
-            })
-            .collect();
+        let varies = self.varying_items(catalog);
         loop {
             let mut changed = false;
             let steady: Vec<bool> = done.iter().zip(&varies).map(|(d, v)| *d && !v).collect();
@@ -1436,6 +1426,22 @@ impl<'a> From<'a> {
             Source::Enclosing(name) => enclosing_body(catalog, name, |body, scope, own| f(body, scope, &overlay(own))),
             _ => None,
         }
+    }
+
+    /// Which items' columns may differ from scan to scan however few rows they have: a subquery
+    /// or a view that calls something volatile, its views' definitions included
+    /// ([`varies_through_views`]), runs again where the plan scans it again, as the inner side of
+    /// a nested loop does. Such an item pins no other, and its columns are no one value to group
+    /// or to tell rows apart by. A WITH query that calls one is materialized, and read once.
+    fn varying_items(&self, catalog: &Catalog) -> Vec<bool> {
+        self.items
+            .iter()
+            .map(|item| match &item.source {
+                Source::Subquery(sub, _) => varies_through_views(&protobuf::Node { node: Some(NodeEnum::SelectStmt(Box::new((*sub).clone()))) }, catalog, VIEW_DEPTH),
+                Source::Relation(rv) => catalog.views.get(&catalog_name(rv)).is_some_and(|definition| view_varies(definition, catalog, VIEW_DEPTH)),
+                _ => false,
+            })
+            .collect()
     }
 
     /// The catalog the statement of subquery or WITH query `i` is read in ([`Catalog::inside`]).
@@ -1740,12 +1746,14 @@ impl<'a> From<'a> {
         }
         if let Some(NodeEnum::ColumnRef(c)) = expr.node.as_ref() {
             let Some((i, column)) = self.column(c, catalog) else { return false };
+            let varies = self.varying_items(catalog);
+            let constant: Vec<bool> = constant.iter().zip(&varies).map(|(c, v)| *c && !v).collect();
             if constant[i] {
                 return true;
             }
             let Source::Relation(rv) = &self.items[i].source else { return false };
             let relation = catalog_name(rv);
-            return self.conjuncts.iter().any(|k| k.may_pin.is_none() && self.equates(k.node, i, &relation, &column, constant, catalog));
+            return self.conjuncts.iter().any(|k| k.may_pin.is_none() && self.equates(k.node, i, &relation, &column, &constant, catalog));
         }
         self.reads(expr, catalog).is_some_and(|read| read.is_empty()) && !calls_volatile(expr, catalog)
     }
@@ -3996,6 +4004,49 @@ fn one_row_in(node: &protobuf::Node) -> Option<(&protobuf::Node, &SelectStmt)> {
     }
     let Some(NodeEnum::SelectStmt(sub)) = l.subselect.as_deref()?.node.as_ref() else { return None };
     Some((l.testexpr.as_deref()?, sub))
+}
+
+/// How many views deep [`varies_through_views`] reads before it takes a view to vary.
+const VIEW_DEPTH: usize = 4;
+
+/// Whether a statement calls something volatile ([`calls_volatile`]), in its own text or in the
+/// definition of a view it reads, `depth` views deep at most.
+fn varies_through_views(node: &protobuf::Node, catalog: &Catalog, depth: usize) -> bool {
+    if calls_volatile(node, catalog) {
+        return true;
+    }
+    fn views<'v>(v: &Value, catalog: &'v Catalog, out: &mut Vec<&'v String>) {
+        match v {
+            Value::Object(map) => map.iter().for_each(|(key, child)| {
+                if key == "RangeVar" {
+                    let part = |name: &str| child.get(name).and_then(Value::as_str).unwrap_or_default();
+                    if let Some(definition) = catalog.views.get(&crate::analyze::relation_name(part("schemaname"), part("relname"))) {
+                        out.push(definition);
+                    }
+                }
+                views(child, catalog, out);
+            }),
+            Value::Array(items) => items.iter().for_each(|i| views(i, catalog, out)),
+            _ => {}
+        }
+    }
+    let Ok(tree) = serde_json::to_value(node) else { return true };
+    let mut read = Vec::new();
+    views(&tree, catalog, &mut read);
+    read.into_iter().any(|definition| view_varies(definition, catalog, depth))
+}
+
+/// Whether a view's definition calls something volatile ([`varies_through_views`]); a definition
+/// past `depth`, or one the parser does not read, may.
+fn view_varies(definition: &str, catalog: &Catalog, depth: usize) -> bool {
+    if depth == 0 {
+        return true;
+    }
+    let Ok(parsed) = crate::stack::parse(definition) else { return true };
+    match parsed.protobuf.stmts.first().and_then(|s| s.stmt.as_deref()) {
+        Some(node) => varies_through_views(node, catalog, depth - 1),
+        None => true,
+    }
 }
 
 /// Whether a statement reads a view anywhere in it, by any name the catalog knows as one.

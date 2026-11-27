@@ -4,3 +4,5 @@ create table posts (id int primary key, user_id int not null, title text not nul
 insert into users values (1, 'a@x', 'a'), (2, null, 'b'), (3, 'c@x', 'c');
 insert into posts values (1, 1, 'x'), (2, 1, 'y'), (3, 2, 'z');
 create view recent_posts as select id, user_id from posts where id > 0;
+create sequence numbering;
+create view numbered_posts as select p.id as post_id, nextval('numbering')::int as id from posts p;
