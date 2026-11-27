@@ -1141,6 +1141,8 @@ test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app
   let reads = 0;
   const once = Object.defineProperty(() => 1, "toJSON", { get: () => (reads++ === 0 ? (key: string) => key : undefined) });
   assert.equal(JSON.stringify(withRawIntegers({ id: 1n, once })), '{"id":1,"once":"once"}');
+  const hook = Object.assign((key: string) => key, { call: null });
+  assert.equal(JSON.stringify(withRawIntegers({ id: 1n, c: { toJSON: hook } })), '{"id":1,"c":"c"}');
   const plain = { n: 1 };
   assert.equal(withRawIntegers(plain), plain, "no copy where it holds no BigInt");
 });

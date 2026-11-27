@@ -1327,7 +1327,7 @@ const LEFT_OUT: unique symbol = Symbol("left out");
 function rawValue(v: unknown, key: string): unknown {
   if ((typeof v === "object" || typeof v === "function") && v !== null) {
     const hook = (v as { toJSON?: unknown }).toJSON;
-    if (typeof hook === "function") v = (hook as (key: string) => unknown).call(v, key);
+    if (typeof hook === "function") v = Reflect.apply(hook, v, [key]);
   }
   if (typeof v === "bigint") return rawInteger(v);
   if (v === undefined || typeof v === "function" || typeof v === "symbol") return LEFT_OUT;
