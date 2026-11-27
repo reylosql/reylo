@@ -121,7 +121,9 @@ pub fn erroring_columns(sql: &str, opaque: &[(usize, usize)]) -> Option<Vec<Stri
     for list in lists(&t, sql) {
         let (k, _) = list?;
         items(&t, sql, k, &mut |from, to| {
-            if !(from..to.saturating_sub(2)).any(|j| is(&t, sql, j, "error") && is(&t, sql, j + 1, "on") && is(&t, sql, j + 2, "error")) {
+            // A comment between the clause's words is a space.
+            let words: Vec<usize> = (from..to).filter(|&j| !(t[j].tok == Tok::Opaque && crate::lex::is_comment(&sql[t[j].start..]))).collect();
+            if !words.windows(3).any(|w| is(&t, sql, w[0], "error") && is(&t, sql, w[1], "on") && is(&t, sql, w[2], "error")) {
                 return;
             }
             // A name the scan splits (`a$b`) runs into the token after it, where a type follows a
@@ -222,7 +224,8 @@ fn items(t: &[Token], sql: &str, k: usize, f: &mut dyn FnMut(usize, usize)) {
         if from >= to {
             continue;
         }
-        if is(t, sql, from, "nested") {
+        // `NESTED [PATH] '…' COLUMNS (…)`, where a column named `nested` has its type next.
+        if is(t, sql, from, "nested") && (is(t, sql, from + 1, "path") || t.get(from + 1).is_some_and(|x| x.tok == Tok::Opaque && sql[x.start..].starts_with('\''))) {
             if let Some(j) = (from..to).find(|&j| is(t, sql, j, "columns") && t.get(j + 1).is_some_and(|x| x.tok == Tok::Open)) {
                 items(t, sql, j + 1, f);
             }
@@ -316,6 +319,11 @@ mod tests {
             Some(vec!["A".to_string(), "c d".to_string()])
         );
         assert_eq!(named("select 'json_table(x, ''$'' columns (n int path ''$'' error on error))'"), Some(vec![]));
+        // A comment inside the clause, and a column named `nested`, beside a NESTED clause without PATH.
+        assert_eq!(
+            named("select * from json_table(?, '$' columns (a int path '$.a' error /* strict */ on -- here\n error, nested varchar(4) path '$.n' error on error, nested '$.m[*]' columns (m int path '$' error on error))) j"),
+            Some(vec!["a".to_string(), "nested".to_string(), "m".to_string()])
+        );
         assert_eq!(named("select * from json_table(?, '$') j"), None);
     }
 
