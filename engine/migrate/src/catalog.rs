@@ -1885,13 +1885,11 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
         db.exec("set session sql_quote_show_create = 1").await?;
     }
     let views = mysql_views(db, &strip).await;
-    if unquoted {
-        db.exec(&format!("set session sql_mode = {}", literal(&mode))).await?;
-    }
-    if !quote {
-        db.exec("set session sql_quote_show_create = 0").await?;
-    }
+    let mode = if unquoted { db.exec(&format!("set session sql_mode = {}", literal(&mode))).await } else { Ok(()) };
+    let quote = if quote { Ok(()) } else { db.exec("set session sql_quote_show_create = 0").await };
     lines.extend(views?);
+    mode?;
+    quote?;
 
     // Each routine's parameters are read in a query of their own and joined here, not in a
     // subquery correlated with the routines: Vitess, which PlanetScale's MySQL runs behind, plans

@@ -112,7 +112,10 @@ impl Migrator {
             return Err(Error::new(format!("reylo::migrate!(): {refusal}")));
         }
         let mut conn = pool.acquire().await.map_err(|e| Error::new(format!("reylo::migrate!() could not take a connection from the pool: {e}")))?;
-        if command == Command::Deploy && DB::DIALECT != Dialect::Sqlite {
+        // A MySQL run changes its session's settings while it reads (`keep`, and the quoting the
+        // catalog reads views with), and one cut short restores nothing: its connection goes back
+        // to no pool.
+        if (command == Command::Deploy && DB::DIALECT != Dialect::Sqlite) || DB::DIALECT == Dialect::Mysql {
             conn.close_on_drop();
         }
         let mut db = Db::Host(DB::session(conn));
