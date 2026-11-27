@@ -939,12 +939,12 @@ test("mysql: mariadb and PlanetScale, which write an array as a list of values, 
     role = "admin";
   }
   await execute(recording as never, update, { name: new Role() });
-  // A Date from another realm, and long.js's Long, which mariadb 2 writes as its integer, stay the driver's.
+  // A Date from another realm stays the driver's, and long.js's Long, -2^40 and 2^64 - 1 here, goes as the BigInt it holds.
   const date = runInNewContext("new Date(0)");
-  const long = { low: 1, high: 0, unsigned: false, __isLong__: true };
   await execute(recording as never, update, { name: date });
-  await execute(recording as never, update, { name: long });
-  assert.deepEqual(given, [['{"role":"admin"}'], [point], [stream], [boxed], ['{"role":"admin"}'], [date], [long]]);
+  await execute(recording as never, update, { name: { low: 0, high: -256, unsigned: false, __isLong__: true } });
+  await execute(recording as never, update, { name: { low: -1, high: -1, unsigned: true, __isLong__: true } });
+  assert.deepEqual(given, [['{"role":"admin"}'], [point], [stream], [boxed], ['{"role":"admin"}'], [date], [-(2n ** 40n)], [2n ** 64n - 1n]]);
   assert.equal(given[2]![0], stream);
 });
 

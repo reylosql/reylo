@@ -780,13 +780,18 @@ const GEO_TYPES = new Set(["Point", "LineString", "Polygon", "MultiPoint", "Mult
  * JSON text, as that text, since the app's permitSetMultiParamEntries would write it as `key` =
  * value pairs, which a per-query option does not turn off on mariadb 3. An object the driver
  * writes otherwise stays the driver's to write: bytes, a Date (from any realm, as it tells one by
- * its tag), a stream (an object with pipe() and read()), a boxed string, long.js's Long, which
- * mariadb 2 writes as its integer, a GeoJSON geometry and one with toSqlString().
+ * its tag), a stream (an object with pipe() and read()), a boxed string, a GeoJSON geometry and
+ * one with toSqlString(). A long.js Long goes as the BigInt it holds, which every version writes as
+ * one integer: mariadb 2 writes a Long as its integer, and mariadb 3 as any other object.
  */
 function asMariadbValue(v: unknown): unknown {
   if (v === null || typeof v !== "object" || v instanceof Uint8Array || v instanceof String || Object.prototype.toString.call(v) === "[object Date]") return v;
-  const own = v as { pipe?: unknown; read?: unknown; toSqlString?: unknown; type?: unknown; __isLong__?: unknown };
-  if ((typeof own.pipe === "function" && typeof own.read === "function") || typeof own.toSqlString === "function" || own.__isLong__ === true || GEO_TYPES.has(own.type as string)) return v;
+  const own = v as { pipe?: unknown; read?: unknown; toSqlString?: unknown; type?: unknown; __isLong__?: unknown; low?: unknown; high?: unknown; unsigned?: unknown };
+  if (own.__isLong__ === true && Number.isInteger(own.low) && Number.isInteger(own.high)) {
+    const bits = (BigInt((own.high as number) >>> 0) << 32n) | BigInt((own.low as number) >>> 0);
+    return own.unsigned === true ? bits : BigInt.asIntN(64, bits);
+  }
+  if ((typeof own.pipe === "function" && typeof own.read === "function") || typeof own.toSqlString === "function" || GEO_TYPES.has(own.type as string)) return v;
   return JSON.stringify(v);
 }
 
