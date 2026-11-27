@@ -66,35 +66,34 @@ fn not_builtin(server: Option<&[Vec<Value>]>) -> HashSet<String> {
     MOVED_OUT.iter().filter(|(from, _)| at >= *from).flat_map(|(_, moved)| moved.iter().map(|n| n.to_string())).collect()
 }
 
-/// One row per column of every unique index of the named tables, in key order, with the column's
-/// type. `?` is the comma-joined table names, because MySQL binds no arrays. A key part over an
-/// expression (MySQL 8.0.13's functional indexes) has no column name.
+/// One row per column of every unique index of a table, in key order, with the column's type.
+/// `?` is the table's name, compared as the server compares names: `find_in_set` would split a name
+/// that holds a comma ([`by_table`]). A key part over an expression (MySQL 8.0.13's functional indexes) has no column name.
 const UNIQUE_KEYS_QUERY: &str = "select s.table_name, s.index_name, s.column_name, c.data_type from information_schema.statistics s \
     left join information_schema.columns c on c.table_schema = s.table_schema and c.table_name = s.table_name and c.column_name = s.column_name \
-    where s.table_schema = database() and s.non_unique = 0 and find_in_set(s.table_name, ?) order by s.table_name, s.index_name, s.seq_in_index";
+    where s.table_schema = database() and s.non_unique = 0 and s.table_name = ? order by s.table_name, s.index_name, s.seq_in_index";
 
-/// One row per column of the named tables and views of the current schema, in order, with its
-/// type. `?` is the comma-joined table names.
+/// One row per column of a table or a view of the current schema, in order, with its type. `?` is
+/// its name.
 const KEY_COLUMNS_QUERY: &str = "select c.table_name, c.column_name, c.data_type from information_schema.columns c \
-    where c.table_schema = database() and find_in_set(c.table_name, ?) order by c.table_name, c.ordinal_position";
+    where c.table_schema = database() and c.table_name = ? order by c.table_name, c.ordinal_position";
 
-/// One row per view among the named tables of the current schema: its name, its defining SELECT
-/// as the server stores it (every name qualified with the schema), and the schema. `?` is the
-/// comma-joined names.
+/// The view of the current schema of a name, if it is one: its name, its defining SELECT as the
+/// server stores it (every name qualified with the schema), and the schema. `?` is the name.
 const VIEW_DEFINITIONS_QUERY: &str = "select v.table_name, v.view_definition, v.table_schema from information_schema.views v \
-    where v.table_schema = database() and find_in_set(v.table_name, ?)";
+    where v.table_schema = database() and v.table_name = ?";
 
-/// One row per column of the named tables and views of the current schema. `?` is the
-/// comma-joined table names.
+/// One row per column of a table or a view of the current schema. `?` is its name.
 const TABLE_COLUMNS_QUERY: &str = "select c.table_name, c.column_name from information_schema.columns c \
-    where c.table_schema = database() and find_in_set(c.table_name, ?) order by c.table_name, c.ordinal_position";
+    where c.table_schema = database() and c.table_name = ? order by c.table_name, c.ordinal_position";
 
-/// One row per enforced CHECK of the named tables of the current database: the table, and the
-/// CHECK as `information_schema` prints it ([`check_clause`]). `?` is the comma-joined table
-/// names. A server before 8.0.16 has neither table, and its error is no CHECK.
-const CHECKS_QUERY: &str = "select tc.table_name, cc.check_clause from information_schema.table_constraints tc \
+/// One row per enforced CHECK of a table of the current database: the table, named as a column's
+/// origin in the prepare names it ([`crate::mysql_params::TYPES_QUERY`]), and the CHECK as
+/// `information_schema` prints it ([`check_clause`]). `?` is the table's name. A server before
+/// 8.0.16 has neither table, and its error is no CHECK.
+const CHECKS_QUERY: &str = "select if(@@lower_case_table_names = 2, lower(tc.table_name), tc.table_name), cc.check_clause from information_schema.table_constraints tc \
     join information_schema.check_constraints cc on cc.constraint_schema = tc.constraint_schema and cc.constraint_name = tc.constraint_name \
-    where tc.table_schema = database() and tc.constraint_type = 'CHECK' and tc.enforced = 'YES' and find_in_set(tc.table_name, ?) \
+    where tc.table_schema = database() and tc.constraint_type = 'CHECK' and tc.enforced = 'YES' and tc.table_name = ? \
     order by tc.table_name, tc.constraint_name";
 
 /// The statements the MySQL analysis reads; any other is a command ([`lex::Statement`]).
@@ -403,7 +402,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
         if column.is_empty() || !traced.as_ref()?.iter().any(|t| t.eq_ignore_ascii_case(table)) {
             return None;
         }
-        typed.columns.get(&(table.to_ascii_lowercase(), column.to_ascii_lowercase())).cloned()
+        typed.columns.get(&(table.to_string(), column.to_ascii_lowercase())).cloned()
     };
     // A result column that is an ENUM or a SET column itself has the labels its column declares.
     let labelled_of = |c: &crate::api::MysqlColumn| -> Option<Type> {
@@ -411,7 +410,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
         if column.is_empty() || !traced.as_ref()?.iter().any(|t| t.eq_ignore_ascii_case(table)) {
             return None;
         }
-        typed.labelled.get(&(table.to_ascii_lowercase(), column.to_ascii_lowercase())).cloned()
+        typed.labelled.get(&(table.to_string(), column.to_ascii_lowercase())).cloned()
     };
     // The character set a result column's table column stores its values in, by the same origin.
     let charset_of = |c: &crate::api::MysqlColumn| -> Option<String> {
@@ -1311,10 +1310,10 @@ impl Owners<'_> {
                     // A WITH query hides a table of its name; only one named exactly as the
                     // reference names it is surely the one read.
                     let known = match name.0.as_slice() {
-                        [ast::ObjectNamePart::Identifier(t)] if alias.as_ref().is_none_or(|a| a.columns.is_empty()) => match self.ctes.iter().rev().find(|(cte, _)| cte.eq_ignore_ascii_case(&t.value)) {
-                            Some((cte, columns)) if *cte == t.value => Some(columns.clone()),
-                            Some(_) => None,
-                            None => match self.columns.get(&t.value) {
+                        [ast::ObjectNamePart::Identifier(t)] if alias.as_ref().is_none_or(|a| a.columns.is_empty()) => match crate::mysql_names::with_query(self.ctes.iter().map(|(cte, _)| cte.as_str()), &t.value) {
+                            crate::mysql_names::Reads::With(at) => Some(self.ctes[at].1.clone()),
+                            crate::mysql_names::Reads::Unknown => None,
+                            crate::mysql_names::Reads::Table => match self.columns.get(&t.value) {
                                 Some(columns) => Some(columns.clone()),
                                 None => {
                                     self.wanted.push(t.value.clone());
@@ -2836,6 +2835,8 @@ pub(crate) struct Keys {
     /// The WITH queries of the statement MySQL may read otherwise where they are read
     /// ([`crate::mysql_derived::rebound`]), whose rows are not followed.
     pub(crate) rebound: crate::mysql_derived::Rebound,
+    /// The names the catalog's rows of each name asked came back under ([`Keys::name`]).
+    answers: crate::mysql_names::Answers,
 }
 
 /// What a value compares as. MySQL compares a string with a number as two doubles, so `'01'`,
@@ -2875,9 +2876,45 @@ impl Class {
 }
 
 /// A catalog query of one table's name, asked of each of `tables` on its own, so that a later
-/// statement naming it reads no more ([`Host::query_each`]).
+/// statement naming it reads no more ([`Host::query_each`]). Each query compares `table_name = ?`,
+/// which matches the one name as the server compares names.
 pub(crate) fn by_table(host: &Host, sql: &str, tables: &[String]) -> Lazy<Result<Vec<Vec<Value>>, reylo_engine_core::api::DbError>> {
     host.query_each(sql, tables.iter().map(|t| vec![json!(t)]), Scope::Statement)
+}
+
+/// [`by_table`], with the names each table's rows came back under, by their first column
+/// ([`crate::mysql_names::Answers`]).
+pub(crate) fn answered_by_table(host: &Host, sql: &str, tables: &[String]) -> Lazy<Result<(Vec<Vec<Value>>, crate::mysql_names::Answers), reylo_engine_core::api::DbError>> {
+    let (mut rows, mut answers, mut error, mut pending) = (Vec::new(), crate::mysql_names::Answers::default(), None, false);
+    for table in tables {
+        if answers.0.contains_key(table) {
+            continue;
+        }
+        match host.query(sql, vec![json!(table)], Scope::Statement) {
+            Some(Ok(found)) => {
+                let mut names: Vec<String> = Vec::new();
+                for name in found.iter().filter_map(|row| row.first().and_then(as_str)) {
+                    if !names.iter().any(|n| n == name) {
+                        names.push(name.to_string());
+                    }
+                }
+                answers.0.insert(table.clone(), names);
+                rows.extend(found);
+            }
+            Some(Err(e)) => {
+                answers.0.insert(table.clone(), Vec::new());
+                error = error.or(Some(e));
+            }
+            None => {
+                answers.0.insert(table.clone(), Vec::new());
+                pending = true;
+            }
+        }
+    }
+    if pending {
+        return None;
+    }
+    Some(error.map_or(Ok((rows, answers)), Err))
 }
 
 /// The columns of `tables`, each table by its name as given: a table the server has under
@@ -2907,7 +2944,7 @@ fn documents(statement: Option<&Statement>, raw: &MysqlDescribe, host: &Host) ->
         .filter_map(|(i, c)| {
             let (table, column) = (c.org_table.as_deref()?, c.org_name.as_deref()?);
             let read = c.r#type == 245 && !column.is_empty() && tables.iter().any(|t| t.eq_ignore_ascii_case(table));
-            read.then(|| (i, table.to_ascii_lowercase(), column.to_ascii_lowercase()))
+            read.then(|| (i, table.to_string(), column.to_ascii_lowercase()))
         })
         .collect();
     if wanted.is_empty() {
@@ -2926,7 +2963,7 @@ fn documents(statement: Option<&Statement>, raw: &MysqlDescribe, host: &Host) ->
             if repeats_key(&schema) {
                 continue;
             }
-            schemas.entry((table.to_ascii_lowercase(), column.to_ascii_lowercase())).or_default().push((schema, &[&crate::schema_type::MYSQL]));
+            schemas.entry((table.to_string(), column.to_ascii_lowercase())).or_default().push((schema, &[&crate::schema_type::MYSQL]));
         }
     }
     let mut out = vec![None; raw.columns.len()];
@@ -3123,19 +3160,26 @@ fn check_documents(clause: &str) -> Vec<(String, String)> {
 fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
     let mut keys = Keys::default();
     let mut names = crate::mysql_keys::tables_anywhere(q, None);
-    let mut seen: HashSet<String> = names.iter().map(|n| n.to_ascii_lowercase()).collect();
+    // Each name as written: where the server keeps case, `K` and `k` are two tables, each fetched.
+    let mut seen: HashSet<String> = names.iter().cloned().collect();
     while !names.is_empty() {
         let found = unique_keys(host, &names);
-        let columns = by_table(host, KEY_COLUMNS_QUERY, &names);
+        let columns = answered_by_table(host, KEY_COLUMNS_QUERY, &names);
         let views = by_table(host, VIEW_DEFINITIONS_QUERY, &names);
         let (Some(found), Some(columns), Some(views)) = (found, columns, views) else { return None };
         keys.of.extend(found.of);
         keys.class.extend(found.class);
-        for row in columns.unwrap_or_default() {
+        // A round answers for each table whole, and a table fetched again under another case, where
+        // the server folds names, answers again: its columns replace the ones it had.
+        let mut answered: HashMap<String, Vec<(String, Class)>> = HashMap::new();
+        let (columns, answers) = columns.unwrap_or_default();
+        keys.answers.extend(answers);
+        for row in columns {
             if let (Some(table), Some(column), Some(ty)) = (row.first().and_then(as_str), row.get(1).and_then(as_str), row.get(2).and_then(as_str)) {
-                keys.columns.entry(table.to_string()).or_default().push((column.to_ascii_lowercase(), class_of(ty)));
+                answered.entry(table.to_string()).or_default().push((column.to_ascii_lowercase(), class_of(ty)));
             }
         }
+        keys.columns.extend(answered);
         let mut next = Vec::new();
         for row in views.unwrap_or_default() {
             let (Some(name), Some(definition), Some(schema)) = (row.first().and_then(as_str), row.get(1).and_then(as_str), row.get(2).and_then(as_str)) else { continue };
@@ -3148,7 +3192,7 @@ fn catalog(host: &Host, q: &Query) -> Lazy<Keys> {
             let Some(Statement::Query(view)) = parsed.pop() else { continue };
             keys.schema = Some(schema.to_string());
             for table in crate::mysql_keys::tables_anywhere(&view, Some(schema)) {
-                if seen.insert(table.to_ascii_lowercase()) {
+                if seen.insert(table.clone()) {
                     next.push(table);
                 }
             }
@@ -3194,33 +3238,36 @@ fn keys_of(rows: Vec<Vec<Value>>) -> Keys {
 }
 
 impl Keys {
-    /// The server's name for the table a statement names. The catalog query compares names as
-    /// the server does, so a row under another case than the statement's came back because the
-    /// server holds the two for one table (`lower_case_table_names` 1 or 2); where it tells them
-    /// apart (0) only the exact name comes back, and `Users` never takes the keys of `users`.
+    /// The server's name for a table or a view the statement names in another case. The catalog
+    /// query compares names as the server does, so a row under another case than the statement's
+    /// came back because the server holds the two for one table (`lower_case_table_names` 1 or 2);
+    /// where it tells them apart (0) only the exact name comes back, and `Users` never takes the
+    /// keys of `users`. It is read off `columns`, which holds every table and view fetched, keyless
+    /// ones too: `of` and `views` leave some out, and a name alone there in another case may be
+    /// another table's. So it is the name the rows asked under the statement's own came back under
+    /// ([`crate::mysql_names::Answers`]), and none for a name the catalog was never asked for, as a
+    /// table a view's schema qualifies.
     fn name(&self, table: &str) -> Option<&str> {
-        if let Some((name, _)) = self.of.get_key_value(table) {
-            return Some(name);
-        }
-        let mut same = self.of.keys().filter(|name| name.eq_ignore_ascii_case(table));
-        match (same.next(), same.next()) {
-            (Some(name), None) => Some(name),
-            _ => None,
-        }
+        self.answers.name(table)
+    }
+
+    /// The entry of `map` under the name the statement gives, else under the server's ([`Keys::name`]).
+    fn get<'m, T>(&self, map: &'m HashMap<String, T>, table: &str) -> Option<&'m T> {
+        map.get(table).or_else(|| map.get(self.name(table)?))
     }
 
     pub(crate) fn keys(&self, table: &str) -> Option<&Vec<Vec<String>>> {
-        self.of.get(self.name(table)?).filter(|keys| !keys.is_empty())
+        self.get(&self.of, table).filter(|keys| !keys.is_empty())
     }
 
-    /// The columns of a table or a view, in lower case, matched by name as [`Keys::name`] does.
+    /// The columns of a table or a view, in lower case.
     pub(crate) fn columns(&self, table: &str) -> Option<&Vec<(String, Class)>> {
-        same_name(&self.columns, table)
+        self.get(&self.columns, table)
     }
 
     /// What a column of a table compares as.
     pub(crate) fn class_of(&self, table: &str, column: &str) -> Option<Class> {
-        if let Some(class) = self.name(table).and_then(|name| self.class.get(name)).and_then(|c| c.get(column)) {
+        if let Some(class) = self.get(&self.class, table).and_then(|c| c.get(column)) {
             return Some(*class);
         }
         self.columns(table)?.iter().find(|(c, _)| c == column).map(|(_, class)| *class)
@@ -3228,19 +3275,7 @@ impl Keys {
 
     /// A view's defining SELECT.
     pub(crate) fn view(&self, name: &str) -> Option<&Query> {
-        same_name(&self.views, name)
-    }
-}
-
-/// The entry of `map` under `name`, or under the one name that differs from it in case alone.
-fn same_name<'m, T>(map: &'m HashMap<String, T>, name: &str) -> Option<&'m T> {
-    if let Some(found) = map.get(name) {
-        return Some(found);
-    }
-    let mut same = map.iter().filter(|(n, _)| n.eq_ignore_ascii_case(name));
-    match (same.next(), same.next()) {
-        (Some((_, found)), None) => Some(found),
-        _ => None,
+        self.get(&self.views, name)
     }
 }
 
@@ -3826,15 +3861,66 @@ mod tests {
     #[test]
     fn a_table_takes_the_keys_the_server_holds_under_its_name() {
         let row = |t: &str, c: &str| vec![json!(t), json!("PRIMARY"), json!(c), json!("int")];
+        // The catalog answers with the columns of every table it holds, keyless ones too, each
+        // name asked with the rows under the names it came back under.
+        let catalog = |rows: Vec<Vec<Value>>, tables: &[&str], answers: &[(&str, &str)]| {
+            let mut keys = keys_of(rows);
+            for table in tables {
+                keys.columns.insert(table.to_string(), vec![("id".to_string(), Class::Number), ("other".to_string(), Class::Number)]);
+            }
+            keys.answers = crate::mysql_names::Answers(answers.iter().map(|(asked, under)| (asked.to_string(), vec![under.to_string()])).collect());
+            keys
+        };
         // The server holds `Users` and `users` for two tables (lower_case_table_names 0) and
         // answers with the one named; where it holds them for one it answers with its own name.
-        let exact = keys_of(vec![row("Users", "id")]);
-        assert_eq!(exact.keys("Users"), Some(&vec![vec!["id".to_string()]]));
-        assert_eq!(exact.keys("users"), Some(&vec![vec!["id".to_string()]]));
-        let both = keys_of(vec![row("Users", "id"), row("users", "other")]);
+        let folded = catalog(vec![row("Users", "id")], &["Users"], &[("users", "Users")]);
+        assert_eq!(folded.keys("Users"), Some(&vec![vec!["id".to_string()]]));
+        assert_eq!(folded.keys("users"), Some(&vec![vec!["id".to_string()]]));
+        let both = catalog(vec![row("Users", "id"), row("users", "other")], &["Users", "users"], &[("Users", "Users"), ("users", "users")]);
         assert_eq!(both.keys("users"), Some(&vec![vec!["other".to_string()]]));
         assert_eq!(both.keys("Users"), Some(&vec![vec!["id".to_string()]]));
         assert!(both.keys("USERS").is_none());
+        // A table with no key beside one that differs from it in case alone takes none of its keys,
+        // and a table beside a view whose name differs from its in case alone is no view.
+        let mut keyless = catalog(vec![row("Users", "id")], &["Users", "users", "V", "v"], &[("Users", "Users"), ("users", "users"), ("V", "V"), ("v", "v")]);
+        assert!(keyless.keys("users").is_none());
+        let Some(Statement::Query(view)) = parse(&SessionDialect::default(), "select id, other from Users where id = 1").unwrap().pop() else { panic!("not a query") };
+        keyless.views.insert("V".to_string(), *view.clone());
+        assert!(keyless.view("V").is_some());
+        assert!(keyless.view("v").is_none());
+        // A view asked under another case than the server's own is that view.
+        let mut folded_view = catalog(Vec::new(), &["V"], &[("v", "V")]);
+        folded_view.views.insert("V".to_string(), *view);
+        assert!(folded_view.view("v").is_some());
+        // A name the catalog was never asked for, as a table a view's schema qualifies, takes no
+        // keys of a table it was asked for under another case: the server that keeps case holds
+        // two. Where the server folds names, a name asked in each case takes the one table's.
+        let unasked = catalog(vec![row("K", "id")], &["K"], &[("K", "K")]);
+        assert!(unasked.keys("k").is_none());
+        let asked_twice = catalog(vec![row("users", "id")], &["users"], &[("Users", "users"), ("users", "users")]);
+        assert_eq!(asked_twice.keys("Users"), Some(&vec![vec!["id".to_string()]]));
+    }
+
+    #[test]
+    fn a_qualifier_in_another_case_reaches_its_item_where_no_enclosing_query_may_hold_one_spelled_so() {
+        // With no enclosing query, `u` is `U` where the server folds names, and the server that
+        // keeps case refuses the statement; a qualifier spelled as its item is that item anywhere.
+        for sql in [
+            "select u.email from users U where u.id = ?",
+            "select d.email from (select X.email from users x where X.id = ?) d",
+            "with w as (select X.email from users x where X.id = ?) select email from w",
+            "select l.email from posts A, lateral (select a.email from users a where a.id = ?) l where A.id = ?",
+        ] {
+            assert_eq!(card(sql), "at_most_one", "{sql}");
+        }
+        // Inside a LATERAL derived table, `A` is the enclosing query's `A` where the server keeps
+        // case, and pins no row of `users a`.
+        for sql in [
+            "select l.email from posts A, lateral (select a.email from users a where A.id = ?) l where A.id = ?",
+            "select l.email from posts A, lateral (select d.email from (select a.email from users a where A.id = ?) d) l where A.id = ?",
+        ] {
+            assert_eq!(card(sql), "many", "{sql}");
+        }
     }
 
     /// Analyzes with a host that answers every prepare with `described`, the mode query with
