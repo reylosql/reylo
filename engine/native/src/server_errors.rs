@@ -14,12 +14,12 @@
 use reylo_engine_core::dialect::Dialect;
 
 /// Whether an error with the database's own `code` (Postgres's SQLSTATE, MySQL's or ClickHouse's
-/// error number, SQLite's result code's name) is the statement's, for a reader that has the code
-/// alone, as a cache writer reading an analysis's diagnostics has.
-pub fn of_statement(dialect: Dialect, code: &str) -> bool {
+/// error number, SQLite's result code's name) is the statement's, for a reader that has the code and
+/// the text that holds the server's `message`, as a cache reading an analysis's diagnostics has.
+pub fn of_statement(dialect: Dialect, code: &str, message: Option<&str>) -> bool {
     match dialect {
         Dialect::Postgres => postgres(code),
-        Dialect::Mysql => code.parse().is_ok_and(|number| mysql(number, None, None)),
+        Dialect::Mysql => code.parse().is_ok_and(|number| mysql(number, None, message)),
         Dialect::Clickhouse => code.parse().is_ok_and(clickhouse),
         Dialect::Sqlite => sqlite(code),
     }
@@ -30,8 +30,8 @@ pub fn of_statement(dialect: Dialect, code: &str) -> bool {
 /// data decides. A `GRANT` moves no schema's fingerprint, nor does the file a ClickHouse `url()` or
 /// `s3()` reads its schema from, so a statement refused for either would stay refused after the
 /// grant or the upload. The engine still reads such an error as the statement's answer.
-pub fn kept(dialect: Dialect, code: &str) -> bool {
-    of_statement(dialect, code)
+pub fn kept(dialect: Dialect, code: &str, message: Option<&str>) -> bool {
+    of_statement(dialect, code, message)
         && match dialect {
             Dialect::Postgres => code != "42501",
             Dialect::Mysql => code.parse().is_ok_and(|n: u16| MYSQL_PRIVILEGE.binary_search_by_key(&n, |&(n, _)| n).is_err()),
@@ -464,9 +464,9 @@ mod tests {
         assert!(mysql(6999, Some("42000"), None));
         assert!(!mysql(6999, Some("HY000"), None));
         assert!(!mysql(6999, None, None));
-        assert!(!of_statement(Dialect::Mysql, "6999"));
-        assert!(of_statement(Dialect::Mysql, "1064"));
-        assert!(!of_statement(Dialect::Mysql, "ER_PARSE_ERROR"));
+        assert!(!of_statement(Dialect::Mysql, "6999", None));
+        assert!(of_statement(Dialect::Mysql, "1064", None));
+        assert!(!of_statement(Dialect::Mysql, "ER_PARSE_ERROR", None));
     }
 
     #[test]
@@ -482,7 +482,7 @@ mod tests {
         for number in [394, 159, 202, 241, 209, 210, 999, 733, 1_000_000] {
             assert!(!clickhouse(number), "{number}");
         }
-        assert!(!of_statement(Dialect::Clickhouse, "Code: 47"));
+        assert!(!of_statement(Dialect::Clickhouse, "Code: 47", None));
     }
 
     #[test]
@@ -497,11 +497,13 @@ mod tests {
 
     #[test]
     fn an_analysis_refused_for_a_privilege_is_not_kept() {
-        assert!(kept(Dialect::Postgres, "42703") && !kept(Dialect::Postgres, "42501") && !kept(Dialect::Postgres, "40P01"));
-        assert!(kept(Dialect::Mysql, "1054") && !kept(Dialect::Mysql, "1142") && !kept(Dialect::Mysql, "1045") && !kept(Dialect::Mysql, "1213"));
-        assert!(kept(Dialect::Clickhouse, "47") && !kept(Dialect::Clickhouse, "497") && !kept(Dialect::Clickhouse, "394"));
+        assert!(kept(Dialect::Postgres, "42703", None) && !kept(Dialect::Postgres, "42501", None) && !kept(Dialect::Postgres, "40P01", None));
+        assert!(kept(Dialect::Mysql, "1054", None) && !kept(Dialect::Mysql, "1142", None) && !kept(Dialect::Mysql, "1045", None) && !kept(Dialect::Mysql, "1213", None));
+        assert!(kept(Dialect::Clickhouse, "47", None) && !kept(Dialect::Clickhouse, "497", None) && !kept(Dialect::Clickhouse, "394", None));
+        // Vitess's outage under the unknown error, by the text the diagnostic keeps.
+        assert!(kept(Dialect::Mysql, "1105", Some("VT12001: unsupported: subquery in GROUP BY (ER_UNKNOWN_ERROR)")) && !kept(Dialect::Mysql, "1105", Some("target: shop.-.primary: no healthy tablet available for 'keyspace:\"shop\"' (ER_UNKNOWN_ERROR)")));
         // A schema inferred from a remote file's data: the statement's answer, kept by no cache.
-        assert!(of_statement(Dialect::Clickhouse, "636") && !kept(Dialect::Clickhouse, "636"));
+        assert!(of_statement(Dialect::Clickhouse, "636", None) && !kept(Dialect::Clickhouse, "636", None));
     }
 
     #[test]

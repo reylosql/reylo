@@ -70,4 +70,7 @@ test("an analysis refused for a privilege is not kept, nor one the server refuse
   for (const [dialect, code, kept] of [["postgres", "42703", true], ["postgres", "42501", false], ["postgres", "40P01", false], ["mysql", "1054", true], ["mysql", "1142", false], ["mysql", "1045", false], ["mysql", "1213", false], ["clickhouse", "47", true], ["clickhouse", "497", false], ["clickhouse", "394", false], ["clickhouse", "636", false], ["sqlite", "SQLITE_ERROR", true]] as const) {
     assert.equal(keptError(dialect, code), kept, `${dialect} ${code}`);
   }
+  // Vitess's outage under the unknown error, by the text the diagnostic keeps.
+  assert.equal(keptError("mysql", "1105", "VT12001: unsupported: subquery in GROUP BY (ER_UNKNOWN_ERROR)"), true);
+  assert.equal(keptError("mysql", "1105", "target: shop.-.primary: no healthy tablet available for 'keyspace:\"shop\"' (ER_UNKNOWN_ERROR)"), false);
 });

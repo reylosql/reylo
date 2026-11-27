@@ -710,7 +710,7 @@ function listed(pair: string): string {
 
 /** Whether an analysis may stand in `reylo/.cache/`: none of its diagnostics carries an error no analysis is kept with (src/server-errors.ts). */
 function keptAnalysis(dialect: Dialect, analysis: Analysis): boolean {
-  return analysis.diagnostics.every((d) => d.server_code === undefined || keptError(dialect, d.server_code));
+  return analysis.diagnostics.every((d) => d.server_code === undefined || keptError(dialect, d.server_code, d.message));
 }
 
 function readEntry(file: string): Entry | undefined {

@@ -35,9 +35,9 @@ export function statementError(dialect: Dialect, code: string | undefined, sqlSt
   }
 }
 
-/** Whether an analysis whose diagnostic carries `code` may be kept in `reylo/.cache/`: the statement's error, and none a privilege or a remote source's data decides, since neither a grant nor an upload moves a schema's fingerprint. */
-export function keptError(dialect: Dialect, code: string): boolean {
-  if (!statementError(dialect, code)) return false;
+/** Whether an analysis whose diagnostic carries `code`, in text that holds the server's `message`, may be kept in `reylo/.cache/`: the statement's error, and none a privilege or a remote source's data decides, since neither a grant nor an upload moves a schema's fingerprint. */
+export function keptError(dialect: Dialect, code: string, message?: string): boolean {
+  if (!statementError(dialect, code, undefined, message)) return false;
   if (dialect === "postgres") return code !== "42501";
   if (dialect === "mysql") return !MYSQL_PRIVILEGE.has(mysqlNames().get(Number(code))!);
   if (dialect === "clickhouse") return ![CLICKHOUSE_PRIVILEGE, CLICKHOUSE_INFERRED].some((list) => list.has(clickhouseNames().get(Number(code))!));

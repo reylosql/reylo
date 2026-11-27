@@ -641,7 +641,7 @@ fn remember(cache: &Path, file: &Path, dialect: Dialect, schema: Option<&str>, a
         Dialect::Mysql => reylo_engine::Dialect::Mysql,
         Dialect::Sqlite => reylo_engine::Dialect::Sqlite,
     };
-    let kept = analysis.diagnostics.iter().all(|d| d.server_code.as_deref().is_none_or(|code| reylo_engine::server_errors::kept(engine, code)));
+    let kept = analysis.diagnostics.iter().all(|d| d.server_code.as_deref().is_none_or(|code| reylo_engine::server_errors::kept(engine, code, Some(&d.message))));
     let analysis = serde_json::to_value(analysis).map_err(|e| e.to_string())?;
     // An entry of an older schema is no answer where the database now refuses the statement, so a
     // build with the database out of reach does not build from it.
@@ -754,16 +754,21 @@ fn fingerprint(rows: &[Vec<Value>]) -> String {
 
 fn read_entry(file: &Path) -> Option<Value> {
     let entry: Value = serde_json::from_str(&fs::read_to_string(file).ok()?).ok()?;
-    // An entry that carries an error no analysis is kept with, as one an older build wrote, is none.
-    let dialect = match entry["dialect"].as_str()? {
-        "postgres" => reylo_engine::Dialect::Postgres,
-        "mysql" => reylo_engine::Dialect::Mysql,
-        "sqlite" => reylo_engine::Dialect::Sqlite,
-        "clickhouse" => reylo_engine::Dialect::Clickhouse,
-        _ => return None,
+    (entry["version"].as_u64() == Some(ENTRY_VERSION) && kept_entry(&entry)).then_some(entry)
+}
+
+/// Whether an entry carries no error an analysis is not kept with (`reylo_engine::server_errors::kept`),
+/// as one an older build wrote may. One of a dialect this build does not name is read as it is.
+fn kept_entry(entry: &Value) -> bool {
+    let dialect = match entry["dialect"].as_str() {
+        Some("postgres") => reylo_engine::Dialect::Postgres,
+        Some("mysql") => reylo_engine::Dialect::Mysql,
+        Some("sqlite") => reylo_engine::Dialect::Sqlite,
+        Some("clickhouse") => reylo_engine::Dialect::Clickhouse,
+        _ => return true,
     };
-    let kept = entry["analysis"]["diagnostics"].as_array().is_none_or(|diagnostics| diagnostics.iter().all(|d| d["server_code"].as_str().is_none_or(|code| reylo_engine::server_errors::kept(dialect, code))));
-    (entry["version"].as_u64() == Some(ENTRY_VERSION) && kept).then_some(entry)
+    let diagnostics = entry["analysis"]["diagnostics"].as_array().map_or(&[][..], Vec::as_slice);
+    diagnostics.iter().all(|d| d["server_code"].as_str().is_none_or(|code| reylo_engine::server_errors::kept(dialect, code, d["message"].as_str())))
 }
 
 /// The entry written last for the statement, by any server.
@@ -798,6 +803,22 @@ fn write_entry(cache: &Path, file: &Path, entry: &Value) {
 mod tests {
     use super::{newest_entry, offline_entry, old_lock, place, sha256, unverified_line, utc_day, ENTRY_VERSION};
     use serde_json::json;
+
+    #[test]
+    fn an_entry_with_an_error_no_analysis_is_kept_with_is_read_as_none() {
+        let file = std::env::temp_dir().join(format!("reylo-build-kept-{}.json", std::process::id()));
+        let read = |code: &str, message: &str| {
+            std::fs::write(&file, json!({"version": ENTRY_VERSION, "dialect": "mysql", "at": 1, "analysis": {"diagnostics": [{"message": message, "start": 0, "length": 1, "code": 6, "server_code": code}]}}).to_string()).unwrap();
+            read_entry(&file).is_some()
+        };
+        assert!(read("1054", "Unknown column 'x' in 'field list' (ER_BAD_FIELD_ERROR)"));
+        assert!(read("1105", "VT12001: unsupported: subquery in GROUP BY (ER_UNKNOWN_ERROR)"));
+        // A deadlock, a tablet not serving, a privilege, kept by an older build.
+        assert!(!read("1213", "Deadlock found when trying to get lock; try restarting transaction (ER_LOCK_DEADLOCK)"));
+        assert!(!read("1105", "target: shop.-.primary: no healthy tablet available for 'keyspace:\"shop\"' (ER_UNKNOWN_ERROR)"));
+        assert!(!read("1142", "SELECT command denied to user 'app'@'%' for table 'users' (ER_TABLEACCESS_DENIED_ERROR)"));
+        std::fs::remove_file(&file).unwrap();
+    }
 
     #[test]
     fn an_unreachable_server_builds_from_its_own_entry_alone() {
