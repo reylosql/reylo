@@ -148,6 +148,33 @@ test("MySQL: a field that reads a column as it is carries the column's comment, 
   }
 });
 
+test("MySQL: where the server keeps the case of table names, two tables that differ in case alone each give their own comment", { skip: mysqlLive }, async (t) => {
+  const mysql = createRequire(join(DRIVERS, "mysql2", "package.json"))("mysql2/promise");
+  const admin = await mysql.createConnection(MYSQL!);
+  const name = `reylo_comments_case_${process.pid}`;
+  try {
+    const [[{ folds }]] = await admin.query("select @@lower_case_table_names as folds");
+    if (Number(folds) !== 0) return t.skip("this server folds the case of table names, as on Windows and macOS, so it holds no two tables that differ in case alone");
+    await admin.query(`drop database if exists ${name}`);
+    await admin.query(`create database ${name}`);
+    const url = new URL(MYSQL!);
+    url.pathname = `/${name}`;
+    const db = await mysql.createConnection(url.href);
+    try {
+      await db.query(`create table other (id int primary key, age int comment 'Another age')`);
+      await db.query(`create table Other (id int primary key, age int comment 'Its own age')`);
+      const root = project(url.href, "mysql2", "mysql");
+      const out = await declarations(root, { "twins.sql": "select Other.age as own, other.age as theirs from Other join other on other.id = Other.id\n" });
+      assert.equal(types(out["twins.sql"]!).row, "{\n  /** Its own age */\n  own: number | null;\n  /** Another age */\n  theirs: number | null;\n}");
+    } finally {
+      await db.end();
+    }
+  } finally {
+    await admin.query(`drop database if exists ${name}`);
+    await admin.end();
+  }
+});
+
 test("the hover over a field of a query's row shows its column's comment", { skip: pgLive }, async () => {
   const db = await postgresDatabase("reylo_hover", POSTGRES_SCHEMA);
   const lsp = { close: async () => {} } as ReturnType<typeof languageServer>;

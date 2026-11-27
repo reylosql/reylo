@@ -485,9 +485,10 @@ export function decodePlan(plan: Plan, v: unknown, column: string, libraries?: L
   if ("elements" in plan) return Array.isArray(v) ? v.map((e, i) => (plan.elements[i] == null ? e : decodePlan(plan.elements[i], e, column, libraries))) : v;
   if (typeof v !== "object") return v;
   if ("fields" in plan) {
-    // A spread copies a field named `__proto__` as the own property it is.
+    // A spread copies a field named `__proto__` as the own property it is, which an assignment then
+    // reaches; a field the object lacks is left out, though `in` finds `__proto__` on every object.
     const o = { ...(v as Record<string, unknown>) };
-    for (const [name, p] of Object.entries(plan.fields)) if (name in o) o[name] = decodePlan(p, o[name], column, libraries);
+    for (const [name, p] of Object.entries(plan.fields)) if (Object.hasOwn(o, name)) o[name] = decodePlan(p, o[name], column, libraries);
     return o;
   }
   const u = v as { tag?: unknown; value: unknown };
@@ -501,7 +502,7 @@ export function decodeCodecs(rows: unknown[], plans: Readonly<Record<string, Pla
   for (const row of rows) {
     if (row === null || typeof row !== "object") continue;
     const r = row as Record<string, unknown>;
-    for (const [column, plan] of entries) if (column in r) r[column] = decodePlan(plan, r[column], column, libraries);
+    for (const [column, plan] of entries) if (Object.hasOwn(r, column)) r[column] = decodePlan(plan, r[column], column, libraries);
   }
   return rows;
 }
@@ -541,6 +542,8 @@ export function encodeCodec(codec: Codec, v: unknown, name: string, dialect: Dia
   // A vector takes its typed array alone, and binds as the numbers the driver writes as its text.
   const vector = VECTOR_CLASS[codec];
   if (vector !== undefined) {
+    // A vector is its typed array here, so an array of anything but numbers is a level of vectors, as `decodeCodec` reads one.
+    if (Array.isArray(v) && !v.every((e) => typeof e === "number")) return v.map((e) => encodeCodec(codec, e, name, dialect, libraries));
     if (tag(v) !== `[object ${vector}]`) throw refuse(`a ${vector}`);
     return Array.from(v as ArrayLike<number>);
   }

@@ -746,8 +746,8 @@ fn is_comment(kind: u16) -> bool {
     kind == tok::SQL_COMMENT || kind == tok::C_COMMENT
 }
 
-/// A token's kind as the grammar reads it, given the token after it (`base_yylex`).
-fn with_lookahead(kind: u16, next: Option<u16>) -> u16 {
+/// A token's kind as the grammar reads it, given the tokens around it (`base_yylex`, which looks at the next one).
+fn with_lookahead(kind: u16, previous: Option<u16>, next: Option<u16>, after_next: Option<u16>) -> u16 {
     let Some(next) = next else { return kind };
     match kind {
         tok::FORMAT if next == tok::JSON => tok::FORMAT_LA,
@@ -755,6 +755,8 @@ fn with_lookahead(kind: u16, next: Option<u16>) -> u16 {
         tok::NULLS_P if matches!(next, tok::FIRST_P | tok::LAST_P) => tok::NULLS_LA,
         tok::WITH if matches!(next, tok::TIME | tok::ORDINALITY) => tok::WITH_LA,
         tok::WITHOUT if next == tok::TIME => tok::WITHOUT_LA,
+        // Postgres 19's null treatment, which follows a function call's closing parenthesis and never takes FIRST or LAST. Anywhere else `ignore` and `respect` stay names, as Postgres 14 to 18 read them: a column, or an index's operator class before NULLS FIRST.
+        tok::IGNORE_P | tok::RESPECT_P if next == tok::NULLS_P && previous == Some(char_token(b')')) && !matches!(after_next, Some(tok::FIRST_P | tok::LAST_P)) => if kind == tok::IGNORE_P { tok::IGNORE_LA } else { tok::RESPECT_LA },
         k => k,
     }
 }
@@ -786,7 +788,9 @@ pub fn read(text: &str) -> Result<(Vec<Read>, u32), (Vec<Read>, u32, Stop)> {
     while k < usable {
         let t = &raw[significant[k]];
         let next = significant.get(k + 1).map(|i| raw[*i].kind);
-        let (mut kind, mut end, mut value) = (with_lookahead(t.kind, next), t.end, t.value.clone());
+        let previous = k.checked_sub(1).map(|j| raw[significant[j]].kind);
+        let after_next = significant.get(k + 2).map(|i| raw[*i].kind);
+        let (mut kind, mut end, mut value) = (with_lookahead(t.kind, previous, next, after_next), t.end, t.value.clone());
         if t.kind == tok::UIDENT || t.kind == tok::USCONST {
             let mut escape = b'\\';
             if next == Some(tok::UESCAPE) {

@@ -7,7 +7,8 @@ export function withSqlcommenter(text: string, source: string, dialect?: string)
   // The value is URL-encoded, and a quote, which encodeURIComponent leaves as it is, escaped.
   const tag = `/*file='${encodeURIComponent(source).replace(/'/g, "\\'")}'*/`;
   if (dialect === "sqlite" || dialect === "clickhouse") return `${tag} ${text}`;
-  const body = text.replace(/[\s;]+$/, "");
+  // ASCII's whitespace alone: a no-break space the statement ends with is part of its last name.
+  const body = text.replace(/[ \t\n\r\f\v;]+$/, "");
   const semicolon = text.slice(body.length).includes(";") ? ";" : "";
   // A line comment on the statement's last line (`--`, and MySQL's `#`) would take the tag in, so
   // after one the tag goes on a line of its own.

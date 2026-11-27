@@ -1265,7 +1265,7 @@ impl Compiler<'_> {
         }
         let lineno = self.lineno(location);
         let tok = self.yylex()?;
-        if tok != t::K_EXECUTE {
+        if !self.tok_is_keyword(tok, t::K_EXECUTE, "execute") {
             self.push_back(tok)?;
             let query = self.read_sql_stmt()?;
             return Ok(Stmt::ReturnQuery { lineno, query: Some(query), dynquery: None, params: Vec::new() });
@@ -1300,7 +1300,7 @@ impl Compiler<'_> {
         let mut tok = self.yylex()?;
         if let Some(strict) = strict {
             *strict = false;
-            if tok == t::K_STRICT {
+            if self.tok_is_keyword(tok, t::K_STRICT, "strict") {
                 *strict = true;
                 tok = self.yylex()?;
             }
@@ -1376,7 +1376,7 @@ impl Compiler<'_> {
         const ROWS: &str = "loop variable of loop over rows must be a record variable or list of scalar variables";
         let mut tok = self.yylex()?;
         let forq = |var| Forq { lineno: 0, label: None, var, body: Vec::new() };
-        if tok == t::K_EXECUTE {
+        if self.tok_is_keyword(tok, t::K_EXECUTE, "execute") {
             let (query, mut term) = self.read_sql_expression2(t::K_LOOP, t::K_USING, "LOOP or USING")?;
             let var = self.row_target(name, lineno, scalar, row, ROWS)?;
             let mut params = Vec::new();
@@ -1652,7 +1652,7 @@ impl Compiler<'_> {
                 return Err(self.yyerror("syntax error, expected \"FOR\""));
             }
             tok = self.yylex()?;
-            if tok == t::K_EXECUTE {
+            if self.tok_is_keyword(tok, t::K_EXECUTE, "execute") {
                 let (expr, mut end) = self.read_sql_expression2(t::K_USING, t::SEMI, "USING or ;")?;
                 dynquery = Some(expr);
                 if end == t::K_USING {

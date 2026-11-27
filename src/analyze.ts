@@ -7,10 +7,11 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
-import { anyEngine, DIAGNOSTIC, engine, reason, MissingEngine, REYLO_VERSION, Unreachable, type Analysis, type Engine, type Lexed } from "./engine.ts";
-import { packageDir, resolveProject, sqlitePath, type ResolvedProject } from "./project.ts";
+import { anyEngine, DIAGNOSTIC, engine, reason, MissingEngine, REYLO_VERSION, Unreachable, type Analysis, type Engine, type Lexed, type Schema } from "./engine.ts";
+import { packageDir, resolveProject, sqlitePath, type Dialect, type ResolvedProject } from "./project.ts";
 import { NotMysql, refusedLogin } from "./connection.ts";
-import { openProjectDrivers, placeRefusal, projectDriverVersions, type SqliteDriver } from "./sqlite-drivers.ts";
+import { keptError } from "./server-errors.ts";
+import { NotPrepared, openProjectDrivers, placeRefusal, projectDriverVersions, type SqliteDriver } from "./sqlite-drivers.ts";
 
 /** What `reylo/.cache/` holds for one statement. */
 export type Entry = {
@@ -40,11 +41,12 @@ export type Outcome =
 
 /**
  * A connection the engine holds (src/engine.ts): `analyze` runs a statement's whole analysis over
- * it, `query` runs the schema's fingerprint, and `forget` drops the answers the engine keeps once
+ * it, `query` runs a catalog query of the caller's, `schema` reads the schema's fingerprint by the
+ * engine's own query, as every host reads it, and `forget` drops the answers the engine keeps once
  * the schema changes. On SQLite, `drivers` are the app's own, which each statement is prepared on
  * too (src/sqlite-drivers.ts).
  */
-type Io = { analyze(sql: string): Promise<Analysis>; query(sql: string, params: unknown[]): Promise<unknown[][]>; forget(): Promise<void>; close(): Promise<void>; drivers?: SqliteDriver[] };
+type Io = { analyze(sql: string): Promise<Analysis>; query(sql: string, params: unknown[]): Promise<unknown[][]>; schema(): Promise<Schema>; forget(): Promise<void>; close(): Promise<void>; drivers?: SqliteDriver[] };
 
 const ENTRY_VERSION = 1;
 // How long a schema fingerprint is trusted, as long as a statement answer: a migration shows up
@@ -61,6 +63,20 @@ const OFFLINE_TTL = 60_000;
 // (`releaseConnections`), and a loader (webpack, Rspack, Turbopack) has no such signal. The type
 // check's session keeps its connection.
 const BUILD_IDLE = 250;
+/**
+ * The URL parameters that choose the server or the database a session reads, beside the URL's
+ * host and path, as each dialect's engine reads them (engine/native/src/): libpq's, among them
+ * `user`, which names the role as the URL's user part does, and `options`, which may set the
+ * search path a name is read through; mysql2's socket; and ClickHouse's database, the header that
+ * names it, and the path in front of its interface. They name a session's entries with its server
+ * (`#server`), as `server` in rust/reylo-build/src/analysis.rs names them.
+ */
+const CHOOSING: Record<Dialect, readonly string[]> = {
+  postgres: ["dbname", "host", "hostaddr", "options", "port", "user"],
+  mysql: ["socket", "socketPath"],
+  clickhouse: ["ch_database", "clickhouse_setting_database", "http_header_x-clickhouse-database", "pathname"],
+  sqlite: [],
+};
 
 const sessions = new Map<string, Session>();
 
@@ -86,6 +102,8 @@ export class Session {
   /** Where the project was resolved from, and with what environment, for `#reread`. */
   readonly #dir: string;
   readonly #env: Record<string, string | undefined>;
+  /** The variables of `ENVIRONMENT` as the session started, which its connection reads too: its entries keep one name however the process's environment changes after. */
+  readonly #libpq = libpqEnvironment();
   #io: Promise<Io> | undefined;
   /** The URL the connection opens: the project's, until a command in `direct_url` gives a fresh one. */
   #url: string | undefined;
@@ -93,8 +111,9 @@ export class Session {
   #timer: ReturnType<typeof setTimeout> | undefined;
   /** What `reylo/.cache/queries` held when this session first looked. */
   #listing: string[] | undefined;
-  #schema: { value: string | null; at: number; error?: string; fatal?: boolean } | undefined;
-  /** The fingerprint read last, or the unverified value that stood in for one, which a spell offline leaves in place: the engine's answers are of that schema. */
+  /** The schema's fingerprint read last, with its stamp where the database keeps one (`Schema`), and when. */
+  #schema: { value: string | null; stamp?: number | null; at: number; error?: string; fatal?: boolean } | undefined;
+  /** The fingerprint and stamp read last, or the unverified value that stood in for them, which a spell offline leaves in place: the engine's answers are of that schema. */
   #known: string | undefined;
 
   private constructor(engine: Engine | MissingEngine, project: ResolvedProject, idle: number, dir: string, env: Record<string, string | undefined>) {
@@ -109,7 +128,7 @@ export class Session {
     this.#engine = engine;
     this.project = project;
     this.#url = project.url;
-    this.#engineFingerprint = engine instanceof MissingEngine ? "unknown" : engine.fingerprint;
+    this.#engineFingerprint = engine instanceof MissingEngine ? "unknown" : engine.cache;
   }
 
   /**
@@ -133,7 +152,8 @@ export class Session {
     const { project, engine } = await openProject(dir, env);
     // A setting the build step reads (`sqlcommenter`, `allow_nested_arrays`, and `dir`, which places the cache) is part of
     // the key, so a change to it in the project file reaches a running watch process.
-    const key = JSON.stringify([project.root, project.url ?? null, project.error ?? null, project.sqlcommenter, project.allowNestedArrays, project.cache, engine instanceof MissingEngine ? engine.message : null]);
+    // So are libpq's variables, which choose the database the connection reaches and name its entries.
+    const key = JSON.stringify([project.root, project.url ?? null, project.error ?? null, project.sqlcommenter, project.allowNestedArrays, project.cache, engine instanceof MissingEngine ? engine.message : null, libpqEnvironment()]);
     let session = sessions.get(key);
     if (!session) sessions.set(key, (session = new Session(engine, project, BUILD_IDLE, dir, env)));
     return session;
@@ -268,7 +288,14 @@ export class Session {
     if (analysis.diagnostics.length || this.#schema?.value == null) return outcome;
     const io = await this.#connection().catch(() => undefined);
     for (const driver of io?.drivers ?? []) {
-      const refusal = await driver.refuses(analysis.rewritten.sql, analysis.rewritten.order.length);
+      let refusal: string | undefined;
+      try {
+        refusal = await driver.refuses(analysis.rewritten.sql, analysis.rewritten.order.length);
+      } catch (e) {
+        // Neither a refusal nor a pass: the next analysis asks the driver again.
+        if (e instanceof NotPrepared) return { ok: false, message: `${driver.name} could not prepare this statement: ${e.message}`, code: DIAGNOSTIC.unreachable };
+        throw e;
+      }
       if (refusal === undefined) continue;
       const { start, length } = placeRefusal(sql, refusal);
       const message = driver.says(refusal);
@@ -317,6 +344,7 @@ export class Session {
     if (shared) return { ok: true, analysis: shared.entry.analysis, source: "cache", entry: shared.file };
     let analysis: Analysis;
     let label: string = schema.value;
+    let stamp = this.#schema?.stamp;
     for (let tries = 1; ; tries++) {
       const io = this.#connection();
       try {
@@ -342,19 +370,35 @@ export class Session {
       // moved. An entry labelled with a fingerprint that a migration has since moved would be served to
       // a database that still has the old schema, or has gone back to it, so the fingerprint is read
       // again now, and the entry written only where it has not moved. Where it has, the engine's
-      // answers are dropped (`schema()`) and the statement analyzed again.
+      // answers are dropped (`schema()`) and the statement analyzed again. Where the database keeps a
+      // stamp (SQLite), a stamp that moved is a schema that changed in between, even one changed
+      // back to the same fingerprint, so the statement is analyzed again then too.
       await this.recheck();
       const read = await this.schema();
       const now = read.value;
-      if (now === label) break;
+      const moved = this.#schema?.stamp;
+      if (now === label && moved === stamp) break;
       // A read that found the database gone leaves the next statement to try it again, rather than a minute offline.
       if (now === null && !read.fatal) this.#schema = undefined;
       if (now === null || now.startsWith("unverified ") || tries === ANALYSES) return { ok: true, analysis, source: "database", entry: file };
       label = now;
+      stamp = moved;
     }
-    if (options.store !== false) {
+    // An analysis that carries an error the server raised for a reason of its own rather than the
+    // statement's, which the engine's host fails the analysis with and which would stand for the
+    // statement until the schema moved, is not kept, nor one a privilege decides, since a grant
+    // moves no schema's fingerprint (src/server-errors.ts).
+    const kept = keptAnalysis(this.project.dialect, analysis);
+    if (options.store !== false && kept) {
       writeEntry(this.project.cache, file, { version: ENTRY_VERSION, dialect: this.project.dialect, schema: label, analysis, at: Date.now() });
       this.#prune(sql, file);
+    } else if (options.store !== false) {
+      // An entry of an older schema is no answer where the database now refuses the statement, so
+      // a build with the database out of reach does not build from it.
+      try {
+        rmSync(file, { force: true });
+      } catch {}
+      this.#listing = undefined;
     }
     return { ok: true, analysis, source: "database", entry: file };
   }
@@ -378,12 +422,13 @@ export class Session {
       return this.#schema;
     }
     try {
-      const rows = await io.query(FINGERPRINT[this.project.dialect], []);
-      const value = createHash("sha256").update(JSON.stringify(rows)).digest("hex").slice(0, 16);
-      // The engine's answers describe the old schema too, and outlast a spell offline.
-      if (this.#known !== undefined && this.#known !== value) await io.forget().catch(() => {});
-      this.#known = value;
-      this.#schema = { value, at: now };
+      const { fingerprint: value, stamp } = await io.schema();
+      // The engine's answers describe the old schema too, and outlast a spell offline: a schema
+      // whose stamp moved may have been another in between, whatever its fingerprint is now.
+      const known = JSON.stringify([value, stamp]);
+      if (this.#known !== undefined && this.#known !== known) await io.forget().catch(() => {});
+      this.#known = known;
+      this.#schema = { value, stamp, at: now };
     } catch (e) {
       if (e instanceof Unreachable) {
         this.#drop(pending);
@@ -447,17 +492,16 @@ export class Session {
     return `Cannot type-check against the database at ${this.where()} (${this.project.urlSource}): it is ${e.server}, and Reylo type-checks MySQL statements against MySQL. Point the type check's URL at a MySQL server, 8.4 or later, with the same schema.`;
   }
 
-  /** The server, without credentials, that names this session's entries: none with no URL, which writes none. */
+  /**
+   * The server, without credentials, that names this session's entries: none with no URL, which
+   * writes none. The URL's parameters that choose the server or the database follow it, so that
+   * two databases they tell apart keep an entry each.
+   */
   #server(): string {
     const { dialect, url, root } = this.project;
     if (!url) return "";
     if (dialect === "sqlite") return sqlitePath(url, root);
-    try {
-      const u = new URL(url);
-      return `${u.protocol}//${u.username}@${u.host}${u.pathname}`;
-    } catch {
-      return url;
-    }
+    return serverName(url, dialect, this.#libpq);
   }
 
   /** The database as a person names it: host, port and database, or the SQLite file. */
@@ -529,6 +573,7 @@ export class Session {
       return {
         analyze: (sql) => again((on) => on.analyze(sql)),
         query: (text, params) => again((on) => on.query(text, params)),
+        schema: () => again((on) => on.schema()),
         forget: () => again((on) => on.forget()),
         close: () => current.then((on) => on.close(), () => {}),
         ...(first.drivers && { drivers: first.drivers }),
@@ -572,7 +617,8 @@ export class Session {
     // The engine opens the database itself: on SQLite the file the project names, and the statement
     // is prepared on the app's own SQLite drivers too, which are the app's, not the engine's.
     const target = dialect === "sqlite" ? sqlitePath(url, root) : url;
-    const c = await this.#engine.open(target);
+    // libpq's variables as the session started, which name its entries, set and unset alike.
+    const c = await this.#engine.open(target, Object.fromEntries(ENVIRONMENT.map((name) => [name, this.#libpq[name]])));
     let drivers: SqliteDriver[] | undefined;
     try {
       drivers = dialect === "sqlite" ? await openProjectDrivers(root, target) : undefined;
@@ -583,6 +629,7 @@ export class Session {
     return {
       analyze: (sql) => c.analyze(sql),
       query: (text, params) => c.query(text, params),
+      schema: () => c.schema(),
       forget: () => c.forget(),
       close: async () => {
         await Promise.all((drivers ?? []).map((d) => d.close().catch(() => {})));
@@ -600,11 +647,88 @@ export async function releaseConnections(): Promise<void> {
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
+/**
+ * The server `url` names, without credentials: the scheme, the user, the hosts and ports, and the
+ * path, read off the text as `server` in rust/reylo-build/src/analysis.rs reads them (both are held
+ * to entry-name-cases.json), since `URL` refuses a URL libpq reads, as `postgres://app@/shop` and a
+ * list of hosts. Then the parameters that choose the server or the database (`CHOOSING`), as
+ * `?name=value&…`, or nothing where it has none, which keeps the name its entries were written
+ * under. A name is matched decoded, as the engine and the bridge to a Unix socket read it
+ * (src/host-url.ts), and a header's in any case, as HTTP compares header names. A name and its
+ * value are kept as written, since their readers decode a value each their own way (libpq reads a
+ * `+` as a plus, ClickHouse and mysql2 as a space), so that a database written two ways is at most
+ * analyzed again under a name of its own. They keep the URL's order, which decides which of
+ * `socket` and `socketPath` the engine opens. On Postgres, the variables the engine and the bridge
+ * read for a part the URL leaves out (`ENVIRONMENT`) follow them, encoded.
+ */
+function serverName(url: string, dialect: Dialect, env: Record<string, string | undefined>): string {
+  const q = url.indexOf("?");
+  const [base, query] = q < 0 ? [url, ""] : [url.slice(0, q), url.slice(q + 1)];
+  const s = base.indexOf("://");
+  const [scheme, rest] = s < 0 ? ["", base] : [base.slice(0, s), base.slice(s + 3)];
+  const p = rest.indexOf("/");
+  const [authority, path] = p < 0 ? [rest, ""] : [rest.slice(0, p), rest.slice(p)];
+  const a = authority.lastIndexOf("@");
+  const [user, host] = a < 0 ? ["", authority] : [authority.slice(0, a).split(":")[0]!, authority.slice(a + 1)];
+  const chosen = query ? query.split("&").filter((pair) => CHOOSING[dialect].includes(listed(pair))) : [];
+  if (dialect === "postgres") {
+    const named = new Set(chosen.map(listed));
+    // The authority's hosts, each with its port where it writes one: an IPv6 address in brackets.
+    const hosts = host.split(",").filter(Boolean).map((chunk) => /^\[[^\]]*\](?::(.*))?$/.exec(chunk)?.[1] ?? (chunk.startsWith("[") ? undefined : chunk.split(":")[1]));
+    const leftOut: Record<(typeof ENVIRONMENT)[number], boolean> = {
+      PGHOST: hosts.length === 0 && !named.has("host") && !named.has("hostaddr"),
+      // Several hosts with no port take 5432 each, as libpq reads them.
+      PGPORT: hosts.length <= 1 && !hosts.some((port) => port) && !named.has("port"),
+      PGUSER: !user && !named.has("user"),
+      PGDATABASE: (path === "" || path === "/") && !named.has("dbname"),
+      PGOPTIONS: !named.has("options"),
+    };
+    for (const name of ENVIRONMENT) if (leftOut[name] && env[name]) chosen.push(`${name}=${encodeURIComponent(env[name])}`);
+  }
+  return `${scheme}://${user}@${host}${path}${chosen.length ? `?${chosen.join("&")}` : ""}`;
+}
+
+/**
+ * The variables libpq reads for a part of the URL it leaves out, as the engine reads them
+ * (engine/native/src/postgres.rs), but for the system's user name, which a URL with no user takes
+ * on every machine it is copied to, so that a cache built in CI is still read on a laptop.
+ */
+const ENVIRONMENT = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"] as const;
+
+/**
+ * The variables of `ENVIRONMENT` this process has, as the engine's connection reads them when it
+ * opens (src/engine.ts): on Windows in any case of a name, as Windows reads one, since a worker
+ * thread's copy of the environment, as the preload's, matches names exactly, and of two spellings
+ * the first in order, as Node passes a child.
+ */
+export function libpqEnvironment(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): Record<string, string> {
+  const value = (name: string) => (platform === "win32" ? env[Object.keys(env).filter((key) => key.toUpperCase() === name).sort()[0] ?? name] : env[name]);
+  return Object.fromEntries(ENVIRONMENT.flatMap((name) => (value(name) ? [[name, value(name)!]] : [])));
+}
+
+/**
+ * A URL parameter's name as `CHOOSING` lists it: decoded, or as written where it does not decode,
+ * and a header's in lower case.
+ */
+function listed(pair: string): string {
+  let name = pair.split("=")[0]!;
+  try {
+    name = decodeURIComponent(name);
+  } catch {}
+  return name.startsWith("http_header_") ? name.toLowerCase() : name;
+}
+
+/** Whether an analysis may stand in `reylo/.cache/`: none of its diagnostics carries an error no analysis is kept with (src/server-errors.ts). */
+function keptAnalysis(dialect: Dialect, analysis: Analysis): boolean {
+  return analysis.diagnostics.every((d) => d.server_code === undefined || keptError(dialect, d.server_code, d.message));
+}
+
 function readEntry(file: string): Entry | undefined {
   if (!existsSync(file)) return undefined;
   try {
     const entry = JSON.parse(readFileSync(file, "utf8")) as Entry;
-    return entry.version === ENTRY_VERSION ? entry : undefined;
+    // An entry that carries an error no analysis is kept with, as one an older build wrote, is none.
+    return entry.version === ENTRY_VERSION && keptAnalysis(entry.dialect, entry.analysis) ? entry : undefined;
   } catch {
     return undefined;
   }
@@ -628,100 +752,3 @@ function writeEntry(cache: string, file: string, entry: Entry): void {
     rmSync(tmp, { force: true });
   }
 }
-
-/**
- * One query per dialect whose rows change when anything an analysis reads changes: relations and
- * their columns with their type modifiers (a `varchar(n)`'s size, a `numeric(p,s)`'s precision) and whether each is an identity or a generated one, inheritance, constraints, indexes, row triggers and rules (nullability and the row
- * count read them), enum labels, a user's collations with whether each is deterministic (a key's equality and a CHECK's narrowing read it), domains with their base type's modifier, functions with their arguments' names, their result columns, their defaults, volatility, strictness,
- * kind and variadic argument, user operators and casts (the trust check reads them), view
- * definitions and column comments (a field's doc comment), and the server settings that change a statement's types;
- * and what the errors a statement may raise are read from: defaults (a domain's too), generated columns, policies and
- * operator classes on Postgres, and triggers, foreign keys, checks with their expressions and whether each is enforced, and every schema's stored functions on MySQL. SQLite's whole schema is
- * its `sqlite_schema` table, and the functions of the SQLite that opened it are part of what an
- * analysis reads: another Node has another SQLite. A `"char"` column is cast to text:
- * `text || "char"` is ambiguous, and a query the server refuses leaves every entry unverified.
- */
-// The Postgres query names every operator, function, type and table as pg_catalog's, and converts a
-// value to text only by a built-in cast (a name, a "char", a boolean) or by its type's output
-// function (`textin(oidout(…))`), as the engine's catalog queries do (engine/postgres/src/postgres.rs):
-// under a search path that puts a user's schema before pg_catalog, a user's `||` that answers NULL
-// would leave every row NULL, and the fingerprint would never move. Each row is the text the plain
-// `||` of each field makes. The server's own `pg_get_viewdef` and `pg_get_ruledef` read a rule
-// through a query of bare operators, which a user's `=` of oids answers too: a view's or a rule's
-// row is then NULL, and left out.
-const NS = `not (n.nspname operator(pg_catalog.=) any ('{pg_catalog,information_schema}'::pg_catalog.name[])) and n.nspname operator(pg_catalog.!~) '^pg_(toast|temp)'::pg_catalog.text`;
-const cat = (...parts: string[]) => parts.join(" operator(pg_catalog.||) ");
-const lit = (s: string) => `'${s}'::pg_catalog.text`;
-const line = (tag: string, ...fields: string[]) => cat(lit(`${tag} `), ...fields.flatMap((f, i) => (i ? [lit(" "), f] : [f])));
-const out = (type: string, value: string) => `pg_catalog.textin(pg_catalog.${type}out(${value}))`;
-// An object by its name, which a database built by the same migrations shares, where its oid differs:
-// each reg type's output writes the name, schema-qualified where the search path does not reach it.
-const named = (type: string, oid: string) => out(type, `${oid}::pg_catalog.${type}`);
-const relation = (oid: string) => named("regclass", oid);
-const type = (oid: string) => named("regtype", oid);
-const txt = (value: string) => `${value}::pg_catalog.text`;
-const md5 = (value: string) => `pg_catalog.md5(${value})`;
-const or = (value: string) => `coalesce(${value}, ''::pg_catalog.text)`;
-const eq = (a: string, b: string) => `${a} operator(pg_catalog.=) ${b}`;
-const rel = (alias: string, column: string) => `join pg_catalog.pg_class c on ${eq("c.oid", `${alias}.${column}`)} join pg_catalog.pg_namespace n on ${eq("n.oid", "c.relnamespace")}`;
-const PG_CLASS = "'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid";
-const USER = "'16384'::pg_catalog.oid";
-// Its first line holds what the session itself adds to an analysis: the server's version, the
-// search path that resolves each name, and the style the session writes dates in (the first part
-// of DateStyle, `ISO` or another), which the engine's host reports an error for (engine/native).
-const POSTGRES_FINGERPRINT = `select pg_catalog.md5(coalesce(pg_catalog.string_agg(t.x, E'\\n'::pg_catalog.text order by t.x), ''::pg_catalog.text)) from (
-    select ${line("v", "pg_catalog.current_setting('server_version_num'::pg_catalog.text)", "pg_catalog.current_setting('search_path'::pg_catalog.text)", "pg_catalog.split_part(pg_catalog.current_setting('DateStyle'::pg_catalog.text), ','::pg_catalog.text, 1)")} as x
-    union all select ${line("r", cat(txt("n.nspname"), lit("."), txt("c.relname")), txt("c.relkind"))} from pg_catalog.pg_class c join pg_catalog.pg_namespace n on ${eq("n.oid", "c.relnamespace")} where ${NS}
-    union all select ${line("a", relation("a.attrelid"), out("int2", "a.attnum"), txt("a.attname"), type("a.atttypid"), out("int4", "a.atttypmod"), txt("a.attnotnull"), named("regcollation", "a.attcollation"), txt("a.attidentity"), txt("a.attgenerated"))} from pg_catalog.pg_attribute a ${rel("a", "attrelid")} where a.attnum operator(pg_catalog.>) 0 and not a.attisdropped and ${NS}
-    union all select ${line("h", relation("h.inhrelid"), relation("h.inhparent"), out("int4", "h.inhseqno"))} from pg_catalog.pg_inherits h ${rel("h", "inhrelid")} where ${NS}
-    union all select ${line("c", relation("o.conrelid"), type("o.contypid"), txt("o.conname"), "pg_catalog.pg_get_constraintdef(o.oid)")} from pg_catalog.pg_constraint o join pg_catalog.pg_namespace n on ${eq("n.oid", "o.connamespace")} where ${NS}
-    union all select ${line("i", relation("i.indexrelid"), txt("i.indisvalid"), "pg_catalog.pg_get_indexdef(i.indexrelid)")} from pg_catalog.pg_index i ${rel("i", "indrelid")} where ${NS}
-    union all select ${line("g", relation("g.tgrelid"), txt("g.tgname"), out("int2", "g.tgtype"), txt("g.tgenabled"), named("regprocedure", "g.tgfoid"))} from pg_catalog.pg_trigger g ${rel("g", "tgrelid")} where not g.tgisinternal and ${NS}
-    union all select ${line("u", relation("w.ev_class"), txt("w.rulename"), txt("w.ev_type"), txt("w.ev_enabled"), md5("pg_catalog.pg_get_ruledef(w.oid)"))} from pg_catalog.pg_rewrite w ${rel("w", "ev_class")} where w.rulename operator(pg_catalog.<>) '_RETURN'::pg_catalog.name and ${NS}
-    union all select ${line("o", named("regoperator", "o.oid"), named("regprocedure", "o.oprcode::pg_catalog.oid"))} from pg_catalog.pg_operator o where o.oid operator(pg_catalog.>=) ${USER}
-    union all select ${line("e", type("e.enumtypid"), out("float4", "e.enumsortorder"), txt("e.enumlabel"))} from pg_catalog.pg_enum e
-    union all select ${line("l", named("regcollation", "l.oid"), txt("l.collprovider"), txt("l.collisdeterministic"), or(txt("l.collcollate")))} from pg_catalog.pg_collation l where l.oid operator(pg_catalog.>=) ${USER}
-    union all select ${line("t", type("t.oid"), txt("t.typname"), txt("t.typtype"), type("t.typbasetype"), out("int4", "t.typtypmod"), txt("t.typnotnull"), md5(or("t.typdefault")))} from pg_catalog.pg_type t join pg_catalog.pg_namespace n on ${eq("n.oid", "t.typnamespace")} where ${NS}
-    union all select ${line("f", named("regprocedure", "p.oid"), type("p.prorettype"), txt("p.proretset"), md5(or("p.prosrc")), md5(or("pg_catalog.pg_get_function_sqlbody(p.oid)")), or(txt("p.proconfig")), md5(or("pg_catalog.pg_get_expr(p.proargdefaults, 0::pg_catalog.oid)")), txt("p.prokind"), txt("p.provolatile"), txt("p.proisstrict"), out("int2", "p.pronargdefaults"), type("p.provariadic"), or(txt("p.proargnames")), or(txt("p.proargmodes")), or(txt("p.proallargtypes::pg_catalog.regtype[]")))} from pg_catalog.pg_proc p join pg_catalog.pg_namespace n on ${eq("n.oid", "p.pronamespace")} where ${NS}
-    union all select ${line("k", type("k.castsource"), type("k.casttarget"), named("regprocedure", "k.castfunc"), txt("k.castcontext"), txt("k.castmethod"))} from pg_catalog.pg_cast k where k.oid operator(pg_catalog.>=) ${USER}
-    union all select ${line("w", relation("c.oid"), md5("pg_catalog.pg_get_viewdef(c.oid)"))} from pg_catalog.pg_class c join pg_catalog.pg_namespace n on ${eq("n.oid", "c.relnamespace")} where c.relkind operator(pg_catalog.=) any ('{v,m}'::pg_catalog."char"[]) and ${NS}
-    union all select ${line("x", relation("d.adrelid"), out("int2", "d.adnum"), md5("pg_catalog.pg_get_expr(d.adbin, d.adrelid)"))} from pg_catalog.pg_attrdef d ${rel("d", "adrelid")} where ${NS}
-    union all select ${line("p", relation("p.polrelid"), txt("p.polname"), txt("p.polcmd"), txt("p.polpermissive"), md5(cat(or("pg_catalog.pg_get_expr(p.polqual, p.polrelid)"), lit(" "), or("pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid)"))))} from pg_catalog.pg_policy p ${rel("p", "polrelid")} where ${NS}
-    union all select ${line("q", named("regnamespace", "q.opcnamespace"), txt("q.opcname"), txt("m.amname"), type("q.opcintype"))} from pg_catalog.pg_opclass q join pg_catalog.pg_am m on ${eq("m.oid", "q.opcmethod")} where q.oid operator(pg_catalog.>=) ${USER}
-    union all select ${line("d", relation("d.objoid"), out("int4", "d.objsubid"), md5("d.description"))} from pg_catalog.pg_description d ${rel("d", "objoid")} where ${eq("d.classoid", PG_CLASS)} and d.objsubid operator(pg_catalog.>) 0 and ${NS}
-  ) t`;
-/**
- * ClickHouse: every column, table (a view's query with it) and function a user made, each hashed
- * field by field, since a name may hold any character, a dot or a space included, and the server's
- * version and the settings the session changed with them, since one of those can change a
- * statement's types (`join_use_nulls`). A statement may read a table of any database, so each
- * database's are in it but the server's own: the connection's with no database's name, so that a
- * database built the same way under another name has the same fingerprint, and any other's with
- * its own.
- */
-const CLICKHOUSE_OWN = "database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')";
-const CLICKHOUSE_IN = "database = currentDatabase(), if(database = currentDatabase(), '', database)";
-const CLICKHOUSE_FINGERPRINT = `SELECT concat(version(), ' ', toString(count()), ' ', toString(sum(x)), ' ', toString(groupBitXor(x))) FROM (
-    SELECT cityHash64('c', ${CLICKHOUSE_IN}, table, name, position, type, default_kind, default_expression, comment) AS x FROM system.columns WHERE ${CLICKHOUSE_OWN}
-    UNION ALL SELECT cityHash64('t', ${CLICKHOUSE_IN}, name, engine, sorting_key, as_select) FROM system.tables WHERE ${CLICKHOUSE_OWN}
-    UNION ALL SELECT cityHash64('f', name, create_query) FROM system.functions WHERE origin = 'SQLUserDefined'
-    UNION ALL SELECT cityHash64('s', name, value) FROM system.settings WHERE changed
-  )`;
-/** Each dialect's schema fingerprint query. The Rust crate keeps copies (rust/reylo-build/src/fingerprint-*.sql), which tests/rust-fingerprints.test.ts holds to these. */
-export const FINGERPRINT: Record<ResolvedProject["dialect"], string> = {
-  postgres: POSTGRES_FINGERPRINT,
-  clickhouse: CLICKHOUSE_FINGERPRINT,
-  mysql: `select concat_ws(' ', @@version, @@sql_mode, count(*), sum(crc32(x)), bit_xor(crc32(x))) from (
-    select concat_ws(' ', 'c', table_name, column_name, ordinal_position, column_type, coalesce(character_set_name, ''), is_nullable, column_key, extra, coalesce(generation_expression, ''), sha2(column_comment, 256)) as x from information_schema.columns where table_schema = database()
-    union all select concat_ws(' ', 's', table_name, index_name, non_unique, seq_in_index, column_name) from information_schema.statistics where table_schema = database()
-    union all select concat_ws(' ', 'v', table_name, sha2(view_definition, 256)) from information_schema.views where table_schema = database()
-    union all select concat_ws(' ', 'r', routine_name, routine_type, coalesce(dtd_identifier, ''), sha2(coalesce(routine_definition, ''), 256)) from information_schema.routines where routine_schema = database()
-    union all select concat_ws(' ', 'p', routine_schema, routine_name) from information_schema.routines where routine_schema <> database() and routine_type = 'FUNCTION'
-    union all select concat_ws(' ', 'g', event_object_table, trigger_name, event_manipulation, action_timing) from information_schema.triggers where event_object_schema = database()
-    union all select concat_ws(' ', 'f', table_name, constraint_name, referenced_table_name, update_rule, delete_rule) from information_schema.referential_constraints where constraint_schema = database()
-    union all select concat_ws(' ', 'k', table_name, constraint_name, constraint_type, enforced) from information_schema.table_constraints where table_schema = database()
-    union all select concat_ws(' ', 'h', constraint_name, sha2(check_clause, 256)) from information_schema.check_constraints where constraint_schema = database()
-  ) t`,
-  sqlite: `select type, name, tbl_name, coalesce(sql, '') from sqlite_schema
-    union all select 'function', name, type, narg from pragma_function_list order by 1, 2, 3, 4`,
-};

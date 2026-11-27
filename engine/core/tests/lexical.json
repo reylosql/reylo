@@ -1,0 +1,409 @@
+{
+  "cases": [
+    {
+      "about": "A carriage return ends a -- comment on Postgres, and the line feed elsewhere",
+      "text": "select :a -- note\r, :b\n, :c",
+      "readings": {
+        "postgres": {
+          "comments": ["-- note"],
+          "params": ["a", "b", "c"]
+        },
+        "sqlite": {
+          "comments": ["-- note\r, :b"],
+          "params": ["a", "c"]
+        },
+        "mysql": {
+          "comments": ["-- note\r, :b"],
+          "params": ["a", "c"]
+        }
+      }
+    },
+    {
+      "about": "A CRLF is one line end",
+      "text": "-- the user\r\nselect :id -- by id\r\n",
+      "readings": {
+        "postgres": {
+          "comments": ["-- the user", "-- by id"],
+          "params": ["id"],
+          "prose": "the user"
+        },
+        "sqlite": {
+          "comments": ["-- the user\r", "-- by id\r"],
+          "params": ["id"],
+          "prose": "the user"
+        },
+        "mysql": {
+          "comments": ["-- the user\r", "-- by id\r"],
+          "params": ["id"],
+          "prose": "the user"
+        }
+      }
+    },
+    {
+      "about": "Bare carriage returns end a Postgres comment's lines",
+      "text": "-- One user,\r--   by id.\rselect 1",
+      "readings": {
+        "postgres": {
+          "comments": ["-- One user,", "--   by id."],
+          "prose": "One user,\n  by id."
+        },
+        "mysql": {
+          "comments": ["-- One user,\r--   by id.\rselect 1"]
+        }
+      }
+    },
+    {
+      "about": "A block comment's lines end at a bare carriage return too, on every dialect",
+      "text": "/**\r * One user.\r * By id.\r */\rselect 1",
+      "readings": {
+        "postgres": {
+          "comments": ["/**\r * One user.\r * By id.\r */"],
+          "prose": "One user.\nBy id."
+        },
+        "sqlite": {
+          "comments": ["/**\r * One user.\r * By id.\r */"],
+          "prose": "One user.\nBy id."
+        },
+        "mysql": {
+          "comments": ["/**\r * One user.\r * By id.\r */"],
+          "prose": "One user.\nBy id."
+        },
+        "clickhouse": {
+          "comments": ["/**\r * One user.\r * By id.\r */"],
+          "prose": "One user.\nBy id."
+        }
+      }
+    },
+    {
+      "about": "A vertical tab is whitespace but on SQLite, so this is a slice on Postgres",
+      "text": "select tags\u000b[:n] from t",
+      "readings": {
+        "postgres": {
+          "params": []
+        },
+        "sqlite": {
+          "strings": ["[:n]"],
+          "params": []
+        },
+        "mysql": {
+          "params": ["n"]
+        }
+      }
+    },
+    {
+      "about": "A no-break space is a name's character but on ClickHouse, where it is whitespace",
+      "text": "\u00a0-- one\nselect 1",
+      "readings": {
+        "postgres": {
+          "comments": ["-- one"],
+          "prose": ""
+        },
+        "sqlite": {
+          "comments": ["-- one"],
+          "prose": ""
+        },
+        "mysql": {
+          "comments": ["-- one"],
+          "prose": ""
+        },
+        "clickhouse": {
+          "comments": ["-- one"],
+          "prose": "one"
+        }
+      }
+    },
+    {
+      "about": "An ideographic space likewise",
+      "text": "\u3000/* one */ select 1",
+      "readings": {
+        "postgres": {
+          "comments": ["/* one */"],
+          "prose": ""
+        },
+        "sqlite": {
+          "comments": ["/* one */"],
+          "prose": ""
+        },
+        "mysql": {
+          "comments": ["/* one */"],
+          "prose": ""
+        },
+        "clickhouse": {
+          "comments": ["/* one */"],
+          "prose": "one"
+        }
+      }
+    },
+    {
+      "about": "A byte-order mark is a name's bytes on Postgres, and whitespace at a token's start on SQLite and ClickHouse",
+      "text": "\ufeff-- one\nselect 1",
+      "readings": {
+        "postgres": {
+          "comments": ["-- one"],
+          "prose": ""
+        },
+        "sqlite": {
+          "comments": ["-- one"],
+          "prose": "one"
+        },
+        "clickhouse": {
+          "comments": ["-- one"],
+          "prose": "one"
+        }
+      }
+    },
+    {
+      "about": "SQLite skips a byte-order mark at a token's start, and keeps one inside a name",
+      "text": "select \ufeff$x as x, 1 as y\ufeff",
+      "readings": {
+        "sqlite": {
+          "params": ["x"]
+        },
+        "postgres": {
+          "params": []
+        }
+      }
+    },
+    {
+      "about": "Block comments nest on Postgres and ClickHouse",
+      "text": "select 1 /* a /* b */ , :x */ as x",
+      "readings": {
+        "postgres": {
+          "comments": ["/* a /* b */ , :x */"],
+          "params": []
+        },
+        "clickhouse": {
+          "comments": ["/* a /* b */ , :x */"],
+          "params": []
+        },
+        "sqlite": {
+          "comments": ["/* a /* b */"],
+          "params": ["x"]
+        },
+        "mysql": {
+          "comments": ["/* a /* b */"],
+          "params": ["x"]
+        }
+      }
+    },
+    {
+      "about": "A SQLite block comment that nothing closes runs to the end",
+      "text": "select :x /* :y",
+      "readings": {
+        "sqlite": {
+          "comments": ["/* :y"],
+          "params": ["x"]
+        },
+        "postgres": {
+          "error": "unterminated block comment"
+        },
+        "mysql": {
+          "error": "unterminated block comment"
+        }
+      }
+    },
+    {
+      "about": "A Postgres dollar quote's tag may hold any byte past ASCII",
+      "text": "select $本文$it's :x$本文$ as s, :y",
+      "readings": {
+        "postgres": {
+          "strings": ["$本文$it's :x$本文$"],
+          "params": ["y"]
+        },
+        "sqlite": {
+          "error": "unterminated string literal"
+        },
+        "mysql": {
+          "error": "unterminated string literal"
+        },
+        "clickhouse": {
+          "error": "$it is not a placeholder on ClickHouse, which writes a parameter with its type; write {it:Type}"
+        }
+      }
+    },
+    {
+      "about": "A ClickHouse heredoc's tag is ASCII letters, digits and _",
+      "text": "SELECT $t$ {a:UInt8} $t$, $ x ${b:UInt8}$ x $",
+      "readings": {
+        "clickhouse": {
+          "strings": ["$t$ {a:UInt8} $t$"],
+          "params": ["b"]
+        },
+        "postgres": {
+          "strings": ["$t$ {a:UInt8} $t$"],
+          "params": []
+        }
+      }
+    },
+    {
+      "about": "A $ is a character of a SQLite name, where nothing opens",
+      "text": "select 1 as a$$b, 2 as é$a, :x",
+      "readings": {
+        "sqlite": {
+          "params": ["x"]
+        },
+        "postgres": {
+          "params": ["x"]
+        },
+        "mysql": {
+          "params": ["x"]
+        }
+      }
+    },
+    {
+      "about": "Only Postgres has E'' strings",
+      "text": "select e'\\', :x as x, '\\' from (select 1 as e)",
+      "readings": {
+        "sqlite": {
+          "strings": ["'\\'", "'\\'"],
+          "params": ["x"]
+        },
+        "postgres": {
+          "error": "unterminated string literal"
+        },
+        "mysql": {
+          "error": "unterminated string literal"
+        }
+      }
+    },
+    {
+      "about": "MySQL's -- is a comment before whitespace, a control character or the end, and # always is",
+      "text": "select :a --:b\n, :c --:d\n, :e #:f\n, 1--",
+      "readings": {
+        "mysql": {
+          "comments": ["--:d", "#:f", "--"],
+          "params": ["a", "b", "c", "e"]
+        },
+        "postgres": {
+          "comments": ["--:b", "--:d", "--"],
+          "params": ["a", "c", "e", "f"]
+        }
+      }
+    },
+    {
+      "about": "ClickHouse's # is a comment before a space or a !",
+      "text": "SELECT {a:UInt8} # {b:UInt8}\n, 1 #{c:UInt8}\n#! {d:UInt8}",
+      "readings": {
+        "clickhouse": {
+          "comments": ["# {b:UInt8}", "#! {d:UInt8}"],
+          "params": ["a", "c"]
+        }
+      }
+    },
+    {
+      "about": "ClickHouse reads Unicode's spaces as whitespace, in a placeholder too",
+      "text": "SELECT\u00a0{\u00a0a\u3000:\u00a0UInt8}\u3000AS\u3000x",
+      "readings": {
+        "clickhouse": {
+          "params": ["a"]
+        }
+      }
+    },
+    {
+      "about": "A SQLite bracketed name ends at its first ]",
+      "text": "select [a'b] as x, :p",
+      "readings": {
+        "sqlite": {
+          "strings": ["[a'b]"],
+          "params": ["p"]
+        }
+      }
+    },
+    {
+      "about": "A backslash escapes in a MySQL string, not in a Postgres name",
+      "text": "select \"a\\\"b:c\", :x",
+      "readings": {
+        "mysql": {
+          "strings": ["\"a\\\"b:c\""],
+          "params": ["x"]
+        },
+        "postgres": {
+          "error": "unterminated quoted identifier"
+        }
+      }
+    },
+    {
+      "about": "ClickHouse's // starts a line comment",
+      "text": "SELECT 1 AS a // {a:UInt8} it's\n, {b:UInt8} AS b",
+      "readings": {
+        "clickhouse": {
+          "comments": ["// {a:UInt8} it's"],
+          "params": ["b"]
+        },
+        "postgres": {
+          "error": "unterminated string literal"
+        }
+      }
+    },
+    {
+      "about": "ClickHouse's typographic quotes quote a string and a name, with no escape",
+      "text": "SELECT ‘{a:UInt8} it's’ AS s, “{b:UInt8}” AS n, {c:UInt8} AS c",
+      "readings": {
+        "clickhouse": {
+          "strings": ["‘{a:UInt8} it's’", "“{b:UInt8}”"],
+          "params": ["c"]
+        }
+      }
+    },
+    {
+      "about": "A heredoc after a no-break space, which ClickHouse reads as whitespace",
+      "text": "SELECT\u00a0$h$a;b$h$ AS s",
+      "readings": {
+        "clickhouse": {
+          "strings": ["$h$a;b$h$"],
+          "params": []
+        }
+      }
+    },
+    {
+      "about": "SQLite reads a vertical tab inside a run of whitespace another space starts",
+      "text": "-- a\n\u000b-- b\nselect 1 \u000b+ :x",
+      "readings": {
+        "sqlite": {
+          "comments": ["-- a", "-- b"],
+          "params": ["x"],
+          "prose": "a\nb"
+        },
+        "postgres": {
+          "comments": ["-- a", "-- b"],
+          "params": ["x"],
+          "prose": "a\nb"
+        },
+        "mysql": {
+          "comments": ["-- a", "-- b"],
+          "params": ["x"],
+          "prose": "a\nb"
+        }
+      }
+    },
+    {
+      "about": "Every Unicode space ClickHouse reads as whitespace, before a comment",
+      "text": "\u0085\u00a0\u180e\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b\u200c\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeff-- one\nSELECT 1",
+      "readings": {
+        "clickhouse": {
+          "comments": ["-- one"],
+          "prose": "one"
+        }
+      }
+    },
+    {
+      "about": "Every Unicode space ClickHouse reads as whitespace, inside a placeholder",
+      "text": "SELECT {\u0085\u00a0\u180e\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b\u200c\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeffa\u0085\u00a0\u180e\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b\u200c\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeff:\u0085\u00a0\u180e\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b\u200c\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeffUInt8} AS x",
+      "readings": {
+        "clickhouse": {
+          "params": ["a"]
+        }
+      }
+    },
+    {
+      "about": "Every Unicode space ClickHouse reads as whitespace, before a heredoc",
+      "text": "SELECT\u0085\u00a0\u180e\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u200b\u200c\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeff$h$a;b$h$ AS s",
+      "readings": {
+        "clickhouse": {
+          "strings": ["$h$a;b$h$"],
+          "params": []
+        }
+      }
+    }
+  ]
+}

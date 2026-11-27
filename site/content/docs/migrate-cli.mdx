@@ -274,6 +274,27 @@ $ reylo migrate deploy --dry-run --url $PROD_URL
     reylo migrate deploy --dry-run
 ```
 
+A migration that changes data can reach the rows a later constraint checks:
+
+```sql title="20261126062650_retire_team_plan.sql"
+update users set plan = 'pro' where plan = 'team';
+```
+
+The dry run can't check that constraint, and says so:
+
+```terminal
+$ reylo migrate deploy --dry-run --url $PROD_URL
+✓ This database is as its migrations left it
+✓ The migrations match reylo/schema.sql
+✓ Tried each of 3 pending migrations on a shadow database:
+    · 20261126062650_retire_team_plan.sql
+    · 20261126062651_plan_check.sql
+    · 20261126062652_plan_check_2.sql
+      ! It holds rows to users_plan_check, which can't be checked here: 20261126062650_retire_team_plan.sql changes those rows first; 8 rows break it as they stand
+        List them:
+          select * from users where not (plan = ANY (ARRAY['free'::text, 'pro'::text]));
+```
+
 To type your build against the schema the deploy leaves, put it after `--`. It runs on the dry run's shadow database, which is dropped when it exits:
 
 ```sh

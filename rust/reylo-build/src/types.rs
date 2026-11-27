@@ -631,6 +631,14 @@ impl Types {
         let mut members = Vec::new();
         let mut null = false;
         schema_members(schema, &mut members, &mut null);
+        // A SQLite INTEGER that may be a REAL, which the engine writes as an int64 or a double: the
+        // i64 its declared type names, as outside a document, where a REAL is an error when the row
+        // is read.
+        if let [SchemaMember::Kind("integer", i), SchemaMember::Kind("number", n)] = members.as_slice() {
+            if i.get("format").and_then(|f| f.as_str()) == Some("int64") && n.get("format").and_then(|f| f.as_str()) == Some("double") {
+                return Ok(Some((quote!(i64), null)));
+            }
+        }
         let [member] = members.as_slice() else { return Ok(None) };
         let ty = match member {
             SchemaMember::Any => None,
@@ -724,7 +732,17 @@ impl Types {
     /// reads the JSON: a number as the integer or float it is, and a date, a time, a uuid or bytes
     /// as the text the database writes for it.
     fn json_value(&mut self, t: &Type, nullable: bool, label: &str) -> syn::Result<TokenStream2> {
+        // A value the database writes as its text inside a document, where its kind would say
+        // otherwise: on Postgres a geometric type, a bit string, a network address, an oid, a vector
+        // and each type with no cast to JSON (engine/core, `postgres_text_in_json`); on MySQL a BIT,
+        // whose bytes it writes as their base64, as any bytes.
+        let text = match self.dialect {
+            Dialect::Postgres => reylo_engine_core::schema::postgres_text_in_json(t),
+            Dialect::Mysql => matches!(t.kind, Kind::Array(_)) && t.label.as_deref().map(bare) == Some("bit"),
+            Dialect::Sqlite => false,
+        };
         let ty = match &t.kind {
+            _ if text => quote!(::std::string::String),
             Kind::Boolean(_) => quote!(bool),
             Kind::Integer(i) => match (i.bits, i.unsigned) {
                 (b, false) if b <= 8 => quote!(i8),
@@ -738,6 +756,10 @@ impl Types {
                 _ => quote!(::reylo::serde_json::Number),
             },
             Kind::Float(_) => quote!(f64),
+            // A SQLite INTEGER that may be a REAL, which SQLite keeps outside a STRICT table: the
+            // i64 its declared type names, as outside a document, where a REAL is an error when
+            // the row is read.
+            Kind::Union(_) if self.dialect == Dialect::Sqlite && t.label.as_deref().is_some_and(|n| !is_bool(n) && affinity(n) == Affinity::Integer) => quote!(i64),
             // serde_json reads a number with a fraction as an f64, which rounds a decimal.
             Kind::Decimal(_) => return Err(syn::Error::new(self.span, format!("{label} holds a decimal inside JSON, which no Rust number reads exactly: cast it to text inside the JSON, as `x::text`"))),
             Kind::Text(_) | Kind::Uuid(_) | Kind::Bytes(_) | Kind::Date(_) | Kind::Time(_) | Kind::DateTime(_) | Kind::Instant(_) | Kind::ZonedDateTime(_) | Kind::Duration(_) => quote!(::std::string::String),
@@ -1229,6 +1251,22 @@ mod tests {
         assert!(column(Dialect::Postgres, Type::opaque("public.ltree")).unwrap_err().contains("no Rust type for public.ltree"));
     }
 
+    /// Inside a document Postgres writes a geometric type, an oid and a type with no cast to JSON as
+    /// their text, and MySQL a BIT as its bytes' base64; a composite of the user's named `point` is an
+    /// object of its fields.
+    #[test]
+    fn a_value_written_as_text_inside_a_document_is_a_string() {
+        use reylo_engine_core::types::{Field, Slot};
+        let point = || Type::structure(vec![Field::new("x", Type::double(), false), Field::new("y", Type::double(), false)]);
+        let in_json = |t: Type| Type::json_of(Slot::non_null(t));
+        let string = Ok(("::reylo::sqlx::types::Json<::std::string::String>".to_string(), true));
+        assert_eq!(column(Dialect::Postgres, in_json(point().named("point"))), string);
+        assert_eq!(column(Dialect::Postgres, in_json(Type::unsigned(32).named("oid"))), string);
+        assert_eq!(column(Dialect::Postgres, in_json(Type::opaque("ltree"))), string);
+        assert_eq!(column(Dialect::Mysql, in_json(Type::array(Slot::non_null(Type::boolean())).named("bit"))), string);
+        assert_ne!(column(Dialect::Postgres, in_json(point().named("public.point"))), string);
+    }
+
     #[test]
     fn a_vector_is_pgvectors_behind_its_feature() {
         use reylo_engine_core::types::Slot;
@@ -1265,6 +1303,22 @@ mod tests {
         assert!(impls.contains(r#"array_of ("public.\"ResourceKind\"")"#), "{impls}");
         assert_eq!(super::qualified("\"a.b\".\"c\"\"d\""), ("\"a.b\"", "\"c\"\"d\""));
         assert_eq!(super::unquoted("\"c\"\"d\""), "c\"d");
+    }
+
+    #[test]
+    fn a_sqlite_integer_that_may_be_a_real_is_an_i64_inside_a_document_too() {
+        use reylo_engine_core::types::{Field, Slot};
+        let either = Type::union(vec![Type::integer(64), Type::double()]).named("INTEGER");
+        assert_eq!(column(Dialect::Sqlite, either.clone()), Ok(("i64".into(), true)));
+        let built = Type::json_of(Slot::non_null(Type::structure(vec![Field::new("n", either, false)])));
+        let mut types = Types::new(Dialect::Sqlite, Options::default(), BTreeMap::new(), Span::call_site(), false);
+        types.column(&built, false, "c").unwrap();
+        let items = types.items.iter().map(|i| i.to_string().replace(' ', "")).collect::<String>();
+        assert!(items.contains("pubn:i64"), "{items}");
+        // So is each value of a map SQLite builds of one, which the engine writes as an int64 or a double.
+        let map = json!({ "type": "object", "additionalProperties": { "anyOf": [{ "type": "integer", "format": "int64" }, { "type": "number", "format": "double" }] } });
+        let (ty, _) = checked(map);
+        assert!(ty.contains("BTreeMap<::std::string::String,i64>"), "{ty}");
     }
 
     #[test]

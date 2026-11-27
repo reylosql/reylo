@@ -7109,29 +7109,26 @@
   },
   "sqlc": {
    "name": "sqlc",
-   "version": "v1.31.1",
+   "version": "v1.31.1, sqlc-gen-typescript 0.1.3",
    "dbs": [
     "postgres",
-    "mysql",
-    "sqlite"
+    "mysql"
    ],
    "connects": "opt-in",
    "wrote": [
-    "?? db/db.go",
-    "?? db/models.go",
-    "?? db/query.sql.go"
+    "?? db/query_sql.ts"
    ],
    "cells": {
     "no-codegen": {
      "state": "n",
      "right": 0,
      "total": 1,
-     "note": "A run leaves new files to commit: `db/db.go`, `db/models.go`, `db/query.sql.go`.",
+     "note": "A run leaves new files to commit: `db/query_sql.ts`.",
      "results": []
     },
     "from-the-database": {
      "state": "p",
-     "right": 3,
+     "right": 2,
      "total": 3,
      "note": "By default it reads your schema files and never connects. A `database:` setting asks Postgres for types, but not for nullability.",
      "results": [
@@ -7139,16 +7136,22 @@
        "db": "postgres",
        "probe": "function",
        "sql": "select add_one(id) as v from users",
-       "ok": true,
-       "problems": [],
-       "at": [],
+       "ok": false,
+       "problems": [
+        "it types the result `string`"
+       ],
+       "at": [
+        {
+         "column": "v"
+        }
+       ],
        "answer": {
         "params": [],
         "columns": [
          {
           "name": "v",
-          "type": "int32",
-          "kind": "num",
+          "type": "string",
+          "kind": "text",
           "nullable": false
          }
         ],
@@ -7187,9 +7190,13 @@
         "columns": [
          {
           "name": "v",
-          "type": "[]int32",
+          "type": "string[]",
           "kind": "json",
-          "nullable": false
+          "nullable": false,
+          "array": true,
+          "elements": [
+           null
+          ]
          }
         ],
         "cardinality": null
@@ -7199,8 +7206,8 @@
     },
     "outer-joins": {
      "state": "p",
-     "right": 14,
-     "total": 20,
+     "right": 9,
+     "total": 13,
      "results": [
       {
        "db": "postgres",
@@ -7220,7 +7227,7 @@
          },
          {
           "name": "title",
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
@@ -7246,7 +7253,7 @@
          },
          {
           "name": "title",
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
@@ -7264,7 +7271,7 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -7278,7 +7285,7 @@
          },
          {
           "name": "title",
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
@@ -7292,7 +7299,7 @@
        "sql": "select u.name, p.title from users u left join posts p on p.author_id = u.id where p.score > 0",
        "ok": false,
        "problems": [
-        "`title` is typed `sql.NullString`, but it is never null"
+        "`title` is typed `string | null`, but it is never null"
        ],
        "at": [
         {
@@ -7310,7 +7317,7 @@
          },
          {
           "name": "title",
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
@@ -7368,7 +7375,7 @@
          },
          {
           "name": "title",
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
@@ -7388,13 +7395,13 @@
         "columns": [
          {
           "name": "name",
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          },
          {
           "name": "title",
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
@@ -7420,7 +7427,7 @@
          },
          {
           "name": "title",
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
@@ -7446,7 +7453,7 @@
          },
          {
           "name": "title",
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
@@ -7464,7 +7471,7 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -7478,7 +7485,7 @@
          },
          {
           "name": "title",
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
@@ -7492,7 +7499,7 @@
        "sql": "select u.name, p.title from users u left join posts p on p.author_id = u.id where p.score > 0",
        "ok": false,
        "problems": [
-        "`title` is typed `sql.NullString`, but it is never null"
+        "`title` is typed `string | null`, but it is never null"
        ],
        "at": [
         {
@@ -7510,7 +7517,7 @@
          },
          {
           "name": "title",
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
@@ -7568,207 +7575,7 @@
          },
          {
           "name": "title",
-          "type": "sql.NullString",
-          "kind": "text",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "left",
-       "sql": "select u.name, p.title from users u left join posts p on p.author_id = u.id",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "name",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "name": "title",
-          "type": "sql.NullString",
-          "kind": "text",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "left-sorted",
-       "sql": "select u.name, p.title from users u left join posts p on p.author_id = u.id order by p.title",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "name",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "name": "title",
-          "type": "sql.NullString",
-          "kind": "text",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "left-where",
-       "sql": "select u.name, p.title from users u left join posts p on p.author_id = u.id where u.id = $1",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [
-         {
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "columns": [
-         {
-          "name": "name",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "name": "title",
-          "type": "sql.NullString",
-          "kind": "text",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "left-narrowed",
-       "sql": "select u.name, p.title from users u left join posts p on p.author_id = u.id where p.score > 0",
-       "ok": false,
-       "problems": [
-        "`title` is typed `sql.NullString`, but it is never null"
-       ],
-       "at": [
-        {
-         "column": "title"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "name",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "name": "title",
-          "type": "sql.NullString",
-          "kind": "text",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "left-subquery",
-       "sql": "select u.name, x.title from users u left join (select author_id, title from posts) x on x.author_id = u.id",
-       "ok": false,
-       "problems": [
-        "`title` is typed `string`, but it can be null"
-       ],
-       "at": [
-        {
-         "column": "title"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "name",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "name": "title",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "right",
-       "sql": "select u.name, p.title from posts p right join users u on u.id = p.author_id",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "name",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "name": "title",
-          "type": "sql.NullString",
-          "kind": "text",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "full",
-       "sql": "select u.name, p.title from users u full join posts p on p.author_id = u.id",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "name",
-          "type": "sql.NullString",
-          "kind": "text",
-          "nullable": true
-         },
-         {
-          "name": "title",
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
@@ -7780,8 +7587,8 @@
     },
     "expression-nullability": {
      "state": "p",
-     "right": 22,
-     "total": 57,
+     "right": 21,
+     "total": 38,
      "results": [
       {
        "db": "postgres",
@@ -7795,8 +7602,8 @@
         "columns": [
          {
           "name": "v",
-          "type": "int64",
-          "kind": "num",
+          "type": "string",
+          "kind": "text",
           "nullable": false
          }
         ],
@@ -7809,7 +7616,7 @@
        "sql": "select max(id) as v from posts",
        "ok": false,
        "problems": [
-        "`v` is typed `interface{}`"
+        "`v` is typed `string`, but it can be null"
        ],
        "at": [
         {
@@ -7821,9 +7628,9 @@
         "columns": [
          {
           "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
+          "type": "string",
+          "kind": "text",
+          "nullable": false
          }
         ],
         "cardinality": null
@@ -7835,7 +7642,7 @@
        "sql": "select sum(score) as v from posts",
        "ok": false,
        "problems": [
-        "`v` is typed `int64`, but it can be null"
+        "`v` is typed `string`, but it can be null"
        ],
        "at": [
         {
@@ -7847,8 +7654,8 @@
         "columns": [
          {
           "name": "v",
-          "type": "int64",
-          "kind": "num",
+          "type": "string",
+          "kind": "text",
           "nullable": false
          }
         ],
@@ -7881,7 +7688,7 @@
        "sql": "select name || '!' as v from users",
        "ok": false,
        "problems": [
-        "`v` is typed `interface{}`"
+        "`v` is typed `string | null`, but it is never null"
        ],
        "at": [
         {
@@ -7893,8 +7700,8 @@
         "columns": [
          {
           "name": "v",
-          "type": "interface{}",
-          "kind": "any",
+          "type": "string | null",
+          "kind": "text",
           "nullable": true
          }
         ],
@@ -7905,22 +7712,16 @@
        "db": "postgres",
        "probe": "concat-nullable",
        "sql": "select nickname || '!' as v from users",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
+       "ok": true,
+       "problems": [],
+       "at": [],
        "answer": {
         "params": [],
         "columns": [
          {
           "name": "v",
-          "type": "interface{}",
-          "kind": "any",
+          "type": "string | null",
+          "kind": "text",
           "nullable": true
          }
         ],
@@ -7931,23 +7732,17 @@
        "db": "postgres",
        "probe": "upper",
        "sql": "select upper(name) as v from users",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
+       "ok": true,
+       "problems": [],
+       "at": [],
        "answer": {
         "params": [],
         "columns": [
          {
           "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
+          "type": "string",
+          "kind": "text",
+          "nullable": false
          }
         ],
         "cardinality": null
@@ -7959,7 +7754,7 @@
        "sql": "select upper(nickname) as v from users",
        "ok": false,
        "problems": [
-        "`v` is typed `interface{}`"
+        "`v` is typed `string`, but it can be null"
        ],
        "at": [
         {
@@ -7971,9 +7766,9 @@
         "columns": [
          {
           "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
+          "type": "string",
+          "kind": "text",
+          "nullable": false
          }
         ],
         "cardinality": null
@@ -7991,8 +7786,8 @@
         "columns": [
          {
           "name": "v",
-          "type": "int32",
-          "kind": "num",
+          "type": "string",
+          "kind": "text",
           "nullable": false
          }
         ],
@@ -8005,7 +7800,7 @@
        "sql": "select score + 1 as v from posts",
        "ok": false,
        "problems": [
-        "`v` is typed `int32`, but it can be null"
+        "`v` is typed `string`, but it can be null"
        ],
        "at": [
         {
@@ -8017,8 +7812,8 @@
         "columns": [
          {
           "name": "v",
-          "type": "int32",
-          "kind": "num",
+          "type": "string",
+          "kind": "text",
           "nullable": false
          }
         ],
@@ -8031,7 +7826,7 @@
        "sql": "select nullif(name, 'x') as v from users",
        "ok": false,
        "problems": [
-        "`v` is typed `bool`, but it can be null"
+        "`v` is typed `boolean`, but it can be null"
        ],
        "at": [
         {
@@ -8043,7 +7838,7 @@
         "columns": [
          {
           "name": "v",
-          "type": "bool",
+          "type": "boolean",
           "kind": "bool",
           "nullable": false
          }
@@ -8055,22 +7850,16 @@
        "db": "postgres",
        "probe": "case-no-else",
        "sql": "select case when id > 0 then name end as v from users",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
+       "ok": true,
+       "problems": [],
+       "at": [],
        "answer": {
         "params": [],
         "columns": [
          {
           "name": "v",
-          "type": "interface{}",
-          "kind": "any",
+          "type": "string | null",
+          "kind": "text",
           "nullable": true
          }
         ],
@@ -8083,7 +7872,7 @@
        "sql": "select nickname is null as v from users",
        "ok": false,
        "problems": [
-        "`v` is typed `interface{}`"
+        "`v` is typed `string | null`, but it is never null"
        ],
        "at": [
         {
@@ -8095,8 +7884,8 @@
         "columns": [
          {
           "name": "v",
-          "type": "interface{}",
-          "kind": "any",
+          "type": "string | null",
+          "kind": "text",
           "nullable": true
          }
         ],
@@ -8115,8 +7904,8 @@
         "columns": [
          {
           "name": "v",
-          "type": "int64",
-          "kind": "num",
+          "type": "string",
+          "kind": "text",
           "nullable": false
          }
         ],
@@ -8135,7 +7924,7 @@
         "columns": [
          {
           "name": "v",
-          "type": "bool",
+          "type": "boolean",
           "kind": "bool",
           "nullable": false
          }
@@ -8155,8 +7944,8 @@
         "columns": [
          {
           "name": "v",
-          "type": "int64",
-          "kind": "num",
+          "type": "string",
+          "kind": "text",
           "nullable": false
          }
         ],
@@ -8169,7 +7958,7 @@
        "sql": "select lag(id) over (order by id) as v from users",
        "ok": false,
        "problems": [
-        "`v` is typed `interface{}`"
+        "`v` is typed `string`, but it can be null"
        ],
        "at": [
         {
@@ -8181,9 +7970,9 @@
         "columns": [
          {
           "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
+          "type": "string",
+          "kind": "text",
+          "nullable": false
          }
         ],
         "cardinality": null
@@ -8195,7 +7984,7 @@
        "sql": "select id as v from users union all select score from posts",
        "ok": false,
        "problems": [
-        "`v` is typed `int32`, but it can be null"
+        "`v` is typed `number`, but it can be null"
        ],
        "at": [
         {
@@ -8207,7 +7996,7 @@
         "columns": [
          {
           "name": "v",
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -8219,23 +8008,17 @@
        "db": "postgres",
        "probe": "grouped-max",
        "sql": "select max(id) as v from posts group by author_id",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
+       "ok": true,
+       "problems": [],
+       "at": [],
        "answer": {
         "params": [],
         "columns": [
          {
           "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
+          "type": "string",
+          "kind": "text",
+          "nullable": false
          }
         ],
         "cardinality": null
@@ -8253,7 +8036,7 @@
         "columns": [
          {
           "name": "v",
-          "type": "int64",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -8267,7 +8050,7 @@
        "sql": "select max(id) as v from posts",
        "ok": false,
        "problems": [
-        "`v` is typed `interface{}`"
+        "`v` is typed `string`, but it can be null"
        ],
        "at": [
         {
@@ -8279,9 +8062,9 @@
         "columns": [
          {
           "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
+          "type": "string",
+          "kind": "text",
+          "nullable": false
          }
         ],
         "cardinality": null
@@ -8293,7 +8076,7 @@
        "sql": "select sum(score) as v from posts",
        "ok": false,
        "problems": [
-        "`v` is typed `interface{}`"
+        "`v` is typed `string`, but it can be null"
        ],
        "at": [
         {
@@ -8305,9 +8088,9 @@
         "columns": [
          {
           "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
+          "type": "string",
+          "kind": "text",
+          "nullable": false
          }
         ],
         "cardinality": null
@@ -8437,7 +8220,7 @@
         "columns": [
          {
           "name": "v",
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -8451,7 +8234,7 @@
        "sql": "select score + 1 as v from posts",
        "ok": false,
        "problems": [
-        "`v` is typed `int32`, but it can be null"
+        "`v` is typed `number`, but it can be null"
        ],
        "at": [
         {
@@ -8463,7 +8246,7 @@
         "columns": [
          {
           "name": "v",
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -8475,380 +8258,6 @@
        "db": "mysql",
        "probe": "nullif",
        "sql": "select nullif(name, 'x') as v from users",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "mysql",
-       "probe": "case-no-else",
-       "sql": "select case when id > 0 then name end as v from users",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "mysql",
-       "probe": "is-null",
-       "sql": "select nickname is null as v from users",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "bool",
-          "kind": "bool",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "mysql",
-       "probe": "subquery-count",
-       "sql": "select (select count(*) from posts) as v",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "mysql",
-       "probe": "exists",
-       "sql": "select exists (select 1 from posts) as v",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "bool",
-          "kind": "bool",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "mysql",
-       "probe": "row-number",
-       "sql": "select row_number() over (order by id) as v from users",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "mysql",
-       "probe": "lag",
-       "sql": "select lag(id) over (order by id) as v from users",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "mysql",
-       "probe": "union",
-       "sql": "select id as v from users union all select score from posts",
-       "ok": false,
-       "problems": [
-        "`v` is typed `int32`, but it can be null"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int32",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "mysql",
-       "probe": "grouped-max",
-       "sql": "select max(id) as v from posts group by author_id",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "count",
-       "sql": "select count(*) as v from posts",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "max",
-       "sql": "select max(id) as v from posts",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "sum",
-       "sql": "select sum(score) as v from posts",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "sql.NullFloat64",
-          "kind": "num",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "coalesce",
-       "sql": "select coalesce(nickname, 'x') as v from users",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "concat",
-       "sql": "select name || '!' as v from users",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "concat-nullable",
-       "sql": "select nickname || '!' as v from users",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "upper",
-       "sql": "select upper(name) as v from users",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "upper-nullable",
-       "sql": "select upper(nickname) as v from users",
        "ok": false,
        "problems": [
         "`v` is typed `string`, but it can be null"
@@ -8872,9 +8281,9 @@
        }
       },
       {
-       "db": "sqlite",
-       "probe": "add",
-       "sql": "select id + 1 as v from posts",
+       "db": "mysql",
+       "probe": "case-no-else",
+       "sql": "select case when id > 0 then name end as v from users",
        "ok": true,
        "problems": [],
        "at": [],
@@ -8883,60 +8292,8 @@
         "columns": [
          {
           "name": "v",
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "add-nullable",
-       "sql": "select score + 1 as v from posts",
-       "ok": false,
-       "problems": [
-        "`v` is typed `int64`, but it can be null"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "nullif",
-       "sql": "select nullif(name, 'x') as v from users",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "interface{}",
-          "kind": "any",
+          "type": "string | null",
+          "kind": "text",
           "nullable": true
          }
         ],
@@ -8944,33 +8301,7 @@
        }
       },
       {
-       "db": "sqlite",
-       "probe": "case-no-else",
-       "sql": "select case when id > 0 then name end as v from users",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
+       "db": "mysql",
        "probe": "is-null",
        "sql": "select nickname is null as v from users",
        "ok": true,
@@ -8981,8 +8312,8 @@
         "columns": [
          {
           "name": "v",
-          "type": "bool",
-          "kind": "bool",
+          "type": "string",
+          "kind": "text",
           "nullable": false
          }
         ],
@@ -8990,7 +8321,7 @@
        }
       },
       {
-       "db": "sqlite",
+       "db": "mysql",
        "probe": "subquery-count",
        "sql": "select (select count(*) from posts) as v",
        "ok": true,
@@ -9001,7 +8332,7 @@
         "columns": [
          {
           "name": "v",
-          "type": "int64",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -9010,7 +8341,7 @@
        }
       },
       {
-       "db": "sqlite",
+       "db": "mysql",
        "probe": "exists",
        "sql": "select exists (select 1 from posts) as v",
        "ok": true,
@@ -9021,8 +8352,8 @@
         "columns": [
          {
           "name": "v",
-          "type": "bool",
-          "kind": "bool",
+          "type": "string",
+          "kind": "text",
           "nullable": false
          }
         ],
@@ -9030,12 +8361,12 @@
        }
       },
       {
-       "db": "sqlite",
+       "db": "mysql",
        "probe": "row-number",
        "sql": "select row_number() over (order by id) as v from users",
        "ok": false,
        "problems": [
-        "`v` is typed `interface{}`"
+        "`v` is typed `string | null`, but it is never null"
        ],
        "at": [
         {
@@ -9047,8 +8378,8 @@
         "columns": [
          {
           "name": "v",
-          "type": "interface{}",
-          "kind": "any",
+          "type": "string | null",
+          "kind": "text",
           "nullable": true
          }
         ],
@@ -9056,25 +8387,19 @@
        }
       },
       {
-       "db": "sqlite",
+       "db": "mysql",
        "probe": "lag",
        "sql": "select lag(id) over (order by id) as v from users",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
+       "ok": true,
+       "problems": [],
+       "at": [],
        "answer": {
         "params": [],
         "columns": [
          {
           "name": "v",
-          "type": "interface{}",
-          "kind": "any",
+          "type": "string | null",
+          "kind": "text",
           "nullable": true
          }
         ],
@@ -9082,12 +8407,12 @@
        }
       },
       {
-       "db": "sqlite",
+       "db": "mysql",
        "probe": "union",
        "sql": "select id as v from users union all select score from posts",
        "ok": false,
        "problems": [
-        "`v` is typed `int64`, but it can be null"
+        "`v` is typed `number`, but it can be null"
        ],
        "at": [
         {
@@ -9099,7 +8424,7 @@
         "columns": [
          {
           "name": "v",
-          "type": "int64",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -9108,26 +8433,20 @@
        }
       },
       {
-       "db": "sqlite",
+       "db": "mysql",
        "probe": "grouped-max",
        "sql": "select max(id) as v from posts group by author_id",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
+       "ok": true,
+       "problems": [],
+       "at": [],
        "answer": {
         "params": [],
         "columns": [
          {
           "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
+          "type": "string",
+          "kind": "text",
+          "nullable": false
          }
         ],
         "cardinality": null
@@ -9136,9 +8455,9 @@
      ]
     },
     "parameter-types": {
-     "state": "y",
-     "right": 17,
-     "total": 17,
+     "state": "p",
+     "right": 10,
+     "total": 12,
      "results": [
       {
        "db": "postgres",
@@ -9150,14 +8469,14 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
         ],
         "columns": [
          {
-          "name": "v",
+          "name": "name",
           "type": "string",
           "kind": "text",
           "nullable": false
@@ -9183,8 +8502,8 @@
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -9202,12 +8521,12 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          },
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          },
@@ -9217,7 +8536,7 @@
           "nullable": false
          },
          {
-          "type": "sql.NullInt32",
+          "type": "number | null",
           "kind": "num",
           "nullable": true
          }
@@ -9230,21 +8549,27 @@
        "db": "postgres",
        "probe": "limit",
        "sql": "select id from users limit $1",
-       "ok": true,
-       "problems": [],
-       "at": [],
+       "ok": false,
+       "problems": [
+        "parameter 1 is typed `string`, but it takes a number"
+       ],
+       "at": [
+        {
+         "param": 1
+        }
+       ],
        "answer": {
         "params": [
          {
-          "type": "int32",
-          "kind": "num",
+          "type": "string",
+          "kind": "text",
           "nullable": false
          }
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -9269,8 +8594,8 @@
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -9288,15 +8613,15 @@
        "answer": {
         "params": [
          {
-          "type": "uuid.NullUUID",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -9314,15 +8639,15 @@
        "answer": {
         "params": [
          {
-          "type": "time.Time",
+          "type": "Date",
           "kind": "time",
           "nullable": false
          }
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -9340,14 +8665,14 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
         ],
         "columns": [
          {
-          "name": "v",
+          "name": "name",
           "type": "string",
           "kind": "text",
           "nullable": false
@@ -9373,8 +8698,8 @@
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -9392,12 +8717,12 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          },
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          },
@@ -9407,7 +8732,7 @@
           "nullable": false
          },
          {
-          "type": "sql.NullInt32",
+          "type": "number | null",
           "kind": "num",
           "nullable": true
          }
@@ -9420,21 +8745,27 @@
        "db": "mysql",
        "probe": "limit",
        "sql": "select id from users limit $1",
-       "ok": true,
-       "problems": [],
-       "at": [],
+       "ok": false,
+       "problems": [
+        "parameter 1 is typed `string`, but it takes a number"
+       ],
+       "at": [
+        {
+         "param": 1
+        }
+       ],
        "answer": {
         "params": [
          {
-          "type": "int32",
-          "kind": "num",
+          "type": "string",
+          "kind": "text",
           "nullable": false
          }
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -9459,146 +8790,8 @@
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "eq-int",
-       "sql": "select name from users where id = $1",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [
-         {
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "columns": [
-         {
-          "name": "v",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "eq-text",
-       "sql": "select id from users where name = $1",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [
-         {
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         }
-        ],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "insert",
-       "sql": "insert into posts (id, author_id, title, score) values ($1, $2, $3, $4)",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [
-         {
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         },
-         {
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         },
-         {
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "type": "sql.NullInt64",
-          "kind": "num",
-          "nullable": true
-         }
-        ],
-        "columns": [],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "limit",
-       "sql": "select id from users limit $1",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [
-         {
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "like",
-       "sql": "select id from users where name like $1",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [
-         {
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         }
-        ],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int64",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -9610,8 +8803,8 @@
     },
     "parameter-nullability": {
      "state": "p",
-     "right": 9,
-     "total": 12,
+     "right": 6,
+     "total": 8,
      "results": [
       {
        "db": "postgres",
@@ -9623,7 +8816,7 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          },
@@ -9638,7 +8831,7 @@
           "nullable": false
          },
          {
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
@@ -9657,12 +8850,12 @@
        "answer": {
         "params": [
          {
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          },
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -9681,14 +8874,14 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
         ],
         "columns": [
          {
-          "name": "v",
+          "name": "name",
           "type": "string",
           "kind": "text",
           "nullable": false
@@ -9703,7 +8896,7 @@
        "sql": "select id from users where nickname = $1",
        "ok": false,
        "problems": [
-        "parameter 1 is typed `sql.NullString`, but it takes no null"
+        "parameter 1 is typed `string | null`, but it takes no null"
        ],
        "at": [
         {
@@ -9713,15 +8906,15 @@
        "answer": {
         "params": [
          {
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -9739,7 +8932,7 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          },
@@ -9754,7 +8947,7 @@
           "nullable": false
          },
          {
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
@@ -9773,12 +8966,12 @@
        "answer": {
         "params": [
          {
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          },
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -9797,14 +8990,14 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
         ],
         "columns": [
          {
-          "name": "v",
+          "name": "name",
           "type": "string",
           "kind": "text",
           "nullable": false
@@ -9819,7 +9012,7 @@
        "sql": "select id from users where nickname = $1",
        "ok": false,
        "problems": [
-        "parameter 1 is typed `sql.NullString`, but it takes no null"
+        "parameter 1 is typed `string | null`, but it takes no null"
        ],
        "at": [
         {
@@ -9829,131 +9022,15 @@
        "answer": {
         "params": [
          {
-          "type": "sql.NullString",
+          "type": "string | null",
           "kind": "text",
           "nullable": true
          }
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "insert",
-       "sql": "insert into users (id, email, name, nickname) values ($1, $2, $3, $4)",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [
-         {
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         },
-         {
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "type": "sql.NullString",
-          "kind": "text",
-          "nullable": true
-         }
-        ],
-        "columns": [],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "update",
-       "sql": "update users set nickname = $1 where id = $2",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [
-         {
-          "type": "sql.NullString",
-          "kind": "text",
-          "nullable": true
-         },
-         {
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "columns": [],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "eq-key",
-       "sql": "select name from users where id = $1",
-       "ok": true,
-       "problems": [],
-       "at": [],
-       "answer": {
-        "params": [
-         {
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "columns": [
-         {
-          "name": "v",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "eq-nullable",
-       "sql": "select id from users where nickname = $1",
-       "ok": false,
-       "problems": [
-        "parameter 1 is typed `sql.NullString`, but it takes no null"
-       ],
-       "at": [
-        {
-         "param": 1
-        }
-       ],
-       "answer": {
-        "params": [
-         {
-          "type": "sql.NullString",
-          "kind": "text",
-          "nullable": true
-         }
-        ],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int64",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -9966,8 +9043,8 @@
     "cardinality": {
      "state": "n",
      "right": 0,
-     "total": 28,
-     "note": "Declared by hand on each query: `:one`, `:many` or `:exec`. The annotation decides the method's return type, and sqlc accepts any of them.",
+     "total": 18,
+     "note": "Declared by hand on each query: `:one`, `:many` or `:exec`. The annotation decides the function's return type, and sqlc accepts any of them.",
      "results": [
       {
        "db": "postgres",
@@ -9985,20 +9062,20 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
         ],
         "columns": [
          {
-          "name": "ID",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          },
          {
-          "name": "Name",
+          "name": "name",
           "type": "string",
           "kind": "text",
           "nullable": false
@@ -10030,8 +9107,8 @@
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -10057,8 +9134,8 @@
         "columns": [
          {
           "name": "v",
-          "type": "int64",
-          "kind": "num",
+          "type": "string",
+          "kind": "text",
           "nullable": false
          }
         ],
@@ -10081,7 +9158,7 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          },
@@ -10098,8 +9175,8 @@
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -10124,8 +9201,8 @@
         "params": [],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -10150,8 +9227,8 @@
         "params": [],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -10180,15 +9257,15 @@
           "nullable": false
          },
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -10212,14 +9289,14 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
         ],
         "columns": [
          {
-          "name": "v",
+          "name": "title",
           "type": "string",
           "kind": "text",
           "nullable": false
@@ -10244,15 +9321,15 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -10276,7 +9353,7 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -10301,20 +9378,20 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
         ],
         "columns": [
          {
-          "name": "ID",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          },
          {
-          "name": "Name",
+          "name": "name",
           "type": "string",
           "kind": "text",
           "nullable": false
@@ -10346,8 +9423,8 @@
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -10373,7 +9450,7 @@
         "columns": [
          {
           "name": "v",
-          "type": "int64",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -10398,8 +9475,8 @@
         "params": [],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -10424,8 +9501,8 @@
         "params": [],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -10449,14 +9526,14 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
         ],
         "columns": [
          {
-          "name": "v",
+          "name": "title",
           "type": "string",
           "kind": "text",
           "nullable": false
@@ -10481,15 +9558,15 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
         ],
         "columns": [
          {
-          "name": "v",
-          "type": "int32",
+          "name": "id",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -10513,323 +9590,7 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "columns": [],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "primary-key",
-       "sql": "select id, name from users where id = $1",
-       "ok": false,
-       "problems": [
-        "it does not infer one"
-       ],
-       "at": [
-        {
-         "cardinality": true
-        }
-       ],
-       "answer": {
-        "params": [
-         {
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "columns": [
-         {
-          "name": "ID",
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         },
-         {
-          "name": "Name",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "unique",
-       "sql": "select id from users where email = $1",
-       "ok": false,
-       "problems": [
-        "it does not infer one"
-       ],
-       "at": [
-        {
-         "cardinality": true
-        }
-       ],
-       "answer": {
-        "params": [
-         {
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         }
-        ],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "count",
-       "sql": "select count(*) as v from users",
-       "ok": false,
-       "problems": [
-        "it does not infer one"
-       ],
-       "at": [
-        {
-         "cardinality": true
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "insert-returning",
-       "sql": "insert into users (id, email, name) values ($1, $2, $3) returning id",
-       "ok": false,
-       "problems": [
-        "it does not infer one"
-       ],
-       "at": [
-        {
-         "cardinality": true
-        }
-       ],
-       "answer": {
-        "params": [
-         {
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         },
-         {
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         }
-        ],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "all",
-       "sql": "select id from users",
-       "ok": false,
-       "problems": [
-        "it does not infer one"
-       ],
-       "at": [
-        {
-         "cardinality": true
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "limit-1",
-       "sql": "select id from users limit 1",
-       "ok": false,
-       "problems": [
-        "it does not infer one"
-       ],
-       "at": [
-        {
-         "cardinality": true
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "update-returning",
-       "sql": "update users set name = $1 where id = $2 returning id",
-       "ok": false,
-       "problems": [
-        "it does not infer one"
-       ],
-       "at": [
-        {
-         "cardinality": true
-        }
-       ],
-       "answer": {
-        "params": [
-         {
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "join-on-keys",
-       "sql": "select p.title from posts p join users u on u.id = p.author_id where p.id = $1",
-       "ok": false,
-       "problems": [
-        "it does not infer one"
-       ],
-       "at": [
-        {
-         "cardinality": true
-        }
-       ],
-       "answer": {
-        "params": [
-         {
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "columns": [
-         {
-          "name": "v",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "non-key",
-       "sql": "select id from posts where author_id = $1",
-       "ok": false,
-       "problems": [
-        "it does not infer one"
-       ],
-       "at": [
-        {
-         "cardinality": true
-        }
-       ],
-       "answer": {
-        "params": [
-         {
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "columns": [
-         {
-          "name": "v",
-          "type": "int64",
-          "kind": "num",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "delete",
-       "sql": "delete from users where id = $1",
-       "ok": false,
-       "problems": [
-        "it does not infer one"
-       ],
-       "at": [
-        {
-         "cardinality": true
-        }
-       ],
-       "answer": {
-        "params": [
-         {
-          "type": "int64",
+          "type": "number",
           "kind": "num",
           "nullable": false
          }
@@ -10843,7 +9604,7 @@
     "json-shapes": {
      "state": "n",
      "right": 0,
-     "total": 10,
+     "total": 7,
      "results": [
       {
        "db": "postgres",
@@ -10851,7 +9612,7 @@
        "sql": "select json_build_object('id', id, 'name', name) as v from users",
        "ok": false,
        "problems": [
-        "`v` is typed `json.RawMessage`"
+        "`v` is typed `any`"
        ],
        "at": [
         {
@@ -10863,9 +9624,9 @@
         "columns": [
          {
           "name": "v",
-          "type": "json.RawMessage",
+          "type": "any",
           "kind": "any",
-          "nullable": false
+          "nullable": true
          }
         ],
         "cardinality": null
@@ -10877,7 +9638,7 @@
        "sql": "select json_agg(json_build_object('id', id, 'title', title)) as v from posts",
        "ok": false,
        "problems": [
-        "`v` is typed `json.RawMessage`"
+        "`v` is typed `any`"
        ],
        "at": [
         {
@@ -10889,9 +9650,9 @@
         "columns": [
          {
           "name": "v",
-          "type": "json.RawMessage",
+          "type": "any",
           "kind": "any",
-          "nullable": false
+          "nullable": true
          }
         ],
         "cardinality": null
@@ -10903,7 +9664,7 @@
        "sql": "select u.name, jsonb_agg(jsonb_build_object('id', p.id, 'title', p.title)) as v from users u join posts p on p.author_id = u.id group by u.id",
        "ok": false,
        "problems": [
-        "`v` is typed `json.RawMessage`"
+        "`v` is typed `any`"
        ],
        "at": [
         {
@@ -10921,9 +9682,9 @@
          },
          {
           "name": "v",
-          "type": "json.RawMessage",
+          "type": "any",
           "kind": "any",
-          "nullable": false
+          "nullable": true
          }
         ],
         "cardinality": null
@@ -10935,7 +9696,7 @@
        "sql": "select u.name, (select jsonb_agg(p order by p.id) from posts p where p.author_id = u.id) as v from users u",
        "ok": false,
        "problems": [
-        "`v` is typed `json.RawMessage`"
+        "`v` is typed `any`"
        ],
        "at": [
         {
@@ -10953,9 +9714,9 @@
          },
          {
           "name": "v",
-          "type": "json.RawMessage",
+          "type": "any",
           "kind": "any",
-          "nullable": false
+          "nullable": true
          }
         ],
         "cardinality": null
@@ -10967,7 +9728,7 @@
        "sql": "select json_object('id', id, 'name', name) as v from users",
        "ok": false,
        "problems": [
-        "`v` is typed `json.RawMessage`"
+        "`v` is typed `any`"
        ],
        "at": [
         {
@@ -10979,9 +9740,9 @@
         "columns": [
          {
           "name": "v",
-          "type": "json.RawMessage",
+          "type": "any",
           "kind": "any",
-          "nullable": false
+          "nullable": true
          }
         ],
         "cardinality": null
@@ -10993,7 +9754,7 @@
        "sql": "select json_arrayagg(json_object('id', id, 'title', title)) as v from posts",
        "ok": false,
        "problems": [
-        "`v` is typed `json.RawMessage`"
+        "`v` is typed `any`"
        ],
        "at": [
         {
@@ -11005,9 +9766,9 @@
         "columns": [
          {
           "name": "v",
-          "type": "json.RawMessage",
+          "type": "any",
           "kind": "any",
-          "nullable": false
+          "nullable": true
          }
         ],
         "cardinality": null
@@ -11019,7 +9780,7 @@
        "sql": "select u.name, json_arrayagg(json_object('id', p.id, 'title', p.title)) as v from users u join posts p on p.author_id = u.id group by u.id, u.name",
        "ok": false,
        "problems": [
-        "`v` is typed `json.RawMessage`"
+        "`v` is typed `any`"
        ],
        "at": [
         {
@@ -11037,91 +9798,7 @@
          },
          {
           "name": "v",
-          "type": "json.RawMessage",
-          "kind": "any",
-          "nullable": false
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "object",
-       "sql": "select json_object('id', id, 'name', name) as v from users",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "aggregate",
-       "sql": "select json_group_array(json_object('id', id, 'title', title)) as v from posts",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "v",
-          "type": "interface{}",
-          "kind": "any",
-          "nullable": true
-         }
-        ],
-        "cardinality": null
-       }
-      },
-      {
-       "db": "sqlite",
-       "probe": "grouped-aggregate",
-       "sql": "select u.name, json_group_array(json_object('id', p.id, 'title', p.title)) as v from users u join posts p on p.author_id = u.id group by u.id",
-       "ok": false,
-       "problems": [
-        "`v` is typed `interface{}`"
-       ],
-       "at": [
-        {
-         "column": "v"
-        }
-       ],
-       "answer": {
-        "params": [],
-        "columns": [
-         {
-          "name": "name",
-          "type": "string",
-          "kind": "text",
-          "nullable": false
-         },
-         {
-          "name": "v",
-          "type": "interface{}",
+          "type": "any",
           "kind": "any",
           "nullable": true
          }
@@ -11142,7 +9819,7 @@
        "sql": "select payload from events",
        "ok": false,
        "problems": [
-        "`payload` is typed `json.RawMessage`"
+        "`payload` is typed `any`"
        ],
        "at": [
         {
@@ -11154,9 +9831,9 @@
         "columns": [
          {
           "name": "payload",
-          "type": "json.RawMessage",
+          "type": "any",
           "kind": "any",
-          "nullable": false
+          "nullable": true
          }
         ],
         "cardinality": null
@@ -11168,7 +9845,7 @@
        "sql": "insert into events (id, payload) values ($1, $2)",
        "ok": false,
        "problems": [
-        "parameter 2 is typed `json.RawMessage`, without its fields"
+        "parameter 2 is typed `any`, without its fields"
        ],
        "at": [
         {
@@ -11178,14 +9855,14 @@
        "answer": {
         "params": [
          {
-          "type": "int32",
+          "type": "number",
           "kind": "num",
           "nullable": false
          },
          {
-          "type": "json.RawMessage",
+          "type": "any",
           "kind": "any",
-          "nullable": false
+          "nullable": true
          }
         ],
         "columns": [],
@@ -11207,9 +9884,10 @@
      "results": []
     },
     "sqlite": {
-     "state": "y",
-     "right": 1,
+     "state": "n",
+     "right": 0,
      "total": 1,
+     "note": "It is not available for SQLite.",
      "results": []
     }
    }
@@ -62539,5 +61217,5 @@
    }
   }
  },
- "at": "2026-11-26T06:43:16.437Z"
+ "at": "2026-11-26T20:45:18.597Z"
 }

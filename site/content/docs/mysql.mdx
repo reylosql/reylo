@@ -388,7 +388,7 @@ Each column can be null unless Reylo can tell it [never is](/docs/inference#left
 - **The server's flags.** Reylo starts from whether MySQL reports each column `NOT NULL`. MySQL is cautious with string and date functions, most casts and division, which stay nullable even over a `NOT NULL` column: `length(name)` is never null, and `upper(name)` can be.
 - **Tests through `coalesce`, `ifnull` and `<=>`** don't make their column non-null, and neither does a test under an `or` that tests another column.
 - **`bit_and`, `bit_or` and `bit_xor`** are never null, even over no rows. Neither are `json_arrayagg` and `json_objectagg` in a group or over a window.
-- **`WITH ROLLUP`** adds summary rows whose grouped columns are `NULL`, so their types include `null`.
+- **`WITH ROLLUP`** adds summary rows whose grouped columns are `NULL`, so their types include `null`. A window reads those rows too, as in `json_arrayagg(id) over ()`.
 - **An aggregate in a subquery that reads only the outer query's columns** aggregates the outer query. An example is `count(u.name)` in `(select count(u.name) from posts)`. The outer query then returns one row even where it reads none.
 
 To say a value is never null, write `coalesce(x, …)`, `ifnull(x, …)` or `where x is not null`.
@@ -733,6 +733,8 @@ What Reylo can't type on MySQL, and what to do instead:
 | A `coalesce`, `ifnull`, `greatest`, `least` or `any_value` of `BIT` columns alone, which MySQL sends as the number's decimal digits under a `BIT` type, in a column or inside JSON: it is typed `unknown` | Make the column a number first: `coalesce(mask + 0, 0)` |
 | A `BIT` that a view, a derived table or a `WITH` query computes, which MySQL sends as bytes or as decimal digits by what computes it: read as a column, it is typed `unknown` | Make it a number where it is computed: `max(mask) + 0` |
 | A loadable function (`create function … soname`), which `information_schema` doesn't list, so `.readOnly` can't see one | Don't retry a query that calls one |
+| A call of `md5`, `sha` or `sha1` on MySQL 9.6 and later, which moved them out of the server: a component or a function of yours answers it, so Reylo keeps MySQL's types for it | Use `sha2`, which MySQL keeps |
+| Two tables, aliases or `WITH` queries whose names differ only in case, as `t A` beside `t a`, which MySQL tells apart on Linux and not on macOS or Windows: their columns keep MySQL's own types, and their keys don't count | Name them apart by more than case |
 | A query Reylo's parser can't read | None: it keeps MySQL's types, every column can be null, it returns `Row[]`, and its JSON is `Json` |
 | A query MySQL reads otherwise than Reylo's parser, by its `sql_mode` (`count (x)` without `IGNORE_SPACE`, `not` under `HIGH_NOT_PRECEDENCE`) or by a `SET_VAR` hint | None: Reylo keeps MySQL's types, every column can be null, and it has no row counts or JSON shapes |
 | A `/*! … */` comment, which MySQL runs as SQL, so it's an error | Write it as plain SQL |
@@ -741,3 +743,4 @@ What Reylo can't type on MySQL, and what to do instead:
 | A statement other than a query, such as `create index` or `show tables` | None: it returns nothing, or rows whose columns are all nullable, as MySQL reports |
 | `explain` and `call`, whose rows MySQL describes only once they run | None: each is an error |
 | A file of several statements, such as a migration | Put each statement in a file of its own |
+| A change to any database the type check's account can see, since a query can read another database: Reylo analyzes your queries again | Grant that account only the databases your queries read |

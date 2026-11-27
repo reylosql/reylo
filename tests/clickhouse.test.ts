@@ -164,6 +164,11 @@ const PARAMS: [type: string, name: string, value: unknown, back?: unknown][] = [
   ["Array(String)", "strings", ["it's", "b\tc\\", ""]],
   ["Array(Nullable(UInt8))", "holes", [1, null]],
   ["Array(Array(UInt64))", "nested_list", [[1n], []]],
+  // A tuple's and a map's own value is an array: the type says each level, at any depth.
+  ["Array(Array(Array(UInt8)))", "deep_list", [[[1, 2]], [[3], []]]],
+  ["Array(Array(Tuple(UInt8, String)))", "deep_pairs", [[[1, "a"]], [[2, "b"], [3, "c"]]]],
+  ["Array(Array(Array(Tuple(n UInt8, s String))))", "deep_named", [[[{ n: 1, s: "a" }]]]],
+  ["Array(Array(Map(String, UInt8)))", "deep_maps", [[[{ key: "k", value: 1 }], []]]],
   ["Array(Decimal(18, 2))", "decimals", ["1.5", "-2.25"]],
   ["Array(DateTime64(3, 'UTC'))", "instants", ["2026-01-01T00:00:00.500Z"]],
   ["Array(DateTime('UTC'))", "seconds", ["2026-01-01T00:00:00Z"]],
@@ -187,12 +192,15 @@ const PARAMS: [type: string, name: string, value: unknown, back?: unknown][] = [
 const row = (pairs: [string, unknown][]) => Object.fromEntries(pairs);
 
 test("a ClickHouse type's name reads into its parts and writes back on one line", () => {
-  for (const name of ["UInt64", "Nullable(String)", "Decimal(18, 4)", "DateTime64(3, 'UTC')", "Enum8('admin' = 1, 'it\\'s' = -2)", "Tuple(n UInt8, s Nullable(String))", "Tuple(`a b` UInt8)", "Tuple()", "Map(String, Array(UInt8))", "Variant(String, UInt8)", "AggregateFunction(quantiles(0.5, 0.9), UInt64)", "JSON(a.b UInt32, max_dynamic_paths = 8, SKIP c.d)"]) {
+  for (const name of ["UInt64", "Nullable(String)", "Decimal(18, 4)", "DateTime64(3, 'UTC')", "Enum8('admin' = 1, 'it\\'s' = -2)", "Tuple(n UInt8, s Nullable(String))", "Tuple(`a b` UInt8)", "Tuple(`a.b` UInt8, b String)", "Nested(`a.b` UInt8, `select` String)", "Tuple(`NULL` UInt8, `Values` String)", "Tuple(`a\\nb` UInt8)", "Enum8('a\\nb' = 1, 'c\\td' = 2, 'e\\rf' = 3, 'g\\0h' = 4, 'i\\bj' = 5, 'k\\fl' = 6)", "Tuple()", "Map(String, Array(UInt8))", "Variant(String, UInt8)", "AggregateFunction(quantiles(0.5, 0.9), UInt64)", "JSON(`a.b` UInt32, max_dynamic_paths = 8, SKIP c.d)"]) {
     assert.equal(typeName(parseType(name)!), name);
   }
   // As a describe writes a tuple with names, a member a line, and as a result's header writes it.
   assert.equal(canonical("Tuple(\n    x Float64,\n    y Tuple(\n        z String))"), "Tuple(x Float64, y Tuple(z String))");
   assert.equal(canonical("Decimal(18,4)"), "Decimal(18, 4)");
+  // A module built before member names with a dot were quoted holds them bare, and a result naming the same members is not changed.
+  assert.equal(canonical("Tuple(a.1 UInt8, a..b String, a. UInt8)"), canonical("Tuple(`a.1` UInt8, `a..b` String, `a.` UInt8)"));
+  assert.notEqual(canonical("Tuple(a.2 UInt8)"), canonical("Tuple(`a.1` UInt8)"));
   assert.equal(parseType("Array(String"), undefined);
   assert.equal(parseType("UInt64 extra"), undefined);
 });
@@ -435,10 +443,10 @@ test("ClickHouse: a select is typed from the server's own description, nullabili
     assert.throws(() => standard.output([{ id: "1" }]), /A Standard Query maps no values on ClickHouse/);
     assert.doesNotMatch(out["user.sql"]!, /~standard/);
     // A query's JSON Schema is of what its parameters take: a wide whole number is a number or a
-    // BigInt and no digits, of no named format past 64 bits, and an array's element is null where
-    // its type says so.
+    // BigInt and no digits, of no named format past a signed 64 bits, a UInt64 among them, and an
+    // array's element is null where its type says so.
     const schemas = await built(root, "schemas", "SELECT {ids:Array(Nullable(UInt8))} AS ids, {wide:UInt128} AS wide, {count:UInt64} AS count");
-    assert.deepEqual(schemas.inputSchema.properties, { ids: { type: "array", items: { anyOf: [{ type: "integer", format: "int32" }, { type: "null" }] } }, wide: { type: "integer" }, count: { type: "integer", format: "int64" } });
+    assert.deepEqual(schemas.inputSchema.properties, { ids: { type: "array", items: { anyOf: [{ type: "integer", format: "int32" }, { type: "null" }] } }, wide: { type: "integer" }, count: { type: "integer" } });
     assert.deepEqual(schemas.outputSchema.items.properties, schemas.inputSchema.properties);
     assert.deepEqual(await schemas.run(db.client, { ids: [1, null], wide: 2n ** 100n, count: 3 }), [{ ids: [1, null], wide: 2n ** 100n, count: 3n }]);
     // A value that is always null admits null alone, which `type` names once.

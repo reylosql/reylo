@@ -217,7 +217,7 @@ const KINDS: &[&str] = &["select", "with", "values", "insert", "replace", "updat
 
 fn run(sql: &str, lexed: &Lexed, ddl: &[String], extras: &Extras, marked: &[String]) -> SqliteAnalysis {
     let failed = |analysis: Analysis| SqliteAnalysis { analysis, declared: Vec::new(), readonly: false, unique_keys: HashMap::new(), booleans: Vec::new() };
-    let statement = match lex::one_statement(sql, lexed, KINDS) {
+    let statement = match lex::one_statement(sql, lexed, Dialect::Sqlite, KINDS) {
         Ok(statement) => statement,
         Err(message) => return failed(bare(sql, lexed, Dialect::Sqlite, vec![diag(message, 0, sql.trim_end().len(), 10)])),
     };
@@ -305,7 +305,7 @@ fn run(sql: &str, lexed: &Lexed, ddl: &[String], extras: &Extras, marked: &[Stri
     }
     // The parameters cast to `nullable(…)`, by the `?n` the tree names each by.
     let nullable_params: HashSet<String> = lexed.params.iter().enumerate().filter(|(_, name)| marked.contains(name)).map(|(k, _)| format!("?{}", k + 1)).collect();
-    let a = Analyzer { tree: &t, extras, skipping: &skipping, nullable_values: nullable_params.clone(), nullable_params, written: std::cell::RefCell::new(HashSet::new()), level: std::cell::RefCell::new(Level::default()), shapes: std::cell::RefCell::new(HashMap::new()), recursion: std::cell::RefCell::new(Vec::new()), settled: std::cell::RefCell::new(HashMap::new()) };
+    let a = Analyzer { tree: &t, extras, skipping: &skipping, nullable_values: nullable_params.clone(), nullable_params, written: std::cell::RefCell::new(HashSet::new()), level: std::cell::RefCell::new(Level::default()), shapes: std::cell::RefCell::new(HashMap::new()), recursion: std::cell::RefCell::new(Vec::new()), settled: std::cell::RefCell::new(HashMap::new()), proofs: std::cell::RefCell::new(HashMap::new()), keys: std::cell::RefCell::new(HashMap::new()) };
     let a = Analyzer { nullable_values: a.bare_nullable().into_iter().chain(a.nullable_params.iter().cloned()).collect(), ..a };
     // A command (DDL, a PRAGMA, a transaction's control) has no tree to read: SQLite's prepare
     // says what it takes and returns, and nothing says where a column comes from, so each is of
@@ -455,13 +455,13 @@ fn reads_itself(sel: &Sel) -> bool {
 /// writes. A view is named, never what it reads; a WITH query, a subquery and a table-valued
 /// function are no table. SQLite expands a view into a subquery as it does a derived table, and
 /// marks both a view: a view keeps the name the statement writes, a derived table has none. A
-/// recursive WITH query's reference to itself is marked as nothing at all, so a name the statement
-/// gives a WITH query is no table anywhere in it.
+/// recursive WITH query's reference to itself has no subquery, and is marked recursive. SQLite
+/// resolved each name where it stands, so a table of a WITH query's name read outside its scope
+/// is still read.
 fn tables(t: &Tree) -> Tables {
     #[derive(Default)]
     struct Walk {
         read: Vec<String>,
-        ctes: Vec<String>,
     }
     impl Walk {
         fn node(&mut self, n: &Node) {
@@ -480,14 +480,11 @@ fn tables(t: &Tree) -> Tables {
                 self.node(&c.expr);
             }
             for f in &s.from {
-                if f.cte {
-                    self.ctes.extend(f.table.clone());
-                }
                 if f.cte || f.subquery.is_some() && f.table.is_none() {
                     if let Some(q) = &f.subquery {
                         self.sel(q);
                     }
-                } else if !f.tab_func {
+                } else if !f.tab_func && !f.recursive {
                     self.read.extend(f.table.clone());
                 }
                 for n in f.args.iter().chain(&f.on) {
@@ -517,8 +514,7 @@ fn tables(t: &Tree) -> Tables {
             walk.node(n);
         }
     }
-    let Walk { mut read, ctes } = walk;
-    read.retain(|table| !ctes.iter().any(|cte| cte.eq_ignore_ascii_case(table)));
+    let Walk { read } = walk;
     Tables { read, write, ..Default::default() }
 }
 
@@ -752,7 +748,8 @@ fn text() -> Type {
 }
 
 /// What a column of an affinity holds outside a STRICT table: an INTEGER or NUMERIC one any
-/// storage class, a REAL one a float, text or bytes, a TEXT one text or bytes.
+/// storage class, a REAL one a float, text or bytes, a TEXT one text or bytes. So does a value
+/// computed from an INTEGER one's ([`LAX`]), under `INTEGER`.
 fn stored(aff: &str) -> Type {
     let members = match aff {
         "real" => vec![real(), text(), Type::bytes()],
@@ -774,7 +771,7 @@ fn descriptor(ty: &Ty, declared: Option<&str>, computed: bool, exact: bool) -> T
     // where the value is what a column of that type holds.
     let declared = declared.map(str::trim).filter(|d| !d.is_empty()).filter(|d| match ty {
         Ty::Scalar { name } if name == "bool" => is_boolean_declared(d),
-        Ty::Scalar { .. } => !is_boolean_declared(d) && column_type(d, affinity(d), false) == *ty,
+        Ty::Scalar { .. } => !is_boolean_declared(d) && (column_type(d, affinity(d), false) == *ty || lax(column_type(d, affinity(d), false)) == *ty),
         _ => false,
     });
     match ty {
@@ -787,7 +784,9 @@ fn descriptor(ty: &Ty, declared: Option<&str>, computed: bool, exact: bool) -> T
             (Some(d), "blob") if exact => Type::bytes().named(d),
             (Some(d), aff) => stored(if aff == "int8" { "integer" } else { aff }).named(d),
             (None, "integer") => int64(),
-            (None, "int8") => int64().named("BIGINT"),
+            (None, LAX) => stored("integer").named("INTEGER"),
+            // A 64-bit column's value passed on holds what a read of the column does.
+            (None, "int8") => stored("integer").named("BIGINT"),
             (None, "real") => real(),
             (None, "text") => text(),
             (None, "blob") => Type::bytes(),
@@ -832,11 +831,12 @@ fn literals_of(n: &Node) -> Option<Vec<reylo_engine_core::literal::Literal>> {
 }
 
 /// A value inside a document SQLite built: an object's fields and an array's items, each the
-/// value SQLite wrote there.
+/// value SQLite wrote there, a [`LAX`] one an integer or a REAL's number.
 fn content(ty: &Ty) -> Type {
     match ty {
         Ty::Object { fields } => Type::structure(fields.iter().map(|f| Field::new(f.name.clone(), content(&f.ty), f.nullable)).collect()),
         Ty::List { of, nullable_items } => Type::array(crate::types::Slot::new(content(of), *nullable_items)),
+        Ty::Scalar { name } if name == LAX => Type::union(vec![int64(), real()]).named("INTEGER"),
         other => descriptor(other, None, false, false),
     }
 }
@@ -855,6 +855,12 @@ fn column_type(declared: &str, aff: &str, strict: bool) -> Ty {
     } else {
         affinity_type(aff)
     }
+}
+
+/// What a table column of type `ty` holds: an INTEGER column that is not exact, outside a STRICT
+/// table or generated in one ([`Analyzer::exacts`]), may hold a REAL ([`LAX`]).
+fn held(ty: Ty, n: &Node) -> Ty {
+    if n.strict && !n.generated { ty } else { lax(ty) }
 }
 
 /// Whether a declared type names a 64-bit integer: `BIGINT`, `INT8` or `UNSIGNED BIG INT`, the
@@ -883,7 +889,26 @@ fn scalar_name(t: &Ty) -> Option<&str> {
 }
 
 fn is_numeric(t: &Ty) -> bool {
-    matches!(scalar_name(t), Some("integer" | "int8" | "real" | "numeric"))
+    matches!(scalar_name(t), Some("integer" | "int8" | "real" | "numeric" | LAX))
+}
+
+/// An INTEGER that may be a REAL: a column of INTEGER affinity outside a STRICT table, which keeps
+/// a REAL it cannot convert (`0.5`, `1e20`, the text `'1.5'`), and what passes its value through
+/// or computes from it (`coalesce(n, 0)`, `max(n)`, `n + 1`, `sum(n)`). Its descriptor is the
+/// column's union, under `INTEGER`, which the run time reads as a number: it returns the REAL as
+/// it is and refuses the text and the BLOB the union also holds. A parameter beside one is an
+/// INTEGER's ([`unlax`]).
+const LAX: &str = "lax_integer";
+
+/// A value of an INTEGER column outside a STRICT table, or of one of its subqueries' or views', as
+/// [`LAX`]; any other type as it is.
+fn lax(t: Ty) -> Ty {
+    if scalar_name(&t) == Some("integer") { Ty::Scalar { name: LAX.into() } } else { t }
+}
+
+/// A parameter's type beside a [`LAX`] value: the INTEGER it is bound as.
+fn unlax(t: Ty) -> Ty {
+    if scalar_name(&t) == Some(LAX) { Ty::Scalar { name: "integer".into() } } else { t }
 }
 
 /// Whether a type is an integer's: SQLite's INTEGER, or a column declared 64 bits wide.
@@ -894,17 +919,19 @@ fn is_integral(t: &Ty) -> bool {
 /// The type of a value computed from one of type `t`: a 64-bit column's value passes through
 /// unchanged only as itself (a column, a subquery's or view's column, `min`, `max`, `coalesce`, a
 /// `CASE` arm, a window's `lag`), and what SQLite computes from it (`-id`, `abs(id)`, `sum(id)`,
-/// `id + 1`) is SQLite's INTEGER, as `count(*)` is.
+/// `id + 1`) is SQLite's INTEGER, as `count(*)` is, or a REAL where the column holds one: a 64-bit
+/// column is never in a STRICT table, so its INTEGER is [`LAX`].
 fn computed(t: Ty) -> Ty {
     if scalar_name(&t) == Some("int8") {
-        Ty::Scalar { name: "integer".into() }
+        Ty::Scalar { name: LAX.into() }
     } else {
         t
     }
 }
 
 /// The type several arms share: one type when they agree, `int8` for a mix of integers of which
-/// one is a 64-bit column's (`coalesce(user_id, 0)`: any integer is exact as a BigInt), `numeric`
+/// one is a 64-bit column's (`coalesce(user_id, 0)`: any integer is exact as a BigInt), [`LAX`] for
+/// one of an INTEGER and a value that may be a REAL, `numeric`
 /// for a mix with a NUMERIC value, `real` for another mix of numbers, unknown otherwise.
 fn shared(facts: &[&Fact]) -> Ty {
     let known: Vec<&Ty> = facts.iter().map(|f| &f.ty).filter(|t| !matches!(t, Ty::Unknown)).collect();
@@ -920,14 +947,20 @@ fn shared(facts: &[&Fact]) -> Ty {
     if let Some(ty) = same_json(&known) {
         return ty;
     }
+    if let Some(ty) = widened(&known).filter(is_built) {
+        return ty;
+    }
     let known: Vec<Ty> = known.iter().map(|t| textual(t)).collect();
     let known: Vec<&Ty> = known.iter().collect();
     let first = known[0];
     if known.iter().all(|t| *t == first) {
         return first.clone();
     }
-    if known.iter().all(|t| is_integral(t)) {
-        return Ty::Scalar { name: "int8".into() };
+    // A [`LAX`] beside an INTEGER may still be a REAL; beside a 64-bit column's it is a BigInt,
+    // which the run time refuses a REAL as.
+    if known.iter().all(|t| is_integral(t) || scalar_name(t) == Some(LAX)) {
+        let wide = known.iter().any(|t| scalar_name(t) == Some("int8"));
+        return Ty::Scalar { name: if wide { "int8" } else { LAX }.into() };
     }
     if known.iter().all(|t| is_numeric(t)) {
         // A NUMERIC value is a number or the text it could not convert (a DATE's '2024-01-01'),
@@ -966,6 +999,47 @@ fn is_built(t: &Ty) -> bool {
 /// A type as SQLite's storage class: built JSON is text.
 fn textual(t: &Ty) -> Ty {
     if is_built(t) { Ty::Scalar { name: "text".into() } } else { t.clone() }
+}
+
+/// A [`LAX`] value's JSON Schema inside a document: an int64 or a REAL's double, so that a reader
+/// keeps the integer exact.
+fn lax_schema() -> serde_json::Value {
+    serde_json::json!({"anyOf": [{"type": "integer", "format": "int64"}, {"type": "number", "format": "double"}]})
+}
+
+/// The one schema two are where they differ only in that one holds an INTEGER's where the other
+/// holds a [`LAX`] value's: the [`LAX`]'s.
+fn widened_schema(a: &serde_json::Value, b: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    let integer = serde_json::json!({"type": "integer", "format": "int64"});
+    let lax = lax_schema();
+    match (a, b) {
+        _ if a == b => Some(a.clone()),
+        _ if (*a == integer && *b == lax) || (*a == lax && *b == integer) => Some(lax),
+        (Value::Object(x), Value::Object(y)) if x.len() == y.len() => x.iter().map(|(k, v)| Some((k.clone(), widened_schema(v, y.get(k)?)?))).collect::<Option<serde_json::Map<_, _>>>().map(Value::Object),
+        (Value::Array(x), Value::Array(y)) if x.len() == y.len() => x.iter().zip(y).map(|(v, w)| widened_schema(v, w)).collect::<Option<Vec<_>>>().map(Value::Array),
+        _ => None,
+    }
+}
+
+/// The one type several are where they differ only in that one holds an INTEGER where another
+/// holds a [`LAX`], at any depth of a document: the [`LAX`].
+fn widened(types: &[&Ty]) -> Option<Ty> {
+    fn widen(a: &Ty, b: &Ty) -> Option<Ty> {
+        match (a, b) {
+            _ if a == b => Some(a.clone()),
+            (Ty::Json { schema: Some(x) }, Ty::Json { schema: Some(y) }) => Some(Ty::Json { schema: Some(widened_schema(x, y)?) }),
+            (Ty::Scalar { name: x }, Ty::Scalar { name: y }) if matches!((x.as_str(), y.as_str()), ("integer", LAX) | (LAX, "integer")) => Some(Ty::Scalar { name: LAX.into() }),
+            (Ty::Object { fields: f }, Ty::Object { fields: g }) if f.len() == g.len() => {
+                let fields = f.iter().zip(g).map(|(f, g)| (f.name == g.name && f.nullable == g.nullable).then(|| widen(&f.ty, &g.ty).map(|ty| TyField { ty, ..f.clone() })).flatten()).collect::<Option<Vec<_>>>()?;
+                Some(Ty::Object { fields })
+            }
+            (Ty::List { of: x, nullable_items: n }, Ty::List { of: y, nullable_items: m }) if n == m => Some(Ty::List { of: Box::new(widen(x, y)?), nullable_items: *n }),
+            _ => None,
+        }
+    }
+    let (first, rest) = types.split_first()?;
+    rest.iter().try_fold((*first).clone(), |acc, t| widen(&acc, t))
 }
 
 /// The one JSON shape several types are, where they differ only in that one is an empty array
@@ -1044,7 +1118,9 @@ const PLAIN: &[&str] = &[
 /// `x'00'` null) or is an error, and a value of no known storage class may be one: any JSON.
 fn in_json(t: &Ty) -> Ty {
     match scalar_name(t) {
-        Some("integer" | "int8" | "real" | "text" | "numeric") => t.clone(),
+        // Nothing refuses a 64-bit column's REAL inside a document.
+        Some("int8") => Ty::Scalar { name: LAX.into() },
+        Some("integer" | "real" | "text" | "numeric" | LAX) => t.clone(),
         _ => Ty::Unknown,
     }
 }
@@ -1069,6 +1145,7 @@ fn value_schema(t: &Ty, nullable: bool) -> serde_json::Value {
         Ty::Scalar { name } => match name.as_str() {
             "integer" | "int8" => json!({"type": "integer", "format": "int64"}),
             "real" => json!({"type": "number", "format": "double"}),
+            LAX => lax_schema(),
             "text" => json!({"type": "string"}),
             "numeric" => json!({"type": ["number", "string"]}),
             _ => json!({}),
@@ -1092,7 +1169,12 @@ fn record(values: Vec<serde_json::Value>) -> Ty {
             distinct.push(v);
         }
     }
-    let rest = if distinct.len() == 1 { distinct.pop().unwrap_or_default() } else { serde_json::json!({"anyOf": distinct}) };
+    // Of no values, no other key: JSON Schema 2020-12 refuses an empty `anyOf`.
+    let rest = match distinct.len() {
+        0 => serde_json::Value::Bool(false),
+        1 => distinct.pop().unwrap_or_default(),
+        _ => serde_json::json!({"anyOf": distinct}),
+    };
     Ty::Json { schema: Some(serde_json::json!({"type": "object", "additionalProperties": rest})) }
 }
 
@@ -1125,6 +1207,12 @@ struct Analyzer<'a> {
     recursion: std::cell::RefCell<Vec<(String, Vec<Fact>)>>,
     /// Each recursive WITH query's settled columns, by its node.
     settled: std::cell::RefCell<HashMap<usize, Vec<Fact>>>,
+    /// What [`Analyzer::exactly_one`] (`true`) and [`Analyzer::at_most_one`] (`false`) found of each
+    /// SELECT, by its node. A FROM asks both of a subquery, and more than once, so without them each
+    /// level of nesting would ask every level below it again.
+    proofs: std::cell::RefCell<HashMap<(usize, bool), Result<(), String>>>,
+    /// Each SELECT's [`Analyzer::output_keys`], by its node.
+    keys: std::cell::RefCell<HashMap<usize, Vec<Vec<i64>>>>,
 }
 
 /// What one SELECT arm's WHERE and grouping prove of the expressions in its select list.
@@ -1728,7 +1816,7 @@ impl Analyzer<'_> {
         if n.register && !n.view && !n.generated && n.column.as_ref().is_some_and(|c| self.written.borrow().contains(&c.to_ascii_lowercase())) {
             let aff = n.affinity.as_deref().unwrap_or(&n.aff);
             let ty = match &n.declared {
-                Some(declared) if !n.rowid => column_type(declared, aff, n.strict),
+                Some(declared) if !n.rowid => held(column_type(declared, aff, n.strict), n),
                 _ => affinity_type(aff),
             };
             return Fact { ty, non_null: true };
@@ -1766,7 +1854,7 @@ impl Analyzer<'_> {
         }
         let aff = n.affinity.as_deref().unwrap_or(&n.aff);
         let ty = match &n.declared {
-            Some(declared) if !n.rowid => column_type(declared, aff, n.strict),
+            Some(declared) if !n.rowid => held(column_type(declared, aff, n.strict), n),
             _ => affinity_type(aff),
         };
         Fact { ty, non_null: !lone && (narrowed || ((n.not_null || n.rowid) && (!n.outer || reduced))) }
@@ -1953,7 +2041,7 @@ impl Analyzer<'_> {
         }
         // A number for SQLite's math functions: a value of INTEGER or REAL type. Any other gives
         // NULL, text that reads as no number included (`sqrt('abc')`, `sign('')`).
-        let numbers = all_non_null && args.iter().all(|a| matches!(scalar_name(&a.ty), Some("integer" | "int8" | "real")));
+        let numbers = all_non_null && args.iter().all(|a| matches!(scalar_name(&a.ty), Some("integer" | "int8" | "real" | LAX)));
         match name {
             // An argument after one that is never NULL is never reached: `coalesce((select
             // json_group_array(…) …), '[]')` is the array.
@@ -2305,7 +2393,7 @@ impl Analyzer<'_> {
             return Some(JsonFact { ty: Ty::Unknown, non_null, carry: Carry::Maybe });
         }
         let types: Vec<&Ty> = facts.iter().map(|f| &f.ty).collect();
-        let ty = if types.iter().all(|t| *t == types[0]) { types[0].clone() } else { same_json(&types).unwrap_or(Ty::Unknown) };
+        let ty = if types.iter().all(|t| *t == types[0]) { types[0].clone() } else { same_json(&types).or_else(|| widened(&types)).unwrap_or(Ty::Unknown) };
         Some(JsonFact { ty, non_null, carry: Carry::Yes })
     }
 
@@ -2612,9 +2700,10 @@ impl Analyzer<'_> {
                 let numbered = format!("?{}", k + 1);
                 let fact = typed.get(numbered.as_str()).map(|f| (*f).clone()).unwrap_or_else(Fact::unknown);
                 // A parameter compared with built JSON is bound as the text it is compared with.
-                let fact = Fact { ty: textual(&fact.ty), ..fact };
+                let fact = Fact { ty: unlax(textual(&fact.ty)), ..fact };
                 let nullable = fills.get(&numbered).copied().unwrap_or(false) || self.nullable_params.contains(&numbered);
-                Param { nullable, ..Param::new(name.clone(), descriptor(&fact.ty, None, false, false)) }
+                let ty = if scalar_name(&fact.ty) == Some("int8") { int64().named("BIGINT") } else { descriptor(&fact.ty, None, false, false) };
+                Param { nullable, ..Param::new(name.clone(), ty) }
             })
             .collect();
         (params, refused)
@@ -2999,6 +3088,24 @@ impl Analyzer<'_> {
     }
 
     fn exactly_one(&self, sel: &Sel) -> Result<(), String> {
+        self.proved(sel, true, || self.prove_exactly_one(sel))
+    }
+
+    /// [`Self::exactly_one`] or [`Self::at_most_one`] of `sel`, proved once and then read from
+    /// `proofs`: neither reads anything but the statement and the schema.
+    fn proved(&self, sel: &Sel, exact: bool, prove: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+        let key = (sel as *const Sel as usize, exact);
+        if let Some(found) = self.proofs.borrow().get(&key) {
+            return found.clone();
+        }
+        #[cfg(test)]
+        tests::PROOFS.set(tests::PROOFS.get() + 1);
+        let found = prove();
+        self.proofs.borrow_mut().insert(key, found.clone());
+        found
+    }
+
+    fn prove_exactly_one(&self, sel: &Sel) -> Result<(), String> {
         // A constant LIMIT of a row or more keeps the one row, and so does an OFFSET of 0; a
         // parameter may be 0.
         let keeps = |n: &Node, least: i64| integer(n).is_some_and(|n| n >= least);
@@ -3057,6 +3164,10 @@ impl Analyzer<'_> {
     }
 
     fn at_most_one(&self, sel: &Sel) -> Result<(), String> {
+        self.proved(sel, false, || self.prove_at_most_one(sel))
+    }
+
+    fn prove_at_most_one(&self, sel: &Sel) -> Result<(), String> {
         if sel.limit.as_ref().and_then(integer).is_some_and(|n| (0..=1).contains(&n)) {
             return Ok(());
         }
@@ -3217,6 +3328,16 @@ impl Analyzer<'_> {
     ///
     /// None for a set operation or a VALUES list, which may repeat a row.
     fn output_keys(&self, sel: &Sel) -> Vec<Vec<i64>> {
+        let key = sel as *const Sel as usize;
+        if let Some(found) = self.keys.borrow().get(&key) {
+            return found.clone();
+        }
+        let found = self.read_output_keys(sel);
+        self.keys.borrow_mut().insert(key, found.clone());
+        found
+    }
+
+    fn read_output_keys(&self, sel: &Sel) -> Vec<Vec<i64>> {
         if let Some(prior) = &sel.prior {
             return self.compound_keys(sel, prior);
         }
@@ -3467,7 +3588,7 @@ fn holds_current_row(n: &Node) -> bool {
 /// When `total` is NULL: never over integers, but over reals a `1e999` and a `-1e999` add up to
 /// NaN, which SQLite gives as NULL.
 fn total_nulls(arg: &Fact) -> Nulls {
-    if is_integral(&arg.ty) { Nulls::Never } else { Nulls::Always }
+    if is_integral(&arg.ty) || scalar_name(&arg.ty) == Some(LAX) { Nulls::Never } else { Nulls::Always }
 }
 
 /// Whether a date and time function always reads its time value and modifiers. SQLite gives NULL
@@ -3735,10 +3856,12 @@ fn cursors(n: &Node) -> Option<Vec<i64>> {
     Some(out)
 }
 
-/// The type of `a op b` for `+`, `-`, `*`, `/`, `%`: integer stays integer, anything else is real.
+/// The type of `a op b` for `+`, `-`, `*`, `/`, `%`: integer stays integer, or a REAL where an
+/// operand may be one ([`LAX`], a 64-bit column's), and anything else is real.
 fn arithmetic(l: &Ty, r: &Ty) -> Ty {
     match (scalar_name(l), scalar_name(r)) {
-        (Some("integer" | "int8"), Some("integer" | "int8")) => Ty::Scalar { name: "integer".into() },
+        (Some("integer"), Some("integer")) => Ty::Scalar { name: "integer".into() },
+        (Some("integer" | "int8" | LAX), Some("integer" | "int8" | LAX)) => Ty::Scalar { name: LAX.into() },
         _ => Ty::Scalar { name: "real".into() },
     }
 }
@@ -3826,6 +3949,38 @@ enum Position {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    std::thread_local! {
+        /// How many times [`Analyzer::exactly_one`] and [`Analyzer::at_most_one`] ran their proof.
+        pub(super) static PROOFS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn each_select_is_proved_once_however_deep_it_nests() {
+        // Without the cache, 12 levels cost thousands of proofs, where the bound below allows 26.
+        let nest = |root: &str, wrap: &dyn Fn(&str) -> String| (0..12).fold(root.to_string(), |q, _| wrap(&q));
+        let derived = |q: &str| format!("select * from ({q}) t");
+        let left_join = |q: &str| format!("select b.* from (select 1 as one) a left join ({q}) b on true");
+        let with = (1..=12).fold("with c0 as (select count(*) as n from users)".to_string(), |q, i| format!("{q}, c{i} as (select n from c{})", i - 1)) + " select n from c12";
+        for (sql, cardinality) in [
+            (nest("select count(*) as n from users", &derived), "one"),
+            (nest("select id from users where id = :id", &derived), "at_most_one"),
+            (nest("select id from users", &derived), "many"),
+            (with, "one"),
+            (nest("select count(*) as n from users", &left_join), "one"),
+            (nest("select id from users where id = :id", &left_join), "one"),
+            (nest("select id from users", &left_join), "many"),
+        ] {
+            // The analysis runs on the engine's thread, whose counter is its own: read it there.
+            let (found, proofs) = crate::stack::run(|| {
+                PROOFS.set(0);
+                (analysis(&sql).cardinality, PROOFS.get())
+            });
+            assert_eq!(found, cardinality, "{sql}");
+            // Each SELECT is proved once to return exactly one row and once to return one at most.
+            assert!(proofs > 0 && proofs <= 2 * sql.matches("select").count(), "{proofs} proofs: {sql}");
+        }
+    }
 
     #[test]
     fn a_row_assigned_fewer_values_than_columns_is_the_database_s_error() {
@@ -3923,6 +4078,28 @@ mod tests {
             assert!(messages.contains(&"The schema replay skipped statement 3: not authorized"), "{messages:?}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_table_of_a_with_querys_name_is_read_outside_its_scope() {
+        // SQLite resolves each name where it stands: a WITH query of a subquery hides `users` in
+        // that subquery alone, and a recursive one's read of itself is no table.
+        let read = |sql: &str| {
+            let t = tree::analyze(&ddl(), sql, sql, &[], None).expect("the tree parses");
+            assert!(t.error.is_none(), "{sql}: {:?}", t.error);
+            let mut tables = tables(&t).read;
+            tables.sort();
+            let named = match crate::capabilities::of_statement(&t).tables {
+                crate::types::CapabilityTables::Named(named) => named.into_keys().collect::<Vec<_>>(),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(named, tables, "{sql}");
+            tables
+        };
+        assert_eq!(read("select u.id from users u join (with users as (select 1 as x) select x from users) s on true"), ["users"]);
+        assert_eq!(read("select p.id from posts p where exists (with posts as (select 1) select 1 from posts)"), ["posts"]);
+        assert_eq!(read("with users as (select id from posts) select id from users"), ["posts"]);
+        assert_eq!(read("with recursive c (n) as (select 1 union all select n + 1 from c where n < 3) select n from c"), Vec::<String>::new());
     }
 
     #[test]
@@ -4373,6 +4550,54 @@ mod tests {
         assert_eq!(kinds("select n from s union all select id from loose"), "integer");
         assert_eq!(kinds("select n from s union all select n from loose"), "union");
         assert_eq!(kinds("select n from s union all values (1)"), "union");
+    }
+
+    #[test]
+    fn an_integer_column_outside_a_strict_table_may_hold_a_real_through_what_passes_it_on() {
+        let ddl = [
+            "create table s (id integer primary key, n int not null, g integer generated always as (n * 2) virtual) strict",
+            "create table loose (id integer primary key, n integer not null, big bigint not null)",
+        ]
+        .map(String::from);
+        let typed = |sql: &str| {
+            let analysis = analyze_ddl(sql, &ddl, &Extras::default()).analysis;
+            analysis.columns.iter().map(|c| { let t = serde_json::to_value(&c.ty).unwrap(); format!("{} {}", t["kind"].as_str().unwrap(), t["label"].as_str().unwrap_or("-")) }).collect::<Vec<_>>().join(", ")
+        };
+        // SQLite keeps a REAL it cannot convert, such as 0.5, in such a column, and `coalesce(n, 0)`,
+        // `max(n)`, `n + 1` and `sum(n)` hand it back or compute a REAL from it.
+        let each = "union INTEGER";
+        assert_eq!(typed("select coalesce(n, 0), ifnull(n, 0), nullif(n, 7), iif(id > 0, n, 0), case when id > 0 then n else 0 end, max(n, 0), n + 1, -n, abs(n), n % 2 from loose"), [each; 10].join(", "));
+        assert_eq!(typed("select sum(n), max(n), min(n) from loose"), [each; 3].join(", "));
+        assert_eq!(typed("select lag(n) over (order by id), sum(n) over () from loose"), [each; 2].join(", "));
+        // A 64-bit column's value passed on holds what the column does, which the run time reads as
+        // a BigInt and refuses a REAL as; what SQLite computes from it may be one.
+        assert_eq!(typed("select coalesce(big, 0), iif(id > 0, n, big), big + 1 from loose"), "union BIGINT, union BIGINT, union INTEGER");
+        let inside = serde_json::to_string(&analyze_ddl("select json_object('b', big) as o from loose", &ddl, &Extras::default()).analysis.columns[0].ty).unwrap();
+        assert!(inside.contains(r#""label":"INTEGER""#), "{inside}");
+        let a = analyze_ddl("select id from loose where big = :b", &ddl, &Extras::default()).analysis;
+        assert_eq!(serde_json::to_value(&a.params[0].ty).unwrap()["label"], "BIGINT");
+        // What holds no REAL: a STRICT column's computed value, a rowid's, a count, a cast.
+        assert_eq!(typed("select n + 1, coalesce(n, 0) from s"), "integer -, integer -");
+        assert_eq!(typed("select id + 1, count(n), length(n), cast(n as integer), total(n) from loose"), "integer -, integer -, integer -, integer -, float -");
+        // A generated column of a STRICT table is checked only from SQLite 3.51.
+        assert_eq!(typed("select g + 1 from s"), each);
+        // Inside a document SQLite builds, the value is a JSON number of either kind.
+        let built = serde_json::to_string(&analyze_ddl("select json_object('n', n) as o from loose", &ddl, &Extras::default()).analysis.columns[0].ty).unwrap();
+        assert!(built.contains(r#""label":"INTEGER""#), "{built}");
+        // Arms that build one shape, but for an INTEGER beside such a value, build it with the value.
+        let arms = serde_json::to_string(&analyze_ddl("select case when id = 1 then json_object('n', n) else json_object('n', id) end as j from loose", &ddl, &Extras::default()).analysis.columns[0].ty).unwrap();
+        assert!(arms.contains(r#""kind":"json""#) && arms.contains(r#""label":"INTEGER""#), "{arms}");
+        // So do arms that build one tuple, or one map, of such a value and an INTEGER.
+        for sql in ["select case when id = 1 then json_array(n) else json_array(id) end as j from loose", "select case when id = 1 then json_object(cast(id as text), n) else json_object(cast(id as text), id) end as j from loose", "select case when id = 1 then json_array(big) else json_array(id) end as j from loose"] {
+            let ty = serde_json::to_value(&analyze_ddl(sql, &ddl, &Extras::default()).analysis.columns[0].ty).unwrap();
+            assert_eq!(ty["kind"], "json", "{sql}: {ty}");
+        }
+        // A map's values keep an integer exact: an int64, or a REAL's double.
+        let map = serde_json::to_string(&analyze_ddl("select json_group_object(cast(id as text), n) as j from loose", &ddl, &Extras::default()).analysis.columns[0].ty).unwrap();
+        assert!(map.contains(r#""anyOf":[{"format":"int64","type":"integer"},{"format":"double","type":"number"}]"#) || map.contains(r#""anyOf":[{"type":"integer","format":"int64"},{"type":"number","format":"double"}]"#), "{map}");
+        // A parameter beside one is bound as an INTEGER.
+        let a = analyze_ddl("select id from loose where n = :n and n + :d > 0", &ddl, &Extras::default()).analysis;
+        assert_eq!(a.params.iter().map(|p| serde_json::to_value(&p.ty).unwrap()["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>(), ["integer", "integer"]);
     }
 
     /// A schema as libSQL 0.10.0 writes it into `sqlite_schema` for a vector column and its
@@ -5311,6 +5536,8 @@ mod tests {
             Kind::Text(_) => Some("text"),
             Kind::Bytes(_) => Some("blob"),
             Kind::Union(_) if is_boolean_declared(name) => Some("bool"),
+            Kind::Union(_) if affinity(name) == "integer" && is_int8_declared(name) => Some("int8"),
+            Kind::Union(_) if affinity(name) == "integer" => Some("integer"),
             Kind::Union(u) if u.members.len() == 2 => Some("text"),
             Kind::Union(u) if u.members.len() == 3 => Some("real"),
             Kind::Union(_) if affinity(name) == "integer" && is_int8_declared(name) => Some("int8"),

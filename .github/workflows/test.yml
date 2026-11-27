@@ -61,6 +61,7 @@ jobs:
       tests: ${{ steps.scope.outputs.tests }}
       shards: ${{ steps.scope.outputs.shards }}
       playground: ${{ steps.scope.outputs.playground }}
+      postgres19: ${{ steps.scope.outputs.postgres19 }}
     steps:
       # A pull request's run checks out the merge of it into main: its first parent is main, so the
       # files between the two are the ones the pull request changes, without a token that reads pull requests.
@@ -80,9 +81,10 @@ jobs:
           # the docs claim.
           everything() {
             echo engine=true
-            echo 'tests=-p reylo-engine-core -p reylo-sql -p reylo-engine-postgres -p reylo-engine-sqlite -p reylo-engine-mysql -p reylo-engine-clickhouse -p reylo-engine -p reylo-migrate -p reylo-cli -p reylo-oracle -p reylo-build -p reylo --features reylo/mysql,reylo/sqlite'
+            echo 'tests=-p reylo-engine-core -p reylo-sql -p reylo-engine-postgres -p reylo-engine-sqlite -p reylo-engine-mysql -p reylo-engine-clickhouse -p reylo-engine -p reylo-migrate -p reylo-cli -p reylo-oracle -p reylo-build -p reylo --features reylo/mysql,reylo/sqlite,reylo-build/mysql,reylo-build/sqlite'
             echo "shards=[\"postgres\",\"sqlite\",\"mysql-1\",\"mysql-2\",\"mysql-slow\",\"clickhouse\"${1-}]"
             echo playground=true
+            echo postgres19=true
           }
           if [ "$SCOPE" = changed ]; then
             base=$(git merge-base origin/main HEAD)
@@ -105,7 +107,7 @@ jobs:
             everything >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          postgres=false mysql=false sqlite=false clickhouse=false binary=false rust=false
+          postgres=false mysql=false sqlite=false clickhouse=false binary=false rust=false migrate=false
           while read -r file; do
             case "$file" in
               engine/postgres/*) postgres=true ;;
@@ -114,7 +116,7 @@ jobs:
               engine/clickhouse/* | oracle/cases/clickhouse_*) clickhouse=true ;;
               engine/cli/*) binary=true ;;
               # The migrations, which the Rust crate's reylo::migrate!() runs from an app too.
-              engine/migrate/*) binary=true rust=true ;;
+              engine/migrate/*) binary=true rust=true migrate=true ;;
               # The Rust crate, whose generator the binary's reylo generate runs.
               rust/*) rust=true binary=true ;;
               oracle/cases/*) postgres=true ;;
@@ -128,14 +130,15 @@ jobs:
           # The binary's own crates, the migrations and the command line, which link every database.
           $binary && tests="$tests -p reylo-migrate -p reylo-cli"
           # The Rust crate on each of its databases, whose own tests (tests/migrate.rs) run on all three.
-          $rust && tests="$tests -p reylo-build -p reylo --features reylo/mysql,reylo/sqlite"
+          $rust && tests="$tests -p reylo-build -p reylo --features reylo/mysql,reylo/sqlite,reylo-build/mysql,reylo-build/sqlite"
           if [ -z "$tests" ]; then
             { echo engine=false; echo tests=; echo 'shards=[]'; } >> "$GITHUB_OUTPUT"
           else
             { echo engine=true; echo "tests=$tests"; echo "shards=[${shards#,}]"; } >> "$GITHUB_OUTPUT"
           fi
-          # The playground's engine is Postgres's alone.
+          # The playground's engine is Postgres's alone, and the Postgres 19 job runs Postgres's engine and the migrations.
           echo "playground=$postgres" >> "$GITHUB_OUTPUT"
+          if $postgres || $migrate; then echo postgres19=true; else echo postgres19=false; fi >> "$GITHUB_OUTPUT"
 
   # The `reylo` binary the loader's tests run (REYLO_ENGINE_PATH), built once per run from this commit's
   # sources, on every pull request: the loader has no engine of its own. It is the release build
@@ -649,7 +652,7 @@ jobs:
   # and runner image. It runs when the oracle's Postgres shard does, and on every push to main and release.
   postgres-19:
     needs: [scope, binary]
-    if: ${{ !github.event.repository.private && contains(needs.scope.outputs.shards, 'postgres') }}
+    if: ${{ !github.event.repository.private && needs.scope.outputs.postgres19 == 'true' }}
     name: Postgres 19, the oracle and the loader's tests
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -765,6 +768,9 @@ jobs:
           done
           # shellcheck disable=SC2086
           cargo run -q -p reylo-oracle -- --url postgres://postgres@localhost:25432/postgres --strict-coverage $cases
+      # Reylo Migrate's commands and its diff engine's corpus on Postgres 19, with 19's pg_dump.
+      - name: Run Reylo Migrate's Postgres tests
+        run: env -u REYLO_TEST_MYSQL PGBIN="$PG_BIN" cargo test -p reylo-migrate --test scenarios --test diff
       - uses: nubjs/setup-nub@c7b970ec04655a2f0a111cd436cc182a3b660e7a # v0.6.0
         with:
           nub-version: "0.9.6"

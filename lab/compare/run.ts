@@ -126,7 +126,10 @@ for (const i of ids) {
     const overBroadNull = (r: any) => r.problems.length > 0 && r.problems.every((p: string) => p.includes("it is never null"));
     const severity = (r: any) => (!r.answer.code ? 0 : (r.answer.untyped || r.answer.error || vague(r) || r.answer.raw) ? 0 : overBroadNull(r) ? 2 : 1);
     const reyloFor = (r: any) => results.tools.reylo?.cells[row]?.results.find((x: any) => x.db === r.db && x.probe === r.probe)?.answer;
-    const first = [...wrong].filter((r: any) => !!reyloFor(r)?.shown).sort((x: any, y: any) => Number(drawn(y)) - Number(drawn(x)) || severity(x) - severity(y) || rank(row, x.probe) - rank(row, y.probe))[0];
+    // Of one query's runs, a card shows one whose right answer does not hold the wrong type as a member of a union: `string` against `number | bigint | string` reads as right.
+    const member = (type: string, shown: string) => !!type && new RegExp(`(^|[:|]\\s*)${type.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\s*[|;}]|$)`).test(shown);
+    const blurred = (r: any) => { const shown = reyloFor(r)?.shown; return Number(r.at.some((at: any) => (at.param && !r.answer.params?.[at.param - 1]?.checksValues && member(r.answer.params?.[at.param - 1]?.type ?? "", shown?.params ?? "")) || (at.column && member(r.answer.columns?.find((c: any) => c.name.toLowerCase() === String(at.column).toLowerCase())?.type ?? "", shown?.row ?? "")))); };
+    const first = [...wrong].filter((r: any) => !!reyloFor(r)?.shown).sort((x: any, y: any) => Number(drawn(y)) - Number(drawn(x)) || severity(x) - severity(y) || rank(row, x.probe) - rank(row, y.probe) || blurred(x) - blurred(y))[0];
     let example: any;
     if (first) {
       const same = (r: any) => r.sql === first.sql && r.problems.join() === first.problems.join();
