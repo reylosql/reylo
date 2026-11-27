@@ -743,8 +743,10 @@ impl Alterer for SqliteAlterer {
             for m in circling.iter().filter(|m| **m != from.id && self.makes_again(&from.id, m)) {
                 let Some(target) = t.objects.get(m) else { continue };
                 let carried = f.objects.get(m).is_some_and(|x| m.strip_prefix("table ").and_then(|name| shape(x, target, decided(name))).is_some_and(|s| s.rebuild));
+                // But for one that references them itself, whose change already waits for theirs.
+                let theirs = |d: &str| t.objects.get(d).is_some_and(|o| o.deps.iter().any(|x| circling.contains(x)));
                 if carried {
-                    out.extend(target.deps.iter().filter(|d| !circling.contains(*d) && !out.contains(*d)).cloned().collect::<Vec<_>>());
+                    out.extend(target.deps.iter().filter(|d| !circling.contains(*d) && !out.contains(*d) && !theirs(d)).cloned().collect::<Vec<_>>());
                 }
             }
         }
