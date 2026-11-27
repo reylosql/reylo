@@ -1437,9 +1437,9 @@ fn json_admits(ty: &Type, json: &Value) -> bool {
 /// digits or more, ` BC` after one before the year 1, the fraction of a second where it is not
 /// zero, a UTC offset in hours and minutes and its seconds where they are not zero (its hours in
 /// three digits from 100, as far as the 169 a POSIX zone's summer reaches: `+168:59`), and an
-/// infinity where the type holds one; a time as its type's own text, whose offset is in hours, with its
-/// minutes and its seconds where they are not zero (`12:00:00+00`, `12:00:00-04:56:02`); and a UUID
-/// in lowercase.
+/// infinity where the type holds one; a time as its type's own text, whose offset is in hours,
+/// with its minutes and its seconds where they are not zero (`12:00:00+00`, `12:00:00-04:56:02`);
+/// and a UUID in lowercase.
 fn written_form(kind: &Kind, text: &str) -> bool {
     static FORMS: std::sync::OnceLock<[regex::Regex; 6]> = std::sync::OnceLock::new();
     let [date, time, time_offset, timestamp, timestamp_offset, uuid] = FORMS.get_or_init(|| {
