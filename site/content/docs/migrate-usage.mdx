@@ -485,7 +485,7 @@ $ reylo migrate new invoices --drop invoices.note --rename orders=invoices
 
 ### Table rewrites
 
-On Postgres, a change that copies a table while it blocks writes is refused until you accept it with `--blocking`:
+On Postgres and MySQL, a change that copies a table while it blocks writes is refused until you accept it with `--blocking`:
 
 ```sql title="schema.sql"
 create table payments (
