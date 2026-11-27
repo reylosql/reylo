@@ -239,15 +239,20 @@ test("on MySQL, an analysis made after a migration, by a session that still trus
   const name = (url: string) => new URL(url).pathname.slice(1);
   // Each database is reached by an account granted it alone, so that the fingerprint, which reads
   // every database the account may reach, holds still while other tests make and drop theirs.
-  const ofA = await mysqlAccount(a.db, `reylo_migrated_a_${process.pid}`, [name(a.url)]);
-  const ofB = await mysqlAccount(b.db, `reylo_migrated_b_${process.pid}`, [name(b.url)]);
+  let ofA: Awaited<ReturnType<typeof mysqlAccount>> | undefined;
+  let ofB: Awaited<ReturnType<typeof mysqlAccount>> | undefined;
   try {
+    ofA = await mysqlAccount(a.db, `reylo_migrated_a_${process.pid}`, [name(a.url)]);
+    ofB = await mysqlAccount(b.db, `reylo_migrated_b_${process.pid}`, [name(b.url)]);
     await migratedUnderASession((root, env) => Session.open(root, env), { url: ofA.url(name(a.url)), run: (sql) => a.db.query(sql) }, { url: ofB.url(name(b.url)) }, "alter table t modify a int not null", "alter table t modify a int null");
   } finally {
-    await ofA.drop();
-    await ofB.drop();
-    await a.drop();
-    await b.drop();
+    try {
+      await ofA?.drop();
+      await ofB?.drop();
+    } finally {
+      await a.drop();
+      await b.drop();
+    }
   }
 });
 

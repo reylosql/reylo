@@ -196,8 +196,13 @@ export async function mysqlDatabase(prefix: string, setup?: string) {
 export async function mysqlAccount(admin: { query(sql: string): Promise<unknown> }, user: string, databases: string[]) {
   await admin.query(`drop user if exists '${user}'@'%'`);
   await admin.query(`create user '${user}'@'%'`);
-  // A `_` in a granted database's name matches any character, unless escaped.
-  for (const database of databases) await admin.query(`grant all on \`${database.replaceAll("_", "\\_")}\`.* to '${user}'@'%'`);
+  try {
+    // A `_` in a granted database's name matches any character, unless escaped.
+    for (const database of databases) await admin.query(`grant all on \`${database.replaceAll("_", "\\_")}\`.* to '${user}'@'%'`);
+  } catch (e) {
+    await admin.query(`drop user if exists '${user}'@'%'`);
+    throw e;
+  }
   return {
     url(database: string) {
       const url = new URL(MYSQL!);
