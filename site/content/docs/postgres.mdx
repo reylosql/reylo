@@ -719,7 +719,7 @@ A parameter accepts the same values `.run()` returns for its type. You can pass 
 | `date`, `timestamp`, `time` | `string` |
 | `timestamptz` | a `string` that names its zone |
 | `interval` | a `string`: an ISO 8601 duration (`-P1D` too) or Postgres's own text |
-| `json`, `jsonb` | any value `JSON.stringify` writes, such as a `Date` inside an object, or what the column's JSON Schema admits |
+| `json`, `jsonb` | any value `JSON.stringify` writes, such as a `Date` inside an object, but no `NaN` or infinity, or what the column's JSON Schema admits |
 | `bytea` | `Uint8Array` |
 | An array | an array of its element's parameter type, without `null` |
 | An enum | the union of its labels |
