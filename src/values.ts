@@ -1313,10 +1313,11 @@ export function withRawIntegers(v: unknown): unknown {
 const bigintToJson = () => typeof (BigInt.prototype as { toJSON?: unknown }).toJSON === "function";
 
 function rawCopy(v: unknown, key = ""): unknown {
+  // What JSON.stringify writes for the value: its toJSON()'s (a Date's), called once with the key it
+  // stands at, then the items and own keys of what that returns.
+  if (v !== null && typeof v === "object" && typeof (v as { toJSON?: unknown }).toJSON === "function") v = (v as { toJSON(key: string): unknown }).toJSON(key);
   if (typeof v === "bigint") return rawInteger(v);
   if (v === null || typeof v !== "object" || (JSON as { isRawJSON?: (x: unknown) => boolean }).isRawJSON?.(v)) return v;
-  // What JSON.stringify writes for the value: its toJSON()'s (a Date's), given the key it stands at, or its items and own keys.
-  if (typeof (v as { toJSON?: unknown }).toJSON === "function") return rawCopy((v as { toJSON(key: string): unknown }).toJSON(key), key);
   if (Array.isArray(v)) return Array.from(v, (x, i) => rawCopy(x, String(i)));
   return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, rawCopy(x, k)]));
 }

@@ -1129,6 +1129,9 @@ test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app
   assert.equal(jsonStringify({ id: { toJSON: () => 9007199254740993n } }), '{"id":9007199254740993}');
   // Bun.sql's copy gives a nested toJSON() the key it stands at, as JSON.stringify does.
   assert.equal(JSON.stringify(withRawIntegers({ id: 9007199254740993n, child: { toJSON: (key: string) => key }, list: [{ toJSON: (key: string) => key }] })), '{"id":9007199254740993,"child":"child","list":["0"]}');
+  // Each toJSON() runs once, even one that returns its own object.
+  const child = { n: 1, toJSON(this: object, key: string) { return key === "child" ? this : ""; } };
+  assert.equal(JSON.stringify(withRawIntegers({ id: 9007199254740993n, child })), '{"id":9007199254740993,"child":{"n":1}}');
   const plain = { n: 1 };
   assert.equal(withRawIntegers(plain), plain, "no copy where it holds no BigInt");
 });
