@@ -307,6 +307,13 @@
   display: flex;
 }
 
+/* The database switch stands on the Query label's line, the ink of its name ending where the code's
+   padding does. */
+#nd-page .reylo-inference-card-switch:has(> .reylo-db-switch, > .reylo-dialect-only) {
+  top: 0.75rem;
+  right: 1rem;
+}
+
 /* A card's code has no copy button: its corner is the switches'. */
 #nd-page .reylo-inference-card .dk-code-copy {
   display: none;
@@ -505,18 +512,180 @@
   }
 }
 
-/* A card or an example on one database only says so in a light gray label where the switch would
-   be (components/dialect-tabs.tsx), in the switch's face and size. */
+/* A card or an example on one database only says so where the switch would be, in the switch's
+   face, size and grey, with no chevron (components/dialect-tabs.tsx). */
 #nd-page .reylo-dialect-only {
-  display: inline-block;
-  margin-inline-start: auto;
-  padding: 11px 8px 3px;
-  font-family: var(--font-mono);
-  font-size: 0.6875rem;
-  font-weight: 500;
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  margin-inline: auto -6px;
+  padding: 0 6px;
+  font: 500 0.6875rem/12px var(--font-code);
   color: var(--color-fd-muted-foreground);
   white-space: nowrap;
+}
+
+/* ── The database switch (components/database-menu.tsx) ────────────────────
+   The chosen database's logo and name in quiet grey, and a chevron, on the label line of what it
+   switches: 20px tall, the line's own height, so nothing hangs over the code under it, and the ink of
+   its name where the box would have its edge (the box's 6px of padding taken back by a margin). A
+   wash under it on hover; a menu of every database under it, on the page's body, where an inference
+   card or a code-tab group cannot clip it. The text sits on a 12px line, a whole pixel, so it lands
+   on the same pixel in every copy (ink-align.mjs: on a line of 1, 11px tall, it sat 1px above the
+   label beside it). On the docs' page it is also docs-kit's `.dk-variant-switch`, whose margins and
+   padding it sets back. */
+.reylo-db-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  margin-inline-end: -6px;
+  padding: 0 6px;
+  border-radius: 5px;
+  font: 500 0.6875rem/12px var(--font-code);
+  color: var(--color-fd-muted-foreground);
+  white-space: nowrap;
+  transition: color 100ms;
+}
+
+#nd-page .reylo-db-switch {
+  margin-block: 0;
+  padding-inline: 6px;
+}
+
+/* At the end of a code-tab strip, whose own padding stops 6px short of the code's, the switch keeps
+   its box's padding, so its ink ends where the code's padding does there too. */
+#nd-page .dk-code-tabs :is(.reylo-db-switch, .reylo-dialect-only) {
+  margin-inline-end: 0;
+}
+
+.reylo-db-switch:is(:hover, [data-open]) {
+  color: var(--color-fd-foreground);
+  background: var(--color-fd-accent);
+}
+
+/* A flex box, not an inline one: on the docs' page the name sits in its database's panel, and a line
+   box of the panel's around an inline one lifted it 1px above the label beside it. */
+.reylo-db-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The saved choice's panel shows (docs-kit hides the others); where the switch doesn't offer the
+   page's choice, its first database does, as the card's panels do. */
+.reylo-db-switch:not(:has(> [role='tabpanel'][data-state='active'])) > [role='tabpanel']:first-of-type {
+  display: block;
+}
+
+.reylo-db-logo {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+}
+
+.reylo-db-chevron {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 150ms;
+}
+
+.reylo-db-switch[data-open] .reylo-db-chevron {
+  transform: rotate(180deg);
+}
+
+/* The whole switch is one button, laid over it. */
+.reylo-db-hit {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  cursor: pointer;
+}
+
+.reylo-db-hit:focus-visible {
+  outline: 2px solid var(--color-fd-ring);
+  outline-offset: 1px;
+}
+
+.reylo-db-menu {
+  position: absolute;
+  z-index: 60;
+  min-width: 9.5rem;
+  padding: 4px;
+  border: 1px solid var(--color-fd-border);
+  border-radius: 9px;
+  background: var(--color-fd-popover);
+  box-shadow: 0 18px 40px -12px rgb(0 0 0 / 0.45);
+  animation: reylo-db-menu-in 120ms ease-out;
+}
+
+@keyframes reylo-db-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+
+.reylo-db-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.reylo-db-list > button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 5px;
+  font: 500 0.75rem/14px var(--font-code);
+  color: var(--color-fd-popover-foreground);
+  text-align: start;
+  white-space: nowrap;
+}
+
+.reylo-db-list > button:is(:hover, :focus-visible) {
+  outline: none;
+  background: var(--color-fd-accent);
+  color: var(--color-fd-accent-foreground);
+}
+
+.reylo-db-list .reylo-db-logo {
+  width: 14px;
+  height: 14px;
+}
+
+.reylo-db-check {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-inline-start: auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  visibility: hidden;
+}
+
+/* The chosen database, or the first where the menu doesn't offer the page's choice: the accent, and the check. */
+.reylo-db-list > button[data-state='active'],
+.reylo-db-list:not(:has(> [data-state='active'])) > button:first-child {
+  color: var(--color-fd-primary);
+}
+
+.reylo-db-list > button[data-state='active'] .reylo-db-check,
+.reylo-db-list:not(:has(> [data-state='active'])) > button:first-child .reylo-db-check {
+  visibility: visible;
 }
 
 
