@@ -42,6 +42,8 @@ function sqliteClass(t: EngineType): string {
     case "text": return "text";
     case "bytes": return "blob";
     case "union": {
+      // A number SQLite computes as an INTEGER or a REAL.
+      if (!name) return "number";
       if (/^bool(ean)?$/i.test(name.trim())) return "bool";
       const affinity = sqliteAffinity(name);
       return affinity === "integer" && sqliteWide(name) ? "int8" : affinity;
@@ -60,6 +62,7 @@ function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean
       switch (sqliteClass(t)) {
         case "integer": case "int8": return { type: "integer", format: "int64" };
         case "real": return { type: "number", format: "double" };
+        case "number": return { type: "number" };
         case "text": return { type: "string" };
         case "blob": return { type: "string", format: "byte", contentEncoding: "base64" };
         case "numeric": return { type: ["number", "string"] };
@@ -69,9 +72,11 @@ function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean
     }
     const kinds = columnKind(t, dialect).split("|");
     if (kinds.length > 1) {
-      // A NUMERIC: whichever storage class the row stored, an integer being a number too.
+      // A NUMERIC, or a number SQLite computes: whichever storage class the row holds, an integer
+      // being a number too.
       const types = [...new Set(kinds.map((k) => kindSchema(k as ScalarKind, t, dialect).type as string))];
-      return { type: types.includes("number") ? types.filter((type) => type !== "integer") : types };
+      const type = types.includes("number") ? types.filter((type) => type !== "integer") : types;
+      return { type: type.length === 1 ? type[0] : type };
     }
     return kindSchema(kinds[0] as ScalarKind, t, dialect);
   }

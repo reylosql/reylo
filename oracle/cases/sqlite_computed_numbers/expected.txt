@@ -1,0 +1,7 @@
+abs.sql: many () -> { a: float(11,52)?, b: int64 | float(11,52)?, c: int64, d: float(11,52), e: int64 | float(11,52)?, f: int64 | float(11,52)? }
+arithmetic.sql: many () -> { a: int64 | float(11,52)?, b: int64 | float(11,52)?, c: float(11,52), d: int64, e: int64 | float(11,52)?, f: int64 | float(11,52)?, g: int64 }
+in_json.sql: many () -> { doc: json { n: int64, m: int64 } }
+mixed.sql: many () -> { a: int64, b: int64 | float(11,52), c: int64 | float(11,52), d: int64 | float(11,52) }
+parameter.sql: many (p: float(11,52)) -> { n: INTEGER(int64 | float(11,52) | text(UTF-8, ill-formed) | bytes) }
+rounding.sql: many () -> { a: int64, b: int64, c: int64, d: float(11,52), e: int64 | float(11,52)?, f: int64 | float(11,52)?, g: int64 | float(11,52)? }
+sums.sql: one () -> { a: int64 | float(11,52)?, b: int64?, c: float(11,52)?, e: int64 | float(11,52)?, f: int64 | float(11,52)? }

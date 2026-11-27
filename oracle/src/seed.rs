@@ -1734,6 +1734,18 @@ pub fn check_sqlite<D: SqliteDb + ?Sized>(db: &D, statements: &[(String, String,
                                 Some(value) if col["type"]["kind"] == "integer" && col["type"]["label"] == "BIGINT" && !matches!(value, rusqlite::types::Value::Null | rusqlite::types::Value::Integer(_)) => {
                                     found.push(format!("{file}: column {name} typed int8 holds {value:?} with ({shown})"));
                                 }
+                                // A column typed real is read as a REAL: an INTEGER there past 2^53
+                                // comes back rounded from a driver that reads numbers, with no
+                                // error, and Rust's f64 refuses one.
+                                Some(rusqlite::types::Value::Integer(i)) if col["type"]["kind"] == "float" => {
+                                    found.push(format!("{file}: column {name} typed real holds the INTEGER {i} with ({shown})"));
+                                }
+                                // And a column typed integer as an INTEGER, but for what SQLite's
+                                // integer arithmetic answers past 64 bits, a REAL of at least
+                                // 2^63, which the type leaves out as Postgres's overflow error is.
+                                Some(rusqlite::types::Value::Real(f)) if col["type"]["kind"] == "integer" && f.abs() < 9.223372036854775808e18 => {
+                                    found.push(format!("{file}: column {name} typed integer holds the REAL {f} with ({shown})"));
+                                }
                                 // JSON a constructor built is text that parses as that JSON,
                                 // each value of the type the engine gave it.
                                 Some(value) if is_built(&col["type"]) && *value != rusqlite::types::Value::Null => {

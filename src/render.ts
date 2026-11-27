@@ -99,7 +99,7 @@ function jsonImage(t: EngineType, dialect: Dialect, inUnion = false): string {
       return "string";
     case "union": {
       // SQLite: a value of a column a NUMERIC declares is a number or the text it holds.
-      if (dialect === "sqlite") return /^bool(ean)?$/i.test(name) ? "boolean" : name.toUpperCase() === "NUMERIC" ? "number | string" : JSON_TYPE;
+      if (dialect === "sqlite" && name) return /^bool(ean)?$/i.test(name) ? "boolean" : name.toUpperCase() === "NUMERIC" ? "number | string" : JSON_TYPE;
       if (dialect === "postgres" && json[name]) return json[name]!;
       const parts = t.members.map((m) => jsonImage(m, dialect, true));
       return parts.includes(JSON_TYPE) ? JSON_TYPE : [...new Set(parts.flatMap((part) => part.split(" | ")))].join(" | ");

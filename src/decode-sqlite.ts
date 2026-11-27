@@ -10,7 +10,8 @@
 //   database, once per database and text (a WeakMap keyed by the database), and sets that
 //   statement's own integer mode, whatever the database's, and no other statement of the app's
 //   changes. node:sqlite's statement, and better-sqlite3's and bun:sqlite's where a column has no
-//   type the module knows or is a BIGINT's (`int8`, a BigInt), read every INTEGER as a BigInt: an
+//   type the module knows, is a BIGINT's (`int8`, a BigInt) or may be an INTEGER or a REAL
+//   (`int|float`, a number SQLite computes as either), read every INTEGER as a BigInt: an
 //   INTEGER's is then a number, or an error naming its column past 2^53. Where every column is
 //   typed and none is a BIGINT's, better-sqlite3's and bun:sqlite's read numbers (a BigInt per
 //   integer cost +70% on 10,000 rows when `exactInteger` compared BigInts, and +17 to 20% since it
@@ -33,8 +34,9 @@
 // - sqlite3 and the sqlite wrapper, libSQL, D1 and Bun.SQL's SQLite: the rows the driver gives,
 //   normalized. sqlite3 and sqlite are not cached: a statement left open makes the app's close()
 //   fail with SQLITE_BUSY. An INTEGER the driver already rounded (sqlite3, sqlite, D1, Bun.SQL
-//   without safeIntegers) is refused in an INTEGER or BIGINT column, where a number past 2^53 can
-//   only be one; a BIGINT's number within 2^53, or libSQL's BigInt or digits, is its BigInt.
+//   without safeIntegers) is refused in a column that may hold an INTEGER, where a whole number
+//   past 2^53 may be one, a column with no type included; a BIGINT's number within 2^53, or
+//   libSQL's BigInt or digits, is its BigInt.
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
 import { bigInteger, coerce, columnKind, DecodeError, exactInteger, ParameterError, refuseTruth, truth, type Columns, type Kind } from "./values.ts";
 import { isDurableObjectSql, isSqlJs, isSqliteWasm, isTurso, type AnyClient as Client, type Bound, type QueryModule, type Runtime } from "./execute.ts";
@@ -123,7 +125,7 @@ function runStatement({ st, exact }: Kept, values: unknown[], columns: Columns |
     return [];
   }
   const all = st.all(...values) as unknown[] | Promise<unknown[]>;
-  if (!Array.isArray(all)) return Promise.resolve(all).then((rows) => normalize(rows, columns));
+  if (!Array.isArray(all)) return Promise.resolve(all).then((rows) => normalize(rows, columns, { exact }));
   let rows = all;
   // Turso's rows, or a database opened with returnArrays, on a Node whose statements cannot turn it off.
   if (rows.length && Array.isArray(rows[0])) rows = byPosition(rows as unknown[][], columns, () => (st.columns() as { name: string }[]).map((c) => c.name));
@@ -146,9 +148,11 @@ function hasProto(columns: Columns | undefined): boolean {
 }
 
 // Every column typed: a number past 2^53 in one can be told as rounded (src/values.ts). A column
-// read as a BigInt (`int8`) needs the statement's integers exact.
+// read as a BigInt (`int8`) needs the statement's integers exact, and so does a number SQLite
+// computes as an INTEGER or a REAL (`int|float`), where only the storage class tells a REAL past
+// 2^53 from an INTEGER rounded to it.
 function everyColumnTyped(columns: Columns | undefined): boolean {
-  return columns !== undefined && columns.length > 0 && !columns.some(([, kind]) => kind === "unknown" || kind.split("|").includes("int8"));
+  return columns !== undefined && columns.length > 0 && !columns.some(([, kind]) => kind === "unknown" || kind === "int|float" || kind.split("|").includes("int8"));
 }
 
 /**
@@ -195,7 +199,7 @@ export function runSqliteWasm(db: AnyClient, text: string, values: unknown[], co
     if (values.length) st.bind(values);
     const rows: unknown[][] = [];
     while (st.step()) rows.push(st.get([]));
-    return rows.length ? normalize(byPosition(rows, columns, () => st.getColumnNames()), columns) : rows;
+    return rows.length ? normalize(byPosition(rows, columns, () => st.getColumnNames()), columns, { rounds: false }) : rows;
   } finally {
     st.finalize();
   }
@@ -242,7 +246,7 @@ const DIGITS = /^[+-]?\d+$/;
  * refused, naming the column, rather than returned as what the type says it is not (`refuseClass`,
  * and `truth` in src/values.ts, since a truth value is 0 or 1 in every SQLite driver).
  */
-function plan(name: string, kind: Kind, exact: boolean): Plan {
+function plan(name: string, kind: Kind, exact: boolean, rounds: boolean): Plan {
   if (kind === "bool") return { name, big: (v) => truth(v, name), num: (v) => truth(v, name), str: (v) => truth(v, name), blob: () => refuseTruth(name, "a BLOB") };
   if (kind === "json") return { name, big: (v) => exactInteger(v, name), num: undefined, str: (v) => JSON.parse(v) };
   const kinds = kind.split("|");
@@ -258,7 +262,7 @@ function plan(name: string, kind: Kind, exact: boolean): Plan {
   // fraction is one either way, which no BigInt holds.
   if (kind === "int8") return { name, big: (v) => v, num: exact ? refuse : (v) => (Number.isInteger(v) ? bigInteger(v, name) : refuse(v)), str: (v) => (DIGITS.test(v) ? BigInt(v) : refuse(v)), blob };
   if (kind === "text") return { name, big: String, num: undefined, str: undefined, blob };
-  if (kind === "int") return { name, big: (v) => exactInteger(v, name), num: exact ? undefined : (v) => exactInteger(v, name), str: (v) => (DIGITS.test(v) ? exactInteger(BigInt(v), name) : refuse(v)), blob };
+  if (kind === "int") return { name, big: (v) => exactInteger(v, name), num: rounds ? (v) => exactInteger(v, name) : undefined, str: (v) => (DIGITS.test(v) ? exactInteger(BigInt(v), name) : refuse(v)), blob };
   // libSQL under intMode "string" hands an INTEGER over as its digits, and says nothing of the storage
   // class or of its mode. Where the column is a REAL's, or a NUMERIC's, those digits can only be an
   // INTEGER's: SQLite stores text that reads as an integer as that integer in a column of REAL or
@@ -268,12 +272,19 @@ function plan(name: string, kind: Kind, exact: boolean): Plan {
   // numbers or BLOBs alone is a TEXT the column's type does not allow.
   const digits = (v: string) => (DIGITS.test(v) ? exactInteger(BigInt(v), name) : texts ? v : refuse(v));
   const str = numericOnly(kinds) || (numbers && !texts) ? digits : texts ? undefined : refuse;
-  // A NUMERIC's either: read as numbers, one past 2^53 may be a rounded INTEGER, which is refused.
-  if (!exact && kinds.includes("int")) return { name, big: (v) => exactInteger(v, name), num: (v) => (Number.isInteger(v) ? exactInteger(v, name) : v), str, blob };
-  // A REAL, a NUMERIC read exact, a column with no type: an integer is exact or refused, a number is
-  // as it is. A BLOB's column holds no number.
+  // A value that may be an INTEGER or a REAL, a NUMERIC's, or of any storage class: where the driver
+  // may round an INTEGER, a whole number past 2^53 may be a rounded one, which is refused, a REAL
+  // that large with it.
+  if (rounds && (any || kinds.includes("int"))) return { name, big: (v) => exactInteger(v, name), num: (v) => (Number.isInteger(v) && Math.abs(v) > Number.MAX_SAFE_INTEGER ? mayBeRounded(v, name) : v), str, blob };
+  // A REAL, or a value that may be an INTEGER where no driver rounds one: an integer is exact or
+  // refused, a number is as it is. A BLOB's column holds no number.
   if (!numbers && !texts) return { name, big: refuse, num: refuse, str, blob };
   return { name, big: (v) => exactInteger(v, name), num: undefined, str, blob };
+}
+
+/** The error for a whole number past 2^53 in a column that may hold an INTEGER or a REAL, which may be an INTEGER the driver rounded. */
+function mayBeRounded(v: number, column: string): never {
+  throw new DecodeError(`Column "${column}" holds ${v}, a whole number past ±(2^53 - 1), which may be an INTEGER the driver already rounded, or a REAL: Reylo refuses it rather than return a value that may be rounded. Cast it in the statement, to text (cast(${column} as text)) to read an INTEGER exactly, or to real (cast(${column} as real)) to read a number.`);
 }
 
 const TYPE_NAMES: Readonly<Record<string, string>> = { int: "number", float: "number", int8: "bigint", text: "string", bytes: "Uint8Array" };
@@ -310,16 +321,18 @@ function numericOnly(kinds: string[]): boolean {
  * The rows with each value in Reylo's form: a BigInt a number (an error past 2^53), a number past
  * 2^53 in an INTEGER column refused as rounded, a BLOB a Uint8Array, a JSON column parsed and a
  * truth value a boolean. In place, since every driver builds new rows per call. `exact`: the driver
- * read every INTEGER as a BigInt, so a number is a REAL, never a rounded integer. `d1`: an array is
+ * read every INTEGER as a BigInt, so a number is a REAL, never a rounded integer. `rounds`: a number
+ * may be an INTEGER the driver rounded, as it may unless `exact`; SQLite Wasm hands over none. `d1`:
+ * an array is
  * D1's BLOB. A row is a plain object on every driver: node:sqlite builds rows with a null
  * prototype, which `assert.deepStrictEqual` and `row.hasOwnProperty` tell apart.
  */
-export function normalize(rows: unknown[], columns: Columns | undefined, { exact = false, d1 = false } = {}): unknown[] {
+export function normalize(rows: unknown[], columns: Columns | undefined, { exact = false, rounds = !exact, d1 = false }: { exact?: boolean; rounds?: boolean; d1?: boolean } = {}): unknown[] {
   if (!Array.isArray(rows) || !rows.length) return Array.isArray(rows) ? rows : [];
   // sqlite3 and the sqlite wrapper assign each name to the row they build, with no way to read by position, so the value of this column is gone. `row.__proto__` would read Object.prototype.
   if (hasProto(columns) && !Object.hasOwn(rows[0] as object, "__proto__")) throw new DecodeError(`This client cannot return a column named __proto__: it builds each row by assigning each name, which sets the object's prototype and loses the value. Give the column an alias in the statement.`);
   // The last column of each name, whose value a row keeps.
-  const plans = (columns ? lastOfEach(columns) : Object.keys(rows[0] as object).map((name) => [name, "unknown"] as const)).map(([name, kind]) => plan(name, kind, exact));
+  const plans = (columns ? lastOfEach(columns) : Object.keys(rows[0] as object).map((name) => [name, "unknown"] as const)).map(([name, kind]) => plan(name, kind, exact, rounds));
   const n = plans.length;
   for (const row of rows as Record<string, unknown>[]) {
     if (Object.getPrototypeOf(row) === null) Object.setPrototypeOf(row, Object.prototype);
@@ -355,7 +368,7 @@ function normalized(p: Plan, v: unknown, d1: boolean): unknown {
 
 /** One column's non-null value as `normalize` gives it, with `normalize`'s default reading. */
 export function sqliteDecoder(name: string, kind: Kind): (v: unknown) => unknown {
-  const p = plan(name, kind, false);
+  const p = plan(name, kind, false, true);
   return (v) => normalized(p, v, false);
 }
 

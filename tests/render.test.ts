@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { EngineType } from "../src/engine.ts";
 import { analysisWithNestedArrays } from "../src/engine-type.ts";
 import { jsonNumbers, orNull, renderParamType, renderType } from "../src/render.ts";
-import { numbersInJson } from "../src/values.ts";
+import { columnKind, numbersInJson } from "../src/values.ts";
 import { typeSchema } from "../src/schema.ts";
 import { array, checked, doc, enumOf, field, lite, my, oneOf, pg, record } from "./descriptors.ts";
 
@@ -145,6 +145,12 @@ test("SQLite: an INTEGER is a number, exact or an error; a NUMERIC whichever the
   assert.equal(renderType({ ...lite("numeric"), label: "DECIMAL(10,2)" } as EngineType, false, "sqlite"), "number | string");
   assert.equal(renderType({ ...lite("numeric"), label: "bigint(20)" } as EngineType, false, "sqlite"), "bigint");
   assert.equal(renderType({ kind: "union", label: "VARCHAR(20)", members: [lite("text"), lite("blob")] }, false, "sqlite"), "string");
+  // A number SQLite computes as an INTEGER or a REAL is a number, inside a document too.
+  assert.equal(renderType(lite("number"), false, "sqlite"), "number");
+  assert.equal(renderType(lite("number"), true, "sqlite"), "number");
+  assert.equal(columnKind(lite("number"), "sqlite"), "int|float");
+  assert.deepEqual(typeSchema(lite("number"), "sqlite"), { type: "number" });
+  assert.deepEqual(typeSchema(lite("number"), "sqlite", false, true), { type: "number" });
   // The driver binds a number for an INTEGER, and the run time a truth value as 1 or 0.
   assert.equal(renderParamType(lite("integer"), "sqlite"), "number");
   assert.equal(renderParamType(lite("numeric"), "sqlite"), "number | string | boolean");

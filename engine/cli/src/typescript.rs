@@ -329,8 +329,9 @@ fn column_kind(t: &Value, dialect: &str) -> String {
         "duration" => if dialect == "mysql" { "text" } else { "interval" }.into(),
         "map" => if dialect == "postgres" && name == "hstore" { "hstore" } else { "unknown" }.into(),
         "union" => {
-            if dialect == "sqlite" {
-                return label(t).map_or_else(|| "unknown".into(), sqlite_declared_kind);
+            // SQLite: what a declared column stores, or a number SQLite computes as an INTEGER or a REAL.
+            if let (true, Some(declared)) = (dialect == "sqlite", label(t)) {
+                return sqlite_declared_kind(declared);
             }
             if dialect == "postgres" && (name == "inet" || name == "cidr") {
                 return "text".into();
@@ -601,7 +602,7 @@ fn json_image_of(t: &Value, dialect: &str, in_union: bool) -> String {
         }
         "text" => "string".into(),
         "union" => {
-            if dialect == "sqlite" {
+            if dialect == "sqlite" && !name.is_empty() {
                 return if BOOLEAN.is_match(&name) {
                     "boolean".into()
                 } else if name.to_uppercase() == "NUMERIC" {
