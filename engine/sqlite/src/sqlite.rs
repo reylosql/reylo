@@ -4072,6 +4072,28 @@ mod tests {
         assert!(small(format!("select id from users where id in ({list})")).diagnostics.is_empty());
     }
 
+    #[test]
+    fn a_chain_of_with_queries_nests_as_deep_as_sqlite_nests_views_and_one_query_past_it_is_an_error_at_the_bound() {
+        // SQLite reads each view and each WITH query a statement reads as a subquery of its own, so
+        // a chain of them, each reading the one before, nests a SELECT per link. SQLite holds a
+        // chain of views to 1,000 nested SELECTs, the statement's own counted, and a chain of WITH
+        // queries to none: the engine holds both to that bound, in a read as in a write.
+        let ddl = vec!["create table users (id integer primary key, name text not null, nick text)".to_string()];
+        let small = |sql: String, ddl: &[String]| std::thread::scope(|s| std::thread::Builder::new().stack_size(256 << 10).spawn_scoped(s, || analyze_ddl(&sql, ddl, &Extras::default()).analysis).unwrap().join().unwrap());
+        let refused = |a: &Analysis| a.diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>();
+        let with = |n: usize| (1..n).fold("with c0 as (select 1 as a)".to_string(), |q, i| format!("{q}, c{i} as (select * from c{})", i - 1));
+        let chain = |n: usize| format!("{} select a from c{}", with(n), n - 1);
+        let at = small(chain(999), &ddl);
+        assert!(at.diagnostics.is_empty(), "{:?}", at.diagnostics);
+        assert_eq!((at.cardinality, col(&at, "a")), (Cardinality::One, ("integer".to_string(), false)));
+        for sql in [chain(1_000), chain(4_200), format!("delete from users where id in ({} select a from c999)", with(1_000)), format!("{} insert into users (id, name) select a, 'x' from c999", with(1_000))] {
+            assert_eq!(refused(&small(sql.clone(), &ddl)), ["VIEWs and/or subqueries nested too deep"], "{}", &sql[sql.len() - 60..]);
+        }
+        let views: Vec<String> = std::iter::once("create view v0 as select 1 as a".to_string()).chain((1..1_000).map(|i| format!("create view v{i} as select * from v{}", i - 1))).collect();
+        assert!(small("select a from v998".to_string(), &views).diagnostics.is_empty());
+        assert_eq!(refused(&small("select a from v999".to_string(), &views)), ["VIEWs and/or subqueries nested too deep"]);
+    }
+
     fn col(a: &Analysis, name: &str) -> (String, bool) {
         let c = a.columns.iter().find(|c| c.name == name).unwrap_or_else(|| panic!("no column {name}"));
         (affinity_of(&c.ty).unwrap_or("unknown").to_string(), c.nullable)
