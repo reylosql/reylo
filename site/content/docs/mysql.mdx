@@ -606,6 +606,8 @@ Reylo runs each query through `mysql2`'s `execute()`, which prepares it first. W
 - A `FLOAT` column comes back with the 6 significant digits MySQL sends as text, so `1.100000023841858` reads as `1.1`.
 - A custom `queryFormat` is refused there, since it would rewrite each statement. So is a non-ASCII value on a connection whose charset isn't UTF-8.
 
+Before `mysql2` 3.23.4, a `TIME` fraction loses its leading zeros, so `12:00:00.05` comes back as `12:00:00.500000`. Use 3.23.4 or later.
+
 ### `mariadb`
 
 The `mariadb` driver works with a MySQL server. The type check refuses a MariaDB server. It takes only a `mariadb://` URL, which Reylo reads as MySQL. Pass a pool or a connection, from either API. A connection taken from a pool can run a transaction:
