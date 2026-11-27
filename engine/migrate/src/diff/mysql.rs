@@ -254,6 +254,55 @@ impl Column {
         }
     }
 
+    /// Its attributes: each word of `rest` outside parentheses (an expression's) and strings (a
+    /// comment's), uppercased, with its byte range.
+    fn attributes(&self) -> Vec<(String, usize, usize)> {
+        let mut depth = 0usize;
+        let mut out = Vec::new();
+        for t in tokenize(&self.rest, Dialect::Mysql) {
+            match (t.kind, t.text.as_str()) {
+                (TokenKind::Symbol, "(") => depth += 1,
+                (TokenKind::Symbol, ")") => depth = depth.saturating_sub(1),
+                (TokenKind::Word, _) if depth == 0 => out.push((t.upper(), t.start, t.end)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn not_null(&self) -> bool {
+        self.attributes().windows(2).any(|w| w[0].0 == "NOT" && w[1].0 == "NULL")
+    }
+
+    fn counts(&self) -> bool {
+        self.attributes().iter().any(|(w, _, _)| w == "AUTO_INCREMENT")
+    }
+
+    /// The column made NOT NULL, without AUTO_INCREMENT.
+    fn held(&self) -> Column {
+        let attributes = self.attributes();
+        let mut cut = Vec::new();
+        let mut k = 0;
+        while k < attributes.len() {
+            let (w, start, end) = &attributes[k];
+            let next = attributes.get(k + 1).filter(|(n, _, _)| w == "NOT" && n == "NULL");
+            let before = k.checked_sub(1).map(|p| attributes[p].0.as_str());
+            if let Some((_, _, next_end)) = next {
+                cut.push((*start, *next_end));
+                k += 1;
+            } else if w == "AUTO_INCREMENT" || (w == "NULL" && before != Some("DEFAULT")) {
+                cut.push((*start, *end));
+            }
+            k += 1;
+        }
+        let mut rest = self.rest.clone();
+        for (start, end) in cut.into_iter().rev() {
+            let end = end + rest[end..].len() - rest[end..].trim_start().len();
+            rest.replace_range(start..end, "");
+        }
+        Column { rest: format!("not null {}", rest.trim()).trim_end().to_string(), ..self.clone() }
+    }
+
     fn written(&self, table_collation: Option<&str>) -> String {
         let mut c = self.clone();
         if table_collation == Some(c.collation.as_str()) {
@@ -261,8 +310,7 @@ impl Column {
         }
         // MySQL shows a nullable AUTO_INCREMENT column without its NULL, and makes one written so
         // NOT NULL.
-        let words: Vec<&str> = c.rest.split_whitespace().collect();
-        if words.contains(&"auto_increment") && !words.windows(2).any(|w| w == ["not", "null"]) && !words.contains(&"null") {
+        if c.counts() && !c.not_null() && !c.attributes().iter().any(|(w, _, _)| w == "NULL") {
             c.rest = format!("null {}", c.rest);
         }
         format!("{} {}", self.q, c.def())
@@ -1213,29 +1261,17 @@ fn alter_table(from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeS
     let swaps = clauses.iter().any(|c| c.starts_with("drop index ") || c == "drop primary key");
     // A column made AUTO_INCREMENT needs a key in the statement that makes it so, which one a
     // foreign key would make only after.
-    let counts: Vec<&String> = to.columns.iter().filter(|c| c.rest.split_whitespace().any(|w| w == "auto_increment") && from.column(&c.name).is_none_or(|was| !was.rest.split_whitespace().any(|w| w == "auto_increment"))).map(|c| &c.name).collect();
+    let counts: Vec<&String> = to.columns.iter().filter(|c| c.counts() && from.column(&c.name).is_none_or(|was| !was.counts())).map(|c| &c.name).collect();
     let keys_a_count = |def: &str| counts.iter().any(|c| reads(def, c));
     // MySQL gives each NULL in a column made AUTO_INCREMENT the next value of its sequence, even in
     // strict mode, which refuses a NULL in a column made NOT NULL: so a nullable column made
-    // AUTO_INCREMENT is made NOT NULL by a statement before, which fails on a NULL rather than
-    // numbering it (a row whose key had no parent would take one).
-    let not_null = |c: &Column| c.rest.split_whitespace().collect::<Vec<_>>().windows(2).any(|w| w == ["not", "null"]);
-    for c in to.columns.iter().filter(|c| counts.contains(&&c.name)) {
-        if kept(c).is_some_and(|was| !not_null(was)) {
-            let words: Vec<&str> = c.rest.split_whitespace().collect();
-            let mut rest = vec!["not", "null"];
-            let mut k = 0;
-            while k < words.len() {
-                match (words[k], words.get(k + 1)) {
-                    ("not", Some(&"null")) => k += 2,
-                    ("null" | "auto_increment", _) => k += 1,
-                    (w, _) => {
-                        rest.push(w);
-                        k += 1;
-                    }
-                }
-            }
-            let held = Column { rest: rest.join(" "), ..c.clone() };
+    // AUTO_INCREMENT NOT NULL is made NOT NULL by a statement before, under its name before any
+    // rename, which fails on a NULL rather than numbering it (a row whose key had no parent would
+    // take one).
+    for c in to.columns.iter().filter(|c| c.not_null() && !remade_columns.contains(&c.name)) {
+        let Some(was) = from.column(old_of.get(c.name.as_str()).copied().unwrap_or(&c.name)) else { continue };
+        if c.counts() && !was.counts() && !was.not_null() {
+            let held = Column { name: was.name.clone(), q: was.q.clone(), ..c.held() };
             first.push(format!("modify column {}", held.written(collation)));
         }
     }
@@ -1863,6 +1899,19 @@ mod tests {
         assert_eq!(body.option("auto_increment"), None);
         assert!(body.counter.is_some());
         assert_eq!(body.partition, "partition by hash (id) partitions 2");
+    }
+
+    #[test]
+    fn makes_a_column_not_null_before_it_counts() {
+        let column = |name: &str, rest: &str| Column { name: name.into(), q: name.into(), ty: "int".into(), collation: String::new(), rest: rest.into() };
+        let table = |c: Column| Body { q: "t".into(), indexes: vec![(c.name.clone(), c.q.clone(), format!("key {} ({})", c.q, c.q))], columns: vec![column("id", "not null"), c], ..Body::default() };
+        let to = table(column("ticket", "not null auto_increment comment 'keep null rows'"));
+        // Renamed as it counts, under the name it had; a comment's words are no attribute.
+        let plan = alter_table(&table(column("seq", "comment 'not null until rollout'")), &to, &[("seq".into(), "ticket".into())], &BTreeSet::new());
+        assert_eq!(plan.first().map(String::as_str), Some("alter table t modify column seq int not null comment 'keep null rows'"), "{plan:?}");
+        // NOT NULL already: nothing before.
+        let plan = alter_table(&table(column("ticket", "not null comment 'x'")), &to, &[], &BTreeSet::new());
+        assert_eq!(plan.len(), 1, "{plan:?}");
     }
 
     #[test]
