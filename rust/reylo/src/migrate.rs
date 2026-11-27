@@ -19,6 +19,7 @@ use crate::sqlx;
 use reylo_migrate::db::{Answer, Db, Row, Session};
 use reylo_migrate::{Dialect, Embedded, Options};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// The project's migrations, its lock and its `schema.sql`, as `reylo::migrate!()` compiled them
@@ -112,21 +113,23 @@ impl Migrator {
             return Err(Error::new(format!("reylo::migrate!(): {refusal}")));
         }
         let mut conn = pool.acquire().await.map_err(|e| Error::new(format!("reylo::migrate!() could not take a connection from the pool: {e}")))?;
-        // A MySQL run changes its session's settings while it reads (`keep`, and the quoting the
-        // catalog reads views with), and one cut short restores nothing: its connection goes back
-        // to no pool.
-        if (command == Command::Deploy && DB::DIALECT != Dialect::Sqlite) || DB::DIALECT == Dialect::Mysql {
+        if command == Command::Deploy && DB::DIALECT != Dialect::Sqlite {
             conn.close_on_drop();
         }
-        let mut db = Db::Host(DB::session(conn));
+        // The run changes its session's settings (`keep`, and the quoting a MySQL catalog reads views
+        // with), so the connection goes back to the pool only once they are restored: a run cut
+        // short, or one whose restore failed, closes it.
+        let restored = Arc::new(AtomicBool::new(false));
+        let mut db = Db::Host(DB::session(conn, restored.clone()));
         let kept = keep(&mut db).await.map_err(Error::of)?;
         let run = match command {
             Command::Deploy => reylo_migrate::deploy_on_host(&mut db, &options).await,
             Command::Status => reylo_migrate::status_on_host(&mut db, &options).await,
         };
-        let restored = restore(&mut db, kept).await;
+        let back = restore(&mut db, kept).await;
+        restored.store(back.is_ok(), Ordering::Relaxed);
         let run = run.map_err(Error::of)?;
-        restored.map_err(Error::of)?;
+        back.map_err(Error::of)?;
         Ok(run)
     }
 }
@@ -138,11 +141,12 @@ enum Command {
 }
 
 /// What the run changes on its connection that the app's queries on it after the run must not see:
-/// MySQL's `sql_mode` and time zone, set to the server's own for the run; SQLite's `foreign_keys`,
-/// which a migration's run turns off and on.
+/// MySQL's `sql_mode` and time zone, set to the server's own for the run, and `sql_quote_show_create`,
+/// which the catalog turns on while it reads views; SQLite's `foreign_keys`, which a migration's run
+/// turns off and on.
 enum Kept {
     Nothing,
-    Mysql { mode: String, zone: String },
+    Mysql { mode: String, zone: String, quote: String },
     Sqlite { foreign_keys: String },
 }
 
@@ -150,10 +154,10 @@ async fn keep(db: &mut Db) -> Result<Kept, reylo_migrate::Error> {
     match db.dialect() {
         Dialect::Postgres => Ok(Kept::Nothing),
         Dialect::Mysql => {
-            let rows = db.rows("select @@session.sql_mode as mode, @@session.time_zone as zone").await?;
+            let rows = db.rows("select @@session.sql_mode as mode, @@session.time_zone as zone, if(@@session.sql_quote_show_create, 'ON', 'OFF') as quote").await?;
             let row = rows.first().cloned().unwrap_or_default();
             db.exec("set session sql_mode = @@global.sql_mode, time_zone = @@global.time_zone").await?;
-            Ok(Kept::Mysql { mode: row.text("mode").to_string(), zone: row.text("zone").to_string() })
+            Ok(Kept::Mysql { mode: row.text("mode").to_string(), zone: row.text("zone").to_string(), quote: row.text("quote").to_string() })
         }
         Dialect::Sqlite => {
             let rows = db.rows("pragma foreign_keys").await?;
@@ -165,7 +169,7 @@ async fn keep(db: &mut Db) -> Result<Kept, reylo_migrate::Error> {
 async fn restore(db: &mut Db, kept: Kept) -> Result<(), reylo_migrate::Error> {
     match kept {
         Kept::Nothing => Ok(()),
-        Kept::Mysql { mode, zone } => db.exec_with("set session sql_mode = ?, time_zone = ?", &[&mode, &zone]).await,
+        Kept::Mysql { mode, zone, quote } => db.exec_with("set session sql_mode = ?, time_zone = ?, sql_quote_show_create = ?", &[&mode, &zone, &quote]).await,
         Kept::Sqlite { foreign_keys } => db.exec(if foreign_keys == "1" { "pragma foreign_keys = on" } else { "pragma foreign_keys = off" }).await,
     }
 }
@@ -189,13 +193,22 @@ mod private {
             None
         }
         /// The connection, as the migrations' code runs statements on it.
-        fn session(conn: sqlx::pool::PoolConnection<Self>) -> Box<dyn Session>;
+        fn session(conn: sqlx::pool::PoolConnection<Self>, restored: Arc<AtomicBool>) -> Box<dyn Session>;
     }
 }
 
 /// One connection of the pool's, as the migrations' code runs statements on it: each as written,
-/// every value as text, as `reylo migrate` reads them through its own clients.
-struct Pooled<DB: sqlx::Database>(sqlx::pool::PoolConnection<DB>);
+/// every value as text, as `reylo migrate` reads them through its own clients. It goes back to the
+/// pool only where its flag says the run restored its session's settings.
+struct Pooled<DB: sqlx::Database>(sqlx::pool::PoolConnection<DB>, Arc<AtomicBool>);
+
+impl<DB: sqlx::Database> Drop for Pooled<DB> {
+    fn drop(&mut self) {
+        if !self.1.load(Ordering::Relaxed) {
+            self.0.close_on_drop();
+        }
+    }
+}
 
 /// A statement for sqlx, which on 0.9 takes a string it is told is safe to send: each of these is
 /// the migrations' code's own or a migration's text, run as written.
@@ -277,8 +290,8 @@ impl private::Hosted for sqlx::Postgres {
         let shown = format!("postgres://{}:{}", o.get_host(), o.get_port());
         reylo_migrate::db::transaction_pooler_at(o.get_host(), Some(o.get_port()), &shown, "")
     }
-    fn session(conn: sqlx::pool::PoolConnection<sqlx::Postgres>) -> Box<dyn Session> {
-        Box::new(Pooled(conn))
+    fn session(conn: sqlx::pool::PoolConnection<sqlx::Postgres>, restored: Arc<AtomicBool>) -> Box<dyn Session> {
+        Box::new(Pooled(conn, restored))
     }
 }
 
@@ -294,8 +307,8 @@ impl private::Hosted for sqlx::MySql {
     fn url(o: &sqlx::mysql::MySqlConnectOptions) -> String {
         format!("mysql://{}@{}:{}/{}", o.get_username(), o.get_host(), o.get_port(), o.get_database().unwrap_or_default())
     }
-    fn session(conn: sqlx::pool::PoolConnection<sqlx::MySql>) -> Box<dyn Session> {
-        Box::new(Pooled(conn))
+    fn session(conn: sqlx::pool::PoolConnection<sqlx::MySql>, restored: Arc<AtomicBool>) -> Box<dyn Session> {
+        Box::new(Pooled(conn, restored))
     }
 }
 
@@ -322,8 +335,8 @@ impl private::Hosted for sqlx::Sqlite {
     fn url(o: &sqlx::sqlite::SqliteConnectOptions) -> String {
         format!("sqlite:{}", o.get_filename().to_string_lossy().replace('%', "%25"))
     }
-    fn session(conn: sqlx::pool::PoolConnection<sqlx::Sqlite>) -> Box<dyn Session> {
-        Box::new(Pooled(conn))
+    fn session(conn: sqlx::pool::PoolConnection<sqlx::Sqlite>, restored: Arc<AtomicBool>) -> Box<dyn Session> {
+        Box::new(Pooled(conn, restored))
     }
 }
 
