@@ -634,12 +634,6 @@ function statement(query: QueryModule, params: ParamsInput, run = true) {
     bound.values.forEach((v, i) => {
       if (typeof v === "bigint" && (v >= 2n ** 63n || v < -(2n ** 63n))) throw new ParameterError(`Parameter "${bound.names[i]}" is ${v}, outside the 64-bit integers SQLite holds (-2^63 to 2^63 - 1), so no SQLite driver binds it exactly.`);
     });
-  // MySQL holds an integer in 64 bits, signed or unsigned, and mariadb's execute() throws inside the
-  // driver on a BigInt below -2^63, which can end the process or leave the connection waiting.
-  if (query.dialect === "mysql")
-    bound.values.forEach((v, i) => {
-      if (typeof v === "bigint" && (v >= 2n ** 64n || v < -(2n ** 63n))) throw new ParameterError(`Parameter "${bound.names[i]}" is ${v}, outside the 64-bit integers MySQL holds (-2^63 to 2^64 - 1).`);
-    });
   // A number a SQLite driver binds as another value goes in at its mark as SQLite's literal for it,
   // on every driver: sqlite3, Turso's engine, sql.js and SQLite Wasm bind -0 as the INTEGER 0, D1
   // sends -0 as 0 and an infinity as null, and libSQL refuses an infinity, which a REAL holds. -0 is

@@ -1542,16 +1542,12 @@ test("mysql: mariadb 3 runs through its execute(), which binds each value, and q
   assert.deepEqual(calls, ["query"]);
 });
 
-test("mysql: a BigInt outside the 64-bit integers MySQL holds is refused before any driver gets it, which mariadb's execute() would throw on inside the driver", async () => {
-  const sent: string[] = [];
-  const mariadb = { batch: async () => ({}), query: async () => (sent.push("query"), []), execute: async () => (sent.push("execute"), []) };
-  const mysql2 = { query: async () => [[], []], execute: async () => (sent.push("execute"), [[], []]) };
+test("mysql: mariadb's execute(), which throws inside the driver on a BigInt below -2^63, gets one as its digits, as mysql2 sends it", async () => {
+  const given: unknown[][] = [];
+  const mariadb = { batch: async () => ({}), query: async () => [], execute: async (_options: unknown, values: unknown[]) => (given.push(values), []) };
   const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "select :n as n", params: ["n"] };
-  for (const client of [mariadb, mysql2]) {
-    for (const n of [-(2n ** 63n) - 1n, 2n ** 64n]) await assert.rejects(execute(client as never, q, { n }) as Promise<unknown>, new RegExp(`Parameter "n" is ${n}, outside the 64-bit integers MySQL holds`));
-    for (const n of [-(2n ** 63n), 2n ** 64n - 1n]) await execute(client as never, q, { n });
-  }
-  assert.deepEqual(sent, ["execute", "execute", "execute", "execute"]);
+  for (const n of [-(2n ** 63n) - 1n, -(2n ** 63n), 2n ** 64n]) await execute(mariadb as never, q, { n });
+  assert.deepEqual(given, [["-9223372036854775809"], [-(2n ** 63n)], [2n ** 64n]]);
 });
 
 test("mysql: only the server's own refusal of a prepared statement sends mariadb to query(), not a message that quotes a value", async () => {
@@ -1574,7 +1570,7 @@ test("mysql: mariadb's execute() gets a Date of another realm as one of this rea
   assert.equal(given[0]![1], "hello");
 });
 
-test("mysql: through mariadb's execute(), a TIME, a DATETIME and a TIMESTAMP come back with their column's fraction digits, none past six", async () => {
+test("mysql: through mariadb's execute(), a TIME, a DATETIME and a TIMESTAMP come back with their column's fraction digits, and one of more than six as the driver gives it", async () => {
   const meta = [
     { name: () => "t", type: "TIME", scale: 2 },
     { name: () => "z", type: "TIME", scale: 6 },
@@ -1582,9 +1578,9 @@ test("mysql: through mariadb's execute(), a TIME, a DATETIME and a TIMESTAMP com
     { name: () => "s", type: "TIMESTAMP", scale: 6 },
     { name: () => "x", type: "TIME", scale: 31 },
   ];
-  const conn = { batch: async () => ({}), query: async () => [], execute: async () => Object.assign([{ t: "-00:00:01.500000", z: "00:00:00", d: "2024-01-01 09:31:00", s: "2024-01-01 09:31:00.5", x: "12:00:00.000000" }], { meta }) };
+  const conn = { batch: async () => ({}), query: async () => [], execute: async () => Object.assign([{ t: "-00:00:01.500000", z: "00:00:00", d: "2024-01-01 09:31:00", s: "2024-01-01 09:31:00.5", x: "12:00:01.500000" }], { meta }) };
   const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "select * from t", params: [] };
-  assert.deepEqual(plain((await execute(conn as never, q, {})) as object[]), [{ t: "-00:00:01.50", z: "00:00:00.000000", d: "2024-01-01T09:31:00.000", s: "2024-01-01T09:31:00.500000", x: "12:00:00" }]);
+  assert.deepEqual(plain((await execute(conn as never, q, {})) as object[]), [{ t: "-00:00:01.50", z: "00:00:00.000000", d: "2024-01-01T09:31:00.000", s: "2024-01-01T09:31:00.500000", x: "12:00:01.500000" }]);
 });
 
 test("mysql: mariadb's execute() runs a statement on an app's pool made with namedPlaceholders, and keeps the order runs were called in on one connection, one prepared already or not", { skip: mariadbLive }, async () => {

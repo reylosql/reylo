@@ -641,9 +641,9 @@ export async function mariadb(c: AnyClient, text: string, values: unknown[], col
   const meta = () => ((result as { meta?: MariadbColumn[] }).meta ?? callbackMeta ?? []) as MariadbColumn[];
   // execute() writes a TIME's fraction with six digits, or none where they are all zero, and mariadb
   // 3.0 a DATETIME's or a TIMESTAMP's with none where they are all zero: each takes its column's own
-  // count, none for a column with more than six (an expression's, which MySQL reports as 31).
+  // count. A column with more than six (an expression's, which MySQL reports as 31) keeps the driver's text.
   if (prepared) {
-    const timed = meta().flatMap((m, i) => (m.type === "TIME" || m.type === "DATETIME" || m.type === "TIMESTAMP" ? [[i, typeof m.name === "function" ? m.name() : m.name, (m.scale ?? 0) > 6 ? 0 : (m.scale ?? 0), m.type === "TIME"] as const] : []));
+    const timed = meta().flatMap((m, i) => ((m.type === "TIME" || m.type === "DATETIME" || m.type === "TIMESTAMP") && (m.scale ?? 0) <= 6 ? [[i, typeof m.name === "function" ? m.name() : m.name, m.scale ?? 0, m.type === "TIME"] as const] : []));
     for (const row of result as Record<string | number, unknown>[]) {
       for (const [i, name, scale, time] of timed) {
         const at = Array.isArray(row) ? i : name;
@@ -841,10 +841,12 @@ const GEO_TYPES = new Set(["Point", "LineString", "Polygon", "MultiPoint", "Mult
  * one integer: mariadb 2 writes a Long as its integer, and mariadb 3 as any other object.
  */
 function asMariadbValue(v: unknown): unknown {
+  // A BigInt below -2^63 as its digits, as mysql2 sends one: mariadb's execute() throws on one inside the driver.
+  if (typeof v === "bigint") return v < -(2n ** 63n) ? String(v) : v;
   if (v === null || typeof v !== "object" || v instanceof Uint8Array) return v;
   // mariadb 3.5's execute() tells a Date and a boxed string by this realm's constructors, and binds one of another realm as quoted JSON.
   const tag = Object.prototype.toString.call(v);
-  if (tag === "[object Date]") return v instanceof Date ? v : new Date((v as Date).getTime());
+  if (tag === "[object Date]" && typeof (v as Date).getTime === "function") return v instanceof Date ? v : new Date((v as Date).getTime());
   if (tag === "[object String]") return String(v);
   const own = v as { pipe?: unknown; read?: unknown; toSqlString?: unknown; type?: unknown; __isLong__?: unknown; low?: unknown; high?: unknown; unsigned?: unknown };
   // long.js marks a Long on its prototype, so a JSON document shaped like one stays a document.
