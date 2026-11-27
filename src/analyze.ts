@@ -665,9 +665,14 @@ function serverName(url: string, dialect: Dialect, env: Record<string, string | 
  */
 const ENVIRONMENT = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"] as const;
 
-/** The variables of `ENVIRONMENT` this process has, as the engine's connection reads them when it opens (src/engine.ts). */
-function libpqEnvironment(): Record<string, string> {
-  return Object.fromEntries(ENVIRONMENT.flatMap((name) => (process.env[name] ? [[name, process.env[name]]] : [])));
+/**
+ * The variables of `ENVIRONMENT` this process has, as the engine's connection reads them when it
+ * opens (src/engine.ts): on Windows in any case of a name, as Windows reads one, since a worker
+ * thread's copy of the environment, as the preload's, matches names exactly.
+ */
+export function libpqEnvironment(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): Record<string, string> {
+  const value = (name: string) => env[name] ?? (platform === "win32" ? Object.entries(env).find(([key]) => key.toUpperCase() === name)?.[1] : undefined);
+  return Object.fromEntries(ENVIRONMENT.flatMap((name) => (value(name) ? [[name, value(name)!]] : [])));
 }
 
 /**

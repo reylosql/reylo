@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { connect, createServer, type AddressInfo, type Server } from "node:net";
-import { Session } from "../src/analyze.ts";
+import { libpqEnvironment, Session } from "../src/analyze.ts";
 import { engine, reason, Unreachable, withVariables } from "../src/engine.ts";
 import { hostUrl } from "../src/host-url.ts";
 import { nativeBinary } from "../src/native.ts";
@@ -541,6 +541,9 @@ test("a session's variables stand in for the process's, in every case of a name 
   const env = { pgdatabase: "other", PGHOST: "h", PATH: "/bin" };
   assert.deepEqual(withVariables(env, { PGDATABASE: undefined, PGHOST: "db" }, "win32"), { PGHOST: "db", PATH: "/bin" });
   assert.deepEqual(withVariables(env, { PGDATABASE: undefined, PGHOST: "db" }, "linux"), { pgdatabase: "other", PGHOST: "db", PATH: "/bin" });
+  // A worker thread's copy of the environment matches names exactly, so a session reads its variables in any case there.
+  assert.deepEqual(libpqEnvironment(env, "win32"), { PGHOST: "h", PGDATABASE: "other" });
+  assert.deepEqual(libpqEnvironment(env, "linux"), { PGHOST: "h" });
 });
 
 test("PGHOST names the socket's directory where the URL names no host, as libpq reads it", async () => {
