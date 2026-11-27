@@ -27,9 +27,11 @@ pub fn of_statement(dialect: Dialect, code: &str, message: Option<&str>) -> bool
 
 /// Whether an analysis whose diagnostic carries `code` may be kept in `reylo/.cache/`: an error
 /// that is the statement's ([`of_statement`]), and that neither a privilege nor a remote source's
-/// data decides. A `GRANT` moves no schema's fingerprint, nor does the file a ClickHouse `url()` or
-/// `s3()` reads its schema from, so a statement refused for either would stay refused after the
-/// grant or the upload. The engine still reads such an error as the statement's answer.
+/// data decides. Not every `GRANT` moves the schema's fingerprint (one a MySQL account's role holds
+/// on a database, which an account that may not read `mysql` never sees), and no upload moves it
+/// for the file a ClickHouse `url()` or `s3()` reads its schema from, so a statement refused for
+/// either could stay refused after the grant or the upload. The engine still reads such an error
+/// as the statement's answer.
 pub fn kept(dialect: Dialect, code: &str, message: Option<&str>) -> bool {
     of_statement(dialect, code, message)
         && match dialect {

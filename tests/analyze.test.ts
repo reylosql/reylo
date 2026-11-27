@@ -1003,6 +1003,31 @@ test("the Postgres fingerprint runs on the server, holds while nothing changes, 
   }
 });
 
+test("on Postgres, a statement that names a schema the role may not use is refused at the name, with the server's error, once the cached analysis no longer holds", { skip: live }, async () => {
+  const own = await postgresDatabase("reylo_usage", "create schema s; create table s.t (id int primary key, v text)");
+  const role = `reylo_usage_${process.pid}`;
+  const root = mkdtempSync(join(tmpdir(), "reylo-usage-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const url = new URL(own.url);
+  url.username = role;
+  const sql = "select v from s.t where id = :id";
+  try {
+    await own.sql.unsafe(`drop role if exists ${role}; create role ${role} login; grant usage on schema s to ${role}; grant select on s.t to ${role}`);
+    const typed = await analyze(root, { DATABASE_URL: url.href }, sql);
+    assert.ok(typed.ok);
+    assert.deepEqual(typed.analysis.diagnostics, []);
+    // The catalog's lookups of s.t are refused too, and say nothing of their own.
+    await own.sql.unsafe(`revoke usage on schema s from ${role}`);
+    const refused = await analyze(root, { DATABASE_URL: url.href }, sql);
+    assert.ok(refused.ok);
+    assert.equal(refused.source, "database");
+    assert.deepEqual(refused.analysis.diagnostics.map((d) => [d.message, sql.slice(d.start, d.start + d.length)]), [["permission denied for schema s (42501)", "s.t"]]);
+  } finally {
+    await own.sql.unsafe(`drop owned by ${role}; drop role ${role}`).catch(() => {});
+    await own.drop();
+  }
+});
+
 test("the MySQL fingerprint holds while nothing changes, and moves with a column's length, precision and scale, fractional seconds and character set, which its type carries, with a CHECK's expression and whether it is enforced, with a stored function's arguments, and with what another database holds, but for Reylo Migrate's shadows other than the URL's own, and with the account's TRIGGER privileges", { skip: mysqlLive }, async () => {
   const root = mkdtempSync(join(tmpdir(), "reylo-fingerprint-"));
   writeFileSync(join(root, "package.json"), "{}");

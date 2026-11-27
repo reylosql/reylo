@@ -198,19 +198,29 @@ async fn describe(client: &Client, sql: &str) -> Result<Result<Describe, DbError
 }
 
 /// The rows of a catalog query over `client`, its statement taken from `prepared` where there is one.
+/// A privilege the session's role lacks, as USAGE on a schema a name is looked up in, is an answer:
+/// the catalog as the role sees it, which the statement's own describe is refused by too, and says
+/// so at its place. Any other error fails the analysis.
 async fn query(client: &Client, prepared: Option<&Prepared>, sql: &str, params: &[Value]) -> Result<Result<Vec<Vec<Value>>, DbError>, HostError> {
     let failed = |what: &str, e: ::tokio_postgres::Error| HostError(if ended(&e) { format!("{ENDED}: {}", pg_message(&e)) } else if let Some(shared) = pooled(&e) { shared } else { format!("catalog query {what}: {}\n    {sql}", pg_message(&e)) });
+    let refused = |e: &::tokio_postgres::Error| e.as_db_error().filter(|d| *d.code() == ::tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE).map(|d| DbError { message: d.message().to_string(), code: Some(d.code().code().to_string()), position: None });
     let stmt = match prepared {
         Some(prepared) => prepared.statement(client, sql).await,
         None => client.prepare(sql).await,
-    }
-    .map_err(|e| failed("failed to prepare", e))?;
+    };
+    let stmt = match stmt {
+        Ok(stmt) => stmt,
+        Err(e) => return refused(&e).map(Err).ok_or_else(|| failed("failed to prepare", e)),
+    };
     let mut values: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
     for (ty, value) in stmt.params().iter().zip(params) {
         values.push(bind(ty, value).ok_or_else(|| HostError(format!("cannot bind {value} as {ty} for the catalog query\n    {sql}")))?);
     }
     let refs: Vec<&(dyn ToSql + Sync)> = values.iter().map(|v| v.as_ref() as &(dyn ToSql + Sync)).collect();
-    let rows = client.query(&stmt, &refs).await.map_err(|e| failed("failed", e))?;
+    let rows = match client.query(&stmt, &refs).await {
+        Ok(rows) => rows,
+        Err(e) => return refused(&e).map(Err).ok_or_else(|| failed("failed", e)),
+    };
     Ok(Ok(rows.iter().map(|row| (0..row.len()).map(|i| cell(row, i)).collect()).collect()))
 }
 
