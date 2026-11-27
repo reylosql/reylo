@@ -1,0 +1,7 @@
+dotted_alias.sql: many (p: { a.b: Int32, b: String(UTF-8, ill-formed) }) -> { x: { a.b: Int32, b: String(UTF-8, ill-formed) } }
+dotted_column.sql: many (at: { x.y: UInt8, select: String(UTF-8, ill-formed) }) -> { id: UInt64, at: { x.y: UInt8, select: String(UTF-8, ill-formed) } }
+dotted_inside.sql: many (m: Map(({ key: String(UTF-8, ill-formed), value: ({ x.y: String(UTF-8, ill-formed)?, z: UInt8 })[] })[])) -> { m: Map(({ key: String(UTF-8, ill-formed), value: ({ x.y: String(UTF-8, ill-formed)?, z: UInt8 })[] })[]) }
+dotted_member.sql: many (p: { a.b: UInt8, b: String(UTF-8, ill-formed) }) -> { x: { a.b: UInt8, b: String(UTF-8, ill-formed) } }
+escaped_labels.sql: many (e: Enum8('a\nb' | 'c\td' | 'e\rf' | 'g\u{0}h' | 'i\u{8}j' | 'k\u{c}l' | 'm\\n' | 'o''p')) -> { id: UInt64, label: Enum8('a\nb' | 'c\td') }
+escaped_member.sql: many (t: { a\b: UInt8, c`d: String(UTF-8, ill-formed), e'f: UInt8 }) -> { t: { a\b: UInt8, c`d: String(UTF-8, ill-formed), e'f: UInt8 } }
+keyword_member.sql: many (k: { select: UInt8, from: String(UTF-8, ill-formed) }) -> { k: { select: UInt8, from: String(UTF-8, ill-formed) } }

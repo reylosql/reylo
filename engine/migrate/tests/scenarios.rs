@@ -4291,6 +4291,7 @@ on!(
     a_supabase_database_adopted_after_moving_or_updating_an_extension_replays_it,
     a_stated_grant_supabase_also_gives_by_default_is_written,
     a_stated_grant_keeps_its_table_and_its_option,
+    the_history_stays_where_it_was_made_whatever_the_search_path,
     a_migration_that_makes_supabases_publication_again_runs,
     a_supabase_project_whose_files_create_its_publication_writes_new_migrations,
     a_supabase_dump_keeps_each_tables_grants,
@@ -9280,6 +9281,41 @@ create trigger kids_note after insert on kids begin update parents set name = na
         assert_eq!(q.rows(&granted("public", "anon", "NO")).await[0].text("n"), "1");
         assert_eq!(q.rows(&granted("private", "anon", "NO")).await[0].text("n"), "0");
         assert_eq!(q.rows(&granted("public", "authenticated", "YES")).await[0].text("n"), "1");
+    }
+
+    /// On a database whose search_path names, before `public`, a schema a migration makes, the history
+    /// stays the one table Reylo made: later runs read what ran, and a change to a grant's option runs
+    /// as any change does. Two tables of its name, as an earlier version made in that schema, are
+    /// refused with what each holds, until they are one.
+    pub async fn the_history_stays_where_it_was_made_whatever_the_search_path(mut p: P) {
+        p.exec("do $$ begin create role madv_readers; exception when duplicate_object or unique_violation then null; end $$").await;
+        p.exec(&format!("alter database {} set search_path = private, public", p.name)).await;
+        let notes = "create schema private;\n\ncreate table private.drafts (id int primary key);\n\ncreate table public.notes (id int primary key);\n\ngrant select on table public.notes to madv_readers;\n";
+        p.file("20261125000000_notes.sql", notes);
+        p.schema(notes);
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        let made = "select count(*)::text as n from pg_class where relname = '__reylo_migrations' and relkind = 'r'";
+        assert_eq!(p.rows(made).await[0].text("n"), "1");
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        p.schema(&format!("{notes}\ngrant select on table public.notes to madv_readers with grant option;\n"));
+        assert_eq!(p.run(async |o, log| reylo_migrate::create(o, "readers", &Default::default(), log).await).await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.rows(made).await[0].text("n"), "1");
+        let ran = |schema: &str| format!("select count(*)::text as n from {schema}.__reylo_migrations where applied_at is not null");
+        assert_eq!(p.rows(&ran("public")).await[0].text("n"), "2");
+        assert_eq!(p.migrate().await, 0, "{}", p.peek());
+        // A second table, as an earlier version left it: each holds a migration the other lacks, and
+        // one a run the other finished.
+        p.exec("create table private.__reylo_migrations (like public.__reylo_migrations including all); insert into private.__reylo_migrations select * from public.__reylo_migrations; delete from public.__reylo_migrations where name like '%readers.sql'; update private.__reylo_migrations set applied_at = null where name like '%notes.sql'").await;
+        let refused = reylo_migrate::status(&p.opts(), &mut |_: &str| {}).await.unwrap_err().0;
+        assert_has!(refused.clone(), r"This database holds 2 of Reylo's history tables");
+        assert_has!(refused.clone(), r"In public\.__reylo_migrations, 1 migration ran, at [^\n,]+\n");
+        assert_has!(refused.clone(), r"In private\.__reylo_migrations, 1 migration ran, at [^\n]+, and 1 started");
+        assert_has!(refused, r"Keep one table holding each migration's row from any of them, its run over its start, and drop the others");
+        p.exec("insert into public.__reylo_migrations select * from private.__reylo_migrations on conflict (name) do update set applied_at = coalesce(__reylo_migrations.applied_at, excluded.applied_at); drop table private.__reylo_migrations").await;
+        assert_eq!(p.status().await, 0, "{}", p.peek());
+        assert_eq!(p.dev().await, 0, "{}", p.peek());
+        assert_eq!(p.rows(&ran("public")).await[0].text("n"), "2");
     }
 
     /// A Supabase database that began without one of Supabase's extensions replays its migrations from
