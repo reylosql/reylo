@@ -1160,12 +1160,17 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
                     if mine.1 && !not_null {
                         said.push("not null".to_string());
                     }
+                    // A generation expression of its own, which a partition made takes with it.
+                    let parent_expression = r.get("parent").and_then(|p| generations.get(&(p.to_string(), c.text("name").to_string())));
+                    if !c.text("generated").is_empty() && parent_expression.is_some_and(|e| c.text("def") != e.as_str()) {
+                        said.insert(0, format!("generated always as ({}) stored", c.text("def")));
+                    }
                     if !said.is_empty() {
                         overrides.push(format!("{} {}", c.text("name"), said.join(" ")));
                     }
                 }
-                // A generation expression of its own, which a partition made, or a column made again
-                // on its table, leaves the table's: set again after.
+                // A generation expression of its own, which a column made again on its table leaves
+                // the table's: set again after.
                 let own_expression = r
                     .get("parent")
                     .and_then(|p| generations.get(&(p.to_string(), c.text("name").to_string())))
@@ -1180,7 +1185,6 @@ async fn read_objects(db: &mut Db, platform: Option<&[String]>) -> Result<Schema
                             dollar_block(&format!("begin raise exception using message = {}; end", literal(&why)))
                         }
                     });
-                later.extend(own_expression.clone());
                 s.add(Object {
                     id: col_id,
                     kind: Some(Kind::Column),
