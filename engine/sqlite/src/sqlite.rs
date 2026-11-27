@@ -1232,7 +1232,8 @@ use Strict::{At, Every};
 /// (and in a build with `SQLITE_LEGACY_JSON_VALID`); `json_extract` of two paths or more writes a
 /// NULL path as JSON's null in an array before 3.45; and on the Turso engine `json_set`,
 /// `json_insert`, `json_replace` and their `jsonb_` forms edit a NULL document, `json_remove`
-/// takes a NULL path as no edit, and `jsonb_remove` edits a NULL document.
+/// takes a NULL path as no edit, `jsonb_remove` edits a NULL document, and `jsonb(NULL)` is a
+/// blob (0.6.1 and 0.7.2).
 ///
 /// `nullif(a, NULL)` is `a`, `concat_ws` skips a NULL after its separator, `printf` and `format`
 /// write a NULL value as nothing, `json_pretty` reads a NULL indent as the default one, and
@@ -1249,7 +1250,7 @@ const NULL_STRICT: &[(&str, usize, usize, Strict)] = &[
     ("date", 1, 6, Every), ("datetime", 1, 6, Every), ("julianday", 1, 6, Every), ("strftime", 1, 6, Every), ("time", 1, 6, Every), ("timediff", 2, 2, Every), ("unixepoch", 1, 6, Every),
     // JSON.
     ("->", 2, 2, Every), ("->>", 2, 2, Every), ("json", 1, 1, Every), ("json_array_length", 1, 2, Every), ("json_error_position", 1, 1, Every), ("json_extract", 2, 2, Every), ("json_patch", 2, 2, Every), ("json_pretty", 1, 2, At(&[0])), ("json_remove", 1, 8, At(&[0])), ("json_type", 1, 2, Every),
-    ("jsonb", 1, 1, Every), ("jsonb_extract", 2, 8, Every), ("jsonb_patch", 2, 2, Every),
+    ("jsonb_extract", 2, 8, Every), ("jsonb_patch", 2, 2, Every),
     // Geopoly.
     ("geopoly_area", 1, 1, Every), ("geopoly_bbox", 1, 1, Every), ("geopoly_blob", 1, 1, Every), ("geopoly_ccw", 1, 1, Every), ("geopoly_contains_point", 3, 3, At(&[0])), ("geopoly_json", 1, 1, Every), ("geopoly_overlap", 2, 2, Every), ("geopoly_regular", 4, 4, At(&[2, 3])), ("geopoly_svg", 1, 8, At(&[0])), ("geopoly_within", 2, 2, Every), ("geopoly_xform", 7, 7, At(&[0])),
     // The rest.
@@ -5855,7 +5856,7 @@ mod tests {
         /// Calls this SQLite answers NULL for a NULL argument, which [`NULL_STRICT`] leaves out
         /// since another SQLite a driver runs does not (its comment says which).
         const ELSEWHERE: &[(&str, usize, usize, Strict)] = &[
-            ("json_valid", 1, 2, At(&[0])), ("json_extract", 3, 8, Every), ("json_remove", 2, 8, Every), ("jsonb_remove", 1, 8, Every),
+            ("json_valid", 1, 2, At(&[0])), ("json_extract", 3, 8, Every), ("jsonb", 1, 1, Every), ("json_remove", 2, 8, Every), ("jsonb_remove", 1, 8, Every),
             ("json_insert", 1, 9, At(&[0])), ("json_replace", 1, 9, At(&[0])), ("json_set", 1, 9, At(&[0])), ("jsonb_insert", 1, 9, At(&[0])), ("jsonb_replace", 1, 9, At(&[0])), ("jsonb_set", 1, 9, At(&[0])),
         ];
 
@@ -6017,7 +6018,7 @@ mod tests {
                 assert_eq!(narrows(test), Some(true), "{test}");
             }
             for test in [
-                "(1 between u.v and 0) is not null", "not json_valid(u.v)", "json_extract('{}', '$', u.v) is not null", "json_set(u.v, '$', 1) is not null", "json_remove('{}', u.v) is not null", "jsonb_remove(u.v) is not null", "not (1 between u.v and 0)", "not (u.v in (select 1))", "not (u.v is null) is null", "(1 in (u.v, 1)) is not null", "(u.v in (select 1)) is not null", "u.v is not 1", "coalesce(u.v, 1) > 0", "nullif(1, u.v) > 0", "iif(u.v, 1, 2) > 0",
+                "(1 between u.v and 0) is not null", "not json_valid(u.v)", "json_extract('{}', '$', u.v) is not null", "json_set(u.v, '$', 1) is not null", "json_remove('{}', u.v) is not null", "jsonb_remove(u.v) is not null", "jsonb(u.v) is not null", "not (1 between u.v and 0)", "not (u.v in (select 1))", "not (u.v is null) is null", "(1 in (u.v, 1)) is not null", "(u.v in (select 1)) is not null", "u.v is not 1", "coalesce(u.v, 1) > 0", "nullif(1, u.v) > 0", "iif(u.v, 1, 2) > 0",
                 "json_set('{}', u.v, 1) is not null", "concat_ws(',', u.v) is not null", "printf('%s', u.v) is not null", "replace('x', '', u.v) = 'x'", "((u.v, 1) = (1, 2)) is not null", "(u.v or 1) is not null",
             ] {
                 assert_eq!(narrows(test), Some(false), "{test}");
