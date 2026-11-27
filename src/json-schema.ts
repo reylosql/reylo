@@ -265,7 +265,7 @@ function is(type: string, v: unknown): boolean {
   switch (type) {
     case "null": return v === null;
     case "boolean": return typeof v === "boolean";
-    // A BigInt is a whole number, which JSON writes as its digits (src/values.ts, `jsonStringify`).
+    // A BigInt is a whole number, which JSON writes as its digits (src/values.ts, `writeJson`).
     case "number": return (typeof v === "number" && Number.isFinite(v)) || typeof v === "bigint";
     case "integer": return (typeof v === "number" && Number.isInteger(v)) || typeof v === "bigint";
     case "string": return typeof v === "string";

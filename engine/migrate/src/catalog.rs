@@ -487,12 +487,13 @@ pub const PLATFORM_CREATOR: &str = "postgres";
 
 /// Whether the publication `p` (a `pg_publication` row) is the platform's as it makes it: on a
 /// platform's database, [`PLATFORM_PUBLICATION`] with no tables, every operation, and no option set.
-/// `version` is the server's, whose columns for schemas (15) and generated columns (18) it reads.
+/// `version` is the server's, whose columns for schemas (15), generated columns (18) and sequences (19) it reads.
 pub(crate) fn platform_publication_as_made(p: &str, version: i64) -> String {
     let schemas = if version >= 150000 { format!(" and not exists (select 1 from pg_publication_namespace s where s.pnpubid = {p}.oid)") } else { String::new() };
     let generated = if version >= 180000 { format!(" and {p}.pubgencols <> 's'") } else { String::new() };
+    let sequences = if version >= 190000 { format!(" and not {p}.puballsequences") } else { String::new() };
     format!(
-        "({} and {p}.pubname = '{PLATFORM_PUBLICATION}' and not {p}.puballtables and {p}.pubinsert and {p}.pubupdate and {p}.pubdelete and {p}.pubtruncate and not {p}.pubviaroot
+        "({} and {p}.pubname = '{PLATFORM_PUBLICATION}' and not {p}.puballtables{sequences} and {p}.pubinsert and {p}.pubupdate and {p}.pubdelete and {p}.pubtruncate and not {p}.pubviaroot
            and not exists (select 1 from pg_publication_rel r where r.prpubid = {p}.oid){schemas}{generated})",
         platform_names()
     )
@@ -1408,8 +1409,8 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
     // Publications, with what each publishes; base types, with the functions that make them.
     for r in db
         .rows(&format!(
-            "select format('publication %I%s%s operations=%s%s', p.pubname, case when p.puballtables then ' all tables' else '' end,
-              coalesce(' tables=' || (select string_agg(format('%I.%I', n.nspname, c.relname){}, ', ' order by format('%I.%I', n.nspname, c.relname))
+            "select format('publication %I%s%s%s operations=%s%s', p.pubname, case when p.puballtables then ' all tables' else '' end, {},
+              coalesce(' tables=' || (select string_agg(format('%I.%I', n.nspname, c.relname){}{}, ', ' order by format('%I.%I', n.nspname, c.relname))
                 from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid), ''),
               concat_ws(',', case when p.pubinsert then 'insert' end, case when p.pubupdate then 'update' end, case when p.pubdelete then 'delete' end, case when p.pubtruncate then 'truncate' end),
               case when p.pubviaroot then ' via root' else '' end) || {} || {} as line
@@ -1418,6 +1419,8 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
               n.nspname, t.typname, t.typinput, t.typoutput, t.typreceive, t.typsend, t.typmodin, t.typmodout, t.typanalyze, t.typlen, t.typbyval, t.typalign, t.typstorage, t.typcategory, t.typispreferred, t.typdelim, t.typcollation <> 0, coalesce(t.typdefault, ''))
             from pg_type t join pg_namespace n on n.oid = t.typnamespace where t.typtype = 'b' and t.typelem = 0 and t.typarray <> 0 and {ns} and {} and {}
             union all select format('shell type %I.%I', n.nspname, t.typname) from pg_type t join pg_namespace n on n.oid = t.typnamespace where t.typtype = 'p' and not t.typisdefined and {ns} and {} and {}",
+            // A publication of all sequences, and a table all tables leave out, are Postgres 19's.
+            if version >= 190000 { "case when p.puballsequences then ' all sequences' else '' end" } else { "''" },
             // A table's row filter and column list, and a publication's schemas, are Postgres 15's.
             if version >= 150000 {
                 " || coalesce(' where (' || pg_get_expr(pr.prqual, pr.prrelid) || ')', '')
@@ -1425,6 +1428,7 @@ async fn postgres_lines(db: &mut Db) -> Result<Vec<String>, Error> {
             } else {
                 ""
             },
+            if version >= 190000 { " || case when pr.prexcept then ' except' else '' end" } else { "" },
             if version >= 150000 {
                 "coalesce(' schemas=' || (select string_agg(format('%I', pn.nspname), ', ' order by 1) from pg_publication_namespace pp join pg_namespace pn on pn.oid = pp.pnnspid where pp.pnpubid = p.oid), '')"
             } else {

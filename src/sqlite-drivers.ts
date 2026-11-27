@@ -21,6 +21,7 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { packageDir } from "./project.ts";
+import { statementError } from "./server-errors.ts";
 
 export interface SqliteDriver {
   /** The package the project lists. */
@@ -88,11 +89,14 @@ export const SQLEAN_AGGREGATES: ReadonlyMap<string, number> = new Map([
 export function withoutSqlean(sql: string, name: string): string | undefined {
   const lower = name.toLowerCase();
   const stand = lower === "stats_seq" ? "generate_series" : SQLEAN_AGGREGATES.get(lower) === 2 ? "group_concat" : SQLEAN_AGGREGATES.has(lower) ? "total" : "char";
-  // Where the next thing after `at` is an opening parenthesis, past spaces and comments.
+  // Where the next thing after `at` is an opening parenthesis, past spaces and comments. SQLite's
+  // whitespace is ASCII's, with a vertical tab only inside a run another space starts, and a name
+  // takes `$` and every character past ASCII, so `uuid4\u00a0()` calls no `uuid4`
+  // (`engine/core/src/lexical.rs`).
   const opens = (at: number): boolean => {
     let j = at;
     for (;;) {
-      while (j < sql.length && /\s/.test(sql[j]!)) j++;
+      while (j < sql.length && (/[ \t\n\f\r\ufeff]/.test(sql[j]!) || (sql[j] === "\v" && /[ \t\n\f\r\v]/.test(sql[j - 1] ?? "")))) j++;
       if (sql.startsWith("--", j)) {
         const end = sql.indexOf("\n", j);
         if (end < 0) return false;
@@ -141,8 +145,8 @@ export function withoutSqlean(sql: string, name: string): string | undefined {
       const j = end <= 0 ? sql.length : end + 1;
       out += sql.slice(i, j);
       i = j;
-    } else if (/[A-Za-z_]/.test(c)) {
-      const word = /^[A-Za-z_][\w$]*/.exec(sql.slice(i))![0];
+    } else if (/[A-Za-z_\u0080-\uffff]/.test(c)) {
+      const word = /^[A-Za-z_\u0080-\uffff][\w$\u0080-\uffff]*/.exec(sql.slice(i))![0];
       if (word.toLowerCase() === lower && opens(i + word.length)) {
         out += stand;
         changed = true;
@@ -156,6 +160,25 @@ export function withoutSqlean(sql: string, name: string): string | undefined {
     }
   }
   return changed ? out : undefined;
+}
+
+/**
+ * A driver that could not prepare a statement for a reason of the connection's or the file's rather
+ * than the statement's: another connection's lock as it read the schema again, memory, a file it
+ * cannot read. The statement is neither refused nor passed (src/analyze.ts).
+ */
+export class NotPrepared extends Error {}
+
+/**
+ * A driver's error as its refusal of the statement: SQLite's message, where the result code the
+ * driver gives (better-sqlite3's, libsql's and node-sqlite3's `code`) is a statement's
+ * (src/server-errors.ts) or where it gives none of SQLite's, as Turso's (`GenericFailure`). A
+ * `NotPrepared` where it is not.
+ */
+function refusal(e: unknown, message: string): string {
+  const code = (e as { code?: unknown }).code;
+  if (typeof code === "string" && code.startsWith("SQLITE_") && !statementError("sqlite", code)) throw new NotPrepared(`${message} (${code})`);
+  return message;
 }
 
 function sync(name: string, db: SyncDatabase, server = false): SqliteDriver {
@@ -173,7 +196,7 @@ function sync(name: string, db: SyncDatabase, server = false): SqliteDriver {
           const message = (e as Error).message;
           const missing = /^no such (?:function|table): (\w+)$/.exec(message)?.[1];
           const next = server && missing !== undefined && SQLEAN_FUNCTIONS.has(missing.toLowerCase()) ? withoutSqlean(text, missing) : undefined;
-          if (next === undefined) return message;
+          if (next === undefined) return refusal(e, message);
           text = next;
         }
       }
@@ -225,11 +248,15 @@ const DRIVERS: [string, Open][] = [
         name: "sqlite3",
         says: (refusal) => `sqlite3 runs SQLite ${version}, which refuses this statement: ${refusal}`,
         refuses: (sql) =>
-          new Promise((done) => {
+          new Promise((done, fail) => {
             const statement = db.prepare(sql, (e) => {
-              if (!e) statement.finalize();
+              if (!e) return (statement.finalize(), done(undefined));
               // node-sqlite3 writes the result code before SQLite's message.
-              done(e ? e.message.replace(/^SQLITE_\w+: /, "") : undefined);
+              try {
+                done(refusal(e, e.message.replace(/^SQLITE_\w+: /, "")));
+              } catch (failed) {
+                fail(failed);
+              }
             });
           }),
         close: () => new Promise<void>((done) => db.close(() => done())),

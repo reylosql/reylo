@@ -233,11 +233,18 @@ const POSTGRES: readonly Case[] = [
   ["composite named like a built-in type", "public.point", ["row(1)"]],
 ];
 
-test("Postgres: every type's values hold to the output schema, as a column and inside each document Postgres builds", { skip: pgLive }, async () => {
-  const types = "create extension if not exists citext; create extension if not exists hstore; create extension if not exists ltree; create extension if not exists vector; create type mood as enum ('ok', 'sad'); create type pair as (a int4, b text); create domain posint as int4 check (value > 0); create type shape as (p point, r int4range, m money); create domain cash as money; create type semver as (major int4, minor int4); create type public.point as (x int4);";
-  const own = await postgresDatabase("reylo_output_schema", `${types}\n${tables(POSTGRES)}`);
+/** The extension each case's type comes from, whose cases a server without it skips, saying so: a Postgres installed on Windows has no pgvector. */
+const EXTENSIONS: Readonly<Record<string, string>> = { citext: "citext", hstore: "hstore", ltree: "ltree", vector: "vector", halfvec: "vector", sparsevec: "vector" };
+
+test("Postgres: every type's values hold to the output schema, as a column and inside each document Postgres builds", { skip: pgLive }, async (t) => {
+  const own = await postgresDatabase("reylo_output_schema");
   try {
-    const problems = await check(project(own.url, ["postgres"]), POSTGRES, (t, [, column]) => [
+    const available = new Set((await own.sql`select name from pg_available_extensions`).map((r: { name: string }) => r.name));
+    for (const missing of new Set(Object.values(EXTENSIONS).filter((e) => !available.has(e)))) await t.test(`${missing}'s types`, { skip: `the test server has no ${missing}` }, () => {});
+    const cases = POSTGRES.filter(([name]) => EXTENSIONS[name] === undefined || available.has(EXTENSIONS[name]));
+    const extensions = [...new Set(Object.values(EXTENSIONS))].filter((e) => available.has(e)).map((e) => `create extension if not exists ${e};`).join(" ");
+    await own.sql.unsafe(`${extensions} create type mood as enum ('ok', 'sad'); create type pair as (a int4, b text); create domain posint as int4 check (value > 0); create type shape as (p point, r int4range, m money); create domain cash as money; create type semver as (major int4, minor int4); create type public.point as (x int4);\n${tables(cases)}`).simple();
+    const problems = await check(project(own.url, ["postgres"]), cases, (t, [, column]) => [
       `select c, to_json(c) as j, json_build_object('v', c) as o, jsonb_build_object('v', c) as b, json_build_array(c) as a, row_to_json(t) as r from ${t} t`,
       `select json_agg(c) as a, jsonb_agg(c) as b, json_object_agg(id, c) as o from ${t}`,
       // A column and a key named __proto__, which a literal or an assignment would take for the object's prototype.
@@ -306,6 +313,10 @@ test("MySQL: every type's values hold to the output schema, as a column and insi
 
 const SQLITE: readonly Case[] = [
   ["integer", "integer", ["-9007199254740991", "9007199254740991"]],
+  // Outside a STRICT table an INTEGER column keeps a REAL it cannot convert, one with a fraction or
+  // past 64 bits, and stores the text '1.5' as that REAL: read alone, passed on, computed from and
+  // inside a document SQLite builds.
+  ["integer holding a REAL", "integer", ["0.5", "'1.5'", "1e20"]],
   ["bigint", "bigint", ["-9223372036854775808", "9223372036854775807"]],
   ["real", "real", ["-1.7976931348623157e308", "5e-324", "-0.0"]],
   ["text", "text", ["''", "'hi'"]],
@@ -326,10 +337,16 @@ test("SQLite: every type's values hold to the output schema, as a column and ins
   const own = new DatabaseSync(join(dir, "app.db"));
   own.exec(tables(SQLITE, "integer primary key"));
   try {
-    const problems = await check(dir, SQLITE, (t, [, column]) => column === "blob" ? [`select c from ${t}`] : [
+    const problems = await check(dir, SQLITE, (t, [name, column]) => column === "blob" ? [`select c from ${t}`] : [
       `select c, json_object('v', c) as o, json_array(c) as a, json_quote(c) as q from ${t}`,
       `select json_group_array(c) as a, json_group_object(cast(id as text), c) as o from ${t}`,
       ...(column === "integer" ? [`select c as "__proto__", json_object('__proto__', c) as o from ${t}`] : []),
+      ...(name === "integer holding a REAL" ? [
+        `select coalesce(c, 0) as k, max(c, 0) as w, c + 1 as p, -c as m, abs(c) as b, iif(id > 0, c, 0) as i, (select c) as s, json_object('v', c + 1) as o from ${t}`,
+        `select sum(c) as s, max(c) as x, min(c) as n, json_group_array(coalesce(c, 0)) as a from ${t}`,
+        `select max(c) over () as w, lag(c) over (order by id) as l from ${t}`,
+        `select case when c is null then json_object('v', id) else json_object('v', c) end as o, case when c is null then json_array(id) else json_array(c) end as a, json_group_object(cast(id as text), c) over () as m from ${t}`,
+      ] : []),
     ], async (q) => q.run(own));
     assert.deepEqual(problems, [], problems.join("\n"));
   } finally {

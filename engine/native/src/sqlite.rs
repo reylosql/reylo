@@ -65,9 +65,53 @@ impl Session {
     }
 }
 
+/// What names this program's analyses in `reylo/.cache/` beside the statement and the schema
+/// ([`Program::fingerprint`]), whichever host writes them (this program for the type check, or a
+/// Rust build): the engine's and this crate's sources, and the functions of the SQLite that reads
+/// the file, which decide what a statement may call (`FUNCTIONS_QUERY`) and differ from one build
+/// of SQLite to another, so that a host with another SQLite keeps analyses of its own.
+pub fn cache_fingerprint() -> &'static str {
+    static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FINGERPRINT.get_or_init(|| {
+        let functions = Db::open_in_memory().ok().and_then(|db| Answers(&db).query(crate::engines::sqlite::sqlite::FUNCTIONS_QUERY, &[]).ok()?.ok());
+        let mut functions = functions.unwrap_or_default();
+        functions.sort_by_key(|row| Value::from(row.clone()).to_string());
+        crate::cache_fingerprint(crate::engines::sqlite::FINGERPRINT, &[crate::fnv(serde_json::to_string(&functions).unwrap_or_default().as_bytes())])
+    })
+}
+
+/// The schema's fingerprint and its stamp, read over `db` in one transaction, as every host reads
+/// them, so that each reads the entries the others write ([`crate::Schema`],
+/// [`crate::engines::sqlite::schema_fingerprint`]).
+pub fn schema(db: &Db) -> rusqlite::Result<crate::Schema> {
+    db.execute_batch("begin")?;
+    let read = (|| -> rusqlite::Result<crate::Schema> {
+        let stamp: i64 = db.query_row(crate::engines::sqlite::schema_fingerprint::STAMP_QUERY, [], |row| row.get(0))?;
+        let mut stmt = db.prepare(crate::engines::sqlite::schema_fingerprint::QUERY)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((0..4)
+                    .map(|i| match row.get_ref(i) {
+                        Ok(rusqlite::types::ValueRef::Integer(n)) => json!(n),
+                        Ok(rusqlite::types::ValueRef::Text(t)) => json!(String::from_utf8_lossy(t)),
+                        _ => Value::Null,
+                    })
+                    .collect::<Vec<Value>>())
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(crate::Schema::of(&rows, Some(stamp)))
+    })();
+    let _ = db.execute_batch("commit");
+    read
+}
+
 impl Program for Sqlite {
     fn call(&self, request: &str) -> String {
         reylo_engine_core::api::call::<crate::engines::sqlite::Sqlite>(request)
+    }
+
+    fn fingerprint(&self) -> String {
+        cache_fingerprint().to_string()
     }
 
     async fn serve(&mut self, request: &Value) -> Option<Value> {
@@ -110,6 +154,17 @@ impl Program for Sqlite {
                             Err(e) => json!({ "status": "error", "message": e.0 }),
                         }
                     }
+                },
+            },
+            // The schema's fingerprint and its stamp, as every host reads them ([`schema`]).
+            "schema" => match self.connections.get(&id) {
+                None => closed(id),
+                Some(c) => match c.file.open() {
+                    Err(e) => json!({ "status": "unreachable", "message": e.to_string() }),
+                    Ok(db) => match schema(&db) {
+                        Ok(schema) => schema.answer(),
+                        Err(e) => json!({ "status": "error", "message": e.to_string() }),
+                    },
                 },
             },
             // The schema changed: what the engine was told about the old one is stale.
@@ -393,5 +448,35 @@ mod tests {
         drop(file);
         drop(app);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::{cache_fingerprint, schema, Db};
+
+    /// A schema changed and changed back has the fingerprint it had, and another stamp, so a host
+    /// that compares both tells it from one that never changed.
+    #[test]
+    fn a_schema_changed_and_changed_back_keeps_its_fingerprint_and_moves_its_stamp() {
+        let db = Db::open_in_memory().unwrap();
+        db.execute_batch("create table t (a int)").unwrap();
+        let before = schema(&db).unwrap();
+        assert_eq!(before, schema(&db).unwrap());
+        db.execute_batch("create table x (b int); drop table x").unwrap();
+        let after = schema(&db).unwrap();
+        assert_eq!(before.fingerprint, after.fingerprint);
+        assert!(after.stamp > before.stamp);
+        db.execute_batch("alter table t add column b int").unwrap();
+        assert_ne!(schema(&db).unwrap().fingerprint, after.fingerprint);
+    }
+
+    /// The analyses are named by the functions of the SQLite that reads the file too, which differ
+    /// from one build of SQLite to another.
+    #[test]
+    fn the_cache_fingerprint_is_the_engines_with_the_programs_sources_and_its_sqlite() {
+        assert_eq!(cache_fingerprint().len(), 16);
+        assert_ne!(cache_fingerprint(), crate::engines::sqlite::FINGERPRINT);
+        assert_ne!(cache_fingerprint(), crate::cache_fingerprint(crate::engines::sqlite::FINGERPRINT, &[]));
     }
 }

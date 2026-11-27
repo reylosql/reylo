@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { execute, type QueryModule } from "./run.ts";
 import { renderParamType, renderType } from "../src/render.ts";
 import { typeSchema } from "../src/schema.ts";
-import { coerce, columnKind, DecodeError, duration, hstore, hstoreText, instant, jsonStringify, kindType, money, numbersInJson, parseRow, postgresInterval, postgresLiteral, postgresYear, rowMasks, scalarKind, textDecoder, withinDimensions, withRawIntegers } from "../src/values.ts";
+import { coerce, columnKind, DecodeError, duration, hstore, hstoreText, instant, kindType, money, numbersInJson, parseRow, postgresInterval, postgresLiteral, postgresYear, RawJson, rowMasks, scalarKind, textDecoder, withinDimensions, writeJson } from "../src/values.ts";
 import { withBases, type EngineType, type JsonSchema } from "../src/engine-type.ts";
 import { validate } from "../src/json-schema.ts";
 import { array, field, lite, my, oneOf, pg, record } from "./descriptors.ts";
@@ -677,6 +677,13 @@ test("the kinds: a BIGINT is a BigInt, and an integer a temporary table may wide
   assert.deepEqual(typeSchema({ kind: "boolean" }, "mysql"), { type: "boolean" });
   assert.deepEqual(typeSchema(lite("bool"), "sqlite"), { type: "boolean" });
   assert.deepEqual(typeSchema(lite("integer"), "sqlite"), { type: "integer", format: "int64" });
+  // Outside a STRICT table an INTEGER column may hold a REAL, which `.run()` returns as the number it is; a BIGINT one refuses it, since no BigInt holds a fraction.
+  for (const declared of ["INTEGER", "INT", "TINYINT"]) assert.deepEqual(typeSchema({ ...lite("numeric"), label: declared } as EngineType, "sqlite"), { type: "number" }, declared);
+  assert.deepEqual(typeSchema({ ...lite("numeric"), label: "BIGINT" } as EngineType, "sqlite"), { type: "integer", format: "int64" });
+  // Inside a document SQLite builds, such a column's value, or one computed from it, is a number of either kind.
+  const either: EngineType = { kind: "union", label: "INTEGER", members: [lite("integer"), lite("real")] };
+  assert.deepEqual(typeSchema(either, "sqlite", false, true), { type: "number" });
+  assert.equal(renderType(either, true, "sqlite"), "number");
   assert.deepEqual(typeSchema(lite("numeric"), "sqlite"), { type: ["number", "string"] });
   for (const kind of ["bool", "int", "float", "int8", "decimal", "text", "date", "timestamp", "timestamptz", "json", "bytes", "unknown"]) assert.notEqual(kindType(kind), "Date", kind);
 });
@@ -1004,6 +1011,43 @@ test("the text Postgres writes inside JSON for a non-finite float or decimal is 
   assert.deepEqual(numbersInJson([["NaN"]], { items: { items: true }, deep: true }), [[NaN]]);
 });
 
+test("a value goes into a document as JSON.stringify writes it, but for NaN, the infinities and -0, which go in as each database's JSON reads them, or are refused where it holds none", () => {
+  const fail = (message: string): never => {
+    throw new TypeError(message);
+  };
+  const plain = { s: "é\u2028\"", n: [1, 2.5, -3e-7, 1e21, null, true], at: new Date(0), gone: undefined, f: () => 1, nested: { a: [{}, []] }, own: { toJSON: (key: string) => `key ${key}` } };
+  for (const dialect of ["postgres", "mysql", "sqlite"] as const) assert.equal(writeJson(plain, dialect, fail), JSON.stringify(plain));
+  // With a number JSON.stringify writes as null or 0, the rest is written as JSON.stringify writes it.
+  const special = { ...plain, z: -0, list: [undefined, -0, () => 1, new Number(-0)], [`a/b~c`]: -0 };
+  const written = JSON.stringify(special).replace(/"z":0/, `"z":-0`).replace(/"list":\[null,0,null,0\]/, `"list":[null,-0,null,-0]`).replace(/"a\/b~c":0/, `"a/b~c":-0`);
+  assert.equal(writeJson(special, "postgres", fail), written);
+  assert.equal(writeJson(special, "mysql", fail), written.replace(/-0([,\]}])/g, "-0e0$1"));
+  // Postgres's JSON holds no number for NaN or an infinity.
+  for (const n of [NaN, Infinity, -Infinity]) assert.throws(() => writeJson({ z: -0, n }, "postgres", fail), new RegExp(`^TypeError: at /n is ${n}, which JSON holds no number for: write null or a string in its place\\.$`));
+  assert.throws(() => writeJson([NaN], "postgres", fail, "[2]"), /^TypeError: at \[2\]\/0 is NaN/);
+  // SQLite writes an infinity as a number past a double's range, and holds no NaN.
+  assert.equal(writeJson({ inf: Infinity, neg: -Infinity, z: -0 }, "sqlite", fail), `{"inf":9e999,"neg":-9e999,"z":-0e0}`);
+  assert.deepEqual(JSON.parse(writeJson({ inf: Infinity, z: -0 }, "sqlite", fail)!), { inf: Infinity, z: -0 });
+  assert.throws(() => writeJson({ a: [NaN] }, "sqlite", fail), /^TypeError: at \/a\/0 is NaN, which SQLite holds no value for: write null or a string in its place\.$/);
+  // MySQL holds neither, and a key's pointer escapes `/` and `~`.
+  assert.throws(() => writeJson({ "a/b~": Infinity }, "mysql", fail), /^TypeError: at \/a~1b~0 is Infinity, which MySQL holds no value for/);
+  assert.throws(() => writeJson(NaN, "mysql", fail), /^TypeError: is NaN, which MySQL holds no value for/);
+  assert.throws(() => writeJson([NaN], "mysql", fail, "[1]"), /^TypeError: at \[1\]\/0 is NaN/);
+  // A float's text NaN, as an array's element reads, is the number.
+  assert.ok(Number.isNaN(coerce("float", "NaN", "f")));
+  // Each value's toJSON() is read once: one that gives NaN, then 0, is refused for its NaN.
+  let calls = 0;
+  const once = { toJSON: () => (calls++ ? { value: 0 } : { value: NaN }) };
+  assert.throws(() => writeJson({ doc: once }, "sqlite", fail), /^TypeError: at \/doc\/value is NaN/);
+  assert.equal(calls, 1);
+  // A boxed number is the number it holds.
+  assert.equal(writeJson({ a: new Number(-0) }, "postgres", fail), `{"a":-0}`);
+  assert.throws(() => writeJson({ a: new Number(Infinity) }, "mysql", fail), /^TypeError: at \/a is Infinity/);
+  // A value written as it is, and what JSON.stringify throws on, a BigInt.
+  assert.equal(writeJson({ big: new RawJson("12345678901234567890") }, "sqlite", fail), `{"big":12345678901234567890}`);
+  assert.throws(() => writeJson({ z: -0, big: 1n }, "postgres", fail), /BigInt/);
+});
+
 test("a row converts each name's last column by that column's own mask, by position beside the columns", () => {
   const n = { keys: [["n", true]] } as const;
   const columns: Columns = [["x", "json"], ["x", "json"], ["y", "json"], ["y", "json"], ["constructor", "json"], ["__proto__", "json"], ["id", "int4"]];
@@ -1109,40 +1153,26 @@ test("a Postgres money is its exact decimal text, read from the C locale's, and 
 });
 
 test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app gives BigInt, and held to the integers MySQL and SQLite read from JSON", () => {
-  assert.equal(jsonStringify({ a: [9007199254740993n, 1], d: new Date(0) }), '{"a":[9007199254740993,1],"d":"1970-01-01T00:00:00.000Z"}');
-  assert.equal(jsonStringify({ a: 1 }), '{"a":1}');
+  const fail = (message: string): never => {
+    throw new TypeError(message);
+  };
+  assert.equal(writeJson({ a: [9007199254740993n, 1], d: new Date(0) }, "postgres", fail), '{"a":[9007199254740993,1],"d":"1970-01-01T00:00:00.000Z"}');
+  // Beside the numbers JSON.stringify writes otherwise, in the same one pass.
+  assert.equal(writeJson({ id: 1n, z: -0 }, "mysql", fail), '{"id":1,"z":-0e0}');
+  // A value whose own toJSON() returns a BigInt.
+  assert.equal(writeJson({ id: { toJSON: () => 9007199254740993n } }, "postgres", fail), '{"id":9007199254740993}');
+  // An app's BigInt.prototype.toJSON, which writes text or a rounded number, never reaches one.
   const proto = BigInt.prototype as unknown as { toJSON?: () => unknown };
   for (const polyfill of [function (this: bigint) { return this.toString(); }, function (this: bigint) { return Number(this); }]) {
     proto.toJSON = polyfill;
     try {
-      assert.equal(jsonStringify({ n: 9007199254740993n }), '{"n":9007199254740993}');
-      assert.equal(JSON.stringify(withRawIntegers({ n: 9007199254740993n })), '{"n":9007199254740993}');
+      assert.equal(writeJson({ n: 9007199254740993n, xs: [9007199254740993n] }, "sqlite", fail), '{"n":9007199254740993,"xs":[9007199254740993]}');
     } finally {
       delete proto.toJSON;
     }
   }
-  assert.equal(jsonStringify([2n ** 64n - 1n], "mysql"), "[18446744073709551615]");
-  assert.throws(() => jsonStringify([2n ** 64n], "mysql"), /the BigInt 18446744073709551616, which MySQL reads from JSON as a float/);
-  assert.throws(() => jsonStringify([2n ** 63n], "sqlite"), /which SQLite reads from JSON as a float: its 64-bit integers run from -9223372036854775808 to 9223372036854775807/);
-  assert.equal(jsonStringify([2n ** 64n], "postgres"), "[18446744073709551616]");
-  // A value whose own toJSON() returns a BigInt.
-  assert.equal(jsonStringify({ id: { toJSON: () => 9007199254740993n } }), '{"id":9007199254740993}');
-  // Bun.sql's copy gives a nested toJSON() the key it stands at, as JSON.stringify does.
-  assert.equal(JSON.stringify(withRawIntegers({ id: 9007199254740993n, child: { toJSON: (key: string) => key }, list: [{ toJSON: (key: string) => key }] })), '{"id":9007199254740993,"child":"child","list":["0"]}');
-  // Each toJSON() runs once, even one that returns its own object, as JSON.stringify runs it.
-  let calls = 0;
-  const child = { n: 1, toJSON(this: object, key: string) { calls++; return this === child && key === "child" ? this : "changed"; } };
-  assert.equal(JSON.stringify(withRawIntegers({ id: 9007199254740993n, child, f: () => 1, xs: [() => 1, undefined] })), '{"id":9007199254740993,"child":{"n":1},"xs":[null,null]}');
-  assert.equal(calls, 1);
-  // A function's own toJSON() runs before it is left out, given its key or its index.
-  const named = Object.assign(() => 1, { toJSON: (key: string) => key });
-  assert.equal(JSON.stringify(withRawIntegers({ id: 1n, named, xs: [named] })), JSON.stringify({ id: 1, named, xs: [named] }));
-  // A toJSON a getter gives is read once.
-  let reads = 0;
-  const once = Object.defineProperty(() => 1, "toJSON", { get: () => (reads++ === 0 ? (key: string) => key : undefined) });
-  assert.equal(JSON.stringify(withRawIntegers({ id: 1n, once })), '{"id":1,"once":"once"}');
-  const hook = Object.assign((key: string) => key, { call: null });
-  assert.equal(JSON.stringify(withRawIntegers({ id: 1n, c: { toJSON: hook } })), '{"id":1,"c":"c"}');
-  const plain = { n: 1 };
-  assert.equal(withRawIntegers(plain), plain, "no copy where it holds no BigInt");
+  assert.equal(writeJson([2n ** 64n - 1n], "mysql", fail), "[18446744073709551615]");
+  assert.throws(() => writeJson([2n ** 64n], "mysql", fail), /^TypeError: at \/0 is the BigInt 18446744073709551616, which MySQL reads from JSON as a float: its 64-bit integers run from -9223372036854775808 to 18446744073709551615\.$/);
+  assert.throws(() => writeJson({ n: 2n ** 63n }, "sqlite", fail), /^TypeError: at \/n is the BigInt 9223372036854775808, which SQLite reads from JSON as a float/);
+  assert.equal(writeJson([2n ** 64n], "postgres", fail), "[18446744073709551616]");
 });

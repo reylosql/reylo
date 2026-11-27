@@ -26,9 +26,9 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, DecodeError, elementKind, isRowKind, jsonStringify, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, withRawIntegers, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
+import { civilFromDays, coerce, DecodeError, elementKind, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
 import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
-import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, jsonText, jsonValue, postgresText, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, jsonElements, jsonText, jsonValue, postgresText, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
 
 type AnyClient = Record<string, any>;
@@ -997,7 +997,7 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
   // left the connection out of step. Each element of a `jsonb[]` is a JSON value.
   const bound = values.map((v, i) => {
     const t = type(i);
-    return Array.isArray(v) && t?.kind === "array" && !isJsonParam(v, i) ? arrayLiteral(t.element.type.kind === "json" ? v.map((e) => (e == null ? e : jsonStringify(e))) : v, query.inputs?.[names[i]!]?.delimiter) : v;
+    return Array.isArray(v) && t?.kind === "array" && !isJsonParam(v, i) ? arrayLiteral(t.element.type.kind === "json" ? jsonElements(v, names[i]!) : v, query.inputs?.[names[i]!]?.delimiter) : v;
   });
   // A JSON parameter goes to pg's family, PGlite and Neon as its JSON text, and to postgres.js
   // as its JSON text declared `unknown` (below). Bun.sql serializes a value for a JSON
@@ -1008,7 +1008,7 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
   // client made with `prepare: false`, as one behind a pooler in transaction mode is, learns no
   // parameter's type and sends an object as its String() ("invalid input syntax for type json"),
   // so it gets the JSON text, which the server reads as the parameter's type.
-  const json = () => bound.map((v, i) => (isJsonParam(v, i) ? jsonText(v) : v));
+  const json = () => bound.map((v, i) => (isJsonParam(v, i) ? jsonText(v, "postgres", names[i]!) : v));
   // Effect SQL's client (src/effect.ts) binds a string as an untyped text parameter, which the
   // server reads as the parameter's type, and a number or a Date by its JavaScript type, so every
   // value goes as the text Postgres reads.
@@ -1045,8 +1045,23 @@ async function runPostgres(c: Client, query: QueryModule<"postgres">, { text, va
     // as it is either way. A query without inputs gets its values as they are, as on every driver.
     const bun = typeof c.commitDistributed === "function";
     // Each handle Bun.sql gives out, a transaction's, a savepoint's and a reserved connection's too, carries its client's options.
-    const bunJson = bun && c.options?.prepare === false ? jsonText : (v: unknown) => ({ toJSON: () => withRawIntegers(jsonValue(v)) });
-    const mapped = bun ? bound.map((v, i) => (isJsonParam(v, i) ? bunJson(v) : v)) : query.inputs ? bound.map((v, i) => c.typed(postgresText(query, names[i]!, v), 705)) : bound;
+    // Where the JSON text is another than JSON.stringify writes (a NaN, an infinity, -0 or a BigInt in it), the
+    // value its toJSON() returns is that text read back, each number and string as JSON.rawJSON of
+    // its own text, which Bun has and writes as it is, so an integer past 2^53 keeps its digits.
+    const raw = (JSON as { rawJSON?: (text: string) => unknown }).rawJSON;
+    const bunJson = (v: unknown, i: number) => {
+      const written = jsonText(v, "postgres", names[i]!);
+      if (c.options?.prepare === false || written === undefined) return written;
+      // JSON.stringify throws on a BigInt, whose text JSON.rawJSON then carries.
+      let plain: string | undefined;
+      try {
+        plain = JSON.stringify(jsonValue(v));
+      } catch {}
+      if (written === plain) return { toJSON: () => jsonValue(v) };
+      const value: unknown = JSON.parse(written, (_key, x: unknown, context?: { source?: string }) => (raw === undefined ? x : (typeof x === "number" || typeof x === "string") && context?.source !== undefined ? raw(context.source) : typeof x === "number" ? raw(Object.is(x, -0) ? "-0" : String(x)) : x));
+      return { toJSON: () => value };
+    };
+    const mapped = bun ? bound.map((v, i) => (isJsonParam(v, i) ? bunJson(v, i) : v)) : query.inputs ? bound.map((v, i) => c.typed(postgresText(query, names[i]!, v), 705)) : bound;
     if (!bun) return await postgresJs(c, text, mapped, query.columns, query.row);
     return (await bunRaw(c, text, mapped, query.columns, query.row)) ?? bunRows(await c.unsafe(text, mapped), query.columns, true);
   }

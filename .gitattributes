@@ -1,0 +1,2 @@
+# The oracle cases of how each database reads a statement's text hold carriage returns and control characters, kept byte for byte.
+oracle/cases/*_lexing/*.sql -text

@@ -2,6 +2,7 @@
 //! (the format's `comment`, `spec/index.ts`).
 
 use crate::dialect::Dialect;
+use crate::lexical::Rules;
 
 /// The comments before a statement, as prose, and the byte offset where they end.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,30 +20,30 @@ pub fn prose(sql: &str, dialect: Dialect) -> Option<String> {
 
 /// The `--` lines and `/* … */` blocks before the statement's first token, markers stripped and
 /// lines kept: a blank line between two comments, or a change from one form to the other, starts a
-/// paragraph. Read as the dialect reads comments: Postgres nests block comments and ends a `--`
-/// one at a carriage return as at a line feed, MySQL's `--` is one only before a space or a
-/// control character and `#` starts one too, and MySQL's `/*!` and `/*+` are code to the server,
-/// so they end the prose.
+/// paragraph. Read as the dialect reads comments and whitespace ([`Rules`]): Postgres and
+/// ClickHouse nest block comments, Postgres ends a `--` one at a carriage return as at a line
+/// feed, MySQL's `--` is one only before a space or a control character and `#` starts one too,
+/// as it does on ClickHouse before a space or a `!`, and MySQL's `/*!` and `/*+` are code to the
+/// server, so they end the prose. A no-break space before a comment is a name's character but on
+/// ClickHouse, so the comment stands after the statement's first token.
 pub fn leading(sql: &str, dialect: Dialect) -> Leading {
+    let rules = Rules::of(dialect);
     let bytes = sql.as_bytes();
     let mut paragraphs: Vec<Vec<String>> = Vec::new();
     let mut last: Option<bool> = None; // Some(true) after a line comment, Some(false) after a block
     let mut i = 0;
     let mut end = 0;
     loop {
-        let ws = sql[i..].len() - sql[i..].trim_start().len();
-        // Postgres ends a line at a bare carriage return too, and `\r\n` is one line end.
-        let gap = &sql[i..i + ws];
-        let breaks = if dialect == Dialect::Postgres { gap.matches('\n').count() + gap.matches('\r').count() - gap.matches("\r\n").count() } else { gap.matches('\n').count() };
+        let at = rules.skip_spaces(bytes, i);
+        // A blank line between two comments starts a paragraph: two line ends, `\r\n` being one,
+        // and a bare carriage return one where it ends a line comment.
+        let gap = &sql[i..at];
+        let breaks = if rules.carriage_return_ends_comment { gap.matches('\n').count() + gap.matches('\r').count() - gap.matches("\r\n").count() } else { gap.matches('\n').count() };
         let blank_before = breaks > 1;
-        let at = i + ws;
         let (ch, next) = (bytes.get(at).copied(), bytes.get(at + 1).copied());
         let mysql = dialect == Dialect::Mysql;
-        let dash = ch == Some(b'-') && next == Some(b'-') && !(mysql && bytes.get(at + 2).is_some_and(|&c| c > 32 && c != 127));
-        // ClickHouse's `#` starts a comment before a space or a `!`.
-        let hash = ch == Some(b'#') && (mysql || (dialect == Dialect::Clickhouse && matches!(next, Some(b' ' | b'!'))));
-        if dash || hash {
-            let stop = sql[at..].find(|c| c == '\n' || (dialect == Dialect::Postgres && c == '\r')).map_or(sql.len(), |n| at + n);
+        if rules.line_comment_at(bytes, at) {
+            let stop = rules.line_comment_end(bytes, at);
             let text = &sql[at + if ch == Some(b'#') { 1 } else { 2 }..stop];
             if last != Some(true) || blank_before || paragraphs.is_empty() {
                 paragraphs.push(Vec::new());
@@ -54,20 +55,10 @@ pub fn leading(sql: &str, dialect: Dialect) -> Leading {
             continue;
         }
         if ch == Some(b'/') && next == Some(b'*') && !(mysql && matches!(bytes.get(at + 2), Some(b'!' | b'+'))) {
-            let nests = matches!(dialect, Dialect::Postgres | Dialect::Clickhouse);
-            let (mut depth, mut j) = (1, at + 2);
-            while j < bytes.len() && depth > 0 {
-                if bytes[j..].starts_with(b"*/") {
-                    depth -= 1;
-                    j += 2;
-                } else if nests && bytes[j..].starts_with(b"/*") {
-                    depth += 1;
-                    j += 2;
-                } else {
-                    j += 1;
-                }
-            }
-            let text = &sql[at + 2..if depth == 0 { j - 2 } else { sql.len() }];
+            // One that nothing closes is prose to the end of the text.
+            let closed = rules.block_comment_end(bytes, at).filter(|&j| j >= at + 4 && sql[..j].ends_with("*/"));
+            let j = closed.unwrap_or(bytes.len());
+            let text = &sql[at + 2..if closed.is_some() { j - 2 } else { j }];
             paragraphs.push(block(text));
             last = Some(false);
             i = j;
@@ -81,10 +72,11 @@ pub fn leading(sql: &str, dialect: Dialect) -> Leading {
 }
 
 /// A block comment's lines, without a `/**`'s extra stars or the `*` that starts each line of one
-/// written as JSDoc is.
+/// written as JSDoc is. A line ends at `\r\n`, `\n` or a bare `\r`: inside a comment a line end
+/// means nothing to any database, so each is read as an editor shows it.
 fn block(text: &str) -> Vec<String> {
-    let text = text.trim_start_matches('*');
-    let lines: Vec<&str> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
+    let text = text.trim_start_matches('*').replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = text.split('\n').collect();
     let rest: Vec<&&str> = lines[1..].iter().filter(|l| !l.trim().is_empty()).collect();
     let starred = |l: &str| l.trim_start().starts_with('*');
     if !rest.is_empty() && rest.iter().all(|l| starred(l)) {
@@ -147,5 +139,17 @@ mod tests {
         assert_eq!(prose("# hash\n--x\nselect 1", Dialect::Mysql), "hash");
         assert_eq!(prose("-- dash\n/*! code */ select 1", Dialect::Mysql), "dash");
         assert_eq!(prose("# not a comment\nselect 1", Dialect::Postgres), "");
+    }
+
+    #[test]
+    fn the_corpus() {
+        let corpus = crate::lexical::Corpus::load();
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql, Dialect::Clickhouse] {
+            for (case, reading) in corpus.on(dialect) {
+                if let Some(expected) = &reading.prose {
+                    assert_eq!(&prose(&case.text, dialect), expected, "{dialect:?}, {}: {:?}", case.about, case.text);
+                }
+            }
+        }
     }
 }

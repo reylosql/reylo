@@ -19,6 +19,8 @@
 //! given a collation without overriding a column's in a comparison, which would change what an
 //! equality on a binary column matches: Reylo writes `:p::text` as the bare placeholder instead,
 //! which takes the collation of the column it meets (`structured.rs`).
+//!
+//! The same reading of a JSON_TABLE's COLUMNS names the columns a value error may name (`errors.rs`).
 
 use crate::lex::Rewritten;
 
@@ -28,7 +30,7 @@ enum Tok {
     Open,
     Close,
     Comma,
-    /// A string, a quoted name or a comment, as the lexer reads them.
+    /// A string or a quoted name, as the lexer reads them; a comment is no token.
     Opaque,
     Other,
 }
@@ -51,7 +53,10 @@ fn tokens(sql: &str, opaque: &[(usize, usize)]) -> Vec<Token> {
         }
         if let Some(&&(start, end)) = next_opaque.peek() {
             if start <= i {
-                out.push(Token { tok: Tok::Opaque, start, end });
+                // A comment reads as a space.
+                if !crate::lex::is_comment(&sql[start..]) {
+                    out.push(Token { tok: Tok::Opaque, start, end });
+                }
                 i = end;
                 continue;
             }
@@ -80,30 +85,99 @@ fn tokens(sql: &str, opaque: &[(usize, usize)]) -> Vec<Token> {
 pub fn sites(sql: &str, opaque: &[(usize, usize)]) -> Vec<usize> {
     let t = tokens(sql, opaque);
     let mut out = Vec::new();
+    // The expansion of a `rows(…)` parameter reads its own columns through CONVERT … COLLATE,
+    // and the run time may write its lists again by offset.
+    for (k, _) in lists(&t, sql).into_iter().flatten().filter(|&(_, expanded)| !expanded) {
+        items(&t, sql, k, &mut |from, to| {
+            // `name type [EXISTS] PATH '…' …`; `name FOR ORDINALITY` has no PATH.
+            let mut depth = 0usize;
+            let Some(path) = (from + 1..to).find(|&j| {
+                match t[j].tok {
+                    Tok::Open => depth += 1,
+                    Tok::Close => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                depth == 0 && (is(&t, sql, j, "path") || is(&t, sql, j, "exists"))
+            }) else {
+                return;
+            };
+            let words: Vec<String> = t[from + 1..path].iter().filter(|x| x.tok == Tok::Word).map(|x| sql[x.start..x.end].to_ascii_lowercase()).collect();
+            let text = matches!(words.first().map(String::as_str), Some("char" | "character" | "varchar" | "tinytext" | "text" | "mediumtext" | "longtext"));
+            let own = words.iter().skip(1).any(|w| matches!(w.as_str(), "character" | "charset" | "collate" | "binary" | "ascii" | "unicode" | "byte"));
+            if text && !own {
+                out.push(t[path - 1].end);
+            }
+        });
+    }
+    out.sort_unstable();
+    out
+}
+
+/// The names of the JSON_TABLE columns of `sql` with ERROR ON ERROR, nested ones included, as a
+/// value error names one: MySQL types such a column by its declaration, and a value that does not
+/// fit it fails the statement under the column's own name. `None` where a JSON_TABLE's COLUMNS
+/// list, or the name of such a column, cannot be read.
+pub fn erroring_columns(sql: &str, opaque: &[(usize, usize)]) -> Option<Vec<String>> {
+    let t = tokens(sql, opaque);
+    let mut out = Vec::new();
+    let mut read = true;
+    for list in lists(&t, sql) {
+        let (k, _) = list?;
+        items(&t, sql, k, &mut |from, to| {
+            if !(from..to.saturating_sub(2)).any(|j| is(&t, sql, j, "error") && is(&t, sql, j + 1, "on") && is(&t, sql, j + 2, "error")) {
+                return;
+            }
+            // A name the scan splits (`a$b`) runs into the token after it, where a type follows a
+            // space.
+            let spaced = t.get(from + 1).is_some_and(|x| x.start > t[from].end);
+            match name(&t[from], sql).filter(|_| spaced) {
+                Some(name) => out.push(name),
+                None => read = false,
+            }
+        });
+    }
+    read.then_some(out)
+}
+
+/// A column's name as written: a word, or a name in backquotes (or double quotes, which
+/// ANSI_QUOTES reads as a name), its quote doubled inside.
+fn name(x: &Token, sql: &str) -> Option<String> {
+    let s = &sql[x.start..x.end];
+    match x.tok {
+        Tok::Word => Some(s.to_string()),
+        Tok::Opaque => {
+            let q = s.chars().next().filter(|&q| q == '`' || q == '"')?;
+            (s.len() >= 2 && s.ends_with(q)).then(|| s[1..s.len() - 1].replace(&format!("{q}{q}"), &q.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// Each JSON_TABLE's COLUMNS list, in text order: the token of its parenthesis, and whether the
+/// expansion of a `rows(…)` parameter wrote it (its names start with `reylo.`); `None` for one
+/// whose list cannot be found.
+fn lists(t: &[Token], sql: &str) -> Vec<Option<(usize, bool)>> {
+    let mut out = Vec::new();
     for k in 0..t.len() {
-        if !(is(&t, sql, k, "json_table") && t.get(k + 1).is_some_and(|x| x.tok == Tok::Open)) {
+        if !(is(t, sql, k, "json_table") && t.get(k + 1).is_some_and(|x| x.tok == Tok::Open)) {
             continue;
         }
-        let Some(end) = close_of(&t, k + 1) else { continue };
-        // The expansion of a `rows(…)` parameter reads its own columns through CONVERT …
-        // COLLATE, and the run time may write its lists again by offset.
-        if t[k + 1..end].iter().any(|x| x.tok == Tok::Opaque && sql[x.start..x.end].starts_with("`reylo.")) {
+        let Some(end) = close_of(t, k + 1) else {
+            out.push(None);
             continue;
-        }
+        };
+        let expanded = t[k + 1..end].iter().any(|x| x.tok == Tok::Opaque && sql[x.start..x.end].starts_with("`reylo."));
         let mut depth = 0usize;
-        for j in k + 2..end {
+        let list = (k + 2..end).find(|&j| {
             match t[j].tok {
                 Tok::Open => depth += 1,
                 Tok::Close => depth -= 1,
                 _ => {}
             }
-            if depth == 0 && is(&t, sql, j, "columns") && t.get(j + 1).is_some_and(|x| x.tok == Tok::Open) {
-                columns(&t, sql, j + 1, &mut out);
-                break;
-            }
-        }
+            depth == 0 && is(t, sql, j, "columns") && t.get(j + 1).is_some_and(|x| x.tok == Tok::Open)
+        });
+        out.push(list.map(|j| (j + 1, expanded)));
     }
-    out.sort_unstable();
     out
 }
 
@@ -129,51 +203,36 @@ fn close_of(t: &[Token], k: usize) -> Option<usize> {
     None
 }
 
-/// A COLUMNS list from its parenthesis at `k`: each column, and each NESTED one's.
-fn columns(t: &[Token], sql: &str, k: usize, out: &mut Vec<usize>) {
+/// Each column of a COLUMNS list from its parenthesis at `k`, and each NESTED one's, as the
+/// tokens `from..to` it spans.
+fn items(t: &[Token], sql: &str, k: usize, f: &mut dyn FnMut(usize, usize)) {
     let Some(end) = close_of(t, k) else { return };
-    let mut items = Vec::new();
+    let mut spans = Vec::new();
     let (mut from, mut depth) = (k + 1, 0usize);
     for j in k + 1..end {
         match t[j].tok {
             Tok::Open => depth += 1,
             Tok::Close => depth -= 1,
             Tok::Comma if depth == 0 => {
-                items.push((from, j));
+                spans.push((from, j));
                 from = j + 1;
             }
             _ => {}
         }
     }
-    items.push((from, end));
-    for (from, to) in items {
+    spans.push((from, end));
+    for (from, to) in spans {
         if from >= to {
             continue;
         }
-        if is(t, sql, from, "nested") {
+        // `NESTED [PATH] '…' COLUMNS (…)`, where a column named `nested` has its type next.
+        if is(t, sql, from, "nested") && (is(t, sql, from + 1, "path") || t.get(from + 1).is_some_and(|x| x.tok == Tok::Opaque && sql[x.start..].starts_with('\''))) {
             if let Some(j) = (from..to).find(|&j| is(t, sql, j, "columns") && t.get(j + 1).is_some_and(|x| x.tok == Tok::Open)) {
-                columns(t, sql, j + 1, out);
+                items(t, sql, j + 1, f);
             }
             continue;
         }
-        // `name type [EXISTS] PATH '…' …`; `name FOR ORDINALITY` has no PATH.
-        let mut depth = 0usize;
-        let Some(path) = (from + 1..to).find(|&j| {
-            match t[j].tok {
-                Tok::Open => depth += 1,
-                Tok::Close => depth = depth.saturating_sub(1),
-                _ => {}
-            }
-            depth == 0 && (is(t, sql, j, "path") || is(t, sql, j, "exists"))
-        }) else {
-            continue;
-        };
-        let words: Vec<String> = t[from + 1..path].iter().filter(|x| x.tok == Tok::Word).map(|x| sql[x.start..x.end].to_ascii_lowercase()).collect();
-        let text = matches!(words.first().map(String::as_str), Some("char" | "character" | "varchar" | "tinytext" | "text" | "mediumtext" | "longtext"));
-        let own = words.iter().skip(1).any(|w| matches!(w.as_str(), "character" | "charset" | "collate" | "binary" | "ascii" | "unicode" | "byte"));
-        if text && !own {
-            out.push(t[path - 1].end);
-        }
+        f(from, to);
     }
 }
 
@@ -190,20 +249,29 @@ pub fn written(rewritten: Rewritten, sites: &[usize], collation: &str) -> Rewrit
         let delta: isize = rewritten.spans.iter().filter(|&&(_, oe, _, _)| oe <= p).map(|&(os, oe, rs, re)| (re - rs) as isize - (oe - os) as isize).sum();
         (p as isize + delta) as usize
     };
-    let mut sql = String::with_capacity(rewritten.sql.len() + sites.len() * clause.len());
+    // Each site with its rewritten offset and its text: a space after the collation where the
+    // type runs straight into PATH (`varchar(4)path`), which would otherwise read as its name.
+    let texts: Vec<(usize, usize, String)> = sites
+        .iter()
+        .map(|&original| {
+            let to = at(original);
+            let text = if rewritten.sql[to..].starts_with(char::is_whitespace) { clause.clone() } else { format!("{clause} ") };
+            (original, to, text)
+        })
+        .collect();
+    let mut sql = String::with_capacity(rewritten.sql.len() + texts.iter().map(|(_, _, text)| text.len()).sum::<usize>());
     let mut inserted = Vec::with_capacity(sites.len());
     let mut from = 0;
-    for &original in sites {
-        let to = at(original);
-        sql.push_str(&rewritten.sql[from..to]);
-        inserted.push((original, sql.len(), sql.len() + clause.len()));
-        sql.push_str(&clause);
-        from = to;
+    for (original, to, text) in &texts {
+        sql.push_str(&rewritten.sql[from..*to]);
+        inserted.push((*original, sql.len(), sql.len() + text.len()));
+        sql.push_str(text);
+        from = *to;
     }
     sql.push_str(&rewritten.sql[from..]);
     // Each placeholder after an added text moved by its length.
     let spans = rewritten.spans.iter().map(|&(os, oe, rs, re)| {
-        let shift = sites.iter().filter(|&&original| original <= os).count() * clause.len();
+        let shift: usize = texts.iter().filter(|(original, _, _)| *original <= os).map(|(_, _, text)| text.len()).sum();
         (os, oe, rs + shift, re + shift)
     });
     let spans = spans.collect();
@@ -230,6 +298,11 @@ mod tests {
             compiled("select u.id from users u join json_table(:names, '$[*]' columns (n varchar(40) path '$', k int path '$.k', t text exists path '$.t')) j on u.name = j.n"),
             "select u.id from users u join json_table(?, '$[*]' columns (n varchar(40) COLLATE utf8mb4_0900_ai_ci path '$', k int path '$.k', t text COLLATE utf8mb4_0900_ai_ci exists path '$.t')) j on u.name = j.n"
         );
+        // A type that runs straight into PATH keeps a space before it.
+        assert_eq!(
+            compiled("select j.n from json_table /* doc */ (:d, '$[*]' columns (n varchar(4)path '$', m int path '$.m')) j where j.n = :n"),
+            "select j.n from json_table /* doc */ (?, '$[*]' columns (n varchar(4) COLLATE utf8mb4_0900_ai_ci path '$', m int path '$.m')) j where j.n = ?"
+        );
         // A NESTED path's columns too; an ordinality column, and a number, take nothing.
         assert_eq!(
             compiled("select * from json_table(:d, '$' columns (id for ordinality, nested path '$.tags[*]' columns (tag char(10) path '$'))) t"),
@@ -251,6 +324,22 @@ mod tests {
             let lexed = lex::lex(sql, Dialect::Mysql).unwrap();
             assert!(sites(sql, &lexed.opaque).is_empty(), "{sql}");
         }
+    }
+
+    #[test]
+    fn a_json_tables_columns_with_error_on_error_are_named_as_written() {
+        let named = |sql: &str| erroring_columns(sql, &lex::lex(sql, Dialect::Mysql).unwrap().opaque);
+        assert_eq!(
+            named("select * from json_table(?, '$' columns (A varchar(2) path '$.a' error on error, n for ordinality, b int path '$.b' default '1' on error, nested path '$.c[*]' columns (\"c d\" date path '$' ERROR ON ERROR))) j, json_table(?, '$' columns (e int exists path '$.e')) k"),
+            Some(vec!["A".to_string(), "c d".to_string()])
+        );
+        assert_eq!(named("select 'json_table(x, ''$'' columns (n int path ''$'' error on error))'"), Some(vec![]));
+        // Comments, which read as spaces, and a column named `nested` beside NESTED clauses.
+        assert_eq!(
+            named("select * from json_table(?, '$' columns (a int path '$.a' error /* strict */ on -- here\n error, nested varchar(4) path '$.n' error on error, nested '$.m[*]' columns (m int path '$' error on error), nested /* kids */ path '$.k[*]' columns (k int path '$' error on error))) j, json_table /* c */ (?, '$' columns /* d */ (l int path '$' error on error)) l"),
+            Some(vec!["a".to_string(), "nested".to_string(), "m".to_string(), "k".to_string(), "l".to_string()])
+        );
+        assert_eq!(named("select * from json_table(?, '$') j"), None);
     }
 
     #[test]

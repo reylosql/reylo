@@ -6,7 +6,10 @@
 //! says so on standard error, once per process and reason, in the loader's words.
 //!
 //! The cache is the TypeScript loader's (`src/analyze.ts`): the same file names, the same entry and
-//! the same schema fingerprint, so a crate and a package in one directory would share it.
+//! the same schema fingerprint, read by the engine's own query as the loader's engine reads it
+//! (`reylo_engine`'s `schema` of each database), so a crate and a package in one directory share it.
+//! On SQLite an entry's name holds the functions of the SQLite that reads the file too, so a crate
+//! whose SQLite is built with other functions than the package's keeps entries of its own.
 //!
 //! Each database is behind the feature of its name, which brings its engine and its client, so a
 //! crate that runs on one database builds neither of the others. With none on, nothing is read, and
@@ -105,17 +108,6 @@ fn session<C, D>(cell: &'static Mutex<Option<Session<C, D>>>, url: &str) -> Mute
     }
     guard
 }
-/// The schema fingerprints of Postgres and MySQL: the loader's own queries (`FINGERPRINT` in
-/// `src/analyze.ts`), as its definitions write them out, so that an entry either writes is current
-/// for both.
-#[cfg(feature = "postgres")]
-const POSTGRES_FINGERPRINT: &str = include_str!("fingerprint-postgres.sql");
-#[cfg(feature = "mysql")]
-const MYSQL_FINGERPRINT: &str = include_str!("fingerprint-mysql.sql");
-/// SQLite's whole schema, and the functions of the SQLite that opened it, as the loader reads them.
-#[cfg(feature = "sqlite")]
-const SQLITE_FINGERPRINT: &str = include_str!("fingerprint-sqlite.sql");
-
 impl Dialect {
     fn name(self) -> &'static str {
         match self {
@@ -125,15 +117,17 @@ impl Dialect {
         }
     }
 
-    /// The engine's fingerprint, where the crate builds the database's engine.
-    fn fingerprint(self) -> Option<&'static str> {
+    /// What names the analyses the crate's engine gives in `reylo/.cache/`, beside the statement and
+    /// the schema, as the loader's engine names its own (its ping's fingerprint), where the crate
+    /// builds the database's engine.
+    fn fingerprint(self) -> Option<String> {
         match self {
             #[cfg(feature = "postgres")]
-            Dialect::Postgres => Some(reylo_engine::engines::postgres::FINGERPRINT),
+            Dialect::Postgres => Some(reylo_engine::postgres::cache_fingerprint()),
             #[cfg(feature = "sqlite")]
-            Dialect::Sqlite => Some(reylo_engine::engines::sqlite::FINGERPRINT),
+            Dialect::Sqlite => Some(reylo_engine::sqlite::cache_fingerprint().to_string()),
             #[cfg(feature = "mysql")]
-            Dialect::Mysql => Some(reylo_engine::engines::mysql::FINGERPRINT),
+            Dialect::Mysql => Some(reylo_engine::mysql::cache_fingerprint()),
             #[allow(unreachable_patterns)]
             _ => None,
         }
@@ -345,10 +339,7 @@ async fn postgres(located: &Located, queries: &Path, sql: &str, session: &mut Se
 #[cfg(feature = "postgres")]
 async fn postgres_schema(session: &mut Session<Driven, reylo_engine::clients::tokio_postgres::Describe>) -> Result<Result<String, String>, String> {
     let schema = match postgres_client(&mut session.conn, &mut session.retired, &session.url).await {
-        Ok(client) => {
-            let rows = client.query(POSTGRES_FINGERPRINT, &[]).await.map_err(|e| format!("the schema fingerprint failed: {}", e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().to_string())))?;
-            Ok(fingerprint(&rows.iter().map(|row| vec![row.get::<_, Option<String>>(0).map_or(Value::Null, Value::from)]).collect::<Vec<_>>()))
-        }
+        Ok(client) => Ok(reylo_engine::postgres::schema(client).await.map_err(|e| format!("the schema fingerprint failed: {}", e.as_db_error().map_or_else(|| e.to_string(), |d| d.message().to_string())))?.fingerprint),
         // Out of reach: the cache answers.
         Err(Failure::Unreachable(why)) => Err(why),
         Err(other) => return Err(other.to_string()),
@@ -429,7 +420,7 @@ async fn mysql_schema(session: &mut Session<mysql_async::Conn, reylo_engine::cli
         rows = mysql_fingerprint(&mut session.conn, &session.url).await;
     }
     let schema = match rows {
-        Ok(Ok(rows)) => Ok(fingerprint(&rows)),
+        Ok(Ok(schema)) => Ok(schema.fingerprint),
         Ok(Err(e)) => return Err(format!("the schema fingerprint failed: {e}")),
         Err(Failure::Unreachable(why)) => Err(why),
         Err(other) => return Err(other.to_string()),
@@ -438,22 +429,12 @@ async fn mysql_schema(session: &mut Session<mysql_async::Conn, reylo_engine::cli
     Ok(schema)
 }
 
-/// The fingerprint's rows as the loader reads them, each value as mysql2 decodes it; the outer
-/// error is a database that cannot be reached.
+/// The schema's fingerprint as the loader's engine reads it; the outer error is a database that
+/// cannot be reached.
 #[cfg(feature = "mysql")]
-async fn mysql_fingerprint(conn: &mut Option<mysql_async::Conn>, url: &str) -> Result<Result<Vec<Vec<Value>>, mysql_async::Error>, Failure> {
-    use mysql_async::prelude::Queryable;
+async fn mysql_fingerprint(conn: &mut Option<mysql_async::Conn>, url: &str) -> Result<Result<reylo_engine::Schema, mysql_async::Error>, Failure> {
     let conn = mysql_conn(conn, url).await?;
-    Ok(async {
-        let mut result = conn.query_iter(MYSQL_FINGERPRINT).await?;
-        let types: Vec<u8> = result.columns_ref().iter().map(|c| c.column_type() as u8).collect();
-        let mut rows = Vec::new();
-        while let Some(row) = result.next().await? {
-            rows.push(row.unwrap().into_iter().zip(&types).map(|(value, code)| reylo_engine::clients::mysql_async::decoded(value, *code)).collect::<Vec<Value>>());
-        }
-        Ok(rows)
-    }
-    .await)
+    Ok(reylo_engine::mysql::schema(conn).await)
 }
 
 /// The session's connection, opened where there is none.
@@ -480,38 +461,26 @@ fn sqlite(located: &Located, queries: &Path, url: &str, sql: &str) -> Result<Val
     let conn = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
     let mut schema = sqlite_schema(&conn)?;
     let own = queries.join(format!("{statement}-{}.json", &sha256(&server)[..16]));
-    if let Some(entry) = current(&own, &schema) {
+    if let Some(entry) = current(&own, &schema.fingerprint) {
         return Ok(entry);
     }
     for tries in 1.. {
         let analysis = reylo_engine::clients::rusqlite::analyze(&conn, sql, &mut AnswerCache::default()).map_err(|e| e.to_string())?;
-        match moved(&schema, sqlite_schema(&conn).map(Ok), tries) {
-            Moved::No => return remember(&located.cache, &own, Dialect::Sqlite, Some(&schema), &analysis),
-            Moved::To(now) => schema = now,
-            Moved::Unknown => return remember(&located.cache, &own, Dialect::Sqlite, None, &analysis),
+        // The file's schema stamp moves with every change to its schema, so a stamp that moved is a
+        // schema that changed in between, even one changed back to the same fingerprint.
+        match sqlite_schema(&conn) {
+            Ok(now) if now == schema => return remember(&located.cache, &own, Dialect::Sqlite, Some(&schema.fingerprint), &analysis),
+            Ok(now) if tries < ANALYSES => schema = now,
+            _ => return remember(&located.cache, &own, Dialect::Sqlite, None, &analysis),
         }
     }
     unreachable!("the loop returns")
 }
 
-/// The schema's fingerprint, read now.
+/// The schema's fingerprint and stamp, read now, as the loader's engine reads them.
 #[cfg(feature = "sqlite")]
-fn sqlite_schema(conn: &rusqlite::Connection) -> Result<String, String> {
-    let mut stmt = conn.prepare(SQLITE_FINGERPRINT).map_err(|e| format!("the schema fingerprint failed: {e}"))?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((0..4)
-                .map(|i| match row.get_ref(i) {
-                    Ok(rusqlite::types::ValueRef::Integer(n)) => json!(n),
-                    Ok(rusqlite::types::ValueRef::Text(t)) => json!(String::from_utf8_lossy(t)),
-                    _ => Value::Null,
-                })
-                .collect::<Vec<Value>>())
-        })
-        .map_err(|e| format!("the schema fingerprint failed: {e}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("the schema fingerprint failed: {e}"))?;
-    Ok(fingerprint(&rows))
+fn sqlite_schema(conn: &rusqlite::Connection) -> Result<reylo_engine::Schema, String> {
+    reylo_engine::sqlite::schema(conn).map_err(|e| format!("the schema fingerprint failed: {e}"))
 }
 
 /// Where the database cannot be reached (`found` says which, and why): this server's entry for the
@@ -614,6 +583,7 @@ fn current(file: &Path, schema: &str) -> Option<Value> {
 /// ended (`#analyze` in `src/analyze.ts`). The fingerprint read before it may be as old as
 /// `SCHEMA_TTL`, and an entry labelled with one a migration has since moved would be served to a
 /// database that still has the old schema, or has gone back to it.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 enum Moved {
     /// The entry is written under it.
     No,
@@ -623,6 +593,7 @@ enum Moved {
     Unknown,
 }
 
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 fn moved(schema: &str, now: Result<Result<String, String>, String>, tries: u32) -> Moved {
     match now {
         Ok(Ok(now)) if now == schema => Moved::No,
@@ -631,10 +602,24 @@ fn moved(schema: &str, now: Result<Result<String, String>, String>, tries: u32) 
     }
 }
 
-/// The analysis as the build reads it, and written to `file` under `schema` where there is one.
+/// The analysis as the build reads it, and written to `file` under `schema` where there is one,
+/// unless it carries an error no analysis is kept with: the server's own rather than the
+/// statement's, or a privilege's, which a grant does not move the schema's fingerprint for
+/// (`reylo_engine::server_errors::kept`).
 fn remember(cache: &Path, file: &Path, dialect: Dialect, schema: Option<&str>, analysis: &reylo_engine::Analysis) -> Result<Value, String> {
+    let engine = match dialect {
+        Dialect::Postgres => reylo_engine::Dialect::Postgres,
+        Dialect::Mysql => reylo_engine::Dialect::Mysql,
+        Dialect::Sqlite => reylo_engine::Dialect::Sqlite,
+    };
+    let kept = analysis.diagnostics.iter().all(|d| d.server_code.as_deref().is_none_or(|code| reylo_engine::server_errors::kept(engine, code, Some(&d.message))));
     let analysis = serde_json::to_value(analysis).map_err(|e| e.to_string())?;
-    if let Some(schema) = schema {
+    // An entry of an older schema is no answer where the database now refuses the statement, so a
+    // build with the database out of reach does not build from it.
+    if schema.is_some() && !kept {
+        let _ = fs::remove_file(file);
+    }
+    if let Some(schema) = schema.filter(|_| kept) {
         let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         write_entry(cache, file, &json!({ "version": ENTRY_VERSION, "dialect": dialect.name(), "schema": schema, "analysis": analysis, "at": at }));
     }
@@ -733,14 +718,23 @@ fn sha256(text: &str) -> String {
     Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The schema's fingerprint from the fingerprint query's rows, as the loader hashes them.
-fn fingerprint(rows: &[Vec<Value>]) -> String {
-    sha256(&serde_json::to_string(rows).unwrap_or_default())[..16].to_string()
-}
-
 fn read_entry(file: &Path) -> Option<Value> {
     let entry: Value = serde_json::from_str(&fs::read_to_string(file).ok()?).ok()?;
-    (entry["version"].as_u64() == Some(ENTRY_VERSION)).then_some(entry)
+    (entry["version"].as_u64() == Some(ENTRY_VERSION) && kept_entry(&entry)).then_some(entry)
+}
+
+/// Whether an entry carries no error an analysis is not kept with (`reylo_engine::server_errors::kept`),
+/// as one an older build wrote may. One of a dialect this build does not name is read as it is.
+fn kept_entry(entry: &Value) -> bool {
+    let dialect = match entry["dialect"].as_str() {
+        Some("postgres") => reylo_engine::Dialect::Postgres,
+        Some("mysql") => reylo_engine::Dialect::Mysql,
+        Some("sqlite") => reylo_engine::Dialect::Sqlite,
+        Some("clickhouse") => reylo_engine::Dialect::Clickhouse,
+        _ => return true,
+    };
+    let diagnostics = entry["analysis"]["diagnostics"].as_array().map_or(&[][..], Vec::as_slice);
+    diagnostics.iter().all(|d| d["server_code"].as_str().is_none_or(|code| reylo_engine::server_errors::kept(dialect, code, d["message"].as_str())))
 }
 
 /// The entry written last for the statement, by any server.
@@ -773,8 +767,24 @@ fn write_entry(cache: &Path, file: &Path, entry: &Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{newest_entry, offline_entry, old_lock, place, sha256, unverified_line, utc_day, ENTRY_VERSION};
+    use super::{newest_entry, offline_entry, old_lock, place, read_entry, sha256, unverified_line, utc_day, ENTRY_VERSION};
     use serde_json::json;
+
+    #[test]
+    fn an_entry_with_an_error_no_analysis_is_kept_with_is_read_as_none() {
+        let file = std::env::temp_dir().join(format!("reylo-build-kept-{}.json", std::process::id()));
+        let read = |code: &str, message: &str| {
+            std::fs::write(&file, json!({"version": ENTRY_VERSION, "dialect": "mysql", "at": 1, "analysis": {"diagnostics": [{"message": message, "start": 0, "length": 1, "code": 6, "server_code": code}]}}).to_string()).unwrap();
+            read_entry(&file).is_some()
+        };
+        assert!(read("1054", "Unknown column 'x' in 'field list' (ER_BAD_FIELD_ERROR)"));
+        assert!(read("1105", "VT12001: unsupported: subquery in GROUP BY (ER_UNKNOWN_ERROR)"));
+        // A deadlock, a tablet not serving, a privilege, kept by an older build.
+        assert!(!read("1213", "Deadlock found when trying to get lock; try restarting transaction (ER_LOCK_DEADLOCK)"));
+        assert!(!read("1105", "target: shop.-.primary: no healthy tablet available for 'keyspace:\"shop\"' (ER_UNKNOWN_ERROR)"));
+        assert!(!read("1142", "SELECT command denied to user 'app'@'%' for table 'users' (ER_TABLEACCESS_DENIED_ERROR)"));
+        std::fs::remove_file(&file).unwrap();
+    }
 
     #[test]
     fn an_unreachable_server_builds_from_its_own_entry_alone() {
@@ -886,6 +896,70 @@ mod tests {
         labels.dedup();
         assert_eq!(labels.len(), 2, "both entries are labelled with the fingerprint from before the migration");
         run(&server, &format!("drop database {name} with (force)"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The entries' schemas under a project's `reylo/.cache/`.
+    #[cfg(any(feature = "mysql", feature = "sqlite"))]
+    fn labels(dir: &std::path::Path) -> Vec<String> {
+        let mut labels: Vec<String> = std::fs::read_dir(dir.join("reylo/.cache/queries")).unwrap().map(|e| serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(e.unwrap().path()).unwrap()).unwrap()["schema"].as_str().unwrap().to_string()).collect();
+        labels.sort();
+        labels.dedup();
+        labels
+    }
+
+    /// The Postgres test's, on MySQL.
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn on_mysql_an_analysis_made_after_a_migration_is_written_under_the_migrated_schemas_fingerprint() {
+        use mysql_async::prelude::Queryable;
+        let Ok(server) = std::env::var("REYLO_TEST_MYSQL") else { return };
+        let name = format!("reylo_build_migrated_mysql_{}", std::process::id());
+        let url = format!("{}/{name}", server.trim_end_matches('/'));
+        let run = |url: &str, sql: &str| {
+            super::runtime().unwrap().block_on(async {
+                let mut conn = mysql_async::Conn::new(mysql_async::Opts::from_url(url).unwrap()).await.unwrap();
+                conn.query_drop(sql).await.unwrap();
+                conn.disconnect().await.unwrap();
+            })
+        };
+        run(&server, &format!("drop database if exists {name}"));
+        run(&server, &format!("create database {name}"));
+        run(&url, "create table u (b int)");
+        run(&url, "create table t (a int)");
+        let dir = std::env::temp_dir().join(&name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".reylo.yaml"), format!("direct_url: {url}\n")).unwrap();
+        super::analyze(&dir, "select b from u").unwrap();
+        run(&url, "alter table t modify a int not null");
+        let (_, analysis) = super::analyze(&dir, "select a from t").unwrap();
+        assert_eq!((analysis["columns"][0]["name"].as_str(), analysis["columns"][0]["nullable"].as_bool()), (Some("a"), None));
+        assert_eq!(labels(&dir).len(), 2, "both entries are labelled with the fingerprint from before the migration");
+        run(&server, &format!("drop database {name}"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// On SQLite, where every statement reads the file's schema again: an analysis made after a
+    /// migration is labelled with the migrated schema's fingerprint, as the engine reads it.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn on_sqlite_an_analysis_made_after_a_migration_is_written_under_the_migrated_schemas_fingerprint() {
+        let dir = std::env::temp_dir().join(format!("reylo-build-migrated-sqlite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("app.db");
+        let db = rusqlite::Connection::open(&file).unwrap();
+        db.execute_batch("create table u (b int); create table t (a int)").unwrap();
+        std::fs::write(dir.join(".reylo.yaml"), "direct_url: file:./app.db\n").unwrap();
+        super::analyze(&dir, "select b from u").unwrap();
+        db.execute_batch("create table t2 (a int not null); drop table t; alter table t2 rename to t").unwrap();
+        let (_, analysis) = super::analyze(&dir, "select a from t").unwrap();
+        assert_eq!((analysis["columns"][0]["name"].as_str(), analysis["columns"][0]["nullable"].as_bool()), (Some("a"), None));
+        let now = reylo_engine::sqlite::schema(&db).unwrap().fingerprint;
+        assert_eq!(labels(&dir).len(), 2);
+        assert!(labels(&dir).contains(&now), "the second entry is labelled with the migrated schema's fingerprint");
+        drop(db);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

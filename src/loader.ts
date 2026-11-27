@@ -85,8 +85,9 @@ export async function moduleInputOf(path: string, sql: string): Promise<{ input:
   if (refused) throw new Error(`${path}:${place(sql, refused.start)}: ${refused.message}`);
   const dialect = session.project.dialect;
   // Each placeholder's place in the compiled statement, where a driver takes the statement in
-  // pieces or with its values written in (src/execute.ts, `QueryModule`); SQLite has no such driver.
-  const marks = dialect === "sqlite" ? undefined : await marksOf(analysis, trimmedStatement(analysis.rewritten.sql), dialect, (region) => session.lex(region));
+  // pieces or with its values written in, or where the run time writes a number a driver would bind
+  // as another value (src/execute.ts, `QueryModule`).
+  const marks = await marksOf(analysis, trimmedStatement(analysis.rewritten.sql), dialect, (region) => session.lex(region));
   const input: ModuleInput = { analysis, raw: sql, params, marks, source: sourceName(path), dialect, codecs: session.project.codecs, sqlcommenter: session.project.sqlcommenter, allowNestedArrays: session.project.allowNestedArrays };
   // The libraries a codec builds values with are imported from the app's own install beside the
   // `.sql` file.
@@ -170,9 +171,9 @@ export function compiledText(m: ModuleInput): string {
   return trimmedStatement(m.analysis.rewritten.sql);
 }
 
-/** A statement without its trailing whitespace, but for one character after a `/*` it would leave last: SQLite reads a block comment that no `*` and `/` close as a comment to the end of the text when anything follows its `/*`, and a bare `/*` as two operators, which it refuses. */
+/** A statement without its trailing whitespace, but for one character after a `/*` it would leave last: SQLite reads a block comment that no `*` and `/` close as a comment to the end of the text when anything follows its `/*`, and a bare `/*` as two operators, which it refuses. The whitespace is ASCII's alone: a no-break or an ideographic space a statement ends with is part of its last name on Postgres, MySQL and SQLite (`as x\u00a0` names a column so), which `trimEnd()` would rename. */
 export function trimmedStatement(sql: string): string {
-  const trimmed = sql.trimEnd();
+  const trimmed = sql.replace(/[ \t\n\r\f\v]+$/, "");
   return trimmed.endsWith("/*") && trimmed.length < sql.length ? sql.slice(0, trimmed.length + 1) : trimmed;
 }
 
@@ -283,7 +284,7 @@ export async function marksOf(analysis: Analysis, text: string, dialect: Dialect
     const region = written.toString("utf8");
     // A ClickHouse placeholder is all the engine wrote there, `{name:Type}`, whose type the run time
     // reads at its mark (src/decode-clickhouse.ts).
-    if (dialect === "clickhouse" ? region.startsWith("{") && region.endsWith("}") : dialect === "mysql" ? region === "?" : /^\$[0-9]+$/.test(region)) {
+    if (dialect === "clickhouse" ? region.startsWith("{") && region.endsWith("}") : dialect === "mysql" || dialect === "sqlite" ? region === "?" : /^\$[0-9]+$/.test(region)) {
       marks.push([utf16(text, start), utf16(text, end)]);
       continue;
     }

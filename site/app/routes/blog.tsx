@@ -3,7 +3,8 @@ import { BlogIndex } from '@/components/blog-index';
 import { blogUrl, posts } from '@/lib/blog';
 import { blogMeta } from '@/lib/blog-meta';
 import { ogHash } from '@/lib/blog-og.server';
-import { docsTitle } from '@/lib/layout.shared';
+import { docsTitle, siteUrl } from '@/lib/layout.shared';
+import { ogAlt } from '@/lib/og';
 import { fetchStars } from '@/lib/stars';
 
 const description = 'What each release of Reylo changed.';
@@ -15,7 +16,7 @@ export async function loader() {
 
 export function meta({ loaderData }: Route.MetaArgs): Route.MetaDescriptors {
   if (!loaderData) return [];
-  return blogMeta({ title: docsTitle('Blog'), description, path: blogUrl, og: loaderData.og, type: 'website' });
+  return blogMeta({ title: docsTitle('Blog'), description, path: blogUrl, image: `${siteUrl}/opengraph-image.png?${loaderData.og}`, alt: ogAlt, type: 'website' });
 }
 
 /** The blog, at /blog: the newest announcement as a card, then the releases (components/blog-index.tsx). */

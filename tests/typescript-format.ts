@@ -37,7 +37,7 @@ export function typescriptOf(sql: string, analysis: Analysis | undefined, dialec
 /** The text for the module the content mapper wrote for a statement, read off its declarations; undefined for a module of no statement. */
 export function typescriptOfModule(text: string): string | undefined {
   const types = /^export type Params = ([\s\S]*?);\nexport type Row = ([\s\S]*?);\nexport type QueryError = /m.exec(text);
-  const cardinality = /declare const query: Query<[\s\S]*, "(one|maybeOne|many|none)", "(?:postgres|mysql|sqlite)"/.exec(text);
+  const cardinality = /declare const query: Query<[\s\S]*, "(one|maybeOne|many|none)", "(?:postgres|mysql|sqlite|clickhouse)"/.exec(text);
   if (!types || !cardinality) return undefined;
   return typescriptText(types[1]!, types[2]!, cardinality[1]!);
 }

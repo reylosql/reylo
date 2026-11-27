@@ -4,6 +4,7 @@
 //! redirected file receives the plain text, byte for byte.
 
 use crate::Dialect;
+use reylo_engine_core::lexical::Rules;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -236,6 +237,7 @@ pub fn tokens(sql: &str, dialect: Dialect) -> Vec<(Token, &str)> {
 
 fn lex<'a>(sql: &'a str, dialect: Dialect, out: &mut Vec<(Token, &'a str)>) {
     let b = sql.as_bytes();
+    let rules = dialect.rules();
     let mut i = 0;
     let mut plain = 0;
     let flush = |out: &mut Vec<(Token, &'a str)>, from: usize, to: usize| {
@@ -246,19 +248,23 @@ fn lex<'a>(sql: &'a str, dialect: Dialect, out: &mut Vec<(Token, &'a str)>) {
     while i < b.len() {
         let c = b[i];
         let next = b.get(i + 1).copied();
-        let (kind, end) = if c == b'-' && next == Some(b'-') {
-            (Token::Comment, sql[i..].find('\n').map_or(b.len(), |n| i + n))
+        // Comments and quotes as the dialect reads them (`reylo_engine_core::lexical`).
+        let (kind, end) = if (c == b'-' || c == b'#') && rules.line_comment_at(b, i) {
+            (Token::Comment, rules.line_comment_end(b, i))
         } else if c == b'/' && next == Some(b'*') {
-            (Token::Comment, sql[i + 2..].find("*/").map_or(b.len(), |n| i + 2 + n + 2))
-        } else if c == b'\'' {
+            (Token::Comment, rules.block_comment_end(b, i).unwrap_or(b.len()))
+        } else if c == b'\'' || (c == b'"' && rules.double_quoted_strings) {
             // A backslash escapes in MySQL's strings and in Postgres's E'…' strings; the others
             // double a quote to escape it.
-            let escaped = dialect == Dialect::Mysql || i > 0 && matches!(b[i - 1], b'E' | b'e') && (i < 2 || !is_word(b[i - 2]));
-            (Token::Literal, quoted(b, i, b'\'', escaped))
+            let escaped = rules.backslash_in_strings || (rules.escape_strings && i > 0 && matches!(b[i - 1], b'E' | b'e') && (i < 2 || !rules.name_part(b[i - 2])));
+            (Token::Literal, quoted(b, i, c, escaped))
         } else if c == b'"' || c == b'`' {
             (Token::Plain, quoted(b, i, c, false))
+        } else if c == b'[' && rules.bracketed_names {
+            // SQLite's `[name]`, to its first `]`.
+            (Token::Plain, b[i..].iter().position(|&x| x == b']').map_or(b.len(), |p| i + p + 1))
         } else if c == b'$' {
-            match dollar_tag(sql, i) {
+            match dollar_tag(sql, i, &rules) {
                 Some(tag) => {
                     flush(out, plain, i);
                     let body = i + tag.len();
@@ -354,17 +360,14 @@ fn quoted(b: &[u8], start: usize, q: u8, escaped: bool) -> usize {
     b.len()
 }
 
-/// The dollar-quote delimiter opening at `i` (`$$`, `$body$`), if one does.
-fn dollar_tag(sql: &str, i: usize) -> Option<&str> {
+/// The dollar-quote delimiter opening at `i` (`$$`, `$body$`, `$本文$`), if one does: on Postgres,
+/// outside a name.
+fn dollar_tag<'a>(sql: &'a str, i: usize, rules: &Rules) -> Option<&'a str> {
     let b = sql.as_bytes();
     if i > 0 && is_word(b[i - 1]) {
         return None;
     }
-    let mut j = i + 1;
-    while j < b.len() && (b[j].is_ascii_alphabetic() || b[j] == b'_' || (j > i + 1 && b[j].is_ascii_digit())) {
-        j += 1;
-    }
-    (b.get(j) == Some(&b'$')).then(|| &sql[i..=j])
+    rules.dollar_tag_end(b, i).map(|end| &sql[i..end])
 }
 
 fn word_kind(word: &str) -> Token {
@@ -451,6 +454,35 @@ mod tests {
         assert_eq!(kinds("'C:\\' x"), vec![(Token::Literal, "'C:\\'".into())]);
         assert_eq!(kinds("E'it\\'s' x"), vec![(Token::Literal, "'it\\'s'".into())]);
         assert_eq!(kinds_on("default 'it\\'s fine', n int", Dialect::Mysql), vec![(Token::Keyword, "default".into()), (Token::Literal, "'it\\'s fine'".into()), (Token::Type, "int".into())]);
+    }
+
+    #[test]
+    fn comments_and_quotes_are_the_dialects() {
+        // A Postgres block comment nests and its `--` ends at a carriage return; MySQL's `#` is a
+        // comment; only Postgres dollar-quotes, with a tag past ASCII too; SQLite has no E''.
+        assert_eq!(kinds("/* a /* b */ c */ x"), vec![(Token::Comment, "/* a /* b */ c */".into())]);
+        assert_eq!(kinds("-- a\rcreate"), vec![(Token::Comment, "-- a".into()), (Token::Keyword, "create".into())]);
+        assert_eq!(kinds_on("# a\ncreate", Dialect::Mysql), vec![(Token::Comment, "# a".into()), (Token::Keyword, "create".into())]);
+        assert_eq!(kinds("$本文$ x $本文$"), vec![(Token::Literal, "$本文$".into()), (Token::Literal, "$本文$".into())]);
+        assert!(kinds_on("$t$ x $t$", Dialect::Sqlite).is_empty());
+        assert!(kinds_on("[a--b] x", Dialect::Sqlite).is_empty());
+        assert_eq!(kinds_on(r"e'\' create '\'", Dialect::Sqlite), vec![(Token::Literal, r"'\'".into()), (Token::Keyword, "create".into()), (Token::Literal, r"'\'".into())]);
+    }
+
+    #[test]
+    fn the_corpus_comments_are_comments() {
+        let Some(corpus) = reylo_engine_core::lexical::Corpus::beside(env!("CARGO_MANIFEST_DIR")) else { return };
+        for dialect in [Dialect::Postgres, Dialect::Mysql, Dialect::Sqlite] {
+            for case in &corpus.cases {
+                let Some(reading) = case.readings.get(dialect.name()).filter(|r| r.error.is_none()) else { continue };
+                // A dollar quote's body is read as SQL, so its comments are coloured too.
+                if dialect == Dialect::Postgres && reading.strings.iter().any(|s| s.starts_with('$')) {
+                    continue;
+                }
+                let comments: Vec<&str> = tokens(&case.text, dialect).into_iter().filter(|(k, _)| *k == Token::Comment).map(|(_, t)| t).collect();
+                assert_eq!(comments, reading.comments, "{dialect:?}, {}: {:?}", case.about, case.text);
+            }
+        }
     }
 
     #[test]

@@ -10,7 +10,7 @@
 // the databases its queries are written for.
 
 import type { QueryError } from "./query-error.ts";
-import { columnKind, describe, given, hstoreText, isLevel, isMultirangeKind, isRangeKind, isRowKind, jsonStringify, numbersInJson, ParameterError, postgresInterval, postgresLiteral, postgresYear, rowMasks, vectorText, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
+import { columnKind, describe, given, hstoreText, isLevel, isMultirangeKind, isRangeKind, isRowKind, numbersInJson, ParameterError, writeJson, postgresInterval, postgresLiteral, postgresYear, rowMasks, vectorText, withinDimensions, zoned, type Columns, type JsonNumbers, type Kind } from "./values.ts";
 import { bareName, holdsWholeArrays, isMysqlSet, schemaOf, type EngineType } from "./engine-type.ts";
 import { withSqlcommenter } from "./sqlcommenter.ts";
 import type { JsonSchema } from "./engine-type.ts";
@@ -194,7 +194,7 @@ export type QueryModule<D extends Dialect = Dialect> = {
   readonly text?: string | undefined;
   /** The binding order for `text`: one name per placeholder of the rewritten statement. */
   readonly order?: readonly string[] | undefined;
-  /** Each placeholder's place in `text`, as the engine found it: where Reylo splits the statement for a driver that takes it in pieces (Slonik's tag) or writes the values into it (mysql2 on a server that refuses prepared statements, src/decode-mysql.ts). A ClickHouse placeholder carries its parameter's type, which Reylo reads at its mark to write the value (src/decode-clickhouse.ts). A build step writes them for Postgres, MySQL and ClickHouse; those two drivers, and a ClickHouse statement with parameters, refuse a query without them. */
+  /** Each placeholder's place in `text`, as the engine found it: where Reylo splits the statement for a driver that takes it in pieces (Slonik's tag) or writes the values into it (mysql2 on a server that refuses prepared statements, src/decode-mysql.ts). A ClickHouse placeholder carries its parameter's type, which Reylo reads at its mark to write the value (src/decode-clickhouse.ts). On MySQL and SQLite, Reylo writes a number a driver would bind as another value at its mark (`literalsAtMarks`). A build step writes them for every dialect; those two drivers, a ClickHouse statement with parameters, and such a number, refuse a query without them. */
   readonly marks?: Marks | undefined;
   /** How the MySQL session the statement was built on reads strings, where another `sql_mode` would read the statement otherwise: Reylo writes values into its text only on a session that reads it the same way (src/decode-mysql.ts). */
   readonly sqlMode?: SqlMode | undefined;
@@ -564,7 +564,7 @@ function checkParams(query: QueryModule, input: unknown): asserts input is Recor
 // The rows are bound positionally in every dialect. A value left out binds NULL, as pg,
 // PGlite, better-sqlite3 and Bun.sql already do; postgres.js, mysql2, node:sqlite and libSQL
 // would reject it instead.
-function statement(query: QueryModule, params: ParamsInput) {
+function statement(query: QueryModule, params: ParamsInput, run = true) {
   // The build step already compiled the statement; only the values need ordering.
   const compiled = compile(query);
   const bound: Bound = { text: compiled.text, values: compiled.order.map((name) => value(params, name)), names: compiled.order, marks: compiled.marks };
@@ -634,11 +634,12 @@ function statement(query: QueryModule, params: ParamsInput) {
     if (cast !== undefined && type !== undefined) checksFor(query, name).checkCast(name, cast, type, bound.values[i], query.dialect);
     checkTime(type, name, bound.values[i], query.dialect);
     checkBinary(type, name, bound.values[i], query.dialect);
+    checkNonFinite(type, name, bound.values[i], query.dialect);
     bound.values[i] = jsonNull ? JSON_NULL : encode(type, bound.values[i], query.dialect, name);
   });
   // Every MySQL and SQLite driver binds JSON text as text, which the database reads as JSON (a
   // structured parameter's is written already).
-  if (query.dialect !== "postgres") bound.values = bound.values.map((v, i) => (isJsonValue(query, bound.names[i]!, v) && query.inputs?.[bound.names[i]!]?.members === undefined ? namedJsonText(bound.names[i]!, v, query.dialect) : v));
+  if (query.dialect !== "postgres") bound.values = bound.values.map((v, i) => (isJsonValue(query, bound.names[i]!, v) && query.inputs?.[bound.names[i]!]?.members === undefined ? jsonText(v, query.dialect, bound.names[i]!) : v));
   // SQLite holds an INTEGER in 64 bits, so a BigInt outside them has no exact form there.
   // better-sqlite3, node:sqlite, libSQL, Turso's engine and SQLite Wasm refuse one, but bun:sqlite
   // and Bun.sql keep its low 64 bits where the statement reads numbers (2^63 was stored as -2^63,
@@ -647,14 +648,63 @@ function statement(query: QueryModule, params: ParamsInput) {
     bound.values.forEach((v, i) => {
       if (typeof v === "bigint" && (v >= 2n ** 63n || v < -(2n ** 63n))) throw new ParameterError(`Parameter "${bound.names[i]}" is ${v}, outside the 64-bit integers SQLite holds (-2^63 to 2^63 - 1), so no SQLite driver binds it exactly.`);
     });
+  // A number a SQLite driver binds as another value goes in at its mark as SQLite's literal for it,
+  // on every driver: sqlite3, Turso's engine, sql.js and SQLite Wasm bind -0 as the INTEGER 0, D1
+  // sends -0 as 0 and an infinity as null, and libSQL refuses an infinity, which a REAL holds. -0 is
+  // written so where the type takes a float, whose sign a REAL value keeps (a REAL column stores it
+  // as 0). Those drivers refuse one whose place isn't known (src/decode-sqlite.ts, `unplaced`), as
+  // mariadb and PlanetScale do on MySQL (src/decode-mysql.ts, `signedZeros`). A Standard Query's
+  // values bind to the module's own text (src/standard-query.ts), so they go as they are.
+  if (query.dialect === "sqlite" && run) {
+    Object.assign(
+      bound,
+      literalsAtMarks(bound, (v, i) => {
+        if (v === Infinity || v === -Infinity) return v > 0 ? "(9e999)" : "(-9e999)";
+        const type = query.inputs?.[bound.names[i]!]?.type;
+        return Object.is(v, -0) && type !== undefined && takesFloat(type, "sqlite") ? "(-0.0)" : undefined;
+      }),
+    );
+  }
   // The comment naming the file goes on last, after a structured parameter's lists are written. It
-  // ends the statement on Postgres and MySQL, so every mark keeps its place; on ClickHouse it opens
-  // the statement, and every mark moves by its length.
+  // ends the statement on Postgres and MySQL, so every mark keeps its place; on SQLite and ClickHouse
+  // it opens the statement, and every mark moves by its length.
   const sent = sentText(query, bound.text);
   const moved = sent.length - bound.text.length;
-  if (query.dialect === "clickhouse" && moved > 0 && bound.marks !== undefined) bound.marks = bound.marks.map(([start, end]) => [start + moved, end + moved] as const);
+  if ((query.dialect === "sqlite" || query.dialect === "clickhouse") && moved > 0 && bound.marks !== undefined) bound.marks = bound.marks.map(([start, end]) => [start + moved, end + moved] as const);
   bound.text = sent;
   return bound;
+}
+
+/** Whether a parameter's type takes a float, alone or as one of the types its value decides between, or is no type the run time knows, so that -0 keeps its sign there. */
+export function takesFloat(type: EngineType, dialect: Dialect): boolean {
+  const kinds = columnKind(type, dialect).split("|");
+  return kinds.includes("float") || kinds.includes("unknown");
+}
+
+/**
+ * The statement with each value `literal` gives a text for written at its placeholder's mark as
+ * that text, and left out of the values, each mark after it moved by what the text gained. A value
+ * whose mark is not the placeholder `?` is bound as it is, and so is every value of a statement
+ * without a mark for each.
+ */
+export function literalsAtMarks({ text, values, names, marks }: Bound, literal: (v: unknown, i: number) => string | undefined): Bound {
+  if (marks?.length !== values.length) return { text, values, names, marks };
+  let written = "";
+  let at = 0;
+  const kept: Bound = { text: "", values: [], names: [], marks: [] };
+  values.forEach((v, i) => {
+    const [start, end] = marks[i]!;
+    const lit = text.slice(start, end) === "?" ? literal(v, i) : undefined;
+    if (lit === undefined) {
+      kept.values.push(v);
+      (kept.names as string[]).push(names[i]!);
+      (kept.marks as (readonly [number, number])[]).push([start - at + written.length, end - at + written.length]);
+      return;
+    }
+    written += text.slice(at, start) + lit;
+    at = end;
+  });
+  return { ...kept, text: written + text.slice(at) };
 }
 
 /** `text` as Reylo sends it: with the comment naming the query's file, where the module asks for one (src/sqlcommenter.ts). */
@@ -666,12 +716,13 @@ export function sentText(query: QueryModule, text: string): string {
  * The statement and its values in the database's raw form, which a Standard Query's `encode`
  * returns (src/standard-query.ts), bound as `.run()` binds them, its checks included: on Postgres
  * each value's text, which a driver binds with no declared type, so the server reads it as the
- * parameter's type; on MySQL and SQLite each value as a driver binds it. ClickHouse has no such
- * form, and a Standard Query on it binds nothing (src/standard-query.ts).
+ * parameter's type; on MySQL and SQLite each value as a driver binds it, with no number written
+ * into the text, since the values bind to the module's own (a -0 or an infinity goes as it is).
+ * ClickHouse has no such form, and a Standard Query on it binds nothing (src/standard-query.ts).
  */
 export function rawStatement(query: QueryModule, params: unknown): { text: string; values: unknown[] } {
   checkParams(query, params);
-  const bound = statement(query, params);
+  const bound = statement(query, params, false);
   const { text, values, names } = bound;
   if (query.dialect !== "postgres") return { text, values };
   return { text, values: values.map((v, i) => postgresText(query, names[i]!, v)) };
@@ -681,14 +732,19 @@ export function rawStatement(query: QueryModule, params: unknown): { text: strin
 export function postgresText(query: QueryModule, name: string, v: unknown): string | null {
   if (v == null) return null;
   const t = query.inputs?.[name]?.type;
-  if (isJsonValue(query, name, v)) return jsonText(v);
-  if (Array.isArray(v) && t?.kind === "array") return arrayLiteral(t.element.type.kind === "json" ? v.map((e) => (e == null ? e : jsonStringify(e))) : v, query.inputs?.[name]?.delimiter);
+  if (isJsonValue(query, name, v)) return jsonText(v, "postgres", name) ?? null;
+  if (Array.isArray(v) && t?.kind === "array") return arrayLiteral(t.element.type.kind === "json" ? jsonElements(v, name) : v, query.inputs?.[name]?.delimiter);
   if (Array.isArray(v)) return arrayLiteral(v);
   if (v instanceof Uint8Array) return asByteaHex(v) as string;
   if (typeof v === "boolean") return v ? "t" : "f";
   if (v instanceof Date) return dateText(v);
   if (typeof v === "object") return JSON.stringify(v);
   return String(v);
+}
+
+/** A `json[]` or `jsonb[]` parameter's elements, each as its JSON text (`jsonText`) or NULL. */
+export function jsonElements(array: readonly unknown[], name: string): unknown[] {
+  return array.map((e, i) => (e == null ? e : jsonText(e, "postgres", name, `[${i}]`)));
 }
 
 /** The checks a parameter needs (src/checks.ts): every build step passes them where its statement has such a parameter. */
@@ -753,18 +809,16 @@ const JSON_NULL: unique symbol = Symbol("JSON null");
 /** A JSON parameter's value as JSON: `JSON_NULL` as null. */
 export const jsonValue = (v: unknown) => (v === JSON_NULL ? null : v);
 
-/** A JSON parameter's text, a refusal of a BigInt in it naming the parameter. */
-function namedJsonText(name: string, v: unknown, dialect: Dialect): string {
-  try {
-    return jsonText(v, dialect);
-  } catch (e) {
-    if (e instanceof ParameterError) throw new ParameterError(`Parameter "${name}": ${e.message}`);
-    throw e;
-  }
-}
-
-/** A JSON parameter's value as the JSON text a driver binds, each BigInt in it as its digits. */
-export const jsonText = (v: unknown, dialect?: Dialect) => jsonStringify(jsonValue(v), dialect);
+/** A JSON parameter's value as the JSON text a driver binds (src/values.ts, `writeJson`), refusing a number the database's JSON holds none for. */
+export const jsonText = (v: unknown, dialect: Dialect, name: string, at = "") =>
+  writeJson(
+    jsonValue(v),
+    dialect,
+    (message) => {
+      throw new ParameterError(`Parameter "${name}" ${message}`);
+    },
+    at,
+  );
 
 // A date or time value's type says whether it has a zone (src/render.ts),
 // and a value that would be read in a zone nobody chose is refused before the
@@ -810,6 +864,23 @@ function checkBinary(type: EngineType | undefined, name: string, v: unknown, dia
   }
   if (columnKind(type, dialect) !== "bytes" || v instanceof Uint8Array) return;
   throw new ParameterError(`Parameter "${name}" is binary data, so it takes a Uint8Array (a Buffer is one), as \`.run()\` returns one; got ${describe(v)}. ${v instanceof ArrayBuffer ? "Wrap an ArrayBuffer in one: new Uint8Array(buffer)." : "Decode base64 or hex text into one first."}`);
+}
+
+// NaN and an infinity, which JSON.stringify writes as null, go only where the database holds them.
+// MySQL holds neither, and its drivers fail in their own ways (mysql2's "DOUBLE value is out of
+// range", mariadb's "Unknown column 'NaN'"); SQLite holds no NaN, which every driver but libSQL
+// binds as NULL; and a Postgres float holds both, a numeric with a precision NaN alone, as the
+// type says. Elsewhere on Postgres the server refuses the text, and ClickHouse's values are
+// checked where they are written (src/decode-clickhouse.ts).
+function checkNonFinite(type: EngineType | undefined, name: string, v: unknown, dialect: Dialect): void {
+  if (typeof v !== "number" || Number.isFinite(v) || dialect === "clickhouse") return;
+  if (dialect === "mysql") throw new ParameterError(`Parameter "${name}" is ${v}, which MySQL holds no value for.`);
+  if (dialect === "sqlite") {
+    if (Number.isNaN(v)) throw new ParameterError(`Parameter "${name}" is NaN, which SQLite holds no value for: it would be bound as NULL.`);
+    return;
+  }
+  if (type?.kind !== "float" && type?.kind !== "decimal") return;
+  if (!(Number.isNaN(v) ? type.nan : type.infinity)) throw new ParameterError(`Parameter "${name}" is ${v}, which its type${type.kind === "decimal" ? ", a numeric with a precision," : ""} holds no value for.`);
 }
 
 // What `run` returns goes back in as the database reads it (the round-trip rule, src/render.ts):
@@ -859,7 +930,7 @@ function encode(type: EngineType | undefined, v: unknown, dialect: Dialect, name
   // A money holds cents in the C locale Reylo reads it in, and Postgres rounds a value past them
   // without an error.
   if (kind === "money" && (typeof v !== "string" || !/^-?\d+(?:\.\d{1,2}0*)?$/.test(v))) throw new ParameterError(`Parameter "${name}" is a Postgres money, which holds cents: pass its decimal text, with two digits after the point at most (1234.56); got ${describe(v)}.`);
-  if (kind === "float" && Object.is(v, -0)) return "-0";
+  if (Object.is(v, -0) && takesFloat(type, dialect)) return "-0";
   if (typeof v !== "string") return v;
   if (isTime(type, dialect)) return postgresYear(v);
   return kind === "interval" ? postgresInterval(v) : v;
