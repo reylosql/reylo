@@ -630,7 +630,7 @@ const callbackPool = mariadbCallbacks.createPool(process.env.DATABASE_URL);
 await getUser.run(callbackPool, { id: 1 });
 ```
 
-Reylo runs each query through the driver's `execute()`, which binds each value. The driver may send the statement a round trip after `.run()` is called, so await `.run()` before the connection's own `commit()` or `rollback()`.
+Reylo runs each query through the driver's `execute()`, which binds each value. Connect with utf8mb4: the driver writes text in the connection's charset, and stores a character that charset lacks as another. The driver may send the statement a round trip after `.run()` is called, so await `.run()` before the connection's own `commit()` or `rollback()`.
 
 It also works through Cloudflare Hyperdrive, in a Worker with Node's APIs. Hyperdrive refuses prepared statements, so Reylo uses `query()` there. Connect it with the fields of the binding:
 

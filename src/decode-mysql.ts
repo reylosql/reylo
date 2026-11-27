@@ -173,7 +173,12 @@ const refusesPrepares = new WeakSet<object>();
 /** The client a refusal is remembered on: the pool or connection under a promise wrapper, which mysql2's callback API makes anew for every call. */
 const preparesKey = (m: AnyClient): object => m.pool ?? m.connection ?? m;
 
-const isPrepareRefusal = (e: unknown) => e instanceof Error && /COM_STMT_PREPARE/.test(e.message);
+/**
+ * Whether an error is the server's refusal of a prepared statement. Only the server's own message
+ * is read, up to its first quote: mariadb's message adds the statement, and a server's message
+ * quotes values, as "Duplicate entry '…'" does.
+ */
+const isPrepareRefusal = (e: unknown) => e instanceof Error && /^[^'"]*\bCOM_STMT_PREPARE\b/.test(String((e as { sqlMessage?: unknown }).sqlMessage ?? e.message));
 
 /** The read of how a session reads a statement's text: its sql_mode, and character_set_client, the charset it reads the text in. */
 const SESSION_READ = "select @@session.sql_mode, @@session.character_set_client";
@@ -402,6 +407,8 @@ const MARIADB_OPTIONS = {
   nestTables: false,
   metaAsArray: false,
   typeCast: undefined,
+  // Reylo passes the values by position, and execute() reads only `:name` under the app's namedPlaceholders.
+  namedPlaceholders: false,
 };
 
 /** A GEOMETRY's bytes, where mariadb would give GeoJSON; only for a statement whose columns hold one, since a typeCast sends every value through mariadb's slower path. */
@@ -598,13 +605,25 @@ export async function mariadb(c: AnyClient, text: string, values: unknown[], col
       if (typeof returned?.then === "function") returned.then(resolve, reject);
     });
   let result: unknown;
-  let prepared = typeof c.execute === "function" && !refusesPrepares.has(preparesKey(c));
+  // A connection's refusal is remembered on its info, which every wrapper a pool hands out over it shares.
+  const key = (typeof c.info === "object" && c.info) || preparesKey(c);
+  let prepared = typeof c.execute === "function" && !refusesPrepares.has(key);
   if (prepared) {
+    const pool = typeof c.getConnection === "function" && typeof c.release !== "function";
     try {
-      result = await call(c, "execute");
+      // On a MySQL server the driver sends a statement's EXECUTE once its PREPARE answers, and at once
+      // where it has the statement prepared already, so one run could overtake another: each run on a
+      // connection waits for the one before it to answer.
+      result = await inTurn(pool ? undefined : c, true, async (handed) => {
+        try {
+          return await call(c, "execute");
+        } finally {
+          handed();
+        }
+      });
     } catch (e) {
       if (!isPrepareRefusal(e)) throw e;
-      refusesPrepares.add(preparesKey(c));
+      refusesPrepares.add(key);
       prepared = false;
     }
   }
@@ -620,12 +639,15 @@ export async function mariadb(c: AnyClient, text: string, values: unknown[], col
   if (!Array.isArray(result)) return [];
   if (!result.length) return result;
   const meta = () => ((result as { meta?: MariadbColumn[] }).meta ?? callbackMeta ?? []) as MariadbColumn[];
+  // execute() writes a TIME's fraction with six digits, or none where they are all zero, and mariadb
+  // 3.0 a DATETIME's or a TIMESTAMP's with none where they are all zero: each takes its column's own
+  // count, none for a column with more than six (an expression's, which MySQL reports as 31).
   if (prepared) {
-    const times = meta().flatMap((m, i) => (m.type === "TIME" ? [[i, typeof m.name === "function" ? m.name() : m.name, m.scale ?? 0] as const] : []));
+    const timed = meta().flatMap((m, i) => (m.type === "TIME" || m.type === "DATETIME" || m.type === "TIMESTAMP" ? [[i, typeof m.name === "function" ? m.name() : m.name, (m.scale ?? 0) > 6 ? 0 : (m.scale ?? 0), m.type === "TIME"] as const] : []));
     for (const row of result as Record<string | number, unknown>[]) {
-      for (const [i, name, scale] of times) {
-        const key = Array.isArray(row) ? i : name;
-        if (key !== undefined && typeof row[key] === "string") row[key] = timeOfScale(row[key] as string, scale);
+      for (const [i, name, scale, time] of timed) {
+        const at = Array.isArray(row) ? i : name;
+        if (at !== undefined && typeof row[at] === "string") row[at] = time ? timeOfScale(row[at] as string, scale) : withFraction(row[at] as string, scale);
       }
     }
   }
@@ -813,13 +835,17 @@ const GEO_TYPES = new Set(["Point", "LineString", "Polygon", "MultiPoint", "Mult
  * A value as mariadb writes it with none of the app's options: an object, which it writes as its
  * JSON text, as that text, since the app's permitSetMultiParamEntries would write it as `key` =
  * value pairs, which a per-query option does not turn off on mariadb 3. An object the driver
- * writes otherwise stays the driver's to write: bytes, a Date (from any realm, as it tells one by
- * its tag), a stream (an object with pipe() and read()), a boxed string, a GeoJSON geometry and
- * one with toSqlString(). A long.js Long goes as the BigInt it holds, which every version writes as
+ * writes otherwise stays the driver's to write: bytes, a Date (one of another realm made one of this
+ * realm's), a stream (an object with pipe() and read()), a GeoJSON geometry and one with
+ * toSqlString(); a boxed string goes as its string. A long.js Long goes as the BigInt it holds, which every version writes as
  * one integer: mariadb 2 writes a Long as its integer, and mariadb 3 as any other object.
  */
 function asMariadbValue(v: unknown): unknown {
-  if (v === null || typeof v !== "object" || v instanceof Uint8Array || v instanceof String || Object.prototype.toString.call(v) === "[object Date]") return v;
+  if (v === null || typeof v !== "object" || v instanceof Uint8Array) return v;
+  // mariadb 3.5's execute() tells a Date and a boxed string by this realm's constructors, and binds one of another realm as quoted JSON.
+  const tag = Object.prototype.toString.call(v);
+  if (tag === "[object Date]") return v instanceof Date ? v : new Date((v as Date).getTime());
+  if (tag === "[object String]") return String(v);
   const own = v as { pipe?: unknown; read?: unknown; toSqlString?: unknown; type?: unknown; __isLong__?: unknown; low?: unknown; high?: unknown; unsigned?: unknown };
   // long.js marks a Long on its prototype, so a JSON document shaped like one stays a document.
   if (own.__isLong__ === true && !Object.hasOwn(v, "__isLong__") && Number.isInteger(own.low) && Number.isInteger(own.high)) {

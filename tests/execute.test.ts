@@ -1091,7 +1091,7 @@ test("mysql: mariadb and PlanetScale, which write an array as a list of values, 
   const point = { type: "Point", coordinates: [1, 2] };
   await execute(recording as never, update, { name: { role: "admin" } });
   await execute(recording as never, update, { name: point });
-  // A stream and a boxed string are the driver's to write.
+  // A stream is the driver's to write, and a boxed string goes as its string.
   const stream = Readable.from(["hello"]);
   const boxed = new String("hello");
   await execute(recording as never, update, { name: stream });
@@ -1101,7 +1101,7 @@ test("mysql: mariadb and PlanetScale, which write an array as a list of values, 
     role = "admin";
   }
   await execute(recording as never, update, { name: new Role() });
-  // A Date from another realm stays the driver's, and long.js's Long, -2^40 and 2^64 - 1 here, goes as the BigInt it holds.
+  // A Date from another realm goes as one of this realm's, and long.js's Long, -2^40 and 2^64 - 1 here, as the BigInt it holds.
   const date = runInNewContext("new Date(0)");
   await execute(recording as never, update, { name: date });
   // long.js marks a Long on its prototype; a JSON document shaped like one stays a document.
@@ -1120,7 +1120,7 @@ test("mysql: mariadb and PlanetScale, which write an array as a list of values, 
   await execute(recording as never, update, { name: new Long(0, -256, false) });
   await execute(recording as never, update, { name: new Long(-1, -1, true) });
   await execute(recording as never, update, { name: lookalike });
-  assert.deepEqual(given, [['{"role":"admin"}'], [point], [stream], [boxed], ['{"role":"admin"}'], [date], [-(2n ** 40n)], [2n ** 64n - 1n], [JSON.stringify(lookalike)]]);
+  assert.deepEqual(given, [['{"role":"admin"}'], [point], [stream], ["hello"], ['{"role":"admin"}'], [new Date(0)], [-(2n ** 40n)], [2n ** 64n - 1n], [JSON.stringify(lookalike)]]);
   assert.equal(given[2]![0], stream);
 });
 
@@ -1540,6 +1540,81 @@ test("mysql: mariadb 3 runs through its execute(), which binds each value, and q
   const { execute: _, ...older } = conn;
   await execute(older, my, { id: 1, name: "ada" });
   assert.deepEqual(calls, ["query"]);
+});
+
+test("mysql: a BigInt outside the 64-bit integers MySQL holds is refused before any driver gets it, which mariadb's execute() would throw on inside the driver", async () => {
+  const sent: string[] = [];
+  const mariadb = { batch: async () => ({}), query: async () => (sent.push("query"), []), execute: async () => (sent.push("execute"), []) };
+  const mysql2 = { query: async () => [[], []], execute: async () => (sent.push("execute"), [[], []]) };
+  const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "select :n as n", params: ["n"] };
+  for (const client of [mariadb, mysql2]) {
+    for (const n of [-(2n ** 63n) - 1n, 2n ** 64n]) await assert.rejects(execute(client as never, q, { n }) as Promise<unknown>, new RegExp(`Parameter "n" is ${n}, outside the 64-bit integers MySQL holds`));
+    for (const n of [-(2n ** 63n), 2n ** 64n - 1n]) await execute(client as never, q, { n });
+  }
+  assert.deepEqual(sent, ["execute", "execute", "execute", "execute"]);
+});
+
+test("mysql: only the server's own refusal of a prepared statement sends mariadb to query(), not a message that quotes a value", async () => {
+  const calls: string[] = [];
+  const duplicate = Object.assign(new Error("(conn:5, no: 1062, SQLState: 23000) Duplicate entry 'COM_STMT_PREPARE' for key 'users.name'\nsql: insert into users (name) values (?)"), { sqlMessage: "Duplicate entry 'COM_STMT_PREPARE' for key 'users.name'", errno: 1062 });
+  const conn = { batch: async () => ({}), query: async () => (calls.push("query"), []), execute: async () => (calls.push("execute"), Promise.reject(duplicate)) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into users (name) values (:name)", params: ["name"] };
+  await assert.rejects(execute(conn as never, ins, { name: "COM_STMT_PREPARE" }) as Promise<unknown>, (e) => e === duplicate);
+  await assert.rejects(execute(conn as never, ins, { name: "COM_STMT_PREPARE" }) as Promise<unknown>, (e) => e === duplicate);
+  assert.deepEqual(calls, ["execute", "execute"]);
+});
+
+test("mysql: mariadb's execute() gets a Date of another realm as one of this realm's and a boxed string as its string, which mariadb 3.5 would bind as quoted JSON", async () => {
+  const given: unknown[][] = [];
+  const conn = { batch: async () => ({}), query: async () => [], execute: async (_options: unknown, values: unknown[]) => (given.push(values), []) };
+  const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "select :a, :b", params: ["a", "b"] };
+  await execute(conn as never, q, { a: runInNewContext("new Date(0)"), b: new String("hello") });
+  assert.ok(given[0]![0] instanceof Date);
+  assert.equal((given[0]![0] as Date).getTime(), 0);
+  assert.equal(given[0]![1], "hello");
+});
+
+test("mysql: through mariadb's execute(), a TIME, a DATETIME and a TIMESTAMP come back with their column's fraction digits, none past six", async () => {
+  const meta = [
+    { name: () => "t", type: "TIME", scale: 2 },
+    { name: () => "z", type: "TIME", scale: 6 },
+    { name: () => "d", type: "DATETIME", scale: 3 },
+    { name: () => "s", type: "TIMESTAMP", scale: 6 },
+    { name: () => "x", type: "TIME", scale: 31 },
+  ];
+  const conn = { batch: async () => ({}), query: async () => [], execute: async () => Object.assign([{ t: "-00:00:01.500000", z: "00:00:00", d: "2024-01-01 09:31:00", s: "2024-01-01 09:31:00.5", x: "12:00:00.000000" }], { meta }) };
+  const q: QueryModule<"mysql"> = { dialect: "mysql", sql: "select * from t", params: [] };
+  assert.deepEqual(plain((await execute(conn as never, q, {})) as object[]), [{ t: "-00:00:01.50", z: "00:00:00.000000", d: "2024-01-01T09:31:00.000", s: "2024-01-01T09:31:00.500000", x: "12:00:00" }]);
+});
+
+test("mysql: mariadb's execute() runs a statement on an app's pool made with namedPlaceholders, and keeps the order runs were called in on one connection, one prepared already or not", { skip: mariadbLive }, async () => {
+  const own = await mysqlDatabase("reylo_execute_mariadb_prepared", "create table t (id int primary key, s varchar(80))");
+  const u = new URL(MYSQL!);
+  const connection = { host: u.hostname, port: Number(u.port), user: decodeURIComponent(u.username) || "root", password: decodeURIComponent(u.password), database: new URL(own.url).pathname.slice(1) };
+  const ins: QueryModule<"mysql"> = { dialect: "mysql", sql: "insert into t (id, s) values (:id, :s)", params: ["id", "s"] };
+  const all: QueryModule<"mysql"> = { dialect: "mysql", sql: "select s from t order by id", params: [] };
+  try {
+    const pool = driver("mariadb").createPool({ ...connection, connectionLimit: 1, namedPlaceholders: true });
+    try {
+      await execute(pool, ins, { id: 1, s: "ada" });
+      assert.deepEqual(plain((await execute(pool, all, {})) as object[]), [{ s: "ada" }]);
+    } finally {
+      await pool.end();
+    }
+    // The select is prepared already, the insert not: the driver would send the select's EXECUTE first.
+    const conn = await driver("mariadb").createConnection(connection);
+    try {
+      await execute(conn, all, {});
+      const wrote = execute(conn, ins, { id: 2, s: "grace" });
+      const read = execute(conn, all, {});
+      await wrote;
+      assert.deepEqual(plain((await read) as object[]), [{ s: "ada" }, { s: "grace" }]);
+    } finally {
+      await conn.end();
+    }
+  } finally {
+    await own.drop();
+  }
 });
 
 test("mysql: mariadb's callback API answers through the callback, and its errors reject", async () => {
