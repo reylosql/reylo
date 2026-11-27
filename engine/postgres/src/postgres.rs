@@ -1414,14 +1414,15 @@ impl<'a> Engine<'a> {
         let (refusing, (), trust) = (refusing?, prefetched?, trust?);
         let rows = refusing.unwrap_or_default();
         // A write lands in the rows of the tables it reaches, and meets each one's own constraints:
-        // an INSERT, the table it names, or the partition it is routed to; an UPDATE or a MERGE
-        // without ONLY, the table and each of its children too. A column refuses null where any
-        // of them refuses it there.
+        // an INSERT, the table it names, or the partition it is routed to; an UPDATE without ONLY,
+        // the table and each of its children too. A column refuses null where any of them refuses
+        // it there.
+        let reaches = |n: i32, relation: &str| parsed.reaching.iter().any(|(p, r)| *p == n && r == relation);
         let mut below: Vec<String> = Vec::new();
         for row in &rows {
             let Some(relation) = row.first().and_then(as_str) else { continue };
             let partitioned = row.get(8).and_then(as_bool).unwrap_or(false);
-            if partitioned || parsed.reaching.iter().any(|r| r == relation) {
+            if partitioned || parsed.reaching.iter().any(|(_, r)| r == relation) {
                 below.extend(row.get(7).and_then(as_strings).unwrap_or_default());
             }
         }
@@ -1433,35 +1434,38 @@ impl<'a> Engine<'a> {
         let theirs = own_refusals(&below_rows, &trust);
         // Each partitioned table among them, which holds no rows of its own.
         let partitioned: HashSet<&str> = rows.iter().chain(&below_rows).filter(|row| row.get(8).and_then(as_bool).unwrap_or(false)).filter_map(|row| row.first().and_then(as_str)).collect();
-        // Per relation, by attribute: whether the column refuses null.
-        let mut refuses: HashMap<(String, i32), bool> = HashMap::new();
+        // Per relation, by attribute: whether the column refuses null in a write to the relation
+        // alone, and in one that reaches its children too.
+        let mut refuses: HashMap<(String, i32), (bool, bool)> = HashMap::new();
         for row in &rows {
             let (Some(relation), Some(attnum), Some(column)) = (row.first().and_then(as_str), row.get(1).and_then(as_u32), row.get(2).and_then(as_str)) else { continue };
-            let reached: Vec<String> = if partitioned.contains(relation) || parsed.reaching.iter().any(|r| r == relation) { row.get(7).and_then(as_strings).unwrap_or_default() } else { Vec::new() };
-            let itself = !partitioned.contains(relation) || reached.is_empty();
-            let refused = (itself && own.get(&(relation, column)).copied().unwrap_or(false)) || reached.iter().filter(|t| !partitioned.contains(t.as_str())).any(|t| theirs.get(&(t.as_str(), column)).copied().unwrap_or(false));
+            let descendants = row.get(7).and_then(as_strings).unwrap_or_default();
+            let below = descendants.iter().filter(|t| !partitioned.contains(t.as_str())).any(|t| theirs.get(&(t.as_str(), column)).copied().unwrap_or(false));
+            let itself = own.get(&(relation, column)).copied().unwrap_or(false);
+            let refused = if partitioned.contains(relation) && !descendants.is_empty() { (below, below) } else { (itself, itself || below) };
             refuses.insert((relation.to_string(), attnum as i32), refused);
         }
         let columns = self.columns_by_name.borrow();
-        // The column `column` of `relation` names, and whether it refuses null; a column the
-        // refusals do not name keeps its NOT NULL alone.
-        let column_of = |relation: &String, column: &analyze::Filled| {
+        // The column `column` of `relation` names, and whether it refuses null in a write that
+        // reaches children (`reach`) or not; a column the refusals do not name keeps its NOT NULL
+        // alone.
+        let column_of = |relation: &String, column: &analyze::Filled, reach: bool| {
             let known = columns.get(relation)?;
             let (attnum, (name, not_null)) = match column {
                 analyze::Filled::Name(name) => known.iter().find(|(_, (c, _))| c == name),
                 analyze::Filled::Position(i) => known.iter().nth(*i),
             }?;
-            Some((name.clone(), refuses.get(&(relation.clone(), *attnum)).copied().unwrap_or(*not_null)))
+            Some((name.clone(), refuses.get(&(relation.clone(), *attnum)).map_or(*not_null, |(alone, reaching)| if reach { *reaching } else { *alone })))
         };
         let mut fills: HashMap<i32, bool> = HashMap::new();
         for (n, relation, column) in &parsed.bare {
-            if let Some((_, refused)) = column_of(relation, column) {
+            if let Some((_, refused)) = column_of(relation, column, reaches(*n, relation)) {
                 *fills.entry(*n).or_insert(true) &= !refused;
             }
         }
         out.params.extend(fills.into_iter().filter(|(_, nullable)| *nullable).map(|(n, _)| n));
         for (n, relation, column) in checked {
-            if let Some((name, true)) = column_of(relation, column) {
+            if let Some((name, true)) = column_of(relation, column, reaches(*n, relation)) {
                 out.refused.push((*n, relation.clone(), name));
             }
         }

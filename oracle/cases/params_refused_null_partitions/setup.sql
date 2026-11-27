@@ -13,7 +13,8 @@ create table mixed_eu (region text not null, p int, gp int generated always as (
 alter table mixed attach partition mixed_eu for values in ('eu');
 create table mixed_rest partition of mixed default;
 -- An INSERT into a table with children lands in the table itself, an UPDATE without ONLY in its
--- children's rows too, and an UPDATE ONLY in its own. The parent's NO INHERIT CHECK refuses NULL
+-- children's rows too, and an UPDATE ONLY in its own, each write apart, as an UPDATE in a WITH
+-- query beside the INSERT is. The parent's NO INHERIT CHECK refuses NULL
 -- in `x` in its own rows, and the child's CHECK in `y` in the child's.
 create table parent (id int primary key, x int check (x is not null) no inherit, y int);
 create table child (check (coalesce(y, 0) > 0)) inherits (parent);
