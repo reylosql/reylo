@@ -1,8 +1,8 @@
 //! The errors a MySQL statement may raise, where it runs only the server's own code
 //! ([`reylo_engine_core::errors`]): no trigger fires on a table it writes, and it calls no stored
 //! function, itself or through a view it reads. Its errors then name only the keys, foreign keys,
-//! checks and columns of the tables it writes and reads, which is all the run time reads from a
-//! MySQL message (src/query-error.ts).
+//! checks and columns of the tables it writes and reads, or a column it makes itself, which is all
+//! the run time reads from a MySQL message (src/query-error.ts).
 
 use reylo_engine_core::types::StatementKind;
 use crate::host::Host;
@@ -17,13 +17,22 @@ use serde_json::Value;
 /// `{called}` the words it calls as functions, which a stored function of any schema may answer to,
 /// since a call may name the schema, but for Reylo Migrate's shadows (`reylo_shadow_…`), each named
 /// at random and dropped by the one check that made it, other than the session's own; `{cascades}` whether a row it writes may change a key
-/// another table's foreign key refers to. One row `('open', why)` for each trigger and stored
+/// another table's foreign key refers to; `{own}` whether it holds a RECURSIVE WITH query or a
+/// JSON_TABLE with ERROR ON ERROR, and `{decimal}` whether it casts to DECIMAL (or DEC). One row `('open', why)` for each trigger and stored
 /// function that may run, for each written table whose triggers the session cannot see (it holds no
 /// TRIGGER privilege there, and `information_schema` shows a table's triggers only to one that
 /// does), for each view whose tables it cannot see and each view of a table of another schema, and
 /// one `('name', code, field, name)` for each name an error may carry.
 /// What a write reaches: the written tables, a view's tables, and, where `{cascades}`, the tables a
 /// foreign key's action writes in turn.
+/// A value error names the column a value does not fit: a column of those tables, or one the
+/// statement makes itself, which no catalog lists. MySQL types a RECURSIVE WITH query's columns by
+/// its anchors alone, so a recursive member's value may not fit one, and a JSON_TABLE's columns by
+/// their declarations, which a value fails under ERROR ON ERROR (MySQL refuses a DEFAULT that does
+/// not fit before the statement runs). It names a cast to DECIMAL out of range by its select item,
+/// an alias or the cast's own text. Where the statement or a view it reads holds a RECURSIVE WITH
+/// query or a JSON_TABLE with ERROR ON ERROR, no value error's column is narrowed, and where either
+/// casts to DECIMAL, no out-of-range value's.
 pub(crate) const ERRORS_QUERY: &str = "with recursive w(t) as ( \
       select table_name from information_schema.tables where table_schema = database() and table_name in ({written}) \
       union select u.table_name from information_schema.view_table_usage u join w on u.view_name = w.t where u.view_schema = database() and u.table_schema = database() \
@@ -56,6 +65,10 @@ pub(crate) const ERRORS_QUERY: &str = "with recursive w(t) as ( \
       union all select n.code, 'column', cast(c.column_name as char) from information_schema.columns c join rel on c.table_name = rel.t \
         cross join (select 'ER_WARN_DATA_OUT_OF_RANGE' as code union all select 'WARN_DATA_TRUNCATED' union all select 'ER_TRUNCATED_WRONG_VALUE' \
           union all select 'ER_TRUNCATED_WRONG_VALUE_FOR_FIELD' union all select 'ER_DATA_TOO_LONG') n where c.table_schema = database() \
+        and not {own} and not exists (select 1 from information_schema.views v join rel on v.table_name = rel.t where v.table_schema = database() \
+          and (v.view_definition like '%recursive%' or v.view_definition like '%json_table%error on error%')) \
+        and not (n.code = 'ER_WARN_DATA_OUT_OF_RANGE' and ({decimal} or exists ( \
+          select 1 from information_schema.views v join rel on v.table_name = rel.t where v.table_schema = database() and v.view_definition like '%decimal%'))) \
     ) k";
 
 /// A string literal every MySQL session reads as written: a quote doubled. A name with a backslash
@@ -82,12 +95,15 @@ fn request(kind: Option<StatementKind>, tables: &Tables, sql: &str) -> Option<St
     let called = called(sql, Dialect::Mysql);
     // An INSERT changes no key but through ON DUPLICATE KEY UPDATE or as a REPLACE, which deletes.
     let cascades = !written.is_empty() && (kind != Some(StatementKind::Insert) || has_word(sql, Dialect::Mysql, &["update", "replace"]));
+    let own = has_word(sql, Dialect::Mysql, &["recursive"]) || (has_word(sql, Dialect::Mysql, &["json_table"]) && has_word(sql, Dialect::Mysql, &["error"]));
     Some(
         ERRORS_QUERY
             .replace("{written}", &list(written.iter().map(String::as_str)))
             .replace("{read}", &list(read.iter().map(String::as_str)))
             .replace("{called}", &list(called.iter().map(String::as_str)))
-            .replace("{cascades}", if cascades { "true" } else { "false" }),
+            .replace("{cascades}", if cascades { "true" } else { "false" })
+            .replace("{own}", if own { "true" } else { "false" })
+            .replace("{decimal}", if has_word(sql, Dialect::Mysql, &["decimal", "dec"]) { "true" } else { "false" }),
     )
 }
 
