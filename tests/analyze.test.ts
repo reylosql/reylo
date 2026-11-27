@@ -300,11 +300,11 @@ test("on SQLite, a schema changed and changed back while a statement is analyzed
       ...c,
       // The first analysis runs on a migration, which is reverted before it ends: the fingerprint
       // after it is the one before it, and only the schema's stamp says it moved.
-      analyze: async (sql) => {
-        if (analyses++ > 0) return c.analyze(sql);
+      analyzeFor: async (sql, label) => {
+        if (analyses++ > 0) return c.analyzeFor(sql, label);
         exec(rebuild("text"));
         try {
-          return await c.analyze(sql);
+          return await c.analyzeFor(sql, label);
         } finally {
           exec(rebuild("text not null"));
         }
@@ -321,13 +321,14 @@ test("on SQLite, a schema changed and changed back while a statement is analyzed
 test("an analysis whose connection says its answers came from replicas that had not shown the schema is given but not kept", async () => {
   const { root, env } = project();
   let replicas = false;
-  const outcome = await withConnections("sqlite", (c) => ({ ...c, kept: () => replicas && c.kept() }), () => analyze(root, env, SELECT));
+  const change = (c: Connection): Connection => ({ ...c, analyzeFor: async (sql, label) => ({ ...(await c.analyzeFor(sql, label)), kept: replicas }) });
+  const outcome = await withConnections("sqlite", change, () => analyze(root, env, SELECT));
   assert.ok(outcome.ok && outcome.source === "database");
   assert.deepEqual(outcome.analysis.columns.map((c) => c.name), ["id", "name"]);
   assert.ok(!existsSync(outcome.entry), "an entry was written");
   // Once the answers came from servers that had shown it, the analysis is kept.
   replicas = true;
-  const kept = await withConnections("sqlite", (c) => ({ ...c, kept: () => replicas && c.kept() }), () => analyze(root, env, SELECT));
+  const kept = await withConnections("sqlite", change, () => analyze(root, env, SELECT));
   assert.ok(kept.ok && kept.source === "database" && existsSync(kept.entry));
 });
 

@@ -28,82 +28,96 @@ struct Connection {
     /// The fingerprint each server answered the schema's fingerprint with last, by the name it
     /// answers with ([`Server::answered`]).
     shown: HashMap<Option<String>, String>,
-    /// The fingerprint read last, which the loader labels the next analysis with.
-    label: Option<String>,
-    /// The servers that answered the last analysis without having shown its label's schema.
-    unshown: BTreeSet<Option<String>>,
+    /// Every server the connection has heard from.
+    seen: BTreeSet<Option<String>>,
+    /// The servers whose answers `answers` may hold: each that answered since it was last cleared.
+    held: BTreeSet<Option<String>>,
 }
 
-/// How many more times the schema's fingerprint is read for servers an analysis heard from that
-/// had not shown it: a load balancer that sends each request to the next replica reaches each in turn.
-const UNSHOWN_READS: usize = 4;
+/// The most reads of the schema's fingerprint after an analysis, to hear again from each server the
+/// engine holds answers of: a load balancer that sends each request to the next replica reaches each
+/// in turn.
+const CONFIRM_READS: usize = 8;
 
 impl Connection {
     fn new(server: Server, version: String) -> Connection {
-        Connection { server, version, answers: AnswerCache::until_cleared(), shown: HashMap::new(), label: None, unshown: BTreeSet::new() }
+        Connection { server, version, answers: AnswerCache::until_cleared(), shown: HashMap::new(), seen: BTreeSet::new(), held: BTreeSet::new() }
     }
 
-    /// Notes the fingerprint `schema` holds as the one its server showed, where one server answered it.
-    fn note(&mut self, schema: &Result<crate::Schema, Value>) {
+    /// Drops the engine's answers, and with them the servers they came from.
+    fn clear(&mut self) {
+        self.answers.clear();
+        self.held.clear();
+    }
+
+    /// The schema's fingerprint read once, and the server that answered it, noted as the one it showed.
+    fn read(&mut self) -> (Result<crate::Schema, Value>, Option<Option<String>>) {
+        self.server.answered();
+        let schema = self.fingerprint();
         let by = self.server.answered();
-        if let (Ok(schema), [server]) = (schema, &by.into_iter().collect::<Vec<_>>()[..]) {
+        self.seen.extend(by.iter().cloned());
+        let server = (by.len() == 1).then(|| by.into_iter().next()).flatten();
+        if let (Ok(schema), Some(server)) = (&schema, &server) {
             self.shown.insert(server.clone(), schema.fingerprint.clone());
-            self.unshown.remove(server);
         }
+        (schema, server)
     }
-}
 
-impl Connection {
-    /// The schema's fingerprint; a failure is the answer the program gives for it. An executable
+    /// The schema's fingerprint, with a stamp that moves each time a server the connection had not
+    /// heard from answers: never on one server, and once per replica where a load balancer sends the
+    /// connection's requests to several, so that the loader makes an analysis again when a replica
+    /// first answers the read after it ([`kept`]); a failure is the answer the program gives for it.
+    fn schema(&mut self) -> Result<crate::Schema, Value> {
+        let (schema, _) = self.read();
+        schema.map(|schema| crate::Schema { stamp: Some(self.seen.len() as i64), ..schema })
+    }
+
+    /// The schema's fingerprint, in one request, so that one server answers it. An executable
     /// function's result is the server's configuration's, which only a server of 26.2 or later
     /// lists: where the configuration defines one and the server can't list it, there is no
     /// fingerprint to keep an analysis by.
-    fn schema(&mut self) -> Result<crate::Schema, Value> {
-        self.server.answered();
-        let schema = self.fingerprint();
-        self.note(&schema);
-        for _ in 0..UNSHOWN_READS {
-            if schema.is_err() || self.unshown.is_empty() {
-                break;
-            }
-            let again = self.fingerprint();
-            self.note(&again);
-        }
-        self.label = schema.as_ref().ok().map(|schema| schema.fingerprint.clone());
-        schema
-    }
-
     fn fingerprint(&self) -> Result<crate::Schema, Value> {
         use crate::engines::clickhouse::schema_fingerprint as fingerprint;
-        let rows = |sql: &str| match self.server.ask(sql) {
-            Ok(Outcome::Rows(rows)) => Ok(rows),
-            Ok(outcome) => Err(failure(&self.server, outcome)),
-            Err(e) => Err(json!({ "status": "unreachable", "message": e })),
+        let signatures = fingerprint::lists_signatures(&self.version);
+        let rows = match self.server.ask(&fingerprint::query(signatures)) {
+            Ok(Outcome::Rows(rows)) => rows,
+            Ok(outcome) => return Err(failure(&self.server, outcome)),
+            Err(e) => return Err(json!({ "status": "unreachable", "message": e })),
         };
-        let base = rows(&fingerprint::query(false))?;
-        let executable = base.first().and_then(|row| row.get(1)).and_then(|n| n.as_u64().or_else(|| n.as_str()?.parse().ok())).unwrap_or(0) > 0;
-        if !executable {
-            return Ok(crate::Schema::of(&base, None));
-        }
-        if !fingerprint::lists_signatures(&self.version) {
+        let executable = rows.first().and_then(|row| row.get(1)).and_then(|n| n.as_u64().or_else(|| n.as_str()?.parse().ok())).unwrap_or(0) > 0;
+        if executable && !signatures {
             return Err(json!({ "status": "error", "message": format!("ClickHouse {} lists no executable function's arguments and result, which 26.2 and later do", self.version) }));
         }
-        Ok(crate::Schema::of(&rows(&fingerprint::query(true))?, None))
+        Ok(crate::Schema::of(&rows, None))
     }
 
-    /// The analysis of one statement, and whether it may be kept under the fingerprint read last
-    /// ([`kept`]); a failure is the answer the program gives for it.
-    fn analyze(&mut self, sql: &str) -> Result<(Analysis, bool), Value> {
-        let shown = self.shown.clone();
+    /// The analysis of one statement, and, where the loader names the fingerprint it would keep it
+    /// under (`label`), whether it may be kept under it ([`kept`]); a failure is the answer the
+    /// program gives for it.
+    fn analyze(&mut self, sql: &str, label: Option<&str>) -> Result<(Analysis, bool), Value> {
+        // A connection opened since the loader read the fingerprint has seen no server show it.
+        if label.is_some() && self.shown.is_empty() {
+            self.read();
+        }
+        let before = self.shown.clone();
         self.server.answered();
         let analyzed = answers::analyze(&self.server, sql, &mut self.answers);
         let by = self.server.answered();
-        let keep = kept(self.label.as_deref(), &shown, &by);
-        // Answers a replica gave before it showed the schema are no answers to keep for the next
-        // statement, and the next read of the fingerprint asks it for its schema.
+        self.seen.extend(by.iter().cloned());
+        self.held.extend(by);
+        let keep = match label {
+            None => true,
+            Some(label) => {
+                let (held, one) = (self.held.clone(), self.seen.len() == 1);
+                kept(label, &before, &held, one, || match self.read() {
+                    (Ok(schema), Some(server)) => Some((server, schema.fingerprint)),
+                    _ => None,
+                })
+            }
+        };
+        // Answers a replica gave for another schema are no answers for the next statement either.
         if !keep {
-            self.answers.clear();
-            self.unshown = by.into_iter().filter(|server| shown.get(server) != self.label.as_ref()).collect();
+            self.clear();
         }
         match analyzed {
             Ok(analysis) => Ok((analysis, keep)),
@@ -113,14 +127,42 @@ impl Connection {
     }
 }
 
-/// Whether an analysis answered by the servers `by` may be kept under `label`, the fingerprint
-/// read last: where each of them had answered the schema's fingerprint with `label` before the
-/// analysis began (`shown`). A replica applies a migration after the one that ran it, and its schema
-/// only moves forward, so one that had shown the label's schema answers for it; one that had not may
-/// answer for the schema before, as when it refuses a table the migration just made. Every analysis
-/// on one server is kept, its fingerprint read on the same server.
-fn kept(label: Option<&str>, shown: &HashMap<Option<String>, String>, by: &BTreeSet<Option<String>>) -> bool {
-    label.is_some_and(|label| by.iter().all(|server| shown.get(server).is_some_and(|f| f == label)))
+/// Whether an analysis may be kept under `label`, the fingerprint the loader would keep it under:
+/// where each server whose answers the engine holds (`held`) had answered the schema's fingerprint
+/// with `label` before the analysis began (`before`), and, where the connection has heard from more
+/// than one server, answers it with `label` again after it, read until each has (`read`, at most
+/// [`CONFIRM_READS`] times). A load balancer may send each of the connection's requests to another
+/// replica, and replicas apply a migration one after another; a replica's schema only moves forward,
+/// so one that showed the label's schema before and after the analysis answered for it throughout,
+/// where one that had not may answer for the schema before, as by refusing a table the migration
+/// just made, or for the one after. On one server, the loader's own read after the analysis reaches
+/// the same server, and a server heard from for the first time moves the schema's stamp. Replicas
+/// that answer with one name, as a shared `display_name` or a proxy that sets its own makes them, are
+/// one server here.
+fn kept(label: &str, before: &HashMap<Option<String>, String>, held: &BTreeSet<Option<String>>, one: bool, mut read: impl FnMut() -> Option<(Option<String>, String)>) -> bool {
+    if !held.iter().all(|server| before.get(server).is_some_and(|f| f == label)) {
+        return false;
+    }
+    if one {
+        return true;
+    }
+    let mut again = BTreeSet::new();
+    for _ in 0..CONFIRM_READS {
+        if held.iter().all(|server| again.contains(server)) {
+            return true;
+        }
+        match read() {
+            Some((server, fingerprint)) if held.contains(&server) => {
+                if fingerprint != label {
+                    return false;
+                }
+                again.insert(server);
+            }
+            Some(_) => {}
+            None => return false,
+        }
+    }
+    held.iter().all(|server| again.contains(server))
 }
 
 /// The statements of one command line's run, analyzed on one server, which keeps the engine's
@@ -139,11 +181,11 @@ impl Session {
 
     /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
     pub fn forget(&mut self) {
-        self.connection.answers.clear();
+        self.connection.clear();
     }
 
     pub fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
-        self.connection.analyze(sql).map(|(analysis, _)| analysis).map_err(|answer| Failure::of(&answer))
+        self.connection.analyze(sql, None).map(|(analysis, _)| analysis).map_err(|answer| Failure::of(&answer))
     }
 }
 
@@ -171,7 +213,7 @@ impl Program for Clickhouse {
             },
             "run" => match self.connections.get_mut(&id) {
                 None => closed(id),
-                Some(c) => match c.analyze(sql) {
+                Some(c) => match c.analyze(sql, request["label"].as_str()) {
                     Ok((analysis, kept)) => json!({ "status": "analysis", "analysis": analysis, "kept": kept }),
                     Err(failure) => failure,
                 },
@@ -198,7 +240,7 @@ impl Program for Clickhouse {
             "forget" => match self.connections.get_mut(&id) {
                 None => closed(id),
                 Some(c) => {
-                    c.answers.clear();
+                    c.clear();
                     json!({ "status": "ok" })
                 }
             },
@@ -268,19 +310,31 @@ mod tests {
     }
 
     #[test]
-    fn an_analysis_is_kept_where_each_server_that_answered_it_had_shown_the_schema() {
+    fn an_analysis_is_kept_where_each_server_it_heard_from_showed_the_schema_before_and_after() {
         let server = |name: &str| Some(name.to_string());
-        let shown: HashMap<Option<String>, String> = [(server("replica1"), "new".to_string()), (server("replica2"), "old".to_string())].into();
-        let by = |names: &[&str]| names.iter().map(|n| server(n)).collect::<BTreeSet<_>>();
-        assert!(kept(Some("new"), &shown, &by(&["replica1"])));
-        // A replica that had shown the schema before the migration, or never answered the fingerprint.
-        assert!(!kept(Some("new"), &shown, &by(&["replica1", "replica2"])));
-        assert!(!kept(Some("new"), &shown, &by(&["replica3"])));
-        // No fingerprint to label it with.
-        assert!(!kept(None, &shown, &by(&["replica1"])));
-        // A server whose answers carry no name is one server, as it was before names were read.
-        let unnamed: HashMap<Option<String>, String> = [(None, "new".to_string())].into();
-        assert!(kept(Some("new"), &unnamed, &[None].into()));
-        assert!(!kept(Some("new"), &unnamed, &[None, server("replica1")].into()));
+        let set = |names: &[&str]| names.iter().map(|n| server(n)).collect::<BTreeSet<_>>();
+        let shown = |pairs: &[(&str, &str)]| pairs.iter().map(|&(n, f)| (server(n), f.to_string())).collect::<HashMap<_, _>>();
+        // The reads after the analysis, in turn; `None` once they run out.
+        let reads = |answers: &[(&str, &str)]| {
+            let mut answers: Vec<Option<(Option<String>, String)>> = answers.iter().map(|&(n, f)| Some((server(n), f.to_string()))).collect();
+            answers.reverse();
+            move || answers.pop().flatten()
+        };
+        // One server: shown before, and the loader's read after reaches it.
+        assert!(kept("new", &shown(&[("a", "new")]), &set(&["a"]), true, reads(&[])));
+        assert!(!kept("new", &shown(&[("a", "old")]), &set(&["a"]), true, reads(&[])));
+        // Two replicas that showed the schema before and show it again after.
+        assert!(kept("new", &shown(&[("a", "new"), ("b", "new")]), &set(&["a", "b"]), false, reads(&[("a", "new"), ("b", "new")])));
+        // One that had not shown it, as a replica the migration has not reached.
+        assert!(!kept("new", &shown(&[("a", "new"), ("b", "old")]), &set(&["a", "b"]), false, reads(&[("a", "new"), ("b", "new")])));
+        // One that moved past it while the analysis ran.
+        assert!(!kept("old", &shown(&[("a", "old"), ("b", "old")]), &set(&["a", "b"]), false, reads(&[("a", "new"), ("b", "old")])));
+        // A replica whose answers the engine holds none of says nothing of the analysis.
+        assert!(kept("new", &shown(&[("a", "new")]), &set(&["a"]), false, reads(&[("c", "old"), ("a", "new")])));
+        // One the reads never reach again, or a read that fails.
+        assert!(!kept("new", &shown(&[("a", "new"), ("b", "new")]), &set(&["a", "b"]), false, reads(&[("a", "new"); CONFIRM_READS])));
+        assert!(!kept("new", &shown(&[("a", "new"), ("b", "new")]), &set(&["a", "b"]), false, reads(&[("a", "new")])));
+        // A server whose answers carry no name is one server, as before names were read.
+        assert!(kept("new", &[(None, "new".to_string())].into(), &[None].into(), true, reads(&[])));
     }
 }
