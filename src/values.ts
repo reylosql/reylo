@@ -1256,9 +1256,8 @@ export function holdsArray(kind: Kind): boolean {
   return holds;
 }
 
-/** A name as SQL writes it: bare where it can be, else quoted. */
-const ident = (name: string) => (/^[a-z_][a-z0-9_]*$/.test(name) && !RESERVED.has(name) ? name : `"${name.replace(/"/g, '""')}"`);
-const RESERVED: ReadonlySet<string> = new Set(["all", "and", "any", "array", "as", "case", "check", "column", "constraint", "default", "do", "else", "end", "false", "for", "from", "group", "having", "in", "limit", "not", "null", "offset", "on", "or", "order", "row", "select", "table", "then", "to", "true", "union", "user", "when", "where", "with"]);
+/** A name as SQL reads it whatever it is, a keyword (`current_date`) or mixed case included: quoted. */
+const ident = (name: string) => `"${name.replace(/"/g, '""')}"`;
 
 /** Why a Postgres array is refused: it holds `depth` dimensions, and its type `declared`; `path` names the row value's field that holds it. */
 function tooDeep(column: string, depth: number, declared: number, path?: FieldPath): DecodeError {

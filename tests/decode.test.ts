@@ -579,13 +579,13 @@ test("a Postgres array column holds one dimension, and an array the statement bu
   // A field of a row inside an array is read off the column only once the row is, so the error offers no field to select.
   await assert.rejects(async () => execute(client([{ ...plain, ps: [null, { a: 1, b: [[3]] }] }]), rows, { id: 1 }), /Column "ps" holds, in its row value's field "b", an array of 2 dimensions, and its type has one: [^]* doesn't enforce\. Set allow_nested_arrays: true/);
   await assert.rejects(async () => execute(client([{ ...plain, outer: { inner: { a: 1, b: [[[1]]] } } }]), rows, { id: 1 }), /Column "outer" holds, in its row value's field "inner\.b", an array of 3 dimensions/);
-  // The field to select is written with each name quoted where SQL needs it.
+  // The field to select is written with each name quoted, a keyword or mixed case included.
   const quoted: QueryModule<"postgres"> = { ...probe, columns: [["row", `(${JSON.stringify(["B", "int[]"])})`]] };
   await assert.rejects(async () => execute(client([{ row: { B: [[1]] } }]), quoted, { id: 1 }), /Select to_jsonb\(\("row"\)\."B"\) to read that field as JSON/);
   // Of two fields or columns of one name the row holds the last one's value, which only its own kind holds to its dimensions.
   const twice: QueryModule<"postgres"> = { ...probe, columns: [["x", "int[]"], ["x", "int[][]"], ["r", `(${JSON.stringify(["y", "int[]"])},${JSON.stringify(["y", "int[][]"])})`]] };
   assert.deepEqual(await execute(client([{ x: [[1]], r: { y: [[2]] } }]), twice, { id: 1 }), [{ x: [[1]], r: { y: [[2]] } }]);
-  await assert.rejects(async () => execute(client([{ x: [[1]], r: { y: [[[2]]] } }]), twice, { id: 1 }), /Column "r" holds, in its row value's field "y", an array of 3 dimensions, and its type has 2: .* Select to_jsonb\(\(r\)\.y\) to read that field as JSON/);
+  await assert.rejects(async () => execute(client([{ x: [[1]], r: { y: [[[2]]] } }]), twice, { id: 1 }), /Column "r" holds, in its row value's field "y", an array of 3 dimensions, and its type has 2: .* Select to_jsonb\(\("r"\)\."y"\) to read that field as JSON/);
   // Under `allow_nested_arrays: true` each field is typed at any depth, and nothing is refused.
   assert.deepEqual(await execute(client([{ ...plain, p: { a: 1, b: [[1, 2]] } }]), { ...rows, nestedArrays: true }, { id: 1 }), [{ ...plain, p: { a: 1, b: [[1, 2]] } }]);
 });
