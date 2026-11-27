@@ -22,6 +22,11 @@ export function cloneJson<T>(value: T): T {
   return value === undefined ? value : JSON.parse(JSON.stringify(value));
 }
 
+/** `o` with `value` under `key` as its own key, `__proto__` too, which an assignment would take as the object's prototype. */
+function put(o: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(o, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
 /**
  * The value with the schema's defaults filled in, as ajv's `useDefaults` fills them (a
  * JSON parameter's default is its schema's `default`): a key `properties`
@@ -38,7 +43,7 @@ export function withDefaults(schema: Schema, value: unknown): unknown {
     const o: Record<string, unknown> = { ...(value as Object_) };
     const properties = (s.properties ?? {}) as Record<string, Schema>;
     for (const [key, sub] of Object.entries(properties)) {
-      if (!holds(o, key) && sub !== null && typeof sub === "object" && "default" in sub) o[key] = cloneJson((sub as Object_).default);
+      if (!holds(o, key) && sub !== null && typeof sub === "object" && "default" in sub) put(o, key, cloneJson((sub as Object_).default));
     }
     const patterns = Object.entries((s.patternProperties ?? {}) as Record<string, Schema>).map(([p, sub]) => [regex(p), sub] as const);
     for (const key of Object.keys(o)) {
@@ -57,7 +62,7 @@ export function withDefaults(schema: Schema, value: unknown): unknown {
       if (!named && s.additionalProperties !== undefined) o[key] = withDefaults(s.additionalProperties as Schema, o[key]);
     }
     if (s.dependentSchemas && typeof s.dependentSchemas === "object") {
-      for (const [key, sub] of Object.entries(s.dependentSchemas as Record<string, Schema>)) if (holds(o, key)) Object.assign(o, withDefaults(sub, o) as object);
+      for (const [key, sub] of Object.entries(s.dependentSchemas as Record<string, Schema>)) if (holds(o, key)) for (const [k, v] of Object.entries(withDefaults(sub, o) as object)) put(o, k, v);
     }
     out = o;
   } else if (Array.isArray(value)) {

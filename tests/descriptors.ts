@@ -102,6 +102,8 @@ export function lite(name: string): EngineType {
     case "text": return text;
     case "blob": return { kind: "bytes" };
     case "numeric": return stored("NUMERIC");
+    // A number SQLite computes as an INTEGER or a REAL, by the value: `ceil` of a NUMERIC.
+    case "number": return { kind: "union", members: [lite("integer"), lite("real")] };
     case "bool": return stored("BOOLEAN");
     default: throw new Error(`no SQLite type ${name}`);
   }

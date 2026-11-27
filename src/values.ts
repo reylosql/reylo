@@ -401,7 +401,8 @@ export function columnKind(t: EngineType, dialect: Dialect): Kind {
     case "map":
       return dialect === "postgres" && name === "hstore" ? "hstore" : "unknown";
     case "union":
-      if (dialect === "sqlite") return "label" in t && t.label !== undefined ? sqliteDeclaredKind(t.label) : "unknown";
+      // SQLite: what a declared column stores, or a number SQLite computes as an INTEGER or a REAL.
+      if (dialect === "sqlite" && "label" in t && t.label !== undefined) return sqliteDeclaredKind(t.label);
       if (dialect === "postgres" && (name === "inet" || name === "cidr")) return "text";
       return either(t.members.map((m) => columnKind(m, dialect)));
     case "tagged_union":

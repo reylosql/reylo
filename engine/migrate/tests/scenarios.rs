@@ -516,6 +516,7 @@ for_each_dialect!(
     a_change_split_across_tables_is_said_partway,
     rows_failures_on_postgres_say_only_what_they_know,
     a_not_null_the_rows_break_is_named_by_its_column,
+    a_publications_sequences_and_exceptions_are_its_own,
     files_that_cannot_run_atomically_are_refused,
     a_lone_statement_cut_off_that_landed,
     a_lone_statement_cut_off_that_did_not_land,
@@ -2196,6 +2197,48 @@ async fn a_not_null_the_rows_break_is_named_by_its_column(mut p: P) {
     let out = p.output();
     assert_has!(&out, r"✗ The migration 20261027110001_nick_2\.sql failed on rows with nulls in people\.nick\n[\s\S]*    select \* from people where nick is null;\n[\s\S]*change people\.nick in ");
     assert_eq!(p.rows(&listed_query(&out)).await.iter().map(|r| r.text("id").to_string()).collect::<Vec<_>>(), ["1"]);
+}
+
+/// On Postgres 19, a publication of all sequences, and the tables its all tables leave out, are
+/// part of it: a schema.sql that changes either disagrees with the migrations, and the change sets
+/// them in place, while one to a list of tables makes the publication again. Introspect writes both,
+/// and the schemas of the tables left out, which the publication can't be made without.
+async fn a_publications_sequences_and_exceptions_are_its_own(mut p: P) {
+    if p.d != Dialect::Postgres || p.rows("select current_setting('server_version_num')::int >= 190000 as ok").await[0].text("ok") != "t" {
+        return;
+    }
+    let tables = "create table a (id bigint primary key);\ncreate table b (id bigint primary key);\ncreate sequence s;";
+    let published = format!("{tables}\ncreate publication p for all tables except (table a), all sequences;");
+    p.schema(&published);
+    p.file("20261127100000_p.sql", &published);
+    let (code, out) = p.check_every_way().await;
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("ahead of the migrations"), "{out}");
+    for (schema, plan) in [
+        ("create publication p for all tables except (table b), all sequences;", r"alter publication p set all tables except \(table only (public\.)?b\), all sequences;"),
+        ("create publication p for all tables except (table a);", r"alter publication p set all tables except \(table only (public\.)?a\);"),
+        ("create publication p for all sequences;", r"alter publication p set all sequences;"),
+        ("create publication p for table b;", r"drop publication p;\n    create publication p for table (only )?(public\.)?b;"),
+    ] {
+        p.schema(&format!("{tables}\n{schema}"));
+        let (_, out) = p.check_every_way().await;
+        assert_has!(&out, &format!(r"The migrations and \S+ disagree\n    {plan}\n"));
+    }
+    // Introspect of one schema of several writes the publications itself, beside pg_dump's dump of
+    // it, as pg_dump 19 writes them, and the schema of a table one leaves out, so that it replays.
+    p.schema(&published);
+    assert_eq!(p.migrate().await, 0, "{}", p.peek());
+    p.exec("create schema other; create table other.x (id int); create schema third; create table third.y (id int); alter publication p set all tables except (table a, table other.x), all sequences").await;
+    let mut said = Vec::new();
+    let text = match reylo_migrate::db_introspect(&p.opts(), &["public".to_string()], &mut |l: &str| said.push(l.to_string())).await {
+        Ok(Ok(text)) => text,
+        other => panic!("introspect: {:?}\n{}", other.map_err(|e| e.0), said.join("\n")),
+    };
+    assert_eq!(said.first().map(String::as_str), Some("» Reading other too, which a publication names"), "{}", said.join("\n"));
+    assert!(text.contains("CREATE PUBLICATION p FOR ALL TABLES EXCEPT (TABLE ONLY other.x, TABLE ONLY public.a), ALL SEQUENCES"), "{text}");
+    let q = P::new(p.d).await.unwrap();
+    q.exec(&text).await;
+    assert_eq!(q.rows("select 1 from pg_publication_rel where prexcept").await.len(), 2);
 }
 
 /// A change `migrate new` split across two tables, an index on each in a file of its own: the files
@@ -6130,7 +6173,8 @@ mod adversarial {
         let result = reylo_migrate::deploy(&opts, &mut |l: &str| out.push(l.to_string())).await;
         let said = format!("{}\n{}", out.join("\n"), result.as_ref().err().map(|e| e.0.clone()).unwrap_or_default());
         assert!(!matches!(result, Ok(0)), "{said}");
-        assert_has!(said, r"function lower\(integer\) does not exist\. No function matches the given name and argument types");
+        // Postgres 19 moves "No function matches …" into a detail of its own, and both end the hint the same way.
+        assert_has!(said, r"function lower\(integer\) does not exist\b.*You might need to add explicit type casts");
     }
 
     /// An init whose init.sql doesn't replay (here a function another role owns, which the shadow's

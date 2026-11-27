@@ -13,6 +13,7 @@
 pub mod api;
 pub mod clickhouse;
 pub mod host;
+pub mod schema_fingerprint;
 pub mod tree;
 pub mod types;
 

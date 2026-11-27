@@ -796,6 +796,14 @@ impl Lines {
         text.len()
     }
 
+    /// The line a byte offset is on, counted from 0, and the bytes of that line without its line end.
+    pub fn line(&self, text: &str, offset: usize) -> (usize, std::ops::Range<usize>) {
+        let line = self.starts.partition_point(|s| *s as usize <= offset.min(text.len())) - 1;
+        let start = self.starts[line] as usize;
+        let next = self.starts.get(line + 1).map_or(text.len(), |s| *s as usize);
+        (line, start..start + text[start..next].trim_end_matches(['\r', '\n']).len())
+    }
+
     /// A byte offset as the protocol's line and character.
     pub fn position(&self, text: &str, offset: usize) -> (u32, u32) {
         let mut end = offset.min(text.len());

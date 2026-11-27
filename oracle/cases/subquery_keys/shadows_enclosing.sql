@@ -1,0 +1,1 @@
+with a as (select id from posts) select * from (with a (id) as (select p.id from posts p cross join tags t) select x.id from posts x join (select id from a where id = :post) s on s.id = x.id) w where w.id = :id

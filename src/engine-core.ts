@@ -5,6 +5,7 @@
 // over the native engine.
 import { Unreachable } from "./connection.ts";
 import type { EngineType } from "./engine-type.ts";
+import { statementError } from "./server-errors.ts";
 
 export type { EngineType } from "./engine-type.ts";
 export type Dialect = "postgres" | "sqlite" | "mysql" | "clickhouse";
@@ -193,13 +194,25 @@ export class EngineCore {
       const r = await this.ask({ op: "analyze", sql, dialect, answers });
       if (r.status === "analysis") return r.analysis;
       if (r.status !== "need") throw new Error(r.status === "error" ? r.message : `unexpected ${r.status}`);
-      await Promise.all(r.needs.map(async (need) => { answers[need.id] = await cache.get(need, () => fulfil(need, io)); }));
+      // Every need settles before a failure ends the analysis, so none is left waiting on a connection the next analysis uses.
+      const settled = await Promise.allSettled(r.needs.map(async (need) => { answers[need.id] = await cache.get(need, () => fulfil(need, dialect, io)); }));
+      // A lost connection is said first, since the session drops it on that alone.
+      const failed = settled.find((s) => s.status === "rejected" && s.reason instanceof Unreachable) ?? settled.find((s) => s.status === "rejected");
+      if (failed) throw (failed as PromiseRejectedResult).reason;
     }
     throw new Error("the analysis engine did not converge");
   }
 }
 
-async function fulfil(need: Need, io: EngineIo): Promise<Answer> {
+/** The shape of each database's own error code: Postgres's SQLSTATE (whose class never opens with E, as a socket's EPIPE does), MySQL's and ClickHouse's number, SQLite's result code's name. */
+const SERVER_CODE: Record<Dialect, RegExp> = { postgres: /^[0-9A-DF-Z][0-9A-Z]{4}$/, mysql: /^\d+$/, clickhouse: /^\d+$/, sqlite: /^SQLITE_\w+$/ };
+
+/**
+ * A need's answer. A database's error is one only where it is the statement's (src/server-errors.ts):
+ * any other, as a deadlock or a cancel, fails the analysis, so the engine never reads it as the
+ * statement's answer, as the engine's own hosts do.
+ */
+async function fulfil(need: Need, dialect: Dialect, io: EngineIo): Promise<Answer> {
   try {
     if (need.kind === "describe") {
       const d = await io.describe(need.sql);
@@ -209,9 +222,15 @@ async function fulfil(need: Need, io: EngineIo): Promise<Answer> {
     return { rows: await io.query(need.sql, need.params) };
   } catch (e) {
     if (e instanceof Unreachable) throw e;
-    const err = e as Error & { code?: string; position?: string | number };
+    const err = e as Error & { code?: string | number; errno?: number; sqlState?: string; position?: string | number };
+    // The database's own code, as the engine reads it: MySQL's number is mysql2's `errno`, its `code`
+    // being the error's name. A driver's code of its own, as postgres.js's `CONNECTION_CLOSED` or a
+    // socket's `ECONNRESET`, is none of the server's.
+    const given = dialect === "mysql" && typeof err.errno === "number" && err.errno > 0 ? String(err.errno) : err.code === undefined ? undefined : String(err.code);
+    const code = given !== undefined && SERVER_CODE[dialect].test(given) ? given : undefined;
+    if (!statementError(dialect, code, err.sqlState, err.message)) throw new Error(code === undefined ? `The analysis of this statement failed, so run it again: ${err.message}` : `The server failed the analysis of this statement for a reason of its own, so run it again: ${err.message} (${code})`);
     const error: DbError = { message: err.message };
-    if (err.code) error.code = err.code;
+    if (code) error.code = code;
     if (err.position !== undefined) error.position = Number(err.position);
     return { error };
   }

@@ -51,8 +51,8 @@ pub fn of_statement(t: &Tree) -> Capabilities {
             walk.node(n);
         }
     }
-    let Walk { read, ctes, functions } = walk;
-    for table in read.into_iter().filter(|table| !ctes.iter().any(|cte| cte.eq_ignore_ascii_case(table))) {
+    let Walk { read, functions } = walk;
+    for table in read {
         capabilities.touch(table, Access::Read);
     }
     if let Some(dml) = &t.dml {
@@ -247,12 +247,10 @@ fn unread(capabilities: &mut Capabilities) {
     capabilities.external = true;
 }
 
-/// The tables a statement reads, a view's included with what it reads, the names of its WITH
-/// queries, and the functions it calls.
+/// The tables a statement reads, a view's included with what it reads, and the functions it calls.
 #[derive(Default)]
 struct Walk {
     read: Vec<String>,
-    ctes: Vec<String>,
     functions: Vec<String>,
 }
 
@@ -279,11 +277,10 @@ impl Walk {
             self.node(&c.expr);
         }
         for f in &s.from {
-            if f.cte {
-                self.ctes.extend(f.table.clone());
-            }
-            // A view keeps the name the statement writes, and reads what its subquery does.
-            if !f.cte && !f.tab_func {
+            // A view keeps the name the statement writes, and reads what its subquery does. A WITH
+            // query, and a recursive one's read of itself, is no table: SQLite resolved each name
+            // where it stands, so a table of a WITH query's name read elsewhere is still read.
+            if !f.cte && !f.recursive && !f.tab_func {
                 self.read.extend(f.table.clone());
             }
             if f.tab_func {

@@ -9347,6 +9347,14 @@ async fn with_referenced(db: &mut Db, schemas: &[String], log: Log<'_>) -> Resul
     }
     let project = crate::catalog::user_schemas(db).await?;
     let mut named = schemas.to_vec();
+    // A publication is in no schema, so its SQL is written whatever --schema names, and it names
+    // tables and schemas of its own, which have to be made before it.
+    let published: Vec<String> = published_schemas(db).await?.into_iter().filter(|s| project.contains(s) && !named.contains(s)).collect();
+    if !published.is_empty() {
+        log(&note(format!("Reading {} too, which a publication names", and_list(&published))));
+        named.extend(published);
+    }
+    let before = named.len();
     loop {
         let more: Vec<String> = referenced_schemas(db, &named).await?.into_iter().filter(|s| project.contains(s) && !named.contains(s)).collect();
         if more.is_empty() {
@@ -9354,10 +9362,32 @@ async fn with_referenced(db: &mut Db, schemas: &[String], log: Log<'_>) -> Resul
         }
         named.extend(more);
     }
-    if named.len() > schemas.len() {
-        log(&note(format!("Reading {} too, which {} refers to", and_list(&named[schemas.len()..]), and_list(schemas))));
+    if named.len() > before {
+        log(&note(format!("Reading {} too, which {} refers to", and_list(&named[before..]), and_list(&named[..before]))));
     }
     Ok(named)
+}
+
+/// The schemas the project's publications name: those of the tables each lists or leaves out of
+/// all tables, and each whose tables it publishes.
+#[cfg(feature = "cli")]
+async fn published_schemas(db: &mut Db) -> Result<Vec<String>, Error> {
+    let version: i64 = db.rows("select current_setting('server_version_num') as v").await?.first().and_then(|r| r.first()?.parse().ok()).unwrap_or(0);
+    // Postgres 15 publishes a schema's tables.
+    let in_schema = if version >= 150000 { "union select pn.pnnspid from pg_publication_namespace pn where pn.pnpubid = p.oid" } else { "" };
+    let rows = db
+        .rows(&format!(
+            "select distinct n.nspname as name from pg_publication p
+               cross join lateral (select c.relnamespace as ns from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid where pr.prpubid = p.oid {in_schema}) o
+               join pg_namespace n on n.oid = o.ns
+             where {} and not ({} and p.pubname = {})
+             order by 1",
+            crate::catalog::not_platform("p.pubowner"),
+            crate::catalog::platform_names(),
+            crate::db::literal(crate::catalog::PLATFORM_PUBLICATION)
+        ))
+        .await?;
+    Ok(rows.iter().map(|r| r.text("name").to_string()).collect())
 }
 
 /// The schemas of the project's that --schema has to name for SQL of them to hold them: each that
@@ -9998,6 +10028,17 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
             };
             // Whether a publication publishes its tables' stored generated columns is Postgres 18's.
             let generated = if version >= 180000 { "case when p.pubgencols = 's' then ', publish_generated_columns = stored' else '' end" } else { "''" };
+            // All sequences, and the tables all tables leave out, are Postgres 19's, written as pg_dump 19 writes them.
+            let (all, listed_only) = if version >= 190000 {
+                (
+                    "case when p.puballtables then 'ALL TABLES' || coalesce(' EXCEPT (' || (select string_agg(format('TABLE ONLY %I.%I', n.nspname, c.relname), ', ' order by n.nspname, c.relname)
+                        from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid and pr.prexcept) || ')', '')
+                        || case when p.puballsequences then ', ALL SEQUENCES' else '' end when p.puballsequences then 'ALL SEQUENCES' end",
+                    " and not pr.prexcept",
+                )
+            } else {
+                ("case when p.puballtables then 'ALL TABLES' end", "")
+            };
             for r in db
                 .rows(&format!(
                     "select 0 as k, et.evtname::text as name, format('CREATE EVENT TRIGGER %I ON %s', et.evtname, et.evtevent)
@@ -10010,10 +10051,10 @@ async fn dump_from(db: &mut Db, opts: &Options, schemas: &[String]) -> Result<St
                     from pg_event_trigger et join pg_proc f on f.oid = et.evtfoid join pg_namespace fn on fn.oid = f.pronamespace where {} and {}
                     union all
                     select 1, p.pubname::text, format('CREATE PUBLICATION %I', p.pubname)
-                        || coalesce(' FOR ' || case when p.puballtables then 'ALL TABLES' else nullif(concat_ws(', ',
+                        || coalesce(' FOR ' || coalesce({all}, nullif(concat_ws(', ',
                           (select string_agg(format('TABLE %I.%I', n.nspname, c.relname) || {columns}, ', ' order by n.nspname, c.relname)
-                            from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid),
-                          {schemas}), '') end, '')
+                            from pg_publication_rel pr join pg_class c on c.oid = pr.prrelid join pg_namespace n on n.oid = c.relnamespace where pr.prpubid = p.oid{listed_only}),
+                          {schemas}), '')), '')
                         || format(' WITH (publish = %L%s%s)', concat_ws(', ', case when p.pubinsert then 'insert' end, case when p.pubupdate then 'update' end,
                           case when p.pubdelete then 'delete' end, case when p.pubtruncate then 'truncate' end), case when p.pubviaroot then ', publish_via_partition_root = true' else '' end, {generated}),
                       null,

@@ -51,6 +51,17 @@ struct Connection {
 }
 
 impl Connection {
+    /// A query's rows, as mysql2 reads them, over the connection opened again once where it was
+    /// lost; a failure is the answer the program gives for it.
+    async fn rows(&mut self, text: String) -> Result<Vec<Vec<Value>>, Value> {
+        let mut result = rows(&mut self.conn, text.clone()).await;
+        if matches!(result, Err(ref e) if !matches!(e, mysql_async::Error::Server(_))) && self.lost().await {
+            self.reopen().await?;
+            result = rows(&mut self.conn, text).await;
+        }
+        result.map_err(|e| failure(&e))
+    }
+
     /// Whether the connection is gone, after a call failed with something other than the server's
     /// answer: mysql_async tells a lost connection apart from no other failure, so it is asked.
     async fn lost(&mut self) -> bool {
@@ -125,9 +136,27 @@ impl Session {
     }
 }
 
+/// What names this program's analyses in `reylo/.cache/` beside the statement and the schema
+/// ([`Program::fingerprint`]), whichever host writes them: this program for the type check, or a Rust
+/// build (reylo-build).
+pub fn cache_fingerprint() -> String {
+    crate::cache_fingerprint(crate::engines::mysql::FINGERPRINT, &[])
+}
+
+/// The schema's fingerprint, read over `conn` as every host reads it, each value as mysql2 decodes
+/// it, so that each reads the entries the others write ([`crate::Schema`],
+/// [`crate::engines::mysql::schema_fingerprint`]).
+pub async fn schema(conn: &mut Conn) -> mysql_async::Result<crate::Schema> {
+    Ok(crate::Schema::of(&rows(conn, crate::engines::mysql::schema_fingerprint::QUERY.to_string()).await?, None))
+}
+
 impl Program for Mysql {
     fn call(&self, request: &str) -> String {
         reylo_engine_core::api::call::<crate::engines::mysql::Mysql>(request)
+    }
+
+    fn fingerprint(&self) -> String {
+        cache_fingerprint()
     }
 
     async fn serve(&mut self, request: &Value) -> Option<Value> {
@@ -155,29 +184,28 @@ impl Program for Mysql {
                     Err(failure) => failure,
                 },
             },
-            // A query the host runs itself (the schema's fingerprint), its rows as mysql2 reads them,
-            // and its failure told apart as `open`'s is: a refused login, a lost server, an error.
+            // A query the host runs itself (a host's own catalog query), its rows as mysql2 reads
+            // them, and its failure told apart as `open`'s is: a refused login, a lost server, an error.
             "query" => match self.connections.get_mut(&id) {
                 None => closed(id),
                 Some(c) => {
                     let params = request["params"].as_array().cloned().unwrap_or_default();
                     match answers::interpolate(sql, &params) {
                         None => json!({ "status": "error", "message": format!("cannot write {params:?} into the query") }),
-                        Some(text) => {
-                            let mut result = rows(&mut c.conn, text.clone()).await;
-                            if matches!(result, Err(ref e) if !matches!(e, mysql_async::Error::Server(_))) && c.lost().await {
-                                if let Err(failure) = c.reopen().await {
-                                    return Some(failure);
-                                }
-                                result = rows(&mut c.conn, text).await;
-                            }
-                            match result {
-                                Ok(rows) => json!({ "status": "rows", "rows": rows }),
-                                Err(e) => failure(&e),
-                            }
-                        }
+                        Some(text) => match c.rows(text).await {
+                            Ok(rows) => json!({ "status": "rows", "rows": rows }),
+                            Err(failure) => failure,
+                        },
                     }
                 }
+            },
+            // The schema's fingerprint, as every host reads it ([`schema`]).
+            "schema" => match self.connections.get_mut(&id) {
+                None => closed(id),
+                Some(c) => match c.rows(crate::engines::mysql::schema_fingerprint::QUERY.to_string()).await {
+                    Ok(rows) => crate::Schema::of(&rows, None).answer(),
+                    Err(failure) => failure,
+                },
             },
             // The schema changed: what the engine was told about the old one is stale.
             "forget" => match self.connections.get_mut(&id) {

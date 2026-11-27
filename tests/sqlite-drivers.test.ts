@@ -228,6 +228,10 @@ test("libSQL's drivers let the sqlean functions Turso Cloud loads through, and a
 test("the check reads a call of a sqlean function as one of char, outside strings, quoted names and comments", () => {
   assert.equal(withoutSqlean("select uuid4(), 'uuid4()', \"uuid4\", Uuid4 (x) -- uuid4()\nfrom t", "uuid4"), "select char(), 'uuid4()', \"uuid4\", char (x) -- uuid4()\nfrom t");
   assert.equal(withoutSqlean("select value from stats_seq(1, 3)", "stats_seq"), "select value from generate_series(1, 3)");
+  // A name runs on past ASCII and over `$`, and a no-break space is a character of one.
+  assert.equal(withoutSqlean("select éuuid4(), uuid4$(), uuid4\u00a0() from t", "uuid4"), undefined);
+  // A vertical tab inside a run of whitespace is whitespace too.
+  assert.equal(withoutSqlean("select uuid4 \v() from t", "uuid4"), "select char \v() from t");
   assert.equal(withoutSqlean("select 'it''s uuid4()' /* uuid4() */ as uuid4", "uuid4"), undefined);
   // A quoted name that is called, and a comment before the parenthesis.
   assert.equal(withoutSqlean('select "uuid4"(), [uuid4] /* a */ (), "uuid4" from t', "uuid4"), 'select char(), char /* a */ (), "uuid4" from t');

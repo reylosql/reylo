@@ -528,6 +528,8 @@ test("a vector is its typed array at every position outside JSON, and nothing bu
   assert.equal(renderParamType(pg("halfvec"), "postgres", false, undefined, codecs), "Float16Array");
   assert.equal(renderType(array(pg("vector")), false, "postgres", codecs), "(Float32Array | null)[]");
   assert.deepEqual(planOf(array(pg("vector")), "postgres", codecs), { array: "vector:float32" });
+  // As JSON a typed array is an array of its numbers, as a Set is one of its members (`AsJson`), where JSON.stringify writes an object by index.
+  for (const name of ["vector", "halfvec"]) assert.deepEqual(typeSchema(pg(name), "postgres", false, false, false, undefined, codecs), { type: "array", items: { type: "number" } });
 });
 
 test("ClickHouse: a codec reaches a tuple's elements, by name and by place, an array's and a map's pairs", () => {
