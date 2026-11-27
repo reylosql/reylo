@@ -2510,8 +2510,8 @@ fn kind(read: Option<&Statement>) -> Option<StatementKind> {
 /// either is an error to parse, left to the server's describe, never an overflow of the stack.
 ///
 /// The engine runs natively alone, on [`reylo_engine_core::stack::STACK_BYTES`], and in a Rust project's
-/// macro unoptimized: there a chain of 4,000 operators, or 500 nested calls, is read, and twice
-/// either overflows the stack, so each bound is half of what that build reads or less. MySQL
+/// macro unoptimized: there, on 64 MiB of stack, a chain of 4,000 operators, or 500 nested calls, is
+/// read, and twice either overflows it, so each bound is half of what that build reads or less. MySQL
 /// itself refuses most statements deeper than these: 500 nested CASEs, 64 nested subqueries and a
 /// sum of 4,000 terms each overrun its thread's stack or its nesting limit (8.4, 2026-11-24).
 const BOUNDS: syntax::mysql::Bounds = syntax::mysql::Bounds { depth: 200, chain: 2_000 };

@@ -33,13 +33,15 @@ use std::cell::Cell;
 /// nested function calls or `CASE`s, 98 subqueries) and a chain of operators to 2,000
 /// (`engine/mysql/src/mysql.rs`), and the embedded SQLite reads an expression as deep as its own
 /// bound, 1,000, and SELECTs nested as deep as SQLite's bound on a chain of views, 1,000, which the
-/// engine holds a chain of WITH queries to as well: each bound alone (`engine/sqlite/csrc/reylo_sqlite.c`).
+/// engine holds a chain of WITH queries to as well: both at once (`engine/sqlite/csrc/reylo_sqlite.c`).
 pub const MAX_DEPTH: usize = 1_000;
 
-/// The stack an analysis runs on natively, with room for [`MAX_DEPTH`] in an unoptimized build.
+/// The stack an analysis runs on natively, with room for [`MAX_DEPTH`] in an unoptimized build, and
+/// for the deepest SQLite statement measured there: SELECTs nested to the bound, each a compound,
+/// over an expression as high as SQLite reads, take 74 MiB (`engine/sqlite/src/sqlite.rs` tests it).
 /// This is reserved address space, and only the pages a deep statement touches are ever backed by
 /// memory.
-pub const STACK_BYTES: usize = 64 << 20;
+pub const STACK_BYTES: usize = 128 << 20;
 
 #[cfg(not(target_family = "wasm"))]
 thread_local! {

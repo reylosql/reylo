@@ -650,7 +650,7 @@ pub fn analyze(ddl: &[String], sql: &str, sent: &str, functions: &[(&str, i32)],
 fn parse(json: &str) -> Result<Tree, String> {
     // The tree nests as deeply as the statement, which SQLite bounds at 1,000 levels of an
     // expression (SQLITE_MAX_EXPR_DEPTH) and the walker at as many nested SELECTs, past
-    // serde_json's default limit of 128; the engine's stack has the room for each alone (`crate::stack`).
+    // serde_json's default limit of 128; the engine's stack has the room for both at once (`crate::stack`).
     let mut reader = serde_json::Deserializer::from_str(json);
     reader.disable_recursion_limit();
     <Tree as Deserialize>::deserialize(&mut reader).map_err(|e| format!("the embedded SQLite's answer did not parse: {e}"))

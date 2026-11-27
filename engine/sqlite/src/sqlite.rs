@@ -4132,6 +4132,21 @@ mod tests {
         assert_eq!(past.diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>(), ["VIEWs and/or subqueries nested too deep"]);
     }
 
+    #[test]
+    fn the_engine_s_stack_holds_selects_nested_to_the_bound_over_the_highest_expression() {
+        // The deepest tree SQLite's bounds admit at once: WITH queries nested to the bound on
+        // SELECTs, each a compound that reads the one before in its first arm, over an expression
+        // whose height across a subquery reaches SQLite's bound on it, which an unoptimized build
+        // reads on the engine's stack (`crate::stack`).
+        let ddl = vec!["create table users (id integer primary key, name text not null, nick text)".to_string()];
+        let coalesce = |n: usize, inner: &str| (0..n).fold(inner.to_string(), |e, _| format!("coalesce({e}, name)"));
+        let high = format!("with c0 as (select {} as a from users), c1 as (select {} as a from users)", coalesce(500, "nick"), coalesce(490, "(select a from c0)"));
+        let sql = (2..997).fold(high, |q, i| format!("{q}, c{i} as (select a from c{} union all select 1)", i - 1)) + " select a from c996";
+        let a = analyze_ddl(&sql, &ddl, &Extras::default()).analysis;
+        assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
+        assert_eq!(a.cardinality, Cardinality::Many);
+    }
+
     fn col(a: &Analysis, name: &str) -> (String, bool) {
         let c = a.columns.iter().find(|c| c.name == name).unwrap_or_else(|| panic!("no column {name}"));
         (affinity_of(&c.ty).unwrap_or("unknown").to_string(), c.nullable)
