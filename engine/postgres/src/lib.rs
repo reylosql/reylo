@@ -52,8 +52,8 @@ mod tests {
         let hashed: Vec<&str> = list.split(',').map(|entry| entry.trim().trim_matches('"')).filter(|entry| !entry.is_empty()).collect();
         for entry in std::fs::read_dir(root).unwrap().flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            // `Cargo.toml` is always hashed, and `examples/` builds no part of the engine.
-            if name.starts_with('.') || name == "Cargo.toml" || name == "examples" {
+            // `Cargo.toml` is always hashed, and `examples/` and `tests/` build no part of the engine.
+            if name.starts_with('.') || name == "Cargo.toml" || name == "examples" || name == "tests" {
                 continue;
             }
             assert!(hashed.contains(&name.as_str()), "{name}/ is not in the fingerprint");

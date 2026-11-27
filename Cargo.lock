@@ -2007,6 +2007,8 @@ dependencies = [
  "reylo-sql",
  "serde",
  "serde_json",
+ "tokio",
+ "tokio-postgres",
 ]
 
 [[package]]
