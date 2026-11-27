@@ -4,15 +4,15 @@ Written by `./run.sh` on 2026-11-26. Each mark comes from what the tool answered
 
 | | Reylo | sqlc | PgTyped | TypedSQL | sqlx-ts | SafeQL | sqlx | TypeSQL | Postgres Typed SQL | Drizzle | Kysely | Prisma | TypeORM |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Version | 0.9.0 | v1.31.1 | 2.4.3 | 7.10.1 | 0.49.0 | 5.4.2 | 0.9.0 | 0.24.0 | 0.1.0-beta.22 | 0.45.4 | 0.29.9 | 7.10.1 | 1.1.3 |
+| Version | 0.9.0 | v1.31.1, sqlc-gen-typescript 0.1.3 | 2.4.3 | 7.10.1 | 0.49.0 | 5.4.2 | 0.9.0 | 0.24.0 | 0.1.0-beta.22 | 0.45.4 | 0.29.9 | 7.10.1 | 1.1.3 |
 | No codegen | yes | no | no | no | no | partly | yes | no | partly | no | no | no | yes |
-| Live database | yes (3/3) | partly (3/3) | yes (3/3) | yes (3/3) | partly (1/3) | partly (2/3) | yes (3/3) | yes (3/3) | no (3/3) | no | no | no | no |
-| Nullable left joins | yes (20/20) | partly (14/20) | no (1/7) | partly (14/20) | no (3/20) | partly (6/7) | partly (14/20) | partly (11/20) | yes (7/7) | partly (17/20) | partly (17/20) | no (0/20) | no (0/20) |
-| Nullable expressions | yes (57/57) | partly (22/57) | no (9/19) | partly (43/57) | partly (27/57) | partly (15/19) | partly (43/57) | partly (49/57) | yes (19/19) | partly (12/57) | partly (28/57) | partly (9/57) | partly (6/57) |
-| Parameter types | yes (17/17) | yes (17/17) | yes (7/7) | partly (12/17) | partly (16/17) | partly (5/7) | partly (7/17) | partly (16/17) | yes (7/7) | yes (17/17) | yes (17/17) | yes (17/17) | yes (17/17) |
-| Nullable parameters | yes (12/12) | partly (9/12) | no (0/4) | no (4/12) | partly (9/12) | no (0/4) | no (0/12) | yes (12/12) | no (2/4) | yes (12/12) | partly (3/12) | yes (9/9) | yes (12/12) |
-| Cardinality | yes (28/28) | no (0/28) | no (0/10) | no (0/28) | no (0/28) | no (0/10) | no (0/28) | partly (16/28) | partly (9/10) | no (0/28) | no (0/28) | no (0/28) | no (0/28) |
-| Nested JSON | yes (10/10) | no (0/10) | no (0/4) | no (0/10) | partly (7/10) | yes (4/4) | no (0/10) | partly (3/10) | yes (4/4) | partly (6/10) | partly (8/10) | partly (6/10) | partly (6/10) |
+| Live database | yes (3/3) | partly (2/3) | yes (3/3) | yes (3/3) | partly (1/3) | partly (2/3) | yes (3/3) | yes (3/3) | no (3/3) | no | no | no | no |
+| Nullable left joins | yes (20/20) | partly (9/13) | no (1/7) | partly (14/20) | no (3/20) | partly (6/7) | partly (14/20) | partly (11/20) | yes (7/7) | partly (17/20) | partly (17/20) | no (0/20) | no (0/20) |
+| Nullable expressions | yes (57/57) | partly (21/38) | no (9/19) | partly (43/57) | partly (27/57) | partly (15/19) | partly (43/57) | partly (49/57) | yes (19/19) | partly (12/57) | partly (28/57) | partly (9/57) | partly (6/57) |
+| Parameter types | yes (17/17) | partly (10/12) | yes (7/7) | partly (12/17) | partly (16/17) | partly (5/7) | partly (7/17) | partly (16/17) | yes (7/7) | yes (17/17) | yes (17/17) | yes (17/17) | yes (17/17) |
+| Nullable parameters | yes (12/12) | partly (6/8) | no (0/4) | no (4/12) | partly (9/12) | no (0/4) | no (0/12) | yes (12/12) | no (2/4) | yes (12/12) | partly (3/12) | yes (9/9) | yes (12/12) |
+| Cardinality | yes (28/28) | no (0/18) | no (0/10) | no (0/28) | no (0/28) | no (0/10) | no (0/28) | partly (16/28) | partly (9/10) | no (0/28) | no (0/28) | no (0/28) | no (0/28) |
+| Nested JSON | yes (10/10) | no (0/7) | no (0/4) | no (0/10) | partly (7/10) | yes (4/4) | no (0/10) | partly (3/10) | yes (4/4) | partly (6/10) | partly (8/10) | partly (6/10) | partly (6/10) |
 | JSON Schema types | yes (2/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) | no (0/2) |
 | Aggregates | yes (15/15) | no | no | no | no | no | no | no | no | partly (12/15) | partly (9/15) | partly (9/15) | no (0/15) |
 | Window functions | yes (12/12) | no | no | no | no | no | no | no | no | no (0/12) | no (0/12) | no (0/12) | no (0/12) |
@@ -23,72 +23,58 @@ Written by `./run.sh` on 2026-11-26. Each mark comes from what the tool answered
 | Enums | yes (8/8) | no | no | no | no | no | no | no | no | partly (4/8) | partly (4/8) | partly (2/8) | partly (2/8) |
 | Postgres | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
 | MySQL | yes | yes | no | yes | yes | no | yes | yes | no | yes | yes | yes | yes |
-| SQLite | yes | yes | no | yes | yes | no | yes | yes | no | yes | yes | yes | yes |
+| SQLite | yes | no | no | yes | yes | no | yes | yes | no | yes | yes | yes | yes |
 
 ## Reylo 0.9.0
 
 **No codegen**: yes. Nothing to commit after a run.
 
-## sqlc v1.31.1
+## sqlc v1.31.1, sqlc-gen-typescript 0.1.3
 
-**No codegen**: no. A run leaves new files to commit: `db/db.go`, `db/models.go`, `db/query.sql.go`.
+**No codegen**: no. A run leaves new files to commit: `db/query_sql.ts`.
 
-**Live database**: partly, 3 of 3. By default it reads your schema files and never connects. A `database:` setting asks Postgres for types, but not for nullability.
+**Live database**: partly, 2 of 3. By default it reads your schema files and never connects. A `database:` setting asks Postgres for types, but not for nullability.
 
-**Nullable left joins**: partly, 14 of 20
+- postgres: `select add_one(id) as v from users`: it types the result `string`
 
-- postgres: `select u.name, p.title from users u left join posts p on p.author_id = u.id where p.score > 0`: `title` is typed `sql.NullString`, but it is never null
+**Nullable left joins**: partly, 9 of 13
+
+- postgres: `select u.name, p.title from users u left join posts p on p.author_id = u.id where p.score > 0`: `title` is typed `string | null`, but it is never null
 - postgres: `select u.name, x.title from users u left join (select author_id, title from posts) x on x.author_id = u.id`: `title` is typed `string`, but it can be null
-- mysql: `select u.name, p.title from users u left join posts p on p.author_id = u.id where p.score > 0`: `title` is typed `sql.NullString`, but it is never null
+- mysql: `select u.name, p.title from users u left join posts p on p.author_id = u.id where p.score > 0`: `title` is typed `string | null`, but it is never null
 - mysql: `select u.name, x.title from users u left join (select author_id, title from posts) x on x.author_id = u.id`: `title` is typed `string`, but it can be null
-- sqlite: `select u.name, p.title from users u left join posts p on p.author_id = u.id where p.score > 0`: `title` is typed `sql.NullString`, but it is never null
-- sqlite: `select u.name, x.title from users u left join (select author_id, title from posts) x on x.author_id = u.id`: `title` is typed `string`, but it can be null
 
-**Nullable expressions**: partly, 22 of 57
+**Nullable expressions**: partly, 21 of 38
 
-- postgres: `select max(id) as v from posts`: `v` is typed `interface{}`
-- postgres: `select sum(score) as v from posts`: `v` is typed `int64`, but it can be null
-- postgres: `select name || '!' as v from users`: `v` is typed `interface{}`
-- postgres: `select nickname || '!' as v from users`: `v` is typed `interface{}`
-- postgres: `select upper(name) as v from users`: `v` is typed `interface{}`
-- postgres: `select upper(nickname) as v from users`: `v` is typed `interface{}`
-- postgres: `select score + 1 as v from posts`: `v` is typed `int32`, but it can be null
-- postgres: `select nullif(name, 'x') as v from users`: `v` is typed `bool`, but it can be null
-- postgres: `select case when id > 0 then name end as v from users`: `v` is typed `interface{}`
-- postgres: `select nickname is null as v from users`: `v` is typed `interface{}`
-- postgres: `select lag(id) over (order by id) as v from users`: `v` is typed `interface{}`
-- postgres: `select id as v from users union all select score from posts`: `v` is typed `int32`, but it can be null
-- postgres: `select max(id) as v from posts group by author_id`: `v` is typed `interface{}`
-- mysql: `select max(id) as v from posts`: `v` is typed `interface{}`
-- mysql: `select sum(score) as v from posts`: `v` is typed `interface{}`
+- postgres: `select max(id) as v from posts`: `v` is typed `string`, but it can be null
+- postgres: `select sum(score) as v from posts`: `v` is typed `string`, but it can be null
+- postgres: `select name || '!' as v from users`: `v` is typed `string | null`, but it is never null
+- postgres: `select upper(nickname) as v from users`: `v` is typed `string`, but it can be null
+- postgres: `select score + 1 as v from posts`: `v` is typed `string`, but it can be null
+- postgres: `select nullif(name, 'x') as v from users`: `v` is typed `boolean`, but it can be null
+- postgres: `select nickname is null as v from users`: `v` is typed `string | null`, but it is never null
+- postgres: `select lag(id) over (order by id) as v from users`: `v` is typed `string`, but it can be null
+- postgres: `select id as v from users union all select score from posts`: `v` is typed `number`, but it can be null
+- mysql: `select max(id) as v from posts`: `v` is typed `string`, but it can be null
+- mysql: `select sum(score) as v from posts`: `v` is typed `string`, but it can be null
 - mysql: `select concat(nickname, '!') as v from users`: `v` is typed `string`, but it can be null
 - mysql: `select upper(nickname) as v from users`: `v` is typed `string`, but it can be null
-- mysql: `select score + 1 as v from posts`: `v` is typed `int32`, but it can be null
-- mysql: `select nullif(name, 'x') as v from users`: `v` is typed `interface{}`
-- mysql: `select case when id > 0 then name end as v from users`: `v` is typed `interface{}`
-- mysql: `select row_number() over (order by id) as v from users`: `v` is typed `interface{}`
-- mysql: `select lag(id) over (order by id) as v from users`: `v` is typed `interface{}`
-- mysql: `select id as v from users union all select score from posts`: `v` is typed `int32`, but it can be null
-- mysql: `select max(id) as v from posts group by author_id`: `v` is typed `interface{}`
-- sqlite: `select max(id) as v from posts`: `v` is typed `interface{}`
-- sqlite: `select name || '!' as v from users`: `v` is typed `interface{}`
-- sqlite: `select nickname || '!' as v from users`: `v` is typed `interface{}`
-- sqlite: `select upper(nickname) as v from users`: `v` is typed `string`, but it can be null
-- sqlite: `select score + 1 as v from posts`: `v` is typed `int64`, but it can be null
-- sqlite: `select nullif(name, 'x') as v from users`: `v` is typed `interface{}`
-- sqlite: `select case when id > 0 then name end as v from users`: `v` is typed `interface{}`
-- sqlite: `select row_number() over (order by id) as v from users`: `v` is typed `interface{}`
-- sqlite: `select lag(id) over (order by id) as v from users`: `v` is typed `interface{}`
-- sqlite: `select id as v from users union all select score from posts`: `v` is typed `int64`, but it can be null
-- sqlite: `select max(id) as v from posts group by author_id`: `v` is typed `interface{}`
+- mysql: `select score + 1 as v from posts`: `v` is typed `number`, but it can be null
+- mysql: `select nullif(name, 'x') as v from users`: `v` is typed `string`, but it can be null
+- mysql: `select row_number() over (order by id) as v from users`: `v` is typed `string | null`, but it is never null
+- mysql: `select id as v from users union all select score from posts`: `v` is typed `number`, but it can be null
 
-**Nullable parameters**: partly, 9 of 12
+**Parameter types**: partly, 10 of 12
 
-- postgres: `select id from users where nickname = $1`: parameter 1 is typed `sql.NullString`, but it takes no null
-- mysql: `select id from users where nickname = $1`: parameter 1 is typed `sql.NullString`, but it takes no null
-- sqlite: `select id from users where nickname = $1`: parameter 1 is typed `sql.NullString`, but it takes no null
+- postgres: `select id from users limit $1`: parameter 1 is typed `string`, but it takes a number
+- mysql: `select id from users limit $1`: parameter 1 is typed `string`, but it takes a number
 
-**Cardinality**: no, 0 of 28. Declared by hand on each query: `:one`, `:many` or `:exec`. The annotation decides the method's return type, and sqlc accepts any of them.
+**Nullable parameters**: partly, 6 of 8
+
+- postgres: `select id from users where nickname = $1`: parameter 1 is typed `string | null`, but it takes no null
+- mysql: `select id from users where nickname = $1`: parameter 1 is typed `string | null`, but it takes no null
+
+**Cardinality**: no, 0 of 18. Declared by hand on each query: `:one`, `:many` or `:exec`. The annotation decides the function's return type, and sqlc accepts any of them.
 
 - postgres: `select id, name from users where id = $1`: it does not infer one
 - postgres: `select id from users where email = $1`: it does not infer one
@@ -108,34 +94,23 @@ Written by `./run.sh` on 2026-11-26. Each mark comes from what the tool answered
 - mysql: `select p.title from posts p join users u on u.id = p.author_id where p.id = $1`: it does not infer one
 - mysql: `select id from posts where author_id = $1`: it does not infer one
 - mysql: `delete from users where id = $1`: it does not infer one
-- sqlite: `select id, name from users where id = $1`: it does not infer one
-- sqlite: `select id from users where email = $1`: it does not infer one
-- sqlite: `select count(*) as v from users`: it does not infer one
-- sqlite: `insert into users (id, email, name) values ($1, $2, $3) returning id`: it does not infer one
-- sqlite: `select id from users`: it does not infer one
-- sqlite: `select id from users limit 1`: it does not infer one
-- sqlite: `update users set name = $1 where id = $2 returning id`: it does not infer one
-- sqlite: `select p.title from posts p join users u on u.id = p.author_id where p.id = $1`: it does not infer one
-- sqlite: `select id from posts where author_id = $1`: it does not infer one
-- sqlite: `delete from users where id = $1`: it does not infer one
 
-**Nested JSON**: no, 0 of 10
+**Nested JSON**: no, 0 of 7
 
-- postgres: `select json_build_object('id', id, 'name', name) as v from users`: `v` is typed `json.RawMessage`
-- postgres: `select json_agg(json_build_object('id', id, 'title', title)) as v from posts`: `v` is typed `json.RawMessage`
-- postgres: `select u.name, jsonb_agg(jsonb_build_object('id', p.id, 'title', p.title)) as v from users u join posts p on p.author_id = u.id group by u.id`: `v` is typed `json.RawMessage`
-- postgres: `select u.name, (select jsonb_agg(p order by p.id) from posts p where p.author_id = u.id) as v from users u`: `v` is typed `json.RawMessage`
-- mysql: `select json_object('id', id, 'name', name) as v from users`: `v` is typed `json.RawMessage`
-- mysql: `select json_arrayagg(json_object('id', id, 'title', title)) as v from posts`: `v` is typed `json.RawMessage`
-- mysql: `select u.name, json_arrayagg(json_object('id', p.id, 'title', p.title)) as v from users u join posts p on p.author_id = u.id group by u.id, u.name`: `v` is typed `json.RawMessage`
-- sqlite: `select json_object('id', id, 'name', name) as v from users`: `v` is typed `interface{}`
-- sqlite: `select json_group_array(json_object('id', id, 'title', title)) as v from posts`: `v` is typed `interface{}`
-- sqlite: `select u.name, json_group_array(json_object('id', p.id, 'title', p.title)) as v from users u join posts p on p.author_id = u.id group by u.id`: `v` is typed `interface{}`
+- postgres: `select json_build_object('id', id, 'name', name) as v from users`: `v` is typed `any`
+- postgres: `select json_agg(json_build_object('id', id, 'title', title)) as v from posts`: `v` is typed `any`
+- postgres: `select u.name, jsonb_agg(jsonb_build_object('id', p.id, 'title', p.title)) as v from users u join posts p on p.author_id = u.id group by u.id`: `v` is typed `any`
+- postgres: `select u.name, (select jsonb_agg(p order by p.id) from posts p where p.author_id = u.id) as v from users u`: `v` is typed `any`
+- mysql: `select json_object('id', id, 'name', name) as v from users`: `v` is typed `any`
+- mysql: `select json_arrayagg(json_object('id', id, 'title', title)) as v from posts`: `v` is typed `any`
+- mysql: `select u.name, json_arrayagg(json_object('id', p.id, 'title', p.title)) as v from users u join posts p on p.author_id = u.id group by u.id, u.name`: `v` is typed `any`
 
 **JSON Schema types**: no, 0 of 2
 
-- postgres: `select payload from events`: `payload` is typed `json.RawMessage`
-- postgres: `insert into events (id, payload) values ($1, $2)`: parameter 2 is typed `json.RawMessage`, without its fields
+- postgres: `select payload from events`: `payload` is typed `any`
+- postgres: `insert into events (id, payload) values ($1, $2)`: parameter 2 is typed `any`, without its fields
+
+**SQLite**: no. It is not available for SQLite.
 
 ## PgTyped 2.4.3
 

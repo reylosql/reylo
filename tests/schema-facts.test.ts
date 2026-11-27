@@ -10,7 +10,7 @@ import { validate } from "../src/json-schema.ts";
 import { sqlModule } from "../src/loader.ts";
 import { querySchemas, typeSchema } from "../src/schema.ts";
 import type { EngineType } from "../src/engine-type.ts";
-import { DRIVERS, INDEX, MYSQL, driver, mysqlDatabase, mysqlLive } from "./helpers.ts";
+import { DRIVERS, INDEX, MYSQL, driver, mysqlDatabase, mysqlLive, pgLive, postgresDatabase } from "./helpers.ts";
 
 const int4 = (facts: object): EngineType => ({ kind: "integer", bits: 32, label: "int4", ...facts }) as EngineType;
 const varchar = (facts: object): EngineType => ({ kind: "text", label: "varchar", ...facts }) as EngineType;
@@ -147,6 +147,78 @@ test("a time with no zone and MySQL's TIME take no format their values would fai
   const span = schema({ kind: "duration", max: "PT838H59M59S", tick: "1/10000", label: "time" }, "mysql");
   assert.equal(span.format, undefined);
   for (const value of ["-838:59:59.0000", "838:59:59", "12:00:00.1235"]) assert.equal(validate(span, value), undefined);
+});
+
+test("Postgres: a date or a timestamptz outside 0000–9999 holds to its query's JSON Schema wherever it stands, and a parameter takes it back", { skip: pgLive, timeout: 60_000 }, async () => {
+  const own = await postgresDatabase(
+    "reylo_schema_years",
+    `create table e (id int primary key, d date, at timestamptz, ds date[], r daterange, tr tstzrange);
+    insert into e values
+      (1, '0002-06-01 BC', '12345-01-01 00:00:00+00', array['12345-01-01'::date, '0002-06-01 BC'], '[0002-06-01 BC, 12345-01-01)', '[4713-01-01 00:00:00+00 BC, 12345-01-01 00:00:00.5+00)'),
+      (2, '2026-06-01', '2026-01-01 00:00:00+00', array['2026-01-01'::date], 'empty', null)`,
+  );
+  const root = mkdtempSync(join(tmpdir(), "reylo-schema-years-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  writeFileSync(join(root, ".env"), `DATABASE_URL=${own.url}\n`);
+  mkdirSync(join(root, "node_modules"));
+  symlinkSync(join(DRIVERS, "postgres"), join(root, "node_modules", "postgres"));
+  const built = async (name: string, sql: string) => {
+    const file = join(root, `${name}.sql`);
+    writeFileSync(file, sql);
+    const { code } = await sqlModule(file, sql);
+    const out = join(root, `${name}.mjs`);
+    writeFileSync(out, code.replace(`from "reylo"`, `from ${JSON.stringify(INDEX)}`));
+    return (await import(pathToFileURL(out).href)).default;
+  };
+  try {
+    const columns = await built("columns", "select d, at, ds, r, tr from e order by id");
+    const document = await built("document", "select jsonb_build_object('d', d, 'at', lower(tr)) as o, json_build_array(d, lower(tr)) as a from e order by id");
+    const param = await built("param", "select id from e where d = :d::date and at = :at::timestamptz");
+    const rows = await columns.run(own.sql);
+    assert.deepEqual(rows[0], { d: "-000001-06-01", at: "+012345-01-01T00:00:00.000000Z", ds: ["+012345-01-01", "-000001-06-01"], r: { lower: "-000001-06-01", upper: "+012345-01-01", bounds: "[)" }, tr: { lower: "-004712-01-01T00:00:00.000000Z", upper: "+012345-01-01T00:00:00.500000Z", bounds: "[)" } });
+    // Inside a document Postgres writes its own year, and an instant before a zone's first standard time with an offset to the second.
+    await own.sql.unsafe("set time zone 'America/New_York'");
+    const documents = await document.run(own.sql);
+    assert.deepEqual(documents[0], { o: { d: "0002-06-01 BC", at: "4714-12-31T19:03:58-04:56:02 BC" }, a: ["0002-06-01 BC", "4714-12-31T19:03:58-04:56:02 BC"] });
+    // A POSIX session zone takes the offset there past RFC 3339's 23:59, as far as 169 hours: the 168 Postgres reads, and
+    // an hour of summer time, which the second zone keeps in January.
+    await own.sql.unsafe("set time zone 'XXX-30'");
+    const posix = await document.run(own.sql);
+    assert.deepEqual(posix[0].a, ["0002-06-01 BC", "4713-01-02T06:00:00+30:00 BC"]);
+    await own.sql.unsafe("set time zone 'XXX-167:59:60YYY,M10.1.0,M3.3.0'");
+    const furthest = await document.run(own.sql);
+    assert.deepEqual(furthest[0].o, { d: "0002-06-01 BC", at: "4713-01-08T01:00:00+169:00 BC" });
+    // A year from 1 to 9999 takes those offsets too, which the format refuses.
+    const fourDigits = await built("four-digits", "select jsonb_build_object('at', at, 'lmt', timestamptz '1850-01-01 00:00:00+00') as o, json_build_array(at, timestamptz '1850-01-01 00:00:00+00') as a from e where id = 2");
+    await own.sql.unsafe("set time zone 'America/New_York'");
+    const localMean = await fourDigits.run(own.sql);
+    // One row by its key, which `.run()` gives alone.
+    assert.deepEqual(localMean.a, ["2025-12-31T19:00:00-05:00", "1849-12-31T19:03:58-04:56:02"]);
+    await own.sql.unsafe("set time zone 'XXX-30'");
+    const posixFour = await fourDigits.run(own.sql);
+    assert.deepEqual(posixFour.o, { at: "2026-01-02T06:00:00+30:00", lmt: "1850-01-02T06:00:00+30:00" });
+    // A range and a multirange inside a document are their text.
+    const ranges = await built("ranges", "select jsonb_build_object('r', r) as o, json_build_array(r, int4multirange(int4range(1, 3), int4range(5, 7))) as a from e order by id");
+    const rangeRows = await ranges.run(own.sql);
+    assert.deepEqual(rangeRows.map((row: { a: unknown }) => row.a), [['["0002-06-01 BC",12345-01-01)', "{[1,3),[5,7)}"], ["empty", "{[1,3),[5,7)}"]]);
+    const ajv = new Ajv2020({ strict: false, validateFormats: false, logger: false });
+    for (const [query, result] of [[columns, rows], [document, documents], [document, posix], [document, furthest], [fourDigits, localMean], [fourDigits, posixFour], [ranges, rangeRows]]) {
+      const json = JSON.parse(JSON.stringify(result));
+      assert.equal(validate(query.outputSchema, json), undefined);
+      assert.ok(ajv.validate(query.outputSchema, json), ajv.errorsText());
+    }
+    // Each place's own spelling: Postgres's inside a document is no value `.run()` gives a column.
+    assert.equal(validate(columns.outputSchema, [{ ...rows[0], d: "0002-06-01 BC" }])?.path, "/0/d");
+    // The engine writes a built array's items (engine/core's `json_schema`), the run time a built object's keys: one schema for one type.
+    const { o, a } = document.outputSchema.items.properties;
+    assert.deepEqual(a.prefixItems, [o.properties.d, o.properties.at]);
+    const back = { d: rows[0].d, at: rows[0].at };
+    assert.equal(validate(param.inputSchema, back), undefined);
+    assert.deepEqual(await param.run(own.sql, back), [{ id: 1 }]);
+  } finally {
+    for (const session of Session.opened()) await session.close();
+    await own.drop();
+  }
 });
 
 test("MySQL: a column's definition reaches a query's JSON Schema as a length in code points alone, and every row `.run()` returns holds to it, on mysql2 and mariadb", { skip: mysqlLive, timeout: 60_000 }, async () => {

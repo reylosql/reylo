@@ -104,6 +104,8 @@ function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean
     if (t.kind === "geometry" && name === "geometry" && dialect === "postgres") return GEOJSON;
     // pgvector has no cast to JSON, so a vector inside a document is its text.
     if (kind === "vector") return { type: "string" };
+    // A range or a multirange has none either: its text, `[1,5)` or `{[1,3),[5,7)}`, as engine/core writes it.
+    if (t.kind === "range" || t.kind === "multirange") return { type: "string", description: `pg type ${name}` };
   } else if (input) {
     // A MySQL TINYINT(1) or BIT(1) column's parameter takes the truth value its rows return, or the integer it stores.
     if (dialect === "mysql" && kind === "bool" && t.kind !== "boolean") return { anyOf: [{ type: "boolean" }, { type: "integer", format: "int32" }] };
@@ -116,7 +118,7 @@ function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean
   if (inJson && isMysqlSet(t)) return { type: "string" };
   if (kind.includes("|")) return { anyOf: kind.split("|").map((k) => kindSchema(k as ScalarKind, t, dialect)) };
   const schema = kindSchema(kind as ScalarKind, t, dialect);
-  if (kind !== "text") return withInfinity(schema, t);
+  if (kind !== "text") return besideFormat(schema, t, inJson);
   if (isMysqlSet(t)) return { type: "string" };
   switch (t.kind) {
     case "text": return { type: "string" };
@@ -133,10 +135,56 @@ function scalar(t: EngineType, dialect: Dialect, inJson: boolean, input: boolean
   }
 }
 
-/** A date or a timestamp that may be infinite, which `.run()` gives, and Postgres writes inside a document, as the text `infinity` or `-infinity`, which no date format admits. */
-function withInfinity(schema: Schema, t: EngineType): Schema {
+// The fields of a date's and an instant's text, each within its range: a year from 0001 to 9999, a
+// month and a day, a time of day, and an offset from UTC within RFC 3339's 23:59 where the value
+// stands on its own. The same in engine/core.
+const YEAR = "(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})";
+const MONTH_DAY = "-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])";
+const CLOCK = "T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?";
+const OFFSET = "[+-]([01][0-9]|2[0-3]):[0-5][0-9]";
+/** ISO 8601's extended year of a value outside 0000–9999, as `isoYear` writes it: a sign and six digits or more, never `-000000`. */
+const EXTENDED_YEAR = `([+-](0[1-9][0-9]{4}|[1-9][0-9]{5,})|-00${YEAR})`;
+/**
+ * An instant's time as Postgres writes it inside a document, in the session's zone: its offset to the
+ * second before the zone's first standard time, and as far as 169 hours under a POSIX zone
+ * (`XXX-167:59:60YYY` in its summer), whose offset Postgres reads up to 168 hours and summer time
+ * moves one more; the hours in two digits below 100, as Postgres pads them.
+ */
+const DOCUMENT_TIME = `${CLOCK}[+-](([0-9]{2}|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00)`;
+/** Of those offsets, the ones RFC 3339's refuses: to the second, or 24 hours or more. A four-digit year with any other is the format's, which checks the calendar too. */
+const ODD_OFFSET = "[+-](([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]|(2[4-9]|[3-9][0-9]|1[0-5][0-9]|16[0-8]):[0-5][0-9](:[0-5][0-9])?|169:00)";
+
+/**
+ * A year that RFC 3339's four digits do not write, as a date's or an instant's text has it: ISO
+ * 8601's extended year where the run time writes the value (`isoYear`, and a Temporal value's
+ * JSON), and inside a document Postgres's own, five digits or more, or four with BC after the
+ * value (`12345-01-01`, `0002-06-01 BC`). Inside a document an instant of a year from 1 to 9999
+ * takes Postgres's offset too where the format refuses it (`1849-12-31T19:03:58-04:56:02`,
+ * `ODD_OFFSET`). The same in engine/core.
+ */
+const PAST_YEARS = {
+  date: [`^${EXTENDED_YEAR}${MONTH_DAY}$`, `^([1-9][0-9]{4,}${MONTH_DAY}|${YEAR}${MONTH_DAY} BC)$`],
+  instant: [`^${EXTENDED_YEAR}${MONTH_DAY}${CLOCK}(Z|${OFFSET})$`, `^([1-9][0-9]{4,}${MONTH_DAY}${DOCUMENT_TIME}|${YEAR}${MONTH_DAY}${DOCUMENT_TIME} BC|${YEAR}${MONTH_DAY}${CLOCK}${ODD_OFFSET})$`],
+} as const;
+
+/** The text of a year outside 0000–9999, which a bound with a sign says a date or an instant of `t` reaches, standing where `inJson` says. */
+function pastYears(t: EngineType, inJson: boolean): Schema | undefined {
+  if (t.kind !== "date" && t.kind !== "instant") return undefined;
+  const signed = [t.min, t.max, t.exclusive_min, t.exclusive_max].some((bound) => bound !== undefined && /^[+-]/.test(bound));
+  return signed ? { type: "string", pattern: PAST_YEARS[t.kind][inJson ? 1 : 0] } : undefined;
+}
+
+/**
+ * A date's or a timestamp's format and, beside it, the text of each value of `t` it refuses: a year
+ * outside 0000–9999 (`pastYears`), and infinity, which `.run()` gives, and Postgres writes inside
+ * a document, as the text `infinity` or `-infinity`.
+ */
+function besideFormat(schema: Schema, t: EngineType, inJson: boolean): Schema {
+  if (schema.format === undefined) return schema;
+  const past = pastYears(t, inJson);
   const infinite = (t.kind === "date" || t.kind === "instant" || t.kind === "datetime" || t.kind === "zoned_datetime") && t.infinity === true;
-  return infinite && schema.format !== undefined ? { anyOf: [schema, { enum: ["infinity", "-infinity"] }] } : schema;
+  const forms = [schema, ...(past === undefined ? [] : [past]), ...(infinite ? [{ enum: ["infinity", "-infinity"] }] : [])];
+  return forms.length > 1 ? { anyOf: forms } : schema;
 }
 
 /** The JSON form of a value of `kind` as `run` returns it, once JSON: each kind's one representation (src/values.ts). */
@@ -313,6 +361,11 @@ function plainSchema(t: EngineType, dialect: Dialect, input: boolean, inJson: bo
   if (codec === "set:array" && t.kind === "array" && isMysqlSet(t)) return { ...CODEC_SCHEMA[codec], items: typeSchema(t.element.type, dialect, input) };
   // A geometry parameter may leave out its srid, which then is the column's.
   if (codec === "geometry" && input) return { ...CODEC_SCHEMA.geometry, required: ["type"] };
+  if (codec === "date" || codec === "instant") {
+    // A Temporal date's or instant's JSON writes a year outside 0000–9999 as ISO 8601 extends it.
+    const past = pastYears(t, false);
+    if (past !== undefined) return { anyOf: [CODEC_SCHEMA[codec], past] };
+  }
   if (codec !== undefined) return CODEC_SCHEMA[codec];
   const name = bareName(t);
   // What the caller passes for a structured parameter: each key as a parameter of its type takes it.

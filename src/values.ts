@@ -483,12 +483,13 @@ export function sixDigits(x: string): string {
 const micros = (fraction: string) => (fraction === "" ? ".000000" : fraction.padEnd(7, "0"));
 
 // timestamptz in DateStyle ISO: `2026-10-20 03:03:00.123456-07`, offsets with seconds before
-// standard time (`-07:52:58`), years past 9999, ` BC`. `new Date(text)`, which postgres.js and
+// standard time (`-07:52:58`), of three digits of hours under a POSIX zone (`XXX-100` writes
+// `+100`), years past 9999, ` BC`. `new Date(text)`, which postgres.js and
 // PGlite use, returns Invalid Date for the last three and reads year 0001 as 2001
 // (wiki/driver-decoding/spike/postgres.md); and a Date holds milliseconds, not the server's
 // microseconds. So Reylo moves the wall-clock time to UTC itself, in whole seconds on a day count,
 // and keeps the fraction as the server wrote it.
-const TSTZ = /^(\d{4,})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(\.\d{1,6})?([+-])(\d\d)(?::(\d\d))?(?::(\d\d))?( BC)?$/;
+const TSTZ = /^(\d{4,})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)(\.\d{1,6})?([+-])(\d\d|1\d\d)(?::(\d\d))?(?::(\d\d))?( BC)?$/;
 
 /** Days from 1970-01-01 to a date of the proleptic Gregorian calendar, year 0 being 1 BC (Howard Hinnant's days_from_civil). */
 function daysFromCivil(y: number, m: number, d: number): number {
