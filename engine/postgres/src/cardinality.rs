@@ -225,20 +225,27 @@ impl Catalog {
         self.scoped(with, cte.map(|cte| at(cte).unwrap_or(0)))
     }
 
-    /// This catalog for a statement nested in one whose WITH clause is `with`, with `with`'s names
-    /// and the statements of the first `upto` of its queries (every one, for `None`) in scope, so
-    /// that a reference to one reads its keys. A WITH query's body sees those before it.
+    /// This catalog for a statement nested in one whose WITH clause is `with`, with the names and
+    /// the statements of the first `upto` of its queries (every one, for `None`) in scope, so that
+    /// a reference to one reads its keys. A WITH query's body sees those before it, as Postgres
+    /// reads a WITH clause without RECURSIVE: its own name and a later one's are an enclosing
+    /// statement's WITH query of the name, or a table. With RECURSIVE every name is in scope, and
+    /// no statement.
     fn scoped(&self, with: Option<&protobuf::WithClause>, upto: Option<usize>) -> Catalog {
         let mut inner = self.clone();
-        inner.enclosing_ctes.extend(with_names(with).cloned());
+        let outer = inner.enclosing_ctes.len();
         let recursive = with.is_some_and(|w| w.recursive);
-        for cte in with.into_iter().flat_map(|w| w.ctes.iter().take(upto.unwrap_or(usize::MAX))) {
+        let names: Vec<&String> = with_names(with).collect();
+        let seen = if recursive { names.len() } else { upto.unwrap_or(usize::MAX).min(names.len()) };
+        inner.enclosing_ctes.extend(names[..seen].iter().map(|name| (*name).clone()));
+        for (at, cte) in with.into_iter().flat_map(|w| w.ctes.iter().take(upto.unwrap_or(usize::MAX))).enumerate() {
             let Some(NodeEnum::CommonTableExpr(cte)) = cte.node.as_ref() else { continue };
             let text = match cte.ctequery.as_deref().and_then(|q| q.node.as_ref()) {
                 Some(NodeEnum::SelectStmt(body)) if !recursive => deparse_select(body),
                 _ => None,
             };
-            inner.enclosing_bodies.push((cte.ctename.clone(), text, cte.aliascolnames.iter().filter_map(field_name).map(String::from).collect(), inner.enclosing_ctes.len()));
+            // Its statement sees the names before it.
+            inner.enclosing_bodies.push((cte.ctename.clone(), text, cte.aliascolnames.iter().filter_map(field_name).map(String::from).collect(), outer + at));
         }
         inner
     }
@@ -4171,9 +4178,10 @@ mod tests {
             From::read(outer, &catalog).through(0, &catalog, |inner, scope, _| {
                 assert_eq!(scope.enclosing_ctes, ["x"]);
                 let from = From::read(inner, scope);
-                for (i, bodies) in [(0, vec!["x", "z"]), (1, vec!["x"])] {
+                // The subquery sees `z`, and `z`'s own statement does not.
+                for (i, names, bodies) in [(0, vec!["x", "z"], vec!["x", "z"]), (1, vec!["x"], vec!["x"])] {
                     from.through(i, scope, |_, child, _| {
-                        assert_eq!(child.enclosing_ctes, ["x", "z"]);
+                        assert_eq!(child.enclosing_ctes, names);
                         assert_eq!(child.enclosing_bodies.iter().map(|(name, _, _, _)| name.as_str()).collect::<Vec<_>>(), bodies);
                     }).unwrap();
                 }
@@ -4858,6 +4866,9 @@ mod tests {
         keyed.unique_keys.insert("x".into(), vec![vec!["k".into()]]);
         let write = "WITH x AS (SELECT id, 1 AS k FROM todos), u AS (UPDATE todos SET id = todos.id FROM x WHERE x.k = $1 AND todos.id = x.id RETURNING todos.id) SELECT * FROM u";
         assert!(at_most_one(write, Dialect::Postgres, &Trust::default(), &keyed).is_err());
+        // A WITH query after it is no name its statement sees: `todos` there is the table.
+        assert_eq!(pg_most("WITH u AS (UPDATE todos AS t SET id = t.id FROM todos AS x WHERE x.id = 2 AND t.id = x.id RETURNING t.id), todos AS (SELECT 1 AS id) SELECT * FROM u"), Ok(()));
+        assert_eq!(pg_most("WITH u AS (SELECT x.id FROM todos x WHERE x.id = $1), todos AS (SELECT 1 AS id) SELECT * FROM u"), Ok(()));
     }
 
     #[test]
