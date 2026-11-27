@@ -3309,8 +3309,12 @@ impl Analyzer<'_> {
         let n = sel.from.len();
         let index: HashMap<i64, usize> = sel.from.iter().enumerate().map(|(i, f)| (f.cursor, i)).collect();
         let terms = conjuncts(sel.where_.as_ref());
+        let varies = self.varying_items(sel);
         loop {
             let mut changed = false;
+            // A determined item's columns are one value each for pinning another item, but for one
+            // whose statement SQLite may run again for each row it meets ([`Self::varying_items`]).
+            let steady: Vec<bool> = done.iter().zip(&varies).map(|(d, v)| *d && !v).collect();
             for i in 0..n {
                 if done[i] {
                     continue;
@@ -3318,12 +3322,12 @@ impl Analyzer<'_> {
                 let f = &sel.from[i];
                 let pinned = if let Some(sub) = &f.subquery {
                     let usable: Vec<&Node> = terms.iter().copied().filter(|t| !t.outer_on || (!constant && t.join == f.cursor)).collect();
-                    !(constant && f.outer) && (self.at_most_one(sub).is_ok() || self.derived_pinned(&derived[i], f.cursor, &usable, &done, &index))
+                    !(constant && f.outer) && (self.at_most_one(sub).is_ok() || self.derived_pinned(&derived[i], f.cursor, &usable, &steady, &index))
                 } else if let (Some(table), false, false) = (f.table.as_deref(), f.tab_func, f.virtual_) {
                     // A WHERE term's `=` rejects the null extension, so it pins even an outer
                     // join's right side for every row.
                     let usable: Vec<&Node> = terms.iter().copied().filter(|t| !t.outer_on || (!constant && t.join == f.cursor)).collect();
-                    self.key_pinned(table, f.cursor, &usable, &done, &index)
+                    self.key_pinned(table, f.cursor, &usable, &steady, &index)
                 } else {
                     false
                 };
@@ -3515,6 +3519,9 @@ impl Analyzer<'_> {
     /// WHERE (not an outer join's ON) equates to a value, or a value itself.
     fn pinned(&self, sel: &Sel, e: &Node, constant: &[bool]) -> bool {
         let index: HashMap<i64, usize> = sel.from.iter().enumerate().map(|(i, f)| (f.cursor, i)).collect();
+        let varies = self.varying_items(sel);
+        let constant: Vec<bool> = constant.iter().zip(&varies).map(|(c, v)| *c && !v).collect();
+        let constant = constant.as_slice();
         if e.op == "column" {
             if index.get(&e.cursor).is_some_and(|i| constant[*i]) {
                 return true;
@@ -3523,6 +3530,28 @@ impl Analyzer<'_> {
             return terms.iter().filter(|t| !t.outer_on).filter_map(|t| self.pins(t, e.cursor, constant, &index)).any(|c| e.column.as_deref().is_some_and(|name| name.eq_ignore_ascii_case(c)));
         }
         e.select.is_none() && !self.calls_volatile(e) && cursors(e).is_some_and(|read| read.iter().all(|c| !index.contains_key(c)))
+    }
+
+    /// Which FROM items are subqueries, WITH queries or views whose statement calls a function that
+    /// may give each call another value: `random()`, `randomblob()`, the counts of rows written so
+    /// far, or one the engine does not know. SQLite may flatten such an item into the query that
+    /// reads it and call the function again for each row it meets, so a determined one is still no
+    /// one value: `t.id = x.id`, with `x.id` a `random()`, may match a row of `t` for each.
+    fn varying_items(&self, sel: &Sel) -> Vec<bool> {
+        sel.from.iter().map(|f| f.subquery.as_deref().is_some_and(|sub| select_calls(sub, &|n| self.varies(n)))).collect()
+    }
+
+    /// Whether a call may give each call another value ([`Self::varying_items`]). A date or time
+    /// function reads `'now'` once per statement, and an aggregate's or a window's value is its
+    /// rows', which SQLite computes before any query reads them.
+    fn varies(&self, n: &Node) -> bool {
+        const VARYING: &[&str] = &["random", "randomblob", "changes", "total_changes", "last_insert_rowid"];
+        const DATES: &[&str] = &["date", "time", "datetime", "julianday", "unixepoch", "strftime", "timediff"];
+        if n.op != "function" || n.agg || n.window {
+            return false;
+        }
+        let name = n.name.as_deref().unwrap_or("").to_ascii_lowercase();
+        VARYING.contains(&name.as_str()) || self.extras.function(&name, n.args.len()).is_some() || !(KNOWN_FUNCTIONS.contains(&name.as_str()) || DATES.contains(&name.as_str()))
     }
 
     /// The DML form: the target table's columns have no stable cursor, so they match by name.
@@ -3948,6 +3977,20 @@ fn has_aggregate(n: &Node) -> bool {
 /// collation off a subquery.
 fn scalar_subquery_value(n: &Node) -> bool {
     n.op == "select" && n.select.as_deref().is_some_and(self_contained)
+}
+
+/// Whether `found` holds of any expression of a SELECT, at any depth: its subqueries', its FROM
+/// items' and its set operation's arms' included.
+fn select_calls(sel: &Sel, found: &dyn Fn(&Node) -> bool) -> bool {
+    fn node(n: &Node, found: &dyn Fn(&Node) -> bool) -> bool {
+        found(n)
+            || n.left.iter().chain(n.right.iter()).chain(n.filter_where.iter()).any(|b| node(b, found))
+            || n.list.iter().chain(&n.args).chain(&n.order_by).chain(&n.partition_by).any(|c| node(c, found))
+            || n.select.as_deref().is_some_and(|s| select_calls(s, found))
+    }
+    sel.from.iter().any(|f| f.args.iter().chain(f.on.iter()).any(|n| node(n, found)) || f.subquery.as_deref().is_some_and(|s| select_calls(s, found)))
+        || sel.columns.iter().map(|c| &c.expr).chain(sel.rows.iter().flatten()).chain(sel.where_.iter()).chain(&sel.group_by).chain(sel.having.iter()).chain(&sel.order_by).chain(sel.limit.iter()).chain(sel.offset.iter()).any(|n| node(n, found))
+        || sel.prior.as_deref().is_some_and(|p| select_calls(p, found))
 }
 
 /// Whether a SELECT reads only columns of its own FROM items, at any depth: none of a query around
@@ -5005,6 +5048,20 @@ mod tests {
             ("select id from users u where id in (select max(p.user_id) filter (where p.title = u.name) over () from posts p limit 1)", "many"),
             // A FILTER over the subquery's own columns reads nothing around it.
             ("select id from users where id = (select max(p.user_id) filter (where p.title = 'x') from posts p)", "at_most_one"),
+        ] {
+            assert_eq!(analysis(sql).cardinality, cardinality, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_column_sqlite_may_compute_again_for_each_row_pins_no_key() {
+        for (sql, cardinality) in [
+            ("update users set name = 'x' from (select (random() & 1) + 1 as id from posts where posts.id = 1) x where users.id = x.id returning users.id", "many"),
+            ("insert into posts (user_id, title) select u.id, 'x' from users u cross join (select (random() & 1) + 1 as id from posts where posts.id = 1) x where u.id = x.id returning id", "many"),
+            ("select u.id from users u, (select abs(random()) % 3 as id) x where u.id = x.id", "many"),
+            // An aggregate's value, and `'now'`, are one value for the statement.
+            ("select u.id from users u, (select max(user_id) as id from posts) x where u.id = x.id", "at_most_one"),
+            ("with input as (select :id as id, datetime('now') as at) update users set name = input.at from input where users.id = input.id returning users.id", "at_most_one"),
         ] {
             assert_eq!(analysis(sql).cardinality, cardinality, "{sql}");
         }

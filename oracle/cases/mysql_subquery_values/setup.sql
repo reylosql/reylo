@@ -3,3 +3,7 @@ create table users (id int primary key, email varchar(100) unique, name varchar(
 create table posts (id int primary key, user_id int not null, title varchar(100) not null);
 insert into users values (1, 'a@x', 'a'), (2, null, 'b'), (3, 'c@x', 'c');
 insert into posts values (1, 1, 'x'), (2, 1, 'y'), (3, 2, 'z');
+create table input (name varchar(100) primary key);
+insert into input values ('a');
+create table singleton (n int primary key);
+insert into singleton values (1);

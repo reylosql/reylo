@@ -418,21 +418,27 @@ impl<'a> From<'a> {
             Some(ast::LimitClause::LimitOffset { limit, offset, limit_by }) => limit.iter().chain(offset.iter().map(|o| &o.value)).chain(limit_by).collect(),
             Some(ast::LimitClause::OffsetCommaLimit { offset, limit }) => vec![offset, limit],
         };
-        let exprs = std::iter::once(value).chain(sub.conjuncts.iter().map(|c| c.expr)).chain(group).chain(s.having.iter()).chain(ordered).chain(limits);
-        exprs.into_iter().all(|e| self.one_value_beside(&sub, e, i, done))
+        // An ON clause sees only the items its join joins, so a bare name there that is not one of
+        // theirs is an enclosing query's even where a sibling of the join holds it: only a
+        // qualified name is placed there.
+        let on = sub.conjuncts.iter().filter(|c| c.may_pin.is_some()).map(|c| c.expr);
+        let exprs = std::iter::once(value).chain(sub.conjuncts.iter().filter(|c| c.may_pin.is_none()).map(|c| c.expr)).chain(group).chain(s.having.iter()).chain(ordered).chain(limits);
+        exprs.into_iter().all(|e| self.one_value_beside(&sub, e, i, done, true)) && on.into_iter().all(|e| self.one_value_beside(&sub, e, i, done, false))
             && sub.output_class(value).is_some_and(Class::exact)
             && (!bounded || at_most_one_in(q, &self.ctes, true, self.keys).is_ok())
     }
 
     /// Whether `e`, an expression of subquery `sub` of this FROM, reads only `sub`'s own columns,
-    /// enclosing queries' and `done` items' other than `i`, and calls nothing that changes from row
-    /// to row but `min`, `max` and `count`, which give the subquery's rows one value.
-    fn one_value_beside(&self, sub: &From, e: &Expr, i: usize, done: &[bool]) -> bool {
-        let all = |e: &Expr| self.one_value_beside(sub, e, i, done);
+    /// enclosing queries' and `done` items' other than `i`, names none by a bare name unless
+    /// `bare`, and calls nothing that changes from row to row but `min`, `max` and `count`, which
+    /// give the subquery's rows one value.
+    fn one_value_beside(&self, sub: &From, e: &Expr, i: usize, done: &[bool], bare: bool) -> bool {
+        let all = |e: &Expr| self.one_value_beside(sub, e, i, done, bare);
         if is_variable(e) {
             return false;
         }
         match e {
+            Expr::Identifier(_) if !bare => false,
             Expr::Identifier(_) | Expr::CompoundIdentifier(_) => match sub.place_expr(e) {
                 Some(Placed::Item(..)) => true,
                 Some(Placed::Outside) => match self.place_expr(e) {
@@ -536,8 +542,14 @@ impl<'a> From<'a> {
     fn determined(&self, mut done: Vec<bool>, keys: &[Vec<Key>], constant: bool) -> Vec<bool> {
         let n = self.items.len();
         let per_row: Vec<bool> = self.items.iter().map(|it| matches!(it.source, Source::Lateral(..))).collect();
+        // The server may merge a derived table, a WITH query or a view into the query that reads
+        // it and call a function of it again for each row it meets, so a determined one that calls
+        // one whose every call may differ ([`calls_nondeterministic`]) is still no one value to pin
+        // another item to.
+        let varies: Vec<bool> = self.items.iter().map(|it| matches!(&it.source, Source::Query(q, ..) | Source::Lateral(q, _) if calls_nondeterministic(&q.to_string()))).collect();
         loop {
             let mut changed = false;
+            let steady: Vec<bool> = done.iter().zip(&varies).map(|(d, v)| *d && !v).collect();
             for i in 0..n {
                 if done[i] {
                     continue;
@@ -545,10 +557,10 @@ impl<'a> From<'a> {
                 let item = &self.items[i];
                 let rest = || (0..n).all(|j| j == i || done[j] || (!constant && per_row[j]));
                 let pinned = match &item.source {
-                    Source::Table(_) => self.key_pinned(i, &keys[i], &done, constant),
+                    Source::Table(_) => self.key_pinned(i, &keys[i], &steady, constant),
                     _ if constant && item.nullable => false,
-                    Source::Query(q, ctes, enclosed) => at_most_one_in(q, ctes, *enclosed, self.keys).is_ok() || self.key_pinned(i, &keys[i], &done, constant),
-                    Source::Lateral(q, ctes) => rest() && (at_most_one_in(q, ctes, true, self.keys).is_ok() || self.key_pinned(i, &keys[i], &done, constant)),
+                    Source::Query(q, ctes, enclosed) => at_most_one_in(q, ctes, *enclosed, self.keys).is_ok() || self.key_pinned(i, &keys[i], &steady, constant),
+                    Source::Lateral(q, ctes) => rest() && (at_most_one_in(q, ctes, true, self.keys).is_ok() || self.key_pinned(i, &keys[i], &steady, constant)),
                     Source::Other => false,
                 };
                 if pinned {
@@ -622,6 +634,21 @@ impl<'a> From<'a> {
             _ => None,
         })
     }
+}
+
+/// Whether a statement's text calls a built-in whose every call may give another value: `RAND()`,
+/// `UUID()`, `UUID_SHORT()`, `SYSDATE()`, `RANDOM_BYTES()`, and the counts of the statement's own
+/// writes, `LAST_INSERT_ID()`, `ROW_COUNT()` and `FOUND_ROWS()`. `NOW()` reads the statement's
+/// start, once.
+fn calls_nondeterministic(text: &str) -> bool {
+    const VARYING: &[&str] = &["rand", "uuid", "uuid_short", "sysdate", "random_bytes", "last_insert_id", "row_count", "found_rows"];
+    let lower = text.to_ascii_lowercase();
+    VARYING.iter().any(|name| {
+        lower.match_indices(name).any(|(at, _)| {
+            let before = lower[..at].chars().next_back().is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '`'));
+            before && lower[at + name.len()..].trim_start().starts_with('(')
+        })
+    })
 }
 
 /// The terms of a condition's top-level `AND`.

@@ -1089,6 +1089,7 @@ struct From<'a> {
 }
 
 /// What the walk of a subquery knows of one of its FROM items' columns ([`From::scope_of`]).
+#[derive(Clone)]
 enum Scoped {
     /// A table or a view the catalog names, whose columns it gives.
     Relation(String),
@@ -1334,8 +1335,20 @@ impl<'a> From<'a> {
         // The catalog each WITH query's and subquery's statement is read in, made once.
         let scopes: Vec<OnceCell<Catalog>> = (0..n).map(|_| OnceCell::new()).collect();
         let inside = |i: usize| scopes[i].get_or_init(|| self.inside(i, catalog));
+        // A subquery that calls something volatile runs again where the plan scans it again, as
+        // the inner side of a nested loop does, so a determined one's columns are still no one
+        // value to pin another item to. A WITH query that calls one is materialized, and read once.
+        let varies: Vec<bool> = self
+            .items
+            .iter()
+            .map(|item| match &item.source {
+                Source::Subquery(sub, _) => calls_volatile(&protobuf::Node { node: Some(NodeEnum::SelectStmt(Box::new((*sub).clone()))) }, catalog),
+                _ => false,
+            })
+            .collect();
         loop {
             let mut changed = false;
+            let steady: Vec<bool> = done.iter().zip(&varies).map(|(d, v)| *d && !v).collect();
             for i in 0..n {
                 if done[i] {
                     continue;
@@ -1345,12 +1358,12 @@ impl<'a> From<'a> {
                 let pinned = match &item.source {
                     _ if item.proven_one => !per_row[i] || rest(),
                     Source::Relation(_) if per_row[i] => !constant && rest(),
-                    Source::Relation(rv) => self.key_pinned(i, rv, &done, constant, catalog) || self.derived_pinned(i, &keys[i], &done, constant, catalog),
+                    Source::Relation(rv) => self.key_pinned(i, rv, &steady, constant, catalog) || self.derived_pinned(i, &keys[i], &steady, constant, catalog),
                     _ if constant && item.nullable => false,
-                    Source::With(cte, recursive) => !*recursive && (with_query_at_most_one(cte, dialect, trust, inside(i)) || self.derived_pinned(i, &keys[i], &done, constant, catalog)),
-                    Source::Subquery(sub, lateral) => (!*lateral || rest()) && (at_most_one_select(sub, dialect, trust, inside(i)).is_ok() || self.derived_pinned(i, &keys[i], &done, constant, catalog)),
+                    Source::With(cte, recursive) => !*recursive && (with_query_at_most_one(cte, dialect, trust, inside(i)) || self.derived_pinned(i, &keys[i], &steady, constant, catalog)),
+                    Source::Subquery(sub, lateral) => (!*lateral || rest()) && (at_most_one_select(sub, dialect, trust, inside(i)).is_ok() || self.derived_pinned(i, &keys[i], &steady, constant, catalog)),
                     Source::Function(f) => !constant && rest() && one_row_function(f, catalog).is_ok(),
-                    Source::Enclosing(_) => self.derived_pinned(i, &keys[i], &done, constant, catalog),
+                    Source::Enclosing(_) => self.derived_pinned(i, &keys[i], &steady, constant, catalog),
                     Source::Opaque => false,
                 };
                 if pinned {
@@ -1863,11 +1876,7 @@ impl<'a> From<'a> {
                     return self.place(c, inner, catalog, out);
                 }
                 if let Some(select) = map.get("SelectStmt") {
-                    let shadowed: Vec<String> = inner.iter().flatten().filter_map(|(name, s)| matches!(s, Scoped::OwnWith).then(|| name.clone())).collect();
-                    inner.push(self.scope_of(select, &shadowed));
-                    let walked = select.as_object().into_iter().flat_map(|o| o.values()).try_for_each(|child| self.walk_reads(child, inner, catalog, out));
-                    inner.pop();
-                    return walked;
+                    return self.walk_select(select, inner, catalog, out);
                 }
                 map.values().try_for_each(|child| self.walk_reads(child, inner, catalog, out))
             }
@@ -1876,11 +1885,71 @@ impl<'a> From<'a> {
         }
     }
 
+    /// One SELECT of a subquery, each part in the scope SQL reads it in: its WITH queries' bodies
+    /// see the names of those queries and none of its FROM items; a join's ON sees the items that
+    /// join joins; a subquery or a function in its FROM sees none of its siblings, so a name it
+    /// reads and does not hold itself cannot be placed; the rest sees the whole FROM. A set
+    /// operation's arms are SELECTs of their own.
+    fn walk_select(&self, select: &Value, inner: &mut Vec<Vec<(String, Scoped)>>, catalog: &Catalog, out: &mut Vec<(usize, Option<String>)>) -> Option<()> {
+        let shadowed: Vec<String> = inner.iter().flatten().filter_map(|(name, s)| matches!(s, Scoped::OwnWith).then(|| name.clone())).collect();
+        let (scope, own) = self.scope_of(select, &shadowed);
+        let withs: Vec<(String, Scoped)> = scope.iter().filter(|(_, s)| matches!(s, Scoped::OwnWith)).map(|(name, _)| (name.clone(), Scoped::OwnWith)).collect();
+        let map = select.as_object()?;
+        if let Some(with) = map.get("with_clause") {
+            inner.push(withs.clone());
+            let walked = self.walk_reads(with, inner, catalog, out);
+            inner.pop();
+            walked?;
+        }
+        for item in map.get("from_clause").and_then(Value::as_array).into_iter().flatten() {
+            inner.push(withs.clone());
+            let walked = self.walk_from(item, &own, inner, catalog, out);
+            inner.pop();
+            walked?;
+        }
+        for arm in ["larg", "rarg"].into_iter().filter_map(|key| map.get(key)).filter(|arm| arm.is_object()) {
+            inner.push(withs.clone());
+            let walked = self.walk_select(arm, inner, catalog, out);
+            inner.pop();
+            walked?;
+        }
+        inner.push(scope);
+        let walked = map.iter().filter(|(key, _)| !matches!(key.as_str(), "with_clause" | "from_clause" | "larg" | "rarg")).try_for_each(|(_, v)| self.walk_reads(v, inner, catalog, out));
+        inner.pop();
+        walked
+    }
+
+    /// One item of a FROM the walk is inside ([`From::walk_select`]).
+    fn walk_from(&self, item: &Value, own: &[String], inner: &mut Vec<Vec<(String, Scoped)>>, catalog: &Catalog, out: &mut Vec<(usize, Option<String>)>) -> Option<()> {
+        let node = item.get("node")?;
+        if node.get("RangeVar").is_some() {
+            return Some(());
+        }
+        if let Some(join) = node.get("JoinExpr") {
+            let sides: Vec<&Value> = ["larg", "rarg"].into_iter().filter_map(|k| join.get(k)).collect();
+            for side in &sides {
+                self.walk_from(side, own, inner, catalog, out)?;
+            }
+            if let Some(quals) = join.get("quals") {
+                inner.push(self.items_of(&sides, own));
+                let walked = self.walk_reads(quals, inner, catalog, out);
+                inner.pop();
+                walked?;
+            }
+            return Some(());
+        }
+        inner.push(vec![(String::new(), Scoped::Unknown)]);
+        let walked = self.walk_reads(item, inner, catalog, out);
+        inner.pop();
+        walked
+    }
+
     /// The names a subquery's FROM goes by, and what the proof knows of each one's columns; and,
     /// as [`Scoped::OwnWith`], the WITH queries the subquery itself defines, which shadow the
     /// statement's of the same name in it and in any subquery inside it, as `shadowed` holds those
-    /// of the subqueries the walk is inside.
-    fn scope_of(&self, select: &Value, shadowed: &[String]) -> Vec<(String, Scoped)> {
+    /// of the subqueries the walk is inside. With it, every WITH query name that shadows the
+    /// statement's in it.
+    fn scope_of(&self, select: &Value, shadowed: &[String]) -> (Vec<(String, Scoped)>, Vec<String>) {
         let mut own: Vec<String> = shadowed.to_vec();
         let mut out = Vec::new();
         for cte in select.get("with_clause").and_then(|w| w.get("ctes")).and_then(Value::as_array).into_iter().flatten() {
@@ -1889,6 +1958,15 @@ impl<'a> From<'a> {
                 out.push((name.to_string(), Scoped::OwnWith));
             }
         }
+        let froms: Vec<&Value> = select.get("from_clause").and_then(Value::as_array).into_iter().flatten().collect();
+        out.extend(self.items_of(&froms, &own));
+        (out, own)
+    }
+
+    /// The names FROM items go by, and what the proof knows of each one's columns, with `own` the
+    /// WITH query names that shadow the statement's there.
+    fn items_of(&self, froms: &[&Value], own: &[String]) -> Vec<(String, Scoped)> {
+        let mut out = Vec::new();
         let with = |name: &str| self.with_columns(name);
         fn item(v: &Value, ctes: &[String], own: &[String], with: &dyn Fn(&str) -> Option<Vec<String>>, out: &mut Vec<(String, Scoped)>) {
             let Some(node) = v.get("node") else { return };
@@ -1917,8 +1995,8 @@ impl<'a> From<'a> {
                 out.push((alias(other).unwrap_or_default(), Scoped::Unknown));
             }
         }
-        for f in select.get("from_clause").and_then(Value::as_array).into_iter().flatten() {
-            item(f, &self.ctes, &own, &with, &mut out);
+        for f in froms {
+            item(f, &self.ctes, own, &with, &mut out);
         }
         out
     }

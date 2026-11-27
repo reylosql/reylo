@@ -1,3 +1,4 @@
+derived_random.sql: many () -> { id: INTEGER }
 key_correlated.sql: many () -> { id: INTEGER }
 key_filter_correlated.sql: many () -> { id: INTEGER }
 key_filter_own.sql: at_most_one () -> { id: INTEGER }
