@@ -1677,6 +1677,21 @@ mod tests {
     }
 
     #[test]
+    fn a_clickhouse_variant_is_whichever_of_its_types_its_value_has() {
+        // `Variant(Array(UInt8), String)`, and a Variant with a member of no known type.
+        let bytes = json!({ "kind": "array", "element": { "type": { "kind": "integer", "bits": 8, "unsigned": true, "label": "UInt8" } } });
+        let a = analysis(
+            json!([
+                { "name": "v", "nullable": true, "type": { "kind": "union", "members": [bytes.clone(), { "kind": "text", "label": "String" }] } },
+                { "name": "w", "nullable": true, "type": { "kind": "union", "members": [bytes, { "kind": "unknown" }] } },
+            ]),
+            json!([]),
+            "many",
+        );
+        assert_eq!(printed(&a, "clickhouse", &Value::Null, false).returns, "{ v: number[] | string | null; w: unknown | null }[]");
+    }
+
+    #[test]
     fn a_statement_the_database_refused_is_unknown() {
         let mut a = analysis(json!([]), json!([]), "many");
         a["diagnostics"] = json!([{ "message": "no", "start": 0, "length": 1, "code": 6 }]);
