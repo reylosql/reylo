@@ -33,6 +33,20 @@ create table sized (
   span time,
   span_ms time(4)
 );
+-- A CHAR or VARCHAR stored as UTF-16 or UTF-32 goes into a JSON document as its bytes, unconverted, so
+-- its length does not hold there. Where a query reads a table that holds one, no CHAR or VARCHAR it
+-- reads through a derived table keeps its length either, since the prepare names the derived column
+-- in place of the table's, which may be another column. A TEXT's capacity, in bytes, still bounds the
+-- characters of its bytes.
+create table wide_sets (
+  id int primary key,
+  u16 varchar(4) character set utf16,
+  u16le varchar(4) character set utf16le,
+  u32 char(4) character set utf32,
+  u2 char(4) character set ucs2,
+  u16_note tinytext character set utf16,
+  plain varchar(4)
+);
 -- A DECIMAL of no whole digits, apart, since the seeding's first value, 1, does not fit it.
 create table parts (id int primary key, part decimal(5,5) not null);
 create view sized_view as select name, concat(name, name) as twice, price, at_ms from sized;

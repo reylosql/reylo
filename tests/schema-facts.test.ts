@@ -276,11 +276,11 @@ test("MySQL: a column's definition reaches a query's JSON Schema as a length in 
   // Each column at its longest in characters of the most bytes it stores, and each decimal at its most digits.
   const own = await mysqlDatabase(
     "reylo_schema_facts",
-    `create table sized (id int primary key, name varchar(20) not null, code char(5), legacy varchar(10) character set latin1, body text, old_body text character set latin1, price decimal(10,2), part decimal(5,5), at datetime(3), span time(4));
+    `create table sized (id int primary key, name varchar(20) not null, code char(5), legacy varchar(10) character set latin1, wide varchar(4) character set utf16, body text, old_body text character set latin1, price decimal(10,2), part decimal(5,5), at datetime(3), span time(4));
     insert into sized values
-      (1, repeat('😀', 20), 'abcde', repeat('é', 10), repeat('😀', 16383), repeat('é', 65535), 99999999.99, 0.99999, '2026-01-01 12:00:00.123', '-838:59:59.0000'),
-      (2, '', 'ab   ', 'a', repeat('z', 65535), '', -99999999.99, -0.00001, '2026-01-01 12:00:00', '12:00:00.1235'),
-      (3, 'x', null, null, null, null, null, null, null, null)`,
+      (1, repeat('😀', 20), 'abcde', repeat('é', 10), repeat('😀', 4), repeat('😀', 16383), repeat('é', 65535), 99999999.99, 0.99999, '2026-01-01 12:00:00.123', '-838:59:59.0000'),
+      (2, '', 'ab   ', 'a', 'ab', repeat('z', 65535), '', -99999999.99, -0.00001, '2026-01-01 12:00:00', '12:00:00.1235'),
+      (3, 'x', null, null, null, null, null, null, null, null, null)`,
   );
   const root = mkdtempSync(join(tmpdir(), "reylo-schema-facts-"));
   writeFileSync(join(root, "package.json"), "{}");
@@ -301,7 +301,7 @@ test("MySQL: a column's definition reaches a query's JSON Schema as a length in 
   try {
     const columns = await built("columns", "select name, code, legacy, body, old_body, price, part, at, span from sized order by id");
     const derived = await built("derived", "select d.body from (select id, body from sized) d order by d.id");
-    const document = await built("document", "select json_object('name', name, 'code', code, 'body', body, 'price', price) as doc from sized order by id");
+    const document = await built("document", "select json_object('name', name, 'code', code, 'wide', wide, 'body', body, 'price', price) as doc from sized order by id");
     const names = await built("names", "select json_arrayagg(name) as names from sized");
     const nullable = (schema: object) => ({ anyOf: [schema, { type: "null" }] });
     const column = columns.outputSchema.items.properties;
@@ -320,6 +320,8 @@ test("MySQL: a column's definition reaches a query's JSON Schema as a length in 
     const leaf = document.outputSchema.items.properties.doc.properties;
     assert.deepEqual(leaf.name, { type: "string", maxLength: 20 });
     assert.deepEqual(leaf.code, nullable({ type: "string", maxLength: 5 }));
+    // MySQL writes a utf16 string into a document as its bytes, so its column's length does not hold there.
+    assert.deepEqual(leaf.wide, { type: ["string", "null"] });
     assert.deepEqual(leaf.body, nullable({ type: "string", maxLength: 65535 }));
     assert.deepEqual(leaf.price, nullable({ type: "number", format: "decimal" }));
     assert.deepEqual(names.outputSchema.properties.names, nullable({ type: "array", items: { type: "string", maxLength: 20 } }));
