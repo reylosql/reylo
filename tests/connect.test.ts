@@ -526,7 +526,7 @@ test("a socket the bridge cannot open is reported with its reason, a Unix socket
   await assert.rejects((await engine("mysql")).open(`mysql://root@localhost/app?socketPath=${encodeURIComponent(path)}`), (e: Error) => e instanceof Unreachable && e.message.startsWith(`cannot open the socket ${path}: connect ENOENT`));
 });
 
-test("the bridge opens the MySQL socket mysql2 would, socketPath before socket, a + in its path a space", { skip: process.platform === "win32" }, async () => {
+test("the bridge opens the MySQL socket mysql2 would, socketPath before socket, a + in its path a space", { skip: process.platform === "win32" && "its paths are Unix sockets, which Windows names as pipes" }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "reylo-sock-"));
   for (const [query, path] of [
     [`socket=${dir}/a.sock&socketPath=${dir}/b.sock`, `${dir}/b.sock`],
