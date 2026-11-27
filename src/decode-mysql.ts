@@ -612,7 +612,8 @@ export async function mariadb(c: AnyClient, text: string, values: unknown[], col
   let callbackMeta: MariadbColumn[] | undefined;
   const call = (conn: AnyClient, method: "execute" | "query", bound: unknown[]) =>
     new Promise((resolve, reject) => {
-      const returned = conn[method](options, bound, (error: Error | null, rows: unknown, meta?: MariadbColumn[]) => (error ? reject(error) : ((callbackMeta = meta), resolve(rows))));
+      // Without values, query() gets none at all, so that the driver sends the text as it is rather than scanning it for placeholders as a session without NO_BACKSLASH_ESCAPES reads it.
+      const returned = conn[method](options, method === "query" && !bound.length ? undefined : bound, (error: Error | null, rows: unknown, meta?: MariadbColumn[]) => (error ? reject(error) : ((callbackMeta = meta), resolve(rows))));
       if (typeof returned?.then === "function") returned.then(resolve, reject);
     });
   // query(), each value held to how the session reads it, in the turn its caller holds where it holds one.

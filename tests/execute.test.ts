@@ -1636,6 +1636,10 @@ test("mysql: mariadb's execute() runs a statement on an app's pool made with nam
           await conn.query("select cast('x' as signed)");
           assert.deepEqual(plain((await execute(conn, { dialect: "mysql", sql, params: [] }, {})) as object[]).map((row) => Object.values(row).map((v) => BigInt(v as bigint))), [[1n]], sql);
         }
+        // Without values the text goes as it is, with no scan for placeholders that reads its strings as another sql_mode would.
+        await conn.query("set session sql_mode = 'NO_BACKSLASH_ESCAPES'");
+        assert.deepEqual(plain((await execute(conn, { dialect: "mysql", sql: "select 'warnings\\' as label, 'why?' as marker", params: [], text: "select 'warnings\\' as label, 'why?' as marker", order: [] }, {})) as object[]), [{ label: "warnings\\", marker: "why?" }]);
+        await conn.query("set session sql_mode = default");
       } finally {
         await conn.release();
       }
@@ -1709,7 +1713,7 @@ test("mysql: a DOUBLE or FLOAT of -0, and one of a type its value decides betwee
   const alone: QueryModule<"mysql"> = { dialect: "mysql", sql: "select coalesce(:d, d) as x from r", params: ["d"], text: "select coalesce(?, d) as x from r", order: ["d"], marks: [[16, 17]], inputs: { d: { type: myType("double") } } };
   seen.length = 0;
   for (const client of [mariadb, planetscale]) await execute(client as never, alone, { d: -0 });
-  assert.deepEqual(seen, [["select coalesce((-0e0), d) as x from r", []], ["select coalesce((-0e0), d) as x from r", null]]);
+  assert.deepEqual(seen, [["select coalesce((-0e0), d) as x from r", undefined], ["select coalesce((-0e0), d) as x from r", null]]);
   // After a minus, the parentheses keep `--`, which mariadb 2 reads as a comment, out of the text.
   const minus: QueryModule<"mysql"> = { dialect: "mysql", sql: "select 1-:d as a, :e as b", params: ["d", "e"], text: "select 1-? as a, ? as b", order: ["d", "e"], marks: [[9, 10], [17, 18]], inputs: { d: { type: myType("double") }, e: { type: myType("double") } } };
   seen.length = 0;
