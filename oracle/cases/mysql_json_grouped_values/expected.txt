@@ -66,6 +66,7 @@ rollup_arrayagg_outer_nested_sub.sql: many () -> { id: int | bigint?, o: json { 
 rollup_arrayagg_outer_truth.sql: many () -> { id: int | bigint?, o: json { a: (boolean | bigint?)[] }? }
 rollup_arrayagg_own_col.sql: one () -> { o: json { a: ({ t: varchar(≤20), u: int })[]? }? }
 rollup_bare_key.sql: many () -> { id: int | bigint?, o: json { id: int? } }
+rollup_bare_key_spaced_alias.sql: many () -> { id: int | bigint?, o: json { id: int? }, display label: json { n: int? } }
 rollup_bare_sub_no_agg.sql: many () -> { id: int | bigint?, o: json { k: int? }? }
 rollup_beside_expr_key.sql: many () -> { k: bigint?, o: json { n: bigint? } }
 rollup_beside_key.sql: many () -> { title: varchar?, o: json { t: unknown?, n: unknown? } }
