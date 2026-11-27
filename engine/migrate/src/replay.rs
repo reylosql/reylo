@@ -238,8 +238,9 @@ impl<'s> Shadows<'s> {
         if self.server.dialect() != Dialect::Postgres || !sql.to_ascii_lowercase().contains("pg_cron") || !crate::commands::extensions_in(sql).iter().any(|e| e == "pg_cron") {
             return Ok(PgCron::Unneeded);
         }
+        let again = sql.to_ascii_lowercase().contains("drop extension");
         let Some(shadow) = self.lanes[l].shadow.take() else { return Ok(PgCron::Unneeded) };
-        let (shadow, named) = self.server.name_for_pg_cron(shadow).await?;
+        let (shadow, named) = self.server.name_for_pg_cron(shadow, again).await?;
         self.lanes[l].shadow = Some(shadow);
         Ok(match named {
             Ok(true) => PgCron::Named,

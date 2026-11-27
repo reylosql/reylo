@@ -1629,7 +1629,7 @@ impl Server {
                 let mut shadow = self.pg_shadow(None).await?;
                 // pg_cron, where the target has it, refuses the shadow's own name.
                 if self.copies_pg_cron() && shadow.db.rows("select 1 from pg_extension where extname = 'pg_cron'").await.is_ok_and(|r| r.is_empty()) {
-                    let (mut named, renamed) = self.name_for_pg_cron(shadow).await?;
+                    let (mut named, renamed) = self.name_for_pg_cron(shadow, false).await?;
                     if renamed == Ok(true) {
                         let _ = named.db.exec("create extension if not exists pg_cron").await;
                         named = self.unname_for_pg_cron(named).await?;
@@ -1852,13 +1852,19 @@ impl Server {
     /// so that a shadow takes what a deploy will.
     /// The answer says whether it was renamed, for [`Server::unname_for_pg_cron`] to name it back, or
     /// why it couldn't be, which pg_cron's refusal then goes on to show.
-    pub(crate) async fn name_for_pg_cron(&mut self, mut shadow: Shadow) -> Result<(Shadow, Result<bool, String>), Error> {
+    /// `again` is a step that drops pg_cron before it makes it, which a shadow that has it needs the name for too.
+    pub(crate) async fn name_for_pg_cron(&mut self, mut shadow: Shadow, again: bool) -> Result<(Shadow, Result<bool, String>), Error> {
         let Server::Postgres { admin, url, settings, pg_cron_target, pg_cron_stuck, .. } = self else { return Ok((shadow, Ok(false))) };
         if !*pg_cron_target || shadow.name == PG_CRON_NAME {
             return Ok((shadow, Ok(false)));
         }
-        if !shadow.db.rows("select 1 from pg_extension where extname = 'pg_cron'").await?.is_empty() {
+        if !again && !shadow.db.rows("select 1 from pg_extension where extname = 'pg_cron'").await?.is_empty() {
             return Ok((shadow, Ok(false)));
+        }
+        // On a server whose pg_cron reads its jobs from a database of that name, a shadow under it would run them.
+        let named = pg_rows(admin, "select current_setting('cron.database_name', true) as n").await.unwrap_or_default();
+        if named.first().and_then(|r| r.get("n")) == Some(PG_CRON_NAME) {
+            return Ok((shadow, Err(format!("the shadows' server's pg_cron runs the jobs of a database named {PG_CRON_NAME}, so no shadow takes that name"))));
         }
         if *pg_cron_stuck {
             return Ok((shadow, Err(format!("another shadow of this run kept the name {PG_CRON_NAME}"))));
@@ -2126,6 +2132,11 @@ async fn drop_left_pg_cron(admin: &tokio_postgres::Client) -> Result<Left, Error
     let left = pg_rows(admin, &format!("select shobj_description(oid, 'pg_database') as note from pg_database where datname = '{PG_CRON_NAME}'")).await?;
     let Some(row) = left.first() else { return Ok(Left::None) };
     let Some(own) = row.get("note").and_then(|n| n.strip_prefix(PG_CRON_NOTE)).map(String::from) else { return Ok(Left::Other) };
+    // A session on it is a live run's, whose lock may be in another database than this one's: advisory
+    // locks are the database's they're taken in.
+    if pg_rows(admin, &format!("select 1 from pg_stat_activity where datname = '{PG_CRON_NAME}'")).await?.first().is_some() {
+        return Ok(Left::Kept);
+    }
     let lock = format!("hashtextextended({}, 0)", literal(&own));
     if !pg_rows(admin, &format!("select pg_try_advisory_lock({lock}) as free")).await?.first().is_some_and(|r| r.flag("free")) {
         return Ok(Left::Kept);
