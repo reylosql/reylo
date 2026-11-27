@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { connect, createServer, type AddressInfo } from "node:net";
@@ -411,8 +412,95 @@ test("a build that cannot reach the database reads reylo/.cache/ with another UR
   assert.ok(moved.entry.startsWith(join(copy, "reylo", ".cache")));
 });
 
+test("an entry is named by its server and the URL's parameters that choose the database as the URL writes them, as reylo-build names it", async () => {
+  // reylo-build names its entries by the same cases but ClickHouse's (rust/reylo-build/src/analysis.rs), so that the two share reylo/.cache/.
+  const cases: { case: string; url: string; server: string; env?: Record<string, string> }[] = JSON.parse(readFileSync(new URL("../rust/reylo-build/src/entry-name-cases.json", import.meta.url), "utf8"));
+  // A ClickHouse bearer token, which reylo-build reads no URL with: the engine sends the database header beside it in either order, so it names no entry, and its value never reaches a name.
+  cases.push(
+    { case: "a ClickHouse database header before a bearer token", url: "clickhouse+http://127.0.0.1:8123/?http_header_X-ClickHouse-Database=analytics&access_token=secret", server: "clickhouse+http://@127.0.0.1:8123/?http_header_X-ClickHouse-Database=analytics" },
+    { case: "a ClickHouse database header after a bearer token", url: "clickhouse+http://127.0.0.1:8123/?access_token=secret&http_header_X-ClickHouse-Database=analytics", server: "clickhouse+http://@127.0.0.1:8123/?http_header_X-ClickHouse-Database=analytics" },
+    { case: "a bearer token alone", url: "clickhouse+http://127.0.0.1:8123/?access_token=secret", server: "clickhouse+http://@127.0.0.1:8123/" },
+  );
+  const root = mkdtempSync(join(tmpdir(), "reylo-entry-names-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  // The variables libpq reads, which the engine reads from this process's environment: each case's own, and none of the machine's.
+  const variables = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"];
+  const saved = Object.fromEntries(variables.map((name) => [name, process.env[name]]));
+  try {
+    for (const c of cases) {
+      for (const name of variables) {
+        if (c.env?.[name] === undefined) delete process.env[name];
+        else process.env[name] = c.env[name];
+      }
+      const session = await Session.open(root, { DATABASE_URL: c.url });
+      try {
+        assert.ok(session.entryFile("select 1").endsWith(`-${createHash("sha256").update(c.server).digest("hex").slice(0, 16)}.json`), c.case);
+      } finally {
+        await session.close();
+      }
+    }
+  } finally {
+    for (const name of variables) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  }
+});
+
+test("a session names its entries by libpq's variables as it started, as its connection reads them", async () => {
+  const root = mkdtempSync(join(tmpdir(), "reylo-entry-environment-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const saved = process.env.PGDATABASE;
+  process.env.PGDATABASE = "first";
+  const session = await Session.open(root, { DATABASE_URL: "postgres://app@db.internal/" });
+  try {
+    const before = session.entryFile("select 1");
+    process.env.PGDATABASE = "second";
+    assert.equal(session.entryFile("select 1"), before);
+    const later = await Session.open(root, { DATABASE_URL: "postgres://app@db.internal/" });
+    assert.notEqual(later.entryFile("select 1"), before);
+    await later.close();
+  } finally {
+    if (saved === undefined) delete process.env.PGDATABASE;
+    else process.env.PGDATABASE = saved;
+    await session.close();
+  }
+});
+
+test("a session's connection reads libpq's variables as the session started, so its analysis is of the database its entries name", { skip: live }, async () => {
+  const first = await postgresDatabase("reylo_env_first", "create table t (v int not null)");
+  const second = await postgresDatabase("reylo_env_second", "create table t (v text)");
+  const root = mkdtempSync(join(tmpdir(), "reylo-entry-environment-"));
+  writeFileSync(join(root, "package.json"), "{}");
+  const saved = process.env.PGDATABASE;
+  // The URL names no database: PGDATABASE does.
+  const url = new URL(first.url);
+  url.pathname = "/";
+  try {
+    process.env.PGDATABASE = new URL(first.url).pathname.slice(1);
+    const session = await Session.open(root, { DATABASE_URL: url.href });
+    // Changed before the session's first connection, which still opens the database its entries name.
+    process.env.PGDATABASE = new URL(second.url).pathname.slice(1);
+    try {
+      const typed = await session.analyze("select v from t");
+      assert.ok(typed.ok);
+      // The first database's `v`, which is never null, where the second's may be.
+      assert.ok(!typed.analysis.columns[0]!.nullable);
+    } finally {
+      await session.close();
+    }
+  } finally {
+    if (saved === undefined) delete process.env.PGDATABASE;
+    else process.env.PGDATABASE = saved;
+    await first.drop();
+    await second.drop();
+  }
+});
+
 test("on a server, a URL that fails reads that server's own entry and no other's, and a build says once that it reads reylo/.cache/ unchecked", { skip: live }, async (t) => {
   const { url, sql, drop } = await postgresDatabase("reylo_offline", "create table users (id int primary key, email text not null)");
+  // Another database on the same server, whose users differ.
+  const second = await postgresDatabase("reylo_offline_other", "create table users (id bigint primary key, email text)");
   const root = mkdtempSync(join(tmpdir(), "reylo-offline-"));
   writeFileSync(join(root, "package.json"), "{}");
   const statement = "select id, email from users where id = :id";
@@ -433,6 +521,21 @@ test("on a server, a URL that fails reads that server's own entry and no other's
     const typed = await analyze(root, env, statement);
     assert.ok(typed.ok);
     assert.deepEqual([typed.source, typed.unverified], ["database", undefined]);
+    // Two databases of the server, each named by `?dbname=` as libpq names one, keep an entry each.
+    // They are a project of their own: the one above reads its newest entry with no URL.
+    const byName = mkdtempSync(join(tmpdir(), "reylo-offline-dbname-"));
+    writeFileSync(join(byName, "package.json"), "{}");
+    const dbname = (database: string) => {
+      const named = new URL(through.href);
+      named.pathname = "/";
+      named.search = `dbname=${new URL(database).pathname.slice(1)}`;
+      return named.href;
+    };
+    const own = await analyze(byName, { DATABASE_URL: dbname(url) }, statement);
+    const another = await analyze(byName, { DATABASE_URL: dbname(second.url) }, statement);
+    assert.ok(own.ok);
+    assert.ok(another.ok);
+    assert.notEqual(own.entry, another.entry);
     await sql.unsafe("alter table users alter email drop not null");
     await new Promise((resolve) => proxy.close(resolve));
     // The server no longer answers: its own entry, as old as it is, and the outcome says so.
@@ -440,6 +543,10 @@ test("on a server, a URL that fails reads that server's own entry and no other's
     assert.ok(stale.ok);
     assert.deepEqual([stale.source, stale.entry], ["cache", typed.entry]);
     assert.match(stale.unverified ?? "", /^cannot connect to the database at 127\.0\.0\.1:\d+\/reylo_offline_\d+ \(DATABASE_URL in the environment\): .+; building from reylo\/\.cache\/, analyzed \d{4}-\d\d-\d\d$/);
+    // Named by `?dbname=`, the database reads its own entry, and never the other database's.
+    const ownStale = await analyze(byName, { DATABASE_URL: dbname(url) }, statement);
+    assert.ok(ownStale.ok);
+    assert.deepEqual([ownStale.source, ownStale.entry, ownStale.analysis], ["cache", own.entry, own.analysis]);
     // A server nothing was analyzed on reads no other's entry: a mistyped host is not the database last analyzed.
     const elsewhere = new URL(url);
     elsewhere.port = "1";
@@ -474,6 +581,7 @@ test("on a server, a URL that fails reads that server's own entry and no other's
   } finally {
     proxy.close();
     await drop();
+    await second.drop();
   }
 });
 

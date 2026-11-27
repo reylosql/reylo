@@ -281,11 +281,13 @@ export class Engine extends EngineCore {
   /**
    * A connection to the database `url` names (a SQLite database's path), opened by the engine in a
    * child of its own, so that a server slow to answer holds up no other connection; an Unreachable
-   * where it cannot be opened.
+   * where it cannot be opened. `variables` stand in for this process's own (one left undefined is
+   * unset), for a caller that names its entries by them: the bridge and the child read those.
    */
-  async open(url: string): Promise<Connection> {
-    const target: HostUrl = url.includes("://") ? await hostUrl(url) : { url, close: () => {} };
-    const channel = new Channel(this.binary, this.dialect);
+  async open(url: string, variables: Record<string, string | undefined> = {}): Promise<Connection> {
+    const env = withVariables(process.env, variables);
+    const target: HostUrl = url.includes("://") ? await hostUrl(url, env) : { url, close: () => {} };
+    const channel = new Channel(this.binary, this.dialect, variables);
     const ask = async <O extends Op>(request: { op: O } & Record<string, unknown>) => answerTo(request.op, await channel.ask(request));
     let conn: number;
     let version: string;
@@ -344,10 +346,20 @@ const FILE_VARIABLES = ["NODE_EXTRA_CA_CERTS", "PGSSLROOTCERT", "PGSSLCERT", "PG
  * this process's working directory as Node and libpq resolve it, now, so that a later `chdir` here
  * changes nothing for a child already running.
  */
-function engineEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
+function engineEnv(variables: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
+  const env = withVariables(process.env, variables);
   for (const name of FILE_VARIABLES) if (env[name] && env[name] !== "system") env[name] = resolve(env[name]);
   return env;
+}
+
+/** `env` with `variables` in place of its own, one left undefined unset, in every case of its name on Windows, which reads a variable's name in any case. */
+export function withVariables(env: NodeJS.ProcessEnv, variables: Record<string, string | undefined>, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  const out = { ...env };
+  for (const [name, value] of Object.entries(variables)) {
+    for (const key of Object.keys(out)) if (key === name || (platform === "win32" && key.toUpperCase() === name.toUpperCase())) delete out[key];
+    if (value !== undefined) out[name] = value;
+  }
+  return out;
 }
 
 /** The answer of `reylo engine <database> call` to `request`, or why there is none, as the engine words a failure. */
@@ -386,8 +398,8 @@ class Channel {
   /** What holds this process while a request waits: a timer, which never fires. */
   #waiting: ReturnType<typeof setInterval> | undefined;
 
-  constructor(binary: string, dialect: Dialect) {
-    const child = spawn(binary, ["engine", dialect], { env: engineEnv(), windowsHide: true });
+  constructor(binary: string, dialect: Dialect, variables: Record<string, string | undefined> = {}) {
+    const child = spawn(binary, ["engine", dialect], { env: engineEnv(variables), windowsHide: true });
     this.#child = child;
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
       this.#buffered += chunk;
