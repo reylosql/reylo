@@ -3401,7 +3401,7 @@ fn api_privileges_in(text: &str) -> Vec<crate::db::ApiPrivilege> {
 }
 
 /// Whether a text may drop pg_cron: a `drop extension` statement that names it among the extensions
-/// it drops, or a body (a `do` block's, a function's) that drops an extension and names pg_cron.
+/// it drops, or a `do` block whose body drops an extension and names pg_cron.
 pub(crate) fn drops_pg_cron(text: &str) -> bool {
     use crate::sql::TokenKind;
     crate::sql::split_statements(text, Dialect::Postgres).iter().any(|s| {
@@ -3412,7 +3412,7 @@ pub(crate) fn drops_pg_cron(text: &str) -> bool {
             _ => false,
         };
         let body = |k: &crate::sql::Token| k.kind == TokenKind::Str && drops_pg_cron_in_body(&k.text);
-        (t.len() > 2 && t[0].upper() == "DROP" && t[1].upper() == "EXTENSION" && t[2..].iter().any(named)) || t.iter().any(body)
+        (t.len() > 2 && t[0].upper() == "DROP" && t[1].upper() == "EXTENSION" && t[2..].iter().any(named)) || (t.first().is_some_and(|k| k.upper() == "DO") && t.iter().any(body))
     })
 }
 
