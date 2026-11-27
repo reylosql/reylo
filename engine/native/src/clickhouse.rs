@@ -28,6 +28,24 @@ struct Connection {
 }
 
 impl Connection {
+    /// The schema's fingerprint; a failure is the answer the program gives for it. An executable
+    /// function's result is the server's configuration's, which only a server of 26.2 or later
+    /// lists: where the configuration defines one and the server can't list it, there is no
+    /// fingerprint to keep an analysis by.
+    fn schema(&self) -> Result<crate::Schema, Value> {
+        use crate::engines::clickhouse::schema_fingerprint as fingerprint;
+        let rows = |sql: &str| match self.server.ask(sql) {
+            Ok(Outcome::Rows(rows)) => Ok(rows),
+            Ok(outcome) => Err(failure(&self.server, outcome)),
+            Err(e) => Err(json!({ "status": "unreachable", "message": e })),
+        };
+        let executable = rows(fingerprint::EXECUTABLE_QUERY)?.first().and_then(|row| row.first()).and_then(|n| n.as_u64().or_else(|| n.as_str()?.parse().ok())).unwrap_or(0) > 0;
+        if executable && !fingerprint::lists_signatures(&self.version) {
+            return Err(json!({ "status": "error", "message": format!("ClickHouse {} lists no executable function's arguments and result, which 26.2 and later do", self.version) }));
+        }
+        Ok(crate::Schema::of(&rows(&fingerprint::query(executable))?, None))
+    }
+
     /// The analysis of one statement; a failure is the answer the program gives for it.
     fn analyze(&mut self, sql: &str) -> Result<Analysis, Value> {
         match answers::analyze(&self.server, sql, &mut self.answers) {
@@ -104,10 +122,9 @@ impl Program for Clickhouse {
             // The schema's fingerprint ([`crate::engines::clickhouse::schema_fingerprint`]).
             "schema" => match self.connections.get(&id) {
                 None => closed(id),
-                Some(c) => match c.server.ask(&crate::engines::clickhouse::schema_fingerprint::query(&c.version)) {
-                    Ok(Outcome::Rows(rows)) => crate::Schema::of(&rows, None).answer(),
-                    Ok(outcome) => failure(&c.server, outcome),
-                    Err(e) => json!({ "status": "unreachable", "message": e }),
+                Some(c) => match c.schema() {
+                    Ok(schema) => schema.answer(),
+                    Err(failure) => failure,
                 },
             },
             // The schema changed: what the engine was told about the old one is stale.

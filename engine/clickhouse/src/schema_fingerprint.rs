@@ -10,16 +10,25 @@
 //! database built the same way under another name has the same fingerprint, and any other's with
 //! its own.
 
-/// The query, on a server of `version` (`26.8.1.1`): one row, the server's version, and how many
-/// lines there are with two sums of their hashes.
-pub fn query(version: &str) -> String {
+/// The query: one row, the server's version, and how many lines there are with two sums of their
+/// hashes. With `signatures`, it reads each executable function's arguments and result too, which
+/// are the server's configuration's, from `system.user_defined_functions`: a table an account may
+/// read only by its own grant, so it is read only where [`EXECUTABLE_QUERY`] finds such a function.
+pub fn query(signatures: bool) -> String {
     let mut rows = ROWS.to_vec();
-    // An executable function's arguments and result are the server's configuration's, which
-    // `system.user_defined_functions` lists from 26.2.
-    if at_least(version, (26, 2)) {
+    if signatures {
         rows.push("SELECT cityHash64('x', name, toString(type), return_type, toString(argument_types), toString(argument_names)) FROM system.user_defined_functions");
     }
     format!("SELECT concat(version(), ' ', toString(count()), ' ', toString(sum(x)), ' ', toString(groupBitXor(x))) FROM (\n    {}\n  )", rows.join("\n    UNION ALL "))
+}
+
+/// How many executable functions the server's configuration defines.
+pub const EXECUTABLE_QUERY: &str = "SELECT count() FROM system.functions WHERE origin = 'ExecutableUserDefined'";
+
+/// Whether a server of `version` (`26.8.1.1`) lists an executable function's signature, which it
+/// does from 26.2.
+pub fn lists_signatures(version: &str) -> bool {
+    at_least(version, (26, 2))
 }
 
 /// Whether `version` is `oldest` or later.
@@ -39,13 +48,13 @@ const ROWS: &[&str] = &[
 
 #[cfg(test)]
 mod tests {
-    /// An executable function's signature is read where the server lists it, and a server older than
-    /// that has a fingerprint all the same.
+    /// An executable function's signature is read where the server lists it.
     #[test]
     fn an_executable_functions_signature_is_read_where_the_server_lists_it() {
-        assert!(!super::query("25.11.2.24").contains("system.user_defined_functions"));
-        assert!(super::query("26.2.1.1").contains("system.user_defined_functions"));
-        assert!(super::query("26.8.48.11").contains("system.user_defined_functions"));
+        assert!(!super::lists_signatures("25.11.2.24"));
+        assert!(super::lists_signatures("26.2.1.1") && super::lists_signatures("26.8.48.11"));
+        assert!(!super::query(false).contains("system.user_defined_functions"));
+        assert!(super::query(true).contains("system.user_defined_functions"));
     }
 
     /// Every catalog a query of the engine's reads (`system.…`), the fingerprint reads too, or one
@@ -62,7 +71,7 @@ mod tests {
             let source = std::fs::read_to_string(entry.path()).unwrap();
             for (i, _) in source.match_indices("system.") {
                 let catalog: String = source[i + "system.".len()..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
-                if !catalog.is_empty() && !super::query("26.8").contains(&format!("system.{catalog}")) && !COVERED.iter().any(|(c, _)| *c == catalog) {
+                if !catalog.is_empty() && !super::query(true).contains(&format!("system.{catalog}")) && !COVERED.iter().any(|(c, _)| *c == catalog) {
                     missed.insert(catalog);
                 }
             }
