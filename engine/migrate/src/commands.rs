@@ -1796,9 +1796,9 @@ async fn leftovers(db: &mut Db, history: &[HistoryRow]) -> Result<Vec<Leftover>,
 }
 
 /// The catalog filter, over `pg_index i` and `pg_class c`, for the indexes a Postgres statement
-/// that builds, drops or rebuilds one concurrently leaves invalid when it is cut off. Spacing and the
-/// folding of an unquoted name to lower case are ASCII's, as Postgres reads them: a U+3000 or a
-/// U+00A0 is part of a name there, and `É` stays `É`.
+/// that builds, drops or rebuilds one concurrently leaves invalid when it is cut off. Spacing is
+/// ASCII's, as Postgres reads it: a U+3000 or a U+00A0 is part of a name there. The server resolves
+/// each name, since how it folds an unquoted one to lower case turns on its encoding and locale.
 fn leftover_filter(statement: &str) -> Option<String> {
     const S: &str = r"[ \t\n\r\x0B\x0C]";
     static PATTERNS: LazyLock<[Regex; 3]> = LazyLock::new(|| {
@@ -1813,17 +1813,12 @@ fn leftover_filter(statement: &str) -> Option<String> {
     });
     let [create, drop, reindex] = &*PATTERNS;
     let literal = |s: &str| format!("'{}'", s.replace('\'', "''"));
-    // A name as the server stores it: unquoted folded to lower case.
-    let stored = |name: &str| match name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) {
-        Some(inner) => inner.replace("\"\"", "\""),
-        None => name.to_ascii_lowercase(),
-    };
     let sql = statement.trim_end_matches(';').trim_end_matches(|c: char| c.is_ascii_whitespace());
     if let Some(c) = create.captures(sql) {
         // An index is made in its table's schema, and named without one.
         let on = format!("i.indrelid = to_regclass({})", literal(&c[2]));
         return Some(match c.get(1) {
-            Some(name) => format!("{on} and c.relname = {}", literal(&stored(name.as_str()))),
+            Some(name) => format!("{on} and c.relname = (parse_ident({}, false))[1]", literal(name.as_str())),
             None => on,
         });
     }
@@ -1832,12 +1827,12 @@ fn leftover_filter(statement: &str) -> Option<String> {
     }
     let c = reindex.captures(sql)?;
     // A concurrent reindex builds <index>_ccnew beside each index, and swaps the old one to <index>_ccold.
-    let copies = |base: &str| format!("(c.relname like {} or c.relname like {})", literal(&format!("{}\\_ccnew%", base.replace('_', "\\_"))), literal(&format!("{}\\_ccold%", base.replace('_', "\\_"))));
     Some(if c[1].eq_ignore_ascii_case("index") {
-        let bare = stored(&crate::sql::last_written(&c[2]));
-        format!("i.indrelid = (select x.indrelid from pg_index x where x.indexrelid = to_regclass({})) and {}", literal(&c[2]), copies(&bare))
+        let index = format!("to_regclass({})", literal(&c[2]));
+        let base = format!("(select x.relname from pg_class x where x.oid = {index})");
+        format!("i.indrelid = (select x.indrelid from pg_index x where x.indexrelid = {index}) and (starts_with(c.relname, {base} || '_ccnew') or starts_with(c.relname, {base} || '_ccold'))")
     } else {
-        format!("i.indrelid = to_regclass({}) and {}", literal(&c[2]), copies("%"))
+        format!(r"i.indrelid = to_regclass({}) and (c.relname like '%\_ccnew%' or c.relname like '%\_ccold%')", literal(&c[2]))
     })
 }
 
@@ -11161,11 +11156,11 @@ mod tests {
     #[test]
     fn an_index_cut_off_is_found_by_its_whole_name() {
         let f = |sql: &str| super::leftover_filter(sql).unwrap();
-        // Postgres reads a U+3000 as part of an unquoted name, and folds only ASCII letters.
-        assert_eq!(f("create unique index concurrently users_email\u{3000} on users (email);"), "i.indrelid = to_regclass('users') and c.relname = 'users_email\u{3000}'");
-        assert_eq!(f("CREATE INDEX CONCURRENTLY Édition_IDX ON t (x)"), "i.indrelid = to_regclass('t') and c.relname = 'Édition_idx'");
+        // Postgres reads a U+3000 as part of an unquoted name; the server folds the name itself.
+        assert_eq!(f("create unique index concurrently users_email\u{3000} on users (email);"), "i.indrelid = to_regclass('users') and c.relname = (parse_ident('users_email\u{3000}', false))[1]");
         assert_eq!(f("drop index concurrently a\u{a0}b;"), "c.oid = to_regclass('a\u{a0}b')");
         assert_eq!(f("create index concurrently on \"T\"\n  (x)"), "i.indrelid = to_regclass('\"T\"')");
+        assert!(f("reindex index concurrently Édition_IDX").contains("x.oid = to_regclass('Édition_IDX')) || '_ccnew')"));
         assert_eq!(super::leftover_filter("create index i on t (x)"), None);
     }
 
