@@ -152,7 +152,7 @@ pub fn analyze(sql: &str, lexed: &Lexed, text: Option<MysqlText>, host: &Host, m
     // What the engine prints of the statement, for the probes it describes, writes its strings
     // as the session reads them back.
     syntax::mysql::ast::set_backslash_escapes(dialect.0.backslash_escapes);
-    let statement = match lex::one_statement(sql, lexed, KINDS) {
+    let statement = match lex::one_statement(sql, lexed, Dialect::Mysql, KINDS) {
         Ok(statement) => statement,
         Err(message) => return Some(crate::analysis::bare(sql, lexed, Dialect::Mysql, vec![Diagnostic { message, start: 0, length: sql.trim_end().len().max(1), code: 10, server_code: None }])),
     };
@@ -1866,7 +1866,7 @@ const SPACE_SENSITIVE: &[&str] = &[
 /// these; an optimizer hint that sets a variable for the statement leaves no mode to ask for.
 fn misread(sql: &str, lexed: &Lexed, host: &Host) -> Lazy<(Option<String>, bool)> {
     let text = |&(start, end): &(usize, usize)| &sql[start..end];
-    let is_comment = |span: &str| span.starts_with("--") || span.starts_with("/*") || span.starts_with('#');
+    let is_comment = lex::is_comment;
     if lexed.opaque.iter().map(text).any(|span| span.starts_with("/*+") && span.to_ascii_lowercase().contains("set_var")) {
         return Some((Some("an optimizer hint sets a variable for this statement (SET_VAR), which may change how the server reads it, so nothing bounds its rows".into()), false));
     }

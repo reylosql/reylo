@@ -2041,6 +2041,7 @@ dependencies = [
  "mysql_async",
  "regex",
  "reylo-engine",
+ "reylo-engine-core",
  "reylo-sql",
  "rusqlite",
  "serde",
@@ -2076,6 +2077,7 @@ version = "0.9.0"
 dependencies = [
  "reylo-engine-build",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

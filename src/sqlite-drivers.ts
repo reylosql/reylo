@@ -89,11 +89,14 @@ export const SQLEAN_AGGREGATES: ReadonlyMap<string, number> = new Map([
 export function withoutSqlean(sql: string, name: string): string | undefined {
   const lower = name.toLowerCase();
   const stand = lower === "stats_seq" ? "generate_series" : SQLEAN_AGGREGATES.get(lower) === 2 ? "group_concat" : SQLEAN_AGGREGATES.has(lower) ? "total" : "char";
-  // Where the next thing after `at` is an opening parenthesis, past spaces and comments.
+  // Where the next thing after `at` is an opening parenthesis, past spaces and comments. SQLite's
+  // whitespace is ASCII's, with a vertical tab only inside a run another space starts, and a name
+  // takes `$` and every character past ASCII, so `uuid4\u00a0()` calls no `uuid4`
+  // (`engine/core/src/lexical.rs`).
   const opens = (at: number): boolean => {
     let j = at;
     for (;;) {
-      while (j < sql.length && /\s/.test(sql[j]!)) j++;
+      while (j < sql.length && (/[ \t\n\f\r\ufeff]/.test(sql[j]!) || (sql[j] === "\v" && /[ \t\n\f\r\v]/.test(sql[j - 1] ?? "")))) j++;
       if (sql.startsWith("--", j)) {
         const end = sql.indexOf("\n", j);
         if (end < 0) return false;
@@ -142,8 +145,8 @@ export function withoutSqlean(sql: string, name: string): string | undefined {
       const j = end <= 0 ? sql.length : end + 1;
       out += sql.slice(i, j);
       i = j;
-    } else if (/[A-Za-z_]/.test(c)) {
-      const word = /^[A-Za-z_][\w$]*/.exec(sql.slice(i))![0];
+    } else if (/[A-Za-z_\u0080-\uffff]/.test(c)) {
+      const word = /^[A-Za-z_\u0080-\uffff][\w$\u0080-\uffff]*/.exec(sql.slice(i))![0];
       if (word.toLowerCase() === lower && opens(i + word.length)) {
         out += stand;
         changed = true;

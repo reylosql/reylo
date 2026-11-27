@@ -170,9 +170,9 @@ export function compiledText(m: ModuleInput): string {
   return trimmedStatement(m.analysis.rewritten.sql);
 }
 
-/** A statement without its trailing whitespace, but for one character after a `/*` it would leave last: SQLite reads a block comment that no `*` and `/` close as a comment to the end of the text when anything follows its `/*`, and a bare `/*` as two operators, which it refuses. */
+/** A statement without its trailing whitespace, but for one character after a `/*` it would leave last: SQLite reads a block comment that no `*` and `/` close as a comment to the end of the text when anything follows its `/*`, and a bare `/*` as two operators, which it refuses. The whitespace is ASCII's alone: a no-break or an ideographic space a statement ends with is part of its last name on Postgres, MySQL and SQLite (`as x\u00a0` names a column so), which `trimEnd()` would rename. */
 export function trimmedStatement(sql: string): string {
-  const trimmed = sql.trimEnd();
+  const trimmed = sql.replace(/[ \t\n\r\f\v]+$/, "");
   return trimmed.endsWith("/*") && trimmed.length < sql.length ? sql.slice(0, trimmed.length + 1) : trimmed;
 }
 
