@@ -84,6 +84,29 @@ test("every Postgres type's values at its edges hold to its JSON Schema, as `.ru
   }
 });
 
+// Postgres's text inside a document for a type with no cast to JSON, as `json_build_object` writes it.
+const DOCUMENT_TEXTS: Record<string, string[]> = {
+  int4range: ["[1,5)", "empty", "(,)"], int8range: ["[1,9223372036854775807)"], numrange: ["[1.5,2.5]"], daterange: ["[2026-01-01,infinity)", '["0002-06-01 BC",12345-01-01)'],
+  tstzrange: ['["2025-12-31 16:00:00-08",)'], int4multirange: ["{[1,3),[5,7)}", "{}"],
+};
+
+test("every Postgres type has a JSON Schema as a column, as a parameter and inside a document, an array of it too", () => {
+  for (const name of [...Object.keys(TEXTS), ...Object.keys(EDGES), ...Object.keys(DOCUMENT_TEXTS), "point", "line", "lseg", "box", "path", "polygon", "circle", "xml", "bit", "macaddr", "inet", "cidr", "vector", "hstore", "geometry", "citext", "record", "tsvector"]) {
+    for (const t of [pg(name), array(pg(name))]) {
+      for (const [input, inJson] of [[false, false], [true, false], [false, true]] as const) {
+        const schema = typeSchema(t, "postgres", input, inJson);
+        assert.ok(typeof schema === "object" || typeof schema === "boolean", `${name} ${t.kind}, input ${input}, inside a document ${inJson}`);
+      }
+    }
+  }
+  // A range and a multirange inside a document are their text.
+  for (const [name, texts] of Object.entries(DOCUMENT_TEXTS)) {
+    const schema = typeSchema(pg(name), "postgres", false, true) as JsonSchema;
+    assert.deepEqual(schema, { type: "string", description: `pg type ${name}` }, name);
+    for (const text of texts) assert.equal(validate(schema, text), undefined, `${name} ${text}`);
+  }
+});
+
 // Postgres's geometric types, each as the server writes it and as the object `.run()` gives it.
 const SHAPES: [name: string, text: string, value: unknown][] = [
   ["point", "(1.5,-2)", { x: 1.5, y: -2 }],

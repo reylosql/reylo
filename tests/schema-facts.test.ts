@@ -234,8 +234,12 @@ test("Postgres: a date or a timestamptz outside 0000–9999 holds to its query's
     await own.sql.unsafe("set time zone 'XXX-30'");
     const posixFour = await fourDigits.run(own.sql);
     assert.deepEqual(posixFour.o, { at: "2026-01-02T06:00:00+30:00", lmt: "1850-01-02T06:00:00+30:00" });
+    // A range and a multirange inside a document are their text.
+    const ranges = await built("ranges", "select jsonb_build_object('r', r) as o, json_build_array(r, int4multirange(int4range(1, 3), int4range(5, 7))) as a from e order by id");
+    const rangeRows = await ranges.run(own.sql);
+    assert.deepEqual(rangeRows.map((row: { a: unknown }) => row.a), [['["0002-06-01 BC",12345-01-01)', "{[1,3),[5,7)}"], ["empty", "{[1,3),[5,7)}"]]);
     const ajv = new Ajv2020({ strict: false, validateFormats: false, logger: false });
-    for (const [query, result] of [[columns, rows], [document, documents], [document, posix], [document, furthest], [fourDigits, localMean], [fourDigits, posixFour]]) {
+    for (const [query, result] of [[columns, rows], [document, documents], [document, posix], [document, furthest], [fourDigits, localMean], [fourDigits, posixFour], [ranges, rangeRows]]) {
       const json = JSON.parse(JSON.stringify(result));
       assert.equal(validate(query.outputSchema, json), undefined);
       assert.ok(ajv.validate(query.outputSchema, json), ajv.errorsText());
