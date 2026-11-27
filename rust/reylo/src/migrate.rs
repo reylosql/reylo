@@ -116,10 +116,12 @@ impl Migrator {
         if command == Command::Deploy && DB::DIALECT != Dialect::Sqlite {
             conn.close_on_drop();
         }
-        // The run changes its session's settings (`keep`, and the quoting a MySQL catalog reads views
-        // with), so the connection goes back to the pool only once they are restored: a run cut
-        // short, or one whose restore failed, closes it.
-        let restored = Arc::new(AtomicBool::new(false));
+        // A MySQL run changes its session's settings (`keep`, and the quoting the catalog reads views
+        // with), so its connection goes back to the pool only once they are restored: a run cut
+        // short, or one whose restore failed, closes it. A SQLite connection is never closed so, since
+        // closing a pool's last one would drop an in-memory database.
+        let mysql = DB::DIALECT == Dialect::Mysql;
+        let restored = Arc::new(AtomicBool::new(!mysql));
         let mut db = Db::Host(DB::session(conn, restored.clone()));
         let kept = keep(&mut db).await.map_err(Error::of)?;
         let run = match command {
@@ -127,7 +129,7 @@ impl Migrator {
             Command::Status => reylo_migrate::status_on_host(&mut db, &options).await,
         };
         let back = restore(&mut db, kept).await;
-        restored.store(back.is_ok(), Ordering::Relaxed);
+        restored.store(back.is_ok() || !mysql, Ordering::Relaxed);
         let run = run.map_err(Error::of)?;
         back.map_err(Error::of)?;
         Ok(run)
