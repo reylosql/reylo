@@ -3,8 +3,9 @@
 //! of a parameter's nullability: one cast to `nullable(…)`, and one that is, bare, with no cast,
 //! the whole value written to a column that may hold null (a row of an INSERT's or a REPLACE's
 //! VALUES, the SELECT that feeds one, its SET list, an UPDATE's SET, ON DUPLICATE KEY UPDATE),
-//! unless it also fills a column that refuses null, by its NOT NULL or by an enforced CHECK that
-//! tests it IS NOT NULL. Any other cast parameter is its cast's type, which the cast states whole.
+//! unless it also fills a column that refuses null: by its NOT NULL, by an enforced CHECK that is
+//! false wherever it is NULL, or by a NOT NULL generated column that is NULL wherever it is. Any
+//! other cast parameter is its cast's type, which the cast states whole.
 //! Every other parameter is a non-null value, one the statement coalesces, tests for null or
 //! compares with `<=>` included.
 
@@ -521,12 +522,19 @@ pub(crate) fn nullable(statement: &Statement, names: &Names, host: &Host, marked
 
 /// Per table, the columns (in lower case) a NULL in which a NOT NULL generated column refuses
 /// (error 1048, naming the generated column), from [`COLUMNS_QUERY`]'s rows: those its expression
-/// is NULL for wherever they are NULL ([`crate::mysql_nulls::nulls_with`]), through the generated
-/// columns it reads in turn. A column an expression reads otherwise, as through `coalesce`, may be
-/// NULL, and so may any column of an expression the parser does not read.
+/// is NULL for wherever they are NULL ([`with_null`]), through the generated columns it reads in
+/// turn. A column an expression gives a value for, as `coalesce` does, may be NULL, and so may any
+/// column of an expression the parser does not read.
 fn refused_by(rows: &[Vec<serde_json::Value>]) -> HashMap<String, HashSet<String>> {
-    // Per table, each generated column's strict columns, and the NOT NULL generated columns.
-    let mut strict: HashMap<&str, HashMap<String, Vec<String>>> = HashMap::new();
+    // Per table, each column in lower case.
+    let mut columns: HashMap<&str, Vec<String>> = HashMap::new();
+    for row in rows {
+        if let (Some(table), Some(column)) = (row.first().and_then(as_str), row.get(1).and_then(as_str)) {
+            columns.entry(table).or_default().push(column.to_ascii_lowercase());
+        }
+    }
+    // Per table, the columns each generated column is NULL for, and the NOT NULL generated columns.
+    let mut null_for: HashMap<&str, HashMap<String, Vec<String>>> = HashMap::new();
     let mut not_null: HashMap<&str, Vec<String>> = HashMap::new();
     for row in rows {
         let (Some(table), Some(column), Some(nullable), Some(extra), Some(expression)) = (row.first().and_then(as_str), row.get(1).and_then(as_str), row.get(2).and_then(as_str), row.get(3).and_then(as_str), row.get(4).and_then(as_str)) else { continue };
@@ -535,16 +543,16 @@ fn refused_by(rows: &[Vec<serde_json::Value>]) -> HashMap<String, HashSet<String
             continue;
         }
         let read = crate::mysql::check_clause(expression).and_then(|text| crate::mysql::parse_expr(&text));
-        let reads = read.map(|e| crate::mysql_nulls::nulls_with(&e).into_iter().filter_map(|parts| parts.last().cloned()).collect()).unwrap_or_default();
+        let reads = read.map(|e| columns[table].iter().filter(|c| with_null(&e, c) == Known::Null).cloned().collect()).unwrap_or_default();
         let column = column.to_ascii_lowercase();
         if nullable.eq_ignore_ascii_case("NO") {
             not_null.entry(table).or_default().push(column.clone());
         }
-        strict.entry(table).or_default().insert(column, reads);
+        null_for.entry(table).or_default().insert(column, reads);
     }
     let mut out: HashMap<String, HashSet<String>> = HashMap::new();
     for (table, generated) in not_null {
-        let reads = &strict[table];
+        let reads = &null_for[table];
         let mut refused: HashSet<String> = HashSet::new();
         let mut next: Vec<String> = generated.iter().flat_map(|g| reads[g].iter().cloned()).collect();
         while let Some(column) = next.pop() {
@@ -558,22 +566,130 @@ fn refused_by(rows: &[Vec<serde_json::Value>]) -> HashMap<String, HashSet<String
 }
 
 /// Whether a CHECK, as the server prints it (`(`email` is not null)`), refuses null in `column`
-/// (lower case): one of its conjuncts tests the column IS NOT NULL, which a null makes false where
-/// any other test of it would be unknown, and so pass.
+/// (lower case): it is false wherever the column is NULL ([`with_null`]), as IS NOT NULL is, and
+/// as `coalesce` with a default that fails it, `<=>` and IS TRUE are. A CHECK that is NULL there
+/// passes, as one that only compares the column is.
 fn refuses_null(clause: &str, column: &str) -> bool {
-    fn conjunct(e: &Expr, column: &str) -> bool {
-        match e {
-            Expr::Nested(inner) => conjunct(inner, column),
-            Expr::BinaryOp { left, op: ast::BinaryOperator::And, right } => conjunct(left, column) || conjunct(right, column),
-            Expr::IsNotNull(inner) => match inner.as_ref() {
-                Expr::Identifier(i) => i.value.eq_ignore_ascii_case(column),
-                Expr::Nested(n) => matches!(n.as_ref(), Expr::Identifier(i) if i.value.eq_ignore_ascii_case(column)),
-                _ => false,
-            },
-            _ => false,
+    crate::mysql::parse_expr(clause).is_some_and(|e| with_null(&e, column) == Known::Int(0))
+}
+
+/// What an expression is wherever one column is NULL, the other columns unknown ([`with_null`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Known {
+    Null,
+    /// This integer, which as a truth value is false for 0 and true for any other.
+    Int(i64),
+    /// Any value, NULL among them.
+    Unknown,
+}
+
+/// What `e`, a CHECK or a generated column's expression as the server prints it, is wherever
+/// `column` (lower case) is NULL and every other column unknown, as MySQL evaluates it. It is NULL
+/// where an operand it is NULL for is ([`crate::mysql_nulls::nulls_with`]), and an integer where
+/// the tests of NULL settle it: IS [NOT] NULL, IS [NOT] TRUE, IS [NOT] FALSE and `<=>`, never
+/// NULL; a comparison of two integers; AND and OR (`NULL and 0` is 0, `NULL or 0` is NULL); IF,
+/// and a CASE without an operand, whose NULL or false test takes the next branch, past the last
+/// its ELSE or NULL; COALESCE, IFNULL and NULLIF. An integer is one a double holds exactly, as
+/// MySQL compares a number with a string; any other literal but NULL and a boolean is unknown.
+fn with_null(e: &Expr, column: &str) -> Known {
+    use ast::BinaryOperator as Op;
+    use Known::{Int, Null, Unknown};
+    let known = |e: &Expr| with_null(e, column);
+    let truth = |b: bool| Int(b as i64);
+    // The value of several branches one of which is taken: theirs where they agree.
+    let one = |values: &[Known]| if values.windows(2).all(|w| w[0] == w[1]) { values[0] } else { Unknown };
+    let strict = || if crate::mysql_nulls::nulls_with(e).iter().any(|parts| parts.last().is_some_and(|c| c == column)) { Null } else { Unknown };
+    match e {
+        Expr::Nested(inner) => known(inner),
+        Expr::Value(v) => match &v.value {
+            ast::Value::Null => Null,
+            ast::Value::Boolean(b) => truth(*b),
+            ast::Value::Number(n, _) => n.parse().ok().filter(|n: &i64| n.unsigned_abs() <= 1 << 53).map_or(Unknown, Int),
+            _ => Unknown,
+        },
+        Expr::IsNull(x) | Expr::IsNotNull(x) => match known(x) {
+            Unknown => Unknown,
+            k => truth((k == Null) == matches!(e, Expr::IsNull(_))),
+        },
+        Expr::IsTrue(x) | Expr::IsNotTrue(x) => match known(x) {
+            Unknown => Unknown,
+            k => truth(matches!(k, Int(n) if n != 0) == matches!(e, Expr::IsTrue(_))),
+        },
+        Expr::IsFalse(x) | Expr::IsNotFalse(x) => match known(x) {
+            Unknown => Unknown,
+            k => truth((k == Int(0)) == matches!(e, Expr::IsFalse(_))),
+        },
+        Expr::BinaryOp { left, op: Op::Spaceship, right } => match (known(left), known(right)) {
+            (Unknown, _) | (_, Unknown) => Unknown,
+            (l, r) => truth(l == r),
+        },
+        Expr::BinaryOp { left, op: op @ (Op::Eq | Op::NotEq | Op::Lt | Op::Gt | Op::LtEq | Op::GtEq), right } => match (known(left), known(right)) {
+            (Null, _) | (_, Null) => Null,
+            // MySQL orders two strings as text, and what COALESCE or IFNULL gives over a column
+            // takes the column's type: an ordering is read only against a number written out,
+            // which makes it numeric.
+            (Int(l), Int(r)) if matches!(op, Op::Eq | Op::NotEq) || [left, right].iter().any(|side| matches!(side.as_ref(), Expr::Value(v) if matches!(v.value, ast::Value::Number(..)))) => truth(match op {
+                Op::Eq => l == r,
+                Op::NotEq => l != r,
+                Op::Lt => l < r,
+                Op::Gt => l > r,
+                Op::LtEq => l <= r,
+                _ => l >= r,
+            }),
+            _ => Unknown,
+        },
+        Expr::BinaryOp { left, op: Op::And, right } => match (known(left), known(right)) {
+            (Int(0), _) | (_, Int(0)) => Int(0),
+            (Unknown, _) | (_, Unknown) => Unknown,
+            (Null, _) | (_, Null) => Null,
+            _ => Int(1),
+        },
+        Expr::BinaryOp { left, op: Op::Or, right } => match (known(left), known(right)) {
+            (l, r) if matches!(l, Int(n) if n != 0) || matches!(r, Int(n) if n != 0) => Int(1),
+            (Unknown, _) | (_, Unknown) => Unknown,
+            (Null, _) | (_, Null) => Null,
+            _ => Int(0),
+        },
+        Expr::Case { operand: None, conditions, else_result, .. } => {
+            let mut results = Vec::new();
+            for when in conditions {
+                match known(&when.condition) {
+                    Int(0) | Null => {}
+                    test => {
+                        results.push(known(&when.result));
+                        if test != Unknown {
+                            return one(&results);
+                        }
+                    }
+                }
+            }
+            results.push(else_result.as_deref().map_or(Null, known));
+            one(&results)
         }
+        Expr::Function(f) if f.over.is_none() && f.filter.is_none() && f.within_group.is_empty() => {
+            let args: Option<Vec<&Expr>> = match &f.args {
+                ast::FunctionArguments::List(list) if list.duplicate_treatment.is_none() && list.clauses.is_empty() => list.args.iter().map(arg_expr).collect(),
+                _ => None,
+            };
+            match (crate::mysql::builtin(f).as_str(), args.as_deref()) {
+                ("if", Some([test, then, otherwise])) => match known(test) {
+                    Int(0) | Null => known(otherwise),
+                    Int(_) => known(then),
+                    Unknown => one(&[known(then), known(otherwise)]),
+                },
+                ("coalesce" | "ifnull", Some(args)) => args.iter().map(|a| known(a)).find(|k| *k != Null).unwrap_or(Null),
+                ("nullif", Some([value, other])) => match (known(value), known(other)) {
+                    (Null, _) => Null,
+                    (value, Null) => value,
+                    (Int(l), Int(r)) if l == r => Null,
+                    (Int(l), Int(_)) => Int(l),
+                    _ => Unknown,
+                },
+                _ => strict(),
+            }
+        }
+        _ => strict(),
     }
-    crate::mysql::parse_expr(clause).is_some_and(|e| conjunct(&e, column))
 }
 
 /// The tables of the current schema the statement reads and writes, as it names them, for the
