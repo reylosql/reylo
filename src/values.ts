@@ -188,15 +188,17 @@ export function writeJson(v: unknown, dialect: Dialect, fail: (message: string) 
   // One pass of JSON.stringify, each such number written as its own text with JSON.rawJSON, so that
   // each value's `toJSON()` and getters are read once. The replacer sees a value after its
   // `toJSON()` and before a boxed number is unboxed, and each object's place is kept for a refusal.
-  if (rawJson !== undefined) {
+  // An app's `BigInt.prototype.toJSON` runs before any replacer sees the BigInt it turns into text
+  // or a rounded number, so then the value is written by the algorithm below, which reads each
+  // property once and a BigInt before its toJSON().
+  const bigintHook = typeof (BigInt.prototype as { toJSON?: unknown }).toJSON === "function";
+  if (rawJson !== undefined && !bigintHook) {
     const places = new WeakMap<object, string>();
     return JSON.stringify(v, function (this: object, key: string, x: unknown) {
       const parent = places.get(this);
       const place = parent === undefined ? at : `${parent}/${key.replace(/~/g, "~0").replace(/\//g, "~1")}`;
-      // A BigInt as its digits, read from the value that holds it before an app's
-      // `BigInt.prototype.toJSON` turns it into text, or as a value's own toJSON() returns it.
-      const held = heldValue(this, key);
-      if (typeof held === "bigint" || typeof x === "bigint") return rawJson(bigintText(typeof held === "bigint" ? held : (x as bigint), place, dialect, fail));
+      // A BigInt as its digits, as it stands or as a value's own toJSON() returns it.
+      if (typeof x === "bigint") return rawJson(bigintText(x, place, dialect, fail));
       if (x !== null && typeof x === "object") places.set(x, place);
       // JSON.rawJSON takes a primitive's text alone, so a document's is read back, each number and
       // string as its own text.
@@ -207,22 +209,18 @@ export function writeJson(v: unknown, dialect: Dialect, fail: (message: string) 
   }
   // Without JSON.rawJSON, JSON.stringify's own text where no such number is in the value; else the
   // value written again by its algorithm, which reads each `toJSON()` a second time.
-  let found = false;
-  const plain = JSON.stringify(v, function (this: object, key: string, x: unknown) {
-    if (typeof heldValue(this, key) === "bigint" || typeof x === "bigint") {
-      found = true;
-      return null;
-    }
-    if (x instanceof RawJson || special(x instanceof Number ? Number(x) : x)) found = true;
-    return x;
-  });
+  let found = bigintHook;
+  const plain = found
+    ? undefined
+    : JSON.stringify(v, (_key: string, x: unknown) => {
+        if (typeof x === "bigint") {
+          found = true;
+          return null;
+        }
+        if (x instanceof RawJson || special(x instanceof Number ? Number(x) : x)) found = true;
+        return x;
+      });
   return found ? jsonOf("", v, at, (n, place) => (typeof n === "bigint" ? bigintText(n, place, dialect, fail) : jsonNumber(n, place, dialect, fail))) : plain;
-}
-
-/** The value a holder keeps at a key, read from its data property, so no getter runs a second time; undefined where a getter gives it. */
-function heldValue(holder: object, key: string): unknown {
-  const property = Object.getOwnPropertyDescriptor(holder, key);
-  return property !== undefined && "value" in property ? property.value : undefined;
 }
 
 /** The 64-bit integers MySQL and SQLite read from JSON as integers: SQLite's signed ones, and MySQL's signed and unsigned ones. */

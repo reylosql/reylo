@@ -1166,7 +1166,13 @@ test("a JSON parameter's BigInt is written as its digits, whatever toJSON an app
   for (const polyfill of [function (this: bigint) { return this.toString(); }, function (this: bigint) { return Number(this); }]) {
     proto.toJSON = polyfill;
     try {
-      assert.equal(writeJson({ n: 9007199254740993n, xs: [9007199254740993n] }, "sqlite", fail), '{"n":9007199254740993,"xs":[9007199254740993]}');
+      assert.equal(writeJson({ n: 9007199254740993n, xs: [9007199254740993n], z: -0 }, "sqlite", fail), '{"n":9007199254740993,"xs":[9007199254740993],"z":-0e0}');
+      // A getter's BigInt too, read once and held to the range.
+      let gets = 0;
+      const got = Object.defineProperty({}, "n", { enumerable: true, get: () => (gets++, 9007199254740993n) });
+      assert.equal(writeJson(got, "postgres", fail), '{"n":9007199254740993}');
+      assert.equal(gets, 1);
+      assert.throws(() => writeJson(Object.defineProperty({}, "n", { enumerable: true, get: () => 2n ** 63n }), "sqlite", fail), /the BigInt 9223372036854775808, which SQLite reads/);
     } finally {
       delete proto.toJSON;
     }

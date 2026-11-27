@@ -28,7 +28,7 @@
 // row, and a built-in catalog table's row type is below 10000 too.
 import { civilFromDays, coerce, DecodeError, elementKind, isRowKind, numbersInJson, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
 import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
-import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, jsonElements, jsonText, jsonValue, postgresText, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
+import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, jsonElements, jsonText, postgresText, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
 import { readPostgresError } from "./query-error.ts";
 
 type AnyClient = Record<string, any>;
