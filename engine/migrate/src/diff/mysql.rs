@@ -354,7 +354,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
     let mut infos: BTreeMap<(String, String), Row> = BTreeMap::new();
     for r in db
         .rows(&format!(
-            "select table_name as t, column_name as c, column_type as type, collation_name as collation, generation_expression as gen,
+            "select table_name as t, column_name as c, column_type as type, collation_name as collation, generation_expression as gen, extra as extra,
               case when extra like '%DEFAULT_GENERATED%' then column_default end as expression
             from information_schema.columns where table_schema = database() and {kept}"
         ))
@@ -501,10 +501,16 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
             let Some(fk) = fks.get(&(name.clone(), fk_name.clone())) else { continue };
             let clause = ctx.tidy(&element, TABLE_TEXT);
             let same_db = fk.ref_schema == ctx.db;
-            let type_of = |t: &str, c: &str| infos.get(&(t.to_string(), c.to_string())).map(|r| r.text("type").to_string()).unwrap_or_default();
-            // The columns' types are part of it: a key cannot stay while either side's type
-            // changes, so it is dropped before the change and added after.
-            let types = fk.cols.iter().map(|c| type_of(&name, c)).chain(fk.refs.iter().map(|c| if same_db { type_of(&fk.ref_table, c) } else { String::new() })).collect::<Vec<_>>().join(", ");
+            // What MySQL won't change on either side of a key while it stands is part of it: each
+            // column's type, collation and AUTO_INCREMENT, so that the key is dropped before such a
+            // change and added after.
+            let held = |t: &str, c: &str| {
+                let Some(r) = infos.get(&(t.to_string(), c.to_string())) else { return String::new() };
+                let collation = r.get("collation").map(|n| format!(" collate {n}")).unwrap_or_default();
+                let counts = if r.text("extra").contains("auto_increment") { " auto_increment" } else { "" };
+                format!("{}{collation}{counts}", r.text("type"))
+            };
+            let columns = fk.cols.iter().map(|c| held(&name, c)).chain(fk.refs.iter().map(|c| if same_db { held(&fk.ref_table, c) } else { String::new() })).collect::<Vec<_>>().join(", ");
             let mut deps: BTreeSet<String> = fk.cols.iter().map(|c| format!("column {name}.{c}")).collect();
             let cycle = in_cycle.contains(&(name.clone(), fk_name.clone()));
             if cycle {
@@ -528,7 +534,7 @@ async fn read_objects(db: &mut Db) -> Result<Schema, Error> {
                 id: format!("foreign key {name}.{fk_name}"),
                 kind: Some(Kind::Constraint),
                 owner: (!cycle).then(|| id.clone()),
-                def: format!("{clause} ({types})"),
+                def: format!("{clause} ({columns})"),
                 create: vec![format!("alter table {q} add {clause}")],
                 drop: vec![drop],
                 deps,
