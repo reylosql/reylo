@@ -11,7 +11,7 @@ direct_url: ${DATABASE_URL}
 env: [.env.local, .env]
 # a parameter whose type cannot be inferred is an error (the default)
 allow_untyped_params: false
-# a Postgres array column holds one dimension (the default)
+# a Postgres array holds one dimension (the default)
 allow_nested_arrays: false
 # a comment naming each query's file, for your database's monitoring (the default)
 sqlcommenter: true
@@ -120,9 +120,9 @@ allow_untyped_params: true
 
 ## `allow_nested_arrays`
 
-Whether a Postgres array column may hold nested arrays.
+Whether Postgres arrays may nest, in a column or a parameter.
 
-Postgres doesn't track an array's dimensions. By default Reylo types an array column as one-dimensional, and `.run()` throws on a deeper value. With this set, the column is a `NestedArray<T>` of any depth.
+Postgres doesn't track an array's dimensions. By default Reylo types an array column as one-dimensional, and `.run()` throws on a deeper value. With this set, an array column and an array parameter are each a `NestedArray<T>` of any depth.
 
 ```yaml title=".reylo.yaml"
 # the default is false

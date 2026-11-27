@@ -26,7 +26,7 @@
 // those oids are arrays, cached in a WeakMap keyed by the app's object. A row value the module knows
 // the fields of has the kind of its column whatever its oid: `record` is one oid for every shape of
 // row, and a built-in catalog table's row type is below 10000 too.
-import { civilFromDays, coerce, coercePostgres, columnKind, DecodeError, describe, elementKind, holdsRareKind, instantOfDate, isArrayValued, isRareKind, isRowKind, ParameterError, postgresInterval, postgresTypesFor, postgresYear, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
+import { civilFromDays, coerce, coercePostgres, columnKind, DecodeError, describe, elementKind, holdsRareKind, instantOfDate, isLevel, isRareKind, isRowKind, ParameterError, postgresInterval, postgresTypesFor, postgresYear, scalarKind, textDecoder, utf8, wholeArrayKind, withFraction, withinDimensions, type Columns, type Decoder, type JsonNumbers, type Kind } from "./values.ts";
 import { bareName, holdsWholeArrays, type EngineType } from "./engine-type.ts";
 import { lastOfEach, namesInResult, rowOf, type RowBuilder } from "./row.ts";
 import { arrayLiteral, asByteaHex, EFFECT_SQL, isJsonValue, isTime, jsonText, jsonValue, postgresText, vectorParameter, wrappers, type AnyClient as Client, type Bound, type EffectSql, type Marks, type QueryModule, type Runtime } from "./execute.ts";
@@ -1114,7 +1114,7 @@ function postgresValue(type: EngineType, v: unknown, name: string): unknown {
       throw new ParameterError(`Parameter "${name}" is an array of arrays, each element ${message}`);
     })));
   }
-  if (type.kind === "array" && kind.endsWith("[]")) return Array.isArray(v) ? v.map((e) => (e == null ? e : postgresValue(Array.isArray(e) && !isArrayValued(columnKind(type.element.type, "postgres")) ? type : type.element.type, e, name))) : v;
+  if (type.kind === "array" && kind.endsWith("[]")) return Array.isArray(v) ? v.map((e) => (e == null ? e : postgresValue(Array.isArray(e) && isLevel(columnKind(type.element.type, "postgres"), e) ? type : type.element.type, e, name))) : v;
   if (kind === "vector" && Array.isArray(v)) {
     if (!v.length) throw new ParameterError(`Parameter "${name}" is a pgvector ${bareName(type)}, which has one dimension at least; got an empty array.`);
     return vectorParameter(v, name, `a pgvector ${bareName(type)}`);

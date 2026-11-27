@@ -69,7 +69,7 @@ export type Materialize<Row, C extends Cardinality> = C extends "many" ? Row[] :
  */
 export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];
 
-/** A Postgres array column under `allow_nested_arrays: true`: an array of `T` at any depth, since Postgres doesn't enforce an array's dimensions. */
+/** A Postgres array column or parameter under `allow_nested_arrays: true`: an array of `T` at any depth, since Postgres doesn't enforce an array's dimensions. */
 export type NestedArray<T> = (T | NestedArray<T>)[];
 
 /**

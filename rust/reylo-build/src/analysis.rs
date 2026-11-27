@@ -647,13 +647,86 @@ fn statement_key(dialect: Dialect, sql: &str) -> Option<String> {
     Some(sha256(&json!([ENTRY_VERSION, dialect.fingerprint()?, dialect.name(), sql]).to_string())[..32].to_string())
 }
 
-/// The server, without credentials: the scheme, the user, the host and port, and the database.
+/// The server, without credentials: the scheme, the user, the host and port, the database, and the
+/// URL's parameters that choose the server or the database, as `#server` in `src/analyze.ts` names
+/// it (both are held to entry-name-cases.json). A name is matched decoded, as the engine and the
+/// loader's bridge to a Unix socket read it. A name and its value are kept as written, since each
+/// reader of the URL decodes a value its own way, so that a database written two ways is at most
+/// analyzed again under a name of its own. They keep the URL's order, which decides which of
+/// `socket` and `socketPath` the engine opens. On Postgres, the variables the engine reads for a
+/// part the URL leaves out (`ENVIRONMENT`) follow them, encoded.
 #[cfg(any(feature = "postgres", feature = "mysql"))]
 fn server(url: &str) -> String {
-    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
-    let (authority, path) = rest.split_once('/').map_or((rest, String::new()), |(a, p)| (a, format!("/{}", p.split('?').next().unwrap_or(""))));
+    server_in(url, &|name| std::env::var(name).ok())
+}
+
+/// The variables libpq reads for a part of the URL it leaves out, as the engine reads them, but for
+/// the system's user name, which a URL with no user takes on every machine it is copied to, so that
+/// a cache built in CI is still read on a laptop (`ENVIRONMENT` in `src/analyze.ts`).
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+const ENVIRONMENT: [&str; 5] = ["PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGOPTIONS"];
+
+/// [`server`], with the variables `env` gives.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+fn server_in(url: &str, env: &dyn Fn(&str) -> Option<String>) -> String {
+    let (base, query) = url.split_once('?').unwrap_or((url, ""));
+    let (scheme, rest) = base.split_once("://").unwrap_or(("", base));
+    let (authority, path) = rest.split_once('/').map_or((rest, String::new()), |(a, p)| (a, format!("/{p}")));
     let (user, host) = authority.rsplit_once('@').map_or(("", authority), |(u, h)| (u.split(':').next().unwrap_or(""), h));
-    format!("{scheme}://{user}@{host}{path}")
+    // libpq's, as the engine reads them, and mysql2's socket (`CHOOSING` in `src/analyze.ts`).
+    let choosing: &[&str] = match Dialect::of(url) {
+        Ok(Dialect::Postgres) => &["dbname", "host", "hostaddr", "options", "port", "user"],
+        Ok(Dialect::Mysql) => &["socket", "socketPath"],
+        _ => &[],
+    };
+    let listed = |pair: &str| decoded(pair.split('=').next().unwrap_or_default());
+    let mut chosen: Vec<String> = query.split('&').filter(|pair| choosing.contains(&listed(pair).as_str())).map(String::from).collect();
+    if matches!(Dialect::of(url), Ok(Dialect::Postgres)) {
+        let named = |name: &str| chosen.iter().any(|pair| listed(pair) == name);
+        // The authority's hosts, each with its port where it writes one.
+        let hosts: Vec<(&str, Option<&str>)> = host.split(',').filter(|h| !h.is_empty()).map(|chunk| match chunk.strip_prefix('[').and_then(|c| c.split_once(']')) {
+            Some((name, rest)) => (name, rest.strip_prefix(':')),
+            None => chunk.split_once(':').map_or((chunk, None), |(name, port)| (name, Some(port))),
+        }).collect();
+        let left_out = [
+            hosts.is_empty() && !named("host") && !named("hostaddr"),
+            // Several hosts with no port take 5432 each, as libpq reads them.
+            hosts.len() <= 1 && !hosts.iter().any(|(_, port)| port.is_some_and(|p| !p.is_empty())) && !named("port"),
+            user.is_empty() && !named("user"),
+            (path.is_empty() || path == "/") && !named("dbname"),
+            !named("options"),
+        ];
+        let found: Vec<String> = ENVIRONMENT.iter().zip(left_out).filter(|(_, out)| *out).filter_map(|(name, _)| env(name).filter(|v| !v.is_empty()).map(|value| format!("{name}={}", encoded(&value)))).collect();
+        chosen.extend(found);
+    }
+    let query = if chosen.is_empty() { String::new() } else { format!("?{}", chosen.join("&")) };
+    format!("{scheme}://{user}@{host}{path}{query}")
+}
+
+/// A value as `encodeURIComponent` writes it.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+fn encoded(value: &str) -> String {
+    value.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) { char::from(b).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+/// A URL parameter's name decoded as `decodeURIComponent` decodes it, or as written where that
+/// throws: a `%` that starts no escape, or escapes that are no UTF-8.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+fn decoded(value: &str) -> String {
+    let hex = |at: usize| value.as_bytes().get(at).and_then(|b| char::from(*b).to_digit(16));
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut at = 0;
+    while let Some(&b) = value.as_bytes().get(at) {
+        if b != b'%' {
+            bytes.push(b);
+            at += 1;
+            continue;
+        }
+        let (Some(high), Some(low)) = (hex(at + 1), hex(at + 2)) else { return value.to_string() };
+        bytes.push((high * 16 + low) as u8);
+        at += 3;
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| value.to_string())
 }
 
 fn sha256(text: &str) -> String {
@@ -719,6 +792,53 @@ mod tests {
         assert_eq!(offline_entry(&queries, "s", "db.internal:5432/shop", false).unwrap()["analysis"]["of"], "db.internal:5432/shop");
         assert_eq!(newest_entry(&queries, "s").unwrap()["analysis"]["of"], "other.internal:5432/shop");
         std::fs::remove_dir_all(&queries).unwrap();
+    }
+
+    #[test]
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
+    fn an_entry_is_named_by_the_parameters_that_choose_the_database() {
+        // The loader names its entries by the same cases (tests/analyze.test.ts).
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("entry-name-cases.json")).unwrap();
+        for case in cases {
+            let url = case["url"].as_str().unwrap();
+            // ClickHouse's are the loader's alone: the crate reads no ClickHouse.
+            if super::Dialect::of(url).is_err() {
+                continue;
+            }
+            let env = |name: &str| case["env"][name].as_str().map(String::from);
+            assert_eq!(super::server_in(url, &env), case["server"].as_str().unwrap(), "{}", case["case"]);
+        }
+    }
+
+    #[test]
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
+    fn urls_named_alike_reach_one_database_as_the_engine_reads_them() {
+        // Every case under its own variables, under none and under all of them: a name two of these
+        // share is one database to the engine, so that a build that cannot reach it never reads
+        // another database's entry.
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("entry-name-cases.json")).unwrap();
+        let every = serde_json::json!({ "PGHOST": "elsewhere", "PGPORT": "7777", "PGUSER": "ci", "PGDATABASE": "other", "PGOPTIONS": "-c search_path=other" });
+        let mut reached: Vec<(String, String, String)> = Vec::new();
+        for (case, variables) in cases.iter().flat_map(|case| [(case, case["env"].clone()), (case, serde_json::Value::Null), (case, every.clone())]) {
+            let url = case["url"].as_str().unwrap();
+            let env = |name: &str| variables[name].as_str().map(String::from);
+            let target = match super::Dialect::of(url) {
+                #[cfg(feature = "postgres")]
+                Ok(super::Dialect::Postgres) => reylo_engine::postgres::target(url, &env),
+                #[cfg(feature = "mysql")]
+                Ok(super::Dialect::Mysql) => reylo_engine::mysql::target(url),
+                _ => continue,
+            };
+            // A URL the engine refuses reaches nothing.
+            let Ok(target) = target else { continue };
+            let name = super::server_in(url, &env);
+            for (other, reaches, said) in &reached {
+                if *other == name {
+                    assert_eq!(*reaches, target, "{} and {} share the name {name}", case["case"], said);
+                }
+            }
+            reached.push((name, target, format!("{} under {variables}", case["case"])));
+        }
     }
 
     #[test]

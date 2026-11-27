@@ -563,6 +563,11 @@ test("a Postgres array column holds one dimension, and an array the statement bu
   const vectors: QueryModule<"postgres"> = { ...probe, columns: [["v", "vector[]"]] };
   assert.deepEqual(await execute(client([{ v: [null, [1, 2]] }]), vectors, { id: 1 }), [{ v: [null, [1, 2]] }]);
   await assert.rejects(async () => execute(client([{ v: [[[1, 2]]] }]), vectors, { id: 1 }), /Column "v" holds an array of 2 dimensions, and its type has one:/);
+  // A level of NULL vectors is a level, as a parameter tells it: `{{NULL,NULL}}` has two dimensions.
+  await assert.rejects(async () => execute(client([{ v: [[null, null]] }]), vectors, { id: 1 }), /Column "v" holds an array of 2 dimensions, and its type has one:/);
+  const segments: QueryModule<"postgres"> = { ...probe, columns: [["s", "lseg[]"], ["m", "multirange:int[]"]] };
+  assert.deepEqual(await execute(client([{ s: [[{ x: 0, y: 0 }, { x: 1, y: 1 }], null], m: [[], [{ lower: 1, upper: 3, bounds: "[)" }]] }]), segments, { id: 1 }), [{ s: [[{ x: 0, y: 0 }, { x: 1, y: 1 }], null], m: [[], [{ lower: 1, upper: 3, bounds: "[)" }]] }]);
+  await assert.rejects(async () => execute(client([{ s: [[null]], m: null }]), segments, { id: 1 }), /Column "s" holds an array of 2 dimensions/);
   const docs: QueryModule<"postgres"> = { ...probe, columns: [["docs", "json[]"]] };
   assert.deepEqual(await execute(client([{ docs: [[[1], { a: [2] }]] }]), docs, { id: 1 }), [{ docs: [[[1], { a: [2] }]] }]);
 });
