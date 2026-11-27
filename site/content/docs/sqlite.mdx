@@ -886,7 +886,7 @@ What Reylo can't type on SQLite, and what to do instead:
 
 | Limit | Instead |
 | --- | --- |
-| Declared types outside a `STRICT` table, which SQLite doesn't enforce, so a value of another kind makes `.run()` throw | Make tables `strict` where you can |
+| Declared types outside a `STRICT` table, which SQLite doesn't enforce, so a value of another kind makes `.run()` throw, and inside JSON a query builds is returned as it is | Make tables `strict` where you can |
 | Functions your app registers, or an extension's, which Reylo's SQLite doesn't have: the type check fails with "no such function" | Call the function in TypeScript on what `.run()` returns |
 | A function your app registers under a built-in's name, such as `lower`, which your connection then calls: Reylo types it as SQLite's built-in | Register it under a name of its own |
 | Attached databases and `TEMP` tables, since the type check reads one database file | None: a query on one is an error in the type check |
