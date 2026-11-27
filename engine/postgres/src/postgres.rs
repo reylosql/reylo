@@ -1417,12 +1417,12 @@ impl<'a> Engine<'a> {
         // an INSERT, the table it names, or the partition it is routed to; an UPDATE without ONLY,
         // the table and each of its children too. A column refuses null where any of them refuses
         // it there.
-        let reaches = |n: i32, relation: &str| parsed.reaching.iter().any(|(p, r)| *p == n && r == relation);
+        let reaches = |n: i32, relation: &str, column: &analyze::Filled| parsed.reaching.iter().any(|(p, r, c)| *p == n && r == relation && c == column);
         let mut below: Vec<String> = Vec::new();
         for row in &rows {
             let Some(relation) = row.first().and_then(as_str) else { continue };
             let partitioned = row.get(8).and_then(as_bool).unwrap_or(false);
-            if partitioned || parsed.reaching.iter().any(|(_, r)| r == relation) {
+            if partitioned || parsed.reaching.iter().any(|(_, r, _)| r == relation) {
                 below.extend(row.get(7).and_then(as_strings).unwrap_or_default());
             }
         }
@@ -1459,13 +1459,13 @@ impl<'a> Engine<'a> {
         };
         let mut fills: HashMap<i32, bool> = HashMap::new();
         for (n, relation, column) in &parsed.bare {
-            if let Some((_, refused)) = column_of(relation, column, reaches(*n, relation)) {
+            if let Some((_, refused)) = column_of(relation, column, reaches(*n, relation, column)) {
                 *fills.entry(*n).or_insert(true) &= !refused;
             }
         }
         out.params.extend(fills.into_iter().filter(|(_, nullable)| *nullable).map(|(n, _)| n));
         for (n, relation, column) in checked {
-            if let Some((name, true)) = column_of(relation, column, reaches(*n, relation)) {
+            if let Some((name, true)) = column_of(relation, column, reaches(*n, relation, column)) {
                 out.refused.push((*n, relation.clone(), name));
             }
         }

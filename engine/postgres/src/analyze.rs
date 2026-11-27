@@ -48,9 +48,9 @@ pub struct Analysis {
     pub read_set: Vec<String>,
     /// Tables written (DML contexts).
     pub write_set: Vec<String>,
-    /// Each parameter of `filled` an UPDATE without ONLY writes, with its relation: the write
-    /// reaches the rows of the relation's children too.
-    pub reaching: Vec<(i32, String)>,
+    /// Each write of `filled` an UPDATE without ONLY makes, which reaches the rows of the
+    /// relation's children too.
+    pub reaching: Vec<(i32, String, Filled)>,
     /// Function names called anywhere in the statement.
     pub functions: Vec<String>,
     /// Operator names written anywhere in the statement (`=`, `~~` for LIKE, an `ANY`'s and an
@@ -189,7 +189,7 @@ fn analyze_here(sql: &str) -> Result<Analysis, AnalyzeError> {
     // An UPDATE, a DELETE or a MERGE anywhere, a WITH query's included, or an ON CONFLICT that updates.
     let mut changes_keys = false;
     let mut filled: Vec<(i32, String, Filled)> = Vec::new();
-    let mut reaching: Vec<(i32, String)> = Vec::new();
+    let mut reaching: Vec<(i32, String, Filled)> = Vec::new();
     let mut bare: Vec<(i32, String, Filled)> = Vec::new();
     let mut selected: Vec<(i32, String, Filled)> = Vec::new();
 
@@ -228,7 +228,7 @@ fn analyze_here(sql: &str) -> Result<Analysis, AnalyzeError> {
             let schema = node.get("relation").and_then(|r| r.get("schemaname")).and_then(|r| r.as_str()).unwrap_or("");
             let relation = relation_name(schema, relname);
             let relation = relation.as_str();
-            // The parameters it writes whole.
+            // The writes it makes of a parameter whole.
             let mut set = |targets: Option<&Value>| {
                 let mut written = Vec::new();
                 for target in targets.and_then(|t| t.as_array()).into_iter().flatten() {
@@ -240,7 +240,7 @@ fn analyze_here(sql: &str) -> Result<Analysis, AnalyzeError> {
                         None => rt.get("val"),
                     };
                     if let (Some(name), Some(n)) = (rt.get("name").and_then(|n| n.as_str()), val.and_then(direct_param_number)) {
-                        written.push(n);
+                        written.push((n, relation.to_string(), Filled::Name(name.to_string())));
                         filled.push((n, relation.to_string(), Filled::Name(name.to_string())));
                         if val.and_then(bare_param_number).is_some() {
                             bare.push((n, relation.to_string(), Filled::Name(name.to_string())));
@@ -253,7 +253,7 @@ fn analyze_here(sql: &str) -> Result<Analysis, AnalyzeError> {
                 "UpdateStmt" => {
                     let written = set(node.get("target_list"));
                     if node.get("relation").and_then(|r| r.get("inh")).and_then(|i| i.as_bool()).unwrap_or(false) {
-                        reaching.extend(written.into_iter().map(|n| (n, relation.to_string())));
+                        reaching.extend(written);
                     }
                 }
                 "InsertStmt" => {
