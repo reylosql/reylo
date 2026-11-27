@@ -269,7 +269,20 @@ mod tests {
         assert_eq!(narrow(&boolean, &[Literal::Boolean(true), Literal::Boolean(false)]), None);
         assert_eq!(narrow(&Type::uuid(), &[Literal::Text("x".into())]), None);
         assert_eq!(narrow(&text, &[]), None);
-        for ty in [narrow(&int4, &[number("1")]), narrow(&numeric, &[number("1.5")]), narrow(&float8, &[number("0.5")]), narrow(&boolean, &[Literal::Boolean(false)])] {
+        // What a narrowing writes is a valid type, its values among its base's.
+        for ty in [
+            narrow(&int4, &[number("1")]),
+            narrow(&int4, &[Literal::Boolean(true), Literal::Boolean(false)]),
+            narrow(&uint8, &[number("255")]),
+            narrow(&numeric, &[number("1.5")]),
+            narrow(&money, &[number("12.30")]),
+            narrow(&float8, &[number("0.5"), number("0.1"), number("1e2")]),
+            narrow(&boolean, &[Literal::Boolean(false)]),
+            narrow(&varchar(Size { max: Some(3), ..Size::default() }), &[Literal::Text("abc".into())]),
+            narrow(&no_nul, &[Literal::Text("a".into())]),
+            narrow(&latin1("ISO-8859-1"), &[Literal::Text("café".into())]),
+            narrow(&mood, &[Literal::Text("sad".into())]),
+        ] {
             ty.unwrap().check().unwrap();
         }
     }

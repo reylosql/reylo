@@ -2100,6 +2100,76 @@ mod tests {
         refused(json!({"kind": "enum", "type": {"kind": "text"}, "values": [{"value": "a", "name": "A"}, {"value": "a", "name": "Alias"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "boolean"}, "values": [{"value": "true"}, {"value": "false"}]}));
         refused(json!({"kind": "enum", "type": {"kind": "boolean"}, "values": [{"value": "yes"}]}));
+        // Its type keeps its own rules before a value is read.
+        refused(json!({"kind": "enum", "type": {"kind": "uuid", "versions": [250]}, "values": [{"value": "01890a5d-ac96-7ed0-8f4c-c3b8d0a1b2c3"}]}));
+        // Each value is one of its type's, in its canonical text, and no two are one value.
+        for (ty, value) in [
+            (json!({"kind": "integer", "bits": 32}), "x"),
+            (json!({"kind": "integer", "bits": 32}), "01"),
+            (json!({"kind": "integer", "bits": 32}), "1.0"),
+            (json!({"kind": "integer", "bits": 8}), "128"),
+            (json!({"kind": "integer", "bits": 8, "unsigned": true}), "-1"),
+            (json!({"kind": "integer", "bits": 32, "min": "0"}), "-5"),
+            (json!({"kind": "decimal"}), "1.50"),
+            (json!({"kind": "decimal"}), "1e2"),
+            (json!({"kind": "decimal", "precision": 4, "min_scale": 2, "max_scale": 2}), "123"),
+            (json!({"kind": "decimal", "max_scale": 2}), "1.234"),
+            (json!({"kind": "float", "exponent_bits": 11, "mantissa_bits": 52, "nan": true}), "NaN"),
+            (json!({"kind": "text", "size": {"max": 1}}), "abc"),
+            (json!({"kind": "text", "code_points": [[1, 1114111]]}), "a\u{0}"),
+            (json!({"kind": "text", "encoding": "US-ASCII"}), "é"),
+            (json!({"kind": "text", "encoding": "UTF-8", "size": {"unit": "byte", "max": 1}}), "é"),
+            (json!({"kind": "bytes"}), "AB=="),
+            (json!({"kind": "bytes"}), "QQ"),
+            (json!({"kind": "bytes", "size": {"exact": 2}}), "QQ=="),
+            (json!({"kind": "uuid"}), "zzz"),
+            (json!({"kind": "uuid", "versions": [7]}), "01890a5d-ac96-4ed0-8f4c-c3b8d0a1b2c3"),
+            (json!({"kind": "date"}), "2026-13-01"),
+            (json!({"kind": "date"}), "2026-02-29"),
+            (json!({"kind": "date"}), "0000-01-01"),
+            (json!({"kind": "datetime", "tick": "1"}), "2026-01-01T25:00:00"),
+            (json!({"kind": "zoned_datetime", "tick": "1"}), "2026-01-01T00:00:00+24:00[+24:00]"),
+            (json!({"kind": "time", "tick": "1"}), "12:60:00"),
+            (json!({"kind": "time", "tick": "1"}), "24:00:00"),
+            (json!({"kind": "time", "tick": "1", "offset": true}), "10:00:00+09:60"),
+        ] {
+            refused(json!({"kind": "enum", "type": ty, "values": [{"value": value}]}));
+        }
+        refused(json!({"kind": "enum", "type": {"kind": "integer", "bits": 32}, "values": [{"value": "0"}, {"value": "-0"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "uuid"}, "values": [{"value": "01890a5d-ac96-7ed0-8f4c-c3b8d0a1b2c3"}, {"value": "01890A5D-AC96-7ED0-8F4C-C3B8D0A1B2C3"}]}));
+        refused(json!({"kind": "enum", "type": {"kind": "instant", "tick": "1/1000"}, "values": [{"value": "2026-01-01T00:00:00.5Z"}, {"value": "2026-01-01T00:00:00.500Z"}]}));
+        for (ty, values) in [
+            (json!({"kind": "integer", "bits": 8}), json!(["-128", "127"])),
+            (json!({"kind": "integer", "bits": 64, "unsigned": true}), json!(["18446744073709551615"])),
+            (json!({"kind": "integer", "bits": 128}), json!(["-170141183460469231731687303715884105728"])),
+            (json!({"kind": "integer", "bits": 8, "unsigned": true}), json!(["-0"])),
+            (json!({"kind": "decimal"}), json!(["-0", "1"])),
+            (json!({"kind": "decimal", "precision": 5, "min_scale": -2, "max_scale": -2}), json!(["1200"])),
+            (json!({"kind": "decimal", "min_scale": 0, "max_scale": 16383, "exclusive_min": "-1e131072", "exclusive_max": "1e131072"}), json!(["-0.25", "0"])),
+            (json!({"kind": "float", "exponent_bits": 11, "mantissa_bits": 52}), json!(["0.1", "-0"])),
+            (json!({"kind": "text", "encoding": "windows-1252", "size": {"exact": 4}}), json!(["café"])),
+            (json!({"kind": "bytes", "size": {"max": 2}}), json!(["", "QQ==", "QUI="])),
+            (json!({"kind": "uuid", "versions": [7]}), json!(["01890A5D-AC96-7ED0-8F4C-C3B8D0A1B2C3"])),
+            (json!({"kind": "date", "min": "-4713-11-24", "max": "+5874897-12-31"}), json!(["-4713-11-24", "2024-02-29", "+5874897-12-31"])),
+            (json!({"kind": "date", "min": "0000-01-01"}), json!(["0000-01-01"])),
+            (json!({"kind": "instant", "tick": "1/1000000"}), json!(["2026-01-01T00:00:00.5Z"])),
+            (json!({"kind": "zoned_datetime", "tick": "1"}), json!(["2026-01-01T10:00:00+09:00[Asia/Tokyo]", "2026-01-01T10:00:00+09:00[+09:00]"])),
+            (json!({"kind": "time", "tick": "1/1000000", "max": "24:00:00"}), json!(["24:00:00", "23:59:60", "00:00:00.5"])),
+            (json!({"kind": "time", "tick": "1"}), json!(["23:59:60"])),
+            (json!({"kind": "time", "tick": "1", "offset": true}), json!(["10:00:00+09:00", "23:59:60+09:00", "24:00:00+09:00"])),
+            (json!({"kind": "time", "tick": "1/1000000", "max": "12:00:00.5"}), json!(["12:00:00.500000"])),
+            // A date or a time not written as the format's examples write its kind is not read, as
+            // ISO 8601 has other forms, and only its text tells it apart.
+            (json!({"kind": "date"}), json!(["1970-01-01", "0.", "20260101", "2026-01-0é"])),
+            (json!({"kind": "datetime", "tick": "1"}), json!(["2026-01-01 00:00:00"])),
+            (json!({"kind": "instant", "tick": "1"}), json!(["2026-01-01T09:00:00+09:00"])),
+            (json!({"kind": "zoned_datetime", "tick": "1"}), json!(["2026-01-01T00:00:00Z"])),
+            (json!({"kind": "time", "tick": "1"}), json!(["12:00", "12:00:0é"])),
+            (json!({"kind": "time", "tick": "1", "offset": true}), json!(["10:00:00"])),
+        ] {
+            let values: Vec<Value> = values.as_array().unwrap().iter().map(|v| json!({"value": v})).collect();
+            passes(json!({"kind": "enum", "type": ty, "values": values}));
+        }
         // Unions and intersections: two members at least, null never one, and no intersection one struct writes.
         refused(json!({"kind": "union", "members": [{"kind": "text"}]}));
         refused(json!({"kind": "union", "members": [{"kind": "text"}, {"kind": "null"}]}));
