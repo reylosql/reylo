@@ -54,7 +54,8 @@ fn query() -> String {
         ),
         format!("select {} from information_schema.statistics where {}", line("s", &[&within("table_schema"), "table_name", "index_name", "non_unique", "seq_in_index", "coalesce(column_name, '')", "coalesce(expression, '')"]), own("table_schema")),
         // Views, and what each reads, which an account without SHOW VIEW sees no definition of.
-        format!("select {} from information_schema.views where {}", line("v", &[&within("table_schema"), "table_name", "sha2(coalesce(view_definition, ''), 256)"]), own("table_schema")),
+        // A view's definition names every table by its database, which is the session's own left out.
+        format!("select {} from information_schema.views where {}", line("v", &[&within("table_schema"), "table_name", "sha2(replace(coalesce(view_definition, ''), concat('`', database(), '`.'), ''), 256)"]), own("table_schema")),
         format!("select {} from information_schema.view_table_usage where {}", line("w", &[&within("view_schema"), "view_name", &within("table_schema"), "table_name"]), own("view_schema")),
         format!("select {} from information_schema.view_routine_usage where {}", line("o", &[&within("table_schema"), "table_name", &within("specific_schema"), "specific_name"]), own("table_schema")),
         // Stored routines with their arguments.
@@ -71,18 +72,24 @@ fn query() -> String {
         format!("select {} from information_schema.referential_constraints where {}", line("f", &[&within("constraint_schema"), "table_name", "constraint_name", "referenced_table_name", "update_rule", "delete_rule"]), own("constraint_schema")),
         format!("select {} from information_schema.table_constraints where {}", line("k", &[&within("table_schema"), "table_name", "constraint_name", "constraint_type", "enforced"]), own("table_schema")),
         format!("select {} from information_schema.check_constraints where {}", line("h", &[&within("constraint_schema"), "constraint_name", "sha2(check_clause, 256)"]), own("constraint_schema")),
-        // The session's account's privileges, which the server checks a statement against when it
-        // prepares it, and without TRIGGER on a written table hides the table's triggers.
+        // The session's account's privileges, its own and its roles', which the server checks a
+        // statement against when it prepares it, and without TRIGGER on a written table hides the
+        // table's triggers.
         format!("select {} from information_schema.user_privileges where grantee = {GRANTEE}", line("u", &["privilege_type"])),
-        format!("select {} from information_schema.schema_privileges where grantee = {GRANTEE}", line("u", &[&within("table_schema"), "privilege_type"])),
-        format!("select {} from information_schema.table_privileges where grantee = {GRANTEE}", line("u", &[&within("table_schema"), "table_name", "privilege_type"])),
-        format!("select {} from information_schema.column_privileges where grantee = {GRANTEE}", line("u", &[&within("table_schema"), "table_name", "column_name", "privilege_type"])),
+        format!("select {} from information_schema.schema_privileges where grantee = {GRANTEE} and {}", line("u", &[&within("table_schema"), "privilege_type"]), own("table_schema")),
+        format!("select {} from information_schema.table_privileges where grantee = {GRANTEE} and {}", line("u", &[&within("table_schema"), "table_name", "privilege_type"]), own("table_schema")),
+        format!("select {} from information_schema.column_privileges where grantee = {GRANTEE} and {}", line("u", &[&within("table_schema"), "table_name", "column_name", "privilege_type"]), own("table_schema")),
+        format!("select {} from information_schema.enabled_roles", line("e", &["role_name", "role_host"])),
+        format!("select {} from information_schema.role_table_grants where {}", line("e", &["grantee", "grantee_host", &within("table_schema"), "table_name", "privilege_type"]), own("table_schema")),
+        format!("select {} from information_schema.role_column_grants where {}", line("e", &["grantee", "grantee_host", &within("table_schema"), "table_name", "column_name", "privilege_type"]), own("table_schema")),
+        format!("select {} from information_schema.role_routine_grants where {}", line("e", &["grantee", "grantee_host", &within("routine_schema"), "routine_name", "privilege_type"]), own("routine_schema")),
     ];
     // The server's version; the session's `sql_mode`, which changes how a statement reads; the
     // database's character set and collation, which a structured parameter is expanded by; whether
-    // a table's name is matched by its case; and the digits a division adds to its result's scale.
+    // a table's name is matched by its case; the digits a division adds to its result's scale; and
+    // the length past which `group_concat` returns a TEXT rather than a VARCHAR.
     format!(
-        "select concat_ws(' ', @@version, @@sql_mode, @@character_set_database, @@collation_database, @@lower_case_table_names, @@div_precision_increment, count(*), sum(cast(conv(substr(h, 1, 15), 16, 10) as unsigned)), bit_xor(cast(conv(substr(h, 16, 16), 16, 10) as unsigned))) from (select sha2(x, 256) as h from (\n    {}\n  ) r) t",
+        "select concat_ws(' ', @@version, @@sql_mode, @@character_set_database, @@collation_database, @@lower_case_table_names, @@div_precision_increment, @@group_concat_max_len, count(*), sum(cast(conv(substr(h, 1, 15), 16, 10) as unsigned)), bit_xor(cast(conv(substr(h, 16, 16), 16, 10) as unsigned))) from (select sha2(x, 256) as h from (\n    {}\n  ) r) t",
         rows.join("\n    union all ")
     )
 }
@@ -118,19 +125,42 @@ mod tests {
             }
         }
         use reylo_engine_core::structured::{MARIADB_TABLE_QUERY, MYSQL_SERVER_QUERY, MYSQL_TABLE_QUERY};
+        // A query defined in another form would be skipped: every definition of a `…_QUERY` is read here.
+        let defined: usize = std::fs::read_dir(&root).unwrap().flatten().filter(|entry| entry.file_name() != "schema_fingerprint.rs").map(|entry| {
+            let source = std::fs::read_to_string(entry.path()).unwrap();
+            source.match_indices("const ").filter(|(i, _)| { let name: String = source[i + 6..].chars().take_while(|c| c.is_ascii_uppercase() || *c == '_').collect(); name.ends_with("_QUERY") }).count()
+        }).sum();
+        assert_eq!(out.len(), defined, "a `…_QUERY` constant here is not a plain string literal, which this test reads");
         out.extend([("MYSQL_TABLE_QUERY", MYSQL_TABLE_QUERY), ("MARIADB_TABLE_QUERY", MARIADB_TABLE_QUERY), ("MYSQL_SERVER_QUERY", MYSQL_SERVER_QUERY)].map(|(n, q)| (n.to_string(), q.to_string())));
         out
     }
 
-    /// The columns of the `information_schema` tables the engine reads.
-    const COLUMNS: &str = "table_catalog table_schema table_name column_name ordinal_position column_default is_nullable data_type character_maximum_length character_octet_length numeric_precision numeric_scale datetime_precision character_set_name collation_name column_type column_key extra privileges column_comment generation_expression srs_id \
-        table_type engine row_format table_rows auto_increment table_collation create_options table_comment \
-        non_unique index_schema index_name seq_in_index sub_part index_type index_comment is_visible expression \
-        view_definition check_option is_updatable definer security_type \
-        specific_name routine_schema routine_name routine_type dtd_identifier routine_body routine_definition is_deterministic sql_data_access routine_comment specific_schema parameter_mode parameter_name \
-        trigger_schema trigger_name event_manipulation event_object_schema event_object_table action_order action_condition action_statement action_orientation action_timing \
-        constraint_schema constraint_name unique_constraint_schema unique_constraint_name match_option update_rule delete_rule referenced_table_name constraint_type enforced check_clause \
-        grantee privilege_type is_grantable view_schema view_name is_default pad_attribute";
+    /// The columns of each `information_schema` table the engine or the fingerprint reads, as MySQL
+    /// 8.4 lists them.
+    const COLUMNS: &[(&str, &str)] = &[
+        ("check_constraints", "constraint_catalog constraint_schema constraint_name check_clause"),
+        ("collations", "collation_name character_set_name id is_default is_compiled sortlen pad_attribute"),
+        ("column_privileges", "grantee table_catalog table_schema table_name column_name privilege_type is_grantable"),
+        ("columns", "table_catalog table_schema table_name column_name ordinal_position column_default is_nullable data_type character_maximum_length character_octet_length numeric_precision numeric_scale datetime_precision character_set_name collation_name column_type column_key extra privileges column_comment generation_expression srs_id"),
+        ("enabled_roles", "role_name role_host is_default is_mandatory"),
+        ("key_column_usage", "constraint_catalog constraint_schema constraint_name table_catalog table_schema table_name column_name ordinal_position position_in_unique_constraint referenced_table_schema referenced_table_name referenced_column_name"),
+        ("parameters", "specific_catalog specific_schema specific_name ordinal_position parameter_mode parameter_name data_type character_maximum_length character_octet_length numeric_precision numeric_scale datetime_precision character_set_name collation_name dtd_identifier routine_type"),
+        ("referential_constraints", "constraint_catalog constraint_schema constraint_name unique_constraint_catalog unique_constraint_schema unique_constraint_name match_option update_rule delete_rule table_name referenced_table_name"),
+        ("role_column_grants", "grantor grantor_host grantee grantee_host table_catalog table_schema table_name column_name privilege_type is_grantable"),
+        ("role_routine_grants", "grantor grantor_host grantee grantee_host specific_catalog specific_schema specific_name routine_catalog routine_schema routine_name privilege_type is_grantable"),
+        ("role_table_grants", "grantor grantor_host grantee grantee_host table_catalog table_schema table_name privilege_type is_grantable"),
+        ("routines", "specific_name routine_catalog routine_schema routine_name routine_type data_type character_maximum_length character_octet_length numeric_precision numeric_scale datetime_precision character_set_name collation_name dtd_identifier routine_body routine_definition external_name external_language parameter_style is_deterministic sql_data_access sql_path security_type created last_altered sql_mode routine_comment definer character_set_client collation_connection database_collation"),
+        ("schema_privileges", "grantee table_catalog table_schema privilege_type is_grantable"),
+        ("statistics", "table_catalog table_schema table_name non_unique index_schema index_name seq_in_index column_name collation cardinality sub_part packed nullable index_type comment index_comment is_visible expression"),
+        ("table_constraints", "constraint_catalog constraint_schema constraint_name table_schema table_name constraint_type enforced"),
+        ("table_privileges", "grantee table_catalog table_schema table_name privilege_type is_grantable"),
+        ("tables", "table_catalog table_schema table_name table_type engine version row_format table_rows avg_row_length data_length max_data_length index_length data_free auto_increment create_time update_time check_time table_collation checksum create_options table_comment"),
+        ("triggers", "trigger_catalog trigger_schema trigger_name event_manipulation event_object_catalog event_object_schema event_object_table action_order action_condition action_statement action_orientation action_timing action_reference_old_table action_reference_new_table action_reference_old_row action_reference_new_row created sql_mode definer character_set_client collation_connection database_collation"),
+        ("user_privileges", "grantee table_catalog privilege_type is_grantable"),
+        ("view_routine_usage", "table_catalog table_schema table_name specific_catalog specific_schema specific_name"),
+        ("view_table_usage", "view_catalog view_schema view_name table_catalog table_schema table_name"),
+        ("views", "table_catalog table_schema table_name view_definition check_option is_updatable definer security_type character_set_client collation_connection"),
+    ];
 
     /// The columns the engine reads that the fingerprint need not, each with why.
     const UNFINGERPRINTED: &[(&str, &str)] = &[
@@ -146,7 +176,7 @@ mod tests {
     fn the_schema_fingerprint_reads_every_column_the_engine_reads() {
         let words = |text: &str| -> std::collections::BTreeSet<String> { text.to_lowercase().split(|c: char| !c.is_ascii_alphanumeric() && c != '_').filter(|w| !w.is_empty()).map(String::from).collect() };
         let fingerprint = words(&super::QUERY);
-        let columns: Vec<&str> = COLUMNS.split_whitespace().collect();
+        let columns: Vec<&str> = COLUMNS.iter().flat_map(|(_, columns)| columns.split_whitespace()).collect();
         let mut missed = Vec::new();
         let queries = queries();
         assert!(queries.len() > 10, "the engine's queries are found");
