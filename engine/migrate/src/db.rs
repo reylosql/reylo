@@ -1629,7 +1629,7 @@ impl Server {
                 let mut shadow = self.pg_shadow(None).await?;
                 // pg_cron, where the target has it, refuses the shadow's own name.
                 if self.copies_pg_cron() && shadow.db.rows("select 1 from pg_extension where extname = 'pg_cron'").await.is_ok_and(|r| r.is_empty()) {
-                    let (mut named, renamed) = self.name_for_pg_cron(shadow, false).await?;
+                    let (mut named, renamed) = self.name_for_pg_cron(shadow).await?;
                     if renamed == Ok(true) {
                         let _ = named.db.exec("create extension if not exists pg_cron").await;
                         named = self.unname_for_pg_cron(named).await?;
@@ -1852,13 +1852,9 @@ impl Server {
     /// so that a shadow takes what a deploy will.
     /// The answer says whether it was renamed, for [`Server::unname_for_pg_cron`] to name it back, or
     /// why it couldn't be, which pg_cron's refusal then goes on to show.
-    /// `again` is a step that drops pg_cron before it makes it, which a shadow that has it needs the name for too.
-    pub(crate) async fn name_for_pg_cron(&mut self, mut shadow: Shadow, again: bool) -> Result<(Shadow, Result<bool, String>), Error> {
+    pub(crate) async fn name_for_pg_cron(&mut self, mut shadow: Shadow) -> Result<(Shadow, Result<bool, String>), Error> {
         let Server::Postgres { admin, url, settings, pg_cron_target, pg_cron_stuck, .. } = self else { return Ok((shadow, Ok(false))) };
         if !*pg_cron_target || shadow.name == PG_CRON_NAME {
-            return Ok((shadow, Ok(false)));
-        }
-        if !again && !shadow.db.rows("select 1 from pg_extension where extname = 'pg_cron'").await?.is_empty() {
             return Ok((shadow, Ok(false)));
         }
         // On a server whose pg_cron reads its jobs from a database of that name, a shadow under it would run them.

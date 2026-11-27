@@ -233,14 +233,14 @@ impl<'s> Shadows<'s> {
 
     /// Readies lane `l`'s shadow to run `sql`. Where it makes pg_cron, which makes itself only in the
     /// database `cron.database_name` names, the shadow goes by the one other name pg_cron takes until
-    /// [`Shadows::after`] names it back.
+    /// [`Shadows::after`] names it back, whether or not it has pg_cron already: what runs may drop it
+    /// first, in ways no reading of the text can follow (a procedure it calls).
     pub(crate) async fn before(&mut self, l: usize, sql: &str) -> Result<PgCron, Error> {
         if self.server.dialect() != Dialect::Postgres || !sql.to_ascii_lowercase().contains("pg_cron") || !crate::commands::extensions_in(sql).iter().any(|e| e == "pg_cron") {
             return Ok(PgCron::Unneeded);
         }
-        let again = crate::commands::drops_pg_cron(sql);
         let Some(shadow) = self.lanes[l].shadow.take() else { return Ok(PgCron::Unneeded) };
-        let (shadow, named) = self.server.name_for_pg_cron(shadow, again).await?;
+        let (shadow, named) = self.server.name_for_pg_cron(shadow).await?;
         self.lanes[l].shadow = Some(shadow);
         Ok(match named {
             Ok(true) => PgCron::Named,
