@@ -141,7 +141,7 @@ function check(type: EngineType, written: string, v: unknown, dialect: Dialect, 
       // A JSON member holds JSON: JSON.stringify skips a function. A BigInt goes in as its digits
       // (src/values.ts, `writeJson`), which also refuses the numbers its database holds none for.
       try {
-        if (JSON.stringify(v, (_key, x: unknown) => (typeof x === "bigint" ? 0 : x)) === undefined) fail(`is ${written}, which holds a JSON value; got ${describe(v)}.`);
+        if (typeof v !== "bigint" && JSON.stringify(v, (_key, x: unknown) => (typeof x === "bigint" ? 0 : x)) === undefined) fail(`is ${written}, which holds a JSON value; got ${describe(v)}.`);
       } catch (e) {
         fail(`is ${written}, which holds a JSON value: ${(e as Error).message}.`);
       }

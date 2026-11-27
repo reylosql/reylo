@@ -61,6 +61,15 @@ test("a value is checked against its column list, and written as the JSON the st
   const big = { id: 1, ts: "2026-10-20T10:00:00Z", meta: { source: "x", n: 9007199254740993n } };
   assert.match(prepareRows("events", events, [big], "sqlite", true).value as string, /\{"source":"x","n":9007199254740993\}/);
   assert.throws(() => prepareRows("events", events, [{ ...big, meta: { source: "x", n: 2n ** 63n } }], "sqlite", true), /the BigInt 9223372036854775808, which SQLite reads from JSON as a float/);
+  // A BigInt member is JSON whatever toJSON an app gives BigInt.
+  const proto = BigInt.prototype as unknown as { toJSON?: () => unknown };
+  proto.toJSON = () => undefined;
+  try {
+    const one = { fields: [{ name: "n", type: { kind: "json" }, written: "json", nullable: false, optional: false }], one: true } as unknown as Parameters<typeof prepareRows>[1];
+    assert.equal(prepareRows("one", one, { n: 9007199254740993n }, "sqlite", false).value, '{"n":9007199254740993}');
+  } finally {
+    delete proto.toJSON;
+  }
   assert.throws(() => prepareRows("events", events, { id: 1 }, "postgres", true), /pass an array of objects, one per row; got an object/);
   assert.throws(() => prepareRows("user", { ...events, one: true }, [], "postgres", true), /each row is an object/);
 });
