@@ -270,10 +270,7 @@ fn rebound_in(q: &Query, scope: &[Cte], names: &mut HashSet<String>) -> Option<(
             .iter()
             // Only a name written the same way surely hides: names may compare as written.
             .filter(|c| match own.cte_tables.iter().position(|o| o.alias.name.value == c.alias.name.value) {
-                Some(at) => own.cte_tables[..=at].iter().any(|o| {
-                    let text = o.query.to_string();
-                    !text.is_ascii() || names_word(&text, &c.alias.name.value)
-                }),
+                Some(at) => own.cte_tables[..=at].iter().any(|o| reads_any(&o.query, std::slice::from_ref(c))),
                 None => true,
             })
             .cloned()
@@ -317,19 +314,6 @@ fn reached<'c>(ctes: &'c [Cte], text: &str) -> Vec<&'c Cte> {
         }
     }
     ctes.iter().zip(read).filter(|(_, read)| *read).map(|(cte, _)| cte).collect()
-}
-
-/// The queries below `q`, at any depth ([`children`]). `None` where a part the walk does not
-/// follow holds a WITH.
-fn queries_in<'a>(q: &'a Query, out: &mut Vec<&'a Query>) -> Option<()> {
-    let mut stack = vec![q];
-    while let Some(next) = stack.pop() {
-        let mut below = Vec::new();
-        children(next, &mut below)?;
-        out.extend(below.iter().copied());
-        stack.extend(below);
-    }
-    Some(())
 }
 
 /// The queries right below `q`: its WITH queries', its derived tables' (LATERAL ones' included),
@@ -433,7 +417,8 @@ fn expr_queries<'a>(e: &'a Expr, out: &mut Vec<&'a Query>) -> Option<()> {
             Some(())
         }
         Expr::BinaryOp { left, right, .. } => all(&mut [&**left, &**right].into_iter(), out),
-        Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } | Expr::SimilarTo { expr, pattern, .. } | Expr::RLike { expr, pattern, .. } => all(&mut [&**expr, &**pattern].into_iter(), out),
+        Expr::Like { expr, pattern, escape_char, .. } | Expr::ILike { expr, pattern, escape_char, .. } | Expr::SimilarTo { expr, pattern, escape_char, .. } => all(&mut [&**expr, &**pattern].into_iter().chain(escape_char.as_deref()), out),
+        Expr::RLike { expr, pattern, .. } => all(&mut [&**expr, &**pattern].into_iter(), out),
         Expr::Nested(inner) | Expr::UnaryOp { expr: inner, .. } | Expr::IsNull(inner) | Expr::IsNotNull(inner) | Expr::IsTrue(inner) | Expr::IsFalse(inner) | Expr::Cast { expr: inner, .. } => expr_queries(inner, out),
         Expr::InList { expr, list, .. } => all(&mut std::iter::once(&**expr).chain(list), out),
         Expr::Between { expr, low, high, .. } => all(&mut [&**expr, &**low, &**high].into_iter(), out),
@@ -511,45 +496,77 @@ fn with_in(text: &str) -> bool {
     })
 }
 
-/// Whether a query reads, as a table of its FROM at any depth, a name one of `ctes` declares;
-/// where the walk cannot say, whether its text holds one of the names as a word.
+/// Whether a query reads, as a table of its FROM at any depth that no WITH inside it declares, a
+/// name one of `ctes` declares; where the walk cannot say, whether its text holds one of the names
+/// as a word.
 fn reads_any(q: &Query, ctes: &[Cte]) -> bool {
     if !q.to_string().is_ascii() || ctes.iter().any(|c| !plain_name(&c.alias.name.value)) {
         return true;
     }
-    let mut queries = vec![q];
-    if queries_in(q, &mut queries).is_none() {
-        let text = q.to_string();
-        return ctes.iter().any(|c| names_word(&text, &c.alias.name.value));
+    match free_tables(q) {
+        Some(free) => ctes.iter().any(|c| free.contains(&c.alias.name.value.to_ascii_lowercase())),
+        None => {
+            let text = q.to_string();
+            ctes.iter().any(|c| names_word(&text, &c.alias.name.value))
+        }
     }
-    fn tables(item: &TableWithJoins, out: &mut Vec<String>) {
+}
+
+/// The names, in lower case, a query reads as tables of its FROMs at any depth, but those a WITH
+/// around the reading declares: a WITH query's name in the query's own body, and in a WITH
+/// query's, the names before it (all of them in a RECURSIVE WITH). `None` where a part the walk
+/// does not follow holds a WITH.
+fn free_tables(q: &Query) -> Option<HashSet<String>> {
+    fn tables(item: &TableWithJoins, bound: &HashSet<String>, out: &mut HashSet<String>) {
         for factor in std::iter::once(&item.relation).chain(item.joins.iter().map(|j| &j.relation)) {
             match factor {
                 TableFactor::Table { name, .. } => {
                     if let [ObjectNamePart::Identifier(t)] = name.0.as_slice() {
-                        out.push(t.value.to_ascii_lowercase());
+                        let t = t.value.to_ascii_lowercase();
+                        if !bound.contains(&t) {
+                            out.insert(t);
+                        }
                     }
                 }
-                TableFactor::NestedJoin { table_with_joins, .. } => tables(table_with_joins, out),
+                TableFactor::NestedJoin { table_with_joins, .. } => tables(table_with_joins, bound, out),
                 _ => {}
             }
         }
     }
-    fn blocks(b: &SetExpr, out: &mut Vec<String>) {
+    fn blocks(b: &SetExpr, bound: &HashSet<String>, out: &mut HashSet<String>) {
         match b {
-            SetExpr::Select(select) => select.from.iter().for_each(|item| tables(item, out)),
+            SetExpr::Select(select) => select.from.iter().for_each(|item| tables(item, bound, out)),
             SetExpr::SetOperation { left, right, .. } => {
-                blocks(left, out);
-                blocks(right, out);
+                blocks(left, bound, out);
+                blocks(right, bound, out);
             }
             _ => {}
         }
     }
-    let mut read = Vec::new();
-    for q in &queries {
-        blocks(&q.body, &mut read);
+    fn walk(q: &Query, bound: &HashSet<String>, out: &mut HashSet<String>) -> Option<()> {
+        let mut inner = bound.clone();
+        let mut kids = Vec::new();
+        children(q, &mut kids)?;
+        let mut own = 0;
+        if let Some(with) = &q.with {
+            let names: Vec<String> = with.cte_tables.iter().map(|c| c.alias.name.value.to_ascii_lowercase()).collect();
+            for (i, cte) in with.cte_tables.iter().enumerate() {
+                let mut seen = bound.clone();
+                seen.extend(names[..if with.recursive { names.len() } else { i }].iter().cloned());
+                walk(&cte.query, &seen, out)?;
+            }
+            inner.extend(names);
+            own = with.cte_tables.len();
+        }
+        blocks(&q.body, &inner, out);
+        for kid in kids.into_iter().skip(own) {
+            walk(kid, &inner, out)?;
+        }
+        Some(())
     }
-    ctes.iter().any(|c| read.contains(&c.alias.name.value.to_ascii_lowercase()))
+    let mut out = HashSet::new();
+    walk(q, &HashSet::new(), &mut out)?;
+    Some(out)
 }
 
 /// A derived table or a WITH query whose columns the statement reads.
@@ -993,6 +1010,7 @@ mod tests {
             "with z as (select x from t4), y as (with t4 as (select 1 as x) select z.x from z) select x from y",
             "with z as (select x from t4) select t3.k from t3 join z on z.x in (with t4 as (select 1 as x) select z.x from z)",
             "with z as (select x from t4) select (with t4 as (select 1 as x) select json_arrayagg(z.x) from z) as j",
+            "with z as (select x from t4) select 'a_' like 'a#_' escape (with t4 as (select '#' as x) select x from z) as matched",
             "with z as (select x from t4) select d.x from (with rollupx as (select 1 as x), t4 as (select 2 as x) select z.x from z) d",
             // Through a WITH between them: e reads y, y reads z, and z's t4 is e's own.
             "with z as (select x from t4) select d.x from (with y as (select x from z) select e.x from (with t4 as (select 1 as x) select x from y) e) d",
@@ -1003,6 +1021,8 @@ mod tests {
             "with z as (select x from t4) select d.x from (with y as (select 1 as x) select z.x from z, y) d",
             "with z as (with t4 as (select 1 as x) select x from t4) select x from z",
             "select d.x from (with t4 as (select 1 as x) select x from t4) d",
+            // A WITH query of a derived table's that reads another of its name, nested.
+            "select id from (with c as (select id from (with c as (select id from t4 where id = ?) select id from c) s) select id from c) s",
             // A derived table's own WITH query that hides a recursive one of its name.
             "with recursive nums (n) as (select 1 union all select n + 1 from nums where n < 3) select d.n from (with nums (n) as (select 1) select n from nums) d",
             // A WITH of a query that reads no outer WITH query, and a named window.
