@@ -7,7 +7,7 @@ use crate::clients::clickhouse::{self as answers, Describe, Outcome, Server};
 use crate::{AnswerCache, Failure, Program, ReplayError};
 use reylo_engine_core::api::Analysis;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// The errors a server answers a login it refuses with: no such user, a wrong password, a password
 /// the login needs, and no right to connect.
@@ -25,6 +25,17 @@ struct Connection {
     version: String,
     /// The engine's answers, kept between statements as the loader's session keeps them.
     answers: AnswerCache<Describe>,
+    /// The fingerprint each server answered the schema's fingerprint with last, by the name it
+    /// answers with ([`Server::answered`]).
+    shown: HashMap<Option<String>, String>,
+    /// The fingerprint read last, which the loader labels the next analysis with.
+    label: Option<String>,
+}
+
+impl Connection {
+    fn new(server: Server, version: String) -> Connection {
+        Connection { server, version, answers: AnswerCache::until_cleared(), shown: HashMap::new(), label: None }
+    }
 }
 
 impl Connection {
@@ -32,7 +43,18 @@ impl Connection {
     /// function's result is the server's configuration's, which only a server of 26.2 or later
     /// lists: where the configuration defines one and the server can't list it, there is no
     /// fingerprint to keep an analysis by.
-    fn schema(&self) -> Result<crate::Schema, Value> {
+    fn schema(&mut self) -> Result<crate::Schema, Value> {
+        self.server.answered();
+        let schema = self.fingerprint();
+        let by = self.server.answered();
+        self.label = schema.as_ref().ok().map(|schema| schema.fingerprint.clone());
+        if let (Ok(schema), [server]) = (&schema, &by.into_iter().collect::<Vec<_>>()[..]) {
+            self.shown.insert(server.clone(), schema.fingerprint.clone());
+        }
+        schema
+    }
+
+    fn fingerprint(&self) -> Result<crate::Schema, Value> {
         use crate::engines::clickhouse::schema_fingerprint as fingerprint;
         let rows = |sql: &str| match self.server.ask(sql) {
             Ok(Outcome::Rows(rows)) => Ok(rows),
@@ -50,14 +72,33 @@ impl Connection {
         Ok(crate::Schema::of(&rows(&fingerprint::query(true))?, None))
     }
 
-    /// The analysis of one statement; a failure is the answer the program gives for it.
-    fn analyze(&mut self, sql: &str) -> Result<Analysis, Value> {
-        match answers::analyze(&self.server, sql, &mut self.answers) {
-            Ok(analysis) => Ok(analysis),
+    /// The analysis of one statement, and whether it may be kept under the fingerprint read last
+    /// ([`kept`]); a failure is the answer the program gives for it.
+    fn analyze(&mut self, sql: &str) -> Result<(Analysis, bool), Value> {
+        let shown = self.shown.clone();
+        self.server.answered();
+        let analyzed = answers::analyze(&self.server, sql, &mut self.answers);
+        let keep = kept(self.label.as_deref(), &shown, &self.server.answered());
+        // Answers a replica gave before it showed the schema are no answers to keep for the next statement.
+        if !keep {
+            self.answers.clear();
+        }
+        match analyzed {
+            Ok(analysis) => Ok((analysis, keep)),
             Err(ReplayError::Host(e)) if e.0.starts_with("the query did not reach the server") => Err(json!({ "status": "unreachable", "message": e.0.lines().next().unwrap_or_default() })),
             Err(e) => Err(json!({ "status": "error", "message": e.to_string() })),
         }
     }
+}
+
+/// Whether an analysis answered by the servers `by` may be kept under `label`, the fingerprint
+/// read last: where each of them had answered the schema's fingerprint with `label` before the
+/// analysis began (`shown`). A replica applies a migration after the one that ran it, and its schema
+/// only moves forward, so one that had shown the label's schema answers for it; one that had not may
+/// answer for the schema before, as when it refuses a table the migration just made. Every analysis
+/// on one server is kept, its fingerprint read on the same server.
+fn kept(label: Option<&str>, shown: &HashMap<Option<String>, String>, by: &BTreeSet<Option<String>>) -> bool {
+    label.is_some_and(|label| by.iter().all(|server| shown.get(server).is_some_and(|f| f == label)))
 }
 
 /// The statements of one command line's run, analyzed on one server, which keeps the engine's
@@ -71,7 +112,7 @@ pub struct Session {
 impl Session {
     pub fn open(url: &str) -> Result<Session, Failure> {
         let (server, version) = connect(url).map_err(|answer| Failure::of(&answer))?;
-        Ok(Session { connection: Connection { server, version: version.clone(), answers: AnswerCache::until_cleared() }, version })
+        Ok(Session { connection: Connection::new(server, version.clone()), version })
     }
 
     /// Drops the answers kept from earlier statements, for a caller that outlives a schema change.
@@ -80,7 +121,7 @@ impl Session {
     }
 
     pub fn analyze(&mut self, sql: &str) -> Result<Analysis, Failure> {
-        self.connection.analyze(sql).map_err(|answer| Failure::of(&answer))
+        self.connection.analyze(sql).map(|(analysis, _)| analysis).map_err(|answer| Failure::of(&answer))
     }
 }
 
@@ -101,7 +142,7 @@ impl Program for Clickhouse {
             "open" => match connect(request["url"].as_str().unwrap_or_default()) {
                 Ok((server, version)) => {
                     self.next += 1;
-                    self.connections.insert(self.next, Connection { server, version: version.clone(), answers: AnswerCache::until_cleared() });
+                    self.connections.insert(self.next, Connection::new(server, version.clone()));
                     json!({ "status": "opened", "conn": self.next, "version": version })
                 }
                 Err(failure) => failure,
@@ -109,7 +150,7 @@ impl Program for Clickhouse {
             "run" => match self.connections.get_mut(&id) {
                 None => closed(id),
                 Some(c) => match c.analyze(sql) {
-                    Ok(analysis) => json!({ "status": "analysis", "analysis": analysis }),
+                    Ok((analysis, kept)) => json!({ "status": "analysis", "analysis": analysis, "kept": kept }),
                     Err(failure) => failure,
                 },
             },
@@ -124,7 +165,7 @@ impl Program for Clickhouse {
                 },
             },
             // The schema's fingerprint ([`crate::engines::clickhouse::schema_fingerprint`]).
-            "schema" => match self.connections.get(&id) {
+            "schema" => match self.connections.get_mut(&id) {
                 None => closed(id),
                 Some(c) => match c.schema() {
                     Ok(schema) => schema.answer(),
@@ -202,5 +243,22 @@ mod tests {
         for typed in ["25.11.1.558", "25.12.9.1", "26.8.40.7", "27.1.1.1", "v-next", ""] {
             assert_eq!(too_old(typed), None, "{typed}");
         }
+    }
+
+    #[test]
+    fn an_analysis_is_kept_where_each_server_that_answered_it_had_shown_the_schema() {
+        let server = |name: &str| Some(name.to_string());
+        let shown: HashMap<Option<String>, String> = [(server("replica1"), "new".to_string()), (server("replica2"), "old".to_string())].into();
+        let by = |names: &[&str]| names.iter().map(|n| server(n)).collect::<BTreeSet<_>>();
+        assert!(kept(Some("new"), &shown, &by(&["replica1"])));
+        // A replica that had shown the schema before the migration, or never answered the fingerprint.
+        assert!(!kept(Some("new"), &shown, &by(&["replica1", "replica2"])));
+        assert!(!kept(Some("new"), &shown, &by(&["replica3"])));
+        // No fingerprint to label it with.
+        assert!(!kept(None, &shown, &by(&["replica1"])));
+        // A server whose answers carry no name is one server, as it was before names were read.
+        let unnamed: HashMap<Option<String>, String> = [(None, "new".to_string())].into();
+        assert!(kept(Some("new"), &unnamed, &[None].into()));
+        assert!(!kept(Some("new"), &unnamed, &[None, server("replica1")].into()));
     }
 }

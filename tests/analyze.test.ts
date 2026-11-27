@@ -318,6 +318,19 @@ test("on SQLite, a schema changed and changed back while a statement is analyzed
   assert.ok(!(JSON.parse(readFileSync(outcome.entry, "utf8")) as { analysis: { columns: { nullable?: boolean }[] } }).analysis.columns[0]!.nullable);
 });
 
+test("an analysis whose connection says its answers came from replicas that had not shown the schema is given but not kept", async () => {
+  const { root, env } = project();
+  let replicas = false;
+  const outcome = await withConnections("sqlite", (c) => ({ ...c, kept: () => replicas && c.kept() }), () => analyze(root, env, SELECT));
+  assert.ok(outcome.ok && outcome.source === "database");
+  assert.deepEqual(outcome.analysis.columns.map((c) => c.name), ["id", "name"]);
+  assert.ok(!existsSync(outcome.entry), "an entry was written");
+  // Once the answers came from servers that had shown it, the analysis is kept.
+  replicas = true;
+  const kept = await withConnections("sqlite", (c) => ({ ...c, kept: () => replicas && c.kept() }), () => analyze(root, env, SELECT));
+  assert.ok(kept.ok && kept.source === "database" && existsSync(kept.entry));
+});
+
 test("the engine's answers from while the fingerprint query failed are dropped once it runs again", async () => {
   const root = mkdtempSync(join(tmpdir(), "reylo-unverified-"));
   writeFileSync(join(root, "package.json"), "{}");

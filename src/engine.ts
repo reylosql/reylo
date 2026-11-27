@@ -108,7 +108,8 @@ type Replies = {
   analyze: Extract<Response, { status: "need" | "analysis" }>;
   config: Extract<Response, { status: "config" | "configError" }>;
   open: { status: "opened"; conn: number; version: string };
-  run: { status: "analysis"; analysis: Analysis };
+  /** `kept` is ClickHouse's alone: false where the analysis may not be kept (`Connection.kept`). */
+  run: { status: "analysis"; analysis: Analysis; kept?: boolean };
   query: { status: "rows"; rows: unknown[][] };
   schema: { status: "schema" } & Schema;
   describe: { status: "described"; params: number[]; columns: Described["columns"] };
@@ -198,6 +199,13 @@ export interface Connection {
   /** The server's version, as the engine read it when the connection opened: `18.1`, `8.4.11`, and on SQLite the engine's own SQLite's, `3.50.2`. */
   readonly version: string;
   analyze(sql: string): Promise<Analysis>;
+  /**
+   * Whether `reylo/.cache/` may keep the analysis this connection gave last under the fingerprint
+   * `schema()` read before it: not where its answers came from replicas that had not shown that
+   * schema, as a load balancer in front of ClickHouse's replicas sends a connection's requests to
+   * several (engine/native/src/clickhouse.rs, `kept`).
+   */
+  kept(): boolean;
   /** A query, its parameters bound and its rows read as the engine's catalog queries are. */
   query(sql: string, params: unknown[]): Promise<unknown[][]>;
   /** The schema as `reylo/.cache/` keeps analyses by it, read by the engine's own query, as every host reads it. */
@@ -291,6 +299,7 @@ export class Engine extends EngineCore {
     const ask = async <O extends Op>(request: { op: O } & Record<string, unknown>) => answerTo(request.op, await channel.ask(request));
     let conn: number;
     let version: string;
+    let kept = true;
     try {
       ({ conn, version } = await ask({ op: "open", url: target.url, ...(target.bridge && { bridge: target.bridge }) }));
     } catch (e) {
@@ -302,7 +311,12 @@ export class Engine extends EngineCore {
     }
     return {
       version,
-      analyze: async (sql) => (await ask({ op: "run", conn, sql })).analysis,
+      analyze: async (sql) => {
+        const answer = await ask({ op: "run", conn, sql });
+        kept = answer.kept !== false;
+        return answer.analysis;
+      },
+      kept: () => kept,
       query: async (sql, params) => (await ask({ op: "query", conn, sql, params })).rows,
       schema: async () => {
         const { fingerprint, stamp } = await ask({ op: "schema", conn });

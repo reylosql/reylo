@@ -46,7 +46,7 @@ export type Outcome =
  * the schema changes. On SQLite, `drivers` are the app's own, which each statement is prepared on
  * too (src/sqlite-drivers.ts).
  */
-type Io = { analyze(sql: string): Promise<Analysis>; query(sql: string, params: unknown[]): Promise<unknown[][]>; schema(): Promise<Schema>; forget(): Promise<void>; close(): Promise<void>; drivers?: SqliteDriver[] };
+type Io = { analyze(sql: string): Promise<Analysis>; kept(): boolean; query(sql: string, params: unknown[]): Promise<unknown[][]>; schema(): Promise<Schema>; forget(): Promise<void>; close(): Promise<void>; drivers?: SqliteDriver[] };
 
 const ENTRY_VERSION = 1;
 // How long a schema fingerprint is trusted, as long as a statement answer: a migration shows up
@@ -343,12 +343,15 @@ export class Session {
     const shared = options.force || options.store === false ? undefined : this.#sameSchema(sql, schema.value);
     if (shared) return { ok: true, analysis: shared.entry.analysis, source: "cache", entry: shared.file };
     let analysis: Analysis;
+    let replicas = true;
     let label: string = schema.value;
     let stamp = this.#schema?.stamp;
     for (let tries = 1; ; tries++) {
       const io = this.#connection();
       try {
-        analysis = await (await io).analyze(sql);
+        const on = await io;
+        analysis = await on.analyze(sql);
+        replicas = on.kept();
       } catch (e) {
         // A dead connection is reopened by the next call; a server error is reported.
         if (e instanceof Unreachable) {
@@ -388,6 +391,9 @@ export class Session {
     // statement's, which the engine's host fails the analysis with and which would stand for the
     // statement until the schema moved, is not kept, nor one a privilege decides, since a grant
     // moves no schema's fingerprint (src/server-errors.ts).
+    // Nor is one whose answers came from replicas that had not shown the schema it would be kept
+    // by, though nothing shows it wrong: the next analysis asks again.
+    if (!replicas) return { ok: true, analysis, source: "database", entry: file };
     const kept = keptAnalysis(this.project.dialect, analysis);
     if (options.store !== false && kept) {
       writeEntry(this.project.cache, file, { version: ENTRY_VERSION, dialect: this.project.dialect, schema: label, analysis, at: Date.now() });
@@ -551,6 +557,8 @@ export class Session {
       // command runs once and one connection replaces the old; a call that fails on a connection
       // already replaced is asked again on the one that replaced it.
       let current: Promise<Io> = Promise.resolve(first);
+      // The connection that gave the last analysis, which says whether it may be kept.
+      let analyzed: Io = first;
       const again = async <T>(call: (on: Io) => Promise<T>): Promise<T> => {
         const used = current;
         const on = await used;
@@ -571,7 +579,8 @@ export class Session {
         }
       };
       return {
-        analyze: (sql) => again((on) => on.analyze(sql)),
+        analyze: (sql) => again((on) => ((analyzed = on), on.analyze(sql))),
+        kept: () => analyzed.kept(),
         query: (text, params) => again((on) => on.query(text, params)),
         schema: () => again((on) => on.schema()),
         forget: () => again((on) => on.forget()),
@@ -628,6 +637,7 @@ export class Session {
     }
     return {
       analyze: (sql) => c.analyze(sql),
+      kept: () => c.kept(),
       query: (text, params) => c.query(text, params),
       schema: () => c.schema(),
       forget: () => c.forget(),
