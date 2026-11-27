@@ -742,6 +742,12 @@ fn render_type(t: &Value, in_json: bool, dialect: &str, codecs: &Value) -> Strin
                 .collect::<Vec<_>>()
                 .join(" | ");
         }
+        // A ClickHouse Variant's value is its member's own, which no codec reaches, so its type is
+        // the union of its members' (src/render.ts); a member of no known type leaves any value.
+        "union" if !in_json && dialect == "clickhouse" => {
+            let members = dedupe(items(&t["members"]).iter().map(|m| render_type(m, false, dialect, NO_CODECS)).collect());
+            return if members.iter().any(|m| m == "unknown") { "unknown".into() } else { members.join(" | ") };
+        }
         k @ ("range" | "multirange") if !in_json && dialect == "postgres" => {
             let range = range_of(&render_type(&t["subtype"], false, dialect, codecs), false);
             return if k == "range" { range } else { format!("({range})[]") };

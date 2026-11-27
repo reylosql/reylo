@@ -112,6 +112,14 @@ export function renderType(t: EngineType, inJson = false, dialect: Dialect = "po
       // engine does not read, any JSON.
       if (inJson) break;
       return t.alternatives.length ? t.alternatives.map((a) => `{ tag: ${JSON.stringify(a.tag)}; value: ${a.nullable ? orNull(renderType(a.type, false, dialect, codecs)) : renderType(a.type, false, dialect, codecs)} }`).join(" | ") : "never";
+    // A ClickHouse Variant's value is its member's own, read as a column of that type is
+    // (src/decode-clickhouse.ts) and reached by no codec (src/codecs.ts, `planOf`), so its type is
+    // the union of its members'; a member of no known type leaves any value.
+    case "union": {
+      if (inJson || dialect !== "clickhouse") break;
+      const members = [...new Set(t.members.map((m) => renderType(m, false, dialect)))];
+      return members.includes("unknown") ? "unknown" : members.join(" | ");
+    }
     // A Postgres range is an object of its bounds, a multirange an array of ranges.
     case "range":
     case "multirange":
