@@ -649,11 +649,11 @@ function statement(query: QueryModule, params: ParamsInput) {
     );
   }
   // The comment naming the file goes on last, after a structured parameter's lists are written. It
-  // ends the statement on Postgres and MySQL, so every mark keeps its place; on ClickHouse it opens
-  // the statement, and every mark moves by its length.
+  // ends the statement on Postgres and MySQL, so every mark keeps its place; on SQLite and ClickHouse
+  // it opens the statement, and every mark moves by its length.
   const sent = sentText(query, bound.text);
   const moved = sent.length - bound.text.length;
-  if (query.dialect === "clickhouse" && moved > 0 && bound.marks !== undefined) bound.marks = bound.marks.map(([start, end]) => [start + moved, end + moved] as const);
+  if ((query.dialect === "sqlite" || query.dialect === "clickhouse") && moved > 0 && bound.marks !== undefined) bound.marks = bound.marks.map(([start, end]) => [start + moved, end + moved] as const);
   bound.text = sent;
   return bound;
 }
@@ -720,7 +720,7 @@ export function postgresText(query: QueryModule, name: string, v: unknown): stri
   if (v instanceof Uint8Array) return asByteaHex(v) as string;
   if (typeof v === "boolean") return v ? "t" : "f";
   if (v instanceof Date) return dateText(v);
-  if (typeof v === "object") return jsonText(v, "postgres", name) ?? null;
+  if (typeof v === "object") return JSON.stringify(v);
   return String(v);
 }
 

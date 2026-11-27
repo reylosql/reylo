@@ -409,12 +409,13 @@ export function queries(d: Dialect, typed = true) {
       { columns: [["doc", "json"], ["raw", "json"]], nonFinite: [{ keys: [["nan", true], ["inf", true], ["neg", true], ["n", true], ["xs", { items: true, deep: true }]] }, null] },
     ),
     // The JSON S10k reads, passed back as a JSON parameter: Postgres's text for each number that is
-    // not finite, which stored as null would be another document.
+    // not finite, which stored as null would be another document. And -0, which a `json` value keeps
+    // as written and `jsonb` makes 0.
     nonFiniteBack: q(
-      `select :doc::jsonb = json_build_object('nan', 'NaN'::float8, 'inf', 'Infinity'::numeric, 'neg', '-Infinity'::float4, 'n', 1.5::numeric, 'xs', array['NaN'::float8, 2])::jsonb as doc`,
-      ["doc"],
+      `select :doc::jsonb = json_build_object('nan', 'NaN'::float8, 'inf', 'Infinity'::numeric, 'neg', '-Infinity'::float4, 'n', 1.5::numeric, 'xs', array['NaN'::float8, 2])::jsonb as doc, (:z::json) ->> 'z' = '-0' as zero`,
+      ["doc", "z"],
       "one",
-      { inputs: { doc: { type: T.json } }, columns: [["doc", "bool"]] },
+      { inputs: { doc: { type: T.json }, z: { type: T.json } }, columns: [["doc", "bool"], ["zero", "bool"]] },
     ),
     // SQLite: JSON a statement builds holding infinities, which SQLite writes as a number past a double's range.
     infiniteJson: q(`select json_object('r', 1e999, 'n', -1e999) as doc`, [], "one", { columns: [["doc", "json"]] }),
@@ -1133,7 +1134,7 @@ export const SCENARIOS: Scenario[] = [
       const d = ctx.job.dialect;
       if (d === "postgres") {
         const { doc } = (await call(ctx, q.nonFiniteJson, client)) as { doc: unknown };
-        typedEq(await call(ctx, q.nonFiniteBack, client, { doc }), { doc: true }, "the document passed back equal to the one built");
+        typedEq(await call(ctx, q.nonFiniteBack, client, { doc, z: { z: -0 } }), { doc: true, zero: true }, "the document passed back equal to the one built, and -0 in a json value");
       } else if (d === "sqlite") {
         const { doc } = (await call(ctx, q.infiniteJson, client)) as { doc: unknown };
         typedEq(doc, { n: -Infinity, r: Infinity }, "the document built");

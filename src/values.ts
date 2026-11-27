@@ -128,8 +128,10 @@ export function writeJson(v: unknown, dialect: Dialect, fail: (message: string) 
   let special = false;
   // The value as JSON.stringify writes it, where it holds no number that writes another, which the
   // replacer sees after each `toJSON()`.
+  // A replacer sees a boxed number before JSON.stringify unboxes it.
   const plain = JSON.stringify(v, (_key, x: unknown) => {
-    if (x instanceof RawJson || (typeof x === "number" && (!Number.isFinite(x) || Object.is(x, -0)))) special = true;
+    const n = x instanceof Number ? Number(x) : x;
+    if (x instanceof RawJson || (typeof n === "number" && (!Number.isFinite(n) || Object.is(n, -0)))) special = true;
     return x;
   });
   return special ? jsonOf("", v, at, (n, place) => jsonNumber(n, place, dialect, fail)) : plain;
@@ -150,7 +152,7 @@ function jsonNumber(n: number, at: string, dialect: Dialect, fail: (message: str
  * already (`writeJson`), which has thrown on a BigInt or a cycle.
  */
 function jsonOf(key: string, value: unknown, at: string, number: (n: number, at: string) => string): string | undefined {
-  if (value !== null && typeof value === "object") {
+  if (value !== null && (typeof value === "object" || typeof value === "function")) {
     const toJSON = (value as { toJSON?: unknown }).toJSON;
     if (typeof toJSON === "function") value = toJSON.call(value, key);
   }

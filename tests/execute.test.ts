@@ -207,6 +207,13 @@ test("sqlite: -0 for a float or a value of no declared type, and an infinity, go
     ["select (-0.0) as r, (-0.0) as u, ? as i, (-0.0) as n, 1-(-0.0) as m", [-0]],
     ["select (9e999) as r, (-9e999) as u, ? as i, ? as n, 1-(9e999) as m", [1, 2.5]],
   ]);
+  // Where the run time doesn't know a placeholder's place, sqlite3 and Turso's engine would bind
+  // the float's -0 as the INTEGER 0, so it is refused; another driver binds it as it is.
+  const unmarked: QueryModule<"sqlite"> = { dialect: "sqlite", sql: "select :r as r", params: ["r"], text: "select ? as r", order: ["r"], inputs: { r: { type: liteType("real") } } };
+  const sqlite3Like = { prepare: () => ({}), exec: () => {}, all: (_: string, v: unknown[], done: (e: null, rows: unknown[]) => void) => setImmediate(() => done(null, [{ r: v[0] }])) };
+  await assert.rejects(Promise.resolve().then(() => execute(sqlite3Like, unmarked, { r: -0 })), /^TypeError: Parameter "r" is -0, which sqlite3 binds as the INTEGER 0/);
+  assert.deepEqual(await execute(sqlite3Like, unmarked, { r: 0 }), [{ r: 0 }]);
+  assert.ok(Object.is((await execute(libsql, unmarked, { r: -0 }), seen.at(-1)![1] as unknown[])[0], -0));
   // On the drivers themselves, each value comes back as it went in.
   const read = (rows: unknown) => (rows as Record<string, number>[]).map((r) => ({ r: r.r, u: r.u, m: r.m, sign: Object.is(r.r, -0) && Object.is(r.u, -0) }));
   const sqlite3 = driver("sqlite3");
@@ -1001,13 +1008,21 @@ test("mysql: a DOUBLE or FLOAT of -0, and one of a type its value decides betwee
   seen.length = 0;
   await execute(mariadb as never, minus, { d: -0, e: 1 });
   assert.deepEqual(seen, [["select 1-(-0e0) as a, ? as b", [1]]]);
-  // Without inputs or marks, as defined by hand, or with the sql_mode its build read its strings
-  // under, every value goes as it is.
+  // Without inputs, as defined by hand, every value goes as it is. Without marks, or with the
+  // sql_mode its build read its strings under, a float's -0 has no place to be written in, and the
+  // driver would write it as 0, so it is refused.
   const { inputs: _, ...untyped } = q;
   const { marks: __, ...unmarked } = q;
   seen.length = 0;
-  for (const query of [untyped, unmarked, { ...q, sqlMode: { backslashEscapes: false, ansiQuotes: false } }]) await execute(mariadb as never, query, { d: -0, f: -0, i: -0, u: -0 });
-  assert.deepEqual(seen, Array(3).fill([text, [-0, -0, -0, -0, -0]]));
+  await execute(mariadb as never, untyped, { d: -0, f: -0, i: -0, u: -0 });
+  assert.deepEqual(seen, [[text, [-0, -0, -0, -0, -0]]]);
+  for (const query of [unmarked, { ...q, sqlMode: { backslashEscapes: false, ansiQuotes: false } }]) {
+    for (const [client, name] of [[mariadb, "mariadb"], [planetscale, "PlanetScale"]] as const) {
+      await assert.rejects(Promise.resolve().then(() => execute(client as never, query, { d: -0, f: 1, i: 0, u: 1 })), new RegExp(`^TypeError: Parameter "d" is -0, which ${name} writes into the statement as 0`));
+    }
+    await execute(mariadb as never, query, { d: 1, f: 1, i: -0, u: 1 });
+  }
+  assert.deepEqual(seen.slice(1), Array(2).fill([text, [1, 1, -0, 1, 1]]));
   seen.length = 0;
   for (const client of [mariadb, planetscale]) await execute(client as never, q, { d: 1.5, f: 0, i: 0, u: 2 });
   assert.deepEqual(seen, Array(2).fill([text, [1.5, 0, 0, 2, 1.5]]));

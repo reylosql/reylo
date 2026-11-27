@@ -1002,6 +1002,9 @@ test("a value goes into a document as JSON.stringify writes it, but for NaN, the
   assert.throws(() => writeJson({ "a/b~": Infinity }, "mysql", fail), /^TypeError: at \/a~1b~0 is Infinity, which MySQL holds no value for/);
   assert.throws(() => writeJson(NaN, "mysql", fail), /^TypeError: is NaN, which MySQL holds no value for/);
   assert.throws(() => writeJson([NaN], "mysql", fail, "[1]"), /^TypeError: at \[1\]\/0 is NaN/);
+  // A boxed number is the number it holds.
+  assert.equal(writeJson({ a: new Number(-0) }, "postgres", fail), `{"a":-0}`);
+  assert.throws(() => writeJson({ a: new Number(Infinity) }, "mysql", fail), /^TypeError: at \/a is Infinity/);
   // A value written as it is, and what JSON.stringify throws on, a BigInt.
   assert.equal(writeJson({ big: new RawJson("12345678901234567890") }, "sqlite", fail), `{"big":12345678901234567890}`);
   assert.throws(() => writeJson({ z: -0, big: 1n }, "postgres", fail), /BigInt/);

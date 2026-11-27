@@ -24,7 +24,7 @@
 // and a column whose kind is `bool` (src/values.ts) is made a boolean after the driver, a value
 // other than 0 or 1 refused (`truth`).
 import { lastOfEach, namesInResult, rowOf } from "./row.ts";
-import { bigInteger, coerce, DecodeError, describe, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
+import { bigInteger, coerce, DecodeError, describe, ParameterError, truth, utf8, withFraction, type Columns, type Kind } from "./values.ts";
 import { bunRows } from "./decode.ts";
 import { readMysqlError } from "./query-error.ts";
 import { literalsAtMarks, takesFloat, type AnyClient as Client, type Bound, type Marks, type QueryModule, type Runtime } from "./execute.ts";
@@ -518,17 +518,21 @@ function asBuffer(v: unknown) {
  * as in `coalesce(:d, d)`. The literal goes in parentheses, since mariadb 2 reads `--` as a comment's
  * start with nothing after it, so `1-?` would hide every placeholder after it. Without marks, or
  * where the module carries the sql_mode its build read
- * the statement's strings under, a mark need not be a placeholder of the session's, and the number
- * goes as it is.
+ * the statement's strings under, a mark need not be a placeholder of the session's, and such a -0
+ * is refused.
  */
-function signedZeros(query: QueryModule<"mysql">, bound: Bound): { text: string; values: unknown[] } {
-  if (query.sqlMode !== undefined) return bound;
+function signedZeros(query: QueryModule<"mysql">, bound: Bound, driver: string): { text: string; values: unknown[] } {
   // A type its value decides between (`:i + :u`, a BIGINT or a DOUBLE) takes the DOUBLE -0 mysql2
   // binds, as a structured parameter's member does (src/rows.ts).
-  return literalsAtMarks(bound, (v, i) => {
-    const type = query.inputs?.[bound.names[i]!]?.type;
-    return Object.is(v, -0) && type !== undefined && takesFloat(type, "mysql") ? "(-0e0)" : undefined;
-  });
+  const zero = (v: unknown, name: string) => {
+    const type = query.inputs?.[name]?.type;
+    return Object.is(v, -0) && type !== undefined && takesFloat(type, "mysql");
+  };
+  const written = query.sqlMode === undefined ? literalsAtMarks(bound, (v, i) => (zero(v, bound.names[i]!) ? "(-0e0)" : undefined)) : bound;
+  // One left, where its place is unknown, would be written as 0.
+  const left = written.values.findIndex((v, i) => zero(v, written.names[i]!));
+  if (left >= 0) throw new ParameterError(`Parameter "${written.names[left]}" is -0, which ${driver} writes into the statement as 0, and Reylo writes it in as -0e0 only where it knows the placeholder's place, read under the default sql_mode: pass 0, or run the statement on mysql2.`);
+  return written;
 }
 
 /** A MySQL statement's rows on each MySQL driver's client, or undefined on any other client. */
@@ -539,7 +543,7 @@ async function runMysql(c: Client, query: QueryModule<"mysql">, bound: Bound): P
   // Its callback API (mariadb/callback) answers through the callback and returns a command
   // object; its promise API returns a promise and ignores the callback.
   if (typeof c.batch === "function" && typeof c.query === "function") {
-    const signed = signedZeros(query, bound);
+    const signed = signedZeros(query, bound, "mariadb");
     return await mariadb(c, signed.text, signed.values.map(asBuffer), query.columns);
   }
   // mysql2's callback API: the promise() wrapper runs on the same connection.
@@ -547,7 +551,7 @@ async function runMysql(c: Client, query: QueryModule<"mysql">, bound: Bound): P
   if (typeof m.execute === "function") {
     // mysql2 has query() beside execute(); PlanetScale's Connection, Client and transaction do not.
     if (typeof m.query === "function") return await mysql2(m, text, values, query.columns, marks, query.sqlMode);
-    const signed = signedZeros(query, bound);
+    const signed = signedZeros(query, bound, "PlanetScale");
     return await planetscale(m, signed.text, signed.values, query.columns);
   }
   return undefined;
