@@ -458,32 +458,7 @@ pub const ARBITERS_QUERY: &str = concat!(
 /// expanded, and replayed through `host`. The direct entry for a host that links this crate
 /// (a server-side extension, which calls it from inside the server, so it never probes for the extension).
 pub fn analyze(sql: &str, host: &Host) -> Lazy<Analysis> {
-    host.on_engine_stack(|host| analyze_here(sql, host).map(|analysis| held_to_refusals(sql, analysis, host)))
-}
-
-/// The analysis, or, where a catalog query it read was refused for a privilege the session's role
-/// lacks (42501, which the host answers with rather than failing) and nothing else is wrong with the
-/// statement, that refusal at the statement: some of the analysis's readers (a structured insert's
-/// check of its columns) would go on without the rows they never got. The statement's own describe
-/// is refused too where it names what the role may not use, as a table in a schema without USAGE,
-/// and then its error, at its place, is the analysis's already. What the errors and the
-/// capabilities read after the analysis (the tables of a view in such a schema, say) leaves them
-/// unknown instead, which they say. A privilege's error is never kept in `reylo/.cache/`, so a
-/// grant makes the type check ask again.
-fn held_to_refusals(sql: &str, analysis: Analysis, host: &Host) -> Analysis {
-    let refusal = host.refusals().into_iter().find(|e| e.code.as_deref() == Some("42501"));
-    match refusal {
-        Some(error) if analysis.diagnostics.is_empty() => {
-            let lexed = match lexed(sql, Dialect::Postgres) {
-                Ok(lexed) => lexed,
-                Err(bare) => return bare,
-            };
-            let length = sql.trim_end().len().max(1);
-            let message = format!("The type check's role may not read all of what this statement reaches in the catalog, so it cannot type it: {} (42501). Run the type check as a role that may.", error.message);
-            bare(sql, &lexed, Dialect::Postgres, vec![Diagnostic { server_code: error.code.clone(), ..diag(message, 0, length, 6) }])
-        }
-        _ => analysis,
-    }
+    host.on_engine_stack(|host| analyze_here(sql, host))
 }
 
 fn analyze_here(sql: &str, host: &Host) -> Lazy<Analysis> {

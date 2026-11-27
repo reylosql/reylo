@@ -198,20 +198,18 @@ async fn describe(client: &Client, sql: &str) -> Result<Result<Describe, DbError
 }
 
 /// The rows of a catalog query over `client`, its statement taken from `prepared` where there is one.
-/// A privilege the session's role lacks (42501: USAGE on a schema a name is looked up in, EXECUTE on
-/// a function, SELECT on a table) is an answer, which the engine holds the analysis to: the
-/// statement's own describe is refused too where it names what the role may not use, and says so at
-/// its place. Any other error fails the analysis.
+/// A privilege the session's role lacks (42501) is an answer where it is of a schema a name is looked
+/// up in ([`refusal`]), and fails the analysis where it is of the catalog itself. Any other error
+/// fails the analysis.
 async fn query(client: &Client, prepared: Option<&Prepared>, sql: &str, params: &[Value]) -> Result<Result<Vec<Vec<Value>>, DbError>, HostError> {
     let failed = |what: &str, e: ::tokio_postgres::Error| HostError(if ended(&e) { format!("{ENDED}: {}", pg_message(&e)) } else if let Some(shared) = pooled(&e) { shared } else { format!("catalog query {what}: {}\n    {sql}", pg_message(&e)) });
-    let refused = |e: &::tokio_postgres::Error| e.as_db_error().filter(|d| *d.code() == ::tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE).map(|d| DbError { message: d.message().to_string(), code: Some(d.code().code().to_string()), position: None });
     let stmt = match prepared {
         Some(prepared) => prepared.statement(client, sql).await,
         None => client.prepare(sql).await,
     };
     let stmt = match stmt {
         Ok(stmt) => stmt,
-        Err(e) => return refused(&e).map(Err).ok_or_else(|| failed("failed to prepare", e)),
+        Err(e) => return refusal(client, &e).await.unwrap_or_else(|| Err(failed("failed to prepare", e))).map(Err),
     };
     let mut values: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
     for (ty, value) in stmt.params().iter().zip(params) {
@@ -220,10 +218,44 @@ async fn query(client: &Client, prepared: Option<&Prepared>, sql: &str, params: 
     let refs: Vec<&(dyn ToSql + Sync)> = values.iter().map(|v| v.as_ref() as &(dyn ToSql + Sync)).collect();
     let rows = match client.query(&stmt, &refs).await {
         Ok(rows) => rows,
-        Err(e) => return refused(&e).map(Err).ok_or_else(|| failed("failed", e)),
+        Err(e) => return refusal(client, &e).await.unwrap_or_else(|| Err(failed("failed", e))).map(Err),
     };
     Ok(Ok(rows.iter().map(|row| (0..row.len()).map(|i| cell(row, i)).collect()).collect()))
 }
+
+/// What a catalog query refused for a privilege the session's role lacks (42501) is: `None` for any
+/// other error. The server raises 42501 alike for USAGE on a schema a name is looked up in and for
+/// EXECUTE or SELECT on the catalog's own functions and tables, with words in the server's language
+/// alone to tell them apart, so the server is asked whether the role may use each object the
+/// engine's queries read (`reylo_engine_postgres::catalog_objects`). Where it may, the refusal was
+/// of a schema: the catalog as the role sees it, an answer, which the schema's fingerprint holds
+/// too. A statement that names such a schema is refused by its own describe, which says so at its
+/// place, and one that reaches it only through a view is analyzed without what the role may not
+/// read, which each reader of a refused query takes as unknown. Where it may not, the analysis
+/// cannot be made, and says what the role lacks.
+async fn refusal(client: &Client, e: &::tokio_postgres::Error) -> Option<Result<DbError, HostError>> {
+    let d = e.as_db_error().filter(|d| *d.code() == ::tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)?;
+    let answer = DbError { message: d.message().to_string(), code: Some(d.code().code().to_string()), position: None };
+    let functions: Vec<&str> = reylo_engine_postgres::catalog_objects::FUNCTIONS.to_vec();
+    let tables: Vec<&str> = reylo_engine_postgres::catalog_objects::TABLES.to_vec();
+    Some(match client.query(CATALOG_PRIVILEGES_QUERY, &[&functions, &tables]).await {
+        Ok(rows) if rows.is_empty() => Ok(answer),
+        Ok(rows) => {
+            let lacked: Vec<String> = rows.iter().map(|row| row.get::<_, String>(0)).collect();
+            Err(HostError(format!("The type check's role may not use {} of the catalog, which the analysis reads: grant it, or run the type check as a role that may", lacked.join(", "))))
+        }
+        Err(_) => Err(HostError(format!("The type check's role may not read the catalog, which the analysis reads: {}", pg_message(e)))),
+    })
+}
+
+/// The objects of the catalog among `$1` (functions) and `$2` (tables), all `pg_catalog`'s, that the
+/// session's role may not use, as `function pg_catalog.to_regclass(text)` and `table pg_proc`.
+const CATALOG_PRIVILEGES_QUERY: &str = "SELECT 'function '::pg_catalog.text OPERATOR(pg_catalog.||) p.oid::pg_catalog.regprocedure::pg_catalog.text FROM pg_catalog.pg_proc p \
+    WHERE p.pronamespace OPERATOR(pg_catalog.=) 'pg_catalog'::pg_catalog.regnamespace::pg_catalog.oid AND p.proname OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.name[]) \
+      AND NOT pg_catalog.has_function_privilege(p.oid, 'EXECUTE'::pg_catalog.text) \
+    UNION ALL SELECT 'table '::pg_catalog.text OPERATOR(pg_catalog.||) c.relname::pg_catalog.text FROM pg_catalog.pg_class c \
+    WHERE c.relnamespace OPERATOR(pg_catalog.=) 'pg_catalog'::pg_catalog.regnamespace::pg_catalog.oid AND c.relname OPERATOR(pg_catalog.=) ANY ($2::pg_catalog.name[]) \
+      AND NOT pg_catalog.has_table_privilege(c.oid, 'SELECT'::pg_catalog.text)";
 
 /// One parameter of a catalog query, by the type the server inferred from the cast in its text.
 fn bind(ty: &Type, value: &Value) -> Option<Box<dyn ToSql + Sync + Send>> {
