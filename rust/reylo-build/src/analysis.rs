@@ -631,10 +631,24 @@ fn moved(schema: &str, now: Result<Result<String, String>, String>, tries: u32) 
     }
 }
 
-/// The analysis as the build reads it, and written to `file` under `schema` where there is one.
+/// The analysis as the build reads it, and written to `file` under `schema` where there is one,
+/// unless it carries an error no analysis is kept with: the server's own rather than the
+/// statement's, or a privilege's, which a grant does not move the schema's fingerprint for
+/// (`reylo_engine::server_errors::kept`).
 fn remember(cache: &Path, file: &Path, dialect: Dialect, schema: Option<&str>, analysis: &reylo_engine::Analysis) -> Result<Value, String> {
+    let engine = match dialect {
+        Dialect::Postgres => reylo_engine::Dialect::Postgres,
+        Dialect::Mysql => reylo_engine::Dialect::Mysql,
+        Dialect::Sqlite => reylo_engine::Dialect::Sqlite,
+    };
+    let kept = analysis.diagnostics.iter().all(|d| d.server_code.as_deref().is_none_or(|code| reylo_engine::server_errors::kept(engine, code)));
     let analysis = serde_json::to_value(analysis).map_err(|e| e.to_string())?;
-    if let Some(schema) = schema {
+    // An entry of an older schema is no answer where the database now refuses the statement, so a
+    // build with the database out of reach does not build from it.
+    if schema.is_some() && !kept {
+        let _ = fs::remove_file(file);
+    }
+    if let Some(schema) = schema.filter(|_| kept) {
         let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
         write_entry(cache, file, &json!({ "version": ENTRY_VERSION, "dialect": dialect.name(), "schema": schema, "analysis": analysis, "at": at }));
     }
