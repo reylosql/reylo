@@ -1215,6 +1215,30 @@ fn alter_table(from: &Body, to: &Body, pairs: &[(String, String)], made: &BTreeS
     // foreign key would make only after.
     let counts: Vec<&String> = to.columns.iter().filter(|c| c.rest.split_whitespace().any(|w| w == "auto_increment") && from.column(&c.name).is_none_or(|was| !was.rest.split_whitespace().any(|w| w == "auto_increment"))).map(|c| &c.name).collect();
     let keys_a_count = |def: &str| counts.iter().any(|c| reads(def, c));
+    // MySQL gives each NULL in a column made AUTO_INCREMENT the next value of its sequence, even in
+    // strict mode, which refuses a NULL in a column made NOT NULL: so a nullable column made
+    // AUTO_INCREMENT is made NOT NULL by a statement before, which fails on a NULL rather than
+    // numbering it (a row whose key had no parent would take one).
+    let not_null = |c: &Column| c.rest.split_whitespace().collect::<Vec<_>>().windows(2).any(|w| w == ["not", "null"]);
+    for c in to.columns.iter().filter(|c| counts.contains(&&c.name)) {
+        if kept(c).is_some_and(|was| !not_null(was)) {
+            let words: Vec<&str> = c.rest.split_whitespace().collect();
+            let mut rest = vec!["not", "null"];
+            let mut k = 0;
+            while k < words.len() {
+                match (words[k], words.get(k + 1)) {
+                    ("not", Some(&"null")) => k += 2,
+                    ("null" | "auto_increment", _) => k += 1,
+                    (w, _) => {
+                        rest.push(w);
+                        k += 1;
+                    }
+                }
+            }
+            let held = Column { rest: rest.join(" "), ..c.clone() };
+            first.push(format!("modify column {}", held.written(collation)));
+        }
+    }
     for (name, _, def) in to.indexes.iter().filter(|(n, _, d)| swaps || !made.contains(n) || keys_a_count(d)) {
         let was = from.indexes.iter().find(|(n, _, _)| n == name);
         if was.is_some_and(|(_, _, d)| seen_only(&index_now(d), def) && !indexes_on(d)) {
