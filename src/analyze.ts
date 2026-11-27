@@ -46,7 +46,7 @@ export type Outcome =
  * the schema changes. On SQLite, `drivers` are the app's own, which each statement is prepared on
  * too (src/sqlite-drivers.ts).
  */
-type Io = { analyze(sql: string, label?: string): Promise<{ analysis: Analysis; kept: boolean }>; query(sql: string, params: unknown[]): Promise<unknown[][]>; schema(): Promise<Schema>; forget(): Promise<void>; close(): Promise<void>; drivers?: SqliteDriver[] };
+type Io = { analyze(sql: string, label?: string): Promise<{ analysis: Analysis; kept: boolean; after?: string }>; query(sql: string, params: unknown[]): Promise<unknown[][]>; schema(): Promise<Schema>; forget(): Promise<void>; close(): Promise<void>; drivers?: SqliteDriver[] };
 
 const ENTRY_VERSION = 1;
 // How long a schema fingerprint is trusted, as long as a statement answer: a migration shows up
@@ -344,13 +344,14 @@ export class Session {
     if (shared) return { ok: true, analysis: shared.entry.analysis, source: "cache", entry: shared.file };
     let analysis: Analysis;
     let replicas = true;
+    let after: string | undefined;
     let label: string = schema.value;
     let stamp = this.#schema?.stamp;
     for (let tries = 1; ; tries++) {
       const io = this.#connection();
       try {
         // The label goes with the analysis only where it may be kept under it.
-        ({ analysis, kept: replicas } = await (await io).analyze(sql, options.store === false || label.startsWith("unverified ") ? undefined : label));
+        ({ analysis, kept: replicas, after } = await (await io).analyze(sql, options.store === false || label.startsWith("unverified ") ? undefined : label));
       } catch (e) {
         // A dead connection is reopened by the next call; a server error is reported.
         if (e instanceof Unreachable) {
@@ -375,7 +376,9 @@ export class Session {
       // answers are dropped (`schema()`) and the statement analyzed again. Where the database keeps a
       // stamp (SQLite), a stamp that moved is a schema that changed in between, even one changed
       // back to the same fingerprint, so the statement is analyzed again then too.
-      await this.recheck();
+      // On ClickHouse the engine read it after the analysis itself, from the servers that answered it.
+      if (after !== undefined) await this.#took(await io, { fingerprint: after, stamp: null }, Date.now());
+      else await this.recheck();
       const read = await this.schema();
       const now = read.value;
       const moved = this.#schema?.stamp;
@@ -426,13 +429,7 @@ export class Session {
       return this.#schema;
     }
     try {
-      const { fingerprint: value, stamp } = await io.schema();
-      // The engine's answers describe the old schema too, and outlast a spell offline: a schema
-      // whose stamp moved may have been another in between, whatever its fingerprint is now.
-      const known = JSON.stringify([value, stamp]);
-      if (this.#known !== undefined && this.#known !== known) await io.forget().catch(() => {});
-      this.#known = known;
-      this.#schema = { value, stamp, at: now };
+      await this.#took(io, await io.schema(), now);
     } catch (e) {
       if (e instanceof Unreachable) {
         this.#drop(pending);
@@ -446,7 +443,17 @@ export class Session {
         this.#known = value;
       }
     }
-    return this.#schema;
+    return this.#schema!;
+  }
+
+  /** The fingerprint read at `at`, as the session's own. */
+  async #took(io: Io, { fingerprint: value, stamp }: Schema, at: number): Promise<void> {
+    // The engine's answers describe the old schema too, and outlast a spell offline: a schema
+    // whose stamp moved may have been another in between, whatever its fingerprint is now.
+    const known = JSON.stringify([value, stamp]);
+    if (this.#known !== undefined && this.#known !== known) await io.forget().catch(() => {});
+    this.#known = known;
+    this.#schema = { value, stamp, at };
   }
 
   /**

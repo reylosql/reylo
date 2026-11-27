@@ -332,6 +332,25 @@ test("an analysis whose connection says its answers came from replicas that had 
   assert.ok(kept.ok && kept.source === "database" && existsSync(kept.entry));
 });
 
+test("the fingerprint the engine read after an analysis stands for the session's own read, and one that moved has the statement analyzed again under it", async () => {
+  const { root, env } = project();
+  const labels: (string | undefined)[] = [];
+  // The engine reads the fingerprint after the analysis, as ClickHouse's does: here, one that moved.
+  const change = (c: Connection): Connection => ({
+    ...c,
+    analyzeFor: async (sql, label) => {
+      labels.push(label);
+      return { ...(await c.analyzeFor(sql, label)), after: "another schema" };
+    },
+  });
+  const outcome = await withConnections("sqlite", change, () => analyze(root, env, SELECT));
+  assert.ok(outcome.ok && outcome.source === "database");
+  assert.equal(labels.length, 2);
+  assert.notEqual(labels[0], "another schema");
+  assert.equal(labels[1], "another schema");
+  assert.equal((JSON.parse(readFileSync(outcome.entry, "utf8")) as { schema: string }).schema, "another schema");
+});
+
 test("the engine's answers from while the fingerprint query failed are dropped once it runs again", async () => {
   const root = mkdtempSync(join(tmpdir(), "reylo-unverified-"));
   writeFileSync(join(root, "package.json"), "{}");
