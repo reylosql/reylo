@@ -1875,7 +1875,12 @@ async fn mysql(db: &mut Db) -> Result<Vec<String>, Error> {
     for r in db.rows("select table_name as n, view_definition as def, check_option as opt, security_type as sec from information_schema.views where table_schema = database()").await? {
         let text = db.rows(&format!("show create view `{}`", r.text("n").replace('`', "``"))).await?.first().map(|v| v.text("Create View").to_string()).unwrap_or_default();
         let algorithm = ALGORITHM.captures(&text).map(|c| c[1].to_string()).unwrap_or_default();
-        lines.push(format!("view {} as {} check={} security={} algorithm={algorithm}", r.text("n"), strip(r.text("def")), r.text("opt"), r.text("sec")));
+        // The body as the view's own statement writes it, which MySQL writes alike however the
+        // view was written: `view_definition` keeps a comma join as `from a join b`, where the
+        // same view made from its statement reads `from (a join b)`.
+        let head = format!("VIEW `{}`", r.text("n").replace('`', "``"));
+        let body = text.find(&head).map(|at| &text[at + head.len()..]).and_then(|rest| rest.find(" AS ").map(|k| &rest[k + 4..])).map(|body| ["CASCADED", "LOCAL"].iter().fold(body, |b, c| b.strip_suffix(&format!(" WITH {c} CHECK OPTION")).unwrap_or(b))).unwrap_or(r.text("def"));
+        lines.push(format!("view {} as {} check={} security={} algorithm={algorithm}", r.text("n"), strip(body), r.text("opt"), r.text("sec")));
     }
 
     // Each routine's parameters are read in a query of their own and joined here, not in a
