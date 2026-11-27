@@ -26,3 +26,9 @@ create table checked (id int primary key, a int default 1 check (coalesce(a, 0) 
 -- too (error 1048). One that gives a value there lets NULL through, as IF's other branch and CASE's
 -- ELSE do where a test is NULL, and so does one that takes its value there from another column.
 create table labels (id int primary key, p int, gp int generated always as (if(p is null, null, 1)) stored not null, q int, gq varchar(1) generated always as (case when q > 0 then 'p' when q <= 0 then 'n' end) virtual not null, r int, gr int generated always as (nullif(1, r is null)) stored not null, s int, gs int generated always as (if(s > 0, s, 0)) virtual not null, t int, gt varchar(1) generated always as (case when t > 0 then 'p' else 'n' end) virtual not null, u int, gu int generated always as (nullif(2, u is null)) virtual not null, v int, gv int generated always as (v <=> 1) virtual not null, w int, gw int generated always as (w is null) virtual not null, y int, z int default 1, gz int generated always as (if(y is null, z, 1)) virtual not null);
+-- Two values that are both 1 still differ as strings: over a DECIMAL, COALESCE gives 1.00, and
+-- IF with a string branch writes it '1.00', which MySQL compares with '1' as text. So `x`'s CHECK
+-- and `y`'s NOT NULL generated column, true and not NULL there, let NULL through.
+create table coerced (id int primary key, x decimal(10,2), y decimal(10,2), check (if(x is null, coalesce(x, 1), 'a') <> if(x is null, 1, 'b')), gy varchar(10) generated always as (nullif(if(y is null, coalesce(y, 1), 'a'), if(y is null, 1, 'b'))) virtual not null);
+-- A strict operator over an expression NULL wherever a column is NULL is NULL there too.
+create table wrapped (id int primary key, w int, gw int generated always as (if(w is null, null, 1) + 1) virtual not null);

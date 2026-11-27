@@ -15,6 +15,7 @@ use crate::lex;
 use crate::mysql::by_table;
 use crate::mysql_keys::Cte;
 use crate::mysql_names::Reads;
+use reylo_engine_core::refusal::{self, Cmp, Probe};
 use syntax::mysql::ast::{self, Expr, FunctionArg, FunctionArgExpr, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins};
 use std::collections::{HashMap, HashSet};
 
@@ -481,7 +482,7 @@ pub(crate) fn nullable(statement: &Statement, names: &Names, host: &Host, marked
         }
     }
     let rows = rows.unwrap_or_default();
-    let generated = refused_by(&rows);
+    let generated = refused_by(&rows, &checked);
     // Per table as the server names it: each column in lower case, whether it may hold NULL, and
     // whether it is INVISIBLE.
     let mut columns: HashMap<String, Vec<(String, bool, bool)>> = HashMap::new();
@@ -520,176 +521,112 @@ pub(crate) fn nullable(statement: &Statement, names: &Names, host: &Host, marked
     Some(out)
 }
 
-/// Per table, the columns (in lower case) a NULL in which a NOT NULL generated column refuses
-/// (error 1048, naming the generated column), from [`COLUMNS_QUERY`]'s rows: those its expression
-/// is NULL for wherever they are NULL ([`with_null`]), through the generated columns it reads in
-/// turn. A column an expression gives a value for, as `coalesce` does, may be NULL, and so may any
+/// Per table, the columns (in lower case) a NULL in which a generated column refusing NULL, by its
+/// NOT NULL (error 1048, naming the generated column) or one of the table's CHECKs (`checked`),
+/// refuses, from [`COLUMNS_QUERY`]'s rows: those its expression is NULL for wherever they are NULL
+/// ([`probe`]), through the generated columns it reads in turn ([`refusal::refused_by_generated`]).
+/// A column an expression gives a value for, as `coalesce` does, may be NULL, and so may any
 /// column of an expression the parser does not read.
-fn refused_by(rows: &[Vec<serde_json::Value>]) -> HashMap<String, HashSet<String>> {
-    // Per table, each column in lower case.
+fn refused_by(rows: &[Vec<serde_json::Value>], checked: &HashMap<String, Vec<String>>) -> HashMap<String, HashSet<String>> {
+    // Per table, each column in lower case, and each generated one with whether it refuses NULL and
+    // its expression.
     let mut columns: HashMap<&str, Vec<String>> = HashMap::new();
+    let mut generated: HashMap<&str, Vec<(String, bool, Probe)>> = HashMap::new();
     for row in rows {
-        if let (Some(table), Some(column)) = (row.first().and_then(as_str), row.get(1).and_then(as_str)) {
-            columns.entry(table).or_default().push(column.to_ascii_lowercase());
-        }
-    }
-    // Per table, the columns each generated column is NULL for, and the NOT NULL generated columns.
-    let mut null_for: HashMap<&str, HashMap<String, Vec<String>>> = HashMap::new();
-    let mut not_null: HashMap<&str, Vec<String>> = HashMap::new();
-    for row in rows {
-        let (Some(table), Some(column), Some(nullable), Some(extra), Some(expression)) = (row.first().and_then(as_str), row.get(1).and_then(as_str), row.get(2).and_then(as_str), row.get(3).and_then(as_str), row.get(4).and_then(as_str)) else { continue };
+        let (Some(table), Some(column)) = (row.first().and_then(as_str), row.get(1).and_then(as_str)) else { continue };
+        let column = column.to_ascii_lowercase();
+        columns.entry(table).or_default().push(column.clone());
+        let (Some(nullable), Some(extra), Some(expression)) = (row.get(2).and_then(as_str), row.get(3).and_then(as_str), row.get(4).and_then(as_str)) else { continue };
         let extra = extra.to_ascii_uppercase();
         if !extra.contains("GENERATED") || extra.contains("DEFAULT_GENERATED") {
             continue;
         }
         let read = crate::mysql::check_clause(expression).and_then(|text| crate::mysql::parse_expr(&text));
-        let reads = read.map(|e| columns[table].iter().filter(|c| with_null(&e, c) == Known::Null).cloned().collect()).unwrap_or_default();
-        let column = column.to_ascii_lowercase();
-        if nullable.eq_ignore_ascii_case("NO") {
-            not_null.entry(table).or_default().push(column.clone());
-        }
-        null_for.entry(table).or_default().insert(column, reads);
+        let refused = nullable.eq_ignore_ascii_case("NO") || checked.get(table).is_some_and(|clauses| clauses.iter().any(|clause| refuses_null(clause, &column)));
+        generated.entry(table).or_default().push((column, refused, read.as_ref().map_or(Probe::Unknown, probe)));
     }
-    let mut out: HashMap<String, HashSet<String>> = HashMap::new();
-    for (table, generated) in not_null {
-        let reads = &null_for[table];
-        let mut refused: HashSet<String> = HashSet::new();
-        let mut next: Vec<String> = generated.iter().flat_map(|g| reads[g].iter().cloned()).collect();
-        while let Some(column) = next.pop() {
-            if refused.insert(column.clone()) {
-                next.extend(reads.get(&column).into_iter().flatten().cloned());
-            }
-        }
-        out.insert(table.to_string(), refused);
-    }
-    out
+    generated.into_iter().map(|(table, generated)| (table.to_string(), refusal::refused_by_generated(&columns[table], &generated))).collect()
 }
 
 /// Whether a CHECK, as the server prints it (`(`email` is not null)`), refuses null in `column`
-/// (lower case): it is false wherever the column is NULL ([`with_null`]), as IS NOT NULL is, and
-/// as `coalesce` with a default that fails it, `<=>` and IS TRUE are. A CHECK that is NULL there
-/// passes, as one that only compares the column is.
+/// (lower case): it is false wherever the column is NULL ([`refusal::check_refuses`]), as IS NOT
+/// NULL is, and as `coalesce` with a default that fails it, `<=>` and IS TRUE are. A CHECK that
+/// is NULL there passes, as one that only compares the column is.
 fn refuses_null(clause: &str, column: &str) -> bool {
-    crate::mysql::parse_expr(clause).is_some_and(|e| with_null(&e, column) == Known::Int(0))
+    crate::mysql::parse_expr(clause).is_some_and(|e| refusal::check_refuses(&probe(&e), column))
 }
 
-/// What an expression is wherever one column is NULL, the other columns unknown ([`with_null`]).
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Known {
-    Null,
-    /// This integer, which as a truth value is false for 0 and true for any other.
-    Int(i64),
-    /// Any value, NULL among them.
-    Unknown,
-}
-
-/// What `e`, a CHECK or a generated column's expression as the server prints it, is wherever
-/// `column` (lower case) is NULL and every other column unknown, as MySQL evaluates it. It is NULL
-/// where an operand it is NULL for is ([`crate::mysql_nulls::nulls_with`]), and an integer where
-/// the tests of NULL settle it: IS [NOT] NULL, IS [NOT] TRUE, IS [NOT] FALSE and `<=>`, never
-/// NULL; a comparison of two integers; AND and OR (`NULL and 0` is 0, `NULL or 0` is NULL); IF,
-/// and a CASE without an operand, whose NULL or false test takes the next branch, past the last
-/// its ELSE or NULL; COALESCE, IFNULL and NULLIF. An integer is one a double holds exactly, as
-/// MySQL compares a number with a string; any other literal but NULL and a boolean is unknown.
-fn with_null(e: &Expr, column: &str) -> Known {
+/// A CHECK or a generated column's expression, as the server prints it, as [`refusal::with_null`]
+/// reads it, as MySQL evaluates it: a column by its name in lower case; NULL, a boolean, an
+/// integer a double holds exactly (as MySQL compares a number with a string) and any other
+/// literal; IS [NOT] NULL, IS [NOT] TRUE, IS [NOT] FALSE and `<=>`; comparisons; AND, OR and NOT;
+/// IF, and a CASE without an operand; COALESCE, IFNULL and NULLIF; and every operator and call
+/// NULL wherever an operand is ([`crate::mysql_nulls::strict_operands`]). Two integers compare as
+/// integers, in a comparison, `<=>` and NULLIF, only where one side is a number written out, which
+/// makes the comparison numeric: what COALESCE, IF or CASE gives takes the type its operands share,
+/// a column's among them, and MySQL compares two strings as text, `'1.00'` apart from `'1'`.
+fn probe(e: &Expr) -> Probe {
     use ast::BinaryOperator as Op;
-    use Known::{Int, Null, Unknown};
-    let known = |e: &Expr| with_null(e, column);
-    let truth = |b: bool| Int(b as i64);
-    // The value of several branches one of which is taken: theirs where they agree.
-    let one = |values: &[Known]| if values.windows(2).all(|w| w[0] == w[1]) { values[0] } else { Unknown };
-    let strict = || if crate::mysql_nulls::nulls_with(e).iter().any(|parts| parts.last().is_some_and(|c| c == column)) { Null } else { Unknown };
-    match e {
-        Expr::Nested(inner) => known(inner),
-        Expr::Value(v) => match &v.value {
-            ast::Value::Null => Null,
-            ast::Value::Boolean(b) => truth(*b),
-            ast::Value::Number(n, _) => n.parse().ok().filter(|n: &i64| n.unsigned_abs() <= 1 << 53).map_or(Unknown, Int),
-            _ => Unknown,
-        },
-        Expr::IsNull(x) | Expr::IsNotNull(x) => match known(x) {
-            Unknown => Unknown,
-            k => truth((k == Null) == matches!(e, Expr::IsNull(_))),
-        },
-        Expr::IsTrue(x) | Expr::IsNotTrue(x) => match known(x) {
-            Unknown => Unknown,
-            k => truth(matches!(k, Int(n) if n != 0) == matches!(e, Expr::IsTrue(_))),
-        },
-        Expr::IsFalse(x) | Expr::IsNotFalse(x) => match known(x) {
-            Unknown => Unknown,
-            k => truth((k == Int(0)) == matches!(e, Expr::IsFalse(_))),
-        },
-        Expr::BinaryOp { left, op: Op::Spaceship, right } => match (known(left), known(right)) {
-            (Unknown, _) | (_, Unknown) => Unknown,
-            (l, r) => truth(l == r),
-        },
-        Expr::BinaryOp { left, op: op @ (Op::Eq | Op::NotEq | Op::Lt | Op::Gt | Op::LtEq | Op::GtEq), right } => match (known(left), known(right)) {
-            (Null, _) | (_, Null) => Null,
-            // MySQL orders two strings as text, and what COALESCE or IFNULL gives over a column
-            // takes the column's type: an ordering is read only against a number written out,
-            // which makes it numeric.
-            (Int(l), Int(r)) if matches!(op, Op::Eq | Op::NotEq) || [left, right].iter().any(|side| matches!(side.as_ref(), Expr::Value(v) if matches!(v.value, ast::Value::Number(..)))) => truth(match op {
-                Op::Eq => l == r,
-                Op::NotEq => l != r,
-                Op::Lt => l < r,
-                Op::Gt => l > r,
-                Op::LtEq => l <= r,
-                _ => l >= r,
-            }),
-            _ => Unknown,
-        },
-        Expr::BinaryOp { left, op: Op::And, right } => match (known(left), known(right)) {
-            (Int(0), _) | (_, Int(0)) => Int(0),
-            (Unknown, _) | (_, Unknown) => Unknown,
-            (Null, _) | (_, Null) => Null,
-            _ => Int(1),
-        },
-        Expr::BinaryOp { left, op: Op::Or, right } => match (known(left), known(right)) {
-            (l, r) if matches!(l, Int(n) if n != 0) || matches!(r, Int(n) if n != 0) => Int(1),
-            (Unknown, _) | (_, Unknown) => Unknown,
-            (Null, _) | (_, Null) => Null,
-            _ => Int(0),
-        },
-        Expr::Case { operand: None, conditions, else_result, .. } => {
-            let mut results = Vec::new();
-            for when in conditions {
-                match known(&when.condition) {
-                    Int(0) | Null => {}
-                    test => {
-                        results.push(known(&when.result));
-                        if test != Unknown {
-                            return one(&results);
-                        }
-                    }
-                }
-            }
-            results.push(else_result.as_deref().map_or(Null, known));
-            one(&results)
+    let boxed = |e: &Expr| Box::new(probe(e));
+    fn number(e: &Expr) -> bool {
+        match e {
+            Expr::Nested(inner) => number(inner),
+            Expr::Value(v) => matches!(v.value, ast::Value::Number(..)),
+            _ => false,
         }
+    }
+    match e {
+        Expr::Nested(inner) => probe(inner),
+        Expr::Value(v) => match &v.value {
+            ast::Value::Null => Probe::Null,
+            ast::Value::Boolean(b) => Probe::Int(*b as i64),
+            ast::Value::Number(n, _) => n.parse().ok().filter(|n: &i64| n.unsigned_abs() <= 1 << 53).map_or(Probe::Value, Probe::Int),
+            _ => Probe::Value,
+        },
+        Expr::Identifier(i) => Probe::Column(i.value.to_ascii_lowercase()),
+        Expr::CompoundIdentifier(parts) => parts.last().map_or(Probe::Unknown, |i| Probe::Column(i.value.to_ascii_lowercase())),
+        Expr::IsNull(x) => Probe::IsNull { arg: boxed(x), not: false },
+        Expr::IsNotNull(x) => Probe::IsNull { arg: boxed(x), not: true },
+        Expr::IsTrue(x) => Probe::IsTrue { arg: boxed(x), not: false },
+        Expr::IsNotTrue(x) => Probe::IsTrue { arg: boxed(x), not: true },
+        Expr::IsFalse(x) => Probe::IsFalse { arg: boxed(x), not: false },
+        Expr::IsNotFalse(x) => Probe::IsFalse { arg: boxed(x), not: true },
+        Expr::BinaryOp { left, op: Op::Spaceship, right } => Probe::Same { left: boxed(left), right: boxed(right), not: false, exact: number(left) || number(right) },
+        Expr::BinaryOp { left, op: op @ (Op::Eq | Op::NotEq | Op::Lt | Op::Gt | Op::LtEq | Op::GtEq), right } => {
+            let op = match op {
+                Op::Eq => Cmp::Eq,
+                Op::NotEq => Cmp::NotEq,
+                Op::Lt => Cmp::Lt,
+                Op::Gt => Cmp::Gt,
+                Op::LtEq => Cmp::LtEq,
+                _ => Cmp::GtEq,
+            };
+            Probe::Compare { op, left: boxed(left), right: boxed(right), exact: number(left) || number(right) }
+        }
+        Expr::BinaryOp { left, op: Op::And, right } => Probe::And(boxed(left), boxed(right)),
+        Expr::BinaryOp { left, op: Op::Or, right } => Probe::Or(boxed(left), boxed(right)),
+        Expr::UnaryOp { op: ast::UnaryOperator::Not, expr } => Probe::Not(boxed(expr)),
+        Expr::Case { operand: None, conditions, else_result, .. } => Probe::Case { arms: conditions.iter().map(|w| (probe(&w.condition), probe(&w.result))).collect(), otherwise: else_result.as_deref().map(boxed) },
         Expr::Function(f) if f.over.is_none() && f.filter.is_none() && f.within_group.is_empty() => {
             let args: Option<Vec<&Expr>> = match &f.args {
                 ast::FunctionArguments::List(list) if list.duplicate_treatment.is_none() && list.clauses.is_empty() => list.args.iter().map(arg_expr).collect(),
                 _ => None,
             };
             match (crate::mysql::builtin(f).as_str(), args.as_deref()) {
-                ("if", Some([test, then, otherwise])) => match known(test) {
-                    Int(0) | Null => known(otherwise),
-                    Int(_) => known(then),
-                    Unknown => one(&[known(then), known(otherwise)]),
-                },
-                ("coalesce" | "ifnull", Some(args)) => args.iter().map(|a| known(a)).find(|k| *k != Null).unwrap_or(Null),
-                ("nullif", Some([value, other])) => match (known(value), known(other)) {
-                    (Null, _) => Null,
-                    (value, Null) => value,
-                    (Int(l), Int(r)) if l == r => Null,
-                    (Int(l), Int(_)) => Int(l),
-                    _ => Unknown,
-                },
-                _ => strict(),
+                ("if", Some([test, then, otherwise])) => Probe::Case { arms: vec![(probe(test), probe(then))], otherwise: Some(boxed(otherwise)) },
+                ("coalesce" | "ifnull", Some(args)) if !args.is_empty() => Probe::Coalesce(args.iter().map(|a| probe(a)).collect()),
+                ("nullif", Some([value, other])) => Probe::NullIf { value: boxed(value), other: boxed(other), exact: number(value) || number(other) },
+                _ => strict(e),
             }
         }
-        _ => strict(),
+        _ => strict(e),
     }
+}
+
+/// An operator or a call NULL wherever one of its strict operands is, else unknown.
+fn strict(e: &Expr) -> Probe {
+    let operands = crate::mysql_nulls::strict_operands(e);
+    if operands.is_empty() { Probe::Unknown } else { Probe::Strict(operands.into_iter().map(probe).collect()) }
 }
 
 /// The tables of the current schema the statement reads and writes, as it names them, for the
@@ -1178,6 +1115,44 @@ pub(crate) fn arg_expr(a: &FunctionArg) -> Option<&Expr> {
 
 #[cfg(test)]
 mod tests {
+
+    /// What a CHECK or a generated column's expression, as MySQL 8.4 prints it, refuses.
+    #[test]
+    fn a_check_or_a_generated_expression_refuses_null_as_mysql_evaluates_it() {
+        use reylo_engine_core::refusal::{check_refuses, with_null, Known};
+        let probe = |text: &str| super::probe(&crate::mysql::parse_expr(text).expect(text));
+        for (check, refuses) in [
+            ("(coalesce(`a`,0) > 0)", true),
+            ("(`a` <=> 1)", true),
+            ("(`a` is true)", true),
+            ("((`a` is null) = 0)", true),
+            ("(not((`a` is null)))", true),
+            ("((`b` > 0) and (`a` is not null))", true),
+            ("(coalesce(`a`,1) > 0)", false),
+            ("(`a` is not false)", false),
+            ("((`a` is null) or (`a` > 0))", false),
+            ("((`a` is not null) or (`b` is not null))", false),
+            // A VARCHAR's COALESCE is a string, which MySQL orders as text: '10' is before '9'.
+            ("((coalesce(`a`,10) < coalesce(`a`,9)) or (`a` is not null))", false),
+            // Over a DECIMAL `a`, the left IF is the string '1.00' and the right '1'.
+            ("(if((`a` is null),coalesce(`a`,1),_utf8mb4'a') <> if((`a` is null),1,_utf8mb4'b'))", false),
+        ] {
+            assert_eq!(check_refuses(&probe(check), "a"), refuses, "{check}");
+        }
+        for (expression, null) in [
+            ("if((`a` is null),NULL,1)", true),
+            ("(if((`a` is null),NULL,1) + 1)", true),
+            ("(case when (`a` > 0) then _utf8mb4'p' when (`a` <= 0) then _utf8mb4'n' end)", true),
+            ("nullif(1,(`a` is null))", true),
+            ("if((`a` > 0),`a`,0)", false),
+            ("(case when (`a` > 0) then _utf8mb4'p' else _utf8mb4'n' end)", false),
+            ("(`a` <=> 1)", false),
+            ("if((`a` is null),`b`,1)", false),
+            ("nullif(if((`a` is null),coalesce(`a`,1),_utf8mb4'a'),if((`a` is null),1,_utf8mb4'b'))", false),
+        ] {
+            assert_eq!(with_null(&probe(expression), "a") == Known::Null, null, "{expression}");
+        }
+    }
 
     use crate::api::{Answer, Need};
     use crate::host::Host;
