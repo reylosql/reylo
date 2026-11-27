@@ -567,7 +567,7 @@ With [`.try()`](/docs/typescript#try), an error MySQL raised comes back as `{ er
 
 Reylo names the error from MySQL's own list, whichever driver ran it. MySQL names a key, a constraint or a column only in its message. Reylo reads it in English, so with another `lc_messages` language those fields are `undefined`.
 
-When the query fires no trigger and calls no stored function, its error type is narrowed. A duplicate entry names only the unique keys of the tables it writes. Other errors name only their constraints and columns. A value's column isn't narrowed where the query, or a view it reads, makes columns an error may name. These are a recursive `WITH` query's columns, and a `JSON_TABLE`'s with `ERROR ON ERROR`. Nor is an out-of-range value's where either casts to `DECIMAL`, which MySQL names by the cast's select item.
+When the query fires no trigger and calls no stored function, its error type is narrowed. A duplicate entry names only the unique keys of the tables it writes. Other errors name only their constraints and columns. A value's column may also be one of the query's `JSON_TABLE` columns with `ERROR ON ERROR`. It isn't narrowed where the query holds a recursive `WITH` query, or reads a view that holds one or such a `JSON_TABLE`. Nor is an out-of-range value's where either casts to `DECIMAL`, which MySQL names by the cast's select item.
 
 ## Drivers
 
